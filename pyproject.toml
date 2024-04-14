@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools >= 61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "comfy-cli"
+license = {file = "LICENSE"}
+version = "2020.0.0"
+requires-python = ">= 3.7"
+description = "A CLI tool for installing and using ComfyUI."
+readme = "README.md"
+keywords = ["comfyui", "stable diffusion"]
+
+maintainers = [
+  {name = "Yoland Yan", email = "yoland@drip.art"},
+  {name = "James Kwon", email = "hongilkwon316@gmail.com"},
+  {name = "Robin Huang", email = "robin@drip.art"}
+]
+
+dependencies = [
+    "typer>=0.3.0"
+]
+
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: GNU General Public License v3 (GPLv3)"
+]
+
+[project.scripts]
+comfy = "comfy.cli:main"
+
+[project.urls]
+Repository = "https://github.com/drip-art/comfy-cli.git"
