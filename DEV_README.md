@@ -7,19 +7,21 @@ This guide provides an overview of how to develop in this repository.
 
 1. Clone the repo
 
-2. Install requirements
+2. Install the package to local
 
-   `pip install -r requirements.txt`
+  `pip install -e .`
 
-3. Add commands or modify existing commands
+3. Test script running
 
-4. Test package:
+  `comfy --help`
+
+4. Add more commands (follow the [Add New Command](#add-new-command) guide)
 
    pip install .
 
 ## Add New Command
 
-- Register it under `comfy/comfy.py` 
+- Register it under `comfy/cmdline.py` 
 
 If it's contains subcommand, create folder under comfy/command/[new_command] and
 add the following boilerplate

@@ -1,6 +1,7 @@
 import typer
 from typing_extensions import Annotated
 from comfy.command.models import models
+from rich import print
 
 
 from comfy.command import custom_nodes
@@ -9,8 +10,13 @@ from comfy.command import run as run_inner
 from comfy import constants
 from comfy.env_checker import EnvChecker
 
-
 app = typer.Typer()
+
+@app.callback(invoke_without_command=True)
+def no_command(ctx: typer.Context):
+    if ctx.invoked_subcommand is None:
+        print(ctx.get_help())
+        ctx.exit()
 
 @app.command(help="Download and install ComfyUI")
 def install(
@@ -32,4 +38,4 @@ def env():
     env_checker.print()
 
 app.add_typer(models.app, name="models", help="Manage models.")
-app.add_typer(custom_nodes.app, name="custom_nodes", help="Manage custom nodes.")
+app.add_typer(custom_nodes.app, name="nodes", help="Manage custom nodes.")
