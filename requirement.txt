@@ -1,3 +1,5 @@
 typer
 rich
 GitPython
+requests
+pyyaml

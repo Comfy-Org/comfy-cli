@@ -1,0 +1,12 @@
+[MASTER]
+disable=
+    C0114, # missing-module-docstring
+    C0115, # missing-class-docstring
+    C0116, # missing-function-docstring
+    C0209, # consider-using-f-string
+
+[FORMAT]
+max-line-length=120
+
+[SIMILARITIES]
+ignore-imports=yes

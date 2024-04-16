@@ -4,8 +4,8 @@ from comfy.command.models import models
 
 
 from comfy.command import custom_nodes
-from comfy.command import install
-from comfy.command import run
+from comfy.command import install as install_inner
+from comfy.command import run as run_inner
 from comfy import constants
 from comfy.env_checker import EnvChecker
 
@@ -17,13 +17,13 @@ def install(
     url: str = constants.COMFY_GITHUB_URL,
     workspace: Annotated[str, typer.Option(help="Path to the output directory.")] = None,
     ):
-    install.execute(url)
+    install_inner.execute(url)
 
 @app.command(help="Run workflow file")
 def run(
     workflow_file: Annotated[str, typer.Option(help="Path to the workflow file.")],
     ):
-    run.execute(workflow_file)
+    run_inner.execute(workflow_file)
 
 
 @app.command(help="Print out current envirment variables.")

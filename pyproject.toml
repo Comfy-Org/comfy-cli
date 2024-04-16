@@ -5,8 +5,8 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "comfy-cli"
 license = {file = "LICENSE"}
-version = "2020.0.0"
-requires-python = ">= 3.7"
+version = "2024.0.0"
+requires-python = ">= 3.8"
 description = "A CLI tool for installing and using ComfyUI."
 readme = "README.md"
 keywords = ["comfyui", "stable diffusion"]
@@ -18,7 +18,11 @@ maintainers = [
 ]
 
 dependencies = [
-    "typer>=0.3.0"
+    "typer>=0.3.0",
+    "GitPython",
+    "rich",
+    "requests",
+    "pyyaml",
 ]
 
 classifiers = [
@@ -28,7 +32,12 @@ classifiers = [
 ]
 
 [project.scripts]
-comfy = "comfy.cli:main"
+comfy = "comfy.__main__:app"
+comfy-cli = "comfy.__main__:app"
+comfycli = "comfy.__main__:app"
 
 [project.urls]
 Repository = "https://github.com/drip-art/comfy-cli.git"
+
+
+

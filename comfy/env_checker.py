@@ -1,12 +1,17 @@
+"""
+Module for checking various env and state conditions.
+"""
+
 import os
 import sys
-import typer
 import git
 from rich import print
 from rich.console import Console
 from rich.table import Table
+import requests
 
 from comfy import constants
+from comfy.utils import singleton
 
 console = Console()
 
@@ -29,6 +34,21 @@ def format_python_version(version_info):
     return "[bold red]{}.{}[/bold red]".format(version_info.major, version_info.minor)
 
 
+def check_comfy_server_running():
+    """
+    Checks if the Comfy server is running by making a GET request to the /history endpoint.
+
+    Returns:
+        bool: True if the Comfy server is running, False otherwise.
+    """
+    try:
+        response = requests.get("http://localhost:8188/history")
+        return response.status_code == 200
+    except requests.exceptions.RequestException:
+        return False
+
+
+@singleton
 class EnvChecker(object):
     """
     Provides an `EnvChecker` class to check the current environment and print information about it.
@@ -38,17 +58,15 @@ class EnvChecker(object):
     - `python_version`: The version information for the current Python installation.
     - `currently_in_comfy_repo`: A boolean indicating whether the current directory is part of the Comfy repository.
 
-    The `EnvChecker` class is a singleton that checks the current environment and stores information about the Python version, virtualenv path, conda environment, and whether the current directory is part of the Comfy repository.
+    The `EnvChecker` class is a singleton that checks the current environment
+    and stores information about the Python version, virtualenv path, conda
+    environment, and whether the current directory is part of the Comfy
+    repository.
 
-    The `print()` method of the `EnvChecker` class displays the collected environment information in a formatted table.
+
+    The `print()` method of the `EnvChecker` class displays the collected
+    environment information in a formatted table.
     """
-
-    _instance = None
-
-    def __new__(cls):
-        if cls._instance is None:
-            cls._instance = super().__new__(cls)
-        return cls._instance
 
     def __init__(self):
         self.virtualenv_path = None
@@ -83,4 +101,8 @@ class EnvChecker(object):
         table.add_row("Python Version", format_python_version(sys.version_info))
         table.add_row("Virtualenv Path", self.virtualenv_path)
         table.add_row("Conda Env", self.conda_env)
+        if check_comfy_server_running():
+            table.add_row("Comfy Server Running", "[bold green]Yes[/bold green]\nhttp://localhost:8188")
+        else:
+            table.add_row("Comfy Server Running", "[bold red]No[/bold red]")
         console.print(table)
