@@ -72,6 +72,11 @@ comfy provides a convenient way to manage custom nodes for extending ComfyUI's f
 
 ```
 basic:
+- workspace:
+  remote:
+  dependencies:
+  branch:
+  commit:
 
 models:
   - model: [name of the model] 
