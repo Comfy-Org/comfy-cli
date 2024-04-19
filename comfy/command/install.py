@@ -4,7 +4,7 @@ from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich import print
 from comfy import env_checker
 
-def execute(url: str, *args, **kwargs):
+def execute(url: str, comfy_workspace: str, *args, **kwargs):
     print(f"Installing from {url}")
 
     checker = env_checker.EnvChecker()

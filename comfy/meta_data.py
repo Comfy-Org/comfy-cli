@@ -1,7 +1,11 @@
 import os
 import yaml
+import concurrent.futures
+from pathlib import Path
+import os
 
 from comfy.utils import singleton
+from comfy import constants
 
 
 @singleton
@@ -13,6 +17,35 @@ class MetadataManager:
     def __init__(self):
         self.metadata_file = None
         self.metadata = {}
+
+    
+    def scan_dir(self):
+        config_files = []
+        for root, dirs, files in os.walk("."):
+            for file in files:
+                if file.endswith(constants.SUPPORTED_PT_EXTENSIONS):
+                    config_files.append(os.path.join(root, file))
+        return config_files
+
+
+    def scan_dir_concur(self):
+        base_path = Path(".")
+        model_files = []
+
+        # Function to check if the file is config.json
+        def check_file(path):
+            if path.name.endswith(constants.SUPPORTED_PT_EXTENSIONS):
+                return str(path)
+
+        # Use ThreadPoolExecutor to manage concurrency
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            futures = [executor.submit(check_file, p) for p in base_path.rglob('*')]
+            for future in concurrent.futures.as_completed(futures):
+                if future.result():
+                    model_files.append(future.result())
+
+        return model_files
+        
 
     def load_metadata(self):
         if os.path.exists(self.metadata_file):

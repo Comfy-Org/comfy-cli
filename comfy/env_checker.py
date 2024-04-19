@@ -30,8 +30,8 @@ def format_python_version(version_info):
         str: The formatted Python version string.
     """
     if version_info.major == 3 and version_info.minor > 8:
-        return "{}.{}".format(version_info.major, version_info.minor)
-    return "[bold red]{}.{}[/bold red]".format(version_info.major, version_info.minor)
+        return "{}.{}.{}".format(version_info.major, version_info.minor, version_info.micro)
+    return "[bold red]{}.{}.{}[/bold red]".format(version_info.major, version_info.minor, version_info.micro)
 
 
 def check_comfy_server_running():
@@ -71,8 +71,9 @@ class EnvChecker(object):
     def __init__(self):
         self.virtualenv_path = None
         self.conda_env = None
-        self.python_version = None
+        self.python_version: None = None
         self.currently_in_comfy_repo = False
+        self.comfy_repo = None
         self.check()
 
     def check(self):
@@ -93,8 +94,11 @@ class EnvChecker(object):
             self.currently_in_comfy_repo = (
                 repo.remotes.origin.url in constants.COMFY_ORIGIN_URL_CHOICES
             )
+            if self.currently_in_comfy_repo:
+                self.comfy_repo = repo
         except git.exc.InvalidGitRepositoryError:
             self.currently_in_comfy_repo = False
+
 
     def print(self):
         table = Table(":laptop_computer: Environment", "Value")
