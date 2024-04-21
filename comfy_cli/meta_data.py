@@ -4,8 +4,8 @@ import concurrent.futures
 from pathlib import Path
 import os
 
-from comfy.utils import singleton
-from comfy import constants
+from comfy_cli.utils import singleton
+from comfy_cli import constants
 
 
 @singleton

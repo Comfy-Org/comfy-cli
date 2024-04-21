@@ -24,9 +24,12 @@ To install ComfyUI using comfy, simply run:
 
 `comfy install`
 
-This command will download and set up the latest version of ComfyUI on your
-system. If you run in in a ComfyUI repo that has already been setup. The command
+This command will download and set up the latest version of ComfyUI and ComfyUI-Manager on your
+system. If you run in a ComfyUI repo that has already been setup. The command
 will simply update the comfy.yaml file to reflect the local setup
+
+  * `comfy install --skip-manager`: Install ComfyUI without ComfyUI-Manager.
+  * `comfy install --workspace=<path>`: Install ComfyUI into `<path>/ComfyUI`.
 
 ### Managing Packages
 

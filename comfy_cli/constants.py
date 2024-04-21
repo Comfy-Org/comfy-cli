@@ -1,5 +1,7 @@
 
 COMFY_GITHUB_URL = 'https://github.com/comfyanonymous/ComfyUI'
+COMFY_MANAGER_GITHUB_URL = 'https://github.com/ltdrdata/ComfyUI-Manager'
+COMFY_WORKSPACE = '~/comfy'
 
 # TODO: figure out a better way to check if this is a comfy repo
 COMFY_ORIGIN_URL_CHOICES = [

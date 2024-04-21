@@ -1,18 +1,18 @@
 import typer
 from typing_extensions import Annotated
-from comfy.command.models import models
+from comfy_cli.command.models import models
 from rich import print
 import os
 import subprocess
 
 
-from comfy.command import custom_nodes
-from comfy.command import install as install_inner
-from comfy.command import run as run_inner
-from comfy import constants
-from comfy.env_checker import EnvChecker
-from comfy.meta_data import MetadataManager
-from comfy import env_checker
+from comfy_cli.command import custom_nodes
+from comfy_cli.command import install as install_inner
+from comfy_cli.command import run as run_inner
+from comfy_cli import constants
+from comfy_cli.env_checker import EnvChecker
+from comfy_cli.meta_data import MetadataManager
+from comfy_cli import env_checker
 from rich.console import Console
 import time
 
@@ -36,18 +36,28 @@ def no_command(ctx: typer.Context):
         ctx.exit()
 
 
-@app.command(help="Download and install ComfyUI")
+@app.command(help="Download and install ComfyUI and ComfyUI-Manager")
 def install(
     url: Annotated[
         str,
         typer.Option(show_default=False)
     ] = constants.COMFY_GITHUB_URL,
+    manager_url: Annotated[
+        str,
+        typer.Option(show_default=False)
+    ] = constants.COMFY_MANAGER_GITHUB_URL,
     workspace: Annotated[
         str,
         typer.Option(
             show_default=False,
             help="Path to ComfyUI workspace")
-    ] = None,
+    ] = constants.COMFY_WORKSPACE,
+    skip_manager: Annotated[
+        bool,
+        lambda: typer.Option(
+            default=False,
+            help="Skip installing the manager component")
+    ] = False,
 ):
     checker = EnvChecker()
     if checker.python_version.major < 3:
@@ -60,9 +70,9 @@ def install(
     if checker.currently_in_comfy_repo:
         console = Console()
         # TODO: warn user that you are teh
-        
 
-    install_inner.execute(url, workspace)
+    install_inner.execute(url, manager_url, workspace, skip_manager)
+
 
 
 def update(self):
@@ -79,10 +89,17 @@ def run(
     run_inner.execute(workflow_file)
 
 
-@app.command(help="Print out current envirment variables.")
+@app.command(help="Launch ComfyUI")
+def launch():
+    os.chdir(self.workspace)
+    run_inner.execute(workflow_file)
+
+
+@app.command(help="Print out current environment variables.")
 def env():
     env_checker = EnvChecker()
     env_checker.print()
+
 
 app.add_typer(models.app, name="models", help="Manage models.")
 app.add_typer(custom_nodes.app, name="nodes", help="Manage custom nodes.")

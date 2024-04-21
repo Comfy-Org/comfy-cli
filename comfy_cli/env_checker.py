@@ -10,8 +10,8 @@ from rich.console import Console
 from rich.table import Table
 import requests
 
-from comfy import constants
-from comfy.utils import singleton
+from comfy_cli import constants
+from comfy_cli.utils import singleton
 
 console = Console()
 
