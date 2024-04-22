@@ -90,37 +90,47 @@ def run(
     run_inner.execute(workflow_file)
 
 
-def launch_comfyui(_env_checker):
+def launch_comfyui(_env_checker, cpu):
     _env_checker.config['DEFAULT']['recent_path'] = os.getcwd()
     _env_checker.write_config()
-    subprocess.run(["python", "main.py"])
+    if cpu:
+        subprocess.run(["python", "main.py", "--cpu"])
+    else:
+        subprocess.run(["python", "main.py"])
 
 
-@app.command(help="Launch ComfyUI: ?[--workspace <path>]")
+@app.command(help="Launch ComfyUI: ?[--workspace <path>] ?[--cpu]")
 def launch(workspace: Annotated[
                 str,
                 typer.Option(
                     show_default=False,
                     help="Path to ComfyUI workspace")
-            ] = None):
+            ] = None,
+           cpu: Annotated[
+               bool,
+               lambda: typer.Option(
+                   default=False,
+                   help="enable CPU mode")
+           ] = False,
+           ):
     _env_checker = EnvChecker()
     if workspace is not None:
         comfyui_path = os.path.join(workspace, 'ComfyUI')
         if os.path.exists(comfyui_path):
             os.chdir(comfyui_path)
             print(f"\nLaunch ComfyUI from repo: {_env_checker.comfy_repo.working_dir}\n")
-            launch_comfyui(_env_checker)
+            launch_comfyui(_env_checker, cpu)
         else:
             print(f"\nInvalid ComfyUI not found in specified workspace: {workspace}\n", file=sys.stderr)
 
     elif _env_checker.comfy_repo is not None:
         print(f"\nLaunch ComfyUI from current repo: {_env_checker.comfy_repo.working_dir}\n")
-        launch_comfyui(_env_checker)
+        launch_comfyui(_env_checker, cpu)
     elif _env_checker.config['DEFAULT'].get('recent_path') is not None:
         comfy_path = _env_checker.config['DEFAULT'].get('recent_path')
         print(f"\nLaunch ComfyUI from recent repo: {comfy_path}\n")
         os.chdir(comfy_path)
-        launch_comfyui(_env_checker)
+        launch_comfyui(_env_checker, cpu)
     else:
         print(f"\nComfyUI is not available.\n", file=sys.stderr)
 
