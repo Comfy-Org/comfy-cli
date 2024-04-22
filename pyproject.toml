@@ -32,9 +32,9 @@ classifiers = [
 ]
 
 [project.scripts]
-comfy = "comfy.__main__:app"
-comfy-cli = "comfy.__main__:app"
-comfycli = "comfy.__main__:app"
+comfy = "comfy_cli.__main__:app"
+comfy-cli = "comfy_cli.__main__:app"
+comfycli = "comfy_cli.__main__:app"
 
 [project.urls]
 Repository = "https://github.com/drip-art/comfy-cli.git"
