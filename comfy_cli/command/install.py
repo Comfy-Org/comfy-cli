@@ -13,6 +13,7 @@ def execute(url: str, manager_url: str, comfy_workspace: str, skip_manager: bool
     # install ComfyUI
     if checker.currently_in_comfy_repo:
         print(f"Already in comfy repo. Skipping installation.")
+        repo_dir = os.getcwd()
     else:
         working_dir = os.path.expanduser(comfy_workspace)
         repo_dir = os.path.join(working_dir, os.path.basename(url).replace(".git", ""))
@@ -45,4 +46,8 @@ def execute(url: str, manager_url: str, comfy_workspace: str, skip_manager: bool
 
             subprocess.run(["pip", "install", "-r", "requirements.txt"])
             os.chdir(os.path.join('..', '..'))
+
+    checker.config['DEFAULT']['recent_path'] = repo_dir
+    checker.write_config()
+
 

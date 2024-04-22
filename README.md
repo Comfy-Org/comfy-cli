@@ -31,6 +31,23 @@ will simply update the comfy.yaml file to reflect the local setup
   * `comfy install --skip-manager`: Install ComfyUI without ComfyUI-Manager.
   * `comfy install --workspace=<path>`: Install ComfyUI into `<path>/ComfyUI`.
 
+
+### Launch ComfyUI
+
+Comfy provides commands that allow you to easily run the installed ComfyUI.
+
+- To execute specifying the path of the workspace where ComfyUI is installed:
+
+  `comfy launch --workspace <path>`
+
+- To run ComfyUI from the current directory, if you are inside the ComfyUI repository:
+  
+  `comfy launch`
+  
+- To execute the ComfyUI that was last run or last installed, if you are outside of the ComfyUI repository:
+
+  `comfy launch`
+
 ### Managing Packages
 
 comfy allows you to easily install, update, and remove packages for ComfyUI. Here are some examples:

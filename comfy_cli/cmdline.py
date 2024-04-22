@@ -1,3 +1,5 @@
+import sys
+
 import typer
 from typing_extensions import Annotated
 from comfy_cli.command.models import models
@@ -74,7 +76,6 @@ def install(
     install_inner.execute(url, manager_url, workspace, skip_manager)
 
 
-
 def update(self):
     print(f"Updating ComfyUI in {self.workspace}...")
     os.chdir(self.workspace)
@@ -84,21 +85,50 @@ def update(self):
 
 @app.command(help="Run workflow file")
 def run(
-    workflow_file: Annotated[str, typer.Option(help="Path to the workflow file.")],
-    ):
+        workflow_file: Annotated[str, typer.Option(help="Path to the workflow file.")],
+        ):
     run_inner.execute(workflow_file)
 
 
-@app.command(help="Launch ComfyUI")
-def launch():
-    os.chdir(self.workspace)
-    run_inner.execute(workflow_file)
+def launch_comfyui(_env_checker):
+    _env_checker.config['DEFAULT']['recent_path'] = os.getcwd()
+    _env_checker.write_config()
+    subprocess.run(["python", "main.py"])
+
+
+@app.command(help="Launch ComfyUI: ?[--workspace <path>]")
+def launch(workspace: Annotated[
+                str,
+                typer.Option(
+                    show_default=False,
+                    help="Path to ComfyUI workspace")
+            ] = None):
+    _env_checker = EnvChecker()
+    if workspace is not None:
+        comfyui_path = os.path.join(workspace, 'ComfyUI')
+        if os.path.exists(comfyui_path):
+            os.chdir(comfyui_path)
+            print(f"\nLaunch ComfyUI from repo: {_env_checker.comfy_repo.working_dir}\n")
+            launch_comfyui(_env_checker)
+        else:
+            print(f"\nInvalid ComfyUI not found in specified workspace: {workspace}\n", file=sys.stderr)
+
+    elif _env_checker.comfy_repo is not None:
+        print(f"\nLaunch ComfyUI from current repo: {_env_checker.comfy_repo.working_dir}\n")
+        launch_comfyui(_env_checker)
+    elif _env_checker.config['DEFAULT'].get('recent_path') is not None:
+        comfy_path = _env_checker.config['DEFAULT'].get('recent_path')
+        print(f"\nLaunch ComfyUI from recent repo: {comfy_path}\n")
+        os.chdir(comfy_path)
+        launch_comfyui(_env_checker)
+    else:
+        print(f"\nComfyUI is not available.\n", file=sys.stderr)
 
 
 @app.command(help="Print out current environment variables.")
 def env():
-    env_checker = EnvChecker()
-    env_checker.print()
+    _env_checker = EnvChecker()
+    _env_checker.print()
 
 
 app.add_typer(models.app, name="models", help="Manage models.")

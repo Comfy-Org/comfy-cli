@@ -5,10 +5,12 @@ COMFY_WORKSPACE = '~/comfy'
 
 # TODO: figure out a better way to check if this is a comfy repo
 COMFY_ORIGIN_URL_CHOICES = [
-    "git@github.com:comfyanonymous/ComfyUI.git"
+    "git@github.com:comfyanonymous/ComfyUI.git",
     "git@github.com:drip-art/comfy.git",
     "https://github.com/comfyanonymous/ComfyUI.git",
     "https://github.com/drip-art/ComfyUI.git",
+    "https://github.com/comfyanonymous/ComfyUI",
+    "https://github.com/drip-art/ComfyUI",
 ]
 
 # Referencing supported pt extension from ComfyUI

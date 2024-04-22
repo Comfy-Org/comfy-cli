@@ -12,6 +12,7 @@ import requests
 
 from comfy_cli import constants
 from comfy_cli.utils import singleton
+import configparser
 
 console = Console()
 
@@ -74,7 +75,35 @@ class EnvChecker(object):
         self.python_version: None = None
         self.currently_in_comfy_repo = False
         self.comfy_repo = None
+        self.config = configparser.ConfigParser()
         self.check()
+
+    def is_isolated_env(self):
+        return self.virtualenv_path or self.conda_env
+
+    def get_isolated_env(self):
+        if self.virtualenv_path:
+            return self.virtualenv_path
+
+        if self.conda_env:
+            return self.conda_env
+
+        return None
+
+    def get_config_path(self):
+        env_path = self.get_isolated_env()
+        if env_path:
+            return os.path.join(env_path, 'comfy-cli', 'config.json')
+        return None
+
+    def write_config(self):
+        env_path = self.get_isolated_env()
+        cli_path = os.path.join(env_path, 'comfy-cli')
+        if not os.path.exists(cli_path):
+            os.mkdir(cli_path)
+
+        with open(self.get_config_path(), 'w') as configfile:
+            self.config.write(configfile)
 
     def check(self):
         self.virtualenv_path = (
@@ -99,12 +128,17 @@ class EnvChecker(object):
         except git.exc.InvalidGitRepositoryError:
             self.currently_in_comfy_repo = False
 
+        config_path = self.get_config_path()
+        if os.path.exists(config_path):
+            self.config = configparser.ConfigParser()
+            self.config.read(config_path)
 
     def print(self):
         table = Table(":laptop_computer: Environment", "Value")
         table.add_row("Python Version", format_python_version(sys.version_info))
         table.add_row("Virtualenv Path", self.virtualenv_path)
         table.add_row("Conda Env", self.conda_env)
+        table.add_row("Recent ComfyUI", self.config['DEFAULT']['recent_path'])
         if check_comfy_server_running():
             table.add_row("Comfy Server Running", "[bold green]Yes[/bold green]\nhttp://localhost:8188")
         else:
