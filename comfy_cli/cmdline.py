@@ -60,6 +60,12 @@ def install(
             default=False,
             help="Skip installing the manager component")
     ] = False,
+    amd: Annotated[
+        bool,
+        lambda: typer.Option(
+            default=False,
+            help="Install for AMD gpu")
+    ] = False,
 ):
     checker = EnvChecker()
     if checker.python_version.major < 3:
@@ -73,7 +79,11 @@ def install(
         console = Console()
         # TODO: warn user that you are teh
 
-    install_inner.execute(url, manager_url, workspace, skip_manager)
+    torch_mode = None
+    if amd:
+        torch_mode = 'amd'
+
+    install_inner.execute(url, manager_url, workspace, skip_manager, torch_mode)
 
 
 def update(self):

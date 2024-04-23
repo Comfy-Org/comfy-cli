@@ -5,7 +5,7 @@ from rich import print
 from comfy_cli import env_checker
 
 
-def execute(url: str, manager_url: str, comfy_workspace: str, skip_manager: bool, *args, **kwargs):
+def execute(url: str, manager_url: str, comfy_workspace: str, skip_manager: bool, torch_mode=None, *args, **kwargs):
     print(f"Installing from {url}")
 
     checker = env_checker.EnvChecker()
@@ -28,6 +28,14 @@ def execute(url: str, manager_url: str, comfy_workspace: str, skip_manager: bool
             subprocess.run(["git", "clone", url, repo_dir])
 
             os.chdir(repo_dir)
+            # install torch
+            if torch_mode == 'amd':
+                pip_url = ['--extra-index-url', 'https://download.pytorch.org/whl/rocm5.7']
+            else:
+                pip_url = ['--extra-index-url', 'https://download.pytorch.org/whl/cu121']
+            subprocess.run(["pip", "install", "torch", "torchvision", "torchaudio"] + pip_url)
+
+            # install other requirements
             subprocess.run(["pip", "install", "-r", "requirements.txt"])
 
     # install ComfyUI-Manager
