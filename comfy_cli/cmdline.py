@@ -93,10 +93,25 @@ def run(
 def launch_comfyui(_env_checker, cpu):
     _env_checker.config['DEFAULT']['recent_path'] = os.getcwd()
     _env_checker.write_config()
-    if cpu:
-        subprocess.run(["python", "main.py", "--cpu"])
-    else:
-        subprocess.run(["python", "main.py"])
+
+    env_path = _env_checker.get_isolated_env()
+    reboot_path = None
+
+    new_env = os.environ.copy()
+
+    if env_path is not None:
+        new_env['__COMFY_CLI_SESSION__'] = os.path.join(env_path, 'comfy-cli')
+        reboot_path = os.path.join(env_path, 'comfy-cli', '.reboot')
+
+    while True:
+        if cpu:
+            subprocess.run(["python", "main.py", "--cpu"], env=new_env)
+        else:
+            subprocess.run(["python", "main.py"], env=new_env)
+
+        if not os.path.exists(reboot_path):
+            return
+        os.remove(reboot_path)
 
 
 @app.command(help="Launch ComfyUI: ?[--workspace <path>] ?[--cpu]")

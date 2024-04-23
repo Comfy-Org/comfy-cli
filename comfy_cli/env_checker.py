@@ -120,8 +120,8 @@ class EnvChecker(object):
 
         try:
             repo = git.Repo(os.getcwd(), search_parent_directories=False)
-            self.currently_in_comfy_repo = (
-                repo.remotes.origin.url in constants.COMFY_ORIGIN_URL_CHOICES
+            self.currently_in_comfy_repo = any(
+                remote.url in constants.COMFY_ORIGIN_URL_CHOICES for remote in repo.remotes
             )
             if self.currently_in_comfy_repo:
                 self.comfy_repo = repo
