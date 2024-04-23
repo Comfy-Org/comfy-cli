@@ -76,21 +76,35 @@ comfy allows you to easily install, update, and remove packages for ComfyUI. Her
 
 comfy provides a convenient way to manage custom nodes for extending ComfyUI's functionality. Here are some examples:
 
-- Create a new custom node:
+- Show custom nodes information:
+ ```
+comfy-cli nodes show [installed|enabled|not-installed|disabled|all|snapshot|snapshot-list] 
+                      ?[--channel <channel name>] 
+                      ?[--mode [remote|local|cache]]
+```
+-
+  `comfy-cli nodes show all --channel recent`
 
-  `comfy-cli node create node-name`
+  `comfy-cli nodes show installed`
 
-- Edit an existing custom node:
 
-  `comfy-cli node edit node-name`
+- Managing snapshot:
 
-- Remove a custom node:
+  `comfy-cli nodes save-snapshot`
+- 
+  `comfy-cli nodes restore-snapshot <snapshot name>`
 
-  `comfy-cli node remove node-name`
 
-- List available custom nodes:
+### Managing ComfyUI-Manager
 
-  `comfy-cli node list`
+- disable GUI of ComfyUI-Manager (disable Manager menu and Server)
+
+  `comfy-cli manager disable-gui`
+
+- enable GUI of ComfyUI-Manager
+
+  `comfy-cli manager enable-gui`
+
 
 ## Format of comfy.yaml
 

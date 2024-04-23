@@ -1,1 +1,1 @@
-from .command import app
+from .command import app, manager_app

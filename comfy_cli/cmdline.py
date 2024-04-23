@@ -137,6 +137,7 @@ def launch(workspace: Annotated[
             launch_comfyui(_env_checker, cpu)
         else:
             print(f"\nInvalid ComfyUI not found in specified workspace: {workspace}\n", file=sys.stderr)
+            raise typer.Exit(code=1)
 
     elif _env_checker.comfy_repo is not None:
         print(f"\nLaunch ComfyUI from current repo: {_env_checker.comfy_repo.working_dir}\n")
@@ -148,6 +149,7 @@ def launch(workspace: Annotated[
         launch_comfyui(_env_checker, cpu)
     else:
         print(f"\nComfyUI is not available.\n", file=sys.stderr)
+        raise typer.Exit(code=1)
 
 
 @app.command(help="Print out current environment variables.")
@@ -158,3 +160,4 @@ def env():
 
 app.add_typer(models.app, name="models", help="Manage models.")
 app.add_typer(custom_nodes.app, name="nodes", help="Manage custom nodes.")
+app.add_typer(custom_nodes.manager_app, name="manager", help="Manager ComfyUI-Manager.")
