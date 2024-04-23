@@ -52,7 +52,7 @@ Comfy provides commands that allow you to easily run the installed ComfyUI.
 
   `comfy launch --cpu`
 
-### Managing Packages
+### Managing Packages (wip)
 
 comfy allows you to easily install, update, and remove packages for ComfyUI. Here are some examples:
 
@@ -72,7 +72,7 @@ comfy allows you to easily install, update, and remove packages for ComfyUI. Her
 
   `comfy package list`
 
-### Managing Custom Nodes
+### Managing Custom Nodes (wip)
 
 comfy provides a convenient way to manage custom nodes for extending ComfyUI's functionality. Here are some examples:
 
@@ -117,7 +117,7 @@ custom_nodes:
 
 We welcome contributions to comfy-cli! If you have any ideas, suggestions, or
 bug reports, please open an issue on our [GitHub
-repository](https://github.com/???/comfy-cli). If you'd like to contribute code,
+repository](https://github.com/Comfy-Org/comfy-cli/issues). If you'd like to contribute code,
 please fork the repository and submit a pull request.
 
 
