@@ -74,9 +74,12 @@ def update(self):
 
 @app.command(help="Run workflow file")
 def run(
-    workflow_file: Annotated[str, typer.Option(help="Path to the workflow file.")],
+    workflow_file: Annotated[str, typer.Option(help="Path to the workflow file.")] = None,
+    *,
+    opts: typer.Argument
     ):
-    run_inner.execute(workflow_file)
+    print(opts)
+    # run_inner.execute(workflow_file)
 
 
 @app.command(help="Print out current envirment variables.")
@@ -86,3 +89,6 @@ def env():
 
 app.add_typer(models.app, name="models", help="Manage models.")
 app.add_typer(custom_nodes.app, name="nodes", help="Manage custom nodes.")
+
+def help():
+    app.rich_help_panel
