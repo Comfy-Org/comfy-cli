@@ -54,7 +54,7 @@ Comfy provides commands that allow you to easily run the installed ComfyUI.
   `comfy launch --cpu`
 
 
-### Managing Packages (wip)
+### Managing Packages
 
 comfy allows you to easily install, update, and remove packages for ComfyUI. Here are some examples:
 
