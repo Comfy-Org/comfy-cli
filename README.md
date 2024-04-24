@@ -16,6 +16,7 @@ To install comfy-cli, make sure you have Python 3.7 or higher installed on your 
 
 `pip install comfy-cli`
 
+
 ## Usage
 
 ### Installing ComfyUI
@@ -52,6 +53,7 @@ Comfy provides commands that allow you to easily run the installed ComfyUI.
 
   `comfy launch --cpu`
 
+
 ### Managing Packages (wip)
 
 comfy allows you to easily install, update, and remove packages for ComfyUI. Here are some examples:
@@ -72,26 +74,31 @@ comfy allows you to easily install, update, and remove packages for ComfyUI. Her
 
   `comfy package list`
 
-### Managing Custom Nodes (wip)
+
+### Managing Custom Nodes
 
 comfy provides a convenient way to manage custom nodes for extending ComfyUI's functionality. Here are some examples:
 
-- Show custom nodes information:
+- Show custom nodes' information:
  ```
-comfy-cli nodes show [installed|enabled|not-installed|disabled|all|snapshot|snapshot-list] 
-                      ?[--channel <channel name>] 
-                      ?[--mode [remote|local|cache]]
+comfy-cli nodes [show|simple-show] [installed|enabled|not-installed|disabled|all|snapshot|snapshot-list] 
+                                  ?[--channel <channel name>] 
+                                  ?[--mode [remote|local|cache]]
 ```
 -
   `comfy-cli nodes show all --channel recent`
 
-  `comfy-cli nodes show installed`
+  `comfy-cli nodes simple-show installed`
+
+  `comfy-cli nodes update all`
+
+  `comfy-cli nodes install ComfyUI-Impact-Pack`
 
 
 - Managing snapshot:
 
   `comfy-cli nodes save-snapshot`
-- 
+
   `comfy-cli nodes restore-snapshot <snapshot name>`
 
 
@@ -105,8 +112,12 @@ comfy-cli nodes show [installed|enabled|not-installed|disabled|all|snapshot|snap
 
   `comfy-cli manager enable-gui`
 
+- Clear reserved startup action:
 
-## Format of comfy.yaml
+  `comfy-cli manager clear`
+
+
+## Format of comfy.yaml (WIP)
 
 ```
 basic:
