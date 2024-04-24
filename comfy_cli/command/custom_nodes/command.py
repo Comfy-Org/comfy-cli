@@ -172,7 +172,7 @@ def uninstall(args: List[str] = typer.Argument(..., help="uninstall custom nodes
 
 @app.command()
 def update(args: List[str] = typer.Argument(..., help="update custom nodes"),
-           channel: Annotated[str, '--channel', typer.Option(show_default=False,help="Specify the operation mode")] = None,
+           channel: Annotated[str, '--channel', typer.Option(show_default=False, help="Specify the operation mode")] = None,
            mode: Annotated[str, '--mode', typer.Option(show_default=False, help="[remote|local|cache]")] = None,
            workspace: Annotated[str, typer.Option(show_default=False, help="Path to ComfyUI workspace")] = None):
     valid_modes = ["remote", "local", "cache"]
@@ -197,8 +197,8 @@ def disable(args: List[str] = typer.Argument(..., help="disable custom nodes"),
 
 
 @app.command()
-def enable(args: List[str] = typer.Argument(..., help="disable custom nodes"),
-           channel: Annotated[str, '--channel', typer.Option(show_default=False,help="Specify the operation mode")] = None,
+def enable(args: List[str] = typer.Argument(..., help="enable custom nodes"),
+           channel: Annotated[str, '--channel', typer.Option(show_default=False, help="Specify the operation mode")] = None,
            mode: Annotated[str, '--mode', typer.Option(show_default=False, help="[remote|local|cache]")] = None,
            workspace: Annotated[str, typer.Option(show_default=False, help="Path to ComfyUI workspace")] = None):
     valid_modes = ["remote", "local", "cache"]
@@ -210,8 +210,8 @@ def enable(args: List[str] = typer.Argument(..., help="disable custom nodes"),
 
 
 @app.command()
-def fix(args: List[str] = typer.Argument(..., help="disable custom nodes"),
-        channel: Annotated[str, '--channel', typer.Option(show_default=False,help="Specify the operation mode")] = None,
+def fix(args: List[str] = typer.Argument(..., help="fix dependencies for specified custom nodes"),
+        channel: Annotated[str, '--channel', typer.Option(show_default=False, help="Specify the operation mode")] = None,
         mode: Annotated[str, '--mode', typer.Option(show_default=False, help="[remote|local|cache]")] = None,
         workspace: Annotated[str, typer.Option(show_default=False, help="Path to ComfyUI workspace")] = None):
     valid_modes = ["remote", "local", "cache"]
