@@ -23,6 +23,7 @@ dependencies = [
     "rich",
     "requests",
     "pyyaml",
+    "typing-extensions",
 ]
 
 classifiers = [
