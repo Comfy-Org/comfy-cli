@@ -81,40 +81,40 @@ comfy provides a convenient way to manage custom nodes for extending ComfyUI's f
 
 - Show custom nodes' information:
  ```
-comfy-cli nodes [show|simple-show] [installed|enabled|not-installed|disabled|all|snapshot|snapshot-list] 
-                                  ?[--channel <channel name>] 
-                                  ?[--mode [remote|local|cache]]
+comfy nodes [show|simple-show] [installed|enabled|not-installed|disabled|all|snapshot|snapshot-list] 
+                              ?[--channel <channel name>] 
+                              ?[--mode [remote|local|cache]]
 ```
 -
-  `comfy-cli nodes show all --channel recent`
+  `comfy nodes show all --channel recent`
 
-  `comfy-cli nodes simple-show installed`
+  `comfy nodes simple-show installed`
 
-  `comfy-cli nodes update all`
+  `comfy nodes update all`
 
-  `comfy-cli nodes install ComfyUI-Impact-Pack`
+  `comfy nodes install ComfyUI-Impact-Pack`
 
 
 - Managing snapshot:
 
-  `comfy-cli nodes save-snapshot`
+  `comfy nodes save-snapshot`
 
-  `comfy-cli nodes restore-snapshot <snapshot name>`
+  `comfy nodes restore-snapshot <snapshot name>`
 
 
 ### Managing ComfyUI-Manager
 
 - disable GUI of ComfyUI-Manager (disable Manager menu and Server)
 
-  `comfy-cli manager disable-gui`
+  `comfy manager disable-gui`
 
 - enable GUI of ComfyUI-Manager
 
-  `comfy-cli manager enable-gui`
+  `comfy manager enable-gui`
 
 - Clear reserved startup action:
 
-  `comfy-cli manager clear`
+  `comfy manager clear`
 
 
 ## Format of comfy.yaml (WIP)
