@@ -136,6 +136,7 @@ class EnvChecker(object):
     def print(self):
         table = Table(":laptop_computer: Environment", "Value")
         table.add_row("Python Version", format_python_version(sys.version_info))
+        table.add_row("Python Executable", sys.executable)
         table.add_row("Virtualenv Path", self.virtualenv_path)
         table.add_row("Conda Env", self.conda_env)
         table.add_row("Recent ComfyUI", self.config['DEFAULT']['recent_path'])
