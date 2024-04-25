@@ -139,7 +139,10 @@ class EnvChecker(object):
         table.add_row("Python Executable", sys.executable)
         table.add_row("Virtualenv Path", self.virtualenv_path)
         table.add_row("Conda Env", self.conda_env)
-        table.add_row("Recent ComfyUI", self.config['DEFAULT']['recent_path'])
+        if self.config.has_section('DEFAULT') and self.config.has_option('DEFAULT', 'recent_path'):
+            table.add_row("Recent ComfyUI", self.config['DEFAULT']['recent_path'])
+        else:
+            table.add_row("Recent ComfyUI", "No recent run")
         if check_comfy_server_running():
             table.add_row("Comfy Server Running", "[bold green]Yes[/bold green]\nhttp://localhost:8188")
         else:
