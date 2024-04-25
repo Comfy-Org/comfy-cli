@@ -32,7 +32,7 @@ def execute_cm_cli(args, channel=None, mode=None, workspace=None):
         print(f"\nComfyUI-Manager not found: {cm_cli_path}\n", file=sys.stderr)
         raise typer.Exit(code=1)
 
-    cmd = ["python", cm_cli_path] + args
+    cmd = [sys.executable, cm_cli_path] + args
     if channel is not None:
         cmd += ['--channel', channel]
 

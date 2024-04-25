@@ -115,9 +115,9 @@ def launch_comfyui(_env_checker, cpu):
 
     while True:
         if cpu:
-            subprocess.run(["python", "main.py", "--cpu"], env=new_env)
+            subprocess.run([sys.executable, "main.py", "--cpu"], env=new_env)
         else:
-            subprocess.run(["python", "main.py"], env=new_env)
+            subprocess.run([sys.executable, "main.py"], env=new_env)
 
         if not os.path.exists(reboot_path):
             return
