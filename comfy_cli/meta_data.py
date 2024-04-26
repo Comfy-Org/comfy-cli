@@ -12,7 +12,7 @@ from comfy_cli import constants
 @singleton
 class MetadataManager:
     """
-    Manages the metadata for ComfyUI when running comfy cli, including loading,
+    Manages the metadata (comfy.yaml) for ComfyUI when running comfy cli, including loading,
     validating, and saving metadata to a file.
     """
     def __init__(self):
