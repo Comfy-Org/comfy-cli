@@ -5,7 +5,7 @@ This guide provides an overview of how to develop in this repository.
 
 ## General guide
 
-1. Clone the repo
+1. Clone the repo, create and activate a conda env
 
 2. Install the package to local
 
@@ -15,9 +15,12 @@ This guide provides an overview of how to develop in this repository.
 
   `comfy --help`
 
-<!-- 4. Add more commands (follow the [Add New Command](#add-new-command) guide)
+## Make changes to the code base
 
-   pip install . -->
+There is a potential need for you to reinstall the package. You can do this by
+either run `pip install -e .` again (which will reinstall), or manually
+uninstall `pip uninstall comfy-cli` and reinstall, or even cleaning your conda
+env and reinstalling the package (`pip install -e .`)
 
 ## Add New Command
 
