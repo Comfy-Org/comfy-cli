@@ -15,9 +15,9 @@ This guide provides an overview of how to develop in this repository.
 
   `comfy --help`
 
-4. Add more commands (follow the [Add New Command](#add-new-command) guide)
+<!-- 4. Add more commands (follow the [Add New Command](#add-new-command) guide)
 
-   pip install .
+   pip install . -->
 
 ## Add New Command
 

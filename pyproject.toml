@@ -14,7 +14,8 @@ keywords = ["comfyui", "stable diffusion"]
 maintainers = [
   {name = "Yoland Yan", email = "yoland@drip.art"},
   {name = "James Kwon", email = "hongilkwon316@gmail.com"},
-  {name = "Robin Huang", email = "robin@drip.art"}
+  {name = "Robin Huang", email = "robin@drip.art"},
+  {name = "Dr.Lt.Data", email = "dr.lt.data@gmail.com"}
 ]
 
 dependencies = [
@@ -33,9 +34,9 @@ classifiers = [
 ]
 
 [project.scripts]
-comfy = "comfy_cli.__main__:app"
-comfy-cli = "comfy_cli.__main__:app"
-comfycli = "comfy_cli.__main__:app"
+comfy = "comfy_cli.__main__:main"
+comfy-cli = "comfy_cli.__main__:main"
+comfycli = "comfy_cli.__main__:main"
 
 [project.urls]
 Repository = "https://github.com/drip-art/comfy-cli.git"

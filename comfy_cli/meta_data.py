@@ -4,6 +4,7 @@ import concurrent.futures
 from pathlib import Path
 import os
 
+from comfy_cli.env_checker import EnvChecker
 from comfy_cli.utils import singleton
 from comfy_cli import constants
 
@@ -16,6 +17,7 @@ class MetadataManager:
     """
     def __init__(self):
         self.metadata_file = None
+        self.env_checker = EnvChecker()
         self.metadata = {}
 
     

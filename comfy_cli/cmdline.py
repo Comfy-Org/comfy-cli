@@ -2,7 +2,7 @@ import sys
 
 import typer
 from typing_extensions import Annotated
-from comfy_cli.command.models import models
+from comfy_cli.command.models import models as models_command
 from rich import print
 import os
 import subprocess
@@ -21,13 +21,17 @@ import time
 app = typer.Typer()
 
 
+def main():
+    init()
+    app()
+
 def init():
-    _env_checker = EnvChecker()
+    # TODO(yoland): after this 
     metadata_manager = MetadataManager()
     start_time = time.time()
     metadata_manager.scan_dir()
     end_time = time.time()
-    
+
     print(f"scan_dir took {end_time - start_time:.2f} seconds to run")
 
 
@@ -53,7 +57,7 @@ def install(
         typer.Option(
             show_default=False,
             help="Path to ComfyUI workspace")
-    ] = constants.COMFY_WORKSPACE,
+    ] = "~/comfy",
     skip_manager: Annotated[
         bool,
         lambda: typer.Option(
@@ -87,10 +91,11 @@ def install(
 
 
 def update(self):
+    _env_checker = EnvChecker()
     print(f"Updating ComfyUI in {self.workspace}...")
     os.chdir(self.workspace)
-    subprocess.run(["git", "pull"])
-    subprocess.run(["pip", "install", "-r", "requirements.txt"])
+    subprocess.run(["git", "pull"], check=True)
+    subprocess.run(["pip", "install", "-r", "requirements.txt"], check=True)
 
 
 @app.command(help="Run workflow file")
@@ -101,8 +106,13 @@ def run(
 
 
 def launch_comfyui(_env_checker, cpu):
-    _env_checker.config['DEFAULT']['recent_path'] = os.getcwd()
-    _env_checker.write_config()
+    # TODO(yoland/data): Disabled config writing for now, checking with @data
+    # We need to find a viable place to write config file, e.g. standard place
+    # for macOS:   ~/Library/Application Support/
+    # for linx:    ~/.config/
+    # for windows: C:\Users\<username>\AppData\Local\
+    #_env_checker.config['DEFAULT']['recent_path'] = os.getcwd()
+    #_env_checker.write_config()
 
     env_path = _env_checker.get_isolated_env()
     reboot_path = None
@@ -115,9 +125,9 @@ def launch_comfyui(_env_checker, cpu):
 
     while True:
         if cpu:
-            subprocess.run([sys.executable, "main.py", "--cpu"], env=new_env)
+            subprocess.run([sys.executable, "main.py", "--cpu"], env=new_env, check=False)
         else:
-            subprocess.run([sys.executable, "main.py"], env=new_env)
+            subprocess.run([sys.executable, "main.py"], env=new_env, check=False)
 
         if not os.path.exists(reboot_path):
             return
@@ -158,7 +168,7 @@ def launch(workspace: Annotated[
         os.chdir(comfy_path)
         launch_comfyui(_env_checker, cpu)
     else:
-        print(f"\nComfyUI is not available.\n", file=sys.stderr)
+        print("\nComfyUI is not available.\nTo install ComfyUI, you can run:\n\n\tcomfy install\n\n", file=sys.stderr)
         raise typer.Exit(code=1)
 
 
@@ -168,6 +178,14 @@ def env():
     _env_checker.print()
 
 
-app.add_typer(models.app, name="models", help="Manage models.")
-app.add_typer(custom_nodes.app, name="nodes", help="Manage custom nodes.")
+@app.command(hidden=True)
+def nodes():
+    print("\n[bold red] No such command, did you mean 'comfy node' instead?[/bold red]\n")
+
+@app.command(hidden=True)
+def models():
+    print("\n[bold red] No such command, did you mean 'comfy model' instead?[/bold red]\n")
+
+app.add_typer(models_command.app, name="model", help="Manage models.")
+app.add_typer(custom_nodes.app, name="node", help="Manage custom nodes.")
 app.add_typer(custom_nodes.manager_app, name="manager", help="Manager ComfyUI-Manager.")

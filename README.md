@@ -81,25 +81,42 @@ comfy provides a convenient way to manage custom nodes for extending ComfyUI's f
 
 - Show custom nodes' information:
  ```
-comfy nodes [show|simple-show] [installed|enabled|not-installed|disabled|all|snapshot|snapshot-list] 
+comfy node [show|simple-show] [installed|enabled|not-installed|disabled|all|snapshot|snapshot-list] 
                               ?[--channel <channel name>] 
                               ?[--mode [remote|local|cache]]
 ```
 -
-  `comfy nodes show all --channel recent`
+  `comfy node show all --channel recent`
 
-  `comfy nodes simple-show installed`
+  `comfy node simple-show installed`
 
-  `comfy nodes update all`
+  `comfy node update all`
 
-  `comfy nodes install ComfyUI-Impact-Pack`
+  `comfy node install ComfyUI-Impact-Pack`
 
 
 - Managing snapshot:
 
-  `comfy nodes save-snapshot`
+  `comfy node save-snapshot`
 
-  `comfy nodes restore-snapshot <snapshot name>`
+  `comfy node restore-snapshot <snapshot name>`
+
+
+### Managing Models
+
+- Model downloading
+
+  `comfy model get`
+
+  *Downloading models that have already been installed will 
+
+- Model remove
+
+  `comfy model enable-gui`
+
+- Model list
+
+  `comfy model list`
 
 
 ### Managing ComfyUI-Manager

@@ -10,6 +10,11 @@ manager_app = typer.Typer()
 
 
 def execute_cm_cli(args, channel=None, mode=None, workspace=None):
+    # TODO(yoland/data): Disabled config writing for now, checking with @data
+    # We need to find a viable place to write config file, e.g. standard place
+    # for macOS:   ~/Library/Application Support/
+    # for linx:    ~/.config/
+    # for windows: C:\Users\<username>\AppData\Local\
     _env_checker = EnvChecker()
     _env_checker.write_config()
 
@@ -48,7 +53,7 @@ def execute_cm_cli(args, channel=None, mode=None, workspace=None):
     subprocess.run(cmd, env=new_env)
 
 
-@app.command('save-snapshot')
+@app.command('save-snapshot', help="Save a snapshot of the current ComfyUI environment")
 def save_snapshot():
     execute_cm_cli(['save-snapshot'])
 

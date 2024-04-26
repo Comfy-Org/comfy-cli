@@ -48,6 +48,20 @@ def check_comfy_server_running():
     except requests.exceptions.RequestException:
         return False
 
+def check_comfy_repo(path):
+    try:
+        repo = git.Repo(path, search_parent_directories=False)
+        path_is_comfy_repo = any(
+            remote.url in constants.COMFY_ORIGIN_URL_CHOICES for remote in repo.remotes
+        )
+        if path_is_comfy_repo:
+            return path_is_comfy_repo, repo
+        else:
+            return False, None
+    # Not in a git repo at all
+    except git.exc.InvalidGitRepositoryError:
+        return False, None
+
 
 @singleton
 class EnvChecker(object):
@@ -74,6 +88,7 @@ class EnvChecker(object):
         self.conda_env = None
         self.python_version: None = None
         self.currently_in_comfy_repo = False
+        self.installed_in_default_repo = False
         self.comfy_repo = None
         self.config = configparser.ConfigParser()
         self.check()
@@ -109,24 +124,22 @@ class EnvChecker(object):
         self.virtualenv_path = (
             os.environ.get("VIRTUAL_ENV")
             if os.environ.get("VIRTUAL_ENV")
-            else "Not Used"
+            else None
         )
         self.conda_env = (
             os.environ.get("CONDA_DEFAULT_ENV")
             if os.environ.get("CONDA_DEFAULT_ENV")
-            else "Not Used"
+            else None
         )
         self.python_version = sys.version_info
 
-        try:
-            repo = git.Repo(os.getcwd(), search_parent_directories=False)
-            self.currently_in_comfy_repo = any(
-                remote.url in constants.COMFY_ORIGIN_URL_CHOICES for remote in repo.remotes
-            )
-            if self.currently_in_comfy_repo:
-                self.comfy_repo = repo
-        except git.exc.InvalidGitRepositoryError:
+        is_comfy_repo, repo = check_comfy_repo(os.getcwd())
+        if is_comfy_repo:
+            self.currently_in_comfy_repo = True
+            self.comfy_repo = repo
+        else:
             self.currently_in_comfy_repo = False
+            self.comfy_repo = None
 
         config_path = self.get_config_path()
         if os.path.exists(config_path):
@@ -137,8 +150,8 @@ class EnvChecker(object):
         table = Table(":laptop_computer: Environment", "Value")
         table.add_row("Python Version", format_python_version(sys.version_info))
         table.add_row("Python Executable", sys.executable)
-        table.add_row("Virtualenv Path", self.virtualenv_path)
-        table.add_row("Conda Env", self.conda_env)
+        table.add_row("Virtualenv Path", self.virtualenv_path if self.virtualenv_path else "Not Used")
+        table.add_row("Conda Env", self.conda_env if self.conda_env else "Not Used")
         if self.config.has_section('DEFAULT') and self.config.has_option('DEFAULT', 'recent_path'):
             table.add_row("Recent ComfyUI", self.config['DEFAULT']['recent_path'])
         else:
