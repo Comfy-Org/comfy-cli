@@ -93,6 +93,22 @@ class EnvChecker(object):
         self.config = configparser.ConfigParser()
         self.check()
 
+    def get_comfyui_manager_path(self):
+        if self.comfy_repo is None:
+            return None
+
+        # To check more robustly, verify up to the `.git` path.
+        manager_path = os.path.join(self.comfy_repo.working_dir, 'custom_nodes', 'ComfyUI-Manager')
+        return manager_path
+
+    def is_comfyui_manager_installed(self):
+        if self.comfy_repo is None:
+            return False
+
+        # To check more robustly, verify up to the `.git` path.
+        manager_git_path = os.path.join(self.comfy_repo.working_dir, 'custom_nodes', 'ComfyUI-Manager', '.git')
+        return os.path.exists(manager_git_path)
+
     def is_isolated_env(self):
         return self.virtualenv_path or self.conda_env
 

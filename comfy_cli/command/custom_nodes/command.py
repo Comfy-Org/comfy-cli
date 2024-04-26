@@ -4,6 +4,7 @@ from comfy_cli.env_checker import EnvChecker
 import os
 import subprocess
 import sys
+from rich import print
 
 app = typer.Typer()
 manager_app = typer.Typer()
@@ -17,6 +18,8 @@ def execute_cm_cli(args, channel=None, mode=None, workspace=None):
     # for windows: C:\Users\<username>\AppData\Local\
     _env_checker = EnvChecker()
     _env_checker.write_config()
+
+    validate_comfyui_manager(_env_checker)
 
     if workspace is not None:
         comfyui_path = os.path.join(workspace, 'ComfyUI')
@@ -51,6 +54,20 @@ def execute_cm_cli(args, channel=None, mode=None, workspace=None):
         new_env['COMFYUI_PATH'] = comfyui_path
 
     subprocess.run(cmd, env=new_env)
+
+
+def validate_comfyui_manager(_env_checker):
+    manager_path = _env_checker.get_comfyui_manager_path()
+
+    if manager_path is None:
+        print(f"[bold red]If ComfyUI is not installed, this feature cannot be used.[/bold red]")
+        raise typer.Exit(code=1)
+    elif not os.path.exists(manager_path):
+        print(f"[bold red]If ComfyUI-Manager is not installed, this feature cannot be used.[/bold red] \\[{manager_path}]")
+        raise typer.Exit(code=1)
+    elif not os.path.exists(os.path.join(manager_path, '.git')):
+        print(f"[bold red]The ComfyUI-Manager installation is invalid. This feature cannot be used.[/bold red] \\[{manager_path}]")
+        raise typer.Exit(code=1)
 
 
 @app.command('save-snapshot', help="Save a snapshot of the current ComfyUI environment")
