@@ -11,7 +11,7 @@ def install_comfyui_dependencies(repo_dir, torch_mode):
 
     # install torch
     if torch_mode == 'amd':
-        pip_url = ['--extra-index-url', 'https://download.pytorch.org/whl/rocm5.7']
+        pip_url = ['--extra-index-url', 'https://download.pytorch.org/whl/rocm6.0']
     else:
         pip_url = ['--extra-index-url', 'https://download.pytorch.org/whl/cu121']
     subprocess.run([sys.executable, '-m', "pip", "install", "torch", "torchvision", "torchaudio"] + pip_url)
