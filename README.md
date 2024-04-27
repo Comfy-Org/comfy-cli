@@ -153,8 +153,18 @@ models:
   - model:
   ...
 
-custom_nodes:
-  - ???
+# compatible with ComfyUI-Manager's .yaml snapshot
+custom_nodes:  
+  comfyui: [commit hash]
+  file_custom_nodes:
+  - disabled: [bool]
+    filename: [.py filename]
+    ...
+  git_custom_nodes:
+    [git-url]:
+      disabled: [bool]
+      hash: [commit hash]
+    ...
 ```
 
 ## Contributing

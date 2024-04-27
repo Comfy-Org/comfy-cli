@@ -72,18 +72,23 @@ def validate_comfyui_manager(_env_checker):
 
 
 @app.command('save-snapshot', help="Save a snapshot of the current ComfyUI environment")
-def save_snapshot():
-    execute_cm_cli(['save-snapshot'])
+def save_snapshot(output: Annotated[str, '--output', typer.Option(show_default=False, help="Specify the output file path. (.json/.yaml)")] = None,):
+    if output is None:
+        execute_cm_cli(['save-snapshot'])
+    else:
+        output = os.path.abspath(output)  # to compensate chdir
+        execute_cm_cli(['save-snapshot', '--output', output])
 
 
 @app.command('restore-snapshot')
 def restore_snapshot(path: str):
+    path = os.path.abspath(path)
     execute_cm_cli(['restore-snapshot', path])
 
 
 @app.command('restore-dependencies')
-def restore_dependencies(path: str):
-    execute_cm_cli(['restore-dependencies', path])
+def restore_dependencies():
+    execute_cm_cli(['restore-dependencies'])
 
 
 @manager_app.command('disable-gui')
@@ -98,6 +103,7 @@ def enable_gui():
 
 @manager_app.command()
 def clear(path: str):
+    path = os.path.abspath(path)
     execute_cm_cli(['clear', path])
 
 
