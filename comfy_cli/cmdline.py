@@ -11,7 +11,7 @@ import subprocess
 from comfy_cli.command import custom_nodes
 from comfy_cli.command import install as install_inner
 from comfy_cli.command import run as run_inner
-from comfy_cli import constants
+from comfy_cli import constants, tracking
 from comfy_cli.env_checker import EnvChecker
 from comfy_cli.meta_data import MetadataManager
 from comfy_cli import env_checker
@@ -44,6 +44,7 @@ def no_command(ctx: typer.Context):
 
 
 @app.command(help="Download and install ComfyUI and ComfyUI-Manager")
+@tracking.track_command()
 def install(
     url: Annotated[
         str,
@@ -106,6 +107,7 @@ def update(self):
 
 
 @app.command(help="Run workflow file")
+@tracking.track_command()
 def run(
         workflow_file: Annotated[str, typer.Option(help="Path to the workflow file.")],
         ):
@@ -151,6 +153,7 @@ def launch_comfyui(_env_checker, extra):
 
 
 @app.command(help="Launch ComfyUI: ?[--workspace <path>] ?[-- <extra args ...>]")
+@tracking.track_command()
 def launch(workspace: Annotated[str, typer.Option(show_default=False, help="Path to ComfyUI workspace")] = None,
            extra: List[str] = typer.Argument(None)):
 
@@ -187,17 +190,20 @@ def launch(workspace: Annotated[str, typer.Option(show_default=False, help="Path
 
 
 @app.command(help="Print out current environment variables.")
+@tracking.track_command()
 def env():
     _env_checker = EnvChecker()
     _env_checker.print()
 
 
 @app.command(hidden=True)
+@tracking.track_command()
 def nodes():
     print("\n[bold red] No such command, did you mean 'comfy node' instead?[/bold red]\n")
 
 
 @app.command(hidden=True)
+@tracking.track_command()
 def models():
     print("\n[bold red] No such command, did you mean 'comfy model' instead?[/bold red]\n")
 
