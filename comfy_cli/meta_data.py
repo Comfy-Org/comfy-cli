@@ -47,7 +47,7 @@ class MetadataManager:
                     model_files.append(future.result())
 
         return model_files
-        
+
 
     def load_metadata(self):
         if os.path.exists(self.metadata_file):
@@ -79,9 +79,6 @@ class MetadataManager:
 
 if __name__ == "__main__":
     manager = MetadataManager()
-    import pdb
-
-    pdb.set_trace()
 
     # model_name = "example_model"
     # model_path = "/path/to/example_model"
