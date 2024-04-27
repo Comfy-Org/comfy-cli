@@ -67,14 +67,12 @@ def install(
     ] = False,
     skip_manager: Annotated[
         bool,
-        lambda: typer.Option(
-            default=False,
+        typer.Option(
             help="Skip installing the manager component")
     ] = False,
     amd: Annotated[
         bool,
-        lambda: typer.Option(
-            default=False,
+        typer.Option(
             help="Install for AMD gpu")
     ] = False,
 ):
