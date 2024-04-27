@@ -45,16 +45,18 @@ Comfy provides commands that allow you to easily run the installed ComfyUI.
   
   `comfy launch`
   
-- To execute the ComfyUI that was last run or last installed, if you are outside of the ComfyUI repository:
+- To execute the ComfyUI that was last run or last installed, if you are outside of the ComfyUI repository: [TODO: NEED TO DISCUSS]
 
   `comfy launch`
 
-- To run in CPU mode:
+- To run with default ComfyUI options:
 
-  `comfy launch --cpu`
+  `comfy launch -- <extra args...>`
+
+  `comfy launch -- --cpu --listen 0.0.0.0`
 
 
-### Managing Packages
+### Managing Packages [WIP]
 
 comfy allows you to easily install, update, and remove packages for ComfyUI. Here are some examples:
 

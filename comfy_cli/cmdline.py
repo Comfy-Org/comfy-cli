@@ -1,7 +1,7 @@
 import sys
 
 import typer
-from typing_extensions import Annotated
+from typing_extensions import List, Annotated
 from comfy_cli.command.models import models as models_command
 from rich import print
 import os
@@ -118,7 +118,7 @@ def validate_comfyui(_env_checker):
         raise typer.Exit(code=1)
 
 
-def launch_comfyui(_env_checker, cpu):
+def launch_comfyui(_env_checker, extra):
     # TODO(yoland/data): Disabled config writing for now, checking with @data
     # We need to find a viable place to write config file, e.g. standard place
     # for macOS:   ~/Library/Application Support/
@@ -126,6 +126,7 @@ def launch_comfyui(_env_checker, cpu):
     # for windows: C:\Users\<username>\AppData\Local\
     #_env_checker.config['DEFAULT']['recent_path'] = os.getcwd()
     #_env_checker.write_config()
+
 
     validate_comfyui(_env_checker)
 
@@ -138,31 +139,21 @@ def launch_comfyui(_env_checker, cpu):
         new_env['__COMFY_CLI_SESSION__'] = os.path.join(env_path, 'comfy-cli')
         reboot_path = os.path.join(env_path, 'comfy-cli', '.reboot')
 
+    extra = extra if extra is not None else []
+
     while True:
-        if cpu:
-            subprocess.run([sys.executable, "main.py", "--cpu"], env=new_env, check=False)
-        else:
-            subprocess.run([sys.executable, "main.py"], env=new_env, check=False)
+        subprocess.run([sys.executable, "main.py"] + extra, env=new_env, check=False)
 
         if not os.path.exists(reboot_path):
             return
+
         os.remove(reboot_path)
 
 
-@app.command(help="Launch ComfyUI: ?[--workspace <path>] ?[--cpu]")
-def launch(workspace: Annotated[
-                str,
-                typer.Option(
-                    show_default=False,
-                    help="Path to ComfyUI workspace")
-            ] = None,
-           cpu: Annotated[
-               bool,
-               lambda: typer.Option(
-                   default=False,
-                   help="enable CPU mode")
-           ] = False,
-           ):
+@app.command(help="Launch ComfyUI: ?[--workspace <path>] ?[-- <extra args ...>]")
+def launch(workspace: Annotated[str, typer.Option(show_default=False, help="Path to ComfyUI workspace")] = None,
+           extra: List[str] = typer.Argument(None)):
+
     _env_checker = EnvChecker()
 
     if workspace is not None:
@@ -172,14 +163,16 @@ def launch(workspace: Annotated[
             _env_checker.check()  # update env
 
             print(f"\nLaunch ComfyUI from repo: {_env_checker.comfy_repo.working_dir}\n")
-            launch_comfyui(_env_checker, cpu)
+            launch_comfyui(_env_checker, extra)
         else:
             print(f"\nInvalid ComfyUI not found in specified workspace: {workspace}\n", file=sys.stderr)
             raise typer.Exit(code=1)
 
     elif _env_checker.comfy_repo is not None:
+        os.chdir(_env_checker.comfy_repo.working_dir)
         print(f"\nLaunch ComfyUI from current repo: {_env_checker.comfy_repo.working_dir}\n")
-        launch_comfyui(_env_checker, cpu)
+        launch_comfyui(_env_checker, extra)
+
     elif _env_checker.config['DEFAULT'].get('recent_path') is not None:
         comfy_path = _env_checker.config['DEFAULT'].get('recent_path')
         print(f"\nLaunch ComfyUI from recent repo: {comfy_path}\n")
@@ -187,7 +180,7 @@ def launch(workspace: Annotated[
         os.chdir(comfy_path)
         _env_checker.check()  # update env
 
-        launch_comfyui(_env_checker, cpu)
+        launch_comfyui(_env_checker, extra)
     else:
         print("\nComfyUI is not available.\nTo install ComfyUI, you can run:\n\n\tcomfy install\n\n", file=sys.stderr)
         raise typer.Exit(code=1)

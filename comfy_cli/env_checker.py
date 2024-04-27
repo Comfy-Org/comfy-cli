@@ -48,9 +48,10 @@ def check_comfy_server_running():
     except requests.exceptions.RequestException:
         return False
 
+
 def check_comfy_repo(path):
     try:
-        repo = git.Repo(path, search_parent_directories=False)
+        repo = git.Repo(path, search_parent_directories=True)
         path_is_comfy_repo = any(
             remote.url in constants.COMFY_ORIGIN_URL_CHOICES for remote in repo.remotes
         )

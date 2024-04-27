@@ -24,6 +24,7 @@ def execute_cm_cli(args, channel=None, mode=None, workspace=None):
     if workspace is not None:
         comfyui_path = os.path.join(workspace, 'ComfyUI')
     elif _env_checker.comfy_repo is not None:
+        os.chdir(_env_checker.comfy_repo.working_dir)
         comfyui_path = _env_checker.comfy_repo.working_dir
     elif _env_checker.config['DEFAULT'].get('recent_path') is not None:
         comfyui_path = _env_checker.config['DEFAULT'].get('recent_path')
