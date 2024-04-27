@@ -66,8 +66,7 @@ def install(
     ] = "~/comfy",
     restore: Annotated[
         bool,
-        lambda: typer.Option(
-            default=False,
+        typer.Option(
             help="Restore dependencies for installed ComfyUI if not installed")
     ] = False,
     skip_manager: Annotated[
