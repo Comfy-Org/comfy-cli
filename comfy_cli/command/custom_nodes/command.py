@@ -7,6 +7,7 @@ import os
 import subprocess
 import sys
 from rich import print
+import uuid
 
 app = typer.Typer()
 manager_app = typer.Typer()
@@ -53,7 +54,8 @@ def execute_cm_cli(args, channel=None, mode=None, workspace=None):
     env_path = _env_checker.get_isolated_env()
     new_env = os.environ.copy()
     if env_path is not None:
-        new_env['__COMFY_CLI_SESSION__'] = os.path.join(env_path, 'comfy-cli')
+        session_path = os.path.join(_env_checker.get_config_path(), 'tmp', str(uuid.uuid4()))
+        new_env['__COMFY_CLI_SESSION__'] = session_path
         new_env['COMFYUI_PATH'] = comfyui_path
 
     subprocess.run(cmd, env=new_env)

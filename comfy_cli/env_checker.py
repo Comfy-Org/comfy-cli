@@ -5,7 +5,6 @@ Module for checking various env and state conditions.
 import os
 import sys
 import git
-from rich import print
 from rich.console import Console
 from rich.table import Table
 import requests
@@ -122,19 +121,24 @@ class EnvChecker(object):
 
         return None
 
+    def get_os(self):
+        if 'win' in sys.platform:
+            return constants.OS.WINDOWS
+        elif sys.platform == 'darwin':
+            return constants.OS.MACOS
+
+        return constants.OS.LINUX
+
     def get_config_path(self):
-        env_path = self.get_isolated_env()
-        if env_path:
-            return os.path.join(env_path, 'comfy-cli', 'config.json')
-        return None
+        return constants.DEFAULT_CONFIG[self.get_os()]
 
     def write_config(self):
-        env_path = self.get_isolated_env()
-        cli_path = os.path.join(env_path, 'comfy-cli')
-        if not os.path.exists(cli_path):
-            os.mkdir(cli_path)
+        config_file_path = os.path.join(self.get_config_path(), 'config.ini')
+        dir_path = os.path.dirname(config_file_path)
+        if not os.path.exists(dir_path):
+            os.mkdir(dir_path)
 
-        with open(self.get_config_path(), 'w') as configfile:
+        with open(config_file_path, 'w') as configfile:
             self.config.write(configfile)
 
     def check(self):
@@ -158,10 +162,15 @@ class EnvChecker(object):
             self.currently_in_comfy_repo = False
             self.comfy_repo = None
 
-        config_path = self.get_config_path()
-        if os.path.exists(config_path):
+        config_file_path = os.path.join(self.get_config_path(), 'config.ini')
+        if os.path.exists(config_file_path):
             self.config = configparser.ConfigParser()
-            self.config.read(config_path)
+            self.config.read(config_file_path)
+
+        # TODO: We need a policy for clearing the tmp directory.
+        tmp_path = os.path.join(self.get_config_path(), 'tmp')
+        if not os.path.exists(tmp_path):
+            os.makedirs(tmp_path)
 
     def print(self):
         table = Table(":laptop_computer: Environment", "Value")
@@ -169,12 +178,20 @@ class EnvChecker(object):
         table.add_row("Python Executable", sys.executable)
         table.add_row("Virtualenv Path", self.virtualenv_path if self.virtualenv_path else "Not Used")
         table.add_row("Conda Env", self.conda_env if self.conda_env else "Not Used")
-        if self.config.has_section('DEFAULT') and self.config.has_option('DEFAULT', 'recent_path'):
+
+        if self.config.has_option('DEFAULT', 'default_workspace'):
+            table.add_row("Default ComfyUI workspace", self.config['DEFAULT']['default_workspace'])
+        else:
+            table.add_row("Default ComfyUI workspace", "No default ComfyUI workspace")
+
+        if self.config.has_option('DEFAULT', 'recent_path'):
             table.add_row("Recent ComfyUI", self.config['DEFAULT']['recent_path'])
         else:
             table.add_row("Recent ComfyUI", "No recent run")
+
         if check_comfy_server_running():
             table.add_row("Comfy Server Running", "[bold green]Yes[/bold green]\nhttp://localhost:8188")
         else:
             table.add_row("Comfy Server Running", "[bold red]No[/bold red]")
+
         console.print(table)

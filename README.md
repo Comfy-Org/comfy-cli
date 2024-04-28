@@ -41,19 +41,27 @@ Comfy provides commands that allow you to easily run the installed ComfyUI.
 
   `comfy launch --workspace <path>`
 
-- To run ComfyUI from the current directory, if you are inside the ComfyUI repository:
-  
-  `comfy launch`
-  
-- To execute the ComfyUI that was last run or last installed, if you are outside of the ComfyUI repository: [TODO: NEED TO DISCUSS]
+- To execute commands automatically, prioritize without specifying a path:
+    - 1st: To run ComfyUI from the current directory, if you are inside the ComfyUI repository
+    - 2nd: To run ComfyUI from the default workspace, if you are inside the ComfyUI repository and default workspace is set
+    - 3rd: To execute the ComfyUI that was last run or last installed, if you are outside of the ComfyUI repository
 
   `comfy launch`
+
+-  To execute the ComfyUI that was last run or last installed
+    - If the `--workspace` option is provided, the `--recent` option is ignored.):
+  
+   `comfy launch --recent`
 
 - To run with default ComfyUI options:
 
   `comfy launch -- <extra args...>`
 
   `comfy launch -- --cpu --listen 0.0.0.0`
+
+- To set default workspace:
+
+  `comfy set-default <workspace path>`
 
 
 ### Managing Packages [WIP]

@@ -17,6 +17,8 @@ from comfy_cli.meta_data import MetadataManager
 from comfy_cli import env_checker
 from rich.console import Console
 import time
+import uuid
+
 
 app = typer.Typer()
 
@@ -119,14 +121,8 @@ def validate_comfyui(_env_checker):
 
 
 def launch_comfyui(_env_checker, extra):
-    # TODO(yoland/data): Disabled config writing for now, checking with @data
-    # We need to find a viable place to write config file, e.g. standard place
-    # for macOS:   ~/Library/Application Support/
-    # for linx:    ~/.config/
-    # for windows: C:\Users\<username>\AppData\Local\
-    #_env_checker.config['DEFAULT']['recent_path'] = os.getcwd()
-    #_env_checker.write_config()
-
+    _env_checker.config['DEFAULT']['recent_path'] = os.getcwd()
+    _env_checker.write_config()
 
     validate_comfyui(_env_checker)
 
@@ -136,8 +132,11 @@ def launch_comfyui(_env_checker, extra):
     new_env = os.environ.copy()
 
     if env_path is not None:
-        new_env['__COMFY_CLI_SESSION__'] = os.path.join(env_path, 'comfy-cli')
-        reboot_path = os.path.join(env_path, 'comfy-cli', '.reboot')
+        session_path = os.path.join(_env_checker.get_config_path(), 'tmp', str(uuid.uuid4()))
+        new_env['__COMFY_CLI_SESSION__'] = session_path
+
+        # To minimize the possibility of leaving residue in the tmp directory, use files instead of directories.
+        reboot_path = os.path.join(session_path + '.reboot')
 
     extra = extra if extra is not None else []
 
@@ -150,15 +149,16 @@ def launch_comfyui(_env_checker, extra):
         os.remove(reboot_path)
 
 
-@app.command(help="Launch ComfyUI: ?[--workspace <path>] ?[-- <extra args ...>]")
+@app.command(help="Launch ComfyUI: ?[--workspace <path>] ?[--recent] ?[-- <extra args ...>]")
 @tracking.track_command()
 def launch(workspace: Annotated[str, typer.Option(show_default=False, help="Path to ComfyUI workspace")] = None,
+           recent: Annotated[bool, typer.Option(help="Launch from recent path (--workspace is higher)")] = False,
            extra: List[str] = typer.Argument(None)):
 
     _env_checker = EnvChecker()
 
     if workspace is not None:
-        comfyui_path = os.path.join(workspace, 'ComfyUI')
+        comfyui_path = os.path.join(os.path.expanduser(workspace), 'ComfyUI')
         if os.path.exists(comfyui_path):
             os.chdir(comfyui_path)
             _env_checker.check()  # update env
@@ -169,9 +169,18 @@ def launch(workspace: Annotated[str, typer.Option(show_default=False, help="Path
             print(f"\nInvalid ComfyUI not found in specified workspace: {workspace}\n", file=sys.stderr)
             raise typer.Exit(code=1)
 
-    elif _env_checker.comfy_repo is not None:
+    elif not recent and _env_checker.comfy_repo is not None:
         os.chdir(_env_checker.comfy_repo.working_dir)
         print(f"\nLaunch ComfyUI from current repo: {_env_checker.comfy_repo.working_dir}\n")
+        launch_comfyui(_env_checker, extra)
+
+    elif not recent and _env_checker.config['DEFAULT'].get('default_workspace') is not None:
+        comfy_path = os.path.join(_env_checker.config['DEFAULT'].get('default_workspace'), 'ComfyUI')
+        print(f"\nLaunch ComfyUI from default workspace: {comfy_path}\n")
+
+        os.chdir(comfy_path)
+        _env_checker.check()  # update env
+
         launch_comfyui(_env_checker, extra)
 
     elif _env_checker.config['DEFAULT'].get('recent_path') is not None:
@@ -182,9 +191,24 @@ def launch(workspace: Annotated[str, typer.Option(show_default=False, help="Path
         _env_checker.check()  # update env
 
         launch_comfyui(_env_checker, extra)
+
     else:
         print("\nComfyUI is not available.\nTo install ComfyUI, you can run:\n\n\tcomfy install\n\n", file=sys.stderr)
         raise typer.Exit(code=1)
+
+
+@app.command("set-default", help="Set default workspace")
+@tracking.track_command()
+def set_default(workspace_path: str):
+    workspace_path = os.path.expanduser(workspace_path)
+    comfy_path = os.path.join(workspace_path, 'ComfyUI')
+    if not os.path.exists(comfy_path):
+        print(f"Invalid workspace path: {workspace_path}\nThe workspace path must contain 'ComfyUI'.")
+        raise typer.Exit(code=1)
+
+    _env_checker = EnvChecker()
+    _env_checker.config['DEFAULT']['default_workspace'] = workspace_path
+    _env_checker.write_config()
 
 
 @app.command(help="Print out current environment variables.")
