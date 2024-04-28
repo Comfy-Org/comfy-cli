@@ -1,7 +1,7 @@
 import typer
 from typing_extensions import Annotated
 
-from comfy_cli import tracking
+from comfy_cli import tracking, logging
 
 app = typer.Typer()
 
@@ -31,7 +31,7 @@ def download_model(url: str, path: str):
   local_filepath = pathlib.Path(path, local_filename)
   local_filepath.parent.mkdir(parents=True, exist_ok=True)
 
-  print(f"downloading {url} ...")
+  logging.debug(f"downloading {url} ...")
   with httpx.stream("GET", url, follow_redirects=True) as stream:
     total = int(stream.headers["Content-Length"])
     with open(local_filepath, "wb") as f, tqdm(
@@ -44,3 +44,31 @@ def download_model(url: str, path: str):
           stream.num_bytes_downloaded - num_bytes_downloaded
         )
         num_bytes_downloaded = stream.num_bytes_downloaded
+
+  # def download_model(url: str, path: str):
+  #   # Set up logging to file
+  #   logging.basicConfig(level=logging.INFO, filename='download.log', filemode='w',
+  #                       format='%(asctime)s - %(levelname)s - %(message)s')
+  #
+  #   local_filename = url.split("/")[-1]
+  #   local_filepath = pathlib.Path(path, local_filename)
+  #   local_filepath.parent.mkdir(parents=True, exist_ok=True)
+  #
+  #   # Log the URL being downloaded
+  #   logging.info(f"Downloading {url} ...")
+  #
+  #   with httpx.stream("GET", url, follow_redirects=True) as stream:
+  #     total = int(stream.headers["Content-Length"])
+  #     with open(local_filepath, "wb") as f, tqdm(
+  #       total=total, unit_scale=True, unit_divisor=1024, unit="B"
+  #     ) as progress:
+  #       num_bytes_downloaded = stream.num_bytes_downloaded
+  #       for data in stream.iter_bytes():
+  #         f.write(data)
+  #         progress.update(
+  #           stream.num_bytes_downloaded - num_bytes_downloaded
+  #         )
+  #         num_bytes_downloaded = stream.num_bytes_downloaded
+  #
+  #   # Log the completion of the download
+  #   logging.info(f"Download completed. File saved to {local_filepath}")
