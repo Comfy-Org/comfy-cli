@@ -44,3 +44,4 @@ share/python-wheels/
 *.manifest
 *.spec
 
+venv/

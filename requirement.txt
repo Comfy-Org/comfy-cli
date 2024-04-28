@@ -4,3 +4,4 @@ GitPython
 requests
 pyyaml
 typing-extensions
+mixpanel

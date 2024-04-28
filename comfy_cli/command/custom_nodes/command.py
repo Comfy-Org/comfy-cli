@@ -1,5 +1,7 @@
 import typer
 from typing_extensions import List, Annotated
+
+from comfy_cli import tracking
 from comfy_cli.env_checker import EnvChecker
 import os
 import subprocess
@@ -72,6 +74,7 @@ def validate_comfyui_manager(_env_checker):
 
 
 @app.command('save-snapshot', help="Save a snapshot of the current ComfyUI environment")
+@tracking.track_command("node")
 def save_snapshot(output: Annotated[str, '--output', typer.Option(show_default=False, help="Specify the output file path. (.json/.yaml)")] = None,):
     if output is None:
         execute_cm_cli(['save-snapshot'])
@@ -81,33 +84,39 @@ def save_snapshot(output: Annotated[str, '--output', typer.Option(show_default=F
 
 
 @app.command('restore-snapshot')
+@tracking.track_command("node")
 def restore_snapshot(path: str):
     path = os.path.abspath(path)
     execute_cm_cli(['restore-snapshot', path])
 
 
 @app.command('restore-dependencies')
+@tracking.track_command("node")
 def restore_dependencies():
     execute_cm_cli(['restore-dependencies'])
 
 
 @manager_app.command('disable-gui')
+@tracking.track_command("node")
 def disable_gui():
     execute_cm_cli(['cli-only-mode', 'enable'])
 
 
 @manager_app.command('enable-gui')
+@tracking.track_command("node")
 def enable_gui():
     execute_cm_cli(['cli-only-mode', 'disable'])
 
 
 @manager_app.command()
+@tracking.track_command("node")
 def clear(path: str):
     path = os.path.abspath(path)
     execute_cm_cli(['clear', path])
 
 
 @app.command()
+@tracking.track_command("node")
 def show(args: List[str] = typer.Argument(..., help="[installed|enabled|not-installed|disabled|all|snapshot|snapshot-list]"),
          channel: Annotated[str, '--channel', typer.Option(show_default=False, help="Specify the operation mode")] = None,
          mode: Annotated[str, '--mode', typer.Option(show_default=False, help="[remote|local|cache]")] = None,
@@ -127,6 +136,7 @@ def show(args: List[str] = typer.Argument(..., help="[installed|enabled|not-inst
 
 
 @app.command('simple-show')
+@tracking.track_command("node")
 def simple_show(args: List[str] = typer.Argument(..., help="[installed|enabled|not-installed|disabled|all|snapshot|snapshot-list]"),
                 channel: Annotated[str, '--channel', typer.Option(show_default=False, help="Specify the operation mode")] = None,
                 mode: Annotated[str, '--mode', typer.Option(show_default=False, help="[remote|local|cache]")] = None,
@@ -147,6 +157,7 @@ def simple_show(args: List[str] = typer.Argument(..., help="[installed|enabled|n
 
 # install, reinstall, uninstall
 @app.command()
+@tracking.track_command("node")
 def install(args: List[str] = typer.Argument(..., help="install custom nodes"),
             channel: Annotated[str, '--channel', typer.Option(show_default=False, help="Specify the operation mode")] = None,
             mode: Annotated[str, '--mode', typer.Option(show_default=False, help="[remote|local|cache]")] = None,
@@ -164,6 +175,7 @@ def install(args: List[str] = typer.Argument(..., help="install custom nodes"),
 
 
 @app.command()
+@tracking.track_command("node")
 def reinstall(args: List[str] = typer.Argument(..., help="reinstall custom nodes"),
               channel: Annotated[str, '--channel', typer.Option(show_default=False, help="Specify the operation mode")] = None,
               mode: Annotated[str, '--mode', typer.Option(show_default=False, help="[remote|local|cache]")] = None,
@@ -181,6 +193,7 @@ def reinstall(args: List[str] = typer.Argument(..., help="reinstall custom nodes
 
 
 @app.command()
+@tracking.track_command("node")
 def uninstall(args: List[str] = typer.Argument(..., help="uninstall custom nodes"),
               channel: Annotated[str, '--channel', typer.Option(show_default=False, help="Specify the operation mode")] = None,
               mode: Annotated[str, '--mode', typer.Option(show_default=False, help="[remote|local|cache]")] = None,
@@ -200,6 +213,7 @@ def uninstall(args: List[str] = typer.Argument(..., help="uninstall custom nodes
 # `update, disable, enable, fix` allows `all` param
 
 @app.command()
+@tracking.track_command("node")
 def update(args: List[str] = typer.Argument(..., help="update custom nodes"),
            channel: Annotated[str, '--channel', typer.Option(show_default=False, help="Specify the operation mode")] = None,
            mode: Annotated[str, '--mode', typer.Option(show_default=False, help="[remote|local|cache]")] = None,
@@ -213,6 +227,7 @@ def update(args: List[str] = typer.Argument(..., help="update custom nodes"),
 
 
 @app.command()
+@tracking.track_command("node")
 def disable(args: List[str] = typer.Argument(..., help="disable custom nodes"),
             channel: Annotated[str, '--channel', typer.Option(show_default=False,help="Specify the operation mode")] = None,
             mode: Annotated[str, '--mode', typer.Option(show_default=False, help="[remote|local|cache]")] = None,
@@ -226,6 +241,7 @@ def disable(args: List[str] = typer.Argument(..., help="disable custom nodes"),
 
 
 @app.command()
+@tracking.track_command("node")
 def enable(args: List[str] = typer.Argument(..., help="enable custom nodes"),
            channel: Annotated[str, '--channel', typer.Option(show_default=False, help="Specify the operation mode")] = None,
            mode: Annotated[str, '--mode', typer.Option(show_default=False, help="[remote|local|cache]")] = None,
@@ -239,6 +255,7 @@ def enable(args: List[str] = typer.Argument(..., help="enable custom nodes"),
 
 
 @app.command()
+@tracking.track_command("node")
 def fix(args: List[str] = typer.Argument(..., help="fix dependencies for specified custom nodes"),
         channel: Annotated[str, '--channel', typer.Option(show_default=False, help="Specify the operation mode")] = None,
         mode: Annotated[str, '--mode', typer.Option(show_default=False, help="[remote|local|cache]")] = None,

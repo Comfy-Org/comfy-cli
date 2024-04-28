@@ -1,10 +1,13 @@
 import typer
 from typing_extensions import Annotated
 
+from comfy_cli import tracking
+
 app = typer.Typer()
 
 
 @app.command()
+@tracking.track_command("model")
 def get(url: Annotated[str, typer.Argument(help="The url of the model")],
         path: Annotated[str, typer.Argument(help="The path to install the model.")]):
   """Download model"""
@@ -13,6 +16,7 @@ def get(url: Annotated[str, typer.Argument(help="The url of the model")],
 
 
 @app.command()
+@tracking.track_command("model")
 def remove():
   """Remove a custom node"""
   # TODO
