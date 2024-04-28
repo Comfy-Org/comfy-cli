@@ -27,11 +27,12 @@ def main():
 
 
 def init():
-    # TODO(yoland): after this 
+    # TODO(yoland): after this
     metadata_manager = MetadataManager()
     start_time = time.time()
     metadata_manager.scan_dir()
     end_time = time.time()
+    logging.setup_logging()
 
     print(f"scan_dir took {end_time - start_time:.2f} seconds to run")
 
