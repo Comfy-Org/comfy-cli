@@ -8,19 +8,15 @@ import subprocess
 import sys
 from rich import print
 import uuid
+from comfy_cli.config_manager import ConfigManager
 
 app = typer.Typer()
 manager_app = typer.Typer()
 
 
 def execute_cm_cli(args, channel=None, mode=None, workspace=None):
-    # TODO(yoland/data): Disabled config writing for now, checking with @data
-    # We need to find a viable place to write config file, e.g. standard place
-    # for macOS:   ~/Library/Application Support/
-    # for linx:    ~/.config/
-    # for windows: C:\Users\<username>\AppData\Local\
     _env_checker = EnvChecker()
-    _env_checker.write_config()
+    _config_manager = ConfigManager().write_config()
 
     validate_comfyui_manager(_env_checker)
 
@@ -29,8 +25,8 @@ def execute_cm_cli(args, channel=None, mode=None, workspace=None):
     elif _env_checker.comfy_repo is not None:
         os.chdir(_env_checker.comfy_repo.working_dir)
         comfyui_path = _env_checker.comfy_repo.working_dir
-    elif _env_checker.config['DEFAULT'].get('recent_path') is not None:
-        comfyui_path = _env_checker.config['DEFAULT'].get('recent_path')
+    elif _config_manager.config['DEFAULT'].get('recent_path') is not None:
+        comfyui_path = _config_manager.config['DEFAULT'].get('recent_path')
     else:
         print(f"\nComfyUI is not available.\n", file=sys.stderr)
         raise typer.Exit(code=1)
@@ -54,7 +50,7 @@ def execute_cm_cli(args, channel=None, mode=None, workspace=None):
     env_path = _env_checker.get_isolated_env()
     new_env = os.environ.copy()
     if env_path is not None:
-        session_path = os.path.join(_env_checker.get_config_path(), 'tmp', str(uuid.uuid4()))
+        session_path = os.path.join(_config_manager.get_config_path(), 'tmp', str(uuid.uuid4()))
         new_env['__COMFY_CLI_SESSION__'] = session_path
         new_env['COMFYUI_PATH'] = comfyui_path
 
