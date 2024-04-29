@@ -5,14 +5,14 @@ Module for checking various env and state conditions.
 import os
 import sys
 import git
-from rich import print
 from rich.console import Console
 from rich.table import Table
 import requests
 
 from comfy_cli import constants
 from comfy_cli.utils import singleton
-import configparser
+
+from comfy_cli.config_manager import ConfigManager
 
 console = Console()
 
@@ -91,7 +91,6 @@ class EnvChecker(object):
         self.currently_in_comfy_repo = False
         self.installed_in_default_repo = False
         self.comfy_repo = None
-        self.config = configparser.ConfigParser()
         self.check()
 
     def get_comfyui_manager_path(self):
@@ -122,21 +121,6 @@ class EnvChecker(object):
 
         return None
 
-    def get_config_path(self):
-        env_path = self.get_isolated_env()
-        if env_path:
-            return os.path.join(env_path, 'comfy-cli', 'config.json')
-        return None
-
-    def write_config(self):
-        env_path = self.get_isolated_env()
-        cli_path = os.path.join(env_path, 'comfy-cli')
-        if not os.path.exists(cli_path):
-            os.mkdir(cli_path)
-
-        with open(self.get_config_path(), 'w') as configfile:
-            self.config.write(configfile)
-
     def check(self):
         self.virtualenv_path = (
             os.environ.get("VIRTUAL_ENV")
@@ -158,23 +142,18 @@ class EnvChecker(object):
             self.currently_in_comfy_repo = False
             self.comfy_repo = None
 
-        config_path = self.get_config_path()
-        if os.path.exists(config_path):
-            self.config = configparser.ConfigParser()
-            self.config.read(config_path)
-
     def print(self):
         table = Table(":laptop_computer: Environment", "Value")
         table.add_row("Python Version", format_python_version(sys.version_info))
         table.add_row("Python Executable", sys.executable)
         table.add_row("Virtualenv Path", self.virtualenv_path if self.virtualenv_path else "Not Used")
         table.add_row("Conda Env", self.conda_env if self.conda_env else "Not Used")
-        if self.config.has_section('DEFAULT') and self.config.has_option('DEFAULT', 'recent_path'):
-            table.add_row("Recent ComfyUI", self.config['DEFAULT']['recent_path'])
-        else:
-            table.add_row("Recent ComfyUI", "No recent run")
+
+        ConfigManager().fill_print_env(table)
+
         if check_comfy_server_running():
             table.add_row("Comfy Server Running", "[bold green]Yes[/bold green]\nhttp://localhost:8188")
         else:
             table.add_row("Comfy Server Running", "[bold red]No[/bold red]")
+
         console.print(table)
