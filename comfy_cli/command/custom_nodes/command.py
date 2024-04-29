@@ -16,15 +16,17 @@ manager_app = typer.Typer()
 
 def execute_cm_cli(args, channel=None, mode=None, workspace=None):
     _env_checker = EnvChecker()
-    _config_manager = ConfigManager().write_config()
-
-    validate_comfyui_manager(_env_checker)
+    _config_manager = ConfigManager()
+    _config_manager.write_config()
 
     if workspace is not None:
+        workspace = os.path.expanduser(workspace)
         comfyui_path = os.path.join(workspace, 'ComfyUI')
     elif _env_checker.comfy_repo is not None:
         os.chdir(_env_checker.comfy_repo.working_dir)
         comfyui_path = _env_checker.comfy_repo.working_dir
+    elif _config_manager.config['DEFAULT'].get('default_workspace') is not None:
+        comfyui_path = os.path.join(_config_manager.config['DEFAULT'].get('default_workspace'), 'ComfyUI')
     elif _config_manager.config['DEFAULT'].get('recent_path') is not None:
         comfyui_path = _config_manager.config['DEFAULT'].get('recent_path')
     else:
