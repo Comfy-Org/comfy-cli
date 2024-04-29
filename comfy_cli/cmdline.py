@@ -11,7 +11,7 @@ import subprocess
 from comfy_cli.command import custom_nodes
 from comfy_cli.command import install as install_inner
 from comfy_cli.command import run as run_inner
-from comfy_cli import constants, tracking
+from comfy_cli import constants, tracking, logging
 from comfy_cli.env_checker import EnvChecker
 from comfy_cli.meta_data import MetadataManager
 from comfy_cli import env_checker
@@ -29,11 +29,12 @@ def main():
 
 
 def init():
-    # TODO(yoland): after this 
+    # TODO(yoland): after this
     metadata_manager = MetadataManager()
     start_time = time.time()
     metadata_manager.scan_dir()
     end_time = time.time()
+    logging.setup_logging()
 
     print(f"scan_dir took {end_time - start_time:.2f} seconds to run")
 
