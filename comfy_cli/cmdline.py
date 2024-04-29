@@ -19,6 +19,7 @@ from rich.console import Console
 import time
 import uuid
 from comfy_cli.config_manager import ConfigManager
+from comfy_cli import utils
 
 
 app = typer.Typer()
@@ -122,11 +123,33 @@ def validate_comfyui(_env_checker):
         raise typer.Exit(code=1)
 
 
-def launch_comfyui(_env_checker, _config_manager, extra):
+def launch_comfyui(_env_checker, _config_manager, extra, background=False):
+    validate_comfyui(_env_checker)
+
+    if background:
+        if _config_manager.background is not None and utils.is_running(_config_manager.background[2]):
+            print(f"ComfyUI is already running in background.")
+            raise typer.Exit(code=1)
+
+        port = 8188
+        listen = "127.0.0.1"
+        for i in range(len(extra)-1):
+            if extra[i] == '--port':
+                port = extra[i+1]
+            if listen[i] == '--listen':
+                listen = extra[i+1]
+
+        if len(extra) > 0:
+            extra = ['--'] + extra
+
+        process = subprocess.Popen(['comfy', 'launch', f'--workspace={os.path.join(os.getcwd(), "..")}'] + extra, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        print(f"ComfyUI is started in background ({listen}:{port})")
+        _config_manager.config['DEFAULT']['background'] = f"{(listen, port, process.pid)}"
+        _config_manager.write_config()
+        return
+
     _config_manager.config['DEFAULT']['recent_path'] = os.getcwd()
     _config_manager.write_config()
-
-    validate_comfyui(_env_checker)
 
     env_path = _env_checker.get_isolated_env()
     reboot_path = None
@@ -151,10 +174,27 @@ def launch_comfyui(_env_checker, _config_manager, extra):
         os.remove(reboot_path)
 
 
-@app.command(help="Launch ComfyUI: ?[--workspace <path>] ?[--recent] ?[-- <extra args ...>]")
+@app.command()
+def stop():
+    _config_manager = ConfigManager()
+
+    if 'background' not in _config_manager.config['DEFAULT']:
+        print(f"No ComfyUI is running in the background.")
+        raise typer.Exit(code=1)
+
+    bg_info = _config_manager.background
+    is_killed = utils.kill_all(bg_info[2])
+
+    print(f"Background ComfyUI is stopped. ({bg_info[0]}:{bg_info[1]})")
+
+    _config_manager.remove_background()
+
+
+@app.command(help="Launch ComfyUI: ?[--workspace <path>] ?[--recent] ?[--background] ?[-- <extra args ...>]")
 @tracking.track_command()
 def launch(workspace: Annotated[str, typer.Option(show_default=False, help="Path to ComfyUI workspace")] = None,
            recent: Annotated[bool, typer.Option(help="Launch from recent path (--workspace is higher)")] = False,
+           background: Annotated[bool, typer.Option(help="Launch ComfyUI in background")] = False,
            extra: List[str] = typer.Argument(None)):
 
     _env_checker = EnvChecker()
@@ -167,7 +207,7 @@ def launch(workspace: Annotated[str, typer.Option(show_default=False, help="Path
             _env_checker.check()  # update env
 
             print(f"\nLaunch ComfyUI from repo: {_env_checker.comfy_repo.working_dir}\n")
-            launch_comfyui(_env_checker, _config_manager, extra)
+            launch_comfyui(_env_checker, _config_manager, extra, background=background)
         else:
             print(f"\nInvalid ComfyUI not found in specified workspace: {workspace}\n", file=sys.stderr)
             raise typer.Exit(code=1)
@@ -175,7 +215,7 @@ def launch(workspace: Annotated[str, typer.Option(show_default=False, help="Path
     elif not recent and _env_checker.comfy_repo is not None:
         os.chdir(_env_checker.comfy_repo.working_dir)
         print(f"\nLaunch ComfyUI from current repo: {_env_checker.comfy_repo.working_dir}\n")
-        launch_comfyui(_env_checker, _config_manager, extra)
+        launch_comfyui(_env_checker, _config_manager, extra, background=background)
 
     elif not recent and _config_manager.config['DEFAULT'].get('default_workspace') is not None:
         comfy_path = os.path.join(_config_manager.config['DEFAULT'].get('default_workspace'), 'ComfyUI')
@@ -184,7 +224,7 @@ def launch(workspace: Annotated[str, typer.Option(show_default=False, help="Path
         os.chdir(comfy_path)
         _env_checker.check()  # update env
 
-        launch_comfyui(_env_checker, _config_manager, extra)
+        launch_comfyui(_env_checker, _config_manager, extra, background=background)
 
     elif _config_manager.config['DEFAULT'].get('recent_path') is not None:
         comfy_path = _config_manager.config['DEFAULT'].get('recent_path')
@@ -193,7 +233,7 @@ def launch(workspace: Annotated[str, typer.Option(show_default=False, help="Path
         os.chdir(comfy_path)
         _env_checker.check()  # update env
 
-        launch_comfyui(_env_checker, _config_manager, extra)
+        launch_comfyui(_env_checker, _config_manager, extra, background=background)
 
     else:
         print("\nComfyUI is not available.\nTo install ComfyUI, you can run:\n\n\tcomfy install\n\n", file=sys.stderr)
