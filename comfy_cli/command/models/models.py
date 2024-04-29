@@ -1,74 +1,146 @@
+import pathlib
+from typing import List, Optional
+
 import typer
+
 from typing_extensions import Annotated
 
-from comfy_cli import tracking, logging
+from comfy_cli import tracking, ui
+from comfy_cli.constants import DEFAULT_COMFY_MODEL_PATH
 
 app = typer.Typer()
 
 
-@app.command()
-@tracking.track_command("model")
-def get(url: Annotated[str, typer.Argument(help="The url of the model")],
-        path: Annotated[str, typer.Argument(help="The path to install the model.")]):
-  """Download model"""
-  print(f"Start downloading url: ${url} into ${path}")
-  download_model(url, path)
+def get_workspace() -> pathlib.Path:
+  # TODO: placeholder logic right now, need to implement a config class that
+  #  helps to get the workspace we are working with.
+  return pathlib.Path.cwd()
 
 
 @app.command()
 @tracking.track_command("model")
-def remove():
-  """Remove a custom node"""
-  # TODO
-
-
-def download_model(url: str, path: str):
-  import httpx
-  import pathlib
-  from tqdm import tqdm
-
+def download(
+  url: Annotated[
+    str,
+    typer.Option(
+      help="The URL from which to download the model",
+      show_default=False)],
+  relative_path: Annotated[
+    Optional[str],
+    typer.Option(
+      help="The relative path from the current workspace to install the model.",
+      show_default=True)] = DEFAULT_COMFY_MODEL_PATH
+):
+  """Download a model to a specified relative path if it is not already downloaded."""
+  # Convert relative path to absolute path based on the current working directory
   local_filename = url.split("/")[-1]
-  local_filepath = pathlib.Path(path, local_filename)
-  local_filepath.parent.mkdir(parents=True, exist_ok=True)
+  local_filepath = get_workspace() / relative_path / local_filename
 
-  logging.debug(f"downloading {url} ...")
-  with httpx.stream("GET", url, follow_redirects=True) as stream:
-    total = int(stream.headers["Content-Length"])
-    with open(local_filepath, "wb") as f, tqdm(
-      total=total, unit_scale=True, unit_divisor=1024, unit="B"
-    ) as progress:
-      num_bytes_downloaded = stream.num_bytes_downloaded
-      for data in stream.iter_bytes():
+  # Check if the file already exists
+  if local_filepath.exists():
+    typer.echo(f"File already exists: {local_filepath}")
+    return
+
+  # File does not exist, proceed with download
+  typer.echo(f"Start downloading URL: {url} into {local_filepath}")
+  download_file(url, local_filepath)
+
+
+@app.command()
+@tracking.track_command("model")
+def remove(
+  relative_path: str = typer.Option(
+    DEFAULT_COMFY_MODEL_PATH,
+    help="The relative path from the current workspace where the models are stored.",
+    show_default=True
+  ),
+  model_names: Optional[List[str]] = typer.Option(
+    None,
+    help="List of model filenames to delete, separated by spaces",
+    show_default=False
+  )
+):
+  """Remove one or more downloaded models, either by specifying them directly or through an interactive selection."""
+  model_dir = get_workspace() / relative_path
+  available_models = list_models(model_dir)
+
+  if not available_models:
+    typer.echo("No models found to remove.")
+    return
+
+  to_delete = []
+  # Scenario #1: User provided model names to delete
+  if model_names:
+    # Validate and filter models to delete based on provided names
+    missing_models = []
+    for name in model_names:
+      model_path = model_dir / name
+      if model_path.exists():
+        to_delete.append(model_path)
+      else:
+        missing_models.append(name)
+
+    if missing_models:
+      typer.echo("The following models were not found and cannot be removed: " + ", ".join(missing_models))
+      if not to_delete:
+        return  # Exit if no valid models were found
+
+    return
+
+  # Scenario #2: User did not provide model names, prompt for selection
+  else:
+    selections = ui.prompt_multi_select("Select models to delete:", [model.name for model in available_models])
+    if not selections:
+      typer.echo("No models selected for deletion.")
+      return
+    to_delete = [model_dir / selection for selection in selections]
+
+  # Confirm deletion
+  if to_delete and ui.confirm_action("Are you sure you want to delete the selected files?"):
+    for model_path in to_delete:
+      model_path.unlink()
+      typer.echo(f"Deleted: {model_path}")
+  else:
+    typer.echo("Deletion canceled.")
+
+
+@app.command()
+@tracking.track_command("model")
+def list(
+  relative_path: str = typer.Option(
+    DEFAULT_COMFY_MODEL_PATH,
+    help="The relative path from the current workspace where the models are stored.",
+    show_default=True
+  )
+):
+  """Display a list of all models currently downloaded in a table format."""
+  model_dir = get_workspace() / relative_path
+  models = list_models(model_dir)
+
+  if not models:
+    typer.echo("No models found.")
+    return
+
+  # Prepare data for table display
+  data = [(model.name, f"{model.stat().st_size // 1024} KB") for model in models]
+  column_names = ["Model Name", "Size"]
+  ui.display_table(data, column_names)
+
+
+def download_file(url: str, local_filepath: pathlib.Path):
+  """Helper function to download a file."""
+
+  import httpx
+
+  local_filepath.parent.mkdir(parents=True, exist_ok=True)  # Ensure the directory exists
+
+  with httpx.stream("GET", url, follow_redirects=True) as response:
+    total = int(response.headers["Content-Length"])
+    with open(local_filepath, "wb") as f:
+      for data in ui.show_progress(response.iter_bytes(), total):
         f.write(data)
-        progress.update(
-          stream.num_bytes_downloaded - num_bytes_downloaded
-        )
-        num_bytes_downloaded = stream.num_bytes_downloaded
 
-  # def download_model(url: str, path: str):
-  #   # Set up logging to file
-  #   logging.basicConfig(level=logging.INFO, filename='download.log', filemode='w',
-  #                       format='%(asctime)s - %(levelname)s - %(message)s')
-  #
-  #   local_filename = url.split("/")[-1]
-  #   local_filepath = pathlib.Path(path, local_filename)
-  #   local_filepath.parent.mkdir(parents=True, exist_ok=True)
-  #
-  #   # Log the URL being downloaded
-  #   logging.info(f"Downloading {url} ...")
-  #
-  #   with httpx.stream("GET", url, follow_redirects=True) as stream:
-  #     total = int(stream.headers["Content-Length"])
-  #     with open(local_filepath, "wb") as f, tqdm(
-  #       total=total, unit_scale=True, unit_divisor=1024, unit="B"
-  #     ) as progress:
-  #       num_bytes_downloaded = stream.num_bytes_downloaded
-  #       for data in stream.iter_bytes():
-  #         f.write(data)
-  #         progress.update(
-  #           stream.num_bytes_downloaded - num_bytes_downloaded
-  #         )
-  #         num_bytes_downloaded = stream.num_bytes_downloaded
-  #
-  #   # Log the completion of the download
-  #   logging.info(f"Download completed. File saved to {local_filepath}")
+
+def list_models(path: pathlib.Path) -> list:
+  """List all models in the specified directory."""
+  return [file for file in path.iterdir() if file.is_file()]

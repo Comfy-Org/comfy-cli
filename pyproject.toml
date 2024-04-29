@@ -25,6 +25,8 @@ dependencies = [
     "requests",
     "pyyaml",
     "typing-extensions",
+    "mixpanel",
+    "questionary",
 ]
 
 classifiers = [

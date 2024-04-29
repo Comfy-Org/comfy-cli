@@ -4,6 +4,8 @@ import uuid
 
 from mixpanel import Mixpanel
 
+from comfy_cli import logging
+
 MIXPANEL_TOKEN = "93aeab8962b622d431ac19800ccc9f67"
 DISABLE_TELEMETRY = os.getenv('DISABLE_TELEMETRY', False)
 mp = Mixpanel(MIXPANEL_TOKEN) if MIXPANEL_TOKEN else None
@@ -29,7 +31,7 @@ def track_command(sub_command: str = None):
       command_name = f"{sub_command}:{func.__name__}" if sub_command is not None else func.__name__
       input_arguments = kwargs  # Example to pass all args and kwargs
 
-      print(f"Tracking command: {command_name} with arguments: {input_arguments}")
+      logging.debug(f"Tracking command: {command_name} with arguments: {input_arguments}")
       track_event(command_name, properties=input_arguments)
       return func(*args, **kwargs)
 
