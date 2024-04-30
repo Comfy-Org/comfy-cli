@@ -1,24 +1,23 @@
+import os
+import subprocess
 import sys
+import time
+import uuid
 from typing import Optional
 
 import typer
-from typing_extensions import List, Annotated
-from comfy_cli.command.models import models as models_command
 from rich import print
-import os
-import subprocess
+from rich.console import Console
+from typing_extensions import Annotated, List
 
+from comfy_cli import constants, env_checker, logging, tracking
 from comfy_cli.command import custom_nodes
 from comfy_cli.command import install as install_inner
 from comfy_cli.command import run as run_inner
-from comfy_cli import constants, tracking, logging
+from comfy_cli.command.models import models as models_command
+from comfy_cli.config_manager import ConfigManager
 from comfy_cli.env_checker import EnvChecker
 from comfy_cli.meta_data import MetadataManager
-from comfy_cli import env_checker
-from rich.console import Console
-import time
-import uuid
-from comfy_cli.config_manager import ConfigManager
 from comfy_cli.workspace_manager import WorkspaceManager
 
 app = typer.Typer()
