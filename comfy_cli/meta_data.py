@@ -1,13 +1,83 @@
-import os
-import yaml
 import concurrent.futures
-from pathlib import Path
 import os
+from dataclasses import dataclass, field
+from datetime import datetime
+from pathlib import Path
+from typing import List, Optional
 
+import yaml
+
+from comfy_cli import constants
 from comfy_cli.env_checker import EnvChecker
 from comfy_cli.utils import singleton
-from comfy_cli import constants
 
+
+@dataclass
+class ModelPath:
+    path: str
+
+@dataclass
+class Model:
+    name: Optional[str] = None
+    url: Optional[str] = None
+    paths: List[ModelPath] = field(default_factory=list)
+    hash: Optional[str] = None
+    type: Optional[str] = None
+
+@dataclass
+class Basics:
+    name: Optional[str] = None
+    updated_at: datetime = None
+
+
+@dataclass
+class CustomNode:
+    #Todo: Add custom node fields for comfy-lock.yaml
+    pass
+
+
+@dataclass
+class ComfyLockYAMLStruct:
+    basics: Basics
+    models: List[Model] = field(default_factory=list)
+    custom_nodes: List[CustomNode] = field(default_factory=list)
+
+
+# Generate and update this following method using chatGPT
+def load_yaml(file_path: str) -> ComfyLockYAMLStruct:
+    with open(file_path, 'r', encoding='utf-8') as file:
+        data = yaml.safe_load(file)
+        basics = Basics(
+            name=data.get("basics", {}).get("name"),
+            updated_at=datetime.fromisoformat(data.get("basics", {}).get("updated_at")) if data.get("basics", {}).get("updated_at") else None
+        )
+        models = [
+            Model(
+                name=m.get("model"),
+                url=m.get("url"),
+                paths=[ModelPath(path=p.get("path")) for p in m.get("paths", [])],
+                hash=m.get("hash"),
+                type=m.get("type")
+            ) for m in data.get("models", [])
+        ]
+        custom_nodes = []
+
+def save_yaml(file_path: str, metadata: ComfyLockYAMLStruct):
+    data = {
+        "basics": {"name": metadata.basics.name, "updated_at": metadata.basics.updated_at.isoformat()},
+        "models": [
+            {
+                "model": m.name,
+                "url": m.url,
+                "paths": [{"path": p.path} for p in m.paths],
+                "hash": m.hash,
+                "type": m.type
+            } for m in metadata.models
+        ],
+        "custom_nodes": []
+    }
+    with open(file_path, 'w', encoding='utf-8') as file:
+        yaml.safe_dump(data, file, default_flow_style=False, allow_unicode=True)
 
 @singleton
 class MetadataManager:
@@ -18,9 +88,12 @@ class MetadataManager:
     def __init__(self):
         self.metadata_file = None
         self.env_checker = EnvChecker()
-        self.metadata = {}
+        self.metadata = ComfyLockYAMLStruct(
+            basics=Basics(),
+            models=[]
+        )
 
-    
+
     def scan_dir(self):
         config_files = []
         for root, dirs, files in os.walk("."):
@@ -47,7 +120,7 @@ class MetadataManager:
                     model_files.append(future.result())
 
         return model_files
-        
+
 
     def load_metadata(self):
         if os.path.exists(self.metadata_file):
@@ -56,32 +129,13 @@ class MetadataManager:
         else:
             return {}
 
-    def validate_metadata(self):
-        if self.metadata and "models" not in self.metadata:
-            self.metadata["models"] = {}
-
     def save_metadata(self):
-        with open(self.metadata_file, "w", encoding="utf-8") as file:
-            yaml.dump(self.metadata, file)
+        save_yaml(self.metadata_file, self.metadata)
 
-    def update_model_metadata(self, model_name, model_path):
-        if "models" not in self.metadata:
-            self.metadata["models"] = {}
-        self.metadata["models"][model_name] = model_path
-        self.save_metadata()
-
-    def get_model_path(self, model_name):
-        if "models" in self.metadata and model_name in self.metadata["models"]:
-            return self.metadata["models"][model_name]
-        else:
-            return None
 
 
 if __name__ == "__main__":
     manager = MetadataManager()
-    import pdb
-
-    pdb.set_trace()
 
     # model_name = "example_model"
     # model_path = "/path/to/example_model"
