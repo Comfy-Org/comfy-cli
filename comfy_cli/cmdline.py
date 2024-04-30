@@ -79,14 +79,16 @@ def install(
   ] = False,
   skip_manager: Annotated[
     bool,
-    typer.Option(
-      help="Skip installing the manager component")
+    typer.Option(help="Skip installing the manager component")
   ] = False,
   amd: Annotated[
     bool,
-    typer.Option(
-      help="Install for AMD gpu")
+    typer.Option(help="Install for AMD gpu")
   ] = False,
+  commit: Annotated[
+    str,
+    typer.Option(help="Specify commit hash for ComfyUI")
+  ] = None
 ):
   checker = EnvChecker()
 
@@ -119,7 +121,7 @@ def install(
   if amd:
     torch_mode = 'amd'
 
-  install_inner.execute(url, manager_url, workspace_path, restore, skip_manager, torch_mode)
+  install_inner.execute(url, manager_url, workspace_path, restore, skip_manager, torch_mode, commit=commit)
   workspace_manager.set_recent_workspace(workspace_path)
 
 
