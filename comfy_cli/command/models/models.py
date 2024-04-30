@@ -96,7 +96,7 @@ def remove(
     to_delete = [model_dir / selection for selection in selections]
 
   # Confirm deletion
-  if to_delete and ui.confirm_action("Are you sure you want to delete the selected files?"):
+  if to_delete and ui.prompt_confirm_action("Are you sure you want to delete the selected files?"):
     for model_path in to_delete:
       model_path.unlink()
       typer.echo(f"Deleted: {model_path}")
