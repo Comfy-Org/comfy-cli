@@ -17,7 +17,6 @@ workspace_manager = WorkspaceManager()
 
 
 def execute_cm_cli(ctx: typer.Context, args, channel=None, mode=None):
-    _env_checker = EnvChecker()
     _config_manager = ConfigManager()
 
     workspace_path = workspace_manager.get_workspace_path(ctx)
