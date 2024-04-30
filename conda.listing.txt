@@ -1,0 +1,1902 @@
+Loading channels: ...working... done
+python 3.8.11 hbdb9e5c_5
+------------------------
+file name   : python-3.8.11-hbdb9e5c_5.conda
+name        : python
+version     : 3.8.11
+build       : hbdb9e5c_5
+build number: 5
+size        : 10.1 MB
+license     : Python-2.0
+subdir      : osx-arm64
+url         : https://repo.anaconda.com/pkgs/main/osx-arm64/python-3.8.11-hbdb9e5c_5.conda
+md5         : 2436f07f2fe23409ff5d29057225820c
+timestamp   : 2021-08-16 10:07:56 UTC
+dependencies: 
+  - libcxx >=12.0.0
+  - libffi >=3.3,<4.0a0
+  - ncurses >=6.2,<7.0a0
+  - openssl >=1.1.1j,<1.1.2a
+  - readline >=8.1,<9.0a0
+  - sqlite >=3.35.4,<4.0a0
+  - tk >=8.6.10,<8.7.0a0
+  - xz >=5.2.5,<6.0a0
+  - zlib >=1.2.11,<1.3.0a0
+  - pip
+
+
+python 3.8.13 hbdb9e5c_0
+------------------------
+file name   : python-3.8.13-hbdb9e5c_0.conda
+name        : python
+version     : 3.8.13
+build       : hbdb9e5c_0
+build number: 0
+size        : 10.6 MB
+license     : PSF-2.0
+subdir      : osx-arm64
+url         : https://repo.anaconda.com/pkgs/main/osx-arm64/python-3.8.13-hbdb9e5c_0.conda
+md5         : 393886f7e6f2096ccf8bb651d38a6022
+timestamp   : 2022-03-28 11:17:08 UTC
+dependencies: 
+  - libcxx >=12.0.0
+  - libffi >=3.3,<4.0a0
+  - ncurses >=6.3,<7.0a0
+  - openssl >=1.1.1n,<1.1.2a
+  - readline >=8.1.2,<9.0a0
+  - sqlite >=3.38.0,<4.0a0
+  - tk >=8.6.11,<8.7.0a0
+  - xz >=5.2.5,<6.0a0
+  - zlib >=1.2.11,<1.3.0a0
+  - pip
+
+
+python 3.8.13 hbdb9e5c_1
+------------------------
+file name   : python-3.8.13-hbdb9e5c_1.conda
+name        : python
+version     : 3.8.13
+build       : hbdb9e5c_1
+build number: 1
+size        : 10.6 MB
+license     : PSF-2.0
+subdir      : osx-arm64
+url         : https://repo.anaconda.com/pkgs/main/osx-arm64/python-3.8.13-hbdb9e5c_1.conda
+md5         : 2f0dbf5c6c2fedbfc3775f92cb964b3f
+timestamp   : 2022-10-19 22:56:01 UTC
+dependencies: 
+  - libcxx >=12.0.0
+  - libffi >=3.3,<4.0a0
+  - ncurses >=6.3,<7.0a0
+  - openssl >=1.1.1q,<1.1.2a
+  - readline >=8.1.2,<9.0a0
+  - sqlite >=3.39.3,<4.0a0
+  - tk >=8.6.12,<8.7.0a0
+  - xz >=5.2.6,<6.0a0
+  - zlib >=1.2.12,<1.3.0a0
+  - pip
+
+
+python 3.8.15 h266c4f5_0
+------------------------
+file name   : python-3.8.15-h266c4f5_0.conda
+name        : python
+version     : 3.8.15
+build       : h266c4f5_0
+build number: 0
+size        : 12.5 MB
+license     : PSF-2.0
+subdir      : osx-arm64
+url         : https://repo.anaconda.com/pkgs/main/osx-arm64/python-3.8.15-h266c4f5_0.conda
+md5         : a8a7637c6349662b86bd3805efdc1cb8
+timestamp   : 2022-11-10 19:18:34 UTC
+dependencies: 
+  - libcxx >=14.0.6
+  - libffi >=3.3,<4.0a0
+  - ncurses >=6.3,<7.0a0
+  - openssl >=1.1.1s,<1.1.2a
+  - readline >=8.1.2,<9.0a0
+  - sqlite >=3.39.3,<4.0a0
+  - tk >=8.6.12,<8.7.0a0
+  - xz >=5.2.6,<6.0a0
+  - zlib >=1.2.13,<1.3.0a0
+  - pip
+
+
+python 3.8.15 hc0d8a6c_2
+------------------------
+file name   : python-3.8.15-hc0d8a6c_2.conda
+name        : python
+version     : 3.8.15
+build       : hc0d8a6c_2
+build number: 2
+size        : 12.3 MB
+license     : PSF-2.0
+subdir      : osx-arm64
+url         : https://repo.anaconda.com/pkgs/main/osx-arm64/python-3.8.15-hc0d8a6c_2.conda
+md5         : cdf4af92159db1d56e48478e03ff47ba
+timestamp   : 2022-11-24 15:05:30 UTC
+dependencies: 
+  - libcxx >=14.0.6
+  - libffi >=3.4,<3.5
+  - libffi >=3.4,<4.0a0
+  - ncurses >=6.3,<7.0a0
+  - openssl >=1.1.1s,<1.1.2a
+  - readline >=8.1.2,<9.0a0
+  - sqlite >=3.40.0,<4.0a0
+  - tk >=8.6.12,<8.7.0a0
+  - xz >=5.2.6,<6.0a0
+  - zlib >=1.2.13,<1.3.0a0
+  - pip
+
+
+python 3.8.16 hb885b13_4
+------------------------
+file name   : python-3.8.16-hb885b13_4.conda
+name        : python
+version     : 3.8.16
+build       : hb885b13_4
+build number: 4
+size        : 12.5 MB
+license     : PSF-2.0
+subdir      : osx-arm64
+url         : https://repo.anaconda.com/pkgs/main/osx-arm64/python-3.8.16-hb885b13_4.conda
+md5         : c510a6cfe22dac91f424b553e203583a
+timestamp   : 2023-06-12 17:55:35 UTC
+dependencies: 
+  - libcxx >=14.0.6
+  - libffi >=3.4,<3.5
+  - libffi >=3.4,<4.0a0
+  - ncurses >=6.4,<7.0a0
+  - openssl >=3.0.8,<4.0a0
+  - readline >=8.1.2,<9.0a0
+  - sqlite >=3.41.2,<4.0a0
+  - tk >=8.6.12,<8.7.0a0
+  - xz >=5.4.2,<6.0a0
+  - zlib >=1.2.13,<1.3.0a0
+  - pip
+
+
+python 3.8.16 hc0d8a6c_2
+------------------------
+file name   : python-3.8.16-hc0d8a6c_2.conda
+name        : python
+version     : 3.8.16
+build       : hc0d8a6c_2
+build number: 2
+size        : 12.6 MB
+license     : PSF-2.0
+subdir      : osx-arm64
+url         : https://repo.anaconda.com/pkgs/main/osx-arm64/python-3.8.16-hc0d8a6c_2.conda
+md5         : 69452a039f7a8f8341550c05a4f7bf24
+timestamp   : 2023-01-17 22:43:16 UTC
+dependencies: 
+  - libcxx >=14.0.6
+  - libffi >=3.4,<3.5
+  - libffi >=3.4,<4.0a0
+  - ncurses >=6.3,<7.0a0
+  - openssl >=1.1.1s,<1.1.2a
+  - readline >=8.1.2,<9.0a0
+  - sqlite >=3.40.1,<4.0a0
+  - tk >=8.6.12,<8.7.0a0
+  - xz >=5.2.10,<6.0a0
+  - zlib >=1.2.13,<1.3.0a0
+  - pip
+
+
+python 3.8.16 hc0d8a6c_3
+------------------------
+file name   : python-3.8.16-hc0d8a6c_3.conda
+name        : python
+version     : 3.8.16
+build       : hc0d8a6c_3
+build number: 3
+size        : 12.6 MB
+license     : PSF-2.0
+subdir      : osx-arm64
+url         : https://repo.anaconda.com/pkgs/main/osx-arm64/python-3.8.16-hc0d8a6c_3.conda
+md5         : 28dad6a0dbda41b86b592ccc0bcb4a70
+timestamp   : 2023-03-02 03:22:19 UTC
+dependencies: 
+  - libcxx >=14.0.6
+  - libffi >=3.4,<3.5
+  - libffi >=3.4,<4.0a0
+  - ncurses >=6.4,<7.0a0
+  - openssl >=1.1.1t,<1.1.2a
+  - readline >=8.1.2,<9.0a0
+  - sqlite >=3.40.1,<4.0a0
+  - tk >=8.6.12,<8.7.0a0
+  - xz >=5.2.10,<6.0a0
+  - zlib >=1.2.13,<1.3.0a0
+  - pip
+
+
+python 3.8.17 hb885b13_0
+------------------------
+file name   : python-3.8.17-hb885b13_0.conda
+name        : python
+version     : 3.8.17
+build       : hb885b13_0
+build number: 0
+size        : 14.2 MB
+license     : PSF-2.0
+subdir      : osx-arm64
+url         : https://repo.anaconda.com/pkgs/main/osx-arm64/python-3.8.17-hb885b13_0.conda
+md5         : 8fe4e692f621f341fb45b67b8c2d97a0
+timestamp   : 2023-07-05 20:40:10 UTC
+dependencies: 
+  - libcxx >=14.0.6
+  - libffi >=3.4,<3.5
+  - libffi >=3.4,<4.0a0
+  - ncurses >=6.4,<7.0a0
+  - openssl >=3.0.9,<4.0a0
+  - readline >=8.1.2,<9.0a0
+  - sqlite >=3.41.2,<4.0a0
+  - tk >=8.6.12,<8.7.0a0
+  - xz >=5.4.2,<6.0a0
+  - zlib >=1.2.13,<1.3.0a0
+  - pip
+
+
+python 3.8.17 hc0d8a6c_0
+------------------------
+file name   : python-3.8.17-hc0d8a6c_0.conda
+name        : python
+version     : 3.8.17
+build       : hc0d8a6c_0
+build number: 0
+size        : 14.2 MB
+license     : PSF-2.0
+subdir      : osx-arm64
+url         : https://repo.anaconda.com/pkgs/main/osx-arm64/python-3.8.17-hc0d8a6c_0.conda
+md5         : aabea42c02d4f3bf2cfe289bc84cecd7
+timestamp   : 2023-07-05 20:48:59 UTC
+dependencies: 
+  - libcxx >=14.0.6
+  - libffi >=3.4,<3.5
+  - libffi >=3.4,<4.0a0
+  - ncurses >=6.4,<7.0a0
+  - openssl >=1.1.1u,<1.1.2a
+  - readline >=8.1.2,<9.0a0
+  - sqlite >=3.41.2,<4.0a0
+  - tk >=8.6.12,<8.7.0a0
+  - xz >=5.4.2,<6.0a0
+  - zlib >=1.2.13,<1.3.0a0
+  - pip
+
+
+python 3.8.18 hb885b13_0
+------------------------
+file name   : python-3.8.18-hb885b13_0.conda
+name        : python
+version     : 3.8.18
+build       : hb885b13_0
+build number: 0
+size        : 14.1 MB
+license     : PSF-2.0
+subdir      : osx-arm64
+url         : https://repo.anaconda.com/pkgs/main/osx-arm64/python-3.8.18-hb885b13_0.conda
+md5         : 545c4eb85fb1283450428e3fa965c12e
+timestamp   : 2023-09-11 13:20:43 UTC
+dependencies: 
+  - libcxx >=14.0.6
+  - libffi >=3.4,<3.5
+  - libffi >=3.4,<4.0a0
+  - ncurses >=6.4,<7.0a0
+  - openssl >=3.0.10,<4.0a0
+  - readline >=8.1.2,<9.0a0
+  - sqlite >=3.41.2,<4.0a0
+  - tk >=8.6.12,<8.7.0a0
+  - xz >=5.4.2,<6.0a0
+  - zlib >=1.2.13,<1.3.0a0
+  - pip
+
+
+python 3.8.18 hc0d8a6c_0
+------------------------
+file name   : python-3.8.18-hc0d8a6c_0.conda
+name        : python
+version     : 3.8.18
+build       : hc0d8a6c_0
+build number: 0
+size        : 14.1 MB
+license     : PSF-2.0
+subdir      : osx-arm64
+url         : https://repo.anaconda.com/pkgs/main/osx-arm64/python-3.8.18-hc0d8a6c_0.conda
+md5         : d02a8fed1d0268879da78d359c35f2f6
+timestamp   : 2023-09-11 13:29:13 UTC
+dependencies: 
+  - libcxx >=14.0.6
+  - libffi >=3.4,<3.5
+  - libffi >=3.4,<4.0a0
+  - ncurses >=6.4,<7.0a0
+  - openssl >=1.1.1v,<1.1.2a
+  - readline >=8.1.2,<9.0a0
+  - sqlite >=3.41.2,<4.0a0
+  - tk >=8.6.12,<8.7.0a0
+  - xz >=5.4.2,<6.0a0
+  - zlib >=1.2.13,<1.3.0a0
+  - pip
+
+
+python 3.8.19 hb885b13_0
+------------------------
+file name   : python-3.8.19-hb885b13_0.conda
+name        : python
+version     : 3.8.19
+build       : hb885b13_0
+build number: 0
+size        : 12.5 MB
+license     : PSF-2.0
+subdir      : osx-arm64
+url         : https://repo.anaconda.com/pkgs/main/osx-arm64/python-3.8.19-hb885b13_0.conda
+md5         : 839957fef1b8aa661305f34467949a2e
+timestamp   : 2024-03-20 20:31:29 UTC
+dependencies: 
+  - libcxx >=14.0.6
+  - libffi >=3.4,<3.5
+  - libffi >=3.4,<4.0a0
+  - ncurses >=6.4,<7.0a0
+  - openssl >=3.0.13,<4.0a0
+  - readline >=8.1.2,<9.0a0
+  - sqlite >=3.41.2,<4.0a0
+  - tk >=8.6.12,<8.7.0a0
+  - xz >=5.4.6,<6.0a0
+  - zlib >=1.2.13,<1.3.0a0
+  - pip
+
+
+python 3.9.6 hc70090a_5
+-----------------------
+file name   : python-3.9.6-hc70090a_5.conda
+name        : python
+version     : 3.9.6
+build       : hc70090a_5
+build number: 5
+size        : 10.0 MB
+license     : Python-2.0
+subdir      : osx-arm64
+url         : https://repo.anaconda.com/pkgs/main/osx-arm64/python-3.9.6-hc70090a_5.conda
+md5         : bdf8e5b921efe19f13ef6fac45a5564f
+timestamp   : 2021-08-16 10:45:59 UTC
+dependencies: 
+  - expat >=2.4.1,<3.0a0
+  - libcxx >=12.0.0
+  - libffi >=3.3,<4.0a0
+  - libiconv >=1.16,<2.0a0
+  - ncurses >=6.2,<7.0a0
+  - openssl >=1.1.1j,<1.1.2a
+  - readline >=8.1,<9.0a0
+  - sqlite >=3.35.4,<4.0a0
+  - tk >=8.6.10,<8.7.0a0
+  - tzdata
+  - xz >=5.2.5,<6.0a0
+  - zlib >=1.2.11,<1.3.0a0
+  - pip
+
+
+python 3.9.7 hc70090a_1
+-----------------------
+file name   : python-3.9.7-hc70090a_1.conda
+name        : python
+version     : 3.9.7
+build       : hc70090a_1
+build number: 1
+size        : 9.6 MB
+license     : Python-2.0
+subdir      : osx-arm64
+url         : https://repo.anaconda.com/pkgs/main/osx-arm64/python-3.9.7-hc70090a_1.conda
+md5         : 1c300656fadc104a32f159071f3e3648
+timestamp   : 2021-09-16 21:56:41 UTC
+dependencies: 
+  - expat >=2.4.1,<3.0a0
+  - libcxx >=12.0.0
+  - libffi >=3.3,<4.0a0
+  - libiconv >=1.16,<2.0a0
+  - ncurses >=6.2,<7.0a0
+  - openssl >=1.1.1j,<1.1.2a
+  - readline >=8.1,<9.0a0
+  - sqlite >=3.36.0,<4.0a0
+  - tk >=8.6.10,<8.7.0a0
+  - tzdata
+  - xz >=5.2.5,<6.0a0
+  - zlib >=1.2.11,<1.3.0a0
+  - pip
+
+
+python 3.9.11 hbdb9e5c_1
+------------------------
+file name   : python-3.9.11-hbdb9e5c_1.conda
+name        : python
+version     : 3.9.11
+build       : hbdb9e5c_1
+build number: 1
+size        : 10.2 MB
+license     : PSF-2.0
+subdir      : osx-arm64
+url         : https://repo.anaconda.com/pkgs/main/osx-arm64/python-3.9.11-hbdb9e5c_1.conda
+md5         : 7602582b891b47e986c2367038eaa3dd
+timestamp   : 2022-03-28 10:09:25 UTC
+dependencies: 
+  - libcxx >=12.0.0
+  - libffi >=3.3,<4.0a0
+  - ncurses >=6.3,<7.0a0
+  - openssl >=1.1.1n,<1.1.2a
+  - readline >=8.1.2,<9.0a0
+  - sqlite >=3.38.0,<4.0a0
+  - tk >=8.6.11,<8.7.0a0
+  - tzdata
+  - xz >=5.2.5,<6.0a0
+  - zlib >=1.2.11,<1.3.0a0
+  - pip
+
+
+python 3.9.11 hbdb9e5c_2
+------------------------
+file name   : python-3.9.11-hbdb9e5c_2.conda
+name        : python
+version     : 3.9.11
+build       : hbdb9e5c_2
+build number: 2
+size        : 10.1 MB
+license     : PSF-2.0
+subdir      : osx-arm64
+url         : https://repo.anaconda.com/pkgs/main/osx-arm64/python-3.9.11-hbdb9e5c_2.conda
+md5         : c4e41bae925a2eb489f0c8644bc8f2ee
+timestamp   : 2022-03-29 19:07:49 UTC
+dependencies: 
+  - libcxx >=12.0.0
+  - libffi >=3.3,<4.0a0
+  - ncurses >=6.3,<7.0a0
+  - openssl >=1.1.1n,<1.1.2a
+  - readline >=8.1.2,<9.0a0
+  - sqlite >=3.38.0,<4.0a0
+  - tk >=8.6.11,<8.7.0a0
+  - tzdata
+  - xz >=5.2.5,<6.0a0
+  - zlib >=1.2.11,<1.3.0a0
+  - pip
+
+
+python 3.9.12 hbdb9e5c_0
+------------------------
+file name   : python-3.9.12-hbdb9e5c_0.conda
+name        : python
+version     : 3.9.12
+build       : hbdb9e5c_0
+build number: 0
+size        : 10.2 MB
+license     : PSF-2.0
+subdir      : osx-arm64
+url         : https://repo.anaconda.com/pkgs/main/osx-arm64/python-3.9.12-hbdb9e5c_0.conda
+md5         : 6d4e471648e21dd0dadd853bf54d8a28
+timestamp   : 2022-04-05 06:55:50 UTC
+dependencies: 
+  - libcxx >=12.0.0
+  - libffi >=3.3,<4.0a0
+  - ncurses >=6.3,<7.0a0
+  - openssl >=1.1.1n,<1.1.2a
+  - readline >=8.1.2,<9.0a0
+  - sqlite >=3.38.2,<4.0a0
+  - tk >=8.6.11,<8.7.0a0
+  - tzdata
+  - xz >=5.2.5,<6.0a0
+  - zlib >=1.2.11,<1.3.0a0
+  - pip
+
+
+python 3.9.12 hbdb9e5c_1
+------------------------
+file name   : python-3.9.12-hbdb9e5c_1.conda
+name        : python
+version     : 3.9.12
+build       : hbdb9e5c_1
+build number: 1
+size        : 10.2 MB
+license     : PSF-2.0
+subdir      : osx-arm64
+url         : https://repo.anaconda.com/pkgs/main/osx-arm64/python-3.9.12-hbdb9e5c_1.conda
+md5         : 53fbd267a0fc103b65fc058892b55519
+timestamp   : 2022-06-01 11:38:07 UTC
+dependencies: 
+  - libcxx >=12.0.0
+  - libffi >=3.3,<4.0a0
+  - ncurses >=6.3,<7.0a0
+  - openssl >=1.1.1o,<1.1.2a
+  - readline >=8.1.2,<9.0a0
+  - sqlite >=3.38.3,<4.0a0
+  - tk >=8.6.11,<8.7.0a0
+  - tzdata
+  - xz >=5.2.5,<6.0a0
+  - zlib >=1.2.12,<1.3.0a0
+  - pip
+
+
+python 3.9.13 hbdb9e5c_1
+------------------------
+file name   : python-3.9.13-hbdb9e5c_1.conda
+name        : python
+version     : 3.9.13
+build       : hbdb9e5c_1
+build number: 1
+size        : 10.1 MB
+license     : PSF-2.0
+subdir      : osx-arm64
+url         : https://repo.anaconda.com/pkgs/main/osx-arm64/python-3.9.13-hbdb9e5c_1.conda
+md5         : 007c2e16a887d4dc3ab85fb765a5005f
+timestamp   : 2022-08-25 23:31:26 UTC
+dependencies: 
+  - libcxx >=12.0.0
+  - libffi >=3.3,<4.0a0
+  - ncurses >=6.3,<7.0a0
+  - openssl >=1.1.1q,<1.1.2a
+  - readline >=8.1.2,<9.0a0
+  - sqlite >=3.39.2,<4.0a0
+  - tk >=8.6.12,<8.7.0a0
+  - tzdata
+  - xz >=5.2.5,<6.0a0
+  - zlib >=1.2.12,<1.3.0a0
+  - pip
+
+
+python 3.9.13 hbdb9e5c_2
+------------------------
+file name   : python-3.9.13-hbdb9e5c_2.conda
+name        : python
+version     : 3.9.13
+build       : hbdb9e5c_2
+build number: 2
+size        : 10.2 MB
+license     : PSF-2.0
+subdir      : osx-arm64
+url         : https://repo.anaconda.com/pkgs/main/osx-arm64/python-3.9.13-hbdb9e5c_2.conda
+md5         : 185591d7dd14a96bb2e02654dacabba3
+timestamp   : 2022-10-13 21:15:59 UTC
+dependencies: 
+  - libcxx >=12.0.0
+  - libffi >=3.3,<4.0a0
+  - ncurses >=6.3,<7.0a0
+  - openssl >=1.1.1q,<1.1.2a
+  - readline >=8.1.2,<9.0a0
+  - sqlite >=3.39.3,<4.0a0
+  - tk >=8.6.12,<8.7.0a0
+  - tzdata
+  - xz >=5.2.6,<6.0a0
+  - zlib >=1.2.12,<1.3.0a0
+  - pip
+
+
+python 3.9.15 hbdb9e5c_0
+------------------------
+file name   : python-3.9.15-hbdb9e5c_0.conda
+name        : python
+version     : 3.9.15
+build       : hbdb9e5c_0
+build number: 0
+size        : 12.5 MB
+license     : PSF-2.0
+subdir      : osx-arm64
+url         : https://repo.anaconda.com/pkgs/main/osx-arm64/python-3.9.15-hbdb9e5c_0.conda
+md5         : 552b857a1dcae1f85b375261336927a0
+timestamp   : 2022-11-04 16:17:09 UTC
+dependencies: 
+  - libcxx >=12.0.0
+  - libffi >=3.3,<4.0a0
+  - ncurses >=6.3,<7.0a0
+  - openssl >=1.1.1q,<1.1.2a
+  - readline >=8.1.2,<9.0a0
+  - sqlite >=3.39.3,<4.0a0
+  - tk >=8.6.12,<8.7.0a0
+  - tzdata
+  - xz >=5.2.6,<6.0a0
+  - zlib >=1.2.13,<1.3.0a0
+  - pip
+
+
+python 3.9.15 hc0d8a6c_2
+------------------------
+file name   : python-3.9.15-hc0d8a6c_2.conda
+name        : python
+version     : 3.9.15
+build       : hc0d8a6c_2
+build number: 2
+size        : 12.5 MB
+license     : PSF-2.0
+subdir      : osx-arm64
+url         : https://repo.anaconda.com/pkgs/main/osx-arm64/python-3.9.15-hc0d8a6c_2.conda
+md5         : e28533a8091cab7be3f75151ba71b335
+timestamp   : 2022-11-24 14:32:05 UTC
+dependencies: 
+  - libcxx >=14.0.6
+  - libffi >=3.4,<3.5
+  - libffi >=3.4,<4.0a0
+  - ncurses >=6.3,<7.0a0
+  - openssl >=1.1.1s,<1.1.2a
+  - readline >=8.1.2,<9.0a0
+  - sqlite >=3.40.0,<4.0a0
+  - tk >=8.6.12,<8.7.0a0
+  - tzdata
+  - xz >=5.2.6,<6.0a0
+  - zlib >=1.2.13,<1.3.0a0
+  - pip
+
+
+python 3.9.16 hb885b13_3
+------------------------
+file name   : python-3.9.16-hb885b13_3.conda
+name        : python
+version     : 3.9.16
+build       : hb885b13_3
+build number: 3
+size        : 12.6 MB
+license     : PSF-2.0
+subdir      : osx-arm64
+url         : https://repo.anaconda.com/pkgs/main/osx-arm64/python-3.9.16-hb885b13_3.conda
+md5         : 0ceab7d1b1b5f3c1b65d0ffbf9f20d7e
+timestamp   : 2023-05-16 19:31:39 UTC
+dependencies: 
+  - libcxx >=14.0.6
+  - libffi >=3.4,<3.5
+  - libffi >=3.4,<4.0a0
+  - ncurses >=6.4,<7.0a0
+  - openssl >=3.0.8,<4.0a0
+  - readline >=8.1.2,<9.0a0
+  - sqlite >=3.41.2,<4.0a0
+  - tk >=8.6.12,<8.7.0a0
+  - tzdata
+  - xz >=5.4.2,<6.0a0
+  - zlib >=1.2.13,<1.3.0a0
+  - pip
+
+
+python 3.9.16 hc0d8a6c_0
+------------------------
+file name   : python-3.9.16-hc0d8a6c_0.conda
+name        : python
+version     : 3.9.16
+build       : hc0d8a6c_0
+build number: 0
+size        : 12.6 MB
+license     : PSF-2.0
+subdir      : osx-arm64
+url         : https://repo.anaconda.com/pkgs/main/osx-arm64/python-3.9.16-hc0d8a6c_0.conda
+md5         : 9dc504b7a7ad7766d0745a267b011682
+timestamp   : 2023-01-11 16:05:53 UTC
+dependencies: 
+  - libcxx >=14.0.6
+  - libffi >=3.4,<3.5
+  - libffi >=3.4,<4.0a0
+  - ncurses >=6.3,<7.0a0
+  - openssl >=1.1.1s,<1.1.2a
+  - readline >=8.1.2,<9.0a0
+  - sqlite >=3.40.1,<4.0a0
+  - tk >=8.6.12,<8.7.0a0
+  - tzdata
+  - xz >=5.2.8,<6.0a0
+  - zlib >=1.2.13,<1.3.0a0
+  - pip
+
+
+python 3.9.16 hc0d8a6c_1
+------------------------
+file name   : python-3.9.16-hc0d8a6c_1.conda
+name        : python
+version     : 3.9.16
+build       : hc0d8a6c_1
+build number: 1
+size        : 12.6 MB
+license     : PSF-2.0
+subdir      : osx-arm64
+url         : https://repo.anaconda.com/pkgs/main/osx-arm64/python-3.9.16-hc0d8a6c_1.conda
+md5         : 4ad0c59b65109fcafa9fbabf38f8be25
+timestamp   : 2023-03-01 18:23:04 UTC
+dependencies: 
+  - libcxx >=14.0.6
+  - libffi >=3.4,<3.5
+  - libffi >=3.4,<4.0a0
+  - ncurses >=6.4,<7.0a0
+  - openssl >=1.1.1t,<1.1.2a
+  - readline >=8.1.2,<9.0a0
+  - sqlite >=3.40.1,<4.0a0
+  - tk >=8.6.12,<8.7.0a0
+  - tzdata
+  - xz >=5.2.10,<6.0a0
+  - zlib >=1.2.13,<1.3.0a0
+  - pip
+
+
+python 3.9.16 hc0d8a6c_2
+------------------------
+file name   : python-3.9.16-hc0d8a6c_2.conda
+name        : python
+version     : 3.9.16
+build       : hc0d8a6c_2
+build number: 2
+size        : 12.6 MB
+license     : PSF-2.0
+subdir      : osx-arm64
+url         : https://repo.anaconda.com/pkgs/main/osx-arm64/python-3.9.16-hc0d8a6c_2.conda
+md5         : f4f3fae25939c852bc4b3a4e52befddc
+timestamp   : 2023-03-08 10:32:54 UTC
+dependencies: 
+  - libcxx >=14.0.6
+  - libffi >=3.4,<3.5
+  - libffi >=3.4,<4.0a0
+  - ncurses >=6.4,<7.0a0
+  - openssl >=1.1.1t,<1.1.2a
+  - readline >=8.1.2,<9.0a0
+  - sqlite >=3.40.1,<4.0a0
+  - tk >=8.6.12,<8.7.0a0
+  - tzdata
+  - xz >=5.2.10,<6.0a0
+  - zlib >=1.2.13,<1.3.0a0
+  - pip
+
+
+python 3.9.17 hb885b13_0
+------------------------
+file name   : python-3.9.17-hb885b13_0.conda
+name        : python
+version     : 3.9.17
+build       : hb885b13_0
+build number: 0
+size        : 12.5 MB
+license     : PSF-2.0
+subdir      : osx-arm64
+url         : https://repo.anaconda.com/pkgs/main/osx-arm64/python-3.9.17-hb885b13_0.conda
+md5         : 6e170bd2d83a85df948e2caf2363f104
+timestamp   : 2023-07-05 20:39:04 UTC
+dependencies: 
+  - libcxx >=14.0.6
+  - libffi >=3.4,<3.5
+  - libffi >=3.4,<4.0a0
+  - ncurses >=6.4,<7.0a0
+  - openssl >=3.0.9,<4.0a0
+  - readline >=8.1.2,<9.0a0
+  - sqlite >=3.41.2,<4.0a0
+  - tk >=8.6.12,<8.7.0a0
+  - tzdata
+  - xz >=5.4.2,<6.0a0
+  - zlib >=1.2.13,<1.3.0a0
+  - pip
+
+
+python 3.9.17 hc0d8a6c_0
+------------------------
+file name   : python-3.9.17-hc0d8a6c_0.conda
+name        : python
+version     : 3.9.17
+build       : hc0d8a6c_0
+build number: 0
+size        : 12.5 MB
+license     : PSF-2.0
+subdir      : osx-arm64
+url         : https://repo.anaconda.com/pkgs/main/osx-arm64/python-3.9.17-hc0d8a6c_0.conda
+md5         : 8fcd5becc236d71202e70518eac0f55b
+timestamp   : 2023-07-05 20:48:43 UTC
+dependencies: 
+  - libcxx >=14.0.6
+  - libffi >=3.4,<3.5
+  - libffi >=3.4,<4.0a0
+  - ncurses >=6.4,<7.0a0
+  - openssl >=1.1.1u,<1.1.2a
+  - readline >=8.1.2,<9.0a0
+  - sqlite >=3.41.2,<4.0a0
+  - tk >=8.6.12,<8.7.0a0
+  - tzdata
+  - xz >=5.4.2,<6.0a0
+  - zlib >=1.2.13,<1.3.0a0
+  - pip
+
+
+python 3.9.18 hb885b13_0
+------------------------
+file name   : python-3.9.18-hb885b13_0.conda
+name        : python
+version     : 3.9.18
+build       : hb885b13_0
+build number: 0
+size        : 11.6 MB
+license     : PSF-2.0
+subdir      : osx-arm64
+url         : https://repo.anaconda.com/pkgs/main/osx-arm64/python-3.9.18-hb885b13_0.conda
+md5         : a846e3766c71915409871458683b5409
+timestamp   : 2023-09-11 13:28:21 UTC
+dependencies: 
+  - libcxx >=14.0.6
+  - libffi >=3.4,<3.5
+  - libffi >=3.4,<4.0a0
+  - ncurses >=6.4,<7.0a0
+  - openssl >=3.0.10,<4.0a0
+  - readline >=8.1.2,<9.0a0
+  - sqlite >=3.41.2,<4.0a0
+  - tk >=8.6.12,<8.7.0a0
+  - tzdata
+  - xz >=5.4.2,<6.0a0
+  - zlib >=1.2.13,<1.3.0a0
+  - pip
+
+
+python 3.9.18 hc0d8a6c_0
+------------------------
+file name   : python-3.9.18-hc0d8a6c_0.conda
+name        : python
+version     : 3.9.18
+build       : hc0d8a6c_0
+build number: 0
+size        : 11.6 MB
+license     : PSF-2.0
+subdir      : osx-arm64
+url         : https://repo.anaconda.com/pkgs/main/osx-arm64/python-3.9.18-hc0d8a6c_0.conda
+md5         : 673a7b485675b69c2cc3e7499951fe2a
+timestamp   : 2023-09-11 13:19:38 UTC
+dependencies: 
+  - libcxx >=14.0.6
+  - libffi >=3.4,<3.5
+  - libffi >=3.4,<4.0a0
+  - ncurses >=6.4,<7.0a0
+  - openssl >=1.1.1v,<1.1.2a
+  - readline >=8.1.2,<9.0a0
+  - sqlite >=3.41.2,<4.0a0
+  - tk >=8.6.12,<8.7.0a0
+  - tzdata
+  - xz >=5.4.2,<6.0a0
+  - zlib >=1.2.13,<1.3.0a0
+  - pip
+
+
+python 3.9.19 hb885b13_0
+------------------------
+file name   : python-3.9.19-hb885b13_0.conda
+name        : python
+version     : 3.9.19
+build       : hb885b13_0
+build number: 0
+size        : 12.5 MB
+license     : PSF-2.0
+subdir      : osx-arm64
+url         : https://repo.anaconda.com/pkgs/main/osx-arm64/python-3.9.19-hb885b13_0.conda
+md5         : 57411d22c3599a86c450fb9be9bee488
+timestamp   : 2024-03-21 17:10:34 UTC
+dependencies: 
+  - libcxx >=14.0.6
+  - libffi >=3.4,<3.5
+  - libffi >=3.4,<4.0a0
+  - ncurses >=6.4,<7.0a0
+  - openssl >=3.0.13,<4.0a0
+  - readline >=8.1.2,<9.0a0
+  - sqlite >=3.41.2,<4.0a0
+  - tk >=8.6.12,<8.7.0a0
+  - tzdata
+  - xz >=5.4.6,<6.0a0
+  - zlib >=1.2.13,<1.3.0a0
+  - pip
+
+
+python 3.10.0 hbdb9e5c_1
+------------------------
+file name   : python-3.10.0-hbdb9e5c_1.tar.bz2
+name        : python
+version     : 3.10.0
+build       : hbdb9e5c_1
+build number: 1
+size        : 12.6 MB
+license     : Python-2.0
+subdir      : osx-arm64
+url         : https://repo.anaconda.com/pkgs/main/osx-arm64/python-3.10.0-hbdb9e5c_1.tar.bz2
+md5         : c344f41666ca0e45950b4484d855b6a5
+timestamp   : 2021-10-07 09:17:07 UTC
+dependencies: 
+  - bzip2 >=1.0.8,<2.0a0
+  - libffi >=3.3,<4.0a0
+  - ncurses >=6.2,<7.0a0
+  - openssl >=1.1.1j,<1.1.2a
+  - readline >=8.1,<9.0a0
+  - sqlite >=3.36.0,<4.0a0
+  - tk >=8.6.10,<8.7.0a0
+  - tzdata
+  - xz >=5.2.5,<6.0a0
+  - zlib >=1.2.11,<1.3.0a0
+  - pip
+
+
+python 3.10.0 hbdb9e5c_2
+------------------------
+file name   : python-3.10.0-hbdb9e5c_2.tar.bz2
+name        : python
+version     : 3.10.0
+build       : hbdb9e5c_2
+build number: 2
+size        : 12.6 MB
+license     : Python-2.0
+subdir      : osx-arm64
+url         : https://repo.anaconda.com/pkgs/main/osx-arm64/python-3.10.0-hbdb9e5c_2.tar.bz2
+md5         : 96ba09e9aaf624a7246c38efb096fcab
+timestamp   : 2021-11-09 13:59:27 UTC
+dependencies: 
+  - bzip2 >=1.0.8,<2.0a0
+  - libffi >=3.3,<4.0a0
+  - ncurses >=6.3,<7.0a0
+  - openssl >=1.1.1j,<1.1.2a
+  - readline >=8.1,<9.0a0
+  - sqlite >=3.36.0,<4.0a0
+  - tk >=8.6.11,<8.7.0a0
+  - tzdata
+  - xz >=5.2.5,<6.0a0
+  - zlib >=1.2.11,<1.3.0a0
+  - pip
+
+
+python 3.10.0 hbdb9e5c_3
+------------------------
+file name   : python-3.10.0-hbdb9e5c_3.tar.bz2
+name        : python
+version     : 3.10.0
+build       : hbdb9e5c_3
+build number: 3
+size        : 12.7 MB
+license     : Python-2.0
+subdir      : osx-arm64
+url         : https://repo.anaconda.com/pkgs/main/osx-arm64/python-3.10.0-hbdb9e5c_3.tar.bz2
+md5         : 546107c8688d70d72a64e2c6c4154014
+timestamp   : 2021-11-10 19:32:03 UTC
+dependencies: 
+  - bzip2 >=1.0.8,<2.0a0
+  - libffi >=3.3,<4.0a0
+  - ncurses >=6.3,<7.0a0
+  - openssl >=1.1.1j,<1.1.2a
+  - readline >=8.1,<9.0a0
+  - sqlite >=3.36.0,<4.0a0
+  - tk >=8.6.11,<8.7.0a0
+  - tzdata
+  - xz >=5.2.5,<6.0a0
+  - zlib >=1.2.11,<1.3.0a0
+  - pip
+
+
+python 3.10.0 hbdb9e5c_5
+------------------------
+file name   : python-3.10.0-hbdb9e5c_5.tar.bz2
+name        : python
+version     : 3.10.0
+build       : hbdb9e5c_5
+build number: 5
+size        : 12.6 MB
+license     : Python-2.0
+subdir      : osx-arm64
+url         : https://repo.anaconda.com/pkgs/main/osx-arm64/python-3.10.0-hbdb9e5c_5.tar.bz2
+md5         : 7149a001b81f5d740645b1eee26d670d
+timestamp   : 2022-03-03 09:58:25 UTC
+dependencies: 
+  - bzip2 >=1.0.8,<2.0a0
+  - libffi >=3.3,<4.0a0
+  - ncurses >=6.3,<7.0a0
+  - openssl >=1.1.1m,<1.1.2a
+  - readline >=8.1.2,<9.0a0
+  - sqlite >=3.37.2,<4.0a0
+  - tk >=8.6.11,<8.7.0a0
+  - tzdata
+  - xz >=5.2.5,<6.0a0
+  - zlib >=1.2.11,<1.3.0a0
+  - pip
+
+
+python 3.10.3 hbdb9e5c_5
+------------------------
+file name   : python-3.10.3-hbdb9e5c_5.tar.bz2
+name        : python
+version     : 3.10.3
+build       : hbdb9e5c_5
+build number: 5
+size        : 13.2 MB
+license     : PSF-2.0
+subdir      : osx-arm64
+url         : https://repo.anaconda.com/pkgs/main/osx-arm64/python-3.10.3-hbdb9e5c_5.tar.bz2
+md5         : 223945c60e1b472da9c1c3903a6d8ba8
+timestamp   : 2022-03-28 09:29:24 UTC
+dependencies: 
+  - bzip2 >=1.0.8,<2.0a0
+  - libffi >=3.3,<4.0a0
+  - ncurses >=6.3,<7.0a0
+  - openssl >=1.1.1n,<1.1.2a
+  - readline >=8.1.2,<9.0a0
+  - sqlite >=3.38.0,<4.0a0
+  - tk >=8.6.11,<8.7.0a0
+  - tzdata
+  - xz >=5.2.5,<6.0a0
+  - zlib >=1.2.11,<1.3.0a0
+  - pip
+
+
+python 3.10.4 hbdb9e5c_0
+------------------------
+file name   : python-3.10.4-hbdb9e5c_0.tar.bz2
+name        : python
+version     : 3.10.4
+build       : hbdb9e5c_0
+build number: 0
+size        : 13.1 MB
+license     : PSF-2.0
+subdir      : osx-arm64
+url         : https://repo.anaconda.com/pkgs/main/osx-arm64/python-3.10.4-hbdb9e5c_0.tar.bz2
+md5         : f4aae673df5b9a783bffae7ef1110657
+timestamp   : 2022-03-31 08:41:25 UTC
+dependencies: 
+  - bzip2 >=1.0.8,<2.0a0
+  - libffi >=3.3,<4.0a0
+  - ncurses >=6.3,<7.0a0
+  - openssl >=1.1.1n,<1.1.2a
+  - readline >=8.1.2,<9.0a0
+  - sqlite >=3.38.0,<4.0a0
+  - tk >=8.6.11,<8.7.0a0
+  - tzdata
+  - xz >=5.2.5,<6.0a0
+  - zlib >=1.2.11,<1.3.0a0
+  - pip
+
+
+python 3.10.6 hbdb9e5c_0
+------------------------
+file name   : python-3.10.6-hbdb9e5c_0.conda
+name        : python
+version     : 3.10.6
+build       : hbdb9e5c_0
+build number: 0
+size        : 10.6 MB
+license     : PSF-2.0
+subdir      : osx-arm64
+url         : https://repo.anaconda.com/pkgs/main/osx-arm64/python-3.10.6-hbdb9e5c_0.conda
+md5         : 88a21cb05becd5c8e9c400c843bf1e28
+timestamp   : 2022-10-07 20:22:27 UTC
+dependencies: 
+  - bzip2 >=1.0.8,<2.0a0
+  - libffi >=3.3,<4.0a0
+  - ncurses >=6.3,<7.0a0
+  - openssl >=1.1.1q,<1.1.2a
+  - readline >=8.1.2,<9.0a0
+  - sqlite >=3.39.3,<4.0a0
+  - tk >=8.6.12,<8.7.0a0
+  - tzdata
+  - xz >=5.2.6,<6.0a0
+  - zlib >=1.2.12,<1.3.0a0
+  - pip
+
+
+python 3.10.6 hbdb9e5c_1
+------------------------
+file name   : python-3.10.6-hbdb9e5c_1.conda
+name        : python
+version     : 3.10.6
+build       : hbdb9e5c_1
+build number: 1
+size        : 10.6 MB
+license     : PSF-2.0
+subdir      : osx-arm64
+url         : https://repo.anaconda.com/pkgs/main/osx-arm64/python-3.10.6-hbdb9e5c_1.conda
+md5         : 82661371d0778f010384ed0a062cb3ae
+timestamp   : 2022-10-24 16:08:02 UTC
+dependencies: 
+  - bzip2 >=1.0.8,<2.0a0
+  - libffi >=3.3,<4.0a0
+  - ncurses >=6.3,<7.0a0
+  - openssl >=1.1.1q,<1.1.2a
+  - readline >=8.1.2,<9.0a0
+  - sqlite >=3.39.3,<4.0a0
+  - tk >=8.6.12,<8.7.0a0
+  - tzdata
+  - xz >=5.2.6,<6.0a0
+  - zlib >=1.2.13,<1.3.0a0
+  - pip
+
+
+python 3.10.8 hbdb9e5c_0
+------------------------
+file name   : python-3.10.8-hbdb9e5c_0.conda
+name        : python
+version     : 3.10.8
+build       : hbdb9e5c_0
+build number: 0
+size        : 13.0 MB
+license     : PSF-2.0
+subdir      : osx-arm64
+url         : https://repo.anaconda.com/pkgs/main/osx-arm64/python-3.10.8-hbdb9e5c_0.conda
+md5         : 545b607406621ce61491dde188a2ac24
+timestamp   : 2022-11-04 13:49:28 UTC
+dependencies: 
+  - bzip2 >=1.0.8,<2.0a0
+  - libffi >=3.3,<4.0a0
+  - ncurses >=6.3,<7.0a0
+  - openssl >=1.1.1q,<1.1.2a
+  - readline >=8.1.2,<9.0a0
+  - sqlite >=3.39.3,<4.0a0
+  - tk >=8.6.12,<8.7.0a0
+  - tzdata
+  - xz >=5.2.6,<6.0a0
+  - zlib >=1.2.13,<1.3.0a0
+  - pip
+
+
+python 3.10.8 hc0d8a6c_1
+------------------------
+file name   : python-3.10.8-hc0d8a6c_1.conda
+name        : python
+version     : 3.10.8
+build       : hc0d8a6c_1
+build number: 1
+size        : 12.9 MB
+license     : PSF-2.0
+subdir      : osx-arm64
+url         : https://repo.anaconda.com/pkgs/main/osx-arm64/python-3.10.8-hc0d8a6c_1.conda
+md5         : 6b0a8c1832a2b63c7bfb0f6de5967601
+timestamp   : 2022-11-24 14:11:54 UTC
+dependencies: 
+  - bzip2 >=1.0.8,<2.0a0
+  - libffi >=3.4,<3.5
+  - libffi >=3.4,<4.0a0
+  - ncurses >=6.3,<7.0a0
+  - openssl >=1.1.1s,<1.1.2a
+  - readline >=8.1.2,<9.0a0
+  - sqlite >=3.40.0,<4.0a0
+  - tk >=8.6.12,<8.7.0a0
+  - tzdata
+  - xz >=5.2.6,<6.0a0
+  - zlib >=1.2.13,<1.3.0a0
+  - pip
+
+
+python 3.10.9 hc0d8a6c_0
+------------------------
+file name   : python-3.10.9-hc0d8a6c_0.conda
+name        : python
+version     : 3.10.9
+build       : hc0d8a6c_0
+build number: 0
+size        : 12.0 MB
+license     : PSF-2.0
+subdir      : osx-arm64
+url         : https://repo.anaconda.com/pkgs/main/osx-arm64/python-3.10.9-hc0d8a6c_0.conda
+md5         : f87a2e1f7595344e3d8e0842f0016831
+timestamp   : 2023-01-11 15:21:53 UTC
+dependencies: 
+  - bzip2 >=1.0.8,<2.0a0
+  - libffi >=3.4,<3.5
+  - libffi >=3.4,<4.0a0
+  - ncurses >=6.3,<7.0a0
+  - openssl >=1.1.1s,<1.1.2a
+  - readline >=8.1.2,<9.0a0
+  - sqlite >=3.40.1,<4.0a0
+  - tk >=8.6.12,<8.7.0a0
+  - tzdata
+  - xz >=5.2.8,<6.0a0
+  - zlib >=1.2.13,<1.3.0a0
+  - pip
+
+
+python 3.10.9 hc0d8a6c_1
+------------------------
+file name   : python-3.10.9-hc0d8a6c_1.conda
+name        : python
+version     : 3.10.9
+build       : hc0d8a6c_1
+build number: 1
+size        : 12.9 MB
+license     : PSF-2.0
+subdir      : osx-arm64
+url         : https://repo.anaconda.com/pkgs/main/osx-arm64/python-3.10.9-hc0d8a6c_1.conda
+md5         : b49223285e681289fe846def063b8c61
+timestamp   : 2023-03-01 18:24:33 UTC
+dependencies: 
+  - bzip2 >=1.0.8,<2.0a0
+  - libffi >=3.4,<3.5
+  - libffi >=3.4,<4.0a0
+  - ncurses >=6.4,<7.0a0
+  - openssl >=1.1.1t,<1.1.2a
+  - readline >=8.1.2,<9.0a0
+  - sqlite >=3.40.1,<4.0a0
+  - tk >=8.6.12,<8.7.0a0
+  - tzdata
+  - xz >=5.2.10,<6.0a0
+  - zlib >=1.2.13,<1.3.0a0
+  - pip
+
+
+python 3.10.9 hc0d8a6c_2
+------------------------
+file name   : python-3.10.9-hc0d8a6c_2.conda
+name        : python
+version     : 3.10.9
+build       : hc0d8a6c_2
+build number: 2
+size        : 13.0 MB
+license     : PSF-2.0
+subdir      : osx-arm64
+url         : https://repo.anaconda.com/pkgs/main/osx-arm64/python-3.10.9-hc0d8a6c_2.conda
+md5         : ede0e4fc40d6eefe7ae13e82831e1578
+timestamp   : 2023-03-08 10:48:06 UTC
+dependencies: 
+  - bzip2 >=1.0.8,<2.0a0
+  - libffi >=3.4,<3.5
+  - libffi >=3.4,<4.0a0
+  - ncurses >=6.4,<7.0a0
+  - openssl >=1.1.1t,<1.1.2a
+  - readline >=8.1.2,<9.0a0
+  - sqlite >=3.40.1,<4.0a0
+  - tk >=8.6.12,<8.7.0a0
+  - tzdata
+  - xz >=5.2.10,<6.0a0
+  - zlib >=1.2.13,<1.3.0a0
+  - pip
+
+
+python 3.10.10 hc0d8a6c_2
+-------------------------
+file name   : python-3.10.10-hc0d8a6c_2.conda
+name        : python
+version     : 3.10.10
+build       : hc0d8a6c_2
+build number: 2
+size        : 13.0 MB
+license     : PSF-2.0
+subdir      : osx-arm64
+url         : https://repo.anaconda.com/pkgs/main/osx-arm64/python-3.10.10-hc0d8a6c_2.conda
+md5         : bd5ef8b4531bcd58ac2c00393a7d8c3f
+timestamp   : 2023-03-21 18:44:40 UTC
+dependencies: 
+  - bzip2 >=1.0.8,<2.0a0
+  - libffi >=3.4,<3.5
+  - libffi >=3.4,<4.0a0
+  - ncurses >=6.4,<7.0a0
+  - openssl >=1.1.1t,<1.1.2a
+  - readline >=8.1.2,<9.0a0
+  - sqlite >=3.41.1,<4.0a0
+  - tk >=8.6.12,<8.7.0a0
+  - tzdata
+  - xz >=5.2.10,<6.0a0
+  - zlib >=1.2.13,<1.3.0a0
+  - pip
+
+
+python 3.10.11 hb885b13_3
+-------------------------
+file name   : python-3.10.11-hb885b13_3.conda
+name        : python
+version     : 3.10.11
+build       : hb885b13_3
+build number: 3
+size        : 13.0 MB
+license     : PSF-2.0
+subdir      : osx-arm64
+url         : https://repo.anaconda.com/pkgs/main/osx-arm64/python-3.10.11-hb885b13_3.conda
+md5         : 9cfd49419eb60ea5fca2bc416708d152
+timestamp   : 2023-05-17 19:34:14 UTC
+dependencies: 
+  - bzip2 >=1.0.8,<2.0a0
+  - libffi >=3.4,<3.5
+  - libffi >=3.4,<4.0a0
+  - ncurses >=6.4,<7.0a0
+  - openssl >=3.0.8,<4.0a0
+  - readline >=8.1.2,<9.0a0
+  - sqlite >=3.41.2,<4.0a0
+  - tk >=8.6.12,<8.7.0a0
+  - tzdata
+  - xz >=5.4.2,<6.0a0
+  - zlib >=1.2.13,<1.3.0a0
+  - pip
+
+
+python 3.10.11 hc0d8a6c_2
+-------------------------
+file name   : python-3.10.11-hc0d8a6c_2.conda
+name        : python
+version     : 3.10.11
+build       : hc0d8a6c_2
+build number: 2
+size        : 13.0 MB
+license     : PSF-2.0
+subdir      : osx-arm64
+url         : https://repo.anaconda.com/pkgs/main/osx-arm64/python-3.10.11-hc0d8a6c_2.conda
+md5         : 658853b9ef9b3961212f913f69d93a51
+timestamp   : 2023-04-20 19:02:14 UTC
+dependencies: 
+  - bzip2 >=1.0.8,<2.0a0
+  - libffi >=3.4,<3.5
+  - libffi >=3.4,<4.0a0
+  - ncurses >=6.4,<7.0a0
+  - openssl >=1.1.1t,<1.1.2a
+  - readline >=8.1.2,<9.0a0
+  - sqlite >=3.41.2,<4.0a0
+  - tk >=8.6.12,<8.7.0a0
+  - tzdata
+  - xz >=5.2.10,<6.0a0
+  - zlib >=1.2.13,<1.3.0a0
+  - pip
+
+
+python 3.10.12 hb885b13_0
+-------------------------
+file name   : python-3.10.12-hb885b13_0.conda
+name        : python
+version     : 3.10.12
+build       : hb885b13_0
+build number: 0
+size        : 13.0 MB
+license     : PSF-2.0
+subdir      : osx-arm64
+url         : https://repo.anaconda.com/pkgs/main/osx-arm64/python-3.10.12-hb885b13_0.conda
+md5         : e48fe886a96893db3aab407ebb7e1878
+timestamp   : 2023-07-05 20:05:59 UTC
+dependencies: 
+  - bzip2 >=1.0.8,<2.0a0
+  - libffi >=3.4,<3.5
+  - libffi >=3.4,<4.0a0
+  - ncurses >=6.4,<7.0a0
+  - openssl >=3.0.9,<4.0a0
+  - readline >=8.1.2,<9.0a0
+  - sqlite >=3.41.2,<4.0a0
+  - tk >=8.6.12,<8.7.0a0
+  - tzdata
+  - xz >=5.4.2,<6.0a0
+  - zlib >=1.2.13,<1.3.0a0
+  - pip
+
+
+python 3.10.12 hc0d8a6c_0
+-------------------------
+file name   : python-3.10.12-hc0d8a6c_0.conda
+name        : python
+version     : 3.10.12
+build       : hc0d8a6c_0
+build number: 0
+size        : 13.0 MB
+license     : PSF-2.0
+subdir      : osx-arm64
+url         : https://repo.anaconda.com/pkgs/main/osx-arm64/python-3.10.12-hc0d8a6c_0.conda
+md5         : 5c51d1ea23c42b63ad5181e4d0d290d6
+timestamp   : 2023-07-05 19:56:28 UTC
+dependencies: 
+  - bzip2 >=1.0.8,<2.0a0
+  - libffi >=3.4,<3.5
+  - libffi >=3.4,<4.0a0
+  - ncurses >=6.4,<7.0a0
+  - openssl >=1.1.1u,<1.1.2a
+  - readline >=8.1.2,<9.0a0
+  - sqlite >=3.41.2,<4.0a0
+  - tk >=8.6.12,<8.7.0a0
+  - tzdata
+  - xz >=5.4.2,<6.0a0
+  - zlib >=1.2.13,<1.3.0a0
+  - pip
+
+
+python 3.10.13 hb885b13_0
+-------------------------
+file name   : python-3.10.13-hb885b13_0.conda
+name        : python
+version     : 3.10.13
+build       : hb885b13_0
+build number: 0
+size        : 13.0 MB
+license     : PSF-2.0
+subdir      : osx-arm64
+url         : https://repo.anaconda.com/pkgs/main/osx-arm64/python-3.10.13-hb885b13_0.conda
+md5         : 27eae236674f98a3bbb86231e68d0c83
+timestamp   : 2023-09-11 13:19:30 UTC
+dependencies: 
+  - bzip2 >=1.0.8,<2.0a0
+  - libffi >=3.4,<3.5
+  - libffi >=3.4,<4.0a0
+  - ncurses >=6.4,<7.0a0
+  - openssl >=3.0.10,<4.0a0
+  - readline >=8.1.2,<9.0a0
+  - sqlite >=3.41.2,<4.0a0
+  - tk >=8.6.12,<8.7.0a0
+  - tzdata
+  - xz >=5.4.2,<6.0a0
+  - zlib >=1.2.13,<1.3.0a0
+  - pip
+
+
+python 3.10.13 hc0d8a6c_0
+-------------------------
+file name   : python-3.10.13-hc0d8a6c_0.conda
+name        : python
+version     : 3.10.13
+build       : hc0d8a6c_0
+build number: 0
+size        : 13.0 MB
+license     : PSF-2.0
+subdir      : osx-arm64
+url         : https://repo.anaconda.com/pkgs/main/osx-arm64/python-3.10.13-hc0d8a6c_0.conda
+md5         : 19df08f8f498cffb70e567ab3e80a07a
+timestamp   : 2023-09-11 13:28:12 UTC
+dependencies: 
+  - bzip2 >=1.0.8,<2.0a0
+  - libffi >=3.4,<3.5
+  - libffi >=3.4,<4.0a0
+  - ncurses >=6.4,<7.0a0
+  - openssl >=1.1.1v,<1.1.2a
+  - readline >=8.1.2,<9.0a0
+  - sqlite >=3.41.2,<4.0a0
+  - tk >=8.6.12,<8.7.0a0
+  - tzdata
+  - xz >=5.4.2,<6.0a0
+  - zlib >=1.2.13,<1.3.0a0
+  - pip
+
+
+python 3.10.14 hb885b13_0
+-------------------------
+file name   : python-3.10.14-hb885b13_0.conda
+name        : python
+version     : 3.10.14
+build       : hb885b13_0
+build number: 0
+size        : 13.0 MB
+license     : PSF-2.0
+subdir      : osx-arm64
+url         : https://repo.anaconda.com/pkgs/main/osx-arm64/python-3.10.14-hb885b13_0.conda
+md5         : 0ad0a3a0082c794a6e34c93153baee3c
+timestamp   : 2024-03-21 16:25:06 UTC
+dependencies: 
+  - bzip2 >=1.0.8,<2.0a0
+  - libffi >=3.4,<3.5
+  - libffi >=3.4,<4.0a0
+  - ncurses >=6.4,<7.0a0
+  - openssl >=3.0.13,<4.0a0
+  - readline >=8.1.2,<9.0a0
+  - sqlite >=3.41.2,<4.0a0
+  - tk >=8.6.12,<8.7.0a0
+  - tzdata
+  - xz >=5.4.6,<6.0a0
+  - zlib >=1.2.13,<1.3.0a0
+  - pip
+
+
+python 3.11.0 hc0d8a6c_2
+------------------------
+file name   : python-3.11.0-hc0d8a6c_2.conda
+name        : python
+version     : 3.11.0
+build       : hc0d8a6c_2
+build number: 2
+size        : 15.3 MB
+license     : PSF-2.0
+subdir      : osx-arm64
+url         : https://repo.anaconda.com/pkgs/main/osx-arm64/python-3.11.0-hc0d8a6c_2.conda
+md5         : 1a7019acdc1637c47a0b2d94fd8ca044
+timestamp   : 2023-01-16 17:19:20 UTC
+dependencies: 
+  - bzip2 >=1.0.8,<2.0a0
+  - libffi >=3.4,<3.5
+  - libffi >=3.4,<4.0a0
+  - ncurses >=6.3,<7.0a0
+  - openssl >=1.1.1s,<1.1.2a
+  - readline >=8.1.2,<9.0a0
+  - sqlite >=3.40.1,<4.0a0
+  - tk >=8.6.12,<8.7.0a0
+  - tzdata
+  - xz >=5.2.8,<6.0a0
+  - zlib >=1.2.13,<1.3.0a0
+  - pip
+
+
+python 3.11.0 hc0d8a6c_3
+------------------------
+file name   : python-3.11.0-hc0d8a6c_3.conda
+name        : python
+version     : 3.11.0
+build       : hc0d8a6c_3
+build number: 3
+size        : 15.3 MB
+license     : PSF-2.0
+subdir      : osx-arm64
+url         : https://repo.anaconda.com/pkgs/main/osx-arm64/python-3.11.0-hc0d8a6c_3.conda
+md5         : 6b08c690468a632dcfd0ef55e1b26ab0
+timestamp   : 2023-03-01 18:41:04 UTC
+dependencies: 
+  - bzip2 >=1.0.8,<2.0a0
+  - libffi >=3.4,<3.5
+  - libffi >=3.4,<4.0a0
+  - ncurses >=6.4,<7.0a0
+  - openssl >=1.1.1t,<1.1.2a
+  - readline >=8.1.2,<9.0a0
+  - sqlite >=3.40.1,<4.0a0
+  - tk >=8.6.12,<8.7.0a0
+  - tzdata
+  - xz >=5.2.10,<6.0a0
+  - zlib >=1.2.13,<1.3.0a0
+  - pip
+
+
+python 3.11.2 hc0d8a6c_0
+------------------------
+file name   : python-3.11.2-hc0d8a6c_0.conda
+name        : python
+version     : 3.11.2
+build       : hc0d8a6c_0
+build number: 0
+size        : 15.3 MB
+license     : PSF-2.0
+subdir      : osx-arm64
+url         : https://repo.anaconda.com/pkgs/main/osx-arm64/python-3.11.2-hc0d8a6c_0.conda
+md5         : 2436b0e3116ed03300c05217a4bf1fa6
+timestamp   : 2023-03-27 23:45:26 UTC
+dependencies: 
+  - bzip2 >=1.0.8,<2.0a0
+  - libffi >=3.4,<3.5
+  - libffi >=3.4,<4.0a0
+  - ncurses >=6.4,<7.0a0
+  - openssl >=1.1.1t,<1.1.2a
+  - readline >=8.1.2,<9.0a0
+  - sqlite >=3.41.1,<4.0a0
+  - tk >=8.6.12,<8.7.0a0
+  - tzdata
+  - xz >=5.2.10,<6.0a0
+  - zlib >=1.2.13,<1.3.0a0
+  - pip
+
+
+python 3.11.3 hb885b13_1
+------------------------
+file name   : python-3.11.3-hb885b13_1.conda
+name        : python
+version     : 3.11.3
+build       : hb885b13_1
+build number: 1
+size        : 15.3 MB
+license     : PSF-2.0
+subdir      : osx-arm64
+url         : https://repo.anaconda.com/pkgs/main/osx-arm64/python-3.11.3-hb885b13_1.conda
+md5         : 23c34a0cd50510828470216735b16180
+timestamp   : 2023-05-15 23:09:06 UTC
+dependencies: 
+  - bzip2 >=1.0.8,<2.0a0
+  - libffi >=3.4,<3.5
+  - libffi >=3.4,<4.0a0
+  - ncurses >=6.4,<7.0a0
+  - openssl >=3.0.8,<4.0a0
+  - readline >=8.1.2,<9.0a0
+  - sqlite >=3.41.2,<4.0a0
+  - tk >=8.6.12,<8.7.0a0
+  - tzdata
+  - xz >=5.4.2,<6.0a0
+  - zlib >=1.2.13,<1.3.0a0
+  - pip
+
+
+python 3.11.3 hc0d8a6c_0
+------------------------
+file name   : python-3.11.3-hc0d8a6c_0.conda
+name        : python
+version     : 3.11.3
+build       : hc0d8a6c_0
+build number: 0
+size        : 15.3 MB
+license     : PSF-2.0
+subdir      : osx-arm64
+url         : https://repo.anaconda.com/pkgs/main/osx-arm64/python-3.11.3-hc0d8a6c_0.conda
+md5         : 2fde54a2c622f9574e2fb47d20e92502
+timestamp   : 2023-04-19 23:56:57 UTC
+dependencies: 
+  - bzip2 >=1.0.8,<2.0a0
+  - libffi >=3.4,<3.5
+  - libffi >=3.4,<4.0a0
+  - ncurses >=6.4,<7.0a0
+  - openssl >=1.1.1t,<1.1.2a
+  - readline >=8.1.2,<9.0a0
+  - sqlite >=3.41.2,<4.0a0
+  - tk >=8.6.12,<8.7.0a0
+  - tzdata
+  - xz >=5.2.10,<6.0a0
+  - zlib >=1.2.13,<1.3.0a0
+  - pip
+
+
+python 3.11.4 hb885b13_0
+------------------------
+file name   : python-3.11.4-hb885b13_0.conda
+name        : python
+version     : 3.11.4
+build       : hb885b13_0
+build number: 0
+size        : 15.3 MB
+license     : PSF-2.0
+subdir      : osx-arm64
+url         : https://repo.anaconda.com/pkgs/main/osx-arm64/python-3.11.4-hb885b13_0.conda
+md5         : 3d614a1117ed0a2dc79776b2dc0b98e5
+timestamp   : 2023-07-05 13:47:27 UTC
+dependencies: 
+  - bzip2 >=1.0.8,<2.0a0
+  - libffi >=3.4,<3.5
+  - libffi >=3.4,<4.0a0
+  - ncurses >=6.4,<7.0a0
+  - openssl >=3.0.9,<4.0a0
+  - readline >=8.1.2,<9.0a0
+  - sqlite >=3.41.2,<4.0a0
+  - tk >=8.6.12,<8.7.0a0
+  - tzdata
+  - xz >=5.4.2,<6.0a0
+  - zlib >=1.2.13,<1.3.0a0
+  - pip
+
+
+python 3.11.4 hc0d8a6c_0
+------------------------
+file name   : python-3.11.4-hc0d8a6c_0.conda
+name        : python
+version     : 3.11.4
+build       : hc0d8a6c_0
+build number: 0
+size        : 15.3 MB
+license     : PSF-2.0
+subdir      : osx-arm64
+url         : https://repo.anaconda.com/pkgs/main/osx-arm64/python-3.11.4-hc0d8a6c_0.conda
+md5         : 2088239ff316e6d47923394f318afbe2
+timestamp   : 2023-07-05 14:01:09 UTC
+dependencies: 
+  - bzip2 >=1.0.8,<2.0a0
+  - libffi >=3.4,<3.5
+  - libffi >=3.4,<4.0a0
+  - ncurses >=6.4,<7.0a0
+  - openssl >=1.1.1u,<1.1.2a
+  - readline >=8.1.2,<9.0a0
+  - sqlite >=3.41.2,<4.0a0
+  - tk >=8.6.12,<8.7.0a0
+  - tzdata
+  - xz >=5.4.2,<6.0a0
+  - zlib >=1.2.13,<1.3.0a0
+  - pip
+
+
+python 3.11.5 hb885b13_0
+------------------------
+file name   : python-3.11.5-hb885b13_0.conda
+name        : python
+version     : 3.11.5
+build       : hb885b13_0
+build number: 0
+size        : 15.4 MB
+license     : PSF-2.0
+subdir      : osx-arm64
+url         : https://repo.anaconda.com/pkgs/main/osx-arm64/python-3.11.5-hb885b13_0.conda
+md5         : 6f528bdf159139704ab578df329dee70
+timestamp   : 2023-09-11 13:37:21 UTC
+dependencies: 
+  - bzip2 >=1.0.8,<2.0a0
+  - libffi >=3.4,<3.5
+  - libffi >=3.4,<4.0a0
+  - ncurses >=6.4,<7.0a0
+  - openssl >=3.0.10,<4.0a0
+  - readline >=8.1.2,<9.0a0
+  - sqlite >=3.41.2,<4.0a0
+  - tk >=8.6.12,<8.7.0a0
+  - tzdata
+  - xz >=5.4.2,<6.0a0
+  - zlib >=1.2.13,<1.3.0a0
+  - pip
+
+
+python 3.11.5 hc0d8a6c_0
+------------------------
+file name   : python-3.11.5-hc0d8a6c_0.conda
+name        : python
+version     : 3.11.5
+build       : hc0d8a6c_0
+build number: 0
+size        : 15.4 MB
+license     : PSF-2.0
+subdir      : osx-arm64
+url         : https://repo.anaconda.com/pkgs/main/osx-arm64/python-3.11.5-hc0d8a6c_0.conda
+md5         : 31403c947341ac90236eb4fe77681875
+timestamp   : 2023-09-11 13:24:13 UTC
+dependencies: 
+  - bzip2 >=1.0.8,<2.0a0
+  - libffi >=3.4,<3.5
+  - libffi >=3.4,<4.0a0
+  - ncurses >=6.4,<7.0a0
+  - openssl >=1.1.1v,<1.1.2a
+  - readline >=8.1.2,<9.0a0
+  - sqlite >=3.41.2,<4.0a0
+  - tk >=8.6.12,<8.7.0a0
+  - tzdata
+  - xz >=5.4.2,<6.0a0
+  - zlib >=1.2.13,<1.3.0a0
+  - pip
+
+
+python 3.11.7 hb885b13_0
+------------------------
+file name   : python-3.11.7-hb885b13_0.conda
+name        : python
+version     : 3.11.7
+build       : hb885b13_0
+build number: 0
+size        : 15.4 MB
+license     : PSF-2.0
+subdir      : osx-arm64
+url         : https://repo.anaconda.com/pkgs/main/osx-arm64/python-3.11.7-hb885b13_0.conda
+md5         : adc1a4b7f0736001e3cedf4597b24c0d
+timestamp   : 2023-12-15 18:15:44 UTC
+dependencies: 
+  - bzip2 >=1.0.8,<2.0a0
+  - libffi >=3.4,<3.5
+  - libffi >=3.4,<4.0a0
+  - ncurses >=6.4,<7.0a0
+  - openssl >=3.0.12,<4.0a0
+  - readline >=8.1.2,<9.0a0
+  - sqlite >=3.41.2,<4.0a0
+  - tk >=8.6.12,<8.7.0a0
+  - tzdata
+  - xz >=5.4.5,<6.0a0
+  - zlib >=1.2.13,<1.3.0a0
+  - pip
+
+
+python 3.11.8 hb885b13_0
+------------------------
+file name   : python-3.11.8-hb885b13_0.conda
+name        : python
+version     : 3.11.8
+build       : hb885b13_0
+build number: 0
+size        : 15.5 MB
+license     : PSF-2.0
+subdir      : osx-arm64
+url         : https://repo.anaconda.com/pkgs/main/osx-arm64/python-3.11.8-hb885b13_0.conda
+md5         : dd7e4ebe9abe2f6d7901fb861ef90ca5
+timestamp   : 2024-02-26 21:43:06 UTC
+dependencies: 
+  - bzip2 >=1.0.8,<2.0a0
+  - libffi >=3.4,<3.5
+  - libffi >=3.4,<4.0a0
+  - ncurses >=6.4,<7.0a0
+  - openssl >=3.0.13,<4.0a0
+  - readline >=8.1.2,<9.0a0
+  - sqlite >=3.41.2,<4.0a0
+  - tk >=8.6.12,<8.7.0a0
+  - tzdata
+  - xz >=5.4.5,<6.0a0
+  - zlib >=1.2.13,<1.3.0a0
+  - pip
+
+
+python 3.11.9 hb885b13_0
+------------------------
+file name   : python-3.11.9-hb885b13_0.conda
+name        : python
+version     : 3.11.9
+build       : hb885b13_0
+build number: 0
+size        : 15.5 MB
+license     : PSF-2.0
+subdir      : osx-arm64
+url         : https://repo.anaconda.com/pkgs/main/osx-arm64/python-3.11.9-hb885b13_0.conda
+md5         : c0fdd4a7e5a6af3681840d6b650cef87
+timestamp   : 2024-04-19 16:52:24 UTC
+dependencies: 
+  - bzip2 >=1.0.8,<2.0a0
+  - libffi >=3.4,<3.5
+  - libffi >=3.4,<4.0a0
+  - ncurses >=6.4,<7.0a0
+  - openssl >=3.0.13,<4.0a0
+  - readline >=8.1.2,<9.0a0
+  - sqlite >=3.41.2,<4.0a0
+  - tk >=8.6.12,<8.7.0a0
+  - tzdata
+  - xz >=5.4.6,<6.0a0
+  - zlib >=1.2.13,<1.3.0a0
+  - pip
+
+
+python 3.12.0 h99e199e_0
+------------------------
+file name   : python-3.12.0-h99e199e_0.conda
+name        : python
+version     : 3.12.0
+build       : h99e199e_0
+build number: 0
+size        : 14.0 MB
+license     : PSF-2.0
+subdir      : osx-arm64
+url         : https://repo.anaconda.com/pkgs/main/osx-arm64/python-3.12.0-h99e199e_0.conda
+md5         : b5d6ef7d1b8ed9ff778f8d4c69afd723
+timestamp   : 2023-10-02 17:28:30 UTC
+dependencies: 
+  - bzip2 >=1.0.8,<2.0a0
+  - expat >=2.5.0,<3.0a0
+  - libffi >=3.4,<4.0a0
+  - ncurses >=6.4,<7.0a0
+  - openssl >=3.0.11,<4.0a0
+  - readline >=8.1.2,<9.0a0
+  - sqlite >=3.41.2,<4.0a0
+  - tk >=8.6.12,<8.7.0a0
+  - tzdata
+  - xz >=5.4.2,<6.0a0
+  - zlib >=1.2.13,<1.3.0a0
+  - pip
+
+
+python 3.12.1 h99e199e_0
+------------------------
+file name   : python-3.12.1-h99e199e_0.conda
+name        : python
+version     : 3.12.1
+build       : h99e199e_0
+build number: 0
+size        : 14.0 MB
+license     : PSF-2.0
+subdir      : osx-arm64
+url         : https://repo.anaconda.com/pkgs/main/osx-arm64/python-3.12.1-h99e199e_0.conda
+md5         : 5ec5d4828c2cb7720fd1e80ed2e8548a
+timestamp   : 2024-01-19 15:52:20 UTC
+dependencies: 
+  - bzip2 >=1.0.8,<2.0a0
+  - expat >=2.5.0,<3.0a0
+  - libffi >=3.4,<4.0a0
+  - ncurses >=6.4,<7.0a0
+  - openssl >=3.0.12,<4.0a0
+  - readline >=8.1.2,<9.0a0
+  - sqlite >=3.41.2,<4.0a0
+  - tk >=8.6.12,<8.7.0a0
+  - tzdata
+  - xz >=5.4.5,<6.0a0
+  - zlib >=1.2.13,<1.3.0a0
+  - pip
+
+
+python 3.12.2 h99e199e_0
+------------------------
+file name   : python-3.12.2-h99e199e_0.conda
+name        : python
+version     : 3.12.2
+build       : h99e199e_0
+build number: 0
+size        : 14.0 MB
+license     : PSF-2.0
+subdir      : osx-arm64
+url         : https://repo.anaconda.com/pkgs/main/osx-arm64/python-3.12.2-h99e199e_0.conda
+md5         : ccdb24048e0e912e3a21eee26cdb7306
+timestamp   : 2024-02-27 19:04:26 UTC
+dependencies: 
+  - bzip2 >=1.0.8,<2.0a0
+  - expat >=2.5.0,<3.0a0
+  - libffi >=3.4,<4.0a0
+  - ncurses >=6.4,<7.0a0
+  - openssl >=3.0.13,<4.0a0
+  - readline >=8.1.2,<9.0a0
+  - sqlite >=3.41.2,<4.0a0
+  - tk >=8.6.12,<8.7.0a0
+  - tzdata
+  - xz >=5.4.6,<6.0a0
+  - zlib >=1.2.13,<1.3.0a0
+  - pip
+
+
+python 3.12.3 h99e199e_0
+------------------------
+file name   : python-3.12.3-h99e199e_0.conda
+name        : python
+version     : 3.12.3
+build       : h99e199e_0
+build number: 0
+size        : 14.0 MB
+license     : PSF-2.0
+subdir      : osx-arm64
+url         : https://repo.anaconda.com/pkgs/main/osx-arm64/python-3.12.3-h99e199e_0.conda
+md5         : 7495a2a48f01afd0866fb72d1a6697b7
+timestamp   : 2024-04-19 16:54:45 UTC
+dependencies: 
+  - bzip2 >=1.0.8,<2.0a0
+  - expat >=2.6.2,<3.0a0
+  - libffi >=3.4,<4.0a0
+  - ncurses >=6.4,<7.0a0
+  - openssl >=3.0.13,<4.0a0
+  - readline >=8.1.2,<9.0a0
+  - sqlite >=3.41.2,<4.0a0
+  - tk >=8.6.12,<8.7.0a0
+  - tzdata
+  - xz >=5.4.6,<6.0a0
+  - zlib >=1.2.13,<1.3.0a0
+  - pip
+
+

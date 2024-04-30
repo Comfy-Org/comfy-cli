@@ -1,13 +1,37 @@
-import os
-import yaml
 import concurrent.futures
-from pathlib import Path
 import os
+from datetime import datetime
+from pathlib import Path
+from typing import List
 
+import yaml
+
+from comfy_cli import constants
 from comfy_cli.env_checker import EnvChecker
 from comfy_cli.utils import singleton
-from comfy_cli import constants
 
+
+class ModelPath:
+    def __init__(self, path: str):
+        self.path = path
+
+class Model:
+    def __init__(self, model: str, url: str, paths: List[ModelPath], hash: str, type: str):
+        self.model = model
+        self.url = url
+        self.paths = paths
+        self.hash = hash
+        self.type = type
+
+class Basics:
+    def __init__(self, name: str, updated_at: datetime):
+        self.name = name
+        self.updated_at = updated_at
+
+class YAMLStructure:
+    def __init__(self, basics: List[Basics], models: List[Model]):
+        self.basics = basics
+        self.models = models
 
 @singleton
 class MetadataManager:
@@ -20,7 +44,7 @@ class MetadataManager:
         self.env_checker = EnvChecker()
         self.metadata = {}
 
-    
+
     def scan_dir(self):
         config_files = []
         for root, dirs, files in os.walk("."):

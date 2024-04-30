@@ -1,25 +1,22 @@
-import sys
-
-import typer
-from typing_extensions import List, Annotated
-from comfy_cli.command.models import models as models_command
-from rich import print
 import os
 import subprocess
+import sys
+import time
+import uuid
 
+import typer
+from rich import print as rprint
+from rich.console import Console
+from typing_extensions import Annotated, List
 
+from comfy_cli import constants, env_checker, logging, tracking
 from comfy_cli.command import custom_nodes
 from comfy_cli.command import install as install_inner
 from comfy_cli.command import run as run_inner
-from comfy_cli import constants, tracking, logging
+from comfy_cli.command.models import models as models_command
+from comfy_cli.config_manager import ConfigManager
 from comfy_cli.env_checker import EnvChecker
 from comfy_cli.meta_data import MetadataManager
-from comfy_cli import env_checker
-from rich.console import Console
-import time
-import uuid
-from comfy_cli.config_manager import ConfigManager
-
 
 app = typer.Typer()
 
@@ -37,13 +34,13 @@ def init():
     end_time = time.time()
     logging.setup_logging()
 
-    print(f"scan_dir took {end_time - start_time:.2f} seconds to run")
+    rprint(f"scan_dir took {end_time - start_time:.2f} seconds to run")
 
 
 @app.callback(invoke_without_command=True)
 def no_command(ctx: typer.Context):
     if ctx.invoked_subcommand is None:
-        print(ctx.get_help())
+        rprint(ctx.get_help())
         ctx.exit()
 
 
@@ -82,10 +79,10 @@ def install(
 ):
     checker = EnvChecker()
     if checker.python_version.major < 3:
-        print(
+        rprint(
             "[bold red]Python version 3.6 or higher is required to run ComfyUI.[/bold red]"
         )
-        print(
+        rprint(
             f"You are currently using Python version {env_checker.format_python_version(checker.python_version)}."
         )
     if checker.currently_in_comfy_repo:
@@ -101,7 +98,7 @@ def install(
 
 def update(self):
     _env_checker = EnvChecker()
-    print(f"Updating ComfyUI in {self.workspace}...")
+    rprint(f"Updating ComfyUI in {self.workspace}...")
     os.chdir(self.workspace)
     subprocess.run(["git", "pull"], check=True)
     subprocess.run([sys.executable, '-m', "pip", "install", "-r", "requirements.txt"], check=True)
@@ -117,7 +114,7 @@ def run(
 
 def validate_comfyui(_env_checker):
     if _env_checker.comfy_repo is None:
-        print(f"[bold red]If ComfyUI is not installed, this feature cannot be used.[/bold red]")
+        rprint("[bold red]If ComfyUI is not installed, this feature cannot be used.[/bold red]")
         raise typer.Exit(code=1)
 
 
@@ -165,20 +162,20 @@ def launch(workspace: Annotated[str, typer.Option(show_default=False, help="Path
             os.chdir(comfyui_path)
             _env_checker.check()  # update env
 
-            print(f"\nLaunch ComfyUI from repo: {_env_checker.comfy_repo.working_dir}\n")
+            rprint(f"\nLaunch ComfyUI from repo: {_env_checker.comfy_repo.working_dir}\n")
             launch_comfyui(_env_checker, _config_manager, extra)
         else:
-            print(f"\nInvalid ComfyUI not found in specified workspace: {workspace}\n", file=sys.stderr)
+            rprint(f"\nInvalid ComfyUI not found in specified workspace: {workspace}\n", file=sys.stderr)
             raise typer.Exit(code=1)
 
     elif not recent and _env_checker.comfy_repo is not None:
         os.chdir(_env_checker.comfy_repo.working_dir)
-        print(f"\nLaunch ComfyUI from current repo: {_env_checker.comfy_repo.working_dir}\n")
+        rprint(f"\nLaunch ComfyUI from current repo: {_env_checker.comfy_repo.working_dir}\n")
         launch_comfyui(_env_checker, _config_manager, extra)
 
     elif not recent and _config_manager.config['DEFAULT'].get('default_workspace') is not None:
         comfy_path = os.path.join(_config_manager.config['DEFAULT'].get('default_workspace'), 'ComfyUI')
-        print(f"\nLaunch ComfyUI from default workspace: {comfy_path}\n")
+        rprint(f"\nLaunch ComfyUI from default workspace: {comfy_path}\n")
 
         os.chdir(comfy_path)
         _env_checker.check()  # update env
@@ -187,7 +184,7 @@ def launch(workspace: Annotated[str, typer.Option(show_default=False, help="Path
 
     elif _config_manager.config['DEFAULT'].get('recent_path') is not None:
         comfy_path = _config_manager.config['DEFAULT'].get('recent_path')
-        print(f"\nLaunch ComfyUI from recent repo: {comfy_path}\n")
+        rprint(f"\nLaunch ComfyUI from recent repo: {comfy_path}\n")
 
         os.chdir(comfy_path)
         _env_checker.check()  # update env
@@ -195,7 +192,7 @@ def launch(workspace: Annotated[str, typer.Option(show_default=False, help="Path
         launch_comfyui(_env_checker, _config_manager, extra)
 
     else:
-        print("\nComfyUI is not available.\nTo install ComfyUI, you can run:\n\n\tcomfy install\n\n", file=sys.stderr)
+        rprint("\nComfyUI is not available.\nTo install ComfyUI, you can run:\n\n\tcomfy install\n\n", file=sys.stderr)
         raise typer.Exit(code=1)
 
 
@@ -207,14 +204,14 @@ def set_default(workspace_path: str):
     workspace_path = os.path.expanduser(workspace_path)
     comfy_path = os.path.join(workspace_path, 'ComfyUI')
     if not os.path.exists(comfy_path):
-        print(f"Invalid workspace path: {workspace_path}\nThe workspace path must contain 'ComfyUI'.")
+        rprint(f"Invalid workspace path: {workspace_path}\nThe workspace path must contain 'ComfyUI'.")
         raise typer.Exit(code=1)
 
     _config_manager.config['DEFAULT']['default_workspace'] = workspace_path
     _config_manager.write_config()
 
 
-@app.command(help="Print out current environment variables.")
+@app.command(help="rprint out current environment variables.")
 @tracking.track_command()
 def env():
     _env_checker = EnvChecker()
@@ -224,13 +221,13 @@ def env():
 @app.command(hidden=True)
 @tracking.track_command()
 def nodes():
-    print("\n[bold red] No such command, did you mean 'comfy node' instead?[/bold red]\n")
+    rprint("\n[bold red] No such command, did you mean 'comfy node' instead?[/bold red]\n")
 
 
 @app.command(hidden=True)
 @tracking.track_command()
 def models():
-    print("\n[bold red] No such command, did you mean 'comfy model' instead?[/bold red]\n")
+    rprint("\n[bold red] No such command, did you mean 'comfy model' instead?[/bold red]\n")
 
 
 app.add_typer(models_command.app, name="model", help="Manage models.")
