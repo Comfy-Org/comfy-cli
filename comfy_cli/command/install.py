@@ -24,8 +24,8 @@ def install_manager_dependencies(repo_dir):
   subprocess.run([sys.executable, '-m', "pip", "install", "-r", "requirements.txt"])
 
 
-def execute(url: str, manager_url: str, comfy_workspace: str, restore: bool, skip_manager: bool, torch_mode=None, *args,
-            **kwargs):
+def execute(url: str, manager_url: str, comfy_workspace: str, restore: bool, skip_manager: bool, torch_mode=None, commit=None,
+            *args, **kwargs):
   print(f"Installing from {url}")
 
   # install ComfyUI
@@ -34,7 +34,11 @@ def execute(url: str, manager_url: str, comfy_workspace: str, restore: bool, ski
   repo_dir = os.path.abspath(repo_dir)
 
   if os.path.exists(os.path.join(repo_dir, '.git')):
-    if restore:
+    if restore or commit is not None:
+      if commit is not None:
+        os.chdir(repo_dir)
+        subprocess.run(["git", "checkout", commit])
+
       install_comfyui_dependencies(repo_dir, torch_mode)
     else:
       print(
@@ -46,6 +50,11 @@ def execute(url: str, manager_url: str, comfy_workspace: str, restore: bool, ski
     repo_dir = os.path.join(working_dir, os.path.basename(url).replace(".git", ""))
     repo_dir = os.path.abspath(repo_dir)
     subprocess.run(["git", "clone", url, repo_dir])
+
+    # checkout specified commit
+    if commit is not None:
+      os.chdir(repo_dir)
+      subprocess.run(["git", "checkout", commit])
 
     install_comfyui_dependencies(repo_dir, torch_mode)
 

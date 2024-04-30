@@ -19,7 +19,6 @@ workspace_manager = WorkspaceManager()
 def execute_cm_cli(ctx: typer.Context, args, channel=None, mode=None):
     _env_checker = EnvChecker()
     _config_manager = ConfigManager()
-    _config_manager.write_config()
 
     workspace_path = workspace_manager.get_workspace_path(ctx)
     comfyui_path = os.path.join(workspace_path, 'ComfyUI')
