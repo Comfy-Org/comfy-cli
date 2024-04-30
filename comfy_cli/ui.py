@@ -1,9 +1,9 @@
 import questionary
-from typing import List, Tuple
-
-from rich.table import Table
+import typer
 from rich.console import Console
 from rich.progress import Progress
+from rich.table import Table
+from typing import List, Tuple
 
 console = Console()
 
@@ -44,7 +44,7 @@ def prompt_multi_select(prompt: str, choices: List[str]) -> List[str]:
   return selections if selections else []
 
 
-def confirm_action(prompt: str) -> bool:
+def prompt_confirm_action(prompt: str) -> bool:
   """
   Prompts the user for confirmation before proceeding with an action.
 
@@ -54,7 +54,8 @@ def confirm_action(prompt: str) -> bool:
   Returns:
       bool: True if the user confirms, False otherwise.
   """
-  return questionary.confirm(prompt).ask()  # returns True if confirmed, otherwise False
+
+  return typer.confirm(prompt)
 
 
 def display_table(data: List[Tuple], column_names: List[str], title: str = "") -> None:

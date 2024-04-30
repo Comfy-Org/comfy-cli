@@ -30,38 +30,43 @@ system. If you run in a ComfyUI repo that has already been setup. The command
 will simply update the comfy.yaml file to reflect the local setup
 
   * `comfy install --skip-manager`: Install ComfyUI without ComfyUI-Manager.
-  * `comfy install --workspace=<path>`: Install ComfyUI into `<path>/ComfyUI`.
+  * `comfy --workspace=<path> install`: Install ComfyUI into `<path>/ComfyUI`.
+  * For `comfy install`, if no path specification like `--workspace, --recent, or --here` is provided, it will be implicitly installed in `<HOME>/comfy`.
 
+
+### Specifying execution path
+
+* You can specify the path of ComfyUI where the command will be applied through path indicators as follows:
+  * `comfy --workspace=<path>`: Run from the ComfyUI installed in the specified workspace.
+  * `comfy --recent`: Run from the recently executed or installed ComfyUI.
+  * `comfy --here`: Run from the ComfyUI located in the current directory.
+* --workspace, --recent, and --here options cannot be used simultaneously.
+* If there is no path indicator, the following priority applies:
+  * Run from the default ComfyUI at the path specified by `comfy set-default <path>`.
+  * Run from the recently executed or installed ComfyUI.
+  * Run from the ComfyUI located in the current directory.
+
+* Example 1: To run the recently executed ComfyUI:
+  * `comfy --recent launch`
+* Example 2: To install a package on the ComfyUI in the current directory:
+  * `comfy --here node install ComfyUI-Impact-Pack`
+* Example 3: To update the automatically selected path of ComfyUI and custom nodes based on priority:
+  * `comfy node update all`
+
+* You can use the `comfy which` command to check the path of the target workspace.
+  * e.g) `comfy --recent which`, `comfy --here which`, `comfy which`, ...
 
 ### Launch ComfyUI
 
 Comfy provides commands that allow you to easily run the installed ComfyUI.
 
-- To execute specifying the path of the workspace where ComfyUI is installed:
-
-  `comfy launch --workspace <path>`
-
-- To execute commands automatically, prioritize without specifying a path:
-    - 1st: To run ComfyUI from the current directory, if you are inside the ComfyUI repository
-    - 2nd: To run ComfyUI from the default workspace, if you are inside the ComfyUI repository and default workspace is set
-    - 3rd: To execute the ComfyUI that was last run or last installed, if you are outside of the ComfyUI repository
-
   `comfy launch`
-
--  To execute the ComfyUI that was last run or last installed
-    - If the `--workspace` option is provided, the `--recent` option is ignored.):
-  
-   `comfy launch --recent`
 
 - To run with default ComfyUI options:
 
   `comfy launch -- <extra args...>`
 
   `comfy launch -- --cpu --listen 0.0.0.0`
-
-- To set default workspace:
-
-  `comfy set-default <workspace path>`
 
 
 ### Managing Packages [WIP]
