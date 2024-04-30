@@ -7,19 +7,21 @@ from typing_extensions import Annotated
 
 from comfy_cli import tracking, ui
 from comfy_cli.constants import DEFAULT_COMFY_MODEL_PATH
+from comfy_cli.workspace_manager import WorkspaceManager
 
 app = typer.Typer()
+workspace_manager = WorkspaceManager()
 
 
-def get_workspace() -> pathlib.Path:
-  # TODO: placeholder logic right now, need to implement a config class that
-  #  helps to get the workspace we are working with.
-  return pathlib.Path.cwd()
+def get_workspace(ctx: typer.Context) -> pathlib.Path:
+  workspace_path = workspace_manager.get_workspace_comfy_path(ctx)
+  return pathlib.Path(workspace_path)
 
 
 @app.command()
 @tracking.track_command("model")
 def download(
+  ctx: typer.Context,
   url: Annotated[
     str,
     typer.Option(
@@ -34,7 +36,7 @@ def download(
   """Download a model to a specified relative path if it is not already downloaded."""
   # Convert relative path to absolute path based on the current working directory
   local_filename = url.split("/")[-1]
-  local_filepath = get_workspace() / relative_path / local_filename
+  local_filepath = get_workspace(ctx) / relative_path / local_filename
 
   # Check if the file already exists
   if local_filepath.exists():
@@ -49,6 +51,7 @@ def download(
 @app.command()
 @tracking.track_command("model")
 def remove(
+  ctx: typer.Context,
   relative_path: str = typer.Option(
     DEFAULT_COMFY_MODEL_PATH,
     help="The relative path from the current workspace where the models are stored.",
@@ -61,7 +64,7 @@ def remove(
   )
 ):
   """Remove one or more downloaded models, either by specifying them directly or through an interactive selection."""
-  model_dir = get_workspace() / relative_path
+  model_dir = get_workspace(ctx) / relative_path
   available_models = list_models(model_dir)
 
   if not available_models:
@@ -107,6 +110,7 @@ def remove(
 @app.command()
 @tracking.track_command("model")
 def list(
+  ctx: typer.Context,
   relative_path: str = typer.Option(
     DEFAULT_COMFY_MODEL_PATH,
     help="The relative path from the current workspace where the models are stored.",
@@ -114,7 +118,7 @@ def list(
   )
 ):
   """Display a list of all models currently downloaded in a table format."""
-  model_dir = get_workspace() / relative_path
+  model_dir = get_workspace(ctx) / relative_path
   models = list_models(model_dir)
 
   if not models:

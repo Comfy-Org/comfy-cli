@@ -15,6 +15,9 @@ class ConfigManager(object):
   def get_config_path():
     return constants.DEFAULT_CONFIG[get_os()]
 
+  def get_config_file_path(self):
+    return os.path.join(self.get_config_path(), 'config.ini')
+
   def write_config(self):
     config_file_path = os.path.join(self.get_config_path(), 'config.ini')
     dir_path = os.path.dirname(config_file_path)
@@ -36,9 +39,6 @@ class ConfigManager(object):
     Get a value from the config file. Returns None if the key does not exist.
     """
     return self.config['DEFAULT'].get(key, None)  # Returns None if the key does not exist
-
-  def get_config_file_path(self):
-    return os.path.join(self.get_config_path(), 'config.ini')
 
   def load(self):
     config_file_path = self.get_config_file_path()

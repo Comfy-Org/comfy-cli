@@ -1,4 +1,5 @@
 import sys
+from typing import Optional
 
 import typer
 from typing_extensions import List, Annotated
@@ -18,13 +19,30 @@ from rich.console import Console
 import time
 import uuid
 from comfy_cli.config_manager import ConfigManager
+from comfy_cli.workspace_manager import WorkspaceManager
 
 app = typer.Typer()
+workspace_manager = WorkspaceManager()
 
 
 def main():
-  init()
   app()
+
+
+@app.callback(invoke_without_command=True)
+def entry(
+  ctx: typer.Context,
+  workspace: Optional[str] = typer.Option(default=None, show_default=False, help="Path to ComfyUI workspace"),
+  recent: Optional[bool] = typer.Option(default=False, show_default=False, is_flag=True,
+                                        help="Launch from recent path (--workspace is higher)"),
+):
+  if ctx.invoked_subcommand is None:
+    print(ctx.get_help())
+    ctx.exit()
+
+  ctx.ensure_object(dict)  # Ensure that ctx.obj exists and is a dict
+  workspace_manager.update_context(ctx, workspace, recent)
+  init()
 
 
 def init():
@@ -39,16 +57,10 @@ def init():
   print(f"scan_dir took {end_time - start_time:.2f} seconds to run")
 
 
-@app.callback(invoke_without_command=True)
-def no_command(ctx: typer.Context):
-  if ctx.invoked_subcommand is None:
-    print(ctx.get_help())
-    ctx.exit()
-
-
 @app.command(help="Download and install ComfyUI and ComfyUI-Manager")
 @tracking.track_command()
 def install(
+  ctx: typer.Context,
   url: Annotated[
     str,
     typer.Option(show_default=False)
@@ -57,12 +69,6 @@ def install(
     str,
     typer.Option(show_default=False)
   ] = constants.COMFY_MANAGER_GITHUB_URL,
-  workspace: Annotated[
-    str,
-    typer.Option(
-      show_default=False,
-      help="Path to ComfyUI workspace")
-  ] = "~/comfy",
   restore: Annotated[
     bool,
     lambda: typer.Option(
@@ -81,6 +87,8 @@ def install(
   ] = False,
 ):
   checker = EnvChecker()
+
+  workspace_path = workspace_manager.get_workspace_path(ctx)
   if checker.python_version.major < 3:
     print(
       "[bold red]Python version 3.6 or higher is required to run ComfyUI.[/bold red]"
@@ -96,7 +104,8 @@ def install(
   if amd:
     torch_mode = 'amd'
 
-  install_inner.execute(url, manager_url, workspace, restore, skip_manager, torch_mode)
+  install_inner.execute(url, manager_url, workspace_path, restore, skip_manager, torch_mode)
+  workspace_manager.set_recent_workspace(workspace_path)
 
 
 def update(self):
@@ -122,9 +131,6 @@ def validate_comfyui(_env_checker):
 
 
 def launch_comfyui(_env_checker, _config_manager, extra):
-  _config_manager.config['DEFAULT']['recent_path'] = os.getcwd()
-  _config_manager.write_config()
-
   validate_comfyui(_env_checker)
 
   env_path = _env_checker.get_isolated_env()
@@ -152,65 +158,37 @@ def launch_comfyui(_env_checker, _config_manager, extra):
 
 @app.command(help="Launch ComfyUI: ?[--workspace <path>] ?[--recent] ?[-- <extra args ...>]")
 @tracking.track_command()
-def launch(workspace: Annotated[str, typer.Option(show_default=False, help="Path to ComfyUI workspace")] = None,
-           recent: Annotated[bool, typer.Option(help="Launch from recent path (--workspace is higher)")] = False,
-           extra: List[str] = typer.Argument(None)):
+def launch(
+  ctx: typer.Context,
+  extra: List[str] = typer.Argument(None)):
   _env_checker = EnvChecker()
   _config_manager = ConfigManager()
 
-  if workspace is not None:
-    comfyui_path = os.path.join(os.path.expanduser(workspace), 'ComfyUI')
-    if os.path.exists(comfyui_path):
-      os.chdir(comfyui_path)
-      _env_checker.check()  # update env
-
-      print(f"\nLaunch ComfyUI from repo: {_env_checker.comfy_repo.working_dir}\n")
-      launch_comfyui(_env_checker, _config_manager, extra)
-    else:
-      print(f"\nInvalid ComfyUI not found in specified workspace: {workspace}\n", file=sys.stderr)
-      raise typer.Exit(code=1)
-
-  elif not recent and _env_checker.comfy_repo is not None:
-    os.chdir(_env_checker.comfy_repo.working_dir)
-    print(f"\nLaunch ComfyUI from current repo: {_env_checker.comfy_repo.working_dir}\n")
-    launch_comfyui(_env_checker, _config_manager, extra)
-
-  elif not recent and _config_manager.config['DEFAULT'].get('default_workspace') is not None:
-    comfy_path = os.path.join(_config_manager.config['DEFAULT'].get('default_workspace'), 'ComfyUI')
-    print(f"\nLaunch ComfyUI from default workspace: {comfy_path}\n")
-
-    os.chdir(comfy_path)
-    _env_checker.check()  # update env
-
-    launch_comfyui(_env_checker, _config_manager, extra)
-
-  elif _config_manager.config['DEFAULT'].get('recent_path') is not None:
-    comfy_path = _config_manager.config['DEFAULT'].get('recent_path')
-    print(f"\nLaunch ComfyUI from recent repo: {comfy_path}\n")
-
-    os.chdir(comfy_path)
-    _env_checker.check()  # update env
-
-    launch_comfyui(_env_checker, _config_manager, extra)
-
-  else:
+  resolved_workspace = workspace_manager.get_workspace_path(ctx)
+  if not resolved_workspace:
     print("\nComfyUI is not available.\nTo install ComfyUI, you can run:\n\n\tcomfy install\n\n", file=sys.stderr)
     raise typer.Exit(code=1)
+
+  os.chdir(resolved_workspace + '/ComfyUI')
+  _env_checker.check()  # update environment checks
+
+  # Update the recent workspace
+  print(f"\nLaunching ComfyUI from: {resolved_workspace}\n")
+  workspace_manager.set_recent_workspace(resolved_workspace)
+
+  launch_comfyui(_env_checker, _config_manager, extra)
 
 
 @app.command("set-default", help="Set default workspace")
 @tracking.track_command()
 def set_default(workspace_path: str):
-  _config_manager = ConfigManager()
-
   workspace_path = os.path.expanduser(workspace_path)
   comfy_path = os.path.join(workspace_path, 'ComfyUI')
   if not os.path.exists(comfy_path):
     print(f"Invalid workspace path: {workspace_path}\nThe workspace path must contain 'ComfyUI'.")
     raise typer.Exit(code=1)
 
-  _config_manager.config['DEFAULT']['default_workspace'] = workspace_path
-  _config_manager.write_config()
+  workspace_manager.set_default_workspace(workspace_path)
 
 
 @app.command(help="Print out current environment variables.")
