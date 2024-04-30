@@ -43,7 +43,7 @@ class WorkspaceManager:
     """
     Sets the default workspace path in the configuration.
     """
-    self.config_manager.set(constants.CONTEXT_KEY_WORKSPACE, path)
+    self.config_manager.set(constants.CONFIG_KEY_DEFAULT_WORKSPACE, path)
 
   def get_workspace_comfy_path(self, context: typer.Context) -> str:
     """
