@@ -39,12 +39,10 @@ def execute_cm_cli(ctx: typer.Context, args, channel=None, mode=None):
     if mode is not None:
         cmd += ['--mode', channel]
 
-    env_path = _env_checker.get_isolated_env()
     new_env = os.environ.copy()
-    if env_path is not None:
-        session_path = os.path.join(_config_manager.get_config_path(), 'tmp', str(uuid.uuid4()))
-        new_env['__COMFY_CLI_SESSION__'] = session_path
-        new_env['COMFYUI_PATH'] = comfyui_path
+    session_path = os.path.join(_config_manager.get_config_path(), 'tmp', str(uuid.uuid4()))
+    new_env['__COMFY_CLI_SESSION__'] = session_path
+    new_env['COMFYUI_PATH'] = comfyui_path
 
     print(f"Execute from: {comfyui_path}")
 
