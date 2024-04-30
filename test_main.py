@@ -10,9 +10,9 @@ class ModelPath:
 @dataclass
 class Model:
     model: str
-    url: str
+    url: Optional[str]
     paths: List[ModelPath]
-    hash: str
+    hash: Optional[str]
     type: str
 
 @dataclass
