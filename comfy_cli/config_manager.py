@@ -58,7 +58,7 @@ class ConfigManager(object):
     else:
       table.add_row("Default ComfyUI workspace", "No default ComfyUI workspace")
 
-    if self.config.has_option('DEFAULT', 'recent_path'):
-      table.add_row("Recent ComfyUI", self.config['DEFAULT']['recent_path'])
+    if self.config.has_option('DEFAULT', constants.CONFIG_KEY_RECENT_WORKSPACE):
+      table.add_row("Recent ComfyUI workspace", self.config['DEFAULT'][constants.CONFIG_KEY_RECENT_WORKSPACE])
     else:
-      table.add_row("Recent ComfyUI", "No recent run")
+      table.add_row("Recent ComfyUI workspace", "No recent run")

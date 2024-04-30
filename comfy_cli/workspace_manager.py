@@ -75,9 +75,9 @@ class WorkspaceManager:
       if os.path.exists(specified_path):
         if os.path.exists(os.path.join(specified_path, 'ComfyUI')):
           return specified_path
-        else:
-          print(f"[bold red]warn: The specified workspace does not contain ComfyUI directory.[/bold red]")  # If a path has been explicitly specified, cancel the command for safety.
-          raise typer.Exit(code=1)
+
+      print(f"[bold red]warn: The specified workspace does not contain ComfyUI directory.[/bold red]")  # If a path has been explicitly specified, cancel the command for safety.
+      raise typer.Exit(code=1)
 
     # Check for recent workspace if requested
     if use_recent:
@@ -85,9 +85,9 @@ class WorkspaceManager:
       if recent_workspace and os.path.exists(recent_workspace):
         if os.path.exists(os.path.join(recent_workspace, 'ComfyUI')):
           return recent_workspace
-        else:
-          print(f"[bold red]warn: The specified workspace does not contain ComfyUI directory.[/bold red]")  # If a path has been explicitly specified, cancel the command for safety.
-          raise typer.Exit(code=1)
+
+      print(f"[bold red]warn: The specified workspace does not contain ComfyUI directory.[/bold red]")  # If a path has been explicitly specified, cancel the command for safety.
+      raise typer.Exit(code=1)
 
     # Check for current workspace if requested
     if use_here:
@@ -101,6 +101,10 @@ class WorkspaceManager:
           return os.path.abspath(os.path.join(comfy_repo.working_dir, '..'))
         else:
           print(f"[bold red]warn: The path name of the ComfyUI executed through 'comfy-cli' must be 'ComfyUI'. The current ComfyUI is being ignored.[/bold red]")
+          raise typer.Exit(code=1)
+
+      print(f"[bold red]warn: The specified workspace does not contain ComfyUI directory.[/bold red]")  # If a path has been explicitly specified, cancel the command for safety.
+      raise typer.Exit(code=1)
 
     # Check for user-set default workspace
     default_workspace = self.config_manager.get(constants.CONFIG_KEY_DEFAULT_WORKSPACE)

@@ -21,7 +21,8 @@ def execute_cm_cli(ctx: typer.Context, args, channel=None, mode=None):
     _config_manager = ConfigManager()
     _config_manager.write_config()
 
-    comfyui_path = os.path.join(workspace_manager.get_workspace_path(ctx), 'ComfyUI')
+    workspace_path = workspace_manager.get_workspace_path(ctx)
+    comfyui_path = os.path.join(workspace_path, 'ComfyUI')
 
     if not os.path.exists(comfyui_path):
         print(f"\nComfyUI not found: {comfyui_path}\n", file=sys.stderr)
@@ -49,6 +50,7 @@ def execute_cm_cli(ctx: typer.Context, args, channel=None, mode=None):
     print(f"Execute from: {comfyui_path}")
 
     subprocess.run(cmd, env=new_env)
+    workspace_manager.set_recent_workspace(workspace_path)
 
 
 def validate_comfyui_manager(_env_checker):
