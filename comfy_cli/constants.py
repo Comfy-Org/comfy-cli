@@ -26,6 +26,7 @@ DEFAULT_CONFIG = {
 
 CONTEXT_KEY_WORKSPACE = 'workspace'
 CONTEXT_KEY_RECENT = 'recent'
+CONTEXT_KEY_HERE = 'here'
 
 CONFIG_KEY_DEFAULT_WORKSPACE = 'default_workspace'
 CONFIG_KEY_RECENT_WORKSPACE = 'recent_workspace'

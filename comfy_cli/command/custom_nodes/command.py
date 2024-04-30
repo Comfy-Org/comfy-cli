@@ -9,29 +9,20 @@ import sys
 from rich import print
 import uuid
 from comfy_cli.config_manager import ConfigManager
+from comfy_cli.workspace_manager import WorkspaceManager
 
 app = typer.Typer()
 manager_app = typer.Typer()
+workspace_manager = WorkspaceManager()
 
 
-def execute_cm_cli(args, channel=None, mode=None, workspace=None, recent=False):
+def execute_cm_cli(ctx: typer.Context, args, channel=None, mode=None):
     _env_checker = EnvChecker()
     _config_manager = ConfigManager()
     _config_manager.write_config()
 
-    if workspace is not None:
-        workspace = os.path.expanduser(workspace)
-        comfyui_path = os.path.join(workspace, 'ComfyUI')
-    elif not recent and _env_checker.comfy_repo is not None:
-        os.chdir(_env_checker.comfy_repo.working_dir)
-        comfyui_path = _env_checker.comfy_repo.working_dir
-    elif not recent and _config_manager.config['DEFAULT'].get('default_workspace') is not None:
-        comfyui_path = os.path.join(_config_manager.config['DEFAULT'].get('default_workspace'), 'ComfyUI')
-    elif _config_manager.config['DEFAULT'].get('recent_path') is not None:
-        comfyui_path = _config_manager.config['DEFAULT'].get('recent_path')
-    else:
-        print(f"\nComfyUI is not available.\n", file=sys.stderr)
-        raise typer.Exit(code=1)
+    workspace_path = workspace_manager.get_workspace_path(ctx)
+    comfyui_path = os.path.join(workspace_path, 'ComfyUI')
 
     if not os.path.exists(comfyui_path):
         print(f"\nComfyUI not found: {comfyui_path}\n", file=sys.stderr)
@@ -59,6 +50,7 @@ def execute_cm_cli(args, channel=None, mode=None, workspace=None, recent=False):
     print(f"Execute from: {comfyui_path}")
 
     subprocess.run(cmd, env=new_env)
+    workspace_manager.set_recent_workspace(workspace_path)
 
 
 def validate_comfyui_manager(_env_checker):
@@ -78,67 +70,54 @@ def validate_comfyui_manager(_env_checker):
 @app.command('save-snapshot', help="Save a snapshot of the current ComfyUI environment")
 @tracking.track_command("node")
 def save_snapshot(
-        output: Annotated[str, '--output', typer.Option(show_default=False, help="Specify the output file path. (.json/.yaml)")] = None,
-        workspace: Annotated[str, typer.Option(show_default=False, help="Path to ComfyUI workspace")] = None,
-        recent: Annotated[bool, typer.Option(help="Use recent path (--workspace is higher)")] = False):
+        ctx: typer.Context,
+        output: Annotated[str, '--output', typer.Option(show_default=False, help="Specify the output file path. (.json/.yaml)")] = None
+):
     if output is None:
-        execute_cm_cli(['save-snapshot'], workspace=workspace, recent=recent)
+        execute_cm_cli(ctx, ['save-snapshot'])
     else:
         output = os.path.abspath(output)  # to compensate chdir
-        execute_cm_cli(['save-snapshot', '--output', output], workspace=workspace, recent=recent)
+        execute_cm_cli(ctx, ['save-snapshot', '--output', output])
 
 
 @app.command('restore-snapshot')
 @tracking.track_command("node")
-def restore_snapshot(
-        path: str,
-        workspace: Annotated[str, typer.Option(show_default=False, help="Path to ComfyUI workspace")] = None,
-        recent: Annotated[bool, typer.Option(help="Use recent path (--workspace is higher)")] = False):
-
+def restore_snapshot(ctx: typer.Context, path: str):
     path = os.path.abspath(path)
-    execute_cm_cli(['restore-snapshot', path], workspace=workspace, recent=recent)
+    execute_cm_cli(ctx, ['restore-snapshot', path])
 
 
 @app.command('restore-dependencies')
 @tracking.track_command("node")
-def restore_dependencies(
-        workspace: Annotated[str, typer.Option(show_default=False, help="Path to ComfyUI workspace")] = None,
-        recent: Annotated[bool, typer.Option(help="Use recent path (--workspace is higher)")] = False):
-    execute_cm_cli(['restore-dependencies'], workspace=workspace, recent=recent)
+def restore_dependencies(ctx: typer.Context):
+    execute_cm_cli(ctx, ['restore-dependencies'])
 
 
 @manager_app.command('disable-gui')
 @tracking.track_command("node")
-def disable_gui(
-        workspace: Annotated[str, typer.Option(show_default=False, help="Path to ComfyUI workspace")] = None,
-        recent: Annotated[bool, typer.Option(help="Use recent path (--workspace is higher)")] = False):
-    execute_cm_cli(['cli-only-mode', 'enable'], workspace=workspace, recent=recent)
+def disable_gui(ctx: typer.Context):
+    execute_cm_cli(ctx, ['cli-only-mode', 'enable'])
 
 
 @manager_app.command('enable-gui')
 @tracking.track_command("node")
-def enable_gui(
-        workspace: Annotated[str, typer.Option(show_default=False, help="Path to ComfyUI workspace")] = None,
-        recent: Annotated[bool, typer.Option(help="Use recent path (--workspace is higher)")] = False):
-    execute_cm_cli(['cli-only-mode', 'disable'], workspace=workspace, recent=recent)
+def enable_gui(ctx: typer.Context):
+    execute_cm_cli(ctx, ['cli-only-mode', 'disable'])
 
 
 @manager_app.command()
 @tracking.track_command("node")
-def clear(path: str,
-          workspace: Annotated[str, typer.Option(show_default=False, help="Path to ComfyUI workspace")] = None,
-          recent: Annotated[bool, typer.Option(help="Use recent path (--workspace is higher)")] = False):
+def clear(ctx: typer.Context, path: str):
     path = os.path.abspath(path)
-    execute_cm_cli(['clear', path], workspace=workspace, recent=recent)
+    execute_cm_cli(ctx, ['clear', path])
 
 
 @app.command()
 @tracking.track_command("node")
-def show(args: List[str] = typer.Argument(..., help="[installed|enabled|not-installed|disabled|all|snapshot|snapshot-list]"),
+def show(ctx: typer.Context,
+         args: List[str] = typer.Argument(..., help="[installed|enabled|not-installed|disabled|all|snapshot|snapshot-list]"),
          channel: Annotated[str, '--channel', typer.Option(show_default=False, help="Specify the operation mode")] = None,
-         mode: Annotated[str, '--mode', typer.Option(show_default=False, help="[remote|local|cache]")] = None,
-         workspace: Annotated[str, typer.Option(show_default=False, help="Path to ComfyUI workspace")] = None,
-         recent: Annotated[bool, typer.Option(help="Use recent path (--workspace is higher)")] = False):
+         mode: Annotated[str, '--mode', typer.Option(show_default=False, help="[remote|local|cache]")] = None):
 
     valid_commands = ["installed", "enabled", "not-installed", "disabled", "all", "snapshot", "snapshot-list"]
     if not args or len(args) > 1 or args[0] not in valid_commands:
@@ -150,16 +129,15 @@ def show(args: List[str] = typer.Argument(..., help="[installed|enabled|not-inst
         typer.echo(f"Invalid mode: {mode}. Allowed modes are 'remote', 'local', 'cache'.", err=True)
         raise typer.Exit(code=1)
 
-    execute_cm_cli(['show'] + args, channel, mode, workspace=workspace, recent=recent)
+    execute_cm_cli(ctx, ['show'] + args, channel, mode)
 
 
 @app.command('simple-show')
 @tracking.track_command("node")
-def simple_show(args: List[str] = typer.Argument(..., help="[installed|enabled|not-installed|disabled|all|snapshot|snapshot-list]"),
+def simple_show(ctx: typer.Context,
+                args: List[str] = typer.Argument(..., help="[installed|enabled|not-installed|disabled|all|snapshot|snapshot-list]"),
                 channel: Annotated[str, '--channel', typer.Option(show_default=False, help="Specify the operation mode")] = None,
-                mode: Annotated[str, '--mode', typer.Option(show_default=False, help="[remote|local|cache]")] = None,
-                workspace: Annotated[str, typer.Option(show_default=False, help="Path to ComfyUI workspace")] = None,
-                recent: Annotated[bool, typer.Option(help="Use recent path (--workspace is higher)")] = False):
+                mode: Annotated[str, '--mode', typer.Option(show_default=False, help="[remote|local|cache]")] = None):
 
     valid_commands = ["installed", "enabled", "not-installed", "disabled", "all", "snapshot", "snapshot-list"]
     if not args or len(args) > 1 or args[0] not in valid_commands:
@@ -171,17 +149,16 @@ def simple_show(args: List[str] = typer.Argument(..., help="[installed|enabled|n
         typer.echo(f"Invalid mode: {mode}. Allowed modes are 'remote', 'local', 'cache'.", err=True)
         raise typer.Exit(code=1)
 
-    execute_cm_cli(['simple-show'] + args, channel, mode, workspace=workspace, recent=recent)
+    execute_cm_cli(ctx, ['simple-show'] + args, channel, mode)
 
 
 # install, reinstall, uninstall
 @app.command()
 @tracking.track_command("node")
-def install(args: List[str] = typer.Argument(..., help="install custom nodes"),
+def install(ctx: typer.Context,
+            args: List[str] = typer.Argument(..., help="install custom nodes"),
             channel: Annotated[str, '--channel', typer.Option(show_default=False, help="Specify the operation mode")] = None,
-            mode: Annotated[str, '--mode', typer.Option(show_default=False, help="[remote|local|cache]")] = None,
-            workspace: Annotated[str, typer.Option(show_default=False, help="Path to ComfyUI workspace")] = None,
-            recent: Annotated[bool, typer.Option(help="Use recent path (--workspace is higher)")] = False):
+            mode: Annotated[str, '--mode', typer.Option(show_default=False, help="[remote|local|cache]")] = None):
     if 'all' in args:
         typer.echo(f"Invalid command: {mode}. `install all` is not allowed", err=True)
         raise typer.Exit(code=1)
@@ -191,16 +168,15 @@ def install(args: List[str] = typer.Argument(..., help="install custom nodes"),
         typer.echo(f"Invalid mode: {mode}. Allowed modes are 'remote', 'local', 'cache'.", err=True)
         raise typer.Exit(code=1)
 
-    execute_cm_cli(['install'] + args, channel, mode, workspace=workspace, recent=recent)
+    execute_cm_cli(ctx, ['install'] + args, channel, mode)
 
 
 @app.command()
 @tracking.track_command("node")
-def reinstall(args: List[str] = typer.Argument(..., help="reinstall custom nodes"),
+def reinstall(ctx: typer.Context,
+              args: List[str] = typer.Argument(..., help="reinstall custom nodes"),
               channel: Annotated[str, '--channel', typer.Option(show_default=False, help="Specify the operation mode")] = None,
-              mode: Annotated[str, '--mode', typer.Option(show_default=False, help="[remote|local|cache]")] = None,
-              workspace: Annotated[str, typer.Option(show_default=False, help="Path to ComfyUI workspace")] = None,
-              recent: Annotated[bool, typer.Option(help="Use recent path (--workspace is higher)")] = False):
+              mode: Annotated[str, '--mode', typer.Option(show_default=False, help="[remote|local|cache]")] = None):
     if 'all' in args:
         typer.echo(f"Invalid command: {mode}. `reinstall all` is not allowed", err=True)
         raise typer.Exit(code=1)
@@ -210,16 +186,15 @@ def reinstall(args: List[str] = typer.Argument(..., help="reinstall custom nodes
         typer.echo(f"Invalid mode: {mode}. Allowed modes are 'remote', 'local', 'cache'.", err=True)
         raise typer.Exit(code=1)
 
-    execute_cm_cli(['reinstall'] + args, channel, mode, workspace=workspace, recent=recent)
+    execute_cm_cli(ctx, ['reinstall'] + args, channel, mode)
 
 
 @app.command()
 @tracking.track_command("node")
-def uninstall(args: List[str] = typer.Argument(..., help="uninstall custom nodes"),
+def uninstall(ctx: typer.Context,
+              args: List[str] = typer.Argument(..., help="uninstall custom nodes"),
               channel: Annotated[str, '--channel', typer.Option(show_default=False, help="Specify the operation mode")] = None,
-              mode: Annotated[str, '--mode', typer.Option(show_default=False, help="[remote|local|cache]")] = None,
-              workspace: Annotated[str, typer.Option(show_default=False, help="Path to ComfyUI workspace")] = None,
-              recent: Annotated[bool, typer.Option(help="Use recent path (--workspace is higher)")] = False):
+              mode: Annotated[str, '--mode', typer.Option(show_default=False, help="[remote|local|cache]")] = None):
     if 'all' in args:
         typer.echo(f"Invalid command: {mode}. `uninstall all` is not allowed", err=True)
         raise typer.Exit(code=1)
@@ -229,66 +204,62 @@ def uninstall(args: List[str] = typer.Argument(..., help="uninstall custom nodes
         typer.echo(f"Invalid mode: {mode}. Allowed modes are 'remote', 'local', 'cache'.", err=True)
         raise typer.Exit(code=1)
 
-    execute_cm_cli(['uninstall'] + args, channel, mode, workspace=workspace, recent=recent)
+    execute_cm_cli(ctx, ['uninstall'] + args, channel, mode)
 
 
 # `update, disable, enable, fix` allows `all` param
 
 @app.command()
 @tracking.track_command("node")
-def update(args: List[str] = typer.Argument(..., help="update custom nodes"),
+def update(ctx: typer.Context,
+           args: List[str] = typer.Argument(..., help="update custom nodes"),
            channel: Annotated[str, '--channel', typer.Option(show_default=False, help="Specify the operation mode")] = None,
-           mode: Annotated[str, '--mode', typer.Option(show_default=False, help="[remote|local|cache]")] = None,
-           workspace: Annotated[str, typer.Option(show_default=False, help="Path to ComfyUI workspace")] = None,
-           recent: Annotated[bool, typer.Option(help="Use recent path (--workspace is higher)")] = False):
+           mode: Annotated[str, '--mode', typer.Option(show_default=False, help="[remote|local|cache]")] = None):
     valid_modes = ["remote", "local", "cache"]
     if mode and mode.lower() not in valid_modes:
         typer.echo(f"Invalid mode: {mode}. Allowed modes are 'remote', 'local', 'cache'.", err=True)
         raise typer.Exit(code=1)
 
-    execute_cm_cli(['update'] + args, channel, mode, workspace=workspace, recent=recent)
+    execute_cm_cli(ctx, ['update'] + args, channel, mode)
 
 
 @app.command()
 @tracking.track_command("node")
-def disable(args: List[str] = typer.Argument(..., help="disable custom nodes"),
+def disable(ctx: typer.Context,
+            args: List[str] = typer.Argument(..., help="disable custom nodes"),
             channel: Annotated[str, '--channel', typer.Option(show_default=False,help="Specify the operation mode")] = None,
-            mode: Annotated[str, '--mode', typer.Option(show_default=False, help="[remote|local|cache]")] = None,
-            workspace: Annotated[str, typer.Option(show_default=False, help="Path to ComfyUI workspace")] = None,
-            recent: Annotated[bool, typer.Option(help="Use recent path (--workspace is higher)")] = False):
+            mode: Annotated[str, '--mode', typer.Option(show_default=False, help="[remote|local|cache]")] = None):
     valid_modes = ["remote", "local", "cache"]
     if mode and mode.lower() not in valid_modes:
         typer.echo(f"Invalid mode: {mode}. Allowed modes are 'remote', 'local', 'cache'.", err=True)
         raise typer.Exit(code=1)
 
-    execute_cm_cli(['disable'] + args, channel, mode, workspace=workspace, recent=recent)
+    execute_cm_cli(ctx, ['disable'] + args, channel, mode)
 
 
 @app.command()
 @tracking.track_command("node")
-def enable(args: List[str] = typer.Argument(..., help="enable custom nodes"),
+def enable(ctx: typer.Context,
+           args: List[str] = typer.Argument(..., help="enable custom nodes"),
            channel: Annotated[str, '--channel', typer.Option(show_default=False, help="Specify the operation mode")] = None,
-           mode: Annotated[str, '--mode', typer.Option(show_default=False, help="[remote|local|cache]")] = None,
-           workspace: Annotated[str, typer.Option(show_default=False, help="Path to ComfyUI workspace")] = None,
-           recent: Annotated[bool, typer.Option(help="Use recent path (--workspace is higher)")] = False):
+           mode: Annotated[str, '--mode', typer.Option(show_default=False, help="[remote|local|cache]")] = None):
     valid_modes = ["remote", "local", "cache"]
     if mode and mode.lower() not in valid_modes:
         typer.echo(f"Invalid mode: {mode}. Allowed modes are 'remote', 'local', 'cache'.", err=True)
         raise typer.Exit(code=1)
 
-    execute_cm_cli(['enable'] + args, channel, mode, workspace=workspace, recent=recent)
+    execute_cm_cli(ctx, ['enable'] + args, channel, mode)
 
 
 @app.command()
 @tracking.track_command("node")
-def fix(args: List[str] = typer.Argument(..., help="fix dependencies for specified custom nodes"),
+def fix(ctx: typer.Context,
+        args: List[str] = typer.Argument(..., help="fix dependencies for specified custom nodes"),
         channel: Annotated[str, '--channel', typer.Option(show_default=False, help="Specify the operation mode")] = None,
-        mode: Annotated[str, '--mode', typer.Option(show_default=False, help="[remote|local|cache]")] = None,
-        workspace: Annotated[str, typer.Option(show_default=False, help="Path to ComfyUI workspace")] = None,
-        recent: Annotated[bool, typer.Option(help="Use recent path (--workspace is higher)")] = False):
+        mode: Annotated[str, '--mode', typer.Option(show_default=False, help="[remote|local|cache]")] = None):
     valid_modes = ["remote", "local", "cache"]
     if mode and mode.lower() not in valid_modes:
         typer.echo(f"Invalid mode: {mode}. Allowed modes are 'remote', 'local', 'cache'.", err=True)
         raise typer.Exit(code=1)
 
-    execute_cm_cli(['fix'] + args, channel, mode, workspace=workspace, recent=recent)
+    execute_cm_cli(ctx, ['fix'] + args, channel, mode)
