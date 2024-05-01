@@ -213,6 +213,10 @@ def set_default(workspace_path: str):
 @tracking.track_command()
 def which(ctx: typer.Context):
   comfy_path = workspace_manager.get_workspace_path(ctx)
+  if not os.path.exists(comfy_path) or not os.path.exists(os.path.join(comfy_path, 'ComfyUI')):
+    print(f"ComfyUI not found, please run 'comfy install', run 'comfy' in a ComfyUI directory, or specify the workspace path with '--workspace'.")
+    raise typer.Exit(code=1)
+
   print(f"Target ComfyUI path: {comfy_path}")
 
 

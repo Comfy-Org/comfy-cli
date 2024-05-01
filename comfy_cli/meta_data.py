@@ -45,11 +45,15 @@ class ComfyLockYAMLStruct:
 
 # Generate and update this following method using chatGPT
 def load_yaml(file_path: str) -> ComfyLockYAMLStruct:
-    with open(file_path, 'r', encoding='utf-8') as file:
+    with open(file_path, "r", encoding="utf-8") as file:
         data = yaml.safe_load(file)
         basics = Basics(
             name=data.get("basics", {}).get("name"),
-            updated_at=datetime.fromisoformat(data.get("basics", {}).get("updated_at")) if data.get("basics", {}).get("updated_at") else None
+            updated_at=(
+                datetime.fromisoformat(data.get("basics", {}).get("updated_at"))
+                if data.get("basics", {}).get("updated_at")
+                else None
+            ),
         )
         models = [
             Model(
@@ -57,10 +61,12 @@ def load_yaml(file_path: str) -> ComfyLockYAMLStruct:
                 url=m.get("url"),
                 paths=[ModelPath(path=p.get("path")) for p in m.get("paths", [])],
                 hash=m.get("hash"),
-                type=m.get("type")
-            ) for m in data.get("models", [])
+                type=m.get("type"),
+            )
+            for m in data.get("models", [])
         ]
         custom_nodes = []
+
 
 def save_yaml(file_path: str, metadata: ComfyLockYAMLStruct):
     data = {
@@ -79,8 +85,16 @@ def save_yaml(file_path: str, metadata: ComfyLockYAMLStruct):
     with open(file_path, 'w', encoding='utf-8') as file:
         yaml.safe_dump(data, file, default_flow_style=False, allow_unicode=True)
 
+
+# Function to check if the file is config.json
+def check_file(path):
+    if path.name.endswith(constants.SUPPORTED_PT_EXTENSIONS):
+        return str(path)
+
+
 @singleton
 class MetadataManager:
+
     """
     Manages the metadata (comfy.yaml) for ComfyUI when running comfy cli, including loading,
     validating, and saving metadata to a file.
@@ -93,24 +107,17 @@ class MetadataManager:
             models=[]
         )
 
-
     def scan_dir(self):
-        config_files = []
+        model_files = []
         for root, dirs, files in os.walk("."):
             for file in files:
                 if file.endswith(constants.SUPPORTED_PT_EXTENSIONS):
-                    config_files.append(os.path.join(root, file))
-        return config_files
-
+                    model_files.append(os.path.join(root, file))
+        return model_files
 
     def scan_dir_concur(self):
         base_path = Path(".")
         model_files = []
-
-        # Function to check if the file is config.json
-        def check_file(path):
-            if path.name.endswith(constants.SUPPORTED_PT_EXTENSIONS):
-                return str(path)
 
         # Use ThreadPoolExecutor to manage concurrency
         with concurrent.futures.ThreadPoolExecutor() as executor:
@@ -121,7 +128,6 @@ class MetadataManager:
 
         return model_files
 
-
     def load_metadata(self):
         if os.path.exists(self.metadata_file):
             with open(self.metadata_file, "r", encoding="utf-8") as file:
@@ -131,7 +137,6 @@ class MetadataManager:
 
     def save_metadata(self):
         save_yaml(self.metadata_file, self.metadata)
-
 
 
 if __name__ == "__main__":
