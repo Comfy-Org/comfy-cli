@@ -134,9 +134,7 @@ class EnvChecker(object):
         return None
 
     def check(self):
-        self.virtualenv_path = (
-            os.environ.get("VIRTUAL_ENV") if os.environ.get("VIRTUAL_ENV") else None
-        )
+        self.virtualenv_path = ()
         self.conda_env = (
             os.environ.get("CONDA_DEFAULT_ENV")
             if os.environ.get("CONDA_DEFAULT_ENV")

@@ -15,6 +15,10 @@ This guide provides an overview of how to develop in this repository.
 
   `comfy --help`
 
+4. Use pre commit hook
+
+  `pre-commit install`
+
 ## Make changes to the code base
 
 There is a potential need for you to reinstall the package. You can do this by
