@@ -28,9 +28,9 @@ def singleton(cls):
 
 
 def get_os():
-    if 'win' in sys.platform:
+    if "win" in sys.platform:
         return constants.OS.WINDOWS
-    elif sys.platform == 'darwin':
+    elif sys.platform == "darwin":
         return constants.OS.MACOS
 
     return constants.OS.LINUX
