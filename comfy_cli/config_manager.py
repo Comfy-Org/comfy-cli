@@ -1,14 +1,16 @@
 import configparser
 import os
-
+import configparser
+from comfy_cli.utils import singleton, get_os, is_running
 from comfy_cli import constants
-from comfy_cli.utils import singleton, get_os
+from rich import print
 
 
 @singleton
 class ConfigManager(object):
   def __init__(self):
     self.config = configparser.ConfigParser()
+    self.background = None
     self.load()
 
   @staticmethod
@@ -51,6 +53,15 @@ class ConfigManager(object):
     if not os.path.exists(tmp_path):
       os.makedirs(tmp_path)
 
+    if 'background' in self.config['DEFAULT']:
+      bg_info = self.config['DEFAULT']['background'].strip('()').split(',')
+      bg_info = [item.strip().strip("'") for item in bg_info]
+      self.background = bg_info[0], int(bg_info[1]), int(bg_info[2])
+
+      if not is_running(self.background[2]):
+        self.remove_background()
+
+
   def fill_print_env(self, table):
     table.add_row("Config Path", self.get_config_file_path())
     if self.config.has_option('DEFAULT', 'default_workspace'):
@@ -61,4 +72,15 @@ class ConfigManager(object):
     if self.config.has_option('DEFAULT', constants.CONFIG_KEY_RECENT_WORKSPACE):
       table.add_row("Recent ComfyUI workspace", self.config['DEFAULT'][constants.CONFIG_KEY_RECENT_WORKSPACE])
     else:
-      table.add_row("Recent ComfyUI workspace", "No recent run")
+        table.add_row("Recent ComfyUI workspace", "No recent run")
+
+    if self.config.has_option('DEFAULT', 'background'):
+      bg_info = self.background
+      table.add_row("Background ComfyUI", f'http://{bg_info[0]}:{bg_info[1]} (pid={bg_info[2]})')
+    else:
+      table.add_row("Background ComfyUI", "[bold red]No[/bold red]")
+
+  def remove_background(self):
+    del self.config['DEFAULT']['background']
+    self.write_config()
+    self.background = None

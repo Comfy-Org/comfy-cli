@@ -4,6 +4,7 @@ Module for utility functions.
 
 import sys
 from comfy_cli import constants
+import psutil
 
 
 def singleton(cls):
@@ -33,3 +34,22 @@ def get_os():
         return constants.OS.MACOS
 
     return constants.OS.LINUX
+
+
+def kill_all(pid):
+    try:
+        parent = psutil.Process(pid)
+        children = parent.children(recursive=True)
+        for child in children:
+            child.kill()
+        return True
+    except Exception:
+        return False
+
+
+def is_running(pid):
+    try:
+        psutil.Process(pid)
+        return True
+    except psutil.NoSuchProcess:
+        return False

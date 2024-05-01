@@ -68,6 +68,15 @@ Comfy provides commands that allow you to easily run the installed ComfyUI.
 
   `comfy launch -- --cpu --listen 0.0.0.0`
 
+- To run background
+
+  `comfy launch --background`
+
+  `comfy --workspace=~/comfy launch --background -- --listen 10.0.0.10 --port 8000`
+  - Instances launched with `--background` are displayed in the "Background ComfyUI" section of `comfy env`, providing management functionalities for a single background instance only. 
+  - Since "Comfy Server Running" in `comfy env` only shows the default port 8188, it doesn't display ComfyUI running on a different port.
+  - Background-running ComfyUI can be stopped with `comfy stop`.
+
 
 ### Managing Packages [WIP]
 

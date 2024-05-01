@@ -13,7 +13,7 @@ from comfy_cli.command import custom_nodes
 from comfy_cli.command import install as install_inner
 from comfy_cli.command import run as run_inner
 from comfy_cli import constants, tracking, logging, ui
-from comfy_cli.env_checker import EnvChecker
+from comfy_cli.env_checker import EnvChecker, check_comfy_server_running
 from comfy_cli.meta_data import MetadataManager
 from comfy_cli import env_checker
 from rich.console import Console
@@ -22,6 +22,8 @@ import uuid
 from comfy_cli.config_manager import ConfigManager
 from comfy_cli.workspace_manager import WorkspaceManager
 import webbrowser
+from comfy_cli import utils
+
 
 app = typer.Typer()
 workspace_manager = WorkspaceManager()
@@ -135,12 +137,12 @@ def update(self):
   subprocess.run([sys.executable, '-m', "pip", "install", "-r", "requirements.txt"], check=True)
 
 
-@app.command(help="Run workflow file")
-@tracking.track_command()
-def run(
-  workflow_file: Annotated[str, typer.Option(help="Path to the workflow file.")],
-):
-  run_inner.execute(workflow_file)
+# @app.command(help="Run workflow file")
+# @tracking.track_command()
+# def run(
+#   workflow_file: Annotated[str, typer.Option(help="Path to the workflow file.")],
+# ):
+#   run_inner.execute(workflow_file)
 
 
 def validate_comfyui(_env_checker):
@@ -149,8 +151,40 @@ def validate_comfyui(_env_checker):
     raise typer.Exit(code=1)
 
 
-def launch_comfyui(_env_checker, _config_manager, extra):
+def launch_comfyui(_env_checker, _config_manager, extra, background=False):
   validate_comfyui(_env_checker)
+
+  if background:
+    if _config_manager.background is not None and utils.is_running(_config_manager.background[2]):
+      print(f"[bold red]ComfyUI is already running in background.\nYou cannot start more than one background service.[/bold red]\n")
+      raise typer.Exit(code=1)
+
+    port = 8188
+    listen = "127.0.0.1"
+
+    if extra is not None:
+      for i in range(len(extra)-1):
+        if extra[i] == '--port':
+          port = extra[i+1]
+        if listen[i] == '--listen':
+          listen = extra[i+1]
+
+      if check_comfy_server_running(port):
+        print(f"[bold red]The {port} port is already in use. A new ComfyUI server cannot be launched.\n[bold red]\n")
+        raise typer.Exit(code=1)
+
+      if len(extra) > 0:
+        extra = ['--'] + extra
+    else:
+      extra = []
+
+    cmd = ['comfy', f'--workspace={os.path.join(os.getcwd(), "..")}', 'launch'] + extra
+
+    process = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    print(f"[bold yellow]Run ComfyUI in the background.[/bold yellow] ({listen}:{port})")
+    _config_manager.config['DEFAULT'][constants.CONFIG_KEY_BACKGROUND] = f"{(listen, port, process.pid)}"
+    _config_manager.write_config()
+    return
 
   env_path = _env_checker.get_isolated_env()
   reboot_path = None
@@ -175,10 +209,27 @@ def launch_comfyui(_env_checker, _config_manager, extra):
     os.remove(reboot_path)
 
 
-@app.command(help="Launch ComfyUI: ?[--workspace <path>] ?[--recent] ?[-- <extra args ...>]")
+@app.command(help="Stop background ComfyUI")
+def stop():
+  _config_manager = ConfigManager()
+
+  if constants.CONFIG_KEY_BACKGROUND not in _config_manager.config['DEFAULT']:
+    print(f"[bold red]No ComfyUI is running in the background.[/bold red]\n")
+    raise typer.Exit(code=1)
+
+  bg_info = _config_manager.background
+  is_killed = utils.kill_all(bg_info[2])
+
+  print(f"[bold yellow]Background ComfyUI is stopped.[/bold yellow] ({bg_info[0]}:{bg_info[1]})")
+
+  _config_manager.remove_background()
+
+
+@app.command(help="Launch ComfyUI: ?[--background] ?[-- <extra args ...>]")
 @tracking.track_command()
 def launch(
   ctx: typer.Context,
+  background: Annotated[bool, typer.Option(help="Launch ComfyUI in background")] = False,
   extra: List[str] = typer.Argument(None)):
   _env_checker = EnvChecker()
   _config_manager = ConfigManager()
@@ -196,7 +247,7 @@ def launch(
   # Update the recent workspace
   workspace_manager.set_recent_workspace(resolved_workspace)
 
-  launch_comfyui(_env_checker, _config_manager, extra)
+  launch_comfyui(_env_checker, _config_manager, extra, background=background)
 
 
 @app.command("set-default", help="Set default workspace")

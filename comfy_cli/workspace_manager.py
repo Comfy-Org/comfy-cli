@@ -37,13 +37,13 @@ class WorkspaceManager:
     """
     Sets the most recent workspace path in the configuration.
     """
-    self.config_manager.set(constants.CONFIG_KEY_RECENT_WORKSPACE, path)
+    self.config_manager.set(constants.CONFIG_KEY_RECENT_WORKSPACE, os.path.abspath(path))
 
   def set_default_workspace(self, path: str):
     """
     Sets the default workspace path in the configuration.
     """
-    self.config_manager.set(constants.CONFIG_KEY_DEFAULT_WORKSPACE, path)
+    self.config_manager.set(constants.CONFIG_KEY_DEFAULT_WORKSPACE, os.path.abspath(path))
 
   def get_workspace_comfy_path(self, context: typer.Context) -> str:
     """

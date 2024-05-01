@@ -31,6 +31,7 @@ CONTEXT_KEY_HERE = 'here'
 CONFIG_KEY_DEFAULT_WORKSPACE = 'default_workspace'
 CONFIG_KEY_RECENT_WORKSPACE = 'recent_workspace'
 CONFIG_KEY_ENABLE_TRACKING = 'enable_tracking'
+CONFIG_KEY_BACKGROUND = 'background'
 
 # TODO: figure out a better way to check if this is a comfy repo
 COMFY_ORIGIN_URL_CHOICES = [
