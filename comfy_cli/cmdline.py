@@ -316,6 +316,6 @@ def feedback():
 
   print("Thank you for your feedback!")
 
-  app.add_typer(models_command.app, name="model", help="Manage models.")
-  app.add_typer(custom_nodes.app, name="node", help="Manage custom nodes.")
-  app.add_typer(custom_nodes.manager_app, name="manager", help="Manager ComfyUI-Manager.")
+app.add_typer(models_command.app, name="model", help="Manage models.")
+app.add_typer(custom_nodes.app, name="node", help="Manage custom nodes.")
+app.add_typer(custom_nodes.manager_app, name="manager", help="Manager ComfyUI-Manager.")
