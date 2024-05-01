@@ -16,6 +16,7 @@ from comfy_cli.utils import singleton
 class ModelPath:
     path: str
 
+
 @dataclass
 class Model:
     name: Optional[str] = None
@@ -23,6 +24,7 @@ class Model:
     paths: List[ModelPath] = field(default_factory=list)
     hash: Optional[str] = None
     type: Optional[str] = None
+
 
 @dataclass
 class Basics:
@@ -32,7 +34,7 @@ class Basics:
 
 @dataclass
 class CustomNode:
-    #Todo: Add custom node fields for comfy-lock.yaml
+    # Todo: Add custom node fields for comfy-lock.yaml
     pass
 
 
@@ -70,19 +72,23 @@ def load_yaml(file_path: str) -> ComfyLockYAMLStruct:
 
 def save_yaml(file_path: str, metadata: ComfyLockYAMLStruct):
     data = {
-        "basics": {"name": metadata.basics.name, "updated_at": metadata.basics.updated_at.isoformat()},
+        "basics": {
+            "name": metadata.basics.name,
+            "updated_at": metadata.basics.updated_at.isoformat(),
+        },
         "models": [
             {
                 "model": m.name,
                 "url": m.url,
                 "paths": [{"path": p.path} for p in m.paths],
                 "hash": m.hash,
-                "type": m.type
-            } for m in metadata.models
+                "type": m.type,
+            }
+            for m in metadata.models
         ],
-        "custom_nodes": []
+        "custom_nodes": [],
     }
-    with open(file_path, 'w', encoding='utf-8') as file:
+    with open(file_path, "w", encoding="utf-8") as file:
         yaml.safe_dump(data, file, default_flow_style=False, allow_unicode=True)
 
 
@@ -99,13 +105,11 @@ class MetadataManager:
     Manages the metadata (comfy.yaml) for ComfyUI when running comfy cli, including loading,
     validating, and saving metadata to a file.
     """
+
     def __init__(self):
         self.metadata_file = None
         self.env_checker = EnvChecker()
-        self.metadata = ComfyLockYAMLStruct(
-            basics=Basics(),
-            models=[]
-        )
+        self.metadata = ComfyLockYAMLStruct(basics=Basics(), models=[])
 
     def scan_dir(self):
         model_files = []
@@ -121,7 +125,7 @@ class MetadataManager:
 
         # Use ThreadPoolExecutor to manage concurrency
         with concurrent.futures.ThreadPoolExecutor() as executor:
-            futures = [executor.submit(check_file, p) for p in base_path.rglob('*')]
+            futures = [executor.submit(check_file, p) for p in base_path.rglob("*")]
             for future in concurrent.futures.as_completed(futures):
                 if future.result():
                     model_files.append(future.result())

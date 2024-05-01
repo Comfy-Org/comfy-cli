@@ -10,26 +10,28 @@ Therefore, it's a good idea to encapsulate logging-related code in a separate mo
 
 
 def setup_logging():
-  # TODO: consider supporting different ways of outputting logs
-  # Note: by default, the log level is set to INFO
-  log_level = os.getenv("LOG_LEVEL", "WARN").upper()
-  logging.basicConfig(level=log_level,
-                      format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-                      datefmt='%Y-%m-%d %H:%M:%S')
+    # TODO: consider supporting different ways of outputting logs
+    # Note: by default, the log level is set to INFO
+    log_level = os.getenv("LOG_LEVEL", "WARN").upper()
+    logging.basicConfig(
+        level=log_level,
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
 
 
 def debug(message):
-  logging.debug(message)
+    logging.debug(message)
 
 
 def info(message):
-  logging.info(message)
+    logging.info(message)
 
 
 def warning(message):
-  logging.warning(message)
+    logging.warning(message)
 
 
 def error(message):
-  logging.error(message)
-  # TODO: consider tracking errors to Mixpanel as well.
+    logging.error(message)
+    # TODO: consider tracking errors to Mixpanel as well.

@@ -31,8 +31,12 @@ def format_python_version(version_info):
         str: The formatted Python version string.
     """
     if version_info.major == 3 and version_info.minor > 8:
-        return "{}.{}.{}".format(version_info.major, version_info.minor, version_info.micro)
-    return "[bold red]{}.{}.{}[/bold red]".format(version_info.major, version_info.minor, version_info.micro)
+        return "{}.{}.{}".format(
+            version_info.major, version_info.minor, version_info.micro
+        )
+    return "[bold red]{}.{}.{}[/bold red]".format(
+        version_info.major, version_info.minor, version_info.micro
+    )
 
 
 def check_comfy_server_running(port=8188):
@@ -98,7 +102,9 @@ class EnvChecker(object):
             return None
 
         # To check more robustly, verify up to the `.git` path.
-        manager_path = os.path.join(self.comfy_repo.working_dir, 'ComfyUI', 'custom_nodes', 'ComfyUI-Manager')
+        manager_path = os.path.join(
+            self.comfy_repo.working_dir, "ComfyUI", "custom_nodes", "ComfyUI-Manager"
+        )
         return manager_path
 
     def is_comfyui_manager_installed(self):
@@ -106,7 +112,13 @@ class EnvChecker(object):
             return False
 
         # To check more robustly, verify up to the `.git` path.
-        manager_git_path = os.path.join(self.comfy_repo.working_dir, 'ComfyUI', 'custom_nodes', 'ComfyUI-Manager', '.git')
+        manager_git_path = os.path.join(
+            self.comfy_repo.working_dir,
+            "ComfyUI",
+            "custom_nodes",
+            "ComfyUI-Manager",
+            ".git",
+        )
         return os.path.exists(manager_git_path)
 
     def is_isolated_env(self):
@@ -123,9 +135,7 @@ class EnvChecker(object):
 
     def check(self):
         self.virtualenv_path = (
-            os.environ.get("VIRTUAL_ENV")
-            if os.environ.get("VIRTUAL_ENV")
-            else None
+            os.environ.get("VIRTUAL_ENV") if os.environ.get("VIRTUAL_ENV") else None
         )
         self.conda_env = (
             os.environ.get("CONDA_DEFAULT_ENV")
@@ -146,13 +156,19 @@ class EnvChecker(object):
         table = Table(":laptop_computer: Environment", "Value")
         table.add_row("Python Version", format_python_version(sys.version_info))
         table.add_row("Python Executable", sys.executable)
-        table.add_row("Virtualenv Path", self.virtualenv_path if self.virtualenv_path else "Not Used")
+        table.add_row(
+            "Virtualenv Path",
+            self.virtualenv_path if self.virtualenv_path else "Not Used",
+        )
         table.add_row("Conda Env", self.conda_env if self.conda_env else "Not Used")
 
         ConfigManager().fill_print_env(table)
 
         if check_comfy_server_running():
-            table.add_row("Comfy Server Running", "[bold green]Yes[/bold green]\nhttp://localhost:8188")
+            table.add_row(
+                "Comfy Server Running",
+                "[bold green]Yes[/bold green]\nhttp://localhost:8188",
+            )
         else:
             table.add_row("Comfy Server Running", "[bold red]No[/bold red]")
 
