@@ -98,7 +98,7 @@ class EnvChecker(object):
             return None
 
         # To check more robustly, verify up to the `.git` path.
-        manager_path = os.path.join(self.comfy_repo.working_dir, 'custom_nodes', 'ComfyUI-Manager')
+        manager_path = os.path.join(self.comfy_repo.working_dir, 'ComfyUI', 'custom_nodes', 'ComfyUI-Manager')
         return manager_path
 
     def is_comfyui_manager_installed(self):
@@ -106,7 +106,7 @@ class EnvChecker(object):
             return False
 
         # To check more robustly, verify up to the `.git` path.
-        manager_git_path = os.path.join(self.comfy_repo.working_dir, 'custom_nodes', 'ComfyUI-Manager', '.git')
+        manager_git_path = os.path.join(self.comfy_repo.working_dir, 'ComfyUI', 'custom_nodes', 'ComfyUI-Manager', '.git')
         return os.path.exists(manager_git_path)
 
     def is_isolated_env(self):

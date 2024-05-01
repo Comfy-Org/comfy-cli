@@ -32,7 +32,8 @@ will simply update the comfy.yaml file to reflect the local setup
   * `comfy install --skip-manager`: Install ComfyUI without ComfyUI-Manager.
   * `comfy --workspace=<path> install`: Install ComfyUI into `<path>/ComfyUI`.
   * For `comfy install`, if no path specification like `--workspace, --recent, or --here` is provided, it will be implicitly installed in `<HOME>/comfy`.
-
+  * **(WIP)** `comfy install --snapshot=<comfy-lock.yaml path>`: Install ComfyUI and whole environments from snapshot.
+    * **(WIP)** Currently, only the installation of ComfyUI and custom nodes is being applied.
 
 ### Specifying execution path
 

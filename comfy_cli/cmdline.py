@@ -92,9 +92,16 @@ def install(
   commit: Annotated[
     str,
     typer.Option(help="Specify commit hash for ComfyUI")
+  ] = None,
+  snapshot: Annotated[
+    str,
+    typer.Option(help="Specify path to comfy-lock.yaml ")
   ] = None
 ):
   checker = EnvChecker()
+
+  if snapshot is not None:
+    snapshot = os.path.abspath(snapshot)
 
   # In the case of installation, since it involves installing in a non-existent path, get_workspace_path is not used.
   specified_workspace = ctx.obj.get(constants.CONTEXT_KEY_WORKSPACE)
@@ -126,6 +133,11 @@ def install(
     torch_mode = 'amd'
 
   install_inner.execute(url, manager_url, workspace_path, restore, skip_manager, torch_mode, commit=commit)
+
+  if snapshot is not None:
+    checker.check()
+    install_inner.apply_snapshot(ctx, checker, snapshot)
+
   workspace_manager.set_recent_workspace(workspace_path)
 
 
@@ -316,6 +328,6 @@ def feedback():
 
   print("Thank you for your feedback!")
 
-  app.add_typer(models_command.app, name="model", help="Manage models.")
-  app.add_typer(custom_nodes.app, name="node", help="Manage custom nodes.")
-  app.add_typer(custom_nodes.manager_app, name="manager", help="Manager ComfyUI-Manager.")
+app.add_typer(models_command.app, name="model", help="Manage models.")
+app.add_typer(custom_nodes.app, name="node", help="Manage custom nodes.")
+app.add_typer(custom_nodes.manager_app, name="manager", help="Manager ComfyUI-Manager.")
