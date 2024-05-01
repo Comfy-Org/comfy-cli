@@ -257,7 +257,7 @@ def feedback():
   # Additional Feature-Specific Feedback
   if questionary.confirm("Do you want to provide additional feature-specific feedback on our GitHub page?").ask():
     tracking.track_event("feedback_additional")
-    webbrowser.open("https://github.com/Comfy-Org/comfy-cli/issues/new")
+    webbrowser.open("https://github.com/Comfy-Org/comfy-cli/issues/new/choose")
 
   print("Thank you for your feedback!")
 
