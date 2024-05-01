@@ -29,6 +29,23 @@ def show_progress(iterable, total, description="Downloading..."):
       progress.update(task, advance=len(chunk))
 
 
+def prompt_select(question: str, choices: list) -> str:
+  """
+  Asks a single select question using questionary and returns the selected response.
+
+  Args:
+      question (str): The question to display to the user.
+      choices (list): A list of string choices for the user to select from.
+
+  Returns:
+      str: The selected choice from the user.
+  """
+  return questionary.select(
+    question,
+    choices=choices
+  ).ask()
+
+
 def prompt_multi_select(prompt: str, choices: List[str]) -> List[str]:
   """
   Prompts the user to select multiple items from a list of choices.

@@ -1,6 +1,7 @@
 import sys
 from typing import Optional
 
+import questionary
 import typer
 from typing_extensions import List, Annotated
 from comfy_cli.command.models import models as models_command
@@ -8,11 +9,10 @@ from rich import print
 import os
 import subprocess
 
-
 from comfy_cli.command import custom_nodes
 from comfy_cli.command import install as install_inner
 from comfy_cli.command import run as run_inner
-from comfy_cli import constants, tracking, logging
+from comfy_cli import constants, tracking, logging, ui
 from comfy_cli.env_checker import EnvChecker
 from comfy_cli.meta_data import MetadataManager
 from comfy_cli import env_checker
@@ -21,6 +21,7 @@ import time
 import uuid
 from comfy_cli.config_manager import ConfigManager
 from comfy_cli.workspace_manager import WorkspaceManager
+import webbrowser
 from comfy_cli import utils
 
 
@@ -155,7 +156,7 @@ def launch_comfyui(_env_checker, _config_manager, extra, background=False):
 
   if background:
     if _config_manager.background is not None and utils.is_running(_config_manager.background[2]):
-      print(f"ComfyUI is already running in background.")
+      print(f"[bold red]ComfyUI is already running in background.\nYou cannot start more than one background service.[/bold red]\n")
       raise typer.Exit(code=1)
 
     port = 8188
@@ -220,7 +221,7 @@ def stop():
   _config_manager.remove_background()
 
 
-@app.command(help="Launch ComfyUI: ?[--workspace <path>] ?[--recent] ?[--background] ?[-- <extra args ...>]")
+@app.command(help="Launch ComfyUI: ?[--background] ?[-- <extra args ...>]")
 @tracking.track_command()
 def launch(
   ctx: typer.Context,
@@ -261,6 +262,10 @@ def set_default(workspace_path: str):
 @tracking.track_command()
 def which(ctx: typer.Context):
   comfy_path = workspace_manager.get_workspace_path(ctx)
+  if not os.path.exists(comfy_path) or not os.path.exists(os.path.join(comfy_path, 'ComfyUI')):
+    print(f"ComfyUI not found, please run 'comfy install', run 'comfy' in a ComfyUI directory, or specify the workspace path with '--workspace'.")
+    raise typer.Exit(code=1)
+
   print(f"Target ComfyUI path: {comfy_path}")
 
 
@@ -283,6 +288,30 @@ def models():
   print("\n[bold red] No such command, did you mean 'comfy model' instead?[/bold red]\n")
 
 
-app.add_typer(models_command.app, name="model", help="Manage models.")
-app.add_typer(custom_nodes.app, name="node", help="Manage custom nodes.")
-app.add_typer(custom_nodes.manager_app, name="manager", help="Manager ComfyUI-Manager.")
+@app.command(help="Provide feedback on the Comfy CLI tool.")
+@tracking.track_command()
+def feedback():
+  print("Feedback Collection for Comfy CLI Tool\n")
+
+  # General Satisfaction
+  general_satisfaction_score = ui.prompt_select(
+    question="On a scale of 1 to 5, how satisfied are you with the Comfy CLI tool? (1 being very dissatisfied and 5 being very satisfied)",
+    choices=["1", "2", "3", "4", "5"])
+  tracking.track_event("feedback_general_satisfaction", {"score": general_satisfaction_score})
+
+  # Usability and User Experience
+  usability_satisfaction_score = ui.prompt_select(
+    question="On a scale of 1 to 5,  how satisfied are you with the usability and user experience of the Comfy CLI tool? (1 being very dissatisfied and 5 being very satisfied)",
+    choices=["1", "2", "3", "4", "5"])
+  tracking.track_event("feedback_usability_satisfaction", {"score": usability_satisfaction_score})
+
+  # Additional Feature-Specific Feedback
+  if questionary.confirm("Do you want to provide additional feature-specific feedback on our GitHub page?").ask():
+    tracking.track_event("feedback_additional")
+    webbrowser.open("https://github.com/Comfy-Org/comfy-cli/issues/new/choose")
+
+  print("Thank you for your feedback!")
+
+  app.add_typer(models_command.app, name="model", help="Manage models.")
+  app.add_typer(custom_nodes.app, name="node", help="Manage custom nodes.")
+  app.add_typer(custom_nodes.manager_app, name="manager", help="Manager ComfyUI-Manager.")

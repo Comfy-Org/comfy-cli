@@ -3,6 +3,7 @@ import os
 import configparser
 from comfy_cli.utils import singleton, get_os, is_running
 from comfy_cli import constants
+from rich import print
 
 
 @singleton
@@ -74,9 +75,10 @@ class ConfigManager(object):
         table.add_row("Recent ComfyUI workspace", "No recent run")
 
     if self.config.has_option('DEFAULT', 'background'):
-      table.add_row("Background ComfyUI", self.config['DEFAULT']['background'])
+      bg_info = self.background
+      table.add_row("Background ComfyUI", f'http://{bg_info[0]}:{bg_info[1]} (pid={bg_info[2]})')
     else:
-      table.add_row("Background ComfyUI", "N/A")
+      table.add_row("Background ComfyUI", "[bold red]No[/bold red]")
 
   def remove_background(self):
     del self.config['DEFAULT']['background']
