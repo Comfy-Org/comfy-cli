@@ -35,7 +35,7 @@ def format_python_version(version_info):
     return "[bold red]{}.{}.{}[/bold red]".format(version_info.major, version_info.minor, version_info.micro)
 
 
-def check_comfy_server_running():
+def check_comfy_server_running(port=8188):
     """
     Checks if the Comfy server is running by making a GET request to the /history endpoint.
 
@@ -43,7 +43,7 @@ def check_comfy_server_running():
         bool: True if the Comfy server is running, False otherwise.
     """
     try:
-        response = requests.get("http://localhost:8188/history")
+        response = requests.get(f"http://localhost:{port}/history")
         return response.status_code == 200
     except requests.exceptions.RequestException:
         return False

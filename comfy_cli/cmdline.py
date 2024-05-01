@@ -13,7 +13,7 @@ from comfy_cli.command import custom_nodes
 from comfy_cli.command import install as install_inner
 from comfy_cli.command import run as run_inner
 from comfy_cli import constants, tracking, logging, ui
-from comfy_cli.env_checker import EnvChecker
+from comfy_cli.env_checker import EnvChecker, check_comfy_server_running
 from comfy_cli.meta_data import MetadataManager
 from comfy_cli import env_checker
 from rich.console import Console
@@ -169,6 +169,10 @@ def launch_comfyui(_env_checker, _config_manager, extra, background=False):
         if listen[i] == '--listen':
           listen = extra[i+1]
 
+      if check_comfy_server_running(port):
+        print(f"[bold red]The {port} port is already in use. A new ComfyUI server cannot be launched.\n[bold red]\n")
+        raise typer.Exit(code=1)
+
       if len(extra) > 0:
         extra = ['--'] + extra
     else:
@@ -177,7 +181,7 @@ def launch_comfyui(_env_checker, _config_manager, extra, background=False):
     cmd = ['comfy', f'--workspace={os.path.join(os.getcwd(), "..")}', 'launch'] + extra
 
     process = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    print(f"ComfyUI is started in background ({listen}:{port})")
+    print(f"[bold yellow]Run ComfyUI in the background.[/bold yellow] ({listen}:{port})")
     _config_manager.config['DEFAULT'][constants.CONFIG_KEY_BACKGROUND] = f"{(listen, port, process.pid)}"
     _config_manager.write_config()
     return
