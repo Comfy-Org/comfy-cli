@@ -137,12 +137,12 @@ def update(self):
   subprocess.run([sys.executable, '-m', "pip", "install", "-r", "requirements.txt"], check=True)
 
 
-@app.command(help="Run workflow file")
-@tracking.track_command()
-def run(
-  workflow_file: Annotated[str, typer.Option(help="Path to the workflow file.")],
-):
-  run_inner.execute(workflow_file)
+# @app.command(help="Run workflow file")
+# @tracking.track_command()
+# def run(
+#   workflow_file: Annotated[str, typer.Option(help="Path to the workflow file.")],
+# ):
+#   run_inner.execute(workflow_file)
 
 
 def validate_comfyui(_env_checker):
@@ -209,18 +209,18 @@ def launch_comfyui(_env_checker, _config_manager, extra, background=False):
     os.remove(reboot_path)
 
 
-@app.command()
+@app.command(help="Stop background ComfyUI")
 def stop():
   _config_manager = ConfigManager()
 
   if constants.CONFIG_KEY_BACKGROUND not in _config_manager.config['DEFAULT']:
-    print(f"No ComfyUI is running in the background.")
+    print(f"[bold red]No ComfyUI is running in the background.[/bold red]\n")
     raise typer.Exit(code=1)
 
   bg_info = _config_manager.background
   is_killed = utils.kill_all(bg_info[2])
 
-  print(f"Background ComfyUI is stopped. ({bg_info[0]}:{bg_info[1]})")
+  print(f"[bold yellow]Background ComfyUI is stopped.[/bold yellow] ({bg_info[0]}:{bg_info[1]})")
 
   _config_manager.remove_background()
 
