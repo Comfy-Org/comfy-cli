@@ -32,19 +32,19 @@ def main():
 
 @app.callback(invoke_without_command=True)
 def entry(
-        ctx: typer.Context,
-        workspace: Optional[str] = typer.Option(
-            default=None, show_default=False, help="Path to ComfyUI workspace"
-        ),
-        recent: Optional[bool] = typer.Option(
-            default=False, show_default=False, is_flag=True, help="Execute from recent path"
-        ),
-        here: Optional[bool] = typer.Option(
-            default=False,
-            show_default=False,
-            is_flag=True,
-            help="Execute from current path",
-        ),
+    ctx: typer.Context,
+    workspace: Optional[str] = typer.Option(
+        default=None, show_default=False, help="Path to ComfyUI workspace"
+    ),
+    recent: Optional[bool] = typer.Option(
+        default=False, show_default=False, is_flag=True, help="Execute from recent path"
+    ),
+    here: Optional[bool] = typer.Option(
+        default=False,
+        show_default=False,
+        is_flag=True,
+        help="Execute from current path",
+    ),
 ):
     if ctx.invoked_subcommand is None:
         print(ctx.get_help())
@@ -70,23 +70,23 @@ def init():
 @app.command(help="Download and install ComfyUI and ComfyUI-Manager")
 @tracking.track_command()
 def install(
-        ctx: typer.Context,
-        url: Annotated[str, typer.Option(show_default=False)] = constants.COMFY_GITHUB_URL,
-        manager_url: Annotated[
-            str, typer.Option(show_default=False)
-        ] = constants.COMFY_MANAGER_GITHUB_URL,
-        restore: Annotated[
-            bool,
-            lambda: typer.Option(
-                default=False,
-                help="Restore dependencies for installed ComfyUI if not installed",
-            ),
-        ] = False,
-        skip_manager: Annotated[
-            bool, typer.Option(help="Skip installing the manager component")
-        ] = False,
-        amd: Annotated[bool, typer.Option(help="Install for AMD gpu")] = False,
-        commit: Annotated[str, typer.Option(help="Specify commit hash for ComfyUI")] = None,
+    ctx: typer.Context,
+    url: Annotated[str, typer.Option(show_default=False)] = constants.COMFY_GITHUB_URL,
+    manager_url: Annotated[
+        str, typer.Option(show_default=False)
+    ] = constants.COMFY_MANAGER_GITHUB_URL,
+    restore: Annotated[
+        bool,
+        lambda: typer.Option(
+            default=False,
+            help="Restore dependencies for installed ComfyUI if not installed",
+        ),
+    ] = False,
+    skip_manager: Annotated[
+        bool, typer.Option(help="Skip installing the manager component")
+    ] = False,
+    amd: Annotated[bool, typer.Option(help="Install for AMD gpu")] = False,
+    commit: Annotated[str, typer.Option(help="Specify commit hash for ComfyUI")] = None,
 ):
     checker = EnvChecker()
 
@@ -136,10 +136,9 @@ def install(
 @app.command(help="Stop background ComfyUI")
 @tracking.track_command()
 def update(
-        ctx: typer.Context,
-        target: str = typer.Argument("comfy", help="[all|comfy]")
+    ctx: typer.Context, target: str = typer.Argument("comfy", help="[all|comfy]")
 ):
-    if target not in ['all', 'comfy']:
+    if target not in ["all", "comfy"]:
         typer.echo(
             f"Invalid target: {target}. Allowed targets are 'all', 'comfy'.",
             err=True,
@@ -149,14 +148,15 @@ def update(
     _env_checker = EnvChecker()
     comfy_path = workspace_manager.get_workspace_comfy_path(ctx)
 
-    if 'all' == target:
-        custom_nodes.command.execute_cm_cli(ctx, ['update', 'all'])
+    if "all" == target:
+        custom_nodes.command.execute_cm_cli(ctx, ["update", "all"])
     else:
         print(f"Updating ComfyUI in {comfy_path}...")
         os.chdir(comfy_path)
         subprocess.run(["git", "pull"], check=True)
         subprocess.run(
-            [sys.executable, "-m", "pip", "install", "-r", "requirements.txt"], check=True
+            [sys.executable, "-m", "pip", "install", "-r", "requirements.txt"],
+            check=True,
         )
 
 
@@ -181,7 +181,7 @@ def launch_comfyui(_env_checker, _config_manager, extra, background=False):
 
     if background:
         if _config_manager.background is not None and utils.is_running(
-                _config_manager.background[2]
+            _config_manager.background[2]
         ):
             print(
                 f"[bold red]ComfyUI is already running in background.\nYou cannot start more than one background service.[/bold red]\n"
@@ -210,10 +210,10 @@ def launch_comfyui(_env_checker, _config_manager, extra, background=False):
             extra = []
 
         cmd = [
-                  "comfy",
-                  f'--workspace={os.path.join(os.getcwd(), "..")}',
-                  "launch",
-              ] + extra
+            "comfy",
+            f'--workspace={os.path.join(os.getcwd(), "..")}',
+            "launch",
+        ] + extra
 
         process = subprocess.Popen(
             cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
@@ -274,11 +274,11 @@ def stop():
 @app.command(help="Launch ComfyUI: ?[--background] ?[-- <extra args ...>]")
 @tracking.track_command()
 def launch(
-        ctx: typer.Context,
-        background: Annotated[
-            bool, typer.Option(help="Launch ComfyUI in background")
-        ] = False,
-        extra: List[str] = typer.Argument(None),
+    ctx: typer.Context,
+    background: Annotated[
+        bool, typer.Option(help="Launch ComfyUI in background")
+    ] = False,
+    extra: List[str] = typer.Argument(None),
 ):
     _env_checker = EnvChecker()
     _config_manager = ConfigManager()
@@ -321,7 +321,7 @@ def set_default(workspace_path: str):
 def which(ctx: typer.Context):
     comfy_path = workspace_manager.get_workspace_path(ctx)
     if not os.path.exists(comfy_path) or not os.path.exists(
-            os.path.join(comfy_path, "ComfyUI")
+        os.path.join(comfy_path, "ComfyUI")
     ):
         print(
             f"ComfyUI not found, please run 'comfy install', run 'comfy' in a ComfyUI directory, or specify the workspace path with '--workspace'."
@@ -379,7 +379,7 @@ def feedback():
 
     # Additional Feature-Specific Feedback
     if questionary.confirm(
-            "Do you want to provide additional feature-specific feedback on our GitHub page?"
+        "Do you want to provide additional feature-specific feedback on our GitHub page?"
     ).ask():
         tracking.track_event("feedback_additional")
         webbrowser.open("https://github.com/Comfy-Org/comfy-cli/issues/new/choose")
