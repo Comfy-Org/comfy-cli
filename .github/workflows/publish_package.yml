@@ -27,8 +27,15 @@ jobs:
 
       - name: Update version in pyproject.toml
         run: |
-          python -c "import tomlkit; with open('pyproject.toml', 'r') as file: pyproj = tomlkit.load(file); pyproj['project']['version'] = '${{ env.VERSION }}'; with open('pyproject.toml', 'w') as file: tomlkit.dump(pyproj, file)"
-
+          python -m pip install tomlkit
+          python -c "\
+          import tomlkit;\
+          with open('pyproject.toml', 'r') as file:\
+              pyproj = tomlkit.load(file);\
+          pyproj['project']['version'] = '${{ env.VERSION }}';\
+          with open('pyproject.toml', 'w') as file:\
+              tomlkit.dump(pyproj, file)"
+              
       - name: Build distribution
         run: python -m build --sdist --wheel --outdir dist/
 
