@@ -27,6 +27,7 @@ dependencies = [
     "typing-extensions",
     "mixpanel",
     "questionary",
+    "psutil",
 ]
 
 classifiers = [
