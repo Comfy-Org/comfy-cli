@@ -133,14 +133,31 @@ def install(
     workspace_manager.set_recent_workspace(workspace_path)
 
 
-def update(self):
+@app.command(help="Stop background ComfyUI")
+@tracking.track_command()
+def update(
+    ctx: typer.Context,
+    target: str = typer.Argument("comfy", help="[all|comfy]")
+):
+    if target not in ['all', 'comfy']:
+        typer.echo(
+            f"Invalid target: {target}. Allowed targets are 'all', 'comfy'.",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
     _env_checker = EnvChecker()
-    print(f"Updating ComfyUI in {self.workspace}...")
-    os.chdir(self.workspace)
-    subprocess.run(["git", "pull"], check=True)
-    subprocess.run(
-        [sys.executable, "-m", "pip", "install", "-r", "requirements.txt"], check=True
-    )
+    comfy_path = workspace_manager.get_workspace_comfy_path(ctx)
+
+    if 'all' == target:
+        custom_nodes.command.execute_cm_cli(ctx, ['update', 'all'])
+    else:
+        print(f"Updating ComfyUI in {comfy_path}...")
+        os.chdir(comfy_path)
+        subprocess.run(["git", "pull"], check=True)
+        subprocess.run(
+            [sys.executable, "-m", "pip", "install", "-r", "requirements.txt"], check=True
+        )
 
 
 # @app.command(help="Run workflow file")
@@ -236,6 +253,7 @@ def launch_comfyui(_env_checker, _config_manager, extra, background=False):
 
 
 @app.command(help="Stop background ComfyUI")
+@tracking.track_command()
 def stop():
     _config_manager = ConfigManager()
 
