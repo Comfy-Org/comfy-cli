@@ -45,7 +45,6 @@ jobs:
           formula-path: Formula/comfy-cli.rb
           homebrew-tap: Comfy-Org/homebrew-comfy-cli
           base-branch: main  # Adjust if your default branch is different
-          download-url: https://files.pythonhosted.org/packages/source/c/comfy-cli/comfy-cli-${{ env.VERSION }}.tar.gz
           commit-message: |
             Update comfy-cli to ${{ env.VERSION }}
 
