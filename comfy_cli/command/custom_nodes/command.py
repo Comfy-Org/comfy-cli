@@ -10,6 +10,7 @@ from rich import print
 import uuid
 from comfy_cli.config_manager import ConfigManager
 from comfy_cli.workspace_manager import WorkspaceManager
+from comfy_cli.registry import publish_node_version, extract_node_configuration
 
 app = typer.Typer()
 manager_app = typer.Typer()
@@ -141,7 +142,6 @@ def show(
         str, "--mode", typer.Option(show_default=False, help="[remote|local|cache]")
     ] = None,
 ):
-
     valid_commands = [
         "installed",
         "enabled",
@@ -183,7 +183,6 @@ def simple_show(
         str, "--mode", typer.Option(show_default=False, help="[remote|local|cache]")
     ] = None,
 ):
-
     valid_commands = [
         "installed",
         "enabled",
@@ -399,3 +398,29 @@ def fix(
         raise typer.Exit(code=1)
 
     execute_cm_cli(ctx, ["fix"] + args, channel, mode)
+
+
+@app.command("publish", help="Publish node to registry")
+@tracking.track_command("node")
+def publish(
+    ctx: typer.Context,
+):
+    """
+    Publish a node with optional validation.
+    """
+
+    # Perform some validation logic here
+    typer.echo("Validating node configuration...")
+    config = extract_node_configuration()
+
+    # Prompt for Personal Access Token
+    token = typer.prompt("Please enter your Personal Access Token", hide_input=True)
+
+    # Call API to fetch node version with the token in the body
+    response = publish_node_version(config, token)
+
+    if response.ok:
+        typer.echo("Node published successfully!")
+    else:
+        typer.echo(f"Failed to publish node: {response.text}", err=True)
+        raise typer.Exit(code=1)

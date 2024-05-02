@@ -1,23 +1,22 @@
-
 # Development Guide
 
 This guide provides an overview of how to develop in this repository.
 
 ## General guide
 
-1. Clone the repo, create and activate a conda env
+1. Clone the repo, create and activate a conda env. Minimum Python version is 3.9.
 
 2. Install the package to local
 
-  `pip install -e .`
+`pip install -e .`
 
 3. Test script running
 
-  `comfy --help`
+`comfy --help`
 
 4. Use pre commit hook
 
-  `pre-commit install`
+`pre-commit install`
 
 ## Make changes to the code base
 
@@ -28,7 +27,7 @@ env and reinstalling the package (`pip install -e .`)
 
 ## Add New Command
 
-- Register it under `comfy_cli/cmdline.py` 
+- Register it under `comfy_cli/cmdline.py`
 
 If it's contains subcommand, create folder under comfy_cli/command/[new_command] and
 add the following boilerplate
@@ -58,21 +57,6 @@ def remove(name: str):
   print(f"Removing a custom node: {name}")
 
 ```
-
-## Code explainer:
-
-- `comfy_cli/cmdline.py` is the entry point of the CLI
-- `comfy_cli/command/` contains definition for some commands (e.g. `node`,
-  `model`, etc)
-- `comfy_cli/config_manager.py` implements ConfigManager class that handles
-  comfy_cli configuration (config.ini) file reading and writing
-- `comfy_cli/workspace_manager.py` implements WorkspaceManager class that
-  handles which ComfyUI workspace (path) and defines workspace comfy-lock.yaml
-  file that register the state fo the comfy workspace.
-- `comfy_cli/env_checker.py` implements EnvChecker class that helps with python
-  env related variables
-- `comfy_cli/tracking.py` handles opt-in anonymous telemetry data from users.
-
 
 ## Guide
 
