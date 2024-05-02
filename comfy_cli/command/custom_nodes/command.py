@@ -50,7 +50,9 @@ def execute_cm_cli(ctx: typer.Context, args, channel=None, mode=None, silent=Fal
     print(f"Execute from: {comfyui_path}")
 
     if silent:
-        subprocess.run(cmd, env=new_env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run(
+            cmd, env=new_env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        )
     else:
         subprocess.run(cmd, env=new_env)
 
