@@ -35,39 +35,18 @@ jobs:
 
       - name: Publish distribution to PyPI
         uses: pypa/gh-action-pypi-publish@v1.8.14
-            
-  update-homebrew-formula:
-    needs: build-n-publish
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout Homebrew repo
-        uses: actions/checkout@v3
+
+      - name: Bump Homebrew formula
+        uses: mislav/bump-homebrew-formula-action@v3
+        env:
+          COMMITTER_TOKEN: ${{ secrets.COMMITTER_TOKEN }}
         with:
-          repository: Comfy-Org/homebrew-comfy-cli
-          path: homebrew-comfy-cli
+          formula-name: comfy-cli
+          formula-path: Formula/comfy-cli.rb
+          homebrew-tap: Comfy-Org/homebrew-comfy-cli
+          base-branch: main  # Adjust if your default branch is different
+          download-url: https://files.pythonhosted.org/packages/source/c/comfy-cli/comfy-cli-${{ env.VERSION }}.tar.gz
+          commit-message: |
+            Update comfy-cli to ${{ env.VERSION }}
 
-      - name: Set up Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.x'
-
-      - name: Create virtual environment and update formula
-        run: |
-          python3 -m venv venv
-          source venv/bin/activate
-          pip install comfy-cli homebrew-pypi-poet
-          mkdir -p homebrew-comfy-cli/Formula
-          poet -f comfy-cli > homebrew-comfy-cli/Formula/comfy-cli.rb
-
-      - name: Commit and push changes
-        run: |
-          cd homebrew-comfy-cli
-          git config --global user.name 'GitHub Actions'
-          git config --global user.email 'actions@github.com'
-          git add Formula/comfy-cli.rb
-          if git diff --staged --quiet; then
-            echo "No changes to commit."
-          else
-            git commit -m "Update comfy-cli formula"
-            git push
-          fi
+            Created by actions/bump-homebrew-formula-action
