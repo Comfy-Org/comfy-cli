@@ -62,7 +62,7 @@ class WorkspaceManager:
         Retrieves the workspace path and appends '/ComfyUI' to it.
         """
 
-        return self.get_workspace_path(context) + "/ComfyUI"
+        return os.path.join(self.get_workspace_path(context), "ComfyUI")
 
     def get_workspace_path(self, context: typer.Context) -> str:
         """

@@ -35,6 +35,16 @@ will simply update the comfy.yaml file to reflect the local setup
   * **(WIP)** `comfy install --snapshot=<comfy-lock.yaml path>`: Install ComfyUI and whole environments from snapshot.
     * **(WIP)** Currently, only the installation of ComfyUI and custom nodes is being applied.
 
+
+### Backup Snapshot [WIP]
+
+To backup ComfyUI Environment:
+
+`comfy backup --output=<.yaml path>`
+
+This command is used to perform a full backup of the currently installed ComfyUI Environment.
+**(WIP)** Currently, only the ComfyUI and Custom node information are backed up.
+
 ### Specifying execution path
 
 * You can specify the path of ComfyUI where the command will be applied through path indicators as follows:
@@ -98,6 +108,7 @@ comfy allows you to easily install, update, and remove packages for ComfyUI. Her
 - List installed packages:
 
   `comfy package list`
+
 
 
 ### Managing Custom Nodes

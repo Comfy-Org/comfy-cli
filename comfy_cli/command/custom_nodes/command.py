@@ -16,7 +16,7 @@ manager_app = typer.Typer()
 workspace_manager = WorkspaceManager()
 
 
-def execute_cm_cli(ctx: typer.Context, args, channel=None, mode=None):
+def execute_cm_cli(ctx: typer.Context, args, channel=None, mode=None, silent=False):
     _config_manager = ConfigManager()
 
     workspace_path = workspace_manager.get_workspace_path(ctx)
@@ -49,7 +49,11 @@ def execute_cm_cli(ctx: typer.Context, args, channel=None, mode=None):
 
     print(f"Execute from: {comfyui_path}")
 
-    subprocess.run(cmd, env=new_env)
+    if silent:
+        subprocess.run(cmd, env=new_env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    else:
+        subprocess.run(cmd, env=new_env)
+
     workspace_manager.set_recent_workspace(workspace_path)
 
 

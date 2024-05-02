@@ -4,6 +4,8 @@ import sys
 import time
 import uuid
 import webbrowser
+import yaml
+
 from typing import Optional
 
 import questionary
@@ -65,6 +67,45 @@ def init():
     tracking.prompt_tracking_consent()
 
     print(f"scan_dir took {end_time - start_time:.2f} seconds to run")
+
+
+@app.command(help="Backup current snapshot")
+@tracking.track_command()
+def backup(
+    ctx: typer.Context,
+    output: Annotated[
+            str,
+            "--output",
+            typer.Option(
+                show_default=False, help="Specify the output file path. (.yaml)"
+            ),
+        ],
+):
+
+    if not output.endswith('.yaml'):
+        print(
+            f"[bold red]The output path must end with '.yaml'.[/bold red]"
+        )
+        raise typer.Exit(code=1)
+
+    output_path = os.path.abspath(output)
+
+    config_manager = workspace_manager.config_manager
+    tmp_path = os.path.join(config_manager.get_config_path(), "tmp", str(uuid.uuid4())) + '.yaml'
+    tmp_path = os.path.abspath(tmp_path)
+    custom_nodes.command.execute_cm_cli(ctx, ["save-snapshot", "--output", tmp_path], silent=True)
+
+    with open(tmp_path, 'r', encoding="UTF-8") as yaml_file:
+        info = yaml.load(yaml_file, Loader=yaml.SafeLoader)
+    os.remove(tmp_path)
+
+    info['basic'] = 'N/A'   # TODO:
+    info['models'] = []     # TODO:
+
+    with open(output_path, "w") as yaml_file:
+        yaml.dump(info, yaml_file, allow_unicode=True)
+
+    print(f"Snapshot file is saved as `{output_path}`")
 
 
 @app.command(help="Download and install ComfyUI and ComfyUI-Manager")
