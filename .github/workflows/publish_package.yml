@@ -1,0 +1,64 @@
+name: Publish and Update Formula
+
+on:
+  release:
+    types: [ created ]
+
+jobs:
+  upload-to-pypi:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.x'
+
+      - name: Install Dependencies
+        run: |
+          python3 -m pip install --upgrade twine 
+
+      - name: Download Release Artifacts
+        uses: actions/download-artifact@v3
+        with:
+          name: dist  # Make sure this matches the artifact name from your build job
+
+      - name: Upload to PyPI
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN }}
+        run: |
+          twine upload dist/*
+
+  update-homebrew-formula:
+    needs: upload-to-pypi
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Homebrew repo
+        uses: actions/checkout@v3
+        with:
+          repository: Comfy-Org/homebrew-comfy-cli
+          path: homebrew-comfy-cli
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.x'
+
+      - name: Create virtual environment and update formula
+        run: |
+          python3 -m venv venv
+          source venv/bin/activate
+          pip install comfy-cli homebrew-pypi-poet
+          poet -f comfy-cli > Formula/comfy-cli.rb  # Directly overwrite the existing file
+
+      - name: Commit and push changes
+        run: |
+          cd homebrew-comfy-cli
+          git config --global user.name 'GitHub Actions'
+          git config --global user.email 'actions@github.com'
+          git add Formula/comfy-cli.rb
+          git commit -m "Update comfy-cli formula"
+          git push
