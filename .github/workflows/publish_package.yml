@@ -20,7 +20,7 @@ jobs:
             
 
   update-homebrew-formula:
-    needs: upload-to-pypi
+    needs: pypi-publish
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Homebrew repo
