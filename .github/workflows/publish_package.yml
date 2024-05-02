@@ -18,15 +18,11 @@ jobs:
 
       - name: Install Dependencies
         run: |
-          python3 -m pip install --upgrade twine 
+          python3 -m pip install --upgrade twine build
 
-      - name: Download Release Artifacts
-        uses: actions/download-artifact@v3
-        with:
-          name: dist  # Make sure this matches the artifact name from your build job
-
-      - name: Upload to PyPI
+      - name: Build and upload to PyPI
         run: |
+          python -m build
           twine upload dist/*
 
   update-homebrew-formula:
