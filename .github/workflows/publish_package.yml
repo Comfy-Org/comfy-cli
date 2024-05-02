@@ -5,25 +5,19 @@ on:
     types: [ created ]
 
 jobs:
-  upload-to-pypi:
+  pypi-publish:
+    name: Upload release to PyPI
     runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/<your-pypi-project-name>
+    permissions:
+      id-token: write  # IMPORTANT: this permission is mandatory for trusted publishing
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
+    # retrieve your distributions here
 
-      - name: Set up Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.x'
-
-      - name: Install Dependencies
-        run: |
-          python3 -m pip install --upgrade twine build
-
-      - name: Build and upload to PyPI
-        run: |
-          python -m build
-          twine upload dist/*
+    - name: Publish package distributions to PyPI
+      uses: pypa/gh-action-pypi-publish@release/v1
 
   update-homebrew-formula:
     needs: upload-to-pypi
