@@ -36,7 +36,6 @@ jobs:
       - name: Publish distribution to PyPI
         uses: pypa/gh-action-pypi-publish@v1.8.14
             
-
   update-homebrew-formula:
     needs: build-n-publish
     runs-on: ubuntu-latest
@@ -57,7 +56,8 @@ jobs:
           python3 -m venv venv
           source venv/bin/activate
           pip install comfy-cli homebrew-pypi-poet
-          poet -f comfy-cli > Formula/comfy-cli.rb  # Directly overwrite the existing file
+          mkdir -p homebrew-comfy-cli/Formula
+          poet -f comfy-cli > homebrew-comfy-cli/Formula/comfy-cli.rb
 
       - name: Commit and push changes
         run: |
