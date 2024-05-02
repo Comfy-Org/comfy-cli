@@ -26,9 +26,6 @@ jobs:
           name: dist  # Make sure this matches the artifact name from your build job
 
       - name: Upload to PyPI
-        env:
-          TWINE_USERNAME: __token__
-          TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN }}
         run: |
           twine upload dist/*
 
