@@ -137,7 +137,7 @@ comfy node [show|simple-show] [installed|enabled|not-installed|disabled|all|snap
   `comfy manager clear`
 
 
-## Format of comfy.yaml (WIP)
+## Format of comfy-lock.yaml (WIP)
 
 ```
 basic:
