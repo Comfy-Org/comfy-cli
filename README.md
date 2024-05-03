@@ -7,6 +7,7 @@ comfy-cli is a command line tool that helps users easily install and manage [Com
 - 🚀 Easy installation of ComfyUI with a single command
 - 📦 Seamless package management for ComfyUI extensions and dependencies
 - 🔧 Custom node management for extending ComfyUI's functionality
+- 🗄️ Download checkpoints and save model hash
 - 💻 Cross-platform compatibility (Windows, macOS, Linux)
 - 📖 Comprehensive documentation and examples
 
@@ -54,7 +55,7 @@ will simply update the comfy.yaml file to reflect the local setup
   * `comfy node update all`
 
 * You can use the `comfy which` command to check the path of the target workspace.
-  * e.g) `comfy --recent which`, `comfy --here which`, `comfy which`, ...
+  * e.g `comfy --recent which`, `comfy --here which`, `comfy which`, ...
 
 ### Launch ComfyUI
 
