@@ -32,10 +32,10 @@ class ProjectConfig:
     requires_python: str = ">= 3.9"
     dependencies: List[str] = field(default_factory=list)
     license: str = ""
-    urls: URLs = URLs()
+    urls: URLs = field(default_factory=URLs)
 
 
 @dataclass
 class PyProjectConfig:
-    project: ProjectConfig = ProjectConfig()
-    tool_comfy: ComfyConfig = ComfyConfig()
+    project: ProjectConfig = field(default_factory=ProjectConfig)
+    tool_comfy: ComfyConfig = field(default_factory=ComfyConfig)
