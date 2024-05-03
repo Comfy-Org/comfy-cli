@@ -4,3 +4,9 @@ repos:
     hooks:
       - id: black
         language_version: python3.9
+  - repo: https://github.com/pylint-dev/pylint
+    rev: v2.16.2
+    hooks:
+      - id: pylint
+        args:
+          - --disable=R,C,W,E0401

@@ -762,7 +762,7 @@ def display_all_nodes():
 
 @app.command("registry-install", help="Install a node from the registry", hidden=True)
 @tracking.track_command("node")
-def install(node_id: str, version: Optional[str] = None):
+def registry_install(node_id: str, version: Optional[str] = None):
     """
     Install a node from the registry.
     Args:
