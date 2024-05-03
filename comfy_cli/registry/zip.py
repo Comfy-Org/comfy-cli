@@ -26,4 +26,5 @@ def zip_files(zip_filename):
                     )
 
 
-zip_files("node.tar.gz")
+# TODO: check this code. this make slow down comfy-cli extremely
+# zip_files("node.tar.gz")
