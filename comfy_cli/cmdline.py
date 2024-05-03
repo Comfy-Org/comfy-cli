@@ -157,8 +157,7 @@ def install(
     )
 
     if snapshot is not None:
-        checker.check()
-        install_inner.apply_snapshot(checker, snapshot)
+        snapshot_command.apply_snapshot(snapshot)
 
     print(f"ComfyUI is installed at: {comfy_path}")
 
@@ -199,7 +198,7 @@ def update(target: str = typer.Argument("comfy", help="[all|comfy]")):
 def validate_comfyui(_env_checker):
     if _env_checker.comfy_repo is None:
         print(
-            f"[bold red]If ComfyUI is not installed, this feature cannot be used.[/bold red]"
+            "[bold red]If ComfyUI is not installed, this feature cannot be used.[/bold red]"
         )
         raise typer.Exit(code=1)
 

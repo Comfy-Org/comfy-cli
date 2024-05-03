@@ -4,6 +4,7 @@ from typing_extensions import Annotated
 from comfy_cli import tracking, ui
 from comfy_cli.workspace_manager import WorkspaceManager
 from comfy_cli.command import custom_nodes
+from rich import print
 import uuid
 import yaml
 
@@ -12,7 +13,7 @@ workspace_manager = WorkspaceManager()
 app = typer.Typer()
 
 
-@app.command(help="Save current snapshot")
+@app.command(help="Save current snapshot to .yaml file")
 @tracking.track_command()
 def save(
     output: Annotated[
@@ -49,3 +50,34 @@ def save(
         yaml.dump(info, yaml_file, allow_unicode=True)
 
     print(f"Snapshot file is saved as `{output_path}`")
+
+
+@app.command(help="Restore from snapshot file")
+@tracking.track_command()
+def restore(
+    input: Annotated[
+        str,
+        "--input",
+        typer.Option(show_default=False, help="Specify the input file path. (.yaml)"),
+    ],
+):
+    input_path = os.path.abspath(input)
+    apply_snapshot(input_path)
+
+    #TODO: restore other properties
+
+
+def apply_snapshot(filepath):
+    if not os.path.exists(filepath):
+        print(f"[bold red]File not found: {filepath}[/bold red]")
+        raise typer.Exit(code=1)
+
+    if workspace_manager.get_comfyui_manager_path() is None or not os.path.exists(
+        workspace_manager.get_comfyui_manager_path()
+    ):
+        print(
+            "[bold red]If ComfyUI-Manager is not installed, the snapshot feature cannot be used.[/bold red]"
+        )
+        raise typer.Exit(code=1)
+
+    custom_nodes.command.restore_snapshot(filepath)

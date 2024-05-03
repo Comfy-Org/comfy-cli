@@ -2,8 +2,6 @@ import os
 import subprocess
 from rich import print
 import sys
-import typer
-from comfy_cli.command import custom_nodes
 from comfy_cli.workspace_manager import WorkspaceManager
 
 
@@ -114,19 +112,3 @@ def execute(
     os.chdir(repo_dir)
 
     print("")
-
-
-def apply_snapshot(checker, filepath):
-    if not os.path.exists(filepath):
-        print(f"[bold red]File not found: {filepath}[/bold red]")
-        raise typer.Exit(code=1)
-
-    if checker.get_comfyui_manager_path() is not None and os.path.exists(
-        checker.get_comfyui_manager_path()
-    ):
-        print(
-            f"[bold red]If ComfyUI-Manager is not installed, the snapshot feature cannot be used.[/bold red]"
-        )
-        raise typer.Exit(code=1)
-
-    custom_nodes.command.restore_snapshot(filepath)

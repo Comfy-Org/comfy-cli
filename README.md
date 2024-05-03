@@ -36,14 +36,19 @@ will simply update the comfy.yaml file to reflect the local setup
     * **(WIP)** Currently, only the installation of ComfyUI and custom nodes is being applied.
 
 
-### Backup Snapshot [WIP]
+### Snapshot [WIP]
 
-To backup ComfyUI Environment:
+To save ComfyUI Environment:
 
-`comfy backup --output=<.yaml path>`
+`comfy snapshot save --output=<.yaml path>`
 
-This command is used to perform a full backup of the currently installed ComfyUI Environment.
+To retore ComfyUI Environment:
+
+`comfy snapshot restore --input=<.yaml path>`
+
+This command is used to perform a full backup/restore of the currently installed ComfyUI Environment.
 **(WIP)** Currently, only the ComfyUI and Custom node information are backed up.
+
 
 ### Specifying execution path
 
