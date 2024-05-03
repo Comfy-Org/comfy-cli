@@ -64,7 +64,7 @@ def restore(
     input_path = os.path.abspath(input)
     apply_snapshot(input_path)
 
-    #TODO: restore other properties
+    # TODO: restore other properties
 
 
 def apply_snapshot(filepath):
