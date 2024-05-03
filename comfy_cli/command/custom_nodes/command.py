@@ -426,15 +426,15 @@ def fix(
 #     upload_file_to_signed_url(signed_url, zip_filename)
 
 
-@app.command("init", help="Init scaffolding for custom node")
-@tracking.track_command("node")
-def scaffold():
-    if os.path.exists("comfynode.toml"):
-        typer.echo("Warning: 'comfynode.toml' already exists. Will not overwrite.")
-        raise typer.Exit(code=1)
+# @app.command("init", help="Init scaffolding for custom node")
+# @tracking.track_command("node")
+# def scaffold():
+#     if os.path.exists("comfynode.toml"):
+#         typer.echo("Warning: 'comfynode.toml' already exists. Will not overwrite.")
+#         raise typer.Exit(code=1)
 
-    typer.echo("Initializing metadata...")
-    initialize_project_config()
-    typer.echo(
-        "comfynode.toml created successfully. Defaults were filled in. Please check before publishing."
-    )
+#     typer.echo("Initializing metadata...")
+#     initialize_project_config()
+#     typer.echo(
+#         "comfynode.toml created successfully. Defaults were filled in. Please check before publishing."
+#     )
