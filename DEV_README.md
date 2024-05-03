@@ -28,18 +28,18 @@ env and reinstalling the package (`pip install -e .`)
 
 ## Add New Command
 
-- Register it under `comfy/cmdline.py` 
+- Register it under `comfy_cli/cmdline.py` 
 
-If it's contains subcommand, create folder under comfy/command/[new_command] and
+If it's contains subcommand, create folder under comfy_cli/command/[new_command] and
 add the following boilerplate
 
-`comfy/command/[new_command]/__init__.py`
+`comfy_cli/command/[new_command]/__init__.py`
 
 ```
 from .command import app
 ```
 
-`comfy/command/[new_command]command.py`
+`comfy_cli/command/[new_command]command.py`
 
 ```
 import typer
@@ -58,6 +58,20 @@ def remove(name: str):
   print(f"Removing a custom node: {name}")
 
 ```
+
+## Code explainer:
+
+- `comfy_cli/cmdline.py` is the entry point of the CLI
+- `comfy_cli/command/` contains definition for some commands (e.g. `node`,
+  `model`, etc)
+- `comfy_cli/config_manager.py` implements ConfigManager class that handles
+  comfy_cli configuration (config.ini) file reading and writing
+- `comfy_cli/workspace_manager.py` implements WorkspaceManager class that
+  handles which ComfyUI workspace (path) and defines workspace comfy-lock.yaml
+  file that register the state fo the comfy workspace.
+- `comfy_cli/env_checker.py` implements EnvChecker class that helps with python
+  env related variables
+- `comfy_cli/tracking.py` handles opt-in anonymous telemetry data from users.
 
 
 ## Guide

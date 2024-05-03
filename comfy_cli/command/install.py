@@ -12,19 +12,34 @@ def install_comfyui_dependencies(repo_dir, torch_mode):
         pip_url = ["--extra-index-url", "https://download.pytorch.org/whl/rocm6.0"]
     else:
         pip_url = ["--extra-index-url", "https://download.pytorch.org/whl/cu121"]
-    subprocess.run(
+    result = subprocess.run(
         [sys.executable, "-m", "pip", "install", "torch", "torchvision", "torchaudio"]
-        + pip_url
+        + pip_url,
+        check=False,
     )
+    if result.returncode != 0:
+        print(
+            "Failed to install PyTorch dependencies. Please check your environment (`comfy env`) and try again"
+        )
+        sys.exit(1)
 
     # install other requirements
-    subprocess.run([sys.executable, "-m", "pip", "install", "-r", "requirements.txt"])
+    result = subprocess.run(
+        [sys.executable, "-m", "pip", "install", "-r", "requirements.txt"], check=False
+    )
+    if result.returncode != 0:
+        print(
+            "Failed to install ComfyUI dependencies. Please check your environment (`comfy env`) and try again."
+        )
+        sys.exit(1)
 
 
 # install requirements for manager
 def install_manager_dependencies(repo_dir):
     os.chdir(os.path.join(repo_dir, "custom_nodes", "ComfyUI-Manager"))
-    subprocess.run([sys.executable, "-m", "pip", "install", "-r", "requirements.txt"])
+    subprocess.run(
+        [sys.executable, "-m", "pip", "install", "-r", "requirements.txt"], check=True
+    )
 
 
 def execute(

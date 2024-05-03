@@ -10,12 +10,12 @@ from comfy_cli.constants import DEFAULT_COMFY_MODEL_PATH
 from comfy_cli.workspace_manager import WorkspaceManager
 
 app = typer.Typer()
+
 workspace_manager = WorkspaceManager()
 
 
-def get_workspace(ctx: typer.Context) -> pathlib.Path:
-    workspace_path = workspace_manager.get_workspace_comfy_path(ctx)
-    return pathlib.Path(workspace_path)
+def get_workspace() -> pathlib.Path:
+    return pathlib.Path(workspace_manager.workspace_path)
 
 
 @app.command()

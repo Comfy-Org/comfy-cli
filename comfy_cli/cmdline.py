@@ -19,52 +19,74 @@ from comfy_cli.command import run as run_inner
 from comfy_cli.command.models import models as models_command
 from comfy_cli.config_manager import ConfigManager
 from comfy_cli.env_checker import EnvChecker, check_comfy_server_running
-from comfy_cli.meta_data import MetadataManager
 from comfy_cli.workspace_manager import WorkspaceManager
 
+logging.setup_logging()
 app = typer.Typer()
-workspace_manager = WorkspaceManager()
 
 
 def main():
     app()
 
 
+def mutually_exclusive_group_options():
+    group = []
+
+    def callback(_ctx: typer.Context, param: typer.CallbackParam, value: str):
+        # Add cli option to group if it was called with a value
+        if value is not None and param.name not in group:
+            group.append(param.name)
+        if len(group) > 1:
+            raise typer.BadParameter(
+                f"option `{param.name}` is mutually exclusive with option `{group[0]}`"
+            )
+        return value
+
+    return callback
+
+
+exclusivity_callback = mutually_exclusive_group_options()
+
+
 @app.callback(invoke_without_command=True)
 def entry(
     ctx: typer.Context,
     workspace: Optional[str] = typer.Option(
-        default=None, show_default=False, help="Path to ComfyUI workspace"
+        default=None,
+        show_default=False,
+        help="Path to ComfyUI workspace",
+        callback=exclusivity_callback,
     ),
     recent: Optional[bool] = typer.Option(
-        default=False, show_default=False, is_flag=True, help="Execute from recent path"
+        default=None,
+        show_default=False,
+        is_flag=True,
+        help="Execute from recent path",
+        callback=exclusivity_callback,
     ),
     here: Optional[bool] = typer.Option(
-        default=False,
+        default=None,
         show_default=False,
         is_flag=True,
         help="Execute from current path",
+        callback=exclusivity_callback,
     ),
 ):
+    workspace_manager = WorkspaceManager()
+    workspace_manager.setup_workspace_manager(workspace, here, recent)
+
+    tracking.prompt_tracking_consent()
+
     if ctx.invoked_subcommand is None:
         print(ctx.get_help())
         ctx.exit()
-
-    ctx.ensure_object(dict)  # Ensure that ctx.obj exists and is a dict
-    workspace_manager.update_context(ctx, workspace, recent, here)
-    init()
-
-
-def init():
-    # TODO(yoland): after this
-    metadata_manager = MetadataManager()
     start_time = time.time()
-    metadata_manager.scan_dir()
+    workspace_manager.scan_dir()
     end_time = time.time()
-    logging.setup_logging()
-    tracking.prompt_tracking_consent()
 
     print(f"scan_dir took {end_time - start_time:.2f} seconds to run")
+    logging.warning(f"scan_dir took {end_time - start_time:.2f} seconds to run")
+    logging.info(f"scan_dir took {end_time - start_time:.2f} seconds to run")
 
 
 @app.command(help="Download and install ComfyUI and ComfyUI-Manager")
@@ -104,7 +126,7 @@ def install(
     elif use_here:
         workspace_path = os.getcwd()
     else:  # For installation, if not explicitly specified, it will only install in the default path.
-        workspace_path = os.path.expanduser("~/comfy")
+        workspace_path = utils.get_not_user_set_default_workspace()
 
     if checker.python_version.major < 3:
         print(
@@ -265,7 +287,7 @@ def launch(
     _env_checker = EnvChecker()
     _config_manager = ConfigManager()
 
-    resolved_workspace = workspace_manager.get_workspace_path(ctx)
+    resolved_workspace = workspace_manager.get_workspace_path()
     if not resolved_workspace:
         print(
             "\nComfyUI is not available.\nTo install ComfyUI, you can run:\n\n\tcomfy install\n\n",
