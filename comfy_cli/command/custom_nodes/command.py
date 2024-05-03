@@ -10,7 +10,12 @@ from rich import print
 import uuid
 from comfy_cli.config_manager import ConfigManager
 from comfy_cli.workspace_manager import WorkspaceManager
-from comfy_cli.registry import publish_node_version, extract_node_configuration
+from comfy_cli.registry import (
+    publish_node_version,
+    extract_node_configuration,
+    upload_file_to_signed_url,
+    zip_files,
+)
 
 app = typer.Typer()
 manager_app = typer.Typer()
@@ -417,10 +422,15 @@ def publish(
     token = typer.prompt("Please enter your Personal Access Token", hide_input=True)
 
     # Call API to fetch node version with the token in the body
+    typer.echo("Publishing node version...")
     response = publish_node_version(config, token)
 
-    if response.ok:
-        typer.echo("Node published successfully!")
-    else:
-        typer.echo(f"Failed to publish node: {response.text}", err=True)
-        raise typer.Exit(code=1)
+    # Zip up all files in the current directory, respecting .gitignore files.
+    signed_url = response.signedUrl
+    zip_filename = "node.tar.gz"
+    typer.echo("Creating zip file...")
+    zip_files(zip_filename)
+
+    # Upload the zip file to the signed URL
+    typer.echo("Uploading zip file...")
+    upload_file_to_signed_url(signed_url, zip_filename)
