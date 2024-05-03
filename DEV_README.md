@@ -1,23 +1,22 @@
-
 # Development Guide
 
 This guide provides an overview of how to develop in this repository.
 
 ## General guide
 
-1. Clone the repo, create and activate a conda env
+1. Clone the repo, create and activate a conda env. Minimum Python version is 3.9.
 
 2. Install the package to local
 
-  `pip install -e .`
+`pip install -e .`
 
 3. Test script running
 
-  `comfy --help`
+`comfy --help`
 
 4. Use pre commit hook
 
-  `pre-commit install`
+`pre-commit install`
 
 ## Make changes to the code base
 
@@ -28,18 +27,18 @@ env and reinstalling the package (`pip install -e .`)
 
 ## Add New Command
 
-- Register it under `comfy/cmdline.py` 
+- Register it under `comfy_cli/cmdline.py`
 
-If it's contains subcommand, create folder under comfy/command/[new_command] and
+If it's contains subcommand, create folder under comfy_cli/command/[new_command] and
 add the following boilerplate
 
-`comfy/command/[new_command]/__init__.py`
+`comfy_cli/command/[new_command]/__init__.py`
 
 ```
 from .command import app
 ```
 
-`comfy/command/[new_command]command.py`
+`comfy_cli/command/[new_command]command.py`
 
 ```
 import typer
@@ -58,7 +57,6 @@ def remove(name: str):
   print(f"Removing a custom node: {name}")
 
 ```
-
 
 ## Guide
 

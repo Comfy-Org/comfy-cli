@@ -5,3 +5,4 @@ requests
 pyyaml
 typing-extensions
 mixpanel
+tomlkit

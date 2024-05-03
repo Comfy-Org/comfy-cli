@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "comfy-cli"
 license = {file = "LICENSE"}
 version = "2024.4.30"
-requires-python = ">= 3.8"
+requires-python = ">= 3.9"
 description = "A CLI tool for installing and using ComfyUI."
 readme = "README.md"
 keywords = ["comfyui", "stable diffusion"]

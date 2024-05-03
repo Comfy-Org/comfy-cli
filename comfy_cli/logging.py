@@ -11,10 +11,17 @@ Therefore, it's a good idea to encapsulate logging-related code in a separate mo
 
 def setup_logging():
     # TODO: consider supporting different ways of outputting logs
-    # Note: by default, the log level is set to INFO
-    log_level = os.getenv("LOG_LEVEL", "WARN").upper()
+    # Note: by default, the log level is set to WARN
+    log_levels = {
+        "DEBUG": logging.DEBUG,
+        "INFO": logging.INFO,
+        "WARNING": logging.WARNING,
+        "ERROR": logging.ERROR,
+        "CRITICAL": logging.CRITICAL,
+    }
+    log_level_key = os.getenv("LOG_LEVEL", "WARN").upper()
     logging.basicConfig(
-        level=log_level,
+        level=log_levels.get(log_level_key, logging.WARNING),
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )

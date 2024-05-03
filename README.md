@@ -89,28 +89,6 @@ Comfy provides commands that allow you to easily run the installed ComfyUI.
   - Background-running ComfyUI can be stopped with `comfy stop`.
 
 
-### Managing Packages [WIP]
-
-comfy allows you to easily install, update, and remove packages for ComfyUI. Here are some examples:
-
-- Install a package:
-
-  `comfy package install package-name`
-
-- Update a package:
-
-  `comfy package update package-name`
-
-- Remove a package:
-
-  `comfy package remove package-name`
-
-- List installed packages:
-
-  `comfy package list`
-
-
-
 ### Managing Custom Nodes
 
 comfy provides a convenient way to manage custom nodes for extending ComfyUI's functionality. Here are some examples:
@@ -170,7 +148,7 @@ comfy node [show|simple-show] [installed|enabled|not-installed|disabled|all|snap
   `comfy manager clear`
 
 
-## Format of comfy.yaml (WIP)
+## Format of comfy-lock.yaml (WIP)
 
 ```
 basic:
