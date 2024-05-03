@@ -39,7 +39,7 @@ def download(
     """Download a model to a specified relative path if it is not already downloaded."""
     # Convert relative path to absolute path based on the current working directory
     local_filename = url.split("/")[-1]
-    local_filepath = get_workspace(ctx) / relative_path / local_filename
+    local_filepath = get_workspace() / relative_path / local_filename
 
     # Check if the file already exists
     if local_filepath.exists():
@@ -67,7 +67,7 @@ def remove(
     ),
 ):
     """Remove one or more downloaded models, either by specifying them directly or through an interactive selection."""
-    model_dir = get_workspace(ctx) / relative_path
+    model_dir = get_workspace() / relative_path
     available_models = list_models(model_dir)
 
     if not available_models:
@@ -128,7 +128,7 @@ def list(
     ),
 ):
     """Display a list of all models currently downloaded in a table format."""
-    model_dir = get_workspace(ctx) / relative_path
+    model_dir = get_workspace() / relative_path
     models = list_models(model_dir)
 
     if not models:
