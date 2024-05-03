@@ -6,3 +6,4 @@ pyyaml
 typing-extensions
 mixpanel
 tomlkit
+pathspec

@@ -28,6 +28,8 @@ dependencies = [
     "mixpanel",
     "questionary",
     "psutil",
+    "tomlkit",
+    "pathspec",
 ]
 
 classifiers = [
