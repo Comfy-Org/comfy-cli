@@ -84,7 +84,6 @@ def entry(
     workspace_manager.scan_dir()
     end_time = time.time()
 
-    print(f"scan_dir took {end_time - start_time:.2f} seconds to run")
     logging.info(f"scan_dir took {end_time - start_time:.2f} seconds to run")
 
 
