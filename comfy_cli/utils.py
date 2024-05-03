@@ -36,6 +36,10 @@ def get_os():
     return constants.OS.LINUX
 
 
+def get_not_user_set_default_workspace():
+    return constants.DEFAULT_COMFY_WORKSPACE[get_os()]
+
+
 def kill_all(pid):
     try:
         parent = psutil.Process(pid)

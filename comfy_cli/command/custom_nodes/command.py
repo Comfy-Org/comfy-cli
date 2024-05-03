@@ -10,24 +10,31 @@ from rich import print
 import uuid
 from comfy_cli.config_manager import ConfigManager
 from comfy_cli.workspace_manager import WorkspaceManager
+from comfy_cli.registry import (
+    publish_node_version,
+    extract_node_configuration,
+    upload_file_to_signed_url,
+    zip_files,
+    initialize_project_config,
+)
 
 app = typer.Typer()
 manager_app = typer.Typer()
 workspace_manager = WorkspaceManager()
 
 
-def execute_cm_cli(ctx: typer.Context, args, channel=None, mode=None):
+# TODO: remove ctx as an args
+def execute_cm_cli(_ctx: typer.Context, args, channel=None, mode=None):
     _config_manager = ConfigManager()
 
-    workspace_path = workspace_manager.get_workspace_path(ctx)
-    comfyui_path = os.path.join(workspace_path, "ComfyUI")
+    workspace_path = workspace_manager.workspace_path
 
-    if not os.path.exists(comfyui_path):
-        print(f"\nComfyUI not found: {comfyui_path}\n", file=sys.stderr)
+    if not os.path.exists(workspace_path):
+        print(f"\nComfyUI not found: {workspace_path}\n", file=sys.stderr)
         raise typer.Exit(code=1)
 
     cm_cli_path = os.path.join(
-        comfyui_path, "custom_nodes", "ComfyUI-Manager", "cm-cli.py"
+        workspace_path, "custom_nodes", "ComfyUI-Manager", "cm-cli.py"
     )
     if not os.path.exists(cm_cli_path):
         print(f"\nComfyUI-Manager not found: {cm_cli_path}\n", file=sys.stderr)
@@ -45,9 +52,9 @@ def execute_cm_cli(ctx: typer.Context, args, channel=None, mode=None):
         _config_manager.get_config_path(), "tmp", str(uuid.uuid4())
     )
     new_env["__COMFY_CLI_SESSION__"] = session_path
-    new_env["COMFYUI_PATH"] = comfyui_path
+    new_env["COMFYUI_PATH"] = workspace_path
 
-    print(f"Execute from: {comfyui_path}")
+    print(f"Execute from: {workspace_path}")
 
     subprocess.run(cmd, env=new_env)
     workspace_manager.set_recent_workspace(workspace_path)
@@ -141,7 +148,6 @@ def show(
         str, "--mode", typer.Option(show_default=False, help="[remote|local|cache]")
     ] = None,
 ):
-
     valid_commands = [
         "installed",
         "enabled",
@@ -183,7 +189,6 @@ def simple_show(
         str, "--mode", typer.Option(show_default=False, help="[remote|local|cache]")
     ] = None,
 ):
-
     valid_commands = [
         "installed",
         "enabled",
@@ -399,3 +404,48 @@ def fix(
         raise typer.Exit(code=1)
 
     execute_cm_cli(ctx, ["fix"] + args, channel, mode)
+
+
+@app.command("publish", help="Publish node to registry")
+@tracking.track_command("node")
+def publish(
+    ctx: typer.Context,
+):
+    """
+    Publish a node with optional validation.
+    """
+
+    # Perform some validation logic here
+    typer.echo("Validating node configuration...")
+    config = extract_node_configuration()
+
+    # Prompt for Personal Access Token
+    token = typer.prompt("Please enter your Personal Access Token", hide_input=True)
+
+    # Call API to fetch node version with the token in the body
+    typer.echo("Publishing node version...")
+    response = publish_node_version(config, token)
+
+    # Zip up all files in the current directory, respecting .gitignore files.
+    signed_url = response.signedUrl
+    zip_filename = "node.tar.gz"
+    typer.echo("Creating zip file...")
+    zip_files(zip_filename)
+
+    # Upload the zip file to the signed URL
+    typer.echo("Uploading zip file...")
+    upload_file_to_signed_url(signed_url, zip_filename)
+
+
+@app.command("init", help="Init scaffolding for custom node")
+@tracking.track_command("node")
+def scaffold():
+    if os.path.exists("comfynode.toml"):
+        typer.echo("Warning: 'comfynode.toml' already exists. Will not overwrite.")
+        raise typer.Exit(code=1)
+
+    typer.echo("Initializing metadata...")
+    initialize_project_config()
+    typer.echo(
+        "comfynode.toml created successfully. Defaults were filled in. Please check before publishing."
+    )

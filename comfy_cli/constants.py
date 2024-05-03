@@ -13,9 +13,9 @@ COMFY_MANAGER_GITHUB_URL = "https://github.com/ltdrdata/ComfyUI-Manager"
 
 DEFAULT_COMFY_MODEL_PATH = "models/checkpoints"
 DEFAULT_COMFY_WORKSPACE = {
-    OS.WINDOWS: os.path.join(os.path.expanduser("~"), "Documents", "ComfyUI"),
-    OS.MACOS: os.path.join(os.path.expanduser("~"), "Documents", "ComfyUI"),
-    OS.LINUX: os.path.join(os.path.expanduser("~"), "ComfyUI"),
+    OS.WINDOWS: os.path.join(os.path.expanduser("~"), "Documents", "comfy", "ComfyUI"),
+    OS.MACOS: os.path.join(os.path.expanduser("~"), "Documents", "comfy", "ComfyUI"),
+    OS.LINUX: os.path.join(os.path.expanduser("~"), "comfy", "ComfyUI"),
 }
 
 DEFAULT_CONFIG = {
@@ -35,6 +35,8 @@ CONFIG_KEY_RECENT_WORKSPACE = "recent_workspace"
 CONFIG_KEY_ENABLE_TRACKING = "enable_tracking"
 CONFIG_KEY_BACKGROUND = "background"
 
+COMFY_LOCK_YAML_FILE = "comfy.lock.yaml"
+
 # TODO: figure out a better way to check if this is a comfy repo
 COMFY_ORIGIN_URL_CHOICES = [
     "git@github.com:comfyanonymous/ComfyUI.git",
@@ -48,3 +50,5 @@ COMFY_ORIGIN_URL_CHOICES = [
 # Referencing supported pt extension from ComfyUI
 # https://github.com/comfyanonymous/ComfyUI/blob/a88b0ebc2d2f933c94e42aa689c42e836eedaf3c/folder_paths.py#L5
 SUPPORTED_PT_EXTENSIONS = (".ckpt", ".pt", ".bin", ".pth", ".safetensors")
+
+COMFY_REGISTRY_URL_ROOT = "http://localhost:8080"

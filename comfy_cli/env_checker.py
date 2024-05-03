@@ -53,21 +53,6 @@ def check_comfy_server_running(port=8188):
         return False
 
 
-def check_comfy_repo(path):
-    try:
-        repo = git.Repo(path, search_parent_directories=True)
-        path_is_comfy_repo = any(
-            remote.url in constants.COMFY_ORIGIN_URL_CHOICES for remote in repo.remotes
-        )
-        if path_is_comfy_repo:
-            return path_is_comfy_repo, repo
-        else:
-            return False, None
-    # Not in a git repo at all
-    except git.exc.InvalidGitRepositoryError:
-        return False, None
-
-
 @singleton
 class EnvChecker(object):
     """
@@ -92,30 +77,7 @@ class EnvChecker(object):
         self.virtualenv_path = None
         self.conda_env = None
         self.python_version: None = None
-        self.currently_in_comfy_repo = False
-        self.installed_in_default_repo = False
-        self.comfy_repo = None
         self.check()
-
-    def get_comfyui_manager_path(self):
-        if self.comfy_repo is None:
-            return None
-
-        # To check more robustly, verify up to the `.git` path.
-        manager_path = os.path.join(
-            self.comfy_repo.working_dir, "custom_nodes", "ComfyUI-Manager"
-        )
-        return manager_path
-
-    def is_comfyui_manager_installed(self):
-        if self.comfy_repo is None:
-            return False
-
-        # To check more robustly, verify up to the `.git` path.
-        manager_git_path = os.path.join(
-            self.comfy_repo.working_dir, "custom_nodes", "ComfyUI-Manager", ".git"
-        )
-        return os.path.exists(manager_git_path)
 
     def is_isolated_env(self):
         return self.virtualenv_path or self.conda_env
@@ -140,14 +102,7 @@ class EnvChecker(object):
         )
         self.python_version = sys.version_info
 
-        is_comfy_repo, repo = check_comfy_repo(os.getcwd())
-        if is_comfy_repo:
-            self.currently_in_comfy_repo = True
-            self.comfy_repo = repo
-        else:
-            self.currently_in_comfy_repo = False
-            self.comfy_repo = None
-
+    # TODO: use ui.display_table
     def print(self):
         table = Table(":laptop_computer: Environment", "Value")
         table.add_row("Python Version", format_python_version(sys.version_info))
