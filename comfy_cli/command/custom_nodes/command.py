@@ -2,7 +2,6 @@ import typer
 from typing_extensions import List, Annotated
 
 from comfy_cli import tracking
-from comfy_cli.env_checker import EnvChecker
 import os
 import subprocess
 import sys

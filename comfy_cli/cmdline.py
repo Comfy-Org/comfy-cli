@@ -4,7 +4,6 @@ import sys
 import time
 import uuid
 import webbrowser
-import yaml
 
 from typing import Optional
 
@@ -17,6 +16,7 @@ from typing_extensions import Annotated, List
 from comfy_cli import constants, env_checker, logging, tracking, ui, utils
 from comfy_cli.command import custom_nodes
 from comfy_cli.command import install as install_inner
+from comfy_cli.command.snapshot import command as snapshot_command
 from comfy_cli.command import run as run_inner
 from comfy_cli.command.models import models as models_command
 from comfy_cli.config_manager import ConfigManager
@@ -87,45 +87,6 @@ def entry(
     end_time = time.time()
 
     logging.info(f"scan_dir took {end_time - start_time:.2f} seconds to run")
-
-
-@app.command(help="Backup current snapshot")
-@tracking.track_command()
-def backup(
-    output: Annotated[
-        str,
-        "--output",
-        typer.Option(show_default=False, help="Specify the output file path. (.yaml)"),
-    ],
-):
-
-    if not output.endswith(".yaml"):
-        print(f"[bold red]The output path must end with '.yaml'.[/bold red]")
-        raise typer.Exit(code=1)
-
-    output_path = os.path.abspath(output)
-
-    config_manager = workspace_manager.config_manager
-    tmp_path = (
-        os.path.join(config_manager.get_config_path(), "tmp", str(uuid.uuid4()))
-        + ".yaml"
-    )
-    tmp_path = os.path.abspath(tmp_path)
-    custom_nodes.command.execute_cm_cli(
-        ["save-snapshot", "--output", tmp_path], silent=True
-    )
-
-    with open(tmp_path, "r", encoding="UTF-8") as yaml_file:
-        info = yaml.load(yaml_file, Loader=yaml.SafeLoader)
-    os.remove(tmp_path)
-
-    info["basic"] = "N/A"  # TODO:
-    info["models"] = []  # TODO:
-
-    with open(output_path, "w") as yaml_file:
-        yaml.dump(info, yaml_file, allow_unicode=True)
-
-    print(f"Snapshot file is saved as `{output_path}`")
 
 
 @app.command(help="Download and install ComfyUI and ComfyUI-Manager")
@@ -448,3 +409,4 @@ def feedback():
 app.add_typer(models_command.app, name="model", help="Manage models.")
 app.add_typer(custom_nodes.app, name="node", help="Manage custom nodes.")
 app.add_typer(custom_nodes.manager_app, name="manager", help="Manager ComfyUI-Manager.")
+app.add_typer(snapshot_command.app, name="snapshot", help="Manage custom nodes.")
