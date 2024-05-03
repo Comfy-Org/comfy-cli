@@ -3,6 +3,21 @@ from typing import List
 
 
 @dataclass
+class NodeVersion:
+    changelog: str
+    dependencies: List[str]
+    deprecated: bool
+    id: str
+    version: str
+
+
+@dataclass
+class PublishNodeVersionResponse:
+    node_version: NodeVersion
+    signedUrl: str
+
+
+@dataclass
 class URLs:
     homepage: str = ""
     documentation: str = ""

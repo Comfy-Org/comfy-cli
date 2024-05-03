@@ -1,10 +1,16 @@
 import requests
 import json
 from comfy_cli import constants
-from comfy_cli.registry.types import PyProjectConfig
+from comfy_cli.registry.types import (
+    PyProjectConfig,
+    PublishNodeVersionResponse,
+    NodeVersion,
+)
 
 
-def publish_node_version(node_config: PyProjectConfig, token: str):
+def publish_node_version(
+    node_config: PyProjectConfig, token: str
+) -> PublishNodeVersionResponse:
     """
     Publishes a new version of a node.
 
@@ -33,9 +39,20 @@ def publish_node_version(node_config: PyProjectConfig, token: str):
     }
 
     response = requests.post(url, headers=headers, data=json.dumps(body))
-    # print the json of response
-    if response.status_code == 200:
-        return response.json()
+
+    if response.status_code == 201:
+        data = response.json()
+        node_version = NodeVersion(
+            changelog=data["node_version"]["changelog"],
+            dependencies=data["node_version"]["dependencies"],
+            deprecated=data["node_version"]["deprecated"],
+            id=data["node_version"]["id"],
+            version=data["node_version"]["version"],
+        )
+        node_data = PublishNodeVersionResponse(
+            node_version=node_version, signedUrl=data["signedUrl"]
+        )
+        return node_data
     else:
         raise Exception(
             f"Failed to publish node version: {response.status_code} {response.text}"
