@@ -162,6 +162,12 @@ class WorkspaceManager:
             constants.CONFIG_KEY_DEFAULT_WORKSPACE, os.path.abspath(path)
         )
 
+    def get_specified_workspace(self):
+        if self.specified_workspace is None:
+            return None
+
+        return os.path.abspath(os.path.expanduser(self.specified_workspace))
+
     def get_workspace_path(self) -> str:
         """
         Retrieves the workspace path based on the following precedence:
@@ -176,9 +182,10 @@ class WorkspaceManager:
             FileNotFoundError: If no valid workspace is found.
         """
         # Check for explicitly specified workspace first
+        specified_workspace = self.get_specified_workspace()
         if self.specified_workspace:
-            if check_comfy_repo(os.path.expanduser(self.specified_workspace)):
-                return self.specified_workspace
+            if check_comfy_repo(specified_workspace):
+                return specified_workspace
 
             print(
                 "[bold red]warn: The specified workspace is not ComfyUI directory.[/bold red]"

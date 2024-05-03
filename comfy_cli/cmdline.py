@@ -19,7 +19,7 @@ from comfy_cli.command import run as run_inner
 from comfy_cli.command.models import models as models_command
 from comfy_cli.config_manager import ConfigManager
 from comfy_cli.env_checker import EnvChecker, check_comfy_server_running
-from comfy_cli.workspace_manager import WorkspaceManager
+from comfy_cli.workspace_manager import WorkspaceManager, check_comfy_repo
 
 logging.setup_logging()
 app = typer.Typer()
@@ -90,7 +90,6 @@ def entry(
 @app.command(help="Download and install ComfyUI and ComfyUI-Manager")
 @tracking.track_command()
 def install(
-    ctx: typer.Context,
     url: Annotated[str, typer.Option(show_default=False)] = constants.COMFY_GITHUB_URL,
     manager_url: Annotated[
         str, typer.Option(show_default=False)
@@ -110,10 +109,22 @@ def install(
 ):
     checker = EnvChecker()
 
-    if workspace_manager.workspace_path is None:
-        workspace_path = utils.get_not_user_set_default_workspace()
-    else:
-        workspace_path = workspace_manager.workspace_path
+    comfy_path = workspace_manager.get_specified_workspace()
+
+    if comfy_path is None:
+        comfy_path = utils.get_not_user_set_default_workspace()
+
+    is_comfy_path, repo_dir = check_comfy_repo(comfy_path)
+    if is_comfy_path and not restore:
+        typer.echo(
+            f"[bold red]ComfyUI is already installed at the specified path:[/bold red] {comfy_path}\n"
+            f"[bold yellow]If you want to restore dependencies, add the '--restore' option.[/bold yellow]",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    if repo_dir is not None:
+        comfy_path = repo_dir.working_dir
 
     if checker.python_version.major < 3:
         print(
@@ -130,20 +141,19 @@ def install(
     install_inner.execute(
         url,
         manager_url,
-        workspace_path,
+        comfy_path,
         restore,
         skip_manager,
         torch_mode,
         commit=commit,
     )
-    workspace_manager.set_recent_workspace(workspace_path)
+
+    print(f"ComfyUI is installed at: {comfy_path}")
 
 
 @app.command(help="Stop background ComfyUI")
 @tracking.track_command()
-def update(
-    ctx: typer.Context, target: str = typer.Argument("comfy", help="[all|comfy]")
-):
+def update(target: str = typer.Argument("comfy", help="[all|comfy]")):
     if target not in ["all", "comfy"]:
         typer.echo(
             f"Invalid target: {target}. Allowed targets are 'all', 'comfy'.",
@@ -152,10 +162,10 @@ def update(
         raise typer.Exit(code=1)
 
     _env_checker = EnvChecker()
-    comfy_path = workspace_manager.get_workspace_comfy_path(ctx)
+    comfy_path = workspace_manager.workspace_path
 
     if "all" == target:
-        custom_nodes.command.execute_cm_cli(ctx, ["update", "all"])
+        custom_nodes.command.execute_cm_cli(["update", "all"])
     else:
         print(f"Updating ComfyUI in {comfy_path}...")
         os.chdir(comfy_path)
@@ -182,12 +192,10 @@ def validate_comfyui(_env_checker):
         raise typer.Exit(code=1)
 
 
-def launch_comfyui(_env_checker, _config_manager, extra, background=False):
-    validate_comfyui(_env_checker)
-
+def launch_comfyui(extra, background=False):
     if background:
-        if _config_manager.background is not None and utils.is_running(
-            _config_manager.background[2]
+        if ConfigManager().background is not None and utils.is_running(
+            ConfigManager().background[2]
         ):
             print(
                 f"[bold red]ComfyUI is already running in background.\nYou cannot start more than one background service.[/bold red]\n"
@@ -217,7 +225,7 @@ def launch_comfyui(_env_checker, _config_manager, extra, background=False):
 
         cmd = [
             "comfy",
-            f'--workspace={os.path.join(os.getcwd(), "..")}',
+            f"--workspace={os.path.abspath(os.getcwd())}",
             "launch",
         ] + extra
 
@@ -227,20 +235,20 @@ def launch_comfyui(_env_checker, _config_manager, extra, background=False):
         print(
             f"[bold yellow]Run ComfyUI in the background.[/bold yellow] ({listen}:{port})"
         )
-        _config_manager.config["DEFAULT"][
+        ConfigManager().config["DEFAULT"][
             constants.CONFIG_KEY_BACKGROUND
         ] = f"{(listen, port, process.pid)}"
-        _config_manager.write_config()
+        ConfigManager().write_config()
         return
 
-    env_path = _env_checker.get_isolated_env()
+    env_path = EnvChecker().get_isolated_env()
     reboot_path = None
 
     new_env = os.environ.copy()
 
     if env_path is not None:
         session_path = os.path.join(
-            _config_manager.get_config_path(), "tmp", str(uuid.uuid4())
+            ConfigManager().get_config_path(), "tmp", str(uuid.uuid4())
         )
         new_env["__COMFY_CLI_SESSION__"] = session_path
 
@@ -261,34 +269,28 @@ def launch_comfyui(_env_checker, _config_manager, extra, background=False):
 @app.command(help="Stop background ComfyUI")
 @tracking.track_command()
 def stop():
-    _config_manager = ConfigManager()
-
-    if constants.CONFIG_KEY_BACKGROUND not in _config_manager.config["DEFAULT"]:
+    if constants.CONFIG_KEY_BACKGROUND not in ConfigManager().config["DEFAULT"]:
         print(f"[bold red]No ComfyUI is running in the background.[/bold red]\n")
         raise typer.Exit(code=1)
 
-    bg_info = _config_manager.background
+    bg_info = ConfigManager().background
     is_killed = utils.kill_all(bg_info[2])
 
     print(
         f"[bold yellow]Background ComfyUI is stopped.[/bold yellow] ({bg_info[0]}:{bg_info[1]})"
     )
 
-    _config_manager.remove_background()
+    ConfigManager().remove_background()
 
 
 @app.command(help="Launch ComfyUI: ?[--background] ?[-- <extra args ...>]")
 @tracking.track_command()
 def launch(
-    ctx: typer.Context,
     background: Annotated[
         bool, typer.Option(help="Launch ComfyUI in background")
     ] = False,
     extra: List[str] = typer.Argument(None),
 ):
-    _env_checker = EnvChecker()
-    _config_manager = ConfigManager()
-
     resolved_workspace = workspace_manager.get_workspace_path()
     if not resolved_workspace:
         print(
@@ -299,32 +301,33 @@ def launch(
 
     print(f"\nLaunching ComfyUI from: {resolved_workspace}\n")
 
-    os.chdir(resolved_workspace + "/ComfyUI")
-    _env_checker.check()  # update environment checks
-
     # Update the recent workspace
     workspace_manager.set_recent_workspace(resolved_workspace)
 
-    launch_comfyui(_env_checker, _config_manager, extra, background=background)
+    os.chdir(resolved_workspace)
+    launch_comfyui(extra, background=background)
 
 
-@app.command("set-default", help="Set default workspace")
+@app.command("set-default", help="Set default ComfyUI path")
 @tracking.track_command()
 def set_default(workspace_path: str):
-    workspace_path = os.path.expanduser(workspace_path)
-    comfy_path = os.path.join(workspace_path, "ComfyUI")
+    comfy_path = os.path.expanduser(workspace_path)
+
     if not os.path.exists(comfy_path):
-        print(
-            f"Invalid workspace path: {workspace_path}\nThe workspace path must contain 'ComfyUI'."
-        )
+        print(f"Path not found: {comfy_path}.")
         raise typer.Exit(code=1)
 
-    workspace_manager.set_default_workspace(workspace_path)
+    if not check_comfy_repo(comfy_path)[0]:
+        print(f"Specified path is not a ComfyUI path: {comfy_path}.")
+        raise typer.Exit(code=1)
+
+    print(f"Specified path is set as default ComfyUI path: {comfy_path} ")
+    workspace_manager.set_default_workspace(comfy_path)
 
 
 @app.command(help="Show which ComfyUI is selected.")
 @tracking.track_command()
-def which(ctx: typer.Context):
+def which():
     comfy_path = workspace_manager.workspace_path
     if comfy_path is None:
         print(

@@ -23,8 +23,7 @@ manager_app = typer.Typer()
 workspace_manager = WorkspaceManager()
 
 
-# TODO: remove ctx as an args
-def execute_cm_cli(_ctx: typer.Context, args, channel=None, mode=None):
+def execute_cm_cli(args, channel=None, mode=None):
     _config_manager = ConfigManager()
 
     workspace_path = workspace_manager.workspace_path
@@ -83,7 +82,6 @@ def validate_comfyui_manager(_env_checker):
 @app.command("save-snapshot", help="Save a snapshot of the current ComfyUI environment")
 @tracking.track_command("node")
 def save_snapshot(
-    ctx: typer.Context,
     output: Annotated[
         str,
         "--output",
@@ -93,48 +91,47 @@ def save_snapshot(
     ] = None,
 ):
     if output is None:
-        execute_cm_cli(ctx, ["save-snapshot"])
+        execute_cm_cli(["save-snapshot"])
     else:
         output = os.path.abspath(output)  # to compensate chdir
-        execute_cm_cli(ctx, ["save-snapshot", "--output", output])
+        execute_cm_cli(["save-snapshot", "--output", output])
 
 
 @app.command("restore-snapshot")
 @tracking.track_command("node")
-def restore_snapshot(ctx: typer.Context, path: str):
+def restore_snapshot(path: str):
     path = os.path.abspath(path)
-    execute_cm_cli(ctx, ["restore-snapshot", path])
+    execute_cm_cli(["restore-snapshot", path])
 
 
 @app.command("restore-dependencies")
 @tracking.track_command("node")
-def restore_dependencies(ctx: typer.Context):
-    execute_cm_cli(ctx, ["restore-dependencies"])
+def restore_dependencies():
+    execute_cm_cli(["restore-dependencies"])
 
 
 @manager_app.command("disable-gui")
 @tracking.track_command("node")
-def disable_gui(ctx: typer.Context):
-    execute_cm_cli(ctx, ["cli-only-mode", "enable"])
+def disable_gui():
+    execute_cm_cli(["cli-only-mode", "enable"])
 
 
 @manager_app.command("enable-gui")
 @tracking.track_command("node")
-def enable_gui(ctx: typer.Context):
-    execute_cm_cli(ctx, ["cli-only-mode", "disable"])
+def enable_gui():
+    execute_cm_cli(["cli-only-mode", "disable"])
 
 
 @manager_app.command()
 @tracking.track_command("node")
-def clear(ctx: typer.Context, path: str):
+def clear(path: str):
     path = os.path.abspath(path)
-    execute_cm_cli(ctx, ["clear", path])
+    execute_cm_cli(["clear", path])
 
 
 @app.command()
 @tracking.track_command("node")
 def show(
-    ctx: typer.Context,
     args: List[str] = typer.Argument(
         ...,
         help="[installed|enabled|not-installed|disabled|all|snapshot|snapshot-list]",
@@ -169,13 +166,12 @@ def show(
         )
         raise typer.Exit(code=1)
 
-    execute_cm_cli(ctx, ["show"] + args, channel, mode)
+    execute_cm_cli(["show"] + args, channel, mode)
 
 
 @app.command("simple-show")
 @tracking.track_command("node")
 def simple_show(
-    ctx: typer.Context,
     args: List[str] = typer.Argument(
         ...,
         help="[installed|enabled|not-installed|disabled|all|snapshot|snapshot-list]",
@@ -210,14 +206,13 @@ def simple_show(
         )
         raise typer.Exit(code=1)
 
-    execute_cm_cli(ctx, ["simple-show"] + args, channel, mode)
+    execute_cm_cli(["simple-show"] + args, channel, mode)
 
 
 # install, reinstall, uninstall
 @app.command()
 @tracking.track_command("node")
 def install(
-    ctx: typer.Context,
     args: List[str] = typer.Argument(..., help="install custom nodes"),
     channel: Annotated[
         str,
@@ -240,13 +235,12 @@ def install(
         )
         raise typer.Exit(code=1)
 
-    execute_cm_cli(ctx, ["install"] + args, channel, mode)
+    execute_cm_cli(["install"] + args, channel, mode)
 
 
 @app.command()
 @tracking.track_command("node")
 def reinstall(
-    ctx: typer.Context,
     args: List[str] = typer.Argument(..., help="reinstall custom nodes"),
     channel: Annotated[
         str,
@@ -269,13 +263,12 @@ def reinstall(
         )
         raise typer.Exit(code=1)
 
-    execute_cm_cli(ctx, ["reinstall"] + args, channel, mode)
+    execute_cm_cli(["reinstall"] + args, channel, mode)
 
 
 @app.command()
 @tracking.track_command("node")
 def uninstall(
-    ctx: typer.Context,
     args: List[str] = typer.Argument(..., help="uninstall custom nodes"),
     channel: Annotated[
         str,
@@ -298,7 +291,7 @@ def uninstall(
         )
         raise typer.Exit(code=1)
 
-    execute_cm_cli(ctx, ["uninstall"] + args, channel, mode)
+    execute_cm_cli(["uninstall"] + args, channel, mode)
 
 
 # `update, disable, enable, fix` allows `all` param
@@ -307,7 +300,6 @@ def uninstall(
 @app.command()
 @tracking.track_command("node")
 def update(
-    ctx: typer.Context,
     args: List[str] = typer.Argument(..., help="update custom nodes"),
     channel: Annotated[
         str,
@@ -326,13 +318,12 @@ def update(
         )
         raise typer.Exit(code=1)
 
-    execute_cm_cli(ctx, ["update"] + args, channel, mode)
+    execute_cm_cli(["update"] + args, channel, mode)
 
 
 @app.command()
 @tracking.track_command("node")
 def disable(
-    ctx: typer.Context,
     args: List[str] = typer.Argument(..., help="disable custom nodes"),
     channel: Annotated[
         str,
@@ -351,13 +342,12 @@ def disable(
         )
         raise typer.Exit(code=1)
 
-    execute_cm_cli(ctx, ["disable"] + args, channel, mode)
+    execute_cm_cli(["disable"] + args, channel, mode)
 
 
 @app.command()
 @tracking.track_command("node")
 def enable(
-    ctx: typer.Context,
     args: List[str] = typer.Argument(..., help="enable custom nodes"),
     channel: Annotated[
         str,
@@ -376,13 +366,12 @@ def enable(
         )
         raise typer.Exit(code=1)
 
-    execute_cm_cli(ctx, ["enable"] + args, channel, mode)
+    execute_cm_cli(["enable"] + args, channel, mode)
 
 
 @app.command()
 @tracking.track_command("node")
 def fix(
-    ctx: typer.Context,
     args: List[str] = typer.Argument(
         ..., help="fix dependencies for specified custom nodes"
     ),
@@ -403,14 +392,12 @@ def fix(
         )
         raise typer.Exit(code=1)
 
-    execute_cm_cli(ctx, ["fix"] + args, channel, mode)
+    execute_cm_cli(["fix"] + args, channel, mode)
 
 
 @app.command("publish", help="Publish node to registry")
 @tracking.track_command("node")
-def publish(
-    ctx: typer.Context,
-):
+def publish():
     """
     Publish a node with optional validation.
     """
