@@ -126,9 +126,9 @@ def install(
     if repo_dir is not None:
         comfy_path = str(repo_dir.working_dir)
 
-    if checker.python_version.major < 3:
+    if checker.python_version.major < 3.9:
         print(
-            "[bold red]Python version 3.6 or higher is required to run ComfyUI.[/bold red]"
+            "[bold red]Python version 3.9 or higher is required to run ComfyUI.[/bold red]"
         )
         print(
             f"You are currently using Python version {env_checker.format_python_version(checker.python_version)}."
