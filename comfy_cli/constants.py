@@ -31,6 +31,7 @@ CONTEXT_KEY_RECENT = "recent"
 CONTEXT_KEY_HERE = "here"
 
 CONFIG_KEY_DEFAULT_WORKSPACE = "default_workspace"
+CONFIG_KEY_DEFAULT_LAUNCH_EXTRAS = "default_launch_extras"
 CONFIG_KEY_RECENT_WORKSPACE = "recent_workspace"
 CONFIG_KEY_ENABLE_TRACKING = "enable_tracking"
 CONFIG_KEY_BACKGROUND = "background"

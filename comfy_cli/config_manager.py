@@ -64,12 +64,24 @@ class ConfigManager(object):
 
     def fill_print_env(self, table):
         table.add_row("Config Path", self.get_config_file_path())
+
+        launch_extras = ""
         if self.config.has_option("DEFAULT", "default_workspace"):
             table.add_row(
-                "Default ComfyUI workspace", self.config["DEFAULT"]["default_workspace"]
+                "Default ComfyUI workspace",
+                self.config["DEFAULT"][constants.CONFIG_KEY_DEFAULT_WORKSPACE],
+            )
+
+            launch_extras = self.config["DEFAULT"].get(
+                constants.CONFIG_KEY_DEFAULT_LAUNCH_EXTRAS, ""
             )
         else:
             table.add_row("Default ComfyUI workspace", "No default ComfyUI workspace")
+
+        if launch_extras == "":
+            launch_extras = "[bold red]None[/bold red]"
+
+        table.add_row("Default ComfyUI launch extra options", launch_extras)
 
         if self.config.has_option("DEFAULT", constants.CONFIG_KEY_RECENT_WORKSPACE):
             table.add_row(
@@ -79,7 +91,7 @@ class ConfigManager(object):
         else:
             table.add_row("Recent ComfyUI workspace", "No recent run")
 
-        if self.config.has_option("DEFAULT", "background"):
+        if self.config.has_option("DEFAULT", constants.CONFIG_KEY_BACKGROUND):
             bg_info = self.background
             if bg_info:
                 table.add_row(

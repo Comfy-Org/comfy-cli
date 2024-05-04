@@ -57,6 +57,16 @@ will simply update the comfy.yaml file to reflect the local setup
 * You can use the `comfy which` command to check the path of the target workspace.
   * e.g `comfy --recent which`, `comfy --here which`, `comfy which`, ...
 
+
+### Default Setup
+
+The default sets the option that will be executed by default when no specific workspace's ComfyUI has been set for the command.
+
+  `comfy set-default <workspace path> ?[--launch-extras="<extra args>"]`
+
+  - `--launch-extras` option specifies extra args that are applied only during launch by default. However, if extras are specified at the time of launch, this setting is ignored.
+
+
 ### Launch ComfyUI
 
 Comfy provides commands that allow you to easily run the installed ComfyUI.
@@ -68,6 +78,8 @@ Comfy provides commands that allow you to easily run the installed ComfyUI.
   `comfy launch -- <extra args...>`
 
   `comfy launch -- --cpu --listen 0.0.0.0`
+
+  - When you manually configure the extra options, the extras set by set-default will be overridden.
 
 - To run background
 
