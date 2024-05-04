@@ -176,6 +176,7 @@ bug reports, please open an issue on our [GitHub
 repository](https://github.com/Comfy-Org/comfy-cli/issues). If you'd like to contribute code,
 please fork the repository and submit a pull request.
 
+Check out the [Dev Guide](/DEV_README.md) for more details.
 
 ## License
 
