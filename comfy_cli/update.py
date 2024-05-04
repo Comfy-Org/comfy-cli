@@ -1,7 +1,10 @@
 import requests
+import tomlkit
+from rich import print
+import tomlkit.exceptions
 
 
-def check_for_update(package_name, current_version):
+def check_for_newer_pypi_version(package_name, current_version):
     url = f"https://pypi.org/pypi/{package_name}/json"
     try:
         response = requests.get(url)
@@ -11,3 +14,34 @@ def check_for_update(package_name, current_version):
     except requests.RequestException as e:
         print(f"Error checking latest version: {e}")
         return False, current_version
+
+
+def check_for_updates():
+    current_version = get_version_from_pyproject()
+    has_newer, newer_version = check_for_newer_pypi_version(
+        "comfy-cli", current_version
+    )
+
+    if has_newer:
+        print(f"Newer version available: {newer_version}")
+
+
+def get_version_from_pyproject(file_path="pyproject.toml"):
+    try:
+        with open(file_path, "r", encoding="utf-8") as file:
+            toml_content = file.read()
+            parsed_toml = tomlkit.parse(toml_content)
+            # Accessing the project version under [project]
+            if "project" in parsed_toml:
+                version = parsed_toml["project"]["version"]
+            else:
+                raise KeyError(
+                    "Version key not found under [project] in pyproject.toml"
+                )
+            return version
+    except FileNotFoundError:
+        print(f"Error: The file '{file_path}' does not exist.")
+    except tomlkit.exceptions.TOMLKitError as e:
+        print(f"Error parsing TOML: {e}")
+    except KeyError as e:
+        print(f"Error accessing version in TOML: {e}")
