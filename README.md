@@ -137,7 +137,7 @@ comfy node [show|simple-show] [installed|enabled|not-installed|disabled|all|snap
   `comfy manager clear`
 
 
-## Format of comfy-lock.yaml (WIP)
+## Beta Feature: format of comfy-lock.yaml (WIP)
 
 ```
 basic:
@@ -148,7 +148,9 @@ models:
     paths: [list of paths to the model]
       - path: [path to the model]
       - path: [path to the model]
-    hash: [md5hash for the model]
+    hashes: [hashes for the model]
+      - hash: [hash]
+        type: [AutoV1, AutoV2, SHA256, CRC32, and Blake3]
     type: [type of the model, e.g. diffuser, lora, etc.]
 
   - model:
