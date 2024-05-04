@@ -9,13 +9,11 @@ from typing import Optional
 import questionary
 import typer
 from rich import print
-from rich.console import Console
 from typing_extensions import Annotated, List
 
 from comfy_cli import constants, env_checker, logging, tracking, ui, utils
 from comfy_cli.command import custom_nodes
 from comfy_cli.command import install as install_inner
-from comfy_cli.command import run as run_inner
 from comfy_cli.command.models import models as models_command
 from comfy_cli.config_manager import ConfigManager
 from comfy_cli.env_checker import EnvChecker, check_comfy_server_running
@@ -105,7 +103,9 @@ def install(
         bool, typer.Option(help="Skip installing the manager component")
     ] = False,
     amd: Annotated[bool, typer.Option(help="Install for AMD gpu")] = False,
-    commit: Annotated[str, typer.Option(help="Specify commit hash for ComfyUI")] = None,
+    commit: Annotated[
+        Optional[str], typer.Option(help="Specify commit hash for ComfyUI")
+    ] = None,
 ):
     checker = EnvChecker()
 
@@ -124,7 +124,7 @@ def install(
         raise typer.Exit(code=1)
 
     if repo_dir is not None:
-        comfy_path = repo_dir.working_dir
+        comfy_path = str(repo_dir.working_dir)
 
     if checker.python_version.major < 3:
         print(
@@ -168,6 +168,9 @@ def update(target: str = typer.Argument("comfy", help="[all|comfy]")):
         custom_nodes.command.execute_cm_cli(["update", "all"])
     else:
         print(f"Updating ComfyUI in {comfy_path}...")
+        if comfy_path is None:
+            print("ComfyUI path is not found.")
+            raise typer.Exit(code=1)
         os.chdir(comfy_path)
         subprocess.run(["git", "pull"], check=True)
         subprocess.run(
@@ -187,18 +190,17 @@ def update(target: str = typer.Argument("comfy", help="[all|comfy]")):
 def validate_comfyui(_env_checker):
     if _env_checker.comfy_repo is None:
         print(
-            f"[bold red]If ComfyUI is not installed, this feature cannot be used.[/bold red]"
+            "[bold red]If ComfyUI is not installed, this feature cannot be used.[/bold red]"
         )
         raise typer.Exit(code=1)
 
 
 def launch_comfyui(extra, background=False):
     if background:
-        if ConfigManager().background is not None and utils.is_running(
-            ConfigManager().background[2]
-        ):
+        config_background = ConfigManager().background
+        if config_background is not None and utils.is_running(config_background[2]):
             print(
-                f"[bold red]ComfyUI is already running in background.\nYou cannot start more than one background service.[/bold red]\n"
+                "[bold red]ComfyUI is already running in background.\nYou cannot start more than one background service.[/bold red]\n"
             )
             raise typer.Exit(code=1)
 
@@ -260,6 +262,10 @@ def launch_comfyui(extra, background=False):
     while True:
         subprocess.run([sys.executable, "main.py"] + extra, env=new_env, check=False)
 
+        if not reboot_path:
+            print("[bold red]ComfyUI is not installed.[/bold red]\n")
+            return
+
         if not os.path.exists(reboot_path):
             return
 
@@ -270,15 +276,21 @@ def launch_comfyui(extra, background=False):
 @tracking.track_command()
 def stop():
     if constants.CONFIG_KEY_BACKGROUND not in ConfigManager().config["DEFAULT"]:
-        print(f"[bold red]No ComfyUI is running in the background.[/bold red]\n")
+        print("[bold red]No ComfyUI is running in the background.[/bold red]\n")
         raise typer.Exit(code=1)
 
     bg_info = ConfigManager().background
+    if not bg_info:
+        print("[bold red]No ComfyUI is running in the background.[/bold red]\n")
+        raise typer.Exit(code=1)
     is_killed = utils.kill_all(bg_info[2])
 
-    print(
-        f"[bold yellow]Background ComfyUI is stopped.[/bold yellow] ({bg_info[0]}:{bg_info[1]})"
-    )
+    if not is_killed:
+        print("[bold red]Failed to stop ComfyUI in the background.[/bold red]\n")
+    else:
+        print(
+            f"[bold yellow]Background ComfyUI is stopped.[/bold yellow] ({bg_info[0]}:{bg_info[1]})"
+        )
 
     ConfigManager().remove_background()
 
@@ -331,7 +343,7 @@ def which():
     comfy_path = workspace_manager.workspace_path
     if comfy_path is None:
         print(
-            f"ComfyUI not found, please run 'comfy install', run 'comfy' in a ComfyUI directory, or specify the workspace path with '--workspace'."
+            "ComfyUI not found, please run 'comfy install', run 'comfy' in a ComfyUI directory, or specify the workspace path with '--workspace'."
         )
         raise typer.Exit(code=1)
 
