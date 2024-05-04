@@ -505,6 +505,14 @@ def which():
         )
         raise typer.Exit(code=1)
 
+    if workspace_manager.workspace_type == WorkspaceType.DEFAULT:
+        print("Default Comfy path is used.")
+    elif workspace_manager.workspace_type == WorkspaceType.CURRENT_DIR:
+        print("Current directory is used.")
+    elif workspace_manager.workspace_type == WorkspaceType.RECENT:
+        print("Most recently used ComfyUP is used")
+    elif workspace_manager.workspace_type == WorkspaceType.SPECIFIED:
+        print("Specified path is used.")
     print(f"Target ComfyUI path: {comfy_path}")
 
 

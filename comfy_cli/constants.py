@@ -38,9 +38,7 @@ CONFIG_KEY_USER_ID = "user_id"
 CONFIG_KEY_INSTALL_EVENT_TRIGGERED = "install_event_triggered"
 CONFIG_KEY_BACKGROUND = "background"
 
-DEFAULT_TRACKING_VALUE = True
-
-COMFY_LOCK_YAML_FILE = "comfy.lock.yaml"
+COMFY_LOCK_YAML_FILE = "comfy-lock.yaml"
 
 # TODO: figure out a better way to check if this is a comfy repo
 COMFY_ORIGIN_URL_CHOICES = [
@@ -64,5 +62,7 @@ class GPU_OPTION(Enum):
 # Referencing supported pt extension from ComfyUI
 # https://github.com/comfyanonymous/ComfyUI/blob/a88b0ebc2d2f933c94e42aa689c42e836eedaf3c/folder_paths.py#L5
 SUPPORTED_PT_EXTENSIONS = (".ckpt", ".pt", ".bin", ".pth", ".safetensors")
+
+IGNORE_CUSTOM_NODE_FOLDERS = ("__pycache__",)
 
 COMFY_REGISTRY_URL_ROOT = "https://api-frontend-dev-qod3oz2v2q-uc.a.run.app"
