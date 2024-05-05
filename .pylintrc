@@ -5,6 +5,8 @@ disable=
     C0116, # missing-function-docstring
     C0209, # consider-using-f-string
     W0622, # redefined-builtin
+    W1113, # too-many-arguments
+    W0613, # unused-argument
 
 [FORMAT]
 max-line-length=120

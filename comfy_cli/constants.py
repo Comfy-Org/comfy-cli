@@ -47,6 +47,15 @@ COMFY_ORIGIN_URL_CHOICES = [
     "https://github.com/drip-art/ComfyUI",
 ]
 
+
+class GPU_OPTION(Enum):
+    NVIDIA = "Nvidia"
+    AMD = "Amd"
+    INTEL_ARC = "Intel Arc"
+    M_SERIES = "Mac M Series"
+    MAC_INTEL = "Mac Intel"
+
+
 # Referencing supported pt extension from ComfyUI
 # https://github.com/comfyanonymous/ComfyUI/blob/a88b0ebc2d2f933c94e42aa689c42e836eedaf3c/folder_paths.py#L5
 SUPPORTED_PT_EXTENSIONS = (".ckpt", ".pt", ".bin", ".pth", ".safetensors")
