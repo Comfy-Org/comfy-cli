@@ -9,13 +9,14 @@ from rich import print
 import uuid
 from comfy_cli.config_manager import ConfigManager
 from comfy_cli.workspace_manager import WorkspaceManager
-from comfy_cli.registry import (
-    publish_node_version,
-    extract_node_configuration,
-    upload_file_to_signed_url,
-    zip_files,
-    initialize_project_config,
-)
+
+# from comfy_cli.registry import (
+#     publish_node_version,
+#     extract_node_configuration,
+#     upload_file_to_signed_url,
+#     zip_files,
+#     initialize_project_config,
+# )
 
 app = typer.Typer()
 manager_app = typer.Typer()
@@ -400,44 +401,45 @@ def fix(
     execute_cm_cli(["fix"] + args, channel, mode)
 
 
-@app.command("publish", help="Publish node to registry")
-@tracking.track_command("node")
-def publish():
-    """
-    Publish a node with optional validation.
-    """
+# TODO: re-enable publish after v0 launch
+# @app.command("publish", help="Publish node to registry")
+# @tracking.track_command("publish")
+# def publish():
+#     """
+#     Publish a node with optional validation.
+#     """
 
-    # Perform some validation logic here
-    typer.echo("Validating node configuration...")
-    config = extract_node_configuration()
+#     # Perform some validation logic here
+#     typer.echo("Validating node configuration...")
+#     config = extract_node_configuration()
 
-    # Prompt for Personal Access Token
-    token = typer.prompt("Please enter your Personal Access Token", hide_input=True)
+#     # Prompt for Personal Access Token
+#     token = typer.prompt("Please enter your Personal Access Token", hide_input=True)
 
-    # Call API to fetch node version with the token in the body
-    typer.echo("Publishing node version...")
-    response = publish_node_version(config, token)
+#     # Call API to fetch node version with the token in the body
+#     typer.echo("Publishing node version...")
+#     response = publish_node_version(config, token)
 
-    # Zip up all files in the current directory, respecting .gitignore files.
-    signed_url = response.signedUrl
-    zip_filename = "node.tar.gz"
-    typer.echo("Creating zip file...")
-    zip_files(zip_filename)
+#     # Zip up all files in the current directory, respecting .gitignore files.
+#     signed_url = response.signedUrl
+#     zip_filename = "node.tar.gz"
+#     typer.echo("Creating zip file...")
+#     zip_files(zip_filename)
 
-    # Upload the zip file to the signed URL
-    typer.echo("Uploading zip file...")
-    upload_file_to_signed_url(signed_url, zip_filename)
+#     # Upload the zip file to the signed URL
+#     typer.echo("Uploading zip file...")
+#     upload_file_to_signed_url(signed_url, zip_filename)
 
 
-@app.command("init", help="Init scaffolding for custom node")
-@tracking.track_command("node")
-def scaffold():
-    if os.path.exists("comfynode.toml"):
-        typer.echo("Warning: 'comfynode.toml' already exists. Will not overwrite.")
-        raise typer.Exit(code=1)
+# @app.command("init", help="Init scaffolding for custom node")
+# @tracking.track_command("node")
+# def scaffold():
+#     if os.path.exists("comfynode.toml"):
+#         typer.echo("Warning: 'comfynode.toml' already exists. Will not overwrite.")
+#         raise typer.Exit(code=1)
 
-    typer.echo("Initializing metadata...")
-    initialize_project_config()
-    typer.echo(
-        "comfynode.toml created successfully. Defaults were filled in. Please check before publishing."
-    )
+#     typer.echo("Initializing metadata...")
+#     initialize_project_config()
+#     typer.echo(
+#         "comfynode.toml created successfully. Defaults were filled in. Please check before publishing."
+#     )

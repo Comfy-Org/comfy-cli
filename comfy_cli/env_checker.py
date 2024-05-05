@@ -4,14 +4,11 @@ Module for checking various env and state conditions.
 
 import os
 import sys
-import git
 from rich.console import Console
 from rich.table import Table
 import requests
 
-from comfy_cli import constants
 from comfy_cli.utils import singleton
-
 from comfy_cli.config_manager import ConfigManager
 
 console = Console()
@@ -76,7 +73,7 @@ class EnvChecker(object):
     def __init__(self):
         self.virtualenv_path = None
         self.conda_env = None
-        self.python_version: None = None
+        self.python_version: sys._version_info = sys.version_info
         self.check()
 
     def is_isolated_env(self):
