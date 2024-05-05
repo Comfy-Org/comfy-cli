@@ -396,6 +396,31 @@ def fix(
     execute_cm_cli(["fix"] + args, channel, mode)
 
 
+@app.command("install-deps")
+@tracking.track_command("node")
+def install_deps(
+    deps_file: str,
+    channel: Annotated[
+        str,
+        "--channel",
+        typer.Option(show_default=False, help="Specify the operation mode"),
+    ] = None,
+    mode: Annotated[
+        str, "--mode", typer.Option(show_default=False, help="[remote|local|cache]")
+    ] = None,
+):
+    valid_modes = ["remote", "local", "cache"]
+    if mode and mode.lower() not in valid_modes:
+        typer.echo(
+            f"Invalid mode: {mode}. Allowed modes are 'remote', 'local', 'cache'.",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    deps_file = os.path.abspath(os.path.expanduser(deps_file))
+    execute_cm_cli(["install-deps", deps_file], channel, mode)
+
+
 # TODO: re-enable publish after v0 launch
 # @app.command("publish", help="Publish node to registry")
 # @tracking.track_command("publish")
