@@ -57,6 +57,7 @@ will simply update the comfy.yaml file to reflect the local setup
 * You can use the `comfy which` command to check the path of the target workspace.
   * e.g `comfy --recent which`, `comfy --here which`, `comfy which`, ...
 
+
 ### Launch ComfyUI
 
 Comfy provides commands that allow you to easily run the installed ComfyUI.
@@ -85,7 +86,7 @@ comfy provides a convenient way to manage custom nodes for extending ComfyUI's f
 
 - Show custom nodes' information:
  ```
-comfy node [show|simple-show] [installed|enabled|not-installed|disabled|all|snapshot|snapshot-list] 
+comfy node [show|simple-show] [installed|enabled|not-installed|disabled|all|snapshot|snapshot-list]
                               ?[--channel <channel name>] 
                               ?[--mode [remote|local|cache]]
 ```
@@ -104,6 +105,18 @@ comfy node [show|simple-show] [installed|enabled|not-installed|disabled|all|snap
   `comfy node save-snapshot`
 
   `comfy node restore-snapshot <snapshot name>`
+
+
+- Install dependencies:
+
+  `comfy node install-deps --deps=<deps .json file>` 
+
+  `comfy node install-deps --workflow=<workflow .json/.png file>`
+
+
+- Generate deps:
+
+  `comfy node deps-in-workflow --workflow=<workflow .json/.png file>` 
 
 
 ### Managing Models

@@ -399,7 +399,12 @@ def fix(
 @app.command("install-deps")
 @tracking.track_command("node")
 def install_deps(
-    deps_file: str,
+    deps: Annotated[
+        str, None, typer.Option(show_default=False, help="Dependency spec file (.json)")
+    ] = None,
+    workflow: Annotated[
+        str, None, typer.Option(show_default=False, help="Workflow file (.json/.png)")
+    ] = None,
     channel: Annotated[
         str,
         "--channel",
@@ -417,8 +422,68 @@ def install_deps(
         )
         raise typer.Exit(code=1)
 
-    deps_file = os.path.abspath(os.path.expanduser(deps_file))
+    if deps is None and workflow is None:
+        print(
+            f"[bold red]One of --deps or --workflow must be provided as an argument.[/bold red]\n"
+        )
+
+    tmp_path = None
+    if workflow is not None:
+        workflow = os.path.abspath(os.path.expanduser(workflow))
+        tmp_path = os.path.join(
+            workspace_manager.config_manager.get_config_path(), "tmp"
+        )
+        if not os.path.exists(tmp_path):
+            os.makedirs(tmp_path)
+        tmp_path = os.path.join(tmp_path, str(uuid.uuid4())) + ".json"
+
+        execute_cm_cli(
+            ["deps-in-workflow", "--workflow", workflow, "--output", tmp_path],
+            channel,
+            mode,
+        )
+
+        deps_file = tmp_path
+    else:
+        deps_file = os.path.abspath(os.path.expanduser(deps))
+
     execute_cm_cli(["install-deps", deps_file], channel, mode)
+
+    if tmp_path is not None and os.path.exists(tmp_path):
+        os.remove(tmp_path)
+
+
+@app.command("deps-in-workflow")
+@tracking.track_command("node")
+def deps_in_workflow(
+    workflow: Annotated[
+        str, None, typer.Option(show_default=False, help="Workflow file (.json/.png)")
+    ],
+    output: Annotated[
+        str, None, typer.Option(show_default=False, help="Workflow file (.json/.png)")
+    ],
+    channel: Annotated[
+        str,
+        "--channel",
+        typer.Option(show_default=False, help="Specify the operation mode"),
+    ] = None,
+    mode: Annotated[
+        str, "--mode", typer.Option(show_default=False, help="[remote|local|cache]")
+    ] = None,
+):
+    valid_modes = ["remote", "local", "cache"]
+    if mode and mode.lower() not in valid_modes:
+        typer.echo(
+            f"Invalid mode: {mode}. Allowed modes are 'remote', 'local', 'cache'.",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    execute_cm_cli(
+        ["deps-in-workflow", "--workflow", workflow, "--output", output],
+        channel,
+        mode,
+    )
 
 
 # TODO: re-enable publish after v0 launch
