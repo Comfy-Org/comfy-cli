@@ -17,7 +17,11 @@ from comfy_cli.command import install as install_inner
 from comfy_cli.command.models import models as models_command
 from comfy_cli.config_manager import ConfigManager
 from comfy_cli.env_checker import EnvChecker, check_comfy_server_running
-from comfy_cli.workspace_manager import WorkspaceManager, check_comfy_repo
+from comfy_cli.workspace_manager import (
+    WorkspaceManager,
+    check_comfy_repo,
+    WorkspaceType,
+)
 
 logging.setup_logging()
 app = typer.Typer()
@@ -151,7 +155,7 @@ def install(
     print(f"ComfyUI is installed at: {comfy_path}")
 
 
-@app.command(help="Stop background ComfyUI")
+@app.command(help="Update ComfyUI Environment [all|comfy]")
 @tracking.track_command()
 def update(target: str = typer.Argument("comfy", help="[all|comfy]")):
     if target not in ["all", "comfy"]:
@@ -311,6 +315,16 @@ def launch(
         )
         raise typer.Exit(code=1)
 
+    if (
+        extra is None or len(extra) == 0
+    ) and workspace_manager.workspace_type == WorkspaceType.DEFAULT:
+        launch_extras = workspace_manager.config_manager.config["DEFAULT"].get(
+            constants.CONFIG_KEY_DEFAULT_LAUNCH_EXTRAS, ""
+        )
+
+        if launch_extras != "":
+            extra = launch_extras.split(" ")
+
     print(f"\nLaunching ComfyUI from: {resolved_workspace}\n")
 
     # Update the recent workspace
@@ -322,19 +336,28 @@ def launch(
 
 @app.command("set-default", help="Set default ComfyUI path")
 @tracking.track_command()
-def set_default(workspace_path: str):
-    comfy_path = os.path.expanduser(workspace_path)
+def set_default(
+    workspace_path: str,
+    launch_extras: Annotated[
+        str, typer.Option(help="Specify extra options for launch")
+    ] = "",
+):
+    comfy_path = os.path.abspath(os.path.expanduser(workspace_path))
 
     if not os.path.exists(comfy_path):
         print(f"Path not found: {comfy_path}.")
         raise typer.Exit(code=1)
 
-    if not check_comfy_repo(comfy_path)[0]:
+    is_comfy_repo, comfy_repo = check_comfy_repo(comfy_path)
+    if not is_comfy_repo:
         print(f"Specified path is not a ComfyUI path: {comfy_path}.")
         raise typer.Exit(code=1)
 
+    comfy_path = comfy_repo.working_dir
+
     print(f"Specified path is set as default ComfyUI path: {comfy_path} ")
     workspace_manager.set_default_workspace(comfy_path)
+    workspace_manager.set_default_launch_extras(launch_extras)
 
 
 @app.command(help="Show which ComfyUI is selected.")
