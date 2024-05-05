@@ -3,6 +3,7 @@ import os
 import uuid
 from mixpanel import Mixpanel
 
+import typer
 from comfy_cli import logging, ui, constants
 from comfy_cli.config_manager import ConfigManager
 
@@ -13,6 +14,20 @@ mp = Mixpanel(MIXPANEL_TOKEN) if MIXPANEL_TOKEN else None
 # Generate a unique tracing ID per command.
 tracing_id = str(uuid.uuid4())
 config_manager = ConfigManager()
+
+app = typer.Typer()
+
+
+@app.command()
+def enable():
+    set_tracking_enabled(True)
+    typer.echo(f"Tracking is now {'enabled' if enable else 'disabled'}.")
+
+
+@app.command()
+def disable():
+    set_tracking_enabled(False)
+    typer.echo(f"Tracking is now {'enabled' if enable else 'disabled'}.")
 
 
 def track_event(event_name: str, properties: any = None):
@@ -54,16 +69,20 @@ def track_command(sub_command: str = None):
 
 
 def prompt_tracking_consent():
-    _config_manager = ConfigManager()
-    tracking_enabled = _config_manager.get(constants.CONFIG_KEY_ENABLE_TRACKING)
+    tracking_enabled = config_manager.get(constants.CONFIG_KEY_ENABLE_TRACKING)
     if tracking_enabled is not None:
         return
 
     enable_tracking = ui.prompt_confirm_action(
         "Do you agree to enable tracking to improve the application?"
     )
-    _config_manager.set(constants.CONFIG_KEY_ENABLE_TRACKING, str(enable_tracking))
+    config_manager.set(constants.CONFIG_KEY_ENABLE_TRACKING, str(enable_tracking))
 
     # Note: only called once when the user interacts with the CLI for the
     #  first time iff the permission is granted.
     track_event("install")
+
+
+def set_tracking_enabled(enabled: bool):
+    config_manager.set(constants.CONFIG_KEY_ENABLE_TRACKING, str(enabled))
+    return enabled
