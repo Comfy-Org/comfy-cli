@@ -3,6 +3,13 @@ import subprocess
 from rich import print
 import sys
 from comfy_cli.workspace_manager import WorkspaceManager
+import platform
+
+
+def get_os_details():
+    os_name = platform.system()  # e.g., Linux, Darwin (macOS), Windows
+    os_version = platform.release()
+    return os_name, os_version
 
 
 def install_comfyui_dependencies(repo_dir, torch_mode):

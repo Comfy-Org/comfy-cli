@@ -91,6 +91,16 @@ class ConfigManager(object):
         else:
             table.add_row("Recent ComfyUI workspace", "No recent run")
 
+        if self.config.has_option("DEFAULT", "enable_tracking"):
+            table.add_row(
+                "Tracking Analytics",
+                (
+                    "Enabled"
+                    if self.config["DEFAULT"]["enable_tracking"] == "True"
+                    else "Disabled"
+                ),
+            )
+
         if self.config.has_option("DEFAULT", constants.CONFIG_KEY_BACKGROUND):
             bg_info = self.background
             if bg_info:

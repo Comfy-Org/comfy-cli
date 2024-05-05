@@ -315,12 +315,15 @@ def launch(
         )
         raise typer.Exit(code=1)
 
-    if extra is None and workspace_manager.workspace_type == WorkspaceType.DEFAULT:
+    if (
+        extra is None or len(extra) == 0
+    ) and workspace_manager.workspace_type == WorkspaceType.DEFAULT:
         launch_extras = workspace_manager.config_manager.config["DEFAULT"].get(
             constants.CONFIG_KEY_DEFAULT_LAUNCH_EXTRAS, ""
         )
+
         if launch_extras != "":
-            extra = launch_extras.split(",")
+            extra = launch_extras.split(" ")
 
     print(f"\nLaunching ComfyUI from: {resolved_workspace}\n")
 
@@ -428,4 +431,5 @@ def feedback():
 
 app.add_typer(models_command.app, name="model", help="Manage models.")
 app.add_typer(custom_nodes.app, name="node", help="Manage custom nodes.")
-app.add_typer(custom_nodes.manager_app, name="manager", help="Manager ComfyUI-Manager.")
+app.add_typer(custom_nodes.manager_app, name="manager", help="Manage ComfyUI-Manager.")
+app.add_typer(tracking.app, name="tracking", help="Manage analytics tracking settings.")
