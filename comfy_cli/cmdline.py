@@ -151,7 +151,7 @@ def install(
     print(f"ComfyUI is installed at: {comfy_path}")
 
 
-@app.command(help="Stop background ComfyUI")
+@app.command(help="Update ComfyUI Environment [all|comfy]")
 @tracking.track_command()
 def update(target: str = typer.Argument("comfy", help="[all|comfy]")):
     if target not in ["all", "comfy"]:
