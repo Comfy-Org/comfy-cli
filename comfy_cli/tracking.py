@@ -1,6 +1,7 @@
 import functools
 import os
 import uuid
+
 from mixpanel import Mixpanel
 
 import typer
@@ -9,11 +10,13 @@ from comfy_cli.config_manager import ConfigManager
 
 MIXPANEL_TOKEN = "93aeab8962b622d431ac19800ccc9f67"
 DISABLE_TELEMETRY = os.getenv("DISABLE_TELEMETRY", False)
+PROJECT_CONFIG_PATH = os.path.join(os.path.dirname(__file__), "pyproject.toml")
 mp = Mixpanel(MIXPANEL_TOKEN) if MIXPANEL_TOKEN else None
 
 # Generate a unique tracing ID per command.
-tracing_id = str(uuid.uuid4())
 config_manager = ConfigManager()
+cli_version = config_manager.get_cli_version()
+tracing_id = str(uuid.uuid4())
 
 app = typer.Typer()
 
@@ -32,7 +35,9 @@ def disable():
 
 def track_event(event_name: str, properties: any = None):
     enable_tracking = config_manager.get(constants.CONFIG_KEY_ENABLE_TRACKING)
+    print("cli_version", cli_version)
     if enable_tracking:
+        properties["cli_version"] = cli_version
         mp.track(distinct_id=tracing_id, event_name=event_name, properties=properties)
 
 
