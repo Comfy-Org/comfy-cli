@@ -63,6 +63,23 @@ def prompt_select_enum(question: str, choices: list) -> str:
     return choice_map[selected]
 
 
+def prompt_input(question: str, default: str = "") -> str:
+    """
+    Asks the user for an input using questionary.
+
+    Args:
+        question (str): The question to display to the user.
+        default (str): The default value for the input.
+
+    Returns:
+        str: The user's input.
+
+    Raises:
+        KeyboardInterrupt: If the user interrupts the input.
+    """
+    return questionary.text(question, default=default).ask()
+
+
 def prompt_multi_select(prompt: str, choices: List[str]) -> List[str]:
     """
     Prompts the user to select multiple items from a list of choices.

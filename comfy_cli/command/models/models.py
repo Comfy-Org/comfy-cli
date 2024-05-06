@@ -22,6 +22,11 @@ class DownloadException(Exception):
     pass
 
 
+def potentially_strip_param_url(path_name: str) -> str:
+    path_name = path_name.split("?")[0]
+    return path_name
+
+
 @app.command()
 @tracking.track_command("model")
 def download(
@@ -42,16 +47,24 @@ def download(
 ):
     """Download a model to a specified relative path if it is not already downloaded."""
     # Convert relative path to absolute path based on the current working directory
-    local_filename = url.split("/")[-1]
+    local_filename = potentially_strip_param_url(url.split("/")[-1])
+    local_filename = ui.prompt_input(
+        "Enter filename to save model as", default=local_filename
+    )
+    if local_filename is None:
+        raise typer.Exit(code=1)
+    if local_filename == "":
+        raise DownloadException("Filename cannot be empty")
+
     local_filepath = get_workspace() / relative_path / local_filename
 
     # Check if the file already exists
     if local_filepath.exists():
-        typer.echo(f"File already exists: {local_filepath}")
+        print(f"[bold red]File already exists: {local_filepath}[/bold red]")
         return
 
     # File does not exist, proceed with download
-    typer.echo(f"Start downloading URL: {url} into {local_filepath}")
+    print(f"Start downloading URL: {url} into {local_filepath}")
     download_file(url, local_filepath)
 
 
