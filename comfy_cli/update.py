@@ -27,7 +27,7 @@ def check_for_updates():
     )
 
     if has_newer:
-        notify_update(newer_version)
+        notify_update(current_version, newer_version)
 
 
 def get_version_from_pyproject(file_path="pyproject.toml"):
@@ -51,9 +51,10 @@ def get_version_from_pyproject(file_path="pyproject.toml"):
         print(f"Error accessing version in TOML: {e}")
 
 
-def notify_update(newer_version):
+def notify_update(current_version: str, newer_version: str):
     message = (
         f":sparkles: Newer version of [bold magenta]comfy-cli[/bold magenta] is available: [bold green]{newer_version}[/bold green].\n"
+        f"Current version: [bold cyan]{current_version}[/bold cyan]\n"
         f"Update by running: [bold yellow]'pip install --upgrade comfy-cli'[/bold yellow] :arrow_up:"
     )
     console.print(
