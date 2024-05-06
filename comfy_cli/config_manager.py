@@ -125,13 +125,13 @@ class ConfigManager(object):
         self.background = None
 
     def get_cli_version(self):
-      try:
-        with open(self.get_pyproject_path(), "r") as f:
-          pyproject_toml_content = f.read()
-        parsed_toml = tomlkit.parse(pyproject_toml_content)
-        version = parsed_toml["project"]["version"]
-        return version
-      except Exception as e:
-        # Handle exceptions when parsing or retrieving the version
-        logging.error(f"Error occurred while retrieving CLI version: {e}")
-        return None
+        try:
+            with open(self.get_pyproject_path(), "r") as f:
+                pyproject_toml_content = f.read()
+            parsed_toml = tomlkit.parse(pyproject_toml_content)
+            version = parsed_toml["project"]["version"]
+            return version
+        except Exception as e:
+            # Handle exceptions when parsing or retrieving the version
+            logging.error(f"Error occurred while retrieving CLI version: {e}")
+            return None
