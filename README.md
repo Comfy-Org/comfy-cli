@@ -118,6 +118,18 @@ comfy node [show|simple-show] [installed|enabled|not-installed|disabled|all|snap
   `comfy node restore-snapshot <snapshot name>`
 
 
+- Install dependencies:
+
+  `comfy node install-deps --deps=<deps .json file>` 
+
+  `comfy node install-deps --workflow=<workflow .json/.png file>`
+
+
+- Generate deps:
+
+  `comfy node deps-in-workflow --workflow=<workflow .json/.png file>` 
+
+
 ### Managing Models
 
 - Model downloading
