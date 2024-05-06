@@ -167,9 +167,20 @@ def download_file(url: str, local_filepath: pathlib.Path):
     with httpx.stream("GET", url, follow_redirects=True) as response:
         if response.status_code == 200:
             total = int(response.headers["Content-Length"])
-            with open(local_filepath, "wb") as f:
-                for data in ui.show_progress(response.iter_bytes(), total):
-                    f.write(data)
+            try:
+                with open(local_filepath, "wb") as f:
+                    for data in ui.show_progress(
+                        response.iter_bytes(),
+                        total,
+                        description=f"Downloading {total//1024//1024} MB",
+                    ):
+                        f.write(data)
+            except KeyboardInterrupt:
+                delete_eh = ui.prompt_confirm_action(
+                    "Download interrupted, cleanup files?"
+                )
+                if delete_eh:
+                    local_filepath.unlink()
         else:
             status_reason = guess_status_code_reason(response.status_code)
             raise DownloadException(f"Failed to download file.\n{status_reason}")
