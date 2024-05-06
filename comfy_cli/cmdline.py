@@ -48,6 +48,12 @@ def mutually_exclusive_group_options():
 exclusivity_callback = mutually_exclusive_group_options()
 
 
+@app.command(help="Display help for commands")
+def help(ctx: typer.Context):
+    print(ctx.find_root().get_help())
+    ctx.exit(0)
+
+
 @app.callback(invoke_without_command=True)
 def entry(
     ctx: typer.Context,
@@ -225,32 +231,31 @@ def install(
     print(f"ComfyUI is installed at: {comfy_path}")
 
 
-@app.command(help="Stop background ComfyUI")
-@tracking.track_command()
-def update(target: str = typer.Argument("comfy", help="[all|comfy]")):
-    if target not in ["all", "comfy"]:
-        typer.echo(
-            f"Invalid target: {target}. Allowed targets are 'all', 'comfy'.",
-            err=True,
-        )
-        raise typer.Exit(code=1)
+# @app.command(help="Update ComfyUI custom nodes")
+# @tracking.track_command()
+# def update(target: str = typer.Argument("comfy", help="[all|comfy]")):
+#     if target not in ["all", "comfy"]:
+#         typer.echo(
+#             f"Invalid target: {target}. Allowed targets are 'all', 'comfy'.",
+#             err=True,
+#         )
+#         raise typer.Exit(code=1)
 
-    _env_checker = EnvChecker()
-    comfy_path = workspace_manager.workspace_path
+#     comfy_path = workspace_manager.workspace_path
 
-    if "all" == target:
-        custom_nodes.command.execute_cm_cli(["update", "all"])
-    else:
-        print(f"Updating ComfyUI in {comfy_path}...")
-        if comfy_path is None:
-            print("ComfyUI path is not found.")
-            raise typer.Exit(code=1)
-        os.chdir(comfy_path)
-        subprocess.run(["git", "pull"], check=True)
-        subprocess.run(
-            [sys.executable, "-m", "pip", "install", "-r", "requirements.txt"],
-            check=True,
-        )
+#     if "all" == target:
+#         custom_nodes.command.execute_cm_cli(["update", "all"])
+#     else:
+#         print(f"Updating ComfyUI in {comfy_path}...")
+#         if comfy_path is None:
+#             print("ComfyUI path is not found.")
+#             raise typer.Exit(code=1)
+#         os.chdir(comfy_path)
+#         subprocess.run(["git", "pull"], check=True)
+#         subprocess.run(
+#             [sys.executable, "-m", "pip", "install", "-r", "requirements.txt"],
+#             check=True,
+#         )
 
 
 # @app.command(help="Run workflow file")
@@ -396,7 +401,13 @@ def launch(
 
 @app.command("set-default", help="Set default ComfyUI path")
 @tracking.track_command()
-def set_default(workspace_path: str):
+def set_default(
+    # todo: support clear option
+    # clear: Annotated[bool, typer.Option(help="Clear existing default path")] = False,
+    workspace_path: Annotated[
+        str, typer.Argument(help="Path to ComfyUI workspace")
+    ] = None
+):
     comfy_path = os.path.expanduser(workspace_path)
 
     if not os.path.exists(comfy_path):
