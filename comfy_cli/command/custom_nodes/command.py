@@ -85,7 +85,6 @@ def validate_comfyui_manager(_env_checker):
 def save_snapshot(
     output: Annotated[
         str,
-        None,
         typer.Option(
             show_default=False, help="Specify the output file path. (.json/.yaml)"
         ),

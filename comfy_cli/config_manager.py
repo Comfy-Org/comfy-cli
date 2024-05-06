@@ -1,7 +1,10 @@
 import configparser
 import os
+
+import tomlkit
+
 from comfy_cli.utils import singleton, get_os, is_running
-from comfy_cli import constants
+from comfy_cli import constants, logging
 from typing import Optional, Tuple
 
 
@@ -15,6 +18,11 @@ class ConfigManager(object):
     @staticmethod
     def get_config_path():
         return constants.DEFAULT_CONFIG[get_os()]
+
+    @staticmethod
+    def get_pyproject_path():
+        # TODO: check if this works for homebrew and pip installed comfy-cli as well.
+        return os.path.join(os.path.dirname(__file__), "../pyproject.toml")
 
     def get_config_file_path(self):
         return os.path.join(self.get_config_path(), "config.ini")
@@ -115,3 +123,15 @@ class ConfigManager(object):
         del self.config["DEFAULT"]["background"]
         self.write_config()
         self.background = None
+
+    def get_cli_version(self):
+        try:
+            with open(self.get_pyproject_path(), "r") as f:
+                pyproject_toml_content = f.read()
+            parsed_toml = tomlkit.parse(pyproject_toml_content)
+            version = parsed_toml["project"]["version"]
+            return version
+        except Exception as e:
+            # Handle exceptions when parsing or retrieving the version
+            logging.error(f"Error occurred while retrieving CLI version: {e}")
+            return None

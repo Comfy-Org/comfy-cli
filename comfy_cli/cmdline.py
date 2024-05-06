@@ -15,6 +15,7 @@ from comfy_cli import constants, env_checker, logging, tracking, ui, utils
 from comfy_cli.command import custom_nodes
 from comfy_cli.command import install as install_inner
 from comfy_cli.command.models import models as models_command
+from comfy_cli.update import check_for_updates
 from comfy_cli.config_manager import ConfigManager
 from comfy_cli.env_checker import EnvChecker, check_comfy_server_running
 from comfy_cli.workspace_manager import (
@@ -111,6 +112,7 @@ def install(
         Optional[str], typer.Option(help="Specify commit hash for ComfyUI")
     ] = None,
 ):
+    check_for_updates()
     checker = EnvChecker()
 
     comfy_path = workspace_manager.get_specified_workspace()
@@ -307,6 +309,7 @@ def launch(
     ] = False,
     extra: List[str] = typer.Argument(None),
 ):
+    check_for_updates()
     resolved_workspace = workspace_manager.workspace_path
     if not resolved_workspace:
         print(
@@ -376,6 +379,7 @@ def which():
 @app.command(help="Print out current environment variables.")
 @tracking.track_command()
 def env():
+    check_for_updates()
     _env_checker = EnvChecker()
     _env_checker.print()
 
