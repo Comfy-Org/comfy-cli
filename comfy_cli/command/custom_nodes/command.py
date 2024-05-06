@@ -1,8 +1,8 @@
 import typer
 from typing_extensions import List, Annotated
+from typing import Optional
 
 from comfy_cli import tracking
-from comfy_cli.env_checker import EnvChecker
 import os
 import subprocess
 import sys
@@ -85,7 +85,7 @@ def validate_comfyui_manager(_env_checker):
 def save_snapshot(
     output: Annotated[
         str,
-        "--output",
+        None,
         typer.Option(
             show_default=False, help="Specify the output file path. (.json/.yaml)"
         ),
@@ -100,9 +100,40 @@ def save_snapshot(
 
 @app.command("restore-snapshot")
 @tracking.track_command("node")
-def restore_snapshot(path: str):
+def restore_snapshot(
+    path: str,
+    pip_non_url: Optional[bool] = typer.Option(
+        default=None,
+        show_default=False,
+        is_flag=True,
+        help="Restore for pip packages registered on PyPI.",
+    ),
+    pip_non_local_url: Optional[bool] = typer.Option(
+        default=None,
+        show_default=False,
+        is_flag=True,
+        help="Restore for pip packages registered at web URLs.",
+    ),
+    pip_local_url: Optional[bool] = typer.Option(
+        default=None,
+        show_default=False,
+        is_flag=True,
+        help="Restore for pip packages specified by local paths.",
+    ),
+):
+    extras = []
+
+    if pip_non_url:
+        extras += ["--pip-non-url"]
+
+    if pip_non_local_url:
+        extras += ["--pip-non-local-url"]
+
+    if pip_local_url:
+        extras += ["--pip-local-url"]
+
     path = os.path.abspath(path)
-    execute_cm_cli(["restore-snapshot", path])
+    execute_cm_cli(["restore-snapshot", path] + extras)
 
 
 @app.command("restore-dependencies")
@@ -217,11 +248,10 @@ def install(
     args: List[str] = typer.Argument(..., help="install custom nodes"),
     channel: Annotated[
         str,
-        "--channel",
         typer.Option(show_default=False, help="Specify the operation mode"),
     ] = None,
     mode: Annotated[
-        str, "--mode", typer.Option(show_default=False, help="[remote|local|cache]")
+        str, typer.Option(show_default=False, help="[remote|local|cache]")
     ] = None,
 ):
     if "all" in args:
@@ -400,18 +430,17 @@ def fix(
 @tracking.track_command("node")
 def install_deps(
     deps: Annotated[
-        str, None, typer.Option(show_default=False, help="Dependency spec file (.json)")
+        str, typer.Option(show_default=False, help="Dependency spec file (.json)")
     ] = None,
     workflow: Annotated[
-        str, None, typer.Option(show_default=False, help="Workflow file (.json/.png)")
+        str, typer.Option(show_default=False, help="Workflow file (.json/.png)")
     ] = None,
     channel: Annotated[
         str,
-        "--channel",
         typer.Option(show_default=False, help="Specify the operation mode"),
     ] = None,
     mode: Annotated[
-        str, "--mode", typer.Option(show_default=False, help="[remote|local|cache]")
+        str, typer.Option(show_default=False, help="[remote|local|cache]")
     ] = None,
 ):
     valid_modes = ["remote", "local", "cache"]
@@ -457,10 +486,10 @@ def install_deps(
 @tracking.track_command("node")
 def deps_in_workflow(
     workflow: Annotated[
-        str, None, typer.Option(show_default=False, help="Workflow file (.json/.png)")
+        str, typer.Option(show_default=False, help="Workflow file (.json/.png)")
     ],
     output: Annotated[
-        str, None, typer.Option(show_default=False, help="Workflow file (.json/.png)")
+        str, typer.Option(show_default=False, help="Workflow file (.json/.png)")
     ],
     channel: Annotated[
         str,
@@ -468,7 +497,7 @@ def deps_in_workflow(
         typer.Option(show_default=False, help="Specify the operation mode"),
     ] = None,
     mode: Annotated[
-        str, "--mode", typer.Option(show_default=False, help="[remote|local|cache]")
+        str, typer.Option(show_default=False, help="[remote|local|cache]")
     ] = None,
 ):
     valid_modes = ["remote", "local", "cache"]
