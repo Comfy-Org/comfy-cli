@@ -96,9 +96,11 @@ def load_yaml(file_path: str) -> ComfyLockYAMLStruct:
         basics = Basics(
             remote=data.get("basics", {}).get("remote", ""),
             name=data.get("basics", {}).get("name"),
-            updated_at=datetime.fromisoformat(data.get("basics", {}).get("updated_at"))
-            if data.get("basics", {}).get("updated_at")
-            else None,
+            updated_at=(
+                datetime.fromisoformat(data.get("basics", {}).get("updated_at"))
+                if data.get("basics", {}).get("updated_at")
+                else None
+            ),
         )
 
         models = [
