@@ -2,6 +2,10 @@ import requests
 import tomlkit
 from rich import print
 import tomlkit.exceptions
+from rich.console import Console
+from rich.panel import Panel
+
+console = Console()
 
 
 def check_for_newer_pypi_version(package_name, current_version):
@@ -23,7 +27,7 @@ def check_for_updates():
     )
 
     if has_newer:
-        print(f"Newer version available: {newer_version}")
+        notify_update(newer_version)
 
 
 def get_version_from_pyproject(file_path="pyproject.toml"):
@@ -45,3 +49,17 @@ def get_version_from_pyproject(file_path="pyproject.toml"):
         print(f"Error parsing TOML: {e}")
     except KeyError as e:
         print(f"Error accessing version in TOML: {e}")
+
+
+def notify_update(newer_version):
+    message = (
+        f":sparkles: Newer version of [bold magenta]comfy-cli[/bold magenta] is available: [bold green]{newer_version}[/bold green].\n"
+        f"Update by running: [bold yellow]'pip install --upgrade comfy-cli'[/bold yellow] :arrow_up:"
+    )
+    console.print(
+        Panel(
+            message,
+            title="[bold red]:bell: Update Available![/bold red]",
+            border_style="bright_blue",
+        )
+    )
