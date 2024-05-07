@@ -98,39 +98,41 @@ def save_snapshot(
         execute_cm_cli(["save-snapshot", "--output", output])
 
 
-@app.command("restore-snapshot")
+@app.command("restore-snapshot", help="Restore snapshot from snapshot file")
 @tracking.track_command("node")
 def restore_snapshot(path: str):
     path = os.path.abspath(path)
     execute_cm_cli(["restore-snapshot", path])
 
 
-@app.command("restore-dependencies")
+@app.command(
+    "restore-dependencies", help="Restore dependencies from installed custom nodes"
+)
 @tracking.track_command("node")
 def restore_dependencies():
     execute_cm_cli(["restore-dependencies"])
 
 
-@manager_app.command("disable-gui")
+@manager_app.command("disable-gui", help="Disable GUI mode of ComfyUI-Manager")
 @tracking.track_command("node")
 def disable_gui():
     execute_cm_cli(["cli-only-mode", "enable"])
 
 
-@manager_app.command("enable-gui")
+@manager_app.command("enable-gui", help="Enable GUI mode of ComfyUI-Manager")
 @tracking.track_command("node")
 def enable_gui():
     execute_cm_cli(["cli-only-mode", "disable"])
 
 
-@manager_app.command()
+@manager_app.command(help="Clear reserved startup action in ComfyUI-Manager")
 @tracking.track_command("node")
 def clear(path: str):
     path = os.path.abspath(path)
     execute_cm_cli(["clear", path])
 
 
-@app.command()
+@app.command(help="Show node list")
 @tracking.track_command("node")
 def show(
     args: List[str] = typer.Argument(
@@ -170,7 +172,7 @@ def show(
     execute_cm_cli(["show"] + args, channel, mode)
 
 
-@app.command("simple-show")
+@app.command("simple-show", help="Show node list (simple mode)")
 @tracking.track_command("node")
 def simple_show(
     args: List[str] = typer.Argument(
@@ -211,7 +213,7 @@ def simple_show(
 
 
 # install, reinstall, uninstall
-@app.command()
+@app.command(help="Install custom nodes")
 @tracking.track_command("node")
 def install(
     args: List[str] = typer.Argument(..., help="install custom nodes"),
@@ -239,7 +241,7 @@ def install(
     execute_cm_cli(["install"] + args, channel, mode)
 
 
-@app.command()
+@app.command(help="Reinstall custom nodes")
 @tracking.track_command("node")
 def reinstall(
     args: List[str] = typer.Argument(..., help="reinstall custom nodes"),
@@ -267,7 +269,7 @@ def reinstall(
     execute_cm_cli(["reinstall"] + args, channel, mode)
 
 
-@app.command()
+@app.command(help="Uninstall custom nodes")
 @tracking.track_command("node")
 def uninstall(
     args: List[str] = typer.Argument(..., help="uninstall custom nodes"),
@@ -298,7 +300,7 @@ def uninstall(
 # `update, disable, enable, fix` allows `all` param
 
 
-@app.command()
+@app.command(help="Update custom nodes or ComfyUI")
 @tracking.track_command("node")
 def update(
     args: List[str] = typer.Argument(..., help="update custom nodes"),
@@ -322,7 +324,7 @@ def update(
     execute_cm_cli(["update"] + args, channel, mode)
 
 
-@app.command()
+@app.command(help="Disable custom nodes")
 @tracking.track_command("node")
 def disable(
     args: List[str] = typer.Argument(..., help="disable custom nodes"),
@@ -346,7 +348,7 @@ def disable(
     execute_cm_cli(["disable"] + args, channel, mode)
 
 
-@app.command()
+@app.command(help="Enable custom nodes")
 @tracking.track_command("node")
 def enable(
     args: List[str] = typer.Argument(..., help="enable custom nodes"),
@@ -370,7 +372,7 @@ def enable(
     execute_cm_cli(["enable"] + args, channel, mode)
 
 
-@app.command()
+@app.command(help="Fix dependencies of custom nodes")
 @tracking.track_command("node")
 def fix(
     args: List[str] = typer.Argument(
@@ -396,7 +398,10 @@ def fix(
     execute_cm_cli(["fix"] + args, channel, mode)
 
 
-@app.command("install-deps")
+@app.command(
+    "install-deps",
+    help="Install dependencies from dependencies file(.json) or workflow(.png/.json)",
+)
 @tracking.track_command("node")
 def install_deps(
     deps: Annotated[
@@ -453,14 +458,16 @@ def install_deps(
         os.remove(tmp_path)
 
 
-@app.command("deps-in-workflow")
+@app.command(
+    "deps-in-workflow", help="Generate dependencies file from workflow (.json/.png)"
+)
 @tracking.track_command("node")
 def deps_in_workflow(
     workflow: Annotated[
         str, None, typer.Option(show_default=False, help="Workflow file (.json/.png)")
     ],
     output: Annotated[
-        str, None, typer.Option(show_default=False, help="Workflow file (.json/.png)")
+        str, None, typer.Option(show_default=False, help="Output file (.json)")
     ],
     channel: Annotated[
         str,
