@@ -62,33 +62,45 @@ def help(ctx: typer.Context):
 @app.callback(invoke_without_command=True)
 def entry(
     ctx: typer.Context,
-    workspace: Optional[str] = typer.Option(
-        default=None,
-        show_default=False,
-        help="Path to ComfyUI workspace",
-        callback=exclusivity_callback,
-    ),
-    recent: Optional[bool] = typer.Option(
-        default=None,
-        show_default=False,
-        is_flag=True,
-        help="Execute from recent path",
-        callback=exclusivity_callback,
-    ),
-    here: Optional[bool] = typer.Option(
-        default=None,
-        show_default=False,
-        is_flag=True,
-        help="Execute from current path",
-        callback=exclusivity_callback,
-    ),
-    yes: bool = typer.Option(
-        False, "--yes", "-y", help="Enable without confirmation", is_flag=True
-    ),
+    workspace: Annotated[
+        Optional[str],
+        typer.Option(
+            show_default=False,
+            help="Path to ComfyUI workspace",
+            callback=exclusivity_callback,
+        ),
+    ] = None,
+    recent: Annotated[
+        Optional[bool],
+        typer.Option(
+            show_default=False,
+            is_flag=True,
+            help="Execute from recent path",
+            callback=exclusivity_callback,
+        ),
+    ] = None,
+    here: Annotated[
+        Optional[bool],
+        typer.Option(
+            show_default=False,
+            is_flag=True,
+            help="Execute from current path",
+            callback=exclusivity_callback,
+        ),
+    ] = None,
+    no_prompting: Annotated[
+        Optional[bool],
+        typer.Option(
+            show_default=False,
+            hidden=True,
+            is_flag=True,
+            help="Do not prompt user for input, use default options",
+        ),
+    ] = None,
 ):
     workspace_manager.setup_workspace_manager(workspace, here, recent)
 
-    tracking.prompt_tracking_consent(yes)
+    tracking.prompt_tracking_consent(no_prompting)
 
     if ctx.invoked_subcommand is None:
         print(
