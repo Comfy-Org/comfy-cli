@@ -215,7 +215,7 @@ comfy is released under the [GNU General Public License v3.0](https://github.com
 
 ## Support
 
-If you encounter any issues or have questions about comfy-cli, please [open an issue](https://github.com/comfy-cli/issues) on our GitHub repository. We'll be happy to assist you!
+If you encounter any issues or have questions about comfy-cli, please [open an issue](https://github.com/comfy-cli/issues) on our GitHub repository or contact us on [Discord](https://discord.gg/comfycontrib). We'll be happy to assist you!
 
 Happy diffusing with ComfyUI and comfy-cli! 🎉
 
