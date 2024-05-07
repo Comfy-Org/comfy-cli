@@ -13,15 +13,19 @@ comfy-cli is a command line tool that helps users easily install and manage [Com
 
 ## Installation
 
-To install comfy-cli, make sure you have Python 3.9 or higher installed on your system. Then, run the following command:
+1. (Recommended, but not necessary) Enable virtual environment ([venv](https://docs.python.org/3/library/venv.html)/[conda](https://conda.io/projects/conda/en/latest/user-guide/getting-started.html))
 
-`pip install comfy-cli`
+2. To install comfy-cli, make sure you have Python 3.9 or higher installed on your system. Then, run the following command:
+
+     `pip install comfy-cli`
 
 ### Shell Autocomplete
 
 To install autocompletion hints in your shell run:
 
 `comfy --install-completion`
+
+This enables you to type `comfy [TAP]` to autocomplete commands and options
 
 ## Usage
 
