@@ -200,6 +200,16 @@ custom_nodes:
     ...
 ```
 
+## Analytics
+
+We track analytics using Mixpanel to help us understand usage patterns and know where to prioritize our efforts. When you first download the cli, it will ask you to give consent. If at any point you wish to opt out:
+
+```
+comfy tracking disable
+```
+
+Check out the usage here: [Mixpanel Board](https://mixpanel.com/p/13hGfPfEPdRkjPtNaS7BYQ)
+
 ## Contributing
 
 We welcome contributions to comfy-cli! If you have any ideas, suggestions, or
