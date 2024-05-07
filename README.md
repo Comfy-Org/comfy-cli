@@ -17,6 +17,11 @@ To install comfy-cli, make sure you have Python 3.7 or higher installed on your 
 
 `pip install comfy-cli`
 
+### Shell Autocomplete
+
+To install autocompletion hints in your shell run:
+
+`comfy --install-completion`
 
 ## Usage
 
@@ -195,22 +200,32 @@ custom_nodes:
     ...
 ```
 
+## Analytics
+
+We track analytics using Mixpanel to help us understand usage patterns and know where to prioritize our efforts. When you first download the cli, it will ask you to give consent. If at any point you wish to opt out:
+
+```
+comfy tracking disable
+```
+
+Check out the usage here: [Mixpanel Board](https://mixpanel.com/p/13hGfPfEPdRkjPtNaS7BYQ)
+
 ## Contributing
 
 We welcome contributions to comfy-cli! If you have any ideas, suggestions, or
 bug reports, please open an issue on our [GitHub
-repository](https://github.com/Comfy-Org/comfy-cli/issues). If you'd like to contribute code,
+repository](https://github.com/yoland68/comfy-cli/issues). If you'd like to contribute code,
 please fork the repository and submit a pull request.
 
 Check out the [Dev Guide](/DEV_README.md) for more details.
 
 ## License
 
-comfy is released under the [GNU General Public License v3.0](https://github.com/drip-art/comfy-cli/blob/master/LICENSE).
+comfy is released under the [GNU General Public License v3.0](https://github.com/yoland68/comfy-cli/blob/master/LICENSE).
 
 ## Support
 
-If you encounter any issues or have questions about comfy-cli, please [open an issue](https://github.com/comfy-cli/issues) on our GitHub repository. We'll be happy to assist you!
+If you encounter any issues or have questions about comfy-cli, please [open an issue](https://github.com/comfy-cli/issues) on our GitHub repository or contact us on [Discord](https://discord.gg/comfycontrib). We'll be happy to assist you!
 
 Happy diffusing with ComfyUI and comfy-cli! 🎉
 

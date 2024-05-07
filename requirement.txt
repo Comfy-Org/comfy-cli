@@ -7,3 +7,4 @@ typing-extensions
 mixpanel
 tomlkit
 pathspec
+httpx
