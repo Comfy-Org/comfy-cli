@@ -1,3 +1,4 @@
+from enum import Enum
 import questionary
 import typer
 from rich.console import Console
@@ -41,6 +42,42 @@ def prompt_select(question: str, choices: list) -> str:
         str: The selected choice from the user.
     """
     return questionary.select(question, choices=choices).ask()
+
+
+def prompt_select_enum(question: str, choices: list) -> str:
+    """
+    Asks a single select question using questionary and returns the selected response.
+
+    Args:
+        question (str): The question to display to the user.
+        choices (list): A list of Enum choices for the user to select from.
+
+    Returns:
+        str: The selected choice from the user.
+    """
+    choice_map = {choice.value: choice for choice in choices}
+    display_choices = list(choice_map.keys())
+
+    selected = questionary.select(question, choices=display_choices).ask()
+
+    return choice_map[selected]
+
+
+def prompt_input(question: str, default: str = "") -> str:
+    """
+    Asks the user for an input using questionary.
+
+    Args:
+        question (str): The question to display to the user.
+        default (str): The default value for the input.
+
+    Returns:
+        str: The user's input.
+
+    Raises:
+        KeyboardInterrupt: If the user interrupts the input.
+    """
+    return questionary.text(question, default=default).ask()
 
 
 def prompt_multi_select(prompt: str, choices: List[str]) -> List[str]:

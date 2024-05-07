@@ -5,6 +5,7 @@ import time
 import uuid
 import webbrowser
 from typing import Optional
+from comfy_cli.constants import GPU_OPTION
 
 import questionary
 import typer
@@ -52,6 +53,12 @@ def mutually_exclusive_group_options():
 exclusivity_callback = mutually_exclusive_group_options()
 
 
+@app.command(help="Display help for commands")
+def help(ctx: typer.Context):
+    print(ctx.find_root().get_help())
+    ctx.exit(0)
+
+
 @app.callback(invoke_without_command=True)
 def entry(
     ctx: typer.Context,
@@ -81,6 +88,9 @@ def entry(
     tracking.prompt_tracking_consent()
 
     if ctx.invoked_subcommand is None:
+        print(
+            "[bold yellow]Welcome to Comfy CLI![/bold yellow]: https://github.com/Comfy-Org/comfy-cli"
+        )
         print(ctx.get_help())
         ctx.exit()
     start_time = time.time()
@@ -88,6 +98,9 @@ def entry(
     end_time = time.time()
 
     logging.info(f"scan_dir took {end_time - start_time:.2f} seconds to run")
+
+
+gpu_exclusivity_callback = mutually_exclusive_group_options()
 
 
 @app.command(help="Download and install ComfyUI and ComfyUI-Manager")
@@ -99,15 +112,46 @@ def install(
     ] = constants.COMFY_MANAGER_GITHUB_URL,
     restore: Annotated[
         bool,
-        lambda: typer.Option(
-            default=False,
+        typer.Option(
+            show_default=False,
             help="Restore dependencies for installed ComfyUI if not installed",
         ),
     ] = False,
     skip_manager: Annotated[
-        bool, typer.Option(help="Skip installing the manager component")
+        bool,
+        typer.Option(show_default=False, help="Skip installing the manager component"),
     ] = False,
-    amd: Annotated[bool, typer.Option(help="Install for AMD gpu")] = False,
+    skip_torch_or_directml: Annotated[
+        bool,
+        typer.Option(show_default=False, help="Skip installing PyTorch Or DirectML"),
+    ] = False,
+    skip_requirement: Annotated[
+        bool, typer.Option(show_default=False, help="Skip installing requirements.txt")
+    ] = False,
+    nvidia: Annotated[
+        bool,
+        typer.Option(
+            show_default=False,
+            help="Install for Nvidia gpu",
+            callback=gpu_exclusivity_callback,
+        ),
+    ] = None,
+    amd: Annotated[
+        bool,
+        typer.Option(
+            show_default=False,
+            help="Install for AMD gpu",
+            callback=gpu_exclusivity_callback,
+        ),
+    ] = None,
+    m_series: Annotated[
+        bool,
+        typer.Option(
+            show_default=False,
+            help="Install for Mac M-Series gpu",
+            callback=gpu_exclusivity_callback,
+        ),
+    ] = None,
     commit: Annotated[
         Optional[str], typer.Option(help="Specify commit hash for ComfyUI")
     ] = None,
@@ -122,17 +166,18 @@ def install(
 
     is_comfy_path, repo_dir = check_comfy_repo(comfy_path)
     if is_comfy_path and not restore:
-        typer.echo(
+        print(
             f"[bold red]ComfyUI is already installed at the specified path:[/bold red] {comfy_path}\n"
-            f"[bold yellow]If you want to restore dependencies, add the '--restore' option.[/bold yellow]",
-            err=True,
+        )
+        print(
+            "[bold yellow]If you want to restore dependencies, add the '--restore' option.[/bold yellow]",
         )
         raise typer.Exit(code=1)
 
     if repo_dir is not None:
         comfy_path = str(repo_dir.working_dir)
 
-    if checker.python_version.major < 3.9:
+    if checker.python_version.major < 3 or checker.python_version.minor < 9:
         print(
             "[bold red]Python version 3.9 or higher is required to run ComfyUI.[/bold red]"
         )
@@ -140,9 +185,41 @@ def install(
             f"You are currently using Python version {env_checker.format_python_version(checker.python_version)}."
         )
 
-    torch_mode = None
-    if amd:
-        torch_mode = "amd"
+    platform = utils.get_os()
+    if nvidia and platform == constants.OS.MACOS:
+        print(
+            "[bold red]Nvidia GPU is never on MacOS. What are you smoking? 🤔[/bold red]"
+        )
+        raise typer.Exit(code=1)
+
+    if platform != constants.OS.MACOS and m_series:
+        print(f"[bold red]You are on {platform} bruh [/bold red]")
+
+    gpu = None
+
+    if nvidia:
+        gpu = GPU_OPTION.NVIDIA
+    elif amd:
+        gpu = GPU_OPTION.AMD
+    elif m_series:
+        gpu = GPU_OPTION.M_SERIES
+    else:
+        if platform == constants.OS.MACOS:
+            gpu = ui.prompt_select_enum(
+                "What type of Mac do you have?",
+                [GPU_OPTION.M_SERIES, GPU_OPTION.MAC_INTEL],
+            )
+        else:
+            gpu = ui.prompt_select_enum(
+                "What GPU do you have?",
+                [GPU_OPTION.NVIDIA, GPU_OPTION.AMD, GPU_OPTION.INTEL_ARC],
+            )
+
+    if gpu == GPU_OPTION.INTEL_ARC:
+        print("[bold yellow]Installing on Intel ARC is not yet supported[/bold yellow]")
+        print(
+            "[bold yellow]Feel free to follow this thread to manually install:\nhttps://github.com/comfyanonymous/ComfyUI/discussions/476[/bold yellow]"
+        )
 
     install_inner.execute(
         url,
@@ -150,8 +227,11 @@ def install(
         comfy_path,
         restore,
         skip_manager,
-        torch_mode,
         commit=commit,
+        gpu=gpu,
+        platform=platform,
+        skip_torch_or_directml=skip_torch_or_directml,
+        skip_requirement=skip_requirement,
     )
 
     print(f"ComfyUI is installed at: {comfy_path}")

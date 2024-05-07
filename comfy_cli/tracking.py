@@ -64,7 +64,7 @@ def track_command(sub_command: str = None):
             logging.debug(
                 f"Tracking command: {command_name} with arguments: {filtered_kwargs}"
             )
-            track_event(command_name, properties=filtered_kwargs)
+            # track_event(command_name, properties=filtered_kwargs)
 
             return func(*args, **kwargs)
 

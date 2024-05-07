@@ -18,6 +18,15 @@ def get_workspace() -> pathlib.Path:
     return pathlib.Path(workspace_manager.workspace_path)
 
 
+class DownloadException(Exception):
+    pass
+
+
+def potentially_strip_param_url(path_name: str) -> str:
+    path_name = path_name.split("?")[0]
+    return path_name
+
+
 @app.command()
 @tracking.track_command("model")
 def download(
@@ -38,16 +47,24 @@ def download(
 ):
     """Download a model to a specified relative path if it is not already downloaded."""
     # Convert relative path to absolute path based on the current working directory
-    local_filename = url.split("/")[-1]
+    local_filename = potentially_strip_param_url(url.split("/")[-1])
+    local_filename = ui.prompt_input(
+        "Enter filename to save model as", default=local_filename
+    )
+    if local_filename is None:
+        raise typer.Exit(code=1)
+    if local_filename == "":
+        raise DownloadException("Filename cannot be empty")
+
     local_filepath = get_workspace() / relative_path / local_filename
 
     # Check if the file already exists
     if local_filepath.exists():
-        typer.echo(f"File already exists: {local_filepath}")
+        print(f"[bold red]File already exists: {local_filepath}[/bold red]")
         return
 
     # File does not exist, proceed with download
-    typer.echo(f"Start downloading URL: {url} into {local_filepath}")
+    print(f"Start downloading URL: {url} into {local_filepath}")
     download_file(url, local_filepath)
 
 
@@ -141,6 +158,16 @@ def list(
     ui.display_table(data, column_names)
 
 
+def guess_status_code_reason(status_code: int) -> str:
+    if status_code == 401:
+        return f"Unauthorized download ({status_code}), you might need to manually log into browser to download one"
+    elif status_code == 403:
+        return f"Forbidden url ({status_code}), you might need to manually log into browser to download one"
+    elif status_code == 404:
+        return "Sorry, your model is in another castle (404)"
+    return f"Unknown error occurred (status code: {status_code})"
+
+
 def download_file(url: str, local_filepath: pathlib.Path):
     """Helper function to download a file."""
 
@@ -151,10 +178,25 @@ def download_file(url: str, local_filepath: pathlib.Path):
     )  # Ensure the directory exists
 
     with httpx.stream("GET", url, follow_redirects=True) as response:
-        total = int(response.headers["Content-Length"])
-        with open(local_filepath, "wb") as f:
-            for data in ui.show_progress(response.iter_bytes(), total):
-                f.write(data)
+        if response.status_code == 200:
+            total = int(response.headers["Content-Length"])
+            try:
+                with open(local_filepath, "wb") as f:
+                    for data in ui.show_progress(
+                        response.iter_bytes(),
+                        total,
+                        description=f"Downloading {total//1024//1024} MB",
+                    ):
+                        f.write(data)
+            except KeyboardInterrupt:
+                delete_eh = ui.prompt_confirm_action(
+                    "Download interrupted, cleanup files?"
+                )
+                if delete_eh:
+                    local_filepath.unlink()
+        else:
+            status_reason = guess_status_code_reason(response.status_code)
+            raise DownloadException(f"Failed to download file.\n{status_reason}")
 
 
 def list_models(path: pathlib.Path) -> list:
