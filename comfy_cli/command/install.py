@@ -1,4 +1,5 @@
 import os
+import platform
 import subprocess
 import sys
 
@@ -7,7 +8,6 @@ from rich import print
 from comfy_cli import constants
 from comfy_cli.constants import GPU_OPTION
 from comfy_cli.workspace_manager import WorkspaceManager
-import platform
 
 
 def get_os_details():
@@ -19,7 +19,7 @@ def get_os_details():
 def install_comfyui_dependencies(
     repo_dir,
     gpu: GPU_OPTION,
-    platform: constants.OS,
+    plat: constants.OS,
     skip_torch_or_directml: bool,
     skip_requirement: bool,
 ):
@@ -28,7 +28,7 @@ def install_comfyui_dependencies(
     result = None
     if not skip_torch_or_directml:
         # install torch for AMD Linux
-        if gpu == GPU_OPTION.AMD and platform == constants.OS.LINUX:
+        if gpu == GPU_OPTION.AMD and plat == constants.OS.LINUX:
             pip_url = ["--extra-index-url", "https://download.pytorch.org/whl/rocm6.0"]
             result = subprocess.run(
                 [
@@ -67,7 +67,7 @@ def install_comfyui_dependencies(
             sys.exit(1)
 
         # install directml for AMD windows
-        if gpu == GPU_OPTION.AMD and platform == constants.OS.WINDOWS:
+        if gpu == GPU_OPTION.AMD and plat == constants.OS.WINDOWS:
             result = subprocess.run(
                 [sys.executable, "-m", "pip", "install", "torch-directml"], check=True
             )
