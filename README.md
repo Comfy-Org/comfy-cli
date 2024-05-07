@@ -214,14 +214,14 @@ Check out the usage here: [Mixpanel Board](https://mixpanel.com/p/13hGfPfEPdRkjP
 
 We welcome contributions to comfy-cli! If you have any ideas, suggestions, or
 bug reports, please open an issue on our [GitHub
-repository](https://github.com/Comfy-Org/comfy-cli/issues). If you'd like to contribute code,
+repository](https://github.com/yoland68/comfy-cli/issues). If you'd like to contribute code,
 please fork the repository and submit a pull request.
 
 Check out the [Dev Guide](/DEV_README.md) for more details.
 
 ## License
 
-comfy is released under the [GNU General Public License v3.0](https://github.com/drip-art/comfy-cli/blob/master/LICENSE).
+comfy is released under the [GNU General Public License v3.0](https://github.com/yoland68/comfy-cli/blob/master/LICENSE).
 
 ## Support
 
