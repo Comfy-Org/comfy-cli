@@ -6,6 +6,7 @@ import tomlkit
 from comfy_cli.utils import singleton, get_os, is_running
 from comfy_cli import constants, logging
 from typing import Optional, Tuple
+from importlib.metadata import version
 
 
 @singleton
@@ -125,13 +126,22 @@ class ConfigManager(object):
         self.background = None
 
     def get_cli_version(self):
+        # First, try reading from pyproject.toml
         try:
             with open(self.get_pyproject_path(), "r") as f:
                 pyproject_toml_content = f.read()
             parsed_toml = tomlkit.parse(pyproject_toml_content)
-            version = parsed_toml["project"]["version"]
-            return version
+            return parsed_toml["project"]["version"]
+        except FileNotFoundError:
+            logging.debug("pyproject.toml not found.")
+        except KeyError:
+            logging.warning("Version key not found in pyproject.toml.")
         except Exception as e:
-            # Handle exceptions when parsing or retrieving the version
-            logging.error(f"Error occurred while retrieving CLI version: {e}")
-            return None
+            logging.warning(f"Error occurred while retrieving CLI version from pyproject.toml: {e}")
+
+        # If the above fails, fall back to using importlib.metadata
+        try:
+            return version('comfy-cli')
+        except Exception as e:
+            logging.debug(f"Error occurred while retrieving CLI version using importlib.metadata: {e}")
+            return 'unknown'

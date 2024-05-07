@@ -19,7 +19,7 @@ def setup_logging():
         "ERROR": logging.ERROR,
         "CRITICAL": logging.CRITICAL,
     }
-    log_level_key = os.getenv("LOG_LEVEL", "WARN").upper()
+    log_level_key = os.getenv("LOG_LEVEL", "ERROR").upper()
     logging.basicConfig(
         level=log_levels.get(log_level_key, logging.WARNING),
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
