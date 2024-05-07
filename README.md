@@ -17,6 +17,11 @@ To install comfy-cli, make sure you have Python 3.7 or higher installed on your 
 
 `pip install comfy-cli`
 
+### Shell Autocomplete
+
+To install autocompletion hints in your shell run:
+
+`comfy --install-completion`
 
 ## Usage
 
