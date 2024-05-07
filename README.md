@@ -13,7 +13,7 @@ comfy-cli is a command line tool that helps users easily install and manage [Com
 
 ## Installation
 
-To install comfy-cli, make sure you have Python 3.7 or higher installed on your system. Then, run the following command:
+To install comfy-cli, make sure you have Python 3.9 or higher installed on your system. Then, run the following command:
 
 `pip install comfy-cli`
 
