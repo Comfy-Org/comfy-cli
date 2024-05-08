@@ -63,4 +63,4 @@ class GPU_OPTION(Enum):
 # https://github.com/comfyanonymous/ComfyUI/blob/a88b0ebc2d2f933c94e42aa689c42e836eedaf3c/folder_paths.py#L5
 SUPPORTED_PT_EXTENSIONS = (".ckpt", ".pt", ".bin", ".pth", ".safetensors")
 
-COMFY_REGISTRY_URL_ROOT = "http://localhost:8080"
+COMFY_REGISTRY_URL_ROOT = "https://api-frontend-dev-qod3oz2v2q-uc.a.run.app"
