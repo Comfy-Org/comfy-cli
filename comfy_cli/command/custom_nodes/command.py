@@ -515,7 +515,11 @@ def deps_in_workflow(
 
 @app.command("publish", help="Publish node to registry")
 @tracking.track_command("publish")
-def publish():
+def publish(
+    token: Optional[str] = typer.Option(
+        None, "--token", help="Personal Access Token for publishing", hide_input=True
+    )
+):
     """
     Publish a node with optional validation.
     """
@@ -525,7 +529,8 @@ def publish():
     config = extract_node_configuration()
 
     # Prompt for Personal Access Token
-    token = typer.prompt("Please enter your Personal Access Token", hide_input=True)
+    if not token:
+        token = typer.prompt("Please enter your Personal Access Token", hide_input=True)
 
     # Call API to fetch node version with the token in the body
     typer.echo("Publishing node version...")
