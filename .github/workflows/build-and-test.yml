@@ -31,4 +31,4 @@ jobs:
 
       - name: Run Tests
         run: |
-          comfy env
+          comfy enable
