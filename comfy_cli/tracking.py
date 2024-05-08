@@ -13,7 +13,6 @@ logginglib.getLogger("urllib3").setLevel(logginglib.ERROR)
 
 MIXPANEL_TOKEN = "93aeab8962b622d431ac19800ccc9f67"
 DISABLE_TELEMETRY = os.getenv("DISABLE_TELEMETRY", False)
-PROJECT_CONFIG_PATH = os.path.join(os.path.dirname(__file__), "pyproject.toml")
 mp = Mixpanel(MIXPANEL_TOKEN) if MIXPANEL_TOKEN else None
 
 # Generate a unique tracing ID per command.
@@ -36,17 +35,19 @@ def disable():
     typer.echo(f"Tracking is now {'enabled' if enable else 'disabled'}.")
 
 
-def track_event(event_name: str, properties: any = {}):
+def track_event(event_name: str, properties: any = None):
+    logging.debug(
+        f"tracking event called with event_name: {event_name} and properties: {properties}"
+    )
     enable_tracking = config_manager.get(constants.CONFIG_KEY_ENABLE_TRACKING)
-    if enable_tracking:
+    if not enable_tracking:
+        return
+
+    try:
         properties["cli_version"] = cli_version
-        try:
-            mp.track(distinct_id=tracing_id, event_name=event_name, properties=properties)
-        except MixpanelException as e:
-            # Ignore errors due to lack of internet.
-            return
-        except Exception as e:
-            logging.error(f"Failed to track event: {e}")
+        mp.track(distinct_id=tracing_id, event_name=event_name, properties=properties)
+    except Exception as e:
+        logging.warning(f"Failed to track event: {e}")  # Log the error but do not raise
 
 
 def track_command(sub_command: str = None):
