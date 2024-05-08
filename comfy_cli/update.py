@@ -2,10 +2,8 @@ import requests
 import tomlkit
 from rich import print
 import tomlkit.exceptions
-from rich.console import Console
 from rich.panel import Panel
-
-console = Console()
+from comfy_cli.console import console
 
 
 def check_for_newer_pypi_version(package_name, current_version):
