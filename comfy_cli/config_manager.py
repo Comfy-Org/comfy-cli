@@ -137,11 +137,15 @@ class ConfigManager(object):
         except KeyError:
             logging.warning("Version key not found in pyproject.toml.")
         except Exception as e:
-            logging.warning(f"Error occurred while retrieving CLI version from pyproject.toml: {e}")
+            logging.warning(
+                f"Error occurred while retrieving CLI version from pyproject.toml: {e}"
+            )
 
         # If the above fails, fall back to using importlib.metadata
         try:
-            return version('comfy-cli')
+            return version("comfy-cli")
         except Exception as e:
-            logging.debug(f"Error occurred while retrieving CLI version using importlib.metadata: {e}")
-            return 'unknown'
+            logging.debug(
+                f"Error occurred while retrieving CLI version using importlib.metadata: {e}"
+            )
+            return "unknown"
