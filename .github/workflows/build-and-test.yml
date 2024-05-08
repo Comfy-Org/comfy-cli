@@ -32,4 +32,4 @@ jobs:
       - name: Run Tests
         run: |
           comfy --yes env
-          comfy install
+          comfy install --cpu

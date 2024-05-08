@@ -155,6 +155,14 @@ def install(
             callback=gpu_exclusivity_callback,
         ),
     ] = None,
+    cpu: Annotated[
+        bool,
+        typer.Option(
+            show_default=False,
+            help="Install for CPU",
+            callback=gpu_exclusivity_callback,
+        ),
+    ] = None,
     commit: Annotated[
         Optional[str], typer.Option(help="Specify commit hash for ComfyUI")
     ] = None,
@@ -206,6 +214,8 @@ def install(
         gpu = GPU_OPTION.AMD
     elif m_series:
         gpu = GPU_OPTION.M_SERIES
+    elif cpu:
+        gpu = None
     else:
         if platform == constants.OS.MACOS:
             gpu = ui.prompt_select_enum(
