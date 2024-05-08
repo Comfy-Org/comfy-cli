@@ -31,4 +31,4 @@ jobs:
 
       - name: Run Tests
         run: |
-          comfy enable
+          comfy tracking enable
