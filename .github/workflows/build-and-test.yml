@@ -11,9 +11,12 @@ jobs:
   test:
     name: "Run Tests on Multiple Platforms"
     runs-on: ${{ matrix.os }}
+    env:
+      PYTHONIOENCODING: "utf8"
+    
     strategy:
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [ubuntu-latest, windows-latest, macos-latest]
         python-version: ["3.9"]
 
     steps:
