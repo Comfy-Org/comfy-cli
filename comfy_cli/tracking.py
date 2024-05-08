@@ -1,12 +1,15 @@
 import functools
 import os
 import uuid
-
-from mixpanel import Mixpanel
+import logging as logginglib
+from mixpanel import Mixpanel, MixpanelException
 
 import typer
 from comfy_cli import logging, ui, constants
 from comfy_cli.config_manager import ConfigManager
+
+# Ignore logs from urllib3 that Mixpanel uses.
+logginglib.getLogger("urllib3").setLevel(logginglib.ERROR)
 
 MIXPANEL_TOKEN = "93aeab8962b622d431ac19800ccc9f67"
 DISABLE_TELEMETRY = os.getenv("DISABLE_TELEMETRY", False)
@@ -33,12 +36,17 @@ def disable():
     typer.echo(f"Tracking is now {'enabled' if enable else 'disabled'}.")
 
 
-def track_event(event_name: str, properties: any = None):
+def track_event(event_name: str, properties: any = {}):
     enable_tracking = config_manager.get(constants.CONFIG_KEY_ENABLE_TRACKING)
-    print("cli_version", cli_version)
     if enable_tracking:
         properties["cli_version"] = cli_version
-        mp.track(distinct_id=tracing_id, event_name=event_name, properties=properties)
+        try:
+            mp.track(distinct_id=tracing_id, event_name=event_name, properties=properties)
+        except MixpanelException as e:
+            # Ignore errors due to lack of internet.
+            return
+        except Exception as e:
+            logging.error(f"Failed to track event: {e}")
 
 
 def track_command(sub_command: str = None):
@@ -64,7 +72,7 @@ def track_command(sub_command: str = None):
             logging.debug(
                 f"Tracking command: {command_name} with arguments: {filtered_kwargs}"
             )
-            # track_event(command_name, properties=filtered_kwargs)
+            track_event(command_name, properties=filtered_kwargs)
 
             return func(*args, **kwargs)
 
