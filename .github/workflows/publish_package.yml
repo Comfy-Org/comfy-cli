@@ -29,7 +29,6 @@ jobs:
         run: |
           sed -i "s/version = \".*\"/version = \"${{ env.VERSION }}\"/" pyproject.toml
 
-              
       - name: Build distribution
         run: python -m build --sdist --wheel --outdir dist/
 
@@ -49,3 +48,17 @@ jobs:
             Update comfy-cli to ${{ env.VERSION }}
 
             Created by actions/bump-homebrew-formula-action
+
+  test-homebrew-installation:
+    name: Test Comfy CLI Installation and Basic Functionality
+    needs: build-n-publish  # This job runs after build-n-publish completes successfully
+    runs-on: macos-latest
+    steps:
+      - name: Tap comfy-cli homebrew tap repository
+        run: brew tap Comfy-Org/comfy-cli
+
+      - name: Install comfy-cli via homebrew
+        run: brew install comfy-org/comfy-cli/comfy-cli
+
+      - name: Test Comfy CLI Help
+        run: comfy --help
