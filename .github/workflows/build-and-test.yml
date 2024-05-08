@@ -31,4 +31,5 @@ jobs:
 
       - name: Run Tests
         run: |
-          comfy tracking enable
+          comfy --yes env
+          comfy install
