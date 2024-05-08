@@ -16,7 +16,7 @@ def check_for_newer_pypi_version(package_name, current_version):
         latest_version = response.json()["info"]["version"]
         return latest_version != current_version, latest_version
     except requests.RequestException as e:
-        #print(f"Error checking latest version: {e}")
+        # print(f"Error checking latest version: {e}")
         return False, current_version
 
 

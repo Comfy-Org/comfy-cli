@@ -74,7 +74,9 @@ def initialize_project_config():
 
     # Convert SSH URL to HTTPS if needed
     if git_remote_url.startswith("git@github.com:"):
-        git_remote_url = git_remote_url.replace("git@github.com:", "https://github.com/")
+        git_remote_url = git_remote_url.replace(
+            "git@github.com:", "https://github.com/"
+        )
 
     # Ensure the URL ends with `.git` and remove it to obtain the plain URL
     repo_name = git_remote_url.split("/")[-1].replace(".git", "")
