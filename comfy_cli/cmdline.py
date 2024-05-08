@@ -82,10 +82,14 @@ def entry(
         help="Execute from current path",
         callback=exclusivity_callback,
     ),
+    yes: bool = typer.Option(
+        False, "--yes", "-y", help="Enable without confirmation", is_flag=True
+    ),
 ):
     workspace_manager.setup_workspace_manager(workspace, here, recent)
 
-    tracking.prompt_tracking_consent()
+    if not yes:
+        tracking.prompt_tracking_consent()
 
     if ctx.invoked_subcommand is None:
         print(
