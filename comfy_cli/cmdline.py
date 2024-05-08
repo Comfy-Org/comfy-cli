@@ -88,8 +88,7 @@ def entry(
 ):
     workspace_manager.setup_workspace_manager(workspace, here, recent)
 
-    if not yes:
-        tracking.prompt_tracking_consent()
+    tracking.prompt_tracking_consent(yes)
 
     if ctx.invoked_subcommand is None:
         print(

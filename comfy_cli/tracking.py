@@ -88,15 +88,18 @@ def track_command(sub_command: str = None):
     return decorator
 
 
-def prompt_tracking_consent():
+def prompt_tracking_consent(yes: bool = False):
     tracking_enabled = config_manager.get(constants.CONFIG_KEY_ENABLE_TRACKING)
     if tracking_enabled is not None:
         return
 
-    enable_tracking = ui.prompt_confirm_action(
-        "Do you agree to enable tracking to improve the application?"
-    )
-    init_tracking(enable_tracking)
+    if yes:
+        init_tracking(True)
+    else:
+        enable_tracking = ui.prompt_confirm_action(
+            "Do you agree to enable tracking to improve the application?"
+        )
+        init_tracking(enable_tracking)
 
 
 def init_tracking(enable_tracking: bool):
