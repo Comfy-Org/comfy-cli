@@ -1,10 +1,11 @@
 import functools
+import logging as logginglib
 import os
 import uuid
-import logging as logginglib
-from mixpanel import Mixpanel, MixpanelException
 
 import typer
+from mixpanel import Mixpanel
+
 from comfy_cli import logging, ui, constants
 from comfy_cli.config_manager import ConfigManager
 
