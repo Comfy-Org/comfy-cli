@@ -1,8 +1,6 @@
 import configparser
 import os
 
-import tomlkit
-
 from comfy_cli.utils import singleton, get_os, is_running
 from comfy_cli import constants, logging
 from typing import Optional, Tuple
@@ -19,11 +17,6 @@ class ConfigManager(object):
     @staticmethod
     def get_config_path():
         return constants.DEFAULT_CONFIG[get_os()]
-
-    @staticmethod
-    def get_pyproject_path():
-        # TODO: check if this works for homebrew and pip installed comfy-cli as well.
-        return os.path.join(os.path.dirname(__file__), "../pyproject.toml")
 
     def get_config_file_path(self):
         return os.path.join(self.get_config_path(), "config.ini")
@@ -126,26 +119,13 @@ class ConfigManager(object):
         self.background = None
 
     def get_cli_version(self):
-        # First, try reading from pyproject.toml
-        try:
-            with open(self.get_pyproject_path(), "r") as f:
-                pyproject_toml_content = f.read()
-            parsed_toml = tomlkit.parse(pyproject_toml_content)
-            return parsed_toml["project"]["version"]
-        except FileNotFoundError:
-            logging.debug("pyproject.toml not found.")
-        except KeyError:
-            logging.warning("Version key not found in pyproject.toml.")
-        except Exception as e:
-            logging.warning(
-                f"Error occurred while retrieving CLI version from pyproject.toml: {e}"
-            )
-
-        # If the above fails, fall back to using importlib.metadata
+        # Note: this approach should work for users installing the CLI via PyPi (e.g., pip install comfy-cli)
         try:
             return version("comfy-cli")
         except Exception as e:
             logging.debug(
                 f"Error occurred while retrieving CLI version using importlib.metadata: {e}"
             )
-            return "unknown"
+
+        # TODO: cover the users installing the CLI via homebrew
+        return "0.0.0"
