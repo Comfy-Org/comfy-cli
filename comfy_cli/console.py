@@ -3,6 +3,7 @@ import platform
 
 is_windows = platform.system() == "Windows"
 
+# Disable emoji on Windows because old Windows terminals don't support emoji.
 console = Console(
-    emoji=is_windows,
+    emoji=not is_windows,
 )
