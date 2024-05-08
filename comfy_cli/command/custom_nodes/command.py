@@ -46,7 +46,7 @@ def execute_cm_cli(args, channel=None, mode=None):
         cmd += ["--channel", channel]
 
     if mode is not None:
-        cmd += ["--mode", channel]
+        cmd += ["--mode", mode]
 
     new_env = os.environ.copy()
     session_path = os.path.join(
@@ -172,11 +172,10 @@ def show(
     ),
     channel: Annotated[
         str,
-        "--channel",
         typer.Option(show_default=False, help="Specify the operation mode"),
     ] = None,
     mode: Annotated[
-        str, "--mode", typer.Option(show_default=False, help="[remote|local|cache]")
+        str, typer.Option(show_default=False, help="[remote|local|cache]")
     ] = None,
 ):
     valid_commands = [
@@ -212,11 +211,10 @@ def simple_show(
     ),
     channel: Annotated[
         str,
-        "--channel",
         typer.Option(show_default=False, help="Specify the operation mode"),
     ] = None,
     mode: Annotated[
-        str, "--mode", typer.Option(show_default=False, help="[remote|local|cache]")
+        str, typer.Option(show_default=False, help="[remote|local|cache]")
     ] = None,
 ):
     valid_commands = [
@@ -277,11 +275,10 @@ def reinstall(
     args: List[str] = typer.Argument(..., help="reinstall custom nodes"),
     channel: Annotated[
         str,
-        "--channel",
         typer.Option(show_default=False, help="Specify the operation mode"),
     ] = None,
     mode: Annotated[
-        str, "--mode", typer.Option(show_default=False, help="[remote|local|cache]")
+        str, typer.Option(show_default=False, help="[remote|local|cache]")
     ] = None,
 ):
     if "all" in args:
@@ -305,11 +302,10 @@ def uninstall(
     args: List[str] = typer.Argument(..., help="uninstall custom nodes"),
     channel: Annotated[
         str,
-        "--channel",
         typer.Option(show_default=False, help="Specify the operation mode"),
     ] = None,
     mode: Annotated[
-        str, "--mode", typer.Option(show_default=False, help="[remote|local|cache]")
+        str, typer.Option(show_default=False, help="[remote|local|cache]")
     ] = None,
 ):
     if "all" in args:
@@ -336,11 +332,10 @@ def update(
     args: List[str] = typer.Argument(..., help="update custom nodes"),
     channel: Annotated[
         str,
-        "--channel",
         typer.Option(show_default=False, help="Specify the operation mode"),
     ] = None,
     mode: Annotated[
-        str, "--mode", typer.Option(show_default=False, help="[remote|local|cache]")
+        str, typer.Option(show_default=False, help="[remote|local|cache]")
     ] = None,
 ):
     valid_modes = ["remote", "local", "cache"]
@@ -360,11 +355,10 @@ def disable(
     args: List[str] = typer.Argument(..., help="disable custom nodes"),
     channel: Annotated[
         str,
-        "--channel",
         typer.Option(show_default=False, help="Specify the operation mode"),
     ] = None,
     mode: Annotated[
-        str, "--mode", typer.Option(show_default=False, help="[remote|local|cache]")
+        str, typer.Option(show_default=False, help="[remote|local|cache]")
     ] = None,
 ):
     valid_modes = ["remote", "local", "cache"]
@@ -384,11 +378,10 @@ def enable(
     args: List[str] = typer.Argument(..., help="enable custom nodes"),
     channel: Annotated[
         str,
-        "--channel",
         typer.Option(show_default=False, help="Specify the operation mode"),
     ] = None,
     mode: Annotated[
-        str, "--mode", typer.Option(show_default=False, help="[remote|local|cache]")
+        str, typer.Option(show_default=False, help="[remote|local|cache]")
     ] = None,
 ):
     valid_modes = ["remote", "local", "cache"]
@@ -410,11 +403,10 @@ def fix(
     ),
     channel: Annotated[
         str,
-        "--channel",
         typer.Option(show_default=False, help="Specify the operation mode"),
     ] = None,
     mode: Annotated[
-        str, "--mode", typer.Option(show_default=False, help="[remote|local|cache]")
+        str, typer.Option(show_default=False, help="[remote|local|cache]")
     ] = None,
 ):
     valid_modes = ["remote", "local", "cache"]
@@ -500,7 +492,6 @@ def deps_in_workflow(
     ],
     channel: Annotated[
         str,
-        "--channel",
         typer.Option(show_default=False, help="Specify the operation mode"),
     ] = None,
     mode: Annotated[
