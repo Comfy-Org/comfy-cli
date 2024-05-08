@@ -554,12 +554,12 @@ def publish():
 @app.command("init", help="Init scaffolding for custom node")
 @tracking.track_command("node")
 def scaffold():
-    if os.path.exists("comfynode.toml"):
-        typer.echo("Warning: 'comfynode.toml' already exists. Will not overwrite.")
+    if os.path.exists("pyproject.toml"):
+        typer.echo("Warning: 'pyproject.toml' already exists. Will not overwrite.")
         raise typer.Exit(code=1)
 
     typer.echo("Initializing metadata...")
     initialize_project_config()
     typer.echo(
-        "comfynode.toml created successfully. Defaults were filled in. Please check before publishing."
+        "pyproject.toml created successfully. Defaults were filled in. Please check before publishing."
     )

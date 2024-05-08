@@ -48,17 +48,16 @@ def create_comfynode_config():
 
     # Write the TOML document to a file
     try:
-        with open("comfynode.toml", "w") as toml_file:
+        with open("pyproject.toml", "w") as toml_file:
             toml_file.write(tomlkit.dumps(document))
-        print("comfynode.toml has been created successfully in the current directory.")
     except IOError as e:
-        raise Exception(f"Failed to write 'comfynode.toml': {str(e)}")
+        raise Exception(f"Failed to write 'pyproject.toml': {str(e)}")
 
 
 def initialize_project_config():
     create_comfynode_config()
 
-    with open("comfynode.toml", "r") as file:
+    with open("pyproject.toml", "r") as file:
         document = tomlkit.parse(file.read())
 
     # Get the current git remote URL
@@ -100,15 +99,15 @@ def initialize_project_config():
 
     # Write the updated config to a new file in the current directory
     try:
-        with open("comfynode.toml", "w") as toml_file:
+        with open("pyproject.toml", "w") as toml_file:
             toml_file.write(tomlkit.dumps(document))
-        print("comfynode.toml has been created successfully in the current directory.")
+        print("pyproject.toml has been created successfully in the current directory.")
     except IOError as e:
-        raise IOError(f"Failed to write 'comfynode.toml': {str(e)}")
+        raise IOError(f"Failed to write 'pyproject.toml': {str(e)}")
 
 
 def extract_node_configuration(
-    path: str = os.path.join(os.getcwd(), "comfynode.toml"),
+    path: str = os.path.join(os.getcwd(), "pyproject.toml"),
 ) -> PyProjectConfig:
     import tomlkit
 
