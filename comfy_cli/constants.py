@@ -34,6 +34,7 @@ CONFIG_KEY_DEFAULT_WORKSPACE = "default_workspace"
 CONFIG_KEY_DEFAULT_LAUNCH_EXTRAS = "default_launch_extras"
 CONFIG_KEY_RECENT_WORKSPACE = "recent_workspace"
 CONFIG_KEY_ENABLE_TRACKING = "enable_tracking"
+CONFIG_KEY_USER_ID = "enable_tracking"
 CONFIG_KEY_BACKGROUND = "background"
 
 COMFY_LOCK_YAML_FILE = "comfy.lock.yaml"

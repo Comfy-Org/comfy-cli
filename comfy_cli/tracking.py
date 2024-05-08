@@ -27,6 +27,7 @@ app = typer.Typer()
 def enable():
     set_tracking_enabled(True)
     typer.echo(f"Tracking is now {'enabled' if enable else 'disabled'}.")
+    set_user_identifier()
 
 
 @app.command()
@@ -91,10 +92,20 @@ def prompt_tracking_consent():
         "Do you agree to enable tracking to improve the application?"
     )
     config_manager.set(constants.CONFIG_KEY_ENABLE_TRACKING, str(enable_tracking))
+    set_user_identifier()
 
     # Note: only called once when the user interacts with the CLI for the
     #  first time iff the permission is granted.
     track_event("install")
+
+
+def set_user_identifier():
+    user_id = config_manager.get(constants.CONFIG_KEY_USER_ID)
+    if user_id is None:
+        user_id = str(uuid.uuid4())
+        config_manager.set(constants.CONFIG_KEY_USER_ID, user_id)
+
+    mp.people_set(user_id, {})  # add anything else about the user here
 
 
 def set_tracking_enabled(enabled: bool):
