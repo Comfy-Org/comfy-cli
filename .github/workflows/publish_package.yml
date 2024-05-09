@@ -73,7 +73,7 @@ jobs:
 
   test-pip-installation:
     name: Test Comfy CLI Installation via pip
-    needs: build-n-publish  # This job runs after build-n-publish completes successfully
+    needs: build-n-publish-pypi  # This job runs after build-n-publish completes successfully
     runs-on: ubuntu-latest
     steps:
       - name: Set up Python
