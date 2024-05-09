@@ -110,7 +110,7 @@ jobs:
   
       - name: Install Comfy CLI using Homebrew Formula
         run: |
-          brew install --build-from-source ./homebrew-repo/Formula/comfy-cli.rb
+          brew install --build-from-source --verbose ./homebrew-repo/Formula/comfy-cli.rb
           comfy --help
           brew uninstall comfy-cli
   
@@ -146,6 +146,10 @@ jobs:
   
       - name: Uninstall comfy-cli latest
         run: brew uninstall comfy-cli
+
+      - name: Extract version from tag
+        id: get_version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_ENV
   
       - name: Install comfy-cli versioned via Homebrew
         run: brew install comfy-org/comfy-cli/comfy-cli@${{ env.VERSION }}
