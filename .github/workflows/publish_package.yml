@@ -38,7 +38,7 @@ jobs:
           repository_url: https://test.pypi.org/legacy/
           
       - name: Wait for Test PyPI availability
-        run: sleep 60  # Wait for 1 minute
+        run: sleep 120  # Wait for 1 minute
 
       - name: Install Comfy CLI from Test Pypi and Test
         run: |
@@ -49,7 +49,7 @@ jobs:
         uses: pypa/gh-action-pypi-publish@v1.8.14
 
       - name: Wait for PyPI availability
-        run: sleep 60  # Wait for 1 minute
+        run: sleep 120  # Wait for 1 minute
           
   test-pip-installation:
     name: Test Comfy CLI Installation via pip
