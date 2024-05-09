@@ -98,14 +98,10 @@ jobs:
       - name: Generate Homebrew Formula
         run: |
           source venv/bin/activate
-          poet -f comfy-cli==$VERSION > comfy-cli@${{ env.VERSION }}.rb
-  
-      - name: Copy Version Formula as Latest
-        run: cp comfy-cli@${{ env.VERSION }}.rb comfy-cli.rb
+          poet -f comfy-cli==$VERSION > comfy-cli.rb
   
       - name: Move Formulas to Tap Directory
         run: |
-          mv comfy-cli@${{ env.VERSION }}.rb homebrew-repo/Formula/
           mv comfy-cli.rb homebrew-repo/Formula/
   
       - name: Install Comfy CLI using Homebrew Formula
@@ -119,7 +115,7 @@ jobs:
           cd homebrew-repo
           git config user.name github-actions
           git config user.email github-actions@github.com
-          git add Formula/comfy-cli.rb Formula/comfy-cli@${{ env.VERSION }}.rb
+          git add Formula/comfy-cli.rb
           git commit -m "Update comfy-cli to latest and version ${VERSION}"
           git push
         env:
@@ -146,18 +142,5 @@ jobs:
   
       - name: Uninstall comfy-cli latest
         run: brew uninstall comfy-cli
-
-      - name: Extract version from tag
-        id: get_version
-        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_ENV
-  
-      - name: Install comfy-cli versioned via Homebrew
-        run: brew install comfy-org/comfy-cli/comfy-cli@${{ env.VERSION }}
-  
-      - name: Test comfy-cli versioned Help
-        run: comfy --help
-  
-      - name: Uninstall comfy-cli versioned
-        run: brew uninstall comfy-cli@${{ env.VERSION }}
 
 
