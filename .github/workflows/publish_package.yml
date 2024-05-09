@@ -39,7 +39,7 @@ jobs:
 
       - name: Install Comfy CLI via pip
         run: |
-          pip install --index-url https://test.pypi.org/simple/ comfy-cli==$VERSION
+          pip install -i https://test.pypi.org/simple/ comfy-cli==${{env.VERSION}}
           comfy --help
           
       - name: Publish distribution to Official PyPI
@@ -124,7 +124,7 @@ jobs:
         run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_ENV
 
       - name: Install Comfy CLI via pip
-        run: pip install comfy-cli==$VERSION
+        run: pip install comfy-cli==${{env.VERSION}}
 
       - name: Test Comfy CLI Help
         run: comfy --help
