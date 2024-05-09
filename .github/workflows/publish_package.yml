@@ -41,6 +41,10 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v2
+        with:
+          repository: 'Comfy-Org/homebrew-comfy-cli'
+          token: ${{ secrets.COMMITTER_TOKEN }}
+          path: 'homebrew-repo'
 
       - name: Extract version from tag
         id: get_version
@@ -56,6 +60,22 @@ jobs:
         run: |
           source venv/bin/activate
           poet comfy-cli==$VERSION > comfy-cli.rb
+
+      - name: Commit and Push Formula
+        run: |
+          mv comfy-cli.rb homebrew-repo/Formula/
+          cd homebrew-repo
+          git config user.name github-actions
+          git config user.email github-actions@github.com
+          git add Formula/comfy-cli.rb
+          git commit -m "Update comfy-cli formula to version $VERSION"
+          git push
+        env:
+          GIT_COMMITTER_NAME: github-actions
+          GIT_COMMITTER_EMAIL: github-actions@github.com
+          GIT_AUTHOR_NAME: github-actions
+          GIT_AUTHOR_EMAIL: github-actions@github.com
+          GITHUB_TOKEN: ${{ secrets.COMMITTER_TOKEN }}
 
   test-homebrew-installation:
     name: Test Comfy CLI Installation via homebrew
