@@ -5,7 +5,7 @@ on:
     types: [ created ]
 
 jobs:
-  build-n-publish-test-pypi:
+  build-n-publish-pypi:
     name: Build and publish Python distributions to PyPI
     runs-on: ubuntu-latest
     permissions:
@@ -36,57 +36,20 @@ jobs:
         uses: pypa/gh-action-pypi-publish@v1.8.14
         with:
           repository_url: https://test.pypi.org/legacy/
-        
-  test-pypi-test-installation:
-    name: Test Comfy CLI Installation via Test PyPi
-    needs: build-n-publish-test-pypi
-    runs-on: ubuntu-latest
-    steps:
-      - name: Set up Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.10'
-
-      - name: Extract version from tag
-        id: get_version
-        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_ENV
-
-      - name: Install Comfy CLI via pip
-        run: pip install -i https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple comfy-cli==${{env.VERSION}}
-
-      - name: Test Comfy CLI Help
-        run: comfy --help
-
-  build-n-publish-pypi:
-    name: Build and publish Python distributions to Official PyPI
-    needs: test-pypi-test-installation
-    runs-on: ubuntu-latest
-    permissions:
-      id-token: write  # IMPORTANT: this permission is mandatory for trusted publishing
-    steps:
-      - uses: actions/checkout@v3
-
-      - name: Set up Python 3.10
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.10'
-
-      - name: Install build and tomlkit dependencies
-        run: python -m pip install --upgrade pip build tomlkit
-
-      - name: Extract version from tag
-        id: get_version
-        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_ENV
-
-      - name: Update version in pyproject.toml
-        run: |
-          sed -i "s/version = \".*\"/version = \"${{ env.VERSION }}\"/" pyproject.toml
-
-      - name: Build distribution
-        run: python -m build --sdist --wheel --outdir dist/
           
+      - name: Wait for Test PyPI availability
+        run: sleep 60  # Wait for 1 minute
+
+      - name: Install Comfy CLI from Test Pypi and Test
+        run: |
+          pip install -i https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple comfy-cli==${{env.VERSION}}
+          comfy --help
+
       - name: Publish distribution to Official PyPI
         uses: pypa/gh-action-pypi-publish@v1.8.14
+
+      - name: Wait for PyPI availability
+        run: sleep 60  # Wait for 1 minute
           
   test-pip-installation:
     name: Test Comfy CLI Installation via pip
@@ -102,14 +65,14 @@ jobs:
         id: get_version
         run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_ENV
 
-      - name: Install Comfy CLI via pip
+      - name: Install Comfy CLI via pip and Test
         run: pip install comfy-cli==${{env.VERSION}}
 
       - name: Test Comfy CLI Help
         run: comfy --help
 
   publish-homebrew-tap:
-    runs-on: ubuntu-latest
+    runs-on: macos-latest  # Use macOS runner where Homebrew is pre-installed
     needs: build-n-publish-pypi
     steps:
       - name: Checkout code
