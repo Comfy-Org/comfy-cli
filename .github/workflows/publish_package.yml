@@ -5,7 +5,7 @@ on:
     types: [ created ]
 
 jobs:
-  build-n-publish:
+  build-n-publish-pypi:
     name: Build and publish Python distributions to PyPI
     runs-on: ubuntu-latest
     permissions:
@@ -35,23 +35,31 @@ jobs:
       - name: Publish distribution to PyPI
         uses: pypa/gh-action-pypi-publish@v1.8.14
 
-      - name: Bump Homebrew formula
-        uses: mislav/bump-homebrew-formula-action@v3
-        env:
-          COMMITTER_TOKEN: ${{ secrets.COMMITTER_TOKEN }}
-        with:
-          formula-name: comfy-cli
-          formula-path: Formula/comfy-cli.rb
-          homebrew-tap: Comfy-Org/homebrew-comfy-cli
-          base-branch: main  # Adjust if your default branch is different
-          commit-message: |
-            Update comfy-cli to ${{ env.VERSION }}
+  publish-homebrew-tap:
+    runs-on: ubuntu-latest
+    needs: build-n-publish-pypi
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
 
-            Created by actions/bump-homebrew-formula-action
+      - name: Extract version from tag
+        id: get_version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_ENV
+
+      - name: Set up Python environment
+        run: |
+          python3 -m venv venv
+          source venv/bin/activate
+          pip install comfy-cli==$VERSION homebrew-pypi-poet
+
+      - name: Generate Homebrew Formula
+        run: |
+          source venv/bin/activate
+          poet comfy-cli==$VERSION > comfy-cli.rb
 
   test-homebrew-installation:
     name: Test Comfy CLI Installation via homebrew
-    needs: build-n-publish  # This job runs after build-n-publish completes successfully
+    needs: publish-homebrew-tap  # This job runs after build-n-publish completes successfully
     runs-on: macos-latest
     steps:
       - name: Tap comfy-cli homebrew tap repository
