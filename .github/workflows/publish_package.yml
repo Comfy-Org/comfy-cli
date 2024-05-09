@@ -59,7 +59,7 @@ jobs:
       - name: Generate Homebrew Formula
         run: |
           source venv/bin/activate
-          poet comfy-cli==$VERSION > comfy-cli.rb
+          poet -f comfy-cli==$VERSION > comfy-cli.rb
 
       - name: Commit and Push Formula
         run: |
