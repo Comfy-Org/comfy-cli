@@ -13,10 +13,19 @@ comfy-cli is a command line tool that helps users easily install and manage [Com
 
 ## Installation
 
-To install comfy-cli, make sure you have Python 3.7 or higher installed on your system. Then, run the following command:
+1. (Recommended, but not necessary) Enable virtual environment ([venv](https://docs.python.org/3/library/venv.html)/[conda](https://conda.io/projects/conda/en/latest/user-guide/getting-started.html))
 
-`pip install comfy-cli`
+2. To install comfy-cli, make sure you have Python 3.9 or higher installed on your system. Then, run the following command:
 
+     `pip install comfy-cli`
+
+### Shell Autocomplete
+
+To install autocompletion hints in your shell run:
+
+`comfy --install-completion`
+
+This enables you to type `comfy [TAP]` to autocomplete commands and options
 
 ## Usage
 
@@ -73,6 +82,16 @@ This command is used to perform a full backup/restore of the currently installed
 * You can use the `comfy which` command to check the path of the target workspace.
   * e.g `comfy --recent which`, `comfy --here which`, `comfy which`, ...
 
+
+### Default Setup
+
+The default sets the option that will be executed by default when no specific workspace's ComfyUI has been set for the command.
+
+  `comfy set-default <workspace path> ?[--launch-extras="<extra args>"]`
+
+  - `--launch-extras` option specifies extra args that are applied only during launch by default. However, if extras are specified at the time of launch, this setting is ignored.
+
+
 ### Launch ComfyUI
 
 Comfy provides commands that allow you to easily run the installed ComfyUI.
@@ -84,6 +103,8 @@ Comfy provides commands that allow you to easily run the installed ComfyUI.
   `comfy launch -- <extra args...>`
 
   `comfy launch -- --cpu --listen 0.0.0.0`
+
+  - When you manually configure the extra options, the extras set by set-default will be overridden.
 
 - To run background
 
@@ -120,6 +141,18 @@ comfy node [show|simple-show] [installed|enabled|not-installed|disabled|all|snap
   `comfy node save-snapshot`
 
   `comfy node restore-snapshot <snapshot name>`
+
+
+- Install dependencies:
+
+  `comfy node install-deps --deps=<deps .json file>` 
+
+  `comfy node install-deps --workflow=<workflow .json/.png file>`
+
+
+- Generate deps:
+
+  `comfy node deps-in-workflow --workflow=<workflow .json/.png file>` 
 
 
 ### Managing Models
@@ -187,22 +220,32 @@ custom_nodes:
     ...
 ```
 
+## Analytics
+
+We track analytics using Mixpanel to help us understand usage patterns and know where to prioritize our efforts. When you first download the cli, it will ask you to give consent. If at any point you wish to opt out:
+
+```
+comfy tracking disable
+```
+
+Check out the usage here: [Mixpanel Board](https://mixpanel.com/p/13hGfPfEPdRkjPtNaS7BYQ)
+
 ## Contributing
 
 We welcome contributions to comfy-cli! If you have any ideas, suggestions, or
 bug reports, please open an issue on our [GitHub
-repository](https://github.com/Comfy-Org/comfy-cli/issues). If you'd like to contribute code,
+repository](https://github.com/yoland68/comfy-cli/issues). If you'd like to contribute code,
 please fork the repository and submit a pull request.
 
 Check out the [Dev Guide](/DEV_README.md) for more details.
 
 ## License
 
-comfy is released under the [GNU General Public License v3.0](https://github.com/drip-art/comfy-cli/blob/master/LICENSE).
+comfy is released under the [GNU General Public License v3.0](https://github.com/yoland68/comfy-cli/blob/master/LICENSE).
 
 ## Support
 
-If you encounter any issues or have questions about comfy-cli, please [open an issue](https://github.com/comfy-cli/issues) on our GitHub repository. We'll be happy to assist you!
+If you encounter any issues or have questions about comfy-cli, please [open an issue](https://github.com/comfy-cli/issues) on our GitHub repository or contact us on [Discord](https://discord.gg/comfycontrib). We'll be happy to assist you!
 
 Happy diffusing with ComfyUI and comfy-cli! 🎉
 

@@ -30,6 +30,7 @@ dependencies = [
     "psutil",
     "tomlkit",
     "pathspec",
+    "httpx",
 ]
 
 classifiers = [

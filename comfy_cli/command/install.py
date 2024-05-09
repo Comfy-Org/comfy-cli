@@ -1,9 +1,13 @@
 import os
-import subprocess
-from rich import print
-import sys
-from comfy_cli.workspace_manager import WorkspaceManager
 import platform
+import subprocess
+import sys
+
+from rich import print
+
+from comfy_cli import constants
+from comfy_cli.constants import GPU_OPTION
+from comfy_cli.workspace_manager import WorkspaceManager
 
 
 def get_os_details():
@@ -12,26 +16,83 @@ def get_os_details():
     return os_name, os_version
 
 
-def install_comfyui_dependencies(repo_dir, torch_mode):
+def install_comfyui_dependencies(
+    repo_dir,
+    gpu: GPU_OPTION,
+    plat: constants.OS,
+    skip_torch_or_directml: bool,
+    skip_requirement: bool,
+):
     os.chdir(repo_dir)
 
-    # install torch
-    if torch_mode == "amd":
-        pip_url = ["--extra-index-url", "https://download.pytorch.org/whl/rocm6.0"]
-    else:
-        pip_url = ["--extra-index-url", "https://download.pytorch.org/whl/cu121"]
-    result = subprocess.run(
-        [sys.executable, "-m", "pip", "install", "torch", "torchvision", "torchaudio"]
-        + pip_url,
-        check=False,
-    )
-    if result.returncode != 0:
-        print(
-            "Failed to install PyTorch dependencies. Please check your environment (`comfy env`) and try again"
-        )
-        sys.exit(1)
+    result = None
+    if not skip_torch_or_directml:
+        # install torch for AMD Linux
+        if gpu == GPU_OPTION.AMD and plat == constants.OS.LINUX:
+            pip_url = ["--extra-index-url", "https://download.pytorch.org/whl/rocm6.0"]
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "pip",
+                    "install",
+                    "torch",
+                    "torchvision",
+                    "torchaudio",
+                ]
+                + pip_url,
+                check=False,
+            )
 
-    # install other requirements
+        # install torch for NVIDIA
+        if gpu == GPU_OPTION.NVIDIA:
+            pip_url = ["--extra-index-url", "https://download.pytorch.org/whl/cu121"]
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "pip",
+                    "install",
+                    "torch",
+                    "torchvision",
+                    "torchaudio",
+                ]
+                + pip_url,
+                check=False,
+            )
+        if result and result.returncode != 0:
+            print(
+                "Failed to install PyTorch dependencies. Please check your environment (`comfy env`) and try again"
+            )
+            sys.exit(1)
+
+        # install directml for AMD windows
+        if gpu == GPU_OPTION.AMD and plat == constants.OS.WINDOWS:
+            result = subprocess.run(
+                [sys.executable, "-m", "pip", "install", "torch-directml"], check=True
+            )
+
+        # install torch for Mac M Series
+        if gpu == GPU_OPTION.M_SERIES:
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "pip",
+                    "install",
+                    "--pre",
+                    "torch",
+                    "torchvision",
+                    "torchaudio",
+                    "--extra-index-url",
+                    "https://download.pytorch.org/whl/nightly/cpu",
+                ],
+                check=True,
+            )
+
+    # install requirements.txt
+    if skip_requirement:
+        return
     result = subprocess.run(
         [sys.executable, "-m", "pip", "install", "-r", "requirements.txt"], check=False
     )
@@ -56,42 +117,32 @@ def execute(
     comfy_path: str,
     restore: bool,
     skip_manager: bool,
-    torch_mode=None,
     commit=None,
+    gpu: constants.GPU_OPTION = None,
+    platform: constants.OS = None,
+    skip_torch_or_directml: bool = False,
+    skip_requirement: bool = False,
     *args,
     **kwargs,
 ):
     print(f"Installing from '{url}' to '{comfy_path}'")
 
     repo_dir = comfy_path
+    parent_path = os.path.join(repo_dir, "..")
 
-    # install ComfyUI
-    if os.path.exists(os.path.join(repo_dir, ".git")):
-        if restore or commit is not None:
-            if commit is not None:
-                os.chdir(repo_dir)
-                subprocess.run(["git", "checkout", commit])
+    if not os.path.exists(parent_path):
+        os.makedirs(parent_path, exist_ok=True)
 
-            install_comfyui_dependencies(repo_dir, torch_mode)
-        else:
-            print(
-                "ComfyUI is installed already. Skipping installation.\nIf you want to restore dependencies, add the '--restore' option."
-            )
-    else:
-        print("\nInstalling ComfyUI..")
-        parent_path = os.path.join(repo_dir, "..")
+    subprocess.run(["git", "clone", url, repo_dir])
 
-        if not os.path.exists(parent_path):
-            os.makedirs(parent_path, exist_ok=True)
+    # checkout specified commit
+    if commit is not None:
+        os.chdir(repo_dir)
+        subprocess.run(["git", "checkout", commit])
 
-        subprocess.run(["git", "clone", url, repo_dir])
-
-        # checkout specified commit
-        if commit is not None:
-            os.chdir(repo_dir)
-            subprocess.run(["git", "checkout", commit])
-
-        install_comfyui_dependencies(repo_dir, torch_mode)
+    install_comfyui_dependencies(
+        repo_dir, gpu, platform, skip_torch_or_directml, skip_requirement
+    )
 
     WorkspaceManager().set_recent_workspace(repo_dir)
 

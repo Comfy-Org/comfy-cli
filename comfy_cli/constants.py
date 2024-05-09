@@ -31,8 +31,11 @@ CONTEXT_KEY_RECENT = "recent"
 CONTEXT_KEY_HERE = "here"
 
 CONFIG_KEY_DEFAULT_WORKSPACE = "default_workspace"
+CONFIG_KEY_DEFAULT_LAUNCH_EXTRAS = "default_launch_extras"
 CONFIG_KEY_RECENT_WORKSPACE = "recent_workspace"
 CONFIG_KEY_ENABLE_TRACKING = "enable_tracking"
+CONFIG_KEY_USER_ID = "user_id"
+CONFIG_KEY_INSTALL_EVENT_TRIGGERED = "install_event_triggered"
 CONFIG_KEY_BACKGROUND = "background"
 
 COMFY_LOCK_YAML_FILE = "comfy.lock.yaml"
@@ -47,8 +50,17 @@ COMFY_ORIGIN_URL_CHOICES = [
     "https://github.com/drip-art/ComfyUI",
 ]
 
+
+class GPU_OPTION(Enum):
+    NVIDIA = "Nvidia"
+    AMD = "Amd"
+    INTEL_ARC = "Intel Arc"
+    M_SERIES = "Mac M Series"
+    MAC_INTEL = "Mac Intel"
+
+
 # Referencing supported pt extension from ComfyUI
 # https://github.com/comfyanonymous/ComfyUI/blob/a88b0ebc2d2f933c94e42aa689c42e836eedaf3c/folder_paths.py#L5
 SUPPORTED_PT_EXTENSIONS = (".ckpt", ".pt", ".bin", ".pth", ".safetensors")
 
-COMFY_REGISTRY_URL_ROOT = "http://localhost:8080"
+COMFY_REGISTRY_URL_ROOT = "https://api-frontend-dev-qod3oz2v2q-uc.a.run.app"

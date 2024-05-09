@@ -1,8 +1,10 @@
 import configparser
 import os
+
 from comfy_cli.utils import singleton, get_os, is_running
-from comfy_cli import constants
+from comfy_cli import constants, logging
 from typing import Optional, Tuple
+from importlib.metadata import version
 
 
 @singleton
@@ -64,12 +66,24 @@ class ConfigManager(object):
 
     def fill_print_env(self, table):
         table.add_row("Config Path", self.get_config_file_path())
+
+        launch_extras = ""
         if self.config.has_option("DEFAULT", "default_workspace"):
             table.add_row(
-                "Default ComfyUI workspace", self.config["DEFAULT"]["default_workspace"]
+                "Default ComfyUI workspace",
+                self.config["DEFAULT"][constants.CONFIG_KEY_DEFAULT_WORKSPACE],
+            )
+
+            launch_extras = self.config["DEFAULT"].get(
+                constants.CONFIG_KEY_DEFAULT_LAUNCH_EXTRAS, ""
             )
         else:
             table.add_row("Default ComfyUI workspace", "No default ComfyUI workspace")
+
+        if launch_extras == "":
+            launch_extras = "[bold red]None[/bold red]"
+
+        table.add_row("Default ComfyUI launch extra options", launch_extras)
 
         if self.config.has_option("DEFAULT", constants.CONFIG_KEY_RECENT_WORKSPACE):
             table.add_row(
@@ -89,7 +103,7 @@ class ConfigManager(object):
                 ),
             )
 
-        if self.config.has_option("DEFAULT", "background"):
+        if self.config.has_option("DEFAULT", constants.CONFIG_KEY_BACKGROUND):
             bg_info = self.background
             if bg_info:
                 table.add_row(
@@ -103,3 +117,15 @@ class ConfigManager(object):
         del self.config["DEFAULT"]["background"]
         self.write_config()
         self.background = None
+
+    def get_cli_version(self):
+        # Note: this approach should work for users installing the CLI via PyPi (e.g., pip install comfy-cli)
+        try:
+            return version("comfy-cli")
+        except Exception as e:
+            logging.debug(
+                f"Error occurred while retrieving CLI version using importlib.metadata: {e}"
+            )
+
+        # TODO: cover the users installing the CLI via homebrew
+        return "0.0.0"

@@ -170,6 +170,14 @@ class WorkspaceManager:
             constants.CONFIG_KEY_DEFAULT_WORKSPACE, os.path.abspath(path)
         )
 
+    def set_default_launch_extras(self, extras: str):
+        """
+        Sets the default workspace path in the configuration.
+        """
+        self.config_manager.set(
+            constants.CONFIG_KEY_DEFAULT_LAUNCH_EXTRAS, extras.strip()
+        )
+
     def get_specified_workspace(self):
         if self.specified_workspace is None:
             return None
