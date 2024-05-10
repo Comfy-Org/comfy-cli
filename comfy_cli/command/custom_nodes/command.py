@@ -11,9 +11,8 @@ import uuid
 from comfy_cli.config_manager import ConfigManager
 from comfy_cli.workspace_manager import WorkspaceManager
 
-
 from comfy_cli.registry import (
-    publish_node_version,
+    RegistryAPI,
     extract_node_configuration,
     upload_file_to_signed_url,
     zip_files,
@@ -23,6 +22,7 @@ from comfy_cli.registry import (
 app = typer.Typer()
 manager_app = typer.Typer()
 workspace_manager = WorkspaceManager()
+registry_api = RegistryAPI()
 
 
 def execute_cm_cli(args, channel=None, mode=None):
@@ -534,7 +534,7 @@ def publish(
 
     # Call API to fetch node version with the token in the body
     typer.echo("Publishing node version...")
-    response = publish_node_version(config, token)
+    response = registry_api.publish_node_version(config, token)
 
     # Zip up all files in the current directory, respecting .gitignore files.
     signed_url = response.signedUrl

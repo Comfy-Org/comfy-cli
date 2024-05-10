@@ -1,6 +1,7 @@
+import os
+
 import requests
 import json
-from comfy_cli import constants
 from comfy_cli.registry.types import (
     PyProjectConfig,
     PublishNodeVersionResponse,
@@ -8,55 +9,64 @@ from comfy_cli.registry.types import (
 )
 
 
-def publish_node_version(
-    node_config: PyProjectConfig, token: str
-) -> PublishNodeVersionResponse:
-    """
-    Publishes a new version of a node.
+class RegistryAPI:
+    def __init__(self):
+        self.base_url = self.determine_base_url()
 
-    Args:
-    node_config (PyProjectConfig): The node configuration.
-    token (str): Personal access token for authentication.
+    def determine_base_url(self):
+        if os.getenv("ENVIRONMENT") == "dev":
+            return "http://localhost:8080"
+        else:
+            return "https://api-frontend-dev-qod3oz2v2q-uc.a.run.app"
 
-    Returns:
-    dict: JSON response from the API server.
-    """
-    url = f"{constants.COMFY_REGISTRY_URL_ROOT}/publishers/{node_config.tool_comfy.publisher_id}/nodes/{node_config.project.name}/versions"
-    headers = {"Content-Type": "application/json"}
-    body = {
-        "personal_access_token": token,
-        "node": {
-            "id": node_config.project.name,
-            "description": node_config.project.description,
-            "name": node_config.tool_comfy.display_name,
-            "license": node_config.project.license,
-            "repository": node_config.project.urls.repository,
-        },
-        "node_version": {
-            "version": node_config.project.version,
-            "dependencies": node_config.project.dependencies,
-        },
-    }
+    def publish_node_version(
+        self, node_config: PyProjectConfig, token: str
+    ) -> PublishNodeVersionResponse:
+        """
+        Publishes a new version of a node.
 
-    response = requests.post(url, headers=headers, data=json.dumps(body))
+        Args:
+          node_config (PyProjectConfig): The node configuration.
+          token (str): The token to authenticate with the API server.
 
-    if response.status_code == 201:
-        data = response.json()
-        node_version = NodeVersion(
-            changelog=data["node_version"]["changelog"],
-            dependencies=data["node_version"]["dependencies"],
-            deprecated=data["node_version"]["deprecated"],
-            id=data["node_version"]["id"],
-            version=data["node_version"]["version"],
-        )
-        node_data = PublishNodeVersionResponse(
-            node_version=node_version, signedUrl=data["signedUrl"]
-        )
-        return node_data
-    else:
-        raise Exception(
-            f"Failed to publish node version: {response.status_code} {response.text}"
-        )
+        Returns:
+        PublishNodeVersionResponse: The response object from the API server.
+        """
+        url = f"{self.base_url}/publishers/{node_config.tool_comfy.publisher_id}/nodes/{node_config.project.name}/versions"
+        headers = {"Content-Type": "application/json"}
+        body = {
+            "personal_access_token": token,
+            "node": {
+                "id": node_config.project.name,
+                "description": node_config.project.description,
+                "name": node_config.tool_comfy.display_name,
+                "license": node_config.project.license,
+                "repository": node_config.project.urls.repository,
+            },
+            "node_version": {
+                "version": node_config.project.version,
+                "dependencies": node_config.project.dependencies,
+            },
+        }
+
+        response = requests.post(url, headers=headers, data=json.dumps(body))
+
+        if response.status_code == 201:
+            data = response.json()
+            node_version = NodeVersion(
+                changelog=data["node_version"]["changelog"],
+                dependencies=data["node_version"]["dependencies"],
+                deprecated=data["node_version"]["deprecated"],
+                id=data["node_version"]["id"],
+                version=data["node_version"]["version"],
+            )
+            return PublishNodeVersionResponse(
+                node_version=node_version, signedUrl=data["signedUrl"]
+            )
+        else:
+            raise Exception(
+                f"Failed to publish node version: {response.status_code} {response.text}"
+            )
 
 
 def upload_file_to_signed_url(signed_url: str, file_path: str):
