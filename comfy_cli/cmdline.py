@@ -5,7 +5,6 @@ import time
 import uuid
 import webbrowser
 from typing import Optional
-from comfy_cli.constants import GPU_OPTION
 
 import questionary
 import typer
@@ -16,13 +15,14 @@ from comfy_cli import constants, env_checker, logging, tracking, ui, utils
 from comfy_cli.command import custom_nodes
 from comfy_cli.command import install as install_inner
 from comfy_cli.command.models import models as models_command
-from comfy_cli.update import check_for_updates
 from comfy_cli.config_manager import ConfigManager
+from comfy_cli.constants import GPU_OPTION
 from comfy_cli.env_checker import EnvChecker, check_comfy_server_running
+from comfy_cli.update import check_for_updates
 from comfy_cli.workspace_manager import (
     WorkspaceManager,
-    check_comfy_repo,
     WorkspaceType,
+    check_comfy_repo,
 )
 
 logging.setup_logging()
@@ -245,6 +245,10 @@ def install(
         print(
             "[bold yellow]Feel free to follow this thread to manually install:\nhttps://github.com/comfyanonymous/ComfyUI/discussions/476[/bold yellow]"
         )
+
+    if gpu is None:
+        print("[bold red]No GPU selected. Exiting...[/bold red]")
+        raise typer.Exit(code=1)
 
     install_inner.execute(
         url,
@@ -522,6 +526,7 @@ def feedback():
     general_satisfaction_score = ui.prompt_select(
         question="On a scale of 1 to 5, how satisfied are you with the Comfy CLI tool? (1 being very dissatisfied and 5 being very satisfied)",
         choices=["1", "2", "3", "4", "5"],
+        force_prompting=True,
     )
     tracking.track_event(
         "feedback_general_satisfaction", {"score": general_satisfaction_score}
@@ -531,6 +536,7 @@ def feedback():
     usability_satisfaction_score = ui.prompt_select(
         question="On a scale of 1 to 5,  how satisfied are you with the usability and user experience of the Comfy CLI tool? (1 being very dissatisfied and 5 being very satisfied)",
         choices=["1", "2", "3", "4", "5"],
+        force_prompting=True,
     )
     tracking.track_event(
         "feedback_usability_satisfaction", {"score": usability_satisfaction_score}
