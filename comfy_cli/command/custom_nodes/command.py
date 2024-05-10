@@ -2,14 +2,18 @@ import typer
 from typing_extensions import List, Annotated
 from typing import Optional
 
-from comfy_cli import tracking
+from comfy_cli import tracking, ui
 import os
+import pathlib
 import subprocess
 import sys
 from rich import print
 import uuid
+
+from comfy_cli.command.models.models import download_file
 from comfy_cli.config_manager import ConfigManager
 from comfy_cli.workspace_manager import WorkspaceManager
+import tarfile
 
 from comfy_cli.registry import (
     RegistryAPI,
@@ -559,3 +563,92 @@ def scaffold():
     typer.echo(
         "pyproject.toml created successfully. Defaults were filled in. Please check before publishing."
     )
+
+
+@app.command("registry-list-all", help="Init scaffolding for custom node")
+@tracking.track_command("node")
+def registry_list_all():
+    """
+    Fetch and display all nodes in a table format.
+    """
+    try:
+        nodes = registry_api.list_all_nodes()
+        # Map Node data class instances to tuples for display
+        node_data = [
+            (
+                node.id,
+                node.name,
+                node.description,
+                node.author or "N/A",
+                node.license or "N/A",
+                ", ".join(node.tags),
+                node.latest_version.version if node.latest_version else "N/A",
+            )
+            for node in nodes
+        ]
+        ui.display_table(
+            node_data,
+            [
+                "ID",
+                "Name",
+                "Description",
+                "Author",
+                "License",
+                "Tags",
+                "Latest Version",
+            ],
+            title="List of All Nodes",
+        )
+    except Exception as e:
+        print(f"[red]Error: {str(e)}[/red]")
+
+
+@app.command("registry-install", help="Init scaffolding for custom node")
+@tracking.track_command("node")
+def registry_install():
+    """
+    Install a node from the registry.
+    """
+    try:
+        node_id = typer.prompt("Enter the ID of the node you want to install")
+        version = typer.prompt(
+            "Enter the version of the node you want to install (leave blank for latest)",
+            default="",
+            show_default=False,
+        )
+
+        # Call the API to install the node
+        node_version = registry_api.install_node(node_id, version)
+        if node_version.download_url:
+            # Download the node archive
+            local_filename = pathlib.Path(
+                f"./downloads/{node_id}-{node_version.version}.tar.gz"
+            )
+            download_file(node_version.download_url, local_filename)
+
+            # Extract the downloaded archive
+            extract_tar_gz(local_filename)
+            print(
+                f"Node {node_id} version {node_version.version} installed successfully."
+            )
+        else:
+            print("Download URL not provided.")
+
+    except Exception as e:
+        print(f"[red]Error: {str(e)}[/red]")
+
+
+def extract_tar_gz(
+    tar_gz_path: pathlib.Path, extract_path: pathlib.Path = pathlib.Path(".")
+):
+    """
+    Extracts a tar.gz file to a specified directory using pathlib.
+
+    Args:
+        tar_gz_path (pathlib.Path): Path to the .tar.gz file.
+        extract_path (pathlib.Path): Directory to extract the files into.
+    """
+    import tarfile
+
+    with tarfile.open(tar_gz_path, "r:gz") as tar:
+        tar.extractall(path=extract_path)
