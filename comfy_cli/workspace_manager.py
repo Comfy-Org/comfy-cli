@@ -142,17 +142,20 @@ class WorkspaceManager:
         self.use_recent = None
         self.workspace_path = None
         self.workspace_type = None
+        self.no_prompting = None
 
     def setup_workspace_manager(
         self,
         specified_workspace: Optional[str] = None,
         use_here: Optional[bool] = None,
         use_recent: Optional[bool] = None,
+        no_prompting: Optional[bool] = None,
     ):
         self.specified_workspace = specified_workspace
         self.use_here = use_here
         self.use_recent = use_recent
         self.workspace_path, self.workspace_type = self.get_workspace_path()
+        self.no_prompting = no_prompting
 
     def set_recent_workspace(self, path: str):
         """

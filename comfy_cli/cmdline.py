@@ -98,7 +98,7 @@ def entry(
         ),
     ] = None,
 ):
-    workspace_manager.setup_workspace_manager(workspace, here, recent)
+    workspace_manager.setup_workspace_manager(workspace, here, recent, no_prompting)
 
     tracking.prompt_tracking_consent(no_prompting)
 

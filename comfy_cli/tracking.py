@@ -8,6 +8,7 @@ from mixpanel import Mixpanel
 
 from comfy_cli import logging, ui, constants
 from comfy_cli.config_manager import ConfigManager
+from comfy_cli.workspace_manager import WorkspaceManager
 
 # Ignore logs from urllib3 that Mixpanel uses.
 logginglib.getLogger("urllib3").setLevel(logginglib.ERROR)
@@ -24,6 +25,7 @@ cli_version = config_manager.get_cli_version()
 user_id = config_manager.get(constants.CONFIG_KEY_USER_ID)
 # tracking all events for a single command
 tracing_id = str(uuid.uuid4())
+workspace_manager = WorkspaceManager()
 
 app = typer.Typer()
 

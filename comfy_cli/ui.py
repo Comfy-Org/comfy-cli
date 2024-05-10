@@ -6,7 +6,10 @@ from rich.progress import Progress
 from rich.table import Table
 from typing import List, Tuple
 
+from comfy_cli.workspace_manager import WorkspaceManager
+
 console = Console()
+workspace_manager = WorkspaceManager()
 
 
 def show_progress(iterable, total, description="Downloading..."):
