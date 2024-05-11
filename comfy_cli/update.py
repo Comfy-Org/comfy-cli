@@ -4,6 +4,8 @@ from rich import print
 import tomlkit.exceptions
 from rich.console import Console
 from rich.panel import Panel
+from importlib.metadata import metadata
+
 
 console = Console()
 
@@ -30,25 +32,9 @@ def check_for_updates():
         notify_update(current_version, newer_version)
 
 
-def get_version_from_pyproject(file_path="pyproject.toml"):
-    try:
-        with open(file_path, "r", encoding="utf-8") as file:
-            toml_content = file.read()
-            parsed_toml = tomlkit.parse(toml_content)
-            # Accessing the project version under [project]
-            if "project" in parsed_toml:
-                version = parsed_toml["project"]["version"]
-            else:
-                raise KeyError(
-                    "Version key not found under [project] in pyproject.toml"
-                )
-            return version
-    except FileNotFoundError:
-        print(f"Error: The file '{file_path}' does not exist.")
-    except tomlkit.exceptions.TOMLKitError as e:
-        print(f"Error parsing TOML: {e}")
-    except KeyError as e:
-        print(f"Error accessing version in TOML: {e}")
+def get_version_from_pyproject():
+    package_metadata = metadata("comfy-cli")
+    return package_metadata["Version"]
 
 
 def notify_update(current_version: str, newer_version: str):
