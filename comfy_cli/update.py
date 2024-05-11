@@ -5,6 +5,7 @@ import tomlkit.exceptions
 from rich.console import Console
 from rich.panel import Panel
 from importlib.metadata import metadata
+from packaging import version
 
 
 console = Console()
@@ -16,7 +17,11 @@ def check_for_newer_pypi_version(package_name, current_version):
         response = requests.get(url)
         response.raise_for_status()  # Raises stored HTTPError, if one occurred
         latest_version = response.json()["info"]["version"]
-        return latest_version != current_version, latest_version
+
+        if version.parse(latest_version) > version.parse(current_version):
+            return True, latest_version
+
+        return False, current_version
     except requests.RequestException as e:
         # print(f"Error checking latest version: {e}")
         return False, current_version
