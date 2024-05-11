@@ -26,9 +26,7 @@ fi
 
 echo "[2/6] CHECK: python3-venv"
 # Check if Python venv is installed
-python3 -m venv --help &> /dev/null
-if [ $? -ne 0 ]
-then
+if ! dpkg -l | grep -qE 'python3\.[0-9]+-venv'; then
     echo "Python3-venv is not installed. Starting installation..."
     if [ "$update_flag" == false ]
     then
