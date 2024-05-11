@@ -7,7 +7,7 @@ if [ ! -d $(pwd)/comfy ]; then
     mkdir $(pwd)/comfy
 fi
 
-echo "[1/6] CHECK: python3"
+echo "[1/7] CHECK: python3"
 # Check if Python3 is installed
 if ! command -v python3 &> /dev/null
 then
@@ -24,7 +24,7 @@ then
     update_flag=true
 fi
 
-echo "[2/6] CHECK: python3-venv"
+echo "[2/7] CHECK: python3-venv"
 # Check if Python venv is installed
 if ! dpkg -l | grep -qE 'python3\.[0-9]+-venv'; then
     echo "Python3-venv is not installed. Starting installation..."
@@ -47,7 +47,7 @@ if ! dpkg -l | grep -qE 'python3\.[0-9]+-venv'; then
     fi
 fi
 
-echo "[3/6] CHECK: git"
+echo "[3/7] CHECK: git"
 # Check if Git is installed
 if ! command -v git &> /dev/null
 then
@@ -72,7 +72,7 @@ then
     fi
 fi
 
-echo "[4/6] CREATE: venv (~/comfy/venv)"
+echo "[4/7] CREATE: venv (~/comfy/venv)"
 # Create virtual environment
 if [ ! -d $(pwd)/comfy/venv ]
 then
@@ -80,13 +80,13 @@ then
     python3 -m venv $(pwd)/comfy/venv
 fi
 
-echo "[5/6] INSTALL: comfy-cli into venv"
+echo "[5/7] INSTALL: comfy-cli into venv"
 # Install Comfy-CLI
 echo "Installing Comfy-CLI..."
 source $(pwd)/comfy/venv/bin/activate
 pip install comfy-cli
 
-echo "[6/6] INSTALL: ComfyUI into $(pwd)/comfy/ComfyUI"
+echo "[6/7] INSTALL: ComfyUI into $(pwd)/comfy/ComfyUI"
 # Run comfy install
 echo "Running comfy install..."
 comfy install
@@ -95,7 +95,7 @@ echo "[7/7] CREATE: Script for 'comfy launch'"
 if [ ! -f $(pwd)/comfy/run.sh ]
 then
     echo "source $(pwd)/comfy/venv/bin/activate" > $(pwd)/comfy/run.sh
-    echo "comfy launch -- $*" >> $(pwd)/comfy/run.sh
+    echo "comfy launch -- \$*" >> $(pwd)/comfy/run.sh
     chmod +x $(pwd)/comfy/run.sh
 else
     echo "Script file already exists: ~/comfy/run.sh"
