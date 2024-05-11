@@ -610,7 +610,7 @@ def display_all_nodes():
 
 @app.command("registry-install", help="Install a node from the registry", hidden=True)
 @tracking.track_command("node")
-def install(node_id: str = "comfyui-inspire-pack", version: str = "1.0.0"):
+def install(node_id: str, version: Optional[str]):
   """
   Install a node from the registry.
   Args:
