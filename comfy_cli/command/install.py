@@ -136,9 +136,10 @@ def execute(
     if os.path.exists(repo_dir):
         subprocess.run(["git", "clone", url, repo_dir])
     elif not check_comfy_repo(repo_dir)[0]:
-        print(f"[bold red]'{repo_dir}' already exists. But it is an invalid ComfyUI repository. Remove it and retry.[/bold red]")
+        print(
+            f"[bold red]'{repo_dir}' already exists. But it is an invalid ComfyUI repository. Remove it and retry.[/bold red]"
+        )
         exit(-1)
-
 
     # checkout specified commit
     if commit is not None:
