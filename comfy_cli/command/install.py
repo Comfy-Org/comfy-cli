@@ -133,7 +133,8 @@ def execute(
     if not os.path.exists(parent_path):
         os.makedirs(parent_path, exist_ok=True)
 
-    subprocess.run(["git", "clone", url, repo_dir])
+    if not os.path.exists(repo_dir):
+        subprocess.run(["git", "clone", url, repo_dir])
 
     # checkout specified commit
     if commit is not None:
