@@ -95,7 +95,7 @@ echo "[7/7] CREATE: Script for 'comfy launch'"
 if [ ! -f $(pwd)/comfy/run.sh ]
 then
     echo "source $(pwd)/comfy/venv/bin/activate" > $(pwd)/comfy/run.sh
-    echo "comfy launch" >> $(pwd)/comfy/run.sh
+    echo "comfy launch -- $*" >> $(pwd)/comfy/run.sh
     chmod +x $(pwd)/comfy/run.sh
 else
     echo "Script file already exists: ~/comfy/run.sh"
