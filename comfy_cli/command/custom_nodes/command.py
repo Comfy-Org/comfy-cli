@@ -1,27 +1,28 @@
-import typer
-from typing_extensions import List, Annotated
-from typing import Optional
-
-from comfy_cli import tracking, ui
 import os
 import pathlib
 import subprocess
 import sys
-from rich import print
 import uuid
+from typing import Optional
 
-from comfy_cli.command.models.models import download_file
+import typer
+from rich import print
+from typing_extensions import List, Annotated
+
+from comfy_cli import ui, logging, tracking
 from comfy_cli.config_manager import ConfigManager
-from comfy_cli.workspace_manager import WorkspaceManager
-import tarfile
-
+from comfy_cli.file_utils import (
+    download_file,
+    upload_file_to_signed_url,
+    zip_files,
+    extract_package_as_zip,
+)
 from comfy_cli.registry import (
     RegistryAPI,
     extract_node_configuration,
-    upload_file_to_signed_url,
-    zip_files,
     initialize_project_config,
 )
+from comfy_cli.workspace_manager import WorkspaceManager
 
 app = typer.Typer()
 manager_app = typer.Typer()
@@ -565,12 +566,13 @@ def scaffold():
     )
 
 
-@app.command("registry-list-all", help="Init scaffolding for custom node")
+@app.command("registry-list", help="List all nodes in the registry")
 @tracking.track_command("node")
-def registry_list_all():
+def display_all_nodes():
     """
-    Fetch and display all nodes in a table format.
+    Display all nodes in the registry.
     """
+
     try:
         nodes = registry_api.list_all_nodes()
         # Map Node data class instances to tuples for display
@@ -603,52 +605,43 @@ def registry_list_all():
         print(f"[red]Error: {str(e)}[/red]")
 
 
-@app.command("registry-install", help="Init scaffolding for custom node")
+@app.command("registry-install", help="Install a node from the registry")
 @tracking.track_command("node")
-def registry_install():
+def install(node_id: str = "comfyui-inspire-pack", version: str = "1.0.0"):
     """
     Install a node from the registry.
+    Args:
+      node_id: The ID of the node to install.
+      version: The version of the node to install. If not provided, the latest version will be installed.
     """
-    try:
-        node_id = typer.prompt("Enter the ID of the node you want to install")
-        version = typer.prompt(
-            "Enter the version of the node you want to install (leave blank for latest)",
-            default="",
-            show_default=False,
-        )
 
+    # If the node ID is not provided, prompt the user to enter it
+    if not node_id:
+        node_id = typer.prompt("Enter the ID of the node you want to install")
+
+    node_version = None
+    try:
         # Call the API to install the node
         node_version = registry_api.install_node(node_id, version)
-        if node_version.download_url:
-            # Download the node archive
-            local_filename = pathlib.Path(
-                f"./downloads/{node_id}-{node_version.version}.tar.gz"
-            )
-            download_file(node_version.download_url, local_filename)
-
-            # Extract the downloaded archive
-            extract_tar_gz(local_filename)
-            print(
-                f"Node {node_id} version {node_version.version} installed successfully."
-            )
-        else:
+        if not node_version.download_url:
+            # TODO: print error message
             print("Download URL not provided.")
+            return
 
     except Exception as e:
+        # TODO: print error message
         print(f"[red]Error: {str(e)}[/red]")
+        return
 
+    logging.debug(f"registry_install command - node version: {node_version}")
+    # Download the node archive
+    local_filename = pathlib.Path(
+        f"./downloads/{node_id}-{node_version.version}.tar.gz"
+    )
+    download_file(node_version.download_url, local_filename)
 
-def extract_tar_gz(
-    tar_gz_path: pathlib.Path, extract_path: pathlib.Path = pathlib.Path(".")
-):
-    """
-    Extracts a tar.gz file to a specified directory using pathlib.
-
-    Args:
-        tar_gz_path (pathlib.Path): Path to the .tar.gz file.
-        extract_path (pathlib.Path): Directory to extract the files into.
-    """
-    import tarfile
-
-    with tarfile.open(tar_gz_path, "r:gz") as tar:
-        tar.extractall(path=extract_path)
+    # Extract the downloaded archive to the custom_node directory on the workspace.
+    # workspace/custom_nodes
+    custom_nodes_path = pathlib.Path(workspace_manager.workspace_path) / "custom_nodes"
+    extract_package_as_zip(local_filename, custom_nodes_path)
+    print(f"Node {node_id} version {node_version.version} installed successfully.")

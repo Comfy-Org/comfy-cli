@@ -7,6 +7,7 @@ from typing_extensions import Annotated
 
 from comfy_cli import tracking, ui
 from comfy_cli.constants import DEFAULT_COMFY_MODEL_PATH
+from comfy_cli.file_utils import download_file, DownloadException
 from comfy_cli.workspace_manager import WorkspaceManager
 
 app = typer.Typer()
@@ -16,10 +17,6 @@ workspace_manager = WorkspaceManager()
 
 def get_workspace() -> pathlib.Path:
     return pathlib.Path(workspace_manager.workspace_path)
-
-
-class DownloadException(Exception):
-    pass
 
 
 def potentially_strip_param_url(path_name: str) -> str:
@@ -156,47 +153,6 @@ def list(
     data = [(model.name, f"{model.stat().st_size // 1024} KB") for model in models]
     column_names = ["Model Name", "Size"]
     ui.display_table(data, column_names)
-
-
-def guess_status_code_reason(status_code: int) -> str:
-    if status_code == 401:
-        return f"Unauthorized download ({status_code}), you might need to manually log into browser to download one"
-    elif status_code == 403:
-        return f"Forbidden url ({status_code}), you might need to manually log into browser to download one"
-    elif status_code == 404:
-        return "Sorry, your model is in another castle (404)"
-    return f"Unknown error occurred (status code: {status_code})"
-
-
-def download_file(url: str, local_filepath: pathlib.Path):
-    """Helper function to download a file."""
-
-    import httpx
-
-    local_filepath.parent.mkdir(
-        parents=True, exist_ok=True
-    )  # Ensure the directory exists
-
-    with httpx.stream("GET", url, follow_redirects=True) as response:
-        if response.status_code == 200:
-            total = int(response.headers["Content-Length"])
-            try:
-                with open(local_filepath, "wb") as f:
-                    for data in ui.show_progress(
-                        response.iter_bytes(),
-                        total,
-                        description=f"Downloading {total//1024//1024} MB",
-                    ):
-                        f.write(data)
-            except KeyboardInterrupt:
-                delete_eh = ui.prompt_confirm_action(
-                    "Download interrupted, cleanup files?"
-                )
-                if delete_eh:
-                    local_filepath.unlink()
-        else:
-            status_reason = guess_status_code_reason(response.status_code)
-            raise DownloadException(f"Failed to download file.\n{status_reason}")
 
 
 def list_models(path: pathlib.Path) -> list:
