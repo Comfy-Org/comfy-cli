@@ -1,8 +1,7 @@
-from .api import RegistryAPI, upload_file_to_signed_url
+from .api import RegistryAPI
 
 from .config_parser import extract_node_configuration, initialize_project_config
-from .types import PyProjectConfig, PublishNodeVersionResponse, NodeVersion
-from .zip import zip_files
+from .types import PyProjectConfig, PublishNodeVersionResponse, NodeVersion, Node
 
 __all__ = [
     "RegistryAPI",
@@ -10,7 +9,6 @@ __all__ = [
     "PyProjectConfig",
     "PublishNodeVersionResponse",
     "NodeVersion",
-    "zip_files",
-    "upload_file_to_signed_url",
+    "Node",
     "initialize_project_config",
 ]

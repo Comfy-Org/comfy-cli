@@ -1,12 +1,11 @@
+import logging
 import os
 
 import requests
 import json
-from comfy_cli.registry.types import (
-    PyProjectConfig,
-    PublishNodeVersionResponse,
-    NodeVersion,
-)
+
+# Reduced global imports from comfy_cli.registry
+from comfy_cli.registry.types import NodeVersion, Node
 
 
 class RegistryAPI:
@@ -19,9 +18,7 @@ class RegistryAPI:
         else:
             return "https://api-frontend-dev-qod3oz2v2q-uc.a.run.app"
 
-    def publish_node_version(
-        self, node_config: PyProjectConfig, token: str
-    ) -> PublishNodeVersionResponse:
+    def publish_node_version(self, node_config, token):
         """
         Publishes a new version of a node.
 
@@ -32,6 +29,9 @@ class RegistryAPI:
         Returns:
         PublishNodeVersionResponse: The response object from the API server.
         """
+        # Local import to prevent circular dependency
+        from comfy_cli.registry.types import PyProjectConfig, PublishNodeVersionResponse
+
         url = f"{self.base_url}/publishers/{node_config.tool_comfy.publisher_id}/nodes/{node_config.project.name}/versions"
         headers = {"Content-Type": "application/json"}
         body = {
@@ -53,40 +53,114 @@ class RegistryAPI:
 
         if response.status_code == 201:
             data = response.json()
-            node_version = NodeVersion(
-                changelog=data["node_version"]["changelog"],
-                dependencies=data["node_version"]["dependencies"],
-                deprecated=data["node_version"]["deprecated"],
-                id=data["node_version"]["id"],
-                version=data["node_version"]["version"],
-            )
             return PublishNodeVersionResponse(
-                node_version=node_version, signedUrl=data["signedUrl"]
+                node_version=map_node_version(data["node_version"]),
+                signedUrl=data["signedUrl"],
             )
         else:
             raise Exception(
                 f"Failed to publish node version: {response.status_code} {response.text}"
             )
 
+    def list_all_nodes(self):
+        """
+        Retrieves a list of all nodes and maps them to Node dataclass instances.
 
-def upload_file_to_signed_url(signed_url: str, file_path: str):
-    try:
-        with open(file_path, "rb") as f:
-            headers = {"Content-Type": "application/gzip"}
-            response = requests.put(signed_url, data=f, headers=headers)
+        Returns:
+          list: A list of Node instances.
+        """
+        url = f"{self.base_url}/nodes"
+        response = requests.get(url)
+        if response.status_code == 200:
+            raw_nodes = response.json()["nodes"]
+            mapped_nodes = [map_node_to_node_class(node) for node in raw_nodes]
+            return mapped_nodes
+        else:
+            raise Exception(
+                f"Failed to retrieve nodes: {response.status_code} - {response.text}"
+            )
 
-            # Simple success check
-            if response.status_code == 200:
-                print("Upload successful.")
-            else:
-                # Print a generic error message with status code and response text
-                print(
-                    f"Upload failed with status code: {response.status_code}. Error: {response.text}"
-                )
+    def install_node(self, node_id, version=None):
+        """
+        Retrieves the node version for installation.
 
-    except requests.exceptions.RequestException as e:
-        # Print error related to the HTTP request
-        print(f"An error occurred during the upload: {str(e)}")
-    except FileNotFoundError:
-        # Print file not found error
-        print(f"Error: The file {file_path} does not exist.")
+        Args:
+          node_id (str): The unique identifier of the node.
+          version (str, optional): Specific version of the node to retrieve. If omitted, the latest version is returned.
+
+        Returns:
+          NodeVersion: Node version data or error message.
+        """
+        if version is None:
+            url = f"{self.base_url}/nodes/{node_id}/install"
+        else:
+            url = f"{self.base_url}/nodes/{node_id}/install?version={version}"
+
+        response = requests.get(url)
+        if response.status_code == 200:
+            # Convert the API response to a NodeVersion object
+            logging.debug(f"RegistryAPI install_node response: {response.json()}")
+            return map_node_version(response.json())
+        else:
+            raise Exception(
+                f"Failed to install node: {response.status_code} - {response.text}"
+            )
+
+
+def map_node_version(api_node_version):
+    """
+    Maps node version data from API response to NodeVersion dataclass.
+
+    Args:
+        api_data (dict): The 'node_version' part of the API response.
+
+    Returns:
+        NodeVersion: An instance of NodeVersion dataclass populated with data from the API.
+    """
+    return NodeVersion(
+        changelog=api_node_version.get(
+            "changelog", ""
+        ),  # Provide a default value if 'changelog' is missing
+        dependencies=api_node_version.get(
+            "dependencies", []
+        ),  # Provide a default empty list if 'dependencies' is missing
+        deprecated=api_node_version.get(
+            "deprecated", False
+        ),  # Assume False if 'deprecated' is not specified
+        id=api_node_version[
+            "id"
+        ],  # 'id' should be mandatory; raise KeyError if missing
+        version=api_node_version[
+            "version"
+        ],  # 'version' should be mandatory; raise KeyError if missing
+        download_url=api_node_version.get(
+            "downloadUrl", ""
+        ),  # Provide a default value if 'downloadUrl' is missing
+    )
+
+
+def map_node_to_node_class(api_node_data):
+    """
+    Maps node data from API response to Node dataclass.
+
+    Args:
+        api_node_data (dict): The node data from the API.
+
+    Returns:
+        Node: An instance of Node dataclass populated with API data.
+    """
+    return Node(
+        id=api_node_data["id"],
+        name=api_node_data["name"],
+        description=api_node_data["description"],
+        author=api_node_data.get("author"),
+        license=api_node_data.get("license"),
+        icon=api_node_data.get("icon"),
+        repository=api_node_data.get("repository"),
+        tags=api_node_data.get("tags", []),
+        latest_version=(
+            map_node_version(api_node_data["latest_version"])
+            if "latest_version" in api_node_data
+            else None
+        ),
+    )

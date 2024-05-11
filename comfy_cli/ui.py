@@ -129,3 +129,13 @@ def display_table(data: List[Tuple], column_names: List[str], title: str = "") -
         table.add_row(*[str(item) for item in row])
 
     console.print(table)
+
+
+def display_error_message(message: str) -> None:
+    """
+    Displays an error message to the user in red text.
+
+    Args:
+        message (str): The error message to display.
+    """
+    console.print(f"[red]{message}[/]")
