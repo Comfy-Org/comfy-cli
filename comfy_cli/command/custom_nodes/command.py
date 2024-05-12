@@ -187,8 +187,26 @@ def mode_completer(incomplete: str) -> list[str]:
 
 
 def channel_completer(incomplete: str) -> list[str]:
-    modes = ["default", "recent", "dev", "forked", "tutorial", "legacy"]
-    return [mode for mode in modes if mode.startswith(incomplete)]
+    channels = ["default", "recent", "dev", "forked", "tutorial", "legacy"]
+    return [channel for channel in channels if channel.startswith(incomplete)]
+
+
+def node_completer(incomplete: str) -> list[str]:
+    try:
+        config_manager = ConfigManager()
+        tmp_path = os.path.join(
+            config_manager.get_config_path(), "tmp", "node-cache.list"
+        )
+
+        with open(tmp_path, "r", encoding="UTF-8", errors="ignore") as cache_file:
+            return [
+                node_id
+                for node_id in cache_file.readlines()
+                if node_id.startswith(incomplete)
+            ]
+
+    except Exception:
+        return []
 
 
 @app.command(help="Show node list")
@@ -285,7 +303,9 @@ def simple_show(
 @app.command(help="Install custom nodes")
 @tracking.track_command("node")
 def install(
-    args: List[str] = typer.Argument(..., help="install custom nodes"),
+    args: List[str] = typer.Argument(
+        ..., help="install custom nodes", autocompletion=node_completer
+    ),
     channel: Annotated[
         str,
         typer.Option(
@@ -318,7 +338,9 @@ def install(
 @app.command(help="Reinstall custom nodes")
 @tracking.track_command("node")
 def reinstall(
-    args: List[str] = typer.Argument(..., help="reinstall custom nodes"),
+    args: List[str] = typer.Argument(
+        ..., help="reinstall custom nodes", autocompletion=node_completer
+    ),
     channel: Annotated[
         str,
         typer.Option(
@@ -351,7 +373,9 @@ def reinstall(
 @app.command(help="Uninstall custom nodes")
 @tracking.track_command("node")
 def uninstall(
-    args: List[str] = typer.Argument(..., help="uninstall custom nodes"),
+    args: List[str] = typer.Argument(
+        ..., help="uninstall custom nodes", autocompletion=node_completer
+    ),
     channel: Annotated[
         str,
         typer.Option(
@@ -381,13 +405,36 @@ def uninstall(
     execute_cm_cli(["uninstall"] + args, channel, mode)
 
 
+def update_node_id_cache():
+    try:
+        config_manager = ConfigManager()
+        workspace_path = workspace_manager.workspace_path
+
+        cm_cli_path = os.path.join(
+            workspace_path, "custom_nodes", "ComfyUI-Manager", "cm-cli.py"
+        )
+
+        tmp_path = os.path.join(config_manager.get_config_path(), "tmp")
+        if not os.path.exists(tmp_path):
+            os.makedirs(tmp_path)
+
+        cache_path = os.path.join(tmp_path, "node-cache.list")
+        cmd = [sys.executable, cm_cli_path, "export-custom-node-ids", cache_path]
+
+        new_env = os.environ.copy()
+        new_env["COMFYUI_PATH"] = workspace_path
+        subprocess.check_output(cmd, env=new_env)
+    except Exception:
+        pass
+
+
 # `update, disable, enable, fix` allows `all` param
-
-
 @app.command(help="Update custom nodes or ComfyUI")
 @tracking.track_command("node")
 def update(
-    args: List[str] = typer.Argument(..., help="update custom nodes"),
+    args: List[str] = typer.Argument(
+        ..., help="update custom nodes", autocompletion=node_completer
+    ),
     channel: Annotated[
         str,
         typer.Option(
@@ -412,11 +459,15 @@ def update(
 
     execute_cm_cli(["update"] + args, channel, mode)
 
+    update_node_id_cache()
+
 
 @app.command(help="Disable custom nodes")
 @tracking.track_command("node")
 def disable(
-    args: List[str] = typer.Argument(..., help="disable custom nodes"),
+    args: List[str] = typer.Argument(
+        ..., help="disable custom nodes", autocompletion=node_completer
+    ),
     channel: Annotated[
         str,
         typer.Option(
@@ -445,7 +496,9 @@ def disable(
 @app.command(help="Enable custom nodes")
 @tracking.track_command("node")
 def enable(
-    args: List[str] = typer.Argument(..., help="enable custom nodes"),
+    args: List[str] = typer.Argument(
+        ..., help="enable custom nodes", autocompletion=node_completer
+    ),
     channel: Annotated[
         str,
         typer.Option(
@@ -475,7 +528,9 @@ def enable(
 @tracking.track_command("node")
 def fix(
     args: List[str] = typer.Argument(
-        ..., help="fix dependencies for specified custom nodes"
+        ...,
+        help="fix dependencies for specified custom nodes",
+        autocompletion=node_completer,
     ),
     channel: Annotated[
         str,

@@ -8,6 +8,7 @@ from rich import print
 from comfy_cli import constants
 from comfy_cli.constants import GPU_OPTION
 from comfy_cli.workspace_manager import WorkspaceManager, check_comfy_repo
+from comfy_cli.command.custom_nodes.command import update_node_id_cache
 
 
 def get_os_details():
@@ -173,6 +174,9 @@ def execute(
             subprocess.run(["git", "clone", manager_url, manager_repo_dir])
             install_manager_dependencies(repo_dir)
 
+        update_node_id_cache()
+
+        
     os.chdir(repo_dir)
 
     print("")
