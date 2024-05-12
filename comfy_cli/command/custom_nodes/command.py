@@ -168,20 +168,49 @@ def clear(path: str):
     execute_cm_cli(["clear", path])
 
 
+def show_completer(incomplete: str) -> list[str]:
+    valid_choices = [
+        "installed",
+        "enabled",
+        "not-installed",
+        "disabled",
+        "all",
+        "snapshot",
+        "snapshot-list",
+    ]
+    return [choice for choice in valid_choices if choice.startswith(incomplete)]
+
+
+def mode_completer(incomplete: str) -> list[str]:
+    modes = ["remote", "local", "cache"]
+    return [mode for mode in modes if mode.startswith(incomplete)]
+
+
+def channel_completer(incomplete: str) -> list[str]:
+    modes = ["default", "recent", "dev", "forked", "tutorial", "legacy"]
+    return [mode for mode in modes if mode.startswith(incomplete)]
+
+
 @app.command(help="Show node list")
 @tracking.track_command("node")
 def show(
-    args: List[str] = typer.Argument(
-        ...,
+    arg: str = typer.Argument(
         help="[installed|enabled|not-installed|disabled|all|snapshot|snapshot-list]",
+        autocompletion=show_completer,
     ),
     channel: Annotated[
         str,
-        typer.Option(show_default=False, help="Specify the operation mode"),
+        typer.Option(
+            show_default=False,
+            help="Specify the operation mode",
+            autocompletion=channel_completer,
+        ),
     ] = None,
-    mode: Annotated[
-        str, typer.Option(show_default=False, help="[remote|local|cache]")
-    ] = None,
+    mode: str = typer.Option(
+        None,
+        help="[remote|local|cache]",
+        autocompletion=mode_completer,
+    ),
 ):
     valid_commands = [
         "installed",
@@ -192,8 +221,8 @@ def show(
         "snapshot",
         "snapshot-list",
     ]
-    if not args or len(args) > 1 or args[0] not in valid_commands:
-        typer.echo(f"Invalid command: `show {' '.join(args)}`", err=True)
+    if arg not in valid_commands:
+        typer.echo(f"Invalid command: `show {arg}`", err=True)
         raise typer.Exit(code=1)
 
     valid_modes = ["remote", "local", "cache"]
@@ -204,23 +233,29 @@ def show(
         )
         raise typer.Exit(code=1)
 
-    execute_cm_cli(["show"] + args, channel, mode)
+    execute_cm_cli(["show", arg], channel, mode)
 
 
 @app.command("simple-show", help="Show node list (simple mode)")
 @tracking.track_command("node")
 def simple_show(
-    args: List[str] = typer.Argument(
-        ...,
+    arg: str = typer.Argument(
         help="[installed|enabled|not-installed|disabled|all|snapshot|snapshot-list]",
+        autocompletion=show_completer,
     ),
     channel: Annotated[
         str,
-        typer.Option(show_default=False, help="Specify the operation mode"),
+        typer.Option(
+            show_default=False,
+            help="Specify the operation mode",
+            autocompletion=channel_completer,
+        ),
     ] = None,
-    mode: Annotated[
-        str, typer.Option(show_default=False, help="[remote|local|cache]")
-    ] = None,
+    mode: str = typer.Option(
+        None,
+        help="[remote|local|cache]",
+        autocompletion=mode_completer,
+    ),
 ):
     valid_commands = [
         "installed",
@@ -231,8 +266,8 @@ def simple_show(
         "snapshot",
         "snapshot-list",
     ]
-    if not args or len(args) > 1 or args[0] not in valid_commands:
-        typer.echo(f"Invalid command: `show {' '.join(args)}`", err=True)
+    if arg not in valid_commands:
+        typer.echo(f"Invalid command: `show {arg}`", err=True)
         raise typer.Exit(code=1)
 
     valid_modes = ["remote", "local", "cache"]
@@ -243,7 +278,7 @@ def simple_show(
         )
         raise typer.Exit(code=1)
 
-    execute_cm_cli(["simple-show"] + args, channel, mode)
+    execute_cm_cli(["simple-show", arg], channel, mode)
 
 
 # install, reinstall, uninstall
@@ -253,11 +288,17 @@ def install(
     args: List[str] = typer.Argument(..., help="install custom nodes"),
     channel: Annotated[
         str,
-        typer.Option(show_default=False, help="Specify the operation mode"),
+        typer.Option(
+            show_default=False,
+            help="Specify the operation mode",
+            autocompletion=channel_completer,
+        ),
     ] = None,
-    mode: Annotated[
-        str, typer.Option(show_default=False, help="[remote|local|cache]")
-    ] = None,
+    mode: str = typer.Option(
+        None,
+        help="[remote|local|cache]",
+        autocompletion=mode_completer,
+    ),
 ):
     if "all" in args:
         typer.echo(f"Invalid command: {mode}. `install all` is not allowed", err=True)
@@ -280,11 +321,17 @@ def reinstall(
     args: List[str] = typer.Argument(..., help="reinstall custom nodes"),
     channel: Annotated[
         str,
-        typer.Option(show_default=False, help="Specify the operation mode"),
+        typer.Option(
+            show_default=False,
+            help="Specify the operation mode",
+            autocompletion=channel_completer,
+        ),
     ] = None,
-    mode: Annotated[
-        str, typer.Option(show_default=False, help="[remote|local|cache]")
-    ] = None,
+    mode: str = typer.Option(
+        None,
+        help="[remote|local|cache]",
+        autocompletion=mode_completer,
+    ),
 ):
     if "all" in args:
         typer.echo(f"Invalid command: {mode}. `reinstall all` is not allowed", err=True)
@@ -307,11 +354,17 @@ def uninstall(
     args: List[str] = typer.Argument(..., help="uninstall custom nodes"),
     channel: Annotated[
         str,
-        typer.Option(show_default=False, help="Specify the operation mode"),
+        typer.Option(
+            show_default=False,
+            help="Specify the operation mode",
+            autocompletion=channel_completer,
+        ),
     ] = None,
-    mode: Annotated[
-        str, typer.Option(show_default=False, help="[remote|local|cache]")
-    ] = None,
+    mode: str = typer.Option(
+        None,
+        help="[remote|local|cache]",
+        autocompletion=mode_completer,
+    ),
 ):
     if "all" in args:
         typer.echo(f"Invalid command: {mode}. `uninstall all` is not allowed", err=True)
@@ -337,11 +390,17 @@ def update(
     args: List[str] = typer.Argument(..., help="update custom nodes"),
     channel: Annotated[
         str,
-        typer.Option(show_default=False, help="Specify the operation mode"),
+        typer.Option(
+            show_default=False,
+            help="Specify the operation mode",
+            autocompletion=channel_completer,
+        ),
     ] = None,
-    mode: Annotated[
-        str, typer.Option(show_default=False, help="[remote|local|cache]")
-    ] = None,
+    mode: str = typer.Option(
+        None,
+        help="[remote|local|cache]",
+        autocompletion=mode_completer,
+    ),
 ):
     valid_modes = ["remote", "local", "cache"]
     if mode and mode.lower() not in valid_modes:
@@ -360,11 +419,17 @@ def disable(
     args: List[str] = typer.Argument(..., help="disable custom nodes"),
     channel: Annotated[
         str,
-        typer.Option(show_default=False, help="Specify the operation mode"),
+        typer.Option(
+            show_default=False,
+            help="Specify the operation mode",
+            autocompletion=channel_completer,
+        ),
     ] = None,
-    mode: Annotated[
-        str, typer.Option(show_default=False, help="[remote|local|cache]")
-    ] = None,
+    mode: str = typer.Option(
+        None,
+        help="[remote|local|cache]",
+        autocompletion=mode_completer,
+    ),
 ):
     valid_modes = ["remote", "local", "cache"]
     if mode and mode.lower() not in valid_modes:
@@ -383,11 +448,17 @@ def enable(
     args: List[str] = typer.Argument(..., help="enable custom nodes"),
     channel: Annotated[
         str,
-        typer.Option(show_default=False, help="Specify the operation mode"),
+        typer.Option(
+            show_default=False,
+            help="Specify the operation mode",
+            autocompletion=channel_completer,
+        ),
     ] = None,
-    mode: Annotated[
-        str, typer.Option(show_default=False, help="[remote|local|cache]")
-    ] = None,
+    mode: str = typer.Option(
+        None,
+        help="[remote|local|cache]",
+        autocompletion=mode_completer,
+    ),
 ):
     valid_modes = ["remote", "local", "cache"]
     if mode and mode.lower() not in valid_modes:
@@ -408,11 +479,17 @@ def fix(
     ),
     channel: Annotated[
         str,
-        typer.Option(show_default=False, help="Specify the operation mode"),
+        typer.Option(
+            show_default=False,
+            help="Specify the operation mode",
+            autocompletion=channel_completer,
+        ),
     ] = None,
-    mode: Annotated[
-        str, typer.Option(show_default=False, help="[remote|local|cache]")
-    ] = None,
+    mode: str = typer.Option(
+        None,
+        help="[remote|local|cache]",
+        autocompletion=mode_completer,
+    ),
 ):
     valid_modes = ["remote", "local", "cache"]
     if mode and mode.lower() not in valid_modes:
@@ -439,11 +516,17 @@ def install_deps(
     ] = None,
     channel: Annotated[
         str,
-        typer.Option(show_default=False, help="Specify the operation mode"),
+        typer.Option(
+            show_default=False,
+            help="Specify the operation mode",
+            autocompletion=channel_completer,
+        ),
     ] = None,
-    mode: Annotated[
-        str, typer.Option(show_default=False, help="[remote|local|cache]")
-    ] = None,
+    mode: str = typer.Option(
+        None,
+        help="[remote|local|cache]",
+        autocompletion=mode_completer,
+    ),
 ):
     valid_modes = ["remote", "local", "cache"]
     if mode and mode.lower() not in valid_modes:
@@ -497,11 +580,17 @@ def deps_in_workflow(
     ],
     channel: Annotated[
         str,
-        typer.Option(show_default=False, help="Specify the operation mode"),
+        typer.Option(
+            show_default=False,
+            help="Specify the operation mode",
+            autocompletion=channel_completer,
+        ),
     ] = None,
-    mode: Annotated[
-        str, typer.Option(show_default=False, help="[remote|local|cache]")
-    ] = None,
+    mode: str = typer.Option(
+        None,
+        help="[remote|local|cache]",
+        autocompletion=mode_completer,
+    ),
 ):
     valid_modes = ["remote", "local", "cache"]
     if mode and mode.lower() not in valid_modes:
