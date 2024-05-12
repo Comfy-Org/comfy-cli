@@ -176,7 +176,6 @@ def execute(
 
         update_node_id_cache()
 
-        
     os.chdir(repo_dir)
 
     print("")
