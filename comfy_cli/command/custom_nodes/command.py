@@ -168,7 +168,7 @@ def clear(path: str):
     execute_cm_cli(["clear", path])
 
 
-def show_completer(incomplete: str) -> List[str]:
+def show_completer(incomplete: str) -> list[str]:
     valid_choices = [
         "installed",
         "enabled",
@@ -181,12 +181,12 @@ def show_completer(incomplete: str) -> List[str]:
     return [choice for choice in valid_choices if choice.startswith(incomplete)]
 
 
-def mode_completion(incomplete: str) -> list[str]:
+def mode_completer(incomplete: str) -> list[str]:
     modes = ["remote", "local", "cache"]
     return [mode for mode in modes if mode.startswith(incomplete)]
 
 
-def channel_completion(incomplete: str) -> list[str]:
+def channel_completer(incomplete: str) -> list[str]:
     modes = ["default", "recent", "dev", "forked", "tutorial", "legacy"]
     return [mode for mode in modes if mode.startswith(incomplete)]
 
@@ -203,13 +203,13 @@ def show(
         typer.Option(
             show_default=False,
             help="Specify the operation mode",
-            autocompletion=channel_completion,
+            autocompletion=channel_completer,
         ),
     ] = None,
     mode: str = typer.Option(
         None,
         help="[remote|local|cache]",
-        autocompletion=mode_completion,
+        autocompletion=mode_completer,
     ),
 ):
     valid_commands = [
@@ -248,13 +248,13 @@ def simple_show(
         typer.Option(
             show_default=False,
             help="Specify the operation mode",
-            autocompletion=channel_completion,
+            autocompletion=channel_completer,
         ),
     ] = None,
     mode: str = typer.Option(
         None,
         help="[remote|local|cache]",
-        autocompletion=mode_completion,
+        autocompletion=mode_completer,
     ),
 ):
     valid_commands = [
@@ -291,13 +291,13 @@ def install(
         typer.Option(
             show_default=False,
             help="Specify the operation mode",
-            autocompletion=channel_completion,
+            autocompletion=channel_completer,
         ),
     ] = None,
     mode: str = typer.Option(
         None,
         help="[remote|local|cache]",
-        autocompletion=mode_completion,
+        autocompletion=mode_completer,
     ),
 ):
     if "all" in args:
@@ -324,13 +324,13 @@ def reinstall(
         typer.Option(
             show_default=False,
             help="Specify the operation mode",
-            autocompletion=channel_completion,
+            autocompletion=channel_completer,
         ),
     ] = None,
     mode: str = typer.Option(
         None,
         help="[remote|local|cache]",
-        autocompletion=mode_completion,
+        autocompletion=mode_completer,
     ),
 ):
     if "all" in args:
@@ -357,13 +357,13 @@ def uninstall(
         typer.Option(
             show_default=False,
             help="Specify the operation mode",
-            autocompletion=channel_completion,
+            autocompletion=channel_completer,
         ),
     ] = None,
     mode: str = typer.Option(
         None,
         help="[remote|local|cache]",
-        autocompletion=mode_completion,
+        autocompletion=mode_completer,
     ),
 ):
     if "all" in args:
@@ -393,13 +393,13 @@ def update(
         typer.Option(
             show_default=False,
             help="Specify the operation mode",
-            autocompletion=channel_completion,
+            autocompletion=channel_completer,
         ),
     ] = None,
     mode: str = typer.Option(
         None,
         help="[remote|local|cache]",
-        autocompletion=mode_completion,
+        autocompletion=mode_completer,
     ),
 ):
     valid_modes = ["remote", "local", "cache"]
@@ -422,13 +422,13 @@ def disable(
         typer.Option(
             show_default=False,
             help="Specify the operation mode",
-            autocompletion=channel_completion,
+            autocompletion=channel_completer,
         ),
     ] = None,
     mode: str = typer.Option(
         None,
         help="[remote|local|cache]",
-        autocompletion=mode_completion,
+        autocompletion=mode_completer,
     ),
 ):
     valid_modes = ["remote", "local", "cache"]
@@ -451,13 +451,13 @@ def enable(
         typer.Option(
             show_default=False,
             help="Specify the operation mode",
-            autocompletion=channel_completion,
+            autocompletion=channel_completer,
         ),
     ] = None,
     mode: str = typer.Option(
         None,
         help="[remote|local|cache]",
-        autocompletion=mode_completion,
+        autocompletion=mode_completer,
     ),
 ):
     valid_modes = ["remote", "local", "cache"]
@@ -482,13 +482,13 @@ def fix(
         typer.Option(
             show_default=False,
             help="Specify the operation mode",
-            autocompletion=channel_completion,
+            autocompletion=channel_completer,
         ),
     ] = None,
     mode: str = typer.Option(
         None,
         help="[remote|local|cache]",
-        autocompletion=mode_completion,
+        autocompletion=mode_completer,
     ),
 ):
     valid_modes = ["remote", "local", "cache"]
@@ -519,13 +519,13 @@ def install_deps(
         typer.Option(
             show_default=False,
             help="Specify the operation mode",
-            autocompletion=channel_completion,
+            autocompletion=channel_completer,
         ),
     ] = None,
     mode: str = typer.Option(
         None,
         help="[remote|local|cache]",
-        autocompletion=mode_completion,
+        autocompletion=mode_completer,
     ),
 ):
     valid_modes = ["remote", "local", "cache"]
@@ -583,13 +583,13 @@ def deps_in_workflow(
         typer.Option(
             show_default=False,
             help="Specify the operation mode",
-            autocompletion=channel_completion,
+            autocompletion=channel_completer,
         ),
     ] = None,
     mode: str = typer.Option(
         None,
         help="[remote|local|cache]",
-        autocompletion=mode_completion,
+        autocompletion=mode_completer,
     ),
 ):
     valid_modes = ["remote", "local", "cache"]
