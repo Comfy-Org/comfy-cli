@@ -57,6 +57,7 @@ echo "[4/6] INSTALL: comfy-cli into venv"
 echo "Installing Comfy-CLI..."
 source "$(pwd)/comfy/venv/bin/activate"
 pip install comfy-cli
+comfy --install-completion
 
 echo "[5/6] INSTALL: ComfyUI into $(pwd)/comfy/ComfyUI"
 
