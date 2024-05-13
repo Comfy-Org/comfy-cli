@@ -252,7 +252,13 @@ def install(
 
 @app.command(help="Update ComfyUI Environment [all|comfy]")
 @tracking.track_command()
-def update(target: str = typer.Argument("comfy", help="[all|comfy]")):
+def update(
+    target: str = typer.Argument(
+        "comfy",
+        help="[all|comfy]",
+        autocompletion=utils.create_choice_completer(["all", "comfy"]),
+    )
+):
     if target not in ["all", "comfy"]:
         typer.echo(
             f"Invalid target: {target}. Allowed targets are 'all', 'comfy'.",
@@ -276,6 +282,8 @@ def update(target: str = typer.Argument("comfy", help="[all|comfy]")):
             [sys.executable, "-m", "pip", "install", "-r", "requirements.txt"],
             check=True,
         )
+
+    custom_nodes.command.update_node_id_cache()
 
 
 # @app.command(help="Run workflow file")

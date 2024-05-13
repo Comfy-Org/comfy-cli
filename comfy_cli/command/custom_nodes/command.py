@@ -9,7 +9,7 @@ import typer
 from rich import print
 from typing_extensions import List, Annotated
 
-from comfy_cli import ui, logging, tracking
+from comfy_cli import ui, logging, tracking, utils
 from comfy_cli.config_manager import ConfigManager
 from comfy_cli.file_utils import (
     download_file,
@@ -168,8 +168,9 @@ def clear(path: str):
     execute_cm_cli(["clear", path])
 
 
-def show_completer(incomplete: str) -> list[str]:
-    valid_choices = [
+# completers
+show_completer = utils.create_choice_completer(
+    [
         "installed",
         "enabled",
         "not-installed",
@@ -178,17 +179,15 @@ def show_completer(incomplete: str) -> list[str]:
         "snapshot",
         "snapshot-list",
     ]
-    return [choice for choice in valid_choices if choice.startswith(incomplete)]
+)
 
 
-def mode_completer(incomplete: str) -> list[str]:
-    modes = ["remote", "local", "cache"]
-    return [mode for mode in modes if mode.startswith(incomplete)]
+mode_completer = utils.create_choice_completer(["remote", "local", "cache"])
 
 
-def channel_completer(incomplete: str) -> list[str]:
-    channels = ["default", "recent", "dev", "forked", "tutorial", "legacy"]
-    return [channel for channel in channels if channel.startswith(incomplete)]
+channel_completer = utils.create_choice_completer(
+    ["default", "recent", "dev", "forked", "tutorial", "legacy"]
+)
 
 
 def node_completer(incomplete: str) -> list[str]:

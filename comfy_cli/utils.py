@@ -57,3 +57,10 @@ def is_running(pid):
         return True
     except psutil.NoSuchProcess:
         return False
+
+
+def create_choice_completer(opts):
+    def f(incomplete: str) -> list[str]:
+        return [opt for opt in opts if opt.startswith(incomplete)]
+
+    return f
