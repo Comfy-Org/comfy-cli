@@ -2,9 +2,14 @@
 Module for utility functions.
 """
 
+import subprocess
 import sys
-from comfy_cli import constants
+
 import psutil
+from rich import print
+import typer
+
+from comfy_cli import constants
 
 
 def singleton(cls):
@@ -34,6 +39,15 @@ def get_os():
         return constants.OS.WINDOWS
 
     return constants.OS.LINUX
+
+
+def install_conda_package(package_name):
+    try:
+        subprocess.check_call(["conda", "install", "-y", package_name])
+        print(f"[bold green] Successfully installed {package_name} [/bold green]")
+    except subprocess.CalledProcessError as e:
+        print(f"[bold red] Failed to install {package_name}. Error: {e} [/bold red]")
+        raise typer.Exit(code=1)
 
 
 def get_not_user_set_default_workspace():

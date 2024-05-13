@@ -178,6 +178,15 @@ def install(
             callback=gpu_exclusivity_callback,
         ),
     ] = None,
+    intel_arc: Annotated[
+        bool,
+        typer.Option(
+            hidden=True,
+            show_default=False,
+            help="(Beta support) install for Intel Arc gpu, based on https://github.com/comfyanonymous/ComfyUI/pull/3439",
+            callback=gpu_exclusivity_callback,
+        ),
+    ] = None,
     cpu: Annotated[
         bool,
         typer.Option(
@@ -240,8 +249,8 @@ def install(
         gpu = GPU_OPTION.AMD
     elif m_series:
         gpu = GPU_OPTION.M_SERIES
-    elif cpu:
-        gpu = None
+    elif intel_arc:
+        gpu = GPU_OPTION.INTEL_ARC
     else:
         if platform == constants.OS.MACOS:
             gpu = ui.prompt_select_enum(
@@ -255,10 +264,22 @@ def install(
             )
 
     if gpu == GPU_OPTION.INTEL_ARC:
-        print("[bold yellow]Installing on Intel ARC is not yet supported[/bold yellow]")
         print(
-            "[bold yellow]Feel free to follow this thread to manually install:\nhttps://github.com/comfyanonymous/ComfyUI/discussions/476[/bold yellow]"
+            "[bold yellow]Installing on Intel ARC is not yet completely supported[/bold yellow]"
         )
+        env_check = env_checker.EnvChecker()
+        if env_check.conda_env is None:
+            print(
+                "[bold red]Intel ARC support requires conda environment to be activated.[/bold red]"
+            )
+            raise typer.Exit(code=1)
+        if intel_arc is None:
+            confirm_result = ui.prompt_confirm_action(
+                "Are you sure you want to try beta install feature on Intel ARC?"
+            )
+            if not confirm_result:
+                raise typer.Exit(code=0)
+        print("[bold yellow]Installing on Intel ARC is in beta stage.[/bold yellow]")
 
     if gpu is None and not cpu:
         print(
