@@ -8,6 +8,7 @@ from rich.console import Console
 from rich.table import Table
 import requests
 
+from comfy_cli import update
 from comfy_cli.utils import singleton
 from comfy_cli.config_manager import ConfigManager
 
@@ -109,6 +110,7 @@ class EnvChecker(object):
             self.virtualenv_path if self.virtualenv_path else "Not Used",
         )
         table.add_row("Conda Env", self.conda_env if self.conda_env else "Not Used")
+        table.add_row("Comfy CLI Version", update.get_version_from_pyproject())
 
         ConfigManager().fill_print_env(table)
 
