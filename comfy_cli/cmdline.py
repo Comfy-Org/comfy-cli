@@ -260,9 +260,9 @@ def install(
             "[bold yellow]Feel free to follow this thread to manually install:\nhttps://github.com/comfyanonymous/ComfyUI/discussions/476[/bold yellow]"
         )
 
-    if gpu is None:
+    if gpu is None and not cpu:
         print(
-            "[bold red]No GPU selected, use --\[gpu option] flag (e.g. --nvidia) to pick GPU. Exiting...[/bold red]"
+            "[bold red]No GPU option selected or `--cpu` enabled, use --\[gpu option] flag (e.g. --nvidia) to pick GPU. use `--cpu` to install for CPU. Exiting...[/bold red]"
         )
         raise typer.Exit(code=1)
 
