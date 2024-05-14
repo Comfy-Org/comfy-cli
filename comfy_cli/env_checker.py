@@ -73,7 +73,7 @@ class EnvChecker(object):
     def __init__(self):
         self.virtualenv_path = None
         self.conda_env = None
-        self.python_version: sys._version_info = sys.version_info
+        self.python_version = sys.version_info
         self.check()
 
     def is_isolated_env(self):
@@ -97,7 +97,6 @@ class EnvChecker(object):
             if os.environ.get("CONDA_DEFAULT_ENV")
             else None
         )
-        self.python_version = sys.version_info
 
     # TODO: use ui.display_table
     def fill_print_table(self):
