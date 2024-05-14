@@ -1,23 +1,28 @@
-import typer
-from typing_extensions import List, Annotated
-from typing import Optional
-
-from comfy_cli import tracking
 import os
+import pathlib
 import subprocess
 import sys
-from rich import print
 import uuid
-from comfy_cli.config_manager import ConfigManager
-from comfy_cli.workspace_manager import WorkspaceManager
+from typing import Optional
 
+import typer
+from rich import print
+from typing_extensions import List, Annotated
+
+from comfy_cli import ui, logging, tracking, utils
+from comfy_cli.config_manager import ConfigManager
+from comfy_cli.file_utils import (
+    download_file,
+    upload_file_to_signed_url,
+    zip_files,
+    extract_package_as_zip,
+)
 from comfy_cli.registry import (
     RegistryAPI,
     extract_node_configuration,
-    upload_file_to_signed_url,
-    zip_files,
     initialize_project_config,
 )
+from comfy_cli.workspace_manager import WorkspaceManager
 
 app = typer.Typer()
 manager_app = typer.Typer()
@@ -163,20 +168,66 @@ def clear(path: str):
     execute_cm_cli(["clear", path])
 
 
+# completers
+show_completer = utils.create_choice_completer(
+    [
+        "installed",
+        "enabled",
+        "not-installed",
+        "disabled",
+        "all",
+        "snapshot",
+        "snapshot-list",
+    ]
+)
+
+
+mode_completer = utils.create_choice_completer(["remote", "local", "cache"])
+
+
+channel_completer = utils.create_choice_completer(
+    ["default", "recent", "dev", "forked", "tutorial", "legacy"]
+)
+
+
+def node_completer(incomplete: str) -> list[str]:
+    try:
+        config_manager = ConfigManager()
+        tmp_path = os.path.join(
+            config_manager.get_config_path(), "tmp", "node-cache.list"
+        )
+
+        with open(tmp_path, "r", encoding="UTF-8", errors="ignore") as cache_file:
+            return [
+                node_id
+                for node_id in cache_file.readlines()
+                if node_id.startswith(incomplete)
+            ]
+
+    except Exception:
+        return []
+
+
 @app.command(help="Show node list")
 @tracking.track_command("node")
 def show(
-    args: List[str] = typer.Argument(
-        ...,
+    arg: str = typer.Argument(
         help="[installed|enabled|not-installed|disabled|all|snapshot|snapshot-list]",
+        autocompletion=show_completer,
     ),
     channel: Annotated[
         str,
-        typer.Option(show_default=False, help="Specify the operation mode"),
+        typer.Option(
+            show_default=False,
+            help="Specify the operation mode",
+            autocompletion=channel_completer,
+        ),
     ] = None,
-    mode: Annotated[
-        str, typer.Option(show_default=False, help="[remote|local|cache]")
-    ] = None,
+    mode: str = typer.Option(
+        None,
+        help="[remote|local|cache]",
+        autocompletion=mode_completer,
+    ),
 ):
     valid_commands = [
         "installed",
@@ -187,8 +238,8 @@ def show(
         "snapshot",
         "snapshot-list",
     ]
-    if not args or len(args) > 1 or args[0] not in valid_commands:
-        typer.echo(f"Invalid command: `show {' '.join(args)}`", err=True)
+    if arg not in valid_commands:
+        typer.echo(f"Invalid command: `show {arg}`", err=True)
         raise typer.Exit(code=1)
 
     valid_modes = ["remote", "local", "cache"]
@@ -199,23 +250,29 @@ def show(
         )
         raise typer.Exit(code=1)
 
-    execute_cm_cli(["show"] + args, channel, mode)
+    execute_cm_cli(["show", arg], channel, mode)
 
 
 @app.command("simple-show", help="Show node list (simple mode)")
 @tracking.track_command("node")
 def simple_show(
-    args: List[str] = typer.Argument(
-        ...,
+    arg: str = typer.Argument(
         help="[installed|enabled|not-installed|disabled|all|snapshot|snapshot-list]",
+        autocompletion=show_completer,
     ),
     channel: Annotated[
         str,
-        typer.Option(show_default=False, help="Specify the operation mode"),
+        typer.Option(
+            show_default=False,
+            help="Specify the operation mode",
+            autocompletion=channel_completer,
+        ),
     ] = None,
-    mode: Annotated[
-        str, typer.Option(show_default=False, help="[remote|local|cache]")
-    ] = None,
+    mode: str = typer.Option(
+        None,
+        help="[remote|local|cache]",
+        autocompletion=mode_completer,
+    ),
 ):
     valid_commands = [
         "installed",
@@ -226,8 +283,8 @@ def simple_show(
         "snapshot",
         "snapshot-list",
     ]
-    if not args or len(args) > 1 or args[0] not in valid_commands:
-        typer.echo(f"Invalid command: `show {' '.join(args)}`", err=True)
+    if arg not in valid_commands:
+        typer.echo(f"Invalid command: `show {arg}`", err=True)
         raise typer.Exit(code=1)
 
     valid_modes = ["remote", "local", "cache"]
@@ -238,21 +295,29 @@ def simple_show(
         )
         raise typer.Exit(code=1)
 
-    execute_cm_cli(["simple-show"] + args, channel, mode)
+    execute_cm_cli(["simple-show", arg], channel, mode)
 
 
 # install, reinstall, uninstall
 @app.command(help="Install custom nodes")
 @tracking.track_command("node")
 def install(
-    args: List[str] = typer.Argument(..., help="install custom nodes"),
+    args: List[str] = typer.Argument(
+        ..., help="install custom nodes", autocompletion=node_completer
+    ),
     channel: Annotated[
         str,
-        typer.Option(show_default=False, help="Specify the operation mode"),
+        typer.Option(
+            show_default=False,
+            help="Specify the operation mode",
+            autocompletion=channel_completer,
+        ),
     ] = None,
-    mode: Annotated[
-        str, typer.Option(show_default=False, help="[remote|local|cache]")
-    ] = None,
+    mode: str = typer.Option(
+        None,
+        help="[remote|local|cache]",
+        autocompletion=mode_completer,
+    ),
 ):
     if "all" in args:
         typer.echo(f"Invalid command: {mode}. `install all` is not allowed", err=True)
@@ -272,14 +337,22 @@ def install(
 @app.command(help="Reinstall custom nodes")
 @tracking.track_command("node")
 def reinstall(
-    args: List[str] = typer.Argument(..., help="reinstall custom nodes"),
+    args: List[str] = typer.Argument(
+        ..., help="reinstall custom nodes", autocompletion=node_completer
+    ),
     channel: Annotated[
         str,
-        typer.Option(show_default=False, help="Specify the operation mode"),
+        typer.Option(
+            show_default=False,
+            help="Specify the operation mode",
+            autocompletion=channel_completer,
+        ),
     ] = None,
-    mode: Annotated[
-        str, typer.Option(show_default=False, help="[remote|local|cache]")
-    ] = None,
+    mode: str = typer.Option(
+        None,
+        help="[remote|local|cache]",
+        autocompletion=mode_completer,
+    ),
 ):
     if "all" in args:
         typer.echo(f"Invalid command: {mode}. `reinstall all` is not allowed", err=True)
@@ -299,14 +372,22 @@ def reinstall(
 @app.command(help="Uninstall custom nodes")
 @tracking.track_command("node")
 def uninstall(
-    args: List[str] = typer.Argument(..., help="uninstall custom nodes"),
+    args: List[str] = typer.Argument(
+        ..., help="uninstall custom nodes", autocompletion=node_completer
+    ),
     channel: Annotated[
         str,
-        typer.Option(show_default=False, help="Specify the operation mode"),
+        typer.Option(
+            show_default=False,
+            help="Specify the operation mode",
+            autocompletion=channel_completer,
+        ),
     ] = None,
-    mode: Annotated[
-        str, typer.Option(show_default=False, help="[remote|local|cache]")
-    ] = None,
+    mode: str = typer.Option(
+        None,
+        help="[remote|local|cache]",
+        autocompletion=mode_completer,
+    ),
 ):
     if "all" in args:
         typer.echo(f"Invalid command: {mode}. `uninstall all` is not allowed", err=True)
@@ -323,20 +404,49 @@ def uninstall(
     execute_cm_cli(["uninstall"] + args, channel, mode)
 
 
+def update_node_id_cache():
+    try:
+        config_manager = ConfigManager()
+        workspace_path = workspace_manager.workspace_path
+
+        cm_cli_path = os.path.join(
+            workspace_path, "custom_nodes", "ComfyUI-Manager", "cm-cli.py"
+        )
+
+        tmp_path = os.path.join(config_manager.get_config_path(), "tmp")
+        if not os.path.exists(tmp_path):
+            os.makedirs(tmp_path)
+
+        cache_path = os.path.join(tmp_path, "node-cache.list")
+        cmd = [sys.executable, cm_cli_path, "export-custom-node-ids", cache_path]
+
+        new_env = os.environ.copy()
+        new_env["COMFYUI_PATH"] = workspace_path
+        subprocess.check_output(cmd, env=new_env)
+    except Exception:
+        pass
+
+
 # `update, disable, enable, fix` allows `all` param
-
-
 @app.command(help="Update custom nodes or ComfyUI")
 @tracking.track_command("node")
 def update(
-    args: List[str] = typer.Argument(..., help="update custom nodes"),
+    args: List[str] = typer.Argument(
+        ..., help="update custom nodes", autocompletion=node_completer
+    ),
     channel: Annotated[
         str,
-        typer.Option(show_default=False, help="Specify the operation mode"),
+        typer.Option(
+            show_default=False,
+            help="Specify the operation mode",
+            autocompletion=channel_completer,
+        ),
     ] = None,
-    mode: Annotated[
-        str, typer.Option(show_default=False, help="[remote|local|cache]")
-    ] = None,
+    mode: str = typer.Option(
+        None,
+        help="[remote|local|cache]",
+        autocompletion=mode_completer,
+    ),
 ):
     valid_modes = ["remote", "local", "cache"]
     if mode and mode.lower() not in valid_modes:
@@ -348,18 +458,28 @@ def update(
 
     execute_cm_cli(["update"] + args, channel, mode)
 
+    update_node_id_cache()
+
 
 @app.command(help="Disable custom nodes")
 @tracking.track_command("node")
 def disable(
-    args: List[str] = typer.Argument(..., help="disable custom nodes"),
+    args: List[str] = typer.Argument(
+        ..., help="disable custom nodes", autocompletion=node_completer
+    ),
     channel: Annotated[
         str,
-        typer.Option(show_default=False, help="Specify the operation mode"),
+        typer.Option(
+            show_default=False,
+            help="Specify the operation mode",
+            autocompletion=channel_completer,
+        ),
     ] = None,
-    mode: Annotated[
-        str, typer.Option(show_default=False, help="[remote|local|cache]")
-    ] = None,
+    mode: str = typer.Option(
+        None,
+        help="[remote|local|cache]",
+        autocompletion=mode_completer,
+    ),
 ):
     valid_modes = ["remote", "local", "cache"]
     if mode and mode.lower() not in valid_modes:
@@ -375,14 +495,22 @@ def disable(
 @app.command(help="Enable custom nodes")
 @tracking.track_command("node")
 def enable(
-    args: List[str] = typer.Argument(..., help="enable custom nodes"),
+    args: List[str] = typer.Argument(
+        ..., help="enable custom nodes", autocompletion=node_completer
+    ),
     channel: Annotated[
         str,
-        typer.Option(show_default=False, help="Specify the operation mode"),
+        typer.Option(
+            show_default=False,
+            help="Specify the operation mode",
+            autocompletion=channel_completer,
+        ),
     ] = None,
-    mode: Annotated[
-        str, typer.Option(show_default=False, help="[remote|local|cache]")
-    ] = None,
+    mode: str = typer.Option(
+        None,
+        help="[remote|local|cache]",
+        autocompletion=mode_completer,
+    ),
 ):
     valid_modes = ["remote", "local", "cache"]
     if mode and mode.lower() not in valid_modes:
@@ -399,15 +527,23 @@ def enable(
 @tracking.track_command("node")
 def fix(
     args: List[str] = typer.Argument(
-        ..., help="fix dependencies for specified custom nodes"
+        ...,
+        help="fix dependencies for specified custom nodes",
+        autocompletion=node_completer,
     ),
     channel: Annotated[
         str,
-        typer.Option(show_default=False, help="Specify the operation mode"),
+        typer.Option(
+            show_default=False,
+            help="Specify the operation mode",
+            autocompletion=channel_completer,
+        ),
     ] = None,
-    mode: Annotated[
-        str, typer.Option(show_default=False, help="[remote|local|cache]")
-    ] = None,
+    mode: str = typer.Option(
+        None,
+        help="[remote|local|cache]",
+        autocompletion=mode_completer,
+    ),
 ):
     valid_modes = ["remote", "local", "cache"]
     if mode and mode.lower() not in valid_modes:
@@ -434,11 +570,17 @@ def install_deps(
     ] = None,
     channel: Annotated[
         str,
-        typer.Option(show_default=False, help="Specify the operation mode"),
+        typer.Option(
+            show_default=False,
+            help="Specify the operation mode",
+            autocompletion=channel_completer,
+        ),
     ] = None,
-    mode: Annotated[
-        str, typer.Option(show_default=False, help="[remote|local|cache]")
-    ] = None,
+    mode: str = typer.Option(
+        None,
+        help="[remote|local|cache]",
+        autocompletion=mode_completer,
+    ),
 ):
     valid_modes = ["remote", "local", "cache"]
     if mode and mode.lower() not in valid_modes:
@@ -492,11 +634,17 @@ def deps_in_workflow(
     ],
     channel: Annotated[
         str,
-        typer.Option(show_default=False, help="Specify the operation mode"),
+        typer.Option(
+            show_default=False,
+            help="Specify the operation mode",
+            autocompletion=channel_completer,
+        ),
     ] = None,
-    mode: Annotated[
-        str, typer.Option(show_default=False, help="[remote|local|cache]")
-    ] = None,
+    mode: str = typer.Option(
+        None,
+        help="[remote|local|cache]",
+        autocompletion=mode_completer,
+    ),
 ):
     valid_modes = ["remote", "local", "cache"]
     if mode and mode.lower() not in valid_modes:
@@ -558,4 +706,104 @@ def scaffold():
     initialize_project_config()
     typer.echo(
         "pyproject.toml created successfully. Defaults were filled in. Please check before publishing."
+    )
+
+
+@app.command("registry-list", help="List all nodes in the registry", hidden=True)
+@tracking.track_command("node")
+def display_all_nodes():
+    """
+    Display all nodes in the registry.
+    """
+
+    nodes = None
+    try:
+        nodes = registry_api.list_all_nodes()
+    except Exception as e:
+        logging.error(f"Failed to fetch nodes from the registry: {str(e)}")
+        ui.display_error_message("Failed to fetch nodes from the registry.")
+
+    # Map Node data class instances to tuples for display
+    node_data = [
+        (
+            node.id,
+            node.name,
+            node.description,
+            node.author or "N/A",
+            node.license or "N/A",
+            ", ".join(node.tags),
+            node.latest_version.version if node.latest_version else "N/A",
+        )
+        for node in nodes
+    ]
+    ui.display_table(
+        node_data,
+        [
+            "ID",
+            "Name",
+            "Description",
+            "Author",
+            "License",
+            "Tags",
+            "Latest Version",
+        ],
+        title="List of All Nodes",
+    )
+
+
+@app.command("registry-install", help="Install a node from the registry", hidden=True)
+@tracking.track_command("node")
+def install(node_id: str, version: Optional[str] = None):
+    """
+    Install a node from the registry.
+    Args:
+      node_id: The ID of the node to install.
+      version: The version of the node to install. If not provided, the latest version will be installed.
+    """
+
+    # If the node ID is not provided, prompt the user to enter it
+    if not node_id:
+        node_id = typer.prompt("Enter the ID of the node you want to install")
+
+    node_version = None
+    try:
+        # Call the API to install the node
+        node_version = registry_api.install_node(node_id, version)
+        if not node_version.download_url:
+            logging.error("Download URL not provided from the registry.")
+            ui.display_error_message(f"Failed to download the custom node {node_id}.")
+            return
+
+    except Exception as e:
+        logging.error(
+            f"Encountered an error while installing the node. error: {str(e)}"
+        )
+        ui.display_error_message(f"Failed to download the custom node {node_id}.")
+        return
+
+    # Download the node archive
+    custom_nodes_path = pathlib.Path(workspace_manager.workspace_path) / "custom_nodes"
+    node_specific_path = custom_nodes_path / node_id  # Subdirectory for the node
+    node_specific_path.mkdir(
+        parents=True, exist_ok=True
+    )  # Create the directory if it doesn't exist
+
+    local_filename = node_specific_path / f"{node_id}-{node_version.version}.zip"
+    logging.debug(
+        f"Start downloading the node {node_id} version {node_version.version} to {local_filename}"
+    )
+    download_file(node_version.download_url, local_filename)
+
+    # Extract the downloaded archive to the custom_node directory on the workspace.
+    logging.debug(
+        f"Start extracting the node {node_id} version {node_version.version} to {custom_nodes_path}"
+    )
+    extract_package_as_zip(local_filename, node_specific_path)
+
+    # Delete the downloaded archive
+    logging.debug(f"Deleting the downloaded archive {local_filename}")
+    os.remove(local_filename)
+
+    logging.info(
+        f"Node {node_id} version {node_version.version} has been successfully installed."
     )

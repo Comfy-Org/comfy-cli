@@ -35,4 +35,5 @@ jobs:
       - name: Run Tests
         run: |
           comfy --yes env
+          comfy tracking disable
           comfy install --cpu

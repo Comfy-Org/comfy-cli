@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import List
+from typing import List, Optional
 
 
 @dataclass
@@ -9,6 +9,20 @@ class NodeVersion:
     deprecated: bool
     id: str
     version: str
+    download_url: str
+
+
+@dataclass
+class Node:
+    id: str
+    name: str
+    description: str
+    author: Optional[str] = None
+    license: Optional[str] = None
+    icon: Optional[str] = None
+    repository: Optional[str] = None
+    tags: List[str] = field(default_factory=list)
+    latest_version: Optional[NodeVersion] = None
 
 
 @dataclass
