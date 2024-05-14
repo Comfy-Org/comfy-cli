@@ -100,7 +100,7 @@ class EnvChecker(object):
         self.python_version = sys.version_info
 
     # TODO: use ui.display_table
-    def print(self):
+    def fill_print_table(self):
         table = Table(":laptop_computer: Environment", "Value")
         table.add_row("Python Version", format_python_version(sys.version_info))
         table.add_row("Python Executable", sys.executable)
@@ -120,4 +120,4 @@ class EnvChecker(object):
         else:
             table.add_row("Comfy Server Running", "[bold red]No[/bold red]")
 
-        console.print(table)
+        return table

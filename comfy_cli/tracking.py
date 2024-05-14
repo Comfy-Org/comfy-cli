@@ -8,12 +8,12 @@ from mixpanel import Mixpanel
 
 from comfy_cli import logging, ui, constants
 from comfy_cli.config_manager import ConfigManager
+from comfy_cli.workspace_manager import WorkspaceManager
 
 # Ignore logs from urllib3 that Mixpanel uses.
 logginglib.getLogger("urllib3").setLevel(logginglib.ERROR)
 
 MIXPANEL_TOKEN = "93aeab8962b622d431ac19800ccc9f67"
-DISABLE_TELEMETRY = os.getenv("DISABLE_TELEMETRY", False)
 mp = Mixpanel(MIXPANEL_TOKEN) if MIXPANEL_TOKEN else None
 
 # Generate a unique tracing ID per command.
@@ -24,6 +24,7 @@ cli_version = config_manager.get_cli_version()
 user_id = config_manager.get(constants.CONFIG_KEY_USER_ID)
 # tracking all events for a single command
 tracing_id = str(uuid.uuid4())
+workspace_manager = WorkspaceManager()
 
 app = typer.Typer()
 
@@ -31,17 +32,19 @@ app = typer.Typer()
 @app.command()
 def enable():
     set_tracking_enabled(True)
-    typer.echo(f"Tracking is now {'enabled' if enable else 'disabled'}.")
+    typer.echo(f"Tracking is now {'enabled'}.")
     init_tracking(True)
 
 
 @app.command()
 def disable():
     set_tracking_enabled(False)
-    typer.echo(f"Tracking is now {'enabled' if enable else 'disabled'}.")
+    typer.echo(f"Tracking is now {'disabled'}.")
 
 
-def track_event(event_name: str, properties: any = {}):
+def track_event(event_name: str, properties: any = None):
+    if properties is None:
+        properties = {}
     logging.debug(
         f"tracking event called with event_name: {event_name} and properties: {properties}"
     )
@@ -89,13 +92,13 @@ def track_command(sub_command: str = None):
     return decorator
 
 
-def prompt_tracking_consent(yes: bool = False):
+def prompt_tracking_consent(skip_prompt: bool = False, default_value: bool = False):
     tracking_enabled = config_manager.get(constants.CONFIG_KEY_ENABLE_TRACKING)
     if tracking_enabled is not None:
         return
 
-    if yes:
-        init_tracking(True)
+    if skip_prompt:
+        init_tracking(default_value)
     else:
         enable_tracking = ui.prompt_confirm_action(
             "Do you agree to enable tracking to improve the application?"
@@ -112,12 +115,12 @@ def init_tracking(enable_tracking: bool):
     if not enable_tracking:
         return
 
-    user_id = config_manager.get(constants.CONFIG_KEY_USER_ID)
-    logging.debug(f'User identifier for tracking user_id found: {user_id}."')
-    if user_id is None:
-        user_id = str(uuid.uuid4())
-        config_manager.set(constants.CONFIG_KEY_USER_ID, user_id)
-        logging.debug(f'Setting user identifier for tracking user_id: {user_id}."')
+    curr_user_id = config_manager.get(constants.CONFIG_KEY_USER_ID)
+    logging.debug(f'User identifier for tracking user_id found: {curr_user_id}."')
+    if curr_user_id is None:
+        curr_user_id = str(uuid.uuid4())
+        config_manager.set(constants.CONFIG_KEY_USER_ID, curr_user_id)
+        logging.debug(f'Setting user identifier for tracking user_id: {curr_user_id}."')
 
     # Note: only called once when the user interacts with the CLI for the
     #  first time iff the permission is granted.

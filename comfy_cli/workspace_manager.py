@@ -142,17 +142,20 @@ class WorkspaceManager:
         self.use_recent = None
         self.workspace_path = None
         self.workspace_type = None
+        self.skip_prompting = None
 
     def setup_workspace_manager(
         self,
         specified_workspace: Optional[str] = None,
         use_here: Optional[bool] = None,
         use_recent: Optional[bool] = None,
+        skip_prompting: Optional[bool] = None,
     ):
         self.specified_workspace = specified_workspace
         self.use_here = use_here
         self.use_recent = use_recent
         self.workspace_path, self.workspace_type = self.get_workspace_path()
+        self.skip_prompting = skip_prompting
 
     def set_recent_workspace(self, path: str):
         """
@@ -328,3 +331,9 @@ class WorkspaceManager:
     def save_metadata(self):
         file_path = os.path.join(self.workspace_path, constants.COMFY_LOCK_YAML_FILE)
         save_yaml(file_path, self.metadata)
+
+    def fill_print_table(self, table):
+        table.add_row(
+            "Current selected workspace",
+            f"[bold green]→ {self.workspace_path}[/bold green]",
+        )
