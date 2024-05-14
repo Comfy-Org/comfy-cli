@@ -44,7 +44,7 @@ def prompt_select(question: str, choices: list, force_prompting: bool = False) -
     Returns:
         str: The selected choice from the user.
     """
-    if workspace_manager.no_prompting and not force_prompting:
+    if workspace_manager.skip_prompting and not force_prompting:
         return None
     return questionary.select(question, choices=choices).ask()
 
@@ -62,7 +62,7 @@ def prompt_select_enum(
     Returns:
         str: The selected choice from the user.
     """
-    if workspace_manager.no_prompting and not force_prompting:
+    if workspace_manager.skip_prompting and not force_prompting:
         return None
     choice_map = {choice.value: choice for choice in choices}
     display_choices = list(choice_map.keys())
@@ -88,7 +88,7 @@ def prompt_input(
     Raises:
         KeyboardInterrupt: If the user interrupts the input.
     """
-    if workspace_manager.no_prompting and not force_prompting:
+    if workspace_manager.skip_prompting and not force_prompting:
         return default
     return questionary.text(question, default=default).ask()
 

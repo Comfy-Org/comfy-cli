@@ -62,7 +62,10 @@ def execute_cm_cli(args, channel=None, mode=None):
 
     print(f"Execute from: {workspace_path}")
 
-    subprocess.run(cmd, env=new_env)
+    res = subprocess.run(cmd, env=new_env, check=True)
+    if res.returncode != 0:
+        print(f"Failed to execute: {cmd}", file=sys.stderr)
+        raise typer.Exit(code=1)
     workspace_manager.set_recent_workspace(workspace_path)
 
 
@@ -71,7 +74,7 @@ def validate_comfyui_manager(_env_checker):
 
     if manager_path is None:
         print(
-            f"[bold red]If ComfyUI is not installed, this feature cannot be used.[/bold red]"
+            "[bold red]If ComfyUI is not installed, this feature cannot be used.[/bold red]"
         )
         raise typer.Exit(code=1)
     elif not os.path.exists(manager_path):
@@ -422,7 +425,13 @@ def update_node_id_cache():
 
         new_env = os.environ.copy()
         new_env["COMFYUI_PATH"] = workspace_path
-        subprocess.check_output(cmd, env=new_env)
+        res = subprocess.run(cmd, env=new_env, check=True)
+        if res.returncode != 0:
+            typer.echo(
+                "Failed to update node id cache.",
+                err=True,
+            )
+            raise typer.Exit(code=1)
     except Exception:
         pass
 

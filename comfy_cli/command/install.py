@@ -4,11 +4,14 @@ import subprocess
 import sys
 
 from rich import print
+import typer
 
-from comfy_cli import constants
+from comfy_cli import constants, ui
 from comfy_cli.constants import GPU_OPTION
 from comfy_cli.workspace_manager import WorkspaceManager, check_comfy_repo
 from comfy_cli.command.custom_nodes.command import update_node_id_cache
+
+workspace_manager = WorkspaceManager()
 
 
 def get_os_details():
@@ -120,13 +123,21 @@ def execute(
     skip_manager: bool,
     commit=None,
     gpu: constants.GPU_OPTION = None,
-    platform: constants.OS = None,
+    plat: constants.OS = None,
     skip_torch_or_directml: bool = False,
     skip_requirement: bool = False,
     *args,
     **kwargs,
 ):
-    print(f"Installing from '{url}' to '{comfy_path}'")
+
+    if not workspace_manager.skip_prompting:
+        res = ui.prompt_confirm_action(f"Install from {url} to {comfy_path}?")
+
+        if not res:
+            print("Aborting...")
+            raise typer.Exit(code=1)
+
+    print(f"Installing from [bold yellow]'{url}'[/bold yellow] to '{comfy_path}'")
 
     repo_dir = comfy_path
     parent_path = os.path.join(repo_dir, "..")
@@ -148,7 +159,7 @@ def execute(
         subprocess.run(["git", "checkout", commit])
 
     install_comfyui_dependencies(
-        repo_dir, gpu, platform, skip_torch_or_directml, skip_requirement
+        repo_dir, gpu, plat, skip_torch_or_directml, skip_requirement
     )
 
     WorkspaceManager().set_recent_workspace(repo_dir)

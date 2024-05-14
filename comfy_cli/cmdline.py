@@ -9,6 +9,7 @@ from typing import Optional
 import questionary
 import typer
 from rich import print
+from rich.console import Console
 from typing_extensions import Annotated, List
 
 from comfy_cli import constants, env_checker, logging, tracking, ui, utils
@@ -28,6 +29,8 @@ from comfy_cli.workspace_manager import (
 logging.setup_logging()
 app = typer.Typer()
 workspace_manager = WorkspaceManager()
+
+console = Console()
 
 
 def main():
@@ -88,19 +91,27 @@ def entry(
             callback=exclusivity_callback,
         ),
     ] = None,
-    no_prompting: Annotated[
+    skip_prompt: Annotated[
+        Optional[bool],
+        typer.Option(
+            show_default=False,
+            is_flag=True,
+            help="Do not prompt user for input, use default options",
+        ),
+    ] = None,
+    enable_telemetry: Annotated[
         Optional[bool],
         typer.Option(
             show_default=False,
             hidden=True,
             is_flag=True,
-            help="Do not prompt user for input, use default options",
+            help="Enable tracking",
         ),
-    ] = None,
+    ] = True,
 ):
-    workspace_manager.setup_workspace_manager(workspace, here, recent, no_prompting)
+    workspace_manager.setup_workspace_manager(workspace, here, recent, skip_prompt)
 
-    tracking.prompt_tracking_consent(no_prompting)
+    tracking.prompt_tracking_consent(skip_prompt, default_value=enable_telemetry)
 
     if ctx.invoked_subcommand is None:
         print(
@@ -185,6 +196,9 @@ def install(
     comfy_path = workspace_manager.get_specified_workspace()
 
     if comfy_path is None:
+        comfy_path = workspace_manager.workspace_path
+
+    if comfy_path is None:
         comfy_path = utils.get_not_user_set_default_workspace()
 
     is_comfy_path, repo_dir = check_comfy_repo(comfy_path)
@@ -247,7 +261,9 @@ def install(
         )
 
     if gpu is None:
-        print("[bold red]No GPU selected. Exiting...[/bold red]")
+        print(
+            "[bold red]No GPU selected, use --\[gpu option] flag (e.g. --nvidia) to pick GPU. Exiting...[/bold red]"
+        )
         raise typer.Exit(code=1)
 
     install_inner.execute(
@@ -258,7 +274,7 @@ def install(
         skip_manager,
         commit=commit,
         gpu=gpu,
-        platform=platform,
+        plat=platform,
         skip_torch_or_directml=skip_torch_or_directml,
         skip_requirement=skip_requirement,
     )
@@ -282,7 +298,6 @@ def update(
         )
         raise typer.Exit(code=1)
 
-    _env_checker = EnvChecker()
     comfy_path = workspace_manager.workspace_path
 
     if "all" == target:
@@ -498,7 +513,9 @@ def which():
 def env():
     check_for_updates()
     _env_checker = EnvChecker()
-    _env_checker.print()
+    table = _env_checker.fill_print_table()
+    workspace_manager.fill_print_table(table)
+    console.print(table)
 
 
 @app.command(hidden=True)
