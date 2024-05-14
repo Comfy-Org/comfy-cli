@@ -6,7 +6,7 @@ import sys
 from rich import print
 import typer
 
-from comfy_cli import constants, ui
+from comfy_cli import constants, ui, utils
 from comfy_cli.constants import GPU_OPTION
 from comfy_cli.workspace_manager import WorkspaceManager, check_comfy_repo
 from comfy_cli.command.custom_nodes.command import update_node_id_cache
@@ -60,6 +60,32 @@ def install_comfyui_dependencies(
                     "torch",
                     "torchvision",
                     "torchaudio",
+                ]
+                + pip_url,
+                check=False,
+            )
+        # Beta support for intel arch based on this PR: https://github.com/comfyanonymous/ComfyUI/pull/3439
+        if gpu == GPU_OPTION.INTEL_ARC:
+            pip_url = [
+                "--extra-index-url",
+                "https://pytorch-extension.intel.com/release-whl/stable/xpu/us/",
+            ]
+            utils.install_conda_package("libuv")
+            # TODO: wrap pip install in a function
+            subprocess.run(
+                [sys.executable, "-m", "pip", "install", "mkl", "mkl-dpcpp"],
+                check=True,
+            )
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "pip",
+                    "install",
+                    "torch==2.1.0.post2",
+                    "torchvision==0.16.0.post2",
+                    "torchaudio==2.1.0.post2",
+                    "intel-extension-for-pytorch==2.1.30",
                 ]
                 + pip_url,
                 check=False,
