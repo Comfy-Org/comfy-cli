@@ -27,30 +27,61 @@ def potentially_strip_param_url(path_name: str) -> str:
 
 # Convert relative path to absolute path based on the current working
 # directory
-def is_huggingface_model(url: str) -> bool:
+def check_huggingface_url(url: str) -> bool:
     return "huggingface.co" in url
 
 
-def is_civitai_model(url: str) -> Tuple[bool, int, int]:
+def check_civitai_url(url: str) -> Tuple[bool, bool, int, int]:
+    """
+    Returns:
+        is_civitai_model_url: True if the url is a civitai model url
+        is_civitai_api_url: True if the url is a civitai api url
+        model_id: The model id or None if it's api url
+        version_id: The version id or None if it doesn't have version id info
+    """
     prefix = "civitai.com"
     try:
         if prefix in url:
+            # URL is civitai api download url: https://civitai.com/api/download/models/12345
+            if "civitai.com/api/download" in url:
+                # This is a direct download link
+                version_id = url.strip("/").split("/")[-1]
+                return False, True, None, int(version_id)
+
+            # URL is civitai web url (e.g.
+            #   - https://civitai.com/models/43331
+            #   - https://civitai.com/models/43331/majicmix-realistic
             subpath = url[url.find(prefix) + len(prefix) :].strip("/")
             url_parts = subpath.split("?")
             if len(url_parts) > 1:
                 model_id = url_parts[0].split("/")[1]
                 version_id = url_parts[1].split("=")[1]
-                return True, int(model_id), int(version_id)
+                return True, False, int(model_id), int(version_id)
             else:
                 model_id = subpath.split("/")[1]
-                return True, int(model_id), None
-    except ValueError:
+                return True, False, int(model_id), None
+    except (ValueError, IndexError):
         print("Error parsing Civitai model URL")
-        pass
-    return False, None, None
+
+    return False, False, None, None
 
 
-def request_civitai_api(model_id: int, version_id: int = None):
+def request_civitai_model_version_api(version_id: int):
+    # Make a request to the Civitai API to get the model information
+    response = requests.get(
+        f"https://civitai.com/api/v1/model-versions/{version_id}", timeout=10
+    )
+    response.raise_for_status()  # Raise an error for bad status codes
+
+    model_data = response.json()
+    for file in model_data["files"]:
+        if file["primary"]:  # Assuming we want the primary file
+            model_name = file["name"]
+            download_url = file["downloadUrl"]
+            return model_name, download_url
+
+
+def request_civitai_model_api(model_id: int, version_id: int = None):
     # Make a request to the Civitai API to get the model information
     response = requests.get(f"https://civitai.com/api/v1/models/{model_id}", timeout=10)
     response.raise_for_status()  # Raise an error for bad status codes
@@ -96,11 +127,15 @@ def download(
 
     local_filename = None
 
-    is_civitai, model_id, version_id = is_civitai_model(url)
+    is_civitai_model_url, is_civitai_api_url, model_id, version_id = check_civitai_url(
+        url
+    )
     is_huggingface = False
-    if is_civitai:
-        local_filename, url = request_civitai_api(model_id, version_id)
-    elif is_huggingface_model(url):
+    if is_civitai_model_url:
+        local_filename, url = request_civitai_model_api(model_id, version_id)
+    elif is_civitai_api_url:
+        local_filename, url = request_civitai_model_version_api(version_id)
+    elif check_huggingface_url(url):
         is_huggingface = True
         local_filename = potentially_strip_param_url(url.split("/")[-1])
     else:
