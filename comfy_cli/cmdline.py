@@ -19,7 +19,7 @@ from comfy_cli.command.models import models as models_command
 from comfy_cli.config_manager import ConfigManager
 from comfy_cli.constants import GPU_OPTION
 from comfy_cli.env_checker import EnvChecker, check_comfy_server_running
-from comfy_cli.update import check_for_updates
+from comfy_cli.update import check_for_updates, get_version_from_pyproject
 from comfy_cli.workspace_manager import (
     WorkspaceManager,
     WorkspaceType,
@@ -94,9 +94,10 @@ def entry(
     skip_prompt: Annotated[
         Optional[bool],
         typer.Option(
+            "--skip-prompt",
             show_default=False,
             is_flag=True,
-            help="Do not prompt user for input, use default options",
+            help="Do not prompt user for input, use default options and command line args",
         ),
     ] = None,
     enable_telemetry: Annotated[
@@ -108,12 +109,26 @@ def entry(
             help="Enable tracking",
         ),
     ] = True,
+    version: Annotated[
+        Optional[bool],
+        typer.Option(
+            "-v",
+            "--version",
+            show_default=False,
+            is_flag=True,
+            help="Display version",
+        ),
+    ] = False,
 ):
     workspace_manager.setup_workspace_manager(workspace, here, recent, skip_prompt)
 
     tracking.prompt_tracking_consent(skip_prompt, default_value=enable_telemetry)
 
-    if ctx.invoked_subcommand is None:
+    if version:
+        version = get_version_from_pyproject()
+        print(f"Comfy CLI version: {version}")
+
+    if ctx.invoked_subcommand is None and not version:
         print(
             "[bold yellow]Welcome to Comfy CLI![/bold yellow]: https://github.com/Comfy-Org/comfy-cli"
         )
@@ -526,6 +541,14 @@ def which():
         )
         raise typer.Exit(code=1)
 
+    if workspace_manager.workspace_type == WorkspaceType.DEFAULT:
+        print("Default Comfy path is used.")
+    elif workspace_manager.workspace_type == WorkspaceType.CURRENT_DIR:
+        print("Current directory is used.")
+    elif workspace_manager.workspace_type == WorkspaceType.RECENT:
+        print("Most recently used ComfyUP is used")
+    elif workspace_manager.workspace_type == WorkspaceType.SPECIFIED:
+        print("Specified path is used.")
     print(f"Target ComfyUI path: {comfy_path}")
 
 

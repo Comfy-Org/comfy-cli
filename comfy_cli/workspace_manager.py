@@ -1,7 +1,8 @@
 import concurrent.futures
 import os
+import pdb
 import sys
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field, is_dataclass
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
@@ -34,6 +35,7 @@ class Model:
 
 @dataclass
 class Basics:
+    remote: str
     name: Optional[str] = None
     updated_at: datetime = None
 
@@ -41,7 +43,10 @@ class Basics:
 @dataclass
 class CustomNode:
     # Todo: Add custom node fields for comfy-lock.yaml
-    pass
+    path: str
+    enabled: bool
+    is_git: Optional[bool] = False
+    remote: Optional[str] = None
 
 
 @dataclass
@@ -68,11 +73,28 @@ def check_comfy_repo(path):
         return False, None
 
 
-# Generate and update this following method using chatGPT
+def _serialize_dataclass(data):
+    """Serialize dataclasses, lists, and datetimes, filtering out None values."""
+    if is_dataclass(data):
+        # Convert dataclass to dict, omitting keys with None values
+        return {
+            k: _serialize_dataclass(v) for k, v in asdict(data).items() if v is not None
+        }
+    elif isinstance(data, list):
+        # Serialize each item in the list
+        return [_serialize_dataclass(item) for item in data]
+    # TODO: keep in mind for any other data type to create condition to serialize it properly
+    elif isinstance(data, datetime):
+        return data.isoformat()
+    return data
+
+
 def load_yaml(file_path: str) -> ComfyLockYAMLStruct:
     with open(file_path, "r", encoding="utf-8") as file:
         data = yaml.safe_load(file)
+
         basics = Basics(
+            remote=data.get("basics", {}).get("remote", ""),
             name=data.get("basics", {}).get("name"),
             updated_at=(
                 datetime.fromisoformat(data.get("basics", {}).get("updated_at"))
@@ -80,46 +102,59 @@ def load_yaml(file_path: str) -> ComfyLockYAMLStruct:
                 else None
             ),
         )
+
         models = [
             Model(
-                name=m.get("model"),
+                name=m.get("name"),
                 url=m.get("url"),
-                paths=[ModelPath(path=p.get("path")) for p in m.get("paths", [])],
+                paths=[ModelPath(path=p["path"]) for p in m.get("paths", [])],
                 hash=m.get("hash"),
                 type=m.get("type"),
             )
             for m in data.get("models", [])
         ]
-        custom_nodes = []
+
+        custom_nodes = [
+            CustomNode(
+                path=cn.get("path"),
+                enabled=cn.get("enabled", False),
+                is_git=cn.get("is_git"),
+                remote=cn.get("remote"),
+            )
+            for cn in data.get("custom_nodes", [])
+        ]
+
+        return ComfyLockYAMLStruct(
+            basics=basics, models=models, custom_nodes=custom_nodes
+        )
 
 
-# Generate and update this following method using chatGPT
 def save_yaml(file_path: str, metadata: ComfyLockYAMLStruct):
-    data = {
-        "basics": {
-            "name": metadata.basics.name,
-            "updated_at": metadata.basics.updated_at.isoformat(),
-        },
-        "models": [
-            {
-                "model": m.name,
-                "url": m.url,
-                "paths": [{"path": p.path} for p in m.paths],
-                "hash": m.hash,
-                "type": m.type,
-            }
-            for m in metadata.models
-        ],
-        "custom_nodes": [],
-    }
+    # Serialize the dataclass to a dictionary, handling nested dataclasses and lists
+    data = _serialize_dataclass(metadata)
+
+    # Write the dictionary to a YAML file
     with open(file_path, "w", encoding="utf-8") as file:
-        yaml.safe_dump(data, file, default_flow_style=False, allow_unicode=True)
+        file.write(
+            "# Beta Feature: This file is generated with comfy-cli to track ComfyUI state\n"
+        )
+        yaml.safe_dump(
+            data, file, default_flow_style=False, allow_unicode=True, sort_keys=True
+        )
 
 
 # Function to check if the file is config.json
 def check_file_is_model(path):
     if path.name.endswith(constants.SUPPORTED_PT_EXTENSIONS):
         return str(path)
+
+
+def check_folder_is_git(path) -> Tuple[bool, Optional[git.Repo]]:
+    try:
+        repo = git.Repo(path)
+        return True, repo
+    except git.exc.InvalidGitRepositoryError:
+        return False, None
 
 
 class WorkspaceType(Enum):
@@ -136,12 +171,13 @@ class WorkspaceManager:
         self,
     ):
         self.config_manager = ConfigManager()
-        self.metadata = ComfyLockYAMLStruct(basics=Basics(), models=[])
+        self.metadata = ComfyLockYAMLStruct(basics=Basics(remote=""), models=[])
         self.specified_workspace = None
         self.use_here = None
         self.use_recent = None
         self.workspace_path = None
         self.workspace_type = None
+        self.workspace_repo = None
         self.skip_prompting = None
 
     def setup_workspace_manager(
@@ -154,7 +190,13 @@ class WorkspaceManager:
         self.specified_workspace = specified_workspace
         self.use_here = use_here
         self.use_recent = use_recent
-        self.workspace_path, self.workspace_type = self.get_workspace_path()
+        (
+            self.workspace_path,
+            self.workspace_type,
+            self.workspace_repo,
+        ) = self.get_workspace_path()
+        if self.workspace_type != WorkspaceType.NOT_FOUND:
+            self.metadata.basics.remote = self.workspace_repo.remotes[0].url
         self.skip_prompting = skip_prompting
 
     def set_recent_workspace(self, path: str):
@@ -187,7 +229,7 @@ class WorkspaceManager:
 
         return os.path.abspath(os.path.expanduser(self.specified_workspace))
 
-    def get_workspace_path(self) -> Tuple[str, WorkspaceType]:
+    def get_workspace_path(self) -> Tuple[str, WorkspaceType, Optional[git.Repo]]:
         """
         Retrieves the workspace path and type based on the following precedence:
         1. Specified Workspace (--workspace)
@@ -204,8 +246,9 @@ class WorkspaceManager:
         # Check for explicitly specified workspace first
         specified_workspace = self.get_specified_workspace()
         if specified_workspace:
-            if check_comfy_repo(specified_workspace):
-                return specified_workspace, WorkspaceType.SPECIFIED
+            found_comfy_repo, repo = check_comfy_repo(specified_workspace)
+            if found_comfy_repo:
+                return specified_workspace, WorkspaceType.SPECIFIED, repo
 
             print(
                 "[bold red]warn: The specified workspace is not ComfyUI directory.[/bold red]"
@@ -218,8 +261,9 @@ class WorkspaceManager:
                 constants.CONFIG_KEY_RECENT_WORKSPACE
             )
             if recent_workspace:
-                if check_comfy_repo(recent_workspace):
-                    return recent_workspace, WorkspaceType.RECENT
+                found_comfy_repo, repo = check_comfy_repo(recent_workspace)
+                if found_comfy_repo:
+                    return recent_workspace, WorkspaceType.RECENT, repo
             else:
                 print(
                     "[bold red]warn: No recent workspace has been set.[/bold red]"
@@ -236,7 +280,7 @@ class WorkspaceManager:
             current_directory = os.getcwd()
             found_comfy_repo, comfy_repo = check_comfy_repo(current_directory)
             if found_comfy_repo:
-                return comfy_repo.working_dir, WorkspaceType.CURRENT_DIR
+                return comfy_repo.working_dir, WorkspaceType.CURRENT_DIR, comfy_repo
 
             print(
                 "[bold red]warn: you are not current in a ComfyUI directory.[/bold red]"
@@ -251,30 +295,34 @@ class WorkspaceManager:
             )
             # If it's in a sub dir of the ComfyUI repo, get the repo working dir
             if found_comfy_repo:
-                return comfy_repo.working_dir, WorkspaceType.CURRENT_DIR
+                return comfy_repo.working_dir, WorkspaceType.CURRENT_DIR, comfy_repo
 
         # Check for user-set default workspace
         default_workspace = self.config_manager.get(
             constants.CONFIG_KEY_DEFAULT_WORKSPACE
         )
 
-        if default_workspace and check_comfy_repo(default_workspace):
-            return default_workspace, WorkspaceType.DEFAULT
+        if default_workspace:
+            found_comfy_repo, repo = check_comfy_repo(default_workspace)
+            return default_workspace, WorkspaceType.DEFAULT, repo
 
         # Fallback to the most recent workspace if it exists
         if self.use_recent is None:
             recent_workspace = self.config_manager.get(
                 constants.CONFIG_KEY_RECENT_WORKSPACE
             )
-            if recent_workspace and check_comfy_repo(recent_workspace):
-                return recent_workspace, WorkspaceType.RECENT
+            if recent_workspace:
+                found_comfy_repo, repo = check_comfy_repo(recent_workspace)
+                if found_comfy_repo:
+                    return recent_workspace, WorkspaceType.RECENT, repo
 
         # Check for comfy-cli default workspace
         default_workspace = utils.get_not_user_set_default_workspace()
-        if check_comfy_repo(default_workspace):
-            return default_workspace, WorkspaceType.DEFAULT
+        found_comfy_repo, repo = check_comfy_repo(default_workspace)
+        if found_comfy_repo:
+            return default_workspace, WorkspaceType.DEFAULT, repo
 
-        return None, WorkspaceType.NOT_FOUND
+        return None, WorkspaceType.NOT_FOUND, None
 
     def get_comfyui_manager_path(self):
         if self.workspace_path is None:
@@ -299,11 +347,52 @@ class WorkspaceManager:
     def scan_dir(self):
         logging.info(f"Scanning directory: {self.workspace_path}")
         model_files = []
+        custom_node_folders = []
+        counter = 0
         for root, _dirs, files in os.walk(self.workspace_path):
             for file in files:
+                counter += 1
                 if file.endswith(constants.SUPPORTED_PT_EXTENSIONS):
-                    model_files.append(os.path.join(root, file))
-        return model_files
+                    model_files.append(
+                        Model(
+                            name=os.path.basename(file),
+                            paths=[ModelPath(path=file)],
+                        )
+                    )
+        for custom_node_path in os.listdir(
+            os.path.join(self.workspace_path, "custom_nodes")
+        ):
+            if not os.path.isdir(custom_node_path):
+                continue
+            if custom_node_path in constants.IGNORE_CUSTOM_NODE_FOLDERS:
+                continue
+            is_git_custom_node, repo = check_folder_is_git(custom_node_path)
+            if is_git_custom_node:
+                custom_node_folders.append(
+                    CustomNode(
+                        path=custom_node_path,
+                        enabled=not custom_node_path.endswith(".disabled"),
+                        is_git=True,
+                        remote=repo.remotes[0].url if repo.remotes else None,
+                    )
+                )
+            else:
+                custom_node_folders.append(
+                    CustomNode(
+                        path=custom_node_path,
+                        enabled=not custom_node_path.endswith(".disabled"),
+                        is_git=False,
+                        remote=None,
+                    )
+                )
+
+        self.metadata.custom_nodes = custom_node_folders
+        self.metadata.models = model_files
+        self.metadata.basics.updated_at = datetime.now()
+        save_yaml(
+            os.path.join(self.workspace_path, constants.COMFY_LOCK_YAML_FILE),
+            self.metadata,
+        )
 
     def scan_dir_concur(self):
         base_path = Path(".")
