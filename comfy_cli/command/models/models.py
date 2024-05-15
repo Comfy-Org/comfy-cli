@@ -39,7 +39,7 @@ def check_civitai_url(url: str) -> Tuple[bool, bool, int, int]:
         model_id: The model id or None if it's api url
         version_id: The version id or None if it doesn't have version id info
     """
-    prefix = "civitai.com"
+    prefix = "civitai.co"
     try:
         if prefix in url:
             # URL is civitai api download url: https://civitai.com/api/download/models/12345
