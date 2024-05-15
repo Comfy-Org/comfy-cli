@@ -408,32 +408,29 @@ def uninstall(
 
 
 def update_node_id_cache():
-    try:
-        config_manager = ConfigManager()
-        workspace_path = workspace_manager.workspace_path
+    config_manager = ConfigManager()
+    workspace_path = workspace_manager.workspace_path
 
-        cm_cli_path = os.path.join(
-            workspace_path, "custom_nodes", "ComfyUI-Manager", "cm-cli.py"
+    cm_cli_path = os.path.join(
+        workspace_path, "custom_nodes", "ComfyUI-Manager", "cm-cli.py"
+    )
+
+    tmp_path = os.path.join(config_manager.get_config_path(), "tmp")
+    if not os.path.exists(tmp_path):
+        os.makedirs(tmp_path)
+
+    cache_path = os.path.join(tmp_path, "node-cache.list")
+    cmd = [sys.executable, cm_cli_path, "export-custom-node-ids", cache_path]
+
+    new_env = os.environ.copy()
+    new_env["COMFYUI_PATH"] = workspace_path
+    res = subprocess.run(cmd, env=new_env, check=True)
+    if res.returncode != 0:
+        typer.echo(
+            "Failed to update node id cache.",
+            err=True,
         )
-
-        tmp_path = os.path.join(config_manager.get_config_path(), "tmp")
-        if not os.path.exists(tmp_path):
-            os.makedirs(tmp_path)
-
-        cache_path = os.path.join(tmp_path, "node-cache.list")
-        cmd = [sys.executable, cm_cli_path, "export-custom-node-ids", cache_path]
-
-        new_env = os.environ.copy()
-        new_env["COMFYUI_PATH"] = workspace_path
-        res = subprocess.run(cmd, env=new_env, check=True)
-        if res.returncode != 0:
-            typer.echo(
-                "Failed to update node id cache.",
-                err=True,
-            )
-            raise typer.Exit(code=1)
-    except Exception:
-        pass
+        raise typer.Exit(code=1)
 
 
 # `update, disable, enable, fix` allows `all` param
