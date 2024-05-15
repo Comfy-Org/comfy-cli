@@ -12,7 +12,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v2
         with:
-          python-version: '3.9'  # Adjust the version as needed
+          python-version: '3.9'  # Follow the min version in pyproject.toml
 
       - name: Install dependencies
         run: |
