@@ -1,0 +1,25 @@
+name: Run pytest
+
+on: [push, pull_request]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v2
+
+      - name: Set up Python
+        uses: actions/setup-python@v2
+        with:
+          python-version: '3.9'  # Adjust the version as needed
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pytest
+          pip install -r requirements.txt  # If you have other dependencies
+
+      - name: Run tests
+        run: |
+          pytest
