@@ -62,10 +62,16 @@ def execute_cm_cli(args, channel=None, mode=None):
 
     print(f"Execute from: {workspace_path}")
 
-    res = subprocess.run(cmd, env=new_env, check=True)
-    if res.returncode != 0:
-        print(f"Failed to execute: {cmd}", file=sys.stderr)
-        raise typer.Exit(code=1)
+    try:
+        subprocess.run(cmd, env=new_env, check=True)
+    except subprocess.CalledProcessError as e:
+        if e.returncode == 1:
+            print(f"Execution error: {cmd}", file=sys.stderr)
+        elif e.returncode == 2:
+            pass
+        else:
+            raise e
+
     workspace_manager.set_recent_workspace(workspace_path)
 
 
@@ -166,9 +172,8 @@ def enable_gui():
 
 @manager_app.command(help="Clear reserved startup action in ComfyUI-Manager")
 @tracking.track_command("node")
-def clear(path: str):
-    path = os.path.abspath(path)
-    execute_cm_cli(["clear", path])
+def clear():
+    execute_cm_cli(["clear"])
 
 
 # completers
@@ -631,6 +636,9 @@ def deps_in_workflow(
     ),
 ):
     validate_mode(mode)
+
+    workflow = os.path.abspath(os.path.expanduser(workflow))
+    output = os.path.abspath(os.path.expanduser(output))
 
     execute_cm_cli(
         ["deps-in-workflow", "--workflow", workflow, "--output", output],
