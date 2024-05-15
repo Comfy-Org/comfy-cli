@@ -48,5 +48,6 @@ comfycli = "comfy_cli.__main__:main"
 [project.urls]
 Repository = "https://github.com/drip-art/comfy-cli.git"
 
-
+[tool.setuptools]
+py-modules = ["comfy_cli"]
 
