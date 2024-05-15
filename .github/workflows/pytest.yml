@@ -12,14 +12,16 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v2
         with:
-          python-version: '3.9'  # Adjust the version as needed
+          python-version: '3.9'  # Follow the min version in pyproject.toml
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install pytest
-          pip install -r requirements.txt  # If you have other dependencies
+          pip install -e .
 
       - name: Run tests
+        env:
+          PYTHONPATH: ${{ github.workspace }}
         run: |
           pytest
