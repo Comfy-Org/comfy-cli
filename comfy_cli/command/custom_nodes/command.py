@@ -211,6 +211,38 @@ def node_completer(incomplete: str) -> list[str]:
         return []
 
 
+def node_or_all_completer(incomplete: str) -> list[str]:
+    try:
+        config_manager = ConfigManager()
+        tmp_path = os.path.join(
+            config_manager.get_config_path(), "tmp", "node-cache.list"
+        )
+
+        all_opt = []
+        if "all".startswith(incomplete):
+            all_opt = ["all"]
+
+        with open(tmp_path, "r", encoding="UTF-8", errors="ignore") as cache_file:
+            return [
+                node_id
+                for node_id in cache_file.readlines()
+                if node_id.startswith(incomplete)
+            ] + all_opt
+
+    except Exception:
+        return []
+
+
+def validate_mode(mode):
+    valid_modes = ["remote", "local", "cache"]
+    if mode and mode.lower() not in valid_modes:
+        typer.echo(
+            f"Invalid mode: {mode}. Allowed modes are 'remote', 'local', 'cache'.",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+
 @app.command(help="Show node list")
 @tracking.track_command("node")
 def show(
@@ -245,13 +277,7 @@ def show(
         typer.echo(f"Invalid command: `show {arg}`", err=True)
         raise typer.Exit(code=1)
 
-    valid_modes = ["remote", "local", "cache"]
-    if mode and mode.lower() not in valid_modes:
-        typer.echo(
-            f"Invalid mode: {mode}. Allowed modes are 'remote', 'local', 'cache'.",
-            err=True,
-        )
-        raise typer.Exit(code=1)
+    validate_mode(mode)
 
     execute_cm_cli(["show", arg], channel, mode)
 
@@ -290,13 +316,7 @@ def simple_show(
         typer.echo(f"Invalid command: `show {arg}`", err=True)
         raise typer.Exit(code=1)
 
-    valid_modes = ["remote", "local", "cache"]
-    if mode and mode.lower() not in valid_modes:
-        typer.echo(
-            f"Invalid mode: {mode}. Allowed modes are 'remote', 'local', 'cache'.",
-            err=True,
-        )
-        raise typer.Exit(code=1)
+    validate_mode(mode)
 
     execute_cm_cli(["simple-show", arg], channel, mode)
 
@@ -305,8 +325,8 @@ def simple_show(
 @app.command(help="Install custom nodes")
 @tracking.track_command("node")
 def install(
-    args: List[str] = typer.Argument(
-        ..., help="install custom nodes", autocompletion=node_completer
+    nodes: List[str] = typer.Argument(
+        ..., help="List of custom nodes to install", autocompletion=node_completer
     ),
     channel: Annotated[
         str,
@@ -322,26 +342,20 @@ def install(
         autocompletion=mode_completer,
     ),
 ):
-    if "all" in args:
+    if "all" in nodes:
         typer.echo(f"Invalid command: {mode}. `install all` is not allowed", err=True)
         raise typer.Exit(code=1)
 
-    valid_modes = ["remote", "local", "cache"]
-    if mode and mode.lower() not in valid_modes:
-        typer.echo(
-            f"Invalid mode: {mode}. Allowed modes are 'remote', 'local', 'cache'.",
-            err=True,
-        )
-        raise typer.Exit(code=1)
+    validate_mode(mode)
 
-    execute_cm_cli(["install"] + args, channel, mode)
+    execute_cm_cli(["install"] + nodes, channel, mode)
 
 
 @app.command(help="Reinstall custom nodes")
 @tracking.track_command("node")
 def reinstall(
-    args: List[str] = typer.Argument(
-        ..., help="reinstall custom nodes", autocompletion=node_completer
+    nodes: List[str] = typer.Argument(
+        ..., help="List of custom nodes to reinstall", autocompletion=node_completer
     ),
     channel: Annotated[
         str,
@@ -357,26 +371,20 @@ def reinstall(
         autocompletion=mode_completer,
     ),
 ):
-    if "all" in args:
+    if "all" in nodes:
         typer.echo(f"Invalid command: {mode}. `reinstall all` is not allowed", err=True)
         raise typer.Exit(code=1)
 
-    valid_modes = ["remote", "local", "cache"]
-    if mode and mode.lower() not in valid_modes:
-        typer.echo(
-            f"Invalid mode: {mode}. Allowed modes are 'remote', 'local', 'cache'.",
-            err=True,
-        )
-        raise typer.Exit(code=1)
+    validate_mode(mode)
 
-    execute_cm_cli(["reinstall"] + args, channel, mode)
+    execute_cm_cli(["reinstall"] + nodes, channel, mode)
 
 
 @app.command(help="Uninstall custom nodes")
 @tracking.track_command("node")
 def uninstall(
-    args: List[str] = typer.Argument(
-        ..., help="uninstall custom nodes", autocompletion=node_completer
+    nodes: List[str] = typer.Argument(
+        ..., help="List of custom nodes to uninstall", autocompletion=node_completer
     ),
     channel: Annotated[
         str,
@@ -392,19 +400,13 @@ def uninstall(
         autocompletion=mode_completer,
     ),
 ):
-    if "all" in args:
+    if "all" in nodes:
         typer.echo(f"Invalid command: {mode}. `uninstall all` is not allowed", err=True)
         raise typer.Exit(code=1)
 
-    valid_modes = ["remote", "local", "cache"]
-    if mode and mode.lower() not in valid_modes:
-        typer.echo(
-            f"Invalid mode: {mode}. Allowed modes are 'remote', 'local', 'cache'.",
-            err=True,
-        )
-        raise typer.Exit(code=1)
+    validate_mode(mode)
 
-    execute_cm_cli(["uninstall"] + args, channel, mode)
+    execute_cm_cli(["uninstall"] + nodes, channel, mode)
 
 
 def update_node_id_cache():
@@ -437,8 +439,10 @@ def update_node_id_cache():
 @app.command(help="Update custom nodes or ComfyUI")
 @tracking.track_command("node")
 def update(
-    args: List[str] = typer.Argument(
-        ..., help="update custom nodes", autocompletion=node_completer
+    nodes: List[str] = typer.Argument(
+        ...,
+        help="[all|List of custom nodes to update]",
+        autocompletion=node_or_all_completer,
     ),
     channel: Annotated[
         str,
@@ -454,15 +458,9 @@ def update(
         autocompletion=mode_completer,
     ),
 ):
-    valid_modes = ["remote", "local", "cache"]
-    if mode and mode.lower() not in valid_modes:
-        typer.echo(
-            f"Invalid mode: {mode}. Allowed modes are 'remote', 'local', 'cache'.",
-            err=True,
-        )
-        raise typer.Exit(code=1)
+    validate_mode(mode)
 
-    execute_cm_cli(["update"] + args, channel, mode)
+    execute_cm_cli(["update"] + nodes, channel, mode)
 
     update_node_id_cache()
 
@@ -470,8 +468,10 @@ def update(
 @app.command(help="Disable custom nodes")
 @tracking.track_command("node")
 def disable(
-    args: List[str] = typer.Argument(
-        ..., help="disable custom nodes", autocompletion=node_completer
+    nodes: List[str] = typer.Argument(
+        ...,
+        help="[all|List of custom nodes to disable]",
+        autocompletion=node_or_all_completer,
     ),
     channel: Annotated[
         str,
@@ -487,22 +487,18 @@ def disable(
         autocompletion=mode_completer,
     ),
 ):
-    valid_modes = ["remote", "local", "cache"]
-    if mode and mode.lower() not in valid_modes:
-        typer.echo(
-            f"Invalid mode: {mode}. Allowed modes are 'remote', 'local', 'cache'.",
-            err=True,
-        )
-        raise typer.Exit(code=1)
+    validate_mode(mode)
 
-    execute_cm_cli(["disable"] + args, channel, mode)
+    execute_cm_cli(["disable"] + nodes, channel, mode)
 
 
 @app.command(help="Enable custom nodes")
 @tracking.track_command("node")
 def enable(
-    args: List[str] = typer.Argument(
-        ..., help="enable custom nodes", autocompletion=node_completer
+    nodes: List[str] = typer.Argument(
+        ...,
+        help="[all|List of custom nodes to enable]",
+        autocompletion=node_or_all_completer,
     ),
     channel: Annotated[
         str,
@@ -518,24 +514,18 @@ def enable(
         autocompletion=mode_completer,
     ),
 ):
-    valid_modes = ["remote", "local", "cache"]
-    if mode and mode.lower() not in valid_modes:
-        typer.echo(
-            f"Invalid mode: {mode}. Allowed modes are 'remote', 'local', 'cache'.",
-            err=True,
-        )
-        raise typer.Exit(code=1)
+    validate_mode(mode)
 
-    execute_cm_cli(["enable"] + args, channel, mode)
+    execute_cm_cli(["enable"] + nodes, channel, mode)
 
 
 @app.command(help="Fix dependencies of custom nodes")
 @tracking.track_command("node")
 def fix(
-    args: List[str] = typer.Argument(
+    nodes: List[str] = typer.Argument(
         ...,
-        help="fix dependencies for specified custom nodes",
-        autocompletion=node_completer,
+        help="[all|List of custom nodes to fix]",
+        autocompletion=node_or_all_completer,
     ),
     channel: Annotated[
         str,
@@ -551,15 +541,9 @@ def fix(
         autocompletion=mode_completer,
     ),
 ):
-    valid_modes = ["remote", "local", "cache"]
-    if mode and mode.lower() not in valid_modes:
-        typer.echo(
-            f"Invalid mode: {mode}. Allowed modes are 'remote', 'local', 'cache'.",
-            err=True,
-        )
-        raise typer.Exit(code=1)
+    validate_mode(mode)
 
-    execute_cm_cli(["fix"] + args, channel, mode)
+    execute_cm_cli(["fix"] + nodes, channel, mode)
 
 
 @app.command(
@@ -588,13 +572,7 @@ def install_deps(
         autocompletion=mode_completer,
     ),
 ):
-    valid_modes = ["remote", "local", "cache"]
-    if mode and mode.lower() not in valid_modes:
-        typer.echo(
-            f"Invalid mode: {mode}. Allowed modes are 'remote', 'local', 'cache'.",
-            err=True,
-        )
-        raise typer.Exit(code=1)
+    validate_mode(mode)
 
     if deps is None and workflow is None:
         print(
@@ -652,13 +630,7 @@ def deps_in_workflow(
         autocompletion=mode_completer,
     ),
 ):
-    valid_modes = ["remote", "local", "cache"]
-    if mode and mode.lower() not in valid_modes:
-        typer.echo(
-            f"Invalid mode: {mode}. Allowed modes are 'remote', 'local', 'cache'.",
-            err=True,
-        )
-        raise typer.Exit(code=1)
+    validate_mode(mode)
 
     execute_cm_cli(
         ["deps-in-workflow", "--workflow", workflow, "--output", output],
