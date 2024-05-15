@@ -4,7 +4,9 @@ GitPython
 requests
 pyyaml
 typing-extensions >= 4.7.0
+questionary
 mixpanel
 tomlkit
 pathspec
 httpx
+packaging
