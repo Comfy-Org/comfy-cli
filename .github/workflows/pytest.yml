@@ -21,5 +21,7 @@ jobs:
           pip install -r requirements.txt  # If you have other dependencies
 
       - name: Run tests
+        env:
+          PYTHONPATH: ${{ github.workspace }}
         run: |
           pytest
