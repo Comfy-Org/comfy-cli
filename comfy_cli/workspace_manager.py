@@ -59,6 +59,22 @@ def check_comfy_repo(path):
         path_is_comfy_repo = any(
             remote.url in constants.COMFY_ORIGIN_URL_CHOICES for remote in repo.remotes
         )
+
+        # If it's within the custom node repo, lookup from the parent directory.
+        if not path_is_comfy_repo and "custom_nodes" in path:
+            parts = path.split(os.sep)
+            try:
+                index = parts.index("custom_nodes")
+                path = os.sep.join(parts[:index])
+
+                repo = git.Repo(path, search_parent_directories=True)
+                path_is_comfy_repo = any(
+                    remote.url in constants.COMFY_ORIGIN_URL_CHOICES
+                    for remote in repo.remotes
+                )
+            except ValueError:
+                pass
+
         if path_is_comfy_repo:
             return path_is_comfy_repo, repo
         else:
