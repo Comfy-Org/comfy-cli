@@ -30,18 +30,20 @@ def create_comfynode_config():
     document.add("project", project)
 
     tool = tomlkit.table()
+    tool.add(tomlkit.comment(" Used by Comfy Registry https://comfyregistry.org"))
+
     comfy = tomlkit.table()
     comfy["PublisherId"] = ""
     comfy["DisplayName"] = ""
     comfy["Icon"] = ""
 
     # Add the default model
-    models = tomlkit.array()
-    model = tomlkit.inline_table()
-    model["location"] = "/checkpoints/model.safetensor"
-    model["model_url"] = "https://example.com/model.zip"
-    models.append(model)
-    comfy["Models"] = models
+    # models = tomlkit.array()
+    # model = tomlkit.inline_table()
+    # model["location"] = "/checkpoints/model.safetensor"
+    # model["model_url"] = "https://example.com/model.zip"
+    # models.append(model)
+    # comfy["Models"] = models
 
     tool.add("comfy", comfy)
     document.add("tool", tool)
