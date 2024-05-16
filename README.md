@@ -157,7 +157,7 @@ comfy node [show|simple-show] [installed|enabled|not-installed|disabled|all|snap
 
 - Model list
 
-  `comfy model list`
+  `comfy model list ?[--relative-path <PATH>]`
 
 ### Managing ComfyUI-Manager
 
