@@ -64,6 +64,7 @@ def check_comfy_repo(path):
         else:
             return False, None
     # Not in a git repo at all
+    # pylint: disable=E1101  # no-member
     except git.exc.InvalidGitRepositoryError:
         return False, None
 
