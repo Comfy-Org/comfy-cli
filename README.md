@@ -147,7 +147,7 @@ comfy node [show|simple-show] [installed|enabled|not-installed|disabled|all|snap
 
 - Model downloading
 
-  `comfy model download ?[--relative-path <PATH>] --url <URL> `
+  `comfy model download --url <URL> ?[--relative-path <PATH>] ?[--set-civitai-api-token <TOKEN>]`
 
   * URL: CivitAI, huggingface file url, ...
 
