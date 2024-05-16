@@ -1,6 +1,7 @@
 import pathlib
 from typing import List, Optional, Tuple
 from rich import print
+import os
 
 import requests
 import typer
@@ -18,6 +19,15 @@ app = typer.Typer()
 
 workspace_manager = WorkspaceManager()
 config_manager = ConfigManager()
+
+
+model_path_map = {
+    "lora": "loras",
+    "hypernetwork": "hypernetworks",
+    "checkpoint": "checkpoints",
+    "textualinversion": "embeddings",
+    "controlnet": "controlnet",
+}
 
 
 def get_workspace() -> pathlib.Path:
@@ -84,7 +94,9 @@ def request_civitai_model_version_api(version_id: int, headers: Optional[dict] =
         if file.get("primary", False):  # Assuming we want the primary file
             model_name = file["name"]
             download_url = file["downloadUrl"]
-            return model_name, download_url
+            model_type = model_data["model"]["type"].lower()
+            basemodel = model_data["baseModel"].replace(" ", "")
+            return model_name, download_url, model_type, basemodel
 
 
 def request_civitai_model_api(
@@ -110,7 +122,9 @@ def request_civitai_model_api(
                 if file.get("primary", False):  # Assuming we want the primary file
                     model_name = file["name"]
                     download_url = file["downloadUrl"]
-                    return model_name, download_url
+                    model_type = model_data["type"].lower()
+                    basemodel = version["baseModel"].replace(" ", "")
+                    return model_name, download_url, model_type, basemodel
 
     # If the specified version_id is not found, raise an error
     raise ValueError(f"Version ID {version_id} not found for model ID {model_id}")
@@ -166,9 +180,33 @@ def download(
 
     is_huggingface = False
     if is_civitai_model_url:
-        local_filename, url = request_civitai_model_api(model_id, version_id, headers)
+        local_filename, url, model_type, basemodel = request_civitai_model_api(
+            model_id, version_id, headers
+        )
+
+        model_path = model_path_map.get(model_type)
+
+        if model_path is None:
+            print(
+                f"[bold red]Downloading of '{model_type}' model isn't supported.[/bold red]"
+            )
+            raise typer.Exit(code=1)
+
+        relative_path = os.path.join(relative_path, model_path, basemodel)
     elif is_civitai_api_url:
-        local_filename, url = request_civitai_model_version_api(version_id, headers)
+        local_filename, url, model_type, basemodel = request_civitai_model_version_api(
+            version_id, headers
+        )
+
+        model_path = model_path_map.get(model_type)
+
+        if model_path is None:
+            print(
+                f"[bold red]Downloading of '{model_type}' model isn't supported.[/bold red]"
+            )
+            raise typer.Exit(code=1)
+
+        relative_path = os.path.join(relative_path, model_path, basemodel)
     elif check_huggingface_url(url):
         is_huggingface = True
         local_filename = potentially_strip_param_url(url.split("/")[-1])
