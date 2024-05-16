@@ -66,5 +66,3 @@ class GPU_OPTION(Enum):
 # Referencing supported pt extension from ComfyUI
 # https://github.com/comfyanonymous/ComfyUI/blob/a88b0ebc2d2f933c94e42aa689c42e836eedaf3c/folder_paths.py#L5
 SUPPORTED_PT_EXTENSIONS = (".ckpt", ".pt", ".bin", ".pth", ".safetensors")
-
-COMFY_REGISTRY_URL_ROOT = "https://api-frontend-dev-qod3oz2v2q-uc.a.run.app"

@@ -16,7 +16,7 @@ class RegistryAPI:
         if os.getenv("ENVIRONMENT") == "dev":
             return "http://localhost:8080"
         else:
-            return "https://api-frontend-dev-qod3oz2v2q-uc.a.run.app"
+            return "https://api.comfy.org"
 
     def publish_node_version(self, node_config, token):
         """
