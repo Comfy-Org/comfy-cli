@@ -7,6 +7,8 @@ import typer
 from typing_extensions import Annotated
 
 from comfy_cli import tracking, ui
+from comfy_cli import constants
+from comfy_cli.config_manager import ConfigManager
 from comfy_cli.constants import DEFAULT_COMFY_MODEL_PATH
 from comfy_cli.file_utils import download_file, DownloadException
 from comfy_cli.workspace_manager import WorkspaceManager
@@ -14,6 +16,7 @@ from comfy_cli.workspace_manager import WorkspaceManager
 app = typer.Typer()
 
 workspace_manager = WorkspaceManager()
+config_manager = ConfigManager()
 
 
 def get_workspace() -> pathlib.Path:
@@ -66,10 +69,12 @@ def check_civitai_url(url: str) -> Tuple[bool, bool, int, int]:
     return False, False, None, None
 
 
-def request_civitai_model_version_api(version_id: int):
+def request_civitai_model_version_api(version_id: int, headers: Optional[dict] = None):
     # Make a request to the Civitai API to get the model information
     response = requests.get(
-        f"https://civitai.com/api/v1/model-versions/{version_id}", timeout=10
+        f"https://civitai.com/api/v1/model-versions/{version_id}",
+        headers=headers,
+        timeout=10,
     )
     response.raise_for_status()  # Raise an error for bad status codes
 
@@ -81,9 +86,13 @@ def request_civitai_model_version_api(version_id: int):
             return model_name, download_url
 
 
-def request_civitai_model_api(model_id: int, version_id: int = None):
+def request_civitai_model_api(
+    model_id: int, version_id: int = None, headers: Optional[dict] = None
+):
     # Make a request to the Civitai API to get the model information
-    response = requests.get(f"https://civitai.com/api/v1/models/{model_id}", timeout=10)
+    response = requests.get(
+        f"https://civitai.com/api/v1/models/{model_id}", headers=headers, timeout=10
+    )
     response.raise_for_status()  # Raise an error for bad status codes
 
     model_data = response.json()
@@ -123,18 +132,42 @@ def download(
             show_default=True,
         ),
     ] = DEFAULT_COMFY_MODEL_PATH,
+    set_civitai_api_token: Annotated[
+        Optional[str],
+        typer.Option(
+            "--set-civitai-api-token",
+            help="Set the CivitAI API token to use for model listing.",
+            show_default=False,
+        ),
+    ] = None,
 ):
 
     local_filename = None
+    headers = None
+    civitai_api_token = None
+
+    if set_civitai_api_token is not None:
+        config_manager.set(constants.CIVITAI_API_TOKEN_KEY, set_civitai_api_token)
+        civitai_api_token = set_civitai_api_token
+
+    else:
+        civitai_api_token = config_manager.get(constants.CIVITAI_API_TOKEN_KEY)
+
+    if civitai_api_token is not None:
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {civitai_api_token}",
+        }
 
     is_civitai_model_url, is_civitai_api_url, model_id, version_id = check_civitai_url(
         url
     )
+
     is_huggingface = False
     if is_civitai_model_url:
-        local_filename, url = request_civitai_model_api(model_id, version_id)
+        local_filename, url = request_civitai_model_api(model_id, version_id, headers)
     elif is_civitai_api_url:
-        local_filename, url = request_civitai_model_version_api(version_id)
+        local_filename, url = request_civitai_model_version_api(version_id, headers)
     elif check_huggingface_url(url):
         is_huggingface = True
         local_filename = potentially_strip_param_url(url.split("/")[-1])
@@ -157,7 +190,7 @@ def download(
 
     # File does not exist, proceed with download
     print(f"Start downloading URL: {url} into {local_filepath}")
-    download_file(url, local_filepath)
+    download_file(url, local_filepath, headers)
 
 
 @app.command()
@@ -236,6 +269,7 @@ def list(
         show_default=True,
     ),
 ):
+
     """Display a list of all models currently downloaded in a table format."""
     model_dir = get_workspace() / relative_path
     models = list_models(model_dir)
