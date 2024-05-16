@@ -130,7 +130,7 @@ def request_civitai_model_api(
     raise ValueError(f"Version ID {version_id} not found for model ID {model_id}")
 
 
-@app.command(help='Download model file from url')
+@app.command(help="Download model file from url")
 @tracking.track_command("model")
 def download(
     _ctx: typer.Context,
@@ -191,10 +191,12 @@ def download(
         if relative_path is None:
             if model_path is None:
                 model_path = ui.prompt_input(
-                    "Enter model type path (e.g. loras, checkpoints, ...)", default=''
+                    "Enter model type path (e.g. loras, checkpoints, ...)", default=""
                 )
 
-            relative_path = os.path.join(DEFAULT_COMFY_MODEL_PATH, model_path, basemodel)
+            relative_path = os.path.join(
+                DEFAULT_COMFY_MODEL_PATH, model_path, basemodel
+            )
     elif is_civitai_api_url:
         local_filename, url, model_type, basemodel = request_civitai_model_version_api(
             version_id, headers
@@ -205,22 +207,26 @@ def download(
         if relative_path is None:
             if model_path is None:
                 model_path = ui.prompt_input(
-                    "Enter model type path (e.g. loras, checkpoints, ...)", default=''
+                    "Enter model type path (e.g. loras, checkpoints, ...)", default=""
                 )
 
-            relative_path = os.path.join(DEFAULT_COMFY_MODEL_PATH, model_path, basemodel)
+            relative_path = os.path.join(
+                DEFAULT_COMFY_MODEL_PATH, model_path, basemodel
+            )
     elif check_huggingface_url(url):
         is_huggingface = True
         local_filename = potentially_strip_param_url(url.split("/")[-1])
 
         if relative_path is None:
             model_path = ui.prompt_input(
-                "Enter model type path (e.g. loras, checkpoints, ...)", default=''
+                "Enter model type path (e.g. loras, checkpoints, ...)", default=""
             )
             basemodel = ui.prompt_input(
-                "Enter base model (e.g. SD1.5, SDXL, ...)", default=''
+                "Enter base model (e.g. SD1.5, SDXL, ...)", default=""
             )
-            relative_path = os.path.join(DEFAULT_COMFY_MODEL_PATH, model_path, basemodel)
+            relative_path = os.path.join(
+                DEFAULT_COMFY_MODEL_PATH, model_path, basemodel
+            )
     else:
         print("Model source is unknown")
 
