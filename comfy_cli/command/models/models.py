@@ -80,7 +80,7 @@ def request_civitai_model_version_api(version_id: int, headers: Optional[dict] =
 
     model_data = response.json()
     for file in model_data["files"]:
-        if file["primary"]:  # Assuming we want the primary file
+        if file.get("primary", False):  # Assuming we want the primary file
             model_name = file["name"]
             download_url = file["downloadUrl"]
             return model_name, download_url
@@ -106,7 +106,7 @@ def request_civitai_model_api(
         if version["id"] == version_id:
             # Get the model name and download URL from the files array
             for file in version["files"]:
-                if file["primary"]:  # Assuming we want the primary file
+                if file.get("primary", False):  # Assuming we want the primary file
                     model_name = file["name"]
                     download_url = file["downloadUrl"]
                     return model_name, download_url
@@ -269,7 +269,6 @@ def list(
         show_default=True,
     ),
 ):
-
     """Display a list of all models currently downloaded in a table format."""
     model_dir = get_workspace() / relative_path
     models = list_models(model_dir)
