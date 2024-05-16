@@ -1,5 +1,6 @@
 import os
 import pathlib
+from typing import Optional
 import zipfile
 
 import requests
@@ -12,8 +13,30 @@ class DownloadException(Exception):
     pass
 
 
-def guess_status_code_reason(status_code: int) -> str:
+def guess_status_code_reason(status_code: int, message: str) -> str:
     if status_code == 401:
+        import json
+
+        def parse_json(input_data):
+            try:
+                # Check if the input is a byte string
+                if isinstance(input_data, bytes):
+                    # Decode the byte string to a regular string
+                    input_data = input_data.decode("utf-8")
+
+                # Parse the string as JSON
+                json_object = json.loads(input_data)
+
+                return json_object
+
+            except json.JSONDecodeError as e:
+                # Handle JSON decoding error
+                print(f"JSON decoding error: {e}")
+
+        msg_json = parse_json(message)
+        if msg_json is not None:
+            if "message" in msg_json:
+                return f"Unauthorized download ({status_code}).\n{msg_json['message']}\nor you can set civitai api token using `comfy model download --set-civitai-api-token <token>`"
         return f"Unauthorized download ({status_code}), you might need to manually log into browser to download one"
     elif status_code == 403:
         return f"Forbidden url ({status_code}), you might need to manually log into browser to download one"
@@ -22,7 +45,10 @@ def guess_status_code_reason(status_code: int) -> str:
     return f"Unknown error occurred (status code: {status_code})"
 
 
-def download_file(url: str, local_filepath: pathlib.Path):
+def download_file(
+    url: str, local_filepath: pathlib.Path, headers: Optional[dict] = None
+):
+
     """Helper function to download a file."""
 
     import httpx
@@ -31,7 +57,7 @@ def download_file(url: str, local_filepath: pathlib.Path):
         parents=True, exist_ok=True
     )  # Ensure the directory exists
 
-    with httpx.stream("GET", url, follow_redirects=True) as response:
+    with httpx.stream("GET", url, follow_redirects=True, headers=headers) as response:
         if response.status_code == 200:
             total = int(response.headers["Content-Length"])
             try:
@@ -49,7 +75,9 @@ def download_file(url: str, local_filepath: pathlib.Path):
                 if delete_eh:
                     local_filepath.unlink()
         else:
-            status_reason = guess_status_code_reason(response.status_code)
+            status_reason = guess_status_code_reason(
+                response.status_code, response.read()
+            )
             raise DownloadException(f"Failed to download file.\n{status_reason}")
 
 

@@ -38,6 +38,8 @@ CONFIG_KEY_USER_ID = "user_id"
 CONFIG_KEY_INSTALL_EVENT_TRIGGERED = "install_event_triggered"
 CONFIG_KEY_BACKGROUND = "background"
 
+CIVITAI_API_TOKEN_KEY = "civitai_api_token"
+
 DEFAULT_TRACKING_VALUE = True
 
 COMFY_LOCK_YAML_FILE = "comfy.lock.yaml"
