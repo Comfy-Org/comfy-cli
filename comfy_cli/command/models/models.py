@@ -1,5 +1,7 @@
 import pathlib
 from typing import List, Optional, Tuple
+from rich import print
+import os
 
 import requests
 import typer
@@ -17,6 +19,15 @@ app = typer.Typer()
 
 workspace_manager = WorkspaceManager()
 config_manager = ConfigManager()
+
+
+model_path_map = {
+    "lora": "loras",
+    "hypernetwork": "hypernetworks",
+    "checkpoint": "checkpoints",
+    "textualinversion": "embeddings",
+    "controlnet": "controlnet",
+}
 
 
 def get_workspace() -> pathlib.Path:
@@ -80,10 +91,12 @@ def request_civitai_model_version_api(version_id: int, headers: Optional[dict] =
 
     model_data = response.json()
     for file in model_data["files"]:
-        if file["primary"]:  # Assuming we want the primary file
+        if file.get("primary", False):  # Assuming we want the primary file
             model_name = file["name"]
             download_url = file["downloadUrl"]
-            return model_name, download_url
+            model_type = model_data["model"]["type"].lower()
+            basemodel = model_data["baseModel"].replace(" ", "")
+            return model_name, download_url, model_type, basemodel
 
 
 def request_civitai_model_api(
@@ -106,16 +119,18 @@ def request_civitai_model_api(
         if version["id"] == version_id:
             # Get the model name and download URL from the files array
             for file in version["files"]:
-                if file["primary"]:  # Assuming we want the primary file
+                if file.get("primary", False):  # Assuming we want the primary file
                     model_name = file["name"]
                     download_url = file["downloadUrl"]
-                    return model_name, download_url
+                    model_type = model_data["type"].lower()
+                    basemodel = version["baseModel"].replace(" ", "")
+                    return model_name, download_url, model_type, basemodel
 
     # If the specified version_id is not found, raise an error
     raise ValueError(f"Version ID {version_id} not found for model ID {model_id}")
 
 
-@app.command()
+@app.command(help="Download model file from url")
 @tracking.track_command("model")
 def download(
     _ctx: typer.Context,
@@ -131,7 +146,7 @@ def download(
             help="The relative path from the current workspace to install the model.",
             show_default=True,
         ),
-    ] = DEFAULT_COMFY_MODEL_PATH,
+    ] = None,
     set_civitai_api_token: Annotated[
         Optional[str],
         typer.Option(
@@ -141,6 +156,8 @@ def download(
         ),
     ] = None,
 ):
+    if relative_path is not None:
+        relative_path = os.path.expanduser(relative_path)
 
     local_filename = None
     headers = None
@@ -165,17 +182,61 @@ def download(
 
     is_huggingface = False
     if is_civitai_model_url:
-        local_filename, url = request_civitai_model_api(model_id, version_id, headers)
+        local_filename, url, model_type, basemodel = request_civitai_model_api(
+            model_id, version_id, headers
+        )
+
+        model_path = model_path_map.get(model_type)
+
+        if relative_path is None:
+            if model_path is None:
+                model_path = ui.prompt_input(
+                    "Enter model type path (e.g. loras, checkpoints, ...)", default=""
+                )
+
+            relative_path = os.path.join(
+                DEFAULT_COMFY_MODEL_PATH, model_path, basemodel
+            )
     elif is_civitai_api_url:
-        local_filename, url = request_civitai_model_version_api(version_id, headers)
+        local_filename, url, model_type, basemodel = request_civitai_model_version_api(
+            version_id, headers
+        )
+
+        model_path = model_path_map.get(model_type)
+
+        if relative_path is None:
+            if model_path is None:
+                model_path = ui.prompt_input(
+                    "Enter model type path (e.g. loras, checkpoints, ...)", default=""
+                )
+
+            relative_path = os.path.join(
+                DEFAULT_COMFY_MODEL_PATH, model_path, basemodel
+            )
     elif check_huggingface_url(url):
         is_huggingface = True
         local_filename = potentially_strip_param_url(url.split("/")[-1])
+
+        if relative_path is None:
+            model_path = ui.prompt_input(
+                "Enter model type path (e.g. loras, checkpoints, ...)", default=""
+            )
+            basemodel = ui.prompt_input(
+                "Enter base model (e.g. SD1.5, SDXL, ...)", default=""
+            )
+            relative_path = os.path.join(
+                DEFAULT_COMFY_MODEL_PATH, model_path, basemodel
+            )
     else:
         print("Model source is unknown")
+
     local_filename = ui.prompt_input(
         "Enter filename to save model as", default=local_filename
     )
+
+    if relative_path is None:
+        relative_path = DEFAULT_COMFY_MODEL_PATH
+
     if local_filename is None:
         raise typer.Exit(code=1)
     if local_filename == "":
@@ -236,8 +297,6 @@ def remove(
             if not to_delete:
                 return  # Exit if no valid models were found
 
-        return
-
     # Scenario #2: User did not provide model names, prompt for selection
     else:
         selections = ui.prompt_multi_select(
@@ -269,7 +328,6 @@ def list(
         show_default=True,
     ),
 ):
-
     """Display a list of all models currently downloaded in a table format."""
     model_dir = get_workspace() / relative_path
     models = list_models(model_dir)

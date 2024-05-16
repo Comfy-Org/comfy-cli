@@ -11,7 +11,7 @@ class OS(Enum):
 COMFY_GITHUB_URL = "https://github.com/comfyanonymous/ComfyUI"
 COMFY_MANAGER_GITHUB_URL = "https://github.com/ltdrdata/ComfyUI-Manager"
 
-DEFAULT_COMFY_MODEL_PATH = "models/checkpoints"
+DEFAULT_COMFY_MODEL_PATH = "models"
 DEFAULT_COMFY_WORKSPACE = {
     OS.WINDOWS: os.path.join(os.path.expanduser("~"), "Documents", "comfy", "ComfyUI"),
     OS.MACOS: os.path.join(os.path.expanduser("~"), "Documents", "comfy", "ComfyUI"),
