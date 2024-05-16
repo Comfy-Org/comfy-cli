@@ -29,13 +29,17 @@ def create_comfynode_config():
     project.add("urls", urls)
     document.add("project", project)
 
+    # Create the tool table
     tool = tomlkit.table()
-    tool.add(tomlkit.comment(" Used by Comfy Registry https://comfyregistry.org"))
+    document.add(tomlkit.comment(" Used by Comfy Registry https://comfyregistry.org"))
 
     comfy = tomlkit.table()
     comfy["PublisherId"] = ""
-    comfy["DisplayName"] = ""
+    comfy["DisplayName"] = "ComfyUI-AIT"
     comfy["Icon"] = ""
+
+    tool.add("comfy", comfy)
+    document.add("tool", tool)
 
     # Add the default model
     # models = tomlkit.array()
@@ -44,9 +48,6 @@ def create_comfynode_config():
     # model["model_url"] = "https://example.com/model.zip"
     # models.append(model)
     # comfy["Models"] = models
-
-    tool.add("comfy", comfy)
-    document.add("tool", tool)
 
     # Write the TOML document to a file
     try:
