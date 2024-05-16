@@ -4,6 +4,9 @@ from rich import print
 import tomlkit.exceptions
 from rich.console import Console
 from rich.panel import Panel
+from importlib.metadata import metadata
+from packaging import version
+
 
 console = Console()
 
@@ -14,7 +17,11 @@ def check_for_newer_pypi_version(package_name, current_version):
         response = requests.get(url)
         response.raise_for_status()  # Raises stored HTTPError, if one occurred
         latest_version = response.json()["info"]["version"]
-        return latest_version != current_version, latest_version
+
+        if version.parse(latest_version) > version.parse(current_version):
+            return True, latest_version
+
+        return False, current_version
     except requests.RequestException as e:
         # print(f"Error checking latest version: {e}")
         return False, current_version
@@ -30,25 +37,9 @@ def check_for_updates():
         notify_update(current_version, newer_version)
 
 
-def get_version_from_pyproject(file_path="pyproject.toml"):
-    try:
-        with open(file_path, "r", encoding="utf-8") as file:
-            toml_content = file.read()
-            parsed_toml = tomlkit.parse(toml_content)
-            # Accessing the project version under [project]
-            if "project" in parsed_toml:
-                version = parsed_toml["project"]["version"]
-            else:
-                raise KeyError(
-                    "Version key not found under [project] in pyproject.toml"
-                )
-            return version
-    except FileNotFoundError:
-        print(f"Error: The file '{file_path}' does not exist.")
-    except tomlkit.exceptions.TOMLKitError as e:
-        print(f"Error parsing TOML: {e}")
-    except KeyError as e:
-        print(f"Error accessing version in TOML: {e}")
+def get_version_from_pyproject():
+    package_metadata = metadata("comfy-cli")
+    return package_metadata["Version"]
 
 
 def notify_update(current_version: str, newer_version: str):

@@ -13,10 +13,10 @@ jobs:
     steps:
       - uses: actions/checkout@v3
 
-      - name: Set up Python 3.10
+      - name: Set up Python 3.12
         uses: actions/setup-python@v4
         with:
-          python-version: '3.10'
+          python-version: '3.12'
 
       - name: Install build and tomlkit dependencies
         run: python -m pip install --upgrade pip build tomlkit
@@ -32,65 +32,24 @@ jobs:
       - name: Build distribution
         run: python -m build --sdist --wheel --outdir dist/
 
-      - name: Publish distribution to PyPI
+      - name: Publish distribution to TestPyPI for Validation
         uses: pypa/gh-action-pypi-publish@v1.8.14
-
-  publish-homebrew-tap:
-    runs-on: ubuntu-latest
-    needs: build-n-publish-pypi
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v2
         with:
-          repository: 'Comfy-Org/homebrew-comfy-cli'
-          token: ${{ secrets.COMMITTER_TOKEN }}
-          path: 'homebrew-repo'
+          repository_url: https://test.pypi.org/legacy/
+          
+      - name: Clear pip cache
+        run: pip cache purge
 
-      - name: Extract version from tag
-        id: get_version
-        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_ENV
-
-      - name: Set up Python environment
+      - name: Install Comfy CLI from Test Pypi and Test
         run: |
-          python3 -m venv venv
-          source venv/bin/activate
-          pip install comfy-cli==$VERSION homebrew-pypi-poet
+          for i in {1..3}; do
+            pip install -i https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple comfy-cli==${{env.VERSION}} && break || sleep 5
+          done
+          comfy --help
 
-      - name: Generate Homebrew Formula
-        run: |
-          source venv/bin/activate
-          poet comfy-cli==$VERSION > comfy-cli.rb
-
-      - name: Commit and Push Formula
-        run: |
-          mv comfy-cli.rb homebrew-repo/Formula/
-          cd homebrew-repo
-          git config user.name github-actions
-          git config user.email github-actions@github.com
-          git add Formula/comfy-cli.rb
-          git commit -m "Update comfy-cli formula to version $VERSION"
-          git push
-        env:
-          GIT_COMMITTER_NAME: github-actions
-          GIT_COMMITTER_EMAIL: github-actions@github.com
-          GIT_AUTHOR_NAME: github-actions
-          GIT_AUTHOR_EMAIL: github-actions@github.com
-          GITHUB_TOKEN: ${{ secrets.COMMITTER_TOKEN }}
-
-  test-homebrew-installation:
-    name: Test Comfy CLI Installation via homebrew
-    needs: publish-homebrew-tap  # This job runs after build-n-publish completes successfully
-    runs-on: macos-latest
-    steps:
-      - name: Tap comfy-cli homebrew tap repository
-        run: brew tap Comfy-Org/comfy-cli
-
-      - name: Install comfy-cli via homebrew
-        run: brew install comfy-org/comfy-cli/comfy-cli
-
-      - name: Test Comfy CLI Help
-        run: comfy --help
-
+      - name: Publish distribution to Official PyPI
+        uses: pypa/gh-action-pypi-publish@v1.8.14
+          
   test-pip-installation:
     name: Test Comfy CLI Installation via pip
     needs: build-n-publish-pypi  # This job runs after build-n-publish completes successfully
@@ -101,8 +60,87 @@ jobs:
         with:
           python-version: '3.10'
 
-      - name: Install Comfy CLI via pip
-        run: pip install comfy-cli
+      - name: Extract version from tag
+        id: get_version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_ENV
+
+      - name: Install Comfy CLI via pip and Test
+        run: pip install comfy-cli==${{env.VERSION}}
 
       - name: Test Comfy CLI Help
         run: comfy --help
+
+  publish-homebrew-tap:
+    runs-on: macos-latest  # Use macOS runner where Homebrew is pre-installed
+    needs: build-n-publish-pypi
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+        with:
+          repository: 'Comfy-Org/homebrew-comfy-cli'
+          token: ${{ secrets.COMMITTER_TOKEN }}
+          path: 'homebrew-repo'
+  
+      - name: Extract version from tag
+        id: get_version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_ENV
+  
+      - name: Set up Python environment
+        run: |
+          python3 -m venv venv
+          source venv/bin/activate
+          pip install homebrew-pypi-poet
+
+          for i in {1..3}; do
+            pip install comfy-cli==${{env.VERSION}} && break || sleep 5
+          done
+  
+      - name: Generate Homebrew Formula
+        run: |
+          source venv/bin/activate
+          poet -f comfy-cli==$VERSION > comfy-cli.rb
+  
+      - name: Move Formulas to Tap Directory
+        run: |
+          mv comfy-cli.rb homebrew-repo/Formula/
+  
+      - name: Install Comfy CLI using Homebrew Formula
+        run: |
+          brew install --build-from-source --verbose ./homebrew-repo/Formula/comfy-cli.rb
+          comfy --help
+          brew uninstall comfy-cli
+  
+      - name: Commit and Push Formula
+        run: |
+          cd homebrew-repo
+          git config user.name github-actions
+          git config user.email github-actions@github.com
+          git add Formula/comfy-cli.rb
+          git commit -m "Update comfy-cli to latest and version ${VERSION}"
+          git push
+        env:
+          GIT_COMMITTER_NAME: github-actions
+          GIT_COMMITTER_EMAIL: github-actions@github.com
+          GIT_AUTHOR_NAME: github-actions
+          GIT_AUTHOR_EMAIL: github-actions@github.com
+          GITHUB_TOKEN: ${{ secrets.COMMITTER_TOKEN }}
+
+
+  test-homebrew-installation:
+    name: Test Comfy CLI Installation via Homebrew
+    needs: publish-homebrew-tap  # This job runs after publish-homebrew-tap completes successfully
+    runs-on: macos-latest
+    steps:
+      - name: Tap Comfy CLI Homebrew tap repository
+        run: brew tap Comfy-Org/comfy-cli
+  
+      - name: Install comfy-cli latest via Homebrew
+        run: brew install comfy-org/comfy-cli/comfy-cli
+  
+      - name: Test comfy-cli latest Help
+        run: comfy --help
+  
+      - name: Uninstall comfy-cli latest
+        run: brew uninstall comfy-cli
+
+

@@ -7,6 +7,7 @@ disable=
     W0622, # redefined-builtin
     W1113, # too-many-arguments
     W0613, # unused-argument
+    W0718, # broad-exception-caught
 
 [FORMAT]
 max-line-length=120

@@ -6,7 +6,10 @@ from rich.progress import Progress
 from rich.table import Table
 from typing import List, Tuple
 
+from comfy_cli.workspace_manager import WorkspaceManager
+
 console = Console()
+workspace_manager = WorkspaceManager()
 
 
 def show_progress(iterable, total, description="Downloading..."):
@@ -30,7 +33,7 @@ def show_progress(iterable, total, description="Downloading..."):
             progress.update(task, advance=len(chunk))
 
 
-def prompt_select(question: str, choices: list) -> str:
+def prompt_select(question: str, choices: list, force_prompting: bool = False) -> str:
     """
     Asks a single select question using questionary and returns the selected response.
 
@@ -41,10 +44,14 @@ def prompt_select(question: str, choices: list) -> str:
     Returns:
         str: The selected choice from the user.
     """
+    if workspace_manager.skip_prompting and not force_prompting:
+        return None
     return questionary.select(question, choices=choices).ask()
 
 
-def prompt_select_enum(question: str, choices: list) -> str:
+def prompt_select_enum(
+    question: str, choices: list, force_prompting: bool = False
+) -> str:
     """
     Asks a single select question using questionary and returns the selected response.
 
@@ -55,6 +62,8 @@ def prompt_select_enum(question: str, choices: list) -> str:
     Returns:
         str: The selected choice from the user.
     """
+    if workspace_manager.skip_prompting and not force_prompting:
+        return None
     choice_map = {choice.value: choice for choice in choices}
     display_choices = list(choice_map.keys())
 
@@ -63,7 +72,9 @@ def prompt_select_enum(question: str, choices: list) -> str:
     return choice_map[selected]
 
 
-def prompt_input(question: str, default: str = "") -> str:
+def prompt_input(
+    question: str, default: str = None, force_prompting: bool = False
+) -> str:
     """
     Asks the user for an input using questionary.
 
@@ -77,6 +88,8 @@ def prompt_input(question: str, default: str = "") -> str:
     Raises:
         KeyboardInterrupt: If the user interrupts the input.
     """
+    if workspace_manager.skip_prompting and not force_prompting:
+        return default
     return questionary.text(question, default=default).ask()
 
 
@@ -129,3 +142,13 @@ def display_table(data: List[Tuple], column_names: List[str], title: str = "") -
         table.add_row(*[str(item) for item in row])
 
     console.print(table)
+
+
+def display_error_message(message: str) -> None:
+    """
+    Displays an error message to the user in red text.
+
+    Args:
+        message (str): The error message to display.
+    """
+    console.print(f"[red]{message}[/]")

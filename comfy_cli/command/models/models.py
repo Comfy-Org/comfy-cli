@@ -1,30 +1,118 @@
 import pathlib
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
+import requests
 import typer
 
 from typing_extensions import Annotated
 
 from comfy_cli import tracking, ui
+from comfy_cli import constants
+from comfy_cli.config_manager import ConfigManager
 from comfy_cli.constants import DEFAULT_COMFY_MODEL_PATH
+from comfy_cli.file_utils import download_file, DownloadException
 from comfy_cli.workspace_manager import WorkspaceManager
 
 app = typer.Typer()
 
 workspace_manager = WorkspaceManager()
+config_manager = ConfigManager()
 
 
 def get_workspace() -> pathlib.Path:
     return pathlib.Path(workspace_manager.workspace_path)
 
 
-class DownloadException(Exception):
-    pass
-
-
 def potentially_strip_param_url(path_name: str) -> str:
     path_name = path_name.split("?")[0]
     return path_name
+
+
+# Convert relative path to absolute path based on the current working
+# directory
+def check_huggingface_url(url: str) -> bool:
+    return "huggingface.co" in url
+
+
+def check_civitai_url(url: str) -> Tuple[bool, bool, int, int]:
+    """
+    Returns:
+        is_civitai_model_url: True if the url is a civitai model url
+        is_civitai_api_url: True if the url is a civitai api url
+        model_id: The model id or None if it's api url
+        version_id: The version id or None if it doesn't have version id info
+    """
+    prefix = "civitai.com"
+    try:
+        if prefix in url:
+            # URL is civitai api download url: https://civitai.com/api/download/models/12345
+            if "civitai.com/api/download" in url:
+                # This is a direct download link
+                version_id = url.strip("/").split("/")[-1]
+                return False, True, None, int(version_id)
+
+            # URL is civitai web url (e.g.
+            #   - https://civitai.com/models/43331
+            #   - https://civitai.com/models/43331/majicmix-realistic
+            subpath = url[url.find(prefix) + len(prefix) :].strip("/")
+            url_parts = subpath.split("?")
+            if len(url_parts) > 1:
+                model_id = url_parts[0].split("/")[1]
+                version_id = url_parts[1].split("=")[1]
+                return True, False, int(model_id), int(version_id)
+            else:
+                model_id = subpath.split("/")[1]
+                return True, False, int(model_id), None
+    except (ValueError, IndexError):
+        print("Error parsing Civitai model URL")
+
+    return False, False, None, None
+
+
+def request_civitai_model_version_api(version_id: int, headers: Optional[dict] = None):
+    # Make a request to the Civitai API to get the model information
+    response = requests.get(
+        f"https://civitai.com/api/v1/model-versions/{version_id}",
+        headers=headers,
+        timeout=10,
+    )
+    response.raise_for_status()  # Raise an error for bad status codes
+
+    model_data = response.json()
+    for file in model_data["files"]:
+        if file["primary"]:  # Assuming we want the primary file
+            model_name = file["name"]
+            download_url = file["downloadUrl"]
+            return model_name, download_url
+
+
+def request_civitai_model_api(
+    model_id: int, version_id: int = None, headers: Optional[dict] = None
+):
+    # Make a request to the Civitai API to get the model information
+    response = requests.get(
+        f"https://civitai.com/api/v1/models/{model_id}", headers=headers, timeout=10
+    )
+    response.raise_for_status()  # Raise an error for bad status codes
+
+    model_data = response.json()
+
+    # If version_id is None, use the first version
+    if version_id is None:
+        version_id = model_data["modelVersions"][0]["id"]
+
+    # Find the version with the specified version_id
+    for version in model_data["modelVersions"]:
+        if version["id"] == version_id:
+            # Get the model name and download URL from the files array
+            for file in version["files"]:
+                if file["primary"]:  # Assuming we want the primary file
+                    model_name = file["name"]
+                    download_url = file["downloadUrl"]
+                    return model_name, download_url
+
+    # If the specified version_id is not found, raise an error
+    raise ValueError(f"Version ID {version_id} not found for model ID {model_id}")
 
 
 @app.command()
@@ -43,10 +131,47 @@ def download(
             show_default=True,
         ),
     ] = DEFAULT_COMFY_MODEL_PATH,
+    set_civitai_api_token: Annotated[
+        Optional[str],
+        typer.Option(
+            "--set-civitai-api-token",
+            help="Set the CivitAI API token to use for model listing.",
+            show_default=False,
+        ),
+    ] = None,
 ):
-    """Download a model to a specified relative path if it is not already downloaded."""
-    # Convert relative path to absolute path based on the current working directory
-    local_filename = potentially_strip_param_url(url.split("/")[-1])
+
+    local_filename = None
+    headers = None
+    civitai_api_token = None
+
+    if set_civitai_api_token is not None:
+        config_manager.set(constants.CIVITAI_API_TOKEN_KEY, set_civitai_api_token)
+        civitai_api_token = set_civitai_api_token
+
+    else:
+        civitai_api_token = config_manager.get(constants.CIVITAI_API_TOKEN_KEY)
+
+    if civitai_api_token is not None:
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {civitai_api_token}",
+        }
+
+    is_civitai_model_url, is_civitai_api_url, model_id, version_id = check_civitai_url(
+        url
+    )
+
+    is_huggingface = False
+    if is_civitai_model_url:
+        local_filename, url = request_civitai_model_api(model_id, version_id, headers)
+    elif is_civitai_api_url:
+        local_filename, url = request_civitai_model_version_api(version_id, headers)
+    elif check_huggingface_url(url):
+        is_huggingface = True
+        local_filename = potentially_strip_param_url(url.split("/")[-1])
+    else:
+        print("Model source is unknown")
     local_filename = ui.prompt_input(
         "Enter filename to save model as", default=local_filename
     )
@@ -64,7 +189,7 @@ def download(
 
     # File does not exist, proceed with download
     print(f"Start downloading URL: {url} into {local_filepath}")
-    download_file(url, local_filepath)
+    download_file(url, local_filepath, headers)
 
 
 @app.command()
@@ -153,47 +278,6 @@ def list(
     data = [(model.name, f"{model.stat().st_size // 1024} KB") for model in models]
     column_names = ["Model Name", "Size"]
     ui.display_table(data, column_names)
-
-
-def guess_status_code_reason(status_code: int) -> str:
-    if status_code == 401:
-        return f"Unauthorized download ({status_code}), you might need to manually log into browser to download one"
-    elif status_code == 403:
-        return f"Forbidden url ({status_code}), you might need to manually log into browser to download one"
-    elif status_code == 404:
-        return "Sorry, your model is in another castle (404)"
-    return f"Unknown error occurred (status code: {status_code})"
-
-
-def download_file(url: str, local_filepath: pathlib.Path):
-    """Helper function to download a file."""
-
-    import httpx
-
-    local_filepath.parent.mkdir(
-        parents=True, exist_ok=True
-    )  # Ensure the directory exists
-
-    with httpx.stream("GET", url, follow_redirects=True) as response:
-        if response.status_code == 200:
-            total = int(response.headers["Content-Length"])
-            try:
-                with open(local_filepath, "wb") as f:
-                    for data in ui.show_progress(
-                        response.iter_bytes(),
-                        total,
-                        description=f"Downloading {total//1024//1024} MB",
-                    ):
-                        f.write(data)
-            except KeyboardInterrupt:
-                delete_eh = ui.prompt_confirm_action(
-                    "Download interrupted, cleanup files?"
-                )
-                if delete_eh:
-                    local_filepath.unlink()
-        else:
-            status_reason = guess_status_code_reason(response.status_code)
-            raise DownloadException(f"Failed to download file.\n{status_reason}")
 
 
 def list_models(path: pathlib.Path) -> list:

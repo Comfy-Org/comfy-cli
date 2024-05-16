@@ -5,11 +5,11 @@ import time
 import uuid
 import webbrowser
 from typing import Optional
-from comfy_cli.constants import GPU_OPTION
 
 import questionary
 import typer
 from rich import print
+from rich.console import Console
 from typing_extensions import Annotated, List
 
 from comfy_cli import constants, env_checker, logging, tracking, ui, utils
@@ -17,18 +17,21 @@ from comfy_cli.command import custom_nodes
 from comfy_cli.command import install as install_inner
 from comfy_cli.command.snapshot import command as snapshot_command
 from comfy_cli.command.models import models as models_command
-from comfy_cli.update import check_for_updates
 from comfy_cli.config_manager import ConfigManager
+from comfy_cli.constants import GPU_OPTION
 from comfy_cli.env_checker import EnvChecker, check_comfy_server_running
+from comfy_cli.update import check_for_updates
 from comfy_cli.workspace_manager import (
     WorkspaceManager,
-    check_comfy_repo,
     WorkspaceType,
+    check_comfy_repo,
 )
 
 logging.setup_logging()
 app = typer.Typer()
 workspace_manager = WorkspaceManager()
+
+console = Console()
 
 
 def main():
@@ -63,33 +66,53 @@ def help(ctx: typer.Context):
 @app.callback(invoke_without_command=True)
 def entry(
     ctx: typer.Context,
-    workspace: Optional[str] = typer.Option(
-        default=None,
-        show_default=False,
-        help="Path to ComfyUI workspace",
-        callback=exclusivity_callback,
-    ),
-    recent: Optional[bool] = typer.Option(
-        default=None,
-        show_default=False,
-        is_flag=True,
-        help="Execute from recent path",
-        callback=exclusivity_callback,
-    ),
-    here: Optional[bool] = typer.Option(
-        default=None,
-        show_default=False,
-        is_flag=True,
-        help="Execute from current path",
-        callback=exclusivity_callback,
-    ),
-    yes: bool = typer.Option(
-        False, "--yes", "-y", help="Enable without confirmation", is_flag=True
-    ),
+    workspace: Annotated[
+        Optional[str],
+        typer.Option(
+            show_default=False,
+            help="Path to ComfyUI workspace",
+            callback=exclusivity_callback,
+        ),
+    ] = None,
+    recent: Annotated[
+        Optional[bool],
+        typer.Option(
+            show_default=False,
+            is_flag=True,
+            help="Execute from recent path",
+            callback=exclusivity_callback,
+        ),
+    ] = None,
+    here: Annotated[
+        Optional[bool],
+        typer.Option(
+            show_default=False,
+            is_flag=True,
+            help="Execute from current path",
+            callback=exclusivity_callback,
+        ),
+    ] = None,
+    skip_prompt: Annotated[
+        Optional[bool],
+        typer.Option(
+            show_default=False,
+            is_flag=True,
+            help="Do not prompt user for input, use default options",
+        ),
+    ] = None,
+    enable_telemetry: Annotated[
+        Optional[bool],
+        typer.Option(
+            show_default=False,
+            hidden=True,
+            is_flag=True,
+            help="Enable tracking",
+        ),
+    ] = True,
 ):
-    workspace_manager.setup_workspace_manager(workspace, here, recent)
+    workspace_manager.setup_workspace_manager(workspace, here, recent, skip_prompt)
 
-    tracking.prompt_tracking_consent(yes)
+    tracking.prompt_tracking_consent(skip_prompt, default_value=enable_telemetry)
 
     if ctx.invoked_subcommand is None:
         print(
@@ -156,6 +179,15 @@ def install(
             callback=gpu_exclusivity_callback,
         ),
     ] = None,
+    intel_arc: Annotated[
+        bool,
+        typer.Option(
+            hidden=True,
+            show_default=False,
+            help="(Beta support) install for Intel Arc gpu, based on https://github.com/comfyanonymous/ComfyUI/pull/3439",
+            callback=gpu_exclusivity_callback,
+        ),
+    ] = None,
     cpu: Annotated[
         bool,
         typer.Option(
@@ -178,6 +210,9 @@ def install(
         snapshot = os.path.abspath(snapshot)
 
     comfy_path = workspace_manager.get_specified_workspace()
+
+    if comfy_path is None:
+        comfy_path = workspace_manager.workspace_path
 
     if comfy_path is None:
         comfy_path = utils.get_not_user_set_default_workspace()
@@ -221,8 +256,8 @@ def install(
         gpu = GPU_OPTION.AMD
     elif m_series:
         gpu = GPU_OPTION.M_SERIES
-    elif cpu:
-        gpu = None
+    elif intel_arc:
+        gpu = GPU_OPTION.INTEL_ARC
     else:
         if platform == constants.OS.MACOS:
             gpu = ui.prompt_select_enum(
@@ -236,10 +271,28 @@ def install(
             )
 
     if gpu == GPU_OPTION.INTEL_ARC:
-        print("[bold yellow]Installing on Intel ARC is not yet supported[/bold yellow]")
         print(
-            "[bold yellow]Feel free to follow this thread to manually install:\nhttps://github.com/comfyanonymous/ComfyUI/discussions/476[/bold yellow]"
+            "[bold yellow]Installing on Intel ARC is not yet completely supported[/bold yellow]"
         )
+        env_check = env_checker.EnvChecker()
+        if env_check.conda_env is None:
+            print(
+                "[bold red]Intel ARC support requires conda environment to be activated.[/bold red]"
+            )
+            raise typer.Exit(code=1)
+        if intel_arc is None:
+            confirm_result = ui.prompt_confirm_action(
+                "Are you sure you want to try beta install feature on Intel ARC?"
+            )
+            if not confirm_result:
+                raise typer.Exit(code=0)
+        print("[bold yellow]Installing on Intel ARC is in beta stage.[/bold yellow]")
+
+    if gpu is None and not cpu:
+        print(
+            "[bold red]No GPU option selected or `--cpu` enabled, use --\[gpu option] flag (e.g. --nvidia) to pick GPU. use `--cpu` to install for CPU. Exiting...[/bold red]"
+        )
+        raise typer.Exit(code=1)
 
     install_inner.execute(
         url,
@@ -249,7 +302,7 @@ def install(
         skip_manager,
         commit=commit,
         gpu=gpu,
-        platform=platform,
+        plat=platform,
         skip_torch_or_directml=skip_torch_or_directml,
         skip_requirement=skip_requirement,
     )
@@ -262,7 +315,13 @@ def install(
 
 @app.command(help="Update ComfyUI Environment [all|comfy]")
 @tracking.track_command()
-def update(target: str = typer.Argument("comfy", help="[all|comfy]")):
+def update(
+    target: str = typer.Argument(
+        "comfy",
+        help="[all|comfy]",
+        autocompletion=utils.create_choice_completer(["all", "comfy"]),
+    )
+):
     if target not in ["all", "comfy"]:
         typer.echo(
             f"Invalid target: {target}. Allowed targets are 'all', 'comfy'.",
@@ -270,7 +329,6 @@ def update(target: str = typer.Argument("comfy", help="[all|comfy]")):
         )
         raise typer.Exit(code=1)
 
-    _env_checker = EnvChecker()
     comfy_path = workspace_manager.workspace_path
 
     if "all" == target:
@@ -286,6 +344,8 @@ def update(target: str = typer.Argument("comfy", help="[all|comfy]")):
             [sys.executable, "-m", "pip", "install", "-r", "requirements.txt"],
             check=True,
         )
+
+    custom_nodes.command.update_node_id_cache()
 
 
 # @app.command(help="Run workflow file")
@@ -484,7 +544,9 @@ def which():
 def env():
     check_for_updates()
     _env_checker = EnvChecker()
-    _env_checker.print()
+    table = _env_checker.fill_print_table()
+    workspace_manager.fill_print_table(table)
+    console.print(table)
 
 
 @app.command(hidden=True)
@@ -512,6 +574,7 @@ def feedback():
     general_satisfaction_score = ui.prompt_select(
         question="On a scale of 1 to 5, how satisfied are you with the Comfy CLI tool? (1 being very dissatisfied and 5 being very satisfied)",
         choices=["1", "2", "3", "4", "5"],
+        force_prompting=True,
     )
     tracking.track_event(
         "feedback_general_satisfaction", {"score": general_satisfaction_score}
@@ -521,6 +584,7 @@ def feedback():
     usability_satisfaction_score = ui.prompt_select(
         question="On a scale of 1 to 5,  how satisfied are you with the usability and user experience of the Comfy CLI tool? (1 being very dissatisfied and 5 being very satisfied)",
         choices=["1", "2", "3", "4", "5"],
+        force_prompting=True,
     )
     tracking.track_event(
         "feedback_usability_satisfaction", {"score": usability_satisfaction_score}

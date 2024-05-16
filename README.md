@@ -1,6 +1,14 @@
-# comfy-cli
+# Comfy-Cli: A Command Line Tool for ComfyUI
 
-comfy-cli is a command line tool that helps users easily install and manage [ComfyUI](https://github.com/comfyanonymous/ComfyUI), a powerful open-source machine learning framework. With comfy-cli, you can quickly set up ComfyUI, install packages, and manage custom nodes, all from the convenience of your terminal.
+comfy-cli is a command line tool that helps users easily install and manage
+[ComfyUI](https://github.com/comfyanonymous/ComfyUI), a powerful open-source
+machine learning framework. With comfy-cli, you can quickly set up ComfyUI,
+install packages, and manage custom nodes, all from the convenience of your
+terminal.
+
+## Demo
+
+<img src="https://github.com/yoland68/comfy-cli/raw/main/assets/comfy-demo.gif" width="400" alt="Comfy Command Demo">
 
 ## Features
 
@@ -17,7 +25,7 @@ comfy-cli is a command line tool that helps users easily install and manage [Com
 
 2. To install comfy-cli, make sure you have Python 3.9 or higher installed on your system. Then, run the following command:
 
-     `pip install comfy-cli`
+   `pip install comfy-cli`
 
 ### Shell Autocomplete
 
@@ -39,11 +47,11 @@ This command will download and set up the latest version of ComfyUI and ComfyUI-
 system. If you run in a ComfyUI repo that has already been setup. The command
 will simply update the comfy.yaml file to reflect the local setup
 
-  * `comfy install --skip-manager`: Install ComfyUI without ComfyUI-Manager.
-  * `comfy --workspace=<path> install`: Install ComfyUI into `<path>/ComfyUI`.
-  * For `comfy install`, if no path specification like `--workspace, --recent, or --here` is provided, it will be implicitly installed in `<HOME>/comfy`.
-  * **(WIP)** `comfy install --snapshot=<comfy-lock.yaml path>`: Install ComfyUI and whole environments from snapshot.
-    * **(WIP)** Currently, only the installation of ComfyUI and custom nodes is being applied.
+- `comfy install --skip-manager`: Install ComfyUI without ComfyUI-Manager.
+- `comfy --workspace=<path> install`: Install ComfyUI into `<path>/ComfyUI`.
+- For `comfy install`, if no path specification like `--workspace, --recent, or --here` is provided, it will be implicitly installed in `<HOME>/comfy`.
+- **(WIP)** `comfy install --snapshot=<comfy-lock.yaml path>`: Install ComfyUI and whole environments from snapshot.
+  - **(WIP)** Currently, only the installation of ComfyUI and custom nodes is being applied.
 
 
 ### Snapshot [WIP]
@@ -62,41 +70,41 @@ This command is used to perform a full backup/restore of the currently installed
 
 ### Specifying execution path
 
-* You can specify the path of ComfyUI where the command will be applied through path indicators as follows:
-  * `comfy --workspace=<path>`: Run from the ComfyUI installed in the specified workspace.
-  * `comfy --recent`: Run from the recently executed or installed ComfyUI.
-  * `comfy --here`: Run from the ComfyUI located in the current directory.
-* --workspace, --recent, and --here options cannot be used simultaneously.
-* If there is no path indicator, the following priority applies:
-  * Run from the default ComfyUI at the path specified by `comfy set-default <path>`.
-  * Run from the recently executed or installed ComfyUI.
-  * Run from the ComfyUI located in the current directory.
+- You can specify the path of ComfyUI where the command will be applied through path indicators as follows:
+  - `comfy --workspace=<path>`: Run from the ComfyUI installed in the specified workspace.
+  - `comfy --recent`: Run from the recently executed or installed ComfyUI.
+  - `comfy --here`: Run from the ComfyUI located in the current directory.
+- --workspace, --recent, and --here options cannot be used simultaneously.
+- If there is no path indicator, the following priority applies:
 
-* Example 1: To run the recently executed ComfyUI:
-  * `comfy --recent launch`
-* Example 2: To install a package on the ComfyUI in the current directory:
-  * `comfy --here node install ComfyUI-Impact-Pack`
-* Example 3: To update the automatically selected path of ComfyUI and custom nodes based on priority:
-  * `comfy node update all`
+  - Run from the default ComfyUI at the path specified by `comfy set-default <path>`.
+  - Run from the recently executed or installed ComfyUI.
+  - Run from the ComfyUI located in the current directory.
 
-* You can use the `comfy which` command to check the path of the target workspace.
-  * e.g `comfy --recent which`, `comfy --here which`, `comfy which`, ...
+- Example 1: To run the recently executed ComfyUI:
+  - `comfy --recent launch`
+- Example 2: To install a package on the ComfyUI in the current directory:
+  - `comfy --here node install ComfyUI-Impact-Pack`
+- Example 3: To update the automatically selected path of ComfyUI and custom nodes based on priority:
 
+  - `comfy node update all`
+
+- You can use the `comfy which` command to check the path of the target workspace.
+  - e.g `comfy --recent which`, `comfy --here which`, `comfy which`, ...
 
 ### Default Setup
 
 The default sets the option that will be executed by default when no specific workspace's ComfyUI has been set for the command.
 
-  `comfy set-default <workspace path> ?[--launch-extras="<extra args>"]`
+`comfy set-default <workspace path> ?[--launch-extras="<extra args>"]`
 
-  - `--launch-extras` option specifies extra args that are applied only during launch by default. However, if extras are specified at the time of launch, this setting is ignored.
-
+- `--launch-extras` option specifies extra args that are applied only during launch by default. However, if extras are specified at the time of launch, this setting is ignored.
 
 ### Launch ComfyUI
 
 Comfy provides commands that allow you to easily run the installed ComfyUI.
 
-  `comfy launch`
+`comfy launch`
 
 - To run with default ComfyUI options:
 
@@ -111,23 +119,24 @@ Comfy provides commands that allow you to easily run the installed ComfyUI.
   `comfy launch --background`
 
   `comfy --workspace=~/comfy launch --background -- --listen 10.0.0.10 --port 8000`
-  - Instances launched with `--background` are displayed in the "Background ComfyUI" section of `comfy env`, providing management functionalities for a single background instance only. 
+
+  - Instances launched with `--background` are displayed in the "Background ComfyUI" section of `comfy env`, providing management functionalities for a single background instance only.
   - Since "Comfy Server Running" in `comfy env` only shows the default port 8188, it doesn't display ComfyUI running on a different port.
   - Background-running ComfyUI can be stopped with `comfy stop`.
-
 
 ### Managing Custom Nodes
 
 comfy provides a convenient way to manage custom nodes for extending ComfyUI's functionality. Here are some examples:
 
 - Show custom nodes' information:
- ```
-comfy node [show|simple-show] [installed|enabled|not-installed|disabled|all|snapshot|snapshot-list] 
-                              ?[--channel <channel name>] 
-                              ?[--mode [remote|local|cache]]
+
 ```
--
-  `comfy node show all --channel recent`
+comfy node [show|simple-show] [installed|enabled|not-installed|disabled|all|snapshot|snapshot-list]
+                             ?[--channel <channel name>]
+                             ?[--mode [remote|local|cache]]
+```
+
+- `comfy node show all --channel recent`
 
   `comfy node simple-show installed`
 
@@ -135,25 +144,21 @@ comfy node [show|simple-show] [installed|enabled|not-installed|disabled|all|snap
 
   `comfy node install ComfyUI-Impact-Pack`
 
-
 - Managing snapshot:
 
   `comfy node save-snapshot`
 
   `comfy node restore-snapshot <snapshot name>`
 
-
 - Install dependencies:
 
-  `comfy node install-deps --deps=<deps .json file>` 
+  `comfy node install-deps --deps=<deps .json file>`
 
   `comfy node install-deps --workflow=<workflow .json/.png file>`
 
-
 - Generate deps:
 
-  `comfy node deps-in-workflow --workflow=<workflow .json/.png file>` 
-
+  `comfy node deps-in-workflow --workflow=<workflow .json/.png file>`
 
 ### Managing Models
 
@@ -161,7 +166,7 @@ comfy node [show|simple-show] [installed|enabled|not-installed|disabled|all|snap
 
   `comfy model get`
 
-  *Downloading models that have already been installed will 
+  \*Downloading models that have already been installed will
 
 - Model remove
 
@@ -170,7 +175,6 @@ comfy node [show|simple-show] [installed|enabled|not-installed|disabled|all|snap
 - Model list
 
   `comfy model list`
-
 
 ### Managing ComfyUI-Manager
 
@@ -186,14 +190,13 @@ comfy node [show|simple-show] [installed|enabled|not-installed|disabled|all|snap
 
   `comfy manager clear`
 
-
 ## Beta Feature: format of comfy-lock.yaml (WIP)
 
 ```
 basic:
 
 models:
-  - model: [name of the model] 
+  - model: [name of the model]
     url: [url of the source, e.g. https://huggingface.co/...]
     paths: [list of paths to the model]
       - path: [path to the model]
@@ -207,7 +210,7 @@ models:
   ...
 
 # compatible with ComfyUI-Manager's .yaml snapshot
-custom_nodes:  
+custom_nodes:
   comfyui: [commit hash]
   file_custom_nodes:
   - disabled: [bool]
@@ -248,4 +251,3 @@ comfy is released under the [GNU General Public License v3.0](https://github.com
 If you encounter any issues or have questions about comfy-cli, please [open an issue](https://github.com/comfy-cli/issues) on our GitHub repository or contact us on [Discord](https://discord.gg/comfycontrib). We'll be happy to assist you!
 
 Happy diffusing with ComfyUI and comfy-cli! 🎉
-

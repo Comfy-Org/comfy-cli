@@ -34,5 +34,5 @@ jobs:
 
       - name: Run Tests
         run: |
-          comfy --yes env
-          comfy install --cpu
+          comfy --skip-prompt --no-enable-telemetry env
+          comfy --skip-prompt install --cpu
