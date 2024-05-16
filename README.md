@@ -147,13 +147,13 @@ comfy node [show|simple-show] [installed|enabled|not-installed|disabled|all|snap
 
 - Model downloading
 
-  `comfy model get`
+  `comfy model download ?[--relative-path <PATH>] --url <URL> `
 
-  \*Downloading models that have already been installed will
+  * URL: CivitAI, huggingface file url, ...
 
 - Model remove
 
-  `comfy model enable-gui`
+  `comfy model remove ?[--relative-path <PATH>] --model-names <model names>`
 
 - Model list
 

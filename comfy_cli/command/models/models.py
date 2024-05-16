@@ -291,8 +291,6 @@ def remove(
             if not to_delete:
                 return  # Exit if no valid models were found
 
-        return
-
     # Scenario #2: User did not provide model names, prompt for selection
     else:
         selections = ui.prompt_multi_select(
