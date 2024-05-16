@@ -1,5 +1,6 @@
 import pathlib
 from typing import List, Optional, Tuple
+from rich import print
 
 import requests
 import typer
