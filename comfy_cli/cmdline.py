@@ -11,6 +11,7 @@ import typer
 from rich import print
 from rich.console import Console
 from typing_extensions import Annotated, List
+import select
 
 from comfy_cli import constants, env_checker, logging, tracking, ui, utils
 from comfy_cli.command import custom_nodes
@@ -391,16 +392,42 @@ def launch_comfyui(extra, background=False):
         ] + extra
 
         process = subprocess.Popen(
-            cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
         )
-        print(
-            f"[bold yellow]Run ComfyUI in the background.[/bold yellow] ({listen}:{port})"
-        )
-        ConfigManager().config["DEFAULT"][
-            constants.CONFIG_KEY_BACKGROUND
-        ] = f"{(listen, port, process.pid)}"
-        ConfigManager().write_config()
-        return
+
+        log = ""
+        while True:
+            reads = [process.stdout.fileno(), process.stderr.fileno()]
+            ret = select.select(reads, [], [])
+
+            for fd in ret[0]:
+                if fd == process.stdout.fileno():
+                    output = process.stdout.readline()
+                    log += output
+
+                elif fd == process.stderr.fileno():
+                    output = process.stderr.readline()
+                    log += output
+
+                    if "Starting server" in output:
+                        print(
+                            f"[bold yellow]ComfyUI is successfully launched in the background.[/bold yellow] ({listen}:{port})"
+                        )
+
+                        ConfigManager().config["DEFAULT"][
+                            constants.CONFIG_KEY_BACKGROUND
+                        ] = f"{(listen, port, process.pid)}"
+                        ConfigManager().write_config()
+
+                        exit(0)
+
+            retcode = process.poll()
+            if retcode is not None:
+                if retcode != 0:
+                    print(log)
+                    print(f"[bold red]Failed to launch ComfyUI[/bold red]")
+                    exit(1)
+                break
 
     env_path = EnvChecker().get_isolated_env()
     reboot_path = None
@@ -419,14 +446,16 @@ def launch_comfyui(extra, background=False):
     extra = extra if extra is not None else []
 
     while True:
-        subprocess.run([sys.executable, "main.py"] + extra, env=new_env, check=False)
+        res = subprocess.run(
+            [sys.executable, "main.py"] + extra, env=new_env, check=False
+        )
 
         if not reboot_path:
             print("[bold red]ComfyUI is not installed.[/bold red]\n")
-            return
+            exit(res)
 
         if not os.path.exists(reboot_path):
-            return
+            exit(0)
 
         os.remove(reboot_path)
 
