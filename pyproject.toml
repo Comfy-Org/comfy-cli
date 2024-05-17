@@ -24,7 +24,7 @@ dependencies = [
     "rich",
     "requests",
     "pyyaml",
-    "typing-extensions",
+    "typing-extensions >= 4.7.0",
     "mixpanel",
     "questionary",
     "psutil",
