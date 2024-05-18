@@ -378,6 +378,7 @@ async def launch_and_monitor(cmd, listen, port):
                 break
 
             line = line.decode("utf-8", errors="ignore")
+            print(f"[DBG] {line}")
 
             if "Launching ComfyUI from:" in line:
                 logging_flag = True
