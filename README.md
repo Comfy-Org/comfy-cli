@@ -1,4 +1,6 @@
 # Comfy-Cli: A Command Line Tool for ComfyUI
+[![Test ComfyUI Example Workflows](https://github.com/Comfy-Org/ComfyUI-Mirror/actions/workflows/test-workflows.yaml/badge.svg)](https://github.com/Comfy-Org/ComfyUI-Mirror/actions/workflows/test-workflows.yaml)
+[![Test ComfyUI Windows with Default Workflow](https://github.com/Comfy-Org/ComfyUI-Mirror/actions/workflows/test-workflows-windows.yaml/badge.svg)](https://github.com/Comfy-Org/ComfyUI-Mirror/actions/workflows/test-workflows-windows.yaml)
 
 comfy-cli is a command line tool that helps users easily install and manage
 [ComfyUI](https://github.com/comfyanonymous/ComfyUI), a powerful open-source
@@ -6,9 +8,7 @@ machine learning framework. With comfy-cli, you can quickly set up ComfyUI,
 install packages, and manage custom nodes, all from the convenience of your
 terminal.
 
-[![Test ComfyUI Example Workflows](https://github.com/Comfy-Org/ComfyUI-Mirror/actions/workflows/test-
-workflows.yaml/badge.svg)](https://github.com/Comfy-Org/ComfyUI-Mirror/actions/workflows/test-workflows.yaml)
-[![Test ComfyUI Windows with Default Workflow](https://github.com/Comfy-Org/ComfyUI-Mirror/actions/workflows/test-workflows-windows.yaml/badge.svg)](https://github.com/Comfy-Org/ComfyUI-Mirror/actions/workflows/test-workflows-windows.yaml)
+
 
 ## Demo
 
