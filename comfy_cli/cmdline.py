@@ -358,12 +358,12 @@ def validate_comfyui(_env_checker):
 
 
 async def launch_and_monitor(cmd, listen, port):
-    """
-    Monitor the process during the background launch.
+    '''
+        Monitor the process during the background launch.
 
-    If a success message is captured, exit;
-    otherwise, return the log in case of failure.
-    """
+        If a success message is captured, exit;
+        otherwise, return the log in case of failure.
+    '''
     logging_flag = False
     log = []
     logging_lock = threading.Lock()
@@ -376,8 +376,6 @@ async def launch_and_monitor(cmd, listen, port):
             line = await stream.readline()
             if not line:
                 break
-
-            line = line.decode("utf-8")
 
             if "Launching ComfyUI from:" in line:
                 logging_flag = True
