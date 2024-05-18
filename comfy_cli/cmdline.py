@@ -368,49 +368,51 @@ async def launch_and_monitor(cmd, listen, port):
     log = []
     logging_lock = threading.Lock()
 
-    async def msg_hook(stream):
+    async def msg_hook(line):
         nonlocal logging_flag
         nonlocal log
 
+        if "Launching ComfyUI from:" in line:
+            logging_flag = True
+        elif "To see the GUI go to:" in line:
+            print(
+                f"[bold yellow]ComfyUI is successfully launched in the background.[/bold yellow] \[http://{listen}:{port}]"
+            )
+
+            ConfigManager().config["DEFAULT"][
+                constants.CONFIG_KEY_BACKGROUND
+            ] = f"{(listen, port, process.pid)}"
+            ConfigManager().write_config()
+            raise exit(0)
+
+        if logging_flag:
+            with logging_lock:
+                log.append(line)
+
+    process = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        encoding='utf-8',
+        text=True
+    )
+
+    async def read_stream(stream, hook):
+        loop = asyncio.get_event_loop()
         while True:
-            line = await stream.readline()
+            line = await loop.run_in_executor(None, stream.readline)
             if not line:
                 break
-
-            line = line.decode("utf-8", errors="ignore")
-            print(f"[DBG] {line}")
-
-            if "Launching ComfyUI from:" in line:
-                logging_flag = True
-            elif "To see the GUI go to:" in line:
-                print(
-                    f"[bold yellow]ComfyUI is successfully launched in the background.[/bold yellow] ({listen}:{port})"
-                )
-
-                ConfigManager().config["DEFAULT"][
-                    constants.CONFIG_KEY_BACKGROUND
-                ] = f"{(listen, port, process.pid)}"
-                ConfigManager().write_config()
-                raise exit(0)
-
-            if logging_flag:
-                with logging_lock:
-                    log.append(line)
-
-    process = await asyncio.create_subprocess_exec(
-        *cmd,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
+            await hook(line)
 
     await asyncio.wait(
         [
-            asyncio.create_task(msg_hook(process.stdout)),
-            asyncio.create_task(msg_hook(process.stderr)),
+            asyncio.create_task(read_stream(process.stdout, msg_hook)),
+            asyncio.create_task(read_stream(process.stderr, msg_hook)),
         ]
     )
 
-    await process.wait()
+    process.wait()
     return log
 
 
