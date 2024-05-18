@@ -358,12 +358,12 @@ def validate_comfyui(_env_checker):
 
 
 async def launch_and_monitor(cmd, listen, port):
-    '''
-        Monitor the process during the background launch.
+    """
+    Monitor the process during the background launch.
 
-        If a success message is captured, exit;
-        otherwise, return the log in case of failure.
-    '''
+    If a success message is captured, exit;
+    otherwise, return the log in case of failure.
+    """
     logging_flag = False
     log = []
     logging_lock = threading.Lock()
@@ -377,6 +377,8 @@ async def launch_and_monitor(cmd, listen, port):
             if not line:
                 break
 
+            line = line.decode("utf-8", errors="ignore")
+
             if "Launching ComfyUI from:" in line:
                 logging_flag = True
             elif "To see the GUI go to:" in line:
@@ -388,8 +390,7 @@ async def launch_and_monitor(cmd, listen, port):
                     constants.CONFIG_KEY_BACKGROUND
                 ] = f"{(listen, port, process.pid)}"
                 ConfigManager().write_config()
-
-                exit(0)
+                raise exit(0)
 
             if logging_flag:
                 with logging_lock:
@@ -430,16 +431,16 @@ def background_launch(extra):
             if listen[i] == "--listen":
                 listen = extra[i + 1]
 
-        if check_comfy_server_running(port):
-            console.print(
-                f"[bold red]The {port} port is already in use. A new ComfyUI server cannot be launched.\n[bold red]\n"
-            )
-            raise typer.Exit(code=1)
-
         if len(extra) > 0:
             extra = ["--"] + extra
     else:
         extra = []
+
+    if check_comfy_server_running(port):
+        console.print(
+            f"[bold red]The {port} port is already in use. A new ComfyUI server cannot be launched.\n[bold red]\n"
+        )
+        raise typer.Exit(code=1)
 
     cmd = [
         "comfy",
@@ -458,7 +459,7 @@ def background_launch(extra):
         )
     )
     console.print(f"\n[bold red]Execution error: failed to launch ComfyUI[/bold red]\n")
-    exit(1)
+    raise typer.Exit(code=1)
 
 
 def launch_comfyui(extra):
