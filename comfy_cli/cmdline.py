@@ -10,8 +10,10 @@ import questionary
 import typer
 from rich import print
 from rich.console import Console
+from rich.panel import Panel
 from typing_extensions import Annotated, List
-import select
+import asyncio
+import threading
 
 from comfy_cli import constants, env_checker, logging, tracking, ui, utils
 from comfy_cli.command import custom_nodes
@@ -355,80 +357,131 @@ def validate_comfyui(_env_checker):
         raise typer.Exit(code=1)
 
 
-def launch_comfyui(extra, background=False):
-    if background:
-        config_background = ConfigManager().background
-        if config_background is not None and utils.is_running(config_background[2]):
-            print(
-                "[bold red]ComfyUI is already running in background.\nYou cannot start more than one background service.[/bold red]\n"
-            )
-            raise typer.Exit(code=1)
+async def launch_and_monitor(cmd, listen, port):
+    """
+    Monitor the process during the background launch.
 
-        port = 8188
-        listen = "127.0.0.1"
+    If a success message is captured, exit;
+    otherwise, return the log in case of failure.
+    """
+    logging_flag = False
+    term_flag = False
+    log = []
+    logging_lock = threading.Lock()
 
-        if extra is not None:
-            for i in range(len(extra) - 1):
-                if extra[i] == "--port":
-                    port = extra[i + 1]
-                if listen[i] == "--listen":
-                    listen = extra[i + 1]
+    # NOTE: To prevent encoding error on Windows platform
+    env = dict(os.environ, PYTHONIOENCODING="utf-8")
 
-            if check_comfy_server_running(port):
-                print(
-                    f"[bold red]The {port} port is already in use. A new ComfyUI server cannot be launched.\n[bold red]\n"
-                )
-                raise typer.Exit(code=1)
-
-            if len(extra) > 0:
-                extra = ["--"] + extra
-        else:
-            extra = []
-
-        cmd = [
-            "comfy",
-            f"--workspace={os.path.abspath(os.getcwd())}",
-            "launch",
-        ] + extra
-
+    if sys.platform == "win32":
         process = subprocess.Popen(
-            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=env,
+            encoding="utf-8",
+            shell=True,  # win32 only
+            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,  # win32 only
+        )
+    else:
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=env,
+            encoding="utf-8",
         )
 
-        log = ""
+    def msg_hook(stream):
+        nonlocal log
+        nonlocal logging_flag
+
         while True:
-            reads = [process.stdout.fileno(), process.stderr.fileno()]
-            ret = select.select(reads, [], [])
+            line = stream.readline()
 
-            for fd in ret[0]:
-                if fd == process.stdout.fileno():
-                    output = process.stdout.readline()
-                    log += output
+            if "Launching ComfyUI from:" in line:
+                logging_flag = True
+            elif "To see the GUI go to:" in line:
+                print(
+                    f"[bold yellow]ComfyUI is successfully launched in the background.[/bold yellow]\nTo see the GUI go to: http://{listen}:{port}"
+                )
+                ConfigManager().config["DEFAULT"][
+                    constants.CONFIG_KEY_BACKGROUND
+                ] = f"{(listen, port, process.pid)}"
+                ConfigManager().write_config()
 
-                elif fd == process.stderr.fileno():
-                    output = process.stderr.readline()
-                    log += output
+                # NOTE: os.exit(0) doesn't work.
+                os._exit(0)
 
-                    if "Starting server" in output:
-                        print(
-                            f"[bold yellow]ComfyUI is successfully launched in the background.[/bold yellow] ({listen}:{port})"
-                        )
+            with logging_lock:
+                if logging_flag:
+                    log.append(line)
 
-                        ConfigManager().config["DEFAULT"][
-                            constants.CONFIG_KEY_BACKGROUND
-                        ] = f"{(listen, port, process.pid)}"
-                        ConfigManager().write_config()
+    stdout_thread = threading.Thread(target=msg_hook, args=(process.stdout,))
+    stderr_thread = threading.Thread(target=msg_hook, args=(process.stderr,))
 
-                        exit(0)
+    stdout_thread.start()
+    stderr_thread.start()
 
-            retcode = process.poll()
-            if retcode is not None:
-                if retcode != 0:
-                    print(log)
-                    print(f"[bold red]Failed to launch ComfyUI[/bold red]")
-                    exit(1)
-                break
+    res = process.wait()
 
+    return log
+
+
+def background_launch(extra):
+    config_background = ConfigManager().background
+    if config_background is not None and utils.is_running(config_background[2]):
+        console.print(
+            "[bold red]ComfyUI is already running in background.\nYou cannot start more than one background service.[/bold red]\n"
+        )
+        raise typer.Exit(code=1)
+
+    port = 8188
+    listen = "127.0.0.1"
+
+    if extra is not None:
+        for i in range(len(extra) - 1):
+            if extra[i] == "--port":
+                port = extra[i + 1]
+            if listen[i] == "--listen":
+                listen = extra[i + 1]
+
+        if len(extra) > 0:
+            extra = ["--"] + extra
+    else:
+        extra = []
+
+    if check_comfy_server_running(port):
+        console.print(
+            f"[bold red]The {port} port is already in use. A new ComfyUI server cannot be launched.\n[bold red]\n"
+        )
+        raise typer.Exit(code=1)
+
+    cmd = [
+        "comfy",
+        f"--workspace={os.path.abspath(os.getcwd())}",
+        "launch",
+    ] + extra
+
+    loop = asyncio.get_event_loop()
+    log = loop.run_until_complete(launch_and_monitor(cmd, listen, port))
+
+    if log is not None:
+        console.print(
+            Panel(
+                "".join(log),
+                title="[bold red]Error log during ComfyUI execution[/bold red]",
+                border_style="bright_red",
+            )
+        )
+
+    console.print(f"\n[bold red]Execution error: failed to launch ComfyUI[/bold red]\n")
+    # NOTE: os.exit(0) doesn't work
+    os._exit(1)
+
+
+def launch_comfyui(extra):
     env_path = EnvChecker().get_isolated_env()
     reboot_path = None
 
@@ -450,12 +503,12 @@ def launch_comfyui(extra, background=False):
             [sys.executable, "main.py"] + extra, env=new_env, check=False
         )
 
-        if not reboot_path:
+        if reboot_path is None:
             print("[bold red]ComfyUI is not installed.[/bold red]\n")
             exit(res)
 
         if not os.path.exists(reboot_path):
-            exit(0)
+            exit(res)
 
         os.remove(reboot_path)
 
@@ -516,7 +569,10 @@ def launch(
     workspace_manager.set_recent_workspace(resolved_workspace)
 
     os.chdir(resolved_workspace)
-    launch_comfyui(extra, background=background)
+    if background:
+        background_launch(extra)
+    else:
+        launch_comfyui(extra)
 
 
 @app.command("set-default", help="Set default ComfyUI path")
