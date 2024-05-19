@@ -404,7 +404,7 @@ async def launch_and_monitor(cmd, listen, port):
                 logging_flag = True
             elif "To see the GUI go to:" in line:
                 print(
-                    f"[bold yellow]ComfyUI is successfully launched in the background.[/bold yellow] => http://{listen}:{port}"
+                    f"[bold yellow]ComfyUI is successfully launched in the background.[/bold yellow]\nTo see the GUI go to: http://{listen}:{port}"
                 )
                 ConfigManager().config["DEFAULT"][
                     constants.CONFIG_KEY_BACKGROUND
