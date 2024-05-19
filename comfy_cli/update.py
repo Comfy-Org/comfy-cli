@@ -1,3 +1,5 @@
+import sys
+
 import requests
 import tomlkit
 from rich import print
@@ -48,10 +50,16 @@ def notify_update(current_version: str, newer_version: str):
         f"Current version: [bold cyan]{current_version}[/bold cyan]\n"
         f"Update by running: [bold yellow]'pip install --upgrade comfy-cli'[/bold yellow] :arrow_up:"
     )
+
+    if sys.platform == "win32":
+        bell = ""  # windows cannot display bell emoji character.
+    else:
+        bell = ":bell:"
+
     console.print(
         Panel(
             message,
-            title="[bold red]:bell: Update Available![/bold red]",
+            title=f"[bold red]{bell} Update Available![/bold red]",
             border_style="bright_blue",
         )
     )
