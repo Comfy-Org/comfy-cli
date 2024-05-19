@@ -370,7 +370,7 @@ async def launch_and_monitor(cmd, listen, port):
     logging_lock = threading.Lock()
 
     # NOTE: To prevent encoding error on Windows platform
-    env = dict(os.environ, PYTHONIOENCODING='utf-8')
+    env = dict(os.environ, PYTHONIOENCODING="utf-8")
 
     process = subprocess.Popen(
         cmd,
@@ -380,7 +380,7 @@ async def launch_and_monitor(cmd, listen, port):
         env=env,
         encoding="utf-8",
         shell=True,
-        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP
+        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
     )
 
     def msg_hook(stream):
@@ -389,18 +389,22 @@ async def launch_and_monitor(cmd, listen, port):
 
         while True:
             line = stream.readline()
-            
+
             if "Launching ComfyUI from:" in line:
                 logging_flag = True
             elif "To see the GUI go to:" in line:
-                print(f"[bold yellow]ComfyUI is successfully launched in the background.[/bold yellow] => http://{listen}:{port}")
-                ConfigManager().config["DEFAULT"][constants.CONFIG_KEY_BACKGROUND] = f"{(listen, port, process.pid)}"
+                print(
+                    f"[bold yellow]ComfyUI is successfully launched in the background.[/bold yellow] => http://{listen}:{port}"
+                )
+                ConfigManager().config["DEFAULT"][
+                    constants.CONFIG_KEY_BACKGROUND
+                ] = f"{(listen, port, process.pid)}"
                 ConfigManager().write_config()
 
                 # NOTE: os.exit(0) doesn't work.
                 os._exit(0)
                 break
-                
+
             with logging_lock:
                 if logging_flag:
                     log.append(line)
@@ -412,7 +416,7 @@ async def launch_and_monitor(cmd, listen, port):
     stderr_thread.start()
 
     process.wait()
-    
+
     return log
 
 
