@@ -372,16 +372,26 @@ async def launch_and_monitor(cmd, listen, port):
     # NOTE: To prevent encoding error on Windows platform
     env = dict(os.environ, PYTHONIOENCODING="utf-8")
 
-    process = subprocess.Popen(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        env=env,
-        encoding="utf-8",
-        shell=True,
-        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
-    )
+    if sys.platform == "win32":
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=env,
+            encoding="utf-8",
+            shell=True,  # win32 only
+            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,  # win32 only
+        )
+    else:
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=env,
+            encoding="utf-8",
+        )
 
     def msg_hook(stream):
         nonlocal log
@@ -403,7 +413,6 @@ async def launch_and_monitor(cmd, listen, port):
 
                 # NOTE: os.exit(0) doesn't work.
                 os._exit(0)
-                break
 
             with logging_lock:
                 if logging_flag:
@@ -415,7 +424,7 @@ async def launch_and_monitor(cmd, listen, port):
     stdout_thread.start()
     stderr_thread.start()
 
-    process.wait()
+    res = process.wait()
 
     return log
 
