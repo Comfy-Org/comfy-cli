@@ -365,54 +365,54 @@ async def launch_and_monitor(cmd, listen, port):
     otherwise, return the log in case of failure.
     """
     logging_flag = False
+    term_flag = False
     log = []
     logging_lock = threading.Lock()
 
-    async def msg_hook(line):
-        nonlocal logging_flag
-        nonlocal log
-
-        if "Launching ComfyUI from:" in line:
-            logging_flag = True
-        elif "To see the GUI go to:" in line:
-            print(
-                f"[bold yellow]ComfyUI is successfully launched in the background.[/bold yellow] \[http://{listen}:{port}]"
-            )
-
-            ConfigManager().config["DEFAULT"][
-                constants.CONFIG_KEY_BACKGROUND
-            ] = f"{(listen, port, process.pid)}"
-            ConfigManager().write_config()
-            raise exit(0)
-
-        if logging_flag:
-            with logging_lock:
-                log.append(line)
+    # NOTE: To prevent encoding error on Windows platform
+    env = dict(os.environ, PYTHONIOENCODING='utf-8')
 
     process = subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        encoding='utf-8',
-        text=True
+        text=True,
+        env=env,
+        encoding="utf-8",
+        shell=True,
+        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP
     )
 
-    async def read_stream(stream, hook):
-        loop = asyncio.get_event_loop()
+    def msg_hook(stream):
+        nonlocal log
+        nonlocal logging_flag
+
         while True:
-            line = await loop.run_in_executor(None, stream.readline)
-            if not line:
-                break
-            await hook(line)
+            line = stream.readline()
+            
+            if "Launching ComfyUI from:" in line:
+                logging_flag = True
+            elif "To see the GUI go to:" in line:
+                print(f"[bold yellow]ComfyUI is successfully launched in the background.[/bold yellow] => http://{listen}:{port}")
+                ConfigManager().config["DEFAULT"][constants.CONFIG_KEY_BACKGROUND] = f"{(listen, port, process.pid)}"
+                ConfigManager().write_config()
 
-    await asyncio.wait(
-        [
-            asyncio.create_task(read_stream(process.stdout, msg_hook)),
-            asyncio.create_task(read_stream(process.stderr, msg_hook)),
-        ]
-    )
+                # NOTE: os.exit(0) doesn't work.
+                os._exit(0)
+                break
+                
+            with logging_lock:
+                if logging_flag:
+                    log.append(line)
+
+    stdout_thread = threading.Thread(target=msg_hook, args=(process.stdout,))
+    stderr_thread = threading.Thread(target=msg_hook, args=(process.stderr,))
+
+    stdout_thread.start()
+    stderr_thread.start()
 
     process.wait()
+    
     return log
 
 
@@ -454,15 +454,18 @@ def background_launch(extra):
     loop = asyncio.get_event_loop()
     log = loop.run_until_complete(launch_and_monitor(cmd, listen, port))
 
-    console.print(
-        Panel(
-            "".join(log),
-            title="[bold red]Error log during ComfyUI execution[/bold red]",
-            border_style="bright_red",
+    if log is not None:
+        console.print(
+            Panel(
+                "".join(log),
+                title="[bold red]Error log during ComfyUI execution[/bold red]",
+                border_style="bright_red",
+            )
         )
-    )
+
     console.print(f"\n[bold red]Execution error: failed to launch ComfyUI[/bold red]\n")
-    raise typer.Exit(code=1)
+    # NOTE: os.exit(0) doesn't work
+    os._exit(1)
 
 
 def launch_comfyui(extra):
