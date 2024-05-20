@@ -19,12 +19,12 @@ maintainers = [
 ]
 
 dependencies = [
-    "typer>=0.3.0",
+    "typer>=0.9.0",
     "GitPython",
     "rich",
     "requests",
     "pyyaml",
-    "typing-extensions >= 4.7.0",
+    "typing-extensions>=4.7.0",
     "mixpanel",
     "questionary",
     "psutil",
