@@ -10,11 +10,15 @@ This guide provides an overview of how to develop in this repository.
 
 `pip install -e .`
 
-3. Test script running
+3. Set ENVIRONMENT variable to DEV.
+
+`export ENVIRONMENT=dev`
+
+4. Test script running
 
 `comfy --help`
 
-4. Use pre commit hook
+5. Use pre commit hook
 
 `pre-commit install`
 

@@ -1,8 +1,11 @@
 import logging
 import os
-
+from rich.console import Console
 import requests
 import json
+from typing import Optional
+
+from comfy_cli.registry.types import PyProjectConfig, PublishNodeVersionResponse
 
 # Reduced global imports from comfy_cli.registry
 from comfy_cli.registry.types import NodeVersion, Node
@@ -18,7 +21,7 @@ class RegistryAPI:
         else:
             return "https://api.comfy.org"
 
-    def publish_node_version(self, node_config, token):
+    def publish_node_version(self, node_config, token) -> PublishNodeVersionResponse:
         """
         Publishes a new version of a node.
 
@@ -30,7 +33,16 @@ class RegistryAPI:
         PublishNodeVersionResponse: The response object from the API server.
         """
         # Local import to prevent circular dependency
-        from comfy_cli.registry.types import PyProjectConfig, PublishNodeVersionResponse
+
+        if not node_config.tool_comfy.publisher_id:
+            raise Exception(
+                "Publisher ID is required in pyproject.toml to publish a node version"
+            )
+
+        if not node_config.project.name:
+            raise Exception(
+                "Project name is required in pyproject.toml to publish a node version"
+            )
 
         url = f"{self.base_url}/publishers/{node_config.tool_comfy.publisher_id}/nodes/{node_config.project.name}/versions"
         headers = {"Content-Type": "application/json"}

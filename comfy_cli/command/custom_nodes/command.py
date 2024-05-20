@@ -668,17 +668,20 @@ def publish(
 
     # Call API to fetch node version with the token in the body
     typer.echo("Publishing node version...")
-    response = registry_api.publish_node_version(config, token)
+    try:
+        response = registry_api.publish_node_version(config, token)
+        # Zip up all files in the current directory, respecting .gitignore files.
+        signed_url = response.signedUrl
+        zip_filename = "node.tar.gz"
+        typer.echo("Creating zip file...")
+        zip_files(zip_filename)
 
-    # Zip up all files in the current directory, respecting .gitignore files.
-    signed_url = response.signedUrl
-    zip_filename = "node.tar.gz"
-    typer.echo("Creating zip file...")
-    zip_files(zip_filename)
-
-    # Upload the zip file to the signed URL
-    typer.echo("Uploading zip file...")
-    upload_file_to_signed_url(signed_url, zip_filename)
+        # Upload the zip file to the signed URL
+        typer.echo("Uploading zip file...")
+        upload_file_to_signed_url(signed_url, zip_filename)
+    except Exception as e:
+        ui.display_error_message({str(e)})
+        return
 
 
 @app.command("init", help="Init scaffolding for custom node")
