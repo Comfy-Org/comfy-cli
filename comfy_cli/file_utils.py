@@ -97,6 +97,9 @@ def zip_files(zip_filename):
                 dirs.remove(".git")
             for file in files:
                 file_path = os.path.join(root, file)
+                # Skip zipping the zip file itself
+                if zip_filename in file_path:
+                    continue
                 relative_path = os.path.relpath(file_path, start=".")
                 if not spec.match_file(relative_path):
                     zipf.write(file_path, relative_path)
