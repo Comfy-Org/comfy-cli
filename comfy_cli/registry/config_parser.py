@@ -1,5 +1,5 @@
 import os
-
+from comfy_cli import ui
 import tomlkit.exceptions
 from comfy_cli.registry.types import (
     PyProjectConfig,
@@ -8,6 +8,7 @@ from comfy_cli.registry.types import (
     Model,
     ComfyConfig,
 )
+from typing import Optional
 import tomlkit
 import subprocess
 
@@ -119,8 +120,14 @@ def initialize_project_config():
 
 def extract_node_configuration(
     path: str = os.path.join(os.getcwd(), "pyproject.toml"),
-) -> PyProjectConfig:
+) -> Optional[PyProjectConfig]:
     import tomlkit
+
+    if not os.path.isfile(path):
+        ui.display_error_message(
+            "No pyproject.toml file found in the current directory."
+        )
+        return None
 
     with open(path, "r") as file:
         data = tomlkit.load(file)

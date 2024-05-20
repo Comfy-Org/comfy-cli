@@ -796,3 +796,19 @@ def registry_install(node_id: str, version: Optional[str] = None):
     logging.info(
         f"Node {node_id} version {node_version.version} has been successfully installed."
     )
+
+
+@app.command(
+    "pack",
+    help="Pack the current node into a tar.gz file. Ignorining .gitignore files.",
+)
+@tracking.track_command("pack")
+def pack():
+    typer.echo("Validating node configuration...")
+    config = extract_node_configuration()
+    if not config:
+        raise typer.Exit(code=1)
+
+    zip_filename = "node.tar.gz"
+    zip_files(zip_filename)
+    logging.info("Node has been packed successfully.")
