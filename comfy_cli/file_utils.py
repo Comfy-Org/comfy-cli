@@ -48,7 +48,6 @@ def guess_status_code_reason(status_code: int, message: str) -> str:
 def download_file(
     url: str, local_filepath: pathlib.Path, headers: Optional[dict] = None
 ):
-
     """Helper function to download a file."""
 
     import httpx
@@ -98,10 +97,9 @@ def zip_files(zip_filename):
                 dirs.remove(".git")
             for file in files:
                 file_path = os.path.join(root, file)
-                if not spec.match_file(file_path):
-                    zipf.write(
-                        file_path, os.path.relpath(file_path, os.path.join(root, ".."))
-                    )
+                relative_path = os.path.relpath(file_path, start=".")
+                if not spec.match_file(relative_path):
+                    zipf.write(file_path, relative_path)
 
 
 def upload_file_to_signed_url(signed_url: str, file_path: str):
