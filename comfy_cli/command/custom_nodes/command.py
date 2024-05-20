@@ -811,4 +811,5 @@ def pack():
 
     zip_filename = "node.tar.gz"
     zip_files(zip_filename)
+    typer.echo("Created zip file: node.tar.gz")
     logging.info("Node has been packed successfully.")
