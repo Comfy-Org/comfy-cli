@@ -412,7 +412,6 @@ async def launch_and_monitor(cmd, listen, port):
                 ConfigManager().write_config()
 
                 # NOTE: os.exit(0) doesn't work.
-                # pylint: disable=protected-access
                 os._exit(0)
 
             with logging_lock:
@@ -479,7 +478,6 @@ def background_launch(extra):
 
     console.print(f"\n[bold red]Execution error: failed to launch ComfyUI[/bold red]\n")
     # NOTE: os.exit(0) doesn't work
-    # pylint: disable=protected-access
     os._exit(1)
 
 
@@ -512,10 +510,10 @@ def launch_comfyui(extra):
 
             if reboot_path is None:
                 print("[bold red]ComfyUI is not installed.[/bold red]\n")
-                os.exit(res)
+                exit(res)
 
             if not os.path.exists(reboot_path):
-                os.exit(res)
+                exit(res)
 
             os.remove(reboot_path)
     else:
@@ -560,17 +558,14 @@ def launch_comfyui(extra):
 
                 if reboot_path is None:
                     print("[bold red]ComfyUI is not installed.[/bold red]\n")
-                    # pylint: disable=protected-access
                     os._exit(process.pid)
 
                 if not os.path.exists(reboot_path):
-                    # pylint: disable=protected-access
                     os._exit(process.pid)
 
                 os.remove(reboot_path)
         except KeyboardInterrupt:
             if process is not None:
-                # pylint: disable=protected-access
                 os._exit(1)
 
 
