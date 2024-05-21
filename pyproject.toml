@@ -33,6 +33,7 @@ dependencies = [
     "pathspec",
     "httpx",
     "packaging",
+    "websocket-client"
 ]
 
 classifiers = [

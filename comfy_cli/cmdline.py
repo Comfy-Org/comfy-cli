@@ -17,6 +17,7 @@ import threading
 
 from comfy_cli import constants, env_checker, logging, tracking, ui, utils
 from comfy_cli.command import custom_nodes
+from comfy_cli.command import run as run_inner
 from comfy_cli.command import install as install_inner
 from comfy_cli.command.models import models as models_command
 from comfy_cli.config_manager import ConfigManager
@@ -341,12 +342,24 @@ def update(
     custom_nodes.command.update_node_id_cache()
 
 
-# @app.command(help="Run workflow file")
-# @tracking.track_command()
-# def run(
-#   workflow_file: Annotated[str, typer.Option(help="Path to the workflow file.")],
-# ):
-#   run_inner.execute(workflow_file)
+@app.command(help="Run API workflow file using the ComfyUI launched by `comfy launch --background`")
+@tracking.track_command()
+def run(
+    workflow: Annotated[str, typer.Option(help="Path to the workflow API json file.")],
+    wait: Annotated[
+        Optional[bool], typer.Option(help="If the command should wait until execution completes.")
+    ] = True,
+    verbose: Annotated[
+        Optional[bool], typer.Option(help="Enables verbose output of the execution process.")
+    ] = False,
+):
+    config = ConfigManager()
+    if not config.background:
+        print(
+            "[bold red]No ComfyUI background process information found. Please ensure you have run `comfy run --background` first.[/bold red]"
+        )
+        raise typer.Exit(code=1)
+    run_inner.execute(workflow, config.background[0], config.background[1], wait, verbose)
 
 
 def validate_comfyui(_env_checker):
