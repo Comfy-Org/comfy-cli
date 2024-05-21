@@ -224,17 +224,16 @@ class WorkflowExecution:
         if "prompt_id" not in data or data["prompt_id"] != self.prompt_id:
             return True
 
-        match message["type"]:
-            case "executing":
-                return self.on_executing(data)
-            case "execution_cached":
-                self.on_cached(data)
-            case "progress":
-                self.on_progress(data)
-            case "executed":
-                self.on_executed(data)
-            case "execution_error":
-                self.on_error(data)
+        if message["type"] == "executing":
+            return self.on_executing(data)
+        elif message["type"] == "execution_cached":
+            self.on_cached(data)
+        elif message["type"] == "progress":
+            self.on_progress(data)
+        elif message["type"] == "executed":
+            self.on_executed(data)
+        elif message["type"] == "execution_error":
+            self.on_error(data)
 
         return True
 
