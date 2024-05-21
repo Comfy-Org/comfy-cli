@@ -166,12 +166,12 @@ def execute(
     print(f"Installing from [bold yellow]'{url}'[/bold yellow] to '{comfy_path}'")
 
     repo_dir = comfy_path
-    parent_path = os.path.join(repo_dir, "..")
+    parent_path = os.path.abspath(os.path.join(repo_dir, ".."))
 
     if not os.path.exists(parent_path):
         os.makedirs(parent_path, exist_ok=True)
 
-    if os.path.exists(repo_dir):
+    if not os.path.exists(repo_dir):
         subprocess.run(["git", "clone", url, repo_dir])
     elif not check_comfy_repo(repo_dir)[0]:
         print(
