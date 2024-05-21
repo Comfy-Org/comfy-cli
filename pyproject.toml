@@ -23,6 +23,7 @@ dependencies = [
     "GitPython",
     "rich",
     "requests",
+    "charset-normalizer>=3.0.0",
     "pyyaml",
     "typing-extensions>=4.7.0",
     "mixpanel",
