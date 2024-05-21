@@ -400,7 +400,6 @@ async def launch_and_monitor(cmd, listen, port):
 
         while True:
             line = stream.readline()
-
             if "Launching ComfyUI from:" in line:
                 logging_flag = True
             elif "To see the GUI go to:" in line:
@@ -527,21 +526,33 @@ def launch_comfyui(extra):
         def redirector_stdout():
             while True:
                 if process is not None:
-                    print(process.stderr.readline(), end="")
+                    print(process.stdout.readline(), end="")
 
         t1 = threading.Thread(target=redirector_stderr).start()
         t2 = threading.Thread(target=redirector_stdout).start()
 
         try:
             while True:
-                process = subprocess.Popen(
-                    [sys.executable, "main.py"] + extra,
-                    text=True,
-                    env=new_env,
-                    encoding="utf-8",
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                )
+                if sys.platform == "win32":
+                    process = subprocess.Popen(
+                        [sys.executable, "main.py"] + extra,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                        env=new_env,
+                        encoding="utf-8",
+                        shell=True,  # win32 only
+                        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,  # win32 only
+                    )
+                else:
+                    process = subprocess.Popen(
+                        [sys.executable, "main.py"] + extra,
+                        text=True,
+                        env=new_env,
+                        encoding="utf-8",
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                    )
 
                 process.wait()
 
