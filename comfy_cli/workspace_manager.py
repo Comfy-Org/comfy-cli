@@ -275,7 +275,7 @@ class WorkspaceManager:
             constants.CONFIG_KEY_DEFAULT_WORKSPACE
         )
 
-        if default_workspace and check_comfy_repo(default_workspace):
+        if default_workspace and check_comfy_repo(default_workspace)[0]:
             return default_workspace, WorkspaceType.DEFAULT
 
         # Fallback to the most recent workspace if it exists
@@ -283,12 +283,12 @@ class WorkspaceManager:
             recent_workspace = self.config_manager.get(
                 constants.CONFIG_KEY_RECENT_WORKSPACE
             )
-            if recent_workspace and check_comfy_repo(recent_workspace):
+            if recent_workspace and check_comfy_repo(recent_workspace)[0]:
                 return recent_workspace, WorkspaceType.RECENT
 
         # Check for comfy-cli default workspace
         default_workspace = utils.get_not_user_set_default_workspace()
-        if check_comfy_repo(default_workspace):
+        if check_comfy_repo(default_workspace)[0]:
             return default_workspace, WorkspaceType.DEFAULT
 
         return None, WorkspaceType.NOT_FOUND
@@ -314,6 +314,9 @@ class WorkspaceManager:
         return os.path.exists(manager_git_path)
 
     def scan_dir(self):
+        if not self.workspace_path:
+            return []
+
         logging.info(f"Scanning directory: {self.workspace_path}")
         model_files = []
         for root, _dirs, files in os.walk(self.workspace_path):

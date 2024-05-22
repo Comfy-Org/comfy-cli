@@ -189,6 +189,7 @@ def execute(
     )
 
     WorkspaceManager().set_recent_workspace(repo_dir)
+    workspace_manager.setup_workspace_manager(specified_workspace=repo_dir)
 
     print("")
 
