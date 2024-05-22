@@ -362,7 +362,7 @@ def run(
     config = ConfigManager()
     if not config.background:
         print(
-            "[bold red]No ComfyUI background process information found. Please ensure you have run `comfy run --background` first.[/bold red]"
+            "[bold red]No ComfyUI background process information found. Please ensure you have run `comfy launch --background` first.[/bold red]"
         )
         raise typer.Exit(code=1)
     run_inner.execute(
