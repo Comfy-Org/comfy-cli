@@ -484,20 +484,18 @@ def background_launch(extra):
 
 
 def launch_comfyui(extra):
-    env_path = EnvChecker().get_isolated_env()
     reboot_path = None
 
     new_env = os.environ.copy()
 
-    if env_path is not None:
-        session_path = os.path.join(
-            ConfigManager().get_config_path(), "tmp", str(uuid.uuid4())
-        )
-        new_env["__COMFY_CLI_SESSION__"] = session_path
-        new_env["PYTHONENCODING"] = "utf-8"
+    session_path = os.path.join(
+        ConfigManager().get_config_path(), "tmp", str(uuid.uuid4())
+    )
+    new_env["__COMFY_CLI_SESSION__"] = session_path
+    new_env["PYTHONENCODING"] = "utf-8"
 
-        # To minimize the possibility of leaving residue in the tmp directory, use files instead of directories.
-        reboot_path = os.path.join(session_path + ".reboot")
+    # To minimize the possibility of leaving residue in the tmp directory, use files instead of directories.
+    reboot_path = os.path.join(session_path + ".reboot")
 
     extra = extra if extra is not None else []
 
