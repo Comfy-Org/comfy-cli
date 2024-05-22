@@ -123,11 +123,13 @@ def entry(
         )
         print(ctx.get_help())
         ctx.exit()
-    start_time = time.time()
-    workspace_manager.scan_dir()
-    end_time = time.time()
 
-    logging.info(f"scan_dir took {end_time - start_time:.2f} seconds to run")
+    # TODO: Move this to proper place
+    # start_time = time.time()
+    # workspace_manager.scan_dir()
+    # end_time = time.time()
+    #
+    # logging.info(f"scan_dir took {end_time - start_time:.2f} seconds to run")
 
 
 gpu_exclusivity_callback = mutually_exclusive_group_options()
@@ -390,6 +392,7 @@ async def launch_and_monitor(cmd, listen, port):
 
     # NOTE: To prevent encoding error on Windows platform
     env = dict(os.environ, PYTHONIOENCODING="utf-8")
+    env["COMFY_CLI_BACKGROUND"] = "true"
 
     if sys.platform == "win32":
         process = subprocess.Popen(
@@ -418,7 +421,6 @@ async def launch_and_monitor(cmd, listen, port):
 
         while True:
             line = stream.readline()
-
             if "Launching ComfyUI from:" in line:
                 logging_flag = True
             elif "To see the GUI go to:" in line:
@@ -511,25 +513,81 @@ def launch_comfyui(extra):
             ConfigManager().get_config_path(), "tmp", str(uuid.uuid4())
         )
         new_env["__COMFY_CLI_SESSION__"] = session_path
+        new_env["PYTHONENCODING"] = "utf-8"
 
         # To minimize the possibility of leaving residue in the tmp directory, use files instead of directories.
         reboot_path = os.path.join(session_path + ".reboot")
 
     extra = extra if extra is not None else []
 
-    while True:
-        res = subprocess.run(
-            [sys.executable, "main.py"] + extra, env=new_env, check=False
-        )
+    process = None
 
-        if reboot_path is None:
-            print("[bold red]ComfyUI is not installed.[/bold red]\n")
-            exit(res)
+    if "COMFY_CLI_BACKGROUND" not in os.environ:
+        # If not running in background mode, there's no need to use popen. This can prevent the issue of linefeeds occurring with tqdm.
+        while True:
+            res = subprocess.run(
+                [sys.executable, "main.py"] + extra, env=new_env, check=False
+            )
 
-        if not os.path.exists(reboot_path):
-            exit(res)
+            if reboot_path is None:
+                print("[bold red]ComfyUI is not installed.[/bold red]\n")
+                exit(res)
 
-        os.remove(reboot_path)
+            if not os.path.exists(reboot_path):
+                exit(res)
+
+            os.remove(reboot_path)
+    else:
+        # If running in background mode without using a popen, broken pipe errors may occur when flushing stdout/stderr.
+        def redirector_stderr():
+            while True:
+                if process is not None:
+                    print(process.stderr.readline(), end="")
+
+        def redirector_stdout():
+            while True:
+                if process is not None:
+                    print(process.stdout.readline(), end="")
+
+        threading.Thread(target=redirector_stderr).start()
+        threading.Thread(target=redirector_stdout).start()
+
+        try:
+            while True:
+                if sys.platform == "win32":
+                    process = subprocess.Popen(
+                        [sys.executable, "main.py"] + extra,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                        env=new_env,
+                        encoding="utf-8",
+                        shell=True,  # win32 only
+                        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,  # win32 only
+                    )
+                else:
+                    process = subprocess.Popen(
+                        [sys.executable, "main.py"] + extra,
+                        text=True,
+                        env=new_env,
+                        encoding="utf-8",
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                    )
+
+                process.wait()
+
+                if reboot_path is None:
+                    print("[bold red]ComfyUI is not installed.[/bold red]\n")
+                    os._exit(process.pid)
+
+                if not os.path.exists(reboot_path):
+                    os._exit(process.pid)
+
+                os.remove(reboot_path)
+        except KeyboardInterrupt:
+            if process is not None:
+                os._exit(1)
 
 
 @app.command(help="Stop background ComfyUI")
@@ -565,6 +623,7 @@ def launch(
 ):
     check_for_updates()
     resolved_workspace = workspace_manager.workspace_path
+
     if not resolved_workspace:
         print(
             "\nComfyUI is not available.\nTo install ComfyUI, you can run:\n\n\tcomfy install\n\n",
@@ -605,12 +664,18 @@ def set_default(
     comfy_path = os.path.abspath(os.path.expanduser(workspace_path))
 
     if not os.path.exists(comfy_path):
-        print(f"Path not found: {comfy_path}.")
+        print(
+            f"\nPath not found: {comfy_path}.\n",
+            file=sys.stderr,
+        )
         raise typer.Exit(code=1)
 
     is_comfy_repo, comfy_repo = check_comfy_repo(comfy_path)
     if not is_comfy_repo:
-        print(f"Specified path is not a ComfyUI path: {comfy_path}.")
+        print(
+            f"\nSpecified path is not a ComfyUI path: {comfy_path}.\n",
+            file=sys.stderr,
+        )
         raise typer.Exit(code=1)
 
     comfy_path = comfy_repo.working_dir

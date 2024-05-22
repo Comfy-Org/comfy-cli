@@ -35,15 +35,20 @@ def execute_cm_cli(args, channel=None, mode=None):
 
     workspace_path = workspace_manager.workspace_path
 
-    if not os.path.exists(workspace_path):
-        print(f"\nComfyUI not found: {workspace_path}\n", file=sys.stderr)
+    if not workspace_path:
+        print(
+            f"\n[bold red]ComfyUI path is not resolved.[/bold red]\n", file=sys.stderr
+        )
         raise typer.Exit(code=1)
 
     cm_cli_path = os.path.join(
         workspace_path, "custom_nodes", "ComfyUI-Manager", "cm-cli.py"
     )
     if not os.path.exists(cm_cli_path):
-        print(f"\nComfyUI-Manager not found: {cm_cli_path}\n", file=sys.stderr)
+        print(
+            f"\n[bold red]ComfyUI-Manager not found: {cm_cli_path}[/bold red]\n",
+            file=sys.stderr,
+        )
         raise typer.Exit(code=1)
 
     cmd = [sys.executable, cm_cli_path] + args
@@ -66,7 +71,7 @@ def execute_cm_cli(args, channel=None, mode=None):
         subprocess.run(cmd, env=new_env, check=True)
     except subprocess.CalledProcessError as e:
         if e.returncode == 1:
-            print(f"Execution error: {cmd}", file=sys.stderr)
+            print(f"\n[bold red]Execution error: {cmd}[/bold red]\n", file=sys.stderr)
         elif e.returncode == 2:
             pass
         else:
@@ -681,7 +686,7 @@ def publish(
         upload_file_to_signed_url(signed_url, zip_filename)
     except Exception as e:
         ui.display_error_message({str(e)})
-        return
+        typer.Exit(code=1)
 
 
 @app.command("init", help="Init scaffolding for custom node")
