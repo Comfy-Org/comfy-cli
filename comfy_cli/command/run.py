@@ -1,5 +1,6 @@
 import json
 import os
+import sys
 import time
 import typer
 import uuid
@@ -32,9 +33,9 @@ def load_api_workflow(file: str):
 
 
 def execute(workflow: str, listen, port, wait=True, verbose=False):
-    workflow_name = os.path.abspath(workflow)
+    workflow_name = os.path.abspath(os.path.expanduser(workflow))
     if not os.path.isfile(workflow):
-        pprint("[bold red]Specified workflow file not found[/bold red]")
+        pprint(f"[bold red]Specified workflow file not found: {workflow}[/bold red]", file=sys.stderr)
         raise typer.Exit(code=1)
 
     workflow = load_api_workflow(workflow)
