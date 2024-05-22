@@ -1,17 +1,10 @@
-
 import json
 import os
 import time
 import typer
 import uuid
 import urllib.error
-from rich.progress import (
-    BarColumn,
-    Progress,
-    TimeElapsedColumn,
-    Column,
-    Table
-)
+from rich.progress import BarColumn, Progress, TimeElapsedColumn, Column, Table
 from urllib import request
 from websocket import WebSocket
 from rich import print as pprint
@@ -41,9 +34,7 @@ def load_api_workflow(file: str):
 def execute(workflow: str, listen, port, wait=True, verbose=False):
     workflow_name = os.path.abspath(workflow)
     if not os.path.isfile(workflow):
-        pprint(
-            "[bold red]Specified workflow file not found[/bold red]"
-        )
+        pprint("[bold red]Specified workflow file not found[/bold red]")
         raise typer.Exit(code=1)
 
     workflow = load_api_workflow(workflow)
@@ -55,9 +46,7 @@ def execute(workflow: str, listen, port, wait=True, verbose=False):
         raise typer.Exit(code=1)
 
     if not check_comfy_server_running(port):
-        pprint(
-            f"[bold red]ComfyUI not running on specified port ({port})[/bold red]"
-        )
+        pprint(f"[bold red]ComfyUI not running on specified port ({port})[/bold red]")
         raise typer.Exit(code=1)
 
     progress = None
@@ -69,8 +58,7 @@ def execute(workflow: str, listen, port, wait=True, verbose=False):
     else:
         print(f"Queuing workflow: {workflow_name}")
 
-    execution = WorkflowExecution(
-        workflow, listen, port, verbose, progress)
+    execution = WorkflowExecution(workflow, listen, port, verbose, progress)
 
     try:
         if wait:
@@ -88,9 +76,10 @@ def execute(workflow: str, listen, port, wait=True, verbose=False):
                 for f in execution.outputs:
                     pprint(f)
 
-            elapsed = timedelta(seconds=end-start)
+            elapsed = timedelta(seconds=end - start)
             pprint(
-                f"[bold green]\nWorkflow execution completed ({elapsed})[/bold green]")
+                f"[bold green]\nWorkflow execution completed ({elapsed})[/bold green]"
+            )
         else:
             pprint("[bold green]Workflow queued[/bold green]")
     finally:
@@ -110,13 +99,14 @@ class ExecutionProgress(Progress):
         )
 
         for task in self.tasks:
-            percent = "[progress.percentage]{task.percentage:>3.0f}%".format(
-                task=task)
+            percent = "[progress.percentage]{task.percentage:>3.0f}%".format(task=task)
             if task.fields.get("progress_type") == "overall":
                 overall_table = Table.grid(
-                    *table_columns, padding=(0, 1), expand=self.expand)
-                overall_table.add_row(BarColumn().render(
-                    task), percent, TimeElapsedColumn().render(task))
+                    *table_columns, padding=(0, 1), expand=self.expand
+                )
+                overall_table.add_row(
+                    BarColumn().render(task), percent, TimeElapsedColumn().render(task)
+                )
                 yield overall_table
             else:
                 yield self.make_tasks_table([task])
@@ -135,7 +125,8 @@ class WorkflowExecution:
         self.total_nodes = len(self.remaining_nodes)
         if progress:
             self.overall_task = self.progress.add_task(
-                "", total=self.total_nodes, progress_type="overall")
+                "", total=self.total_nodes, progress_type="overall"
+            )
         self.current_node = None
         self.progress_task = None
         self.progress_node = None
@@ -143,13 +134,13 @@ class WorkflowExecution:
 
     def connect(self):
         self.ws = WebSocket()
-        self.ws.connect(
-            f"ws://{self.host}:{self.port}/ws?clientId={self.client_id}")
+        self.ws.connect(f"ws://{self.host}:{self.port}/ws?clientId={self.client_id}")
 
     def queue(self):
         data = {"prompt": self.workflow, "client_id": self.client_id}
         req = request.Request(
-            f"http://{self.host}:{self.port}/prompt", json.dumps(data).encode("utf-8"))
+            f"http://{self.host}:{self.port}/prompt", json.dumps(data).encode("utf-8")
+        )
         try:
             resp = request.urlopen(req)
             body = json.loads(resp.read())
@@ -167,10 +158,8 @@ class WorkflowExecution:
                     message = json.dumps(body["node_errors"], indent=2)
 
             self.progress.stop()
-            
-            pprint(
-                f"[bold red]Error running workflow\n{message}[/bold red]"
-            )
+
+            pprint(f"[bold red]Error running workflow\n{message}[/bold red]")
             raise typer.Exit(code=1)
 
     def watch_execution(self):
@@ -184,7 +173,8 @@ class WorkflowExecution:
 
     def update_overall_progress(self):
         self.progress.update(
-            self.overall_task, completed=self.total_nodes - len(self.remaining_nodes))
+            self.overall_task, completed=self.total_nodes - len(self.remaining_nodes)
+        )
 
     def get_node_title(self, node_id):
         node = self.workflow[node_id]
@@ -214,8 +204,9 @@ class WorkflowExecution:
         if subfolder:
             filename = os.path.join(subfolder, filename)
 
-        filename = os.path.join(workspace_manager.get_workspace_path()[
-                                0], output_type, filename)
+        filename = os.path.join(
+            workspace_manager.get_workspace_path()[0], output_type, filename
+        )
         return filename
 
     def on_message(self, message):
@@ -245,11 +236,11 @@ class WorkflowExecution:
         if data["node"] is None:
             return False
         else:
-           if self.current_node:
-               self.remaining_nodes.discard(self.current_node)
-               self.update_overall_progress()
-           self.current_node = data["node"]
-           self.log_node("Executing", data["node"])
+            if self.current_node:
+                self.remaining_nodes.discard(self.current_node)
+                self.update_overall_progress()
+            self.current_node = data["node"]
+            self.log_node("Executing", data["node"])
         return True
 
     def on_cached(self, data):
@@ -267,7 +258,8 @@ class WorkflowExecution:
                 self.progress.remove_task(self.progress_task)
 
             self.progress_task = self.progress.add_task(
-                self.get_node_title(node), total=data["max"], progress_type="node")
+                self.get_node_title(node), total=data["max"], progress_type="node"
+            )
         self.progress.update(self.progress_task, completed=data["value"])
 
     def on_executed(self, data):
