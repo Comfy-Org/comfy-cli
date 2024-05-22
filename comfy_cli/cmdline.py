@@ -122,11 +122,13 @@ def entry(
         )
         print(ctx.get_help())
         ctx.exit()
-    start_time = time.time()
-    workspace_manager.scan_dir()
-    end_time = time.time()
 
-    logging.info(f"scan_dir took {end_time - start_time:.2f} seconds to run")
+    # TODO: Move this to proper place
+    # start_time = time.time()
+    # workspace_manager.scan_dir()
+    # end_time = time.time()
+    #
+    # logging.info(f"scan_dir took {end_time - start_time:.2f} seconds to run")
 
 
 gpu_exclusivity_callback = mutually_exclusive_group_options()
