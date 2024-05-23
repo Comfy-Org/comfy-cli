@@ -478,7 +478,7 @@ def background_launch(extra):
             )
         )
 
-    console.print(f"\n[bold red]Execution error: failed to launch ComfyUI[/bold red]\n")
+    console.print("\n[bold red]Execution error: failed to launch ComfyUI[/bold red]\n")
     # NOTE: os.exit(0) doesn't work
     os._exit(1)
 
