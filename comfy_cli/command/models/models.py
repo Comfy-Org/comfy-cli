@@ -309,7 +309,7 @@ def remove(
 
     # Confirm deletion
     if to_delete and ui.prompt_confirm_action(
-        "Are you sure you want to delete the selected files?"
+        "Are you sure you want to delete the selected files?", False
     ):
         for model_path in to_delete:
             model_path.unlink()

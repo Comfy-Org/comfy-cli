@@ -157,7 +157,7 @@ def execute(
 ):
 
     if not workspace_manager.skip_prompting:
-        res = ui.prompt_confirm_action(f"Install from {url} to {comfy_path}?")
+        res = ui.prompt_confirm_action(f"Install from {url} to {comfy_path}?", True)
 
         if not res:
             print("Aborting...")

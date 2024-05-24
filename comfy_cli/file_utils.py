@@ -41,7 +41,7 @@ def guess_status_code_reason(status_code: int, message: str) -> str:
     elif status_code == 403:
         return f"Forbidden url ({status_code}), you might need to manually log into browser to download one"
     elif status_code == 404:
-        return "Sorry, your model is in another castle (404)"
+        return "Sorry, your file is in another castle (404)"
     return f"Unknown error occurred (status code: {status_code})"
 
 
@@ -69,7 +69,7 @@ def download_file(
                         f.write(data)
             except KeyboardInterrupt:
                 delete_eh = ui.prompt_confirm_action(
-                    "Download interrupted, cleanup files?"
+                    "Download interrupted, cleanup files?", True
                 )
                 if delete_eh:
                     local_filepath.unlink()

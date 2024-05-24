@@ -1,5 +1,7 @@
 import os
 import pathlib
+import platform
+import re
 import subprocess
 import sys
 import uuid
@@ -98,6 +100,125 @@ def validate_comfyui_manager(_env_checker):
             f"[bold red]The ComfyUI-Manager installation is invalid. This feature cannot be used.[/bold red] \\[{manager_path}]"
         )
         raise typer.Exit(code=1)
+
+
+def run_script(cmd, cwd="."):
+    if len(cmd) > 0 and cmd[0].startswith("#"):
+        print(f"[ComfyUI-Manager] Unexpected behavior: `{cmd}`")
+        return 0
+
+    subprocess.check_call(cmd, cwd=cwd)
+
+    return 0
+
+
+pip_map = None
+
+
+def get_installed_packages():
+    global pip_map
+
+    if pip_map is None:
+        try:
+            result = subprocess.check_output(
+                [sys.executable, "-m", "pip", "list"], universal_newlines=True
+            )
+
+            pip_map = {}
+            for line in result.split("\n"):
+                x = line.strip()
+                if x:
+                    y = line.split()
+                    if y[0] == "Package" or y[0].startswith("-"):
+                        continue
+
+                    pip_map[y[0]] = y[1]
+        except subprocess.CalledProcessError as e:
+            print(
+                f"[ComfyUI-Manager] Failed to retrieve the information of installed pip packages."
+            )
+            return set()
+
+    return pip_map
+
+
+def try_install_script(repo_path, install_cmd, instant_execution=False):
+    startup_script_path = os.path.join(
+        workspace_manager.workspace_path, "startup-scripts"
+    )
+    if not instant_execution and (
+        (len(install_cmd) > 0 and install_cmd[0].startswith("#"))
+        or (
+            platform.system()
+            == "Windows"
+            # From Yoland: disable commit compare
+            # and comfy_ui_commit_datetime.date()
+            # >= comfy_ui_required_commit_datetime.date()
+        )
+    ):
+        if not os.path.exists(startup_script_path):
+            os.makedirs(startup_script_path)
+
+        script_path = os.path.join(startup_script_path, "install-scripts.txt")
+        with open(script_path, "a", encoding="utf-8") as file:
+            obj = [repo_path] + install_cmd
+            file.write(f"{obj}\n")
+
+        return True
+    else:
+        # From Yoland: Disable blacklisting
+        # if len(install_cmd) == 5 and install_cmd[2:4] == ['pip', 'install']:
+        #     if is_blacklisted(install_cmd[4]):
+        #         print(f"[ComfyUI-Manager] skip black listed pip installation: '{install_cmd[4]}'")
+        #         return True
+
+        print(f"\n## ComfyUI-Manager: EXECUTE => {install_cmd}")
+        code = run_script(install_cmd, cwd=repo_path)
+
+        # From Yoland: Disable warning
+        # if platform.system() != "Windows":
+        #     try:
+        #         if comfy_ui_commit_datetime.date() < comfy_ui_required_commit_datetime.date():
+        #             print("\n\n###################################################################")
+        #             print(f"[WARN] ComfyUI-Manager: Your ComfyUI version ({comfy_ui_revision})[{comfy_ui_commit_datetime.date()}] is too old. Please update to the latest version.")
+        #             print(f"[WARN] The extension installation feature may not work properly in the current installed ComfyUI version on Windows environment.")
+        #             print("###################################################################\n\n")
+        #     except:
+        #         pass
+
+        if code != 0:
+            print("install script failed")
+            return False
+
+
+def execute_install_script(repo_path):
+    install_script_path = os.path.join(repo_path, "install.py")
+    requirements_path = os.path.join(repo_path, "requirements.txt")
+
+    # From Yoland: disable lazy mode
+    # if lazy_mode:
+    #     install_cmd = ["#LAZY-INSTALL-SCRIPT",  sys.executable]
+    #     try_install_script(repo_path, install_cmd)
+    # else:
+
+    if os.path.exists(requirements_path):
+        # import pdb
+        # pdb.set_trace()
+        print("Install: pip packages")
+        with open(requirements_path, "r", encoding="utf-8") as requirements_file:
+            for line in requirements_file:
+                # From Yoland: disable pip override
+                # package_name = remap_pip_package(line.strip())
+                package_name = line.strip()
+                if package_name and not package_name.startswith("#"):
+                    install_cmd = [sys.executable, "-m", "pip", "install", package_name]
+                    if package_name.strip() != "":
+                        try_install_script(repo_path, install_cmd)
+
+    if os.path.exists(install_script_path):
+        print("Install: install script")
+        install_cmd = [sys.executable, "install.py"]
+        try_install_script(repo_path, install_cmd)
 
 
 @app.command("save-snapshot", help="Save a snapshot of the current ComfyUI environment")
@@ -745,9 +866,23 @@ def display_all_nodes():
     )
 
 
-@app.command("registry-install", help="Install a node from the registry", hidden=True)
+@app.command(
+    "registry-install",
+    help="Install a node from the registry",
+    hidden=True,
+)
 @tracking.track_command("node")
-def registry_install(node_id: str, version: Optional[str] = None):
+def registry_install(
+    node_id: str,
+    version: Optional[str] = None,
+    force_download: Annotated[
+        bool,
+        typer.Option(
+            "--force-download",
+            help="Force download the node even if it is already installed",
+        ),
+    ] = False,
+):
     """
     Install a node from the registry.
     Args:
@@ -778,6 +913,17 @@ def registry_install(node_id: str, version: Optional[str] = None):
     # Download the node archive
     custom_nodes_path = pathlib.Path(workspace_manager.workspace_path) / "custom_nodes"
     node_specific_path = custom_nodes_path / node_id  # Subdirectory for the node
+    if node_specific_path.exists():
+        print(
+            f"[bold red] The node {node_id} already exists in the workspace. This migit delete any model files in the node.[/bold red]"
+        )
+
+        confirm = ui.prompt_confirm_action(
+            "Do you want to overwrite it?",
+            force_download,
+        )
+        if not confirm:
+            return
     node_specific_path.mkdir(
         parents=True, exist_ok=True
     )  # Create the directory if it doesn't exist
@@ -793,6 +939,9 @@ def registry_install(node_id: str, version: Optional[str] = None):
         f"Start extracting the node {node_id} version {node_version.version} to {custom_nodes_path}"
     )
     extract_package_as_zip(local_filename, node_specific_path)
+
+    # TODO: temoporary solution to run requirement.txt and install script
+    execute_install_script(node_specific_path)
 
     # Delete the downloaded archive
     logging.debug(f"Deleting the downloaded archive {local_filename}")

@@ -110,7 +110,7 @@ def prompt_multi_select(prompt: str, choices: List[str]) -> List[str]:
     return selections if selections else []
 
 
-def prompt_confirm_action(prompt: str) -> bool:
+def prompt_confirm_action(prompt: str, default: bool) -> bool:
     """
     Prompts the user for confirmation before proceeding with an action.
 
@@ -120,6 +120,8 @@ def prompt_confirm_action(prompt: str) -> bool:
     Returns:
         bool: True if the user confirms, False otherwise.
     """
+    if workspace_manager.skip_prompting:
+        return default
 
     return typer.confirm(prompt)
 

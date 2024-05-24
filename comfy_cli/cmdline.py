@@ -280,7 +280,7 @@ def install(
             raise typer.Exit(code=1)
         if intel_arc is None:
             confirm_result = ui.prompt_confirm_action(
-                "Are you sure you want to try beta install feature on Intel ARC?"
+                "Are you sure you want to try beta install feature on Intel ARC?", True
             )
             if not confirm_result:
                 raise typer.Exit(code=0)
