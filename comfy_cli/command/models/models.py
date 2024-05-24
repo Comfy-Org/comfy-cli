@@ -44,6 +44,9 @@ def potentially_strip_param_url(path_name: str) -> str:
 def check_huggingface_url(url: str) -> bool:
     return "huggingface.co" in url
 
+def check_comfy_dl_url(url: str) -> bool:
+    return "comfy-dl.vercel.app" in url
+
 
 def check_civitai_url(url: str) -> Tuple[bool, bool, int, int]:
     """
@@ -128,7 +131,6 @@ def request_civitai_model_api(
 
     # If the specified version_id is not found, raise an error
     raise ValueError(f"Version ID {version_id} not found for model ID {model_id}")
-
 
 @app.command(help="Download model file from url")
 @tracking.track_command("model")
@@ -227,9 +229,24 @@ def download(
             relative_path = os.path.join(
                 DEFAULT_COMFY_MODEL_PATH, model_path, basemodel
             )
-    else:
-        print("Model source is unknown")
+    elif check_comfy_dl_url(url):
+        is_comfy_dl = True
+        local_filename = potentially_strip_param_url(url.split("/")[-1])
 
+        if relative_path is None:
+            model_path = ui.prompt_input(
+                "Enter model type path (e.g. loras, checkpoints, ...)", default=""
+            )
+            basemodel = ui.prompt_input(
+                "Enter base model (e.g. SD1.5, SDXL, ...)", default=""
+            )
+            relative_path = os.path.join(
+                DEFAULT_COMFY_MODEL_PATH, model_path, basemodel
+            )
+    else:
+        local_filename = potentially_strip_param_url(url.split("/")[-1])
+        print("Model source is unknown") 
+    
     local_filename = ui.prompt_input(
         "Enter filename to save model as", default=local_filename
     )
