@@ -51,7 +51,7 @@ class RegistryAPI:
             "node": {
                 "id": node_config.project.name,
                 "description": node_config.project.description,
-                "icon": node_config.project.icon,
+                "icon": node_config.tool_comfy.icon,
                 "name": node_config.tool_comfy.display_name,
                 "license": node_config.project.license,
                 "repository": node_config.project.urls.repository,
