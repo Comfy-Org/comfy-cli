@@ -358,16 +358,41 @@ def run(
         Optional[bool],
         typer.Option(help="Enables verbose output of the execution process."),
     ] = False,
+    host: Annotated[
+        Optional[str],
+        typer.Option(
+            help="The IP/hostname where the ComfyUI instance is running, e.g. 127.0.0.1 or localhost."
+        ),
+    ] = None,
+    port: Annotated[
+        Optional[int],
+        typer.Option(help="The port where the ComfyUI instance is running, e.g. 8188."),
+    ] = None,
 ):
     config = ConfigManager()
-    if not config.background:
-        print(
-            "[bold red]No ComfyUI background process information found. Please ensure you have run `comfy launch --background` first.[/bold red]"
-        )
-        raise typer.Exit(code=1)
-    run_inner.execute(
-        workflow, config.background[0], config.background[1], wait, verbose
-    )
+
+    if host:
+        s = host.split(":")
+        host = s[0]
+        if not port and len(s) == 2:
+            port = int(s[1])
+
+    local_paths = False
+    if config.background:
+        if not host:
+            host = config.background[0]
+            local_paths = True
+        if port:
+            local_paths = False
+        else:
+            port = config.background[1]
+
+    if not host:
+        host = "127.0.0.1"
+    if not port:
+        port = 8188
+
+    run_inner.execute(workflow, host, port, wait, verbose, local_paths)
 
 
 def validate_comfyui(_env_checker):

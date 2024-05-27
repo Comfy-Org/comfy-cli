@@ -5,6 +5,7 @@ import time
 import typer
 import uuid
 import urllib.error
+import urllib.parse
 from rich.progress import BarColumn, Progress, TimeElapsedColumn, Column, Table
 from urllib import request
 from websocket import WebSocket
@@ -32,10 +33,13 @@ def load_api_workflow(file: str):
         return workflow
 
 
-def execute(workflow: str, listen, port, wait=True, verbose=False):
+def execute(workflow: str, host, port, wait=True, verbose=False, local_paths=False):
     workflow_name = os.path.abspath(os.path.expanduser(workflow))
     if not os.path.isfile(workflow):
-        pprint(f"[bold red]Specified workflow file not found: {workflow}[/bold red]", file=sys.stderr)
+        pprint(
+            f"[bold red]Specified workflow file not found: {workflow}[/bold red]",
+            file=sys.stderr,
+        )
         raise typer.Exit(code=1)
 
     workflow = load_api_workflow(workflow)
@@ -46,8 +50,10 @@ def execute(workflow: str, listen, port, wait=True, verbose=False):
         )
         raise typer.Exit(code=1)
 
-    if not check_comfy_server_running(port):
-        pprint(f"[bold red]ComfyUI not running on specified port ({port})[/bold red]")
+    if not check_comfy_server_running(port, host):
+        pprint(
+            f"[bold red]ComfyUI not running on specified address ({host}:{port})[/bold red]"
+        )
         raise typer.Exit(code=1)
 
     progress = None
@@ -59,7 +65,7 @@ def execute(workflow: str, listen, port, wait=True, verbose=False):
     else:
         print(f"Queuing workflow: {workflow_name}")
 
-    execution = WorkflowExecution(workflow, listen, port, verbose, progress)
+    execution = WorkflowExecution(workflow, host, port, verbose, progress, local_paths)
 
     try:
         if wait:
@@ -114,11 +120,12 @@ class ExecutionProgress(Progress):
 
 
 class WorkflowExecution:
-    def __init__(self, workflow, host, port, verbose, progress):
+    def __init__(self, workflow, host, port, verbose, progress, local_paths):
         self.workflow = workflow
         self.host = host
         self.port = port
         self.verbose = verbose
+        self.local_paths = local_paths
         self.client_id = str(uuid.uuid4())
         self.outputs = []
         self.progress = progress
@@ -202,13 +209,17 @@ class WorkflowExecution:
         subfolder = img["subfolder"]
         output_type = img["type"] or "output"
 
-        if subfolder:
-            filename = os.path.join(subfolder, filename)
+        if self.local_paths:
+            if subfolder:
+                filename = os.path.join(subfolder, filename)
 
-        filename = os.path.join(
-            workspace_manager.get_workspace_path()[0], output_type, filename
-        )
-        return filename
+            filename = os.path.join(
+                workspace_manager.get_workspace_path()[0], output_type, filename
+            )
+            return filename
+
+        query = urllib.parse.urlencode(img)
+        return f"http://{self.host}:{self.port}/view?{query}"
 
     def on_message(self, message):
         data = message["data"] if "data" in message else {}
