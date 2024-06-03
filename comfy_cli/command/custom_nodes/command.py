@@ -807,7 +807,7 @@ def publish(
         upload_file_to_signed_url(signed_url, zip_filename)
     except Exception as e:
         ui.display_error_message({str(e)})
-        typer.Exit(code=1)
+        raise typer.Exit(code=1)
 
 
 @app.command("init", help="Init scaffolding for custom node")
