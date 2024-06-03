@@ -32,10 +32,10 @@ jobs:
       - name: Build distribution
         run: python -m build --sdist --wheel --outdir dist/
 
-      - name: Publish distribution to TestPyPI for Validation
-        uses: pypa/gh-action-pypi-publish@v1.8.14
-        with:
-          repository_url: https://test.pypi.org/legacy/
+      # - name: Publish distribution to TestPyPI for Validation
+      #   uses: pypa/gh-action-pypi-publish@v1.8.14
+      #   with:
+      #     repository_url: https://test.pypi.org/legacy/
           
       - name: Clear pip cache
         run: pip cache purge
