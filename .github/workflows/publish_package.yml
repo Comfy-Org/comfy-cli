@@ -37,15 +37,15 @@ jobs:
       #   with:
       #     repository_url: https://test.pypi.org/legacy/
           
-      - name: Clear pip cache
-        run: pip cache purge
+      # - name: Clear pip cache
+      #   run: pip cache purge
 
-      - name: Install Comfy CLI from Test Pypi and Test
-        run: |
-          for i in {1..3}; do
-            pip install -i https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple comfy-cli==${{env.VERSION}} && break || sleep 5
-          done
-          comfy --help
+      # - name: Install Comfy CLI from Test Pypi and Test
+      #   run: |
+      #     for i in {1..3}; do
+      #       pip install -i https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple comfy-cli==${{env.VERSION}} && break || sleep 5
+      #     done
+      #     comfy --help
 
       - name: Publish distribution to Official PyPI
         uses: pypa/gh-action-pypi-publish@v1.8.14
