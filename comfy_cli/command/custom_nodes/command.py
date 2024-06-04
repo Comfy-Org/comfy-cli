@@ -25,6 +25,7 @@ from comfy_cli.registry import (
     initialize_project_config,
 )
 from comfy_cli.workspace_manager import WorkspaceManager
+from comfy_cli.constants import NODE_ZIP_FILENAME
 
 app = typer.Typer()
 manager_app = typer.Typer()
@@ -798,7 +799,7 @@ def publish(
         response = registry_api.publish_node_version(config, token)
         # Zip up all files in the current directory, respecting .gitignore files.
         signed_url = response.signedUrl
-        zip_filename = "node.tar.gz"
+        zip_filename = NODE_ZIP_FILENAME
         typer.echo("Creating zip file...")
         zip_files(zip_filename)
 
@@ -954,7 +955,7 @@ def registry_install(
 
 @app.command(
     "pack",
-    help="Pack the current node into a tar.gz file. Ignorining .gitignore files.",
+    help="Pack the current node into a zip file. Ignorining .gitignore files.",
 )
 @tracking.track_command("pack")
 def pack():
@@ -963,7 +964,7 @@ def pack():
     if not config:
         raise typer.Exit(code=1)
 
-    zip_filename = "node.tar.gz"
+    zip_filename = NODE_ZIP_FILENAME
     zip_files(zip_filename)
-    typer.echo("Created zip file: node.tar.gz")
+    typer.echo(f"Created zip file: {NODE_ZIP_FILENAME}")
     logging.info("Node has been packed successfully.")
