@@ -11,3 +11,4 @@ pathspec
 httpx
 packaging
 charset-normalizer>=3.0.0
+websocket-client

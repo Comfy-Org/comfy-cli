@@ -17,6 +17,7 @@ import threading
 
 from comfy_cli import constants, env_checker, logging, tracking, ui, utils
 from comfy_cli.command import custom_nodes
+from comfy_cli.command import run as run_inner
 from comfy_cli.command import install as install_inner
 from comfy_cli.command.models import models as models_command
 from comfy_cli.config_manager import ConfigManager
@@ -355,12 +356,55 @@ def update(
     custom_nodes.command.update_node_id_cache()
 
 
-# @app.command(help="Run workflow file")
-# @tracking.track_command()
-# def run(
-#   workflow_file: Annotated[str, typer.Option(help="Path to the workflow file.")],
-# ):
-#   run_inner.execute(workflow_file)
+@app.command(
+    help="Run API workflow file using the ComfyUI launched by `comfy launch --background`"
+)
+@tracking.track_command()
+def run(
+    workflow: Annotated[str, typer.Option(help="Path to the workflow API json file.")],
+    wait: Annotated[
+        Optional[bool],
+        typer.Option(help="If the command should wait until execution completes."),
+    ] = True,
+    verbose: Annotated[
+        Optional[bool],
+        typer.Option(help="Enables verbose output of the execution process."),
+    ] = False,
+    host: Annotated[
+        Optional[str],
+        typer.Option(
+            help="The IP/hostname where the ComfyUI instance is running, e.g. 127.0.0.1 or localhost."
+        ),
+    ] = None,
+    port: Annotated[
+        Optional[int],
+        typer.Option(help="The port where the ComfyUI instance is running, e.g. 8188."),
+    ] = None,
+):
+    config = ConfigManager()
+
+    if host:
+        s = host.split(":")
+        host = s[0]
+        if not port and len(s) == 2:
+            port = int(s[1])
+
+    local_paths = False
+    if config.background:
+        if not host:
+            host = config.background[0]
+            local_paths = True
+        if port:
+            local_paths = False
+        else:
+            port = config.background[1]
+
+    if not host:
+        host = "127.0.0.1"
+    if not port:
+        port = 8188
+
+    run_inner.execute(workflow, host, port, wait, verbose, local_paths)
 
 
 def validate_comfyui(_env_checker):
