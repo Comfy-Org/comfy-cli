@@ -111,7 +111,19 @@ def entry(
             help="Enable tracking",
         ),
     ] = True,
+    version: bool = typer.Option(
+        False,
+        "--version",
+        "-v",
+        help="Print version and exit",
+        is_flag=True,
+        callback=exclusivity_callback,
+    ),
 ):
+    if version:
+        print(ConfigManager().get_cli_version())
+        ctx.exit(0)
+
     workspace_manager.setup_workspace_manager(workspace, here, recent, skip_prompt)
 
     tracking.prompt_tracking_consent(skip_prompt, default_value=enable_telemetry)

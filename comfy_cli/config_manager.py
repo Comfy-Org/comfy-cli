@@ -1,6 +1,8 @@
 import configparser
 import os
 
+import tomlkit
+
 from comfy_cli.utils import singleton, get_os, is_running
 from comfy_cli import constants, logging
 from typing import Optional, Tuple
@@ -119,7 +121,8 @@ class ConfigManager(object):
         self.background = None
 
     def get_cli_version(self):
-        # Note: this approach should work for users installing the CLI via PyPi (e.g., pip install comfy-cli)
+        # Note: this approach should work for users installing the CLI via
+        # PyPi and Homebrew (e.g., pip install comfy-cli)
         try:
             return version("comfy-cli")
         except Exception as e:
@@ -127,5 +130,4 @@ class ConfigManager(object):
                 f"Error occurred while retrieving CLI version using importlib.metadata: {e}"
             )
 
-        # TODO: cover the users installing the CLI via homebrew
         return "0.0.0"
