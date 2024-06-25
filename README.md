@@ -145,7 +145,7 @@ comfy node [show|simple-show] [installed|enabled|not-installed|disabled|all|snap
 
 - Generate deps:
 
-  `comfy node deps-in-workflow --workflow=<workflow .json/.png file>`
+  `comfy node deps-in-workflow --workflow=<workflow .json/.png file> --output=<output deps .json file>` 
 
 ### Managing Models
 
