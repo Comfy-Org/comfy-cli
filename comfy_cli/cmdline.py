@@ -112,14 +112,15 @@ def entry(
             help="Enable tracking",
         ),
     ] = True,
-    version: bool = typer.Option(
-        False,
-        "--version",
-        "-v",
-        help="Print version and exit",
-        is_flag=True,
-        callback=exclusivity_callback,
-    ),
+    version: Annotated[
+        Optional[bool],
+        typer.Option(
+            show_default=False,
+            is_flag=True,
+            help="Print version and exit",
+            callback=exclusivity_callback,
+        ),
+    ] = None,
 ):
     if version:
         print(ConfigManager().get_cli_version())
