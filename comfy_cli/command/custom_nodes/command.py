@@ -789,9 +789,12 @@ def publish(
     typer.echo("Validating node configuration...")
     config = extract_node_configuration()
 
-    # Prompt for Personal Access Token
+    # Prompt for API Key
     if not token:
-        token = typer.prompt("Please enter your Personal Access Token", hide_input=True)
+        token = typer.prompt(
+            "Please enter your API Key (can be created on https://registry.comfy.org)",
+            hide_input=True,
+        )
 
     # Call API to fetch node version with the token in the body
     typer.echo("Publishing node version...")
