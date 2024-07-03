@@ -23,6 +23,10 @@ jobs:
       - name: Check out code
         uses: actions/checkout@v4
 
+      - name: Check Nvidia
+        run: |
+          nvidia-smi
+
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
