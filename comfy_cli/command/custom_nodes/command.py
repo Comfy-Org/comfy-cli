@@ -33,7 +33,7 @@ workspace_manager = WorkspaceManager()
 registry_api = RegistryAPI()
 
 
-def execute_cm_cli(args, channel=None, mode=None):
+def execute_cm_cli(args, channel=None, mode=None, silent=False):
     _config_manager = ConfigManager()
 
     workspace_path = workspace_manager.workspace_path
@@ -71,7 +71,16 @@ def execute_cm_cli(args, channel=None, mode=None):
     print(f"Execute from: {workspace_path}")
 
     try:
-        subprocess.run(cmd, env=new_env, check=True)
+        if silent:
+            subprocess.run(
+                cmd,
+                env=new_env,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=True,
+            )
+        else:
+            subprocess.run(cmd, env=new_env, check=True)
     except subprocess.CalledProcessError as e:
         if e.returncode == 1:
             print(f"\n[bold red]Execution error: {cmd}[/bold red]\n", file=sys.stderr)

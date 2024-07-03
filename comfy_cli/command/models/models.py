@@ -133,7 +133,6 @@ def request_civitai_model_api(
 @app.command(help="Download model file from url")
 @tracking.track_command("model")
 def download(
-    _ctx: typer.Context,
     url: Annotated[
         str,
         typer.Option(
@@ -257,7 +256,6 @@ def download(
 @app.command()
 @tracking.track_command("model")
 def remove(
-    ctx: typer.Context,
     relative_path: str = typer.Option(
         DEFAULT_COMFY_MODEL_PATH,
         help="The relative path from the current workspace where the models are stored.",
@@ -321,7 +319,6 @@ def remove(
 @app.command()
 @tracking.track_command("model")
 def list(
-    ctx: typer.Context,
     relative_path: str = typer.Option(
         DEFAULT_COMFY_MODEL_PATH,
         help="The relative path from the current workspace where the models are stored.",

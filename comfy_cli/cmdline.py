@@ -19,6 +19,7 @@ from comfy_cli import constants, env_checker, logging, tracking, ui, utils
 from comfy_cli.command import custom_nodes
 from comfy_cli.command import run as run_inner
 from comfy_cli.command import install as install_inner
+from comfy_cli.command.snapshot import command as snapshot_command
 from comfy_cli.command.models import models as models_command
 from comfy_cli.config_manager import ConfigManager
 from comfy_cli.constants import GPU_OPTION
@@ -215,9 +216,15 @@ def install(
     commit: Annotated[
         Optional[str], typer.Option(help="Specify commit hash for ComfyUI")
     ] = None,
+    snapshot: Annotated[
+        str, typer.Option(help="Specify path to comfy-lock.yaml ")
+    ] = None,
 ):
     check_for_updates()
     checker = EnvChecker()
+
+    if snapshot is not None:
+        snapshot = os.path.abspath(snapshot)
 
     comfy_path = workspace_manager.get_specified_workspace()
 
@@ -316,6 +323,9 @@ def install(
         skip_torch_or_directml=skip_torch_or_directml,
         skip_requirement=skip_requirement,
     )
+
+    if snapshot is not None:
+        snapshot_command.apply_snapshot(snapshot)
 
     print(f"ComfyUI is installed at: {comfy_path}")
 
@@ -796,3 +806,4 @@ app.add_typer(models_command.app, name="model", help="Manage models.")
 app.add_typer(custom_nodes.app, name="node", help="Manage custom nodes.")
 app.add_typer(custom_nodes.manager_app, name="manager", help="Manage ComfyUI-Manager.")
 app.add_typer(tracking.app, name="tracking", help="Manage analytics tracking settings.")
+app.add_typer(snapshot_command.app, name="snapshot", help="Manage custom nodes.")
