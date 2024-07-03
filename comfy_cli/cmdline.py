@@ -115,6 +115,8 @@ def entry(
     version: Annotated[
         Optional[bool],
         typer.Option(
+            "--version",
+            "-v",
             show_default=False,
             is_flag=True,
             help="Print version and exit",
