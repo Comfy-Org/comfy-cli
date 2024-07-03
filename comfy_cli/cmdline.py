@@ -50,7 +50,7 @@ def mutually_exclusive_group_options():
             group.append(param.name)
         if len(group) > 1:
             raise typer.BadParameter(
-                f"option `{param.name}` is mutually exclusive with option `{group[0]}`"
+                f"option `{param.name}` is mutually exclusive with option `{group.pop()}`"
             )
         return value
 
@@ -118,7 +118,6 @@ def entry(
         "-v",
         help="Print version and exit",
         is_flag=True,
-        callback=exclusivity_callback,
     ),
 ):
     if version:
@@ -423,7 +422,6 @@ async def launch_and_monitor(cmd, listen, port):
     otherwise, return the log in case of failure.
     """
     logging_flag = False
-    term_flag = False
     log = []
     logging_lock = threading.Lock()
 
