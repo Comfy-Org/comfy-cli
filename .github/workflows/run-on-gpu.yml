@@ -1,4 +1,5 @@
 name: "Test CLI Tool on Multiple Platforms"
+
 on:
   push:
     branches:
@@ -8,16 +9,17 @@ on:
       - main
 
 jobs:
-  test:
-    name: "Run Tests on Multiple Platforms"
-    runs-on: ${{ matrix.os }}
-    env:
-      PYTHONIOENCODING: "utf8"
-    
+  test-cli-gpu:
+    name: "Run Tests on GPU Runners"
+    runs-on: ${{ matrix.os-runner }}
     strategy:
+      fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
-        python-version: ["3.9"]
+        include:
+          - os-runner: self-hosted, windows-x64-gpu
+            comfy-flags: "--nvidia"
+          - os-runner: self-hosted, linux-x64-gpu
+            comfy-flags: "--nvidia"
 
     steps:
       - name: Check out code
@@ -35,6 +37,4 @@ jobs:
       - name: Run Core Functionality
         run: |
           comfy --skip-prompt --no-enable-telemetry env
-          comfy --skip-prompt install --cpu
-          comfy launch --background
-          
+          comfy --skip-prompt install ${{ matrix.comfy-flags }}
