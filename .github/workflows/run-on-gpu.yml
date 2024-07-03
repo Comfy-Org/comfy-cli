@@ -36,3 +36,4 @@ jobs:
         run: |
           comfy --skip-prompt --no-enable-telemetry env
           comfy --skip-prompt install ${{ matrix.comfy-flags }} --nvidia
+          comfy launch --background
