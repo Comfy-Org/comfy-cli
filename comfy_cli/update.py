@@ -52,7 +52,10 @@ def notify_update(current_version: str, newer_version: str):
     )
 
     if sys.platform == "win32":
-        bell = ""  # windows cannot display bell emoji character.
+        # windows cannot display emoji characters.
+        bell = ""
+        message = message.replace(":sparkles:", "")
+        message = message.replace(":arrow_up:", "")
     else:
         bell = ":bell:"
 
