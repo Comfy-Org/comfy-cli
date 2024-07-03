@@ -37,5 +37,5 @@ jobs:
         run: |
           comfy --skip-prompt --no-enable-telemetry env
           comfy --skip-prompt install --cpu
-          comfy launch --background
+          comfy launch --background -- --cpu
           
