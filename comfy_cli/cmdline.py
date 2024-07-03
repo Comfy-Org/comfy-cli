@@ -315,6 +315,7 @@ def install(
         skip_manager,
         commit=commit,
         gpu=gpu,
+        cuda_version=cuda_version,
         plat=platform,
         skip_torch_or_directml=skip_torch_or_directml,
         skip_requirement=skip_requirement,
