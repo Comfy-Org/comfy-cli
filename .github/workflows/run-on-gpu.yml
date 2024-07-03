@@ -35,4 +35,4 @@ jobs:
       - name: Run Core Functionality
         run: |
           comfy --skip-prompt --no-enable-telemetry env
-          comfy --skip-prompt install ${{ matrix.comfy-flags }}
+          comfy --skip-prompt install ${{ matrix.comfy-flags }} --gpu --nvidia
