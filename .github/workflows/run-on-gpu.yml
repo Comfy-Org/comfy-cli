@@ -1,0 +1,47 @@
+name: "Test CLI Tool on GPU runners"
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'comfy_cli/**'
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'comfy_cli/**'
+
+jobs:
+  test-cli-gpu:
+    name: "Run Tests on GPU Runners"
+    runs-on: 
+      group: gpu-runners
+      labels: ${{ matrix.os }}-x64-gpu # 
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows, linux]
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Check Nvidia
+        run: |
+          nvidia-smi
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: 3.12
+
+      - name: Install Dependencies
+        run: |
+          pip install -e .
+
+      - name: Run Core Functionality
+        run: |
+          comfy --skip-prompt --no-enable-telemetry env
+          comfy --skip-prompt install ${{ matrix.comfy-flags }} --nvidia --cuda-version 11.8
+          comfy launch --background

@@ -24,6 +24,7 @@ def install_comfyui_dependencies(
     repo_dir,
     gpu: GPU_OPTION,
     plat: constants.OS,
+    cuda_version: constants.CUDAVersion,
     skip_torch_or_directml: bool,
     skip_requirement: bool,
 ):
@@ -50,18 +51,33 @@ def install_comfyui_dependencies(
 
         # install torch for NVIDIA
         if gpu == GPU_OPTION.NVIDIA:
-            pip_url = ["--extra-index-url", "https://download.pytorch.org/whl/cu121"]
-            result = subprocess.run(
-                [
-                    sys.executable,
-                    "-m",
-                    "pip",
-                    "install",
-                    "torch",
-                    "torchvision",
-                    "torchaudio",
+            base_command = [
+                sys.executable,
+                "-m",
+                "pip",
+                "install",
+                "torch",
+                "torchvision",
+                "torchaudio",
+            ]
+            if (
+                plat == constants.OS.WINDOWS
+                and cuda_version == constants.CUDAVersion.v12_1
+            ):
+                base_command += [
+                    "--extra-index-url",
+                    "https://download.pytorch.org/whl/cu121",
                 ]
-                + pip_url,
+            elif (
+                plat == constants.OS.WINDOWS
+                and cuda_version == constants.CUDAVersion.v11_8
+            ):
+                base_command += [
+                    "--extra-index-url",
+                    "https://download.pytorch.org/whl/cu118",
+                ]
+            result = subprocess.run(
+                base_command,
                 check=False,
             )
         # Beta support for intel arch based on this PR: https://github.com/comfyanonymous/ComfyUI/pull/3439
@@ -149,6 +165,7 @@ def execute(
     skip_manager: bool,
     commit=None,
     gpu: constants.GPU_OPTION = None,
+    cuda_version: constants.CUDAVersion = constants.CUDAVersion.v12_1,
     plat: constants.OS = None,
     skip_torch_or_directml: bool = False,
     skip_requirement: bool = False,
@@ -185,7 +202,7 @@ def execute(
         subprocess.run(["git", "checkout", commit])
 
     install_comfyui_dependencies(
-        repo_dir, gpu, plat, skip_torch_or_directml, skip_requirement
+        repo_dir, gpu, plat, cuda_version, skip_torch_or_directml, skip_requirement
     )
 
     WorkspaceManager().set_recent_workspace(repo_dir)

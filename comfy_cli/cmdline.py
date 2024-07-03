@@ -21,7 +21,7 @@ from comfy_cli.command import run as run_inner
 from comfy_cli.command import install as install_inner
 from comfy_cli.command.models import models as models_command
 from comfy_cli.config_manager import ConfigManager
-from comfy_cli.constants import GPU_OPTION
+from comfy_cli.constants import GPU_OPTION, CUDAVersion
 from comfy_cli.env_checker import EnvChecker, check_comfy_server_running
 from comfy_cli.update import check_for_updates
 from comfy_cli.workspace_manager import (
@@ -179,6 +179,9 @@ def install(
             callback=gpu_exclusivity_callback,
         ),
     ] = None,
+    cuda_version: Annotated[
+        CUDAVersion, typer.Option(show_default=True)
+    ] = CUDAVersion.v12_1,
     amd: Annotated[
         bool,
         typer.Option(
@@ -312,6 +315,7 @@ def install(
         skip_manager,
         commit=commit,
         gpu=gpu,
+        cuda_version=cuda_version,
         plat=platform,
         skip_torch_or_directml=skip_torch_or_directml,
         skip_requirement=skip_requirement,

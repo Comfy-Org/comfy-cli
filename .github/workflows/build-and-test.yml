@@ -15,6 +15,7 @@ jobs:
       PYTHONIOENCODING: "utf8"
     
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
         python-version: ["3.9"]
@@ -32,7 +33,9 @@ jobs:
         run: |
           pip install -e .
 
-      - name: Run Tests
+      - name: Run Core Functionality
         run: |
           comfy --skip-prompt --no-enable-telemetry env
           comfy --skip-prompt install --cpu
+          comfy launch --background -- --cpu
+          
