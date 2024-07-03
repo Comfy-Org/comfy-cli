@@ -11,15 +11,13 @@ on:
 jobs:
   test-cli-gpu:
     name: "Run Tests on GPU Runners"
-    runs-on: ${{ matrix.os-runner }}
+    runs-on: 
+      group: gpu-runners
+      labels: ${{ matrix.os }}-x64-gpu
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os-runner: gpu-runners, windows-x64-gpu
-            comfy-flags: "--nvidia"
-          - os-runner: gpu-runners, linux-x64-gpu
-            comfy-flags: "--nvidia"
+        os: [windows, linux]
 
     steps:
       - name: Check out code
