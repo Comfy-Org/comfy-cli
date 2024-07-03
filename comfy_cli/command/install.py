@@ -203,7 +203,7 @@ def execute(
         subprocess.run(["git", "checkout", commit])
 
     install_comfyui_dependencies(
-        repo_dir, gpu, plat, skip_torch_or_directml, skip_requirement
+        repo_dir, gpu, plat, cuda_version, skip_torch_or_directml, skip_requirement
     )
 
     WorkspaceManager().set_recent_workspace(repo_dir)
