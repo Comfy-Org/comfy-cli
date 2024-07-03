@@ -51,12 +51,20 @@ def install_comfyui_dependencies(
 
         # install torch for NVIDIA
         if gpu == GPU_OPTION.NVIDIA:
-            pip_url = ""
+            base_command = [
+                sys.executable,
+                "-m",
+                "pip",
+                "install",
+                "torch",
+                "torchvision",
+                "torchaudio",
+            ]
             if (
                 plat == constants.OS.WINDOWS
                 and cuda_version == constants.CUDAVersion.v12_1
             ):
-                pip_url = [
+                base_command += [
                     "--extra-index-url",
                     "https://download.pytorch.org/whl/cu121",
                 ]
@@ -64,21 +72,12 @@ def install_comfyui_dependencies(
                 plat == constants.OS.WINDOWS
                 and cuda_version == constants.CUDAVersion.v11_8
             ):
-                pip_url = [
+                base_command += [
                     "--extra-index-url",
                     "https://download.pytorch.org/whl/cu118",
                 ]
             result = subprocess.run(
-                [
-                    sys.executable,
-                    "-m",
-                    "pip",
-                    "install",
-                    "torch",
-                    "torchvision",
-                    "torchaudio",
-                ]
-                + pip_url,
+                base_command,
                 check=False,
             )
         # Beta support for intel arch based on this PR: https://github.com/comfyanonymous/ComfyUI/pull/3439
