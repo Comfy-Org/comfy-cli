@@ -35,5 +35,5 @@ jobs:
       - name: Run Core Functionality
         run: |
           comfy --skip-prompt --no-enable-telemetry env
-          comfy --skip-prompt install ${{ matrix.comfy-flags }} --nvidia
+          comfy --skip-prompt install ${{ matrix.comfy-flags }} --nvidia --cuda-version 11.8
           comfy launch --background

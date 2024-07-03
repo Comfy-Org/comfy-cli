@@ -24,6 +24,7 @@ def install_comfyui_dependencies(
     repo_dir,
     gpu: GPU_OPTION,
     plat: constants.OS,
+    cuda_version: constants.CUDAVersion,
     skip_torch_or_directml: bool,
     skip_requirement: bool,
 ):
@@ -50,7 +51,23 @@ def install_comfyui_dependencies(
 
         # install torch for NVIDIA
         if gpu == GPU_OPTION.NVIDIA:
-            pip_url = ["--extra-index-url", "https://download.pytorch.org/whl/cu121"]
+            pip_url = ""
+            if (
+                plat == constants.OS.WINDOWS
+                and cuda_version == constants.CUDAVersion.v12_1
+            ):
+                pip_url = [
+                    "--extra-index-url",
+                    "https://download.pytorch.org/whl/cu121",
+                ]
+            elif (
+                plat == constants.OS.WINDOWS
+                and cuda_version == constants.CUDAVersion.v11_8
+            ):
+                pip_url = [
+                    "--extra-index-url",
+                    "https://download.pytorch.org/whl/cu118",
+                ]
             result = subprocess.run(
                 [
                     sys.executable,
@@ -149,6 +166,7 @@ def execute(
     skip_manager: bool,
     commit=None,
     gpu: constants.GPU_OPTION = None,
+    cuda_version: constants.CUDAVersion = constants.CUDAVersion.v12_1,
     plat: constants.OS = None,
     skip_torch_or_directml: bool = False,
     skip_requirement: bool = False,

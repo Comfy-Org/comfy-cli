@@ -55,6 +55,11 @@ COMFY_ORIGIN_URL_CHOICES = [
 ]
 
 
+class CUDAVersion(str, Enum):
+    v12_1 = "12.1"
+    v11_8 = "11.8"
+
+
 class GPU_OPTION(Enum):
     NVIDIA = "Nvidia"
     AMD = "Amd"
