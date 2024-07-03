@@ -4,16 +4,20 @@ on:
   push:
     branches:
       - main
+    paths:
+      - 'comfy_cli/**'
   pull_request:
     branches:
       - main
+    paths:
+      - 'comfy_cli/**'
 
 jobs:
   test-cli-gpu:
     name: "Run Tests on GPU Runners"
     runs-on: 
       group: gpu-runners
-      labels: ${{ matrix.os }}-x64-gpu
+      labels: ${{ matrix.os }}-x64-gpu # 
     strategy:
       fail-fast: false
       matrix:
