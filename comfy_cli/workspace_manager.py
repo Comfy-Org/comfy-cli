@@ -256,7 +256,7 @@ class WorkspaceManager:
                 return comfy_repo.working_dir, WorkspaceType.CURRENT_DIR
 
             print(
-                "[bold red]warn: you are not current in a ComfyUI directory.[/bold red]"
+                "[bold red]warn: you are not currently in a ComfyUI directory.[/bold red]"
             )
             raise typer.Exit(code=1)
 
