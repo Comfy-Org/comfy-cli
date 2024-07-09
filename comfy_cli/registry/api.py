@@ -18,6 +18,10 @@ class RegistryAPI:
     def determine_base_url(self):
         if os.getenv("ENVIRONMENT") == "dev":
             return "http://localhost:8080"
+        elif os.getenv("ENVIRONMENT") == "staging":
+            # print environment variable
+            print(os.getenv("ENVIRONMENT"))
+            return "https://staging-comfy-backend-qod3oz2v2q-uc.a.run.app"
         else:
             return "https://api.comfy.org"
 

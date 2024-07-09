@@ -20,7 +20,6 @@ app = typer.Typer()
 workspace_manager = WorkspaceManager()
 config_manager = ConfigManager()
 
-
 model_path_map = {
     "lora": "loras",
     "hypernetwork": "hypernetworks",
@@ -147,6 +146,13 @@ def download(
             show_default=True,
         ),
     ] = None,
+    filename: Annotated[
+        Optional[str],
+        typer.Option(
+            help="The filename to save the model.",
+            show_default=True,
+        ),
+    ] = None,
     set_civitai_api_token: Annotated[
         Optional[str],
         typer.Option(
@@ -230,9 +236,12 @@ def download(
     else:
         print("Model source is unknown")
 
-    local_filename = ui.prompt_input(
-        "Enter filename to save model as", default=local_filename
-    )
+    if filename is None:
+        local_filename = ui.prompt_input(
+            "Enter filename to save model as", default=local_filename
+        )
+    else:
+        local_filename = filename
 
     if relative_path is None:
         relative_path = DEFAULT_COMFY_MODEL_PATH

@@ -38,4 +38,8 @@ jobs:
           comfy --skip-prompt --no-enable-telemetry env
           comfy --skip-prompt install --cpu
           comfy launch --background -- --cpu
+          comfy model download --url https://huggingface.co/guoyww/animatediff/resolve/cd71ae134a27ec6008b968d6419952b0c0494cf2/mm_sd_v14.ckpt?download=true --relative-path models/animatediff_models --filename animatediff_models
+          comfy node install ComfyUI-AnimateDiff-Evolved
+          comfy node update ComfyUI-AnimateDiff-Evolved
+          comfy node uninstall ComfyUI-AnimateDiff-Evolved
           
