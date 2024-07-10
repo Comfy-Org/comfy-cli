@@ -1,10 +1,11 @@
 import unittest
 from unittest.mock import patch, MagicMock
-from comfy_cli.registry.api import RegistryAPI, PyProjectConfig
+from comfy_cli.registry import PyProjectConfig
+from comfy_cli.registry.api import RegistryAPI
 from comfy_cli.registry.types import ProjectConfig, ComfyConfig, URLs
 
-class TestRegistryAPI(unittest.TestCase):
 
+class TestRegistryAPI(unittest.TestCase):
     def setUp(self):
         self.registry_api = RegistryAPI()
         self.node_config = PyProjectConfig(
@@ -15,27 +16,31 @@ class TestRegistryAPI(unittest.TestCase):
                 requires_python=">= 3.9",
                 dependencies=["dep1", "dep2"],
                 license="MIT",
-                urls=URLs(repository="https://github.com/test/test_node")
+                urls=URLs(repository="https://github.com/test/test_node"),
             ),
             tool_comfy=ComfyConfig(
                 publisher_id="123",
                 display_name="Test Node",
-                icon="https://example.com/icon.png"
-            )
+                icon="https://example.com/icon.png",
+            ),
         )
         self.token = "dummy_token"
 
-    @patch('os.getenv')
+    @patch("os.getenv")
     def test_determine_base_url_dev(self, mock_getenv):
-        mock_getenv.return_value = 'dev'
-        self.assertEqual(self.registry_api.determine_base_url(), 'http://localhost:8080')
+        mock_getenv.return_value = "dev"
+        self.assertEqual(
+            self.registry_api.determine_base_url(), "http://localhost:8080"
+        )
 
-    @patch('os.getenv')
+    @patch("os.getenv")
     def test_determine_base_url_prod(self, mock_getenv):
-        mock_getenv.return_value = 'prod'
-        self.assertEqual(self.registry_api.determine_base_url(), 'https://api.comfy.org')
+        mock_getenv.return_value = "prod"
+        self.assertEqual(
+            self.registry_api.determine_base_url(), "https://api.comfy.org"
+        )
 
-    @patch('requests.post')
+    @patch("requests.post")
     def test_publish_node_version_success(self, mock_post):
         mock_response = MagicMock()
         mock_response.status_code = 201
@@ -46,9 +51,9 @@ class TestRegistryAPI(unittest.TestCase):
                 "changelog": "",
                 "dependencies": ["dep1", "dep2"],
                 "deprecated": False,
-                "downloadUrl": "https://example.com/download"
+                "downloadUrl": "https://example.com/download",
             },
-            "signedUrl": "https://example.com/signed"
+            "signedUrl": "https://example.com/signed",
         }
         mock_post.return_value = mock_response
 
@@ -57,7 +62,7 @@ class TestRegistryAPI(unittest.TestCase):
         self.assertEqual(response.node_version.version, "0.1.0")
         self.assertEqual(response.signedUrl, "https://example.com/signed")
 
-    @patch('requests.post')
+    @patch("requests.post")
     def test_publish_node_version_failure(self, mock_post):
         mock_response = MagicMock()
         mock_response.status_code = 400
@@ -68,7 +73,7 @@ class TestRegistryAPI(unittest.TestCase):
             self.registry_api.publish_node_version(self.node_config, self.token)
         self.assertIn("Failed to publish node version", str(context.exception))
 
-    @patch('requests.get')
+    @patch("requests.get")
     def test_list_all_nodes_success(self, mock_get):
         mock_response = MagicMock()
         mock_response.status_code = 200
@@ -89,8 +94,8 @@ class TestRegistryAPI(unittest.TestCase):
                         "changelog": "",
                         "dependencies": ["dep1"],
                         "deprecated": False,
-                        "downloadUrl": "https://example.com/download1"
-                    }
+                        "downloadUrl": "https://example.com/download1",
+                    },
                 }
             ]
         }
@@ -101,7 +106,7 @@ class TestRegistryAPI(unittest.TestCase):
         self.assertEqual(nodes[0].id, "node1")
         self.assertEqual(nodes[0].name, "Node 1")
 
-    @patch('requests.get')
+    @patch("requests.get")
     def test_list_all_nodes_failure(self, mock_get):
         mock_response = MagicMock()
         mock_response.status_code = 500
@@ -112,7 +117,7 @@ class TestRegistryAPI(unittest.TestCase):
             self.registry_api.list_all_nodes()
         self.assertIn("Failed to retrieve nodes", str(context.exception))
 
-    @patch('requests.get')
+    @patch("requests.get")
     def test_install_node_success(self, mock_get):
         mock_response = MagicMock()
         mock_response.status_code = 200
@@ -122,7 +127,7 @@ class TestRegistryAPI(unittest.TestCase):
             "changelog": "",
             "dependencies": ["dep1"],
             "deprecated": False,
-            "downloadUrl": "https://example.com/download1"
+            "downloadUrl": "https://example.com/download1",
         }
         mock_get.return_value = mock_response
 
@@ -130,7 +135,7 @@ class TestRegistryAPI(unittest.TestCase):
         self.assertEqual(node_version.id, "node1")
         self.assertEqual(node_version.version, "1.0.0")
 
-    @patch('requests.get')
+    @patch("requests.get")
     def test_install_node_failure(self, mock_get):
         mock_response = MagicMock()
         mock_response.status_code = 404
