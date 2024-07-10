@@ -51,9 +51,18 @@ class ComfyLockYAMLStruct:
     custom_nodes: List[CustomNode] = field(default_factory=list)
 
 
-def check_comfy_repo(path):
+def get_comfy_repo(path: str) -> Optional[git.Repo]:
+    """
+    Check if the given path is a Comfy repository.
+
+    Args:
+        path (str): The path to check.
+
+    Returns:
+        Optional[str]: The repository object if the path is a Comfy repository, otherwise None.
+    """
     if not os.path.exists(path):
-        return False, None
+        return None
     try:
         repo = git.Repo(path, search_parent_directories=True)
         path_is_comfy_repo = any(
@@ -76,13 +85,13 @@ def check_comfy_repo(path):
                 pass
 
         if path_is_comfy_repo:
-            return path_is_comfy_repo, repo
+            return repo
         else:
-            return False, None
+            return None
     # Not in a git repo at all
     # pylint: disable=E1101  # no-member
     except git.exc.InvalidGitRepositoryError:
-        return False, None
+        return None
 
 
 # Generate and update this following method using chatGPT
@@ -221,7 +230,7 @@ class WorkspaceManager:
         # Check for explicitly specified workspace first
         specified_workspace = self.get_specified_workspace()
         if specified_workspace:
-            if check_comfy_repo(specified_workspace):
+            if get_comfy_repo(specified_workspace):
                 return specified_workspace, WorkspaceType.SPECIFIED
 
             print(
@@ -235,7 +244,7 @@ class WorkspaceManager:
                 constants.CONFIG_KEY_RECENT_WORKSPACE
             )
             if recent_workspace:
-                if check_comfy_repo(recent_workspace):
+                if get_comfy_repo(recent_workspace):
                     return recent_workspace, WorkspaceType.RECENT
             else:
                 print(
@@ -251,8 +260,8 @@ class WorkspaceManager:
         # Check for current workspace if requested
         if self.use_here:
             current_directory = os.getcwd()
-            found_comfy_repo, comfy_repo = check_comfy_repo(current_directory)
-            if found_comfy_repo:
+            comfy_repo = get_comfy_repo(current_directory)
+            if comfy_repo:
                 return comfy_repo.working_dir, WorkspaceType.CURRENT_DIR
 
             print(
@@ -263,11 +272,11 @@ class WorkspaceManager:
         # Check the current directory for a ComfyUI
         if self.use_here is None:
             current_directory = os.getcwd()
-            found_comfy_repo, comfy_repo = check_comfy_repo(
+            comfy_repo = get_comfy_repo(
                 os.path.join(current_directory)
             )
             # If it's in a sub dir of the ComfyUI repo, get the repo working dir
-            if found_comfy_repo:
+            if comfy_repo:
                 return comfy_repo.working_dir, WorkspaceType.CURRENT_DIR
 
         # Check for user-set default workspace
@@ -275,7 +284,7 @@ class WorkspaceManager:
             constants.CONFIG_KEY_DEFAULT_WORKSPACE
         )
 
-        if default_workspace and check_comfy_repo(default_workspace)[0]:
+        if default_workspace and get_comfy_repo(default_workspace)[0]:
             return default_workspace, WorkspaceType.DEFAULT
 
         # Fallback to the most recent workspace if it exists
@@ -283,12 +292,12 @@ class WorkspaceManager:
             recent_workspace = self.config_manager.get(
                 constants.CONFIG_KEY_RECENT_WORKSPACE
             )
-            if recent_workspace and check_comfy_repo(recent_workspace)[0]:
+            if recent_workspace and get_comfy_repo(recent_workspace)[0]:
                 return recent_workspace, WorkspaceType.RECENT
 
         # Check for comfy-cli default workspace
         default_workspace = utils.get_not_user_set_default_workspace()
-        if check_comfy_repo(default_workspace)[0]:
+        if get_comfy_repo(default_workspace)[0]:
             return default_workspace, WorkspaceType.DEFAULT
 
         return None, WorkspaceType.NOT_FOUND

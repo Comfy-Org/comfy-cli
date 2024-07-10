@@ -8,7 +8,7 @@ import typer
 
 from comfy_cli import constants, ui, utils
 from comfy_cli.constants import GPU_OPTION
-from comfy_cli.workspace_manager import WorkspaceManager, check_comfy_repo
+from comfy_cli.workspace_manager import WorkspaceManager, get_comfy_repo
 from comfy_cli.command.custom_nodes.command import update_node_id_cache
 
 workspace_manager = WorkspaceManager()
@@ -190,7 +190,7 @@ def execute(
 
     if not os.path.exists(repo_dir):
         subprocess.run(["git", "clone", url, repo_dir])
-    elif not check_comfy_repo(repo_dir)[0]:
+    elif not get_comfy_repo(repo_dir)[0]:
         print(
             f"[bold red]'{repo_dir}' already exists. But it is an invalid ComfyUI repository. Remove it and retry.[/bold red]"
         )

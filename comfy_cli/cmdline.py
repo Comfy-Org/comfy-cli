@@ -6,6 +6,7 @@ import uuid
 import webbrowser
 from typing import Optional
 
+import git
 import questionary
 import typer
 from rich import print
@@ -27,7 +28,7 @@ from comfy_cli.update import check_for_updates
 from comfy_cli.workspace_manager import (
     WorkspaceManager,
     WorkspaceType,
-    check_comfy_repo,
+    get_comfy_repo,
 )
 
 logging.setup_logging()
@@ -230,8 +231,8 @@ def install(
     if comfy_path is None:
         comfy_path = utils.get_not_user_set_default_workspace()
 
-    is_comfy_path, repo_dir = check_comfy_repo(comfy_path)
-    if is_comfy_path and not restore:
+    comfy_repo: git.Repo = get_comfy_repo(comfy_path)
+    if comfy_repo and not restore:
         print(
             f"[bold red]ComfyUI is already installed at the specified path:[/bold red] {comfy_path}\n"
         )
@@ -240,8 +241,8 @@ def install(
         )
         raise typer.Exit(code=1)
 
-    if repo_dir is not None:
-        comfy_path = str(repo_dir.working_dir)
+    if comfy_repo is not None:
+        comfy_path = str(comfy_repo.working_dir)
 
     if checker.python_version.major < 3 or checker.python_version.minor < 9:
         print(
@@ -707,8 +708,8 @@ def set_default(
         )
         raise typer.Exit(code=1)
 
-    is_comfy_repo, comfy_repo = check_comfy_repo(comfy_path)
-    if not is_comfy_repo:
+    comfy_repo = get_comfy_repo(comfy_path)
+    if not comfy_repo:
         print(
             f"\nSpecified path is not a ComfyUI path: {comfy_path}.\n",
             file=sys.stderr,
