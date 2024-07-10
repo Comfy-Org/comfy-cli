@@ -44,10 +44,6 @@ jobs:
         run: |
           df -h
 
-      - name: Check disk space
-        run: |
-          df -h
-
       - name: Run Core Functionality
         run: |
           comfy --skip-prompt --no-enable-telemetry env
