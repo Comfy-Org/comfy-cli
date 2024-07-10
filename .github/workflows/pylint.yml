@@ -23,4 +23,4 @@ jobs:
           pip install -r requirements.txt
           pip install pylint
       - name: Lint with Pylint
-        run: pylint --disable=R,C,W **/*.py
+        run: pylint --disable=R,C **/*.py

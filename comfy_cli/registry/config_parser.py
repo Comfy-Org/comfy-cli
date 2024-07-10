@@ -55,7 +55,7 @@ def create_comfynode_config():
         with open("pyproject.toml", "w") as toml_file:
             toml_file.write(tomlkit.dumps(document))
     except IOError as e:
-        raise Exception(f"Failed to write 'pyproject.toml': {str(e)}")
+        raise Exception("Failed to write 'pyproject.toml'") from e
 
 
 def initialize_project_config():
@@ -71,10 +71,10 @@ def initialize_project_config():
             .decode()
             .strip()
         )
-    except subprocess.CalledProcessError:
+    except subprocess.CalledProcessError as e:
         raise Exception(
             "Could not retrieve Git remote URL. Are you in a Git repository?"
-        )
+        ) from e
 
     # Convert SSH URL to HTTPS if needed
     if git_remote_url.startswith("git@github.com:"):
@@ -115,14 +115,12 @@ def initialize_project_config():
             toml_file.write(tomlkit.dumps(document))
         print("pyproject.toml has been created successfully in the current directory.")
     except IOError as e:
-        raise IOError(f"Failed to write 'pyproject.toml': {str(e)}")
+        raise IOError("Failed to write 'pyproject.toml'") from e
 
 
 def extract_node_configuration(
     path: str = os.path.join(os.getcwd(), "pyproject.toml"),
 ) -> Optional[PyProjectConfig]:
-    import tomlkit
-
     if not os.path.isfile(path):
         ui.display_error_message(
             "No pyproject.toml file found in the current directory."

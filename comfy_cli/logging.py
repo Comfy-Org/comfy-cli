@@ -1,12 +1,12 @@
-import logging
-import os
-
 """
 This module provides logging utilities for the CLI.
 
 Note: we could potentially change the logging library or the way we log messages in the future.
 Therefore, it's a good idea to encapsulate logging-related code in a separate module.
 """
+
+import logging
+import os
 
 
 def setup_logging():

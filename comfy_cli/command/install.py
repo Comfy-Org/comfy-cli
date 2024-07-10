@@ -189,7 +189,7 @@ def execute(
         os.makedirs(parent_path, exist_ok=True)
 
     if not os.path.exists(repo_dir):
-        subprocess.run(["git", "clone", url, repo_dir])
+        subprocess.run(["git", "clone", url, repo_dir], check=True)
     elif not check_comfy_repo(repo_dir)[0]:
         print(
             f"[bold red]'{repo_dir}' already exists. But it is an invalid ComfyUI repository. Remove it and retry.[/bold red]"
@@ -199,7 +199,7 @@ def execute(
     # checkout specified commit
     if commit is not None:
         os.chdir(repo_dir)
-        subprocess.run(["git", "checkout", commit])
+        subprocess.run(["git", "checkout", commit], check=True)
 
     install_comfyui_dependencies(
         repo_dir, gpu, plat, cuda_version, skip_torch_or_directml, skip_requirement
@@ -226,7 +226,7 @@ def execute(
         else:
             print("\nInstalling ComfyUI-Manager..")
 
-            subprocess.run(["git", "clone", manager_url, manager_repo_dir])
+            subprocess.run(["git", "clone", manager_url, manager_repo_dir], check=True)
             install_manager_dependencies(repo_dir)
 
         update_node_id_cache()
