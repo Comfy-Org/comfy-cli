@@ -22,4 +22,4 @@ jobs:
           python -m pip install --upgrade pip
           pip install pylint
       - name: Lint with Pylint
-        run: pylint --disable=R,C,W,E0401 **/*.py
+        run: pylint --disable=R,C,W **/*.py
