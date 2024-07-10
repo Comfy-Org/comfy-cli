@@ -54,3 +54,5 @@ Repository = "https://github.com/drip-art/comfy-cli.git"
 where = ["."]
 include = ["comfy_cli*"]
 
+[tool.black]
+line-length = 120
