@@ -52,8 +52,6 @@ class ComfyLockYAMLStruct:
 
 
 def check_comfy_repo(path) -> Tuple[bool, Optional[git.Repo]]:
-    print("path:")
-    print(path)
     if not os.path.exists(path):
         return False, None
     try:
@@ -236,9 +234,13 @@ class WorkspaceManager:
                 raise typer.Exit(code=1)
 
         # Check for current workspace if requested
-        if self.use_here:
+        if self.use_here is True:
             current_directory = os.getcwd()
-            return current_directory, WorkspaceType.CURRENT_DIR
+            found_comfy_repo, comfy_repo = check_comfy_repo(current_directory)
+            if found_comfy_repo:
+                return comfy_repo.working_dir, WorkspaceType.CURRENT_DIR
+            else:
+                return current_directory + "/ComfyUI", WorkspaceType.CURRENT_DIR
 
         # Check the current directory for a ComfyUI
         if self.use_here is None:

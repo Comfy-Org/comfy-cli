@@ -8,7 +8,7 @@ runner = CliRunner()
 def test_app():
     result = runner.invoke(
         app,
-        ["--here", "install", "--cpu"],
+        ["--here", "--skip-prompt", "install", "--cpu"],
     )
     print("Stdout:")
     print(result.stdout)

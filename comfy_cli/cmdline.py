@@ -244,8 +244,25 @@ def install(
         print(
             f"You are currently using Python version {env_checker.format_python_version(checker.python_version)}."
         )
-
     platform = utils.get_os()
+    if cpu:
+        print("[bold yellow]Installing for CPU[/bold yellow]")
+        install_inner.execute(
+            url,
+            manager_url,
+            comfy_path,
+            restore,
+            skip_manager,
+            commit=commit,
+            gpu=None,
+            cuda_version=cuda_version,
+            plat=platform,
+            skip_torch_or_directml=skip_torch_or_directml,
+            skip_requirement=skip_requirement,
+        )
+        print(f"ComfyUI is installed at: {comfy_path}")
+        return None
+
     if nvidia and platform == constants.OS.MACOS:
         print(
             "[bold red]Nvidia GPU is never on MacOS. What are you smoking? 🤔[/bold red]"
