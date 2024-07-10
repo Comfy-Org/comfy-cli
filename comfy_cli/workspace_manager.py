@@ -240,7 +240,7 @@ class WorkspaceManager:
             if found_comfy_repo:
                 return comfy_repo.working_dir, WorkspaceType.CURRENT_DIR
             else:
-                return current_directory + "/ComfyUI", WorkspaceType.CURRENT_DIR
+                return os.path.join(current_directory, "ComfyUI"), WorkspaceType.CURRENT_DIR
 
         # Check the current directory for a ComfyUI
         if self.use_here is None:

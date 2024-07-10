@@ -41,23 +41,27 @@ def main():
     app()
 
 
-def mutually_exclusive_group_options():
-    group = []
 
-    def callback(_ctx: typer.Context, param: typer.CallbackParam, value: str):
+class MutuallyExclusiveValidator:
+    def __init__(self):
+        self.group = []
+
+    def reset_for_testing(self):
+        self.group.clear()
+
+    def validate(self, _ctx: typer.Context, param: typer.CallbackParam, value: str):
         # Add cli option to group if it was called with a value
-        if value is not None and param.name not in group:
-            group.append(param.name)
-        if len(group) > 1:
+        if value is not None and param.name not in self.group:
+            self.group.append(param.name)
+        if len(self.group) > 1:
             raise typer.BadParameter(
-                f"option `{param.name}` is mutually exclusive with option `{group.pop()}`"
+                f"option `{param.name}` is mutually exclusive with option `{self.group.pop()}`"
             )
         return value
 
-    return callback
 
-
-exclusivity_callback = mutually_exclusive_group_options()
+g_exclusivity = MutuallyExclusiveValidator()
+g_gpu_exclusivity = MutuallyExclusiveValidator()
 
 
 @app.command(help="Display help for commands")
@@ -74,7 +78,7 @@ def entry(
         typer.Option(
             show_default=False,
             help="Path to ComfyUI workspace",
-            callback=exclusivity_callback,
+            callback=g_exclusivity.validate,
         ),
     ] = None,
     recent: Annotated[
@@ -83,7 +87,7 @@ def entry(
             show_default=False,
             is_flag=True,
             help="Execute from recent path",
-            callback=exclusivity_callback,
+            callback=g_exclusivity.validate,
         ),
     ] = None,
     here: Annotated[
@@ -92,7 +96,7 @@ def entry(
             show_default=False,
             is_flag=True,
             help="Execute from current path",
-            callback=exclusivity_callback,
+            callback=g_exclusivity.validate,
         ),
     ] = None,
     skip_prompt: Annotated[
@@ -143,9 +147,6 @@ def entry(
     # logging.info(f"scan_dir took {end_time - start_time:.2f} seconds to run")
 
 
-gpu_exclusivity_callback = mutually_exclusive_group_options()
-
-
 @app.command(help="Download and install ComfyUI and ComfyUI-Manager")
 @tracking.track_command()
 def install(
@@ -176,7 +177,7 @@ def install(
         typer.Option(
             show_default=False,
             help="Install for Nvidia gpu",
-            callback=gpu_exclusivity_callback,
+            callback=g_gpu_exclusivity.validate,
         ),
     ] = None,
     cuda_version: Annotated[
@@ -187,7 +188,7 @@ def install(
         typer.Option(
             show_default=False,
             help="Install for AMD gpu",
-            callback=gpu_exclusivity_callback,
+            callback=g_gpu_exclusivity.validate,
         ),
     ] = None,
     m_series: Annotated[
@@ -195,7 +196,7 @@ def install(
         typer.Option(
             show_default=False,
             help="Install for Mac M-Series gpu",
-            callback=gpu_exclusivity_callback,
+            callback=g_gpu_exclusivity.validate,
         ),
     ] = None,
     intel_arc: Annotated[
@@ -204,7 +205,7 @@ def install(
             hidden=True,
             show_default=False,
             help="(Beta support) install for Intel Arc gpu, based on https://github.com/comfyanonymous/ComfyUI/pull/3439",
-            callback=gpu_exclusivity_callback,
+            callback=g_gpu_exclusivity.validate,
         ),
     ] = None,
     cpu: Annotated[
@@ -212,7 +213,7 @@ def install(
         typer.Option(
             show_default=False,
             help="Install for CPU",
-            callback=gpu_exclusivity_callback,
+            callback=g_gpu_exclusivity.validate,
         ),
     ] = None,
     commit: Annotated[
