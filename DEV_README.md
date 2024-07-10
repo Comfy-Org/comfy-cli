@@ -32,9 +32,7 @@ You can add following config to your VSCode `launch.json` to launch debugger.
   "type": "debugpy",
   "request": "launch",
   "module": "comfy_cli.__main__",
-  "args": [
-    ... command line args
-  ],
+  "args": [],
   "console": "integratedTerminal"
 }
 ```
