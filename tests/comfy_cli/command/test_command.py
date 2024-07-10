@@ -49,3 +49,9 @@ def test_install_here(cmd, runner, mock_execute, mock_prompt_select_enum):
     assert url == "https://github.com/comfyanonymous/ComfyUI"
     assert manager_url == "https://github.com/ltdrdata/ComfyUI-Manager"
     assert comfy_path == os.path.join(os.getcwd(), "ComfyUI")
+
+
+def test_version(runner):
+    result = runner.invoke(app, ["-v"])
+    assert result.exit_code == 0
+    assert "0.0.0" in result.stdout
