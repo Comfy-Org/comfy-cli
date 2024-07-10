@@ -1,8 +1,10 @@
+import json
 import os
 import pathlib
 import zipfile
 from typing import Optional
 
+import httpx
 import requests
 from pathspec import pathspec
 
@@ -15,7 +17,6 @@ class DownloadException(Exception):
 
 def guess_status_code_reason(status_code: int, message: str) -> str:
     if status_code == 401:
-        import json
 
         def parse_json(input_data):
             try:
@@ -49,9 +50,6 @@ def download_file(
     url: str, local_filepath: pathlib.Path, headers: Optional[dict] = None
 ):
     """Helper function to download a file."""
-
-    import httpx
-
     local_filepath.parent.mkdir(
         parents=True, exist_ok=True
     )  # Ensure the directory exists

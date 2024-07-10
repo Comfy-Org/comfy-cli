@@ -85,7 +85,7 @@ def initialize_project_config():
         )
 
     # Ensure the URL ends with `.git` and remove it to obtain the plain URL
-    repo_name = git_remote_url.split("/")[-1].replace(".git", "")
+    repo_name = git_remote_url.rsplit("/", maxsplit=1)[-1].replace(".git", "")
     git_remote_url = git_remote_url.replace(".git", "")
 
     project = document.get("project", tomlkit.table())

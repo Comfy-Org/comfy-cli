@@ -14,6 +14,8 @@ disable=
     W0603, # global-statement
     W1203, # logging-fstring-interpolation
     W0212, # protected-access
+    C0301, # line-too-long
+    C0103, # invalid-name
 
     # TODO
     W3101, # missing timeout on request

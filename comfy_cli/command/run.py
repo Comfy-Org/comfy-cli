@@ -79,7 +79,7 @@ def execute(workflow: str, host, port, wait=True, verbose=False, local_paths=Fal
             progress.stop()
             progress = None
 
-            if len(execution.outputs):
+            if len(execution.outputs) > 0:
                 pprint("[bold green]\nOutputs:[/bold green]")
 
                 for f in execution.outputs:
