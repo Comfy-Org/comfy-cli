@@ -29,16 +29,12 @@ class TestRegistryAPI(unittest.TestCase):
     @patch("os.getenv")
     def test_determine_base_url_dev(self, mock_getenv):
         mock_getenv.return_value = "dev"
-        self.assertEqual(
-            self.registry_api.determine_base_url(), "http://localhost:8080"
-        )
+        self.assertEqual(self.registry_api.determine_base_url(), "http://localhost:8080")
 
     @patch("os.getenv")
     def test_determine_base_url_prod(self, mock_getenv):
         mock_getenv.return_value = "prod"
-        self.assertEqual(
-            self.registry_api.determine_base_url(), "https://api.comfy.org"
-        )
+        self.assertEqual(self.registry_api.determine_base_url(), "https://api.comfy.org")
 
     @patch("requests.post")
     def test_publish_node_version_success(self, mock_post):
