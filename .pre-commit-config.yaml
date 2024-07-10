@@ -11,3 +11,7 @@ repos:
           # Note: E0401 is disabled as pylint does not run in an environment
           # where the package is installed
           - --disable=R,C,E0401
+  - repo: https://github.com/PyCQA/isort
+    rev: 5.13.2
+    hooks:
+      - id: isort

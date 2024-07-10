@@ -3,13 +3,13 @@ import platform
 import subprocess
 import sys
 
-from rich import print
 import typer
+from rich import print
 
 from comfy_cli import constants, ui, utils
+from comfy_cli.command.custom_nodes.command import update_node_id_cache
 from comfy_cli.constants import GPU_OPTION
 from comfy_cli.workspace_manager import WorkspaceManager, check_comfy_repo
-from comfy_cli.command.custom_nodes.command import update_node_id_cache
 
 workspace_manager = WorkspaceManager()
 

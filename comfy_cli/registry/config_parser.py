@@ -1,16 +1,18 @@
 import os
-from comfy_cli import ui
-import tomlkit.exceptions
-from comfy_cli.registry.types import (
-    PyProjectConfig,
-    ProjectConfig,
-    URLs,
-    Model,
-    ComfyConfig,
-)
-from typing import Optional
-import tomlkit
 import subprocess
+from typing import Optional
+
+import tomlkit
+import tomlkit.exceptions
+
+from comfy_cli import ui
+from comfy_cli.registry.types import (
+    ComfyConfig,
+    Model,
+    ProjectConfig,
+    PyProjectConfig,
+    URLs,
+)
 
 
 def create_comfynode_config():

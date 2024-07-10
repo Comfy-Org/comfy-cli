@@ -2,17 +2,19 @@ import json
 import os
 import sys
 import time
-import typer
-import uuid
 import urllib.error
 import urllib.parse
-from rich.progress import BarColumn, Progress, TimeElapsedColumn, Column, Table
+import uuid
+from datetime import timedelta
 from urllib import request
-from websocket import WebSocket
+
+import typer
 from rich import print as pprint
+from rich.progress import BarColumn, Column, Progress, Table, TimeElapsedColumn
+from websocket import WebSocket
+
 from comfy_cli.env_checker import check_comfy_server_running
 from comfy_cli.workspace_manager import WorkspaceManager
-from datetime import timedelta
 
 workspace_manager = WorkspaceManager()
 

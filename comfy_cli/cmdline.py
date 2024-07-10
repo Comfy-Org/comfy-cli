@@ -1,6 +1,8 @@
+import asyncio
 import os
 import subprocess
 import sys
+import threading
 import uuid
 import webbrowser
 from typing import Optional
@@ -11,13 +13,11 @@ from rich import print
 from rich.console import Console
 from rich.panel import Panel
 from typing_extensions import Annotated, List
-import asyncio
-import threading
 
 from comfy_cli import constants, env_checker, logging, tracking, ui, utils
 from comfy_cli.command import custom_nodes
-from comfy_cli.command import run as run_inner
 from comfy_cli.command import install as install_inner
+from comfy_cli.command import run as run_inner
 from comfy_cli.command.models import models as models_command
 from comfy_cli.config_manager import ConfigManager
 from comfy_cli.constants import GPU_OPTION, CUDAVersion

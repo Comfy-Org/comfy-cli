@@ -5,7 +5,7 @@ import uuid
 import typer
 from mixpanel import Mixpanel
 
-from comfy_cli import logging, ui, constants
+from comfy_cli import constants, logging, ui
 from comfy_cli.config_manager import ConfigManager
 from comfy_cli.workspace_manager import WorkspaceManager
 

@@ -1,8 +1,9 @@
 import unittest
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
+
 from comfy_cli.registry import PyProjectConfig
 from comfy_cli.registry.api import RegistryAPI
-from comfy_cli.registry.types import ProjectConfig, ComfyConfig, URLs
+from comfy_cli.registry.types import ComfyConfig, ProjectConfig, URLs
 
 
 class TestRegistryAPI(unittest.TestCase):

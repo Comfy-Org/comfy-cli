@@ -1,7 +1,7 @@
 import os
 import pathlib
-from typing import Optional
 import zipfile
+from typing import Optional
 
 import requests
 from pathspec import pathspec
