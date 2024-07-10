@@ -139,6 +139,7 @@ class WorkflowExecution:
         self.progress_task = None
         self.progress_node = None
         self.prompt_id = None
+        self.ws = None
 
     def connect(self):
         self.ws = WebSocket()

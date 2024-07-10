@@ -1,6 +1,5 @@
 import functools
 import logging as logginglib
-import os
 import uuid
 
 import typer

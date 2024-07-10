@@ -1,9 +1,6 @@
 import sys
 
 import requests
-import tomlkit
-from rich import print
-import tomlkit.exceptions
 from rich.console import Console
 from rich.panel import Panel
 from importlib.metadata import metadata
@@ -24,7 +21,7 @@ def check_for_newer_pypi_version(package_name, current_version):
             return True, latest_version
 
         return False, current_version
-    except requests.RequestException as e:
+    except requests.RequestException:
         # print(f"Error checking latest version: {e}")
         return False, current_version
 

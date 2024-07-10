@@ -1,6 +1,5 @@
 import concurrent.futures
 import os
-import sys
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
@@ -14,8 +13,7 @@ from rich import print
 
 from comfy_cli import constants, logging, utils
 from comfy_cli.config_manager import ConfigManager
-from comfy_cli.env_checker import EnvChecker
-from comfy_cli.utils import get_os, singleton
+from comfy_cli.utils import singleton
 
 
 @dataclass
@@ -86,28 +84,28 @@ def check_comfy_repo(path) -> Tuple[bool, Optional[git.Repo]]:
 
 
 # Generate and update this following method using chatGPT
-def load_yaml(file_path: str) -> ComfyLockYAMLStruct:
-    with open(file_path, "r", encoding="utf-8") as file:
-        data = yaml.safe_load(file)
-        basics = Basics(
-            name=data.get("basics", {}).get("name"),
-            updated_at=(
-                datetime.fromisoformat(data.get("basics", {}).get("updated_at"))
-                if data.get("basics", {}).get("updated_at")
-                else None
-            ),
-        )
-        models = [
-            Model(
-                name=m.get("model"),
-                url=m.get("url"),
-                paths=[ModelPath(path=p.get("path")) for p in m.get("paths", [])],
-                hash=m.get("hash"),
-                type=m.get("type"),
-            )
-            for m in data.get("models", [])
-        ]
-        custom_nodes = []
+# def load_yaml(file_path: str) -> ComfyLockYAMLStruct:
+#     with open(file_path, "r", encoding="utf-8") as file:
+#         data = yaml.safe_load(file)
+#         basics = Basics(
+#             name=data.get("basics", {}).get("name"),
+#             updated_at=(
+#                 datetime.fromisoformat(data.get("basics", {}).get("updated_at"))
+#                 if data.get("basics", {}).get("updated_at")
+#                 else None
+#             ),
+#         )
+#         models = [
+#             Model(
+#                 name=m.get("model"),
+#                 url=m.get("url"),
+#                 paths=[ModelPath(path=p.get("path")) for p in m.get("paths", [])],
+#                 hash=m.get("hash"),
+#                 type=m.get("type"),
+#             )
+#             for m in data.get("models", [])
+#         ]
+#         custom_nodes = []
 
 
 # Generate and update this following method using chatGPT
@@ -240,7 +238,10 @@ class WorkspaceManager:
             if found_comfy_repo:
                 return comfy_repo.working_dir, WorkspaceType.CURRENT_DIR
             else:
-                return os.path.join(current_directory, "ComfyUI"), WorkspaceType.CURRENT_DIR
+                return (
+                    os.path.join(current_directory, "ComfyUI"),
+                    WorkspaceType.CURRENT_DIR,
+                )
 
         # Check the current directory for a ComfyUI
         if self.use_here is None:

@@ -1,4 +1,3 @@
-from enum import Enum
 import questionary
 import typer
 from rich.console import Console

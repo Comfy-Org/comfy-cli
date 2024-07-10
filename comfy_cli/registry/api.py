@@ -1,11 +1,8 @@
 import logging
 import os
-from rich.console import Console
 import requests
 import json
-from typing import Optional
-
-from comfy_cli.registry.types import PyProjectConfig, PublishNodeVersionResponse
+from comfy_cli.registry.types import PublishNodeVersionResponse
 
 # Reduced global imports from comfy_cli.registry
 from comfy_cli.registry.types import NodeVersion, Node

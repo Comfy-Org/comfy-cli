@@ -1,7 +1,6 @@
 import os
 import pathlib
 import platform
-import re
 import subprocess
 import sys
 import uuid
@@ -39,9 +38,7 @@ def execute_cm_cli(args, channel=None, mode=None):
     workspace_path = workspace_manager.workspace_path
 
     if not workspace_path:
-        print(
-            f"\n[bold red]ComfyUI path is not resolved.[/bold red]\n", file=sys.stderr
-        )
+        print("\n[bold red]ComfyUI path is not resolved.[/bold red]\n", file=sys.stderr)
         raise typer.Exit(code=1)
 
     cm_cli_path = os.path.join(
@@ -134,9 +131,9 @@ def get_installed_packages():
                         continue
 
                     pip_map[y[0]] = y[1]
-        except subprocess.CalledProcessError as e:
+        except subprocess.CalledProcessError:
             print(
-                f"[ComfyUI-Manager] Failed to retrieve the information of installed pip packages."
+                "[ComfyUI-Manager] Failed to retrieve the information of installed pip packages."
             )
             return set()
 
@@ -710,7 +707,7 @@ def install_deps(
 
     if deps is None and workflow is None:
         print(
-            f"[bold red]One of --deps or --workflow must be provided as an argument.[/bold red]\n"
+            "[bold red]One of --deps or --workflow must be provided as an argument.[/bold red]\n"
         )
 
     tmp_path = None

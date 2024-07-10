@@ -1,7 +1,6 @@
 import os
 import subprocess
 import sys
-import time
 import uuid
 import webbrowser
 from typing import Optional
@@ -39,7 +38,6 @@ console = Console()
 
 def main():
     app()
-
 
 
 class MutuallyExclusiveValidator:
@@ -496,7 +494,7 @@ async def launch_and_monitor(cmd, listen, port):
     stdout_thread.start()
     stderr_thread.start()
 
-    res = process.wait()
+    process.wait()
 
     return log
 
@@ -548,7 +546,7 @@ def background_launch(extra):
             )
         )
 
-    console.print(f"\n[bold red]Execution error: failed to launch ComfyUI[/bold red]\n")
+    console.print("\n[bold red]Execution error: failed to launch ComfyUI[/bold red]\n")
     # NOTE: os.exit(0) doesn't work
     os._exit(1)
 

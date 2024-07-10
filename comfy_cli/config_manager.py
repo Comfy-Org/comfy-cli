@@ -1,8 +1,6 @@
 import configparser
 import os
 
-import tomlkit
-
 from comfy_cli.utils import singleton, get_os, is_running
 from comfy_cli import constants, logging
 from typing import Optional, Tuple
