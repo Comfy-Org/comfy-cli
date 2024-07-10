@@ -172,7 +172,7 @@ def install(
         bool, typer.Option(show_default=False, help="Skip installing requirements.txt")
     ] = False,
     nvidia: Annotated[
-        bool,
+        Optional[bool],
         typer.Option(
             show_default=False,
             help="Install for Nvidia gpu",
@@ -183,7 +183,7 @@ def install(
         CUDAVersion, typer.Option(show_default=True)
     ] = CUDAVersion.v12_1,
     amd: Annotated[
-        bool,
+        Optional[bool],
         typer.Option(
             show_default=False,
             help="Install for AMD gpu",
@@ -191,7 +191,7 @@ def install(
         ),
     ] = None,
     m_series: Annotated[
-        bool,
+        Optional[bool],
         typer.Option(
             show_default=False,
             help="Install for Mac M-Series gpu",
@@ -199,7 +199,7 @@ def install(
         ),
     ] = None,
     intel_arc: Annotated[
-        bool,
+        Optional[bool],
         typer.Option(
             hidden=True,
             show_default=False,
@@ -208,7 +208,7 @@ def install(
         ),
     ] = None,
     cpu: Annotated[
-        bool,
+        Optional[bool],
         typer.Option(
             show_default=False,
             help="Install for CPU",
