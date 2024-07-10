@@ -6,19 +6,23 @@ This guide provides an overview of how to develop in this repository.
 
 1. Clone the repo, create and activate a conda env. Minimum Python version is 3.9.
 
-2. Install the package to local
+1. Install the package to local
 
 `pip install -e .`
 
-3. Set ENVIRONMENT variable to DEV.
+1. Set ENVIRONMENT variable to DEV.
+
+1. Install Dev Requirements
+
+`pip install -r requirements-dev.txt`
 
 `export ENVIRONMENT=dev`
 
-4. Test script running
+1. Test script running
 
 `comfy --help`
 
-5. Use pre commit hook
+1. Use pre commit hook
 
 `pre-commit install`
 
