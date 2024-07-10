@@ -5,7 +5,7 @@ from .cmdline import app
 runner = CliRunner()
 
 
-def test_app():
+def test_install_here():
     result = runner.invoke(
         app,
         ["--here", "--skip-prompt", "install", "--cpu"],
@@ -13,13 +13,14 @@ def test_app():
     print("Stdout:")
     print(result.stdout)
     assert result.exit_code == 0
+    assert "ComfyUI is installed at" in result.stdout
 
 
-def test_app():
+def test_display_version():
     result = runner.invoke(
         app,
-        ["--here", "--skip-prompt", "install", "--cpu"],
+        ["-v"],
     )
-    print("Stdout:")
-    print(result.stdout)
+
     assert result.exit_code == 0
+    assert "0.0.0" in result.stdout
