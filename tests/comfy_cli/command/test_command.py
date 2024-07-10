@@ -21,7 +21,9 @@ def mock_execute():
 
 @pytest.fixture(scope="function")
 def mock_prompt_select_enum():
-    def mocked_prompt_select_enum(question: str, choices: list, force_prompting: bool = False):
+    def mocked_prompt_select_enum(
+        question: str, choices: list, force_prompting: bool = False
+    ):
         return choices[0]
 
     with patch(
@@ -42,7 +44,7 @@ def test_install_here(cmd, runner, mock_execute, mock_prompt_select_enum):
     result = runner.invoke(app, cmd)
     assert result.exit_code == 0, result.stdout
 
-    args, _ = mock_execute.call_args
+    args, kwargs = mock_execute.call_args
     url, manager_url, comfy_path, *_ = args
     assert url == "https://github.com/comfyanonymous/ComfyUI"
     assert manager_url == "https://github.com/ltdrdata/ComfyUI-Manager"

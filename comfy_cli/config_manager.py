@@ -41,7 +41,9 @@ class ConfigManager(object):
         """
         Get a value from the config file. Returns None if the key does not exist.
         """
-        return self.config["DEFAULT"].get(key, None)  # Returns None if the key does not exist
+        return self.config["DEFAULT"].get(
+            key, None
+        )  # Returns None if the key does not exist
 
     def load(self):
         config_file_path = self.get_config_file_path()
@@ -72,7 +74,9 @@ class ConfigManager(object):
                 self.config["DEFAULT"][constants.CONFIG_KEY_DEFAULT_WORKSPACE],
             )
 
-            launch_extras = self.config["DEFAULT"].get(constants.CONFIG_KEY_DEFAULT_LAUNCH_EXTRAS, "")
+            launch_extras = self.config["DEFAULT"].get(
+                constants.CONFIG_KEY_DEFAULT_LAUNCH_EXTRAS, ""
+            )
         else:
             table.add_row("Default ComfyUI workspace", "No default ComfyUI workspace")
 
@@ -92,7 +96,11 @@ class ConfigManager(object):
         if self.config.has_option("DEFAULT", "enable_tracking"):
             table.add_row(
                 "Tracking Analytics",
-                ("Enabled" if self.config["DEFAULT"]["enable_tracking"] == "True" else "Disabled"),
+                (
+                    "Enabled"
+                    if self.config["DEFAULT"]["enable_tracking"] == "True"
+                    else "Disabled"
+                ),
             )
 
         if self.config.has_option("DEFAULT", constants.CONFIG_KEY_BACKGROUND):
@@ -116,6 +124,8 @@ class ConfigManager(object):
         try:
             return version("comfy-cli")
         except Exception as e:
-            logging.debug(f"Error occurred while retrieving CLI version using importlib.metadata: {e}")
+            logging.debug(
+                f"Error occurred while retrieving CLI version using importlib.metadata: {e}"
+            )
 
         return "0.0.0"

@@ -48,7 +48,9 @@ def prompt_select(question: str, choices: list, force_prompting: bool = False) -
     return questionary.select(question, choices=choices).ask()
 
 
-def prompt_select_enum(question: str, choices: list, force_prompting: bool = False) -> str:
+def prompt_select_enum(
+    question: str, choices: list, force_prompting: bool = False
+) -> str:
     """
     Asks a single select question using questionary and returns the selected response.
 
@@ -69,7 +71,9 @@ def prompt_select_enum(question: str, choices: list, force_prompting: bool = Fal
     return choice_map[selected]
 
 
-def prompt_input(question: str, default: str = None, force_prompting: bool = False) -> str:
+def prompt_input(
+    question: str, default: str = None, force_prompting: bool = False
+) -> str:
     """
     Asks the user for an input using questionary.
 
@@ -99,7 +103,9 @@ def prompt_multi_select(prompt: str, choices: List[str]) -> List[str]:
     Returns:
         List[str]: A list of the selected items.
     """
-    selections = questionary.checkbox(prompt, choices=choices).ask()  # returns list of selected items
+    selections = questionary.checkbox(
+        prompt, choices=choices
+    ).ask()  # returns list of selected items
     return selections if selections else []
 
 

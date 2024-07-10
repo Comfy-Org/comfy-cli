@@ -45,11 +45,15 @@ def execute(workflow: str, host, port, wait=True, verbose=False, local_paths=Fal
     workflow = load_api_workflow(workflow)
 
     if not workflow:
-        pprint("[bold red]Specified workflow does not appear to be an API workflow json file[/bold red]")
+        pprint(
+            "[bold red]Specified workflow does not appear to be an API workflow json file[/bold red]"
+        )
         raise typer.Exit(code=1)
 
     if not check_comfy_server_running(port, host):
-        pprint(f"[bold red]ComfyUI not running on specified address ({host}:{port})[/bold red]")
+        pprint(
+            f"[bold red]ComfyUI not running on specified address ({host}:{port})[/bold red]"
+        )
         raise typer.Exit(code=1)
 
     progress = None
@@ -80,7 +84,9 @@ def execute(workflow: str, host, port, wait=True, verbose=False, local_paths=Fal
                     pprint(f)
 
             elapsed = timedelta(seconds=end - start)
-            pprint(f"[bold green]\nWorkflow execution completed ({elapsed})[/bold green]")
+            pprint(
+                f"[bold green]\nWorkflow execution completed ({elapsed})[/bold green]"
+            )
         else:
             pprint("[bold green]Workflow queued[/bold green]")
     finally:
@@ -91,15 +97,23 @@ def execute(workflow: str, host, port, wait=True, verbose=False, local_paths=Fal
 class ExecutionProgress(Progress):
     def get_renderables(self):
         table_columns = (
-            (Column(no_wrap=True) if isinstance(_column, str) else _column.get_table_column().copy())
+            (
+                Column(no_wrap=True)
+                if isinstance(_column, str)
+                else _column.get_table_column().copy()
+            )
             for _column in self.columns
         )
 
         for task in self.tasks:
             percent = "[progress.percentage]{task.percentage:>3.0f}%".format(task=task)
             if task.fields.get("progress_type") == "overall":
-                overall_table = Table.grid(*table_columns, padding=(0, 1), expand=self.expand)
-                overall_table.add_row(BarColumn().render(task), percent, TimeElapsedColumn().render(task))
+                overall_table = Table.grid(
+                    *table_columns, padding=(0, 1), expand=self.expand
+                )
+                overall_table.add_row(
+                    BarColumn().render(task), percent, TimeElapsedColumn().render(task)
+                )
                 yield overall_table
             else:
                 yield self.make_tasks_table([task])
@@ -118,7 +132,9 @@ class WorkflowExecution:
         self.remaining_nodes = set(self.workflow.keys())
         self.total_nodes = len(self.remaining_nodes)
         if progress:
-            self.overall_task = self.progress.add_task("", total=self.total_nodes, progress_type="overall")
+            self.overall_task = self.progress.add_task(
+                "", total=self.total_nodes, progress_type="overall"
+            )
         self.current_node = None
         self.progress_task = None
         self.progress_node = None
@@ -131,7 +147,9 @@ class WorkflowExecution:
 
     def queue(self):
         data = {"prompt": self.workflow, "client_id": self.client_id}
-        req = request.Request(f"http://{self.host}:{self.port}/prompt", json.dumps(data).encode("utf-8"))
+        req = request.Request(
+            f"http://{self.host}:{self.port}/prompt", json.dumps(data).encode("utf-8")
+        )
         try:
             resp = request.urlopen(req)
             body = json.loads(resp.read())
@@ -163,7 +181,9 @@ class WorkflowExecution:
                     break
 
     def update_overall_progress(self):
-        self.progress.update(self.overall_task, completed=self.total_nodes - len(self.remaining_nodes))
+        self.progress.update(
+            self.overall_task, completed=self.total_nodes - len(self.remaining_nodes)
+        )
 
     def get_node_title(self, node_id):
         node = self.workflow[node_id]
@@ -194,7 +214,9 @@ class WorkflowExecution:
             if subfolder:
                 filename = os.path.join(subfolder, filename)
 
-            filename = os.path.join(workspace_manager.get_workspace_path()[0], output_type, filename)
+            filename = os.path.join(
+                workspace_manager.get_workspace_path()[0], output_type, filename
+            )
             return filename
 
         query = urllib.parse.urlencode(img)
@@ -269,5 +291,7 @@ class WorkflowExecution:
             self.outputs.append(self.format_image_path(img))
 
     def on_error(self, data):
-        pprint(f"[bold red]Error running workflow\n{json.dumps(data, indent=2)}[/bold red]")
+        pprint(
+            f"[bold red]Error running workflow\n{json.dumps(data, indent=2)}[/bold red]"
+        )
         raise typer.Exit(code=1)

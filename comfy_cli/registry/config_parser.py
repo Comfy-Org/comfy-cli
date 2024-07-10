@@ -66,13 +66,21 @@ def initialize_project_config():
 
     # Get the current git remote URL
     try:
-        git_remote_url = subprocess.check_output(["git", "remote", "get-url", "origin"]).decode().strip()
+        git_remote_url = (
+            subprocess.check_output(["git", "remote", "get-url", "origin"])
+            .decode()
+            .strip()
+        )
     except subprocess.CalledProcessError as e:
-        raise Exception("Could not retrieve Git remote URL. Are you in a Git repository?") from e
+        raise Exception(
+            "Could not retrieve Git remote URL. Are you in a Git repository?"
+        ) from e
 
     # Convert SSH URL to HTTPS if needed
     if git_remote_url.startswith("git@github.com:"):
-        git_remote_url = git_remote_url.replace("git@github.com:", "https://github.com/")
+        git_remote_url = git_remote_url.replace(
+            "git@github.com:", "https://github.com/"
+        )
 
     # Ensure the URL ends with `.git` and remove it to obtain the plain URL
     repo_name = git_remote_url.split("/")[-1].replace(".git", "")
@@ -114,7 +122,9 @@ def extract_node_configuration(
     path: str = os.path.join(os.getcwd(), "pyproject.toml"),
 ) -> Optional[PyProjectConfig]:
     if not os.path.isfile(path):
-        ui.display_error_message("No pyproject.toml file found in the current directory.")
+        ui.display_error_message(
+            "No pyproject.toml file found in the current directory."
+        )
         return None
 
     with open(path, "r") as file:
@@ -143,7 +153,10 @@ def extract_node_configuration(
         publisher_id=comfy_data.get("PublisherId", ""),
         display_name=comfy_data.get("DisplayName", ""),
         icon=comfy_data.get("Icon", ""),
-        models=[Model(location=m["location"], model_url=m["model_url"]) for m in comfy_data.get("Models", [])],
+        models=[
+            Model(location=m["location"], model_url=m["model_url"])
+            for m in comfy_data.get("Models", [])
+        ],
     )
 
     return PyProjectConfig(project=project, tool_comfy=comfy)

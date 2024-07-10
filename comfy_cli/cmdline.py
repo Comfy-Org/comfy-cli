@@ -52,7 +52,9 @@ class MutuallyExclusiveValidator:
         if value is not None and param.name not in self.group:
             self.group.append(param.name)
         if len(self.group) > 1:
-            raise typer.BadParameter(f"option `{param.name}` is mutually exclusive with option `{self.group.pop()}`")
+            raise typer.BadParameter(
+                f"option `{param.name}` is mutually exclusive with option `{self.group.pop()}`"
+            )
         return value
 
 
@@ -129,7 +131,9 @@ def entry(
     tracking.prompt_tracking_consent(skip_prompt, default_value=enable_telemetry)
 
     if ctx.invoked_subcommand is None:
-        print("[bold yellow]Welcome to Comfy CLI![/bold yellow]: https://github.com/Comfy-Org/comfy-cli")
+        print(
+            "[bold yellow]Welcome to Comfy CLI![/bold yellow]: https://github.com/Comfy-Org/comfy-cli"
+        )
         print(ctx.get_help())
         ctx.exit()
 
@@ -145,7 +149,9 @@ def entry(
 @tracking.track_command()
 def install(
     url: Annotated[str, typer.Option(show_default=False)] = constants.COMFY_GITHUB_URL,
-    manager_url: Annotated[str, typer.Option(show_default=False)] = constants.COMFY_MANAGER_GITHUB_URL,
+    manager_url: Annotated[
+        str, typer.Option(show_default=False)
+    ] = constants.COMFY_MANAGER_GITHUB_URL,
     restore: Annotated[
         bool,
         typer.Option(
@@ -172,7 +178,9 @@ def install(
             callback=g_gpu_exclusivity.validate,
         ),
     ] = None,
-    cuda_version: Annotated[CUDAVersion, typer.Option(show_default=True)] = CUDAVersion.v12_1,
+    cuda_version: Annotated[
+        CUDAVersion, typer.Option(show_default=True)
+    ] = CUDAVersion.v12_1,
     amd: Annotated[
         Optional[bool],
         typer.Option(
@@ -206,7 +214,9 @@ def install(
             callback=g_gpu_exclusivity.validate,
         ),
     ] = None,
-    commit: Annotated[Optional[str], typer.Option(help="Specify commit hash for ComfyUI")] = None,
+    commit: Annotated[
+        Optional[str], typer.Option(help="Specify commit hash for ComfyUI")
+    ] = None,
 ):
     check_for_updates()
     checker = EnvChecker()
@@ -215,7 +225,9 @@ def install(
 
     is_comfy_installed_at_path, repo_dir = check_comfy_repo(comfy_path)
     if is_comfy_installed_at_path and not restore:
-        print(f"[bold red]ComfyUI is already installed at the specified path:[/bold red] {comfy_path}\n")
+        print(
+            f"[bold red]ComfyUI is already installed at the specified path:[/bold red] {comfy_path}\n"
+        )
         print(
             "[bold yellow]If you want to restore dependencies, add the '--restore' option.[/bold yellow]",
         )
@@ -225,8 +237,12 @@ def install(
         comfy_path = str(repo_dir.working_dir)
 
     if checker.python_version.major < 3 or checker.python_version.minor < 9:
-        print("[bold red]Python version 3.9 or higher is required to run ComfyUI.[/bold red]")
-        print(f"You are currently using Python version {env_checker.format_python_version(checker.python_version)}.")
+        print(
+            "[bold red]Python version 3.9 or higher is required to run ComfyUI.[/bold red]"
+        )
+        print(
+            f"You are currently using Python version {env_checker.format_python_version(checker.python_version)}."
+        )
     platform = utils.get_os()
     if cpu:
         print("[bold yellow]Installing for CPU[/bold yellow]")
@@ -247,7 +263,9 @@ def install(
         return None
 
     if nvidia and platform == constants.OS.MACOS:
-        print("[bold red]Nvidia GPU is never on MacOS. What are you smoking? 🤔[/bold red]")
+        print(
+            "[bold red]Nvidia GPU is never on MacOS. What are you smoking? 🤔[/bold red]"
+        )
         raise typer.Exit(code=1)
 
     if platform != constants.OS.MACOS and m_series:
@@ -276,10 +294,14 @@ def install(
             )
 
     if gpu == GPU_OPTION.INTEL_ARC:
-        print("[bold yellow]Installing on Intel ARC is not yet completely supported[/bold yellow]")
+        print(
+            "[bold yellow]Installing on Intel ARC is not yet completely supported[/bold yellow]"
+        )
         env_check = env_checker.EnvChecker()
         if env_check.conda_env is None:
-            print("[bold red]Intel ARC support requires conda environment to be activated.[/bold red]")
+            print(
+                "[bold red]Intel ARC support requires conda environment to be activated.[/bold red]"
+            )
             raise typer.Exit(code=1)
         if intel_arc is None:
             confirm_result = ui.prompt_confirm_action(
@@ -347,7 +369,9 @@ def update(
     custom_nodes.command.update_node_id_cache()
 
 
-@app.command(help="Run API workflow file using the ComfyUI launched by `comfy launch --background`")
+@app.command(
+    help="Run API workflow file using the ComfyUI launched by `comfy launch --background`"
+)
 @tracking.track_command()
 def run(
     workflow: Annotated[str, typer.Option(help="Path to the workflow API json file.")],
@@ -361,7 +385,9 @@ def run(
     ] = False,
     host: Annotated[
         Optional[str],
-        typer.Option(help="The IP/hostname where the ComfyUI instance is running, e.g. 127.0.0.1 or localhost."),
+        typer.Option(
+            help="The IP/hostname where the ComfyUI instance is running, e.g. 127.0.0.1 or localhost."
+        ),
     ] = None,
     port: Annotated[
         Optional[int],
@@ -396,7 +422,9 @@ def run(
 
 def validate_comfyui(_env_checker):
     if _env_checker.comfy_repo is None:
-        print("[bold red]If ComfyUI is not installed, this feature cannot be used.[/bold red]")
+        print(
+            "[bold red]If ComfyUI is not installed, this feature cannot be used.[/bold red]"
+        )
         raise typer.Exit(code=1)
 
 
@@ -448,7 +476,9 @@ async def launch_and_monitor(cmd, listen, port):
                 print(
                     f"[bold yellow]ComfyUI is successfully launched in the background.[/bold yellow]\nTo see the GUI go to: http://{listen}:{port}"
                 )
-                ConfigManager().config["DEFAULT"][constants.CONFIG_KEY_BACKGROUND] = f"{(listen, port, process.pid)}"
+                ConfigManager().config["DEFAULT"][
+                    constants.CONFIG_KEY_BACKGROUND
+                ] = f"{(listen, port, process.pid)}"
                 ConfigManager().write_config()
 
                 # NOTE: os.exit(0) doesn't work.
@@ -526,7 +556,9 @@ def launch_comfyui(extra):
 
     new_env = os.environ.copy()
 
-    session_path = os.path.join(ConfigManager().get_config_path(), "tmp", str(uuid.uuid4()))
+    session_path = os.path.join(
+        ConfigManager().get_config_path(), "tmp", str(uuid.uuid4())
+    )
     new_env["__COMFY_CLI_SESSION__"] = session_path
     new_env["PYTHONENCODING"] = "utf-8"
 
@@ -540,7 +572,9 @@ def launch_comfyui(extra):
     if "COMFY_CLI_BACKGROUND" not in os.environ:
         # If not running in background mode, there's no need to use popen. This can prevent the issue of linefeeds occurring with tqdm.
         while True:
-            res = subprocess.run([sys.executable, "main.py"] + extra, env=new_env, check=False)
+            res = subprocess.run(
+                [sys.executable, "main.py"] + extra, env=new_env, check=False
+            )
 
             if reboot_path is None:
                 print("[bold red]ComfyUI is not installed.[/bold red]\n")
@@ -619,7 +653,9 @@ def stop():
     if not is_killed:
         print("[bold red]Failed to stop ComfyUI in the background.[/bold red]\n")
     else:
-        print(f"[bold yellow]Background ComfyUI is stopped.[/bold yellow] ({bg_info[0]}:{bg_info[1]})")
+        print(
+            f"[bold yellow]Background ComfyUI is stopped.[/bold yellow] ({bg_info[0]}:{bg_info[1]})"
+        )
 
     ConfigManager().remove_background()
 
@@ -627,7 +663,9 @@ def stop():
 @app.command(help="Launch ComfyUI: ?[--background] ?[-- <extra args ...>]")
 @tracking.track_command()
 def launch(
-    background: Annotated[bool, typer.Option(help="Launch ComfyUI in background")] = False,
+    background: Annotated[
+        bool, typer.Option(help="Launch ComfyUI in background")
+    ] = False,
     extra: List[str] = typer.Argument(None),
 ):
     check_for_updates()
@@ -640,7 +678,9 @@ def launch(
         )
         raise typer.Exit(code=1)
 
-    if (extra is None or len(extra) == 0) and workspace_manager.workspace_type == WorkspaceType.DEFAULT:
+    if (
+        extra is None or len(extra) == 0
+    ) and workspace_manager.workspace_type == WorkspaceType.DEFAULT:
         launch_extras = workspace_manager.config_manager.config["DEFAULT"].get(
             constants.CONFIG_KEY_DEFAULT_LAUNCH_EXTRAS, ""
         )
@@ -664,7 +704,9 @@ def launch(
 @tracking.track_command()
 def set_default(
     workspace_path: str,
-    launch_extras: Annotated[str, typer.Option(help="Specify extra options for launch")] = "",
+    launch_extras: Annotated[
+        str, typer.Option(help="Specify extra options for launch")
+    ] = "",
 ):
     comfy_path = os.path.abspath(os.path.expanduser(workspace_path))
 
@@ -716,13 +758,17 @@ def env():
 @app.command(hidden=True)
 @tracking.track_command()
 def nodes():
-    print("\n[bold red] No such command, did you mean 'comfy node' instead?[/bold red]\n")
+    print(
+        "\n[bold red] No such command, did you mean 'comfy node' instead?[/bold red]\n"
+    )
 
 
 @app.command(hidden=True)
 @tracking.track_command()
 def models():
-    print("\n[bold red] No such command, did you mean 'comfy model' instead?[/bold red]\n")
+    print(
+        "\n[bold red] No such command, did you mean 'comfy model' instead?[/bold red]\n"
+    )
 
 
 @app.command(help="Provide feedback on the Comfy CLI tool.")
@@ -736,7 +782,9 @@ def feedback():
         choices=["1", "2", "3", "4", "5"],
         force_prompting=True,
     )
-    tracking.track_event("feedback_general_satisfaction", {"score": general_satisfaction_score})
+    tracking.track_event(
+        "feedback_general_satisfaction", {"score": general_satisfaction_score}
+    )
 
     # Usability and User Experience
     usability_satisfaction_score = ui.prompt_select(
@@ -744,10 +792,14 @@ def feedback():
         choices=["1", "2", "3", "4", "5"],
         force_prompting=True,
     )
-    tracking.track_event("feedback_usability_satisfaction", {"score": usability_satisfaction_score})
+    tracking.track_event(
+        "feedback_usability_satisfaction", {"score": usability_satisfaction_score}
+    )
 
     # Additional Feature-Specific Feedback
-    if questionary.confirm("Do you want to provide additional feature-specific feedback on our GitHub page?").ask():
+    if questionary.confirm(
+        "Do you want to provide additional feature-specific feedback on our GitHub page?"
+    ).ask():
         tracking.track_event("feedback_additional")
         webbrowser.open("https://github.com/Comfy-Org/comfy-cli/issues/new/choose")
 
