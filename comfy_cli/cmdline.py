@@ -222,16 +222,10 @@ def install(
     check_for_updates()
     checker = EnvChecker()
 
-    comfy_path = workspace_manager.get_specified_workspace()
+    comfy_path, _ = workspace_manager.get_workspace_path()
 
-    if comfy_path is None:
-        comfy_path = workspace_manager.workspace_path
-
-    if comfy_path is None:
-        comfy_path = utils.get_not_user_set_default_workspace()
-
-    is_comfy_path, repo_dir = check_comfy_repo(comfy_path)
-    if is_comfy_path and not restore:
+    is_comfy_installed_at_path, repo_dir = check_comfy_repo(comfy_path)
+    if is_comfy_installed_at_path and not restore:
         print(
             f"[bold red]ComfyUI is already installed at the specified path:[/bold red] {comfy_path}\n"
         )
@@ -250,8 +244,25 @@ def install(
         print(
             f"You are currently using Python version {env_checker.format_python_version(checker.python_version)}."
         )
-
     platform = utils.get_os()
+    if cpu:
+        print("[bold yellow]Installing for CPU[/bold yellow]")
+        install_inner.execute(
+            url,
+            manager_url,
+            comfy_path,
+            restore,
+            skip_manager,
+            commit=commit,
+            gpu=None,
+            cuda_version=cuda_version,
+            plat=platform,
+            skip_torch_or_directml=skip_torch_or_directml,
+            skip_requirement=skip_requirement,
+        )
+        print(f"ComfyUI is installed at: {comfy_path}")
+        return None
+
     if nvidia and platform == constants.OS.MACOS:
         print(
             "[bold red]Nvidia GPU is never on MacOS. What are you smoking? 🤔[/bold red]"

@@ -51,7 +51,7 @@ class ComfyLockYAMLStruct:
     custom_nodes: List[CustomNode] = field(default_factory=list)
 
 
-def check_comfy_repo(path):
+def check_comfy_repo(path) -> Tuple[bool, Optional[git.Repo]]:
     if not os.path.exists(path):
         return False, None
     try:
@@ -144,7 +144,6 @@ class WorkspaceType(Enum):
     DEFAULT = "default"
     SPECIFIED = "specified"
     RECENT = "recent"
-    NOT_FOUND = "not_found"
 
 
 @singleton
@@ -198,7 +197,7 @@ class WorkspaceManager:
             constants.CONFIG_KEY_DEFAULT_LAUNCH_EXTRAS, extras.strip()
         )
 
-    def get_specified_workspace(self):
+    def __get_specified_workspace(self) -> Optional[str]:
         if self.specified_workspace is None:
             return None
 
@@ -206,7 +205,7 @@ class WorkspaceManager:
 
     def get_workspace_path(self) -> Tuple[str, WorkspaceType]:
         """
-        Retrieves the workspace path and type based on the following precedence:
+        Retrieves a workspace path based on user input and defaults. This function does not validate the existence of a validate ComfyUI workspace.
         1. Specified Workspace (--workspace)
         2. Most Recent (if --recent is True)
         3. Current Directory (if --here is True)
@@ -215,19 +214,11 @@ class WorkspaceManager:
         6. Most Recent Workspace (if --no-recent is not True)
         7. Fallback Default Workspace ('~/comfy' for linux or ~/Documents/comfy for windows/macos)
 
-        Raises:
-            FileNotFoundError: If no valid workspace is found.
         """
         # Check for explicitly specified workspace first
-        specified_workspace = self.get_specified_workspace()
+        specified_workspace = self.__get_specified_workspace()
         if specified_workspace:
-            if check_comfy_repo(specified_workspace):
-                return specified_workspace, WorkspaceType.SPECIFIED
-
-            print(
-                "[bold red]warn: The specified workspace is not ComfyUI directory.[/bold red]"
-            )  # If a path has been explicitly specified, cancel the command for safety.
-            raise typer.Exit(code=1)
+            return specified_workspace, WorkspaceType.SPECIFIED
 
         # Check for recent workspace if requested
         if self.use_recent:
@@ -235,30 +226,21 @@ class WorkspaceManager:
                 constants.CONFIG_KEY_RECENT_WORKSPACE
             )
             if recent_workspace:
-                if check_comfy_repo(recent_workspace):
-                    return recent_workspace, WorkspaceType.RECENT
+                return recent_workspace, WorkspaceType.RECENT
             else:
                 print(
                     "[bold red]warn: No recent workspace has been set.[/bold red]"
                 )  # If a path has been explicitly specified, cancel the command for safety.
                 raise typer.Exit(code=1)
 
-            print(
-                "[bold red]warn: The recent workspace is not ComfyUI.[/bold red]"
-            )  # If a path has been explicitly specified, cancel the command for safety.
-            raise typer.Exit(code=1)
-
         # Check for current workspace if requested
-        if self.use_here:
+        if self.use_here is True:
             current_directory = os.getcwd()
             found_comfy_repo, comfy_repo = check_comfy_repo(current_directory)
             if found_comfy_repo:
                 return comfy_repo.working_dir, WorkspaceType.CURRENT_DIR
-
-            print(
-                "[bold red]warn: you are not currently in a ComfyUI directory.[/bold red]"
-            )
-            raise typer.Exit(code=1)
+            else:
+                return current_directory + "/ComfyUI", WorkspaceType.CURRENT_DIR
 
         # Check the current directory for a ComfyUI
         if self.use_here is None:
@@ -285,13 +267,14 @@ class WorkspaceManager:
             )
             if recent_workspace and check_comfy_repo(recent_workspace)[0]:
                 return recent_workspace, WorkspaceType.RECENT
+            else:
+                print(
+                    f"[bold red]warn: The recent workspace {recent_workspace} is not a valid ComfyUI path.[/bold red]"
+                )
 
         # Check for comfy-cli default workspace
         default_workspace = utils.get_not_user_set_default_workspace()
-        if check_comfy_repo(default_workspace)[0]:
-            return default_workspace, WorkspaceType.DEFAULT
-
-        return None, WorkspaceType.NOT_FOUND
+        return default_workspace, WorkspaceType.DEFAULT
 
     def get_comfyui_manager_path(self):
         if self.workspace_path is None:
