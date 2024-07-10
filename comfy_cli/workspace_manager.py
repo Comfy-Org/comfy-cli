@@ -284,7 +284,7 @@ class WorkspaceManager:
             constants.CONFIG_KEY_DEFAULT_WORKSPACE
         )
 
-        if default_workspace and get_comfy_repo(default_workspace)[0]:
+        if default_workspace and get_comfy_repo(default_workspace):
             return default_workspace, WorkspaceType.DEFAULT
 
         # Fallback to the most recent workspace if it exists
@@ -292,12 +292,12 @@ class WorkspaceManager:
             recent_workspace = self.config_manager.get(
                 constants.CONFIG_KEY_RECENT_WORKSPACE
             )
-            if recent_workspace and get_comfy_repo(recent_workspace)[0]:
+            if recent_workspace and get_comfy_repo(recent_workspace):
                 return recent_workspace, WorkspaceType.RECENT
 
         # Check for comfy-cli default workspace
         default_workspace = utils.get_not_user_set_default_workspace()
-        if get_comfy_repo(default_workspace)[0]:
+        if get_comfy_repo(default_workspace):
             return default_workspace, WorkspaceType.DEFAULT
 
         return None, WorkspaceType.NOT_FOUND
