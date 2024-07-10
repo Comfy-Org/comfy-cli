@@ -37,6 +37,22 @@ You can add following config to your VSCode `launch.json` to launch debugger.
 }
 ```
 
+## Linting and Type Checking
+
+Here is the recommended VScode settings. We use Black to format python code. We use Pylance's to do some basic type checking.
+
+```
+{
+    "[python]": {
+        "editor.defaultFormatter": "ms-python.black-formatter",
+        "editor.formatOnSave": true
+
+      },
+    "python.languageServer": "Pylance",
+    "python.analysis.typeCheckingMode": "basic"
+}
+```
+
 ## Make changes to the code base
 
 There is a potential need for you to reinstall the package. You can do this by

@@ -98,7 +98,7 @@ def request_civitai_model_version_api(version_id: int, headers: Optional[dict] =
 
 
 def request_civitai_model_api(
-    model_id: int, version_id: int = None, headers: Optional[dict] = None
+    model_id: int, version_id: Optional[int] = None, headers: Optional[dict] = None
 ):
     # Make a request to the Civitai API to get the model information
     response = requests.get(

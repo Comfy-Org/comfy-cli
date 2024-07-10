@@ -1,4 +1,4 @@
-name: Lint
+name: Lint & Type Check
 
 on:
   push:
@@ -17,6 +17,9 @@ jobs:
         uses: actions/setup-python@v4
         with:
           python-version: "3.x"
+      - uses: jakebailey/pyright-action@v2
+        with:
+          pylance-version: latest-release
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
