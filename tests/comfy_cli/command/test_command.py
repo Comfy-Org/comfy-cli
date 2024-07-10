@@ -3,21 +3,23 @@ import pytest
 from unittest.mock import patch
 from typer.testing import CliRunner
 
-from comfy_cli.cmdline import app
+from comfy_cli.cmdline import app, g_exclusivity, g_gpu_exclusivity
 
 
-@pytest.fixture
+@pytest.fixture(scope="function")
 def runner():
+    g_exclusivity.reset_for_testing()
+    g_gpu_exclusivity.reset_for_testing()
     return CliRunner()
 
 
-@pytest.fixture
+@pytest.fixture(scope="function")
 def mock_execute():
     with patch("comfy_cli.command.install.execute") as mock:
         yield mock
 
 
-@pytest.fixture
+@pytest.fixture(scope="function")
 def mock_prompt_select_enum():
     def mocked_prompt_select_enum(
         question: str, choices: list, force_prompting: bool = False
@@ -31,17 +33,19 @@ def mock_prompt_select_enum():
         yield mock
 
 
-
-@pytest.mark.parametrize("cmd", [
-    ["--here", "install"],
-    ["--workspace", "./", "install"],
-])
-def test_install_here(runner, mock_execute, mock_prompt_select_enum):
-    result = runner.invoke(app, ["--here", "install"])
+@pytest.mark.parametrize(
+    "cmd",
+    [
+        ["--here", "install"],
+        ["--workspace", "./ComfyUI", "install"],
+    ],
+)
+def test_install_here(cmd, runner, mock_execute, mock_prompt_select_enum):
+    result = runner.invoke(app, cmd)
     assert result.exit_code == 0, result.stdout
 
     args, kwargs = mock_execute.call_args
     url, manager_url, comfy_path, *_ = args
     assert url == "https://github.com/comfyanonymous/ComfyUI"
     assert manager_url == "https://github.com/ltdrdata/ComfyUI-Manager"
-    assert comfy_path == os.getcwd()
+    assert comfy_path == os.path.join(os.getcwd(), "ComfyUI")
