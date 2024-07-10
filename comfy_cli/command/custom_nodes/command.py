@@ -226,7 +226,7 @@ def execute_install_script(repo_path):
 @tracking.track_command("node")
 def save_snapshot(
     output: Annotated[
-        str,
+        Optional[str],
         typer.Option(
             show_default=False, help="Specify the output file path. (.json/.yaml)"
         ),
@@ -383,7 +383,7 @@ def show(
         autocompletion=show_completer,
     ),
     channel: Annotated[
-        str,
+        Optional[str],
         typer.Option(
             show_default=False,
             help="Specify the operation mode",
@@ -422,7 +422,7 @@ def simple_show(
         autocompletion=show_completer,
     ),
     channel: Annotated[
-        str,
+        Optional[str],
         typer.Option(
             show_default=False,
             help="Specify the operation mode",
@@ -461,7 +461,7 @@ def install(
         ..., help="List of custom nodes to install", autocompletion=node_completer
     ),
     channel: Annotated[
-        str,
+        Optional[str],
         typer.Option(
             show_default=False,
             help="Specify the operation mode",
@@ -490,7 +490,7 @@ def reinstall(
         ..., help="List of custom nodes to reinstall", autocompletion=node_completer
     ),
     channel: Annotated[
-        str,
+        Optional[str],
         typer.Option(
             show_default=False,
             help="Specify the operation mode",
@@ -519,7 +519,7 @@ def uninstall(
         ..., help="List of custom nodes to uninstall", autocompletion=node_completer
     ),
     channel: Annotated[
-        str,
+        Optional[str],
         typer.Option(
             show_default=False,
             help="Specify the operation mode",
@@ -577,7 +577,7 @@ def update(
         autocompletion=node_or_all_completer,
     ),
     channel: Annotated[
-        str,
+        Optional[str],
         typer.Option(
             show_default=False,
             help="Specify the operation mode",
@@ -606,7 +606,7 @@ def disable(
         autocompletion=node_or_all_completer,
     ),
     channel: Annotated[
-        str,
+        Optional[str],
         typer.Option(
             show_default=False,
             help="Specify the operation mode",
@@ -633,7 +633,7 @@ def enable(
         autocompletion=node_or_all_completer,
     ),
     channel: Annotated[
-        str,
+        Optional[str],
         typer.Option(
             show_default=False,
             help="Specify the operation mode",
@@ -660,7 +660,7 @@ def fix(
         autocompletion=node_or_all_completer,
     ),
     channel: Annotated[
-        str,
+        Optional[str],
         typer.Option(
             show_default=False,
             help="Specify the operation mode",
@@ -685,13 +685,15 @@ def fix(
 @tracking.track_command("node")
 def install_deps(
     deps: Annotated[
-        str, typer.Option(show_default=False, help="Dependency spec file (.json)")
+        Optional[str],
+        typer.Option(show_default=False, help="Dependency spec file (.json)"),
     ] = None,
     workflow: Annotated[
-        str, typer.Option(show_default=False, help="Workflow file (.json/.png)")
+        Optional[str],
+        typer.Option(show_default=False, help="Workflow file (.json/.png)"),
     ] = None,
     channel: Annotated[
-        str,
+        Optional[str],
         typer.Option(
             show_default=False,
             help="Specify the operation mode",
@@ -749,7 +751,7 @@ def deps_in_workflow(
         str, typer.Option(show_default=False, help="Output file (.json)")
     ],
     channel: Annotated[
-        str,
+        Optional[str],
         typer.Option(
             show_default=False,
             help="Specify the operation mode",
