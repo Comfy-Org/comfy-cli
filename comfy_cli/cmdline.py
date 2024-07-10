@@ -366,11 +366,11 @@ def update(
 def run(
     workflow: Annotated[str, typer.Option(help="Path to the workflow API json file.")],
     wait: Annotated[
-        Optional[bool],
+        bool,
         typer.Option(help="If the command should wait until execution completes."),
     ] = True,
     verbose: Annotated[
-        Optional[bool],
+        bool,
         typer.Option(help="Enables verbose output of the execution process."),
     ] = False,
     host: Annotated[
