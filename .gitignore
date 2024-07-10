@@ -9,6 +9,7 @@ __pycache__/
 *.swo
 .vscode/settings.json
 .idea/
+.vscode/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
