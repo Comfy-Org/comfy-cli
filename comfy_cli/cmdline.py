@@ -124,7 +124,7 @@ def entry(
         print(ConfigManager().get_cli_version())
         ctx.exit(0)
 
-    workspace_manager.setup_workspace_manager(workspace, here, recent, skip_prompt)
+    # workspace_manager.setup_workspace_manager(workspace, here, recent, skip_prompt)
 
     tracking.prompt_tracking_consent(skip_prompt, default_value=enable_telemetry)
 
