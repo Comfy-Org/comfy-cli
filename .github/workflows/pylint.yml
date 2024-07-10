@@ -23,8 +23,8 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install pylint
+      - name: Lint with Pylint
+        run: pylint --disable=R **/*.py
       - uses: jakebailey/pyright-action@v2
         with:
           pylance-version: latest-release
-      - name: Lint with Pylint
-        run: pylint --disable=R **/*.py
