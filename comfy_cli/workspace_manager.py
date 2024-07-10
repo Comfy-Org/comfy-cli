@@ -54,7 +54,9 @@ def check_comfy_repo(path) -> Tuple[bool, Optional[git.Repo]]:
         return False, None
     try:
         repo = git.Repo(path, search_parent_directories=True)
-        path_is_comfy_repo = any(remote.url in constants.COMFY_ORIGIN_URL_CHOICES for remote in repo.remotes)
+        path_is_comfy_repo = any(
+            remote.url in constants.COMFY_ORIGIN_URL_CHOICES for remote in repo.remotes
+        )
 
         # If it's within the custom node repo, lookup from the parent directory.
         if not path_is_comfy_repo and "custom_nodes" in path:
@@ -64,7 +66,10 @@ def check_comfy_repo(path) -> Tuple[bool, Optional[git.Repo]]:
                 path = os.sep.join(parts[:index])
 
                 repo = git.Repo(path, search_parent_directories=True)
-                path_is_comfy_repo = any(remote.url in constants.COMFY_ORIGIN_URL_CHOICES for remote in repo.remotes)
+                path_is_comfy_repo = any(
+                    remote.url in constants.COMFY_ORIGIN_URL_CHOICES
+                    for remote in repo.remotes
+                )
             except ValueError:
                 pass
 
@@ -170,19 +175,25 @@ class WorkspaceManager:
         """
         Sets the most recent workspace path in the configuration.
         """
-        self.config_manager.set(constants.CONFIG_KEY_RECENT_WORKSPACE, os.path.abspath(path))
+        self.config_manager.set(
+            constants.CONFIG_KEY_RECENT_WORKSPACE, os.path.abspath(path)
+        )
 
     def set_default_workspace(self, path: str):
         """
         Sets the default workspace path in the configuration.
         """
-        self.config_manager.set(constants.CONFIG_KEY_DEFAULT_WORKSPACE, os.path.abspath(path))
+        self.config_manager.set(
+            constants.CONFIG_KEY_DEFAULT_WORKSPACE, os.path.abspath(path)
+        )
 
     def set_default_launch_extras(self, extras: str):
         """
         Sets the default workspace path in the configuration.
         """
-        self.config_manager.set(constants.CONFIG_KEY_DEFAULT_LAUNCH_EXTRAS, extras.strip())
+        self.config_manager.set(
+            constants.CONFIG_KEY_DEFAULT_LAUNCH_EXTRAS, extras.strip()
+        )
 
     def __get_specified_workspace(self) -> Optional[str]:
         if self.specified_workspace is None:
@@ -209,7 +220,9 @@ class WorkspaceManager:
 
         # Check for recent workspace if requested
         if self.use_recent:
-            recent_workspace = self.config_manager.get(constants.CONFIG_KEY_RECENT_WORKSPACE)
+            recent_workspace = self.config_manager.get(
+                constants.CONFIG_KEY_RECENT_WORKSPACE
+            )
             if recent_workspace:
                 return recent_workspace, WorkspaceType.RECENT
             else:
@@ -233,20 +246,26 @@ class WorkspaceManager:
         # Check the current directory for a ComfyUI
         if self.use_here is None:
             current_directory = os.getcwd()
-            found_comfy_repo, comfy_repo = check_comfy_repo(os.path.join(current_directory))
+            found_comfy_repo, comfy_repo = check_comfy_repo(
+                os.path.join(current_directory)
+            )
             # If it's in a sub dir of the ComfyUI repo, get the repo working dir
             if found_comfy_repo:
                 return comfy_repo.working_dir, WorkspaceType.CURRENT_DIR
 
         # Check for user-set default workspace
-        default_workspace = self.config_manager.get(constants.CONFIG_KEY_DEFAULT_WORKSPACE)
+        default_workspace = self.config_manager.get(
+            constants.CONFIG_KEY_DEFAULT_WORKSPACE
+        )
 
         if default_workspace and check_comfy_repo(default_workspace)[0]:
             return default_workspace, WorkspaceType.DEFAULT
 
         # Fallback to the most recent workspace if it exists
         if self.use_recent is None:
-            recent_workspace = self.config_manager.get(constants.CONFIG_KEY_RECENT_WORKSPACE)
+            recent_workspace = self.config_manager.get(
+                constants.CONFIG_KEY_RECENT_WORKSPACE
+            )
             if recent_workspace and check_comfy_repo(recent_workspace)[0]:
                 return recent_workspace, WorkspaceType.RECENT
             else:
@@ -263,7 +282,9 @@ class WorkspaceManager:
             return None
 
         # To check more robustly, verify up to the `.git` path.
-        manager_path = os.path.join(self.workspace_path, "custom_nodes", "ComfyUI-Manager")
+        manager_path = os.path.join(
+            self.workspace_path, "custom_nodes", "ComfyUI-Manager"
+        )
         return manager_path
 
     def is_comfyui_manager_installed(self):
@@ -271,7 +292,9 @@ class WorkspaceManager:
             return False
 
         # To check more robustly, verify up to the `.git` path.
-        manager_git_path = os.path.join(self.workspace_path, "custom_nodes", "ComfyUI-Manager", ".git")
+        manager_git_path = os.path.join(
+            self.workspace_path, "custom_nodes", "ComfyUI-Manager", ".git"
+        )
         return os.path.exists(manager_git_path)
 
     def scan_dir(self):
@@ -292,7 +315,9 @@ class WorkspaceManager:
 
         # Use ThreadPoolExecutor to manage concurrency
         with concurrent.futures.ThreadPoolExecutor() as executor:
-            futures = [executor.submit(check_file_is_model, p) for p in base_path.rglob("*")]
+            futures = [
+                executor.submit(check_file_is_model, p) for p in base_path.rglob("*")
+            ]
             for future in concurrent.futures.as_completed(futures):
                 if future.result():
                     model_files.append(future.result())

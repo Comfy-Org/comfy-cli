@@ -28,8 +28,12 @@ def format_python_version(version_info):
         str: The formatted Python version string.
     """
     if version_info.major == 3 and version_info.minor > 8:
-        return "{}.{}.{}".format(version_info.major, version_info.minor, version_info.micro)
-    return "[bold red]{}.{}.{}[/bold red]".format(version_info.major, version_info.minor, version_info.micro)
+        return "{}.{}.{}".format(
+            version_info.major, version_info.minor, version_info.micro
+        )
+    return "[bold red]{}.{}.{}[/bold red]".format(
+        version_info.major, version_info.minor, version_info.micro
+    )
 
 
 def check_comfy_server_running(port=8188, host="localhost"):
@@ -85,8 +89,14 @@ class EnvChecker(object):
         return None
 
     def check(self):
-        self.virtualenv_path = os.environ.get("VIRTUAL_ENV") if os.environ.get("VIRTUAL_ENV") else None
-        self.conda_env = os.environ.get("CONDA_DEFAULT_ENV") if os.environ.get("CONDA_DEFAULT_ENV") else None
+        self.virtualenv_path = (
+            os.environ.get("VIRTUAL_ENV") if os.environ.get("VIRTUAL_ENV") else None
+        )
+        self.conda_env = (
+            os.environ.get("CONDA_DEFAULT_ENV")
+            if os.environ.get("CONDA_DEFAULT_ENV")
+            else None
+        )
 
     # TODO: use ui.display_table
     def fill_print_table(self):

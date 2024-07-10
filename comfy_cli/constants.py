@@ -20,7 +20,9 @@ DEFAULT_COMFY_WORKSPACE = {
 
 DEFAULT_CONFIG = {
     OS.WINDOWS: os.path.join(os.path.expanduser("~"), "AppData", "Local", "comfy-cli"),
-    OS.MACOS: os.path.join(os.path.expanduser("~"), "Library", "Application Support", "comfy-cli"),
+    OS.MACOS: os.path.join(
+        os.path.expanduser("~"), "Library", "Application Support", "comfy-cli"
+    ),
     OS.LINUX: os.path.join(os.path.expanduser("~"), ".config", "comfy-cli"),
 }
 

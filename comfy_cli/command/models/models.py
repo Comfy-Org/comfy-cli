@@ -99,9 +99,13 @@ def request_civitai_model_version_api(version_id: int, headers: Optional[dict] =
             return model_name, download_url, model_type, basemodel
 
 
-def request_civitai_model_api(model_id: int, version_id: int = None, headers: Optional[dict] = None):
+def request_civitai_model_api(
+    model_id: int, version_id: int = None, headers: Optional[dict] = None
+):
     # Make a request to the Civitai API to get the model information
-    response = requests.get(f"https://civitai.com/api/v1/models/{model_id}", headers=headers, timeout=10)
+    response = requests.get(
+        f"https://civitai.com/api/v1/models/{model_id}", headers=headers, timeout=10
+    )
     response.raise_for_status()  # Raise an error for bad status codes
 
     model_data = response.json()
@@ -132,7 +136,9 @@ def download(
     _ctx: typer.Context,
     url: Annotated[
         str,
-        typer.Option(help="The URL from which to download the model", show_default=False),
+        typer.Option(
+            help="The URL from which to download the model", show_default=False
+        ),
     ],
     relative_path: Annotated[
         Optional[str],
@@ -170,39 +176,63 @@ def download(
             "Authorization": f"Bearer {civitai_api_token}",
         }
 
-    is_civitai_model_url, is_civitai_api_url, model_id, version_id = check_civitai_url(url)
+    is_civitai_model_url, is_civitai_api_url, model_id, version_id = check_civitai_url(
+        url
+    )
 
+    is_huggingface = False
     if is_civitai_model_url:
-        local_filename, url, model_type, basemodel = request_civitai_model_api(model_id, version_id, headers)
+        local_filename, url, model_type, basemodel = request_civitai_model_api(
+            model_id, version_id, headers
+        )
 
         model_path = model_path_map.get(model_type)
 
         if relative_path is None:
             if model_path is None:
-                model_path = ui.prompt_input("Enter model type path (e.g. loras, checkpoints, ...)", default="")
+                model_path = ui.prompt_input(
+                    "Enter model type path (e.g. loras, checkpoints, ...)", default=""
+                )
 
-            relative_path = os.path.join(DEFAULT_COMFY_MODEL_PATH, model_path, basemodel)
+            relative_path = os.path.join(
+                DEFAULT_COMFY_MODEL_PATH, model_path, basemodel
+            )
     elif is_civitai_api_url:
-        local_filename, url, model_type, basemodel = request_civitai_model_version_api(version_id, headers)
+        local_filename, url, model_type, basemodel = request_civitai_model_version_api(
+            version_id, headers
+        )
 
         model_path = model_path_map.get(model_type)
 
         if relative_path is None:
             if model_path is None:
-                model_path = ui.prompt_input("Enter model type path (e.g. loras, checkpoints, ...)", default="")
+                model_path = ui.prompt_input(
+                    "Enter model type path (e.g. loras, checkpoints, ...)", default=""
+                )
 
-            relative_path = os.path.join(DEFAULT_COMFY_MODEL_PATH, model_path, basemodel)
+            relative_path = os.path.join(
+                DEFAULT_COMFY_MODEL_PATH, model_path, basemodel
+            )
     elif check_huggingface_url(url):
+        is_huggingface = True
         local_filename = potentially_strip_param_url(url.split("/")[-1])
 
         if relative_path is None:
-            model_path = ui.prompt_input("Enter model type path (e.g. loras, checkpoints, ...)", default="")
-            basemodel = ui.prompt_input("Enter base model (e.g. SD1.5, SDXL, ...)", default="")
-            relative_path = os.path.join(DEFAULT_COMFY_MODEL_PATH, model_path, basemodel)
+            model_path = ui.prompt_input(
+                "Enter model type path (e.g. loras, checkpoints, ...)", default=""
+            )
+            basemodel = ui.prompt_input(
+                "Enter base model (e.g. SD1.5, SDXL, ...)", default=""
+            )
+            relative_path = os.path.join(
+                DEFAULT_COMFY_MODEL_PATH, model_path, basemodel
+            )
     else:
         print("Model source is unknown")
 
-    local_filename = ui.prompt_input("Enter filename to save model as", default=local_filename)
+    local_filename = ui.prompt_input(
+        "Enter filename to save model as", default=local_filename
+    )
 
     if relative_path is None:
         relative_path = DEFAULT_COMFY_MODEL_PATH
@@ -260,20 +290,27 @@ def remove(
                 missing_models.append(name)
 
         if missing_models:
-            typer.echo("The following models were not found and cannot be removed: " + ", ".join(missing_models))
+            typer.echo(
+                "The following models were not found and cannot be removed: "
+                + ", ".join(missing_models)
+            )
             if not to_delete:
                 return  # Exit if no valid models were found
 
     # Scenario #2: User did not provide model names, prompt for selection
     else:
-        selections = ui.prompt_multi_select("Select models to delete:", [model.name for model in available_models])
+        selections = ui.prompt_multi_select(
+            "Select models to delete:", [model.name for model in available_models]
+        )
         if not selections:
             typer.echo("No models selected for deletion.")
             return
         to_delete = [model_dir / selection for selection in selections]
 
     # Confirm deletion
-    if to_delete and ui.prompt_confirm_action("Are you sure you want to delete the selected files?", False):
+    if to_delete and ui.prompt_confirm_action(
+        "Are you sure you want to delete the selected files?", False
+    ):
         for model_path in to_delete:
             model_path.unlink()
             typer.echo(f"Deleted: {model_path}")

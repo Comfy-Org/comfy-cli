@@ -44,7 +44,9 @@ def disable():
 def track_event(event_name: str, properties: any = None):
     if properties is None:
         properties = {}
-    logging.debug(f"tracking event called with event_name: {event_name} and properties: {properties}")
+    logging.debug(
+        f"tracking event called with event_name: {event_name} and properties: {properties}"
+    )
     enable_tracking = config_manager.get(constants.CONFIG_KEY_ENABLE_TRACKING)
     if not enable_tracking:
         return
@@ -65,13 +67,21 @@ def track_command(sub_command: str = None):
     def decorator(func):
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
-            command_name = f"{sub_command}:{func.__name__}" if sub_command is not None else func.__name__
+            command_name = (
+                f"{sub_command}:{func.__name__}"
+                if sub_command is not None
+                else func.__name__
+            )
 
             # Copy kwargs to avoid mutating original dictionary
             # Remove context and ctx from the dictionary as they are not needed for tracking and not serializable.
-            filtered_kwargs = {k: v for k, v in kwargs.items() if k != "ctx" and k != "context"}
+            filtered_kwargs = {
+                k: v for k, v in kwargs.items() if k != "ctx" and k != "context"
+            }
 
-            logging.debug(f"Tracking command: {command_name} with arguments: {filtered_kwargs}")
+            logging.debug(
+                f"Tracking command: {command_name} with arguments: {filtered_kwargs}"
+            )
             track_event(command_name, properties=filtered_kwargs)
 
             return func(*args, **kwargs)
@@ -89,7 +99,9 @@ def prompt_tracking_consent(skip_prompt: bool = False, default_value: bool = Fal
     if skip_prompt:
         init_tracking(default_value)
     else:
-        enable_tracking = ui.prompt_confirm_action("Do you agree to enable tracking to improve the application?", True)
+        enable_tracking = ui.prompt_confirm_action(
+            "Do you agree to enable tracking to improve the application?", True
+        )
         init_tracking(enable_tracking)
 
 
@@ -111,7 +123,9 @@ def init_tracking(enable_tracking: bool):
 
     # Note: only called once when the user interacts with the CLI for the
     #  first time iff the permission is granted.
-    install_event_triggered = config_manager.get(constants.CONFIG_KEY_INSTALL_EVENT_TRIGGERED)
+    install_event_triggered = config_manager.get(
+        constants.CONFIG_KEY_INSTALL_EVENT_TRIGGERED
+    )
     if not install_event_triggered:
         logging.debug("Tracking install event.")
         config_manager.set(constants.CONFIG_KEY_INSTALL_EVENT_TRIGGERED, "True")
