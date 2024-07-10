@@ -180,7 +180,6 @@ def download(
         url
     )
 
-    is_huggingface = False
     if is_civitai_model_url:
         local_filename, url, model_type, basemodel = request_civitai_model_api(
             model_id, version_id, headers
@@ -214,7 +213,6 @@ def download(
                 DEFAULT_COMFY_MODEL_PATH, model_path, basemodel
             )
     elif check_huggingface_url(url):
-        is_huggingface = True
         local_filename = potentially_strip_param_url(url.split("/")[-1])
 
         if relative_path is None:

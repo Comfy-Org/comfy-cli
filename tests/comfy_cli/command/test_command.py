@@ -44,7 +44,7 @@ def test_install_here(cmd, runner, mock_execute, mock_prompt_select_enum):
     result = runner.invoke(app, cmd)
     assert result.exit_code == 0, result.stdout
 
-    args, kwargs = mock_execute.call_args
+    args, _ = mock_execute.call_args
     url, manager_url, comfy_path, *_ = args
     assert url == "https://github.com/comfyanonymous/ComfyUI"
     assert manager_url == "https://github.com/ltdrdata/ComfyUI-Manager"
