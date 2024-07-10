@@ -222,16 +222,10 @@ def install(
     check_for_updates()
     checker = EnvChecker()
 
-    comfy_path = workspace_manager.get_specified_workspace()
+    comfy_path, _ = workspace_manager.get_workspace_path()
 
-    if comfy_path is None:
-        comfy_path = workspace_manager.workspace_path
-
-    if comfy_path is None:
-        comfy_path = utils.get_not_user_set_default_workspace()
-
-    is_comfy_path, repo_dir = check_comfy_repo(comfy_path)
-    if is_comfy_path and not restore:
+    is_comfy_installed_at_path, repo_dir = check_comfy_repo(comfy_path)
+    if is_comfy_installed_at_path and not restore:
         print(
             f"[bold red]ComfyUI is already installed at the specified path:[/bold red] {comfy_path}\n"
         )
