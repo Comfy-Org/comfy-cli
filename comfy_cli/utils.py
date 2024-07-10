@@ -6,8 +6,8 @@ import subprocess
 import sys
 
 import psutil
-from rich import print
 import typer
+from rich import print
 
 from comfy_cli import constants
 

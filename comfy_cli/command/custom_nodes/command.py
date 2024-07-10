@@ -8,15 +8,16 @@ from typing import Optional
 
 import typer
 from rich import print
-from typing_extensions import List, Annotated
+from typing_extensions import Annotated, List
 
-from comfy_cli import ui, logging, tracking, utils
+from comfy_cli import logging, tracking, ui, utils
 from comfy_cli.config_manager import ConfigManager
+from comfy_cli.constants import NODE_ZIP_FILENAME
 from comfy_cli.file_utils import (
     download_file,
+    extract_package_as_zip,
     upload_file_to_signed_url,
     zip_files,
-    extract_package_as_zip,
 )
 from comfy_cli.registry import (
     RegistryAPI,
@@ -24,7 +25,6 @@ from comfy_cli.registry import (
     initialize_project_config,
 )
 from comfy_cli.workspace_manager import WorkspaceManager
-from comfy_cli.constants import NODE_ZIP_FILENAME
 
 app = typer.Typer()
 manager_app = typer.Typer()

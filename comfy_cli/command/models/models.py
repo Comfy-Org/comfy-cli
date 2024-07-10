@@ -1,18 +1,16 @@
+import os
 import pathlib
 from typing import List, Optional, Tuple
-from rich import print
-import os
 
 import requests
 import typer
-
+from rich import print
 from typing_extensions import Annotated
 
-from comfy_cli import tracking, ui
-from comfy_cli import constants
+from comfy_cli import constants, tracking, ui
 from comfy_cli.config_manager import ConfigManager
 from comfy_cli.constants import DEFAULT_COMFY_MODEL_PATH
-from comfy_cli.file_utils import download_file, DownloadException
+from comfy_cli.file_utils import DownloadException, download_file
 from comfy_cli.workspace_manager import WorkspaceManager
 
 app = typer.Typer()

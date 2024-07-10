@@ -1,11 +1,10 @@
 import sys
+from importlib.metadata import metadata
 
 import requests
+from packaging import version
 from rich.console import Console
 from rich.panel import Panel
-from importlib.metadata import metadata
-from packaging import version
-
 
 console = Console()
 

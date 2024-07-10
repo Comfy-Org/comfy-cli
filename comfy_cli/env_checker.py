@@ -4,12 +4,13 @@ Module for checking various env and state conditions.
 
 import os
 import sys
+
+import requests
 from rich.console import Console
 from rich.table import Table
-import requests
 
-from comfy_cli.utils import singleton
 from comfy_cli.config_manager import ConfigManager
+from comfy_cli.utils import singleton
 
 console = Console()
 
