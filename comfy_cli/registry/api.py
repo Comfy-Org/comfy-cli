@@ -21,7 +21,7 @@ class RegistryAPI:
         elif os.getenv("ENVIRONMENT") == "staging":
             # print environment variable
             print(os.getenv("ENVIRONMENT"))
-            return "https://staging-comfy-backend-qod3oz2v2q-uc.a.run.app"
+            return "https://stagingapi.comfy.org"
         else:
             return "https://api.comfy.org"
 
