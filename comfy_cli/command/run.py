@@ -2,17 +2,19 @@ import json
 import os
 import sys
 import time
-import typer
-import uuid
 import urllib.error
 import urllib.parse
-from rich.progress import BarColumn, Progress, TimeElapsedColumn, Column, Table
+import uuid
+from datetime import timedelta
 from urllib import request
-from websocket import WebSocket
+
+import typer
 from rich import print as pprint
+from rich.progress import BarColumn, Column, Progress, Table, TimeElapsedColumn
+from websocket import WebSocket
+
 from comfy_cli.env_checker import check_comfy_server_running
 from comfy_cli.workspace_manager import WorkspaceManager
-from datetime import timedelta
 
 workspace_manager = WorkspaceManager()
 
@@ -77,7 +79,7 @@ def execute(workflow: str, host, port, wait=True, verbose=False, local_paths=Fal
             progress.stop()
             progress = None
 
-            if len(execution.outputs):
+            if len(execution.outputs) > 0:
                 pprint("[bold green]\nOutputs:[/bold green]")
 
                 for f in execution.outputs:
@@ -139,6 +141,7 @@ class WorkflowExecution:
         self.progress_task = None
         self.progress_node = None
         self.prompt_id = None
+        self.ws = None
 
     def connect(self):
         self.ws = WebSocket()

@@ -1,7 +1,8 @@
+import asyncio
 import os
 import subprocess
 import sys
-import time
+import threading
 import uuid
 import webbrowser
 from typing import Optional
@@ -12,13 +13,11 @@ from rich import print
 from rich.console import Console
 from rich.panel import Panel
 from typing_extensions import Annotated, List
-import asyncio
-import threading
 
 from comfy_cli import constants, env_checker, logging, tracking, ui, utils
 from comfy_cli.command import custom_nodes
-from comfy_cli.command import run as run_inner
 from comfy_cli.command import install as install_inner
+from comfy_cli.command import run as run_inner
 from comfy_cli.command.models import models as models_command
 from comfy_cli.config_manager import ConfigManager
 from comfy_cli.constants import GPU_OPTION, CUDAVersion
@@ -41,23 +40,26 @@ def main():
     app()
 
 
-def mutually_exclusive_group_options():
-    group = []
+class MutuallyExclusiveValidator:
+    def __init__(self):
+        self.group = []
 
-    def callback(_ctx: typer.Context, param: typer.CallbackParam, value: str):
+    def reset_for_testing(self):
+        self.group.clear()
+
+    def validate(self, _ctx: typer.Context, param: typer.CallbackParam, value: str):
         # Add cli option to group if it was called with a value
-        if value is not None and param.name not in group:
-            group.append(param.name)
-        if len(group) > 1:
+        if value is not None and param.name not in self.group:
+            self.group.append(param.name)
+        if len(self.group) > 1:
             raise typer.BadParameter(
-                f"option `{param.name}` is mutually exclusive with option `{group.pop()}`"
+                f"option `{param.name}` is mutually exclusive with option `{self.group.pop()}`"
             )
         return value
 
-    return callback
 
-
-exclusivity_callback = mutually_exclusive_group_options()
+g_exclusivity = MutuallyExclusiveValidator()
+g_gpu_exclusivity = MutuallyExclusiveValidator()
 
 
 @app.command(help="Display help for commands")
@@ -74,7 +76,7 @@ def entry(
         typer.Option(
             show_default=False,
             help="Path to ComfyUI workspace",
-            callback=exclusivity_callback,
+            callback=g_exclusivity.validate,
         ),
     ] = None,
     recent: Annotated[
@@ -83,7 +85,7 @@ def entry(
             show_default=False,
             is_flag=True,
             help="Execute from recent path",
-            callback=exclusivity_callback,
+            callback=g_exclusivity.validate,
         ),
     ] = None,
     here: Annotated[
@@ -92,7 +94,7 @@ def entry(
             show_default=False,
             is_flag=True,
             help="Execute from current path",
-            callback=exclusivity_callback,
+            callback=g_exclusivity.validate,
         ),
     ] = None,
     skip_prompt: Annotated[
@@ -143,9 +145,6 @@ def entry(
     # logging.info(f"scan_dir took {end_time - start_time:.2f} seconds to run")
 
 
-gpu_exclusivity_callback = mutually_exclusive_group_options()
-
-
 @app.command(help="Download and install ComfyUI and ComfyUI-Manager")
 @tracking.track_command()
 def install(
@@ -172,47 +171,47 @@ def install(
         bool, typer.Option(show_default=False, help="Skip installing requirements.txt")
     ] = False,
     nvidia: Annotated[
-        bool,
+        Optional[bool],
         typer.Option(
             show_default=False,
             help="Install for Nvidia gpu",
-            callback=gpu_exclusivity_callback,
+            callback=g_gpu_exclusivity.validate,
         ),
     ] = None,
     cuda_version: Annotated[
         CUDAVersion, typer.Option(show_default=True)
     ] = CUDAVersion.v12_1,
     amd: Annotated[
-        bool,
+        Optional[bool],
         typer.Option(
             show_default=False,
             help="Install for AMD gpu",
-            callback=gpu_exclusivity_callback,
+            callback=g_gpu_exclusivity.validate,
         ),
     ] = None,
     m_series: Annotated[
-        bool,
+        Optional[bool],
         typer.Option(
             show_default=False,
             help="Install for Mac M-Series gpu",
-            callback=gpu_exclusivity_callback,
+            callback=g_gpu_exclusivity.validate,
         ),
     ] = None,
     intel_arc: Annotated[
-        bool,
+        Optional[bool],
         typer.Option(
             hidden=True,
             show_default=False,
             help="(Beta support) install for Intel Arc gpu, based on https://github.com/comfyanonymous/ComfyUI/pull/3439",
-            callback=gpu_exclusivity_callback,
+            callback=g_gpu_exclusivity.validate,
         ),
     ] = None,
     cpu: Annotated[
-        bool,
+        Optional[bool],
         typer.Option(
             show_default=False,
             help="Install for CPU",
-            callback=gpu_exclusivity_callback,
+            callback=g_gpu_exclusivity.validate,
         ),
     ] = None,
     commit: Annotated[
@@ -222,16 +221,10 @@ def install(
     check_for_updates()
     checker = EnvChecker()
 
-    comfy_path = workspace_manager.get_specified_workspace()
+    comfy_path, _ = workspace_manager.get_workspace_path()
 
-    if comfy_path is None:
-        comfy_path = workspace_manager.workspace_path
-
-    if comfy_path is None:
-        comfy_path = utils.get_not_user_set_default_workspace()
-
-    is_comfy_path, repo_dir = check_comfy_repo(comfy_path)
-    if is_comfy_path and not restore:
+    is_comfy_installed_at_path, repo_dir = check_comfy_repo(comfy_path)
+    if is_comfy_installed_at_path and not restore:
         print(
             f"[bold red]ComfyUI is already installed at the specified path:[/bold red] {comfy_path}\n"
         )
@@ -250,8 +243,25 @@ def install(
         print(
             f"You are currently using Python version {env_checker.format_python_version(checker.python_version)}."
         )
-
     platform = utils.get_os()
+    if cpu:
+        print("[bold yellow]Installing for CPU[/bold yellow]")
+        install_inner.execute(
+            url,
+            manager_url,
+            comfy_path,
+            restore,
+            skip_manager,
+            commit=commit,
+            gpu=None,
+            cuda_version=cuda_version,
+            plat=platform,
+            skip_torch_or_directml=skip_torch_or_directml,
+            skip_requirement=skip_requirement,
+        )
+        print(f"ComfyUI is installed at: {comfy_path}")
+        return None
+
     if nvidia and platform == constants.OS.MACOS:
         print(
             "[bold red]Nvidia GPU is never on MacOS. What are you smoking? 🤔[/bold red]"
@@ -366,11 +376,11 @@ def update(
 def run(
     workflow: Annotated[str, typer.Option(help="Path to the workflow API json file.")],
     wait: Annotated[
-        Optional[bool],
+        bool,
         typer.Option(help="If the command should wait until execution completes."),
     ] = True,
     verbose: Annotated[
-        Optional[bool],
+        bool,
         typer.Option(help="Enables verbose output of the execution process."),
     ] = False,
     host: Annotated[
@@ -484,7 +494,7 @@ async def launch_and_monitor(cmd, listen, port):
     stdout_thread.start()
     stderr_thread.start()
 
-    res = process.wait()
+    process.wait()
 
     return log
 
@@ -536,7 +546,7 @@ def background_launch(extra):
             )
         )
 
-    console.print(f"\n[bold red]Execution error: failed to launch ComfyUI[/bold red]\n")
+    console.print("\n[bold red]Execution error: failed to launch ComfyUI[/bold red]\n")
     # NOTE: os.exit(0) doesn't work
     os._exit(1)
 

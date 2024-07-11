@@ -1,12 +1,10 @@
 import configparser
 import os
-
-import tomlkit
-
-from comfy_cli.utils import singleton, get_os, is_running
-from comfy_cli import constants, logging
-from typing import Optional, Tuple
 from importlib.metadata import version
+from typing import Optional, Tuple
+
+from comfy_cli import constants, logging
+from comfy_cli.utils import get_os, is_running, singleton
 
 
 @singleton

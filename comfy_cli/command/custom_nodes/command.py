@@ -1,7 +1,6 @@
 import os
 import pathlib
 import platform
-import re
 import subprocess
 import sys
 import uuid
@@ -9,15 +8,16 @@ from typing import Optional
 
 import typer
 from rich import print
-from typing_extensions import List, Annotated
+from typing_extensions import Annotated, List
 
-from comfy_cli import ui, logging, tracking, utils
+from comfy_cli import logging, tracking, ui, utils
 from comfy_cli.config_manager import ConfigManager
+from comfy_cli.constants import NODE_ZIP_FILENAME
 from comfy_cli.file_utils import (
     download_file,
+    extract_package_as_zip,
     upload_file_to_signed_url,
     zip_files,
-    extract_package_as_zip,
 )
 from comfy_cli.registry import (
     RegistryAPI,
@@ -25,7 +25,6 @@ from comfy_cli.registry import (
     initialize_project_config,
 )
 from comfy_cli.workspace_manager import WorkspaceManager
-from comfy_cli.constants import NODE_ZIP_FILENAME
 
 app = typer.Typer()
 manager_app = typer.Typer()
@@ -39,9 +38,7 @@ def execute_cm_cli(args, channel=None, mode=None):
     workspace_path = workspace_manager.workspace_path
 
     if not workspace_path:
-        print(
-            f"\n[bold red]ComfyUI path is not resolved.[/bold red]\n", file=sys.stderr
-        )
+        print("\n[bold red]ComfyUI path is not resolved.[/bold red]\n", file=sys.stderr)
         raise typer.Exit(code=1)
 
     cm_cli_path = os.path.join(
@@ -134,9 +131,9 @@ def get_installed_packages():
                         continue
 
                     pip_map[y[0]] = y[1]
-        except subprocess.CalledProcessError as e:
+        except subprocess.CalledProcessError:
             print(
-                f"[ComfyUI-Manager] Failed to retrieve the information of installed pip packages."
+                "[ComfyUI-Manager] Failed to retrieve the information of installed pip packages."
             )
             return set()
 
@@ -226,7 +223,7 @@ def execute_install_script(repo_path):
 @tracking.track_command("node")
 def save_snapshot(
     output: Annotated[
-        str,
+        Optional[str],
         typer.Option(
             show_default=False, help="Specify the output file path. (.json/.yaml)"
         ),
@@ -383,7 +380,7 @@ def show(
         autocompletion=show_completer,
     ),
     channel: Annotated[
-        str,
+        Optional[str],
         typer.Option(
             show_default=False,
             help="Specify the operation mode",
@@ -422,7 +419,7 @@ def simple_show(
         autocompletion=show_completer,
     ),
     channel: Annotated[
-        str,
+        Optional[str],
         typer.Option(
             show_default=False,
             help="Specify the operation mode",
@@ -461,7 +458,7 @@ def install(
         ..., help="List of custom nodes to install", autocompletion=node_completer
     ),
     channel: Annotated[
-        str,
+        Optional[str],
         typer.Option(
             show_default=False,
             help="Specify the operation mode",
@@ -490,7 +487,7 @@ def reinstall(
         ..., help="List of custom nodes to reinstall", autocompletion=node_completer
     ),
     channel: Annotated[
-        str,
+        Optional[str],
         typer.Option(
             show_default=False,
             help="Specify the operation mode",
@@ -519,7 +516,7 @@ def uninstall(
         ..., help="List of custom nodes to uninstall", autocompletion=node_completer
     ),
     channel: Annotated[
-        str,
+        Optional[str],
         typer.Option(
             show_default=False,
             help="Specify the operation mode",
@@ -577,7 +574,7 @@ def update(
         autocompletion=node_or_all_completer,
     ),
     channel: Annotated[
-        str,
+        Optional[str],
         typer.Option(
             show_default=False,
             help="Specify the operation mode",
@@ -606,7 +603,7 @@ def disable(
         autocompletion=node_or_all_completer,
     ),
     channel: Annotated[
-        str,
+        Optional[str],
         typer.Option(
             show_default=False,
             help="Specify the operation mode",
@@ -633,7 +630,7 @@ def enable(
         autocompletion=node_or_all_completer,
     ),
     channel: Annotated[
-        str,
+        Optional[str],
         typer.Option(
             show_default=False,
             help="Specify the operation mode",
@@ -660,7 +657,7 @@ def fix(
         autocompletion=node_or_all_completer,
     ),
     channel: Annotated[
-        str,
+        Optional[str],
         typer.Option(
             show_default=False,
             help="Specify the operation mode",
@@ -685,13 +682,15 @@ def fix(
 @tracking.track_command("node")
 def install_deps(
     deps: Annotated[
-        str, typer.Option(show_default=False, help="Dependency spec file (.json)")
+        Optional[str],
+        typer.Option(show_default=False, help="Dependency spec file (.json)"),
     ] = None,
     workflow: Annotated[
-        str, typer.Option(show_default=False, help="Workflow file (.json/.png)")
+        Optional[str],
+        typer.Option(show_default=False, help="Workflow file (.json/.png)"),
     ] = None,
     channel: Annotated[
-        str,
+        Optional[str],
         typer.Option(
             show_default=False,
             help="Specify the operation mode",
@@ -708,7 +707,7 @@ def install_deps(
 
     if deps is None and workflow is None:
         print(
-            f"[bold red]One of --deps or --workflow must be provided as an argument.[/bold red]\n"
+            "[bold red]One of --deps or --workflow must be provided as an argument.[/bold red]\n"
         )
 
     tmp_path = None
@@ -749,7 +748,7 @@ def deps_in_workflow(
         str, typer.Option(show_default=False, help="Output file (.json)")
     ],
     channel: Annotated[
-        str,
+        Optional[str],
         typer.Option(
             show_default=False,
             help="Specify the operation mode",

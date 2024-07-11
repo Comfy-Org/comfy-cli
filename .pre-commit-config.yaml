@@ -3,10 +3,15 @@ repos:
     rev: 22.3.0
     hooks:
       - id: black
-        language_version: python3.9
   - repo: https://github.com/pylint-dev/pylint
     rev: v2.16.2
     hooks:
       - id: pylint
         args:
-          - --disable=R,C,W,E0401
+          # Note: E0401 is disabled as pylint does not run in an environment
+          # where the package is installed
+          - --disable=R,E0401
+  - repo: https://github.com/PyCQA/isort
+    rev: 5.13.2
+    hooks:
+      - id: isort

@@ -1,10 +1,10 @@
-from enum import Enum
+from typing import List, Tuple
+
 import questionary
 import typer
 from rich.console import Console
 from rich.progress import Progress
 from rich.table import Table
-from typing import List, Tuple
 
 from comfy_cli.workspace_manager import WorkspaceManager
 

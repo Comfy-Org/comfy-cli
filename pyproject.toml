@@ -54,3 +54,6 @@ Repository = "https://github.com/drip-art/comfy-cli.git"
 where = ["."]
 include = ["comfy_cli*"]
 
+[tool.isort]
+profile = "black"
+line_length = 88

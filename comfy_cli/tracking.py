@@ -1,12 +1,11 @@
 import functools
 import logging as logginglib
-import os
 import uuid
-
+from typing import Any, Optional
 import typer
 from mixpanel import Mixpanel
 
-from comfy_cli import logging, ui, constants
+from comfy_cli import constants, logging, ui
 from comfy_cli.config_manager import ConfigManager
 from comfy_cli.workspace_manager import WorkspaceManager
 
@@ -42,7 +41,7 @@ def disable():
     typer.echo(f"Tracking is now {'disabled'}.")
 
 
-def track_event(event_name: str, properties: any = None):
+def track_event(event_name: str, properties: Any = None):
     if properties is None:
         properties = {}
     logging.debug(
@@ -55,12 +54,17 @@ def track_event(event_name: str, properties: any = None):
     try:
         properties["cli_version"] = cli_version
         properties["tracing_id"] = tracing_id
-        mp.track(distinct_id=user_id, event_name=event_name, properties=properties)
+        if mp:
+            mp.track(distinct_id=user_id, event_name=event_name, properties=properties)
+        else:
+            logging.debug(
+                f"Mixpanel token not found. Skipping tracking event: {event_name}"
+            )
     except Exception as e:
         logging.warning(f"Failed to track event: {e}")  # Log the error but do not raise
 
 
-def track_command(sub_command: str = None):
+def track_command(sub_command: Optional[str] = None):
     """
     A decorator factory that logs the command function name and selected arguments when it's called.
     """

@@ -6,11 +6,13 @@ on:
       - main
     paths:
       - 'comfy_cli/**'
+      - '!comfy_cli/test_**'
   pull_request:
     branches:
       - main
     paths:
       - 'comfy_cli/**'
+      - '!comfy_cli/test_**'
 
 jobs:
   test-cli-gpu:
@@ -39,6 +41,10 @@ jobs:
       - name: Install Dependencies
         run: |
           pip install -e .
+
+      - name: Check disk space
+        run: |
+          df -h
 
       - name: Run Core Functionality
         run: |

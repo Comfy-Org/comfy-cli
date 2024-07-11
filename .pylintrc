@@ -8,6 +8,18 @@ disable=
     W1113, # too-many-arguments
     W0613, # unused-argument
     W0718, # broad-exception-caught
+    W0511, # fixme
+    W0621, # redefined-outer-name
+    W1514, # unspecified-encoding
+    W0603, # global-statement
+    W1203, # logging-fstring-interpolation
+    W0212, # protected-access
+    C0301, # line-too-long
+    C0103, # invalid-name
+
+    # TODO
+    W3101, # missing timeout on request
+    W0719, # broad-exception-raised
 
 [FORMAT]
 max-line-length=120

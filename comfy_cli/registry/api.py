@@ -1,14 +1,11 @@
+import json
 import logging
 import os
-from rich.console import Console
-import requests
-import json
-from typing import Optional
 
-from comfy_cli.registry.types import PyProjectConfig, PublishNodeVersionResponse
+import requests
 
 # Reduced global imports from comfy_cli.registry
-from comfy_cli.registry.types import NodeVersion, Node
+from comfy_cli.registry.types import Node, NodeVersion, PublishNodeVersionResponse
 
 
 class RegistryAPI:
