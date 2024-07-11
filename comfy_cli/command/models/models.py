@@ -250,11 +250,11 @@ def download(
     else:
         print("Model source is unknown")
 
-    if filename is None:
+    if local_filename is None and filename is None:
         local_filename = ui.prompt_input(
             "Enter filename to save model as", default=local_filename
         )
-    else:
+    elif filename is not None:
         local_filename = filename
 
     if relative_path is None:
