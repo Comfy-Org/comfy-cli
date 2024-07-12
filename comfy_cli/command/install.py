@@ -9,6 +9,7 @@ from typing import Optional
 from comfy_cli import constants, ui, utils
 from comfy_cli.command.custom_nodes.command import update_node_id_cache
 from comfy_cli.constants import GPU_OPTION
+from comfy_cli.uv import fastInstallComfyDeps
 from comfy_cli.workspace_manager import WorkspaceManager, check_comfy_repo
 
 workspace_manager = WorkspaceManager()
@@ -169,6 +170,7 @@ def execute(
     plat: constants.OS = None,
     skip_torch_or_directml: bool = False,
     skip_requirement: bool = False,
+    fast_deps: bool = False,
     *args,
     **kwargs,
 ):
@@ -208,9 +210,10 @@ def execute(
         os.chdir(repo_dir)
         subprocess.run(["git", "checkout", commit], check=True)
 
-    install_comfyui_dependencies(
-        repo_dir, gpu, plat, cuda_version, skip_torch_or_directml, skip_requirement
-    )
+    if not fast_deps:
+        install_comfyui_dependencies(
+            repo_dir, gpu, plat, cuda_version, skip_torch_or_directml, skip_requirement
+        )
 
     WorkspaceManager().set_recent_workspace(repo_dir)
     workspace_manager.setup_workspace_manager(specified_workspace=repo_dir)
@@ -224,7 +227,7 @@ def execute(
         manager_repo_dir = os.path.join(repo_dir, "custom_nodes", "ComfyUI-Manager")
 
         if os.path.exists(manager_repo_dir):
-            if restore:
+            if restore and not fast_deps:
                 install_manager_dependencies(repo_dir)
             else:
                 print(
@@ -241,9 +244,15 @@ def execute(
             else:
                 subprocess.run(["git", "clone", manager_url, manager_repo_dir], check=True)
 
-            install_manager_dependencies(repo_dir)
+            if not fast_deps:
+                install_manager_dependencies(repo_dir)
+        if not fast_deps:
+            update_node_id_cache()
 
-        update_node_id_cache()
+    if fast_deps:
+        fastInstallComfyDeps(cwd=repo_dir, gpu=gpu)
+        if not skip_manager:
+            update_node_id_cache()
 
     os.chdir(repo_dir)
 

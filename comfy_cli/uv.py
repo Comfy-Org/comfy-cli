@@ -6,6 +6,8 @@ import sys
 from textwrap import dedent
 from typing import Any
 
+from comfy_cli.constants import GPU_OPTION
+
 PathLike = os.PathLike[str] | str
 
 def _run(cmd: list[str], cwd: PathLike) -> subprocess.CompletedProcess[Any]:
@@ -95,6 +97,7 @@ class DependencyCompiler:
         cwd: PathLike,
         reqFile: list[PathLike],
         override: PathLike | None = None,
+        extraUrl: str | None = None,
         index_strategy: str | None = "unsafe-best-match",
         dry: bool = False
     ) -> subprocess.CompletedProcess[Any]:
@@ -112,6 +115,12 @@ class DependencyCompiler:
             cmd.extend([
                 "--index-strategy",
                 "unsafe-best-match",
+            ])
+
+        if extraUrl is not None:
+            cmd.extend([
+                "--extra-index-url",
+                extraUrl,
             ])
 
         if override is not None:
@@ -170,7 +179,7 @@ class DependencyCompiler:
         self.extDirs = [Path(extDir) for extDir in extDirs] if extDirs is not None else None
         self.gpu = gpu
 
-        self.gpuUrl = DependencyCompiler.nvidiaPytorchUrl if self.gpu == "nvidia" else DependencyCompiler.rocmPytorchUrl if self.gpu == "amd" else None
+        self.gpuUrl = DependencyCompiler.nvidiaPytorchUrl if self.gpu == GPU_OPTION.NVIDIA else DependencyCompiler.rocmPytorchUrl if self.gpu == GPU_OPTION.AMD else None
         self.out = self.cwd / outName
         self.override = self.cwd / "override.txt"
 
@@ -209,14 +218,15 @@ class DependencyCompiler:
             out=self.out,
         )
 
-    def syncCorePlusExt(self):
-        # Appler.install(
-        #     cwd=self.cwd,
-        #     reqFile=self.out,
-        #     override=self.override,
-        #     dry=True,
-        # )
+    def installCorePlusExt(self):
+        DependencyCompiler.install(
+            cwd=self.cwd,
+            reqFile=self.out,
+            override=self.override,
+            extraUrl=self.gpuUrl,
+        )
 
+    def syncCorePlusExt(self):
         DependencyCompiler.sync(
             cwd=self.cwd,
             reqFile=self.out,
@@ -244,8 +254,8 @@ class DependencyCompiler:
                     if "opencv-python==" not in line:
                         f.write(line)
 
-def installComfyDeps(cwd: PathLike, gpu: str):
-    _check_call(["pip", "install", "uv"])
+def fastInstallComfyDeps(cwd: PathLike, gpu: str):
+    _check_call(cmd=["pip", "install", "uv"], cwd=cwd)
 
     p = Path(cwd)
     extDirs = [d for d in p.glob("custom_nodes/[!__pycache__]*") if d.is_dir()]
@@ -256,19 +266,4 @@ def installComfyDeps(cwd: PathLike, gpu: str):
     appler.compileCorePlusExt()
     appler.handleOpencv()
 
-    appler.syncCorePlusExt()
-
-def parseArguments():
-    # Create argument parser
-    parser = argparse.ArgumentParser()
-
-    # Positional mandatory arguments
-    parser.add_argument("cwd", help="ComfyUI core directory to run in", type=str)
-    parser.add_argument("gpu", help="GPU type. amd, nvidia, or none", type=str, choices=["amd", "nvidia", "none"])
-
-    return parser.parse_args()
-
-if __name__ == "__main__":
-    args = parseArguments()
-
-    installComfyDeps(cwd=args.cwd, gpu=args.gpu)
+    appler.installCorePlusExt()
