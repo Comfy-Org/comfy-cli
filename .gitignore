@@ -10,6 +10,8 @@ __pycache__/
 .vscode/settings.json
 .idea/
 .vscode/
+*.code-workspace
+.history
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
