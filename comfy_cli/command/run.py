@@ -174,7 +174,7 @@ class WorkflowExecution:
             raise typer.Exit(code=1)
 
     def watch_execution(self):
-        self.ws.settimeout(30)
+        self.ws.settimeout(60)
         while True:
             message = self.ws.recv()
             if isinstance(message, str):
