@@ -35,7 +35,9 @@ def load_api_workflow(file: str):
         return workflow
 
 
-def execute(workflow: str, host, port, wait=True, verbose=False, local_paths=False):
+def execute(
+    workflow: str, host, port, wait=True, verbose=False, local_paths=False, timeout=60
+):
     workflow_name = os.path.abspath(os.path.expanduser(workflow))
     if not os.path.isfile(workflow):
         pprint(
@@ -67,7 +69,9 @@ def execute(workflow: str, host, port, wait=True, verbose=False, local_paths=Fal
     else:
         print(f"Queuing workflow: {workflow_name}")
 
-    execution = WorkflowExecution(workflow, host, port, verbose, progress, local_paths)
+    execution = WorkflowExecution(
+        workflow, host, port, verbose, progress, local_paths, timeout
+    )
 
     try:
         if wait:
@@ -122,7 +126,9 @@ class ExecutionProgress(Progress):
 
 
 class WorkflowExecution:
-    def __init__(self, workflow, host, port, verbose, progress, local_paths):
+    def __init__(
+        self, workflow, host, port, verbose, progress, local_paths, timeout=60
+    ):
         self.workflow = workflow
         self.host = host
         self.port = port
@@ -142,6 +148,7 @@ class WorkflowExecution:
         self.progress_node = None
         self.prompt_id = None
         self.ws = None
+        self.timeout = timeout
 
     def connect(self):
         self.ws = WebSocket()
@@ -174,7 +181,7 @@ class WorkflowExecution:
             raise typer.Exit(code=1)
 
     def watch_execution(self):
-        self.ws.settimeout(30)
+        self.ws.settimeout(self.timeout)
         while True:
             message = self.ws.recv()
             if isinstance(message, str):

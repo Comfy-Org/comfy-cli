@@ -18,7 +18,6 @@ app = typer.Typer()
 workspace_manager = WorkspaceManager()
 config_manager = ConfigManager()
 
-
 model_path_map = {
     "lora": "loras",
     "hypernetwork": "hypernetworks",
@@ -285,6 +284,11 @@ def remove(
         help="List of model filenames to delete, separated by spaces",
         show_default=False,
     ),
+    confirm: bool = typer.Option(
+        False,
+        help="Confirm for deletion and skip the prompt",
+        show_default=False,
+    ),
 ):
     """Remove one or more downloaded models, either by specifying them directly or through an interactive selection."""
     model_dir = get_workspace() / relative_path
@@ -325,8 +329,11 @@ def remove(
         to_delete = [model_dir / selection for selection in selections]
 
     # Confirm deletion
-    if to_delete and ui.prompt_confirm_action(
-        "Are you sure you want to delete the selected files?", False
+    if to_delete and (
+        confirm
+        or ui.prompt_confirm_action(
+            "Are you sure you want to delete the selected files?", False
+        )
     ):
         for model_path in to_delete:
             model_path.unlink()
