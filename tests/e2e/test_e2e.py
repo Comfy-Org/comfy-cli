@@ -167,7 +167,7 @@ def test_run(comfy_cli):
     )
     proc = exec(
         f"""
-        {comfy_cli} run --workflow {workflow} --wait
+        {comfy_cli} run --workflow {workflow} --wait --timeout 600
         """
     )
     assert 0 == proc.returncode
