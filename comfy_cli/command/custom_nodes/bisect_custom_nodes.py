@@ -1,0 +1,184 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Literal, NamedTuple
+
+import typer
+
+from comfy_cli.command.custom_nodes.cm_cli_util import execute_cm_cli
+
+bisect_app = typer.Typer()
+
+# File to store the state of bisect
+default_state_file = Path("bisect_state.json")
+
+
+class BisectState(NamedTuple):
+    status: Literal["idle", "running", "resolved"]
+
+    # All nodes in the current bisect session
+    all: list[str]
+
+    # The range of nodes that contains the bad node
+    range: list[str]
+
+    # The active set of nodes to test
+    active: list[str]
+
+    def good(self) -> BisectState:
+        """The active set of nodes is good, narrowing down the potential problem area."""
+        if self.status != "running":
+            raise ValueError("No bisect session running.")
+
+        new_range = list(set(self.range) - set(self.active))
+
+        if len(new_range) == 1:
+            return BisectState(
+                status="resolved", all=self.all, range=new_range, active=[]
+            )
+
+        return BisectState(
+            status="running",
+            all=self.all,
+            range=new_range,
+            active=new_range[len(new_range) // 2 :],
+        )
+
+    def bad(self) -> BisectState:
+        """The active set of nodes is bad, indicating the problem is within this set."""
+        if self.status != "running":
+            raise ValueError("No bisect session running.")
+
+        new_range = self.active
+
+        if len(new_range) == 1:
+            return BisectState(
+                status="resolved", all=self.all, range=new_range, active=[]
+            )
+
+        return BisectState(
+            status="running",
+            all=self.all,
+            range=new_range,
+            active=new_range[len(new_range) // 2 :],
+        )
+
+    def save(self, state_file=None):
+        self.set_custom_node_enabled_states()
+        state_file = state_file or default_state_file
+        with state_file.open("w") as f:
+            json.dump(self._asdict(), f)  # pylint: disable=no-member
+
+    def reset(self):
+        BisectState(
+            "idle", all=self.all, range=self.all, active=self.all
+        ).set_custom_node_enabled_states()
+        return BisectState("idle", self.all, self.all, self.all)
+
+    @classmethod
+    def load(cls, state_file=None) -> BisectState:
+        state_file = state_file or default_state_file
+        if state_file.exists():
+            with state_file.open() as f:
+                return BisectState(**json.load(f))
+        return BisectState("idle", [], [], [])
+
+    @property
+    def inactive_nodes(self) -> list[str]:
+        return list(set(self.all) - set(self.active))
+
+    def set_custom_node_enabled_states(self):
+        if self.active:
+            execute_cm_cli(["enable", *self.active])
+        if self.inactive_nodes:
+            execute_cm_cli(["disable", *self.inactive_nodes])
+
+    def __str__(self):
+        active_list = "\n".join(
+            [f"{i:3}. {node}" for i, node in enumerate(self.active)]
+        )
+        return f"""BisectState(status={self.status})
+set of nodes with culprit: {len(self.range)}
+set of nodes to test: {len(self.active)}
+--------------------------
+{active_list}"""
+
+
+@bisect_app.command(
+    help="Start a new bisect session with a comma-separated list of nodes."
+)
+def start():
+    """Start a new bisect session with a comma-separated list of nodes.
+    The initial state is bad with all custom nodes enabled, good with
+    all custom nodes disabled."""
+
+    cm_output: str | None = execute_cm_cli(["simple-show", "enabled"])
+    if cm_output is None:
+        typer.echo("Failed to fetch the list of nodes.")
+        raise typer.Exit()
+
+    nodes_list = [
+        line.strip()
+        for line in cm_output.strip().split("\n")
+        if not line.startswith("FETCH DATA")
+    ]
+    state = BisectState(
+        status="running",
+        all=nodes_list,
+        range=nodes_list,
+        active=nodes_list,
+    )
+    state.save()
+
+    typer.echo(f"Bisect session started.\n{state}")
+    bad()
+
+
+@bisect_app.command(
+    help="Mark the current active set as good, indicating the problem is outside the test set."
+)
+def good():
+    state = BisectState.load()
+    if state.status != "running":
+        typer.echo("No bisect session running or no active nodes to process.")
+        raise typer.Exit()
+
+    new_state = state.good()
+
+    if new_state.status == "resolved":
+        assert len(new_state.range) == 1
+        typer.echo(f"Problematic node identified: {new_state.range[0]}")
+        reset()
+    else:
+        new_state.save()
+        typer.echo(new_state)
+
+
+@bisect_app.command(
+    help="Mark the current active set as bad, indicating the problem is within the test set."
+)
+def bad():
+    state = BisectState.load()
+    if state.status != "running":
+        typer.echo("No bisect session running or no active nodes to process.")
+        raise typer.Exit()
+
+    new_state = state.bad()
+
+    if new_state.status == "resolved":
+        assert len(new_state.range) == 1
+        typer.echo(f"Problematic node identified: {new_state.range[0]}")
+        reset()
+    else:
+        new_state.save()
+        typer.echo(new_state)
+
+
+@bisect_app.command(help="Reset the current bisect session.")
+def reset():
+    if default_state_file.exists():
+        BisectState.load().reset()
+        typer.echo("Bisect session reset.")
+    else:
+        typer.echo("No bisect session to reset.")
