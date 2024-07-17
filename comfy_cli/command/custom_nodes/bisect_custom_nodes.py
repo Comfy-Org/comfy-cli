@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Literal, NamedTuple
 
 import typer
 
 from comfy_cli.command.custom_nodes.cm_cli_util import execute_cm_cli
+from comfy_cli.command.launch import launch as launch_command
 
 bisect_app = typer.Typer()
 
@@ -26,6 +28,9 @@ class BisectState(NamedTuple):
     # The active set of nodes to test
     active: list[str]
 
+    # The arguments to pass to the ComfyUI launch command
+    launch_args: list[str] = []
+
     def good(self) -> BisectState:
         """The active set of nodes is good, narrowing down the potential problem area."""
         if self.status != "running":
@@ -35,12 +40,17 @@ class BisectState(NamedTuple):
 
         if len(new_range) == 1:
             return BisectState(
-                status="resolved", all=self.all, range=new_range, active=[]
+                status="resolved",
+                all=self.all,
+                launch_args=self.launch_args,
+                range=new_range,
+                active=[],
             )
 
         return BisectState(
             status="running",
             all=self.all,
+            launch_args=self.launch_args,
             range=new_range,
             active=new_range[len(new_range) // 2 :],
         )
@@ -54,12 +64,17 @@ class BisectState(NamedTuple):
 
         if len(new_range) == 1:
             return BisectState(
-                status="resolved", all=self.all, range=new_range, active=[]
+                status="resolved",
+                all=self.all,
+                launch_args=self.launch_args,
+                range=new_range,
+                active=[],
             )
 
         return BisectState(
             status="running",
             all=self.all,
+            launch_args=self.launch_args,
             range=new_range,
             active=new_range[len(new_range) // 2 :],
         )
@@ -72,9 +87,13 @@ class BisectState(NamedTuple):
 
     def reset(self):
         BisectState(
-            "idle", all=self.all, range=self.all, active=self.all
+            "idle",
+            all=self.all,
+            launch_args=self.launch_args,
+            range=self.all,
+            active=self.all,
         ).set_custom_node_enabled_states()
-        return BisectState("idle", self.all, self.all, self.all)
+        return BisectState("idle", self.all, self.all, self.all, self.launch_args)
 
     @classmethod
     def load(cls, state_file=None) -> BisectState:
@@ -106,12 +125,16 @@ set of nodes to test: {len(self.active)}
 
 
 @bisect_app.command(
-    help="Start a new bisect session with a comma-separated list of nodes."
+    help="Start a new bisect session with a comma-separated list of nodes. ?[-- <extra args ...>]"
 )
-def start():
+def start(extra: list[str] = typer.Argument(None)):
     """Start a new bisect session with a comma-separated list of nodes.
     The initial state is bad with all custom nodes enabled, good with
     all custom nodes disabled."""
+
+    if BisectState.load().status != "idle":
+        typer.echo("A bisect session is already running.")
+        raise typer.Exit()
 
     cm_output: str | None = execute_cm_cli(["simple-show", "enabled"])
     if cm_output is None:
@@ -128,6 +151,7 @@ def start():
         all=nodes_list,
         range=nodes_list,
         active=nodes_list,
+        launch_args=extra or [],
     )
     state.save()
 
@@ -153,6 +177,7 @@ def good():
     else:
         new_state.save()
         typer.echo(new_state)
+        launch_command(background=False, extra=state.launch_args)
 
 
 @bisect_app.command(
@@ -173,12 +198,14 @@ def bad():
     else:
         new_state.save()
         typer.echo(new_state)
+        launch_command(background=False, extra=state.launch_args)
 
 
 @bisect_app.command(help="Reset the current bisect session.")
 def reset():
     if default_state_file.exists():
         BisectState.load().reset()
+        os.unlink(default_state_file)
         typer.echo("Bisect session reset.")
     else:
         typer.echo("No bisect session to reset.")
