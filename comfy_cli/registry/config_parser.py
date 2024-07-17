@@ -95,7 +95,11 @@ def initialize_project_config():
     project["name"] = repo_name.lower()
     project["description"] = ""
     project["version"] = "1.0.0"
-    project["license"] = "LICENSE"
+
+    # Update the license field to comply with pyproject.toml spec
+    license_table = tomlkit.inline_table()
+    license_table["file"] = "LICENSE"
+    project["license"] = license_table
 
     tool = document.get("tool", tomlkit.table())
     comfy = tool.get("comfy", tomlkit.table())
