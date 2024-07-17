@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Literal, NamedTuple
 
 import typer
+from typing_extensions import Annotated
 
 from comfy_cli.command.custom_nodes.cm_cli_util import execute_cm_cli
 from comfy_cli.command.launch import launch as launch_command
@@ -125,9 +126,16 @@ set of nodes to test: {len(self.active)}
 
 
 @bisect_app.command(
-    help="Start a new bisect session with a comma-separated list of nodes. ?[-- <extra args ...>]"
+    help="Start a new bisect session with a comma-separated list of nodes. "
+    + "?[--pinned-nodes PINNED_NODES]"
+    + "?[-- <extra args ...>]"
 )
-def start(extra: list[str] = typer.Argument(None)):
+def start(
+    pinned_nodes: Annotated[
+        str, typer.Option(help="Pinned nodes always enable during the bisect")
+    ] = "",
+    extra: list[str] = typer.Argument(None),
+):
     """Start a new bisect session with a comma-separated list of nodes.
     The initial state is bad with all custom nodes enabled, good with
     all custom nodes disabled."""
@@ -135,6 +143,8 @@ def start(extra: list[str] = typer.Argument(None)):
     if BisectState.load().status != "idle":
         typer.echo("A bisect session is already running.")
         raise typer.Exit()
+
+    pinned_nodes = {s.strip() for s in pinned_nodes.split(",") if s}
 
     cm_output: str | None = execute_cm_cli(["simple-show", "enabled"])
     if cm_output is None:
@@ -144,7 +154,7 @@ def start(extra: list[str] = typer.Argument(None)):
     nodes_list = [
         line.strip()
         for line in cm_output.strip().split("\n")
-        if not line.startswith("FETCH DATA")
+        if not line.startswith("FETCH DATA") and line.strip() not in pinned_nodes
     ]
     state = BisectState(
         status="running",
@@ -156,6 +166,9 @@ def start(extra: list[str] = typer.Argument(None)):
     state.save()
 
     typer.echo(f"Bisect session started.\n{state}")
+    if pinned_nodes:
+        typer.echo(f"Pinned nodes: {', '.join(pinned_nodes)}")
+
     bad()
 
 
