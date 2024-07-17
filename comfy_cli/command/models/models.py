@@ -29,9 +29,6 @@ model_path_map = {
 
 
 def get_workspace() -> pathlib.Path:
-    if workspace_manager.workspace_path is None:
-        print("[bold red]Error: Workspace not set.")
-        raise typer.Exit(code=1)
     return pathlib.Path(workspace_manager.workspace_path)
 
 
@@ -46,7 +43,7 @@ def check_huggingface_url(url: str) -> bool:
     return "huggingface.co" in url
 
 
-def check_civitai_url(url: str) -> Tuple[bool, bool, Optional[int], Optional[int]]:
+def check_civitai_url(url: str) -> Tuple[bool, bool, int, int]:
     """
     Returns:
         is_civitai_model_url: True if the url is a civitai model url
@@ -81,9 +78,7 @@ def check_civitai_url(url: str) -> Tuple[bool, bool, Optional[int], Optional[int
     return False, False, None, None
 
 
-def request_civitai_model_version_api(
-    version_id: int, headers: Optional[dict] = None
-) -> Optional[Tuple[str, str, str, str]]:
+def request_civitai_model_version_api(version_id: int, headers: Optional[dict] = None):
     # Make a request to the Civitai API to get the model information
     response = requests.get(
         f"https://civitai.com/api/v1/model-versions/{version_id}",
@@ -100,12 +95,11 @@ def request_civitai_model_version_api(
             model_type = model_data["model"]["type"].lower()
             basemodel = model_data["baseModel"].replace(" ", "")
             return model_name, download_url, model_type, basemodel
-    return None
 
 
 def request_civitai_model_api(
-    model_id: int, version_id: Optional[int] = None, headers: Optional[dict] = None
-) -> Tuple[str, str, str, str]:
+    model_id: int, version_id: int = None, headers: Optional[dict] = None
+):
     # Make a request to the Civitai API to get the model information
     response = requests.get(
         f"https://civitai.com/api/v1/models/{model_id}", headers=headers, timeout=10
@@ -185,8 +179,6 @@ def download(
     )
 
     if is_civitai_model_url:
-        if model_id is None:
-            raise ValueError("Model ID is required for Civitai model URL")
         local_filename, url, model_type, basemodel = request_civitai_model_api(
             model_id, version_id, headers
         )
@@ -198,17 +190,14 @@ def download(
                 model_path = ui.prompt_input(
                     "Enter model type path (e.g. loras, checkpoints, ...)", default=""
                 )
-                if model_path is None:
-                    raise ValueError("Model type path is required")
 
             relative_path = os.path.join(
                 DEFAULT_COMFY_MODEL_PATH, model_path, basemodel
             )
-    elif is_civitai_api_url and version_id is not None:
-        result = request_civitai_model_version_api(version_id, headers)
-        if result is None:
-            raise ValueError("Model information not found")
-        local_filename, url, model_type, basemodel = result
+    elif is_civitai_api_url:
+        local_filename, url, model_type, basemodel = request_civitai_model_version_api(
+            version_id, headers
+        )
 
         model_path = model_path_map.get(model_type)
 
@@ -217,8 +206,6 @@ def download(
                 model_path = ui.prompt_input(
                     "Enter model type path (e.g. loras, checkpoints, ...)", default=""
                 )
-                if model_path is None:
-                    raise ValueError("Model type path is required")
 
             relative_path = os.path.join(
                 DEFAULT_COMFY_MODEL_PATH, model_path, basemodel
@@ -230,26 +217,18 @@ def download(
             model_path = ui.prompt_input(
                 "Enter model type path (e.g. loras, checkpoints, ...)", default=""
             )
-            if model_path is None:
-                raise ValueError("Model type path is required")
             basemodel = ui.prompt_input(
                 "Enter base model (e.g. SD1.5, SDXL, ...)", default=""
             )
-            if basemodel is None:
-                raise ValueError("Mode name is required")
-
             relative_path = os.path.join(
                 DEFAULT_COMFY_MODEL_PATH, model_path, basemodel
             )
     else:
         print("Model source is unknown")
 
-    if local_filename is None:
-        local_filename = ui.prompt_input("Enter filename to save model as")
-    else:
-        local_filename = ui.prompt_input(
-            "Enter filename to save model as", default=local_filename
-        )
+    local_filename = ui.prompt_input(
+        "Enter filename to save model as", default=local_filename
+    )
 
     if relative_path is None:
         relative_path = DEFAULT_COMFY_MODEL_PATH
@@ -359,6 +338,6 @@ def list(
     ui.display_table(data, column_names)
 
 
-def list_models(path: pathlib.Path) -> List[pathlib.Path]:
+def list_models(path: pathlib.Path) -> list:
     """List all models in the specified directory."""
     return [file for file in path.iterdir() if file.is_file()]
