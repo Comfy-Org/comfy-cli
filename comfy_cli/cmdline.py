@@ -393,6 +393,10 @@ def run(
         Optional[int],
         typer.Option(help="The port where the ComfyUI instance is running, e.g. 8188."),
     ] = None,
+    timeout: Annotated[
+        Optional[int],
+        typer.Option(help="The timeout in seconds for the workflow execution."),
+    ] = 30,
 ):
     config = ConfigManager()
 
@@ -417,7 +421,7 @@ def run(
     if not port:
         port = 8188
 
-    run_inner.execute(workflow, host, port, wait, verbose, local_paths)
+    run_inner.execute(workflow, host, port, wait, verbose, local_paths, timeout)
 
 
 def validate_comfyui(_env_checker):
