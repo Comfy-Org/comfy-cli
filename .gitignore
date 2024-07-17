@@ -46,3 +46,5 @@ share/python-wheels/
 *.spec
 
 venv/
+
+bisect_state.json
