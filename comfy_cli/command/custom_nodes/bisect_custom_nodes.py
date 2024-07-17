@@ -96,7 +96,7 @@ class BisectState(NamedTuple):
 
     def __str__(self):
         active_list = "\n".join(
-            [f"{i:3}. {node}" for i, node in enumerate(self.active)]
+            [f"{i + 1:3}. {node}" for i, node in enumerate(self.active)]
         )
         return f"""BisectState(status={self.status})
 set of nodes with culprit: {len(self.range)}

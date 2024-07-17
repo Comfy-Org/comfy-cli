@@ -145,7 +145,16 @@ comfy node [show|simple-show] [installed|enabled|not-installed|disabled|all|snap
 
 - Generate deps:
 
-  `comfy node deps-in-workflow --workflow=<workflow .json/.png file> --output=<output deps .json file>` 
+  `comfy node deps-in-workflow --workflow=<workflow .json/.png file> --output=<output deps .json file>`
+
+#### Bisect custom nodes
+
+The bisect tool can help you pinpoint the custom node that causes the issue.
+
+- `comfy node bisect start`: Start a new bisect session with a comma-separated list of nodes.
+- `comfy node bisect good`: Mark the current active set as bad, indicating the problem is within the test set
+- `comfy node bisect bad`: Mark the current active set as bad, indicating the problem is within the test set.
+- `comfy node bisect reset`: Reset the current bisect session.
 
 ### Managing Models
 
