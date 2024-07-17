@@ -36,7 +36,7 @@ def load_api_workflow(file: str):
 
 
 def execute(
-    workflow: str, host, port, wait=True, verbose=False, local_paths=False, timeout=30
+    workflow: str, host, port, wait=True, verbose=False, local_paths=False, timeout=60
 ):
     workflow_name = os.path.abspath(os.path.expanduser(workflow))
     if not os.path.isfile(workflow):
@@ -127,7 +127,7 @@ class ExecutionProgress(Progress):
 
 class WorkflowExecution:
     def __init__(
-        self, workflow, host, port, verbose, progress, local_paths, timeout=30
+        self, workflow, host, port, verbose, progress, local_paths, timeout=60
     ):
         self.workflow = workflow
         self.host = host

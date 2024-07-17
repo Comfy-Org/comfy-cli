@@ -674,7 +674,6 @@ def launch(
 ):
     check_for_updates()
     resolved_workspace = workspace_manager.workspace_path
-
     if not resolved_workspace:
         print(
             "\nComfyUI is not available.\nTo install ComfyUI, you can run:\n\n\tcomfy install\n\n",
