@@ -6,23 +6,19 @@ This guide provides an overview of how to develop in this repository.
 
 1. Clone the repo, create and activate a conda env. Minimum Python version is 3.9.
 
-1. Install the package to local
+2. Install the package to local
 
 `pip install -e .`
 
-1. Set ENVIRONMENT variable to DEV.
-
-1. Install Dev Requirements
-
-`pip install -r requirements-dev.txt`
+3. Set ENVIRONMENT variable to DEV.
 
 `export ENVIRONMENT=dev`
 
-1. Test script running
+4. Test script running
 
 `comfy --help`
 
-1. Use pre commit hook
+5. Use pre commit hook
 
 `pre-commit install`
 
@@ -38,22 +34,6 @@ You can add following config to your VSCode `launch.json` to launch debugger.
   "module": "comfy_cli.__main__",
   "args": [],
   "console": "integratedTerminal"
-}
-```
-
-## Linting and Type Checking
-
-Here is the recommended VScode settings. We use Black to format python code. We use Pylance's to do some basic type checking.
-
-```
-{
-    "[python]": {
-        "editor.defaultFormatter": "ms-python.black-formatter",
-        "editor.formatOnSave": true
-
-      },
-    "python.languageServer": "Pylance",
-    "python.analysis.typeCheckingMode": "basic"
 }
 ```
 
