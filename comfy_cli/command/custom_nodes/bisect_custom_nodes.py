@@ -126,7 +126,7 @@ set of nodes to test: {len(self.active)}
 
 
 @bisect_app.command(
-    help="Start a new bisect session with a comma-separated list of nodes. "
+    help="Start a new bisect session with optionally pinned nodes to always enable, and optional ComfyUI launch args."
     + "?[--pinned-nodes PINNED_NODES]"
     + "?[-- <extra args ...>]"
 )
@@ -136,9 +136,8 @@ def start(
     ] = "",
     extra: list[str] = typer.Argument(None),
 ):
-    """Start a new bisect session with a comma-separated list of nodes.
-    The initial state is bad with all custom nodes enabled, good with
-    all custom nodes disabled."""
+    """Start a new bisect session. The initial state is bad with all custom nodes
+    enabled, good with all custom nodes disabled."""
 
     if BisectState.load().status != "idle":
         typer.echo("A bisect session is already running.")
