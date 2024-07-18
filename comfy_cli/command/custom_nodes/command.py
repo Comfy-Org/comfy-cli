@@ -11,6 +11,8 @@ from rich import print
 from typing_extensions import Annotated, List
 
 from comfy_cli import logging, tracking, ui, utils
+from comfy_cli.command.custom_nodes.bisect_custom_nodes import bisect_app
+from comfy_cli.command.custom_nodes.cm_cli_util import execute_cm_cli
 from comfy_cli.config_manager import ConfigManager
 from comfy_cli.constants import NODE_ZIP_FILENAME
 from comfy_cli.file_utils import (
@@ -27,57 +29,10 @@ from comfy_cli.registry import (
 from comfy_cli.workspace_manager import WorkspaceManager
 
 app = typer.Typer()
+app.add_typer(bisect_app, name="bisect", help="Bisect custom nodes for culprit node.")
 manager_app = typer.Typer()
 workspace_manager = WorkspaceManager()
 registry_api = RegistryAPI()
-
-
-def execute_cm_cli(args, channel=None, mode=None):
-    _config_manager = ConfigManager()
-
-    workspace_path = workspace_manager.workspace_path
-
-    if not workspace_path:
-        print("\n[bold red]ComfyUI path is not resolved.[/bold red]\n", file=sys.stderr)
-        raise typer.Exit(code=1)
-
-    cm_cli_path = os.path.join(
-        workspace_path, "custom_nodes", "ComfyUI-Manager", "cm-cli.py"
-    )
-    if not os.path.exists(cm_cli_path):
-        print(
-            f"\n[bold red]ComfyUI-Manager not found: {cm_cli_path}[/bold red]\n",
-            file=sys.stderr,
-        )
-        raise typer.Exit(code=1)
-
-    cmd = [sys.executable, cm_cli_path] + args
-    if channel is not None:
-        cmd += ["--channel", channel]
-
-    if mode is not None:
-        cmd += ["--mode", mode]
-
-    new_env = os.environ.copy()
-    session_path = os.path.join(
-        _config_manager.get_config_path(), "tmp", str(uuid.uuid4())
-    )
-    new_env["__COMFY_CLI_SESSION__"] = session_path
-    new_env["COMFYUI_PATH"] = workspace_path
-
-    print(f"Execute from: {workspace_path}")
-
-    try:
-        subprocess.run(cmd, env=new_env, check=True)
-    except subprocess.CalledProcessError as e:
-        if e.returncode == 1:
-            print(f"\n[bold red]Execution error: {cmd}[/bold red]\n", file=sys.stderr)
-        elif e.returncode == 2:
-            pass
-        else:
-            raise e
-
-    workspace_manager.set_recent_workspace(workspace_path)
 
 
 def validate_comfyui_manager(_env_checker):
