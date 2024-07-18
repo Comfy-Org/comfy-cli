@@ -106,7 +106,7 @@ def entry(
             is_flag=True,
             help="Enable tracking",
         ),
-    ] = True,
+    ] = False,
     version: bool = typer.Option(
         False,
         "--version",
