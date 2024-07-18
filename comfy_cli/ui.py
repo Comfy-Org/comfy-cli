@@ -1,5 +1,6 @@
-from typing import List, Tuple
-
+from typing import List, Tuple, Optional, TypeVar, Union, Dict, Any
+from enum import Enum
+from questionary import Choice
 import questionary
 import typer
 from rich.console import Console
@@ -33,47 +34,60 @@ def show_progress(iterable, total, description="Downloading..."):
             progress.update(task, advance=len(chunk))
 
 
-def prompt_select(question: str, choices: list, force_prompting: bool = False) -> str:
+ChoiceType = Union[str, Choice, Dict[str, Any]]
+
+def prompt_select(
+    question: str,
+    choices: List[ChoiceType],
+    force_prompting: bool = False
+) -> Optional[ChoiceType]:
     """
     Asks a single select question using questionary and returns the selected response.
 
     Args:
         question (str): The question to display to the user.
-        choices (list): A list of string choices for the user to select from.
+        choices (List[T]): A list of choices for the user to select from.
+        force_prompting (bool): Whether to force prompting even if skip_prompting is set.
 
     Returns:
-        str: The selected choice from the user.
+        Optional[T]: The selected choice from the user, or None if skipping prompts.
     """
     if workspace_manager.skip_prompting and not force_prompting:
         return None
     return questionary.select(question, choices=choices).ask()
 
 
+E = TypeVar('E', bound=Enum)
+
 def prompt_select_enum(
-    question: str, choices: list, force_prompting: bool = False
-) -> str:
+    question: str,
+    choices: List[E],
+    force_prompting: bool = False
+) -> Optional[E]:
     """
     Asks a single select question using questionary and returns the selected response.
 
     Args:
         question (str): The question to display to the user.
-        choices (list): A list of Enum choices for the user to select from.
+        choices (List[E]): A list of Enum choices for the user to select from.
+        force_prompting (bool): Whether to force prompting even if skip_prompting is set.
 
     Returns:
-        str: The selected choice from the user.
+        Optional[E]: The selected Enum choice from the user, or None if skipping prompts.
     """
     if workspace_manager.skip_prompting and not force_prompting:
         return None
+
     choice_map = {choice.value: choice for choice in choices}
     display_choices = list(choice_map.keys())
 
     selected = questionary.select(question, choices=display_choices).ask()
 
-    return choice_map[selected]
+    return choice_map[selected] if selected is not None else None
 
 
 def prompt_input(
-    question: str, default: str = None, force_prompting: bool = False
+    question: str, default: str = "", force_prompting: bool = False
 ) -> str:
     """
     Asks the user for an input using questionary.
