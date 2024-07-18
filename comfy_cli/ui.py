@@ -46,11 +46,11 @@ def prompt_select(
 
     Args:
         question (str): The question to display to the user.
-        choices (List[T]): A list of choices for the user to select from.
+        choices (List[ChoiceType]): A list of choices for the user to select from.
         force_prompting (bool): Whether to force prompting even if skip_prompting is set.
 
     Returns:
-        Optional[T]: The selected choice from the user, or None if skipping prompts.
+        Optional[ChoiceType]: The selected choice from the user, or None if skipping prompts.
     """
     if workspace_manager.skip_prompting and not force_prompting:
         return None
