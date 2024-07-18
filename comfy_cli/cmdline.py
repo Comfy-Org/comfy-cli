@@ -91,15 +91,15 @@ def entry(
         ),
     ] = None,
     skip_prompt: Annotated[
-        Optional[bool],
+        bool,
         typer.Option(
             show_default=False,
             is_flag=True,
             help="Do not prompt user for input, use default options",
         ),
-    ] = None,
+    ] = False,
     enable_telemetry: Annotated[
-        Optional[bool],
+        bool,
         typer.Option(
             show_default=False,
             hidden=True,
