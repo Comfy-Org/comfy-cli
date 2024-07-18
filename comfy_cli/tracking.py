@@ -100,7 +100,7 @@ def prompt_tracking_consent(skip_prompt: bool = False, default_value: bool = Fal
         init_tracking(default_value)
     else:
         enable_tracking = ui.prompt_confirm_action(
-            "Do you agree to enable tracking to improve the application?", True
+            "Do you agree to enable tracking to improve the application?", False
         )
         init_tracking(enable_tracking)
 
