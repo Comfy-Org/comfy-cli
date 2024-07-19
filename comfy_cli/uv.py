@@ -1,4 +1,4 @@
-import argparse
+from importlib import metadata
 import os
 from pathlib import Path
 import subprocess
@@ -168,6 +168,22 @@ class DependencyCompiler:
 
         return _check_call(cmd, cwd)
 
+    @staticmethod
+    def resolveGpu(gpu: str | None):
+        if gpu is None:
+            try:
+                tver = metadata.version("torch")
+                if "+cu" in tver:
+                    return GPU_OPTION.NVIDIA
+                elif "+rocm" in tver:
+                    return GPU_OPTION.AMD
+                else:
+                    return None
+            except metadata.PackageNotFoundError:
+                return None
+        else:
+            return gpu
+
     def __init__(
         self,
         cwd: PathLike = ".",
@@ -177,7 +193,7 @@ class DependencyCompiler:
     ):
         self.cwd = Path(cwd)
         self.extDirs = [Path(extDir) for extDir in extDirs] if extDirs is not None else None
-        self.gpu = gpu
+        self.gpu = DependencyCompiler.resolveGpu(gpu)
 
         self.gpuUrl = DependencyCompiler.nvidiaPytorchUrl if self.gpu == GPU_OPTION.NVIDIA else DependencyCompiler.rocmPytorchUrl if self.gpu == GPU_OPTION.AMD else None
         self.out = self.cwd / outName
