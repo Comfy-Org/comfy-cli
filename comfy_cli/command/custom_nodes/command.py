@@ -363,7 +363,7 @@ def show(
 
     validate_mode(mode)
 
-    execute_cm_cli(["show", arg], channel, mode)
+    execute_cm_cli(["show", arg], channel=channel, mode=mode)
 
 
 @app.command("simple-show", help="Show node list (simple mode)")
@@ -402,7 +402,7 @@ def simple_show(
 
     validate_mode(mode)
 
-    execute_cm_cli(["simple-show", arg], channel, mode)
+    execute_cm_cli(["simple-show", arg], channel=channel, mode=mode)
 
 
 # install, reinstall, uninstall
@@ -420,6 +420,13 @@ def install(
             autocompletion=channel_completer,
         ),
     ] = None,
+    fast_deps: Annotated[
+        Optional[bool],
+        typer.Option(
+            show_default=False,
+            help="Use new fast dependency installer",
+        ),
+    ] = False,
     mode: str = typer.Option(
         None,
         help="[remote|local|cache]",
@@ -432,7 +439,7 @@ def install(
 
     validate_mode(mode)
 
-    execute_cm_cli(["install"] + nodes, channel, mode)
+    execute_cm_cli(["install"] + nodes, channel=channel, fast_deps=fast_deps, mode=mode)
 
 
 @app.command(help="Reinstall custom nodes")
@@ -449,6 +456,13 @@ def reinstall(
             autocompletion=channel_completer,
         ),
     ] = None,
+    fast_deps: Annotated[
+        Optional[bool],
+        typer.Option(
+            show_default=False,
+            help="Use new fast dependency installer",
+        ),
+    ] = False,
     mode: str = typer.Option(
         None,
         help="[remote|local|cache]",
@@ -461,7 +475,7 @@ def reinstall(
 
     validate_mode(mode)
 
-    execute_cm_cli(["reinstall"] + nodes, channel, mode)
+    execute_cm_cli(["reinstall"] + nodes, channel=channel, fast_deps=fast_deps, mode=mode)
 
 
 @app.command(help="Uninstall custom nodes")
@@ -490,7 +504,7 @@ def uninstall(
 
     validate_mode(mode)
 
-    execute_cm_cli(["uninstall"] + nodes, channel, mode)
+    execute_cm_cli(["uninstall"] + nodes, channel=channel, mode=mode)
 
 
 def update_node_id_cache():
@@ -544,7 +558,7 @@ def update(
 ):
     validate_mode(mode)
 
-    execute_cm_cli(["update"] + nodes, channel, mode)
+    execute_cm_cli(["update"] + nodes, channel=channel, mode=mode)
 
     update_node_id_cache()
 
@@ -573,7 +587,7 @@ def disable(
 ):
     validate_mode(mode)
 
-    execute_cm_cli(["disable"] + nodes, channel, mode)
+    execute_cm_cli(["disable"] + nodes, channel=channel, mode=mode)
 
 
 @app.command(help="Enable custom nodes")
@@ -600,7 +614,7 @@ def enable(
 ):
     validate_mode(mode)
 
-    execute_cm_cli(["enable"] + nodes, channel, mode)
+    execute_cm_cli(["enable"] + nodes, channel=channel, mode=mode)
 
 
 @app.command(help="Fix dependencies of custom nodes")
@@ -627,7 +641,7 @@ def fix(
 ):
     validate_mode(mode)
 
-    execute_cm_cli(["fix"] + nodes, channel, mode)
+    execute_cm_cli(["fix"] + nodes, channel=channel, mode=mode)
 
 
 @app.command(
@@ -685,7 +699,7 @@ def install_deps(
     else:
         deps_file = os.path.abspath(os.path.expanduser(deps))
 
-    execute_cm_cli(["install-deps", deps_file], channel, mode)
+    execute_cm_cli(["install-deps", deps_file], channel=channel, mode=mode)
 
     if tmp_path is not None and os.path.exists(tmp_path):
         os.remove(tmp_path)

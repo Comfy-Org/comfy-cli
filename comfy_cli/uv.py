@@ -254,7 +254,7 @@ class DependencyCompiler:
                     if "opencv-python==" not in line:
                         f.write(line)
 
-def fastInstallComfyDeps(cwd: PathLike, gpu: str):
+def fastInstallComfyDeps(cwd: PathLike, gpu: str | None = None):
     _check_call(cmd=["pip", "install", "uv"], cwd=cwd)
 
     p = Path(cwd)
