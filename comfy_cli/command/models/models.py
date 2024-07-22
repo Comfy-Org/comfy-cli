@@ -145,6 +145,13 @@ def download(
             show_default=True,
         ),
     ] = None,
+    filename: Annotated[
+        Optional[str],
+        typer.Option(
+            help="The filename to save the model.",
+            show_default=True,
+        ),
+    ] = None,
     set_civitai_api_token: Annotated[
         Optional[str],
         typer.Option(
@@ -226,9 +233,15 @@ def download(
     else:
         print("Model source is unknown")
 
-    local_filename = ui.prompt_input(
-        "Enter filename to save model as", default=local_filename
-    )
+    if filename is None:
+        if local_filename is None:
+            local_filename = ui.prompt_input("Enter filename to save model as")
+        else:
+            local_filename = ui.prompt_input(
+                "Enter filename to save model as", default=local_filename
+            )
+    else:
+        local_filename = filename
 
     if relative_path is None:
         relative_path = DEFAULT_COMFY_MODEL_PATH
@@ -262,6 +275,11 @@ def remove(
     model_names: Optional[List[str]] = typer.Option(
         None,
         help="List of model filenames to delete, separated by spaces",
+        show_default=False,
+    ),
+    confirm: bool = typer.Option(
+        False,
+        help="Confirm for deletion and skip the prompt",
         show_default=False,
     ),
 ):
@@ -304,8 +322,11 @@ def remove(
         to_delete = [model_dir / selection for selection in selections]
 
     # Confirm deletion
-    if to_delete and ui.prompt_confirm_action(
-        "Are you sure you want to delete the selected files?", False
+    if to_delete and (
+        confirm
+        or ui.prompt_confirm_action(
+            "Are you sure you want to delete the selected files?", False
+        )
     ):
         for model_path in to_delete:
             model_path.unlink()

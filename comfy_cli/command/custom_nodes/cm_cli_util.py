@@ -53,6 +53,7 @@ def execute_cm_cli(args, channel=None, mode=None) -> str | None:
         result = subprocess.run(
             cmd, env=new_env, check=True, capture_output=True, text=True
         )
+        print(result.stdout)
         return result.stdout
     except subprocess.CalledProcessError as e:
         if e.returncode == 1:
