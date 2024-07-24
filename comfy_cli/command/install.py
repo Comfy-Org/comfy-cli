@@ -227,6 +227,12 @@ def execute(
             print("\nInstalling ComfyUI-Manager..")
 
             subprocess.run(["git", "clone", manager_url, manager_repo_dir], check=True)
+
+            # TODO: REMOVED - Alpha Testing  -----------------------------
+            os.chdir(workspace_manager.get_comfyui_manager_path())
+            subprocess.run(["git", "switch", 'feat/cnr'], check=True)
+            # ------------------------------------------------------------
+
             install_manager_dependencies(repo_dir)
 
         update_node_id_cache()
