@@ -497,10 +497,15 @@ def update_node_id_cache():
     config_manager = ConfigManager()
     workspace_path = workspace_manager.workspace_path
 
-    cm_cli_path = os.path.join(
-        workspace_path, "custom_nodes", "ComfyUI-Manager", "cm-cli.py"
-    )
+    cm_cli_path = workspace_manager.get_cm_cli_path()
 
+    if cm_cli_path is None:
+        print(
+            f"\n[bold red]ComfyUI-Manager not found[/bold red]\n",
+            file=sys.stderr,
+        )
+        raise typer.Exit(code=1)
+        
     tmp_path = os.path.join(config_manager.get_config_path(), "tmp")
     if not os.path.exists(tmp_path):
         os.makedirs(tmp_path)
@@ -628,6 +633,35 @@ def fix(
     validate_mode(mode)
 
     execute_cm_cli(["fix"] + nodes, channel, mode)
+
+
+@app.command(
+    "show-versions", help="Show the list of available versions for the target custom node."
+)
+@tracking.track_command("node")
+def show_versions(
+    node_name: str,
+    channel: Annotated[
+        Optional[str],
+        typer.Option(
+            show_default=False,
+            help="Specify the operation mode",
+            autocompletion=channel_completer,
+        ),
+    ] = None,
+    mode: str = typer.Option(
+        None,
+        help="[remote|local|cache]",
+        autocompletion=mode_completer,
+    ),
+):
+    validate_mode(mode)
+
+    execute_cm_cli(
+        ["show-versions", node_name],
+        channel,
+        mode,
+    )
 
 
 @app.command(
@@ -821,92 +855,6 @@ def display_all_nodes():
             "Latest Version",
         ],
         title="List of All Nodes",
-    )
-
-
-@app.command(
-    "registry-install",
-    help="Install a node from the registry",
-    hidden=True,
-)
-@tracking.track_command("node")
-def registry_install(
-    node_id: str,
-    version: Optional[str] = None,
-    force_download: Annotated[
-        bool,
-        typer.Option(
-            "--force-download",
-            help="Force download the node even if it is already installed",
-        ),
-    ] = False,
-):
-    """
-    Install a node from the registry.
-    Args:
-      node_id: The ID of the node to install.
-      version: The version of the node to install. If not provided, the latest version will be installed.
-    """
-
-    # If the node ID is not provided, prompt the user to enter it
-    if not node_id:
-        node_id = typer.prompt("Enter the ID of the node you want to install")
-
-    node_version = None
-    try:
-        # Call the API to install the node
-        node_version = registry_api.install_node(node_id, version)
-        if not node_version.download_url:
-            logging.error("Download URL not provided from the registry.")
-            ui.display_error_message(f"Failed to download the custom node {node_id}.")
-            return
-
-    except Exception as e:
-        logging.error(
-            f"Encountered an error while installing the node. error: {str(e)}"
-        )
-        ui.display_error_message(f"Failed to download the custom node {node_id}.")
-        return
-
-    # Download the node archive
-    custom_nodes_path = pathlib.Path(workspace_manager.workspace_path) / "custom_nodes"
-    node_specific_path = custom_nodes_path / node_id  # Subdirectory for the node
-    if node_specific_path.exists():
-        print(
-            f"[bold red] The node {node_id} already exists in the workspace. This migit delete any model files in the node.[/bold red]"
-        )
-
-        confirm = ui.prompt_confirm_action(
-            "Do you want to overwrite it?",
-            force_download,
-        )
-        if not confirm:
-            return
-    node_specific_path.mkdir(
-        parents=True, exist_ok=True
-    )  # Create the directory if it doesn't exist
-
-    local_filename = node_specific_path / f"{node_id}-{node_version.version}.zip"
-    logging.debug(
-        f"Start downloading the node {node_id} version {node_version.version} to {local_filename}"
-    )
-    download_file(node_version.download_url, local_filename)
-
-    # Extract the downloaded archive to the custom_node directory on the workspace.
-    logging.debug(
-        f"Start extracting the node {node_id} version {node_version.version} to {custom_nodes_path}"
-    )
-    extract_package_as_zip(local_filename, node_specific_path)
-
-    # TODO: temoporary solution to run requirement.txt and install script
-    execute_install_script(node_specific_path)
-
-    # Delete the downloaded archive
-    logging.debug(f"Deleting the downloaded archive {local_filename}")
-    os.remove(local_filename)
-
-    logging.info(
-        f"Node {node_id} version {node_version.version} has been successfully installed."
     )
 
 

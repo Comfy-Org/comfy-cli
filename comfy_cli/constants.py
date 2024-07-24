@@ -37,6 +37,7 @@ CONFIG_KEY_ENABLE_TRACKING = "enable_tracking"
 CONFIG_KEY_USER_ID = "user_id"
 CONFIG_KEY_INSTALL_EVENT_TRIGGERED = "install_event_triggered"
 CONFIG_KEY_BACKGROUND = "background"
+CONFIG_KEY_COMFYUI_MANAGER_PATH = 'comfyui_manager_path'
 
 CIVITAI_API_TOKEN_KEY = "civitai_api_token"
 
