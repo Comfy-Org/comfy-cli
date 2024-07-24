@@ -505,7 +505,7 @@ def update_node_id_cache():
             file=sys.stderr,
         )
         raise typer.Exit(code=1)
-        
+
     tmp_path = os.path.join(config_manager.get_config_path(), "tmp")
     if not os.path.exists(tmp_path):
         os.makedirs(tmp_path)
@@ -636,7 +636,8 @@ def fix(
 
 
 @app.command(
-    "show-versions", help="Show the list of available versions for the target custom node."
+    "show-versions",
+    help="Show the list of available versions for the target custom node.",
 )
 @tracking.track_command("node")
 def show_versions(

@@ -214,7 +214,9 @@ def execute(
     if skip_manager:
         print("Skipping installation of ComfyUI-Manager. (by --skip-manager)")
     else:
-        manager_repo_dir = os.path.join(repo_dir, "custom_nodes", "comfyui-manager@nightly")
+        manager_repo_dir = os.path.join(
+            repo_dir, "custom_nodes", "comfyui-manager@nightly"
+        )
 
         if os.path.exists(manager_repo_dir):
             if restore:
@@ -228,9 +230,9 @@ def execute(
 
             subprocess.run(["git", "clone", manager_url, manager_repo_dir], check=True)
 
-            # TODO: REMOVED - Alpha Testing  -----------------------------
+            # TODO: REMOVED - Alpha Testing  -----------------------------`
             os.chdir(workspace_manager.get_comfyui_manager_path())
-            subprocess.run(["git", "switch", 'feat/cnr'], check=True)
+            subprocess.run(["git", "switch", "feat/cnr"], check=True)
             # ------------------------------------------------------------
 
             install_manager_dependencies(repo_dir)
