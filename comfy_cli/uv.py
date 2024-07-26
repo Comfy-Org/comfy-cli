@@ -187,7 +187,7 @@ class DependencyCompiler:
     def __init__(
         self,
         cwd: PathLike = ".",
-        extDirs: list[PathLike] = [],
+        extDirs: Optional[list[PathLike]] = None,
         gpu: Union[str, None] = None,
         outName: str = "requirements.compiled",
     ):
