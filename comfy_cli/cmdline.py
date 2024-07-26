@@ -222,6 +222,7 @@ def install(
     fast_deps: Annotated[
         Optional[bool],
         typer.Option(
+            "--fast-deps",
             show_default=False,
             help="Use new fast dependency installer",
         ),
