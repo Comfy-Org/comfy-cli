@@ -331,7 +331,7 @@ def validate_mode(mode):
 @tracking.track_command("node")
 def show(
     arg: str = typer.Argument(
-        help="[installed|enabled|not-installed|disabled|all|snapshot|snapshot-list]",
+        help="[installed|enabled|not-installed|disabled|all|cnr|snapshot|snapshot-list]",
         autocompletion=show_completer,
     ),
     channel: Annotated[
@@ -354,6 +354,7 @@ def show(
         "not-installed",
         "disabled",
         "all",
+        "cnr",
         "snapshot",
         "snapshot-list",
     ]
