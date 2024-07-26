@@ -4,11 +4,11 @@ from pathlib import Path
 import subprocess
 import sys
 from textwrap import dedent
-from typing import Any
+from typing import Any, Optional, Union
 
 from comfy_cli.constants import GPU_OPTION
 
-PathLike = os.PathLike[str] | str
+PathLike = Union[os.PathLike[str], str]
 
 def _run(cmd: list[str], cwd: PathLike) -> subprocess.CompletedProcess[Any]:
     return subprocess.run(
@@ -55,9 +55,9 @@ class DependencyCompiler:
     def compile(
         cwd: PathLike,
         reqFiles: list[PathLike],
-        override: PathLike | None = None,
-        out: PathLike | None = None,
-        index_strategy: str | None = "unsafe-best-match",
+        override: Optional[PathLike] = None,
+        out: Optional[PathLike] = None,
+        index_strategy: Optional[str] = "unsafe-best-match",
     ) -> subprocess.CompletedProcess[Any]:
         cmd = [
             sys.executable,
@@ -96,9 +96,9 @@ class DependencyCompiler:
     def install(
         cwd: PathLike,
         reqFile: list[PathLike],
-        override: PathLike | None = None,
-        extraUrl: str | None = None,
-        index_strategy: str | None = "unsafe-best-match",
+        override: Optional[PathLike] = None,
+        extraUrl: Optional[str] = None,
+        index_strategy: Optional[str] = "unsafe-best-match",
         dry: bool = False
     ) -> subprocess.CompletedProcess[Any]:
         cmd = [
@@ -138,8 +138,8 @@ class DependencyCompiler:
     def sync(
         cwd: PathLike,
         reqFile: list[PathLike],
-        extraUrl: str | None = None,
-        index_strategy: str | None = "unsafe-best-match",
+        extraUrl: Optional[str] = None,
+        index_strategy: Optional[str] = "unsafe-best-match",
         dry: bool = False
     ) -> subprocess.CompletedProcess[Any]:
         cmd = [
@@ -169,7 +169,7 @@ class DependencyCompiler:
         return _check_call(cmd, cwd)
 
     @staticmethod
-    def resolveGpu(gpu: str | None):
+    def resolveGpu(gpu: Union[str, None]):
         if gpu is None:
             try:
                 tver = metadata.version("torch")
@@ -188,7 +188,7 @@ class DependencyCompiler:
         self,
         cwd: PathLike = ".",
         extDirs: list[PathLike] = [],
-        gpu: str | None = None,
+        gpu: Union[str, None] = None,
         outName: str = "requirements.compiled",
     ):
         self.cwd = Path(cwd)
@@ -270,7 +270,7 @@ class DependencyCompiler:
                     if "opencv-python==" not in line:
                         f.write(line)
 
-def fastInstallComfyDeps(cwd: PathLike, gpu: str | None = None):
+def fastInstallComfyDeps(cwd: PathLike, gpu: Optional[str] = None):
     _check_call(cmd=["pip", "install", "uv"], cwd=cwd)
 
     p = Path(cwd)
