@@ -157,6 +157,9 @@ def extract_node_configuration(
             license = License()
     else:
         license = License()
+        typer.echo(
+            "Warning: License dictionary does not contain 'file' or 'text' keys. Please check the documentation: https://docs.comfy.org/registry/specifications."
+        )
 
     project = ProjectConfig(
         name=project_data.get("name", ""),

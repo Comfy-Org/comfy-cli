@@ -51,10 +51,7 @@ class RegistryAPI:
                 "Project name is required in pyproject.toml to publish a node version"
             )
         license_json = serialize_license(node_config.project.license)
-
-        url = f"{self.base_url}/publishers/{node_config.tool_comfy.publisher_id}/nodes/{node_config.project.name}/versions"
-        headers = {"Content-Type": "application/json"}
-        body = {
+        request_body = {
             "personal_access_token": token,
             "node": {
                 "id": node_config.project.name,
@@ -69,6 +66,10 @@ class RegistryAPI:
                 "dependencies": node_config.project.dependencies,
             },
         }
+        print(request_body)
+        url = f"{self.base_url}/publishers/{node_config.tool_comfy.publisher_id}/nodes/{node_config.project.name}/versions"
+        headers = {"Content-Type": "application/json"}
+        body = request_body
 
         response = requests.post(url, headers=headers, data=json.dumps(body))
 
@@ -187,9 +188,9 @@ def map_node_to_node_class(api_node_data):
     )
 
 
-def serialize_license(license: License) -> dict:
+def serialize_license(license: License) -> str:
     if license.file:
-        return {"file": license.file}
+        return json.dumps({"file": license.file})
     if license.text:
-        return {"text": license.text}
-    return {}
+        return json.dumps({"text": license.text})
+    return "{}"

@@ -109,3 +109,17 @@ def test_extract_node_configuration_license_text_dict():
         assert result.project.license == License(
             text="MIT License\n\nCopyright (c) 2023 Example Corp\n\nPermission is hereby granted..."
         )
+
+
+def test_extract_license_incorrect_format():
+    mock_data = {
+        "project": {"license": "MIT"},
+    }
+    with patch("os.path.isfile", return_value=True), patch(
+        "builtins.open", mock_open()
+    ), patch("tomlkit.load", return_value=mock_data):
+        result = extract_node_configuration("fake_path.toml")
+
+        assert result is not None, "Expected PyProjectConfig, got None"
+        assert isinstance(result, PyProjectConfig)
+        assert result.project.license == License(text="MIT")
