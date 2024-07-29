@@ -9,8 +9,7 @@ import typer
 from rich import print
 from rich.console import Console
 from typing_extensions import Annotated, List
-import ui
-from comfy_cli import constants, env_checker, logging, tracking, utils
+from comfy_cli import constants, env_checker, logging, tracking, utils, ui
 from comfy_cli.command import custom_nodes
 from comfy_cli.command import install as install_inner
 from comfy_cli.command import run as run_inner
