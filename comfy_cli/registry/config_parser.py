@@ -11,6 +11,7 @@ from comfy_cli.registry.types import (
     Model,
     ProjectConfig,
     PyProjectConfig,
+    License,
     URLs,
 )
 
@@ -140,13 +141,24 @@ def extract_node_configuration(
     urls_data = project_data.get("urls", {})
     comfy_data = data.get("tool", {}).get("comfy", {})
 
+    license_data = project_data.get("license", {})
+    if isinstance(license_data, str):
+        license = License(text=license_data)
+    elif isinstance(license_data, dict):
+        license = License(
+            file=license_data.get("file", ""),
+            text=license_data.get("text", "")
+        )
+    else:
+        license = License()
+
     project = ProjectConfig(
         name=project_data.get("name", ""),
         description=project_data.get("description", ""),
         version=project_data.get("version", ""),
-        requires_python=project_data.get("requires-pyton", ""),
+        requires_python=project_data.get("requires-python", ""),
         dependencies=project_data.get("dependencies", []),
-        license=project_data.get("license", ""),
+        license=license,
         urls=URLs(
             homepage=urls_data.get("Homepage", ""),
             documentation=urls_data.get("Documentation", ""),

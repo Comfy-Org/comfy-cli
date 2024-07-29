@@ -5,7 +5,7 @@ import os
 import requests
 
 # Reduced global imports from comfy_cli.registry
-from comfy_cli.registry.types import Node, NodeVersion, PublishNodeVersionResponse
+from comfy_cli.registry.types import Node, NodeVersion, PublishNodeVersionResponse, PyProjectConfig, License
 
 
 class RegistryAPI:
@@ -17,11 +17,11 @@ class RegistryAPI:
         if env == "dev":
             return "http://localhost:8080"
         elif env == "staging":
-            return "https://staging.comfyregistry.org"
+            return "https://stagingapi.comfy.org"
         else:
             return "https://api.comfy.org"
 
-    def publish_node_version(self, node_config, token) -> PublishNodeVersionResponse:
+    def publish_node_version(self, node_config: PyProjectConfig, token) -> PublishNodeVersionResponse:
         """
         Publishes a new version of a node.
 
@@ -33,7 +33,7 @@ class RegistryAPI:
         PublishNodeVersionResponse: The response object from the API server.
         """
         # Local import to prevent circular dependency
-
+        print(self.determine_base_url())
         if not node_config.tool_comfy.publisher_id:
             raise Exception(
                 "Publisher ID is required in pyproject.toml to publish a node version"
@@ -43,6 +43,7 @@ class RegistryAPI:
             raise Exception(
                 "Project name is required in pyproject.toml to publish a node version"
             )
+        license_json = serialize_license(node_config.project.license)
 
         url = f"{self.base_url}/publishers/{node_config.tool_comfy.publisher_id}/nodes/{node_config.project.name}/versions"
         headers = {"Content-Type": "application/json"}
@@ -53,7 +54,7 @@ class RegistryAPI:
                 "description": node_config.project.description,
                 "icon": node_config.tool_comfy.icon,
                 "name": node_config.tool_comfy.display_name,
-                "license": node_config.project.license,
+                "license": license_json,
                 "repository": node_config.project.urls.repository,
             },
             "node_version": {
@@ -177,3 +178,11 @@ def map_node_to_node_class(api_node_data):
             else None
         ),
     )
+
+
+def serialize_license(license: License) -> dict:
+    if license.file:
+        return {"file": license.file}
+    if license.text:
+        return {"text": license.text}
+    return {}

@@ -10,6 +10,7 @@ from comfy_cli import constants, ui, utils
 from comfy_cli.command.custom_nodes.command import update_node_id_cache
 from comfy_cli.constants import GPU_OPTION
 from comfy_cli.workspace_manager import WorkspaceManager, check_comfy_repo
+from typing import Optional
 
 workspace_manager = WorkspaceManager()
 
@@ -22,7 +23,7 @@ def get_os_details():
 
 def install_comfyui_dependencies(
     repo_dir,
-    gpu: GPU_OPTION,
+    gpu: Optional[GPU_OPTION],
     plat: constants.OS,
     cuda_version: constants.CUDAVersion,
     skip_torch_or_directml: bool,
@@ -163,10 +164,10 @@ def execute(
     comfy_path: str,
     restore: bool,
     skip_manager: bool,
+    plat: constants.OS,
     commit=None,
-    gpu: constants.GPU_OPTION = None,
+    gpu: Optional[constants.GPU_OPTION] = None,
     cuda_version: constants.CUDAVersion = constants.CUDAVersion.v12_1,
-    plat: constants.OS = None,
     skip_torch_or_directml: bool = False,
     skip_requirement: bool = False,
     *args,

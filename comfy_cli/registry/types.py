@@ -52,7 +52,10 @@ class ComfyConfig:
     icon: str = ""
     models: List[Model] = field(default_factory=list)
 
-
+@dataclass
+class License:
+    file: str = ""
+    text: str = ""
 @dataclass
 class ProjectConfig:
     name: str = ""
@@ -60,7 +63,7 @@ class ProjectConfig:
     version: str = "1.0.0"
     requires_python: str = ">= 3.9"
     dependencies: List[str] = field(default_factory=list)
-    license: str = ""
+    license: License = field(default_factory=License)
     urls: URLs = field(default_factory=URLs)
 
 
