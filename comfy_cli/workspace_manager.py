@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
-from typing import List, Optional, Tuple, Dict
+from typing import List, Optional, Tuple
 
 import git
 import typer
@@ -33,7 +33,7 @@ class Model:
 @dataclass
 class Basics:
     name: Optional[str] = None
-    updated_at: Optional[datetime] = None
+    updated_at: datetime = None
 
 
 @dataclass
@@ -79,7 +79,7 @@ def check_comfy_repo(path) -> Tuple[bool, Optional[git.Repo]]:
             return False, None
     # Not in a git repo at all
     # pylint: disable=E1101  # no-member
-    except git.InvalidGitRepositoryError:
+    except git.exc.InvalidGitRepositoryError:
         return False, None
 
 
@@ -110,14 +110,10 @@ def check_comfy_repo(path) -> Tuple[bool, Optional[git.Repo]]:
 
 # Generate and update this following method using chatGPT
 def save_yaml(file_path: str, metadata: ComfyLockYAMLStruct):
-    updated_at = None
-    if metadata.basics.updated_at:
-        updated_at = metadata.basics.updated_at.isoformat()
-
     data = {
         "basics": {
             "name": metadata.basics.name,
-            "updated_at": updated_at,
+            "updated_at": metadata.basics.updated_at.isoformat(),
         },
         "models": [
             {
@@ -239,12 +235,13 @@ class WorkspaceManager:
         if self.use_here is True:
             current_directory = os.getcwd()
             found_comfy_repo, comfy_repo = check_comfy_repo(current_directory)
-            if found_comfy_repo and comfy_repo:
-                return str(comfy_repo.working_dir), WorkspaceType.CURRENT_DIR
-            return (
-                os.path.join(current_directory, "ComfyUI"),
-                WorkspaceType.CURRENT_DIR,
-            )
+            if found_comfy_repo:
+                return comfy_repo.working_dir, WorkspaceType.CURRENT_DIR
+            else:
+                return (
+                    os.path.join(current_directory, "ComfyUI"),
+                    WorkspaceType.CURRENT_DIR,
+                )
 
         # Check the current directory for a ComfyUI
         if self.use_here is None:
@@ -253,8 +250,8 @@ class WorkspaceManager:
                 os.path.join(current_directory)
             )
             # If it's in a sub dir of the ComfyUI repo, get the repo working dir
-            if found_comfy_repo and comfy_repo:
-                return str(comfy_repo.working_dir), WorkspaceType.CURRENT_DIR
+            if found_comfy_repo:
+                return comfy_repo.working_dir, WorkspaceType.CURRENT_DIR
 
         # Check for user-set default workspace
         default_workspace = self.config_manager.get(
@@ -327,9 +324,7 @@ class WorkspaceManager:
 
         return model_files
 
-    def load_metadata(self) -> Dict:
-        if self.workspace_path is None:
-            return {}
+    def load_metadata(self):
         file_path = os.path.join(self.workspace_path, constants.COMFY_LOCK_YAML_FILE)
         if os.path.exists(file_path):
             with open(file_path, "r", encoding="utf-8") as file:
@@ -338,9 +333,6 @@ class WorkspaceManager:
             return {}
 
     def save_metadata(self):
-        if self.workspace_path is None:
-            print("[bold red]warn: Workspace path not set. Skipping metadata save.[/bold red]")
-            return
         file_path = os.path.join(self.workspace_path, constants.COMFY_LOCK_YAML_FILE)
         save_yaml(file_path, self.metadata)
 
