@@ -3,7 +3,7 @@ from unittest.mock import MagicMock, patch
 
 from comfy_cli.registry import PyProjectConfig
 from comfy_cli.registry.api import RegistryAPI
-from comfy_cli.registry.types import ComfyConfig, ProjectConfig, URLs
+from comfy_cli.registry.types import ComfyConfig, ProjectConfig, URLs, License
 
 
 class TestRegistryAPI(unittest.TestCase):
@@ -16,7 +16,7 @@ class TestRegistryAPI(unittest.TestCase):
                 version="0.1.0",
                 requires_python=">= 3.9",
                 dependencies=["dep1", "dep2"],
-                license="MIT",
+                license=License(file="LICENSE"),
                 urls=URLs(repository="https://github.com/test/test_node"),
             ),
             tool_comfy=ComfyConfig(
