@@ -1,6 +1,7 @@
 import os
 import subprocess
 from typing import Optional
+import typer
 
 import tomlkit
 import tomlkit.exceptions
@@ -145,10 +146,15 @@ def extract_node_configuration(
     if isinstance(license_data, str):
         license = License(text=license_data)
     elif isinstance(license_data, dict):
-        license = License(
-            file=license_data.get("file", ""),
-            text=license_data.get("text", "")
-        )
+        if "file" in license_data or "text" in license_data:
+            license = License(
+                file=license_data.get("file", ""), text=license_data.get("text", "")
+            )
+        else:
+            typer.echo(
+                "Warning: License dictionary does not contain 'file' or 'text' keys. Please check the documentation: https://docs.comfy.org/registry/specifications."
+            )
+            license = License()
     else:
         license = License()
 
