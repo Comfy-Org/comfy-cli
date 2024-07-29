@@ -145,6 +145,9 @@ def extract_node_configuration(
     license_data = project_data.get("license", {})
     if isinstance(license_data, str):
         license = License(text=license_data)
+        typer.echo(
+            'Warning: License should be in one of these two formats: license = {file = "LICENSE"} OR license = {text = "MIT License"}. Please check the documentation: https://docs.comfy.org/registry/specifications.'
+        )
     elif isinstance(license_data, dict):
         if "file" in license_data or "text" in license_data:
             license = License(
@@ -152,13 +155,13 @@ def extract_node_configuration(
             )
         else:
             typer.echo(
-                "Warning: License dictionary does not contain 'file' or 'text' keys. Please check the documentation: https://docs.comfy.org/registry/specifications."
+                'Warning: License should be in one of these two formats: license = {file = "LICENSE"} OR license = {text = "MIT License"}. Please check the documentation: https://docs.comfy.org/registry/specifications.'
             )
             license = License()
     else:
         license = License()
         typer.echo(
-            "Warning: License dictionary does not contain 'file' or 'text' keys. Please check the documentation: https://docs.comfy.org/registry/specifications."
+            'Warning: License should be in one of these two formats: license = {file = "LICENSE"} OR license = {text = "MIT License"}. Please check the documentation: https://docs.comfy.org/registry/specifications.'
         )
 
     project = ProjectConfig(
