@@ -667,6 +667,15 @@ def show_versions(
 
 
 @app.command(
+    "migrate",
+    help="Changes the old-style custom node installation to the new-style custom node installation.",
+)
+@tracking.track_command("node")
+def migration():
+    execute_cm_cli(["migrate"])
+
+
+@app.command(
     "install-deps",
     help="Install dependencies from dependencies file(.json) or workflow(.png/.json)",
 )
