@@ -140,9 +140,19 @@ def entry(
 @app.command(help="Download and install ComfyUI and ComfyUI-Manager")
 @tracking.track_command()
 def install(
-    url: Annotated[str, typer.Option(show_default=False)] = constants.COMFY_GITHUB_URL,
+    url: Annotated[
+        str,
+        typer.Option(
+            show_default=False,
+            help="url or local path pointing to the ComfyUI core git repo to be installed",
+        ),
+    ] = constants.COMFY_GITHUB_URL,
     manager_url: Annotated[
-        str, typer.Option(show_default=False)
+        str,
+        typer.Option(
+            show_default=False,
+            help="url or local path pointing to the ComfyUI-Manager git repo to be installed. A specific branch can optionally be specified using a setuptools-like syntax, eg https://foo.git@bar",
+        ),
     ] = constants.COMFY_MANAGER_GITHUB_URL,
     restore: Annotated[
         bool,
