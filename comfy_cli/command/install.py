@@ -226,7 +226,15 @@ def execute(
         else:
             print("\nInstalling ComfyUI-Manager..")
 
-            subprocess.run(["git", "clone", manager_url, manager_repo_dir], check=True)
+            if "@" in manager_url:
+                # clone specific branch
+                *manager_url_parts, manager_branch = manager_url.split("@")
+                manager_url = "".join(manager_url_parts)
+
+                subprocess.run(["git", "clone", "-b", manager_branch, manager_url, manager_repo_dir], check=True)
+            else:
+                subprocess.run(["git", "clone", manager_url, manager_repo_dir], check=True)
+
             install_manager_dependencies(repo_dir)
 
         update_node_id_cache()
