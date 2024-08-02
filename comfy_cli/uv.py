@@ -207,7 +207,7 @@ class DependencyCompiler:
         return DependencyCompiler.findReqFiles(self.cwd)
 
     def findExtReqs(self):
-        extDirs = [d for d in self.cwd.glob("custom_nodes/[!__pycache__]*") if d.is_dir()]
+        extDirs = [d for d in (self.cwd / "custom_nodes").iterdir() if d.is_dir() and d.name != "__pycache__"]
         return DependencyCompiler.findReqFiles(*extDirs)
 
     def makeOverride(self):
@@ -279,6 +279,7 @@ class DependencyCompiler:
                         f.write(line)
 
 def fastInstallComfyDeps(cwd: PathLike, gpu: Optional[str] = None):
+    _check_call(cmd=["pip", "install", "-U", "pip"], cwd=cwd)
     _check_call(cmd=["pip", "install", "uv"], cwd=cwd)
 
     appler = DependencyCompiler(cwd=cwd, gpu=gpu)
