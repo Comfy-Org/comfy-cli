@@ -47,6 +47,9 @@ share/python-wheels/
 *.manifest
 *.spec
 
+# temporary files created by tests
+tests/temp
+
 venv/
 
 bisect_state.json
