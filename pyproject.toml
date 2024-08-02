@@ -61,9 +61,10 @@ where = ["."]
 include = ["comfy_cli*"]
 
 [tool.ruff]
-line-length = 150
+line-length = 120
 target-version = "py39"
 
+[tool.ruff.lint]
 select = [
   "E4", # default
   "E7", # default
