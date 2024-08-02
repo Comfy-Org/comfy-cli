@@ -191,8 +191,7 @@ def execute(
     if not os.path.exists(repo_dir):
         if "@" in url:
             # clone specific branch
-            *url_parts, branch = url.split("@")
-            url = "".join(url_parts)
+            url, branch = url.rsplit("@", 1)
 
             subprocess.run(["git", "clone", "-b", branch, url, repo_dir], check=True)
         else:
@@ -236,8 +235,7 @@ def execute(
 
             if "@" in manager_url:
                 # clone specific branch
-                *manager_url_parts, manager_branch = manager_url.split("@")
-                manager_url = "".join(manager_url_parts)
+                manager_url, manager_branch = manager_url.rsplit("@", 1)
 
                 subprocess.run(["git", "clone", "-b", manager_branch, manager_url, manager_repo_dir], check=True)
             else:
