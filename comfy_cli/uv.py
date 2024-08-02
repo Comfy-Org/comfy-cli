@@ -12,12 +12,22 @@ from comfy_cli.constants import GPU_OPTION
 PathLike = Union[os.PathLike[str], str]
 
 def _run(cmd: list[str], cwd: PathLike) -> subprocess.CompletedProcess[Any]:
-    return subprocess.run(
-        cmd,
-        cwd=cwd,
-        capture_output=True,
-        text=True,
-    )
+    try:
+        return subprocess.run(
+            cmd,
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            check=True
+        )
+
+    except subprocess.CalledProcessError as e:
+        print(e.__class__.__name__)
+        print(e)
+        print(f"STDOUT:\n{e.stdout}")
+        print(f"STDERR:\n{e.stderr}")
+
+        raise RuntimeError
 
 def _check_call(cmd: list[str], cwd: Optional[PathLike] = None):
     """uses check_call to run pip, as reccomended by the pip maintainers.
@@ -237,7 +247,7 @@ class DependencyCompiler:
                 f.write(DependencyCompiler.overrideGpu.format(gpu=self.gpu, gpuUrl=self.gpuUrl))
                 f.write("\n\n")
 
-        coreOverride = DependencyCompiler.Compile(
+        completed = DependencyCompiler.Compile(
             cwd=self.cwd,
             reqFiles=self.reqFilesCore,
             override=self.override
@@ -245,7 +255,7 @@ class DependencyCompiler:
 
         with open(self.override, "a") as f:
             f.write("# ensure that core comfyui deps take precedence over any 3rd party extension deps\n")
-            for line in coreOverride.stdout:
+            for line in completed.stdout:
                 f.write(line)
             f.write("\n")
 
