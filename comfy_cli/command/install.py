@@ -1,10 +1,10 @@
+from rich import print
 import os
 import platform
 import subprocess
 import sys
-
 import typer
-from rich import print
+from typing import Optional
 
 from comfy_cli import constants, ui, utils
 from comfy_cli.command.custom_nodes.command import update_node_id_cache
@@ -163,7 +163,7 @@ def execute(
     comfy_path: str,
     restore: bool,
     skip_manager: bool,
-    commit=None,
+    commit: Optional[str] = None,
     gpu: constants.GPU_OPTION = None,
     cuda_version: constants.CUDAVersion = constants.CUDAVersion.v12_1,
     plat: constants.OS = None,
