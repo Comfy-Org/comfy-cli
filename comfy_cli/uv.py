@@ -45,7 +45,7 @@ class DependencyCompiler:
     }
 
     @staticmethod
-    def findReqFiles(*ders: PathLike) -> list[Path]:
+    def FindReqFiles(*ders: PathLike) -> list[Path]:
         return [file
             for der in ders
             for file in Path(der).absolute().iterdir()
@@ -53,7 +53,7 @@ class DependencyCompiler:
         ]
 
     @staticmethod
-    def installBuildDeps():
+    def InstallBuildDeps():
         """Use pip to install bare minimum requirements for uv to do its thing
         """
         if shutil.which("uv") is None:
@@ -61,7 +61,7 @@ class DependencyCompiler:
             _check_call(cmd=["python", "-m", "pip", "install", "uv"])
 
     @staticmethod
-    def compile(
+    def Compile(
         cwd: PathLike,
         reqFiles: list[PathLike],
         override: Optional[PathLike] = None,
@@ -102,7 +102,7 @@ class DependencyCompiler:
         return _run(cmd, cwd)
 
     @staticmethod
-    def install(
+    def Install(
         cwd: PathLike,
         reqFile: list[PathLike],
         override: Optional[PathLike] = None,
@@ -144,7 +144,7 @@ class DependencyCompiler:
         return _check_call(cmd, cwd)
 
     @staticmethod
-    def sync(
+    def Sync(
         cwd: PathLike,
         reqFile: list[PathLike],
         extraUrl: Optional[str] = None,
@@ -178,7 +178,7 @@ class DependencyCompiler:
         return _check_call(cmd, cwd)
 
     @staticmethod
-    def resolveGpu(gpu: Union[str, None]):
+    def ResolveGpu(gpu: Union[str, None]):
         if gpu is None:
             try:
                 tver = metadata.version("torch")
@@ -203,7 +203,7 @@ class DependencyCompiler:
     ):
         self.cwd = Path(cwd)
         self.reqFiles = [Path(reqFile) for reqFile in reqFilesExt] if reqFilesExt is not None else None
-        self.gpu = DependencyCompiler.resolveGpu(gpu)
+        self.gpu = DependencyCompiler.ResolveGpu(gpu)
 
         self.gpuUrl = DependencyCompiler.nvidiaPytorchUrl if self.gpu == GPU_OPTION.NVIDIA else DependencyCompiler.rocmPytorchUrl if self.gpu == GPU_OPTION.AMD else None
         self.out = self.cwd / outName
@@ -213,11 +213,11 @@ class DependencyCompiler:
         self.reqFilesExt = reqFilesExt if reqFilesExt is not None else self.findExtReqs()
 
     def findCoreReqs(self):
-        return DependencyCompiler.findReqFiles(self.cwd)
+        return DependencyCompiler.FindReqFiles(self.cwd)
 
     def findExtReqs(self):
         extDirs = [d for d in (self.cwd / "custom_nodes").iterdir() if d.is_dir() and d.name != "__pycache__"]
-        return DependencyCompiler.findReqFiles(*extDirs)
+        return DependencyCompiler.FindReqFiles(*extDirs)
 
     def makeOverride(self):
         #clean up
@@ -228,7 +228,7 @@ class DependencyCompiler:
                 f.write(DependencyCompiler.overrideGpu.format(gpu=self.gpu, gpuUrl=self.gpuUrl))
                 f.write("\n\n")
 
-        coreOverride = DependencyCompiler.compile(
+        coreOverride = DependencyCompiler.Compile(
             cwd=self.cwd,
             reqFiles=self.reqFilesCore,
             override=self.override
@@ -244,7 +244,7 @@ class DependencyCompiler:
         #clean up
         self.out.unlink(missing_ok=True)
 
-        DependencyCompiler.compile(
+        DependencyCompiler.Compile(
             cwd=self.cwd,
             reqFiles=(self.reqFilesCore + self.reqFilesExt),
             override=self.override,
@@ -252,7 +252,7 @@ class DependencyCompiler:
         )
 
     def installCorePlusExt(self):
-        DependencyCompiler.install(
+        DependencyCompiler.Install(
             cwd=self.cwd,
             reqFile=self.out,
             override=self.override,
@@ -260,7 +260,7 @@ class DependencyCompiler:
         )
 
     def syncCorePlusExt(self):
-        DependencyCompiler.sync(
+        DependencyCompiler.Sync(
             cwd=self.cwd,
             reqFile=self.out,
             extraUrl=self.gpuUrl,
@@ -288,7 +288,7 @@ class DependencyCompiler:
                         f.write(line)
 
     def installComfyDeps(self):
-        DependencyCompiler.installBuildDeps()
+        DependencyCompiler.InstallBuildDeps()
 
         self.makeOverride()
         self.compileCorePlusExt()
