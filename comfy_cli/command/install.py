@@ -9,7 +9,7 @@ from typing import Optional
 from comfy_cli import constants, ui, utils
 from comfy_cli.command.custom_nodes.command import update_node_id_cache
 from comfy_cli.constants import GPU_OPTION
-from comfy_cli.uv import fastInstallComfyDeps
+from comfy_cli.uv import DependencyCompiler
 from comfy_cli.workspace_manager import WorkspaceManager, check_comfy_repo
 
 workspace_manager = WorkspaceManager()
@@ -246,7 +246,8 @@ def execute(
                 install_manager_dependencies(repo_dir)
 
     if fast_deps:
-        fastInstallComfyDeps(cwd=repo_dir, gpu=gpu)
+        depComp = DependencyCompiler(cwd=repo_dir, gpu=gpu)
+        depComp.installComfyDeps()
 
     if not skip_manager:
         update_node_id_cache()

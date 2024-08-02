@@ -1,6 +1,7 @@
 from importlib import metadata
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 from textwrap import dedent
@@ -18,7 +19,7 @@ def _run(cmd: list[str], cwd: PathLike) -> subprocess.CompletedProcess[Any]:
         text=True,
     )
 
-def _check_call(cmd: list[str], cwd: PathLike):
+def _check_call(cmd: list[str], cwd: Optional[PathLike] = None):
     """uses check_call to run pip, as reccomended by the pip maintainers.
     see https://pip.pypa.io/en/stable/user_guide/#using-pip-from-your-program"""
 
@@ -50,6 +51,14 @@ class DependencyCompiler:
             for file in Path(der).absolute().iterdir()
             if file.name in DependencyCompiler.reqNames
         ]
+
+    @staticmethod
+    def installBuildDeps():
+        """Use pip to install bare minimum requirements for uv to do its thing
+        """
+        if shutil.which("uv") is None:
+            _check_call(cmd=["python", "-m", "pip", "install", "-U", "pip"])
+            _check_call(cmd=["python", "-m", "pip", "install", "uv"])
 
     @staticmethod
     def compile(
@@ -278,14 +287,11 @@ class DependencyCompiler:
                     if "opencv-python==" not in line:
                         f.write(line)
 
-def fastInstallComfyDeps(cwd: PathLike, gpu: Optional[str] = None):
-    _check_call(cmd=["pip", "install", "-U", "pip"], cwd=cwd)
-    _check_call(cmd=["pip", "install", "uv"], cwd=cwd)
+    def installComfyDeps(self):
+        DependencyCompiler.installBuildDeps()
 
-    appler = DependencyCompiler(cwd=cwd, gpu=gpu)
+        self.makeOverride()
+        self.compileCorePlusExt()
+        self.handleOpencv()
 
-    appler.makeOverride()
-    appler.compileCorePlusExt()
-    appler.handleOpencv()
-
-    appler.installCorePlusExt()
+        self.installCorePlusExt()
