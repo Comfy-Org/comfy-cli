@@ -15,31 +15,36 @@ maintainers = [
   {name = "Yoland Yan", email = "yoland@drip.art"},
   {name = "James Kwon", email = "hongilkwon316@gmail.com"},
   {name = "Robin Huang", email = "robin@drip.art"},
-  {name = "Dr.Lt.Data", email = "dr.lt.data@gmail.com"}
-]
-
-dependencies = [
-    "typer>=0.9.0",
-    "GitPython",
-    "rich",
-    "requests",
-    "charset-normalizer>=3.0.0",
-    "pyyaml",
-    "typing-extensions>=4.7.0",
-    "mixpanel",
-    "questionary",
-    "psutil",
-    "tomlkit",
-    "pathspec",
-    "httpx",
-    "packaging",
-    "websocket-client"
+  {name = "Dr.Lt.Data", email = "dr.lt.data@gmail.com"},
 ]
 
 classifiers = [
   "Development Status :: 4 - Beta",
   "Intended Audience :: Developers",
-  "License :: OSI Approved :: GNU General Public License v3 (GPLv3)"
+  "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
+]
+
+dependencies = [
+  "charset-normalizer>=3.0.0",
+  "GitPython",
+  "httpx",
+  "mixpanel",
+  "packaging",
+  "pathspec",
+  "psutil",
+  "pyyaml",
+  "questionary",
+  "requests",
+  "rich",
+  "tomlkit",
+  "typer>=0.9.0",
+  "typing-extensions>=4.7.0",
+  "websocket-client",
+]
+
+[project.optional-dependencies]
+dev = [
+  "ruff",
 ]
 
 [project.scripts]
@@ -54,6 +59,14 @@ Repository = "https://github.com/drip-art/comfy-cli.git"
 where = ["."]
 include = ["comfy_cli*"]
 
-[tool.isort]
-profile = "black"
-line_length = 88
+[tool.ruff]
+line-length = 150
+target-version = "py39"
+
+select = [
+  "E4", # default
+  "E7", # default
+  "E9", # default
+  "F", # default
+  "I", # isort-like behavior (import statement sorting)
+]
