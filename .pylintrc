@@ -1,30 +1,28 @@
-[MASTER]
-disable=
-    C0114, # missing-module-docstring
-    C0115, # missing-class-docstring
-    C0116, # missing-function-docstring
-    C0209, # consider-using-f-string
-    W0622, # redefined-builtin
-    W1113, # too-many-arguments
-    W0613, # unused-argument
-    W0718, # broad-exception-caught
-    W0511, # fixme
-    W0621, # redefined-outer-name
-    W1514, # unspecified-encoding
-    W0603, # global-statement
-    W1203, # logging-fstring-interpolation
-    W0212, # protected-access
-    C0301, # line-too-long
-    C0103, # invalid-name
-    W1510, # subprocess-run-check
-    W0707, # raise-missing-from
+; [MASTER]
+; disable=
+;     C0114, # missing-module-docstring
+;     C0115, # missing-class-docstring
+;     C0116, # missing-function-docstring
+;     C0209, # consider-using-f-string
+;     W0622, # redefined-builtin
+;     W1113, # too-many-arguments
+;     W0613, # unused-argument
+;     W0718, # broad-exception-caught
+;     W0511, # fixme
+;     W0621, # redefined-outer-name
+;     W1514, # unspecified-encoding
+;     W0603, # global-statement
+;     W1203, # logging-fstring-interpolation
+;     W0212, # protected-access
+;     C0301, # line-too-long
+;     W0707, # raise-missing-from
 
-    # TODO
-    W3101, # missing timeout on request
-    W0719, # broad-exception-raised
+;     # TODO
+;     W3101, # missing timeout on request
+;     W0719, # broad-exception-raised
 
-[FORMAT]
-max-line-length=120
+; [FORMAT]
+; max-line-length=120
 
-[SIMILARITIES]
-ignore-imports=yes
+; [SIMILARITIES]
+; ignore-imports=yes
