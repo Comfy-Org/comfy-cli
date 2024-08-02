@@ -194,7 +194,6 @@ def execute(
         if "@" in url:
             # clone specific branch
             url, branch = url.rsplit("@", 1)
-
             subprocess.run(["git", "clone", "-b", branch, url, repo_dir], check=True)
         else:
             subprocess.run(["git", "clone", url, repo_dir], check=True)
@@ -239,20 +238,18 @@ def execute(
             if "@" in manager_url:
                 # clone specific branch
                 manager_url, manager_branch = manager_url.rsplit("@", 1)
-
                 subprocess.run(["git", "clone", "-b", manager_branch, manager_url, manager_repo_dir], check=True)
             else:
                 subprocess.run(["git", "clone", manager_url, manager_repo_dir], check=True)
 
             if not fast_deps:
                 install_manager_dependencies(repo_dir)
-        if not fast_deps:
-            update_node_id_cache()
 
     if fast_deps:
         fastInstallComfyDeps(cwd=repo_dir, gpu=gpu)
-        if not skip_manager:
-            update_node_id_cache()
+
+    if not skip_manager:
+        update_node_id_cache()
 
     os.chdir(repo_dir)
 
