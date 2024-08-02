@@ -57,8 +57,17 @@ class DependencyCompiler:
         """Use pip to install bare minimum requirements for uv to do its thing
         """
         if shutil.which("uv") is None:
-            _check_call(cmd=["python", "-m", "pip", "install", "-U", "pip"])
-            _check_call(cmd=["python", "-m", "pip", "install", "uv"])
+            cmd = [
+                sys.executable,
+                "-m",
+                "pip",
+                "install",
+                "--upgrade",
+                "pip",
+                "uv"
+            ]
+
+            _check_call(cmd=cmd)
 
     @staticmethod
     def Compile(
