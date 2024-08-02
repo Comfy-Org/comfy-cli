@@ -36,20 +36,20 @@ class DependencyCompiler:
         torchvision
     """).strip()
 
-    reqNames = [
+    reqNames = {
         "requirements.txt",
         "pyproject.toml",
         "setup.cfg",
         "setup.py",
-    ]
+    }
 
     @staticmethod
-    def findReqFiles(p: PathLike) -> list[Path]:
-        p = Path(p).absolute()
-        reqFiles: list[Path] = []
-        for reqName in DependencyCompiler.reqNames:
-            reqFiles.extend(p.glob(reqName))
-        return reqFiles
+    def findReqFiles(*ders: PathLike) -> list[Path]:
+        return [file
+            for der in ders
+            for file in Path(der).absolute().iterdir()
+            if file.name in DependencyCompiler.reqNames
+        ]
 
     @staticmethod
     def compile(
@@ -187,20 +187,28 @@ class DependencyCompiler:
     def __init__(
         self,
         cwd: PathLike = ".",
-        extDirs: Optional[list[PathLike]] = None,
-        gpu: Union[str, None] = None,
+        reqFilesCore: Optional[list[PathLike]] = None,
+        reqFilesExt: Optional[list[PathLike]] = None,
+        gpu: Optional[str] = None,
         outName: str = "requirements.compiled",
     ):
         self.cwd = Path(cwd)
-        self.extDirs = [Path(extDir) for extDir in extDirs] if extDirs is not None else None
+        self.reqFiles = [Path(reqFile) for reqFile in reqFilesExt] if reqFilesExt is not None else None
         self.gpu = DependencyCompiler.resolveGpu(gpu)
 
         self.gpuUrl = DependencyCompiler.nvidiaPytorchUrl if self.gpu == GPU_OPTION.NVIDIA else DependencyCompiler.rocmPytorchUrl if self.gpu == GPU_OPTION.AMD else None
         self.out = self.cwd / outName
         self.override = self.cwd / "override.txt"
 
-        self.coreReqFiles = DependencyCompiler.findReqFiles(self.cwd)
-        self.extReqFiles = [reqFile for extDir in self.extDirs for reqFile in DependencyCompiler.findReqFiles(extDir)]
+        self.reqFilesCore = reqFilesCore if reqFilesCore is not None else self.findCoreReqs()
+        self.reqFilesExt = reqFilesExt if reqFilesExt is not None else self.findExtReqs()
+
+    def findCoreReqs(self):
+        return DependencyCompiler.findReqFiles(self.cwd)
+
+    def findExtReqs(self):
+        extDirs = [d for d in self.cwd.glob("custom_nodes/[!__pycache__]*") if d.is_dir()]
+        return DependencyCompiler.findReqFiles(*extDirs)
 
     def makeOverride(self):
         #clean up
@@ -213,7 +221,7 @@ class DependencyCompiler:
 
         coreOverride = DependencyCompiler.compile(
             cwd=self.cwd,
-            reqFiles=self.coreReqFiles,
+            reqFiles=self.reqFilesCore,
             override=self.override
         )
 
@@ -229,7 +237,7 @@ class DependencyCompiler:
 
         DependencyCompiler.compile(
             cwd=self.cwd,
-            reqFiles=(self.coreReqFiles + self.extReqFiles),
+            reqFiles=(self.reqFilesCore + self.reqFilesExt),
             override=self.override,
             out=self.out,
         )
@@ -273,10 +281,7 @@ class DependencyCompiler:
 def fastInstallComfyDeps(cwd: PathLike, gpu: Optional[str] = None):
     _check_call(cmd=["pip", "install", "uv"], cwd=cwd)
 
-    p = Path(cwd)
-    extDirs = [d for d in p.glob("custom_nodes/[!__pycache__]*") if d.is_dir()]
-
-    appler = DependencyCompiler(cwd=cwd, extDirs=extDirs, gpu=gpu)
+    appler = DependencyCompiler(cwd=cwd, gpu=gpu)
 
     appler.makeOverride()
     appler.compileCorePlusExt()
