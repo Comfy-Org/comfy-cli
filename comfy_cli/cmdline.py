@@ -144,7 +144,7 @@ def install(
         str,
         typer.Option(
             show_default=False,
-            help="url or local path pointing to the ComfyUI core git repo to be installed",
+            help="url or local path pointing to the ComfyUI core git repo to be installed. A specific branch can optionally be specified using a setuptools-like syntax, eg https://foo.git@bar",
         ),
     ] = constants.COMFY_GITHUB_URL,
     manager_url: Annotated[

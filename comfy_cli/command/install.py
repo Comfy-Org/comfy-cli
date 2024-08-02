@@ -189,7 +189,15 @@ def execute(
         os.makedirs(parent_path, exist_ok=True)
 
     if not os.path.exists(repo_dir):
-        subprocess.run(["git", "clone", url, repo_dir], check=True)
+        if "@" in url:
+            # clone specific branch
+            *url_parts, branch = url.split("@")
+            url = "".join(url_parts)
+
+            subprocess.run(["git", "clone", "-b", branch, url, repo_dir], check=True)
+        else:
+            subprocess.run(["git", "clone", url, repo_dir], check=True)
+
     elif not check_comfy_repo(repo_dir)[0]:
         print(
             f"[bold red]'{repo_dir}' already exists. But it is an invalid ComfyUI repository. Remove it and retry.[/bold red]"
