@@ -1,10 +1,10 @@
+from rich import print
 import os
 import platform
 import subprocess
 import sys
-
 import typer
-from rich import print
+from typing import Optional
 
 from comfy_cli import constants, ui, utils
 from comfy_cli.command.custom_nodes.command import update_node_id_cache
@@ -163,7 +163,7 @@ def execute(
     comfy_path: str,
     restore: bool,
     skip_manager: bool,
-    commit=None,
+    commit: Optional[str] = None,
     gpu: constants.GPU_OPTION = None,
     cuda_version: constants.CUDAVersion = constants.CUDAVersion.v12_1,
     plat: constants.OS = None,
@@ -189,7 +189,14 @@ def execute(
         os.makedirs(parent_path, exist_ok=True)
 
     if not os.path.exists(repo_dir):
-        subprocess.run(["git", "clone", url, repo_dir], check=True)
+        if "@" in url:
+            # clone specific branch
+            url, branch = url.rsplit("@", 1)
+
+            subprocess.run(["git", "clone", "-b", branch, url, repo_dir], check=True)
+        else:
+            subprocess.run(["git", "clone", url, repo_dir], check=True)
+
     elif not check_comfy_repo(repo_dir)[0]:
         print(
             f"[bold red]'{repo_dir}' already exists. But it is an invalid ComfyUI repository. Remove it and retry.[/bold red]"
@@ -228,12 +235,13 @@ def execute(
         else:
             print("\nInstalling ComfyUI-Manager..")
 
-            subprocess.run(["git", "clone", manager_url, manager_repo_dir], check=True)
+            if "@" in manager_url:
+                # clone specific branch
+                manager_url, manager_branch = manager_url.rsplit("@", 1)
 
-            # TODO: REMOVED - Alpha Testing  -----------------------------`
-            os.chdir(workspace_manager.get_comfyui_manager_path())
-            subprocess.run(["git", "switch", "feat/cnr"], check=True)
-            # ------------------------------------------------------------
+                subprocess.run(["git", "clone", "-b", manager_branch, manager_url, manager_repo_dir], check=True)
+            else:
+                subprocess.run(["git", "clone", manager_url, manager_repo_dir], check=True)
 
             install_manager_dependencies(repo_dir)
 
