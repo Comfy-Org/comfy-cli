@@ -149,9 +149,10 @@ comfy node [show|simple-show] [installed|enabled|not-installed|disabled|all|snap
 
 #### Bisect custom nodes
 
-The bisect tool can help you pinpoint the custom node that causes the issue.
+If you encounter bugs only with custom nodes enabled, and want to find out which custom node(s) causes the bug,
+ the bisect tool can help you pinpoint the custom node that causes the issue.
 
-- `comfy node bisect start`: Start a new bisect session with optional ComfyUI launch args.
+- `comfy node bisect start`: Start a new bisect session with optional ComfyUI launch args. It automatically marks the starting state as bad, and takes all enabled nodes when the command executes as the test set.
 - `comfy node bisect good`: Mark the current active set as bad, indicating the problem is within the test set
 - `comfy node bisect bad`: Mark the current active set as bad, indicating the problem is within the test set.
 - `comfy node bisect reset`: Reset the current bisect session.
