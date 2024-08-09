@@ -9,26 +9,18 @@ from textwrap import dedent
 from typing import Any, Optional, Union, cast
 
 from comfy_cli.constants import GPU_OPTION
+from comfy_cli.ui import prompt_select
 
 PathLike = Union[os.PathLike[str], str]
 
 def _run(cmd: list[str], cwd: PathLike) -> subprocess.CompletedProcess[Any]:
-    try:
-        return subprocess.run(
-            cmd,
-            cwd=cwd,
-            capture_output=True,
-            text=True,
-            check=True
-        )
-
-    except subprocess.CalledProcessError as e:
-        print(e.__class__.__name__)
-        print(e)
-        print(f"STDOUT:\n{e.stdout}")
-        print(f"STDERR:\n{e.stderr}")
-
-        raise RuntimeError
+    return subprocess.run(
+        cmd,
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        check=True
+    )
 
 def _check_call(cmd: list[str], cwd: Optional[PathLike] = None):
     """uses check_call to run pip, as reccomended by the pip maintainers.
@@ -102,6 +94,7 @@ class DependencyCompiler:
         override: Optional[PathLike] = None,
         out: Optional[PathLike] = None,
         index_strategy: Optional[str] = "unsafe-best-match",
+        resolve_strategy: Optional[str] = None,
     ) -> subprocess.CompletedProcess[Any]:
         cmd = [
             sys.executable,
@@ -134,7 +127,31 @@ class DependencyCompiler:
                 str(out),
             ])
 
-        return _run(cmd, cwd)
+        try:
+            return _run(cmd, cwd)
+        except subprocess.CalledProcessError as e:
+            if resolve_strategy == "ask":
+                name, reqs = parseUvCompileError(e.stderr)
+                vers = [req.split(name)[1].strip(",") for req in reqs]
+
+                ver = prompt_select("Please manually select one of the conflicting requirements (or latest):", vers + ["latest"])
+
+                if ver == "latest":
+                    req = name
+                else:
+                    req = name + ver
+
+                e.req = req
+                raise e
+            elif resolve_strategy is not None:
+                raise ValueError
+
+            print(e.__class__.__name__)
+            print(e)
+            print(f"STDOUT:\n{e.stdout}")
+            print(f"STDERR:\n{e.stderr}")
+
+            raise e
 
     @staticmethod
     def Install(
@@ -284,6 +301,7 @@ class DependencyCompiler:
             reqFiles=(self.reqFilesCore + self.reqFilesExt),
             override=self.override,
             out=self.out,
+            resolve_strategy="ask",
         )
 
     def installCorePlusExt(self):
