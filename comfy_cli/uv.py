@@ -34,6 +34,10 @@ def _reqReClosure(name: str) -> re.Pattern[str]:
     return re.compile(rf"({name}\S+)")
 
 def parseUvCompileError(err: str) -> list[str]:
+    """takes in stderr from a run of `uv pip compile` that failed due to requirement conflict and spits out
+    a tuple of (reqiurement_name, requirement_spec_in_conflict_a, requirement_spec_in_conflict_b). Will probably
+    fail for stderr produced from other kinds of errors
+    """
     if reqNameMatch := _reqNameRe.search(err):
         reqName = reqNameMatch[1]
     else:
@@ -130,11 +134,16 @@ class DependencyCompiler:
         try:
             return _run(cmd, cwd)
         except subprocess.CalledProcessError as e:
+            print(e.__class__.__name__)
+            print(e)
+            print(f"STDOUT:\n{e.stdout}")
+            print(f"STDERR:\n{e.stderr}")
+
             if resolve_strategy == "ask":
                 name, reqs = parseUvCompileError(e.stderr)
                 vers = [req.split(name)[1].strip(",") for req in reqs]
 
-                ver = prompt_select("Please manually select one of the conflicting requirements (or latest):", vers + ["latest"])
+                ver = prompt_select("Please pick one of the conflicting version specs (or pick latest):", vers + ["latest"])
 
                 if ver == "latest":
                     req = name
@@ -142,14 +151,9 @@ class DependencyCompiler:
                     req = name + ver
 
                 e.req = req
-                raise e
             elif resolve_strategy is not None:
+                # no other resolve_strategy options implemented yet
                 raise ValueError
-
-            print(e.__class__.__name__)
-            print(e)
-            print(f"STDOUT:\n{e.stdout}")
-            print(f"STDERR:\n{e.stderr}")
 
             raise e
 
