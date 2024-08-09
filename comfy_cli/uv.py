@@ -296,13 +296,23 @@ class DependencyCompiler:
         #clean up
         self.out.unlink(missing_ok=True)
 
-        DependencyCompiler.Compile(
-            cwd=self.cwd,
-            reqFiles=(self.reqFilesCore + self.reqFilesExt),
-            override=self.override,
-            out=self.out,
-            resolve_strategy="ask",
-        )
+        while True:
+            try:
+                DependencyCompiler.Compile(
+                    cwd=self.cwd,
+                    reqFiles=(self.reqFilesCore + self.reqFilesExt),
+                    override=self.override,
+                    out=self.out,
+                    resolve_strategy="ask",
+                )
+
+                break
+            except subprocess.CalledProcessError as e:
+                if hasattr(e, "req"):
+                    with open(self.override, "a") as f:
+                        f.write(e.req + "\n")
+                else:
+                    raise ValueError
 
     def installCorePlusExt(self):
         DependencyCompiler.Install(
