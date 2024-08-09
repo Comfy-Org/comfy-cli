@@ -9,7 +9,7 @@ from textwrap import dedent
 from typing import Any, Optional, Union, cast
 
 from comfy_cli.constants import GPU_OPTION
-from comfy_cli.ui import prompt_select
+from comfy_cli import ui
 
 PathLike = Union[os.PathLike[str], str]
 
@@ -143,7 +143,7 @@ class DependencyCompiler:
                 name, reqs = parseUvCompileError(e.stderr)
                 vers = [req.split(name)[1].strip(",") for req in reqs]
 
-                ver = prompt_select(
+                ver = ui.prompt_select(
                     "Please pick one of the conflicting version specs (or pick latest):",
                     choices=vers + ["latest"],
                     default=vers[0],
