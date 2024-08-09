@@ -1,11 +1,12 @@
 from importlib import metadata
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
 from textwrap import dedent
-from typing import Any, Optional, Union
+from typing import Any, Optional, Union, cast
 
 from comfy_cli.constants import GPU_OPTION
 
@@ -34,6 +35,21 @@ def _check_call(cmd: list[str], cwd: Optional[PathLike] = None):
     see https://pip.pypa.io/en/stable/user_guide/#using-pip-from-your-program"""
 
     subprocess.check_call(cmd, cwd=cwd)
+
+_reqNameRe: re.Pattern[str] = re.compile(r"require\s([\w-]+)")
+
+def _reqReClosure(name: str) -> re.Pattern[str]:
+    return re.compile(rf"({name}\S+)")
+
+def parseUvCompileError(err: str) -> list[str]:
+    if reqNameMatch := _reqNameRe.search(err):
+        reqName = reqNameMatch[1]
+    else:
+        raise ValueError
+
+    reqRe = _reqReClosure(reqName)
+
+    return reqName, cast(list[str], reqRe.findall(err))
 
 class DependencyCompiler:
     rocmPytorchUrl = "https://download.pytorch.org/whl/rocm6.0"
