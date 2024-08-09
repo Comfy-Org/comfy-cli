@@ -143,7 +143,11 @@ class DependencyCompiler:
                 name, reqs = parseUvCompileError(e.stderr)
                 vers = [req.split(name)[1].strip(",") for req in reqs]
 
-                ver = prompt_select("Please pick one of the conflicting version specs (or pick latest):", vers + ["latest"])
+                ver = prompt_select(
+                    "Please pick one of the conflicting version specs (or pick latest):",
+                    choices=vers + ["latest"],
+                    default=vers[0],
+                )
 
                 if ver == "latest":
                     req = name
@@ -316,7 +320,7 @@ class DependencyCompiler:
                     with open(self.override, "a") as f:
                         f.write(e.req + "\n")
                 else:
-                    raise ValueError
+                    raise AttributeError
 
     def installCorePlusExt(self):
         DependencyCompiler.Install(

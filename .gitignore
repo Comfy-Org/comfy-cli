@@ -48,7 +48,7 @@ share/python-wheels/
 *.spec
 
 # temporary files created by tests
-tests/temp
+tests/temp/
 
 venv/
 
