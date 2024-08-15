@@ -16,7 +16,7 @@ temp.mkdir(exist_ok=True, parents=True)
 
 @pytest.fixture
 def mock_prompt_select(monkeypatch):
-    mockChoices = [">=1.13.0", ">=2.0.0"]
+    mockChoices = ["==1.13.0", "==2.0.0"]
     def _mock_prompt_select(*args, **kwargs):
         return mockChoices.pop(0)
 
