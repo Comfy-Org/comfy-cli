@@ -21,7 +21,7 @@ def get_os_details():
     return os_name, os_version
 
 
-def install_comfyui_dependencies(
+def pip_install_comfyui_dependencies(
     repo_dir,
     gpu: GPU_OPTION,
     plat: constants.OS,
@@ -151,7 +151,7 @@ def install_comfyui_dependencies(
 
 
 # install requirements for manager
-def install_manager_dependencies(repo_dir):
+def pip_install_manager_dependencies(repo_dir):
     os.chdir(os.path.join(repo_dir, "custom_nodes", "ComfyUI-Manager"))
     subprocess.run(
         [sys.executable, "-m", "pip", "install", "-r", "requirements.txt"], check=True
@@ -210,7 +210,7 @@ def execute(
         subprocess.run(["git", "checkout", commit], check=True)
 
     if not fast_deps:
-        install_comfyui_dependencies(
+        pip_install_comfyui_dependencies(
             repo_dir, gpu, plat, cuda_version, skip_torch_or_directml, skip_requirement
         )
 
@@ -227,7 +227,7 @@ def execute(
 
         if os.path.exists(manager_repo_dir):
             if restore and not fast_deps:
-                install_manager_dependencies(repo_dir)
+                pip_install_manager_dependencies(repo_dir)
             else:
                 print(
                     f"Directory {manager_repo_dir} already exists. Skipping installation of ComfyUI-Manager.\nIf you want to restore dependencies, add the '--restore' option."
@@ -243,7 +243,7 @@ def execute(
                 subprocess.run(["git", "clone", manager_url, manager_repo_dir], check=True)
 
             if not fast_deps:
-                install_manager_dependencies(repo_dir)
+                pip_install_manager_dependencies(repo_dir)
 
     if fast_deps:
         depComp = DependencyCompiler(cwd=repo_dir, gpu=gpu)
