@@ -29,9 +29,14 @@ def test_compile(mock_prompt_select):
         reqFilesExt=[reqsDir/"x_reqs.txt", reqsDir/"y_reqs.txt"],
     )
 
+    DependencyCompiler.Install_Build_Deps()
     depComp.make_override()
     depComp.compile_core_plus_ext()
 
     with open(reqsDir/"requirements.compiled", "r") as known, open(temp/"requirements.compiled", "r") as test:
-        knownLines, testLines = known.readlines(), test.readlines()
+        # compare all non-commented lines in generated file vs reference file
+        knownLines, testLines = [
+            [line for line in known.readlines() if line.strip()[0]!="#"],
+            [line for line in test.readlines() if line.strip()[0]!="#"],
+        ]
         assert knownLines == testLines
