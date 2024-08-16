@@ -9,6 +9,7 @@ from typing import Optional
 from comfy_cli import constants, ui, utils
 from comfy_cli.command.custom_nodes.command import update_node_id_cache
 from comfy_cli.constants import GPU_OPTION
+from comfy_cli.uv import DependencyCompiler
 from comfy_cli.workspace_manager import WorkspaceManager, check_comfy_repo
 
 workspace_manager = WorkspaceManager()
@@ -20,7 +21,7 @@ def get_os_details():
     return os_name, os_version
 
 
-def install_comfyui_dependencies(
+def pip_install_comfyui_dependencies(
     repo_dir,
     gpu: GPU_OPTION,
     plat: constants.OS,
@@ -150,7 +151,7 @@ def install_comfyui_dependencies(
 
 
 # install requirements for manager
-def install_manager_dependencies(repo_dir):
+def pip_install_manager_dependencies(repo_dir):
     os.chdir(os.path.join(repo_dir, "custom_nodes", "ComfyUI-Manager"))
     subprocess.run(
         [sys.executable, "-m", "pip", "install", "-r", "requirements.txt"], check=True
@@ -169,6 +170,7 @@ def execute(
     plat: constants.OS = None,
     skip_torch_or_directml: bool = False,
     skip_requirement: bool = False,
+    fast_deps: bool = False,
     *args,
     **kwargs,
 ):
@@ -192,7 +194,6 @@ def execute(
         if "@" in url:
             # clone specific branch
             url, branch = url.rsplit("@", 1)
-
             subprocess.run(["git", "clone", "-b", branch, url, repo_dir], check=True)
         else:
             subprocess.run(["git", "clone", url, repo_dir], check=True)
@@ -208,9 +209,10 @@ def execute(
         os.chdir(repo_dir)
         subprocess.run(["git", "checkout", commit], check=True)
 
-    install_comfyui_dependencies(
-        repo_dir, gpu, plat, cuda_version, skip_torch_or_directml, skip_requirement
-    )
+    if not fast_deps:
+        pip_install_comfyui_dependencies(
+            repo_dir, gpu, plat, cuda_version, skip_torch_or_directml, skip_requirement
+        )
 
     WorkspaceManager().set_recent_workspace(repo_dir)
     workspace_manager.setup_workspace_manager(specified_workspace=repo_dir)
@@ -224,8 +226,8 @@ def execute(
         manager_repo_dir = os.path.join(repo_dir, "custom_nodes", "ComfyUI-Manager")
 
         if os.path.exists(manager_repo_dir):
-            if restore:
-                install_manager_dependencies(repo_dir)
+            if restore and not fast_deps:
+                pip_install_manager_dependencies(repo_dir)
             else:
                 print(
                     f"Directory {manager_repo_dir} already exists. Skipping installation of ComfyUI-Manager.\nIf you want to restore dependencies, add the '--restore' option."
@@ -236,13 +238,18 @@ def execute(
             if "@" in manager_url:
                 # clone specific branch
                 manager_url, manager_branch = manager_url.rsplit("@", 1)
-
                 subprocess.run(["git", "clone", "-b", manager_branch, manager_url, manager_repo_dir], check=True)
             else:
                 subprocess.run(["git", "clone", manager_url, manager_repo_dir], check=True)
 
-            install_manager_dependencies(repo_dir)
+            if not fast_deps:
+                pip_install_manager_dependencies(repo_dir)
 
+    if fast_deps:
+        depComp = DependencyCompiler(cwd=repo_dir, gpu=gpu)
+        depComp.install_comfy_deps()
+
+    if not skip_manager:
         update_node_id_cache()
 
     os.chdir(repo_dir)

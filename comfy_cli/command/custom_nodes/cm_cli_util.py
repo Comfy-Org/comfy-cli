@@ -9,12 +9,18 @@ import typer
 from rich import print
 
 from comfy_cli.config_manager import ConfigManager
+from comfy_cli.uv import DependencyCompiler
 from comfy_cli.workspace_manager import WorkspaceManager
 
 workspace_manager = WorkspaceManager()
 
+# set of commands that invalidate (ie require an update of) dependencies after they are run
+_dependency_cmds = {
+    'install',
+    'reinstall',
+}
 
-def execute_cm_cli(args, channel=None, mode=None) -> str | None:
+def execute_cm_cli(args, channel=None, fast_deps=False, mode=None) -> str | None:
     _config_manager = ConfigManager()
 
     workspace_path = workspace_manager.workspace_path
@@ -34,8 +40,12 @@ def execute_cm_cli(args, channel=None, mode=None) -> str | None:
         raise typer.Exit(code=1)
 
     cmd = [sys.executable, cm_cli_path] + args
+
     if channel is not None:
         cmd += ["--channel", channel]
+
+    if fast_deps:
+        cmd += ["--no-deps"]
 
     if mode is not None:
         cmd += ["--mode", mode]
@@ -54,6 +64,12 @@ def execute_cm_cli(args, channel=None, mode=None) -> str | None:
             cmd, env=new_env, check=True, capture_output=True, text=True
         )
         print(result.stdout)
+
+        if fast_deps and args[0] in _dependency_cmds:
+            # we're using the fast_deps behavior and just ran a command that invalidated the dependencies
+            depComp = DependencyCompiler(cwd=workspace_path)
+            depComp.install_comfy_deps()
+
         return result.stdout
     except subprocess.CalledProcessError as e:
         if e.returncode == 1:

@@ -10,6 +10,8 @@ __pycache__/
 .vscode/settings.json
 .idea/
 .vscode/
+*.code-workspace
+.history
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
@@ -44,6 +46,9 @@ share/python-wheels/
 # before PyInstaller builds the exe, so as to inject date/other infos into it.
 *.manifest
 *.spec
+
+# temporary files created by tests
+tests/temp/
 
 venv/
 

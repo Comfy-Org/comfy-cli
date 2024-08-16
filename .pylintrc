@@ -16,6 +16,8 @@ disable=
     W0212, # protected-access
     C0301, # line-too-long
     C0103, # invalid-name
+    W1510, # subprocess-run-check
+    W0707, # raise-missing-from
 
     # TODO
     W3101, # missing timeout on request
