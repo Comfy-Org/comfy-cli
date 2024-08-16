@@ -28,22 +28,22 @@ def _check_call(cmd: list[str], cwd: Optional[PathLike] = None):
 
     subprocess.check_call(cmd, cwd=cwd)
 
-_reqNameRe: re.Pattern[str] = re.compile(r"require\s([\w-]+)")
+_req_name_re: re.Pattern[str] = re.compile(r"require\s([\w-]+)")
 
-def _reqReClosure(name: str) -> re.Pattern[str]:
+def _req_re_closure(name: str) -> re.Pattern[str]:
     return re.compile(rf"({name}\S+)")
 
-def parseUvCompileError(err: str) -> tuple[str, list[str]]:
+def parse_uv_compile_error(err: str) -> tuple[str, list[str]]:
     """takes in stderr from a run of `uv pip compile` that failed due to requirement conflict and spits out
     a tuple of (reqiurement_name, [requirement_spec_in_conflict_a, requirement_spec_in_conflict_b]). Will probably
     fail for stderr produced from other kinds of errors
     """
-    if reqNameMatch := _reqNameRe.search(err):
+    if reqNameMatch := _req_name_re.search(err):
         reqName = reqNameMatch[1]
     else:
         raise ValueError
 
-    reqRe = _reqReClosure(reqName)
+    reqRe = _req_re_closure(reqName)
 
     return reqName, cast(list[str], reqRe.findall(err))
 
@@ -67,7 +67,7 @@ class DependencyCompiler:
     }
 
     @staticmethod
-    def FindReqFiles(*ders: PathLike) -> list[Path]:
+    def Find_Req_Files(*ders: PathLike) -> list[Path]:
         return [file
             for der in ders
             for file in Path(der).absolute().iterdir()
@@ -75,7 +75,7 @@ class DependencyCompiler:
         ]
 
     @staticmethod
-    def InstallBuildDeps():
+    def Install_Build_Deps():
         """Use pip to install bare minimum requirements for uv to do its thing
         """
         if shutil.which("uv") is None:
@@ -140,7 +140,7 @@ class DependencyCompiler:
             print(f"STDERR:\n{e.stderr}")
 
             if resolve_strategy == "ask":
-                name, reqs = parseUvCompileError(e.stderr)
+                name, reqs = parse_uv_compile_error(e.stderr)
                 vers = [req.split(name)[1].strip(",") for req in reqs]
 
                 ver = ui.prompt_select(
@@ -238,7 +238,7 @@ class DependencyCompiler:
         return _check_call(cmd, cwd)
 
     @staticmethod
-    def ResolveGpu(gpu: Union[str, None]):
+    def Resolve_Gpu(gpu: Union[str, None]):
         if gpu is None:
             try:
                 tver = metadata.version("torch")
@@ -263,23 +263,23 @@ class DependencyCompiler:
     ):
         self.cwd = Path(cwd)
         self.reqFiles = [Path(reqFile) for reqFile in reqFilesExt] if reqFilesExt is not None else None
-        self.gpu = DependencyCompiler.ResolveGpu(gpu)
+        self.gpu = DependencyCompiler.Resolve_Gpu(gpu)
 
         self.gpuUrl = DependencyCompiler.nvidiaPytorchUrl if self.gpu == GPU_OPTION.NVIDIA else DependencyCompiler.rocmPytorchUrl if self.gpu == GPU_OPTION.AMD else None
         self.out = self.cwd / outName
         self.override = self.cwd / "override.txt"
 
-        self.reqFilesCore = reqFilesCore if reqFilesCore is not None else self.findCoreReqs()
-        self.reqFilesExt = reqFilesExt if reqFilesExt is not None else self.findExtReqs()
+        self.reqFilesCore = reqFilesCore if reqFilesCore is not None else self.find_core_reqs()
+        self.reqFilesExt = reqFilesExt if reqFilesExt is not None else self.find_ext_reqs()
 
-    def findCoreReqs(self):
-        return DependencyCompiler.FindReqFiles(self.cwd)
+    def find_core_reqs(self):
+        return DependencyCompiler.Find_Req_Files(self.cwd)
 
-    def findExtReqs(self):
+    def find_ext_reqs(self):
         extDirs = [d for d in (self.cwd / "custom_nodes").iterdir() if d.is_dir() and d.name != "__pycache__"]
-        return DependencyCompiler.FindReqFiles(*extDirs)
+        return DependencyCompiler.Find_Req_Files(*extDirs)
 
-    def makeOverride(self):
+    def make_override(self):
         #clean up
         self.override.unlink(missing_ok=True)
 
@@ -300,7 +300,7 @@ class DependencyCompiler:
                 f.write(line)
             f.write("\n")
 
-    def compileCorePlusExt(self):
+    def compile_core_plus_ext(self):
         #clean up
         self.out.unlink(missing_ok=True)
 
@@ -322,7 +322,7 @@ class DependencyCompiler:
                 else:
                     raise AttributeError
 
-    def installCorePlusExt(self):
+    def install_core_plus_ext(self):
         DependencyCompiler.Install(
             cwd=self.cwd,
             reqFile=self.out,
@@ -330,14 +330,14 @@ class DependencyCompiler:
             extraUrl=self.gpuUrl,
         )
 
-    def syncCorePlusExt(self):
+    def sync_core_plus_ext(self):
         DependencyCompiler.Sync(
             cwd=self.cwd,
             reqFile=self.out,
             extraUrl=self.gpuUrl,
         )
 
-    def handleOpencv(self):
+    def handle_opencv(self):
         """as per the opencv docs, you should only have exactly one opencv package.
         headless is more suitable for comfy than the gui version, so remove gui if
         headless is present. TODO: add support for contrib pkgs. see: https://github.com/opencv/opencv-python"""
@@ -358,11 +358,11 @@ class DependencyCompiler:
                     if "opencv-python==" not in line:
                         f.write(line)
 
-    def installComfyDeps(self):
-        DependencyCompiler.InstallBuildDeps()
+    def install_comfy_deps(self):
+        DependencyCompiler.Install_Build_Deps()
 
-        self.makeOverride()
-        self.compileCorePlusExt()
-        self.handleOpencv()
+        self.make_override()
+        self.compile_core_plus_ext()
+        self.handle_opencv()
 
-        self.installCorePlusExt()
+        self.install_core_plus_ext()

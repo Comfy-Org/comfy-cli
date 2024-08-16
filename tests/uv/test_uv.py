@@ -29,8 +29,8 @@ def test_compile(mock_prompt_select):
         reqFilesExt=[reqsDir/"x_reqs.txt", reqsDir/"y_reqs.txt"],
     )
 
-    depComp.makeOverride()
-    depComp.compileCorePlusExt()
+    depComp.make_override()
+    depComp.compile_core_plus_ext()
 
     with open(reqsDir/"requirements.compiled", "r") as known, open(temp/"requirements.compiled", "r") as test:
         knownLines, testLines = known.readlines(), test.readlines()
