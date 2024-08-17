@@ -27,9 +27,7 @@ def launch_comfyui(extra):
 
     new_env = os.environ.copy()
 
-    session_path = os.path.join(
-        ConfigManager().get_config_path(), "tmp", str(uuid.uuid4())
-    )
+    session_path = os.path.join(ConfigManager().get_config_path(), "tmp", str(uuid.uuid4()))
     new_env["__COMFY_CLI_SESSION__"] = session_path
     new_env["PYTHONENCODING"] = "utf-8"
 
@@ -43,9 +41,7 @@ def launch_comfyui(extra):
     if "COMFY_CLI_BACKGROUND" not in os.environ:
         # If not running in background mode, there's no need to use popen. This can prevent the issue of linefeeds occurring with tqdm.
         while True:
-            res = subprocess.run(
-                [sys.executable, "main.py"] + extra, env=new_env, check=False
-            )
+            res = subprocess.run([sys.executable, "main.py"] + extra, env=new_env, check=False)
 
             if reboot_path is None:
                 print("[bold red]ComfyUI is not installed.[/bold red]\n")
@@ -122,9 +118,7 @@ def launch(
         )
         raise typer.Exit(code=1)
 
-    if (
-        extra is None or len(extra) == 0
-    ) and workspace_manager.workspace_type == WorkspaceType.DEFAULT:
+    if (extra is None or len(extra) == 0) and workspace_manager.workspace_type == WorkspaceType.DEFAULT:
         launch_extras = workspace_manager.config_manager.config["DEFAULT"].get(
             constants.CONFIG_KEY_DEFAULT_LAUNCH_EXTRAS, ""
         )
@@ -244,9 +238,7 @@ async def launch_and_monitor(cmd, listen, port):
                 print(
                     f"[bold yellow]ComfyUI is successfully launched in the background.[/bold yellow]\nTo see the GUI go to: http://{listen}:{port}"
                 )
-                ConfigManager().config["DEFAULT"][
-                    constants.CONFIG_KEY_BACKGROUND
-                ] = f"{(listen, port, process.pid)}"
+                ConfigManager().config["DEFAULT"][constants.CONFIG_KEY_BACKGROUND] = f"{(listen, port, process.pid)}"
                 ConfigManager().write_config()
 
                 # NOTE: os.exit(0) doesn't work.

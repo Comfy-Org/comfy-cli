@@ -46,13 +46,9 @@ def guess_status_code_reason(status_code: int, message: str) -> str:
     return f"Unknown error occurred (status code: {status_code})"
 
 
-def download_file(
-    url: str, local_filepath: pathlib.Path, headers: Optional[dict] = None
-):
+def download_file(url: str, local_filepath: pathlib.Path, headers: Optional[dict] = None):
     """Helper function to download a file."""
-    local_filepath.parent.mkdir(
-        parents=True, exist_ok=True
-    )  # Ensure the directory exists
+    local_filepath.parent.mkdir(parents=True, exist_ok=True)  # Ensure the directory exists
 
     with httpx.stream("GET", url, follow_redirects=True, headers=headers) as response:
         if response.status_code == 200:
@@ -66,15 +62,11 @@ def download_file(
                     ):
                         f.write(data)
             except KeyboardInterrupt:
-                delete_eh = ui.prompt_confirm_action(
-                    "Download interrupted, cleanup files?", True
-                )
+                delete_eh = ui.prompt_confirm_action("Download interrupted, cleanup files?", True)
                 if delete_eh:
                     local_filepath.unlink()
         else:
-            status_reason = guess_status_code_reason(
-                response.status_code, response.read()
-            )
+            status_reason = guess_status_code_reason(response.status_code, response.read())
             raise DownloadException(f"Failed to download file.\n{status_reason}")
 
 
@@ -114,9 +106,7 @@ def upload_file_to_signed_url(signed_url: str, file_path: str):
                 print("Upload successful.")
             else:
                 # Print a generic error message with status code and response text
-                print(
-                    f"Upload failed with status code: {response.status_code}. Error: {response.text}"
-                )
+                print(f"Upload failed with status code: {response.status_code}. Error: {response.text}")
 
     except requests.exceptions.RequestException as e:
         # Print error related to the HTTP request

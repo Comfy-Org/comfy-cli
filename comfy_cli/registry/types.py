@@ -52,10 +52,13 @@ class ComfyConfig:
     icon: str = ""
     models: List[Model] = field(default_factory=list)
 
+
 @dataclass
 class License:
     file: str = ""
     text: str = ""
+
+
 @dataclass
 class ProjectConfig:
     name: str = ""

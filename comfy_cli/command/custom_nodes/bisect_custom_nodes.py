@@ -115,9 +115,7 @@ class BisectState(NamedTuple):
             execute_cm_cli(["disable", *self.inactive_nodes])
 
     def __str__(self):
-        active_list = "\n".join(
-            [f"{i + 1:3}. {node}" for i, node in enumerate(self.active)]
-        )
+        active_list = "\n".join([f"{i + 1:3}. {node}" for i, node in enumerate(self.active)])
         return f"""BisectState(status={self.status})
 set of nodes with culprit: {len(self.range)}
 set of nodes to test: {len(self.active)}
@@ -131,9 +129,7 @@ set of nodes to test: {len(self.active)}
     + "?[-- <extra args ...>]"
 )
 def start(
-    pinned_nodes: Annotated[
-        str, typer.Option(help="Pinned nodes always enable during the bisect")
-    ] = "",
+    pinned_nodes: Annotated[str, typer.Option(help="Pinned nodes always enable during the bisect")] = "",
     extra: list[str] = typer.Argument(None),
 ):
     """Start a new bisect session. The initial state is bad with all custom nodes
@@ -171,9 +167,7 @@ def start(
     bad()
 
 
-@bisect_app.command(
-    help="Mark the current active set as good, indicating the problem is outside the test set."
-)
+@bisect_app.command(help="Mark the current active set as good, indicating the problem is outside the test set.")
 def good():
     state = BisectState.load()
     if state.status != "running":
@@ -192,9 +186,7 @@ def good():
         launch_command(background=False, extra=state.launch_args)
 
 
-@bisect_app.command(
-    help="Mark the current active set as bad, indicating the problem is within the test set."
-)
+@bisect_app.command(help="Mark the current active set as bad, indicating the problem is within the test set.")
 def bad():
     state = BisectState.load()
     if state.status != "running":

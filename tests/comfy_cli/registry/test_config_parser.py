@@ -1,13 +1,13 @@
-from unittest.mock import patch, mock_open
+from unittest.mock import mock_open, patch
+
 import pytest
+
 from comfy_cli.registry.config_parser import extract_node_configuration
 from comfy_cli.registry.types import (
-    PyProjectConfig,
-    ProjectConfig,
     License,
-    URLs,
-    ComfyConfig,
     Model,
+    PyProjectConfig,
+    URLs,
 )
 
 
@@ -49,9 +49,11 @@ def mock_toml_data():
 
 
 def test_extract_node_configuration_success(mock_toml_data):
-    with patch("os.path.isfile", return_value=True), patch(
-        "builtins.open", mock_open()
-    ), patch("tomlkit.load", return_value=mock_toml_data):
+    with (
+        patch("os.path.isfile", return_value=True),
+        patch("builtins.open", mock_open()),
+        patch("tomlkit.load", return_value=mock_toml_data),
+    ):
         result = extract_node_configuration("fake_path.toml")
 
         assert isinstance(result, PyProjectConfig)
@@ -71,9 +73,7 @@ def test_extract_node_configuration_success(mock_toml_data):
         assert result.tool_comfy.display_name == "Test Project"
         assert result.tool_comfy.icon == "icon.png"
         assert len(result.tool_comfy.models) == 2
-        assert result.tool_comfy.models[0] == Model(
-            location="model1.bin", model_url="https://example.com/model1"
-        )
+        assert result.tool_comfy.models[0] == Model(location="model1.bin", model_url="https://example.com/model1")
 
 
 def test_extract_node_configuration_license_text():
@@ -82,9 +82,11 @@ def test_extract_node_configuration_license_text():
             "license": "MIT License",
         },
     }
-    with patch("os.path.isfile", return_value=True), patch(
-        "builtins.open", mock_open()
-    ), patch("tomlkit.load", return_value=mock_data):
+    with (
+        patch("os.path.isfile", return_value=True),
+        patch("builtins.open", mock_open()),
+        patch("tomlkit.load", return_value=mock_data),
+    ):
         result = extract_node_configuration("fake_path.toml")
         assert result is not None, "Expected PyProjectConfig, got None"
         assert isinstance(result, PyProjectConfig)
@@ -94,14 +96,14 @@ def test_extract_node_configuration_license_text():
 def test_extract_node_configuration_license_text_dict():
     mock_data = {
         "project": {
-            "license": {
-                "text": "MIT License\n\nCopyright (c) 2023 Example Corp\n\nPermission is hereby granted..."
-            },
+            "license": {"text": "MIT License\n\nCopyright (c) 2023 Example Corp\n\nPermission is hereby granted..."},
         },
     }
-    with patch("os.path.isfile", return_value=True), patch(
-        "builtins.open", mock_open()
-    ), patch("tomlkit.load", return_value=mock_data):
+    with (
+        patch("os.path.isfile", return_value=True),
+        patch("builtins.open", mock_open()),
+        patch("tomlkit.load", return_value=mock_data),
+    ):
         result = extract_node_configuration("fake_path.toml")
 
         assert result is not None, "Expected PyProjectConfig, got None"
@@ -115,9 +117,11 @@ def test_extract_license_incorrect_format():
     mock_data = {
         "project": {"license": "MIT"},
     }
-    with patch("os.path.isfile", return_value=True), patch(
-        "builtins.open", mock_open()
-    ), patch("tomlkit.load", return_value=mock_data):
+    with (
+        patch("os.path.isfile", return_value=True),
+        patch("builtins.open", mock_open()),
+        patch("tomlkit.load", return_value=mock_data),
+    ):
         result = extract_node_configuration("fake_path.toml")
 
         assert result is not None, "Expected PyProjectConfig, got None"

@@ -1,8 +1,9 @@
-from typing import List, Tuple, Optional, TypeVar, Union, Dict, Any
 from enum import Enum
-from questionary import Choice
+from typing import Any, Dict, List, Optional, Tuple, TypeVar, Union
+
 import questionary
 import typer
+from questionary import Choice
 from rich.console import Console
 from rich.progress import Progress
 from rich.table import Table
@@ -36,11 +37,9 @@ def show_progress(iterable, total, description="Downloading..."):
 
 ChoiceType = Union[str, Choice, Dict[str, Any]]
 
+
 def prompt_autocomplete(
-    question: str,
-    choices: List[ChoiceType],
-    default: ChoiceType = "",
-    force_prompting: bool = False
+    question: str, choices: List[ChoiceType], default: ChoiceType = "", force_prompting: bool = False
 ) -> Optional[ChoiceType]:
     """
     Asks a single select question using questionary and returns the selected response.
@@ -60,10 +59,7 @@ def prompt_autocomplete(
 
 
 def prompt_select(
-    question: str,
-    choices: List[ChoiceType],
-    default: ChoiceType = "",
-    force_prompting: bool = False
+    question: str, choices: List[ChoiceType], default: ChoiceType = "", force_prompting: bool = False
 ) -> Optional[ChoiceType]:
     """
     Asks a single select question using questionary and returns the selected response.
@@ -82,13 +78,10 @@ def prompt_select(
     return questionary.select(question, choices=choices, default=default).ask()
 
 
-E = TypeVar('E', bound=Enum)
+E = TypeVar("E", bound=Enum)
 
-def prompt_select_enum(
-    question: str,
-    choices: List[E],
-    force_prompting: bool = False
-) -> Optional[E]:
+
+def prompt_select_enum(question: str, choices: List[E], force_prompting: bool = False) -> Optional[E]:
     """
     Asks a single select question using questionary and returns the selected response.
 
@@ -111,9 +104,7 @@ def prompt_select_enum(
     return choice_map[selected] if selected is not None else None
 
 
-def prompt_input(
-    question: str, default: str = "", force_prompting: bool = False
-) -> str:
+def prompt_input(question: str, default: str = "", force_prompting: bool = False) -> str:
     """
     Asks the user for an input using questionary.
 
@@ -143,9 +134,7 @@ def prompt_multi_select(prompt: str, choices: List[str]) -> List[str]:
     Returns:
         List[str]: A list of the selected items.
     """
-    selections = questionary.checkbox(
-        prompt, choices=choices
-    ).ask()  # returns list of selected items
+    selections = questionary.checkbox(prompt, choices=choices).ask()  # returns list of selected items
     return selections if selections else []
 
 
