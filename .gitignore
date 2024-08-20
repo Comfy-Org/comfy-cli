@@ -3,6 +3,7 @@ __pycache__/
 
 #COMMON CONFIGs
 .DS_Store
+.ruff_cache
 .src_port
 .webpack_watch.log
 *.swp

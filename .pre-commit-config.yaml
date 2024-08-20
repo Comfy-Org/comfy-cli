@@ -1,17 +1,10 @@
 repos:
-  - repo: https://github.com/psf/black
-    rev: 22.3.0
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    # Ruff version.
+    rev: v0.6.1
     hooks:
-      - id: black
-  - repo: https://github.com/pylint-dev/pylint
-    rev: v2.16.2
-    hooks:
-      - id: pylint
-        args:
-          # Note: E0401 is disabled as pylint does not run in an environment
-          # where the package is installed
-          - --disable=R,E0401
-  - repo: https://github.com/PyCQA/isort
-    rev: 5.13.2
-    hooks:
-      - id: isort
+      # Run the linter.
+      - id: ruff
+        args: [ --fix ]
+      # Run the formatter.
+      - id: ruff-format
