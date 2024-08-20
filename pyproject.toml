@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "comfy-cli"
-license = {file = "LICENSE"}
+license = "GPL-3.0-only"
 version = "0.0.0" # Will be filled in by the CI/CD pipeline. Check publish_package.py.
 requires-python = ">= 3.9"
 description = "A CLI tool for installing and using ComfyUI."
