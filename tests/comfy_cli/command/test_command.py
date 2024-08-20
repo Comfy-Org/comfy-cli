@@ -22,9 +22,7 @@ def mock_execute():
 
 @pytest.fixture(scope="function")
 def mock_prompt_select_enum():
-    def mocked_prompt_select_enum(
-        question: str, choices: list, force_prompting: bool = False
-    ):
+    def mocked_prompt_select_enum(question: str, choices: list, force_prompting: bool = False):
         return choices[0]
 
     with patch(

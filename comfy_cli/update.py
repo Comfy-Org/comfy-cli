@@ -27,9 +27,7 @@ def check_for_newer_pypi_version(package_name, current_version):
 
 def check_for_updates():
     current_version = get_version_from_pyproject()
-    has_newer, newer_version = check_for_newer_pypi_version(
-        "comfy-cli", current_version
-    )
+    has_newer, newer_version = check_for_newer_pypi_version("comfy-cli", current_version)
 
     if has_newer:
         notify_update(current_version, newer_version)

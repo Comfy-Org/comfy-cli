@@ -71,10 +71,7 @@ class DependencyCompiler:
     @staticmethod
     def Find_Req_Files(*ders: PathLike) -> list[Path]:
         return [
-            file
-            for der in ders
-            for file in Path(der).absolute().iterdir()
-            if file.name in DependencyCompiler.reqNames
+            file for der in ders for file in Path(der).absolute().iterdir() if file.name in DependencyCompiler.reqNames
         ]
 
     @staticmethod
@@ -272,11 +269,7 @@ class DependencyCompiler:
         outName: str = "requirements.compiled",
     ):
         self.cwd = Path(cwd)
-        self.reqFiles = (
-            [Path(reqFile) for reqFile in reqFilesExt]
-            if reqFilesExt is not None
-            else None
-        )
+        self.reqFiles = [Path(reqFile) for reqFile in reqFilesExt] if reqFilesExt is not None else None
         self.gpu = DependencyCompiler.Resolve_Gpu(gpu)
 
         self.gpuUrl = (
@@ -289,22 +282,14 @@ class DependencyCompiler:
         self.out = self.cwd / outName
         self.override = self.cwd / "override.txt"
 
-        self.reqFilesCore = (
-            reqFilesCore if reqFilesCore is not None else self.find_core_reqs()
-        )
-        self.reqFilesExt = (
-            reqFilesExt if reqFilesExt is not None else self.find_ext_reqs()
-        )
+        self.reqFilesCore = reqFilesCore if reqFilesCore is not None else self.find_core_reqs()
+        self.reqFilesExt = reqFilesExt if reqFilesExt is not None else self.find_ext_reqs()
 
     def find_core_reqs(self):
         return DependencyCompiler.Find_Req_Files(self.cwd)
 
     def find_ext_reqs(self):
-        extDirs = [
-            d
-            for d in (self.cwd / "custom_nodes").iterdir()
-            if d.is_dir() and d.name != "__pycache__"
-        ]
+        extDirs = [d for d in (self.cwd / "custom_nodes").iterdir() if d.is_dir() and d.name != "__pycache__"]
         return DependencyCompiler.Find_Req_Files(*extDirs)
 
     def make_override(self):
@@ -313,21 +298,13 @@ class DependencyCompiler:
 
         with open(self.override, "w") as f:
             if self.gpu is not None and self.gpuUrl is not None:
-                f.write(
-                    DependencyCompiler.overrideGpu.format(
-                        gpu=self.gpu, gpuUrl=self.gpuUrl
-                    )
-                )
+                f.write(DependencyCompiler.overrideGpu.format(gpu=self.gpu, gpuUrl=self.gpuUrl))
                 f.write("\n\n")
 
-        completed = DependencyCompiler.Compile(
-            cwd=self.cwd, reqFiles=self.reqFilesCore, override=self.override
-        )
+        completed = DependencyCompiler.Compile(cwd=self.cwd, reqFiles=self.reqFilesCore, override=self.override)
 
         with open(self.override, "a") as f:
-            f.write(
-                "# ensure that core comfyui deps take precedence over any 3rd party extension deps\n"
-            )
+            f.write("# ensure that core comfyui deps take precedence over any 3rd party extension deps\n")
             for line in completed.stdout:
                 f.write(line)
             f.write("\n")

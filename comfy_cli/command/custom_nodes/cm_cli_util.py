@@ -16,9 +16,10 @@ workspace_manager = WorkspaceManager()
 
 # set of commands that invalidate (ie require an update of) dependencies after they are run
 _dependency_cmds = {
-    'install',
-    'reinstall',
+    "install",
+    "reinstall",
 }
+
 
 def execute_cm_cli(args, channel=None, fast_deps=False, mode=None) -> str | None:
     _config_manager = ConfigManager()
@@ -29,9 +30,7 @@ def execute_cm_cli(args, channel=None, fast_deps=False, mode=None) -> str | None
         print("\n[bold red]ComfyUI path is not resolved.[/bold red]\n", file=sys.stderr)
         raise typer.Exit(code=1)
 
-    cm_cli_path = os.path.join(
-        workspace_path, "custom_nodes", "ComfyUI-Manager", "cm-cli.py"
-    )
+    cm_cli_path = os.path.join(workspace_path, "custom_nodes", "ComfyUI-Manager", "cm-cli.py")
     if not os.path.exists(cm_cli_path):
         print(
             f"\n[bold red]ComfyUI-Manager not found: {cm_cli_path}[/bold red]\n",
@@ -51,18 +50,14 @@ def execute_cm_cli(args, channel=None, fast_deps=False, mode=None) -> str | None
         cmd += ["--mode", mode]
 
     new_env = os.environ.copy()
-    session_path = os.path.join(
-        _config_manager.get_config_path(), "tmp", str(uuid.uuid4())
-    )
+    session_path = os.path.join(_config_manager.get_config_path(), "tmp", str(uuid.uuid4()))
     new_env["__COMFY_CLI_SESSION__"] = session_path
     new_env["COMFYUI_PATH"] = workspace_path
 
     print(f"Execute from: {workspace_path}")
 
     try:
-        result = subprocess.run(
-            cmd, env=new_env, check=True, capture_output=True, text=True
-        )
+        result = subprocess.run(cmd, env=new_env, check=True, capture_output=True, text=True)
         print(result.stdout)
 
         if fast_deps and args[0] in _dependency_cmds:
