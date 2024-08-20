@@ -37,6 +37,7 @@ dependencies = [
   "requests",
   "rich",
   "tomlkit",
+  "tqdm",
   "typer>=0.9.0",
   "typing-extensions>=4.7.0",
   "websocket-client",

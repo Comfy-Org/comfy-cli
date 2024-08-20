@@ -7,6 +7,9 @@ class OS(Enum):
     MACOS = "macos"
     LINUX = "linux"
 
+class PROC(Enum):
+    X86_64 = "x86_64"
+    ARM = "arm"
 
 COMFY_GITHUB_URL = "https://github.com/comfyanonymous/ComfyUI"
 COMFY_MANAGER_GITHUB_URL = "https://github.com/ltdrdata/ComfyUI-Manager"
