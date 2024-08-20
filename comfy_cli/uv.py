@@ -21,7 +21,6 @@ def _run(cmd: list[str], cwd: PathLike) -> subprocess.CompletedProcess[Any]:
 def _check_call(cmd: list[str], cwd: Optional[PathLike] = None):
     """uses check_call to run pip, as reccomended by the pip maintainers.
     see https://pip.pypa.io/en/stable/user_guide/#using-pip-from-your-program"""
-
     subprocess.check_call(cmd, cwd=cwd)
 
 
@@ -71,7 +70,10 @@ class DependencyCompiler:
     @staticmethod
     def Find_Req_Files(*ders: PathLike) -> list[Path]:
         return [
-            file for der in ders for file in Path(der).absolute().iterdir() if file.name in DependencyCompiler.reqNames
+            file  # fmt: skip
+            for der in ders
+            for file in Path(der).absolute().iterdir()
+            if file.name in DependencyCompiler.reqNames
         ]
 
     @staticmethod
@@ -105,28 +107,13 @@ class DependencyCompiler:
         # ensures that eg tqdm is latest version, even though an old tqdm is on the amd url
         # see https://github.com/astral-sh/uv/blob/main/PIP_COMPATIBILITY.md#packages-that-exist-on-multiple-indexes and https://github.com/astral-sh/uv/issues/171
         if index_strategy is not None:
-            cmd.extend(
-                [
-                    "--index-strategy",
-                    "unsafe-best-match",
-                ]
-            )
+            cmd.extend(["--index-strategy", "unsafe-best-match"])
 
         if override is not None:
-            cmd.extend(
-                [
-                    "--override",
-                    str(override),
-                ]
-            )
+            cmd.extend(["--override", str(override)])
 
         if out is not None:
-            cmd.extend(
-                [
-                    "-o",
-                    str(out),
-                ]
-            )
+            cmd.extend(["-o", str(out)])
 
         try:
             return _run(cmd, cwd)
@@ -178,28 +165,13 @@ class DependencyCompiler:
         ]
 
         if index_strategy is not None:
-            cmd.extend(
-                [
-                    "--index-strategy",
-                    "unsafe-best-match",
-                ]
-            )
+            cmd.extend(["--index-strategy", "unsafe-best-match"])
 
         if extraUrl is not None:
-            cmd.extend(
-                [
-                    "--extra-index-url",
-                    extraUrl,
-                ]
-            )
+            cmd.extend(["--extra-index-url", extraUrl])
 
         if override is not None:
-            cmd.extend(
-                [
-                    "--override",
-                    str(override),
-                ]
-            )
+            cmd.extend(["--override", str(override)])
 
         if dry:
             cmd.append("--dry-run")
@@ -224,20 +196,10 @@ class DependencyCompiler:
         ]
 
         if index_strategy is not None:
-            cmd.extend(
-                [
-                    "--index-strategy",
-                    "unsafe-best-match",
-                ]
-            )
+            cmd.extend(["--index-strategy", "unsafe-best-match"])
 
         if extraUrl is not None:
-            cmd.extend(
-                [
-                    "--extra-index-url",
-                    extraUrl,
-                ]
-            )
+            cmd.extend(["--extra-index-url", extraUrl])
 
         if dry:
             cmd.append("--dry-run")
