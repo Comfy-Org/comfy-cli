@@ -9,11 +9,9 @@ import psutil
 import shutil
 import subprocess
 import sys
-from typing import Optional
 
 import requests
-from rich import print
-from tqdm.auto import tqdm
+from rich import print, progress
 import typer
 
 from comfy_cli.constants import DEFAULT_COMFY_WORKSPACE, OS, PROC
@@ -112,7 +110,7 @@ def download_progress(url: str, fname: PathLike, cwd: PathLike = ".", allow_redi
 
     desc = "(Unknown total file size)" if fsize == 0 else ""
     response.raw.read = functools.partial(response.raw.read, decode_content=True)  # Decompress if needed
-    with tqdm.wrapattr(response.raw, "read", total=fsize, desc=desc) as response_raw:
+    with progress.wrap_file(response.raw, total=fsize, description=desc) as response_raw:
         with fpath.open("wb") as f:
             shutil.copyfileobj(response_raw, f)
 
