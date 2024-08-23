@@ -2,10 +2,15 @@ import os
 from enum import Enum
 
 
-class OS(Enum):
+class OS(str, Enum):
     WINDOWS = "windows"
     MACOS = "macos"
     LINUX = "linux"
+
+
+class PROC(str, Enum):
+    X86_64 = "x86_64"
+    ARM = "arm"
 
 
 COMFY_GITHUB_URL = "https://github.com/comfyanonymous/ComfyUI"
@@ -58,12 +63,13 @@ class CUDAVersion(str, Enum):
     v11_8 = "11.8"
 
 
-class GPU_OPTION(Enum):
-    NVIDIA = "Nvidia"
-    AMD = "Amd"
-    INTEL_ARC = "Intel Arc"
-    M_SERIES = "Mac M Series"
-    MAC_INTEL = "Mac Intel"
+class GPU_OPTION(str, Enum):
+    CPU = None
+    NVIDIA = "nvidia"
+    AMD = "amd"
+    INTEL_ARC = "intel_arc"
+    M_SERIES = "mac_m_series"
+    MAC_INTEL = "mac_intel"
 
 
 # Referencing supported pt extension from ComfyUI
