@@ -162,9 +162,7 @@ def test_run(comfy_cli):
     )
     assert 0 == proc.returncode
 
-    workflow = os.path.join(
-        os.path.dirname(os.path.realpath(__file__)), "workflow.json"
-    )
+    workflow = os.path.join(os.path.dirname(os.path.realpath(__file__)), "workflow.json")
     proc = exec(
         f"""
         {comfy_cli} run --workflow {workflow} --wait --timeout 180

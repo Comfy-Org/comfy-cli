@@ -83,6 +83,26 @@ def remove(name: str):
 - Use `rich` for all console output
   - For progress reporting, use either [`rich.progress`](https://rich.readthedocs.io/en/stable/progress.html)
 
+## Develop comfy-cli and ComfyUI-Manager (cm-cli) together
+### Make changes to both
+1. Fork your own branches of `comfy-cli` and `ComfyUI-Manager`, make changes
+2. Be sure to commit any changes to `ComfyUI-Manager` to a new branch, and push to remote
+
+### Try out changes to both
+1. clone the changed branch of `comfy-cli`, then live install `comfy-cli`:
+  - `pip install -e comfy-cli`
+2. Go to a test dir and run:
+  - `comfy --here install --manager-url=<path-or-url-to-fork-of-ComfyUI-Manager>`
+3. Run:
+  - `cd ComfyUI/custom_nodes/ComfyUI-Manager/ && git checkout <changed-branch> && cd -`
+4. Further changes can be pulled into these copies of the `comfy-cli` and `ComfyUI-Manager` repos
+
+### Debug both simultaneously
+1. Follow instructions above to get working install with changes
+2. Add breakpoints directly to code: `import ipdb; ipdb.set_trace()`
+3. Execute relevant `comfy-cli` command
+
+
 ## Contact
 
 If you have any questions or need further assistance, please contact the project maintainer at [???](mailto:???@drip.art).

@@ -6,11 +6,11 @@ import requests
 
 # Reduced global imports from comfy_cli.registry
 from comfy_cli.registry.types import (
+    License,
     Node,
     NodeVersion,
     PublishNodeVersionResponse,
     PyProjectConfig,
-    License,
 )
 
 
@@ -27,9 +27,7 @@ class RegistryAPI:
         else:
             return "https://api.comfy.org"
 
-    def publish_node_version(
-        self, node_config: PyProjectConfig, token
-    ) -> PublishNodeVersionResponse:
+    def publish_node_version(self, node_config: PyProjectConfig, token) -> PublishNodeVersionResponse:
         """
         Publishes a new version of a node.
 
@@ -42,14 +40,10 @@ class RegistryAPI:
         """
         # Local import to prevent circular dependency
         if not node_config.tool_comfy.publisher_id:
-            raise Exception(
-                "Publisher ID is required in pyproject.toml to publish a node version"
-            )
+            raise Exception("Publisher ID is required in pyproject.toml to publish a node version")
 
         if not node_config.project.name:
-            raise Exception(
-                "Project name is required in pyproject.toml to publish a node version"
-            )
+            raise Exception("Project name is required in pyproject.toml to publish a node version")
         license_json = serialize_license(node_config.project.license)
         request_body = {
             "personal_access_token": token,
@@ -80,9 +74,7 @@ class RegistryAPI:
                 signedUrl=data["signedUrl"],
             )
         else:
-            raise Exception(
-                f"Failed to publish node version: {response.status_code} {response.text}"
-            )
+            raise Exception(f"Failed to publish node version: {response.status_code} {response.text}")
 
     def list_all_nodes(self):
         """
@@ -98,9 +90,7 @@ class RegistryAPI:
             mapped_nodes = [map_node_to_node_class(node) for node in raw_nodes]
             return mapped_nodes
         else:
-            raise Exception(
-                f"Failed to retrieve nodes: {response.status_code} - {response.text}"
-            )
+            raise Exception(f"Failed to retrieve nodes: {response.status_code} - {response.text}")
 
     def install_node(self, node_id, version=None):
         """
@@ -124,9 +114,7 @@ class RegistryAPI:
             logging.debug(f"RegistryAPI install_node response: {response.json()}")
             return map_node_version(response.json())
         else:
-            raise Exception(
-                f"Failed to install node: {response.status_code} - {response.text}"
-            )
+            raise Exception(f"Failed to install node: {response.status_code} - {response.text}")
 
 
 def map_node_version(api_node_version):
@@ -140,24 +128,14 @@ def map_node_version(api_node_version):
         NodeVersion: An instance of NodeVersion dataclass populated with data from the API.
     """
     return NodeVersion(
-        changelog=api_node_version.get(
-            "changelog", ""
-        ),  # Provide a default value if 'changelog' is missing
+        changelog=api_node_version.get("changelog", ""),  # Provide a default value if 'changelog' is missing
         dependencies=api_node_version.get(
             "dependencies", []
         ),  # Provide a default empty list if 'dependencies' is missing
-        deprecated=api_node_version.get(
-            "deprecated", False
-        ),  # Assume False if 'deprecated' is not specified
-        id=api_node_version[
-            "id"
-        ],  # 'id' should be mandatory; raise KeyError if missing
-        version=api_node_version[
-            "version"
-        ],  # 'version' should be mandatory; raise KeyError if missing
-        download_url=api_node_version.get(
-            "downloadUrl", ""
-        ),  # Provide a default value if 'downloadUrl' is missing
+        deprecated=api_node_version.get("deprecated", False),  # Assume False if 'deprecated' is not specified
+        id=api_node_version["id"],  # 'id' should be mandatory; raise KeyError if missing
+        version=api_node_version["version"],  # 'version' should be mandatory; raise KeyError if missing
+        download_url=api_node_version.get("downloadUrl", ""),  # Provide a default value if 'downloadUrl' is missing
     )
 
 
@@ -181,9 +159,7 @@ def map_node_to_node_class(api_node_data):
         repository=api_node_data.get("repository"),
         tags=api_node_data.get("tags", []),
         latest_version=(
-            map_node_version(api_node_data["latest_version"])
-            if "latest_version" in api_node_data
-            else None
+            map_node_version(api_node_data["latest_version"]) if "latest_version" in api_node_data else None
         ),
     )
 
