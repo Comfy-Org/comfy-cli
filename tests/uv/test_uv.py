@@ -29,6 +29,7 @@ def mock_prompt_select(monkeypatch):
 def test_compile(mock_prompt_select):
     depComp = DependencyCompiler(
         cwd=temp,
+        outDir=temp,
         reqFilesCore=[reqsDir / "core_reqs.txt"],
         reqFilesExt=[reqsDir / "x_reqs.txt", reqsDir / "y_reqs.txt"],
     )
