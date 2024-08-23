@@ -1,8 +1,8 @@
 import os
-from pathlib import Path
 import shutil
 import subprocess
 import tarfile
+from pathlib import Path
 from typing import Optional
 
 import requests
@@ -21,24 +21,27 @@ _platform_targets = {
     (OS.WINDOWS, PROC.X86_64): "x86_64-pc-windows-msvc-shared",
 }
 
-_latest_release_json_url = "https://raw.githubusercontent.com/indygreg/python-build-standalone/latest-release/latest-release.json"
+_latest_release_json_url = (
+    "https://raw.githubusercontent.com/indygreg/python-build-standalone/latest-release/latest-release.json"
+)
 _asset_url_prefix = "https://github.com/indygreg/python-build-standalone/releases/download/{tag}"
 
+
 def download_standalone_python(
-        platform: Optional[str] = None,
-        proc: Optional[str] = None,
-        version: str = "3.12.5",
-        tag: str = "latest",
-        flavor: str = "install_only",
-        cwd: PathLike = ".",
-    ) -> PathLike:
+    platform: Optional[str] = None,
+    proc: Optional[str] = None,
+    version: str = "3.12.5",
+    tag: str = "latest",
+    flavor: str = "install_only",
+    cwd: PathLike = ".",
+) -> PathLike:
     """grab a pre-built distro from the python-build-standalone project. See
     https://gregoryszorc.com/docs/python-build-standalone/main/"""
     platform = get_os() if platform is None else platform
     proc = get_proc() if proc is None else proc
     target = _platform_targets[(platform, proc)]
 
-    if tag=="latest":
+    if tag == "latest":
         # try to fetch json with info about latest release
         response = requests.get(_latest_release_json_url)
         if response.status_code != 200:
@@ -57,6 +60,7 @@ def download_standalone_python(
 
     return download_progress(url, fname, cwd=cwd)
 
+
 class StandalonePython:
     @staticmethod
     def FromDistro(
@@ -66,9 +70,16 @@ class StandalonePython:
         tag: str = "latest",
         flavor: str = "install_only",
         cwd: PathLike = ".",
-        name: PathLike = "python"
+        name: PathLike = "python",
     ):
-        fpath = download_standalone_python(platform=platform, proc=proc, version=version, tag=tag, flavor=flavor, cwd=cwd)
+        fpath = download_standalone_python(
+            platform=platform,
+            proc=proc,
+            version=version,
+            tag=tag,
+            flavor=flavor,
+            cwd=cwd,
+        )
         return StandalonePython.FromTarball(fpath, name)
 
     @staticmethod

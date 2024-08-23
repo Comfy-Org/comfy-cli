@@ -552,13 +552,15 @@ def standalone(
         typer.Option(
             show_default=False,
             help="Create standalone Python for specified platform",
-    )] = None,
+        ),
+    ] = None,
     proc: Annotated[
         Optional[constants.PROC],
         typer.Option(
             show_default=False,
             help="Create standalone Python for specified processor",
-    )] = None,
+        ),
+    ] = None,
     nvidia: Annotated[
         Optional[bool],
         typer.Option(
@@ -646,6 +648,7 @@ def standalone(
     sty = StandalonePython.FromDistro(platform=platform, proc=proc)
     sty.precache_comfy_deps(comfyDir=comfy_path, gpu=gpu)
     sty.to_tarball()
+
 
 app.add_typer(models_command.app, name="model", help="Manage models.")
 app.add_typer(custom_nodes.app, name="node", help="Manage custom nodes.")

@@ -1,5 +1,4 @@
 import re
-import shutil
 import subprocess
 import sys
 from importlib import metadata
@@ -303,8 +302,8 @@ class DependencyCompiler:
         self.gpuUrl = (
             DependencyCompiler.nvidiaPytorchUrl if self.gpu == GPU_OPTION.NVIDIA else
             DependencyCompiler.rocmPytorchUrl if self.gpu == GPU_OPTION.AMD else
-            None  # fmt: skip
-        )
+            None
+        )  # fmt: skip
         self.out = self.outDir / outName
         self.override = self.outDir / "override.txt"
 
@@ -331,7 +330,7 @@ class DependencyCompiler:
             cwd=self.cwd,
             reqFiles=self.reqFilesCore,
             executable=self.executable,
-            override=self.override
+            override=self.override,
         )
 
         with open(self.override, "a") as f:
@@ -414,7 +413,7 @@ class DependencyCompiler:
             executable=self.executable,
             extraUrl=self.gpuUrl,
             noDeps=True,
-            out=self.outDir / "cache"
+            out=self.outDir / "cache",
         )
 
     def wheel_comfy_deps(self):
@@ -425,7 +424,7 @@ class DependencyCompiler:
             executable=self.executable,
             extraUrl=self.gpuUrl,
             noDeps=True,
-            out=self.outDir / "wheels"
+            out=self.outDir / "wheels",
         )
 
     def install_comfy_deps(self):

@@ -3,16 +3,16 @@ Module for utility functions.
 """
 
 import functools
-from pathlib import Path
 import platform
-import psutil
 import shutil
 import subprocess
 import sys
+from pathlib import Path
 
+import psutil
 import requests
-from rich import print, progress
 import typer
+from rich import print, progress
 
 from comfy_cli.constants import DEFAULT_COMFY_WORKSPACE, OS, PROC
 from comfy_cli.typing import PathLike
@@ -96,6 +96,7 @@ def create_choice_completer(opts):
 
     return f
 
+
 def download_progress(url: str, fname: PathLike, cwd: PathLike = ".", allow_redirects: bool = True) -> PathLike:
     """download url to local file fname and show a progress bar.
     See https://stackoverflow.com/q/37573483"""
@@ -106,7 +107,7 @@ def download_progress(url: str, fname: PathLike, cwd: PathLike = ".", allow_redi
     if response.status_code != 200:
         response.raise_for_status()  # Will only raise for 4xx codes, so...
         raise RuntimeError(f"Request to {url} returned status code {response.status_code}")
-    fsize = int(response.headers.get('Content-Length', 0))
+    fsize = int(response.headers.get("Content-Length", 0))
 
     desc = "(Unknown total file size)" if fsize == 0 else ""
     response.raw.read = functools.partial(response.raw.read, decode_content=True)  # Decompress if needed
