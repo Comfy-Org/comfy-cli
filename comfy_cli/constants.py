@@ -2,12 +2,12 @@ import os
 from enum import Enum
 
 
-class OS(Enum):
+class OS(str, Enum):
     WINDOWS = "windows"
     MACOS = "macos"
     LINUX = "linux"
 
-class PROC(Enum):
+class PROC(str, Enum):
     X86_64 = "x86_64"
     ARM = "arm"
 
@@ -61,7 +61,8 @@ class CUDAVersion(str, Enum):
     v11_8 = "11.8"
 
 
-class GPU_OPTION(Enum):
+class GPU_OPTION(str, Enum):
+    CPU = None
     NVIDIA = "nvidia"
     AMD = "amd"
     INTEL_ARC = "intel_arc"

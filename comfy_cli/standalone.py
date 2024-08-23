@@ -90,6 +90,10 @@ class StandalonePython:
         self.bin = self.rpath / "bin"
         self.executable = self.bin / "python"
 
+        # paths to store package artifacts
+        self.cache = self.rpath / "cache"
+        self.wheels = self.rpath / "wheels"
+
         self.dep_comp = None
 
         # upgrade pip if needed, install uv
@@ -123,18 +127,31 @@ class StandalonePython:
     def install_comfy(self, *args: list[str], gpu_arg: str = "--nvidia"):
         self.run_comfy_cli("--here", "--skip-prompt", "install", "--fast-deps", gpu_arg, *args)
 
-    def compile_comfy_deps(self, comfyDir: PathLike, gpu: str, outDir: PathLike = "."):
+    def compile_comfy_deps(self, comfyDir: PathLike, gpu: str, outDir: Optional[PathLike] = None):
+        outDir = self.rpath if outDir is None else outDir
+
         self.dep_comp = DependencyCompiler(cwd=comfyDir, executable=self.executable, gpu=gpu, outDir=outDir)
         self.dep_comp.compile_comfy_deps()
 
-    def install_comfy_deps(self, comfyDir: PathLike, gpu: str, outDir: PathLike = "."):
+    def install_comfy_deps(self, comfyDir: PathLike, gpu: str, outDir: Optional[PathLike] = None):
+        outDir = self.rpath if outDir is None else outDir
+
         self.dep_comp = DependencyCompiler(cwd=comfyDir, executable=self.executable, gpu=gpu, outDir=outDir)
         self.dep_comp.install_core_plus_ext()
 
-    def precache_comfy_deps(self, comfyDir: PathLike, gpu: str, outDir: PathLike = "."):
+    def precache_comfy_deps(self, comfyDir: PathLike, gpu: str, outDir: Optional[PathLike] = None):
+        outDir = self.rpath if outDir is None else outDir
+
         self.dep_comp = DependencyCompiler(cwd=comfyDir, executable=self.executable, gpu=gpu, outDir=outDir)
         self.dep_comp.precache_comfy_deps()
 
-    def wheel_comfy_deps(self, comfyDir: PathLike, gpu: str, outDir: PathLike = "."):
+    def wheel_comfy_deps(self, comfyDir: PathLike, gpu: str, outDir: Optional[PathLike] = None):
+        outDir = self.rpath if outDir is None else outDir
+
         self.dep_comp = DependencyCompiler(cwd=comfyDir, executable=self.executable, gpu=gpu, outDir=outDir)
         self.dep_comp.wheel_comfy_deps()
+
+    def to_tarball(self, outPath: Optional[PathLike] = None):
+        outPath = self.rpath.with_suffix(".tgz") if outPath is None else Path(outPath)
+        with tarfile.open(outPath, "w:gz") as tar:
+            tar.add(self.rpath, arcname=self.rpath.parent)

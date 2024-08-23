@@ -295,7 +295,8 @@ class DependencyCompiler:
     ):
         self.cwd = Path(cwd).expanduser().resolve()
         self.outDir = Path(outDir).expanduser().resolve()
-        self.executable = Path(executable).expanduser().resolve()
+        # use .absolute since .resolve breaks the softlink-is-interpreter assumption of venvs
+        self.executable = Path(executable).expanduser().absolute()
         self.gpu = DependencyCompiler.Resolve_Gpu(gpu)
         self.reqFiles = [Path(reqFile) for reqFile in reqFilesExt] if reqFilesExt is not None else None
 
