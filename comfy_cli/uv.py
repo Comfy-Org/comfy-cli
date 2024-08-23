@@ -75,10 +75,10 @@ class DependencyCompiler:
         ]
 
     @staticmethod
-    def Install_Build_Deps():
+    def Install_Build_Deps(executable: PathLike = sys.executable):
         """Use pip to install bare minimum requirements for uv to do its thing"""
         if shutil.which("uv") is None:
-            cmd = [sys.executable, "-m", "pip", "install", "--upgrade", "pip", "uv"]
+            cmd = [str(executable), "-m", "pip", "install", "--upgrade", "pip", "uv"]
 
             _check_call(cmd=cmd)
 
@@ -86,13 +86,14 @@ class DependencyCompiler:
     def Compile(
         cwd: PathLike,
         reqFiles: list[PathLike],
+        executable: PathLike = sys.executable,
+        index_strategy: str = "unsafe-best-match",
         override: Optional[PathLike] = None,
         out: Optional[PathLike] = None,
-        index_strategy: Optional[str] = "unsafe-best-match",
         resolve_strategy: Optional[str] = None,
     ) -> subprocess.CompletedProcess[Any]:
         cmd = [
-            sys.executable,
+            str(executable),
             "-m",
             "uv",
             "pip",
@@ -147,13 +148,14 @@ class DependencyCompiler:
     def Install(
         cwd: PathLike,
         reqFile: list[PathLike],
-        override: Optional[PathLike] = None,
-        extraUrl: Optional[str] = None,
-        index_strategy: Optional[str] = "unsafe-best-match",
         dry: bool = False,
+        executable: PathLike = sys.executable,
+        extraUrl: Optional[str] = None,
+        index_strategy: str = "unsafe-best-match",
+        override: Optional[PathLike] = None,
     ) -> subprocess.CompletedProcess[Any]:
         cmd = [
-            sys.executable,
+            str(executable),
             "-m",
             "uv",
             "pip",
@@ -180,12 +182,13 @@ class DependencyCompiler:
     def Sync(
         cwd: PathLike,
         reqFile: list[PathLike],
-        extraUrl: Optional[str] = None,
-        index_strategy: Optional[str] = "unsafe-best-match",
         dry: bool = False,
+        executable: PathLike = sys.executable,
+        extraUrl: Optional[str] = None,
+        index_strategy: str = "unsafe-best-match",
     ) -> subprocess.CompletedProcess[Any]:
         cmd = [
-            sys.executable,
+            str(executable),
             "-m",
             "uv",
             "pip",
@@ -223,14 +226,16 @@ class DependencyCompiler:
     def __init__(
         self,
         cwd: PathLike = ".",
-        reqFilesCore: Optional[list[PathLike]] = None,
-        reqFilesExt: Optional[list[PathLike]] = None,
+        executable: PathLike = sys.executable,
         gpu: Optional[str] = None,
         outName: str = "requirements.compiled",
+        reqFilesCore: Optional[list[PathLike]] = None,
+        reqFilesExt: Optional[list[PathLike]] = None,
     ):
         self.cwd = Path(cwd)
-        self.reqFiles = [Path(reqFile) for reqFile in reqFilesExt] if reqFilesExt is not None else None
+        self.executable = executable
         self.gpu = DependencyCompiler.Resolve_Gpu(gpu)
+        self.reqFiles = [Path(reqFile) for reqFile in reqFilesExt] if reqFilesExt is not None else None
 
         self.gpuUrl = (
             DependencyCompiler.nvidiaPytorchUrl
@@ -261,7 +266,12 @@ class DependencyCompiler:
                 f.write(DependencyCompiler.overrideGpu.format(gpu=self.gpu, gpuUrl=self.gpuUrl))
                 f.write("\n\n")
 
-        completed = DependencyCompiler.Compile(cwd=self.cwd, reqFiles=self.reqFilesCore, override=self.override)
+        completed = DependencyCompiler.Compile(
+            cwd=self.cwd,
+            reqFiles=self.reqFilesCore,
+            executable=self.executable,
+            override=self.override
+        )
 
         with open(self.override, "a") as f:
             f.write("# ensure that core comfyui deps take precedence over any 3rd party extension deps\n")
@@ -278,6 +288,7 @@ class DependencyCompiler:
                 DependencyCompiler.Compile(
                     cwd=self.cwd,
                     reqFiles=(self.reqFilesCore + self.reqFilesExt),
+                    executable=self.executable,
                     override=self.override,
                     out=self.out,
                     resolve_strategy="ask",
@@ -295,14 +306,16 @@ class DependencyCompiler:
         DependencyCompiler.Install(
             cwd=self.cwd,
             reqFile=self.out,
-            override=self.override,
+            executable=self.executable,
             extraUrl=self.gpuUrl,
+            override=self.override,
         )
 
     def sync_core_plus_ext(self):
         DependencyCompiler.Sync(
             cwd=self.cwd,
             reqFile=self.out,
+            executable=self.executable,
             extraUrl=self.gpuUrl,
         )
 
@@ -328,7 +341,7 @@ class DependencyCompiler:
                         f.write(line)
 
     def install_comfy_deps(self):
-        DependencyCompiler.Install_Build_Deps()
+        DependencyCompiler.Install_Build_Deps(executable=self.executable)
 
         self.make_override()
         self.compile_core_plus_ext()
