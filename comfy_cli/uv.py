@@ -206,7 +206,67 @@ class DependencyCompiler:
         return _check_call(cmd, cwd)
 
     @staticmethod
-    def Resolve_Gpu(gpu: Union[str, None]):
+    def Download(
+        cwd: PathLike,
+        reqFile: list[PathLike],
+        executable: PathLike = sys.executable,
+        extraUrl: Optional[str] = None,
+        noDeps: bool = False,
+        out: Optional[PathLike] = None,
+    ) -> subprocess.CompletedProcess[Any]:
+        """For now, the `download` cmd has no uv support, so use pip"""
+        cmd = [
+            str(executable),
+            "-m",
+            "pip",
+            "download",
+            "-r",
+            str(reqFile),
+        ]
+
+        if extraUrl is not None:
+            cmd.extend(["--extra-index-url", extraUrl])
+
+        if noDeps:
+            cmd.append("--no-deps")
+
+        if out is not None:
+            cmd.extend(["-d", str(out)])
+
+        return _check_call(cmd, cwd)
+
+    @staticmethod
+    def Wheel(
+        cwd: PathLike,
+        reqFile: list[PathLike],
+        executable: PathLike = sys.executable,
+        extraUrl: Optional[str] = None,
+        noDeps: bool = False,
+        out: Optional[PathLike] = None,
+    ) -> subprocess.CompletedProcess[Any]:
+        """For now, the `wheel` cmd has no uv support, so use pip"""
+        cmd = [
+            str(executable),
+            "-m",
+            "pip",
+            "wheel",
+            "-r",
+            str(reqFile),
+        ]
+
+        if extraUrl is not None:
+            cmd.extend(["--extra-index-url", extraUrl])
+
+        if noDeps:
+            cmd.append("--no-deps")
+
+        if out is not None:
+            cmd.extend(["-w", str(out)])
+
+        return _check_call(cmd, cwd)
+
+    @staticmethod
+    def Resolve_Gpu(gpu: Union[GPU_OPTION, str, None]):
         if gpu is None:
             try:
                 tver = metadata.version("torch")
@@ -218,6 +278,8 @@ class DependencyCompiler:
                     return None
             except metadata.PackageNotFoundError:
                 return None
+        elif isinstance(gpu, str):
+            return GPU_OPTION[gpu.upper()]
         else:
             return gpu
 
@@ -225,25 +287,25 @@ class DependencyCompiler:
         self,
         cwd: PathLike = ".",
         executable: PathLike = sys.executable,
-        gpu: Optional[str] = None,
+        gpu: Union[GPU_OPTION, str, None] = None,
+        outDir: PathLike = ".",
         outName: str = "requirements.compiled",
         reqFilesCore: Optional[list[PathLike]] = None,
         reqFilesExt: Optional[list[PathLike]] = None,
     ):
-        self.cwd = Path(cwd)
-        self.executable = executable
+        self.cwd = Path(cwd).expanduser().resolve()
+        self.outDir = Path(outDir).expanduser().resolve()
+        self.executable = Path(executable).expanduser().resolve()
         self.gpu = DependencyCompiler.Resolve_Gpu(gpu)
         self.reqFiles = [Path(reqFile) for reqFile in reqFilesExt] if reqFilesExt is not None else None
 
         self.gpuUrl = (
-            DependencyCompiler.nvidiaPytorchUrl
-            if self.gpu == GPU_OPTION.NVIDIA
-            else DependencyCompiler.rocmPytorchUrl
-            if self.gpu == GPU_OPTION.AMD
-            else None
+            DependencyCompiler.nvidiaPytorchUrl if self.gpu == GPU_OPTION.NVIDIA else
+            DependencyCompiler.rocmPytorchUrl if self.gpu == GPU_OPTION.AMD else
+            None  # fmt: skip
         )
-        self.out = self.cwd / outName
-        self.override = self.cwd / "override.txt"
+        self.out = self.outDir / outName
+        self.override = self.outDir / "override.txt"
 
         self.reqFilesCore = reqFilesCore if reqFilesCore is not None else self.find_core_reqs()
         self.reqFilesExt = reqFilesExt if reqFilesExt is not None else self.find_ext_reqs()
@@ -338,11 +400,35 @@ class DependencyCompiler:
                     if "opencv-python==" not in line:
                         f.write(line)
 
-    def install_comfy_deps(self):
-        DependencyCompiler.Install_Build_Deps(executable=self.executable)
-
+    def compile_comfy_deps(self):
         self.make_override()
         self.compile_core_plus_ext()
         self.handle_opencv()
 
+    def precache_comfy_deps(self):
+        self.compile_comfy_deps()
+        DependencyCompiler.Download(
+            cwd=self.cwd,
+            reqFile=self.out,
+            executable=self.executable,
+            extraUrl=self.gpuUrl,
+            noDeps=True,
+            out=self.outDir / "cache"
+        )
+
+    def wheel_comfy_deps(self):
+        self.compile_comfy_deps()
+        DependencyCompiler.Wheel(
+            cwd=self.cwd,
+            reqFile=self.out,
+            executable=self.executable,
+            extraUrl=self.gpuUrl,
+            noDeps=True,
+            out=self.outDir / "wheels"
+        )
+
+    def install_comfy_deps(self):
+        DependencyCompiler.Install_Build_Deps(executable=self.executable)
+
+        self.compile_comfy_deps()
         self.install_core_plus_ext()

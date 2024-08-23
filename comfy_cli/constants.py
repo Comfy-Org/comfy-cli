@@ -62,11 +62,11 @@ class CUDAVersion(str, Enum):
 
 
 class GPU_OPTION(Enum):
-    NVIDIA = "Nvidia"
-    AMD = "Amd"
-    INTEL_ARC = "Intel Arc"
-    M_SERIES = "Mac M Series"
-    MAC_INTEL = "Mac Intel"
+    NVIDIA = "nvidia"
+    AMD = "amd"
+    INTEL_ARC = "intel_arc"
+    M_SERIES = "mac_m_series"
+    MAC_INTEL = "mac_intel"
 
 
 # Referencing supported pt extension from ComfyUI

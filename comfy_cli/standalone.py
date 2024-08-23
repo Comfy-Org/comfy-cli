@@ -90,6 +90,8 @@ class StandalonePython:
         self.bin = self.rpath / "bin"
         self.executable = self.bin / "python"
 
+        self.dep_comp = None
+
         # upgrade pip if needed, install uv
         self.pip_install("-U", "pip", "uv")
 
@@ -120,3 +122,19 @@ class StandalonePython:
 
     def install_comfy(self, *args: list[str], gpu_arg: str = "--nvidia"):
         self.run_comfy_cli("--here", "--skip-prompt", "install", "--fast-deps", gpu_arg, *args)
+
+    def compile_comfy_deps(self, comfyDir: PathLike, gpu: str, outDir: PathLike = "."):
+        self.dep_comp = DependencyCompiler(cwd=comfyDir, executable=self.executable, gpu=gpu, outDir=outDir)
+        self.dep_comp.compile_comfy_deps()
+
+    def install_comfy_deps(self, comfyDir: PathLike, gpu: str, outDir: PathLike = "."):
+        self.dep_comp = DependencyCompiler(cwd=comfyDir, executable=self.executable, gpu=gpu, outDir=outDir)
+        self.dep_comp.install_core_plus_ext()
+
+    def precache_comfy_deps(self, comfyDir: PathLike, gpu: str, outDir: PathLike = "."):
+        self.dep_comp = DependencyCompiler(cwd=comfyDir, executable=self.executable, gpu=gpu, outDir=outDir)
+        self.dep_comp.precache_comfy_deps()
+
+    def wheel_comfy_deps(self, comfyDir: PathLike, gpu: str, outDir: PathLike = "."):
+        self.dep_comp = DependencyCompiler(cwd=comfyDir, executable=self.executable, gpu=gpu, outDir=outDir)
+        self.dep_comp.wheel_comfy_deps()
