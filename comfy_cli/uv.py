@@ -12,8 +12,8 @@ from comfy_cli.constants import GPU_OPTION
 from comfy_cli.typing import PathLike
 
 
-def _run(cmd: list[str], cwd: PathLike) -> subprocess.CompletedProcess[Any]:
-    return subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, check=True)
+def _run(cmd: list[str], cwd: PathLike, check: bool = True) -> subprocess.CompletedProcess[Any]:
+    return subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, check=check)
 
 
 def _check_call(cmd: list[str], cwd: Optional[PathLike] = None):
@@ -45,7 +45,7 @@ def parse_uv_compile_error(err: str) -> tuple[str, list[str]]:
 
 
 class DependencyCompiler:
-    rocmPytorchUrl = "https://download.pytorch.org/whl/rocm6.0"
+    rocmPytorchUrl = "https://download.pytorch.org/whl/rocm6.1"
     nvidiaPytorchUrl = "https://download.pytorch.org/whl/cu121"
 
     overrideGpu = dedent(
@@ -77,10 +77,8 @@ class DependencyCompiler:
     @staticmethod
     def Install_Build_Deps(executable: PathLike = sys.executable):
         """Use pip to install bare minimum requirements for uv to do its thing"""
-        if shutil.which("uv") is None:
-            cmd = [str(executable), "-m", "pip", "install", "--upgrade", "pip", "uv"]
-
-            _check_call(cmd=cmd)
+        cmd = [str(executable), "-m", "pip", "install", "--upgrade", "pip", "uv"]
+        _check_call(cmd=cmd)
 
     @staticmethod
     def Compile(

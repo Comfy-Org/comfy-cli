@@ -1,14 +1,18 @@
 import os
 from pathlib import Path
 import shutil
+import subprocess
 import tarfile
 from typing import Optional
 
 import requests
 
 from comfy_cli.constants import OS, PROC
-from comfy_cli.utils import download_progress, get_os, get_proc
 from comfy_cli.typing import PathLike
+from comfy_cli.utils import download_progress, get_os, get_proc
+from comfy_cli.uv import DependencyCompiler
+
+_here = Path(__file__).expanduser().resolve().parent
 
 _platform_targets = {
     (OS.MACOS, PROC.ARM): "aarch64-apple-darwin",
@@ -85,3 +89,34 @@ class StandalonePython:
         self.name = self.rpath.name
         self.bin = self.rpath / "bin"
         self.executable = self.bin / "python"
+
+        # upgrade pip if needed, install uv
+        self.pip_install("-U", "pip", "uv")
+
+    def run_module(self, mod: str, *args: list[str]):
+        cmd: list[str] = [
+            str(self.executable),
+            "-m",
+            mod,
+            *args,
+        ]
+
+        subprocess.run(cmd, check=True)
+
+    def pip_install(self, *args: list[str]):
+        self.run_module("pip", "install", *args)
+
+    def uv_install(self, *args: list[str]):
+        self.run_module("uv", "pip", "install", *args)
+
+    def install_comfy_cli(self, dev: bool = False):
+        if dev:
+            self.uv_install(str(_here.parent))
+        else:
+            self.uv_install("comfy_cli")
+
+    def run_comfy_cli(self, *args: list[str]):
+        self.run_module("comfy_cli", *args)
+
+    def install_comfy(self, *args: list[str], gpu_arg: str = "--nvidia"):
+        self.run_comfy_cli("--here", "--skip-prompt", "install", "--fast-deps", gpu_arg, *args)
