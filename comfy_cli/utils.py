@@ -9,6 +9,7 @@ import psutil
 import shutil
 import subprocess
 import sys
+from typing import Optional
 
 import requests
 from rich import print
@@ -16,6 +17,7 @@ from tqdm.auto import tqdm
 import typer
 
 from comfy_cli.constants import DEFAULT_COMFY_WORKSPACE, OS, PROC
+from comfy_cli.typing import PathLike
 
 
 def singleton(cls):
@@ -96,7 +98,7 @@ def create_choice_completer(opts):
 
     return f
 
-def download_progress(url, fname, cwd=".", allow_redirects=True):
+def download_progress(url: str, fname: PathLike, cwd: PathLike = ".", allow_redirects: bool = True) -> PathLike:
     """download url to local file fname and show a progress bar.
     See https://stackoverflow.com/q/37573483"""
     cwd = Path(cwd).expanduser().resolve()

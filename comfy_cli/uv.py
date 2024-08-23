@@ -1,4 +1,3 @@
-import os
 import re
 import shutil
 import subprocess
@@ -10,8 +9,7 @@ from typing import Any, Optional, Union, cast
 
 from comfy_cli import ui
 from comfy_cli.constants import GPU_OPTION
-
-PathLike = Union[os.PathLike[str], str]
+from comfy_cli.typing import PathLike
 
 
 def _run(cmd: list[str], cwd: PathLike) -> subprocess.CompletedProcess[Any]:
