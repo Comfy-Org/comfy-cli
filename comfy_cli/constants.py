@@ -68,7 +68,7 @@ class GPU_OPTION(str, Enum):
     NVIDIA = "nvidia"
     AMD = "amd"
     INTEL_ARC = "intel_arc"
-    M_SERIES = "mac_m_series"
+    MAC_M_SERIES = "mac_m_series"
     MAC_INTEL = "mac_intel"
 
 
