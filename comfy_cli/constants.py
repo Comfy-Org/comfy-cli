@@ -1,17 +1,22 @@
-from enum import Enum
 import os
+from enum import Enum
 
 
-class OS(Enum):
+class OS(str, Enum):
     WINDOWS = "windows"
     MACOS = "macos"
     LINUX = "linux"
 
 
+class PROC(str, Enum):
+    X86_64 = "x86_64"
+    ARM = "arm"
+
+
 COMFY_GITHUB_URL = "https://github.com/comfyanonymous/ComfyUI"
 COMFY_MANAGER_GITHUB_URL = "https://github.com/ltdrdata/ComfyUI-Manager"
 
-DEFAULT_COMFY_MODEL_PATH = "models/checkpoints"
+DEFAULT_COMFY_MODEL_PATH = "models"
 DEFAULT_COMFY_WORKSPACE = {
     OS.WINDOWS: os.path.join(os.path.expanduser("~"), "Documents", "comfy", "ComfyUI"),
     OS.MACOS: os.path.join(os.path.expanduser("~"), "Documents", "comfy", "ComfyUI"),
@@ -20,9 +25,7 @@ DEFAULT_COMFY_WORKSPACE = {
 
 DEFAULT_CONFIG = {
     OS.WINDOWS: os.path.join(os.path.expanduser("~"), "AppData", "Local", "comfy-cli"),
-    OS.MACOS: os.path.join(
-        os.path.expanduser("~"), "Library", "Application Support", "comfy-cli"
-    ),
+    OS.MACOS: os.path.join(os.path.expanduser("~"), "Library", "Application Support", "comfy-cli"),
     OS.LINUX: os.path.join(os.path.expanduser("~"), ".config", "comfy-cli"),
 }
 
@@ -55,16 +58,22 @@ COMFY_ORIGIN_URL_CHOICES = [
 ]
 
 
-class GPU_OPTION(Enum):
-    NVIDIA = "Nvidia"
-    AMD = "Amd"
-    INTEL_ARC = "Intel Arc"
-    M_SERIES = "Mac M Series"
-    MAC_INTEL = "Mac Intel"
+class CUDAVersion(str, Enum):
+    v12_1 = "12.1"
+    v11_8 = "11.8"
+
+
+class GPU_OPTION(str, Enum):
+    CPU = None
+    NVIDIA = "nvidia"
+    AMD = "amd"
+    INTEL_ARC = "intel_arc"
+    M_SERIES = "mac_m_series"
+    MAC_INTEL = "mac_intel"
 
 
 # Referencing supported pt extension from ComfyUI
 # https://github.com/comfyanonymous/ComfyUI/blob/a88b0ebc2d2f933c94e42aa689c42e836eedaf3c/folder_paths.py#L5
 SUPPORTED_PT_EXTENSIONS = (".ckpt", ".pt", ".bin", ".pth", ".safetensors")
 
-COMFY_REGISTRY_URL_ROOT = "https://api-frontend-dev-qod3oz2v2q-uc.a.run.app"
+NODE_ZIP_FILENAME = "node.zip"

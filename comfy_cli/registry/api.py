@@ -1,11 +1,17 @@
+import json
 import logging
 import os
 
 import requests
-import json
 
 # Reduced global imports from comfy_cli.registry
-from comfy_cli.registry.types import NodeVersion, Node
+from comfy_cli.registry.types import (
+    License,
+    Node,
+    NodeVersion,
+    PublishNodeVersionResponse,
+    PyProjectConfig,
+)
 
 
 class RegistryAPI:
@@ -13,12 +19,15 @@ class RegistryAPI:
         self.base_url = self.determine_base_url()
 
     def determine_base_url(self):
-        if os.getenv("ENVIRONMENT") == "dev":
+        env = os.getenv("ENVIRONMENT")
+        if env == "dev":
             return "http://localhost:8080"
+        elif env == "staging":
+            return "https://stagingapi.comfy.org"
         else:
-            return "https://api-frontend-dev-qod3oz2v2q-uc.a.run.app"
+            return "https://api.comfy.org"
 
-    def publish_node_version(self, node_config, token):
+    def publish_node_version(self, node_config: PyProjectConfig, token) -> PublishNodeVersionResponse:
         """
         Publishes a new version of a node.
 
@@ -30,17 +39,20 @@ class RegistryAPI:
         PublishNodeVersionResponse: The response object from the API server.
         """
         # Local import to prevent circular dependency
-        from comfy_cli.registry.types import PyProjectConfig, PublishNodeVersionResponse
+        if not node_config.tool_comfy.publisher_id:
+            raise Exception("Publisher ID is required in pyproject.toml to publish a node version")
 
-        url = f"{self.base_url}/publishers/{node_config.tool_comfy.publisher_id}/nodes/{node_config.project.name}/versions"
-        headers = {"Content-Type": "application/json"}
-        body = {
+        if not node_config.project.name:
+            raise Exception("Project name is required in pyproject.toml to publish a node version")
+        license_json = serialize_license(node_config.project.license)
+        request_body = {
             "personal_access_token": token,
             "node": {
                 "id": node_config.project.name,
                 "description": node_config.project.description,
+                "icon": node_config.tool_comfy.icon,
                 "name": node_config.tool_comfy.display_name,
-                "license": node_config.project.license,
+                "license": license_json,
                 "repository": node_config.project.urls.repository,
             },
             "node_version": {
@@ -48,6 +60,10 @@ class RegistryAPI:
                 "dependencies": node_config.project.dependencies,
             },
         }
+        print(request_body)
+        url = f"{self.base_url}/publishers/{node_config.tool_comfy.publisher_id}/nodes/{node_config.project.name}/versions"
+        headers = {"Content-Type": "application/json"}
+        body = request_body
 
         response = requests.post(url, headers=headers, data=json.dumps(body))
 
@@ -58,9 +74,7 @@ class RegistryAPI:
                 signedUrl=data["signedUrl"],
             )
         else:
-            raise Exception(
-                f"Failed to publish node version: {response.status_code} {response.text}"
-            )
+            raise Exception(f"Failed to publish node version: {response.status_code} {response.text}")
 
     def list_all_nodes(self):
         """
@@ -76,9 +90,7 @@ class RegistryAPI:
             mapped_nodes = [map_node_to_node_class(node) for node in raw_nodes]
             return mapped_nodes
         else:
-            raise Exception(
-                f"Failed to retrieve nodes: {response.status_code} - {response.text}"
-            )
+            raise Exception(f"Failed to retrieve nodes: {response.status_code} - {response.text}")
 
     def install_node(self, node_id, version=None):
         """
@@ -102,9 +114,7 @@ class RegistryAPI:
             logging.debug(f"RegistryAPI install_node response: {response.json()}")
             return map_node_version(response.json())
         else:
-            raise Exception(
-                f"Failed to install node: {response.status_code} - {response.text}"
-            )
+            raise Exception(f"Failed to install node: {response.status_code} - {response.text}")
 
 
 def map_node_version(api_node_version):
@@ -118,24 +128,14 @@ def map_node_version(api_node_version):
         NodeVersion: An instance of NodeVersion dataclass populated with data from the API.
     """
     return NodeVersion(
-        changelog=api_node_version.get(
-            "changelog", ""
-        ),  # Provide a default value if 'changelog' is missing
+        changelog=api_node_version.get("changelog", ""),  # Provide a default value if 'changelog' is missing
         dependencies=api_node_version.get(
             "dependencies", []
         ),  # Provide a default empty list if 'dependencies' is missing
-        deprecated=api_node_version.get(
-            "deprecated", False
-        ),  # Assume False if 'deprecated' is not specified
-        id=api_node_version[
-            "id"
-        ],  # 'id' should be mandatory; raise KeyError if missing
-        version=api_node_version[
-            "version"
-        ],  # 'version' should be mandatory; raise KeyError if missing
-        download_url=api_node_version.get(
-            "downloadUrl", ""
-        ),  # Provide a default value if 'downloadUrl' is missing
+        deprecated=api_node_version.get("deprecated", False),  # Assume False if 'deprecated' is not specified
+        id=api_node_version["id"],  # 'id' should be mandatory; raise KeyError if missing
+        version=api_node_version["version"],  # 'version' should be mandatory; raise KeyError if missing
+        download_url=api_node_version.get("downloadUrl", ""),  # Provide a default value if 'downloadUrl' is missing
     )
 
 
@@ -159,8 +159,14 @@ def map_node_to_node_class(api_node_data):
         repository=api_node_data.get("repository"),
         tags=api_node_data.get("tags", []),
         latest_version=(
-            map_node_version(api_node_data["latest_version"])
-            if "latest_version" in api_node_data
-            else None
+            map_node_version(api_node_data["latest_version"]) if "latest_version" in api_node_data else None
         ),
     )
+
+
+def serialize_license(license: License) -> str:
+    if license.file:
+        return json.dumps({"file": license.file})
+    if license.text:
+        return json.dumps({"text": license.text})
+    return "{}"

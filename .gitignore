@@ -3,12 +3,16 @@ __pycache__/
 
 #COMMON CONFIGs
 .DS_Store
+.ruff_cache
 .src_port
 .webpack_watch.log
 *.swp
 *.swo
 .vscode/settings.json
 .idea/
+.vscode/
+*.code-workspace
+.history
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
@@ -44,4 +48,9 @@ share/python-wheels/
 *.manifest
 *.spec
 
+# temporary files created by tests
+tests/temp/
+
 venv/
+
+bisect_state.json

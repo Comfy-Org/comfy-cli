@@ -1,8 +1,6 @@
 import os
 import subprocess
 import sys
-import time
-import uuid
 import webbrowser
 from typing import Optional
 
@@ -15,17 +13,16 @@ from typing_extensions import Annotated, List
 from comfy_cli import constants, env_checker, logging, tracking, ui, utils
 from comfy_cli.command import custom_nodes
 from comfy_cli.command import install as install_inner
-from comfy_cli.command.snapshot import command as snapshot_command
+from comfy_cli.command import run as run_inner
+from comfy_cli.command.launch import launch as launch_command
 from comfy_cli.command.models import models as models_command
+from comfy_cli.command.snapshot import command as snapshot_command
 from comfy_cli.config_manager import ConfigManager
-from comfy_cli.constants import GPU_OPTION
-from comfy_cli.env_checker import EnvChecker, check_comfy_server_running
+from comfy_cli.constants import GPU_OPTION, CUDAVersion
+from comfy_cli.env_checker import EnvChecker
+from comfy_cli.standalone import StandalonePython
 from comfy_cli.update import check_for_updates
-from comfy_cli.workspace_manager import (
-    WorkspaceManager,
-    WorkspaceType,
-    check_comfy_repo,
-)
+from comfy_cli.workspace_manager import WorkspaceManager, check_comfy_repo
 
 logging.setup_logging()
 app = typer.Typer()
@@ -38,23 +35,24 @@ def main():
     app()
 
 
-def mutually_exclusive_group_options():
-    group = []
+class MutuallyExclusiveValidator:
+    def __init__(self):
+        self.group = []
 
-    def callback(_ctx: typer.Context, param: typer.CallbackParam, value: str):
+    def reset_for_testing(self):
+        self.group.clear()
+
+    def validate(self, _ctx: typer.Context, param: typer.CallbackParam, value: str):
         # Add cli option to group if it was called with a value
-        if value is not None and param.name not in group:
-            group.append(param.name)
-        if len(group) > 1:
-            raise typer.BadParameter(
-                f"option `{param.name}` is mutually exclusive with option `{group[0]}`"
-            )
+        if value is not None and param.name not in self.group:
+            self.group.append(param.name)
+        if len(self.group) > 1:
+            raise typer.BadParameter(f"option `{param.name}` is mutually exclusive with option `{self.group.pop()}`")
         return value
 
-    return callback
 
-
-exclusivity_callback = mutually_exclusive_group_options()
+g_exclusivity = MutuallyExclusiveValidator()
+g_gpu_exclusivity = MutuallyExclusiveValidator()
 
 
 @app.command(help="Display help for commands")
@@ -71,7 +69,7 @@ def entry(
         typer.Option(
             show_default=False,
             help="Path to ComfyUI workspace",
-            callback=exclusivity_callback,
+            callback=g_exclusivity.validate,
         ),
     ] = None,
     recent: Annotated[
@@ -80,7 +78,7 @@ def entry(
             show_default=False,
             is_flag=True,
             help="Execute from recent path",
-            callback=exclusivity_callback,
+            callback=g_exclusivity.validate,
         ),
     ] = None,
     here: Annotated[
@@ -89,53 +87,71 @@ def entry(
             show_default=False,
             is_flag=True,
             help="Execute from current path",
-            callback=exclusivity_callback,
+            callback=g_exclusivity.validate,
         ),
     ] = None,
     skip_prompt: Annotated[
-        Optional[bool],
+        bool,
         typer.Option(
             show_default=False,
             is_flag=True,
             help="Do not prompt user for input, use default options",
         ),
-    ] = None,
+    ] = False,
     enable_telemetry: Annotated[
-        Optional[bool],
+        bool,
         typer.Option(
             show_default=False,
             hidden=True,
             is_flag=True,
             help="Enable tracking",
         ),
-    ] = True,
+    ] = False,
+    version: bool = typer.Option(
+        False,
+        "--version",
+        "-v",
+        help="Print version and exit",
+        is_flag=True,
+    ),
 ):
+    if version:
+        print(ConfigManager().get_cli_version())
+        ctx.exit(0)
+
     workspace_manager.setup_workspace_manager(workspace, here, recent, skip_prompt)
 
     tracking.prompt_tracking_consent(skip_prompt, default_value=enable_telemetry)
 
     if ctx.invoked_subcommand is None:
-        print(
-            "[bold yellow]Welcome to Comfy CLI![/bold yellow]: https://github.com/Comfy-Org/comfy-cli"
-        )
+        print("[bold yellow]Welcome to Comfy CLI![/bold yellow]: https://github.com/Comfy-Org/comfy-cli")
         print(ctx.get_help())
         ctx.exit()
-    start_time = time.time()
-    workspace_manager.scan_dir()
-    end_time = time.time()
 
-    logging.info(f"scan_dir took {end_time - start_time:.2f} seconds to run")
-
-
-gpu_exclusivity_callback = mutually_exclusive_group_options()
+    # TODO: Move this to proper place
+    # start_time = time.time()
+    # workspace_manager.scan_dir()
+    # end_time = time.time()
+    #
+    # logging.info(f"scan_dir took {end_time - start_time:.2f} seconds to run")
 
 
 @app.command(help="Download and install ComfyUI and ComfyUI-Manager")
 @tracking.track_command()
 def install(
-    url: Annotated[str, typer.Option(show_default=False)] = constants.COMFY_GITHUB_URL,
+    url: Annotated[
+        str,
+        typer.Option(
+            show_default=False,
+            help="url or local path pointing to the ComfyUI core git repo to be installed. A specific branch can optionally be specified using a setuptools-like syntax, eg https://foo.git@bar",
+        ),
+    ] = constants.COMFY_GITHUB_URL,
     manager_url: Annotated[
-        str, typer.Option(show_default=False)
+        str,
+        typer.Option(
+            show_default=False,
+            help="url or local path pointing to the ComfyUI-Manager git repo to be installed. A specific branch can optionally be specified using a setuptools-like syntax, eg https://foo.git@bar",
+        ),
     ] = constants.COMFY_MANAGER_GITHUB_URL,
     restore: Annotated[
         bool,
@@ -156,52 +172,57 @@ def install(
         bool, typer.Option(show_default=False, help="Skip installing requirements.txt")
     ] = False,
     nvidia: Annotated[
-        bool,
+        Optional[bool],
         typer.Option(
             show_default=False,
             help="Install for Nvidia gpu",
-            callback=gpu_exclusivity_callback,
+            callback=g_gpu_exclusivity.validate,
         ),
     ] = None,
+    cuda_version: Annotated[CUDAVersion, typer.Option(show_default=True)] = CUDAVersion.v12_1,
     amd: Annotated[
-        bool,
+        Optional[bool],
         typer.Option(
             show_default=False,
             help="Install for AMD gpu",
-            callback=gpu_exclusivity_callback,
+            callback=g_gpu_exclusivity.validate,
         ),
     ] = None,
     m_series: Annotated[
-        bool,
+        Optional[bool],
         typer.Option(
             show_default=False,
             help="Install for Mac M-Series gpu",
-            callback=gpu_exclusivity_callback,
+            callback=g_gpu_exclusivity.validate,
         ),
     ] = None,
     intel_arc: Annotated[
-        bool,
+        Optional[bool],
         typer.Option(
             hidden=True,
             show_default=False,
             help="(Beta support) install for Intel Arc gpu, based on https://github.com/comfyanonymous/ComfyUI/pull/3439",
-            callback=gpu_exclusivity_callback,
+            callback=g_gpu_exclusivity.validate,
         ),
     ] = None,
     cpu: Annotated[
-        bool,
+        Optional[bool],
         typer.Option(
             show_default=False,
             help="Install for CPU",
-            callback=gpu_exclusivity_callback,
+            callback=g_gpu_exclusivity.validate,
         ),
     ] = None,
-    commit: Annotated[
-        Optional[str], typer.Option(help="Specify commit hash for ComfyUI")
-    ] = None,
-    snapshot: Annotated[
-        str, typer.Option(help="Specify path to comfy-lock.yaml ")
-    ] = None,
+    commit: Annotated[Optional[str], typer.Option(help="Specify commit hash for ComfyUI")] = None,
+    fast_deps: Annotated[
+        Optional[bool],
+        typer.Option(
+            "--fast-deps",
+            show_default=False,
+            help="Use new fast dependency installer",
+        ),
+    ] = False,
+    snapshot: Annotated[str, typer.Option(help="Specify path to comfy-lock.yaml")] = None,
 ):
     check_for_updates()
     checker = EnvChecker()
@@ -209,19 +230,11 @@ def install(
     if snapshot is not None:
         snapshot = os.path.abspath(snapshot)
 
-    comfy_path = workspace_manager.get_specified_workspace()
+    comfy_path, _ = workspace_manager.get_workspace_path()
 
-    if comfy_path is None:
-        comfy_path = workspace_manager.workspace_path
-
-    if comfy_path is None:
-        comfy_path = utils.get_not_user_set_default_workspace()
-
-    is_comfy_path, repo_dir = check_comfy_repo(comfy_path)
-    if is_comfy_path and not restore:
-        print(
-            f"[bold red]ComfyUI is already installed at the specified path:[/bold red] {comfy_path}\n"
-        )
+    is_comfy_installed_at_path, repo_dir = check_comfy_repo(comfy_path)
+    if is_comfy_installed_at_path and not restore:
+        print(f"[bold red]ComfyUI is already installed at the specified path:[/bold red] {comfy_path}\n")
         print(
             "[bold yellow]If you want to restore dependencies, add the '--restore' option.[/bold yellow]",
         )
@@ -231,18 +244,30 @@ def install(
         comfy_path = str(repo_dir.working_dir)
 
     if checker.python_version.major < 3 or checker.python_version.minor < 9:
-        print(
-            "[bold red]Python version 3.9 or higher is required to run ComfyUI.[/bold red]"
-        )
-        print(
-            f"You are currently using Python version {env_checker.format_python_version(checker.python_version)}."
-        )
-
+        print("[bold red]Python version 3.9 or higher is required to run ComfyUI.[/bold red]")
+        print(f"You are currently using Python version {env_checker.format_python_version(checker.python_version)}.")
     platform = utils.get_os()
-    if nvidia and platform == constants.OS.MACOS:
-        print(
-            "[bold red]Nvidia GPU is never on MacOS. What are you smoking? 🤔[/bold red]"
+    if cpu:
+        print("[bold yellow]Installing for CPU[/bold yellow]")
+        install_inner.execute(
+            url,
+            manager_url,
+            comfy_path,
+            restore,
+            skip_manager,
+            commit=commit,
+            gpu=None,
+            cuda_version=cuda_version,
+            plat=platform,
+            skip_torch_or_directml=skip_torch_or_directml,
+            skip_requirement=skip_requirement,
+            fast_deps=fast_deps,
         )
+        print(f"ComfyUI is installed at: {comfy_path}")
+        return None
+
+    if nvidia and platform == constants.OS.MACOS:
+        print("[bold red]Nvidia GPU is never on MacOS. What are you smoking? 🤔[/bold red]")
         raise typer.Exit(code=1)
 
     if platform != constants.OS.MACOS and m_series:
@@ -271,18 +296,14 @@ def install(
             )
 
     if gpu == GPU_OPTION.INTEL_ARC:
-        print(
-            "[bold yellow]Installing on Intel ARC is not yet completely supported[/bold yellow]"
-        )
+        print("[bold yellow]Installing on Intel ARC is not yet completely supported[/bold yellow]")
         env_check = env_checker.EnvChecker()
         if env_check.conda_env is None:
-            print(
-                "[bold red]Intel ARC support requires conda environment to be activated.[/bold red]"
-            )
+            print("[bold red]Intel ARC support requires conda environment to be activated.[/bold red]")
             raise typer.Exit(code=1)
         if intel_arc is None:
             confirm_result = ui.prompt_confirm_action(
-                "Are you sure you want to try beta install feature on Intel ARC?"
+                "Are you sure you want to try beta install feature on Intel ARC?", True
             )
             if not confirm_result:
                 raise typer.Exit(code=0)
@@ -290,7 +311,7 @@ def install(
 
     if gpu is None and not cpu:
         print(
-            "[bold red]No GPU option selected or `--cpu` enabled, use --\[gpu option] flag (e.g. --nvidia) to pick GPU. use `--cpu` to install for CPU. Exiting...[/bold red]"
+            "[bold red]No GPU option selected or `--cpu` enabled, use --\\[gpu option] flag (e.g. --nvidia) to pick GPU. use `--cpu` to install for CPU. Exiting...[/bold red]"
         )
         raise typer.Exit(code=1)
 
@@ -302,9 +323,11 @@ def install(
         skip_manager,
         commit=commit,
         gpu=gpu,
+        cuda_version=cuda_version,
         plat=platform,
         skip_torch_or_directml=skip_torch_or_directml,
         skip_requirement=skip_requirement,
+        fast_deps=fast_deps,
     )
 
     if snapshot is not None:
@@ -320,7 +343,7 @@ def update(
         "comfy",
         help="[all|comfy]",
         autocompletion=utils.create_choice_completer(["all", "comfy"]),
-    )
+    ),
 ):
     if target not in ["all", "comfy"]:
         typer.echo(
@@ -348,97 +371,61 @@ def update(
     custom_nodes.command.update_node_id_cache()
 
 
-# @app.command(help="Run workflow file")
-# @tracking.track_command()
-# def run(
-#   workflow_file: Annotated[str, typer.Option(help="Path to the workflow file.")],
-# ):
-#   run_inner.execute(workflow_file)
+@app.command(help="Run API workflow file using the ComfyUI launched by `comfy launch --background`")
+@tracking.track_command()
+def run(
+    workflow: Annotated[str, typer.Option(help="Path to the workflow API json file.")],
+    wait: Annotated[
+        bool,
+        typer.Option(help="If the command should wait until execution completes."),
+    ] = True,
+    verbose: Annotated[
+        bool,
+        typer.Option(help="Enables verbose output of the execution process."),
+    ] = False,
+    host: Annotated[
+        Optional[str],
+        typer.Option(help="The IP/hostname where the ComfyUI instance is running, e.g. 127.0.0.1 or localhost."),
+    ] = None,
+    port: Annotated[
+        Optional[int],
+        typer.Option(help="The port where the ComfyUI instance is running, e.g. 8188."),
+    ] = None,
+    timeout: Annotated[
+        Optional[int],
+        typer.Option(help="The timeout in seconds for the workflow execution."),
+    ] = 30,
+):
+    config = ConfigManager()
+
+    if host:
+        s = host.split(":")
+        host = s[0]
+        if not port and len(s) == 2:
+            port = int(s[1])
+
+    local_paths = False
+    if config.background:
+        if not host:
+            host = config.background[0]
+            local_paths = True
+        if port:
+            local_paths = False
+        else:
+            port = config.background[1]
+
+    if not host:
+        host = "127.0.0.1"
+    if not port:
+        port = 8188
+
+    run_inner.execute(workflow, host, port, wait, verbose, local_paths, timeout)
 
 
 def validate_comfyui(_env_checker):
     if _env_checker.comfy_repo is None:
-        print(
-            "[bold red]If ComfyUI is not installed, this feature cannot be used.[/bold red]"
-        )
+        print("[bold red]If ComfyUI is not installed, this feature cannot be used.[/bold red]")
         raise typer.Exit(code=1)
-
-
-def launch_comfyui(extra, background=False):
-    if background:
-        config_background = ConfigManager().background
-        if config_background is not None and utils.is_running(config_background[2]):
-            print(
-                "[bold red]ComfyUI is already running in background.\nYou cannot start more than one background service.[/bold red]\n"
-            )
-            raise typer.Exit(code=1)
-
-        port = 8188
-        listen = "127.0.0.1"
-
-        if extra is not None:
-            for i in range(len(extra) - 1):
-                if extra[i] == "--port":
-                    port = extra[i + 1]
-                if listen[i] == "--listen":
-                    listen = extra[i + 1]
-
-            if check_comfy_server_running(port):
-                print(
-                    f"[bold red]The {port} port is already in use. A new ComfyUI server cannot be launched.\n[bold red]\n"
-                )
-                raise typer.Exit(code=1)
-
-            if len(extra) > 0:
-                extra = ["--"] + extra
-        else:
-            extra = []
-
-        cmd = [
-            "comfy",
-            f"--workspace={os.path.abspath(os.getcwd())}",
-            "launch",
-        ] + extra
-
-        process = subprocess.Popen(
-            cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-        )
-        print(
-            f"[bold yellow]Run ComfyUI in the background.[/bold yellow] ({listen}:{port})"
-        )
-        ConfigManager().config["DEFAULT"][
-            constants.CONFIG_KEY_BACKGROUND
-        ] = f"{(listen, port, process.pid)}"
-        ConfigManager().write_config()
-        return
-
-    env_path = EnvChecker().get_isolated_env()
-    reboot_path = None
-
-    new_env = os.environ.copy()
-
-    if env_path is not None:
-        session_path = os.path.join(
-            ConfigManager().get_config_path(), "tmp", str(uuid.uuid4())
-        )
-        new_env["__COMFY_CLI_SESSION__"] = session_path
-
-        # To minimize the possibility of leaving residue in the tmp directory, use files instead of directories.
-        reboot_path = os.path.join(session_path + ".reboot")
-
-    extra = extra if extra is not None else []
-
-    while True:
-        subprocess.run([sys.executable, "main.py"] + extra, env=new_env, check=False)
-
-        if not reboot_path:
-            print("[bold red]ComfyUI is not installed.[/bold red]\n")
-            return
-
-        if not os.path.exists(reboot_path):
-            return
-
-        os.remove(reboot_path)
 
 
 @app.command(help="Stop background ComfyUI")
@@ -457,9 +444,7 @@ def stop():
     if not is_killed:
         print("[bold red]Failed to stop ComfyUI in the background.[/bold red]\n")
     else:
-        print(
-            f"[bold yellow]Background ComfyUI is stopped.[/bold yellow] ({bg_info[0]}:{bg_info[1]})"
-        )
+        print(f"[bold yellow]Background ComfyUI is stopped.[/bold yellow] ({bg_info[0]}:{bg_info[1]})")
 
     ConfigManager().remove_background()
 
@@ -467,56 +452,33 @@ def stop():
 @app.command(help="Launch ComfyUI: ?[--background] ?[-- <extra args ...>]")
 @tracking.track_command()
 def launch(
-    background: Annotated[
-        bool, typer.Option(help="Launch ComfyUI in background")
-    ] = False,
+    background: Annotated[bool, typer.Option(help="Launch ComfyUI in background")] = False,
     extra: List[str] = typer.Argument(None),
 ):
-    check_for_updates()
-    resolved_workspace = workspace_manager.workspace_path
-    if not resolved_workspace:
-        print(
-            "\nComfyUI is not available.\nTo install ComfyUI, you can run:\n\n\tcomfy install\n\n",
-            file=sys.stderr,
-        )
-        raise typer.Exit(code=1)
-
-    if (
-        extra is None or len(extra) == 0
-    ) and workspace_manager.workspace_type == WorkspaceType.DEFAULT:
-        launch_extras = workspace_manager.config_manager.config["DEFAULT"].get(
-            constants.CONFIG_KEY_DEFAULT_LAUNCH_EXTRAS, ""
-        )
-
-        if launch_extras != "":
-            extra = launch_extras.split(" ")
-
-    print(f"\nLaunching ComfyUI from: {resolved_workspace}\n")
-
-    # Update the recent workspace
-    workspace_manager.set_recent_workspace(resolved_workspace)
-
-    os.chdir(resolved_workspace)
-    launch_comfyui(extra, background=background)
+    launch_command(background, extra)
 
 
 @app.command("set-default", help="Set default ComfyUI path")
 @tracking.track_command()
 def set_default(
     workspace_path: str,
-    launch_extras: Annotated[
-        str, typer.Option(help="Specify extra options for launch")
-    ] = "",
+    launch_extras: Annotated[str, typer.Option(help="Specify extra options for launch")] = "",
 ):
     comfy_path = os.path.abspath(os.path.expanduser(workspace_path))
 
     if not os.path.exists(comfy_path):
-        print(f"Path not found: {comfy_path}.")
+        print(
+            f"\nPath not found: {comfy_path}.\n",
+            file=sys.stderr,
+        )
         raise typer.Exit(code=1)
 
     is_comfy_repo, comfy_repo = check_comfy_repo(comfy_path)
     if not is_comfy_repo:
-        print(f"Specified path is not a ComfyUI path: {comfy_path}.")
+        print(
+            f"\nSpecified path is not a ComfyUI path: {comfy_path}.\n",
+            file=sys.stderr,
+        )
         raise typer.Exit(code=1)
 
     comfy_path = comfy_repo.working_dir
@@ -552,17 +514,13 @@ def env():
 @app.command(hidden=True)
 @tracking.track_command()
 def nodes():
-    print(
-        "\n[bold red] No such command, did you mean 'comfy node' instead?[/bold red]\n"
-    )
+    print("\n[bold red] No such command, did you mean 'comfy node' instead?[/bold red]\n")
 
 
 @app.command(hidden=True)
 @tracking.track_command()
 def models():
-    print(
-        "\n[bold red] No such command, did you mean 'comfy model' instead?[/bold red]\n"
-    )
+    print("\n[bold red] No such command, did you mean 'comfy model' instead?[/bold red]\n")
 
 
 @app.command(help="Provide feedback on the Comfy CLI tool.")
@@ -576,9 +534,7 @@ def feedback():
         choices=["1", "2", "3", "4", "5"],
         force_prompting=True,
     )
-    tracking.track_event(
-        "feedback_general_satisfaction", {"score": general_satisfaction_score}
-    )
+    tracking.track_event("feedback_general_satisfaction", {"score": general_satisfaction_score})
 
     # Usability and User Experience
     usability_satisfaction_score = ui.prompt_select(
@@ -586,18 +542,120 @@ def feedback():
         choices=["1", "2", "3", "4", "5"],
         force_prompting=True,
     )
-    tracking.track_event(
-        "feedback_usability_satisfaction", {"score": usability_satisfaction_score}
-    )
+    tracking.track_event("feedback_usability_satisfaction", {"score": usability_satisfaction_score})
 
     # Additional Feature-Specific Feedback
-    if questionary.confirm(
-        "Do you want to provide additional feature-specific feedback on our GitHub page?"
-    ).ask():
+    if questionary.confirm("Do you want to provide additional feature-specific feedback on our GitHub page?").ask():
         tracking.track_event("feedback_additional")
         webbrowser.open("https://github.com/Comfy-Org/comfy-cli/issues/new/choose")
 
     print("Thank you for your feedback!")
+
+
+@app.command(help="Download a standalone Python interpreter and dependencies based on an existing comfyui workspace")
+@tracking.track_command()
+def standalone(
+    platform: Annotated[
+        Optional[constants.OS],
+        typer.Option(
+            show_default=False,
+            help="Create standalone Python for specified platform",
+        ),
+    ] = None,
+    proc: Annotated[
+        Optional[constants.PROC],
+        typer.Option(
+            show_default=False,
+            help="Create standalone Python for specified processor",
+        ),
+    ] = None,
+    nvidia: Annotated[
+        Optional[bool],
+        typer.Option(
+            show_default=False,
+            help="Create standalone Python for Nvidia gpu",
+            callback=g_gpu_exclusivity.validate,
+        ),
+    ] = None,
+    cuda_version: Annotated[CUDAVersion, typer.Option(show_default=True)] = CUDAVersion.v12_1,
+    amd: Annotated[
+        Optional[bool],
+        typer.Option(
+            show_default=False,
+            help="Create standalone Python for AMD gpu",
+            callback=g_gpu_exclusivity.validate,
+        ),
+    ] = None,
+    m_series: Annotated[
+        Optional[bool],
+        typer.Option(
+            show_default=False,
+            help="Create standalone Python for Mac M-Series gpu",
+            callback=g_gpu_exclusivity.validate,
+        ),
+    ] = None,
+    intel_arc: Annotated[
+        Optional[bool],
+        typer.Option(
+            hidden=True,
+            show_default=False,
+            help="(Beta support) Create standalone Python for Intel Arc gpu, based on https://github.com/comfyanonymous/ComfyUI/pull/3439",
+            callback=g_gpu_exclusivity.validate,
+        ),
+    ] = None,
+    cpu: Annotated[
+        Optional[bool],
+        typer.Option(
+            show_default=False,
+            help="Create standalone Python for CPU",
+            callback=g_gpu_exclusivity.validate,
+        ),
+    ] = None,
+):
+    comfy_path, _ = workspace_manager.get_workspace_path()
+
+    platform = utils.get_os() if platform is None else platform
+    proc = utils.get_proc() if proc is None else proc
+
+    if cpu:
+        gpu = GPU_OPTION.CPU
+    elif nvidia:
+        gpu = GPU_OPTION.NVIDIA
+    elif amd:
+        gpu = GPU_OPTION.AMD
+    elif m_series:
+        gpu = GPU_OPTION.M_SERIES
+    elif intel_arc:
+        gpu = GPU_OPTION.INTEL_ARC
+    else:
+        if platform == constants.OS.MACOS:
+            gpu = ui.prompt_select_enum(
+                "What type of Mac do you have?",
+                [GPU_OPTION.M_SERIES, GPU_OPTION.MAC_INTEL],
+            )
+        else:
+            gpu = ui.prompt_select_enum(
+                "What GPU do you have?",
+                [GPU_OPTION.NVIDIA, GPU_OPTION.AMD, GPU_OPTION.INTEL_ARC, GPU_OPTION.CPU],
+            )
+
+    if gpu == GPU_OPTION.INTEL_ARC:
+        print("[bold yellow]Installing on Intel ARC is not yet completely supported[/bold yellow]")
+        env_check = env_checker.EnvChecker()
+        if env_check.conda_env is None:
+            print("[bold red]Intel ARC support requires conda environment to be activated.[/bold red]")
+            raise typer.Exit(code=1)
+        if intel_arc is None:
+            confirm_result = ui.prompt_confirm_action(
+                "Are you sure you want to try beta install feature on Intel ARC?", True
+            )
+            if not confirm_result:
+                raise typer.Exit(code=0)
+        print("[bold yellow]Installing on Intel ARC is in beta stage.[/bold yellow]")
+
+    sty = StandalonePython.FromDistro(platform=platform, proc=proc)
+    sty.precache_comfy_deps(comfyDir=comfy_path, gpu=gpu)
+    sty.to_tarball()
 
 
 app.add_typer(models_command.app, name="model", help="Manage models.")

@@ -1,8 +1,10 @@
+import json
 import os
 import pathlib
-from typing import Optional
 import zipfile
+from typing import Optional
 
+import httpx
 import requests
 from pathspec import pathspec
 
@@ -15,7 +17,6 @@ class DownloadException(Exception):
 
 def guess_status_code_reason(status_code: int, message: str) -> str:
     if status_code == 401:
-        import json
 
         def parse_json(input_data):
             try:
@@ -41,21 +42,13 @@ def guess_status_code_reason(status_code: int, message: str) -> str:
     elif status_code == 403:
         return f"Forbidden url ({status_code}), you might need to manually log into browser to download one"
     elif status_code == 404:
-        return "Sorry, your model is in another castle (404)"
+        return "Sorry, your file is in another castle (404)"
     return f"Unknown error occurred (status code: {status_code})"
 
 
-def download_file(
-    url: str, local_filepath: pathlib.Path, headers: Optional[dict] = None
-):
-
+def download_file(url: str, local_filepath: pathlib.Path, headers: Optional[dict] = None):
     """Helper function to download a file."""
-
-    import httpx
-
-    local_filepath.parent.mkdir(
-        parents=True, exist_ok=True
-    )  # Ensure the directory exists
+    local_filepath.parent.mkdir(parents=True, exist_ok=True)  # Ensure the directory exists
 
     with httpx.stream("GET", url, follow_redirects=True, headers=headers) as response:
         if response.status_code == 200:
@@ -69,15 +62,11 @@ def download_file(
                     ):
                         f.write(data)
             except KeyboardInterrupt:
-                delete_eh = ui.prompt_confirm_action(
-                    "Download interrupted, cleanup files?"
-                )
+                delete_eh = ui.prompt_confirm_action("Download interrupted, cleanup files?", True)
                 if delete_eh:
                     local_filepath.unlink()
         else:
-            status_reason = guess_status_code_reason(
-                response.status_code, response.read()
-            )
+            status_reason = guess_status_code_reason(response.status_code, response.read())
             raise DownloadException(f"Failed to download file.\n{status_reason}")
 
 
@@ -98,10 +87,12 @@ def zip_files(zip_filename):
                 dirs.remove(".git")
             for file in files:
                 file_path = os.path.join(root, file)
-                if not spec.match_file(file_path):
-                    zipf.write(
-                        file_path, os.path.relpath(file_path, os.path.join(root, ".."))
-                    )
+                # Skip zipping the zip file itself
+                if zip_filename in file_path:
+                    continue
+                relative_path = os.path.relpath(file_path, start=".")
+                if not spec.match_file(relative_path):
+                    zipf.write(file_path, relative_path)
 
 
 def upload_file_to_signed_url(signed_url: str, file_path: str):
@@ -115,9 +106,7 @@ def upload_file_to_signed_url(signed_url: str, file_path: str):
                 print("Upload successful.")
             else:
                 # Print a generic error message with status code and response text
-                print(
-                    f"Upload failed with status code: {response.status_code}. Error: {response.text}"
-                )
+                print(f"Upload failed with status code: {response.status_code}. Error: {response.text}")
 
     except requests.exceptions.RequestException as e:
         # Print error related to the HTTP request

@@ -4,12 +4,13 @@ Module for checking various env and state conditions.
 
 import os
 import sys
+
+import requests
 from rich.console import Console
 from rich.table import Table
-import requests
 
-from comfy_cli.utils import singleton
 from comfy_cli.config_manager import ConfigManager
+from comfy_cli.utils import singleton
 
 console = Console()
 
@@ -28,15 +29,11 @@ def format_python_version(version_info):
         str: The formatted Python version string.
     """
     if version_info.major == 3 and version_info.minor > 8:
-        return "{}.{}.{}".format(
-            version_info.major, version_info.minor, version_info.micro
-        )
-    return "[bold red]{}.{}.{}[/bold red]".format(
-        version_info.major, version_info.minor, version_info.micro
-    )
+        return "{}.{}.{}".format(version_info.major, version_info.minor, version_info.micro)
+    return "[bold red]{}.{}.{}[/bold red]".format(version_info.major, version_info.minor, version_info.micro)
 
 
-def check_comfy_server_running(port=8188):
+def check_comfy_server_running(port=8188, host="localhost"):
     """
     Checks if the Comfy server is running by making a GET request to the /history endpoint.
 
@@ -44,7 +41,7 @@ def check_comfy_server_running(port=8188):
         bool: True if the Comfy server is running, False otherwise.
     """
     try:
-        response = requests.get(f"http://localhost:{port}/history")
+        response = requests.get(f"http://{host}:{port}/history")
         return response.status_code == 200
     except requests.exceptions.RequestException:
         return False
@@ -89,14 +86,8 @@ class EnvChecker(object):
         return None
 
     def check(self):
-        self.virtualenv_path = (
-            os.environ.get("VIRTUAL_ENV") if os.environ.get("VIRTUAL_ENV") else None
-        )
-        self.conda_env = (
-            os.environ.get("CONDA_DEFAULT_ENV")
-            if os.environ.get("CONDA_DEFAULT_ENV")
-            else None
-        )
+        self.virtualenv_path = os.environ.get("VIRTUAL_ENV") if os.environ.get("VIRTUAL_ENV") else None
+        self.conda_env = os.environ.get("CONDA_DEFAULT_ENV") if os.environ.get("CONDA_DEFAULT_ENV") else None
 
     # TODO: use ui.display_table
     def fill_print_table(self):

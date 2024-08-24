@@ -2,14 +2,20 @@
 Module for utility functions.
 """
 
+import functools
+import platform
+import shutil
 import subprocess
 import sys
+from pathlib import Path
 
 import psutil
-from rich import print
+import requests
 import typer
+from rich import print, progress
 
-from comfy_cli import constants
+from comfy_cli.constants import DEFAULT_COMFY_WORKSPACE, OS, PROC
+from comfy_cli.typing import PathLike
 
 
 def singleton(cls):
@@ -34,11 +40,22 @@ def singleton(cls):
 
 def get_os():
     if sys.platform == "darwin":
-        return constants.OS.MACOS
+        return OS.MACOS
     elif "win" in sys.platform:
-        return constants.OS.WINDOWS
+        return OS.WINDOWS
 
-    return constants.OS.LINUX
+    return OS.LINUX
+
+
+def get_proc():
+    proc = platform.processor()
+
+    if proc == "x86_64":
+        return PROC.X86_64
+    elif "arm" in proc:
+        return PROC.ARM
+    else:
+        raise ValueError
 
 
 def install_conda_package(package_name):
@@ -51,7 +68,7 @@ def install_conda_package(package_name):
 
 
 def get_not_user_set_default_workspace():
-    return constants.DEFAULT_COMFY_WORKSPACE[get_os()]
+    return DEFAULT_COMFY_WORKSPACE[get_os()]
 
 
 def kill_all(pid):
@@ -78,3 +95,24 @@ def create_choice_completer(opts):
         return [opt for opt in opts if opt.startswith(incomplete)]
 
     return f
+
+
+def download_progress(url: str, fname: PathLike, cwd: PathLike = ".", allow_redirects: bool = True) -> PathLike:
+    """download url to local file fname and show a progress bar.
+    See https://stackoverflow.com/q/37573483"""
+    cwd = Path(cwd).expanduser().resolve()
+    fpath = cwd / fname
+
+    response = requests.get(url, stream=True, allow_redirects=allow_redirects)
+    if response.status_code != 200:
+        response.raise_for_status()  # Will only raise for 4xx codes, so...
+        raise RuntimeError(f"Request to {url} returned status code {response.status_code}")
+    fsize = int(response.headers.get("Content-Length", 0))
+
+    desc = "(Unknown total file size)" if fsize == 0 else ""
+    response.raw.read = functools.partial(response.raw.read, decode_content=True)  # Decompress if needed
+    with progress.wrap_file(response.raw, total=fsize, description=desc) as response_raw:
+        with fpath.open("wb") as f:
+            shutil.copyfileobj(response_raw, f)
+
+    return fpath

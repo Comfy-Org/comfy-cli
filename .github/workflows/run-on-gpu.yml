@@ -1,0 +1,67 @@
+name: "Test CLI Tool on GPU runners"
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "comfy_cli/**"
+      - "!comfy_cli/test_**"
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "comfy_cli/**"
+      - "!comfy_cli/test_**"
+
+jobs:
+  test-cli-gpu:
+    name: "Run Tests on GPU Runners"
+    runs-on:
+      group: gpu-runners
+      labels: ${{ matrix.os }}-x64-gpu #
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [linux]
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Check Nvidia
+        run: |
+          nvidia-smi
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: 3.12
+
+      - name: Check disk space
+        run: |
+          df -h
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pytest
+          pip install -e .
+
+      - name: Test e2e
+        id: test-e2e
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+          TEST_E2E: true
+          TEST_E2E_COMFY_INSTALL_FLAGS: --nvidia --cuda-version 11.8
+          TEST_E2E_COMFY_LAUNCH_FLAGS_EXTRA: ""
+        run: |
+          pytest tests/e2e
+
+      - name: Retry test e2e but without gpu
+        if: ${{ failure() && steps.test-e2e.conclusion == 'failure' }}
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+          TEST_E2E: true
+        run: |
+          pytest tests/e2e

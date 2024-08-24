@@ -1,5 +1,6 @@
 import os
 import pathlib
+import platform
 import subprocess
 import sys
 import uuid
@@ -7,15 +8,18 @@ from typing import Optional
 
 import typer
 from rich import print
-from typing_extensions import List, Annotated
+from typing_extensions import Annotated, List
 
-from comfy_cli import ui, logging, tracking, utils
+from comfy_cli import logging, tracking, ui, utils
+from comfy_cli.command.custom_nodes.bisect_custom_nodes import bisect_app
+from comfy_cli.command.custom_nodes.cm_cli_util import execute_cm_cli
 from comfy_cli.config_manager import ConfigManager
+from comfy_cli.constants import NODE_ZIP_FILENAME
 from comfy_cli.file_utils import (
     download_file,
+    extract_package_as_zip,
     upload_file_to_signed_url,
     zip_files,
-    extract_package_as_zip,
 )
 from comfy_cli.registry import (
     RegistryAPI,
@@ -25,72 +29,17 @@ from comfy_cli.registry import (
 from comfy_cli.workspace_manager import WorkspaceManager
 
 app = typer.Typer()
+app.add_typer(bisect_app, name="bisect", help="Bisect custom nodes for culprit node.")
 manager_app = typer.Typer()
 workspace_manager = WorkspaceManager()
 registry_api = RegistryAPI()
-
-
-def execute_cm_cli(args, channel=None, mode=None, silent=False):
-    _config_manager = ConfigManager()
-
-    workspace_path = workspace_manager.workspace_path
-
-    if not os.path.exists(workspace_path):
-        print(f"\nComfyUI not found: {workspace_path}\n", file=sys.stderr)
-        raise typer.Exit(code=1)
-
-    cm_cli_path = os.path.join(
-        workspace_path, "custom_nodes", "ComfyUI-Manager", "cm-cli.py"
-    )
-    if not os.path.exists(cm_cli_path):
-        print(f"\nComfyUI-Manager not found: {cm_cli_path}\n", file=sys.stderr)
-        raise typer.Exit(code=1)
-
-    cmd = [sys.executable, cm_cli_path] + args
-    if channel is not None:
-        cmd += ["--channel", channel]
-
-    if mode is not None:
-        cmd += ["--mode", mode]
-
-    new_env = os.environ.copy()
-    session_path = os.path.join(
-        _config_manager.get_config_path(), "tmp", str(uuid.uuid4())
-    )
-    new_env["__COMFY_CLI_SESSION__"] = session_path
-    new_env["COMFYUI_PATH"] = workspace_path
-
-    print(f"Execute from: {workspace_path}")
-
-    try:
-        if silent:
-            subprocess.run(
-                cmd,
-                env=new_env,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                check=True,
-            )
-        else:
-            subprocess.run(cmd, env=new_env, check=True)
-    except subprocess.CalledProcessError as e:
-        if e.returncode == 1:
-            print(f"Execution error: {cmd}", file=sys.stderr)
-        elif e.returncode == 2:
-            pass
-        else:
-            raise e
-
-    workspace_manager.set_recent_workspace(workspace_path)
 
 
 def validate_comfyui_manager(_env_checker):
     manager_path = _env_checker.get_comfyui_manager_path()
 
     if manager_path is None:
-        print(
-            "[bold red]If ComfyUI is not installed, this feature cannot be used.[/bold red]"
-        )
+        print("[bold red]If ComfyUI is not installed, this feature cannot be used.[/bold red]")
         raise typer.Exit(code=1)
     elif not os.path.exists(manager_path):
         print(
@@ -104,14 +53,124 @@ def validate_comfyui_manager(_env_checker):
         raise typer.Exit(code=1)
 
 
+def run_script(cmd, cwd="."):
+    if len(cmd) > 0 and cmd[0].startswith("#"):
+        print(f"[ComfyUI-Manager] Unexpected behavior: `{cmd}`")
+        return 0
+
+    subprocess.check_call(cmd, cwd=cwd)
+
+    return 0
+
+
+pip_map = None
+
+
+def get_installed_packages():
+    global pip_map
+
+    if pip_map is None:
+        try:
+            result = subprocess.check_output([sys.executable, "-m", "pip", "list"], universal_newlines=True)
+
+            pip_map = {}
+            for line in result.split("\n"):
+                x = line.strip()
+                if x:
+                    y = line.split()
+                    if y[0] == "Package" or y[0].startswith("-"):
+                        continue
+
+                    pip_map[y[0]] = y[1]
+        except subprocess.CalledProcessError:
+            print("[ComfyUI-Manager] Failed to retrieve the information of installed pip packages.")
+            return set()
+
+    return pip_map
+
+
+def try_install_script(repo_path, install_cmd, instant_execution=False):
+    startup_script_path = os.path.join(workspace_manager.workspace_path, "startup-scripts")
+    if not instant_execution and (
+        (len(install_cmd) > 0 and install_cmd[0].startswith("#"))
+        or (
+            platform.system() == "Windows"
+            # From Yoland: disable commit compare
+            # and comfy_ui_commit_datetime.date()
+            # >= comfy_ui_required_commit_datetime.date()
+        )
+    ):
+        if not os.path.exists(startup_script_path):
+            os.makedirs(startup_script_path)
+
+        script_path = os.path.join(startup_script_path, "install-scripts.txt")
+        with open(script_path, "a", encoding="utf-8") as file:
+            obj = [repo_path] + install_cmd
+            file.write(f"{obj}\n")
+
+        return True
+    else:
+        # From Yoland: Disable blacklisting
+        # if len(install_cmd) == 5 and install_cmd[2:4] == ['pip', 'install']:
+        #     if is_blacklisted(install_cmd[4]):
+        #         print(f"[ComfyUI-Manager] skip black listed pip installation: '{install_cmd[4]}'")
+        #         return True
+
+        print(f"\n## ComfyUI-Manager: EXECUTE => {install_cmd}")
+        code = run_script(install_cmd, cwd=repo_path)
+
+        # From Yoland: Disable warning
+        # if platform.system() != "Windows":
+        #     try:
+        #         if comfy_ui_commit_datetime.date() < comfy_ui_required_commit_datetime.date():
+        #             print("\n\n###################################################################")
+        #             print(f"[WARN] ComfyUI-Manager: Your ComfyUI version ({comfy_ui_revision})[{comfy_ui_commit_datetime.date()}] is too old. Please update to the latest version.")
+        #             print(f"[WARN] The extension installation feature may not work properly in the current installed ComfyUI version on Windows environment.")
+        #             print("###################################################################\n\n")
+        #     except:
+        #         pass
+
+        if code != 0:
+            print("install script failed")
+            return False
+
+
+def execute_install_script(repo_path):
+    install_script_path = os.path.join(repo_path, "install.py")
+    requirements_path = os.path.join(repo_path, "requirements.txt")
+
+    # From Yoland: disable lazy mode
+    # if lazy_mode:
+    #     install_cmd = ["#LAZY-INSTALL-SCRIPT",  sys.executable]
+    #     try_install_script(repo_path, install_cmd)
+    # else:
+
+    if os.path.exists(requirements_path):
+        # import pdb
+        # pdb.set_trace()
+        print("Install: pip packages")
+        with open(requirements_path, "r", encoding="utf-8") as requirements_file:
+            for line in requirements_file:
+                # From Yoland: disable pip override
+                # package_name = remap_pip_package(line.strip())
+                package_name = line.strip()
+                if package_name and not package_name.startswith("#"):
+                    install_cmd = [sys.executable, "-m", "pip", "install", package_name]
+                    if package_name.strip() != "":
+                        try_install_script(repo_path, install_cmd)
+
+    if os.path.exists(install_script_path):
+        print("Install: install script")
+        install_cmd = [sys.executable, "install.py"]
+        try_install_script(repo_path, install_cmd)
+
+
 @app.command("save-snapshot", help="Save a snapshot of the current ComfyUI environment")
 @tracking.track_command("node")
 def save_snapshot(
     output: Annotated[
-        str,
-        typer.Option(
-            show_default=False, help="Specify the output file path. (.json/.yaml)"
-        ),
+        Optional[str],
+        typer.Option(show_default=False, help="Specify the output file path. (.json/.yaml)"),
     ] = None,
 ):
     if output is None:
@@ -159,9 +218,7 @@ def restore_snapshot(
     execute_cm_cli(["restore-snapshot", path] + extras)
 
 
-@app.command(
-    "restore-dependencies", help="Restore dependencies from installed custom nodes"
-)
+@app.command("restore-dependencies", help="Restore dependencies from installed custom nodes")
 @tracking.track_command("node")
 def restore_dependencies():
     execute_cm_cli(["restore-dependencies"])
@@ -202,24 +259,16 @@ show_completer = utils.create_choice_completer(
 mode_completer = utils.create_choice_completer(["remote", "local", "cache"])
 
 
-channel_completer = utils.create_choice_completer(
-    ["default", "recent", "dev", "forked", "tutorial", "legacy"]
-)
+channel_completer = utils.create_choice_completer(["default", "recent", "dev", "forked", "tutorial", "legacy"])
 
 
 def node_completer(incomplete: str) -> list[str]:
     try:
         config_manager = ConfigManager()
-        tmp_path = os.path.join(
-            config_manager.get_config_path(), "tmp", "node-cache.list"
-        )
+        tmp_path = os.path.join(config_manager.get_config_path(), "tmp", "node-cache.list")
 
         with open(tmp_path, "r", encoding="UTF-8", errors="ignore") as cache_file:
-            return [
-                node_id
-                for node_id in cache_file.readlines()
-                if node_id.startswith(incomplete)
-            ]
+            return [node_id for node_id in cache_file.readlines() if node_id.startswith(incomplete)]
 
     except Exception:
         return []
@@ -228,20 +277,14 @@ def node_completer(incomplete: str) -> list[str]:
 def node_or_all_completer(incomplete: str) -> list[str]:
     try:
         config_manager = ConfigManager()
-        tmp_path = os.path.join(
-            config_manager.get_config_path(), "tmp", "node-cache.list"
-        )
+        tmp_path = os.path.join(config_manager.get_config_path(), "tmp", "node-cache.list")
 
         all_opt = []
         if "all".startswith(incomplete):
             all_opt = ["all"]
 
         with open(tmp_path, "r", encoding="UTF-8", errors="ignore") as cache_file:
-            return [
-                node_id
-                for node_id in cache_file.readlines()
-                if node_id.startswith(incomplete)
-            ] + all_opt
+            return [node_id for node_id in cache_file.readlines() if node_id.startswith(incomplete)] + all_opt
 
     except Exception:
         return []
@@ -265,7 +308,7 @@ def show(
         autocompletion=show_completer,
     ),
     channel: Annotated[
-        str,
+        Optional[str],
         typer.Option(
             show_default=False,
             help="Specify the operation mode",
@@ -293,7 +336,7 @@ def show(
 
     validate_mode(mode)
 
-    execute_cm_cli(["show", arg], channel, mode)
+    execute_cm_cli(["show", arg], channel=channel, mode=mode)
 
 
 @app.command("simple-show", help="Show node list (simple mode)")
@@ -304,7 +347,7 @@ def simple_show(
         autocompletion=show_completer,
     ),
     channel: Annotated[
-        str,
+        Optional[str],
         typer.Option(
             show_default=False,
             help="Specify the operation mode",
@@ -332,24 +375,30 @@ def simple_show(
 
     validate_mode(mode)
 
-    execute_cm_cli(["simple-show", arg], channel, mode)
+    execute_cm_cli(["simple-show", arg], channel=channel, mode=mode)
 
 
 # install, reinstall, uninstall
 @app.command(help="Install custom nodes")
 @tracking.track_command("node")
 def install(
-    nodes: List[str] = typer.Argument(
-        ..., help="List of custom nodes to install", autocompletion=node_completer
-    ),
+    nodes: List[str] = typer.Argument(..., help="List of custom nodes to install", autocompletion=node_completer),
     channel: Annotated[
-        str,
+        Optional[str],
         typer.Option(
             show_default=False,
             help="Specify the operation mode",
             autocompletion=channel_completer,
         ),
     ] = None,
+    fast_deps: Annotated[
+        Optional[bool],
+        typer.Option(
+            "--fast-deps",
+            show_default=False,
+            help="Use new fast dependency installer",
+        ),
+    ] = False,
     mode: str = typer.Option(
         None,
         help="[remote|local|cache]",
@@ -362,23 +411,29 @@ def install(
 
     validate_mode(mode)
 
-    execute_cm_cli(["install"] + nodes, channel, mode)
+    execute_cm_cli(["install"] + nodes, channel=channel, fast_deps=fast_deps, mode=mode)
 
 
 @app.command(help="Reinstall custom nodes")
 @tracking.track_command("node")
 def reinstall(
-    nodes: List[str] = typer.Argument(
-        ..., help="List of custom nodes to reinstall", autocompletion=node_completer
-    ),
+    nodes: List[str] = typer.Argument(..., help="List of custom nodes to reinstall", autocompletion=node_completer),
     channel: Annotated[
-        str,
+        Optional[str],
         typer.Option(
             show_default=False,
             help="Specify the operation mode",
             autocompletion=channel_completer,
         ),
     ] = None,
+    fast_deps: Annotated[
+        Optional[bool],
+        typer.Option(
+            "--fast-deps",
+            show_default=False,
+            help="Use new fast dependency installer",
+        ),
+    ] = False,
     mode: str = typer.Option(
         None,
         help="[remote|local|cache]",
@@ -391,17 +446,15 @@ def reinstall(
 
     validate_mode(mode)
 
-    execute_cm_cli(["reinstall"] + nodes, channel, mode)
+    execute_cm_cli(["reinstall"] + nodes, channel=channel, fast_deps=fast_deps, mode=mode)
 
 
 @app.command(help="Uninstall custom nodes")
 @tracking.track_command("node")
 def uninstall(
-    nodes: List[str] = typer.Argument(
-        ..., help="List of custom nodes to uninstall", autocompletion=node_completer
-    ),
+    nodes: List[str] = typer.Argument(..., help="List of custom nodes to uninstall", autocompletion=node_completer),
     channel: Annotated[
-        str,
+        Optional[str],
         typer.Option(
             show_default=False,
             help="Specify the operation mode",
@@ -420,16 +473,14 @@ def uninstall(
 
     validate_mode(mode)
 
-    execute_cm_cli(["uninstall"] + nodes, channel, mode)
+    execute_cm_cli(["uninstall"] + nodes, channel=channel, mode=mode)
 
 
 def update_node_id_cache():
     config_manager = ConfigManager()
     workspace_path = workspace_manager.workspace_path
 
-    cm_cli_path = os.path.join(
-        workspace_path, "custom_nodes", "ComfyUI-Manager", "cm-cli.py"
-    )
+    cm_cli_path = os.path.join(workspace_path, "custom_nodes", "ComfyUI-Manager", "cm-cli.py")
 
     tmp_path = os.path.join(config_manager.get_config_path(), "tmp")
     if not os.path.exists(tmp_path):
@@ -459,7 +510,7 @@ def update(
         autocompletion=node_or_all_completer,
     ),
     channel: Annotated[
-        str,
+        Optional[str],
         typer.Option(
             show_default=False,
             help="Specify the operation mode",
@@ -474,7 +525,7 @@ def update(
 ):
     validate_mode(mode)
 
-    execute_cm_cli(["update"] + nodes, channel, mode)
+    execute_cm_cli(["update"] + nodes, channel=channel, mode=mode)
 
     update_node_id_cache()
 
@@ -488,7 +539,7 @@ def disable(
         autocompletion=node_or_all_completer,
     ),
     channel: Annotated[
-        str,
+        Optional[str],
         typer.Option(
             show_default=False,
             help="Specify the operation mode",
@@ -503,7 +554,7 @@ def disable(
 ):
     validate_mode(mode)
 
-    execute_cm_cli(["disable"] + nodes, channel, mode)
+    execute_cm_cli(["disable"] + nodes, channel=channel, mode=mode)
 
 
 @app.command(help="Enable custom nodes")
@@ -515,7 +566,7 @@ def enable(
         autocompletion=node_or_all_completer,
     ),
     channel: Annotated[
-        str,
+        Optional[str],
         typer.Option(
             show_default=False,
             help="Specify the operation mode",
@@ -530,7 +581,7 @@ def enable(
 ):
     validate_mode(mode)
 
-    execute_cm_cli(["enable"] + nodes, channel, mode)
+    execute_cm_cli(["enable"] + nodes, channel=channel, mode=mode)
 
 
 @app.command(help="Fix dependencies of custom nodes")
@@ -542,7 +593,7 @@ def fix(
         autocompletion=node_or_all_completer,
     ),
     channel: Annotated[
-        str,
+        Optional[str],
         typer.Option(
             show_default=False,
             help="Specify the operation mode",
@@ -557,7 +608,7 @@ def fix(
 ):
     validate_mode(mode)
 
-    execute_cm_cli(["fix"] + nodes, channel, mode)
+    execute_cm_cli(["fix"] + nodes, channel=channel, mode=mode)
 
 
 @app.command(
@@ -567,13 +618,15 @@ def fix(
 @tracking.track_command("node")
 def install_deps(
     deps: Annotated[
-        str, typer.Option(show_default=False, help="Dependency spec file (.json)")
+        Optional[str],
+        typer.Option(show_default=False, help="Dependency spec file (.json)"),
     ] = None,
     workflow: Annotated[
-        str, typer.Option(show_default=False, help="Workflow file (.json/.png)")
+        Optional[str],
+        typer.Option(show_default=False, help="Workflow file (.json/.png)"),
     ] = None,
     channel: Annotated[
-        str,
+        Optional[str],
         typer.Option(
             show_default=False,
             help="Specify the operation mode",
@@ -589,16 +642,12 @@ def install_deps(
     validate_mode(mode)
 
     if deps is None and workflow is None:
-        print(
-            f"[bold red]One of --deps or --workflow must be provided as an argument.[/bold red]\n"
-        )
+        print("[bold red]One of --deps or --workflow must be provided as an argument.[/bold red]\n")
 
     tmp_path = None
     if workflow is not None:
         workflow = os.path.abspath(os.path.expanduser(workflow))
-        tmp_path = os.path.join(
-            workspace_manager.config_manager.get_config_path(), "tmp"
-        )
+        tmp_path = os.path.join(workspace_manager.config_manager.get_config_path(), "tmp")
         if not os.path.exists(tmp_path):
             os.makedirs(tmp_path)
         tmp_path = os.path.join(tmp_path, str(uuid.uuid4())) + ".json"
@@ -613,25 +662,19 @@ def install_deps(
     else:
         deps_file = os.path.abspath(os.path.expanduser(deps))
 
-    execute_cm_cli(["install-deps", deps_file], channel, mode)
+    execute_cm_cli(["install-deps", deps_file], channel=channel, mode=mode)
 
     if tmp_path is not None and os.path.exists(tmp_path):
         os.remove(tmp_path)
 
 
-@app.command(
-    "deps-in-workflow", help="Generate dependencies file from workflow (.json/.png)"
-)
+@app.command("deps-in-workflow", help="Generate dependencies file from workflow (.json/.png)")
 @tracking.track_command("node")
 def deps_in_workflow(
-    workflow: Annotated[
-        str, typer.Option(show_default=False, help="Workflow file (.json/.png)")
-    ],
-    output: Annotated[
-        str, typer.Option(show_default=False, help="Output file (.json)")
-    ],
+    workflow: Annotated[str, typer.Option(show_default=False, help="Workflow file (.json/.png)")],
+    output: Annotated[str, typer.Option(show_default=False, help="Output file (.json)")],
     channel: Annotated[
-        str,
+        Optional[str],
         typer.Option(
             show_default=False,
             help="Specify the operation mode",
@@ -659,9 +702,7 @@ def deps_in_workflow(
 @app.command("publish", help="Publish node to registry")
 @tracking.track_command("publish")
 def publish(
-    token: Optional[str] = typer.Option(
-        None, "--token", help="Personal Access Token for publishing", hide_input=True
-    )
+    token: Optional[str] = typer.Option(None, "--token", help="Personal Access Token for publishing", hide_input=True),
 ):
     """
     Publish a node with optional validation.
@@ -671,23 +712,29 @@ def publish(
     typer.echo("Validating node configuration...")
     config = extract_node_configuration()
 
-    # Prompt for Personal Access Token
+    # Prompt for API Key
     if not token:
-        token = typer.prompt("Please enter your Personal Access Token", hide_input=True)
+        token = typer.prompt(
+            "Please enter your API Key (can be created on https://registry.comfy.org)",
+            hide_input=True,
+        )
 
     # Call API to fetch node version with the token in the body
     typer.echo("Publishing node version...")
-    response = registry_api.publish_node_version(config, token)
+    try:
+        response = registry_api.publish_node_version(config, token)
+        # Zip up all files in the current directory, respecting .gitignore files.
+        signed_url = response.signedUrl
+        zip_filename = NODE_ZIP_FILENAME
+        typer.echo("Creating zip file...")
+        zip_files(zip_filename)
 
-    # Zip up all files in the current directory, respecting .gitignore files.
-    signed_url = response.signedUrl
-    zip_filename = "node.tar.gz"
-    typer.echo("Creating zip file...")
-    zip_files(zip_filename)
-
-    # Upload the zip file to the signed URL
-    typer.echo("Uploading zip file...")
-    upload_file_to_signed_url(signed_url, zip_filename)
+        # Upload the zip file to the signed URL
+        typer.echo("Uploading zip file...")
+        upload_file_to_signed_url(signed_url, zip_filename)
+    except Exception as e:
+        ui.display_error_message({str(e)})
+        raise typer.Exit(code=1)
 
 
 @app.command("init", help="Init scaffolding for custom node")
@@ -699,9 +746,7 @@ def scaffold():
 
     typer.echo("Initializing metadata...")
     initialize_project_config()
-    typer.echo(
-        "pyproject.toml created successfully. Defaults were filled in. Please check before publishing."
-    )
+    typer.echo("pyproject.toml created successfully. Defaults were filled in. Please check before publishing.")
 
 
 @app.command("registry-list", help="List all nodes in the registry", hidden=True)
@@ -746,9 +791,23 @@ def display_all_nodes():
     )
 
 
-@app.command("registry-install", help="Install a node from the registry", hidden=True)
+@app.command(
+    "registry-install",
+    help="Install a node from the registry",
+    hidden=True,
+)
 @tracking.track_command("node")
-def registry_install(node_id: str, version: Optional[str] = None):
+def registry_install(
+    node_id: str,
+    version: Optional[str] = None,
+    force_download: Annotated[
+        bool,
+        typer.Option(
+            "--force-download",
+            help="Force download the node even if it is already installed",
+        ),
+    ] = False,
+):
     """
     Install a node from the registry.
     Args:
@@ -770,35 +829,56 @@ def registry_install(node_id: str, version: Optional[str] = None):
             return
 
     except Exception as e:
-        logging.error(
-            f"Encountered an error while installing the node. error: {str(e)}"
-        )
+        logging.error(f"Encountered an error while installing the node. error: {str(e)}")
         ui.display_error_message(f"Failed to download the custom node {node_id}.")
         return
 
     # Download the node archive
     custom_nodes_path = pathlib.Path(workspace_manager.workspace_path) / "custom_nodes"
     node_specific_path = custom_nodes_path / node_id  # Subdirectory for the node
-    node_specific_path.mkdir(
-        parents=True, exist_ok=True
-    )  # Create the directory if it doesn't exist
+    if node_specific_path.exists():
+        print(
+            f"[bold red] The node {node_id} already exists in the workspace. This migit delete any model files in the node.[/bold red]"
+        )
+
+        confirm = ui.prompt_confirm_action(
+            "Do you want to overwrite it?",
+            force_download,
+        )
+        if not confirm:
+            return
+    node_specific_path.mkdir(parents=True, exist_ok=True)  # Create the directory if it doesn't exist
 
     local_filename = node_specific_path / f"{node_id}-{node_version.version}.zip"
-    logging.debug(
-        f"Start downloading the node {node_id} version {node_version.version} to {local_filename}"
-    )
+    logging.debug(f"Start downloading the node {node_id} version {node_version.version} to {local_filename}")
     download_file(node_version.download_url, local_filename)
 
     # Extract the downloaded archive to the custom_node directory on the workspace.
-    logging.debug(
-        f"Start extracting the node {node_id} version {node_version.version} to {custom_nodes_path}"
-    )
+    logging.debug(f"Start extracting the node {node_id} version {node_version.version} to {custom_nodes_path}")
     extract_package_as_zip(local_filename, node_specific_path)
+
+    # TODO: temoporary solution to run requirement.txt and install script
+    execute_install_script(node_specific_path)
 
     # Delete the downloaded archive
     logging.debug(f"Deleting the downloaded archive {local_filename}")
     os.remove(local_filename)
 
-    logging.info(
-        f"Node {node_id} version {node_version.version} has been successfully installed."
-    )
+    logging.info(f"Node {node_id} version {node_version.version} has been successfully installed.")
+
+
+@app.command(
+    "pack",
+    help="Pack the current node into a zip file. Ignorining .gitignore files.",
+)
+@tracking.track_command("pack")
+def pack():
+    typer.echo("Validating node configuration...")
+    config = extract_node_configuration()
+    if not config:
+        raise typer.Exit(code=1)
+
+    zip_filename = NODE_ZIP_FILENAME
+    zip_files(zip_filename)
+    typer.echo(f"Created zip file: {NODE_ZIP_FILENAME}")
+    logging.info("Node has been packed successfully.")

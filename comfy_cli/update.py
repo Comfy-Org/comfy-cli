@@ -1,12 +1,10 @@
+import sys
+from importlib.metadata import metadata
+
 import requests
-import tomlkit
-from rich import print
-import tomlkit.exceptions
+from packaging import version
 from rich.console import Console
 from rich.panel import Panel
-from importlib.metadata import metadata
-from packaging import version
-
 
 console = Console()
 
@@ -22,16 +20,14 @@ def check_for_newer_pypi_version(package_name, current_version):
             return True, latest_version
 
         return False, current_version
-    except requests.RequestException as e:
+    except requests.RequestException:
         # print(f"Error checking latest version: {e}")
         return False, current_version
 
 
 def check_for_updates():
     current_version = get_version_from_pyproject()
-    has_newer, newer_version = check_for_newer_pypi_version(
-        "comfy-cli", current_version
-    )
+    has_newer, newer_version = check_for_newer_pypi_version("comfy-cli", current_version)
 
     if has_newer:
         notify_update(current_version, newer_version)
@@ -48,10 +44,19 @@ def notify_update(current_version: str, newer_version: str):
         f"Current version: [bold cyan]{current_version}[/bold cyan]\n"
         f"Update by running: [bold yellow]'pip install --upgrade comfy-cli'[/bold yellow] :arrow_up:"
     )
+
+    if sys.platform == "win32":
+        # windows cannot display emoji characters.
+        bell = ""
+        message = message.replace(":sparkles:", "")
+        message = message.replace(":arrow_up:", "")
+    else:
+        bell = ":bell:"
+
     console.print(
         Panel(
             message,
-            title="[bold red]:bell: Update Available![/bold red]",
+            title=f"[bold red]{bell} Update Available![/bold red]",
             border_style="bright_blue",
         )
     )

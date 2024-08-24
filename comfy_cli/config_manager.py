@@ -1,10 +1,10 @@
 import configparser
 import os
-
-from comfy_cli.utils import singleton, get_os, is_running
-from comfy_cli import constants, logging
-from typing import Optional, Tuple
 from importlib.metadata import version
+from typing import Optional, Tuple
+
+from comfy_cli import constants, logging
+from comfy_cli.utils import get_os, is_running, singleton
 
 
 @singleton
@@ -41,9 +41,7 @@ class ConfigManager(object):
         """
         Get a value from the config file. Returns None if the key does not exist.
         """
-        return self.config["DEFAULT"].get(
-            key, None
-        )  # Returns None if the key does not exist
+        return self.config["DEFAULT"].get(key, None)  # Returns None if the key does not exist
 
     def load(self):
         config_file_path = self.get_config_file_path()
@@ -74,9 +72,7 @@ class ConfigManager(object):
                 self.config["DEFAULT"][constants.CONFIG_KEY_DEFAULT_WORKSPACE],
             )
 
-            launch_extras = self.config["DEFAULT"].get(
-                constants.CONFIG_KEY_DEFAULT_LAUNCH_EXTRAS, ""
-            )
+            launch_extras = self.config["DEFAULT"].get(constants.CONFIG_KEY_DEFAULT_LAUNCH_EXTRAS, "")
         else:
             table.add_row("Default ComfyUI workspace", "No default ComfyUI workspace")
 
@@ -96,11 +92,7 @@ class ConfigManager(object):
         if self.config.has_option("DEFAULT", "enable_tracking"):
             table.add_row(
                 "Tracking Analytics",
-                (
-                    "Enabled"
-                    if self.config["DEFAULT"]["enable_tracking"] == "True"
-                    else "Disabled"
-                ),
+                ("Enabled" if self.config["DEFAULT"]["enable_tracking"] == "True" else "Disabled"),
             )
 
         if self.config.has_option("DEFAULT", constants.CONFIG_KEY_BACKGROUND):
@@ -119,13 +111,11 @@ class ConfigManager(object):
         self.background = None
 
     def get_cli_version(self):
-        # Note: this approach should work for users installing the CLI via PyPi (e.g., pip install comfy-cli)
+        # Note: this approach should work for users installing the CLI via
+        # PyPi and Homebrew (e.g., pip install comfy-cli)
         try:
             return version("comfy-cli")
         except Exception as e:
-            logging.debug(
-                f"Error occurred while retrieving CLI version using importlib.metadata: {e}"
-            )
+            logging.debug(f"Error occurred while retrieving CLI version using importlib.metadata: {e}")
 
-        # TODO: cover the users installing the CLI via homebrew
         return "0.0.0"

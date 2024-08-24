@@ -1,2 +1,3 @@
-from . import custom_nodes
-from . import install
+from . import custom_nodes, install
+
+__all__ = ["custom_nodes", "install"]

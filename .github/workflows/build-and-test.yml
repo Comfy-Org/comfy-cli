@@ -13,8 +13,9 @@ jobs:
     runs-on: ${{ matrix.os }}
     env:
       PYTHONIOENCODING: "utf8"
-    
+
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
         python-version: ["3.9"]
@@ -30,9 +31,13 @@ jobs:
 
       - name: Install Dependencies
         run: |
+          python -m pip install --upgrade pip
+          pip install pytest
           pip install -e .
 
-      - name: Run Tests
+      - name: Test e2e
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+          TEST_E2E: true
         run: |
-          comfy --skip-prompt --no-enable-telemetry env
-          comfy --skip-prompt install --cpu
+          pytest tests/e2e
