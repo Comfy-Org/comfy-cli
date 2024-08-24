@@ -6,6 +6,9 @@ from pathlib import Path
 from typing import Optional
 
 import requests
+from rich.live import Live
+from rich.progress import Progress, TextColumn
+from rich.table import Table
 
 from comfy_cli.constants import GPU_OPTION, OS, PROC
 from comfy_cli.typing import PathLike
@@ -172,5 +175,23 @@ class StandalonePython:
 
     def to_tarball(self, outPath: Optional[PathLike] = None):
         outPath = self.rpath.with_suffix(".tgz") if outPath is None else Path(outPath)
-        with tarfile.open(outPath, "w:gz") as tar:
-            tar.add(self.rpath, arcname=self.rpath.parent)
+        fileSize = sum(f.stat().st_size for f in self.rpath.glob("**/*"))
+
+        barProg = Progress()
+        addTar = barProg.add_task("[cyan]Creating tarball...", total=fileSize)
+        pathProg = Progress(TextColumn("{task.description}"))
+        pathTar = pathProg.add_task("")
+
+        progress_table = Table.grid()
+        progress_table.add_row(barProg)
+        progress_table.add_row(pathProg)
+
+        def _filter(tinfo: tarfile.TarInfo):
+            pathProg.update(pathTar, description=tinfo.path)
+            size = Path(tinfo.path).stat().st_size
+            barProg.advance(addTar, size)
+            return tinfo
+
+        with Live(progress_table, refresh_per_second=10):
+            with tarfile.open(outPath, "w:gz") as tar:
+                tar.add(self.rpath, filter=_filter)
