@@ -275,14 +275,14 @@ def install(
     elif amd:
         gpu = GPU_OPTION.AMD
     elif m_series:
-        gpu = GPU_OPTION.M_SERIES
+        gpu = GPU_OPTION.MAC_M_SERIES
     elif intel_arc:
         gpu = GPU_OPTION.INTEL_ARC
     else:
         if platform == constants.OS.MACOS:
             gpu = ui.prompt_select_enum(
                 "What type of Mac do you have?",
-                [GPU_OPTION.M_SERIES, GPU_OPTION.MAC_INTEL],
+                [GPU_OPTION.MAC_M_SERIES, GPU_OPTION.MAC_INTEL],
             )
         else:
             gpu = ui.prompt_select_enum(
@@ -616,14 +616,14 @@ def standalone(
     elif amd:
         gpu = GPU_OPTION.AMD
     elif m_series:
-        gpu = GPU_OPTION.M_SERIES
+        gpu = GPU_OPTION.MAC_M_SERIES
     elif intel_arc:
         gpu = GPU_OPTION.INTEL_ARC
     else:
         if platform == constants.OS.MACOS:
             gpu = ui.prompt_select_enum(
                 "What type of Mac do you have?",
-                [GPU_OPTION.M_SERIES, GPU_OPTION.MAC_INTEL],
+                [GPU_OPTION.MAC_M_SERIES, GPU_OPTION.MAC_INTEL],
             )
         else:
             gpu = ui.prompt_select_enum(

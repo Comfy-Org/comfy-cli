@@ -111,7 +111,7 @@ def pip_install_comfyui_dependencies(
             result = subprocess.run([sys.executable, "-m", "pip", "install", "torch-directml"], check=True)
 
         # install torch for Mac M Series
-        if gpu == GPU_OPTION.M_SERIES:
+        if gpu == GPU_OPTION.MAC_M_SERIES:
             result = subprocess.run(
                 [
                     sys.executable,

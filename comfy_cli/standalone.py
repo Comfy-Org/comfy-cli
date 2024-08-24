@@ -7,7 +7,7 @@ from typing import Optional
 
 import requests
 
-from comfy_cli.constants import OS, PROC
+from comfy_cli.constants import GPU_OPTION, OS, PROC
 from comfy_cli.typing import PathLike
 from comfy_cli.utils import download_progress, get_os, get_proc
 from comfy_cli.uv import DependencyCompiler
@@ -92,6 +92,8 @@ class StandalonePython:
 
         old_rpath = fpath.parent / old_name
         rpath = fpath.parent / name
+        # clean the expanded destination
+        shutil.rmtree(rpath, ignore_errors=True)
         shutil.move(old_rpath, rpath)
         return StandalonePython(rpath=rpath)
 
@@ -138,25 +140,25 @@ class StandalonePython:
     def install_comfy(self, *args: list[str], gpu_arg: str = "--nvidia"):
         self.run_comfy_cli("--here", "--skip-prompt", "install", "--fast-deps", gpu_arg, *args)
 
-    def compile_comfy_deps(self, comfyDir: PathLike, gpu: str, outDir: Optional[PathLike] = None):
+    def compile_comfy_deps(self, comfyDir: PathLike, gpu: GPU_OPTION, outDir: Optional[PathLike] = None):
         outDir = self.rpath if outDir is None else outDir
 
         self.dep_comp = DependencyCompiler(cwd=comfyDir, executable=self.executable, gpu=gpu, outDir=outDir)
         self.dep_comp.compile_comfy_deps()
 
-    def install_comfy_deps(self, comfyDir: PathLike, gpu: str, outDir: Optional[PathLike] = None):
+    def install_comfy_deps(self, comfyDir: PathLike, gpu: GPU_OPTION, outDir: Optional[PathLike] = None):
         outDir = self.rpath if outDir is None else outDir
 
         self.dep_comp = DependencyCompiler(cwd=comfyDir, executable=self.executable, gpu=gpu, outDir=outDir)
         self.dep_comp.install_core_plus_ext()
 
-    def precache_comfy_deps(self, comfyDir: PathLike, gpu: str, outDir: Optional[PathLike] = None):
+    def precache_comfy_deps(self, comfyDir: PathLike, gpu: GPU_OPTION, outDir: Optional[PathLike] = None):
         outDir = self.rpath if outDir is None else outDir
 
         self.dep_comp = DependencyCompiler(cwd=comfyDir, executable=self.executable, gpu=gpu, outDir=outDir)
         self.dep_comp.precache_comfy_deps()
 
-    def wheel_comfy_deps(self, comfyDir: PathLike, gpu: str, outDir: Optional[PathLike] = None):
+    def wheel_comfy_deps(self, comfyDir: PathLike, gpu: GPU_OPTION, outDir: Optional[PathLike] = None):
         outDir = self.rpath if outDir is None else outDir
 
         self.dep_comp = DependencyCompiler(cwd=comfyDir, executable=self.executable, gpu=gpu, outDir=outDir)
