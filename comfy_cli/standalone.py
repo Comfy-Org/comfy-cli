@@ -85,15 +85,21 @@ class StandalonePython:
     @staticmethod
     def FromTarball(fpath: PathLike, name: PathLike = "python"):
         fpath = Path(fpath)
+
         with tarfile.open(fpath) as tar:
             info = tar.next()
             old_name = info.name.split("/")[0]
-            tar.extractall()
 
         old_rpath = fpath.parent / old_name
         rpath = fpath.parent / name
-        # clean the expanded destination
+
+        # clean the tar file expand target and the final target
+        shutil.rmtree(old_rpath, ignore_errors=True)
         shutil.rmtree(rpath, ignore_errors=True)
+
+        with tarfile.open(fpath) as tar:
+            tar.extractall()
+
         shutil.move(old_rpath, rpath)
         return StandalonePython(rpath=rpath)
 
