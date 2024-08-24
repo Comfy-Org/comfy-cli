@@ -265,7 +265,7 @@ class DependencyCompiler:
         return _check_call(cmd, cwd)
 
     @staticmethod
-    def Resolve_Gpu(gpu: Union[GPU_OPTION, str, None]):
+    def Resolve_Gpu(gpu: Union[GPU_OPTION, None]):
         if gpu is None:
             try:
                 tver = metadata.version("torch")
@@ -277,8 +277,6 @@ class DependencyCompiler:
                     return None
             except metadata.PackageNotFoundError:
                 return None
-        elif isinstance(gpu, str):
-            return GPU_OPTION[gpu.upper()]
         else:
             return gpu
 
@@ -286,7 +284,7 @@ class DependencyCompiler:
         self,
         cwd: PathLike = ".",
         executable: PathLike = sys.executable,
-        gpu: Union[GPU_OPTION, str, None] = None,
+        gpu: Union[GPU_OPTION, None] = None,
         outDir: PathLike = ".",
         outName: str = "requirements.compiled",
         reqFilesCore: Optional[list[PathLike]] = None,
