@@ -149,37 +149,22 @@ class StandalonePython:
     def install_comfy(self, *args: list[str], gpu_arg: str = "--nvidia"):
         self.run_comfy_cli("--here", "--skip-prompt", "install", "--fast-deps", gpu_arg, *args)
 
-    def compile_comfy_deps(self, comfyDir: PathLike, gpu: GPU_OPTION, outDir: Optional[PathLike] = None):
-        outDir = self.rpath if outDir is None else outDir
-
-        self.dep_comp = DependencyCompiler(cwd=comfyDir, executable=self.executable, gpu=gpu, outDir=outDir)
-        self.dep_comp.compile_comfy_deps()
-
-    def install_comfy_deps(self, comfyDir: PathLike, gpu: GPU_OPTION, outDir: Optional[PathLike] = None):
-        outDir = self.rpath if outDir is None else outDir
-
-        self.dep_comp = DependencyCompiler(cwd=comfyDir, executable=self.executable, gpu=gpu, outDir=outDir)
-        self.dep_comp.install_core_plus_ext()
-
-    def precache_comfy_deps(
+    def dehydrate_comfy_deps(
         self,
         comfyDir: PathLike,
         gpu: GPU_OPTION,
         outDir: Optional[PathLike] = None,
         extraSpecs: Optional[list[str]] = None,
     ):
-        outDir = self.rpath if outDir is None else outDir
-
         self.dep_comp = DependencyCompiler(
-            cwd=comfyDir, executable=self.executable, gpu=gpu, outDir=outDir, extraSpecs=extraSpecs
+            cwd=comfyDir,
+            executable=self.executable,
+            gpu=gpu,
+            outDir=self.rpath if outDir is None else outDir,
+            extraSpecs=extraSpecs,
         )
-        self.dep_comp.precache_comfy_deps()
-
-    def wheel_comfy_deps(self, comfyDir: PathLike, gpu: GPU_OPTION, outDir: Optional[PathLike] = None):
-        outDir = self.rpath if outDir is None else outDir
-
-        self.dep_comp = DependencyCompiler(cwd=comfyDir, executable=self.executable, gpu=gpu, outDir=outDir)
-        self.dep_comp.wheel_comfy_deps()
+        self.dep_comp.compile_deps()
+        self.dep_comp.fetch_dep_wheels()
 
     def to_tarball(self, outPath: Optional[PathLike] = None, progress: bool = True):
         outPath = self.rpath.with_suffix(".tgz") if outPath is None else Path(outPath)

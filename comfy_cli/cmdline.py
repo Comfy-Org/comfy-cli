@@ -653,7 +653,7 @@ def standalone(
         print("[bold yellow]Installing on Intel ARC is in beta stage.[/bold yellow]")
 
     sty = StandalonePython.FromDistro(platform=platform, proc=proc)
-    sty.precache_comfy_deps(comfyDir=comfy_path, gpu=gpu, extraSpecs=cli_spec)
+    sty.dehydrate_comfy_deps(comfyDir=comfy_path, gpu=gpu, extraSpecs=cli_spec)
     sty.to_tarball()
 
 

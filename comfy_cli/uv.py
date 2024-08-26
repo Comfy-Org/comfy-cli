@@ -383,23 +383,6 @@ class DependencyCompiler:
                 else:
                     raise AttributeError
 
-    def install_core_plus_ext(self):
-        DependencyCompiler.Install(
-            cwd=self.cwd,
-            reqFile=self.out,
-            executable=self.executable,
-            extraUrl=self.gpuUrl,
-            override=self.override,
-        )
-
-    def sync_core_plus_ext(self):
-        DependencyCompiler.Sync(
-            cwd=self.cwd,
-            reqFile=self.out,
-            executable=self.executable,
-            extraUrl=self.gpuUrl,
-        )
-
     def handle_opencv(self):
         """as per the opencv docs, you should only have exactly one opencv package.
         headless is more suitable for comfy than the gui version, so remove gui if
@@ -421,24 +404,22 @@ class DependencyCompiler:
                     if "opencv-python==" not in line:
                         f.write(line)
 
-    def compile_comfy_deps(self):
+    def compile_deps(self):
         self.make_override()
         self.compile_core_plus_ext()
         self.handle_opencv()
 
-    def precache_comfy_deps(self):
-        self.compile_comfy_deps()
+    def fetch_dep_dists(self):
         DependencyCompiler.Download(
             cwd=self.cwd,
             reqFile=self.out,
             executable=self.executable,
             extraUrl=self.gpuUrl,
             noDeps=True,
-            out=self.outDir / "cache",
+            out=self.outDir / "dists",
         )
 
-    def wheel_comfy_deps(self):
-        self.compile_comfy_deps()
+    def fetch_dep_wheels(self):
         DependencyCompiler.Wheel(
             cwd=self.cwd,
             reqFile=self.out,
@@ -448,8 +429,23 @@ class DependencyCompiler:
             out=self.outDir / "wheels",
         )
 
-    def install_comfy_deps(self):
-        DependencyCompiler.Install_Build_Deps(executable=self.executable)
+    def install_core_plus_ext(self):
+        DependencyCompiler.Install(
+            cwd=self.cwd,
+            reqFile=self.out,
+            executable=self.executable,
+            extraUrl=self.gpuUrl,
+            override=self.override,
+        )
 
-        self.compile_comfy_deps()
+    def sync_core_plus_ext(self):
+        DependencyCompiler.Sync(
+            cwd=self.cwd,
+            reqFile=self.out,
+            executable=self.executable,
+            extraUrl=self.gpuUrl,
+        )
+
+    def install_deps(self):
+        self.compile_deps()
         self.install_core_plus_ext()

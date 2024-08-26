@@ -34,7 +34,6 @@ def test_compile(mock_prompt_select):
         reqFilesExt=[reqsDir / "x_reqs.txt", reqsDir / "y_reqs.txt"],
     )
 
-    DependencyCompiler.Install_Build_Deps()
     depComp.make_override()
     depComp.compile_core_plus_ext()
 
