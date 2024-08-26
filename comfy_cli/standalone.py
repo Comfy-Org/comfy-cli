@@ -153,18 +153,21 @@ class StandalonePython:
         self,
         comfyDir: PathLike,
         gpu: GPU_OPTION,
-        outDir: Optional[PathLike] = None,
         extraSpecs: Optional[list[str]] = None,
     ):
         self.dep_comp = DependencyCompiler(
             cwd=comfyDir,
             executable=self.executable,
             gpu=gpu,
-            outDir=self.rpath if outDir is None else outDir,
+            outDir=self.rpath,
             extraSpecs=extraSpecs,
         )
         self.dep_comp.compile_deps()
         self.dep_comp.fetch_dep_wheels()
+
+    def rehydrate_comfy_deps(self):
+        self.dep_comp = DependencyCompiler(executable=self.executable, outDir=self.rpath)
+        self.dep_comp.install_wheels()
 
     def to_tarball(self, outPath: Optional[PathLike] = None, progress: bool = True):
         outPath = self.rpath.with_suffix(".tgz") if outPath is None else Path(outPath)

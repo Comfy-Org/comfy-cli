@@ -90,7 +90,7 @@ def is_running(pid):
         return False
 
 
-def create_choice_completer(opts):
+def create_choice_completer(opts: list[str]):
     def f(incomplete: str) -> list[str]:
         return [opt for opt in opts if opt.startswith(incomplete)]
 
