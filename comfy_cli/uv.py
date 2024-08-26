@@ -351,19 +351,24 @@ class DependencyCompiler:
                 f.write(line)
             f.write("\n")
 
-            for spec in self.extraSpecs:
-                f.write(spec)
-            f.write("\n")
-
     def compile_core_plus_ext(self):
+        reqExtras = self.outDir / "requirements.extra"
         # clean up
+        reqExtras.unlink(missing_ok=True)
         self.out.unlink(missing_ok=True)
+
+        # make the extra specs file
+        if self.extraSpecs:
+            with reqExtras.open("w") as f:
+                for spec in self.extraSpecs:
+                    f.write(spec)
+                f.write("\n")
 
         while True:
             try:
                 DependencyCompiler.Compile(
                     cwd=self.cwd,
-                    reqFiles=(self.reqFilesCore + self.reqFilesExt),
+                    reqFiles=self.reqFilesCore + self.reqFilesExt + ([reqExtras] if self.extraSpecs else []),
                     executable=self.executable,
                     override=self.override,
                     out=self.out,
