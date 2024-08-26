@@ -166,7 +166,9 @@ class StandalonePython:
         self.dep_comp.fetch_dep_wheels()
 
     def rehydrate_comfy_deps(self):
-        self.dep_comp = DependencyCompiler(executable=self.executable, outDir=self.rpath)
+        self.dep_comp = DependencyCompiler(
+            executable=self.executable, outDir=self.rpath, reqFilesCore=[], reqFilesExt=[]
+        )
         self.dep_comp.install_wheels()
 
     def to_tarball(self, outPath: Optional[PathLike] = None, progress: bool = True):

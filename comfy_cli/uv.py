@@ -150,6 +150,7 @@ class DependencyCompiler:
         extra_index_url: Optional[str] = None,
         find_links: Optional[list[str]] = None,
         index_strategy: Optional[str] = "unsafe-best-match",
+        no_deps: bool = False,
         no_index: bool = False,
         override: Optional[PathLike] = None,
     ) -> subprocess.CompletedProcess[Any]:
@@ -175,6 +176,9 @@ class DependencyCompiler:
 
         if index_strategy is not None:
             cmd.extend(["--index-strategy", "unsafe-best-match"])
+
+        if no_deps:
+            cmd.append("--no-deps")
 
         if no_index:
             cmd.append("--no-index")
@@ -433,6 +437,7 @@ class DependencyCompiler:
             reqFile=self.out,
             executable=self.executable,
             find_links=[self.outDir / "dists"],
+            no_deps=True,
             no_index=True,
         )
 
@@ -442,6 +447,7 @@ class DependencyCompiler:
             reqFile=self.out,
             executable=self.executable,
             find_links=[self.outDir / "wheels"],
+            no_deps=True,
             no_index=True,
         )
 

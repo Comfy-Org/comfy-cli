@@ -660,7 +660,7 @@ def standalone(
         print("[bold yellow]Installing on Intel ARC is in beta stage.[/bold yellow]")
 
     if rehydrate:
-        sty = StandalonePython.FromTarball(fpath="python")
+        sty = StandalonePython.FromTarball(fpath="python.tgz")
         sty.rehydrate_comfy_deps()
     else:
         sty = StandalonePython.FromDistro(platform=platform, proc=proc)
