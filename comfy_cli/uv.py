@@ -145,10 +145,12 @@ class DependencyCompiler:
     def Install(
         cwd: PathLike,
         reqFile: list[PathLike],
-        dry: bool = False,
         executable: PathLike = sys.executable,
-        extraUrl: Optional[str] = None,
-        index_strategy: str = "unsafe-best-match",
+        dry: bool = False,
+        extra_index_url: Optional[str] = None,
+        find_links: Optional[list[str]] = None,
+        index_strategy: Optional[str] = "unsafe-best-match",
+        no_index: bool = False,
         override: Optional[PathLike] = None,
     ) -> subprocess.CompletedProcess[Any]:
         cmd = [
@@ -161,17 +163,24 @@ class DependencyCompiler:
             str(reqFile),
         ]
 
+        if dry:
+            cmd.append("--dry-run")
+
+        if extra_index_url is not None:
+            cmd.extend(["--extra-index-url", extra_index_url])
+
+        if find_links is not None:
+            for fl in find_links:
+                cmd.extend(["--find-links", fl])
+
         if index_strategy is not None:
             cmd.extend(["--index-strategy", "unsafe-best-match"])
 
-        if extraUrl is not None:
-            cmd.extend(["--extra-index-url", extraUrl])
+        if no_index:
+            cmd.append("--no-index")
 
         if override is not None:
             cmd.extend(["--override", str(override)])
-
-        if dry:
-            cmd.append("--dry-run")
 
         return _check_call(cmd, cwd)
 
@@ -409,6 +418,41 @@ class DependencyCompiler:
         self.compile_core_plus_ext()
         self.handle_opencv()
 
+    def install_deps(self):
+        DependencyCompiler.Install(
+            cwd=self.cwd,
+            reqFile=self.out,
+            executable=self.executable,
+            extra_index_url=self.gpuUrl,
+            override=self.override,
+        )
+
+    def install_dists(self):
+        DependencyCompiler.Install(
+            cwd=self.cwd,
+            reqFile=self.out,
+            executable=self.executable,
+            find_links=[self.outDir / "dists"],
+            no_index=True,
+        )
+
+    def install_wheels(self):
+        DependencyCompiler.Install(
+            cwd=self.cwd,
+            reqFile=self.out,
+            executable=self.executable,
+            find_links=[self.outDir / "wheels"],
+            no_index=True,
+        )
+
+    def sync_core_plus_ext(self):
+        DependencyCompiler.Sync(
+            cwd=self.cwd,
+            reqFile=self.out,
+            executable=self.executable,
+            extraUrl=self.gpuUrl,
+        )
+
     def fetch_dep_dists(self):
         DependencyCompiler.Download(
             cwd=self.cwd,
@@ -428,24 +472,3 @@ class DependencyCompiler:
             noDeps=True,
             out=self.outDir / "wheels",
         )
-
-    def install_core_plus_ext(self):
-        DependencyCompiler.Install(
-            cwd=self.cwd,
-            reqFile=self.out,
-            executable=self.executable,
-            extraUrl=self.gpuUrl,
-            override=self.override,
-        )
-
-    def sync_core_plus_ext(self):
-        DependencyCompiler.Sync(
-            cwd=self.cwd,
-            reqFile=self.out,
-            executable=self.executable,
-            extraUrl=self.gpuUrl,
-        )
-
-    def install_deps(self):
-        self.compile_deps()
-        self.install_core_plus_ext()

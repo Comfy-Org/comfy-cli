@@ -3,7 +3,6 @@ __pycache__/
 
 #COMMON CONFIGs
 .DS_Store
-.ruff_cache
 .src_port
 .webpack_watch.log
 *.swp
@@ -48,7 +47,9 @@ share/python-wheels/
 *.manifest
 *.spec
 
-# temporary files created by tests
+# temporary files created by linting, tests, etc
+.pytest_cache/
+.ruff_cache/
 tests/temp/
 
 venv/

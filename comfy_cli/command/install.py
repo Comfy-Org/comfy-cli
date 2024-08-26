@@ -229,6 +229,7 @@ def execute(
 
     if fast_deps:
         depComp = DependencyCompiler(cwd=repo_dir, gpu=gpu)
+        depComp.compile_deps()
         depComp.install_deps()
 
     if not skip_manager:
