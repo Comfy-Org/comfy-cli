@@ -194,7 +194,7 @@ class StandalonePython:
 
         with Live(progress_table, refresh_per_second=10):
             with tarfile.open(outPath, "w:gz") as tar:
-                tar.add(self.rpath, filter=_filter)
+                tar.add(self.rpath.relative_to(Path(".").expanduser().resolve()), filter=_filter)
 
             if progress:
                 barProg.advance(addTar, _size)
