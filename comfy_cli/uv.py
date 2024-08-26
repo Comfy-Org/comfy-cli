@@ -289,13 +289,27 @@ class DependencyCompiler:
         outName: str = "requirements.compiled",
         reqFilesCore: Optional[list[PathLike]] = None,
         reqFilesExt: Optional[list[PathLike]] = None,
+        extraSpecs: Optional[list[str]] = None,
     ):
+        """Compiler/installer of Python dependencies based on uv
+
+        Args:
+            cwd (PathLike): should generally be a comfy workspace dir. Dir that is searched for dependency specification files, and where subprocesses are run in
+            executable (PathLike): path to Python executable used to run uv and other subprocesses
+            gpu (Union[GPU_OPTION, None]): the gpu against which pytorch and any related dependencies should be built against
+            outDir (PathLike): the directory in which to create any output from the compiler itself
+            outName (str): the name of the output file containing the compiled requirements
+            reqFilesCore (Optional[list[PathLike]]): list of core requirement files (requirements.txt, pyproject.toml, etc) to be included in the compilation. Any requirements determined from these files will override all other requirements
+            reqFilesExt (Optional[list[PathLike]]): list of requirement files (requirements.txt, pyproject.toml, etc) to be included in the compilation
+            extraSpecs (Optional[list[str]]): list of extra Python requirement specifiers to be included in the compilation
+        """
         self.cwd = Path(cwd).expanduser().resolve()
         self.outDir = Path(outDir).expanduser().resolve()
         # use .absolute since .resolve breaks the softlink-is-interpreter assumption of venvs
         self.executable = Path(executable).expanduser().absolute()
         self.gpu = DependencyCompiler.Resolve_Gpu(gpu)
         self.reqFiles = [Path(reqFile) for reqFile in reqFilesExt] if reqFilesExt is not None else None
+        self.extraSpecs = [] if extraSpecs is None else extraSpecs
 
         self.gpuUrl = (
             DependencyCompiler.nvidiaPytorchUrl if self.gpu == GPU_OPTION.NVIDIA else
@@ -335,6 +349,10 @@ class DependencyCompiler:
             f.write("# ensure that core comfyui deps take precedence over any 3rd party extension deps\n")
             for line in completed.stdout:
                 f.write(line)
+            f.write("\n")
+
+            for spec in self.extraSpecs:
+                f.write(spec)
             f.write("\n")
 
     def compile_core_plus_ext(self):

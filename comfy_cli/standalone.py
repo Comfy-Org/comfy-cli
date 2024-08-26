@@ -161,10 +161,18 @@ class StandalonePython:
         self.dep_comp = DependencyCompiler(cwd=comfyDir, executable=self.executable, gpu=gpu, outDir=outDir)
         self.dep_comp.install_core_plus_ext()
 
-    def precache_comfy_deps(self, comfyDir: PathLike, gpu: GPU_OPTION, outDir: Optional[PathLike] = None):
+    def precache_comfy_deps(
+        self,
+        comfyDir: PathLike,
+        gpu: GPU_OPTION,
+        outDir: Optional[PathLike] = None,
+        extraSpecs: Optional[list[str]] = None,
+    ):
         outDir = self.rpath if outDir is None else outDir
 
-        self.dep_comp = DependencyCompiler(cwd=comfyDir, executable=self.executable, gpu=gpu, outDir=outDir)
+        self.dep_comp = DependencyCompiler(
+            cwd=comfyDir, executable=self.executable, gpu=gpu, outDir=outDir, extraSpecs=extraSpecs
+        )
         self.dep_comp.precache_comfy_deps()
 
     def wheel_comfy_deps(self, comfyDir: PathLike, gpu: GPU_OPTION, outDir: Optional[PathLike] = None):

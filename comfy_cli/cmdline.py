@@ -547,6 +547,13 @@ def feedback():
 @app.command(help="Download a standalone Python interpreter and dependencies based on an existing comfyui workspace")
 @tracking.track_command()
 def standalone(
+    cli_spec: Annotated[
+        str,
+        typer.Option(
+            show_default=False,
+            help="setuptools-style requirement specificer pointing to an instance of comfy-cli",
+        ),
+    ] = "comfy-cli",
     platform: Annotated[
         Optional[constants.OS],
         typer.Option(
@@ -646,7 +653,7 @@ def standalone(
         print("[bold yellow]Installing on Intel ARC is in beta stage.[/bold yellow]")
 
     sty = StandalonePython.FromDistro(platform=platform, proc=proc)
-    sty.precache_comfy_deps(comfyDir=comfy_path, gpu=gpu)
+    sty.precache_comfy_deps(comfyDir=comfy_path, gpu=gpu, extraSpecs=cli_spec)
     sty.to_tarball()
 
 
