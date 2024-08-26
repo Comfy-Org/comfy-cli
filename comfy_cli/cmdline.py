@@ -610,6 +610,13 @@ def standalone(
             callback=g_gpu_exclusivity.validate,
         ),
     ] = None,
+    rehydrate: Annotated[
+        bool,
+        typer.Option(
+            show_default=False,
+            help="Create standalone Python for CPU",
+        ),
+    ] = False,
 ):
     comfy_path, _ = workspace_manager.get_workspace_path()
 
@@ -652,9 +659,13 @@ def standalone(
                 raise typer.Exit(code=0)
         print("[bold yellow]Installing on Intel ARC is in beta stage.[/bold yellow]")
 
-    sty = StandalonePython.FromDistro(platform=platform, proc=proc)
-    sty.dehydrate_comfy_deps(comfyDir=comfy_path, gpu=gpu, extraSpecs=cli_spec)
-    sty.to_tarball()
+    if rehydrate:
+        sty = StandalonePython.FromTarball(fpath="python")
+        sty.rehydrate_comfy_deps()
+    else:
+        sty = StandalonePython.FromDistro(platform=platform, proc=proc)
+        sty.dehydrate_comfy_deps(comfyDir=comfy_path, gpu=gpu, extraSpecs=cli_spec)
+        sty.to_tarball()
 
 
 app.add_typer(models_command.app, name="model", help="Manage models.")
