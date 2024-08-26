@@ -181,25 +181,36 @@ class StandalonePython:
         self.dep_comp = DependencyCompiler(cwd=comfyDir, executable=self.executable, gpu=gpu, outDir=outDir)
         self.dep_comp.wheel_comfy_deps()
 
-    def to_tarball(self, outPath: Optional[PathLike] = None):
+    def to_tarball(self, outPath: Optional[PathLike] = None, progress: bool = True):
         outPath = self.rpath.with_suffix(".tgz") if outPath is None else Path(outPath)
-        fileSize = sum(f.stat().st_size for f in self.rpath.glob("**/*"))
 
-        barProg = Progress()
-        addTar = barProg.add_task("[cyan]Creating tarball...", total=fileSize)
-        pathProg = Progress(TextColumn("{task.description}"))
-        pathTar = pathProg.add_task("")
+        if progress:
+            fileSize = sum(f.stat().st_size for f in self.rpath.glob("**/*"))
 
-        progress_table = Table.grid()
-        progress_table.add_row(barProg)
-        progress_table.add_row(pathProg)
+            barProg = Progress()
+            addTar = barProg.add_task("[cyan]Creating tarball...", total=fileSize)
+            pathProg = Progress(TextColumn("{task.description}"))
+            pathTar = pathProg.add_task("")
 
-        def _filter(tinfo: tarfile.TarInfo):
-            pathProg.update(pathTar, description=tinfo.path)
-            size = Path(tinfo.path).stat().st_size
-            barProg.advance(addTar, size)
-            return tinfo
+            progress_table = Table.grid()
+            progress_table.add_row(barProg)
+            progress_table.add_row(pathProg)
+
+            _size = 0
+
+            def _filter(tinfo: tarfile.TarInfo):
+                nonlocal _size
+                pathProg.update(pathTar, description=tinfo.path)
+                barProg.advance(addTar, _size)
+                _size = Path(tinfo.path).stat().st_size
+                return tinfo
+        else:
+            _filter = None
 
         with Live(progress_table, refresh_per_second=10):
             with tarfile.open(outPath, "w:gz") as tar:
                 tar.add(self.rpath, filter=_filter)
+
+            if progress:
+                barProg.advance(addTar, _size)
+                pathProg.update(pathTar, description="")
