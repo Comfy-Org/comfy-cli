@@ -57,3 +57,5 @@ venv/
 bisect_state.json
 python*
 cpython*
+requirements.compiled
+override.txt
