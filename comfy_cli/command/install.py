@@ -229,7 +229,8 @@ def execute(
 
     if fast_deps:
         depComp = DependencyCompiler(cwd=repo_dir, gpu=gpu)
-        depComp.install_comfy_deps()
+        depComp.compile_deps()
+        depComp.install_deps()
 
     if not skip_manager:
         update_node_id_cache()

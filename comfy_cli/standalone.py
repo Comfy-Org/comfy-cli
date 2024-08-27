@@ -6,6 +6,9 @@ from pathlib import Path
 from typing import Optional
 
 import requests
+from rich.live import Live
+from rich.progress import Progress, TextColumn
+from rich.table import Table
 
 from comfy_cli.constants import GPU_OPTION, OS, PROC
 from comfy_cli.typing import PathLike
@@ -146,31 +149,58 @@ class StandalonePython:
     def install_comfy(self, *args: list[str], gpu_arg: str = "--nvidia"):
         self.run_comfy_cli("--here", "--skip-prompt", "install", "--fast-deps", gpu_arg, *args)
 
-    def compile_comfy_deps(self, comfyDir: PathLike, gpu: GPU_OPTION, outDir: Optional[PathLike] = None):
-        outDir = self.rpath if outDir is None else outDir
+    def dehydrate_comfy_deps(
+        self,
+        comfyDir: PathLike,
+        gpu: GPU_OPTION,
+        extraSpecs: Optional[list[str]] = None,
+    ):
+        self.dep_comp = DependencyCompiler(
+            cwd=comfyDir,
+            executable=self.executable,
+            gpu=gpu,
+            outDir=self.rpath,
+            extraSpecs=extraSpecs,
+        )
+        self.dep_comp.compile_deps()
+        self.dep_comp.fetch_dep_wheels()
 
-        self.dep_comp = DependencyCompiler(cwd=comfyDir, executable=self.executable, gpu=gpu, outDir=outDir)
-        self.dep_comp.compile_comfy_deps()
+    def rehydrate_comfy_deps(self):
+        self.dep_comp = DependencyCompiler(
+            executable=self.executable, outDir=self.rpath, reqFilesCore=[], reqFilesExt=[]
+        )
+        self.dep_comp.install_wheels_directly()
 
-    def install_comfy_deps(self, comfyDir: PathLike, gpu: GPU_OPTION, outDir: Optional[PathLike] = None):
-        outDir = self.rpath if outDir is None else outDir
-
-        self.dep_comp = DependencyCompiler(cwd=comfyDir, executable=self.executable, gpu=gpu, outDir=outDir)
-        self.dep_comp.install_core_plus_ext()
-
-    def precache_comfy_deps(self, comfyDir: PathLike, gpu: GPU_OPTION, outDir: Optional[PathLike] = None):
-        outDir = self.rpath if outDir is None else outDir
-
-        self.dep_comp = DependencyCompiler(cwd=comfyDir, executable=self.executable, gpu=gpu, outDir=outDir)
-        self.dep_comp.precache_comfy_deps()
-
-    def wheel_comfy_deps(self, comfyDir: PathLike, gpu: GPU_OPTION, outDir: Optional[PathLike] = None):
-        outDir = self.rpath if outDir is None else outDir
-
-        self.dep_comp = DependencyCompiler(cwd=comfyDir, executable=self.executable, gpu=gpu, outDir=outDir)
-        self.dep_comp.wheel_comfy_deps()
-
-    def to_tarball(self, outPath: Optional[PathLike] = None):
+    def to_tarball(self, outPath: Optional[PathLike] = None, progress: bool = True):
         outPath = self.rpath.with_suffix(".tgz") if outPath is None else Path(outPath)
-        with tarfile.open(outPath, "w:gz") as tar:
-            tar.add(self.rpath, arcname=self.rpath.parent)
+
+        if progress:
+            fileSize = sum(f.stat().st_size for f in self.rpath.glob("**/*"))
+
+            barProg = Progress()
+            addTar = barProg.add_task("[cyan]Creating tarball...", total=fileSize)
+            pathProg = Progress(TextColumn("{task.description}"))
+            pathTar = pathProg.add_task("")
+
+            progress_table = Table.grid()
+            progress_table.add_row(barProg)
+            progress_table.add_row(pathProg)
+
+            _size = 0
+
+            def _filter(tinfo: tarfile.TarInfo):
+                nonlocal _size
+                pathProg.update(pathTar, description=tinfo.path)
+                barProg.advance(addTar, _size)
+                _size = Path(tinfo.path).stat().st_size
+                return tinfo
+        else:
+            _filter = None
+
+        with Live(progress_table, refresh_per_second=10):
+            with tarfile.open(outPath, "w:gz") as tar:
+                tar.add(self.rpath.relative_to(Path(".").expanduser().resolve()), filter=_filter)
+
+            if progress:
+                barProg.advance(addTar, _size)
+                pathProg.update(pathTar, description="")

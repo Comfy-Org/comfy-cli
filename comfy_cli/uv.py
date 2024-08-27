@@ -144,12 +144,16 @@ class DependencyCompiler:
     @staticmethod
     def Install(
         cwd: PathLike,
-        reqFile: list[PathLike],
-        dry: bool = False,
         executable: PathLike = sys.executable,
-        extraUrl: Optional[str] = None,
-        index_strategy: str = "unsafe-best-match",
+        dry: bool = False,
+        extra_index_url: Optional[str] = None,
+        find_links: Optional[list[str]] = None,
+        index_strategy: Optional[str] = "unsafe-best-match",
+        no_deps: bool = False,
+        no_index: bool = False,
         override: Optional[PathLike] = None,
+        reqs: Optional[list[str]] = None,
+        reqFile: Optional[list[PathLike]] = None,
     ) -> subprocess.CompletedProcess[Any]:
         cmd = [
             str(executable),
@@ -157,21 +161,36 @@ class DependencyCompiler:
             "uv",
             "pip",
             "install",
-            "-r",
-            str(reqFile),
         ]
+
+        if dry:
+            cmd.append("--dry-run")
+
+        if extra_index_url is not None:
+            cmd.extend(["--extra-index-url", extra_index_url])
+
+        if find_links is not None:
+            for fl in find_links:
+                cmd.extend(["--find-links", fl])
 
         if index_strategy is not None:
             cmd.extend(["--index-strategy", "unsafe-best-match"])
 
-        if extraUrl is not None:
-            cmd.extend(["--extra-index-url", extraUrl])
+        if no_deps:
+            cmd.append("--no-deps")
+
+        if no_index:
+            cmd.append("--no-index")
 
         if override is not None:
             cmd.extend(["--override", str(override)])
 
-        if dry:
-            cmd.append("--dry-run")
+        if reqs is not None:
+            cmd.extend(reqs)
+
+        if reqFile is not None:
+            for rf in reqFile:
+                cmd.extend(["--requirement", rf])
 
         return _check_call(cmd, cwd)
 
@@ -289,13 +308,27 @@ class DependencyCompiler:
         outName: str = "requirements.compiled",
         reqFilesCore: Optional[list[PathLike]] = None,
         reqFilesExt: Optional[list[PathLike]] = None,
+        extraSpecs: Optional[list[str]] = None,
     ):
+        """Compiler/installer of Python dependencies based on uv
+
+        Args:
+            cwd (PathLike): should generally be a comfy workspace dir. Dir that is searched for dependency specification files, and where subprocesses are run in
+            executable (PathLike): path to Python executable used to run uv and other subprocesses
+            gpu (Union[GPU_OPTION, None]): the gpu against which pytorch and any related dependencies should be built against
+            outDir (PathLike): the directory in which to create any output from the compiler itself
+            outName (str): the name of the output file containing the compiled requirements
+            reqFilesCore (Optional[list[PathLike]]): list of core requirement files (requirements.txt, pyproject.toml, etc) to be included in the compilation. Any requirements determined from these files will override all other requirements
+            reqFilesExt (Optional[list[PathLike]]): list of requirement files (requirements.txt, pyproject.toml, etc) to be included in the compilation
+            extraSpecs (Optional[list[str]]): list of extra Python requirement specifiers to be included in the compilation
+        """
         self.cwd = Path(cwd).expanduser().resolve()
         self.outDir = Path(outDir).expanduser().resolve()
         # use .absolute since .resolve breaks the softlink-is-interpreter assumption of venvs
         self.executable = Path(executable).expanduser().absolute()
         self.gpu = DependencyCompiler.Resolve_Gpu(gpu)
         self.reqFiles = [Path(reqFile) for reqFile in reqFilesExt] if reqFilesExt is not None else None
+        self.extraSpecs = [] if extraSpecs is None else extraSpecs
 
         self.gpuUrl = (
             DependencyCompiler.nvidiaPytorchUrl if self.gpu == GPU_OPTION.NVIDIA else
@@ -338,14 +371,23 @@ class DependencyCompiler:
             f.write("\n")
 
     def compile_core_plus_ext(self):
+        reqExtras = self.outDir / "requirements.extra"
         # clean up
+        reqExtras.unlink(missing_ok=True)
         self.out.unlink(missing_ok=True)
+
+        # make the extra specs file
+        if self.extraSpecs:
+            with reqExtras.open("w") as f:
+                for spec in self.extraSpecs:
+                    f.write(spec)
+                f.write("\n")
 
         while True:
             try:
                 DependencyCompiler.Compile(
                     cwd=self.cwd,
-                    reqFiles=(self.reqFilesCore + self.reqFilesExt),
+                    reqFiles=self.reqFilesCore + self.reqFilesExt + ([reqExtras] if self.extraSpecs else []),
                     executable=self.executable,
                     override=self.override,
                     out=self.out,
@@ -359,23 +401,6 @@ class DependencyCompiler:
                         f.write(e.req + "\n")
                 else:
                     raise AttributeError
-
-    def install_core_plus_ext(self):
-        DependencyCompiler.Install(
-            cwd=self.cwd,
-            reqFile=self.out,
-            executable=self.executable,
-            extraUrl=self.gpuUrl,
-            override=self.override,
-        )
-
-    def sync_core_plus_ext(self):
-        DependencyCompiler.Sync(
-            cwd=self.cwd,
-            reqFile=self.out,
-            executable=self.executable,
-            extraUrl=self.gpuUrl,
-        )
 
     def handle_opencv(self):
         """as per the opencv docs, you should only have exactly one opencv package.
@@ -398,24 +423,68 @@ class DependencyCompiler:
                     if "opencv-python==" not in line:
                         f.write(line)
 
-    def compile_comfy_deps(self):
+    def compile_deps(self):
         self.make_override()
         self.compile_core_plus_ext()
         self.handle_opencv()
 
-    def precache_comfy_deps(self):
-        self.compile_comfy_deps()
+    def install_deps(self):
+        DependencyCompiler.Install(
+            cwd=self.cwd,
+            reqFile=self.out,
+            executable=self.executable,
+            extra_index_url=self.gpuUrl,
+            override=self.override,
+        )
+
+    def install_dists(self):
+        DependencyCompiler.Install(
+            cwd=self.cwd,
+            reqFile=self.out,
+            executable=self.executable,
+            find_links=[self.outDir / "dists"],
+            no_deps=True,
+            no_index=True,
+        )
+
+    def install_wheels(self):
+        DependencyCompiler.Install(
+            cwd=self.cwd,
+            executable=self.executable,
+            find_links=[self.outDir / "wheels"],
+            no_deps=True,
+            no_index=True,
+            reqFile=self.out,
+        )
+
+    def install_wheels_directly(self):
+        DependencyCompiler.Install(
+            cwd=self.cwd,
+            executable=self.executable,
+            no_deps=True,
+            no_index=True,
+            reqs=(self.outDir / "wheels").glob("*.whl"),
+        )
+
+    def sync_core_plus_ext(self):
+        DependencyCompiler.Sync(
+            cwd=self.cwd,
+            reqFile=self.out,
+            executable=self.executable,
+            extraUrl=self.gpuUrl,
+        )
+
+    def fetch_dep_dists(self):
         DependencyCompiler.Download(
             cwd=self.cwd,
             reqFile=self.out,
             executable=self.executable,
             extraUrl=self.gpuUrl,
             noDeps=True,
-            out=self.outDir / "cache",
+            out=self.outDir / "dists",
         )
 
-    def wheel_comfy_deps(self):
-        self.compile_comfy_deps()
+    def fetch_dep_wheels(self):
         DependencyCompiler.Wheel(
             cwd=self.cwd,
             reqFile=self.out,
@@ -424,9 +493,3 @@ class DependencyCompiler:
             noDeps=True,
             out=self.outDir / "wheels",
         )
-
-    def install_comfy_deps(self):
-        DependencyCompiler.Install_Build_Deps(executable=self.executable)
-
-        self.compile_comfy_deps()
-        self.install_core_plus_ext()
