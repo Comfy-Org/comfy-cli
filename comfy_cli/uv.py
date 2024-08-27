@@ -291,7 +291,7 @@ class DependencyCompiler:
 
         if out is not None:
             cmd.extend(["-w", str(out)])
-        print(cmd)
+
         return _check_call(cmd, cwd)
 
     @staticmethod
