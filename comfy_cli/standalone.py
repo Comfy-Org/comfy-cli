@@ -10,7 +10,7 @@ from rich.live import Live
 from rich.progress import Progress, TextColumn
 from rich.table import Table
 
-from comfy_cli.constants import GPU_OPTION, OS, PROC
+from comfy_cli.constants import OS, PROC
 from comfy_cli.typing import PathLike
 from comfy_cli.utils import download_progress, get_os, get_proc
 from comfy_cli.uv import DependencyCompiler
@@ -152,13 +152,11 @@ class StandalonePython:
     def dehydrate_comfy_deps(
         self,
         comfyDir: PathLike,
-        gpu: GPU_OPTION,
         extraSpecs: Optional[list[str]] = None,
     ):
         self.dep_comp = DependencyCompiler(
             cwd=comfyDir,
             executable=self.executable,
-            gpu=gpu,
             outDir=self.rpath,
             extraSpecs=extraSpecs,
         )
