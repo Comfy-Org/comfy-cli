@@ -246,9 +246,13 @@ class DependencyCompiler:
             "-m",
             "pip",
             "download",
-            "-r",
-            str(reqFile),
         ]
+
+        if isinstance(reqFile, (str, Path)):
+            cmd.extend(["-r", str(reqFile)])
+        elif isinstance(reqFile, list):
+            for rf in reqFile:
+                cmd.extend(["-r", str(rf)])
 
         if extraUrl is not None:
             cmd.extend(["--extra-index-url", extraUrl])
@@ -271,14 +275,13 @@ class DependencyCompiler:
         out: Optional[PathLike] = None,
     ) -> subprocess.CompletedProcess[Any]:
         """For now, the `wheel` cmd has no uv support, so use pip"""
-        cmd = [
-            str(executable),
-            "-m",
-            "pip",
-            "wheel",
-            "-r",
-            str(reqFile),
-        ]
+        cmd = [str(executable), "-m", "pip", "wheel"]
+
+        if isinstance(reqFile, (str, Path)):
+            cmd.extend(["-r", str(reqFile)])
+        elif isinstance(reqFile, list):
+            for rf in reqFile:
+                cmd.extend(["-r", str(rf)])
 
         if extraUrl is not None:
             cmd.extend(["--extra-index-url", extraUrl])
