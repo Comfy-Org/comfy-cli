@@ -83,10 +83,12 @@ class DependencyCompiler:
     def Compile(
         cwd: PathLike,
         reqFiles: list[PathLike],
+        emit_index_annotation: bool = True,
+        emit_index_url: bool = True,
         executable: PathLike = sys.executable,
         index_strategy: str = "unsafe-best-match",
-        override: Optional[PathLike] = None,
         out: Optional[PathLike] = None,
+        override: Optional[PathLike] = None,
         resolve_strategy: Optional[str] = None,
     ) -> subprocess.CompletedProcess[Any]:
         cmd = [
@@ -95,23 +97,27 @@ class DependencyCompiler:
             "uv",
             "pip",
             "compile",
-            "--emit-index-url",
-            "--emit-index-annotation",
         ]
 
         for reqFile in reqFiles:
             cmd.append(str(reqFile))
+
+        if emit_index_annotation:
+            cmd.append("--emit-index-annotation")
+
+        if emit_index_url:
+            cmd.append("--emit-index-url")
 
         # ensures that eg tqdm is latest version, even though an old tqdm is on the amd url
         # see https://github.com/astral-sh/uv/blob/main/PIP_COMPATIBILITY.md#packages-that-exist-on-multiple-indexes and https://github.com/astral-sh/uv/issues/171
         if index_strategy is not None:
             cmd.extend(["--index-strategy", "unsafe-best-match"])
 
-        if override is not None:
-            cmd.extend(["--override", str(override)])
-
         if out is not None:
             cmd.extend(["-o", str(out)])
+
+        if override is not None:
+            cmd.extend(["--override", str(override)])
 
         try:
             return _run(cmd, cwd)
@@ -362,6 +368,8 @@ class DependencyCompiler:
         completed = DependencyCompiler.Compile(
             cwd=self.cwd,
             reqFiles=self.reqFilesCore,
+            emit_index_annotation=False,
+            emit_index_url=False,
             executable=self.executable,
             override=self.override,
         )
