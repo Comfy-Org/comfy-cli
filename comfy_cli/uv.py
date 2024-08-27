@@ -95,6 +95,8 @@ class DependencyCompiler:
             "uv",
             "pip",
             "compile",
+            "--emit-index-url",
+            "--emit-index-annotation",
         ]
 
         for reqFile in reqFiles:
