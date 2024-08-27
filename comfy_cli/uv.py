@@ -144,7 +144,6 @@ class DependencyCompiler:
     @staticmethod
     def Install(
         cwd: PathLike,
-        reqFile: list[PathLike],
         executable: PathLike = sys.executable,
         dry: bool = False,
         extra_index_url: Optional[str] = None,
@@ -153,6 +152,8 @@ class DependencyCompiler:
         no_deps: bool = False,
         no_index: bool = False,
         override: Optional[PathLike] = None,
+        reqs: Optional[list[str]] = None,
+        reqFile: Optional[list[PathLike]] = None,
     ) -> subprocess.CompletedProcess[Any]:
         cmd = [
             str(executable),
@@ -160,8 +161,6 @@ class DependencyCompiler:
             "uv",
             "pip",
             "install",
-            "-r",
-            str(reqFile),
         ]
 
         if dry:
@@ -185,6 +184,13 @@ class DependencyCompiler:
 
         if override is not None:
             cmd.extend(["--override", str(override)])
+
+        if reqs is not None:
+            cmd.extend(reqs)
+
+        if reqFile is not None:
+            for rf in reqFile:
+                cmd.extend(["--requirement", rf])
 
         return _check_call(cmd, cwd)
 
@@ -444,11 +450,20 @@ class DependencyCompiler:
     def install_wheels(self):
         DependencyCompiler.Install(
             cwd=self.cwd,
-            reqFile=self.out,
             executable=self.executable,
             find_links=[self.outDir / "wheels"],
             no_deps=True,
             no_index=True,
+            reqFile=self.out,
+        )
+
+    def install_wheels_directly(self):
+        DependencyCompiler.Install(
+            cwd=self.cwd,
+            executable=self.executable,
+            no_deps=True,
+            no_index=True,
+            reqs=(self.outDir / "wheels").glob("*.whl"),
         )
 
     def sync_core_plus_ext(self):

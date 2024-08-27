@@ -169,7 +169,7 @@ class StandalonePython:
         self.dep_comp = DependencyCompiler(
             executable=self.executable, outDir=self.rpath, reqFilesCore=[], reqFilesExt=[]
         )
-        self.dep_comp.install_wheels()
+        self.dep_comp.install_wheels_directly()
 
     def to_tarball(self, outPath: Optional[PathLike] = None, progress: bool = True):
         outPath = self.rpath.with_suffix(".tgz") if outPath is None else Path(outPath)
