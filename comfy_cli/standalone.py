@@ -121,6 +121,10 @@ class StandalonePython:
         # upgrade pip if needed, install uv
         self.pip_install("-U", "pip", "uv")
 
+    def clean(self):
+        for pycache in self.rpath.glob("**/__pycache__"):
+            shutil.rmtree(pycache)
+
     def run_module(self, mod: str, *args: list[str]):
         cmd: list[str] = [
             str(self.executable),
@@ -171,6 +175,10 @@ class StandalonePython:
 
     def to_tarball(self, outPath: Optional[PathLike] = None, progress: bool = True):
         outPath = self.rpath.with_suffix(".tgz") if outPath is None else Path(outPath)
+
+        # do a little clean up prep
+        outPath.unlink(missing_ok=True)
+        self.clean()
 
         if progress:
             fileSize = sum(f.stat().st_size for f in self.rpath.glob("**/*"))
