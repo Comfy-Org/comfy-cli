@@ -246,9 +246,13 @@ class DependencyCompiler:
             "-m",
             "pip",
             "download",
-            "-r",
-            str(reqFile),
         ]
+
+        if isinstance(reqFile, (str, Path)):
+            cmd.extend(["-r", str(reqFile)])
+        elif isinstance(reqFile, list):
+            for rf in reqFile:
+                cmd.extend(["-r", str(rf)])
 
         if extraUrl is not None:
             cmd.extend(["--extra-index-url", extraUrl])
@@ -271,14 +275,13 @@ class DependencyCompiler:
         out: Optional[PathLike] = None,
     ) -> subprocess.CompletedProcess[Any]:
         """For now, the `wheel` cmd has no uv support, so use pip"""
-        cmd = [
-            str(executable),
-            "-m",
-            "pip",
-            "wheel",
-            "-r",
-            str(reqFile),
-        ]
+        cmd = [str(executable), "-m", "pip", "wheel"]
+
+        if isinstance(reqFile, (str, Path)):
+            cmd.extend(["-r", str(reqFile)])
+        elif isinstance(reqFile, list):
+            for rf in reqFile:
+                cmd.extend(["-r", str(rf)])
 
         if extraUrl is not None:
             cmd.extend(["--extra-index-url", extraUrl])
@@ -288,7 +291,7 @@ class DependencyCompiler:
 
         if out is not None:
             cmd.extend(["-w", str(out)])
-
+        print(cmd)
         return _check_call(cmd, cwd)
 
     @staticmethod
@@ -343,8 +346,8 @@ class DependencyCompiler:
             DependencyCompiler.rocmPytorchUrl if self.gpu == GPU_OPTION.AMD else
             None
         )  # fmt: skip
-        self.out: Path = self.outDir / outName
-        self.override = self.outDir / "override.txt"
+        self.out: Path = self.cwd / outName
+        self.override = self.cwd / "override.txt"
 
         self.reqFilesCore = reqFilesCore if reqFilesCore is not None else self.find_core_reqs()
         self.reqFilesExt = reqFilesExt if reqFilesExt is not None else self.find_ext_reqs()
