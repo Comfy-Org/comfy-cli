@@ -331,7 +331,7 @@ class DependencyCompiler:
             extraSpecs (Optional[list[str]]): list of extra Python requirement specifiers to be included in the compilation
         """
         self.cwd = Path(cwd).expanduser().resolve()
-        self.outDir = Path(outDir).expanduser().resolve()
+        self.outDir: Path = Path(outDir).expanduser().resolve()
         # use .absolute since .resolve breaks the softlink-is-interpreter assumption of venvs
         self.executable = Path(executable).expanduser().absolute()
         self.gpu = DependencyCompiler.Resolve_Gpu(gpu)
@@ -343,7 +343,7 @@ class DependencyCompiler:
             DependencyCompiler.rocmPytorchUrl if self.gpu == GPU_OPTION.AMD else
             None
         )  # fmt: skip
-        self.out = self.outDir / outName
+        self.out: Path = self.outDir / outName
         self.override = self.outDir / "override.txt"
 
         self.reqFilesCore = reqFilesCore if reqFilesCore is not None else self.find_core_reqs()
@@ -441,7 +441,7 @@ class DependencyCompiler:
     def install_deps(self):
         DependencyCompiler.Install(
             cwd=self.cwd,
-            reqFile=self.out,
+            reqFile=[self.out],
             executable=self.executable,
             extra_index_url=self.gpuUrl,
             override=self.override,
@@ -450,7 +450,7 @@ class DependencyCompiler:
     def install_dists(self):
         DependencyCompiler.Install(
             cwd=self.cwd,
-            reqFile=self.out,
+            reqFile=[self.out],
             executable=self.executable,
             find_links=[self.outDir / "dists"],
             no_deps=True,
@@ -464,7 +464,7 @@ class DependencyCompiler:
             find_links=[self.outDir / "wheels"],
             no_deps=True,
             no_index=True,
-            reqFile=self.out,
+            reqFile=[self.out],
         )
 
     def install_wheels_directly(self):
@@ -479,7 +479,7 @@ class DependencyCompiler:
     def sync_core_plus_ext(self):
         DependencyCompiler.Sync(
             cwd=self.cwd,
-            reqFile=self.out,
+            reqFile=[self.out],
             executable=self.executable,
             extraUrl=self.gpuUrl,
         )
@@ -487,7 +487,7 @@ class DependencyCompiler:
     def fetch_dep_dists(self):
         DependencyCompiler.Download(
             cwd=self.cwd,
-            reqFile=self.out,
+            reqFile=[self.out],
             executable=self.executable,
             extraUrl=self.gpuUrl,
             noDeps=True,
@@ -497,7 +497,7 @@ class DependencyCompiler:
     def fetch_dep_wheels(self):
         DependencyCompiler.Wheel(
             cwd=self.cwd,
-            reqFile=self.out,
+            reqFile=[self.out],
             executable=self.executable,
             extraUrl=self.gpuUrl,
             noDeps=True,
