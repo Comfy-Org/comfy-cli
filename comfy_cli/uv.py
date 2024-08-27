@@ -346,8 +346,8 @@ class DependencyCompiler:
             DependencyCompiler.rocmPytorchUrl if self.gpu == GPU_OPTION.AMD else
             None
         )  # fmt: skip
-        self.out: Path = self.cwd / outName
-        self.override = self.cwd / "override.txt"
+        self.out: Path = self.outDir / outName
+        self.override = self.outDir / "override.txt"
 
         self.reqFilesCore = reqFilesCore if reqFilesCore is not None else self.find_core_reqs()
         self.reqFilesExt = reqFilesExt if reqFilesExt is not None else self.find_ext_reqs()
