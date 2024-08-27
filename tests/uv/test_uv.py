@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 
 from comfy_cli import ui
+from comfy_cli.constants import GPU_OPTION
 from comfy_cli.uv import DependencyCompiler
 
 hereDir = Path(__file__).parent.resolve()
@@ -29,6 +30,7 @@ def mock_prompt_select(monkeypatch):
 def test_compile(mock_prompt_select):
     depComp = DependencyCompiler(
         cwd=temp,
+        gpu=GPU_OPTION.AMD,
         outDir=temp,
         reqFilesCore=[reqsDir / "core_reqs.txt"],
         reqFilesExt=[reqsDir / "x_reqs.txt", reqsDir / "y_reqs.txt"],
@@ -40,7 +42,7 @@ def test_compile(mock_prompt_select):
     with open(reqsDir / "requirements.compiled", "r") as known, open(temp / "requirements.compiled", "r") as test:
         # compare all non-commented lines in generated file vs reference file
         knownLines, testLines = [
-            [line for line in known.readlines() if line.strip()[0] != "#"],
-            [line for line in test.readlines() if line.strip()[0] != "#"],
+            [line for line in known.readlines() if not line.strip().startswith("#")],
+            [line for line in test.readlines() if not line.strip().startswith("#")],
         ]
         assert knownLines == testLines
