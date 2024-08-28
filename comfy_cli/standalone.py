@@ -1,9 +1,9 @@
-import os
 import shutil
 import subprocess
 import tarfile
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urljoin
 
 import requests
 from rich.live import Live
@@ -59,7 +59,7 @@ def download_standalone_python(
 
     name = f"cpython-{version}+{tag}-{target}-{flavor}"
     fname = f"{name}.tar.gz"
-    url = os.path.join(asset_url_prefix, fname)
+    url = urljoin(asset_url_prefix, fname)
 
     return download_progress(url, fname, cwd=cwd)
 
