@@ -1,4 +1,4 @@
-import platform
+import platform as os_platform
 import shutil
 import subprocess
 import tarfile
@@ -105,7 +105,7 @@ class StandalonePython:
 
         shutil.move(old_rpath, rpath)
 
-        if platform.system() == "Windows":
+        if os_platform.system() == "Windows":
             return StandlonePythonWindows(rpath=rpath)
         return StandalonePythonUnix(rpath=rpath)
 
