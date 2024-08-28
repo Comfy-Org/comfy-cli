@@ -1,3 +1,4 @@
+import platform
 import shutil
 import subprocess
 import tarfile
@@ -63,7 +64,7 @@ def download_standalone_python(
     return download_progress(url, fname, cwd=cwd)
 
 
-class StandalonePython:
+class StandalonePythonBase:
     @staticmethod
     def FromDistro(
         platform: Optional[str] = None,
@@ -82,10 +83,10 @@ class StandalonePython:
             flavor=flavor,
             cwd=cwd,
         )
-        return StandalonePython.FromTarball(fpath, name)
+        return StandalonePythonBase.FromTarball(fpath, name)
 
     @staticmethod
-    def FromTarball(fpath: PathLike, name: PathLike = "python"):
+    def FromTarball(fpath: PathLike, name: PathLike = "python") -> "StandalonePythonBase":
         fpath = Path(fpath)
 
         with tarfile.open(fpath) as tar:
@@ -103,13 +104,21 @@ class StandalonePython:
             tar.extractall()
 
         shutil.move(old_rpath, rpath)
-        return StandalonePython(rpath=rpath)
+
+        if platform.system() == "Windows":
+            return StandlonePythonWindows(rpath=rpath)
+        return StandalonePythonUnix(rpath=rpath)
 
     def __init__(self, rpath: PathLike):
         self.rpath = Path(rpath)
         self.name = self.rpath.name
-        self.bin = self.rpath / "bin"
-        self.executable = self.bin / "python"
+        # Determine the correct paths based on the platform
+        if platform.system() == "Windows":
+            self.bin = self.rpath
+            self.executable = self.bin / "python.exe"
+        else:  # Linux and macOS
+            self.bin = self.rpath / "bin"
+            self.executable = self.bin / "python"
 
         # paths to store package artifacts
         self.cache = self.rpath / "cache"
@@ -209,3 +218,19 @@ class StandalonePython:
             if progress:
                 barProg.advance(addTar, _size)
                 pathProg.update(pathTar, description="")
+
+
+class StandalonePythonUnix(StandalonePythonBase):
+    def get_bin_path(self) -> Path:
+        return self.rpath / "bin"
+
+    def get_executable_path(self) -> Path:
+        return self.bin / "python"
+
+
+class StandlonePythonWindows(StandalonePythonBase):
+    def get_bin_path(self) -> Path:
+        return self.rpath
+
+    def get_executable_path(self) -> Path:
+        return self.bin / "python.exe"
