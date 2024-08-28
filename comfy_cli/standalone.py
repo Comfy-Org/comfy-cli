@@ -3,7 +3,6 @@ import subprocess
 import tarfile
 from pathlib import Path
 from typing import Optional
-from urllib.parse import urljoin
 
 import requests
 from rich.live import Live
