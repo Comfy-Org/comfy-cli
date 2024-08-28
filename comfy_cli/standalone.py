@@ -64,7 +64,7 @@ def download_standalone_python(
     return download_progress(url, fname, cwd=cwd)
 
 
-class StandalonePythonBase:
+class StandalonePython:
     @staticmethod
     def FromDistro(
         platform: Optional[str] = None,
@@ -83,10 +83,10 @@ class StandalonePythonBase:
             flavor=flavor,
             cwd=cwd,
         )
-        return StandalonePythonBase.FromTarball(fpath, name)
+        return StandalonePython.FromTarball(fpath, name)
 
     @staticmethod
-    def FromTarball(fpath: PathLike, name: PathLike = "python") -> "StandalonePythonBase":
+    def FromTarball(fpath: PathLike, name: PathLike = "python") -> "StandalonePython":
         fpath = Path(fpath)
 
         with tarfile.open(fpath) as tar:
@@ -112,13 +112,8 @@ class StandalonePythonBase:
     def __init__(self, rpath: PathLike):
         self.rpath = Path(rpath)
         self.name = self.rpath.name
-        # Determine the correct paths based on the platform
-        if platform.system() == "Windows":
-            self.bin = self.rpath
-            self.executable = self.bin / "python.exe"
-        else:  # Linux and macOS
-            self.bin = self.rpath / "bin"
-            self.executable = self.bin / "python"
+        self.bin = self.rpath / "bin"
+        self.executable = self.bin / "python"
 
         # paths to store package artifacts
         self.cache = self.rpath / "cache"
@@ -220,7 +215,7 @@ class StandalonePythonBase:
                 pathProg.update(pathTar, description="")
 
 
-class StandalonePythonUnix(StandalonePythonBase):
+class StandalonePythonUnix(StandalonePython):
     def get_bin_path(self) -> Path:
         return self.rpath / "bin"
 
@@ -228,7 +223,7 @@ class StandalonePythonUnix(StandalonePythonBase):
         return self.bin / "python"
 
 
-class StandlonePythonWindows(StandalonePythonBase):
+class StandlonePythonWindows(StandalonePython):
     def get_bin_path(self) -> Path:
         return self.rpath
 

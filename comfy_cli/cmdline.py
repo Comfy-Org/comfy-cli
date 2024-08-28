@@ -19,7 +19,7 @@ from comfy_cli.command.models import models as models_command
 from comfy_cli.config_manager import ConfigManager
 from comfy_cli.constants import GPU_OPTION, CUDAVersion
 from comfy_cli.env_checker import EnvChecker
-from comfy_cli.standalone import StandalonePythonBase
+from comfy_cli.standalone import StandalonePython
 from comfy_cli.update import check_for_updates
 from comfy_cli.workspace_manager import WorkspaceManager, check_comfy_repo
 
@@ -582,10 +582,10 @@ def standalone(
     proc = utils.get_proc() if proc is None else proc
 
     if rehydrate:
-        sty = StandalonePythonBase.FromTarball(fpath="python.tgz")
+        sty = StandalonePython.FromTarball(fpath="python.tgz")
         sty.rehydrate_comfy_deps()
     else:
-        sty = StandalonePythonBase.FromDistro(platform=platform, proc=proc)
+        sty = StandalonePython.FromDistro(platform=platform, proc=proc)
         sty.dehydrate_comfy_deps(comfyDir=comfy_path, extraSpecs=cli_spec)
         sty.to_tarball()
 
