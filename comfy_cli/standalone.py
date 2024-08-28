@@ -1,4 +1,3 @@
-import os
 import shutil
 import subprocess
 import tarfile
@@ -59,7 +58,7 @@ def download_standalone_python(
 
     name = f"cpython-{version}+{tag}-{target}-{flavor}"
     fname = f"{name}.tar.gz"
-    url = os.path.join(asset_url_prefix, fname)
+    url = f"{asset_url_prefix}/{fname}"
 
     return download_progress(url, fname, cwd=cwd)
 
