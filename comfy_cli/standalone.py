@@ -1,3 +1,4 @@
+import platform
 import shutil
 import subprocess
 import tarfile
@@ -85,7 +86,7 @@ class StandalonePython:
         return StandalonePython.FromTarball(fpath, name)
 
     @staticmethod
-    def FromTarball(fpath: PathLike, name: PathLike = "python"):
+    def FromTarball(fpath: PathLike, name: PathLike = "python") -> "StandalonePython":
         fpath = Path(fpath)
 
         with tarfile.open(fpath) as tar:
@@ -103,7 +104,10 @@ class StandalonePython:
             tar.extractall()
 
         shutil.move(old_rpath, rpath)
-        return StandalonePython(rpath=rpath)
+
+        if platform.system() == "Windows":
+            return StandlonePythonWindows(rpath=rpath)
+        return StandalonePythonUnix(rpath=rpath)
 
     def __init__(self, rpath: PathLike):
         self.rpath = Path(rpath)
@@ -209,3 +213,19 @@ class StandalonePython:
             if progress:
                 barProg.advance(addTar, _size)
                 pathProg.update(pathTar, description="")
+
+
+class StandalonePythonUnix(StandalonePython):
+    def get_bin_path(self) -> Path:
+        return self.rpath / "bin"
+
+    def get_executable_path(self) -> Path:
+        return self.bin / "python"
+
+
+class StandlonePythonWindows(StandalonePython):
+    def get_bin_path(self) -> Path:
+        return self.rpath
+
+    def get_executable_path(self) -> Path:
+        return self.bin / "python.exe"
