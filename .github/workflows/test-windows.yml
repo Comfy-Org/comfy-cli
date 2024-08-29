@@ -1,0 +1,31 @@
+name: "Windows Specific Commands"
+on:
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  test:
+    name: "Run Tests on Multiple Platforms"
+    runs-on: windows-latest
+    env:
+      PYTHONIOENCODING: "utf8"
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: 3.12
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pytest
+          pip install -e .
+          comfy --skip-prompt --workspace ./ComfyUI install --fast-deps --nvidia --cuda-version 12.1
+          comfy --workspace ./ComfyUI standalone  --platform windows --proc x86_64
+          ls
+          comfy standalone --rehydrate --platform windows --proc x86_64
