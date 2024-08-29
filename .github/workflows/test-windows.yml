@@ -23,6 +23,7 @@ jobs:
         run: |
           python -m venv venv
           .\venv\Scripts\Activate.ps1
+          Get-Command python
           python -m pip install --upgrade pip
           pip install pytest
           pip install -e .
