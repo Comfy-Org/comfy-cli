@@ -6,11 +6,15 @@ on:
       - main
     paths:
       - "comfy_cli/**"
+      - "!comfy_cli/test_**"
+      - "!.github/**"
   pull_request:
     branches:
       - main
     paths:
       - "comfy_cli/**"
+      - "!comfy_cli/test_**"
+      - "!.github/**"
 
 jobs:
   test-cli-gpu:
