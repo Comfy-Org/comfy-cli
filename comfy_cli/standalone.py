@@ -105,15 +105,17 @@ class StandalonePython:
 
         shutil.move(old_rpath, rpath)
 
-        if os_platform.system() == "Windows":
-            return StandlonePythonWindows(rpath=rpath)
-        return StandalonePythonUnix(rpath=rpath)
+        return StandalonePython(rpath=rpath)
 
     def __init__(self, rpath: PathLike):
         self.rpath = Path(rpath)
         self.name = self.rpath.name
-        self.bin = self.rpath / "bin"
-        self.executable = self.bin / "python"
+        if os_platform.system() == "Windows":
+            self.bin = self.rpath
+            self.executable = self.bin / "python.exe"
+        else:
+            self.bin = self.rpath / "bin"
+            self.executable = self.bin / "python"
 
         # paths to store package artifacts
         self.cache = self.rpath / "cache"
@@ -213,19 +215,3 @@ class StandalonePython:
             if progress:
                 barProg.advance(addTar, _size)
                 pathProg.update(pathTar, description="")
-
-
-class StandalonePythonUnix(StandalonePython):
-    def get_bin_path(self) -> Path:
-        return self.rpath / "bin"
-
-    def get_executable_path(self) -> Path:
-        return self.bin / "python"
-
-
-class StandlonePythonWindows(StandalonePython):
-    def get_bin_path(self) -> Path:
-        return self.rpath
-
-    def get_executable_path(self) -> Path:
-        return self.bin / "python.exe"
