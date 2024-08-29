@@ -110,7 +110,7 @@ class StandalonePython:
     def __init__(self, rpath: PathLike):
         self.rpath = Path(rpath)
         self.name = self.rpath.name
-        if os_platform.system() == "windows":
+        if os_platform.system() == "Windows":
             self.bin = self.rpath
             self.executable = self.bin / "python.exe"
         else:
