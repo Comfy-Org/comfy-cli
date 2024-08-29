@@ -107,7 +107,7 @@ class StandalonePython:
 
         if os_platform.system() == "Windows":
             return StandlonePythonWindows(rpath=rpath)
-        return StandalonePythonUnix(rpath=rpath)
+        return StandalonePython(rpath=rpath)
 
     def __init__(self, rpath: PathLike):
         self.rpath = Path(rpath)
@@ -215,17 +215,8 @@ class StandalonePython:
                 pathProg.update(pathTar, description="")
 
 
-class StandalonePythonUnix(StandalonePython):
-    def get_bin_path(self) -> Path:
-        return self.rpath / "bin"
-
-    def get_executable_path(self) -> Path:
-        return self.bin / "python"
-
-
 class StandlonePythonWindows(StandalonePython):
-    def get_bin_path(self) -> Path:
-        return self.rpath
-
-    def get_executable_path(self) -> Path:
-        return self.bin / "python.exe"
+    def __init__(self, rpath: PathLike):
+        super().__init__(rpath)
+        self.bin = self.rpath
+        self.executable = self.bin / "python.exe"
