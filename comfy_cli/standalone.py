@@ -1,4 +1,3 @@
-import platform as os_platform
 import shutil
 import subprocess
 import tarfile
@@ -110,7 +109,7 @@ class StandalonePython:
     def __init__(self, rpath: PathLike):
         self.rpath = Path(rpath)
         self.name = self.rpath.name
-        if os_platform.system() == "Windows":
+        if get_os() == OS.WINDOWS:
             self.bin = self.rpath
             self.executable = self.bin / "python.exe"
         else:

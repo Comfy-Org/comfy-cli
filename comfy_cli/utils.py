@@ -6,7 +6,6 @@ import functools
 import platform
 import shutil
 import subprocess
-import sys
 from pathlib import Path
 
 import psutil
@@ -39,12 +38,16 @@ def singleton(cls):
 
 
 def get_os():
-    if sys.platform == "darwin":
-        return OS.MACOS
-    elif "win" in sys.platform:
-        return OS.WINDOWS
+    platform_system = platform.system().lower()
 
-    return OS.LINUX
+    if platform_system == "darwin":
+        return OS.MACOS
+    elif platform_system == "windows":
+        return OS.WINDOWS
+    elif platform_system == "linux":
+        return OS.LINUX
+    else:
+        raise ValueError(f"Running on unsupported os {platform.system()}")
 
 
 def get_proc():
