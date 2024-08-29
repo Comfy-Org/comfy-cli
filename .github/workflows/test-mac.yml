@@ -1,4 +1,4 @@
-name: "Windows Specific Commands"
+name: "Mac Specific Commands"
 on:
   pull_request:
     branches:
@@ -6,7 +6,7 @@ on:
 
 jobs:
   test:
-    runs-on: windows-latest
+    runs-on: macos-latest
     env:
       PYTHONIOENCODING: "utf8"
 
@@ -22,11 +22,10 @@ jobs:
       - name: Install Dependencies
         run: |
           python -m venv venv
-          venv\Scripts\activate
+          source venv/bin/activate
           python -m pip install --upgrade pip
           pip install pytest
           pip install -e .
-          comfy --skip-prompt --workspace ./ComfyUI install --fast-deps --nvidia --cuda-version 12.1
-          comfy --workspace ./ComfyUI standalone  --platform windows --proc x86_64
-          ls
-          comfy standalone --rehydrate --platform windows --proc x86_64
+          comfy --skip-prompt --workspace ./ComfyUI install --fast-deps --m-series
+          comfy --workspace ./ComfyUI standalone  --platform macos
+          comfy standalone --rehydrate
