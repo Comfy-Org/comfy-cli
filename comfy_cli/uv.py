@@ -234,11 +234,12 @@ class DependencyCompiler:
     @staticmethod
     def Download(
         cwd: PathLike,
-        reqFile: list[PathLike],
         executable: PathLike = sys.executable,
         extraUrl: Optional[str] = None,
         noDeps: bool = False,
         out: Optional[PathLike] = None,
+        reqs: Optional[list[str]] = None,
+        reqFile: Optional[list[PathLike]] = None,
     ) -> subprocess.CompletedProcess[Any]:
         """For now, the `download` cmd has no uv support, so use pip"""
         cmd = [
@@ -247,12 +248,6 @@ class DependencyCompiler:
             "pip",
             "download",
         ]
-
-        if isinstance(reqFile, (str, Path)):
-            cmd.extend(["-r", str(reqFile)])
-        elif isinstance(reqFile, list):
-            for rf in reqFile:
-                cmd.extend(["-r", str(rf)])
 
         if extraUrl is not None:
             cmd.extend(["--extra-index-url", extraUrl])
@@ -263,25 +258,32 @@ class DependencyCompiler:
         if out is not None:
             cmd.extend(["-d", str(out)])
 
+        if reqs is not None:
+            cmd.extend(reqs)
+
+        if reqFile is not None:
+            for rf in reqFile:
+                cmd.extend(["--requirement", rf])
+
         return _check_call(cmd, cwd)
 
     @staticmethod
     def Wheel(
         cwd: PathLike,
-        reqFile: list[PathLike],
         executable: PathLike = sys.executable,
         extraUrl: Optional[str] = None,
         noDeps: bool = False,
         out: Optional[PathLike] = None,
+        reqs: Optional[list[str]] = None,
+        reqFile: Optional[list[PathLike]] = None,
     ) -> subprocess.CompletedProcess[Any]:
         """For now, the `wheel` cmd has no uv support, so use pip"""
-        cmd = [str(executable), "-m", "pip", "wheel"]
-
-        if isinstance(reqFile, (str, Path)):
-            cmd.extend(["-r", str(reqFile)])
-        elif isinstance(reqFile, list):
-            for rf in reqFile:
-                cmd.extend(["-r", str(rf)])
+        cmd = [
+            str(executable),
+            "-m",
+            "pip",
+            "wheel",
+        ]
 
         if extraUrl is not None:
             cmd.extend(["--extra-index-url", extraUrl])
@@ -291,6 +293,13 @@ class DependencyCompiler:
 
         if out is not None:
             cmd.extend(["-w", str(out)])
+
+        if reqs is not None:
+            cmd.extend(reqs)
+
+        if reqFile is not None:
+            for rf in reqFile:
+                cmd.extend(["--requirement", rf])
 
         return _check_call(cmd, cwd)
 
