@@ -167,12 +167,13 @@ def extract_tarball(
 
         _size = 0
 
-        def _filter(tinfo: tarfile.TarInfo, _path: Optional[PathLike] = None):
+        def _filter(tinfo: tarfile.TarInfo, _path: PathLike):
             nonlocal _size
             pathProg.update(pathTask, description=tinfo.path)
             barProg.advance(barTask, _size)
             _size = tinfo.size
-            return tinfo
+
+            return tarfile.data_filter(tinfo, _path)
     else:
         _filter = None
 
@@ -214,12 +215,13 @@ def create_tarball(
 
         _size = 0
 
-        def _filter(tinfo: tarfile.TarInfo):
+        def _filter(tinfo: tarfile.TarInfo, _path: PathLike):
             nonlocal _size
             pathProg.update(pathTask, description=tinfo.path)
             barProg.advance(barTask, _size)
             _size = Path(tinfo.path).stat().st_size
-            return tinfo
+
+            return tarfile.data_filter(tinfo, _path)
     else:
         _filter = None
 
