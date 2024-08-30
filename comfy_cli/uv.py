@@ -43,6 +43,26 @@ def parse_uv_compile_error(err: str) -> tuple[str, list[str]]:
     return reqName, cast(list[str], reqRe.findall(err))
 
 
+def parse_req_file(rf: PathLike, skips: Optional[list[str]] = None):
+    skips = [] if skips is None else skips
+
+    reqs: list[str] = []
+    opts: list[str] = []
+    with open(rf) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            elif "==" in line and line.split("==")[0] in skips:
+                continue
+            elif line.startswith("--"):
+                opts.extend(line.split())
+            else:
+                reqs.append(line)
+
+    return opts + reqs
+
+
 class DependencyCompiler:
     rocmPytorchUrl = "https://download.pytorch.org/whl/rocm6.1"
     nvidiaPytorchUrl = "https://download.pytorch.org/whl/cu121"
@@ -497,47 +517,31 @@ class DependencyCompiler:
         )
 
     def fetch_dep_dists(self, skip_uv: bool = False):
-        if skip_uv:
-            reqFile = None
-            with open(self.out) as f:
-                reqs = [
-                    line
-                    for line in f.readlines()
-                    if not line.strip().startswith("#") and not line.strip().startswith("uv==")
-                ]
-        else:
-            reqFile = [self.out]
-            reqs = None
+        skips = ["uv"] if skip_uv else None
+        reqs = parse_req_file(self.out, skips=skips)
+
+        extraUrl = None if "--extra-index-url" in reqs else self.gpuUrl
 
         DependencyCompiler.Download(
             cwd=self.cwd,
             executable=self.executable,
-            extraUrl=self.gpuUrl,
+            extraUrl=extraUrl,
             noDeps=True,
             out=self.outDir / "dists",
-            reqFile=reqFile,
             reqs=reqs,
         )
 
     def fetch_dep_wheels(self, skip_uv: bool = False):
-        if skip_uv:
-            reqFile = None
-            with open(self.out) as f:
-                reqs = [
-                    line
-                    for line in f.readlines()
-                    if not line.strip().startswith("#") and not line.strip().startswith("uv==")
-                ]
-        else:
-            reqFile = [self.out]
-            reqs = None
+        skips = ["uv"] if skip_uv else None
+        reqs = parse_req_file(self.out, skips=skips)
+
+        extraUrl = None if "--extra-index-url" in reqs else self.gpuUrl
 
         DependencyCompiler.Wheel(
             cwd=self.cwd,
             executable=self.executable,
-            extraUrl=self.gpuUrl,
+            extraUrl=extraUrl,
             noDeps=True,
             out=self.outDir / "wheels",
-            reqFile=reqFile,
             reqs=reqs,
         )
