@@ -55,7 +55,7 @@ def download_standalone_python(
 
     name = f"cpython-{version}+{tag}-{target}-{flavor}"
     fname = f"{name}.tar.gz"
-    url = f"{asset_url_prefix}/{fname}"
+    url = f"{asset_url_prefix.rstrip('/')}/{fname.lstrip('/')}"
 
     return download_url(url, fname, cwd=cwd, show_progress=show_progress)
 
