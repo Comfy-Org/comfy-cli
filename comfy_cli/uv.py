@@ -7,8 +7,9 @@ from textwrap import dedent
 from typing import Any, Optional, Union, cast
 
 from comfy_cli import ui
-from comfy_cli.constants import GPU_OPTION
+from comfy_cli.constants import GPU_OPTION, OS
 from comfy_cli.typing import PathLike
+from comfy_cli.utils import get_os
 
 
 def _run(cmd: list[str], cwd: PathLike, check: bool = True) -> subprocess.CompletedProcess[Any]:
@@ -43,6 +44,26 @@ def parse_uv_compile_error(err: str) -> tuple[str, list[str]]:
     return reqName, cast(list[str], reqRe.findall(err))
 
 
+def parse_req_file(rf: PathLike, skips: Optional[list[str]] = None):
+    skips = [] if skips is None else skips
+
+    reqs: list[str] = []
+    opts: list[str] = []
+    with open(rf) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            elif "==" in line and line.split("==")[0] in skips:
+                continue
+            elif line.startswith("--"):
+                opts.extend(line.split())
+            else:
+                reqs.append(line)
+
+    return opts + reqs
+
+
 class DependencyCompiler:
     rocmPytorchUrl = "https://download.pytorch.org/whl/rocm6.1"
     nvidiaPytorchUrl = "https://download.pytorch.org/whl/cu121"
@@ -52,6 +73,7 @@ class DependencyCompiler:
         # ensure usage of {gpu} version of pytorch
         --extra-index-url {gpuUrl}
         torch
+        torchaudio
         torchsde
         torchvision
     """
@@ -234,11 +256,12 @@ class DependencyCompiler:
     @staticmethod
     def Download(
         cwd: PathLike,
-        reqFile: list[PathLike],
         executable: PathLike = sys.executable,
         extraUrl: Optional[str] = None,
         noDeps: bool = False,
         out: Optional[PathLike] = None,
+        reqs: Optional[list[str]] = None,
+        reqFile: Optional[list[PathLike]] = None,
     ) -> subprocess.CompletedProcess[Any]:
         """For now, the `download` cmd has no uv support, so use pip"""
         cmd = [
@@ -247,12 +270,6 @@ class DependencyCompiler:
             "pip",
             "download",
         ]
-
-        if isinstance(reqFile, (str, Path)):
-            cmd.extend(["-r", str(reqFile)])
-        elif isinstance(reqFile, list):
-            for rf in reqFile:
-                cmd.extend(["-r", str(rf)])
 
         if extraUrl is not None:
             cmd.extend(["--extra-index-url", extraUrl])
@@ -263,25 +280,32 @@ class DependencyCompiler:
         if out is not None:
             cmd.extend(["-d", str(out)])
 
+        if reqs is not None:
+            cmd.extend(reqs)
+
+        if reqFile is not None:
+            for rf in reqFile:
+                cmd.extend(["--requirement", rf])
+
         return _check_call(cmd, cwd)
 
     @staticmethod
     def Wheel(
         cwd: PathLike,
-        reqFile: list[PathLike],
         executable: PathLike = sys.executable,
         extraUrl: Optional[str] = None,
         noDeps: bool = False,
         out: Optional[PathLike] = None,
+        reqs: Optional[list[str]] = None,
+        reqFile: Optional[list[PathLike]] = None,
     ) -> subprocess.CompletedProcess[Any]:
         """For now, the `wheel` cmd has no uv support, so use pip"""
-        cmd = [str(executable), "-m", "pip", "wheel"]
-
-        if isinstance(reqFile, (str, Path)):
-            cmd.extend(["-r", str(reqFile)])
-        elif isinstance(reqFile, list):
-            for rf in reqFile:
-                cmd.extend(["-r", str(rf)])
+        cmd = [
+            str(executable),
+            "-m",
+            "pip",
+            "wheel",
+        ]
 
         if extraUrl is not None:
             cmd.extend(["--extra-index-url", extraUrl])
@@ -291,6 +315,13 @@ class DependencyCompiler:
 
         if out is not None:
             cmd.extend(["-w", str(out)])
+
+        if reqs is not None:
+            cmd.extend(reqs)
+
+        if reqFile is not None:
+            for rf in reqFile:
+                cmd.extend(["--requirement", rf])
 
         return _check_call(cmd, cwd)
 
@@ -366,6 +397,11 @@ class DependencyCompiler:
         with open(self.override, "w") as f:
             if self.gpu is not None and self.gpuUrl is not None:
                 f.write(DependencyCompiler.overrideGpu.format(gpu=self.gpu, gpuUrl=self.gpuUrl))
+                f.write("\n\n")
+
+            # TODO: remove numpy<2 override once torch is compatible with numpy>=2
+            if get_os() == OS.WINDOWS:
+                f.write("numpy<2\n")
                 f.write("\n\n")
 
         completed = DependencyCompiler.Compile(
@@ -487,22 +523,32 @@ class DependencyCompiler:
             extraUrl=self.gpuUrl,
         )
 
-    def fetch_dep_dists(self):
+    def fetch_dep_dists(self, skip_uv: bool = False):
+        skips = ["uv"] if skip_uv else None
+        reqs = parse_req_file(self.out, skips=skips)
+
+        extraUrl = None if "--extra-index-url" in reqs else self.gpuUrl
+
         DependencyCompiler.Download(
             cwd=self.cwd,
-            reqFile=[self.out],
             executable=self.executable,
-            extraUrl=self.gpuUrl,
+            extraUrl=extraUrl,
             noDeps=True,
             out=self.outDir / "dists",
+            reqs=reqs,
         )
 
-    def fetch_dep_wheels(self):
+    def fetch_dep_wheels(self, skip_uv: bool = False):
+        skips = ["uv"] if skip_uv else None
+        reqs = parse_req_file(self.out, skips=skips)
+
+        extraUrl = None if "--extra-index-url" in reqs else self.gpuUrl
+
         DependencyCompiler.Wheel(
             cwd=self.cwd,
-            reqFile=[self.out],
             executable=self.executable,
-            extraUrl=self.gpuUrl,
+            extraUrl=extraUrl,
             noDeps=True,
             out=self.outDir / "wheels",
+            reqs=reqs,
         )
