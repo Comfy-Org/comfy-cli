@@ -152,9 +152,9 @@ def test_node(comfy_cli, workspace):
 
 @e2e_test
 def test_run(comfy_cli):
-    url = "https://huggingface.co/runwayml/stable-diffusion-v1-5/resolve/main/v1-5-pruned-emaonly.ckpt"
+    url = "https://huggingface.co/Comfy-Org/stable-diffusion-v1-5-archive/resolve/main/v1-5-pruned-emaonly-fp16.safetensors?download=true"
     path = os.path.join("models", "checkpoints")
-    name = "v1-5-pruned-emaonly.ckpt"
+    name = "v1-5-pruned-emaonly.safetensors"
     proc = exec(
         f"""
             {comfy_cli} model download --url {url} --relative-path {path} --filename {name}
