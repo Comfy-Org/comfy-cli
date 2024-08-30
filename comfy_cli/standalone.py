@@ -1,17 +1,13 @@
 import shutil
 import subprocess
-import tarfile
 from pathlib import Path
 from typing import Optional
 
 import requests
-from rich.live import Live
-from rich.progress import Progress, TextColumn
-from rich.table import Table
 
 from comfy_cli.constants import OS, PROC
 from comfy_cli.typing import PathLike
-from comfy_cli.utils import download_progress, get_os, get_proc
+from comfy_cli.utils import create_tarball, download_url, extract_tarball, get_os, get_proc
 from comfy_cli.uv import DependencyCompiler
 
 _here = Path(__file__).expanduser().resolve().parent
@@ -36,6 +32,7 @@ def download_standalone_python(
     tag: str = "latest",
     flavor: str = "install_only",
     cwd: PathLike = ".",
+    show_progress: bool = True,
 ) -> PathLike:
     """grab a pre-built distro from the python-build-standalone project. See
     https://gregoryszorc.com/docs/python-build-standalone/main/"""
@@ -60,7 +57,7 @@ def download_standalone_python(
     fname = f"{name}.tar.gz"
     url = f"{asset_url_prefix}/{fname}"
 
-    return download_progress(url, fname, cwd=cwd)
+    return download_url(url, fname, cwd=cwd, show_progress=show_progress)
 
 
 class StandalonePython:
@@ -73,7 +70,8 @@ class StandalonePython:
         flavor: str = "install_only",
         cwd: PathLike = ".",
         name: PathLike = "python",
-    ):
+        show_progress: bool = True,
+    ) -> "StandalonePython":
         fpath = download_standalone_python(
             platform=platform,
             proc=proc,
@@ -81,28 +79,16 @@ class StandalonePython:
             tag=tag,
             flavor=flavor,
             cwd=cwd,
+            show_progress=show_progress,
         )
         return StandalonePython.FromTarball(fpath, name)
 
     @staticmethod
-    def FromTarball(fpath: PathLike, name: PathLike = "python") -> "StandalonePython":
+    def FromTarball(fpath: PathLike, name: PathLike = "python", show_progress: bool = True) -> "StandalonePython":
         fpath = Path(fpath)
-
-        with tarfile.open(fpath) as tar:
-            info = tar.next()
-            old_name = info.name.split("/")[0]
-
-        old_rpath = fpath.parent / old_name
         rpath = fpath.parent / name
 
-        # clean the tar file expand target and the final target
-        shutil.rmtree(old_rpath, ignore_errors=True)
-        shutil.rmtree(rpath, ignore_errors=True)
-
-        with tarfile.open(fpath) as tar:
-            tar.extractall()
-
-        shutil.move(old_rpath, rpath)
+        extract_tarball(inPath=fpath, outPath=rpath, show_progress=show_progress)
 
         return StandalonePython(rpath=rpath)
 
@@ -177,40 +163,8 @@ class StandalonePython:
         )
         self.dep_comp.install_wheels_directly()
 
-    def to_tarball(self, outPath: Optional[PathLike] = None, progress: bool = True):
-        outPath = self.rpath.with_suffix(".tgz") if outPath is None else Path(outPath)
-
-        # do a little clean up prep
-        outPath.unlink(missing_ok=True)
+    def to_tarball(self, outPath: Optional[PathLike] = None, show_progress: bool = True):
+        # remove any __pycache__ before creating archive
         self.clean()
 
-        if progress:
-            fileSize = sum(f.stat().st_size for f in self.rpath.glob("**/*"))
-
-            barProg = Progress()
-            addTar = barProg.add_task("[cyan]Creating tarball...", total=fileSize)
-            pathProg = Progress(TextColumn("{task.description}"))
-            pathTar = pathProg.add_task("")
-
-            progress_table = Table.grid()
-            progress_table.add_row(barProg)
-            progress_table.add_row(pathProg)
-
-            _size = 0
-
-            def _filter(tinfo: tarfile.TarInfo):
-                nonlocal _size
-                pathProg.update(pathTar, description=tinfo.path)
-                barProg.advance(addTar, _size)
-                _size = Path(tinfo.path).stat().st_size
-                return tinfo
-        else:
-            _filter = None
-
-        with Live(progress_table, refresh_per_second=10):
-            with tarfile.open(outPath, "w:gz") as tar:
-                tar.add(self.rpath.relative_to(Path(".").expanduser().resolve()), filter=_filter)
-
-            if progress:
-                barProg.advance(addTar, _size)
-                pathProg.update(pathTar, description="")
+        create_tarball(inPath=self.rpath, outPath=outPath, show_progress=show_progress)
