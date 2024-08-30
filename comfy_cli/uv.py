@@ -371,7 +371,7 @@ class DependencyCompiler:
                 f.write("\n\n")
 
             # TODO: remove numpy<2 override once torch is compatible with numpy>=2
-            if get_os == OS.WINDOWS:
+            if get_os() == OS.WINDOWS:
                 f.write("numpy<2\n")
                 f.write("\n\n")
 
