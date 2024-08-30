@@ -155,7 +155,9 @@ class StandalonePython:
             extraSpecs=extraSpecs,
         )
         self.dep_comp.compile_deps()
-        self.dep_comp.fetch_dep_wheels()
+
+        skip_uv = get_os() == OS.WINDOWS
+        self.dep_comp.fetch_dep_wheels(skip_uv=skip_uv)
 
     def rehydrate_comfy_deps(self):
         self.dep_comp = DependencyCompiler(

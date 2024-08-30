@@ -496,22 +496,48 @@ class DependencyCompiler:
             extraUrl=self.gpuUrl,
         )
 
-    def fetch_dep_dists(self):
+    def fetch_dep_dists(self, skip_uv: bool = False):
+        if skip_uv:
+            reqFile = None
+            with open(self.out) as f:
+                reqs = [
+                    line
+                    for line in f.readlines()
+                    if not line.strip().startswith("#") and not line.strip().startswith("uv==")
+                ]
+        else:
+            reqFile = [self.out]
+            reqs = None
+
         DependencyCompiler.Download(
             cwd=self.cwd,
-            reqFile=[self.out],
             executable=self.executable,
             extraUrl=self.gpuUrl,
             noDeps=True,
             out=self.outDir / "dists",
+            reqFile=reqFile,
+            reqs=reqs,
         )
 
-    def fetch_dep_wheels(self):
+    def fetch_dep_wheels(self, skip_uv: bool = False):
+        if skip_uv:
+            reqFile = None
+            with open(self.out) as f:
+                reqs = [
+                    line
+                    for line in f.readlines()
+                    if not line.strip().startswith("#") and not line.strip().startswith("uv==")
+                ]
+        else:
+            reqFile = [self.out]
+            reqs = None
+
         DependencyCompiler.Wheel(
             cwd=self.cwd,
-            reqFile=[self.out],
             executable=self.executable,
             extraUrl=self.gpuUrl,
             noDeps=True,
             out=self.outDir / "wheels",
+            reqFile=reqFile,
+            reqs=reqs,
         )
