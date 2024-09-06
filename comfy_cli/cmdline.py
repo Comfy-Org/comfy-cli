@@ -275,14 +275,14 @@ def install(
     elif amd:
         gpu = GPU_OPTION.AMD
     elif m_series:
-        gpu = GPU_OPTION.M_SERIES
+        gpu = GPU_OPTION.MAC_M_SERIES
     elif intel_arc:
         gpu = GPU_OPTION.INTEL_ARC
     else:
         if platform == constants.OS.MACOS:
             gpu = ui.prompt_select_enum(
                 "What type of Mac do you have?",
-                [GPU_OPTION.M_SERIES, GPU_OPTION.MAC_INTEL],
+                [GPU_OPTION.MAC_M_SERIES, GPU_OPTION.MAC_INTEL],
             )
         else:
             gpu = ui.prompt_select_enum(
@@ -547,6 +547,13 @@ def feedback():
 @app.command(help="Download a standalone Python interpreter and dependencies based on an existing comfyui workspace")
 @tracking.track_command()
 def standalone(
+    cli_spec: Annotated[
+        str,
+        typer.Option(
+            show_default=False,
+            help="setuptools-style requirement specificer pointing to an instance of comfy-cli",
+        ),
+    ] = "comfy-cli",
     platform: Annotated[
         Optional[constants.OS],
         typer.Option(
@@ -561,93 +568,26 @@ def standalone(
             help="Create standalone Python for specified processor",
         ),
     ] = None,
-    nvidia: Annotated[
-        Optional[bool],
-        typer.Option(
-            show_default=False,
-            help="Create standalone Python for Nvidia gpu",
-            callback=g_gpu_exclusivity.validate,
-        ),
-    ] = None,
-    cuda_version: Annotated[CUDAVersion, typer.Option(show_default=True)] = CUDAVersion.v12_1,
-    amd: Annotated[
-        Optional[bool],
-        typer.Option(
-            show_default=False,
-            help="Create standalone Python for AMD gpu",
-            callback=g_gpu_exclusivity.validate,
-        ),
-    ] = None,
-    m_series: Annotated[
-        Optional[bool],
-        typer.Option(
-            show_default=False,
-            help="Create standalone Python for Mac M-Series gpu",
-            callback=g_gpu_exclusivity.validate,
-        ),
-    ] = None,
-    intel_arc: Annotated[
-        Optional[bool],
-        typer.Option(
-            hidden=True,
-            show_default=False,
-            help="(Beta support) Create standalone Python for Intel Arc gpu, based on https://github.com/comfyanonymous/ComfyUI/pull/3439",
-            callback=g_gpu_exclusivity.validate,
-        ),
-    ] = None,
-    cpu: Annotated[
-        Optional[bool],
+    rehydrate: Annotated[
+        bool,
         typer.Option(
             show_default=False,
             help="Create standalone Python for CPU",
-            callback=g_gpu_exclusivity.validate,
         ),
-    ] = None,
+    ] = False,
 ):
     comfy_path, _ = workspace_manager.get_workspace_path()
 
     platform = utils.get_os() if platform is None else platform
     proc = utils.get_proc() if proc is None else proc
 
-    if cpu:
-        gpu = GPU_OPTION.CPU
-    elif nvidia:
-        gpu = GPU_OPTION.NVIDIA
-    elif amd:
-        gpu = GPU_OPTION.AMD
-    elif m_series:
-        gpu = GPU_OPTION.M_SERIES
-    elif intel_arc:
-        gpu = GPU_OPTION.INTEL_ARC
+    if rehydrate:
+        sty = StandalonePython.FromTarball(fpath="python.tgz")
+        sty.rehydrate_comfy_deps()
     else:
-        if platform == constants.OS.MACOS:
-            gpu = ui.prompt_select_enum(
-                "What type of Mac do you have?",
-                [GPU_OPTION.M_SERIES, GPU_OPTION.MAC_INTEL],
-            )
-        else:
-            gpu = ui.prompt_select_enum(
-                "What GPU do you have?",
-                [GPU_OPTION.NVIDIA, GPU_OPTION.AMD, GPU_OPTION.INTEL_ARC, GPU_OPTION.CPU],
-            )
-
-    if gpu == GPU_OPTION.INTEL_ARC:
-        print("[bold yellow]Installing on Intel ARC is not yet completely supported[/bold yellow]")
-        env_check = env_checker.EnvChecker()
-        if env_check.conda_env is None:
-            print("[bold red]Intel ARC support requires conda environment to be activated.[/bold red]")
-            raise typer.Exit(code=1)
-        if intel_arc is None:
-            confirm_result = ui.prompt_confirm_action(
-                "Are you sure you want to try beta install feature on Intel ARC?", True
-            )
-            if not confirm_result:
-                raise typer.Exit(code=0)
-        print("[bold yellow]Installing on Intel ARC is in beta stage.[/bold yellow]")
-
-    sty = StandalonePython.FromDistro(platform=platform, proc=proc)
-    sty.precache_comfy_deps(comfyDir=comfy_path, gpu=gpu)
-    sty.to_tarball()
+        sty = StandalonePython.FromDistro(platform=platform, proc=proc)
+        sty.dehydrate_comfy_deps(comfyDir=comfy_path, extraSpecs=cli_spec)
+        sty.to_tarball()
 
 
 app.add_typer(models_command.app, name="model", help="Manage models.")

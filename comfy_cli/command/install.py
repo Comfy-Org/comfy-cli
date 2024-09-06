@@ -111,7 +111,7 @@ def pip_install_comfyui_dependencies(
             result = subprocess.run([sys.executable, "-m", "pip", "install", "torch-directml"], check=True)
 
         # install torch for Mac M Series
-        if gpu == GPU_OPTION.M_SERIES:
+        if gpu == GPU_OPTION.MAC_M_SERIES:
             result = subprocess.run(
                 [
                     sys.executable,
@@ -231,7 +231,8 @@ def execute(
 
     if fast_deps:
         depComp = DependencyCompiler(cwd=repo_dir, gpu=gpu)
-        depComp.install_comfy_deps()
+        depComp.compile_deps()
+        depComp.install_deps()
 
     if not skip_manager:
         update_node_id_cache()

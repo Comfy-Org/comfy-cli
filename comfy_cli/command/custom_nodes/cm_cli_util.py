@@ -63,7 +63,8 @@ def execute_cm_cli(args, channel=None, fast_deps=False, mode=None) -> str | None
         if fast_deps and args[0] in _dependency_cmds:
             # we're using the fast_deps behavior and just ran a command that invalidated the dependencies
             depComp = DependencyCompiler(cwd=workspace_path)
-            depComp.install_comfy_deps()
+            depComp.compile_deps()
+            depComp.install_deps()
 
         return result.stdout
     except subprocess.CalledProcessError as e:

@@ -1,7 +1,5 @@
-import os
 import shutil
 import subprocess
-import tarfile
 from pathlib import Path
 from typing import Optional
 
@@ -9,7 +7,7 @@ import requests
 
 from comfy_cli.constants import OS, PROC
 from comfy_cli.typing import PathLike
-from comfy_cli.utils import download_progress, get_os, get_proc
+from comfy_cli.utils import create_tarball, download_url, extract_tarball, get_os, get_proc
 from comfy_cli.uv import DependencyCompiler
 
 _here = Path(__file__).expanduser().resolve().parent
@@ -34,6 +32,7 @@ def download_standalone_python(
     tag: str = "latest",
     flavor: str = "install_only",
     cwd: PathLike = ".",
+    show_progress: bool = True,
 ) -> PathLike:
     """grab a pre-built distro from the python-build-standalone project. See
     https://gregoryszorc.com/docs/python-build-standalone/main/"""
@@ -56,9 +55,9 @@ def download_standalone_python(
 
     name = f"cpython-{version}+{tag}-{target}-{flavor}"
     fname = f"{name}.tar.gz"
-    url = os.path.join(asset_url_prefix, fname)
+    url = f"{asset_url_prefix.rstrip('/')}/{fname.lstrip('/')}"
 
-    return download_progress(url, fname, cwd=cwd)
+    return download_url(url, fname, cwd=cwd, show_progress=show_progress)
 
 
 class StandalonePython:
@@ -71,7 +70,8 @@ class StandalonePython:
         flavor: str = "install_only",
         cwd: PathLike = ".",
         name: PathLike = "python",
-    ):
+        show_progress: bool = True,
+    ) -> "StandalonePython":
         fpath = download_standalone_python(
             platform=platform,
             proc=proc,
@@ -79,27 +79,28 @@ class StandalonePython:
             tag=tag,
             flavor=flavor,
             cwd=cwd,
+            show_progress=show_progress,
         )
         return StandalonePython.FromTarball(fpath, name)
 
     @staticmethod
-    def FromTarball(fpath: PathLike, name: PathLike = "python"):
+    def FromTarball(fpath: PathLike, name: PathLike = "python", show_progress: bool = True) -> "StandalonePython":
         fpath = Path(fpath)
-        with tarfile.open(fpath) as tar:
-            info = tar.next()
-            old_name = info.name.split("/")[0]
-            tar.extractall()
-
-        old_rpath = fpath.parent / old_name
         rpath = fpath.parent / name
-        shutil.move(old_rpath, rpath)
+
+        extract_tarball(inPath=fpath, outPath=rpath, show_progress=show_progress)
+
         return StandalonePython(rpath=rpath)
 
     def __init__(self, rpath: PathLike):
         self.rpath = Path(rpath)
         self.name = self.rpath.name
-        self.bin = self.rpath / "bin"
-        self.executable = self.bin / "python"
+        if get_os() == OS.WINDOWS:
+            self.bin = self.rpath
+            self.executable = self.bin / "python.exe"
+        else:
+            self.bin = self.rpath / "bin"
+            self.executable = self.bin / "python"
 
         # paths to store package artifacts
         self.cache = self.rpath / "cache"
@@ -109,6 +110,10 @@ class StandalonePython:
 
         # upgrade pip if needed, install uv
         self.pip_install("-U", "pip", "uv")
+
+    def clean(self):
+        for pycache in self.rpath.glob("**/__pycache__"):
+            shutil.rmtree(pycache)
 
     def run_module(self, mod: str, *args: list[str]):
         cmd: list[str] = [
@@ -138,31 +143,30 @@ class StandalonePython:
     def install_comfy(self, *args: list[str], gpu_arg: str = "--nvidia"):
         self.run_comfy_cli("--here", "--skip-prompt", "install", "--fast-deps", gpu_arg, *args)
 
-    def compile_comfy_deps(self, comfyDir: PathLike, gpu: str, outDir: Optional[PathLike] = None):
-        outDir = self.rpath if outDir is None else outDir
+    def dehydrate_comfy_deps(
+        self,
+        comfyDir: PathLike,
+        extraSpecs: Optional[list[str]] = None,
+    ):
+        self.dep_comp = DependencyCompiler(
+            cwd=comfyDir,
+            executable=self.executable,
+            outDir=self.rpath,
+            extraSpecs=extraSpecs,
+        )
+        self.dep_comp.compile_deps()
 
-        self.dep_comp = DependencyCompiler(cwd=comfyDir, executable=self.executable, gpu=gpu, outDir=outDir)
-        self.dep_comp.compile_comfy_deps()
+        skip_uv = get_os() == OS.WINDOWS
+        self.dep_comp.fetch_dep_wheels(skip_uv=skip_uv)
 
-    def install_comfy_deps(self, comfyDir: PathLike, gpu: str, outDir: Optional[PathLike] = None):
-        outDir = self.rpath if outDir is None else outDir
+    def rehydrate_comfy_deps(self):
+        self.dep_comp = DependencyCompiler(
+            executable=self.executable, outDir=self.rpath, reqFilesCore=[], reqFilesExt=[]
+        )
+        self.dep_comp.install_wheels_directly()
 
-        self.dep_comp = DependencyCompiler(cwd=comfyDir, executable=self.executable, gpu=gpu, outDir=outDir)
-        self.dep_comp.install_core_plus_ext()
+    def to_tarball(self, outPath: Optional[PathLike] = None, show_progress: bool = True):
+        # remove any __pycache__ before creating archive
+        self.clean()
 
-    def precache_comfy_deps(self, comfyDir: PathLike, gpu: str, outDir: Optional[PathLike] = None):
-        outDir = self.rpath if outDir is None else outDir
-
-        self.dep_comp = DependencyCompiler(cwd=comfyDir, executable=self.executable, gpu=gpu, outDir=outDir)
-        self.dep_comp.precache_comfy_deps()
-
-    def wheel_comfy_deps(self, comfyDir: PathLike, gpu: str, outDir: Optional[PathLike] = None):
-        outDir = self.rpath if outDir is None else outDir
-
-        self.dep_comp = DependencyCompiler(cwd=comfyDir, executable=self.executable, gpu=gpu, outDir=outDir)
-        self.dep_comp.wheel_comfy_deps()
-
-    def to_tarball(self, outPath: Optional[PathLike] = None):
-        outPath = self.rpath.with_suffix(".tgz") if outPath is None else Path(outPath)
-        with tarfile.open(outPath, "w:gz") as tar:
-            tar.add(self.rpath, arcname=self.rpath.parent)
+        create_tarball(inPath=self.rpath, outPath=outPath, show_progress=show_progress)
