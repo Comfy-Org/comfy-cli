@@ -55,9 +55,9 @@ def get_os():
 
 
 def get_proc():
-    proc = platform.processor()
+    proc = platform.machine()
 
-    if proc == "x86_64":
+    if proc == "x86_64" or proc == "AMD64":
         return PROC.X86_64
     elif "arm" in proc:
         return PROC.ARM
