@@ -20,7 +20,6 @@ from comfy_cli.config_manager import ConfigManager
 from comfy_cli.constants import GPU_OPTION, CUDAVersion
 from comfy_cli.env_checker import EnvChecker
 from comfy_cli.standalone import StandalonePython
-#from comfy_cli.update import check_for_updates
 from comfy_cli.workspace_manager import WorkspaceManager, check_comfy_repo
 
 logging.setup_logging()
@@ -222,7 +221,6 @@ def install(
         ),
     ] = False,
 ):
-    #check_for_updates()
     checker = EnvChecker()
 
     comfy_path, _ = workspace_manager.get_workspace_path()
@@ -496,7 +494,6 @@ def which():
 @app.command(help="Print out current environment variables.")
 @tracking.track_command()
 def env():
-    #check_for_updates()
     _env_checker = EnvChecker()
     table = _env_checker.fill_print_table()
     workspace_manager.fill_print_table(table)

@@ -15,7 +15,6 @@ from rich.panel import Panel
 from comfy_cli import constants, utils
 from comfy_cli.config_manager import ConfigManager
 from comfy_cli.env_checker import check_comfy_server_running
-#from comfy_cli.update import check_for_updates
 from comfy_cli.workspace_manager import WorkspaceManager, WorkspaceType
 
 workspace_manager = WorkspaceManager()
@@ -108,7 +107,6 @@ def launch(
     background: bool = False,
     extra: list[str] | None = None,
 ):
-    #check_for_updates()
     resolved_workspace = workspace_manager.workspace_path
 
     if not resolved_workspace:
