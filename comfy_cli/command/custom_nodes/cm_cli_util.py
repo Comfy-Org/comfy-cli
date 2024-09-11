@@ -21,7 +21,7 @@ _dependency_cmds = {
 }
 
 
-def execute_cm_cli(args, channel=None, fast_deps=False, mode=None) -> str | None:
+def execute_cm_cli(args, channel=None, fast_deps=False, mode=None, silent=False) -> str | None:
     _config_manager = ConfigManager()
 
     workspace_path = workspace_manager.workspace_path
@@ -58,7 +58,8 @@ def execute_cm_cli(args, channel=None, fast_deps=False, mode=None) -> str | None
 
     try:
         result = subprocess.run(cmd, env=new_env, check=True, capture_output=True, text=True)
-        print(result.stdout)
+        if not silent:
+            print(result.stdout)
 
         if fast_deps and args[0] in _dependency_cmds:
             # we're using the fast_deps behavior and just ran a command that invalidated the dependencies
