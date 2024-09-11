@@ -65,7 +65,7 @@ class StandalonePython:
     def FromDistro(
         platform: Optional[str] = None,
         proc: Optional[str] = None,
-        version: str = "3.12.5",
+        version: str = "3.12.6",
         tag: str = "latest",
         flavor: str = "install_only",
         cwd: PathLike = ".",
