@@ -2,9 +2,10 @@ import shutil
 import subprocess
 from pathlib import Path
 from typing import Optional
+
 import requests
 
-from comfy_cli.constants import OS, PROC, DEFAULT_STANDALONE_PYTHON_DOWNLOAD_VERSION
+from comfy_cli.constants import DEFAULT_STANDALONE_PYTHON_DOWNLOAD_VERSION, OS, PROC
 from comfy_cli.typing import PathLike
 from comfy_cli.utils import create_tarball, download_url, extract_tarball, get_os, get_proc
 from comfy_cli.uv import DependencyCompiler
