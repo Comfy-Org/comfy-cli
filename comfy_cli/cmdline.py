@@ -6,7 +6,7 @@ from typing import Optional
 
 import questionary
 import typer
-from rich import print
+from rich import print as rprint
 from rich.console import Console
 from typing_extensions import Annotated, List
 
@@ -14,6 +14,7 @@ from comfy_cli import constants, env_checker, logging, tracking, ui, utils
 from comfy_cli.command import custom_nodes
 from comfy_cli.command import install as install_inner
 from comfy_cli.command import run as run_inner
+from comfy_cli.command.install import validate_version
 from comfy_cli.command.launch import launch as launch_command
 from comfy_cli.command.models import models as models_command
 from comfy_cli.config_manager import ConfigManager
@@ -56,7 +57,7 @@ g_gpu_exclusivity = MutuallyExclusiveValidator()
 
 @app.command(help="Display help for commands")
 def help(ctx: typer.Context):
-    print(ctx.find_root().get_help())
+    rprint(ctx.find_root().get_help())
     ctx.exit(0)
 
 
@@ -115,7 +116,7 @@ def entry(
     ),
 ):
     if version:
-        print(ConfigManager().get_cli_version())
+        rprint(ConfigManager().get_cli_version())
         ctx.exit(0)
 
     workspace_manager.setup_workspace_manager(workspace, here, recent, skip_prompt)
@@ -123,8 +124,8 @@ def entry(
     tracking.prompt_tracking_consent(skip_prompt, default_value=enable_telemetry)
 
     if ctx.invoked_subcommand is None:
-        print("[bold yellow]Welcome to Comfy CLI![/bold yellow]: https://github.com/Comfy-Org/comfy-cli")
-        print(ctx.get_help())
+        rprint("[bold yellow]Welcome to Comfy CLI![/bold yellow]: https://github.com/Comfy-Org/comfy-cli")
+        rprint(ctx.get_help())
         ctx.exit()
 
     # TODO: Move this to proper place
@@ -133,6 +134,15 @@ def entry(
     # end_time = time.time()
     #
     # logging.info(f"scan_dir took {end_time - start_time:.2f} seconds to run")
+
+
+def validate_commit_and_version(commit: Optional[str], ctx: typer.Context):
+    """
+    Validate that the commit is not specified unless the version is 'nightly'.
+    """
+    version = ctx.params.get("version")
+    if commit and version != "nightly":
+        raise typer.BadParameter("You can only specify the commit if the version is 'nightly'.")
 
 
 @app.command(help="Download and install ComfyUI and ComfyUI-Manager")
@@ -145,6 +155,14 @@ def install(
             help="url or local path pointing to the ComfyUI core git repo to be installed. A specific branch can optionally be specified using a setuptools-like syntax, eg https://foo.git@bar",
         ),
     ] = constants.COMFY_GITHUB_URL,
+    version: Annotated[
+        str,
+        typer.Option(
+            show_default=False,
+            help="Specify version of ComfyUI to install. Default is nightl, which is the latest commit on master branch. Other options include: latest, which is the latest stable release. Or a specific version number, eg. 0.2.0",
+            callback=validate_version,
+        ),
+    ] = "nightly",
     manager_url: Annotated[
         str,
         typer.Option(
@@ -212,9 +230,11 @@ def install(
             callback=g_gpu_exclusivity.validate,
         ),
     ] = None,
-    commit: Annotated[Optional[str], typer.Option(help="Specify commit hash for ComfyUI")] = None,
+    commit: Annotated[
+        Optional[str], typer.Option(help="Specify commit hash for ComfyUI", callback=validate_commit_and_version)
+    ] = None,
     fast_deps: Annotated[
-        Optional[bool],
+        bool,
         typer.Option(
             "--fast-deps",
             show_default=False,
@@ -229,8 +249,8 @@ def install(
 
     is_comfy_installed_at_path, repo_dir = check_comfy_repo(comfy_path)
     if is_comfy_installed_at_path and not restore:
-        print(f"[bold red]ComfyUI is already installed at the specified path:[/bold red] {comfy_path}\n")
-        print(
+        rprint(f"[bold red]ComfyUI is already installed at the specified path:[/bold red] {comfy_path}\n")
+        rprint(
             "[bold yellow]If you want to restore dependencies, add the '--restore' option.[/bold yellow]",
         )
         raise typer.Exit(code=1)
@@ -239,11 +259,11 @@ def install(
         comfy_path = str(repo_dir.working_dir)
 
     if checker.python_version.major < 3 or checker.python_version.minor < 9:
-        print("[bold red]Python version 3.9 or higher is required to run ComfyUI.[/bold red]")
-        print(f"You are currently using Python version {env_checker.format_python_version(checker.python_version)}.")
+        rprint("[bold red]Python version 3.9 or higher is required to run ComfyUI.[/bold red]")
+        rprint(f"You are currently using Python version {env_checker.format_python_version(checker.python_version)}.")
     platform = utils.get_os()
     if cpu:
-        print("[bold yellow]Installing for CPU[/bold yellow]")
+        rprint("[bold yellow]Installing for CPU[/bold yellow]")
         install_inner.execute(
             url,
             manager_url,
@@ -251,22 +271,23 @@ def install(
             restore,
             skip_manager,
             commit=commit,
-            gpu=None,
+            version=version,
+            gpu=GPU_OPTION.CPU,
             cuda_version=cuda_version,
             plat=platform,
             skip_torch_or_directml=skip_torch_or_directml,
             skip_requirement=skip_requirement,
             fast_deps=fast_deps,
         )
-        print(f"ComfyUI is installed at: {comfy_path}")
+        rprint(f"ComfyUI is installed at: {comfy_path}")
         return None
 
     if nvidia and platform == constants.OS.MACOS:
-        print("[bold red]Nvidia GPU is never on MacOS. What are you smoking? 🤔[/bold red]")
+        rprint("[bold red]Nvidia GPU is never on MacOS. What are you smoking? 🤔[/bold red]")
         raise typer.Exit(code=1)
 
     if platform != constants.OS.MACOS and m_series:
-        print(f"[bold red]You are on {platform} bruh [/bold red]")
+        rprint(f"[bold red]You are on {platform} bruh [/bold red]")
 
     gpu = None
 
@@ -291,10 +312,10 @@ def install(
             )
 
     if gpu == GPU_OPTION.INTEL_ARC:
-        print("[bold yellow]Installing on Intel ARC is not yet completely supported[/bold yellow]")
+        rprint("[bold yellow]Installing on Intel ARC is not yet completely supported[/bold yellow]")
         env_check = env_checker.EnvChecker()
         if env_check.conda_env is None:
-            print("[bold red]Intel ARC support requires conda environment to be activated.[/bold red]")
+            rprint("[bold red]Intel ARC support requires conda environment to be activated.[/bold red]")
             raise typer.Exit(code=1)
         if intel_arc is None:
             confirm_result = ui.prompt_confirm_action(
@@ -302,10 +323,10 @@ def install(
             )
             if not confirm_result:
                 raise typer.Exit(code=0)
-        print("[bold yellow]Installing on Intel ARC is in beta stage.[/bold yellow]")
+        rprint("[bold yellow]Installing on Intel ARC is in beta stage.[/bold yellow]")
 
     if gpu is None and not cpu:
-        print(
+        rprint(
             "[bold red]No GPU option selected or `--cpu` enabled, use --\\[gpu option] flag (e.g. --nvidia) to pick GPU. use `--cpu` to install for CPU. Exiting...[/bold red]"
         )
         raise typer.Exit(code=1)
@@ -318,6 +339,7 @@ def install(
         skip_manager,
         commit=commit,
         gpu=gpu,
+        version=version,
         cuda_version=cuda_version,
         plat=platform,
         skip_torch_or_directml=skip_torch_or_directml,
@@ -325,7 +347,7 @@ def install(
         fast_deps=fast_deps,
     )
 
-    print(f"ComfyUI is installed at: {comfy_path}")
+    rprint(f"ComfyUI is installed at: {comfy_path}")
 
 
 @app.command(help="Update ComfyUI Environment [all|comfy]")
@@ -349,9 +371,9 @@ def update(
     if "all" == target:
         custom_nodes.command.execute_cm_cli(["update", "all"])
     else:
-        print(f"Updating ComfyUI in {comfy_path}...")
+        rprint(f"Updating ComfyUI in {comfy_path}...")
         if comfy_path is None:
-            print("ComfyUI path is not found.")
+            rprint("ComfyUI path is not found.")
             raise typer.Exit(code=1)
         os.chdir(comfy_path)
         subprocess.run(["git", "pull"], check=True)
@@ -416,7 +438,7 @@ def run(
 
 def validate_comfyui(_env_checker):
     if _env_checker.comfy_repo is None:
-        print("[bold red]If ComfyUI is not installed, this feature cannot be used.[/bold red]")
+        rprint("[bold red]If ComfyUI is not installed, this feature cannot be used.[/bold red]")
         raise typer.Exit(code=1)
 
 
@@ -424,19 +446,19 @@ def validate_comfyui(_env_checker):
 @tracking.track_command()
 def stop():
     if constants.CONFIG_KEY_BACKGROUND not in ConfigManager().config["DEFAULT"]:
-        print("[bold red]No ComfyUI is running in the background.[/bold red]\n")
+        rprint("[bold red]No ComfyUI is running in the background.[/bold red]\n")
         raise typer.Exit(code=1)
 
     bg_info = ConfigManager().background
     if not bg_info:
-        print("[bold red]No ComfyUI is running in the background.[/bold red]\n")
+        rprint("[bold red]No ComfyUI is running in the background.[/bold red]\n")
         raise typer.Exit(code=1)
     is_killed = utils.kill_all(bg_info[2])
 
     if not is_killed:
-        print("[bold red]Failed to stop ComfyUI in the background.[/bold red]\n")
+        rprint("[bold red]Failed to stop ComfyUI in the background.[/bold red]\n")
     else:
-        print(f"[bold yellow]Background ComfyUI is stopped.[/bold yellow] ({bg_info[0]}:{bg_info[1]})")
+        rprint(f"[bold yellow]Background ComfyUI is stopped.[/bold yellow] ({bg_info[0]}:{bg_info[1]})")
 
     ConfigManager().remove_background()
 
@@ -459,7 +481,7 @@ def set_default(
     comfy_path = os.path.abspath(os.path.expanduser(workspace_path))
 
     if not os.path.exists(comfy_path):
-        print(
+        rprint(
             f"\nPath not found: {comfy_path}.\n",
             file=sys.stderr,
         )
@@ -467,7 +489,7 @@ def set_default(
 
     is_comfy_repo, comfy_repo = check_comfy_repo(comfy_path)
     if not is_comfy_repo:
-        print(
+        rprint(
             f"\nSpecified path is not a ComfyUI path: {comfy_path}.\n",
             file=sys.stderr,
         )
@@ -475,7 +497,7 @@ def set_default(
 
     comfy_path = comfy_repo.working_dir
 
-    print(f"Specified path is set as default ComfyUI path: {comfy_path} ")
+    rprint(f"Specified path is set as default ComfyUI path: {comfy_path} ")
     workspace_manager.set_default_workspace(comfy_path)
     workspace_manager.set_default_launch_extras(launch_extras)
 
@@ -485,12 +507,12 @@ def set_default(
 def which():
     comfy_path = workspace_manager.workspace_path
     if comfy_path is None:
-        print(
+        rprint(
             "ComfyUI not found, please run 'comfy install', run 'comfy' in a ComfyUI directory, or specify the workspace path with '--workspace'."
         )
         raise typer.Exit(code=1)
 
-    print(f"Target ComfyUI path: {comfy_path}")
+    rprint(f"Target ComfyUI path: {comfy_path}")
 
 
 @app.command(help="Print out current environment variables.")
@@ -500,25 +522,25 @@ def env():
     _env_checker = EnvChecker()
     table = _env_checker.fill_print_table()
     workspace_manager.fill_print_table(table)
-    console.print(table)
+    console.rprint(table)
 
 
 @app.command(hidden=True)
 @tracking.track_command()
 def nodes():
-    print("\n[bold red] No such command, did you mean 'comfy node' instead?[/bold red]\n")
+    rprint("\n[bold red] No such command, did you mean 'comfy node' instead?[/bold red]\n")
 
 
 @app.command(hidden=True)
 @tracking.track_command()
 def models():
-    print("\n[bold red] No such command, did you mean 'comfy model' instead?[/bold red]\n")
+    rprint("\n[bold red] No such command, did you mean 'comfy model' instead?[/bold red]\n")
 
 
 @app.command(help="Provide feedback on the Comfy CLI tool.")
 @tracking.track_command()
 def feedback():
-    print("Feedback Collection for Comfy CLI Tool\n")
+    rprint("Feedback Collection for Comfy CLI Tool\n")
 
     # General Satisfaction
     general_satisfaction_score = ui.prompt_select(
@@ -541,7 +563,7 @@ def feedback():
         tracking.track_event("feedback_additional")
         webbrowser.open("https://github.com/Comfy-Org/comfy-cli/issues/new/choose")
 
-    print("Thank you for your feedback!")
+    rprint("Thank you for your feedback!")
 
 
 @app.command(help="Download a standalone Python interpreter and dependencies based on an existing comfyui workspace")
