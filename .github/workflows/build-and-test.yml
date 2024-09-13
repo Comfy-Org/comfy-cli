@@ -3,9 +3,17 @@ on:
   push:
     branches:
       - main
+    paths:
+      - "comfy_cli/**"
+      - "!.github/**"
+      - "!tests/**"
   pull_request:
     branches:
       - main
+    paths:
+      - "comfy_cli/**"
+      - "!.github/**"
+      - "!tests/**"
 
 jobs:
   test:
