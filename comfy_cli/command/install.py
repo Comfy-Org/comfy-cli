@@ -253,7 +253,7 @@ def execute(
 
 def validate_version(version: str) -> Optional[str]:
     """
-    Validates the input version string.
+    Validates the version string as 'latest', 'nightly', or a semantically version number.
 
     Args:
     version (str): The version string to validate.
@@ -281,7 +281,10 @@ def validate_version(version: str) -> Optional[str]:
         ) from exc
 
 
-def fetch_releases(repo_owner, repo_name):
+def fetch_github_releases(repo_owner: str, repo_name: str) -> List[Dict[str, str]]:
+    """
+    Fetch the list of releases from the GitHub API.
+    """
     url = f"https://api.github.com/repos/{repo_owner}/{repo_name}/releases"
     response = requests.get(url)
     return response.json()
@@ -290,6 +293,11 @@ def fetch_releases(repo_owner, repo_name):
 class GithubRelease(TypedDict):
     """
     A dictionary representing a GitHub release.
+
+    Fields:
+    - version: The version number of the release. (Removed the v prefix)
+    - tag: The tag name of the release.
+    - download_url: The URL to download the release.
     """
 
     version: Optional[semver.VersionInfo]
@@ -317,8 +325,10 @@ def select_version(releases: List[GithubRelease], version: str) -> Optional[Gith
     """
     Given a list of Github releases, select the release that matches the specified version.
     """
-    if version == "latest":
+    if version.lower() == "latest":
         return next((r for r in releases if r["tag"].lower() == version.lower()), None)
+
+    version = version.lstrip("v")
 
     try:
         requested_version = semver.VersionInfo.parse(version)
@@ -351,7 +361,7 @@ def checkout_stable_comfyui(version: str, repo_dir: str):
     if version == "latest":
         selected_release = get_latest_release("comfyanonymous", "ComfyUI")
     else:
-        releases = fetch_releases("comfyanonymous", "ComfyUI")
+        releases = fetch_github_releases("comfyanonymous", "ComfyUI")
         parsed_releases = parse_releases(releases)
         selected_release = select_version(parsed_releases, version)
 
