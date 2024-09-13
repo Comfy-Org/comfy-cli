@@ -8,6 +8,9 @@ on:
       - "comfy_cli/**"
       - "!comfy_cli/test_**"
       - "!.github/**"
+      - "!tests/**"
+      - "!.coveragerc"
+      - "!.gitignore"
   pull_request:
     branches:
       - main
@@ -15,6 +18,9 @@ on:
       - "comfy_cli/**"
       - "!comfy_cli/test_**"
       - "!.github/**"
+      - "!tests/**"
+      - "!.coveragerc"
+      - "!.gitignore"
 
 jobs:
   test-cli-gpu:

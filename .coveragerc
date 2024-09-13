@@ -1,0 +1,23 @@
+[run]
+source = comfy_cli
+omit = tests/*
+
+[report]
+exclude_lines =
+    pragma: no cover
+    def __repr__
+    if self.debug:
+    if __name__ == .__main__.:
+    raise NotImplementedError
+    pass
+    except ImportError:
+    def parse_args
+    @abstractmethod
+
+ignore_errors = True
+
+[html]
+directory = coverage_html_report
+
+[xml]
+output = coverage.xml

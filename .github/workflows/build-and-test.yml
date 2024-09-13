@@ -3,9 +3,21 @@ on:
   push:
     branches:
       - main
+    paths:
+      - "comfy_cli/**"
+      - "!.github/**"
+      - "!tests/**"
+      - "!.coveragerc"
+      - "!.gitignore"
   pull_request:
     branches:
       - main
+    paths:
+      - "comfy_cli/**"
+      - "!.github/**"
+      - "!tests/**"
+      - "!.coveragerc"
+      - "!.gitignore"
 
 jobs:
   test:
