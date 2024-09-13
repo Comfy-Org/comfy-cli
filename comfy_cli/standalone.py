@@ -5,7 +5,7 @@ from typing import Optional
 
 import requests
 
-from comfy_cli.constants import OS, PROC
+from comfy_cli.constants import DEFAULT_STANDALONE_PYTHON_DOWNLOAD_VERSION, OS, PROC
 from comfy_cli.typing import PathLike
 from comfy_cli.utils import create_tarball, download_url, extract_tarball, get_os, get_proc
 from comfy_cli.uv import DependencyCompiler
@@ -28,7 +28,7 @@ _asset_url_prefix = "https://github.com/indygreg/python-build-standalone/release
 def download_standalone_python(
     platform: Optional[str] = None,
     proc: Optional[str] = None,
-    version: str = "3.12.5",
+    version: str = DEFAULT_STANDALONE_PYTHON_DOWNLOAD_VERSION,
     tag: str = "latest",
     flavor: str = "install_only",
     cwd: PathLike = ".",
@@ -65,7 +65,7 @@ class StandalonePython:
     def FromDistro(
         platform: Optional[str] = None,
         proc: Optional[str] = None,
-        version: str = "3.12.6",
+        version: str = DEFAULT_STANDALONE_PYTHON_DOWNLOAD_VERSION,
         tag: str = "latest",
         flavor: str = "install_only",
         cwd: PathLike = ".",
