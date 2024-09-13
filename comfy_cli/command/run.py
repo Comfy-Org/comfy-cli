@@ -265,7 +265,7 @@ class WorkflowExecution:
 
         output = data["output"]
 
-        if "images" not in output:
+        if output is None or "images" not in output:
             return
 
         for img in output["images"]:
