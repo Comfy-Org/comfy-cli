@@ -1,0 +1,4 @@
+# .pylintrc or pylintrc
+
+[MAIN]
+max-line-length=120
