@@ -372,7 +372,7 @@ def checkout_stable_comfyui(version: str, repo_dir: str):
     tag = str(selected_release["tag"])
     console.print(
         Panel(
-            f"🔍 Checking out ComfyUI version: [bold cyan]{selected_release['tag']}[/bold cyan]",
+            f"Checking out ComfyUI version: [bold cyan]{selected_release['tag']}[/bold cyan]",
             title="[yellow]ComfyUI Checkout[/yellow]",
             border_style="green",
             expand=False,
@@ -382,10 +382,10 @@ def checkout_stable_comfyui(version: str, repo_dir: str):
     with console.status("[bold green]Checking out tag...", spinner="dots"):
         success = git_checkout_tag(repo_dir, tag)
         if not success:
-            console.print("\n❌ [bold red]Failed to checkout tag![/bold red]")
+            console.print("\n[bold red]Failed to checkout tag![/bold red]")
             sys.exit(1)
 
-    console.print("\n✅ [bold green]Successfully checked out tag![/bold green]")
+    console.print("\n[bold green]Successfully checked out tag![/bold green]")
 
 
 def get_latest_release(repo_owner: str, repo_name: str) -> Optional[GithubRelease]:
