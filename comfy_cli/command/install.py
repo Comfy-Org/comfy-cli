@@ -385,8 +385,6 @@ def checkout_stable_comfyui(version: str, repo_dir: str):
             console.print("\n[bold red]Failed to checkout tag![/bold red]")
             sys.exit(1)
 
-    console.print("\n[bold green]Successfully checked out tag![/bold green]")
-
 
 def get_latest_release(repo_owner: str, repo_name: str) -> Optional[GithubRelease]:
     """
