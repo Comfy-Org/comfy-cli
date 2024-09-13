@@ -1,6 +1,5 @@
 import os
 import subprocess
-from typing import Optional
 
 from rich.console import Console
 from rich.panel import Panel
@@ -35,9 +34,9 @@ def git_checkout_tag(repo_path: str, tag: str) -> bool:
     except subprocess.CalledProcessError as e:
         error_message = Text()
         error_message.append("Git Checkout Error", style="bold red on white")
-        error_message.append(f"\n\nFailed to checkout tag: ", style="bold yellow")
+        error_message.append("\n\nFailed to checkout tag: ", style="bold yellow")
         error_message.append(f"[cyan]{tag}[/cyan]")
-        error_message.append(f"\n\nError details:", style="bold red")
+        error_message.append("\n\nError details:", style="bold red")
         error_message.append(f"\n{str(e)}", style="italic")
 
         if e.stderr:
