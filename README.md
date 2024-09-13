@@ -1,14 +1,15 @@
 # Comfy-Cli: A Command Line Tool for ComfyUI
+
 [![Test ComfyUI Example Workflows](https://github.com/Comfy-Org/ComfyUI-Mirror/actions/workflows/test-workflows.yaml/badge.svg)](https://github.com/Comfy-Org/ComfyUI-Mirror/actions/workflows/test-workflows.yaml)
 [![Test ComfyUI Windows with Default Workflow](https://github.com/Comfy-Org/ComfyUI-Mirror/actions/workflows/test-workflows-windows.yaml/badge.svg)](https://github.com/Comfy-Org/ComfyUI-Mirror/actions/workflows/test-workflows-windows.yaml)
+
+[![codecov](https://codecov.io/github/Comfy-Org/comfy-cli/graph/badge.svg?token=S64WJWD2ZX)](https://codecov.io/github/Comfy-Org/comfy-cli)
 
 comfy-cli is a command line tool that helps users easily install and manage
 [ComfyUI](https://github.com/comfyanonymous/ComfyUI), a powerful open-source
 machine learning framework. With comfy-cli, you can quickly set up ComfyUI,
 install packages, and manage custom nodes, all from the convenience of your
 terminal.
-
-
 
 ## Demo
 
@@ -150,7 +151,7 @@ comfy node [show|simple-show] [installed|enabled|not-installed|disabled|all|snap
 #### Bisect custom nodes
 
 If you encounter bugs only with custom nodes enabled, and want to find out which custom node(s) causes the bug,
- the bisect tool can help you pinpoint the custom node that causes the issue.
+the bisect tool can help you pinpoint the custom node that causes the issue.
 
 - `comfy node bisect start`: Start a new bisect session with optional ComfyUI launch args. It automatically marks the starting state as bad, and takes all enabled nodes when the command executes as the test set.
 - `comfy node bisect good`: Mark the current active set as good, indicating the problem is not within the test set.
@@ -163,7 +164,7 @@ If you encounter bugs only with custom nodes enabled, and want to find out which
 
   `comfy model download --url <URL> ?[--relative-path <PATH>] ?[--set-civitai-api-token <TOKEN>]`
 
-  * URL: CivitAI, huggingface file url, ...
+  - URL: CivitAI, huggingface file url, ...
 
 - Model remove
 
