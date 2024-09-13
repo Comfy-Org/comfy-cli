@@ -522,7 +522,7 @@ def env():
     _env_checker = EnvChecker()
     table = _env_checker.fill_print_table()
     workspace_manager.fill_print_table(table)
-    console.rprint(table)
+    console.print(table)
 
 
 @app.command(hidden=True)
