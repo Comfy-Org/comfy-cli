@@ -8,6 +8,7 @@ on:
       - "!.github/**"
       - "!tests/**"
       - "!.coveragerc"
+      - "!.gitignore"
   pull_request:
     branches:
       - main
@@ -16,6 +17,7 @@ on:
       - "!.github/**"
       - "!tests/**"
       - "!.coveragerc"
+      - "!.gitignore"
 
 jobs:
   test:
