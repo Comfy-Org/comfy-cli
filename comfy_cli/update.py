@@ -41,7 +41,6 @@ def check_for_updates(timeout: float = 10) -> None:
     is displayed.
 
     :param timeout: (default 10) Timeout in seconds for the request to check for updates.
-                    If not provided, no timeout is enforced.
     """
     current_version = get_version_from_pyproject()
     has_newer, newer_version = check_for_newer_pypi_version("comfy-cli", current_version, timeout=timeout)
