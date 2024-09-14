@@ -242,7 +242,7 @@ def install(
         ),
     ] = False,
 ):
-    check_for_updates()
+    check_for_updates(timeout=3)
     checker = EnvChecker()
 
     comfy_path, _ = workspace_manager.get_workspace_path()
@@ -518,7 +518,7 @@ def which():
 @app.command(help="Print out current environment variables.")
 @tracking.track_command()
 def env():
-    check_for_updates()
+    check_for_updates(timeout=3)
     _env_checker = EnvChecker()
     table = _env_checker.fill_print_table()
     workspace_manager.fill_print_table(table)
