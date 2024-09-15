@@ -115,7 +115,7 @@ class StandalonePython:
         for pycache in self.rpath.glob("**/__pycache__"):
             shutil.rmtree(pycache)
 
-    def run_module(self, mod: str, *args: list[str]):
+    def run_module(self, mod: str, *args: str):
         cmd: list[str] = [
             str(self.executable),
             "-m",
@@ -125,10 +125,10 @@ class StandalonePython:
 
         subprocess.run(cmd, check=True)
 
-    def pip_install(self, *args: list[str]):
+    def pip_install(self, *args: str):
         self.run_module("pip", "install", *args)
 
-    def uv_install(self, *args: list[str]):
+    def uv_install(self, *args: str):
         self.run_module("uv", "pip", "install", *args)
 
     def install_comfy_cli(self, dev: bool = False):
@@ -137,16 +137,17 @@ class StandalonePython:
         else:
             self.uv_install("comfy_cli")
 
-    def run_comfy_cli(self, *args: list[str]):
+    def run_comfy_cli(self, *args: str):
         self.run_module("comfy_cli", *args)
 
-    def install_comfy(self, *args: list[str], gpu_arg: str = "--nvidia"):
+    def install_comfy(self, *args: str, gpu_arg: str = "--nvidia"):
         self.run_comfy_cli("--here", "--skip-prompt", "install", "--fast-deps", gpu_arg, *args)
 
     def dehydrate_comfy_deps(
         self,
         comfyDir: PathLike,
         extraSpecs: Optional[list[str]] = None,
+        packWheels: bool = False,
     ):
         self.dep_comp = DependencyCompiler(
             cwd=comfyDir,
@@ -156,14 +157,19 @@ class StandalonePython:
         )
         self.dep_comp.compile_deps()
 
-        skip_uv = get_os() == OS.WINDOWS
-        self.dep_comp.fetch_dep_wheels(skip_uv=skip_uv)
+        if packWheels:
+            skip_uv = get_os() == OS.WINDOWS
+            self.dep_comp.fetch_dep_wheels(skip_uv=skip_uv)
 
-    def rehydrate_comfy_deps(self):
+    def rehydrate_comfy_deps(self, packWheels: bool = False):
         self.dep_comp = DependencyCompiler(
             executable=self.executable, outDir=self.rpath, reqFilesCore=[], reqFilesExt=[]
         )
-        self.dep_comp.install_wheels_directly()
+
+        if packWheels:
+            self.dep_comp.install_wheels_directly()
+        else:
+            self.dep_comp.install_deps()
 
     def to_tarball(self, outPath: Optional[PathLike] = None, show_progress: bool = True):
         # remove any __pycache__ before creating archive

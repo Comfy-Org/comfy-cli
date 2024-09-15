@@ -184,7 +184,7 @@ class DependencyCompiler:
         override: Optional[PathLike] = None,
         reqs: Optional[list[str]] = None,
         reqFile: Optional[list[PathLike]] = None,
-    ) -> subprocess.CompletedProcess[Any]:
+    ) -> None:
         cmd = [
             str(executable),
             "-m",
@@ -232,7 +232,7 @@ class DependencyCompiler:
         executable: PathLike = sys.executable,
         extraUrl: Optional[str] = None,
         index_strategy: str = "unsafe-best-match",
-    ) -> subprocess.CompletedProcess[Any]:
+    ) -> None:
         cmd = [
             str(executable),
             "-m",
@@ -262,7 +262,7 @@ class DependencyCompiler:
         out: Optional[PathLike] = None,
         reqs: Optional[list[str]] = None,
         reqFile: Optional[list[PathLike]] = None,
-    ) -> subprocess.CompletedProcess[Any]:
+    ) -> None:
         """For now, the `download` cmd has no uv support, so use pip"""
         cmd = [
             str(executable),
@@ -298,7 +298,7 @@ class DependencyCompiler:
         out: Optional[PathLike] = None,
         reqs: Optional[list[str]] = None,
         reqFile: Optional[list[PathLike]] = None,
-    ) -> subprocess.CompletedProcess[Any]:
+    ) -> None:
         """For now, the `wheel` cmd has no uv support, so use pip"""
         cmd = [
             str(executable),
@@ -480,20 +480,20 @@ class DependencyCompiler:
     def install_deps(self):
         DependencyCompiler.Install(
             cwd=self.cwd,
-            reqFile=[self.out],
             executable=self.executable,
             extra_index_url=self.gpuUrl,
             override=self.override,
+            reqFile=[self.out],
         )
 
     def install_dists(self):
         DependencyCompiler.Install(
             cwd=self.cwd,
-            reqFile=[self.out],
             executable=self.executable,
             find_links=[self.outDir / "dists"],
             no_deps=True,
             no_index=True,
+            reqFile=[self.out],
         )
 
     def install_wheels(self):
