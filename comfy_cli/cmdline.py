@@ -272,7 +272,7 @@ def install(
             skip_manager,
             commit=commit,
             version=version,
-            gpu=GPU_OPTION.CPU,
+            gpu=None,
             cuda_version=cuda_version,
             plat=platform,
             skip_torch_or_directml=skip_torch_or_directml,
