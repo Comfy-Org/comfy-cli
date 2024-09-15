@@ -19,6 +19,7 @@ def _run(cmd: list[str], cwd: PathLike, check: bool = True) -> subprocess.Comple
 def _check_call(cmd: list[str], cwd: Optional[PathLike] = None):
     """uses check_call to run pip, as reccomended by the pip maintainers.
     see https://pip.pypa.io/en/stable/user_guide/#using-pip-from-your-program"""
+    print("Running:", " ".join(cmd))
     subprocess.check_call(cmd, cwd=cwd)
 
 
@@ -326,8 +327,8 @@ class DependencyCompiler:
         return _check_call(cmd, cwd)
 
     @staticmethod
-    def Resolve_Gpu(gpu: Union[GPU_OPTION, None]):
-        if gpu is None:
+    def Resolve_Gpu(gpu: GPU_OPTION):
+        if gpu is None or gpu is GPU_OPTION.CPU:
             try:
                 tver = metadata.version("torch")
                 if "+cu" in tver:
@@ -345,7 +346,7 @@ class DependencyCompiler:
         self,
         cwd: PathLike = ".",
         executable: PathLike = sys.executable,
-        gpu: Union[GPU_OPTION, None] = None,
+        gpu: GPU_OPTION = GPU_OPTION.CPU,
         outDir: PathLike = ".",
         outName: str = "requirements.compiled",
         reqFilesCore: Optional[list[PathLike]] = None,
