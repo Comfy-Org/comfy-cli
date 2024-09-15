@@ -576,6 +576,13 @@ def standalone(
             help="setuptools-style requirement specificer pointing to an instance of comfy-cli",
         ),
     ] = "comfy-cli",
+    pack_wheels: Annotated[
+        bool,
+        typer.Option(
+            show_default=False,
+            help="Pack requirement wheels in archive when creating standalone bundle",
+        ),
+    ] = False,
     platform: Annotated[
         Optional[constants.OS],
         typer.Option(
@@ -605,10 +612,10 @@ def standalone(
 
     if rehydrate:
         sty = StandalonePython.FromTarball(fpath="python.tgz")
-        sty.rehydrate_comfy_deps()
+        sty.rehydrate_comfy_deps(packWheels=pack_wheels)
     else:
         sty = StandalonePython.FromDistro(platform=platform, proc=proc)
-        sty.dehydrate_comfy_deps(comfyDir=comfy_path, extraSpecs=cli_spec)
+        sty.dehydrate_comfy_deps(comfyDir=comfy_path, extraSpecs=[cli_spec], packWheels=pack_wheels)
         sty.to_tarball()
 
 

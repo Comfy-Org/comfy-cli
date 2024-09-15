@@ -147,6 +147,7 @@ class StandalonePython:
         self,
         comfyDir: PathLike,
         extraSpecs: Optional[list[str]] = None,
+        packWheels: bool = False,
     ):
         self.dep_comp = DependencyCompiler(
             cwd=comfyDir,
@@ -156,14 +157,20 @@ class StandalonePython:
         )
         self.dep_comp.compile_deps()
 
-        skip_uv = get_os() == OS.WINDOWS
-        self.dep_comp.fetch_dep_wheels(skip_uv=skip_uv)
+        if packWheels:
+            skip_uv = get_os() == OS.WINDOWS
+            self.dep_comp.fetch_dep_wheels(skip_uv=skip_uv)
 
-    def rehydrate_comfy_deps(self):
+    def rehydrate_comfy_deps(self, packWheels: bool = False):
         self.dep_comp = DependencyCompiler(
             executable=self.executable, outDir=self.rpath, reqFilesCore=[], reqFilesExt=[]
         )
-        self.dep_comp.install_wheels_directly()
+
+        if packWheels:
+            self.dep_comp.install_wheels_directly()
+        else:
+            self.dep_comp.install_deps()
+
 
     def to_tarball(self, outPath: Optional[PathLike] = None, show_progress: bool = True):
         # remove any __pycache__ before creating archive
