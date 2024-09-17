@@ -1,7 +1,6 @@
 import functools
 import logging as logginglib
 import uuid
-import threading
 
 import typer
 from mixpanel import Mixpanel
@@ -42,7 +41,7 @@ def disable():
     typer.echo(f"Tracking is now {'disabled'}.")
 
 
-def track_event(event_name: str, properties: any = None, timeout: float = 10):
+def track_event(event_name: str, properties: any = None):
     if properties is None:
         properties = {}
     logging.debug(f"tracking event called with event_name: {event_name} and properties: {properties}")
@@ -53,29 +52,9 @@ def track_event(event_name: str, properties: any = None, timeout: float = 10):
     try:
         properties["cli_version"] = cli_version
         properties["tracing_id"] = tracing_id
-
-        # Define a function to wrap the mp.track call to enable timeout
-        def track_call():
-            mp.track(distinct_id=user_id, event_name=event_name, properties=properties)
-
-        # Create a thread to run the track_call function
-        track_thread = threading.Thread(target=track_call)
-
-        # Start the thread
-        track_thread.start()
-
-        # Wait for the thread to finish within the timeout period
-        track_thread.join(timeout)
-
-        # Check if the thread is still active after the timeout
-        if track_thread.is_alive():
-            logging.warning(f"Tracking event '{event_name}' timed out after {timeout} seconds")
-        else:
-            logging.debug(f"Successfully tracked event '{event_name}'")
-
+        mp.track(distinct_id=user_id, event_name=event_name, properties=properties)
     except Exception as e:
         logging.warning(f"Failed to track event: {e}")  # Log the error but do not raise
-
 
 def track_command(sub_command: str = None):
     """
@@ -139,5 +118,5 @@ def init_tracking(enable_tracking: bool):
 
 
 def set_tracking_enabled(enabled: bool):
-    config_manager.set(constants.CONFIG_KEY_ENABLE_TRACKING, str(enabled))
+    config_manager.set(constants.CONFIG_KEY_ENABLE_TRACKING, enabled)
     return enabled
