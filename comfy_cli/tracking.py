@@ -81,7 +81,7 @@ def track_command(sub_command: str = None):
 
 
 def prompt_tracking_consent(skip_prompt: bool = False, default_value: bool = False):
-    tracking_enabled = config_manager.get(constants.CONFIG_KEY_ENABLE_TRACKING)
+    tracking_enabled = config_manager.get(constants.CONFIG_KEY_ENABLE_TRACKING, type_cast=bool)
     if tracking_enabled is not None:
         return
 
@@ -97,7 +97,7 @@ def init_tracking(enable_tracking: bool):
     Initialize the tracking system by setting the user identifier and tracking enabled status.
     """
     logging.debug(f"Initializing tracking with enable_tracking: {enable_tracking}")
-    config_manager.set(constants.CONFIG_KEY_ENABLE_TRACKING, str(enable_tracking))
+    config_manager.set(constants.CONFIG_KEY_ENABLE_TRACKING, enable_tracking)
     if not enable_tracking:
         return
 
