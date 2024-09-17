@@ -1,6 +1,7 @@
 import functools
 import logging as logginglib
 import uuid
+import asyncio
 
 import typer
 from mixpanel import Mixpanel
@@ -41,7 +42,7 @@ def disable():
     typer.echo(f"Tracking is now {'disabled'}.")
 
 
-def track_event(event_name: str, properties: any = None):
+def track_event(event_name: str, properties: any = None, timeout: int = 10):
     if properties is None:
         properties = {}
     logging.debug(f"tracking event called with event_name: {event_name} and properties: {properties}")
@@ -52,7 +53,17 @@ def track_event(event_name: str, properties: any = None):
     try:
         properties["cli_version"] = cli_version
         properties["tracing_id"] = tracing_id
-        mp.track(distinct_id=user_id, event_name=event_name, properties=properties)
+
+        # Define a function to wrap the mp.track call to enable timeout
+        async def track_with_timeout():
+            await asyncio.to_thread(mp.track, distinct_id=user_id, event_name=event_name, properties=properties)
+
+        # Run the mp.track with a timeout
+        try:
+            asyncio.run(asyncio.wait_for(track_with_timeout(), timeout=timeout))
+        except asyncio.TimeoutError:
+            logging.warning(f"Tracking event '{event_name}' timed out after {timeout} seconds")
+
     except Exception as e:
         logging.warning(f"Failed to track event: {e}")  # Log the error but do not raise
 
