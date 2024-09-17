@@ -61,6 +61,7 @@ def track_event(event_name: str, properties: any = None, timeout: int = 10):
         # Run the mp.track with a timeout
         try:
             asyncio.run(asyncio.wait_for(track_with_timeout(), timeout=timeout))
+            logging.debug(f"Successfully tracked event '{event_name}'")
         except asyncio.TimeoutError:
             logging.warning(f"Tracking event '{event_name}' timed out after {timeout} seconds")
 
