@@ -1,10 +1,14 @@
 import sys
+import logging
 from importlib.metadata import metadata
 
 import requests
 from packaging import version
 from rich.console import Console
 from rich.panel import Panel
+
+# Set up a logger for the module
+logger = logging.getLogger(__name__)
 
 console = Console()
 
@@ -29,8 +33,9 @@ def check_for_newer_pypi_version(package_name: str, current_version: str, timeou
             return True, latest_version
 
         return False, current_version
-    except requests.RequestException:
-        # Fail quietly on timeout or any request exception
+    except requests.RequestException as e:
+        logger.warning(f"Unable to fetch {package_name} version metadata from PyPI. Retaining current version {current_version}. "
+                       f"Exception: {type(e).__name__} - {e}")
         return False, current_version
 
 
