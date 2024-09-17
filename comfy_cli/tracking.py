@@ -55,7 +55,7 @@ def track_event(event_name: str, properties: any = None, timeout: float = 10):
         properties["tracing_id"] = tracing_id
 
         # Define a function to wrap the mp.track call to enable timeout
-        def track_with_timeout():
+        def track_call():
             mp.track(distinct_id=user_id, event_name=event_name, properties=properties)
 
         # Create a thread to run the track_call function
