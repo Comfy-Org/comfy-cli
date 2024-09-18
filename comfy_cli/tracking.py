@@ -81,7 +81,7 @@ def track_command(sub_command: str = None):
 
 
 def prompt_tracking_consent(skip_prompt: bool = False, default_value: bool = False):
-    tracking_enabled = config_manager.get(constants.CONFIG_KEY_ENABLE_TRACKING, type_cast=bool)
+    tracking_enabled = config_manager.get(constants.CONFIG_KEY_ENABLE_TRACKING)
     if tracking_enabled is not None:
         return
 

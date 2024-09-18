@@ -42,6 +42,8 @@ class ConfigManager(object):
         Get a value from the config file. Returns None if the key does not exist.
         """
         value = self.config["DEFAULT"].get(key, None)  # Returns None if the key does not exist
+        if value is None:
+            return None
 
         # Handle boolean conversion
         if type_cast == bool:
