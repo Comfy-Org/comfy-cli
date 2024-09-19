@@ -567,6 +567,7 @@ def feedback():
     rprint("Thank you for your feedback!")
 
 
+@app.command(hidden=True)
 @app.command(
     help="Given an existing installation of comfy core and any custom nodes, installs any needed python dependencies"
 )
