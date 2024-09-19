@@ -79,21 +79,28 @@ class DependencyCompiler:
     """
     ).strip()
 
-    reqNames = {
+    reqNames = (
         "requirements.txt",
         "pyproject.toml",
         "setup.cfg",
         "setup.py",
-    }
+    )
 
     @staticmethod
     def Find_Req_Files(*ders: PathLike) -> list[Path]:
-        return [
-            file  # fmt: skip
-            for der in ders
-            for file in Path(der).absolute().iterdir()
-            if file.name in DependencyCompiler.reqNames
-        ]
+        reqFiles = []
+        for der in ders:
+            reqFound = False
+            for reqName in DependencyCompiler.reqNames:
+                for file in Path(der).absolute().iterdir():
+                    if file.name == reqName:
+                        reqFiles.append(file)
+                        reqFound = True
+                        break
+                if reqFound:
+                    break
+
+        return reqFiles
 
     @staticmethod
     def Install_Build_Deps(executable: PathLike = sys.executable):
