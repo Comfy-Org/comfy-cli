@@ -22,6 +22,7 @@ from comfy_cli.constants import GPU_OPTION, CUDAVersion
 from comfy_cli.env_checker import EnvChecker
 from comfy_cli.standalone import StandalonePython
 from comfy_cli.update import check_for_updates
+from comfy_cli.uv import DependencyCompiler
 from comfy_cli.workspace_manager import WorkspaceManager, check_comfy_repo
 
 logging.setup_logging()
@@ -564,6 +565,18 @@ def feedback():
         webbrowser.open("https://github.com/Comfy-Org/comfy-cli/issues/new/choose")
 
     rprint("Thank you for your feedback!")
+
+
+@app.command(
+    help="Given an existing installation of comfy core and any custom nodes, installs any needed python dependencies"
+)
+@tracking.track_command()
+def dependency():
+    comfy_path, _ = workspace_manager.get_workspace_path()
+
+    depComp = DependencyCompiler(cwd=comfy_path)
+    depComp.compile_deps()
+    depComp.install_deps()
 
 
 @app.command(help="Download a standalone Python interpreter and dependencies based on an existing comfyui workspace")
