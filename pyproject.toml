@@ -39,7 +39,7 @@ dependencies = [
     "tomlkit",
     "typer>=0.9.0",
     "typing-extensions>=4.7.0",
-    "uv",
+    "uv<=0.4.0",
     "websocket-client",
     "semver~=3.0.2",
 ]
