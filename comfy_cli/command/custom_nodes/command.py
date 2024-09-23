@@ -534,7 +534,7 @@ def update(
 @tracking.track_command("node")
 def disable(
     nodes: List[str] = typer.Argument(
-        ...,
+        None,
         help="[all|List of custom nodes to disable]",
         autocompletion=node_or_all_completer,
     ),
@@ -552,9 +552,13 @@ def disable(
         autocompletion=mode_completer,
     ),
 ):
-    validate_mode(mode)
+    ui.prompt_multi_select(
+        "Select nodes to disable",
+        ["node1", "node2", "node3"]
+    )
+    # validate_mode(mode)
 
-    execute_cm_cli(["disable"] + nodes, channel=channel, mode=mode)
+    # execute_cm_cli(["disable"] + nodes, channel=channel, mode=mode)
 
 
 @app.command(help="Enable custom nodes")
