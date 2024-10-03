@@ -79,4 +79,4 @@ SUPPORTED_PT_EXTENSIONS = (".ckpt", ".pt", ".bin", ".pth", ".safetensors")
 NODE_ZIP_FILENAME = "node.zip"
 
 # The default version to download from python-build-standalone.
-DEFAULT_STANDALONE_PYTHON_DOWNLOAD_VERSION = "3.12.6"
+DEFAULT_STANDALONE_PYTHON_DOWNLOAD_VERSION = "3.12.7"
