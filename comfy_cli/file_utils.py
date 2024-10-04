@@ -46,6 +46,25 @@ def guess_status_code_reason(status_code: int, message: str) -> str:
     return f"Unknown error occurred (status code: {status_code})"
 
 
+def check_unauthorized(url: str, headers: Optional[dict] = None) -> bool:
+    """
+    Perform a GET request to the given URL and check if the response status code is 401 (Unauthorized).
+
+    Args:
+        url (str): The URL to send the GET request to.
+        headers (Optional[dict]): Optional headers to include in the request.
+
+    Returns:
+        bool: True if the response status code is 401, False otherwise.
+    """
+    try:
+        response = requests.get(url, headers=headers, allow_redirects=True)
+        return response.status_code == 401
+    except requests.RequestException:
+        # If there's an error making the request, we can't determine if it's unauthorized
+        return False
+
+
 def download_file(url: str, local_filepath: pathlib.Path, headers: Optional[dict] = None):
     """Helper function to download a file."""
     local_filepath.parent.mkdir(parents=True, exist_ok=True)  # Ensure the directory exists
