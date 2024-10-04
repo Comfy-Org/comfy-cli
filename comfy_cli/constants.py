@@ -42,6 +42,7 @@ CONFIG_KEY_INSTALL_EVENT_TRIGGERED = "install_event_triggered"
 CONFIG_KEY_BACKGROUND = "background"
 
 CIVITAI_API_TOKEN_KEY = "civitai_api_token"
+HF_API_TOKEN_KEY = "hf_api_token"
 
 DEFAULT_TRACKING_VALUE = True
 
