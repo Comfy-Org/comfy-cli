@@ -12,36 +12,36 @@ readme = "README.md"
 keywords = ["comfyui", "stable diffusion"]
 
 maintainers = [
-    { name = "Yoland Yan", email = "yoland@drip.art" },
-    { name = "James Kwon", email = "hongilkwon316@gmail.com" },
-    { name = "Robin Huang", email = "robin@drip.art" },
-    { name = "Dr.Lt.Data", email = "dr.lt.data@gmail.com" },
+  { name = "Yoland Yan", email = "yoland@drip.art" },
+  { name = "James Kwon", email = "hongilkwon316@gmail.com" },
+  { name = "Robin Huang", email = "robin@drip.art" },
+  { name = "Dr.Lt.Data", email = "dr.lt.data@gmail.com" },
 ]
 
 classifiers = [
-    "Development Status :: 4 - Beta",
-    "Intended Audience :: Developers",
-    "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
 ]
 
 dependencies = [
-    "charset-normalizer>=3.0.0",
-    "GitPython",
-    "httpx",
-    "mixpanel",
-    "packaging",
-    "pathspec",
-    "psutil",
-    "pyyaml",
-    "questionary",
-    "requests",
-    "rich",
-    "tomlkit",
-    "typer>=0.9.0",
-    "typing-extensions>=4.7.0",
-    "uv<=0.4.0",
-    "websocket-client",
-    "semver~=3.0.2",
+  "charset-normalizer>=3.0.0",
+  "GitPython",
+  "httpx",
+  "mixpanel",
+  "packaging",
+  "pathspec",
+  "psutil",
+  "pyyaml",
+  "questionary",
+  "requests",
+  "rich",
+  "tomlkit",
+  "typer>=0.9.0",
+  "typing-extensions>=4.7.0",
+  "uv",
+  "websocket-client",
+  "semver~=3.0.2",
 ]
 
 [project.optional-dependencies]
@@ -65,9 +65,9 @@ target-version = "py39"
 
 [tool.ruff.lint]
 select = [
-    "E4", # default
-    "E7", # default
-    "E9", # default
-    "F",  # default
-    "I",  # isort-like behavior (import statement sorting)
+  "E4", # default
+  "E7", # default
+  "E9", # default
+  "F",  # default
+  "I",  # isort-like behavior (import statement sorting)
 ]
