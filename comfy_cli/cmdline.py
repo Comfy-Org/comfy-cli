@@ -629,7 +629,7 @@ def standalone(
         sty.rehydrate_comfy_deps(packWheels=pack_wheels)
     else:
         sty = StandalonePython.FromDistro(platform=platform, proc=proc)
-        sty.dehydrate_comfy_deps(comfyDir=comfy_path, extraSpecs=[cli_spec], packWheels=pack_wheels)
+        sty.dehydrate_comfy_deps(comfyDir=comfy_path, extraSpecs=[], packWheels=pack_wheels)
         sty.to_tarball()
 
 
