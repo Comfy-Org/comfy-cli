@@ -34,14 +34,22 @@ class ConfigManager(object):
         """
         Set a key-value pair in the config file.
         """
-        self.config["DEFAULT"][key] = value
+        self.config["DEFAULT"][key] = str(value)
         self.write_config()  # Write changes to file immediately
 
-    def get(self, key):
+    def get(self, key, type_cast=str):
         """
         Get a value from the config file. Returns None if the key does not exist.
         """
-        return self.config["DEFAULT"].get(key, None)  # Returns None if the key does not exist
+        value = self.config["DEFAULT"].get(key, None)  # Returns None if the key does not exist
+        if value is None:
+            return None
+
+        # Handle boolean conversion
+        if type_cast == bool:
+            return value.lower() in ("true", "yes", "1")
+
+        return type_cast(value)
 
     def load(self):
         config_file_path = self.get_config_file_path()
