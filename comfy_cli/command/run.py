@@ -190,7 +190,7 @@ class WorkflowExecution:
 
     def format_image_path(self, img):
         filename = img["filename"]
-        subfolder = img["subfolder"]
+        subfolder = img["subfolder"] if "subfolder" in img else None
         output_type = img["type"] or "output"
 
         if self.local_paths:
