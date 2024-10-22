@@ -1,7 +1,6 @@
 # Comfy-Cli: A Command Line Tool for ComfyUI
 
 [![Test ComfyUI Example Workflows](https://github.com/Comfy-Org/ComfyUI-Mirror/actions/workflows/test-workflows.yaml/badge.svg)](https://github.com/Comfy-Org/ComfyUI-Mirror/actions/workflows/test-workflows.yaml)
-[![Test ComfyUI Windows with Default Workflow](https://github.com/Comfy-Org/ComfyUI-Mirror/actions/workflows/test-workflows-windows.yaml/badge.svg)](https://github.com/Comfy-Org/ComfyUI-Mirror/actions/workflows/test-workflows-windows.yaml)
 
 [![codecov](https://codecov.io/github/Comfy-Org/comfy-cli/graph/badge.svg?token=S64WJWD2ZX)](https://codecov.io/github/Comfy-Org/comfy-cli)
 
