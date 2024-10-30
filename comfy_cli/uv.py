@@ -7,9 +7,8 @@ from textwrap import dedent
 from typing import Any, Optional, Union, cast
 
 from comfy_cli import ui
-from comfy_cli.constants import GPU_OPTION, OS
+from comfy_cli.constants import GPU_OPTION
 from comfy_cli.typing import PathLike
-from comfy_cli.utils import get_os
 
 
 def _run(cmd: list[str], cwd: PathLike, check: bool = True) -> subprocess.CompletedProcess[Any]:
