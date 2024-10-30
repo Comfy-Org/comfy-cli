@@ -153,7 +153,7 @@ def background_launch(extra):
         for i in range(len(extra) - 1):
             if extra[i] == "--port":
                 port = extra[i + 1]
-            if listen[i] == "--listen":
+            if extra[i] == "--listen":
                 listen = extra[i + 1]
 
         if len(extra) > 0:
