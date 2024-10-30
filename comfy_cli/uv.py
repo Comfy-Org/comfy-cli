@@ -406,8 +406,6 @@ class DependencyCompiler:
                 f.write(DependencyCompiler.overrideGpu.format(gpu=self.gpu, gpuUrl=self.gpuUrl))
                 f.write("\n\n")
 
-            # TODO: remove numpy<2 override once torch is compatible with numpy>=2
-            if get_os() == OS.WINDOWS:
                 f.write("numpy<2\n")
                 f.write("\n\n")
 
