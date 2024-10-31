@@ -7,9 +7,8 @@ from textwrap import dedent
 from typing import Any, Optional, Union, cast
 
 from comfy_cli import ui
-from comfy_cli.constants import GPU_OPTION, OS
+from comfy_cli.constants import GPU_OPTION
 from comfy_cli.typing import PathLike
-from comfy_cli.utils import get_os
 
 
 def _run(cmd: list[str], cwd: PathLike, check: bool = True) -> subprocess.CompletedProcess[Any]:
@@ -406,8 +405,6 @@ class DependencyCompiler:
                 f.write(DependencyCompiler.overrideGpu.format(gpu=self.gpu, gpuUrl=self.gpuUrl))
                 f.write("\n\n")
 
-            # TODO: remove numpy<2 override once torch is compatible with numpy>=2
-            if get_os() == OS.WINDOWS:
                 f.write("numpy<2\n")
                 f.write("\n\n")
 
