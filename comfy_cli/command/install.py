@@ -3,7 +3,6 @@ import platform
 import subprocess
 import sys
 from typing import Dict, List, Optional, TypedDict
-from datetime import datetime
 
 import requests
 import semver
