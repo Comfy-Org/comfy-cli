@@ -191,7 +191,7 @@ def execute(
     if version != "nightly":
         try:
             checkout_stable_comfyui(version=version, repo_dir=repo_dir)
-        except Exception as e:
+        except GitHubRateLimitError as e:
             rprint(f"[bold red]Error checking out ComfyUI version: {e}[/bold red]")
             sys.exit(1)
 
@@ -199,7 +199,7 @@ def execute(
         rprint(
             f"[bold red]'{repo_dir}' already exists. But it is an invalid ComfyUI repository. Remove it and retry.[/bold red]"
         )
-        exit(-1)
+        sys.exit(-1)
 
     # checkout specified commit
     if commit is not None:
@@ -297,7 +297,11 @@ def fetch_github_releases(repo_owner: str, repo_name: str) -> List[Dict[str, str
     """
     url = f"https://api.github.com/repos/{repo_owner}/{repo_name}/releases"
 
-    response = requests.get(url, timeout=5)
+    headers = {}
+    if github_token := os.getenv("GITHUB_TOKEN"):
+        headers["Authorization"] = f"Bearer {github_token}"
+
+    response = requests.get(url, headers=headers, timeout=5)
 
     # Handle rate limiting
     if response.status_code in (403, 429):
