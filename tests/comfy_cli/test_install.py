@@ -53,7 +53,7 @@ def test_fetch_releases_success(mock_get):
     assert len(releases) == 2
     assert releases[0]["tag_name"] == "v1.0.0"
     assert releases[1]["tag_name"] == "v1.1.0"
-    mock_get.assert_called_once_with("https://api.github.com/repos/owner/repo/releases")
+    mock_get.assert_called_once_with("https://api.github.com/repos/owner/repo/releases", 5)
 
 
 @patch("requests.get")
