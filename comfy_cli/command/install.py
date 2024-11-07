@@ -188,13 +188,17 @@ def execute(
         clone_comfyui(url=url, repo_dir=repo_dir)
 
     if version != "nightly":
-        checkout_stable_comfyui(version=version, repo_dir=repo_dir)
+        try:
+            checkout_stable_comfyui(version=version, repo_dir=repo_dir)
+        except GitHubRateLimitError as e:
+            rprint(f"[bold red]Error checking out ComfyUI version: {e}[/bold red]")
+            sys.exit(1)
 
     elif not check_comfy_repo(repo_dir)[0]:
         rprint(
             f"[bold red]'{repo_dir}' already exists. But it is an invalid ComfyUI repository. Remove it and retry.[/bold red]"
         )
-        exit(-1)
+        sys.exit(-1)
 
     # checkout specified commit
     if commit is not None:
@@ -281,12 +285,39 @@ def validate_version(version: str) -> Optional[str]:
         ) from exc
 
 
+class GitHubRateLimitError(Exception):
+    """Raised when GitHub API rate limit is exceeded"""
+
+
 def fetch_github_releases(repo_owner: str, repo_name: str) -> List[Dict[str, str]]:
     """
     Fetch the list of releases from the GitHub API.
+    Handles rate limiting by logging the wait time.
     """
     url = f"https://api.github.com/repos/{repo_owner}/{repo_name}/releases"
-    response = requests.get(url)
+
+    headers = {}
+    if github_token := os.getenv("GITHUB_TOKEN"):
+        headers["Authorization"] = f"Bearer {github_token}"
+
+    response = requests.get(url, headers=headers, timeout=5)
+
+    # Handle rate limiting
+    if response.status_code in (403, 429):
+        # Check rate limit headers
+        remaining = int(response.headers.get("x-ratelimit-remaining", 0))
+        if remaining == 0:
+            reset_time = int(response.headers.get("x-ratelimit-reset", 0))
+            message = f"Primary rate limit from Github exceeded! Please retry after: {reset_time})"
+            raise GitHubRateLimitError(message)
+
+        if "retry-after" in response.headers:
+            wait_seconds = int(response.headers["retry-after"])
+            message = f"Rate limit from Github exceeded! Please wait {wait_seconds} seconds before retrying."
+            rprint(f"[yellow]{message}[/yellow]")
+            raise GitHubRateLimitError(message)
+
+    response.raise_for_status()
     return response.json()
 
 
