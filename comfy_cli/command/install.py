@@ -157,6 +157,7 @@ def execute(
     skip_manager: bool,
     version: str,
     commit: Optional[str] = None,
+    manager_commit: Optional[str] = None,
     gpu: constants.GPU_OPTION = None,
     cuda_version: constants.CUDAVersion = constants.CUDAVersion.v12_1,
     plat: constants.OS = None,
@@ -238,6 +239,8 @@ def execute(
                 )
             else:
                 subprocess.run(["git", "clone", manager_url, manager_repo_dir], check=True)
+                if manager_commit is not None:
+                    subprocess.run(["git", "checkout", manager_commit], check=True, cwd=manager_repo_dir)
 
             if not fast_deps:
                 pip_install_manager_dependencies(repo_dir)
