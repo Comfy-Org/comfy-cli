@@ -242,6 +242,10 @@ def install(
             help="Use new fast dependency installer",
         ),
     ] = False,
+    manager_commit: Annotated[
+        Optional[str],
+        typer.Option(help="Specify commit hash for ComfyUI-Manager"),
+    ] = None,
 ):
     check_for_updates()
     checker = EnvChecker()
@@ -279,6 +283,7 @@ def install(
             skip_torch_or_directml=skip_torch_or_directml,
             skip_requirement=skip_requirement,
             fast_deps=fast_deps,
+            manager_commit=manager_commit,
         )
         rprint(f"ComfyUI is installed at: {comfy_path}")
         return None
@@ -346,6 +351,7 @@ def install(
         skip_torch_or_directml=skip_torch_or_directml,
         skip_requirement=skip_requirement,
         fast_deps=fast_deps,
+        manager_commit=manager_commit,
     )
 
     rprint(f"ComfyUI is installed at: {comfy_path}")
