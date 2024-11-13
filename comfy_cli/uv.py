@@ -4,12 +4,11 @@ import sys
 from importlib import metadata
 from pathlib import Path
 from textwrap import dedent
-from typing import Any, Optional, cast
+from typing import Any, Optional, Union, cast
 
 from comfy_cli import ui
-from comfy_cli.constants import GPU_OPTION, OS
+from comfy_cli.constants import GPU_OPTION
 from comfy_cli.typing import PathLike
-from comfy_cli.utils import get_os
 
 
 def _run(cmd: list[str], cwd: PathLike, check: bool = True) -> subprocess.CompletedProcess[Any]:
@@ -19,7 +18,6 @@ def _run(cmd: list[str], cwd: PathLike, check: bool = True) -> subprocess.Comple
 def _check_call(cmd: list[str], cwd: Optional[PathLike] = None):
     """uses check_call to run pip, as reccomended by the pip maintainers.
     see https://pip.pypa.io/en/stable/user_guide/#using-pip-from-your-program"""
-    print("Running:", " ".join(cmd))
     subprocess.check_call(cmd, cwd=cwd)
 
 
@@ -80,21 +78,28 @@ class DependencyCompiler:
     """
     ).strip()
 
-    reqNames = {
+    reqNames = (
         "requirements.txt",
         "pyproject.toml",
         "setup.cfg",
         "setup.py",
-    }
+    )
 
     @staticmethod
     def Find_Req_Files(*ders: PathLike) -> list[Path]:
-        return [
-            file  # fmt: skip
-            for der in ders
-            for file in Path(der).absolute().iterdir()
-            if file.name in DependencyCompiler.reqNames
-        ]
+        reqFiles = []
+        for der in ders:
+            reqFound = False
+            for reqName in DependencyCompiler.reqNames:
+                for file in Path(der).absolute().iterdir():
+                    if file.name == reqName:
+                        reqFiles.append(file)
+                        reqFound = True
+                        break
+                if reqFound:
+                    break
+
+        return reqFiles
 
     @staticmethod
     def Install_Build_Deps(executable: PathLike = sys.executable):
@@ -185,7 +190,7 @@ class DependencyCompiler:
         override: Optional[PathLike] = None,
         reqs: Optional[list[str]] = None,
         reqFile: Optional[list[PathLike]] = None,
-    ) -> subprocess.CompletedProcess[Any]:
+    ) -> None:
         cmd = [
             str(executable),
             "-m",
@@ -233,7 +238,7 @@ class DependencyCompiler:
         executable: PathLike = sys.executable,
         extraUrl: Optional[str] = None,
         index_strategy: str = "unsafe-best-match",
-    ) -> subprocess.CompletedProcess[Any]:
+    ) -> None:
         cmd = [
             str(executable),
             "-m",
@@ -263,7 +268,7 @@ class DependencyCompiler:
         out: Optional[PathLike] = None,
         reqs: Optional[list[str]] = None,
         reqFile: Optional[list[PathLike]] = None,
-    ) -> subprocess.CompletedProcess[Any]:
+    ) -> None:
         """For now, the `download` cmd has no uv support, so use pip"""
         cmd = [
             str(executable),
@@ -299,7 +304,7 @@ class DependencyCompiler:
         out: Optional[PathLike] = None,
         reqs: Optional[list[str]] = None,
         reqFile: Optional[list[PathLike]] = None,
-    ) -> subprocess.CompletedProcess[Any]:
+    ) -> None:
         """For now, the `wheel` cmd has no uv support, so use pip"""
         cmd = [
             str(executable),
@@ -327,8 +332,8 @@ class DependencyCompiler:
         return _check_call(cmd, cwd)
 
     @staticmethod
-    def Resolve_Gpu(gpu: GPU_OPTION):
-        if gpu is None or gpu is GPU_OPTION.CPU:
+    def Resolve_Gpu(gpu: Union[GPU_OPTION, None]):
+        if gpu is None:
             try:
                 tver = metadata.version("torch")
                 if "+cu" in tver:
@@ -346,7 +351,7 @@ class DependencyCompiler:
         self,
         cwd: PathLike = ".",
         executable: PathLike = sys.executable,
-        gpu: GPU_OPTION = GPU_OPTION.CPU,
+        gpu: Union[GPU_OPTION, None] = None,
         outDir: PathLike = ".",
         outName: str = "requirements.compiled",
         reqFilesCore: Optional[list[PathLike]] = None,
@@ -400,8 +405,6 @@ class DependencyCompiler:
                 f.write(DependencyCompiler.overrideGpu.format(gpu=self.gpu, gpuUrl=self.gpuUrl))
                 f.write("\n\n")
 
-            # TODO: remove numpy<2 override once torch is compatible with numpy>=2
-            if get_os() == OS.WINDOWS:
                 f.write("numpy<2\n")
                 f.write("\n\n")
 
@@ -481,20 +484,20 @@ class DependencyCompiler:
     def install_deps(self):
         DependencyCompiler.Install(
             cwd=self.cwd,
-            reqFile=[self.out],
             executable=self.executable,
             extra_index_url=self.gpuUrl,
             override=self.override,
+            reqFile=[self.out],
         )
 
     def install_dists(self):
         DependencyCompiler.Install(
             cwd=self.cwd,
-            reqFile=[self.out],
             executable=self.executable,
             find_links=[self.outDir / "dists"],
             no_deps=True,
             no_index=True,
+            reqFile=[self.out],
         )
 
     def install_wheels(self):
