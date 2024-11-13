@@ -251,7 +251,10 @@ def execute(
         depComp.install_deps()
 
     if not skip_manager:
-        update_node_id_cache()
+        try:
+            update_node_id_cache()
+        except subprocess.CalledProcessError as e:
+            rprint(f"Failed to update node id cache: {e}")
 
     os.chdir(repo_dir)
 
