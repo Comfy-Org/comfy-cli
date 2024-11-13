@@ -4,7 +4,7 @@ import sys
 from importlib import metadata
 from pathlib import Path
 from textwrap import dedent
-from typing import Any, Optional, Union, cast
+from typing import Any, Optional, cast
 
 from comfy_cli import ui
 from comfy_cli.constants import GPU_OPTION, OS
