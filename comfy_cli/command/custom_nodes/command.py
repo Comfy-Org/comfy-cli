@@ -491,13 +491,7 @@ def update_node_id_cache():
 
     new_env = os.environ.copy()
     new_env["COMFYUI_PATH"] = workspace_path
-    res = subprocess.run(cmd, env=new_env, check=True)
-    if res.returncode != 0:
-        typer.echo(
-            "Failed to update node id cache.",
-            err=True,
-        )
-        raise typer.Exit(code=1)
+    subprocess.run(cmd, env=new_env, check=True)
 
 
 # `update, disable, enable, fix` allows `all` param
