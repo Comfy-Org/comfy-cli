@@ -69,7 +69,9 @@ def download_file(url: str, local_filepath: pathlib.Path, headers: Optional[dict
     """Helper function to download a file."""
     local_filepath.parent.mkdir(parents=True, exist_ok=True)  # Ensure the directory exists
 
-    with httpx.stream("GET", url, follow_redirects=True, headers=headers) as response:
+    timeout = httpx.Timeout(timeout=5.0, read=None)  # Default timeout with no read timeout
+
+    with httpx.stream("GET", url, follow_redirects=True, headers=headers, timeout=timeout) as response:
         if response.status_code == 200:
             total = int(response.headers["Content-Length"])
             try:
