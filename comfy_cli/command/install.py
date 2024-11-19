@@ -234,11 +234,11 @@ def execute(
                 # clone specific branch
                 manager_url, manager_branch = manager_url.rsplit("@", 1)
                 subprocess.run(
-                    ["git", "clone", "-b", manager_branch, manager_url, manager_repo_dir],
+                    ["git", "clone", '--depth=1', "-b", manager_branch, manager_url, manager_repo_dir],
                     check=True,
                 )
             else:
-                subprocess.run(["git", "clone", manager_url, manager_repo_dir], check=True)
+                subprocess.run(["git", "clone", '--depth=1', manager_url, manager_repo_dir], check=True)
                 if manager_commit is not None:
                     subprocess.run(["git", "checkout", manager_commit], check=True, cwd=manager_repo_dir)
 
@@ -384,9 +384,9 @@ def clone_comfyui(url: str, repo_dir: str):
     if "@" in url:
         # clone specific branch
         url, branch = url.rsplit("@", 1)
-        subprocess.run(["git", "clone", "-b", branch, url, repo_dir], check=True)
+        subprocess.run(["git", "clone", '--depth=1', "-b", branch, url, repo_dir], check=True)
     else:
-        subprocess.run(["git", "clone", url, repo_dir], check=True)
+        subprocess.run(["git", "clone", '--depth=1', url, repo_dir], check=True)
 
 
 def checkout_stable_comfyui(version: str, repo_dir: str):
