@@ -137,13 +137,14 @@ def entry(
     # logging.info(f"scan_dir took {end_time - start_time:.2f} seconds to run")
 
 
-def validate_commit_and_version(commit: Optional[str], ctx: typer.Context):
+def validate_commit_and_version(commit: Optional[str], ctx: typer.Context) -> Optional[str]:
     """
     Validate that the commit is not specified unless the version is 'nightly'.
     """
     version = ctx.params.get("version")
     if commit and version != "nightly":
         raise typer.BadParameter("You can only specify the commit if the version is 'nightly'.")
+    return commit
 
 
 @app.command(help="Download and install ComfyUI and ComfyUI-Manager")
