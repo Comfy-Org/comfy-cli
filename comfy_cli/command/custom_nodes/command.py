@@ -8,9 +8,6 @@ from typing import Optional
 
 import typer
 from rich import print
-from ruff import ConfigurationError
-from ruff.__main__ import find_ruff_python_files
-from ruff.linter import lint_file
 from typing_extensions import Annotated, List
 
 from comfy_cli import logging, tracking, ui, utils
@@ -712,31 +709,21 @@ def publish(
     # Run security checks first
     typer.echo("Running security checks...")
     try:
-        files = find_ruff_python_files(["."])
-        settings = {
-            "select": ["S102", "S307"],
-            "ignore": [],
-            "line-length": 88,
-        }
+        # Run ruff check with security rules
+        cmd = ["ruff", "check", ".", "--select", "S102,S307"]
+        result = subprocess.run(cmd, capture_output=True, text=True)
 
-        has_violations = False
-        for python_file in files:
-            violations = lint_file(python_file, settings=settings)
-            if violations:
-                has_violations = True
-                for violation in violations:
-                    print(f"[red]{violation}[/red]")
-
-        if has_violations:
-            print("[red]Security issues found. Please fix them before publishing.[/red]")
+        if result.returncode != 0:
+            print("[red]Security issues found:[/red]")
+            print(result.stdout)
             raise typer.Exit(code=1)
 
-    except ConfigurationError as e:
-        print(f"[red]Configuration error during security check: {e}[/red]")
-        # raise typer.Exit(code=1)
+    except FileNotFoundError:
+        print("[red]Ruff is not installed. Please install it with 'pip install ruff'[/red]")
+        raise typer.Exit(code=1)
     except Exception as e:
         print(f"[red]Error running security check: {e}[/red]")
-        # raise typer.Exit(code=1)
+        raise typer.Exit(code=1)
 
     # Prompt for API Key
     if not token:
