@@ -709,14 +709,16 @@ def publish(
     # Run security checks first
     typer.echo("Running security checks...")
     try:
-        # Run ruff check with security rules
-        cmd = ["ruff", "check", ".", "--select", "S102,S307"]
+        # Run ruff check with security rules and --exit-zero to only warn
+        cmd = ["ruff", "check", ".", "--select", "S102,S307", "--exit-zero"]
         result = subprocess.run(cmd, capture_output=True, text=True)
 
-        if result.returncode != 0:
-            print("[red]Security issues found:[/red]")
+        if result.stdout:  # Changed from checking returncode to checking if there's output
+            print("[yellow]Security warnings found:[/yellow]")  # Changed from red to yellow to indicate warning
             print(result.stdout)
-            raise typer.Exit(code=1)
+            print("[bold yellow]We will soon disable exec and eval, so this will be an error soon.[/bold yellow]")
+            # TODO: re-enable exit when we disable exec and eval
+            # raise typer.Exit(code=1)
 
     except FileNotFoundError:
         print("[red]Ruff is not installed. Please install it with 'pip install ruff'[/red]")

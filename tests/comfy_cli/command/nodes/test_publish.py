@@ -13,11 +13,16 @@ def test_publish_fails_on_security_violations():
     mock_result.returncode = 1
     mock_result.stdout = "S102 Use of exec() detected"
 
-    with patch("subprocess.run", return_value=mock_result):
+    with (
+        patch("subprocess.run", return_value=mock_result),
+        patch("typer.prompt", return_value="test-token"),
+    ):
         result = runner.invoke(app, ["publish"])
 
-        assert result.exit_code == 1
-        assert "Security issues found" in result.stdout
+        # TODO: re-enable exit when we disable exec and eval
+        # assert result.exit_code == 1
+        # assert "Security issues found" in result.stdout
+        assert "Security warnings found" in result.stdout
 
 
 def test_publish_continues_on_no_security_violations():
