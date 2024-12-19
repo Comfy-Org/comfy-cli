@@ -41,6 +41,7 @@ dependencies = [
   "typing-extensions>=4.7.0",
   "uv",
   "websocket-client",
+  "ruff",
   "semver~=3.0.2",
 ]
 
