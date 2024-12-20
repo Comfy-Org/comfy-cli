@@ -710,7 +710,7 @@ def publish(
     typer.echo("Running security checks...")
     try:
         # Run ruff check with security rules and --exit-zero to only warn
-        cmd = ["ruff", "check", ".", "--select", "S102,S307", "--exit-zero"]
+        cmd = ["ruff", "check", ".", "-q", "--select", "S102,S307", "--exit-zero"]
         result = subprocess.run(cmd, capture_output=True, text=True)
 
         if result.stdout:  # Changed from checking returncode to checking if there's output
