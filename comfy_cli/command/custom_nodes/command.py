@@ -693,15 +693,11 @@ def deps_in_workflow(
     )
 
 
-@app.command("publish", help="Publish node to registry")
-@tracking.track_command("publish")
-def publish(
-    token: Optional[str] = typer.Option(None, "--token", help="Personal Access Token for publishing", hide_input=True),
-):
+def validate_node_for_publishing():
     """
-    Publish a node with optional validation.
+    Validates node configuration and runs security checks.
+    Returns the validated config if successful, raises typer.Exit if validation fails.
     """
-
     # Perform some validation logic here
     typer.echo("Validating node configuration...")
     config = extract_node_configuration()
@@ -713,12 +709,10 @@ def publish(
         cmd = ["ruff", "check", ".", "-q", "--select", "S102,S307", "--exit-zero"]
         result = subprocess.run(cmd, capture_output=True, text=True)
 
-        if result.stdout:  # Changed from checking returncode to checking if there's output
-            print("[yellow]Security warnings found:[/yellow]")  # Changed from red to yellow to indicate warning
+        if result.stdout:
+            print("[yellow]Security warnings found:[/yellow]")
             print(result.stdout)
             print("[bold yellow]We will soon disable exec and eval, so this will be an error soon.[/bold yellow]")
-            # TODO: re-enable exit when we disable exec and eval
-            # raise typer.Exit(code=1)
 
     except FileNotFoundError:
         print("[red]Ruff is not installed. Please install it with 'pip install ruff'[/red]")
@@ -726,6 +720,29 @@ def publish(
     except Exception as e:
         print(f"[red]Error running security check: {e}[/red]")
         raise typer.Exit(code=1)
+
+    return config
+
+
+@app.command("validate", help="Run validation checks for publishing")
+@tracking.track_command("publish")
+def validate():
+    """
+    Run validation checks that would be performed during publishing.
+    """
+    validate_node_for_publishing()
+    print("[green]✓ All validation checks passed successfully[/green]")
+
+
+@app.command("publish", help="Publish node to registry")
+@tracking.track_command("publish")
+def publish(
+    token: Optional[str] = typer.Option(None, "--token", help="Personal Access Token for publishing", hide_input=True),
+):
+    """
+    Publish a node with optional validation.
+    """
+    config = validate_node_for_publishing()
 
     # Prompt for API Key
     if not token:
