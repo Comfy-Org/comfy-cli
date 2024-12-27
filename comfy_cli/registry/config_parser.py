@@ -62,6 +62,30 @@ def create_comfynode_config():
         raise Exception("Failed to write 'pyproject.toml'") from e
 
 
+def sanitize_node_name(name: str) -> str:
+    """Remove common ComfyUI-related prefixes from a string.
+
+    Args:
+        name: The string to process
+
+    Returns:
+        The string with any ComfyUI-related prefix removed
+    """
+    name = name.lower()
+    prefixes = [
+        "comfyui-",
+        "comfyui_",
+        "comfy-",
+        "comfy_",
+        "comfy",
+        "comfyui",
+    ]
+
+    for prefix in prefixes:
+        name = name.removeprefix(prefix)
+    return name
+
+
 def initialize_project_config():
     create_comfynode_config()
 
@@ -86,7 +110,7 @@ def initialize_project_config():
     urls = project.get("urls", tomlkit.table())
     urls["Repository"] = git_remote_url
     project["urls"] = urls
-    project["name"] = repo_name.lower()
+    project["name"] = sanitize_node_name(repo_name)
     project["description"] = ""
     project["version"] = "1.0.0"
 
