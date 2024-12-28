@@ -61,7 +61,7 @@ jobs:
         env:
           PYTHONPATH: ${{ github.workspace }}
           TEST_E2E: true
-          TEST_E2E_COMFY_INSTALL_FLAGS: --nvidia --cuda-version 11.8
+          TEST_E2E_COMFY_INSTALL_FLAGS: --nvidia --cuda-version 12.4
           TEST_E2E_COMFY_LAUNCH_FLAGS_EXTRA: ""
         run: |
           pytest tests/e2e
