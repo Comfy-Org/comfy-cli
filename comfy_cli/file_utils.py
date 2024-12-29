@@ -90,15 +90,17 @@ def download_file(url: str, local_filepath: pathlib.Path, headers: Optional[dict
 
 
 def zip_files(zip_filename):
+    # Check if we're in a CI environment
+    is_ci = os.getenv("CI", "false").lower() == "true"
+
     gitignore_path = ".gitignore"
-    if not os.path.exists(gitignore_path):
-        print(f"No .gitignore file found in {os.getcwd()}, proceeding without it.")
-        gitignore = ""
-    else:
+    if not is_ci and os.path.exists(gitignore_path):
         with open(gitignore_path, "r") as file:
             gitignore = file.read()
-
-    spec = pathspec.PathSpec.from_lines("gitwildmatch", gitignore.splitlines())
+        spec = pathspec.PathSpec.from_lines("gitwildmatch", gitignore.splitlines())
+    else:
+        # Empty spec that doesn't match any files when in CI or no .gitignore exists
+        spec = pathspec.PathSpec.from_lines("gitwildmatch", [])
 
     with zipfile.ZipFile(zip_filename, "w", zipfile.ZIP_DEFLATED) as zipf:
         for root, dirs, files in os.walk("."):
@@ -112,6 +114,8 @@ def zip_files(zip_filename):
                 relative_path = os.path.relpath(file_path, start=".")
                 if not spec.match_file(relative_path):
                     zipf.write(file_path, relative_path)
+                else:
+                    print(f"Excluding file: {relative_path}")
 
 
 def upload_file_to_signed_url(signed_url: str, file_path: str):
