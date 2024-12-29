@@ -100,6 +100,8 @@ def zip_files(zip_filename):
         spec = pathspec.PathSpec.from_lines("gitwildmatch", gitignore.splitlines())
     else:
         # Empty spec that doesn't match any files when in CI or no .gitignore exists
+        if is_ci:
+            print("Disregarding .gitignore in CI environment")
         spec = pathspec.PathSpec.from_lines("gitwildmatch", [])
 
     with zipfile.ZipFile(zip_filename, "w", zipfile.ZIP_DEFLATED) as zipf:
