@@ -6,7 +6,6 @@ from typing import Optional
 
 import httpx
 import requests
-from pathspec import pathspec
 
 from comfy_cli import ui
 
@@ -90,15 +89,26 @@ def download_file(url: str, local_filepath: pathlib.Path, headers: Optional[dict
 
 
 def zip_files(zip_filename):
-    gitignore_path = ".gitignore"
-    if not os.path.exists(gitignore_path):
-        print(f"No .gitignore file found in {os.getcwd()}, proceeding without it.")
-        gitignore = ""
-    else:
-        with open(gitignore_path, "r") as file:
-            gitignore = file.read()
+    """
+    Zip all files in the current directory that are tracked by git.
+    """
+    try:
+        # Get list of git-tracked files using git ls-files
+        import subprocess
 
-    spec = pathspec.PathSpec.from_lines("gitwildmatch", gitignore.splitlines())
+        git_files = subprocess.check_output(["git", "ls-files"], text=True).splitlines()
+        # Zip only git-tracked files
+        with zipfile.ZipFile(zip_filename, "w", zipfile.ZIP_DEFLATED) as zipf:
+            for file_path in git_files:
+                if zip_filename in file_path:
+                    continue
+                if os.path.exists(file_path):
+                    zipf.write(file_path)
+                else:
+                    print(f"File not found. Not including in zip: {file_path}")
+        return
+    except (subprocess.SubprocessError, FileNotFoundError):
+        print("Warning: Not in a git repository or git not installed. Zipping all files.")
 
     with zipfile.ZipFile(zip_filename, "w", zipfile.ZIP_DEFLATED) as zipf:
         for root, dirs, files in os.walk("."):
@@ -110,8 +120,7 @@ def zip_files(zip_filename):
                 if zip_filename in file_path:
                     continue
                 relative_path = os.path.relpath(file_path, start=".")
-                if not spec.match_file(relative_path):
-                    zipf.write(file_path, relative_path)
+                zipf.write(file_path, relative_path)
 
 
 def upload_file_to_signed_url(signed_url: str, file_path: str):
