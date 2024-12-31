@@ -90,34 +90,34 @@ def download_file(url: str, local_filepath: pathlib.Path, headers: Optional[dict
 
 
 def zip_files(zip_filename):
-    # Check if we're in a CI environment
-    is_ci = os.getenv("CI", "false").lower() == "true"
+    try:
+        # Get list of git-tracked files using git ls-files
+        import subprocess
 
-    gitignore_path = ".gitignore"
-    if not is_ci and os.path.exists(gitignore_path):
-        with open(gitignore_path, "r") as file:
-            gitignore = file.read()
-        spec = pathspec.PathSpec.from_lines("gitwildmatch", gitignore.splitlines())
-    else:
-        # Empty spec that doesn't match any files when in CI or no .gitignore exists
-        if is_ci:
-            print("Disregarding .gitignore in CI environment")
-        spec = pathspec.PathSpec.from_lines("gitwildmatch", [])
+        git_files = subprocess.check_output(["git", "ls-files"], text=True).splitlines()
+        # Zip only git-tracked files
+        with zipfile.ZipFile(zip_filename, "w", zipfile.ZIP_DEFLATED) as zipf:
+            for file_path in git_files:
+                if zip_filename in file_path:
+                    continue
+                if os.path.exists(file_path):
+                    zipf.write(file_path)
+                else:
+                    print(f"File not found. Not including in zip: {file_path}")
+        return
+    except (subprocess.SubprocessError, FileNotFoundError):
+        print("Warning: Not in a git repository or git not installed. Zipping all files.")
 
     with zipfile.ZipFile(zip_filename, "w", zipfile.ZIP_DEFLATED) as zipf:
         for root, dirs, files in os.walk("."):
-            if ".git" in dirs:
+            if ".git" in dirs:  # Still skip .git directory
                 dirs.remove(".git")
             for file in files:
                 file_path = os.path.join(root, file)
-                # Skip zipping the zip file itself
-                if zip_filename in file_path:
+                if zip_filename in file_path:  # Skip the zip file itself
                     continue
                 relative_path = os.path.relpath(file_path, start=".")
-                if not spec.match_file(relative_path):
-                    zipf.write(file_path, relative_path)
-                else:
-                    print(f"Excluding file: {relative_path}")
+                zipf.write(file_path, relative_path)
 
 
 def upload_file_to_signed_url(signed_url: str, file_path: str):
