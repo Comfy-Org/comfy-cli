@@ -6,7 +6,6 @@ from typing import Optional
 
 import httpx
 import requests
-from pathspec import pathspec
 
 from comfy_cli import ui
 
