@@ -30,7 +30,7 @@ jobs:
         env:
           PYTHONPATH: ${{ github.workspace }}
         run: |
-          pytest --cov --cov-report=xml
+          pytest tests/ --cov=comfy_cli --cov-report=xml
       
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v4
