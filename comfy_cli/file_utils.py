@@ -90,6 +90,9 @@ def download_file(url: str, local_filepath: pathlib.Path, headers: Optional[dict
 
 
 def zip_files(zip_filename):
+    """
+    Zip all files in the current directory that are tracked by git.
+    """
     try:
         # Get list of git-tracked files using git ls-files
         import subprocess
