@@ -117,7 +117,7 @@ def zip_files(zip_filename):
 def upload_file_to_signed_url(signed_url: str, file_path: str):
     try:
         with open(file_path, "rb") as f:
-            headers = {"Content-Type": "application/gzip"}
+            headers = {"Content-Type": "application/zip"}
             response = requests.put(signed_url, data=f, headers=headers)
 
             # Simple success check
