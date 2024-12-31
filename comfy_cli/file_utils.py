@@ -110,11 +110,12 @@ def zip_files(zip_filename):
 
     with zipfile.ZipFile(zip_filename, "w", zipfile.ZIP_DEFLATED) as zipf:
         for root, dirs, files in os.walk("."):
-            if ".git" in dirs:  # Still skip .git directory
+            if ".git" in dirs:
                 dirs.remove(".git")
             for file in files:
                 file_path = os.path.join(root, file)
-                if zip_filename in file_path:  # Skip the zip file itself
+                # Skip zipping the zip file itself
+                if zip_filename in file_path:
                     continue
                 relative_path = os.path.relpath(file_path, start=".")
                 zipf.write(file_path, relative_path)
