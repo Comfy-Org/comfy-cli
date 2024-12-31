@@ -3,6 +3,8 @@ on:
   pull_request:
     branches:
       - main
+    paths:
+      - comfy_cli/**
 
 jobs:
   test:
@@ -24,7 +26,6 @@ jobs:
           python -m venv venv
           source venv/bin/activate
           python -m pip install --upgrade pip
-          pip install pytest
           pip install -e .
           comfy --skip-prompt --workspace ./ComfyUI install --fast-deps --m-series --skip-manager
           comfy --workspace ./ComfyUI standalone  --platform macos
