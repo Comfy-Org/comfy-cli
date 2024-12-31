@@ -3,6 +3,8 @@ on:
   pull_request:
     branches:
       - main
+    paths:
+      - comfy_cli/**
 
 jobs:
   test:
