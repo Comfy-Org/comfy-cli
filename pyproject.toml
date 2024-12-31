@@ -46,7 +46,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pre-commit", "pytest", "ruff"]
+dev = ["pre-commit", "pytest", "ruff", "pytest-cov"]
 
 [project.scripts]
 comfy = "comfy_cli.__main__:main"

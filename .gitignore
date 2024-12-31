@@ -60,3 +60,4 @@ cpython*
 requirements.compiled
 override.txt
 .coverage
+coverage.xml
