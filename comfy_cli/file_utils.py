@@ -124,24 +124,14 @@ def zip_files(zip_filename):
 
 
 def upload_file_to_signed_url(signed_url: str, file_path: str):
-    try:
-        with open(file_path, "rb") as f:
-            headers = {"Content-Type": "application/zip"}
-            response = requests.put(signed_url, data=f, headers=headers)
+    with open(file_path, "rb") as f:
+        headers = {"Content-Type": "application/zip"}
+        response = requests.put(signed_url, data=f, headers=headers)
 
-            # Simple success check
-            if response.status_code == 200:
-                print("Upload successful.")
-            else:
-                # Print a generic error message with status code and response text
-                print(f"Upload failed with status code: {response.status_code}. Error: {response.text}")
-
-    except requests.exceptions.RequestException as e:
-        # Print error related to the HTTP request
-        print(f"An error occurred during the upload: {str(e)}")
-    except FileNotFoundError:
-        # Print file not found error
-        print(f"Error: The file {file_path} does not exist.")
+        if response.status_code == 200:
+            print("Upload successful.")
+        else:
+            raise Exception(f"Upload failed with status code: {response.status_code}. Error: {response.text}")
 
 
 def extract_package_as_zip(file_path: pathlib.Path, extract_path: pathlib.Path):
