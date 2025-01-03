@@ -706,13 +706,17 @@ def validate_node_for_publishing():
     typer.echo("Running security checks...")
     try:
         # Run ruff check with security rules and --exit-zero to only warn
-        cmd = ["ruff", "check", ".", "-q", "--select", "S102,S307", "--exit-zero"]
+        cmd = ["ruff", "check", ".", "-q", "--select", "S102,S307,E702", "--exit-zero"]
         result = subprocess.run(cmd, capture_output=True, text=True)
 
         if result.stdout:
             print("[yellow]Security warnings found:[/yellow]")
             print(result.stdout)
-            print("[bold yellow]We will soon disable exec and eval, so this will be an error soon.[/bold yellow]")
+            print(
+                "[bold yellow]We will soon disable exec and eval, and multiple statements in a single line, so this will be an error soon.[/bold yellow]"
+            )
+        else:
+            print("[green]✓ All validation checks passed successfully[/green]")
 
     except FileNotFoundError:
         print("[red]Ruff is not installed. Please install it with 'pip install ruff'[/red]")
@@ -731,7 +735,7 @@ def validate():
     Run validation checks that would be performed during publishing.
     """
     validate_node_for_publishing()
-    print("[green]✓ All validation checks passed successfully[/green]")
+    # print("[green]✓ All validation checks passed successfully[/green]")
 
 
 @app.command("publish", help="Publish node to registry")
