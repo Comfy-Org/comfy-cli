@@ -263,7 +263,14 @@ class WorkspaceManager:
             return None
 
         # To check more robustly, verify up to the `.git` path.
-        manager_path = os.path.join(self.workspace_path, "custom_nodes", "ComfyUI-Manager")
+        manager_path_default = os.path.join(self.workspace_path, "custom_nodes", "comfyui-manager")  # path since CNR
+        manager_path_legacy = os.path.join(self.workspace_path, "custom_nodes", "ComfyUI-Manager")  # legacy path
+
+        if os.path.exists(manager_path_legacy):
+            manager_path = manager_path_legacy  # if the legacy path exists
+        else:
+            manager_path = manager_path_default  # manager is not installed, or manager_path1 exists
+
         return manager_path
 
     def is_comfyui_manager_installed(self):
@@ -271,8 +278,10 @@ class WorkspaceManager:
             return False
 
         # To check more robustly, verify up to the `.git` path.
-        manager_git_path = os.path.join(self.workspace_path, "custom_nodes", "ComfyUI-Manager", ".git")
-        return os.path.exists(manager_git_path)
+        manager_path_default = os.path.join(self.workspace_path, "custom_nodes", "comfyui-manager", ".git")  # path since CNR
+        manager_path_legacy = os.path.join(self.workspace_path, "custom_nodes", "ComfyUI-Manager", ".git")  # legacy path
+
+        return os.path.exists(manager_path_default) or os.path.exists(manager_path_legacy)
 
     def scan_dir(self):
         if not self.workspace_path:

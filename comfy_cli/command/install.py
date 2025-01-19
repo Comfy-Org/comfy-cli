@@ -149,8 +149,8 @@ def pip_install_comfyui_dependencies(
 
 
 # install requirements for manager
-def pip_install_manager_dependencies(repo_dir):
-    os.chdir(os.path.join(repo_dir, "custom_nodes", "ComfyUI-Manager"))
+def pip_install_manager_dependencies(repo_dir, manager_repo_dir):
+    os.chdir(manager_repo_dir)
     subprocess.run([sys.executable, "-m", "pip", "install", "-r", "requirements.txt"], check=True)
 
 
@@ -223,16 +223,25 @@ def execute(
     if skip_manager:
         rprint("Skipping installation of ComfyUI-Manager. (by --skip-manager)")
     else:
-        manager_repo_dir = os.path.join(repo_dir, "custom_nodes", "ComfyUI-Manager")
+        manager_repo_dir1 = os.path.join(repo_dir, "custom_nodes", "comfyui-manager")  # path since CNR.
+        manager_repo_dir2 = os.path.join(repo_dir, "custom_nodes", "ComfyUI-Manager")  # legacy path
 
-        if os.path.exists(manager_repo_dir):
+        manager_repo_dir = None
+        if os.path.exists(manager_repo_dir1):
+            manager_repo_dir = manager_repo_dir1
+        elif os.path.exists(manager_repo_dir2):
+            manager_repo_dir = manager_repo_dir2
+
+        if manager_repo_dir is not None:
             if restore and not fast_deps:
-                pip_install_manager_dependencies(repo_dir)
+                pip_install_manager_dependencies(repo_dir, manager_repo_dir)
             else:
                 rprint(
                     f"Directory {manager_repo_dir} already exists. Skipping installation of ComfyUI-Manager.\nIf you want to restore dependencies, add the '--restore' option."
                 )
         else:
+            manager_repo_dir = manager_repo_dir1
+
             rprint("\nInstalling ComfyUI-Manager..")
 
             if "@" in manager_url:
@@ -248,7 +257,7 @@ def execute(
                     subprocess.run(["git", "checkout", manager_commit], check=True, cwd=manager_repo_dir)
 
             if not fast_deps:
-                pip_install_manager_dependencies(repo_dir)
+                pip_install_manager_dependencies(repo_dir, manager_repo_dir)
 
     if fast_deps:
         depComp = DependencyCompiler(cwd=repo_dir, gpu=gpu)
