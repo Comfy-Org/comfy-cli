@@ -278,8 +278,12 @@ class WorkspaceManager:
             return False
 
         # To check more robustly, verify up to the `.git` path.
-        manager_path_default = os.path.join(self.workspace_path, "custom_nodes", "comfyui-manager", ".git")  # path since CNR
-        manager_path_legacy = os.path.join(self.workspace_path, "custom_nodes", "ComfyUI-Manager", ".git")  # legacy path
+        manager_path_default = os.path.join(
+            self.workspace_path, "custom_nodes", "comfyui-manager", ".git"
+        )  # path since CNR
+        manager_path_legacy = os.path.join(
+            self.workspace_path, "custom_nodes", "ComfyUI-Manager", ".git"
+        )  # legacy path
 
         return os.path.exists(manager_path_default) or os.path.exists(manager_path_legacy)
 
