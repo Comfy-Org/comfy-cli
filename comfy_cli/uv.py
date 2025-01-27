@@ -65,7 +65,7 @@ def parse_req_file(rf: PathLike, skips: Optional[list[str]] = None):
 
 class DependencyCompiler:
     rocmPytorchUrl = "https://download.pytorch.org/whl/rocm6.1"
-    nvidiaPytorchUrl = "https://download.pytorch.org/whl/cu121"
+    nvidiaPytorchUrl = "https://download.pytorch.org/whl/cu124"
 
     overrideGpu = dedent(
         """
