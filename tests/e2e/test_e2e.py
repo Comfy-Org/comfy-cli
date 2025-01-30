@@ -94,7 +94,7 @@ def test_model(comfy_cli):
 
 @e2e_test
 def test_node(comfy_cli, workspace):
-    node = "ComfyUI-AnimateDiff-Evolved"
+    node = "comfyui-animatediff-evolved"
     proc = exec(
         f"""
             {comfy_cli} node install {node}
