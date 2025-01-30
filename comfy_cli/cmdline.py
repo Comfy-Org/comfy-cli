@@ -198,7 +198,7 @@ def install(
             callback=g_gpu_exclusivity.validate,
         ),
     ] = None,
-    cuda_version: Annotated[CUDAVersion, typer.Option(show_default=True)] = CUDAVersion.v12_4,
+    cuda_version: Annotated[CUDAVersion, typer.Option(show_default=True)] = CUDAVersion.v12_6,
     amd: Annotated[
         Optional[bool],
         typer.Option(
