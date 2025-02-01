@@ -68,7 +68,13 @@ def pip_install_comfyui_dependencies(
                 "torchvision",
                 "torchaudio",
             ]
-            if plat == constants.OS.WINDOWS and cuda_version == constants.CUDAVersion.v12_4:
+
+            if plat == constants.OS.WINDOWS and cuda_version == constants.CUDAVersion.v12_6:
+                base_command += [
+                    "--extra-index-url",
+                    "https://download.pytorch.org/whl/cu126",
+                ]
+            elif plat == constants.OS.WINDOWS and cuda_version == constants.CUDAVersion.v12_4:
                 base_command += [
                     "--extra-index-url",
                     "https://download.pytorch.org/whl/cu124",
@@ -164,7 +170,7 @@ def execute(
     commit: Optional[str] = None,
     manager_commit: Optional[str] = None,
     gpu: constants.GPU_OPTION = None,
-    cuda_version: constants.CUDAVersion = constants.CUDAVersion.v12_4,
+    cuda_version: constants.CUDAVersion = constants.CUDAVersion.v12_6,
     plat: constants.OS = None,
     skip_torch_or_directml: bool = False,
     skip_requirement: bool = False,
