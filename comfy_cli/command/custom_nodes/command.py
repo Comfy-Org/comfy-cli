@@ -8,6 +8,7 @@ from typing import Optional
 
 import typer
 from rich import print
+from rich.console import Console
 from typing_extensions import Annotated, List
 
 from comfy_cli import logging, tracking, ui, utils
@@ -28,6 +29,7 @@ from comfy_cli.registry import (
 )
 from comfy_cli.workspace_manager import WorkspaceManager
 
+console = Console()
 app = typer.Typer()
 app.add_typer(bisect_app, name="bisect", help="Bisect custom nodes for culprit node.")
 manager_app = typer.Typer()
@@ -918,3 +920,20 @@ def pack():
     zip_files(zip_filename)
     typer.echo(f"Created zip file: {NODE_ZIP_FILENAME}")
     logging.info("Node has been packed successfully.")
+
+
+@app.command("scaffold", help="Create a new ComfyUI custom node project using cookiecutter")
+@tracking.track_command("node")
+def scaffold_cookiecutter():
+    """Create a new ComfyUI custom node project using cookiecutter."""
+    import cookiecutter.main
+
+    try:
+        cookiecutter.main.cookiecutter(
+            "https://github.com/Comfy-Org/cookiecutter-comfy-extension.git",
+            overwrite_if_exists=True,
+        )
+        console.print("[bold green]✓ Custom node project created successfully![/bold green]")
+    except Exception as e:
+        console.print(f"[bold red]Error creating project: {str(e)}[/bold red]")
+        raise typer.Exit(code=1)

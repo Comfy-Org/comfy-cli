@@ -43,6 +43,7 @@ dependencies = [
   "websocket-client",
   "ruff",
   "semver~=3.0.2",
+  "cookiecutter",
 ]
 
 [project.optional-dependencies]
