@@ -48,7 +48,7 @@ def launch_comfyui(extra):
                 exit(res)
 
             if not os.path.exists(reboot_path):
-                exit(res)
+                exit(res.returncode)
 
             os.remove(reboot_path)
     else:
