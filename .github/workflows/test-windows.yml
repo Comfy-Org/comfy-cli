@@ -30,7 +30,4 @@ jobs:
           pip install pytest
           pip install -e .
           comfy --skip-prompt --workspace ./ComfyUI install --fast-deps --nvidia --cuda-version 12.6 --skip-manager
-          comfy --workspace ./ComfyUI standalone  --platform windows --proc x86_64
-          ls
-          comfy standalone --rehydrate --platform windows --proc x86_64
-          ./python/python.exe ComfyUI/main.py --cpu --quick-test-for-ci
+          comfy --here launch -- --cpu --quick-test-for-ci
