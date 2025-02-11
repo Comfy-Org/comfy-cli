@@ -394,7 +394,7 @@ def install(
         ),
     ] = None,
     fast_deps: Annotated[
-        Optional[bool],
+        bool,
         typer.Option(
             "--fast-deps",
             show_default=False,
@@ -651,7 +651,7 @@ def install_deps(
         execute_cm_cli(
             ["deps-in-workflow", "--workflow", workflow, "--output", tmp_path],
             channel,
-            mode,
+            mode=mode,
         )
 
         deps_file = tmp_path
@@ -691,7 +691,7 @@ def deps_in_workflow(
     execute_cm_cli(
         ["deps-in-workflow", "--workflow", workflow, "--output", output],
         channel,
-        mode,
+        mode=mode,
     )
 
 
