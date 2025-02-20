@@ -45,7 +45,7 @@ def track_event(event_name: str, properties: any = None):
     if properties is None:
         properties = {}
     logging.debug(f"tracking event called with event_name: {event_name} and properties: {properties}")
-    enable_tracking = config_manager.get(constants.CONFIG_KEY_ENABLE_TRACKING)
+    enable_tracking = config_manager.get(constants.CONFIG_KEY_ENABLE_TRACKING, type_cast=bool)
     if not enable_tracking:
         return
 
@@ -55,7 +55,6 @@ def track_event(event_name: str, properties: any = None):
         mp.track(distinct_id=user_id, event_name=event_name, properties=properties)
     except Exception as e:
         logging.warning(f"Failed to track event: {e}")  # Log the error but do not raise
-
 
 def track_command(sub_command: str = None):
     """
@@ -98,7 +97,7 @@ def init_tracking(enable_tracking: bool):
     Initialize the tracking system by setting the user identifier and tracking enabled status.
     """
     logging.debug(f"Initializing tracking with enable_tracking: {enable_tracking}")
-    config_manager.set(constants.CONFIG_KEY_ENABLE_TRACKING, str(enable_tracking))
+    config_manager.set(constants.CONFIG_KEY_ENABLE_TRACKING, enable_tracking)
     if not enable_tracking:
         return
 
@@ -119,5 +118,5 @@ def init_tracking(enable_tracking: bool):
 
 
 def set_tracking_enabled(enabled: bool):
-    config_manager.set(constants.CONFIG_KEY_ENABLE_TRACKING, str(enabled))
+    config_manager.set(constants.CONFIG_KEY_ENABLE_TRACKING, enabled)
     return enabled

@@ -108,7 +108,7 @@ def launch(
     background: bool = False,
     extra: list[str] | None = None,
 ):
-    check_for_updates()
+    check_for_updates(timeout=3)
     resolved_workspace = workspace_manager.workspace_path
 
     if not resolved_workspace:
