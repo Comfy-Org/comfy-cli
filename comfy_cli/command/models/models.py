@@ -305,6 +305,9 @@ def download(
             )
             print(f"Model downloaded successfully to: {output_path}")
     else:
+        headers = {
+            "Accept-Encoding": "identity", # Prevent gzip and chunking which the expectation of Content-Length, which is needed for progress bars. Also, it's slower.
+        }
         print(f"Start downloading URL: {url} into {local_filepath}")
         download_file(url, local_filepath, headers)
 
