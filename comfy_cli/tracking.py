@@ -30,14 +30,14 @@ app = typer.Typer()
 
 @app.command()
 def enable():
-    set_tracking_enabled(True)
+    init_tracking(True)
     typer.echo(f"Tracking is now {'enabled'}.")
     init_tracking(True)
 
 
 @app.command()
 def disable():
-    set_tracking_enabled(False)
+    init_tracking(False)
     typer.echo(f"Tracking is now {'disabled'}.")
 
 
@@ -116,8 +116,3 @@ def init_tracking(enable_tracking: bool):
         logging.debug("Tracking install event.")
         config_manager.set(constants.CONFIG_KEY_INSTALL_EVENT_TRIGGERED, "True")
         track_event("install")
-
-
-def set_tracking_enabled(enabled: bool):
-    config_manager.set(constants.CONFIG_KEY_ENABLE_TRACKING, str(enabled))
-    return enabled
