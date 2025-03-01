@@ -262,16 +262,27 @@ class WorkspaceManager:
         if self.workspace_path is None:
             return None
 
-        # To check more robustly, verify up to the `.git` path.
-        manager_path = os.path.join(self.workspace_path, "custom_nodes", "ComfyUI-Manager")
-        return manager_path
+        # ComfyUI-Manager may in lower case folder name (registry name)
+        possible_paths = [
+            os.path.join(self.workspace_path, "custom_nodes", "ComfyUI-Manager"),
+            os.path.join(self.workspace_path, "custom_nodes", "comfyui-manager")
+        ]
+        for manager_path in possible_paths:
+            if os.path.exists(manager_path):
+                return manager_path
+            else:
+                return None
 
     def is_comfyui_manager_installed(self):
         if self.workspace_path is None:
             return False
 
+        manager_path = self.get_comfyui_manager_path()
+        if manager_path is None:
+            return False
+
         # To check more robustly, verify up to the `.git` path.
-        manager_git_path = os.path.join(self.workspace_path, "custom_nodes", "ComfyUI-Manager", ".git")
+        manager_git_path = os.path.join(manager_path, ".git")
         return os.path.exists(manager_git_path)
 
     def scan_dir(self):
