@@ -270,8 +270,7 @@ class WorkspaceManager:
         for manager_path in possible_paths:
             if os.path.exists(manager_path):
                 return manager_path
-            else:
-                return None
+        return None
 
     def is_comfyui_manager_installed(self):
         if self.workspace_path is None:
