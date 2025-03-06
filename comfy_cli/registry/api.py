@@ -19,6 +19,10 @@ class RegistryAPI:
         self.base_url = self.determine_base_url()
 
     def determine_base_url(self):
+        COMFY_REGISTRY_API = os.getenv("COMFY_REGISTRY_API", None)
+        if COMFY_REGISTRY_API is not None:
+            return COMFY_REGISTRY_API
+
         env = os.getenv("ENVIRONMENT")
         if env == "dev":
             return "http://localhost:8080"
