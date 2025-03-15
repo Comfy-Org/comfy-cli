@@ -167,6 +167,15 @@ def execute_install_script(repo_path):
         try_install_script(repo_path, install_cmd)
 
 
+@app.callback()
+def app_callback(ctx: typer.Context):
+    """Global options for the CLI"""
+    if not hasattr(app_callback, "context"):
+        app_callback.context = {}
+    # Get verbose flag from parent context
+    app_callback.context["verbose"] = ctx.obj.get("verbose", False)
+
+
 @app.command("save-snapshot", help="Save a snapshot of the current ComfyUI environment")
 @tracking.track_command("node")
 def save_snapshot(
@@ -175,11 +184,12 @@ def save_snapshot(
         typer.Option(show_default=False, help="Specify the output file path. (.json/.yaml)"),
     ] = None,
 ):
+    verbose = app_callback.context.get("verbose", False)
     if output is None:
-        execute_cm_cli(["save-snapshot"])
+        execute_cm_cli(["save-snapshot"], verbose=verbose)
     else:
         output = os.path.abspath(output)  # to compensate chdir
-        execute_cm_cli(["save-snapshot", "--output", output])
+        execute_cm_cli(["save-snapshot", "--output", output], verbose=verbose)
 
 
 @app.command("restore-snapshot", help="Restore snapshot from snapshot file")
@@ -216,32 +226,37 @@ def restore_snapshot(
     if pip_local_url:
         extras += ["--pip-local-url"]
 
+    verbose = app_callback.context.get("verbose", False)
     path = os.path.abspath(path)
-    execute_cm_cli(["restore-snapshot", path] + extras)
+    execute_cm_cli(["restore-snapshot", path] + extras, verbose=verbose)
 
 
 @app.command("restore-dependencies", help="Restore dependencies from installed custom nodes")
 @tracking.track_command("node")
 def restore_dependencies():
-    execute_cm_cli(["restore-dependencies"])
+    verbose = app_callback.context.get("verbose", False)
+    execute_cm_cli(["restore-dependencies"], verbose=verbose)
 
 
 @manager_app.command("disable-gui", help="Disable GUI mode of ComfyUI-Manager")
 @tracking.track_command("node")
 def disable_gui():
-    execute_cm_cli(["cli-only-mode", "enable"])
+    verbose = app_callback.context.get("verbose", False)
+    execute_cm_cli(["cli-only-mode", "enable"], verbose=verbose)
 
 
 @manager_app.command("enable-gui", help="Enable GUI mode of ComfyUI-Manager")
 @tracking.track_command("node")
 def enable_gui():
-    execute_cm_cli(["cli-only-mode", "disable"])
+    verbose = app_callback.context.get("verbose", False)
+    execute_cm_cli(["cli-only-mode", "disable"], verbose=verbose)
 
 
 @manager_app.command(help="Clear reserved startup action in ComfyUI-Manager")
 @tracking.track_command("node")
 def clear():
-    execute_cm_cli(["clear"])
+    verbose = app_callback.context.get("verbose", False)
+    execute_cm_cli(["clear"], verbose=verbose)
 
 
 # completers
@@ -338,7 +353,8 @@ def show(
 
     validate_mode(mode)
 
-    execute_cm_cli(["show", arg], channel=channel, mode=mode)
+    verbose = app_callback.context.get("verbose", False)
+    execute_cm_cli(["show", arg], channel=channel, mode=mode, verbose=verbose)
 
 
 @app.command("simple-show", help="Show node list (simple mode)")
@@ -377,7 +393,8 @@ def simple_show(
 
     validate_mode(mode)
 
-    execute_cm_cli(["simple-show", arg], channel=channel, mode=mode)
+    verbose = app_callback.context.get("verbose", False)
+    execute_cm_cli(["simple-show", arg], channel=channel, mode=mode, verbose=verbose)
 
 
 # install, reinstall, uninstall
@@ -413,7 +430,8 @@ def install(
 
     validate_mode(mode)
 
-    execute_cm_cli(["install"] + nodes, channel=channel, fast_deps=fast_deps, mode=mode)
+    verbose = app_callback.context.get("verbose", False)
+    execute_cm_cli(["install"] + nodes, channel=channel, fast_deps=fast_deps, mode=mode, verbose=verbose)
 
 
 @app.command(help="Reinstall custom nodes")
@@ -448,7 +466,8 @@ def reinstall(
 
     validate_mode(mode)
 
-    execute_cm_cli(["reinstall"] + nodes, channel=channel, fast_deps=fast_deps, mode=mode)
+    verbose = app_callback.context.get("verbose", False)
+    execute_cm_cli(["reinstall"] + nodes, channel=channel, fast_deps=fast_deps, mode=mode, verbose=verbose)
 
 
 @app.command(help="Uninstall custom nodes")
@@ -475,7 +494,8 @@ def uninstall(
 
     validate_mode(mode)
 
-    execute_cm_cli(["uninstall"] + nodes, channel=channel, mode=mode)
+    verbose = app_callback.context.get("verbose", False)
+    execute_cm_cli(["uninstall"] + nodes, channel=channel, mode=mode, verbose=verbose)
 
 
 def update_node_id_cache():
@@ -521,7 +541,8 @@ def update(
 ):
     validate_mode(mode)
 
-    execute_cm_cli(["update"] + nodes, channel=channel, mode=mode)
+    verbose = app_callback.context.get("verbose", False)
+    execute_cm_cli(["update"] + nodes, channel=channel, mode=mode, verbose=verbose)
 
     update_node_id_cache()
 
@@ -550,7 +571,8 @@ def disable(
 ):
     validate_mode(mode)
 
-    execute_cm_cli(["disable"] + nodes, channel=channel, mode=mode)
+    verbose = app_callback.context.get("verbose", False)
+    execute_cm_cli(["disable"] + nodes, channel=channel, mode=mode, verbose=verbose)
 
 
 @app.command(help="Enable custom nodes")
@@ -577,7 +599,8 @@ def enable(
 ):
     validate_mode(mode)
 
-    execute_cm_cli(["enable"] + nodes, channel=channel, mode=mode)
+    verbose = app_callback.context.get("verbose", False)
+    execute_cm_cli(["enable"] + nodes, channel=channel, mode=mode, verbose=verbose)
 
 
 @app.command(help="Fix dependencies of custom nodes")
@@ -604,7 +627,8 @@ def fix(
 ):
     validate_mode(mode)
 
-    execute_cm_cli(["fix"] + nodes, channel=channel, mode=mode)
+    verbose = app_callback.context.get("verbose", False)
+    execute_cm_cli(["fix"] + nodes, channel=channel, mode=mode, verbose=verbose)
 
 
 @app.command(
@@ -648,17 +672,20 @@ def install_deps(
             os.makedirs(tmp_path)
         tmp_path = os.path.join(tmp_path, str(uuid.uuid4())) + ".json"
 
+        verbose = app_callback.context.get("verbose", False)
         execute_cm_cli(
             ["deps-in-workflow", "--workflow", workflow, "--output", tmp_path],
             channel,
             mode=mode,
+            verbose=verbose,
         )
 
         deps_file = tmp_path
     else:
         deps_file = os.path.abspath(os.path.expanduser(deps))
 
-    execute_cm_cli(["install-deps", deps_file], channel=channel, mode=mode)
+    verbose = app_callback.context.get("verbose", False)
+    execute_cm_cli(["install-deps", deps_file], channel=channel, mode=mode, verbose=verbose)
 
     if tmp_path is not None and os.path.exists(tmp_path):
         os.remove(tmp_path)
@@ -688,10 +715,12 @@ def deps_in_workflow(
     workflow = os.path.abspath(os.path.expanduser(workflow))
     output = os.path.abspath(os.path.expanduser(output))
 
+    verbose = app_callback.context.get("verbose", False)
     execute_cm_cli(
         ["deps-in-workflow", "--workflow", workflow, "--output", output],
         channel,
         mode=mode,
+        verbose=verbose,
     )
 
 
