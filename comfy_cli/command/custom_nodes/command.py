@@ -708,7 +708,7 @@ def validate_node_for_publishing():
     typer.echo("Running security checks...")
     try:
         # Run ruff check with security rules and --exit-zero to only warn
-        cmd = ["ruff", "check", ".", "-q", "--select", "S102,S307,E702", "--exit-zero"]
+        cmd = [sys.executable, "-m", "ruff", "check", ".", "-q", "--select", "S102,S307,E702", "--exit-zero"]
         result = subprocess.run(cmd, capture_output=True, text=True)
 
         if result.stdout:
