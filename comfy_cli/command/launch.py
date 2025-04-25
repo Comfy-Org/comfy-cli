@@ -244,7 +244,9 @@ async def launch_and_monitor(cmd, listen, port, name: str | None = None):
                 )
                 if name is not None and name not in ConfigManager().config:
                     ConfigManager().config.add_section(name)
-                ConfigManager().config[name or constants.CONFIG_DEFAULT_KEY][constants.CONFIG_KEY_BACKGROUND] = f"{(listen, port, process.pid)}"
+                ConfigManager().config[name or constants.CONFIG_DEFAULT_KEY][constants.CONFIG_KEY_BACKGROUND] = (
+                    f"{(listen, port, process.pid)}"
+                )
                 ConfigManager().write_config()
 
                 # NOTE: os.exit(0) doesn't work.

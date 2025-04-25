@@ -453,7 +453,9 @@ def validate_comfyui(_env_checker):
 @app.command(help="Stop background ComfyUI: ?[--name str]")
 @tracking.track_command()
 def stop(
-        name: Annotated[str | None, typer.Option(help="If running multiple servers, a name should be specified for each of them")] = None
+    name: Annotated[
+        str | None, typer.Option(help="If running multiple servers, a name should be specified for each of them")
+    ] = None,
 ):
     if name is not None:
         ConfigManager().load(name=name)
@@ -480,7 +482,9 @@ def stop(
 def launch(
     background: Annotated[bool, typer.Option(help="Launch ComfyUI in background")] = False,
     extra: List[str] = typer.Argument(None),
-    name: Annotated[str | None, typer.Option(help="If running multiple servers, a name should be specified for each of them")] = None
+    name: Annotated[
+        str | None, typer.Option(help="If running multiple servers, a name should be specified for each of them")
+    ] = None,
 ):
     launch_command(background, extra, name=name)
 

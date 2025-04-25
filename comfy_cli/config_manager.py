@@ -35,20 +35,22 @@ class ConfigManager(object):
             with open(config_file_path, "w") as configfile:
                 self.config.write(configfile)
 
-    def set(self, key, value, name: str | None = None):
+    def set(self, key, value, name: Optional[str] = None):
         """
         Set a key-value pair in the config file.
         """
         self.config[name or constants.CONFIG_DEFAULT_KEY][key] = value
         self.write_config()  # Write changes to file immediately
 
-    def get(self, key, name: str | None = None):
+    def get(self, key, name: Optional[str] = None):
         """
         Get a value from the config file. Returns None if the key does not exist.
         """
-        return self.config[name or constants.CONFIG_DEFAULT_KEY].get(key, None)  # Returns None if the key does not exist
+        return self.config[name or constants.CONFIG_DEFAULT_KEY].get(
+            key, None
+        )  # Returns None if the key does not exist
 
-    def load(self, name: str | None = None):
+    def load(self, name: Optional[str] = None):
         config_file_path = self.get_config_file_path()
         if os.path.exists(config_file_path):
             self.config = configparser.ConfigParser()
@@ -69,7 +71,7 @@ class ConfigManager(object):
             if not is_running(self.background[2]):
                 self.remove_background(name=section)
 
-    def fill_print_env(self, table, name: str | None = None):
+    def fill_print_env(self, table, name: Optional[str] = None):
         section = name or constants.CONFIG_DEFAULT_KEY
         table.add_row("Config Path", self.get_config_file_path())
 
@@ -113,7 +115,7 @@ class ConfigManager(object):
         else:
             table.add_row("Background ComfyUI", "[bold red]No[/bold red]")
 
-    def remove_background(self, name: str | None = None):
+    def remove_background(self, name: Optional[str] = None):
         section = name or constants.CONFIG_DEFAULT_KEY
         del self.config[section][constants.CONFIG_KEY_BACKGROUND]
         if name is not None:
@@ -125,9 +127,9 @@ class ConfigManager(object):
         if section not in self.config or section == constants.CONFIG_DEFAULT_KEY:
             return
         overridden_options = [
-            opt for opt in self.config.options(section)
-            if section in self.config and opt in self.config[section]
-               and opt not in self.config.defaults()
+            opt
+            for opt in self.config.options(section)
+            if section in self.config and opt in self.config[section] and opt not in self.config.defaults()
         ]
         if not overridden_options:
             self.config.remove_section(section)
