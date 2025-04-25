@@ -10,6 +10,7 @@ import uuid
 import typer
 from rich import print
 from rich.console import Console
+from rich.markup import escape
 from rich.panel import Panel
 
 from comfy_cli import constants, utils
@@ -56,12 +57,12 @@ def launch_comfyui(extra):
         def redirector_stderr():
             while True:
                 if process is not None:
-                    print(process.stderr.readline(), end="")
+                    print(escape(process.stderr.readline()), end="")
 
         def redirector_stdout():
             while True:
                 if process is not None:
-                    print(process.stdout.readline(), end="")
+                    print(escape(process.stdout.readline()), end="")
 
         threading.Thread(target=redirector_stderr).start()
         threading.Thread(target=redirector_stdout).start()
@@ -107,6 +108,7 @@ def launch_comfyui(extra):
 def launch(
     background: bool = False,
     extra: list[str] | None = None,
+    name: str | None = None,
 ):
     check_for_updates()
     resolved_workspace = workspace_manager.workspace_path
@@ -119,7 +121,7 @@ def launch(
         raise typer.Exit(code=1)
 
     if (extra is None or len(extra) == 0) and workspace_manager.workspace_type == WorkspaceType.DEFAULT:
-        launch_extras = workspace_manager.config_manager.config["DEFAULT"].get(
+        launch_extras = workspace_manager.config_manager.config[name or constants.CONFIG_DEFAULT_KEY].get(
             constants.CONFIG_KEY_DEFAULT_LAUNCH_EXTRAS, ""
         )
 
@@ -133,12 +135,14 @@ def launch(
 
     os.chdir(resolved_workspace)
     if background:
-        background_launch(extra)
+        background_launch(extra, name=name)
     else:
         launch_comfyui(extra)
 
 
-def background_launch(extra):
+def background_launch(extra, name: str | None = None):
+    if name is not None:
+        ConfigManager().load(name=name)
     config_background = ConfigManager().background
     if config_background is not None and utils.is_running(config_background[2]):
         console.print(
@@ -174,7 +178,7 @@ def background_launch(extra):
     ] + extra
 
     loop = asyncio.get_event_loop()
-    log = loop.run_until_complete(launch_and_monitor(cmd, listen, port))
+    log = loop.run_until_complete(launch_and_monitor(cmd, listen, port, name=name))
 
     if log is not None:
         console.print(
@@ -190,7 +194,7 @@ def background_launch(extra):
     os._exit(1)
 
 
-async def launch_and_monitor(cmd, listen, port):
+async def launch_and_monitor(cmd, listen, port, name: str | None = None):
     """
     Monitor the process during the background launch.
 
@@ -238,7 +242,9 @@ async def launch_and_monitor(cmd, listen, port):
                 print(
                     f"[bold yellow]ComfyUI is successfully launched in the background.[/bold yellow]\nTo see the GUI go to: http://{listen}:{port}"
                 )
-                ConfigManager().config["DEFAULT"][constants.CONFIG_KEY_BACKGROUND] = f"{(listen, port, process.pid)}"
+                if name is not None and name not in ConfigManager().config:
+                    ConfigManager().config.add_section(name)
+                ConfigManager().config[name or constants.CONFIG_DEFAULT_KEY][constants.CONFIG_KEY_BACKGROUND] = f"{(listen, port, process.pid)}"
                 ConfigManager().write_config()
 
                 # NOTE: os.exit(0) doesn't work.

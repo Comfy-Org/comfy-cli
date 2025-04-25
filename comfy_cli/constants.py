@@ -28,6 +28,7 @@ DEFAULT_CONFIG = {
     OS.MACOS: os.path.join(os.path.expanduser("~"), "Library", "Application Support", "comfy-cli"),
     OS.LINUX: os.path.join(os.path.expanduser("~"), ".config", "comfy-cli"),
 }
+CONFIG_DEFAULT_KEY = "DEFAULT"
 
 CONTEXT_KEY_WORKSPACE = "workspace"
 CONTEXT_KEY_RECENT = "recent"

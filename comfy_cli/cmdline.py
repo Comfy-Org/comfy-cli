@@ -450,10 +450,14 @@ def validate_comfyui(_env_checker):
         raise typer.Exit(code=1)
 
 
-@app.command(help="Stop background ComfyUI")
+@app.command(help="Stop background ComfyUI: ?[--name str]")
 @tracking.track_command()
-def stop():
-    if constants.CONFIG_KEY_BACKGROUND not in ConfigManager().config["DEFAULT"]:
+def stop(
+        name: Annotated[str | None, typer.Option(help="If running multiple servers, a name should be specified for each of them")] = None
+):
+    if name is not None:
+        ConfigManager().load(name=name)
+    if not ConfigManager().config.has_option(name or constants.CONFIG_DEFAULT_KEY, constants.CONFIG_KEY_BACKGROUND):
         rprint("[bold red]No ComfyUI is running in the background.[/bold red]\n")
         raise typer.Exit(code=1)
 
@@ -468,16 +472,17 @@ def stop():
     else:
         rprint(f"[bold yellow]Background ComfyUI is stopped.[/bold yellow] ({bg_info[0]}:{bg_info[1]})")
 
-    ConfigManager().remove_background()
+    ConfigManager().remove_background(name=name)
 
 
-@app.command(help="Launch ComfyUI: ?[--background] ?[-- <extra args ...>]")
+@app.command(help="Launch ComfyUI: ?[--background] ?[--name str] ?[-- <extra args ...>]")
 @tracking.track_command()
 def launch(
     background: Annotated[bool, typer.Option(help="Launch ComfyUI in background")] = False,
     extra: List[str] = typer.Argument(None),
+    name: Annotated[str | None, typer.Option(help="If running multiple servers, a name should be specified for each of them")] = None
 ):
-    launch_command(background, extra)
+    launch_command(background, extra, name=name)
 
 
 @app.command("set-default", help="Set default ComfyUI path")
