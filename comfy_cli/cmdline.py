@@ -454,7 +454,7 @@ def validate_comfyui(_env_checker):
 @tracking.track_command()
 def stop(
     name: Annotated[
-        str | None, typer.Option(help="If running multiple servers, a name should be specified for each of them")
+        Optional[str], typer.Option(help="If running multiple servers, a name should be specified for each of them")
     ] = None,
 ):
     if name is not None:

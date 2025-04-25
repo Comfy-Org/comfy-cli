@@ -1,9 +1,10 @@
 import ast
 import configparser
-from filelock import FileLock
 import os
 from importlib.metadata import version
 from typing import Optional, Tuple
+
+from filelock import FileLock
 
 from comfy_cli import constants, logging
 from comfy_cli.utils import get_os, is_running, singleton
