@@ -44,6 +44,7 @@ dependencies = [
   "ruff",
   "semver~=3.0.2",
   "cookiecutter",
+  "comfyui-manager"
 ]
 
 [project.optional-dependencies]

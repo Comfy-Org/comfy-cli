@@ -14,7 +14,6 @@ class PROC(str, Enum):
 
 
 COMFY_GITHUB_URL = "https://github.com/comfyanonymous/ComfyUI"
-COMFY_MANAGER_GITHUB_URL = "https://github.com/ltdrdata/ComfyUI-Manager"
 
 DEFAULT_COMFY_MODEL_PATH = "models"
 DEFAULT_COMFY_WORKSPACE = {

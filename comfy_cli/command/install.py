@@ -12,7 +12,6 @@ from rich.console import Console
 from rich.panel import Panel
 
 from comfy_cli import constants, ui, utils
-from comfy_cli.command.custom_nodes.command import update_node_id_cache
 from comfy_cli.constants import GPU_OPTION
 from comfy_cli.git_utils import git_checkout_tag
 from comfy_cli.uv import DependencyCompiler
@@ -162,13 +161,10 @@ def pip_install_manager_dependencies(repo_dir):
 
 def execute(
     url: str,
-    manager_url: str,
     comfy_path: str,
     restore: bool,
-    skip_manager: bool,
     version: str,
     commit: Optional[str] = None,
-    manager_commit: Optional[str] = None,
     gpu: constants.GPU_OPTION = None,
     cuda_version: constants.CUDAVersion = constants.CUDAVersion.v12_6,
     plat: constants.OS = None,
@@ -225,47 +221,10 @@ def execute(
 
     rprint("")
 
-    # install ComfyUI-Manager
-    if skip_manager:
-        rprint("Skipping installation of ComfyUI-Manager. (by --skip-manager)")
-    else:
-        manager_repo_dir = os.path.join(repo_dir, "custom_nodes", "ComfyUI-Manager")
-
-        if os.path.exists(manager_repo_dir):
-            if restore and not fast_deps:
-                pip_install_manager_dependencies(repo_dir)
-            else:
-                rprint(
-                    f"Directory {manager_repo_dir} already exists. Skipping installation of ComfyUI-Manager.\nIf you want to restore dependencies, add the '--restore' option."
-                )
-        else:
-            rprint("\nInstalling ComfyUI-Manager..")
-
-            if "@" in manager_url:
-                # clone specific branch
-                manager_url, manager_branch = manager_url.rsplit("@", 1)
-                subprocess.run(
-                    ["git", "clone", "-b", manager_branch, manager_url, manager_repo_dir],
-                    check=True,
-                )
-            else:
-                subprocess.run(["git", "clone", manager_url, manager_repo_dir], check=True)
-                if manager_commit is not None:
-                    subprocess.run(["git", "checkout", manager_commit], check=True, cwd=manager_repo_dir)
-
-            if not fast_deps:
-                pip_install_manager_dependencies(repo_dir)
-
     if fast_deps:
         depComp = DependencyCompiler(cwd=repo_dir, gpu=gpu)
         depComp.compile_deps()
         depComp.install_deps()
-
-    if not skip_manager:
-        try:
-            update_node_id_cache()
-        except subprocess.CalledProcessError as e:
-            rprint(f"Failed to update node id cache: {e}")
 
     os.chdir(repo_dir)
 

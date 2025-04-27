@@ -482,14 +482,12 @@ def update_node_id_cache():
     config_manager = ConfigManager()
     workspace_path = workspace_manager.workspace_path
 
-    cm_cli_path = os.path.join(workspace_path, "custom_nodes", "ComfyUI-Manager", "cm-cli.py")
-
     tmp_path = os.path.join(config_manager.get_config_path(), "tmp")
     if not os.path.exists(tmp_path):
         os.makedirs(tmp_path)
 
     cache_path = os.path.join(tmp_path, "node-cache.list")
-    cmd = [sys.executable, cm_cli_path, "export-custom-node-ids", cache_path]
+    cmd = [sys.executable, "-m", "comfyui_manager.cm_cli", "export-custom-node-ids", cache_path]
 
     new_env = os.environ.copy()
     new_env["COMFYUI_PATH"] = workspace_path
