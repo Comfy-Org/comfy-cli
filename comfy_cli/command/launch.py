@@ -6,6 +6,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import uuid
 
 import typer
@@ -199,7 +200,7 @@ async def launch_and_monitor(cmd, listen, port):
     otherwise, return the log in case of failure.
     """
     logging_flag = False
-    log = []
+    log = None
     logging_lock = threading.Lock()
 
     # NOTE: To prevent encoding error on Windows platform
@@ -252,17 +253,21 @@ async def launch_and_monitor(cmd, listen, port):
                 # 注意：os.exit(0) 不起作用。
                 os._exit(0)
 
+            if "error while attempting to bind on address" in content:
+                print(f"Launch Error, [bold red]{listen}:{port}[/bold red] binding failed.")
+                os._exit(-1)
+
             # 如果需要，将内容添加到日志中
             with logging_lock:
                 if logging_flag:
-                    log.append(content)
+                    log = content
 
-    found_event = threading.Event()
+            time.sleep(0.1)
+
     stdout_thread = threading.Thread(target=msg_hook, args=(tmp_file_out,))
     stderr_thread = threading.Thread(target=msg_hook, args=(tmp_file_err,))
     stdout_thread.start()
     stderr_thread.start()
-    found_event.wait(timeout=300)
     process.wait()
 
     return log
