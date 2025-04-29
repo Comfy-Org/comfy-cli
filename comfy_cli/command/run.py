@@ -71,6 +71,7 @@ def execute(workflow: str, host, port, wait=True, verbose=False, local_paths=Fal
         execution.queue()
         if wait:
             execution.watch_execution()
+            execution.close()
             end = time.time()
             progress.stop()
             progress = None
@@ -164,6 +165,10 @@ class WorkflowExecution:
                 message = json.loads(message)
                 if not self.on_message(message):
                     break
+
+    def close(self):
+        if self.ws:
+            self.ws.close()
 
     def update_overall_progress(self):
         self.progress.update(self.overall_task, completed=self.total_nodes - len(self.remaining_nodes))
@@ -273,4 +278,5 @@ class WorkflowExecution:
 
     def on_error(self, data):
         pprint(f"[bold red]Error running workflow\n{json.dumps(data, indent=2)}[/bold red]")
+        self.close()
         raise typer.Exit(code=1)
