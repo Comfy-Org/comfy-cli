@@ -44,6 +44,7 @@ dependencies = [
   "ruff",
   "semver~=3.0.2",
   "cookiecutter",
+  "click<=8.1.8"
 ]
 
 [project.optional-dependencies]
