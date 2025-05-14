@@ -482,7 +482,15 @@ def update_node_id_cache():
     config_manager = ConfigManager()
     workspace_path = workspace_manager.workspace_path
 
-    cm_cli_path = os.path.join(workspace_path, "custom_nodes", "ComfyUI-Manager", "cm-cli.py")
+    cm_path = workspace_manager.get_comfyui_manager_path()
+    if cm_path is None:
+        print(
+            f"\n[bold red]ComfyUI-Manager not found: {cm_path}[/bold red]\n",
+            file=sys.stderr,
+        )
+        raise typer.Exit(code=1)
+
+    cm_cli_path = os.path.join(cm_path, "cm-cli.py")
 
     tmp_path = os.path.join(config_manager.get_config_path(), "tmp")
     if not os.path.exists(tmp_path):
