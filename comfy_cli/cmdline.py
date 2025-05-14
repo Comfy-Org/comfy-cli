@@ -115,10 +115,22 @@ def entry(
         help="Print version and exit",
         is_flag=True,
     ),
+    verbose: Annotated[
+        bool,
+        typer.Option(
+            "--verbose",
+            help="Show detailed output during execution",
+            is_flag=True,
+        ),
+    ] = False,
 ):
     if version:
         rprint(ConfigManager().get_cli_version())
         ctx.exit(0)
+
+    # Store verbose flag in context for subcommands
+    ctx.ensure_object(dict)
+    ctx.obj["verbose"] = verbose
 
     workspace_manager.setup_workspace_manager(workspace, here, recent, skip_prompt)
 

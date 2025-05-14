@@ -21,7 +21,7 @@ _dependency_cmds = {
 }
 
 
-def execute_cm_cli(args, channel=None, fast_deps=False, mode=None) -> str | None:
+def execute_cm_cli(args, channel=None, fast_deps=False, mode=None, verbose=False) -> str | None:
     _config_manager = ConfigManager()
 
     workspace_path = workspace_manager.workspace_path
@@ -57,8 +57,51 @@ def execute_cm_cli(args, channel=None, fast_deps=False, mode=None) -> str | None
     print(f"Execute from: {workspace_path}")
 
     try:
-        result = subprocess.run(cmd, env=new_env, check=True, capture_output=True, text=True)
-        print(result.stdout)
+        if verbose:
+            # Use Popen for real-time output when verbose
+            process = subprocess.Popen(
+                cmd,
+                env=new_env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                bufsize=1,
+                universal_newlines=True
+            )
+
+            stdout_output = []
+            stderr_output = []
+            
+            while True:
+                stdout_line = process.stdout.readline()
+                stderr_line = process.stderr.readline()
+                
+                if stdout_line:
+                    print(stdout_line.rstrip())
+                    stdout_output.append(stdout_line)
+                if stderr_line:
+                    print(stderr_line.rstrip(), file=sys.stderr)
+                    stderr_output.append(stderr_line)
+                    
+                if process.poll() is not None and not stdout_line and not stderr_line:
+                    break
+            
+            return_code = process.wait()
+
+            if return_code != 0:
+                if return_code == 1:
+                    print(f"\n[bold red]Execution error: {cmd}[/bold red]\n", file=sys.stderr)
+                    return None
+                if return_code == 2:
+                    return None
+                raise subprocess.CalledProcessError(return_code, cmd)
+
+            output = ''.join(stdout_output)
+        else:
+            # Original behavior when not verbose
+            result = subprocess.run(cmd, env=new_env, check=True, capture_output=True, text=True)
+            print(result.stdout)
+            output = result.stdout
 
         if fast_deps and args[0] in _dependency_cmds:
             # we're using the fast_deps behavior and just ran a command that invalidated the dependencies
@@ -66,15 +109,9 @@ def execute_cm_cli(args, channel=None, fast_deps=False, mode=None) -> str | None
             depComp.compile_deps()
             depComp.install_deps()
 
-        return result.stdout
-    except subprocess.CalledProcessError as e:
-        if e.returncode == 1:
-            print(f"\n[bold red]Execution error: {cmd}[/bold red]\n", file=sys.stderr)
-            return None
-
-        if e.returncode == 2:
-            return None
-
+        return output
+    except Exception as e:
+        print(f"\n[bold red]Error executing command: {str(e)}[/bold red]\n", file=sys.stderr)
         raise e
     finally:
         workspace_manager.set_recent_workspace(workspace_path)
