@@ -51,6 +51,7 @@ class ComfyConfig:
     display_name: str = ""
     icon: str = ""
     models: List[Model] = field(default_factory=list)
+    includes: List[str] = field(default_factory=list)
 
 
 @dataclass
