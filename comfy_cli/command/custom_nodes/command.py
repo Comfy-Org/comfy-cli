@@ -765,7 +765,13 @@ def publish(
         signed_url = response.signedUrl
         zip_filename = NODE_ZIP_FILENAME
         typer.echo("Creating zip file...")
-        zip_files(zip_filename)
+
+        includes = config.tool_comfy.includes if config and config.tool_comfy else []
+
+        if includes:
+            typer.echo(f"Including additional directories: {', '.join(includes)}")
+
+        zip_files(zip_filename, includes=includes)
 
         # Upload the zip file to the signed URL
         typer.echo("Uploading zip file...")
@@ -917,7 +923,13 @@ def pack():
         raise typer.Exit(code=1)
 
     zip_filename = NODE_ZIP_FILENAME
-    zip_files(zip_filename)
+    includes = config.tool_comfy.includes if config and config.tool_comfy else []
+
+    if includes:
+        typer.echo(f"Including additional directories: {', '.join(includes)}")
+
+    zip_files(zip_filename, includes=includes)
+
     typer.echo(f"Created zip file: {NODE_ZIP_FILENAME}")
     logging.info("Node has been packed successfully.")
 

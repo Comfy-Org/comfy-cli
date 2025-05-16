@@ -42,6 +42,7 @@ def create_comfynode_config():
     comfy["PublisherId"] = ""
     comfy["DisplayName"] = "ComfyUI-AIT"
     comfy["Icon"] = ""
+    comfy["includes"] = tomlkit.array()
 
     tool.add("comfy", comfy)
     document.add("tool", tool)
@@ -196,6 +197,7 @@ def extract_node_configuration(
         display_name=comfy_data.get("DisplayName", ""),
         icon=comfy_data.get("Icon", ""),
         models=[Model(location=m["location"], model_url=m["model_url"]) for m in comfy_data.get("Models", [])],
+        includes=comfy_data.get("includes", []),
     )
 
     return PyProjectConfig(project=project, tool_comfy=comfy)
