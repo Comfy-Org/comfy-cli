@@ -99,6 +99,7 @@ def zip_files(zip_filename, includes=None):
 
     try:
         import subprocess
+
         git_files = subprocess.check_output(["git", "ls-files"], text=True).splitlines()
     except (subprocess.SubprocessError, FileNotFoundError):
         print("Warning: Not in a git repository or git not installed. Zipping all files.")
@@ -128,7 +129,7 @@ def zip_files(zip_filename, includes=None):
                     included_paths.add(file_path)
 
         for include_dir in includes:
-            include_dir = include_dir.lstrip('/')
+            include_dir = include_dir.lstrip("/")
             if not os.path.exists(include_dir):
                 print(f"Warning: Included directory '{include_dir}' does not exist, creating empty directory")
                 zipf.writestr(f"{include_dir}/", "")
