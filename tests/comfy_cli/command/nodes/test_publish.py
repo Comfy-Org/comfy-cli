@@ -7,6 +7,26 @@ from comfy_cli.command.custom_nodes.command import app
 runner = CliRunner()
 
 
+def create_mock_config():
+    mock_pyproject_config = MagicMock()
+
+    mock_tool_comfy_section = MagicMock()
+    mock_tool_comfy_section.name = "test-node"
+    mock_tool_comfy_section.version = "0.1.0"
+    mock_tool_comfy_section.description = "A test node."
+    mock_tool_comfy_section.author = "Test Author"
+    mock_tool_comfy_section.license = "MIT"
+    mock_tool_comfy_section.tags = ["test"]
+    mock_tool_comfy_section.repository = "http://example.com/repo"
+    mock_tool_comfy_section.homepage = "http://example.com/home"
+    mock_tool_comfy_section.documentation = "http://example.com/docs"
+    mock_tool_comfy_section.includes = []
+
+    mock_pyproject_config.tool_comfy = mock_tool_comfy_section
+
+    return mock_pyproject_config
+
+
 def test_publish_fails_on_security_violations():
     # Mock subprocess.run to simulate security violations
     mock_result = MagicMock()
@@ -40,7 +60,8 @@ def test_publish_continues_on_no_security_violations():
         patch("comfy_cli.command.custom_nodes.command.upload_file_to_signed_url") as mock_upload,
     ):
         # Setup the mocks
-        mock_extract.return_value = {"name": "test-node"}
+        mock_extract.return_value = create_mock_config()
+
         mock_prompt.return_value = "test-token"
         mock_publish.return_value = MagicMock(signedUrl="https://test.url")
 
@@ -76,7 +97,8 @@ def test_publish_with_token_option():
         patch("comfy_cli.command.custom_nodes.command.upload_file_to_signed_url") as mock_upload,
     ):
         # Setup the mocks
-        mock_extract.return_value = {"name": "test-node"}
+        mock_extract.return_value = create_mock_config()
+
         mock_publish.return_value = MagicMock(signedUrl="https://test.url")
 
         # Run the publish command with token
@@ -104,7 +126,8 @@ def test_publish_exits_on_upload_failure():
         patch("comfy_cli.command.custom_nodes.command.upload_file_to_signed_url") as mock_upload,
     ):
         # Setup the mocks
-        mock_extract.return_value = {"name": "test-node"}
+        mock_extract.return_value = create_mock_config()
+
         mock_publish.return_value = MagicMock(signedUrl="https://test.url")
         mock_upload.side_effect = Exception("Upload failed with status code: 403")
 
