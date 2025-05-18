@@ -7,7 +7,10 @@ from comfy_cli.command.custom_nodes.command import app
 runner = CliRunner()
 
 
-def create_mock_config():
+def create_mock_config(includes_list=None):
+    if includes_list is None:
+        includes_list = []
+
     mock_pyproject_config = MagicMock()
 
     mock_tool_comfy_section = MagicMock()
@@ -20,7 +23,7 @@ def create_mock_config():
     mock_tool_comfy_section.repository = "http://example.com/repo"
     mock_tool_comfy_section.homepage = "http://example.com/home"
     mock_tool_comfy_section.documentation = "http://example.com/docs"
-    mock_tool_comfy_section.includes = []
+    mock_tool_comfy_section.includes = includes_list
 
     mock_pyproject_config.tool_comfy = mock_tool_comfy_section
 
@@ -136,6 +139,33 @@ def test_publish_exits_on_upload_failure():
 
         # Verify the command exited with error
         assert result.exit_code == 1
+        assert mock_extract.called
+        assert mock_publish.called
+        assert mock_zip.called
+        assert mock_upload.called
+
+def test_publish_with_includes_parameter():
+    # Mock subprocess.run to simulate no violations
+    mock_result = MagicMock()
+    mock_result.returncode = 0
+    mock_result.stdout = ""
+
+    with (
+        patch("subprocess.run", return_value=mock_result),
+        patch("comfy_cli.command.custom_nodes.command.extract_node_configuration") as mock_extract,
+        patch("comfy_cli.command.custom_nodes.command.registry_api.publish_node_version") as mock_publish,
+        patch("comfy_cli.command.custom_nodes.command.zip_files") as mock_zip,
+        patch("comfy_cli.command.custom_nodes.command.upload_file_to_signed_url") as mock_upload,
+    ):
+        # Setup the mocks
+        mock_extract.return_value = create_mock_config(includes_list=['/dist', '/js'])
+
+        mock_publish.return_value = MagicMock(signedUrl="https://test.url")
+
+        # Run the publish command with token
+        _result = runner.invoke(app, ["publish"])
+
+        # Verify the publish flow worked with provided token
         assert mock_extract.called
         assert mock_publish.called
         assert mock_zip.called
