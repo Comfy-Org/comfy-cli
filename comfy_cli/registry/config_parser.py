@@ -36,7 +36,7 @@ def create_comfynode_config():
 
     # Create the tool table
     tool = tomlkit.table()
-    document.add(tomlkit.comment(" Used by Comfy Registry https://comfyregistry.org"))
+    document.add(tomlkit.comment(" Used by Comfy Registry https://registry.comfy.org"))
 
     comfy = tomlkit.table()
     comfy["PublisherId"] = ""
