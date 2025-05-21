@@ -144,6 +144,7 @@ def test_publish_exits_on_upload_failure():
         assert mock_zip.called
         assert mock_upload.called
 
+
 def test_publish_with_includes_parameter():
     # Mock subprocess.run to simulate no violations
     mock_result = MagicMock()
@@ -157,7 +158,7 @@ def test_publish_with_includes_parameter():
         patch("comfy_cli.command.custom_nodes.command.zip_files") as mock_zip,
         patch("comfy_cli.command.custom_nodes.command.upload_file_to_signed_url") as mock_upload,
     ):
-        includes = ['/js', '/dist']
+        includes = ["/js", "/dist"]
 
         # Setup the mocks
         mock_extract.return_value = create_mock_config(includes)
