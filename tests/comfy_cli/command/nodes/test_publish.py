@@ -157,13 +157,15 @@ def test_publish_with_includes_parameter():
         patch("comfy_cli.command.custom_nodes.command.zip_files") as mock_zip,
         patch("comfy_cli.command.custom_nodes.command.upload_file_to_signed_url") as mock_upload,
     ):
+        includes = ['/js', '/dist']
+
         # Setup the mocks
-        mock_extract.return_value = create_mock_config(includes_list=['/dist', '/js'])
+        mock_extract.return_value = create_mock_config(includes)
 
         mock_publish.return_value = MagicMock(signedUrl="https://test.url")
 
         # Run the publish command with token
-        _result = runner.invoke(app, ["publish"])
+        _result = runner.invoke(app, ["publish", "--token", "test-token"])
 
         # Verify the publish flow worked with provided token
         assert mock_extract.called
