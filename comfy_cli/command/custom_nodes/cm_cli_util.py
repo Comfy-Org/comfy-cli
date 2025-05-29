@@ -57,7 +57,9 @@ def execute_cm_cli(args, channel=None, fast_deps=False, mode=None) -> str | None
     print(f"Execute from: {workspace_path}")
 
     try:
-        result = subprocess.run(cmd, env=new_env, check=True, capture_output=True, text=True, encoding="utf-8", errors="replace")
+        result = subprocess.run(
+            cmd, env=new_env, check=True, capture_output=True, text=True, encoding="utf-8", errors="replace"
+        )
         print(result.stdout)
 
         if fast_deps and args[0] in _dependency_cmds:
