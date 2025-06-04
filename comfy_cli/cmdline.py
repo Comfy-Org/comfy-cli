@@ -375,6 +375,7 @@ def update(
         raise typer.Exit(code=1)
 
     comfy_path = workspace_manager.workspace_path
+    python_exe = workspace_manager.python_exe
 
     if "all" == target:
         custom_nodes.command.execute_cm_cli(["update", "all"])
@@ -386,7 +387,7 @@ def update(
         os.chdir(comfy_path)
         subprocess.run(["git", "pull"], check=True)
         subprocess.run(
-            [sys.executable, "-m", "pip", "install", "-r", "requirements.txt"],
+            [python_exe, "-m", "pip", "install", "-r", "requirements.txt"],
             check=True,
         )
 
