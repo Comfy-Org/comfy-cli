@@ -110,6 +110,9 @@ def initialize_project_config():
     project = document.get("project", tomlkit.table())
     urls = project.get("urls", tomlkit.table())
     urls["Repository"] = git_remote_url
+    urls["Documentation"] = git_remote_url + "/wiki"
+    urls["Bug Tracker"] = git_remote_url + "/issues"
+
     project["urls"] = urls
     project["name"] = sanitize_node_name(repo_name)
     project["description"] = ""
