@@ -126,7 +126,8 @@ def initialize_project_config():
     tool = document.get("tool", tomlkit.table())
     comfy = tool.get("comfy", tomlkit.table())
     comfy["DisplayName"] = repo_name
-    comfy["requires-comfyui"] = ">=1.0.0"
+    comfy["requires-comfyui"] = ">=1.0.0" # ComfyUI version compatibility
+
     tool["comfy"] = comfy
     document["tool"] = tool
 
