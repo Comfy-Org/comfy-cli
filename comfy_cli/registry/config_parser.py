@@ -122,6 +122,33 @@ def initialize_project_config():
     license_table = tomlkit.inline_table()
     license_table["file"] = "LICENSE"
     project["license"] = license_table
+    
+    # Classifiers
+    # [project]
+    # classifiers = [
+    #     # For OS-independent nodes (works on all operating systems)
+    #     "Operating System :: OS Independent",
+
+    #     # OR for OS-specific nodes, specify the supported systems:
+    #     "Operating System :: Microsoft :: Windows",  # Windows specific
+    #     "Operating System :: POSIX :: Linux",  # Linux specific
+    #     "Operating System :: MacOS",  # macOS specific
+        
+    #     # GPU Accelerator support
+    #     "Environment :: GPU :: NVIDIA CUDA",    # NVIDIA CUDA support
+    #     "Environment :: GPU :: AMD ROCm",       # AMD ROCm support
+    #     "Environment :: GPU :: Intel Arc",      # Intel Arc support
+    #     "Environment :: NPU :: Huawei Ascend",  # Huawei Ascend support
+    #     "Environment :: GPU :: Apple Metal",    # Apple Metal support
+    # ]
+    project["classifiers"] = tomlkit.array(
+        "Operating System :: OS Independent",
+        "Environment :: GPU :: NVIDIA CUDA",
+        "Environment :: GPU :: AMD ROCm",
+        "Environment :: GPU :: Intel Arc",
+        "Environment :: NPU :: Huawei Ascend",
+        "Environment :: GPU :: Apple Metal",
+    )
 
     tool = document.get("tool", tomlkit.table())
     comfy = tool.get("comfy", tomlkit.table())
