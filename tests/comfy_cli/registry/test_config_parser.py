@@ -133,6 +133,7 @@ def test_extract_license_incorrect_format():
         assert isinstance(result, PyProjectConfig)
         assert result.project.license == License(text="MIT")
 
+
 def test_extract_node_configuration_with_os_classifiers():
     mock_data = {
         "project": {
@@ -216,6 +217,7 @@ def test_extract_node_configuration_with_requires_comfyui():
         assert result is not None
         assert result.project.supported_comfyui_version == "2.0.0"
 
+
 def test_validate_and_extract_os_classifiers_valid():
     """Test OS validation with valid classifiers."""
     classifiers = [
@@ -229,7 +231,8 @@ def test_validate_and_extract_os_classifiers_valid():
     expected = ["Microsoft :: Windows", "POSIX :: Linux", "MacOS", "OS Independent"]
     assert result == expected
 
-@patch('typer.echo')
+
+@patch("typer.echo")
 def test_validate_and_extract_os_classifiers_invalid(mock_echo):
     """Test OS validation with invalid classifiers."""
     classifiers = [
@@ -254,11 +257,17 @@ def test_validate_and_extract_accelerator_classifiers_valid():
         "Programming Language :: Python :: 3",
     ]
     result = validate_and_extract_accelerator_classifiers(classifiers)
-    expected = ["GPU :: NVIDIA CUDA", "GPU :: AMD ROCm", "GPU :: Intel Arc", "NPU :: Huawei Ascend", "GPU :: Apple Metal"]
+    expected = [
+        "GPU :: NVIDIA CUDA",
+        "GPU :: AMD ROCm",
+        "GPU :: Intel Arc",
+        "NPU :: Huawei Ascend",
+        "GPU :: Apple Metal",
+    ]
     assert result == expected
 
 
-@patch('typer.echo')
+@patch("typer.echo")
 def test_validate_and_extract_accelerator_classifiers_invalid(mock_echo):
     """Test accelerator validation with invalid classifiers."""
     classifiers = [
@@ -293,13 +302,13 @@ def test_validate_version_valid():
         "1.0.0,2.0.0",
         ">1.0.0,<2.0.0,!=1.5.0-beta",
     ]
-    
+
     for version in valid_versions:
         result = validate_version(version, "test_field")
         assert result == version, f"Version {version} should be valid"
 
 
-@patch('typer.echo')
+@patch("typer.echo")
 def test_validate_version_invalid(mock_echo):
     """Test version validation with invalid versions."""
     invalid_versions = [
@@ -312,9 +321,9 @@ def test_validate_version_invalid(mock_echo):
         "1.0,2.0.0",
         ">=1.0.0,>=abc",
     ]
-    
+
     for version in invalid_versions:
         result = validate_version(version, "test_field")
         assert result == "", f"Version {version} should be invalid"
-    
+
     assert mock_echo.call_count == len(invalid_versions)

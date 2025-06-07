@@ -93,32 +93,32 @@ def validate_and_extract_os_classifiers(classifiers: list) -> list:
     if not os_classifiers:
         return []
 
-    os_values = [c[len("Operating System :: "):] for c in os_classifiers]    
+    os_values = [c[len("Operating System :: ") :] for c in os_classifiers]
     valid_os_prefixes = {"Microsoft", "POSIX", "MacOS", "OS Independent"}
-    
+
     for os_value in os_values:
         if not any(os_value.startswith(prefix) for prefix in valid_os_prefixes):
             typer.echo(
                 'Warning: Invalid Operating System classifier found. Operating System classifiers must start with one of: "Microsoft", "POSIX", "MacOS", "OS Independent". '
                 'Examples: "Operating System :: Microsoft :: Windows", "Operating System :: POSIX :: Linux", "Operating System :: MacOS", "Operating System :: OS Independent". '
-                'No OS information will be populated.'
+                "No OS information will be populated."
             )
             return []
 
     return os_values
 
 
-def validate_and_extract_accelerator_classifiers(classifiers: list) -> list:    
+def validate_and_extract_accelerator_classifiers(classifiers: list) -> list:
     accelerator_classifiers = [c for c in classifiers if c.startswith("Environment ::")]
     if not accelerator_classifiers:
         return []
-    
-    accelerator_values = [c[len("Environment :: "):] for c in accelerator_classifiers]
-    
+
+    accelerator_values = [c[len("Environment :: ") :] for c in accelerator_classifiers]
+
     valid_accelerators = {
         "GPU :: NVIDIA CUDA",
         "GPU :: AMD ROCm",
-        "GPU :: Intel Arc", 
+        "GPU :: Intel Arc",
         "NPU :: Huawei Ascend",
         "GPU :: Apple Metal",
     }
@@ -126,10 +126,10 @@ def validate_and_extract_accelerator_classifiers(classifiers: list) -> list:
     for accelerator_value in accelerator_values:
         if accelerator_value not in valid_accelerators:
             typer.echo(
-                'Warning: Invalid Environment classifier found. Environment classifiers must be one of: '
+                "Warning: Invalid Environment classifier found. Environment classifiers must be one of: "
                 '"Environment :: GPU :: NVIDIA CUDA", "Environment :: GPU :: AMD ROCm", "Environment :: GPU :: Intel Arc", '
                 '"Environment :: NPU :: Huawei Ascend", "Environment :: GPU :: Apple Metal". '
-                'No accelerator information will be populated.'
+                "No accelerator information will be populated."
             )
             return []
 
@@ -140,21 +140,21 @@ def validate_version(version: str, field_name: str) -> str:
     if not version:
         return version
 
-    version_pattern = r'^(?:(==|>=|<=|!=|~=|>|<|<>|=)\s*)?(\d+\.\d+\.\d+(?:-[a-zA-Z0-9]+)?)?$'
+    version_pattern = r"^(?:(==|>=|<=|!=|~=|>|<|<>|=)\s*)?(\d+\.\d+\.\d+(?:-[a-zA-Z0-9]+)?)?$"
 
-    version_parts = [part.strip() for part in version.split(',')]
+    version_parts = [part.strip() for part in version.split(",")]
     for part in version_parts:
         if not re.match(version_pattern, part):
             typer.echo(
                 f'Warning: Invalid {field_name} format: "{version}". '
-                f'Each version part must follow the pattern: [operator][version] where operator is optional (==, >=, <=, !=, ~=, >, <, <>, =) '
-                f'and version is in format major.minor.patch[-suffix]. '
-                f'Multiple versions can be comma-separated. '
+                f"Each version part must follow the pattern: [operator][version] where operator is optional (==, >=, <=, !=, ~=, >, <, <>, =) "
+                f"and version is in format major.minor.patch[-suffix]. "
+                f"Multiple versions can be comma-separated. "
                 f'Examples: ">=1.0.0", "==2.1.0-beta", "1.5.2", ">=1.0.0,<2.0.0". '
-                f'No {field_name} will be populated.'
+                f"No {field_name} will be populated."
             )
             return ""
-    
+
     return version
 
 
@@ -246,7 +246,9 @@ def extract_node_configuration(
     supported_os = validate_and_extract_os_classifiers(classifiers)
     supported_accelerators = validate_and_extract_accelerator_classifiers(classifiers)
     supported_comfyui_version = validate_version(supported_comfyui_version, "requires-comfyui")
-    supported_comfyui_frontend_version = validate_version(supported_comfyui_frontend_version, "comfyui-frontend-package")
+    supported_comfyui_frontend_version = validate_version(
+        supported_comfyui_frontend_version, "comfyui-frontend-package"
+    )
 
     license_data = project_data.get("license", {})
     if isinstance(license_data, str):

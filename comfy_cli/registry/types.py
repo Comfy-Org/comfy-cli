@@ -74,6 +74,7 @@ class ProjectConfig:
     supported_comfyui_version: str = ""
     supported_comfyui_frontend_version: str = ""
 
+
 @dataclass
 class PyProjectConfig:
     project: ProjectConfig = field(default_factory=ProjectConfig)
