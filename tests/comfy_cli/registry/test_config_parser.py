@@ -206,7 +206,7 @@ def test_extract_node_configuration_with_comfyui_version():
 
 
 def test_extract_node_configuration_with_requires_comfyui():
-    mock_data = {"project": {}, "tool": {"requires-comfyui": "2.0.0"}}
+    mock_data = {"project": {}, "tool": {"comfy": {"requires-comfyui": "2.0.0"}}}
     with (
         patch("os.path.isfile", return_value=True),
         patch("builtins.open", mock_open()),

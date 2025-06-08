@@ -240,7 +240,7 @@ def extract_node_configuration(
         dep for dep in dependencies if not (isinstance(dep, str) and dep.startswith("comfyui-frontend-package"))
     ]
 
-    supported_comfyui_version = data.get("tool", {}).get("requires-comfyui", "")
+    supported_comfyui_version = data.get("tool", {}).get("comfy", {}).get("requires-comfyui", "")
 
     classifiers = project_data.get("classifiers", [])
     supported_os = validate_and_extract_os_classifiers(classifiers)
