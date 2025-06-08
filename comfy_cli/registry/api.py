@@ -54,10 +54,18 @@ class RegistryAPI:
                 "name": node_config.tool_comfy.display_name,
                 "license": license_json,
                 "repository": node_config.project.urls.repository,
+                "supported_os": node_config.project.supported_os,
+                "supported_accelerators": node_config.project.supported_accelerators,
+                "supported_comfyui_version": node_config.project.supported_comfyui_version,
+                "supported_comfyui_frontend_version": node_config.project.supported_comfyui_frontend_version,
             },
             "node_version": {
                 "version": node_config.project.version,
                 "dependencies": node_config.project.dependencies,
+                "supported_os": node_config.project.supported_os,
+                "supported_accelerators": node_config.project.supported_accelerators,
+                "supported_comfyui_version": node_config.project.supported_comfyui_version,
+                "supported_comfyui_frontend_version": node_config.project.supported_comfyui_frontend_version,
             },
         }
         print(request_body)
