@@ -134,7 +134,7 @@ def initialize_project_config():
     #     "Operating System :: POSIX :: Linux",  # Linux specific
     #     "Operating System :: MacOS",  # macOS specific
         
-    #     # GPU Accelerator support
+    #     # GPU Accelerator support. Pick the ones that are supported by your extension.
     #     "Environment :: GPU :: NVIDIA CUDA",    # NVIDIA CUDA support
     #     "Environment :: GPU :: AMD ROCm",       # AMD ROCm support
     #     "Environment :: GPU :: Intel Arc",      # Intel Arc support
