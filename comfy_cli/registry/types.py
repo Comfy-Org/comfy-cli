@@ -52,6 +52,7 @@ class ComfyConfig:
     icon: str = ""
     models: List[Model] = field(default_factory=list)
     includes: List[str] = field(default_factory=list)
+    banner_url: str = ""
 
 
 @dataclass
