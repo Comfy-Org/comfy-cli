@@ -38,6 +38,7 @@ def mock_toml_data():
                 "PublisherId": "test-publisher",
                 "DisplayName": "Test Project",
                 "Icon": "icon.png",
+                "Banner": "https://example.com/banner.png",
                 "Models": [
                     {
                         "location": "model1.bin",
@@ -77,6 +78,7 @@ def test_extract_node_configuration_success(mock_toml_data):
         assert result.tool_comfy.publisher_id == "test-publisher"
         assert result.tool_comfy.display_name == "Test Project"
         assert result.tool_comfy.icon == "icon.png"
+        assert result.tool_comfy.banner_url == "https://example.com/banner.png"
         assert len(result.tool_comfy.models) == 2
         assert result.tool_comfy.models[0] == Model(location="model1.bin", model_url="https://example.com/model1")
 

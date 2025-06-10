@@ -54,6 +54,7 @@ class RegistryAPI:
                 "name": node_config.tool_comfy.display_name,
                 "license": license_json,
                 "repository": node_config.project.urls.repository,
+                "banner_url": node_config.tool_comfy.banner_url,
                 "supported_os": node_config.project.supported_os,
                 "supported_accelerators": node_config.project.supported_accelerators,
                 "supported_comfyui_version": node_config.project.supported_comfyui_version,
