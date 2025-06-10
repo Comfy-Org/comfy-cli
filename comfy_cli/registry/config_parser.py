@@ -296,6 +296,7 @@ def extract_node_configuration(
         models=[Model(location=m["location"], model_url=m["model_url"]) for m in comfy_data.get("Models", [])],
         includes=comfy_data.get("includes", []),
         banner_url=comfy_data.get("Banner", ""),
+        web=comfy_data.get("web", ""),
     )
 
     return PyProjectConfig(project=project, tool_comfy=comfy)

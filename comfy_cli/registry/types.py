@@ -53,6 +53,7 @@ class ComfyConfig:
     models: List[Model] = field(default_factory=list)
     includes: List[str] = field(default_factory=list)
     banner_url: str = ""
+    web: Optional[str] = None
 
 
 @dataclass
