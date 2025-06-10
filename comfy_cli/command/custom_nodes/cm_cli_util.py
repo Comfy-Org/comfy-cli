@@ -30,13 +30,15 @@ def execute_cm_cli(args, channel=None, fast_deps=False, mode=None) -> str | None
         print("\n[bold red]ComfyUI path is not resolved.[/bold red]\n", file=sys.stderr)
         raise typer.Exit(code=1)
 
-    cm_cli_path = os.path.join(workspace_path, "custom_nodes", "ComfyUI-Manager", "cm-cli.py")
-    if not os.path.exists(cm_cli_path):
+    cm_path = workspace_manager.get_comfyui_manager_path()
+    if cm_path is None:
         print(
-            f"\n[bold red]ComfyUI-Manager not found: {cm_cli_path}[/bold red]\n",
+            f"\n[bold red]ComfyUI-Manager not found: {cm_path}[/bold red]\n",
             file=sys.stderr,
         )
         raise typer.Exit(code=1)
+
+    cm_cli_path = os.path.join(cm_path, "cm-cli.py")
 
     cmd = [sys.executable, cm_cli_path] + args
 
