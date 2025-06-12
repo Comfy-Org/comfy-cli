@@ -37,6 +37,7 @@ def pip_install_comfyui_dependencies(
     skip_requirement: bool,
 ):
     os.chdir(repo_dir)
+    python_exe = workspace_manager.python_exe
 
     result = None
     if not skip_torch_or_directml:
@@ -45,7 +46,7 @@ def pip_install_comfyui_dependencies(
             pip_url = ["--extra-index-url", "https://download.pytorch.org/whl/rocm6.0"]
             result = subprocess.run(
                 [
-                    sys.executable,
+                    python_exe,
                     "-m",
                     "pip",
                     "install",
@@ -60,7 +61,7 @@ def pip_install_comfyui_dependencies(
         # install torch for NVIDIA
         if gpu == GPU_OPTION.NVIDIA:
             base_command = [
-                sys.executable,
+                python_exe,
                 "-m",
                 "pip",
                 "install",
@@ -102,12 +103,12 @@ def pip_install_comfyui_dependencies(
             utils.install_conda_package("libuv")
             # TODO: wrap pip install in a function
             subprocess.run(
-                [sys.executable, "-m", "pip", "install", "mkl", "mkl-dpcpp"],
+                [python_exe, "-m", "pip", "install", "mkl", "mkl-dpcpp"],
                 check=True,
             )
             result = subprocess.run(
                 [
-                    sys.executable,
+                    python_exe,
                     "-m",
                     "pip",
                     "install",
@@ -125,13 +126,13 @@ def pip_install_comfyui_dependencies(
 
         # install directml for AMD windows
         if gpu == GPU_OPTION.AMD and plat == constants.OS.WINDOWS:
-            result = subprocess.run([sys.executable, "-m", "pip", "install", "torch-directml"], check=True)
+            result = subprocess.run([python_exe, "-m", "pip", "install", "torch-directml"], check=True)
 
         # install torch for Mac M Series
         if gpu == GPU_OPTION.MAC_M_SERIES:
             result = subprocess.run(
                 [
-                    sys.executable,
+                    python_exe,
                     "-m",
                     "pip",
                     "install",
@@ -148,7 +149,7 @@ def pip_install_comfyui_dependencies(
     # install requirements.txt
     if skip_requirement:
         return
-    result = subprocess.run([sys.executable, "-m", "pip", "install", "-r", "requirements.txt"], check=False)
+    result = subprocess.run([python_exe, "-m", "pip", "install", "-r", "requirements.txt"], check=False)
     if result.returncode != 0:
         rprint("Failed to install ComfyUI dependencies. Please check your environment (`comfy env`) and try again.")
         sys.exit(1)
@@ -156,8 +157,10 @@ def pip_install_comfyui_dependencies(
 
 # install requirements for manager
 def pip_install_manager_dependencies(repo_dir):
+    python_exe =  workspace_manager.python_exe
+
     os.chdir(os.path.join(repo_dir, "custom_nodes", "ComfyUI-Manager"))
-    subprocess.run([sys.executable, "-m", "pip", "install", "-r", "requirements.txt"], check=True)
+    subprocess.run([python_exe, "-m", "pip", "install", "-r", "requirements.txt"], check=True)
 
 
 def execute(
