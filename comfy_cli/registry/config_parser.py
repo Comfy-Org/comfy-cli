@@ -123,8 +123,7 @@ def initialize_project_config():
     license_table["file"] = "LICENSE"
     project["license"] = license_table
 
-    # Classifiers
-
+    # [project].classfiers Classifiers uncommentable hint for OS/GPU support
     project["classifiers"] = tomlkit.array()
     project["classifiers"].comment("""
 # classifiers = [
@@ -136,7 +135,7 @@ def initialize_project_config():
 #     "Operating System :: POSIX :: Linux",  # Linux specific
 #     "Operating System :: MacOS",  # macOS specific
 #     
-#     # GPU Accelerator support
+#     # GPU Accelerator support. Pick the ones that are supported by your extension.
 #     "Environment :: GPU :: NVIDIA CUDA",    # NVIDIA CUDA support
 #     "Environment :: GPU :: AMD ROCm",       # AMD ROCm support
 #     "Environment :: GPU :: Intel Arc",      # Intel Arc support
@@ -148,11 +147,11 @@ def initialize_project_config():
     tool = document.get("tool", tomlkit.table())
     comfy = tool.get("comfy", tomlkit.table())
     comfy["DisplayName"] = repo_name
-    document.add(tomlkit.comment('"requires-comfyui" = ">=1.0.0" # ComfyUI version compatibility'))
-    # comfy["requires-comfyui"] = ">=1.0.0" # ComfyUI version compatibility
 
     tool["comfy"] = comfy
     document["tool"] = tool
+    # [tool.comfy].requires-comfyui Uncommentable hint for ComfyUI version compatibility
+    document.add(tomlkit.comment('requires-comfyui = ">=1.0.0" # ComfyUI version compatibility'))
 
     # Handle dependencies
     if os.path.exists("requirements.txt"):
