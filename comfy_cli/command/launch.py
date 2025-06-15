@@ -34,6 +34,8 @@ def launch_comfyui(extra):
     # To minimize the possibility of leaving residue in the tmp directory, use files instead of directories.
     reboot_path = os.path.join(session_path + ".reboot")
 
+    python_exe = workspace_manager.python_exe
+
     extra = extra if extra is not None else []
 
     process = None
@@ -41,7 +43,7 @@ def launch_comfyui(extra):
     if "COMFY_CLI_BACKGROUND" not in os.environ:
         # If not running in background mode, there's no need to use popen. This can prevent the issue of linefeeds occurring with tqdm.
         while True:
-            res = subprocess.run([sys.executable, "main.py"] + extra, env=new_env, check=False)
+            res = subprocess.run([python_exe, "main.py"] + extra, env=new_env, check=False)
 
             if reboot_path is None:
                 print("[bold red]ComfyUI is not installed.[/bold red]\n")
@@ -70,7 +72,7 @@ def launch_comfyui(extra):
             while True:
                 if sys.platform == "win32":
                     process = subprocess.Popen(
-                        [sys.executable, "main.py"] + extra,
+                        [python_exe, "main.py"] + extra,
                         stdout=subprocess.PIPE,
                         stderr=subprocess.PIPE,
                         text=True,
@@ -81,7 +83,7 @@ def launch_comfyui(extra):
                     )
                 else:
                     process = subprocess.Popen(
-                        [sys.executable, "main.py"] + extra,
+                        [python_exe, "main.py"] + extra,
                         text=True,
                         env=new_env,
                         encoding="utf-8",
