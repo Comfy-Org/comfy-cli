@@ -528,9 +528,19 @@ def which():
 def env():
     check_for_updates()
     _env_checker = EnvChecker()
-    table = _env_checker.fill_print_table()
-    workspace_manager.fill_print_table(table)
-    console.print(table)
+    
+    env_data = _env_checker.fill_print_table()
+    
+    workspace_data = workspace_manager.fill_print_table()
+    
+    all_data = env_data + workspace_data
+    
+    ui.display_table(
+        data=all_data,
+        column_names=[":laptop_computer: Environment", "Value"],
+        title="Environment Information",
+    )
+
 
 
 @app.command(hidden=True)
