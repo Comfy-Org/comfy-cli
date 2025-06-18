@@ -311,8 +311,10 @@ class WorkspaceManager:
         file_path = os.path.join(self.workspace_path, constants.COMFY_LOCK_YAML_FILE)
         save_yaml(file_path, self.metadata)
 
-    def fill_print_table(self, table):
-        table.add_row(
+    def fill_print_table(self):
+        data = []
+        data.append((
             "Current selected workspace",
             f"[bold green]→ {self.workspace_path}[/bold green]",
-        )
+        ))
+        return data
