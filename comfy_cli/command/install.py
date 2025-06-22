@@ -13,8 +13,9 @@ from rich.panel import Panel
 
 from comfy_cli import constants, ui, utils
 from comfy_cli.command.custom_nodes.command import update_node_id_cache
+from comfy_cli.command.github.pr_info import PRInfo
 from comfy_cli.constants import GPU_OPTION
-from comfy_cli.git_utils import git_checkout_tag
+from comfy_cli.git_utils import git_checkout_tag, checkout_pr
 from comfy_cli.uv import DependencyCompiler
 from comfy_cli.workspace_manager import WorkspaceManager, check_comfy_repo
 
@@ -175,9 +176,15 @@ def execute(
     skip_torch_or_directml: bool = False,
     skip_requirement: bool = False,
     fast_deps: bool = False,
+    pr: Optional[str] = None,
     *args,
     **kwargs,
 ):
+
+    if pr:
+        url = handle_pr_checkout(pr, comfy_path)
+        version = "nightly"
+
     """
     Install ComfyUI from a given URL.
     """
@@ -272,6 +279,64 @@ def execute(
     rprint("")
 
 
+def handle_pr_checkout(pr_ref: str, comfy_path: str) -> str:
+    try:
+        repo_owner, repo_name, pr_number = parse_pr_reference(pr_ref)
+    except ValueError as e:
+        rprint(f"[bold red]Error parsing PR reference: {e}[/bold red]")
+        raise typer.Exit(code=1)
+
+    try:
+        if pr_number:
+            pr_info = fetch_pr_info(repo_owner, repo_name, pr_number)
+        else:
+            username, branch = pr_ref.split(':', 1)
+            pr_info = find_pr_by_branch("comfyanonymous", "ComfyUI", username, branch)
+
+        if not pr_info:
+            rprint(f"[bold red]PR not found: {pr_ref}[/bold red]")
+            raise typer.Exit(code=1)
+
+    except Exception as e:
+        rprint(f"[bold red]Error fetching PR information: {e}[/bold red]")
+        raise typer.Exit(code=1)
+
+    console.print(Panel(
+        f"[bold]PR #{pr_info.number}[/bold]: {pr_info.title}\n"
+        f"[yellow]Author[/yellow]: {pr_info.user}\n"
+        f"[yellow]Branch[/yellow]: {pr_info.head_branch}\n"
+        f"[yellow]Source[/yellow]: {pr_info.head_repo_url}\n"
+        f"[yellow]Mergeable[/yellow]: {'✓' if pr_info.mergeable else '✗'}",
+        title="[bold blue]Pull Request Information[/bold blue]",
+        border_style="blue"
+    ))
+
+    if not workspace_manager.skip_prompting:
+        if not ui.prompt_confirm_action(f"Install ComfyUI from PR #{pr_info.number}?", True):
+            rprint("Aborting...")
+            raise typer.Exit(code=1)
+
+    parent_path = os.path.abspath(os.path.join(comfy_path, ".."))
+
+    if not os.path.exists(parent_path):
+        os.makedirs(parent_path, exist_ok=True)
+
+    if not os.path.exists(comfy_path):
+        rprint(f"Cloning base repository to {comfy_path}...")
+        clone_comfyui(url=pr_info.base_repo_url, repo_dir=comfy_path)
+
+    rprint(f"Checking out PR #{pr_info.number}: {pr_info.title}")
+    success = checkout_pr(comfy_path, pr_info)
+    if not success:
+        rprint("[bold red]Failed to checkout PR[/bold red]")
+        raise typer.Exit(code=1)
+
+    rprint(f"[bold green]✓ Successfully checked out PR #{pr_info.number}[/bold green]")
+    rprint(f"[bold yellow]Note:[/bold yellow] You are now on branch pr-{pr_info.number}")
+
+    return pr_info.base_repo_url
+
+
 def validate_version(version: str) -> Optional[str]:
     """
     Validates the version string as 'latest', 'nightly', or a semantically version number.
@@ -305,6 +370,19 @@ def validate_version(version: str) -> Optional[str]:
 class GitHubRateLimitError(Exception):
     """Raised when GitHub API rate limit is exceeded"""
 
+def handle_github_rate_limit(response):
+    # Check rate limit headers
+    remaining = int(response.headers.get("x-ratelimit-remaining", 0))
+    if remaining == 0:
+        reset_time = int(response.headers.get("x-ratelimit-reset", 0))
+        message = f"Primary rate limit from Github exceeded! Please retry after: {reset_time})"
+        raise GitHubRateLimitError(message)
+
+    if "retry-after" in response.headers:
+        wait_seconds = int(response.headers["retry-after"])
+        message = f"Rate limit from Github exceeded! Please wait {wait_seconds} seconds before retrying."
+        rprint(f"[yellow]{message}[/yellow]")
+        raise GitHubRateLimitError(message)
 
 def fetch_github_releases(repo_owner: str, repo_name: str) -> List[Dict[str, str]]:
     """
@@ -321,18 +399,7 @@ def fetch_github_releases(repo_owner: str, repo_name: str) -> List[Dict[str, str
 
     # Handle rate limiting
     if response.status_code in (403, 429):
-        # Check rate limit headers
-        remaining = int(response.headers.get("x-ratelimit-remaining", 0))
-        if remaining == 0:
-            reset_time = int(response.headers.get("x-ratelimit-reset", 0))
-            message = f"Primary rate limit from Github exceeded! Please retry after: {reset_time})"
-            raise GitHubRateLimitError(message)
-
-        if "retry-after" in response.headers:
-            wait_seconds = int(response.headers["retry-after"])
-            message = f"Rate limit from Github exceeded! Please wait {wait_seconds} seconds before retrying."
-            rprint(f"[yellow]{message}[/yellow]")
-            raise GitHubRateLimitError(message)
+        handle_github_rate_limit(response)
 
     response.raise_for_status()
     return response.json()
@@ -459,3 +526,104 @@ def get_latest_release(repo_owner: str, repo_name: str) -> Optional[GithubReleas
     except requests.RequestException as e:
         rprint(f"Error fetching latest release: {e}")
         return None
+
+
+from urllib.parse import urlparse
+
+def parse_pr_reference(pr_ref: str) -> tuple[str, str, Optional[int]]:
+    """
+    support formats：
+    - username:branch-name
+    - #123
+    - https://github.com/comfyanonymous/ComfyUI/pull/123
+
+    Returns:
+        (repo_owner, repo_name, pr_number)
+    """
+    pr_ref = pr_ref.strip()
+
+    if pr_ref.startswith('https://github.com/'):
+        parsed = urlparse(pr_ref)
+        if '/pull/' in parsed.path:
+            path_parts = parsed.path.strip('/').split('/')
+            if len(path_parts) >= 4:
+                repo_owner = path_parts[0]
+                repo_name = path_parts[1]
+                pr_number = int(path_parts[3])
+                return repo_owner, repo_name, pr_number
+
+    elif pr_ref.startswith('#'):
+        pr_number = int(pr_ref[1:])
+        return "comfyanonymous", "ComfyUI", pr_number
+
+    elif ':' in pr_ref:
+        username, branch = pr_ref.split(':', 1)
+        return username, "ComfyUI", None
+
+    else:
+        raise ValueError(f"Invalid PR reference format: {pr_ref}")
+
+
+def fetch_pr_info(repo_owner: str, repo_name: str, pr_number: int) -> PRInfo:
+    url = f"https://api.github.com/repos/{repo_owner}/{repo_name}/pulls/{pr_number}"
+
+    headers = {}
+    if github_token := os.getenv("GITHUB_TOKEN"):
+        headers["Authorization"] = f"Bearer {github_token}"
+
+    try:
+        response = requests.get(url, headers=headers, timeout=10)
+
+        if response.status_code in (403, 429):
+            handle_github_rate_limit(response)
+
+        response.raise_for_status()
+        data = response.json()
+
+        return PRInfo(
+            number=data["number"],
+            head_repo_url=data["head"]["repo"]["clone_url"],
+            head_branch=data["head"]["ref"],
+            base_repo_url=data["base"]["repo"]["clone_url"],
+            title=data["title"],
+            user=data["head"]["repo"]["owner"]["login"],
+            mergeable=data.get("mergeable", True)
+        )
+
+    except requests.RequestException as e:
+        raise Exception(f"Failed to fetch PR #{pr_number}: {e}")
+
+
+def find_pr_by_branch(repo_owner: str, repo_name: str, username: str, branch: str) -> Optional[PRInfo]:
+    url = f"https://api.github.com/repos/{repo_owner}/{repo_name}/pulls"
+    params = {
+        "head": f"{username}:{branch}",
+        "state": "open"
+    }
+
+    headers = {}
+    if github_token := os.getenv("GITHUB_TOKEN"):
+        headers["Authorization"] = f"Bearer {github_token}"
+
+    try:
+        response = requests.get(url, headers=headers, params=params, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+
+        if data:
+            pr_data = data[0]
+            return PRInfo(
+                number=pr_data["number"],
+                head_repo_url=pr_data["head"]["repo"]["clone_url"],
+                head_branch=pr_data["head"]["ref"],
+                base_repo_url=pr_data["base"]["repo"]["clone_url"],
+                title=pr_data["title"],
+                user=pr_data["head"]["repo"]["owner"]["login"],
+                mergeable=pr_data.get("mergeable", True)
+            )
+
+        return None
+
+    except requests.RequestException:
+        return None
+

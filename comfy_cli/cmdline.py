@@ -247,6 +247,13 @@ def install(
         Optional[str],
         typer.Option(help="Specify commit hash for ComfyUI-Manager"),
     ] = None,
+    pr: Annotated[
+        Optional[str],
+        typer.Option(
+            show_default=False,
+            help="Install from a specific PR. Supports formats: username:branch, #123, or PR URL",
+        ),
+    ] = None,
 ):
     check_for_updates()
     checker = EnvChecker()
@@ -338,6 +345,10 @@ def install(
         )
         raise typer.Exit(code=1)
 
+    if pr and (version != "nightly" or commit):
+        rprint("--pr cannot be used with --version or --commit")
+        raise typer.Exit(code=1)
+
     install_inner.execute(
         url,
         manager_url,
@@ -353,6 +364,7 @@ def install(
         skip_requirement=skip_requirement,
         fast_deps=fast_deps,
         manager_commit=manager_commit,
+        pr=pr,
     )
 
     rprint(f"ComfyUI is installed at: {comfy_path}")

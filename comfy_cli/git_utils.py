@@ -5,6 +5,8 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.text import Text
 
+from comfy_cli.command.github.pr_info import PRInfo
+
 console = Console()
 
 
@@ -55,4 +57,71 @@ def git_checkout_tag(repo_path: str, tag: str) -> bool:
         return False
     finally:
         # Ensure we always return to the original directory
+        os.chdir(original_dir)
+
+
+def checkout_pr(repo_path: str, pr_info: PRInfo) -> bool:
+    original_dir = os.getcwd()
+
+    try:
+        os.chdir(repo_path)
+
+        if pr_info.is_fork:
+            remote_name = f"pr-{pr_info.user}"
+
+            result = subprocess.run(
+                ["git", "remote", "get-url", remote_name],
+                capture_output=True, text=True
+            )
+
+            if result.returncode != 0:
+                subprocess.run([
+                    "git", "remote", "add", remote_name, pr_info.head_repo_url
+                ], check=True, capture_output=True, text=True)
+
+            subprocess.run([
+                "git", "fetch", remote_name, pr_info.head_branch
+            ], check=True, capture_output=True, text=True)
+
+            local_branch = f"pr-{pr_info.number}-{pr_info.head_branch}"
+            subprocess.run([
+                "git", "checkout", "-B", local_branch,
+                f"{remote_name}/{pr_info.head_branch}"
+            ], check=True, capture_output=True, text=True)
+
+        else:
+            subprocess.run([
+                "git", "fetch", "origin", pr_info.head_branch
+            ], check=True, capture_output=True, text=True)
+
+            subprocess.run([
+                "git", "checkout", "-B", f"pr-{pr_info.number}",
+                f"origin/{pr_info.head_branch}"
+            ], check=True, capture_output=True, text=True)
+
+        console.print(
+            f"[bold green]Successfully checked out PR #{pr_info.number}: {pr_info.title}[/bold green]"
+        )
+        return True
+
+    except subprocess.CalledProcessError as e:
+        error_message = Text()
+        error_message.append("Git PR Checkout Error", style="bold red on white")
+        error_message.append(f"\n\nFailed to checkout PR #{pr_info.number}", style="bold yellow")
+        error_message.append(f"\nTitle: {pr_info.title}", style="italic")
+        error_message.append(f"\nBranch: {pr_info.head_branch}", style="italic")
+
+        if e.stderr:
+            error_message.append("\n\nError output:", style="bold red")
+            error_message.append(f"\n{e.stderr}", style="italic yellow")
+
+        console.print(Panel(
+            error_message,
+            title="[bold white on red]PR Checkout Failed[/bold white on red]",
+            border_style="red",
+            expand=False,
+        ))
+        return False
+
+    finally:
         os.chdir(original_dir)
