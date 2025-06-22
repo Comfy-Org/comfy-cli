@@ -3,6 +3,7 @@ import platform
 import subprocess
 import sys
 from typing import Dict, List, Optional, TypedDict
+from urllib.parse import urlparse
 
 import requests
 import semver
@@ -15,7 +16,7 @@ from comfy_cli import constants, ui, utils
 from comfy_cli.command.custom_nodes.command import update_node_id_cache
 from comfy_cli.command.github.pr_info import PRInfo
 from comfy_cli.constants import GPU_OPTION
-from comfy_cli.git_utils import git_checkout_tag, checkout_pr
+from comfy_cli.git_utils import checkout_pr, git_checkout_tag
 from comfy_cli.uv import DependencyCompiler
 from comfy_cli.workspace_manager import WorkspaceManager, check_comfy_repo
 
@@ -528,7 +529,8 @@ def get_latest_release(repo_owner: str, repo_name: str) -> Optional[GithubReleas
         return None
 
 
-from urllib.parse import urlparse
+
+
 
 def parse_pr_reference(pr_ref: str) -> tuple[str, str, Optional[int]]:
     """

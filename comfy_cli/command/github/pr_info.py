@@ -1,5 +1,6 @@
 from typing import NamedTuple
 
+
 class PRInfo(NamedTuple):
     number: int
     head_repo_url: str
