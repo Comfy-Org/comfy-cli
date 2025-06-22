@@ -27,7 +27,7 @@ def sample_pr_info():
         base_branch="master",
         title="Add 3D node loading support",
         user="jtydhr88",
-        mergeable=True
+        mergeable=True,
     )
 
 
@@ -78,17 +78,11 @@ class TestGitHubAPIIntegration:
             "number": 123,
             "title": "Add 3D node loading support",
             "head": {
-                "repo": {
-                    "clone_url": "https://github.com/jtydhr88/ComfyUI.git",
-                    "owner": {"login": "jtydhr88"}
-                },
-                "ref": "load-3d-nodes"
+                "repo": {"clone_url": "https://github.com/jtydhr88/ComfyUI.git", "owner": {"login": "jtydhr88"}},
+                "ref": "load-3d-nodes",
             },
-            "base": {
-                "repo": {"clone_url": "https://github.com/comfyanonymous/ComfyUI.git"},
-                "ref": "master"
-            },
-            "mergeable": True
+            "base": {"repo": {"clone_url": "https://github.com/comfyanonymous/ComfyUI.git"}, "ref": "master"},
+            "mergeable": True,
         }
         mock_get.return_value = mock_response
 
@@ -127,22 +121,18 @@ class TestGitHubAPIIntegration:
         """Test finding PR by branch name"""
         mock_response = Mock()
         mock_response.status_code = 200
-        mock_response.json.return_value = [{
-            "number": 123,
-            "title": "Add 3D node loading support",
-            "head": {
-                "repo": {
-                    "clone_url": "https://github.com/jtydhr88/ComfyUI.git",
-                    "owner": {"login": "jtydhr88"}
+        mock_response.json.return_value = [
+            {
+                "number": 123,
+                "title": "Add 3D node loading support",
+                "head": {
+                    "repo": {"clone_url": "https://github.com/jtydhr88/ComfyUI.git", "owner": {"login": "jtydhr88"}},
+                    "ref": "load-3d-nodes",
                 },
-                "ref": "load-3d-nodes"
-            },
-            "base": {
-                "repo": {"clone_url": "https://github.com/comfyanonymous/ComfyUI.git"},
-                "ref": "master"
-            },
-            "mergeable": True
-        }]
+                "base": {"repo": {"clone_url": "https://github.com/comfyanonymous/ComfyUI.git"}, "ref": "master"},
+                "mergeable": True,
+            }
+        ]
         mock_get.return_value = mock_response
 
         result = find_pr_by_branch("comfyanonymous", "ComfyUI", "jtydhr88", "load-3d-nodes")
@@ -206,7 +196,7 @@ class TestGitOperations:
             base_branch="master",
             title="Feature branch",
             user="comfyanonymous",
-            mergeable=True
+            mergeable=True,
         )
 
         mock_subprocess.side_effect = [
@@ -244,9 +234,17 @@ class TestHandlePRCheckout:
     @patch("comfy_cli.ui.prompt_confirm_action")
     @patch("os.path.exists")
     @patch("os.makedirs")
-    def test_handle_pr_checkout_success(self, mock_makedirs, mock_exists, mock_confirm,
-                                        mock_clone, mock_checkout, mock_fetch, mock_parse,
-                                        sample_pr_info):
+    def test_handle_pr_checkout_success(
+        self,
+        mock_makedirs,
+        mock_exists,
+        mock_confirm,
+        mock_clone,
+        mock_checkout,
+        mock_fetch,
+        mock_parse,
+        sample_pr_info,
+    ):
         """Test successful PR checkout handling"""
         mock_parse.return_value = ("jtydhr88", "ComfyUI", 123)
         mock_fetch.return_value = sample_pr_info
@@ -257,7 +255,7 @@ class TestHandlePRCheckout:
         with patch("comfy_cli.command.install.workspace_manager") as mock_ws:
             mock_ws.skip_prompting = False
 
-            result = handle_pr_checkout("jtydhr88:load-3d-nodes","/path/to/comfy")
+            result = handle_pr_checkout("jtydhr88:load-3d-nodes", "/path/to/comfy")
 
             assert result == "https://github.com/comfyanonymous/ComfyUI.git"
             mock_clone.assert_called_once()
@@ -270,12 +268,7 @@ class TestCommandLineIntegration:
     @patch("comfy_cli.command.install.execute")
     def test_install_with_pr_parameter(self, mock_execute, runner):
         """Test install command with --pr parameter"""
-        result = runner.invoke(app, [
-            "install",
-            "--pr", "jtydhr88:load-3d-nodes",
-            "--nvidia",
-            "--skip-prompt"
-        ])
+        result = runner.invoke(app, ["install", "--pr", "jtydhr88:load-3d-nodes", "--nvidia", "--skip-prompt"])
 
         assert "Invalid PR reference format" not in result.stdout
 
@@ -285,22 +278,13 @@ class TestCommandLineIntegration:
 
     def test_pr_and_version_conflict(self, runner):
         """Test that --pr conflicts with --version"""
-        result = runner.invoke(app, [
-            "install",
-            "--pr", "#123",
-            "--version", "1.0.0"
-        ])
+        result = runner.invoke(app, ["install", "--pr", "#123", "--version", "1.0.0"])
 
         assert result.exit_code != 0
 
     def test_pr_and_commit_conflict(self, runner):
         """Test that --pr conflicts with --commit"""
-        result = runner.invoke(app, [
-            "install",
-            "--pr", "#123",
-            "--version", "nightly",
-            "--commit", "abc123"
-        ])
+        result = runner.invoke(app, ["install", "--pr", "#123", "--version", "nightly", "--commit", "abc123"])
 
         assert result.exit_code != 0
 
@@ -318,7 +302,7 @@ class TestPRInfoDataClass:
             base_branch="master",
             title="Title",
             user="user",
-            mergeable=True
+            mergeable=True,
         )
         assert pr_info.is_fork is True
 
@@ -332,7 +316,7 @@ class TestPRInfoDataClass:
             base_branch="master",
             title="Title",
             user="comfyanonymous",
-            mergeable=True
+            mergeable=True,
         )
         assert pr_info.is_fork is False
 
@@ -355,12 +339,9 @@ class TestEdgeCases:
         mock_response.json.return_value = {
             "number": 123,
             "title": "Test",
-            "head": {
-                "repo": {"clone_url": "url", "owner": {"login": "user"}},
-                "ref": "branch"
-            },
+            "head": {"repo": {"clone_url": "url", "owner": {"login": "user"}}, "ref": "branch"},
             "base": {"repo": {"clone_url": "base_url"}, "ref": "master"},
-            "mergeable": True
+            "mergeable": True,
         }
         mock_get.return_value = mock_response
 
