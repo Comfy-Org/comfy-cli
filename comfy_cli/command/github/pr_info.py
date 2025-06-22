@@ -6,6 +6,7 @@ class PRInfo(NamedTuple):
     head_repo_url: str
     head_branch: str
     base_repo_url: str
+    base_branch: str
     title: str
     user: str
     mergeable: bool

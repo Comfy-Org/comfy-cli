@@ -587,6 +587,7 @@ def fetch_pr_info(repo_owner: str, repo_name: str, pr_number: int) -> PRInfo:
             head_repo_url=data["head"]["repo"]["clone_url"],
             head_branch=data["head"]["ref"],
             base_repo_url=data["base"]["repo"]["clone_url"],
+            base_branch=data["base"]["ref"],
             title=data["title"],
             user=data["head"]["repo"]["owner"]["login"],
             mergeable=data.get("mergeable", True)
@@ -619,6 +620,7 @@ def find_pr_by_branch(repo_owner: str, repo_name: str, username: str, branch: st
                 head_repo_url=pr_data["head"]["repo"]["clone_url"],
                 head_branch=pr_data["head"]["ref"],
                 base_repo_url=pr_data["base"]["repo"]["clone_url"],
+                base_branch=pr_data["base"]["ref"],
                 title=pr_data["title"],
                 user=pr_data["head"]["repo"]["owner"]["login"],
                 mergeable=pr_data.get("mergeable", True)
