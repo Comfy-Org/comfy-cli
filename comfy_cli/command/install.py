@@ -181,9 +181,7 @@ def execute(
     *args,
     **kwargs,
 ):
-    """
-    Install ComfyUI from a given PR reference.
-    """
+    # Install ComfyUI from a given PR reference.
     if pr:
         url = handle_pr_checkout(pr, comfy_path)
         version = "nightly"
