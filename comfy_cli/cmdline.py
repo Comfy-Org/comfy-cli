@@ -345,7 +345,7 @@ def install(
         )
         raise typer.Exit(code=1)
 
-    if pr and (version != "nightly" or commit):
+    if pr and version not in {None, "nightly"} or commit:
         rprint("--pr cannot be used with --version or --commit")
         raise typer.Exit(code=1)
 

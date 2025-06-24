@@ -181,6 +181,9 @@ def execute(
     *args,
     **kwargs,
 ):
+    """
+    Install ComfyUI from a given PR reference.
+    """
     if pr:
         url = handle_pr_checkout(pr, comfy_path)
         version = "nightly"
@@ -575,6 +578,9 @@ def fetch_pr_info(repo_owner: str, repo_name: str, pr_number: int) -> PRInfo:
 
     try:
         response = requests.get(url, headers=headers, timeout=10)
+
+        if response is None:
+            raise Exception(f"Failed to fetch PR #{pr_number}: No response from GitHub API")
 
         if response.status_code in (403, 429):
             handle_github_rate_limit(response)

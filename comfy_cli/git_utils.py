@@ -10,6 +10,20 @@ from comfy_cli.command.github.pr_info import PRInfo
 console = Console()
 
 
+def sanitize_for_local_branch(branch_name: str) -> str:
+    if not branch_name:
+        return "unknown"
+
+    sanitized = branch_name.replace("/", "-")
+
+    while "--" in sanitized:
+        sanitized = sanitized.replace("--", "-")
+
+    sanitized = sanitized.strip("-")
+
+    return sanitized or "unknown"
+
+
 def git_checkout_tag(repo_path: str, tag: str) -> bool:
     """
     Checkout a specific Git tag in the given repository.
@@ -67,7 +81,7 @@ def checkout_pr(repo_path: str, pr_info: PRInfo) -> bool:
         os.chdir(repo_path)
 
         if pr_info.is_fork:
-            remote_name = f"pr-{pr_info.user}"
+            remote_name = f"pr-{pr_info.number}-{pr_info.user}"
 
             result = subprocess.run(["git", "remote", "get-url", remote_name], capture_output=True, text=True)
 
@@ -83,7 +97,10 @@ def checkout_pr(repo_path: str, pr_info: PRInfo) -> bool:
                 ["git", "fetch", remote_name, pr_info.head_branch], check=True, capture_output=True, text=True
             )
 
-            local_branch = f"pr-{pr_info.number}-{pr_info.head_branch}"
+            # fix: "feature/add-support" -> "pr-123-feature-add-support"
+            sanitized_branch = sanitize_for_local_branch(pr_info.head_branch)
+            local_branch = f"pr-{pr_info.number}-{sanitized_branch}"
+
             subprocess.run(
                 ["git", "checkout", "-B", local_branch, f"{remote_name}/{pr_info.head_branch}"],
                 check=True,
@@ -94,14 +111,18 @@ def checkout_pr(repo_path: str, pr_info: PRInfo) -> bool:
         else:
             subprocess.run(["git", "fetch", "origin", pr_info.head_branch], check=True, capture_output=True, text=True)
 
+            sanitized_branch = sanitize_for_local_branch(pr_info.head_branch)
+            local_branch = f"pr-{pr_info.number}-{sanitized_branch}"
+
             subprocess.run(
-                ["git", "checkout", "-B", f"pr-{pr_info.number}", f"origin/{pr_info.head_branch}"],
+                ["git", "checkout", "-B", local_branch, f"origin/{pr_info.head_branch}"],
                 check=True,
                 capture_output=True,
                 text=True,
             )
 
         console.print(f"[bold green]Successfully checked out PR #{pr_info.number}: {pr_info.title}[/bold green]")
+        console.print(f"[bold yellow]Local branch:[/bold yellow] {local_branch}")
         return True
 
     except subprocess.CalledProcessError as e:
