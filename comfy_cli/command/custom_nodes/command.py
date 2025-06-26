@@ -401,6 +401,13 @@ def install(
             help="Use new fast dependency installer",
         ),
     ] = False,
+    exit_on_fail: Annotated[
+        bool,
+        typer.Option(
+            "--exit-on-fail",
+            help="Exit on failure",
+        ),
+    ] = False,
     mode: str = typer.Option(
         None,
         help="[remote|local|cache]",
@@ -413,7 +420,12 @@ def install(
 
     validate_mode(mode)
 
-    execute_cm_cli(["install"] + nodes, channel=channel, fast_deps=fast_deps, mode=mode)
+    if exit_on_fail:
+        cmd = ["install", "--exit-on-fail"] + nodes
+    else:
+        cmd = ["install"] + nodes
+
+    execute_cm_cli(cmd, channel=channel, fast_deps=fast_deps, mode=mode)
 
 
 @app.command(help="Reinstall custom nodes")
