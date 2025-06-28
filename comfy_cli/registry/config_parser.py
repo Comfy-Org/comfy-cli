@@ -181,6 +181,9 @@ def initialize_project_config():
     project = document.get("project", tomlkit.table())
     urls = project.get("urls", tomlkit.table())
     urls["Repository"] = git_remote_url
+    urls["Documentation"] = git_remote_url + "/wiki"
+    urls["Bug Tracker"] = git_remote_url + "/issues"
+
     project["urls"] = urls
     project["name"] = sanitize_node_name(repo_name)
     project["description"] = ""
@@ -191,11 +194,35 @@ def initialize_project_config():
     license_table["file"] = "LICENSE"
     project["license"] = license_table
 
+    # [project].classfiers Classifiers uncommentable hint for OS/GPU support
+    project["classifiers"] = tomlkit.array()
+    project["classifiers"].comment("""
+# classifiers = [
+#     # For OS-independent nodes (works on all operating systems)
+#     "Operating System :: OS Independent",
+# 
+#     # OR for OS-specific nodes, specify the supported systems:
+#     "Operating System :: Microsoft :: Windows",  # Windows specific
+#     "Operating System :: POSIX :: Linux",  # Linux specific
+#     "Operating System :: MacOS",  # macOS specific
+#     
+#     # GPU Accelerator support. Pick the ones that are supported by your extension.
+#     "Environment :: GPU :: NVIDIA CUDA",    # NVIDIA CUDA support
+#     "Environment :: GPU :: AMD ROCm",       # AMD ROCm support
+#     "Environment :: GPU :: Intel Arc",      # Intel Arc support
+#     "Environment :: NPU :: Huawei Ascend",  # Huawei Ascend support
+#     "Environment :: GPU :: Apple Metal",    # Apple Metal support
+# ]
+""")
+
     tool = document.get("tool", tomlkit.table())
     comfy = tool.get("comfy", tomlkit.table())
     comfy["DisplayName"] = repo_name
+
     tool["comfy"] = comfy
     document["tool"] = tool
+    # [tool.comfy].requires-comfyui Uncommentable hint for ComfyUI version compatibility
+    document.add(tomlkit.comment('requires-comfyui = ">=1.0.0" # ComfyUI version compatibility'))
 
     # Handle dependencies
     if os.path.exists("requirements.txt"):
