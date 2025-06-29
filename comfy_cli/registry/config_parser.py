@@ -199,7 +199,7 @@ def initialize_project_config():
     license_table["file"] = "LICENSE"
     project["license"] = license_table
 
-    # [project].classfiers Classifiers uncommentable hint for OS/GPU support
+    # [project].classifiers Classifiers uncommentable hint for OS/GPU support
     # Attach classifiers comments to the project, below of "license" field.
     # will generate a comment like this:
     #
