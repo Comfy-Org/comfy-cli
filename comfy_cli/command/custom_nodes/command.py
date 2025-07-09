@@ -70,10 +70,11 @@ pip_map = None
 
 def get_installed_packages():
     global pip_map
+    python_exe = workspace_manager.python_exe
 
     if pip_map is None:
         try:
-            result = subprocess.check_output([sys.executable, "-m", "pip", "list"], universal_newlines=True)
+            result = subprocess.check_output([python_exe, "-m", "pip", "list"], universal_newlines=True)
 
             pip_map = {}
             for line in result.split("\n"):
@@ -138,6 +139,7 @@ def try_install_script(repo_path, install_cmd, instant_execution=False):
 
 
 def execute_install_script(repo_path):
+    python_exe = workspace_manager.python_exe
     install_script_path = os.path.join(repo_path, "install.py")
     requirements_path = os.path.join(repo_path, "requirements.txt")
 
@@ -157,13 +159,13 @@ def execute_install_script(repo_path):
                 # package_name = remap_pip_package(line.strip())
                 package_name = line.strip()
                 if package_name and not package_name.startswith("#"):
-                    install_cmd = [sys.executable, "-m", "pip", "install", package_name]
+                    install_cmd = [python_exe, "-m", "pip", "install", package_name]
                     if package_name.strip() != "":
                         try_install_script(repo_path, install_cmd)
 
     if os.path.exists(install_script_path):
         print("Install: install script")
-        install_cmd = [sys.executable, "install.py"]
+        install_cmd = [python_exe, "install.py"]
         try_install_script(repo_path, install_cmd)
 
 
@@ -481,6 +483,7 @@ def uninstall(
 def update_node_id_cache():
     config_manager = ConfigManager()
     workspace_path = workspace_manager.workspace_path
+    python_exe = workspace_manager.python_exe
 
     cm_cli_path = os.path.join(workspace_path, "custom_nodes", "ComfyUI-Manager", "cm-cli.py")
 
@@ -489,7 +492,7 @@ def update_node_id_cache():
         os.makedirs(tmp_path)
 
     cache_path = os.path.join(tmp_path, "node-cache.list")
-    cmd = [sys.executable, cm_cli_path, "export-custom-node-ids", cache_path]
+    cmd = [python_exe, cm_cli_path, "export-custom-node-ids", cache_path]
 
     new_env = os.environ.copy()
     new_env["COMFYUI_PATH"] = workspace_path
