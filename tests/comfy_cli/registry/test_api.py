@@ -37,6 +37,11 @@ class TestRegistryAPI(unittest.TestCase):
         mock_getenv.side_effect = lambda key, default=None: "prod" if key == "ENVIRONMENT" else default
         self.assertEqual(self.registry_api.determine_base_url(), "https://api.comfy.org")
 
+    @patch("os.getenv")
+    def test_determine_base_url_custom_registry(self, mock_getenv):
+        mock_getenv.side_effect = lambda key, default=None: "https://custom.registry.com" if key == "COMFY_REGISTRY_API" else default
+        self.assertEqual(self.registry_api.determine_base_url(), "https://custom.registry.com")
+
     @patch("requests.post")
     def test_publish_node_version_success(self, mock_post):
         mock_response = MagicMock()
