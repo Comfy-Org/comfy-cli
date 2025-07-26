@@ -25,7 +25,7 @@ def test_guess_status_code_reason_401_with_json():
 def test_guess_status_code_reason_401_without_json():
     result = guess_status_code_reason(401, "not json")
     assert "Unauthorized download (401)" in result
-    assert "manually log into browser" in result
+    assert "manually log into a browser" in result
 
 
 def test_guess_status_code_reason_403():
@@ -35,7 +35,7 @@ def test_guess_status_code_reason_403():
 
 def test_guess_status_code_reason_404():
     result = guess_status_code_reason(404, "")
-    assert "another castle (404)" in result
+    assert "not found on server (404)" in result
 
 
 def test_guess_status_code_reason_unknown():

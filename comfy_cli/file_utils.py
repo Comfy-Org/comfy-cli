@@ -37,11 +37,11 @@ def guess_status_code_reason(status_code: int, message: str) -> str:
         if msg_json is not None:
             if "message" in msg_json:
                 return f"Unauthorized download ({status_code}).\n{msg_json['message']}\nor you can set civitai api token using `comfy model download --set-civitai-api-token <token>`"
-        return f"Unauthorized download ({status_code}), you might need to manually log into browser to download one"
+        return f"Unauthorized download ({status_code}), you might need to manually log into a browser to download this"
     elif status_code == 403:
-        return f"Forbidden url ({status_code}), you might need to manually log into browser to download one"
+        return f"Forbidden url ({status_code}), you might need to manually log into a browser to download this"
     elif status_code == 404:
-        return "Sorry, your file is in another castle (404)"
+        return "File not found on server (404)"
     return f"Unknown error occurred (status code: {status_code})"
 
 
