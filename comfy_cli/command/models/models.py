@@ -214,14 +214,14 @@ def download(
     else:
         hf_api_token = config_manager.get(constants.HF_API_TOKEN_KEY)
 
-    if civitai_api_token is not None:
+    is_civitai_model_url, is_civitai_api_url, model_id, version_id = check_civitai_url(url)
+    is_huggingface_url, repo_id, hf_filename, hf_folder_name, hf_branch_name = check_huggingface_url(url)
+
+    if (is_civitai_model_url or is_civitai_api_url) and civitai_api_token is not None:
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {civitai_api_token}",
         }
-
-    is_civitai_model_url, is_civitai_api_url, model_id, version_id = check_civitai_url(url)
-    is_huggingface_url, repo_id, hf_filename, hf_folder_name, hf_branch_name = check_huggingface_url(url)
 
     if is_civitai_model_url:
         local_filename, url, model_type, basemodel = request_civitai_model_api(model_id, version_id, headers)
