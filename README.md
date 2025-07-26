@@ -173,9 +173,11 @@ the bisect tool can help you pinpoint the custom node that causes the issue.
 
 - Model downloading
 
-  `comfy model download --url <URL> ?[--relative-path <PATH>] ?[--set-civitai-api-token <TOKEN>]`
+  `comfy model download --url <URL> ?[--relative-path <PATH>] ?[--set-civitai-api-token <TOKEN>] ?[--set-hf-api-token <TOKEN>]`
 
-  - URL: CivitAI, huggingface file url, ...
+  - URL: CivitAI page, Hugging Face file URL, etc...
+  - You can also specify your API tokens via the `CIVITAI_API_TOKEN` and `HF_API_TOKEN` environment variables. The order of priority is `--set-X-token` (always highest priority), then the environment variables if they exist, and lastly your config's stored tokens from previous `--set-X-token` usage (which remembers your most recently set token values).
+  - Tokens provided via the environment variables are never stored persistently in your config file. They are intended as a way to easily and safely provide transient secrets.
 
 - Model remove
 

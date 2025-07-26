@@ -106,13 +106,13 @@ def check_civitai_url(url: str) -> Tuple[bool, bool, int, int]:
                 model_id = subpath.split("/")[1]
                 return True, False, int(model_id), None
     except (ValueError, IndexError):
-        print("Error parsing Civitai model URL")
+        print("Error parsing CivitAI model URL")
 
     return False, False, None, None
 
 
 def request_civitai_model_version_api(version_id: int, headers: Optional[dict] = None):
-    # Make a request to the Civitai API to get the model information
+    # Make a request to the CivitAI API to get the model information
     response = requests.get(
         f"https://civitai.com/api/v1/model-versions/{version_id}",
         headers=headers,
@@ -131,7 +131,7 @@ def request_civitai_model_version_api(version_id: int, headers: Optional[dict] =
 
 
 def request_civitai_model_api(model_id: int, version_id: int = None, headers: Optional[dict] = None):
-    # Make a request to the Civitai API to get the model information
+    # Make a request to the CivitAI API to get the model information
     response = requests.get(f"https://civitai.com/api/v1/models/{model_id}", headers=headers, timeout=10)
     response.raise_for_status()  # Raise an error for bad status codes
 
@@ -163,7 +163,7 @@ def download(
     _ctx: typer.Context,
     url: Annotated[
         str,
-        typer.Option(help="The URL from which to download the model", show_default=False),
+        typer.Option(help="The URL from which to download the model.", show_default=False),
     ],
     relative_path: Annotated[
         Optional[str],
@@ -183,7 +183,7 @@ def download(
         Optional[str],
         typer.Option(
             "--set-civitai-api-token",
-            help="Set the CivitAI API token to use for model listing.",
+            help="Set the CivitAI API token to use for model downloading.",
             show_default=False,
         ),
     ] = None,
@@ -191,7 +191,7 @@ def download(
         Optional[str],
         typer.Option(
             "--set-hf-api-token",
-            help="Set the HuggingFace API token to use for model listing.",
+            help="Set the Hugging Face API token to use for model downloading.",
             show_default=False,
         ),
     ] = None,
@@ -202,17 +202,12 @@ def download(
     local_filename = None
     headers = None
 
-    if set_civitai_api_token is not None:
-        config_manager.set(constants.CIVITAI_API_TOKEN_KEY, set_civitai_api_token)
-        civitai_api_token = set_civitai_api_token
-    else:
-        civitai_api_token = config_manager.get(constants.CIVITAI_API_TOKEN_KEY)
-
-    if set_hf_api_token is not None:
-        config_manager.set(constants.HF_API_TOKEN_KEY, set_hf_api_token)
-        hf_api_token = set_hf_api_token
-    else:
-        hf_api_token = config_manager.get(constants.HF_API_TOKEN_KEY)
+    civitai_api_token = config_manager.get_or_override(
+        constants.CIVITAI_API_TOKEN_ENV_KEY, constants.CIVITAI_API_TOKEN_KEY, set_civitai_api_token
+    )
+    hf_api_token = config_manager.get_or_override(
+        constants.HF_API_TOKEN_ENV_KEY, constants.HF_API_TOKEN_KEY, set_hf_api_token
+    )
 
     is_civitai_model_url, is_civitai_api_url, model_id, version_id = check_civitai_url(url)
     is_huggingface_url, repo_id, hf_filename, hf_folder_name, hf_branch_name = check_huggingface_url(url)
@@ -281,7 +276,7 @@ def download(
     if is_huggingface_url and check_unauthorized(url, headers):
         if hf_api_token is None:
             print(
-                "Unauthorized access to Hugging Face model. Please set the HuggingFace API token using --set-hf-api-token"
+                f"Unauthorized access to Hugging Face model. Please set the Hugging Face API token using `comfy model download --set-hf-api-token` or via the `{constants.HF_API_TOKEN_ENV_KEY}` environment variable"
             )
             return
         else:
