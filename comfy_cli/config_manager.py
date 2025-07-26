@@ -43,6 +43,27 @@ class ConfigManager(object):
         """
         return self.config["DEFAULT"].get(key, None)  # Returns None if the key does not exist
 
+    def get_or_override(self, env_key: str, config_key: str, set_value: Optional[str] = None) -> Optional[str]:
+        """
+        Resolves and conditionally stores a config value.
+
+        The selected value and action is determined by the following priority:
+
+        1. Use CLI-provided `--set-*` value (if not None), and save it to config via `set()`.
+        2. Use process environment variable if exists (empty strings are allowed).
+        3. Otherwise, use the current config value via `get()`.
+
+        Returns None if the selected value is an empty string.
+        """
+
+        if set_value is not None:
+            self.set(config_key, set_value)
+            return set_value or None
+        elif env_key in os.environ:
+            return os.environ[env_key] or None
+        else:
+            return self.get(config_key) or None
+
     def load(self):
         config_file_path = self.get_config_file_path()
         if os.path.exists(config_file_path):
