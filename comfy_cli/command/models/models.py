@@ -201,17 +201,17 @@ def download(
 
     local_filename = None
     headers = None
-    civitai_api_token = None
 
     if set_civitai_api_token is not None:
         config_manager.set(constants.CIVITAI_API_TOKEN_KEY, set_civitai_api_token)
         civitai_api_token = set_civitai_api_token
+    else:
+        civitai_api_token = config_manager.get(constants.CIVITAI_API_TOKEN_KEY)
 
     if set_hf_api_token is not None:
         config_manager.set(constants.HF_API_TOKEN_KEY, set_hf_api_token)
         hf_api_token = set_hf_api_token
     else:
-        civitai_api_token = config_manager.get(constants.CIVITAI_API_TOKEN_KEY)
         hf_api_token = config_manager.get(constants.HF_API_TOKEN_KEY)
 
     if civitai_api_token is not None:
