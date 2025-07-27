@@ -527,9 +527,8 @@ def which():
 @tracking.track_command()
 def env():
     check_for_updates()
-    _env_checker = EnvChecker()
     
-    env_data = _env_checker.fill_print_table()
+    env_data = EnvChecker().fill_print_table()
     
     workspace_data = workspace_manager.fill_print_table()
     
@@ -540,7 +539,6 @@ def env():
         column_names=[":laptop_computer: Environment", "Value"],
         title="Environment Information",
     )
-
 
 
 @app.command(hidden=True)

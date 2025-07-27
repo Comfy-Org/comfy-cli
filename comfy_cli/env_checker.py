@@ -11,7 +11,6 @@ from rich.table import Table
 
 from comfy_cli.config_manager import ConfigManager
 from comfy_cli.utils import singleton
-from comfy_cli import ui
 
 console = Console()
 

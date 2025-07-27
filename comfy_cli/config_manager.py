@@ -62,11 +62,6 @@ class ConfigManager(object):
             if not is_running(self.background[2]):
                 self.remove_background()
 
-    def fill_print_env(self, table):
-        env_data = self.get_env_data()
-        
-        for key, value in env_data:
-            table.add_row(key, value)
 
     def get_env_data(self):
         """

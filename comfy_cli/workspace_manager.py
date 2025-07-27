@@ -312,9 +312,4 @@ class WorkspaceManager:
         save_yaml(file_path, self.metadata)
 
     def fill_print_table(self):
-        data = []
-        data.append((
-            "Current selected workspace",
-            f"[bold green]→ {self.workspace_path}[/bold green]",
-        ))
-        return data
+        return [("Current selected workspace", f"[bold green]→ {self.workspace_path}[/bold green]")]
