@@ -51,6 +51,9 @@ class ComfyConfig:
     display_name: str = ""
     icon: str = ""
     models: List[Model] = field(default_factory=list)
+    includes: List[str] = field(default_factory=list)
+    banner_url: str = ""
+    web: Optional[str] = None
 
 
 @dataclass
@@ -68,6 +71,10 @@ class ProjectConfig:
     dependencies: List[str] = field(default_factory=list)
     license: License = field(default_factory=License)
     urls: URLs = field(default_factory=URLs)
+    supported_os: List[str] = field(default_factory=list)
+    supported_accelerators: List[str] = field(default_factory=list)
+    supported_comfyui_version: str = ""
+    supported_comfyui_frontend_version: str = ""
 
 
 @dataclass

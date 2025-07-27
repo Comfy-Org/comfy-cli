@@ -1,4 +1,5 @@
 import os
+import re
 import subprocess
 from typing import Optional
 
@@ -36,12 +37,18 @@ def create_comfynode_config():
 
     # Create the tool table
     tool = tomlkit.table()
-    document.add(tomlkit.comment(" Used by Comfy Registry https://comfyregistry.org"))
+    document.add(tomlkit.comment(" Used by Comfy Registry https://registry.comfy.org"))
 
     comfy = tomlkit.table()
     comfy["PublisherId"] = ""
     comfy["DisplayName"] = "ComfyUI-AIT"
     comfy["Icon"] = ""
+    comfy["includes"] = tomlkit.array()
+
+    # Add uncommentable hint for ComfyUI version compatibility, below of "[tool.comfy].includes" field.
+    comfy["includes"].comment("""
+# "requires-comfyui" = ">=1.0.0"  # ComfyUI version compatibility
+""")
 
     tool.add("comfy", comfy)
     document.add("tool", tool)
@@ -86,6 +93,76 @@ def sanitize_node_name(name: str) -> str:
     return name
 
 
+def validate_and_extract_os_classifiers(classifiers: list) -> list:
+    os_classifiers = [c for c in classifiers if c.startswith("Operating System :: ")]
+    if not os_classifiers:
+        return []
+
+    os_values = [c[len("Operating System :: ") :] for c in os_classifiers]
+    valid_os_prefixes = {"Microsoft", "POSIX", "MacOS", "OS Independent"}
+
+    for os_value in os_values:
+        if not any(os_value.startswith(prefix) for prefix in valid_os_prefixes):
+            typer.echo(
+                'Warning: Invalid Operating System classifier found. Operating System classifiers must start with one of: "Microsoft", "POSIX", "MacOS", "OS Independent". '
+                'Examples: "Operating System :: Microsoft :: Windows", "Operating System :: POSIX :: Linux", "Operating System :: MacOS", "Operating System :: OS Independent". '
+                "No OS information will be populated."
+            )
+            return []
+
+    return os_values
+
+
+def validate_and_extract_accelerator_classifiers(classifiers: list) -> list:
+    accelerator_classifiers = [c for c in classifiers if c.startswith("Environment ::")]
+    if not accelerator_classifiers:
+        return []
+
+    accelerator_values = [c[len("Environment :: ") :] for c in accelerator_classifiers]
+
+    valid_accelerators = {
+        "GPU :: NVIDIA CUDA",
+        "GPU :: AMD ROCm",
+        "GPU :: Intel Arc",
+        "NPU :: Huawei Ascend",
+        "GPU :: Apple Metal",
+    }
+
+    for accelerator_value in accelerator_values:
+        if accelerator_value not in valid_accelerators:
+            typer.echo(
+                "Warning: Invalid Environment classifier found. Environment classifiers must be one of: "
+                '"Environment :: GPU :: NVIDIA CUDA", "Environment :: GPU :: AMD ROCm", "Environment :: GPU :: Intel Arc", '
+                '"Environment :: NPU :: Huawei Ascend", "Environment :: GPU :: Apple Metal". '
+                "No accelerator information will be populated."
+            )
+            return []
+
+    return accelerator_values
+
+
+def validate_version(version: str, field_name: str) -> str:
+    if not version:
+        return version
+
+    version_pattern = r"^(?:(==|>=|<=|!=|~=|>|<|<>|=)\s*)?(\d+\.\d+\.\d+(?:-[a-zA-Z0-9]+)?)?$"
+
+    version_parts = [part.strip() for part in version.split(",")]
+    for part in version_parts:
+        if not re.match(version_pattern, part):
+            typer.echo(
+                f'Warning: Invalid {field_name} format: "{version}". '
+                f"Each version part must follow the pattern: [operator][version] where operator is optional (==, >=, <=, !=, ~=, >, <, <>, =) "
+                f"and version is in format major.minor.patch[-suffix]. "
+                f"Multiple versions can be comma-separated. "
+                f'Examples: ">=1.0.0", "==2.1.0-beta", "1.5.2", ">=1.0.0,<2.0.0". '
+                f"No {field_name} will be populated."
+            )
+            return ""
+
+    return version
+
+
 def initialize_project_config():
     create_comfynode_config()
 
@@ -109,6 +186,9 @@ def initialize_project_config():
     project = document.get("project", tomlkit.table())
     urls = project.get("urls", tomlkit.table())
     urls["Repository"] = git_remote_url
+    urls["Documentation"] = git_remote_url + "/wiki"
+    urls["Bug Tracker"] = git_remote_url + "/issues"
+
     project["urls"] = urls
     project["name"] = sanitize_node_name(repo_name)
     project["description"] = ""
@@ -118,6 +198,36 @@ def initialize_project_config():
     license_table = tomlkit.inline_table()
     license_table["file"] = "LICENSE"
     project["license"] = license_table
+
+    # [project].classifiers Classifiers uncommentable hint for OS/GPU support
+    # Attach classifiers comments to the project, below of "license" field.
+    # will generate a comment like this:
+    #
+    # [project]
+    # ...
+    # license = {file = "LICENSE"}
+    # # classifiers = [
+    # #     # For OS-independent nodes (works on all operating systems)
+    # ...
+
+    project["license"].comment("""
+# classifiers = [
+#     # For OS-independent nodes (works on all operating systems)
+#     "Operating System :: OS Independent",
+# 
+#     # OR for OS-specific nodes, specify the supported systems:
+#     "Operating System :: Microsoft :: Windows",  # Windows specific
+#     "Operating System :: POSIX :: Linux",  # Linux specific
+#     "Operating System :: MacOS",  # macOS specific
+#     
+#     # GPU Accelerator support. Pick the ones that are supported by your extension.
+#     "Environment :: GPU :: NVIDIA CUDA",    # NVIDIA CUDA support
+#     "Environment :: GPU :: AMD ROCm",       # AMD ROCm support
+#     "Environment :: GPU :: Intel Arc",      # Intel Arc support
+#     "Environment :: NPU :: Huawei Ascend",  # Huawei Ascend support
+#     "Environment :: GPU :: Apple Metal",    # Apple Metal support
+# ]
+""")
 
     tool = document.get("tool", tomlkit.table())
     comfy = tool.get("comfy", tomlkit.table())
@@ -156,6 +266,28 @@ def extract_node_configuration(
     urls_data = project_data.get("urls", {})
     comfy_data = data.get("tool", {}).get("comfy", {})
 
+    dependencies = project_data.get("dependencies", [])
+    supported_comfyui_frontend_version = ""
+    for dep in dependencies:
+        if isinstance(dep, str) and dep.startswith("comfyui-frontend-package"):
+            supported_comfyui_frontend_version = dep.removeprefix("comfyui-frontend-package")
+            break
+
+    # Remove the ComfyUI-frontend dependency from the dependencies list
+    dependencies = [
+        dep for dep in dependencies if not (isinstance(dep, str) and dep.startswith("comfyui-frontend-package"))
+    ]
+
+    supported_comfyui_version = data.get("tool", {}).get("comfy", {}).get("requires-comfyui", "")
+
+    classifiers = project_data.get("classifiers", [])
+    supported_os = validate_and_extract_os_classifiers(classifiers)
+    supported_accelerators = validate_and_extract_accelerator_classifiers(classifiers)
+    supported_comfyui_version = validate_version(supported_comfyui_version, "requires-comfyui")
+    supported_comfyui_frontend_version = validate_version(
+        supported_comfyui_frontend_version, "comfyui-frontend-package"
+    )
+
     license_data = project_data.get("license", {})
     if isinstance(license_data, str):
         license = License(text=license_data)
@@ -181,7 +313,7 @@ def extract_node_configuration(
         description=project_data.get("description", ""),
         version=project_data.get("version", ""),
         requires_python=project_data.get("requires-python", ""),
-        dependencies=project_data.get("dependencies", []),
+        dependencies=dependencies,
         license=license,
         urls=URLs(
             homepage=urls_data.get("Homepage", ""),
@@ -189,6 +321,10 @@ def extract_node_configuration(
             repository=urls_data.get("Repository", ""),
             issues=urls_data.get("Issues", ""),
         ),
+        supported_os=supported_os,
+        supported_accelerators=supported_accelerators,
+        supported_comfyui_version=supported_comfyui_version,
+        supported_comfyui_frontend_version=supported_comfyui_frontend_version,
     )
 
     comfy = ComfyConfig(
@@ -196,6 +332,9 @@ def extract_node_configuration(
         display_name=comfy_data.get("DisplayName", ""),
         icon=comfy_data.get("Icon", ""),
         models=[Model(location=m["location"], model_url=m["model_url"]) for m in comfy_data.get("Models", [])],
+        includes=comfy_data.get("includes", []),
+        banner_url=comfy_data.get("Banner", ""),
+        web=comfy_data.get("web", ""),
     )
 
     return PyProjectConfig(project=project, tool_comfy=comfy)

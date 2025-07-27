@@ -88,39 +88,61 @@ def download_file(url: str, local_filepath: pathlib.Path, headers: Optional[dict
             raise DownloadException(f"Failed to download file.\n{status_reason}")
 
 
-def zip_files(zip_filename):
+def zip_files(zip_filename, includes=None):
     """
-    Zip all files in the current directory that are tracked by git.
+    Zip all files in the current directory that are tracked by git,
+    plus any additional directories specified in includes.
     """
+    includes = includes or []
+    included_paths = set()
+    git_files = []
+
     try:
-        # Get list of git-tracked files using git ls-files
         import subprocess
 
         git_files = subprocess.check_output(["git", "ls-files"], text=True).splitlines()
-        # Zip only git-tracked files
-        with zipfile.ZipFile(zip_filename, "w", zipfile.ZIP_DEFLATED) as zipf:
+    except (subprocess.SubprocessError, FileNotFoundError):
+        print("Warning: Not in a git repository or git not installed. Zipping all files.")
+
+    # Zip only git-tracked files
+    with zipfile.ZipFile(zip_filename, "w", zipfile.ZIP_DEFLATED) as zipf:
+        if git_files:
             for file_path in git_files:
                 if zip_filename in file_path:
                     continue
                 if os.path.exists(file_path):
                     zipf.write(file_path)
+                    included_paths.add(file_path)
                 else:
                     print(f"File not found. Not including in zip: {file_path}")
-        return
-    except (subprocess.SubprocessError, FileNotFoundError):
-        print("Warning: Not in a git repository or git not installed. Zipping all files.")
+        else:
+            for root, dirs, files in os.walk("."):
+                if ".git" in dirs:
+                    dirs.remove(".git")
+                for file in files:
+                    file_path = os.path.join(root, file)
+                    # Skip zipping the zip file itself
+                    if zip_filename in file_path:
+                        continue
+                    relative_path = os.path.relpath(file_path, start=".")
+                    zipf.write(file_path, relative_path)
+                    included_paths.add(file_path)
 
-    with zipfile.ZipFile(zip_filename, "w", zipfile.ZIP_DEFLATED) as zipf:
-        for root, dirs, files in os.walk("."):
-            if ".git" in dirs:
-                dirs.remove(".git")
-            for file in files:
-                file_path = os.path.join(root, file)
-                # Skip zipping the zip file itself
-                if zip_filename in file_path:
-                    continue
-                relative_path = os.path.relpath(file_path, start=".")
-                zipf.write(file_path, relative_path)
+        for include_dir in includes:
+            include_dir = include_dir.lstrip("/")
+            if not os.path.exists(include_dir):
+                print(f"Warning: Included directory '{include_dir}' does not exist, creating empty directory")
+                zipf.writestr(f"{include_dir}/", "")
+                continue
+
+            for root, dirs, files in os.walk(include_dir):
+                for file in files:
+                    file_path = os.path.join(root, file)
+                    if zip_filename in file_path or file_path in included_paths:
+                        continue
+                    relative_path = os.path.relpath(file_path, start=".")
+                    zipf.write(file_path, relative_path)
+                    included_paths.add(file_path)
 
 
 def upload_file_to_signed_url(signed_url: str, file_path: str):
