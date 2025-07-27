@@ -22,6 +22,7 @@ terminal.
 - 🗄️ Download checkpoints and save model hash
 - 💻 Cross-platform compatibility (Windows, macOS, Linux)
 - 📖 Comprehensive documentation and examples
+- 🎉 install pull request to ComfyUI automatically
 
 ## Installation
 
@@ -110,6 +111,17 @@ Comfy provides commands that allow you to easily run the installed ComfyUI.
   - Instances launched with `--background` are displayed in the "Background ComfyUI" section of `comfy env`, providing management functionalities for a single background instance only.
   - Since "Comfy Server Running" in `comfy env` only shows the default port 8188, it doesn't display ComfyUI running on a different port.
   - Background-running ComfyUI can be stopped with `comfy stop`.
+
+- to run ComfyUI with a specific pull request:
+
+  `comfy install --pr "#1234"`
+
+  `comfy install --pr "jtydhr88:load-3d-nodes"`
+
+  `comfy install --pr "https://github.com/comfyanonymous/ComfyUI/pull/1234"`
+
+  - If you want to run ComfyUI with a specific pull request, you can use the `--pr` option. This will automatically install the specified pull request and run ComfyUI with it.
+  - Important: When using --pr, any --version and --commit parameters are ignored. The PR branch will be checked out regardless of version settings.
 
 ### Managing Custom Nodes
 
@@ -245,6 +257,6 @@ comfy is released under the [GNU General Public License v3.0](https://github.com
 
 ## Support
 
-If you encounter any issues or have questions about comfy-cli, please [open an issue](https://github.com/comfy-cli/issues) on our GitHub repository or contact us on [Discord](https://discord.gg/comfycontrib). We'll be happy to assist you!
+If you encounter any issues or have questions about comfy-cli, please [open an issue](https://github.com/comfy-cli/issues) on our GitHub repository or contact us on [Discord](https://discord.com/invite/comfyorg). We'll be happy to assist you!
 
 Happy diffusing with ComfyUI and comfy-cli! 🎉
