@@ -158,7 +158,7 @@ def pip_install_comfyui_dependencies(
 
 # install requirements for manager
 def pip_install_manager_dependencies(repo_dir):
-    os.chdir(os.path.join(repo_dir, "custom_nodes", "ComfyUI-Manager"))
+    os.chdir(workspace_manager.get_comfyui_manager_path())
     subprocess.run([sys.executable, "-m", "pip", "install", "-r", "requirements.txt"], check=True)
 
 
@@ -237,7 +237,9 @@ def execute(
     if skip_manager:
         rprint("Skipping installation of ComfyUI-Manager. (by --skip-manager)")
     else:
-        manager_repo_dir = os.path.join(repo_dir, "custom_nodes", "ComfyUI-Manager")
+        manager_repo_dir = os.path.join(
+            repo_dir, "custom_nodes", "comfyui-manager@nightly"
+        )
 
         if os.path.exists(manager_repo_dir):
             if restore and not fast_deps:

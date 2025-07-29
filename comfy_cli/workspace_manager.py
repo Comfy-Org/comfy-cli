@@ -262,17 +262,50 @@ class WorkspaceManager:
         if self.workspace_path is None:
             return None
 
-        # To check more robustly, verify up to the `.git` path.
-        manager_path = os.path.join(self.workspace_path, "custom_nodes", "ComfyUI-Manager")
+        cached_manager_path = self.config_manager.get(
+            constants.CONFIG_KEY_COMFYUI_MANAGER_PATH
+        )
+
+        if cached_manager_path is None or not cached_manager_path.startswith(
+            self.workspace_path
+        ):
+            manager_path = os.path.join(
+                self.workspace_path, "custom_nodes", "comfyui-manager@nightly"
+            )
+        else:
+            manager_path = cached_manager_path
+
+        if not os.path.exists(manager_path):
+            manager_path = os.path.join(
+                self.workspace_path, "custom_nodes", "ComfyUI-Manager"
+            )
+
+        if not os.path.exists(manager_path):
+            custom_nodes = os.path.join(self.workspace_path, "custom_nodes")
+
+            manager_path = None
+            for subdir in os.listdir(custom_nodes):
+                if subdir.startswith("comfyui-manager@"):
+                    manager_path = os.path.join(custom_nodes, subdir)
+                    break
+
+        if manager_path is not None and manager_path != cached_manager_path:
+            self.config_manager.set(
+                constants.CONFIG_KEY_COMFYUI_MANAGER_PATH, manager_path
+            )
         return manager_path
 
     def is_comfyui_manager_installed(self):
         if self.workspace_path is None:
             return False
 
-        # To check more robustly, verify up to the `.git` path.
-        manager_git_path = os.path.join(self.workspace_path, "custom_nodes", "ComfyUI-Manager", ".git")
-        return os.path.exists(manager_git_path)
+        return self.get_comfyui_manager_path() is not None
+
+    def get_cm_cli_path(self):
+        cm_path = self.get_comfyui_manager_path()
+        if cm_path is not None:
+            return os.path.join(cm_path, "cm-cli.py")
+        return None
 
     def scan_dir(self):
         if not self.workspace_path:
