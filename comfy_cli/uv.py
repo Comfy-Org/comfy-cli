@@ -405,9 +405,6 @@ class DependencyCompiler:
                 f.write(DependencyCompiler.overrideGpu.format(gpu=self.gpu, gpuUrl=self.gpuUrl))
                 f.write("\n\n")
 
-                f.write("numpy<2\n")
-                f.write("\n\n")
-
         completed = DependencyCompiler.Compile(
             cwd=self.cwd,
             reqFiles=self.reqFilesCore,
