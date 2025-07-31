@@ -7,7 +7,6 @@ import sys
 
 import requests
 from rich.console import Console
-from rich.table import Table
 
 from comfy_cli.config_manager import ConfigManager
 from comfy_cli.utils import singleton
