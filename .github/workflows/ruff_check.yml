@@ -24,4 +24,4 @@ jobs:
       - name: lint check and then format check with ruff
         run: |
           ruff check
-          ruff format --check
+          ruff format --diff
