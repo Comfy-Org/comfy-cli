@@ -539,13 +539,9 @@ def which():
 @tracking.track_command()
 def env():
     check_for_updates()
-    
     env_data = EnvChecker().fill_print_table()
-    
     workspace_data = workspace_manager.fill_print_table()
-    
     all_data = env_data + workspace_data
-    
     ui.display_table(
         data=all_data,
         column_names=[":laptop_computer: Environment", "Value"],

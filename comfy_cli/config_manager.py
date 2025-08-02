@@ -83,7 +83,6 @@ class ConfigManager(object):
             if not is_running(self.background[2]):
                 self.remove_background()
 
-
     def get_env_data(self):
         """
         Get environment data as a list of tuples for display.
@@ -96,10 +95,12 @@ class ConfigManager(object):
 
         launch_extras = ""
         if self.config.has_option("DEFAULT", "default_workspace"):
-            data.append((
-                "Default ComfyUI workspace",
-                self.config["DEFAULT"][constants.CONFIG_KEY_DEFAULT_WORKSPACE],
-            ))
+            data.append(
+                (
+                    "Default ComfyUI workspace",
+                    self.config["DEFAULT"][constants.CONFIG_KEY_DEFAULT_WORKSPACE],
+                )
+            )
             launch_extras = self.config["DEFAULT"].get(constants.CONFIG_KEY_DEFAULT_LAUNCH_EXTRAS, "")
         else:
             data.append(("Default ComfyUI workspace", "No default ComfyUI workspace"))
@@ -110,26 +111,32 @@ class ConfigManager(object):
         data.append(("Default ComfyUI launch extra options", launch_extras))
 
         if self.config.has_option("DEFAULT", constants.CONFIG_KEY_RECENT_WORKSPACE):
-            data.append((
-                "Recent ComfyUI workspace",
-                self.config["DEFAULT"][constants.CONFIG_KEY_RECENT_WORKSPACE],
-            ))
+            data.append(
+                (
+                    "Recent ComfyUI workspace",
+                    self.config["DEFAULT"][constants.CONFIG_KEY_RECENT_WORKSPACE],
+                )
+            )
         else:
             data.append(("Recent ComfyUI workspace", "No recent run"))
 
         if self.config.has_option("DEFAULT", "enable_tracking"):
-            data.append((
-                "Tracking Analytics",
-                ("Enabled" if self.config["DEFAULT"]["enable_tracking"] == "True" else "Disabled"),
-            ))
+            data.append(
+                (
+                    "Tracking Analytics",
+                    ("Enabled" if self.config["DEFAULT"]["enable_tracking"] == "True" else "Disabled"),
+                )
+            )
 
         if self.config.has_option("DEFAULT", constants.CONFIG_KEY_BACKGROUND):
             bg_info = self.background
             if bg_info:
-                data.append((
-                    "Background ComfyUI",
-                    f"http://{bg_info[0]}:{bg_info[1]} (pid={bg_info[2]})",
-                ))
+                data.append(
+                    (
+                        "Background ComfyUI",
+                        f"http://{bg_info[0]}:{bg_info[1]} (pid={bg_info[2]})",
+                    )
+                )
         else:
             data.append(("Background ComfyUI", "[bold red]No[/bold red]"))
 

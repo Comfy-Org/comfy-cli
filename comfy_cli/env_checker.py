@@ -92,20 +92,24 @@ class EnvChecker(object):
         data = []
         data.append(("Python Version", format_python_version(sys.version_info)))
         data.append(("Python Executable", sys.executable))
-        data.append((
-            "Virtualenv Path",
-            self.virtualenv_path if self.virtualenv_path else "Not Used",
-        ))
+        data.append(
+            (
+                "Virtualenv Path",
+                self.virtualenv_path if self.virtualenv_path else "Not Used",
+            )
+        )
         data.append(("Conda Env", self.conda_env if self.conda_env else "Not Used"))
 
         config_data = ConfigManager().get_env_data()
         data.extend(config_data)
 
         if check_comfy_server_running():
-            data.append((
-                "Comfy Server Running",
-                "[bold green]Yes[/bold green]\nhttp://localhost:8188",
-            ))
+            data.append(
+                (
+                    "Comfy Server Running",
+                    "[bold green]Yes[/bold green]\nhttp://localhost:8188",
+                )
+            )
         else:
             data.append(("Comfy Server Running", "[bold red]No[/bold red]"))
 
