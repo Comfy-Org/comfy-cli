@@ -75,8 +75,8 @@ class ConfigManager(object):
         if not os.path.exists(tmp_path):
             os.makedirs(tmp_path)
 
-        if "background" in self.config["DEFAULT"]:
-            bg_info = self.config["DEFAULT"]["background"].strip("()").split(",")
+        if constants.CONFIG_KEY_BACKGROUND in self.config["DEFAULT"]:
+            bg_info = self.config["DEFAULT"][constants.CONFIG_KEY_BACKGROUND].strip("()").split(",")
             bg_info = [item.strip().strip("'") for item in bg_info]
             self.background = bg_info[0], int(bg_info[1]), int(bg_info[2])
 
@@ -94,7 +94,7 @@ class ConfigManager(object):
         data.append(("Config Path", self.get_config_file_path()))
 
         launch_extras = ""
-        if self.config.has_option("DEFAULT", "default_workspace"):
+        if self.config.has_option("DEFAULT", constants.CONFIG_KEY_DEFAULT_WORKSPACE):
             data.append(
                 (
                     "Default ComfyUI workspace",
@@ -120,11 +120,15 @@ class ConfigManager(object):
         else:
             data.append(("Recent ComfyUI workspace", "No recent run"))
 
-        if self.config.has_option("DEFAULT", "enable_tracking"):
+        if self.config.has_option("DEFAULT", constants.CONFIG_KEY_ENABLE_TRACKING):
             data.append(
                 (
                     "Tracking Analytics",
-                    ("Enabled" if self.config["DEFAULT"]["enable_tracking"] == "True" else "Disabled"),
+                    (
+                        "Enabled"
+                        if self.config["DEFAULT"][constants.CONFIG_KEY_ENABLE_TRACKING] == "True"
+                        else "Disabled"
+                    ),
                 )
             )
 
@@ -143,7 +147,7 @@ class ConfigManager(object):
         return data
 
     def remove_background(self):
-        del self.config["DEFAULT"]["background"]
+        del self.config["DEFAULT"][constants.CONFIG_KEY_BACKGROUND]
         self.write_config()
         self.background = None
 
