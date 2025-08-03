@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Optional
 
 import git
 import typer
@@ -25,7 +25,7 @@ class ModelPath:
 class Model:
     name: Optional[str] = None
     url: Optional[str] = None
-    paths: List[ModelPath] = field(default_factory=list)
+    paths: list[ModelPath] = field(default_factory=list)
     hash: Optional[str] = None
     type: Optional[str] = None
 
@@ -45,11 +45,11 @@ class CustomNode:
 @dataclass
 class ComfyLockYAMLStruct:
     basics: Basics
-    models: List[Model] = field(default_factory=list)
-    custom_nodes: List[CustomNode] = field(default_factory=list)
+    models: list[Model] = field(default_factory=list)
+    custom_nodes: list[CustomNode] = field(default_factory=list)
 
 
-def check_comfy_repo(path) -> Tuple[bool, Optional[git.Repo]]:
+def check_comfy_repo(path) -> tuple[bool, Optional[git.Repo]]:
     if not os.path.exists(path):
         return False, None
     try:
@@ -190,7 +190,7 @@ class WorkspaceManager:
 
         return os.path.abspath(os.path.expanduser(self.specified_workspace))
 
-    def get_workspace_path(self) -> Tuple[str, WorkspaceType]:
+    def get_workspace_path(self) -> tuple[str, WorkspaceType]:
         """
         Retrieves a workspace path based on user input and defaults. This function does not validate the existence of a validate ComfyUI workspace.
         1. Specified Workspace (--workspace)
@@ -302,7 +302,7 @@ class WorkspaceManager:
     def load_metadata(self):
         file_path = os.path.join(self.workspace_path, constants.COMFY_LOCK_YAML_FILE)
         if os.path.exists(file_path):
-            with open(file_path, "r", encoding="utf-8") as file:
+            with open(file_path, encoding="utf-8") as file:
                 return yaml.safe_load(file)
         else:
             return {}

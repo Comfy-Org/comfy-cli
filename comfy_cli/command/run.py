@@ -98,7 +98,7 @@ class ExecutionProgress(Progress):
         )
 
         for task in self.tasks:
-            percent = "[progress.percentage]{task.percentage:>3.0f}%".format(task=task)
+            percent = "[progress.percentage]{task.percentage:>3.0f}%".format(task=task)  # noqa
             if task.fields.get("progress_type") == "overall":
                 overall_table = Table.grid(*table_columns, padding=(0, 1), expand=self.expand)
                 overall_table.add_row(BarColumn().render(task), percent, TimeElapsedColumn().render(task))

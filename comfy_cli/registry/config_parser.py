@@ -65,7 +65,7 @@ def create_comfynode_config():
     try:
         with open("pyproject.toml", "w") as toml_file:
             toml_file.write(tomlkit.dumps(document))
-    except IOError as e:
+    except OSError as e:
         raise Exception("Failed to write 'pyproject.toml'") from e
 
 
@@ -166,7 +166,7 @@ def validate_version(version: str, field_name: str) -> str:
 def initialize_project_config():
     create_comfynode_config()
 
-    with open("pyproject.toml", "r") as file:
+    with open("pyproject.toml") as file:
         document = tomlkit.parse(file.read())
 
     # Get the current git remote URL
@@ -237,7 +237,7 @@ def initialize_project_config():
 
     # Handle dependencies
     if os.path.exists("requirements.txt"):
-        with open("requirements.txt", "r") as req_file:
+        with open("requirements.txt") as req_file:
             dependencies = [line.strip() for line in req_file if line.strip()]
         project["dependencies"] = dependencies
     else:
@@ -248,8 +248,8 @@ def initialize_project_config():
         with open("pyproject.toml", "w") as toml_file:
             toml_file.write(tomlkit.dumps(document))
         print("pyproject.toml has been created successfully in the current directory.")
-    except IOError as e:
-        raise IOError("Failed to write 'pyproject.toml'") from e
+    except OSError as e:
+        raise OSError("Failed to write 'pyproject.toml'") from e
 
 
 def extract_node_configuration(
@@ -259,7 +259,7 @@ def extract_node_configuration(
         ui.display_error_message("No pyproject.toml file found in the current directory.")
         return None
 
-    with open(path, "r") as file:
+    with open(path) as file:
         data = tomlkit.load(file)
 
     project_data = data.get("project", {})

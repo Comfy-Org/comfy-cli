@@ -74,4 +74,5 @@ lint.select = [
   "E9", # default
   "F",  # default
   "I",  # isort-like behavior (import statement sorting)
+  "UP", # pyupgrade
 ]

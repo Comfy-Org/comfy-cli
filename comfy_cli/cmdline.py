@@ -2,13 +2,12 @@ import os
 import subprocess
 import sys
 import webbrowser
-from typing import Optional
+from typing import Annotated, Optional
 
 import questionary
 import typer
 from rich import print as rprint
 from rich.console import Console
-from typing_extensions import Annotated, List
 
 from comfy_cli import constants, env_checker, logging, tracking, ui, utils
 from comfy_cli.command import custom_nodes
@@ -487,7 +486,7 @@ def stop():
 @tracking.track_command()
 def launch(
     background: Annotated[bool, typer.Option(help="Launch ComfyUI in background")] = False,
-    extra: List[str] = typer.Argument(None),
+    extra: list[str] = typer.Argument(None),
 ):
     launch_command(background, extra)
 

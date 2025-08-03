@@ -1,13 +1,12 @@
 import os
 import pathlib
 import sys
-from typing import List, Optional, Tuple
+from typing import Annotated, Optional
 from urllib.parse import unquote, urlparse
 
 import requests
 import typer
 from rich import print
-from typing_extensions import Annotated
 
 from comfy_cli import constants, tracking, ui
 from comfy_cli.config_manager import ConfigManager
@@ -39,7 +38,7 @@ def potentially_strip_param_url(path_name: str) -> str:
     return path_name
 
 
-def check_huggingface_url(url: str) -> Tuple[bool, Optional[str], Optional[str], Optional[str], Optional[str]]:
+def check_huggingface_url(url: str) -> tuple[bool, Optional[str], Optional[str], Optional[str], Optional[str]]:
     """
     Check if the given URL is a Hugging Face URL and extract relevant information.
 
@@ -76,7 +75,7 @@ def check_huggingface_url(url: str) -> Tuple[bool, Optional[str], Optional[str],
     return True, repo_id, filename, folder_name, branch_name
 
 
-def check_civitai_url(url: str) -> Tuple[bool, bool, int, int]:
+def check_civitai_url(url: str) -> tuple[bool, bool, int, int]:
     """
     Returns:
         is_civitai_model_url: True if the url is a civitai model url
@@ -314,7 +313,7 @@ def remove(
         help="The relative path from the current workspace where the models are stored.",
         show_default=True,
     ),
-    model_names: Optional[List[str]] = typer.Option(
+    model_names: Optional[list[str]] = typer.Option(
         None,
         help="List of model filenames to delete, separated by spaces",
         show_default=False,

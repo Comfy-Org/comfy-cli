@@ -1,17 +1,17 @@
 import configparser
 import os
 from importlib.metadata import version
-from typing import Optional, Tuple
+from typing import Optional
 
 from comfy_cli import constants, logging
 from comfy_cli.utils import get_os, is_running, singleton
 
 
 @singleton
-class ConfigManager(object):
+class ConfigManager:
     def __init__(self):
         self.config = configparser.ConfigParser()
-        self.background: Optional[Tuple[str, int, int]] = None
+        self.background: Optional[tuple[str, int, int]] = None
         self.load()
 
     @staticmethod

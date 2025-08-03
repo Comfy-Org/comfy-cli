@@ -4,12 +4,11 @@ import platform
 import subprocess
 import sys
 import uuid
-from typing import Optional
+from typing import Annotated, Optional
 
 import typer
 from rich import print
 from rich.console import Console
-from typing_extensions import Annotated, List
 
 from comfy_cli import logging, tracking, ui, utils
 from comfy_cli.command.custom_nodes.bisect_custom_nodes import bisect_app
@@ -151,7 +150,7 @@ def execute_install_script(repo_path):
         # import pdb
         # pdb.set_trace()
         print("Install: pip packages")
-        with open(requirements_path, "r", encoding="utf-8") as requirements_file:
+        with open(requirements_path, encoding="utf-8") as requirements_file:
             for line in requirements_file:
                 # From Yoland: disable pip override
                 # package_name = remap_pip_package(line.strip())
@@ -269,7 +268,7 @@ def node_completer(incomplete: str) -> list[str]:
         config_manager = ConfigManager()
         tmp_path = os.path.join(config_manager.get_config_path(), "tmp", "node-cache.list")
 
-        with open(tmp_path, "r", encoding="UTF-8", errors="ignore") as cache_file:
+        with open(tmp_path, encoding="UTF-8", errors="ignore") as cache_file:
             return [node_id for node_id in cache_file.readlines() if node_id.startswith(incomplete)]
 
     except Exception:
@@ -285,7 +284,7 @@ def node_or_all_completer(incomplete: str) -> list[str]:
         if "all".startswith(incomplete):
             all_opt = ["all"]
 
-        with open(tmp_path, "r", encoding="UTF-8", errors="ignore") as cache_file:
+        with open(tmp_path, encoding="UTF-8", errors="ignore") as cache_file:
             return [node_id for node_id in cache_file.readlines() if node_id.startswith(incomplete)] + all_opt
 
     except Exception:
@@ -384,7 +383,7 @@ def simple_show(
 @app.command(help="Install custom nodes")
 @tracking.track_command("node")
 def install(
-    nodes: List[str] = typer.Argument(..., help="List of custom nodes to install", autocompletion=node_completer),
+    nodes: list[str] = typer.Argument(..., help="List of custom nodes to install", autocompletion=node_completer),
     channel: Annotated[
         Optional[str],
         typer.Option(
@@ -431,7 +430,7 @@ def install(
 @app.command(help="Reinstall custom nodes")
 @tracking.track_command("node")
 def reinstall(
-    nodes: List[str] = typer.Argument(..., help="List of custom nodes to reinstall", autocompletion=node_completer),
+    nodes: list[str] = typer.Argument(..., help="List of custom nodes to reinstall", autocompletion=node_completer),
     channel: Annotated[
         Optional[str],
         typer.Option(
@@ -466,7 +465,7 @@ def reinstall(
 @app.command(help="Uninstall custom nodes")
 @tracking.track_command("node")
 def uninstall(
-    nodes: List[str] = typer.Argument(..., help="List of custom nodes to uninstall", autocompletion=node_completer),
+    nodes: list[str] = typer.Argument(..., help="List of custom nodes to uninstall", autocompletion=node_completer),
     channel: Annotated[
         Optional[str],
         typer.Option(
@@ -512,7 +511,7 @@ def update_node_id_cache():
 @app.command(help="Update custom nodes or ComfyUI")
 @tracking.track_command("node")
 def update(
-    nodes: List[str] = typer.Argument(
+    nodes: list[str] = typer.Argument(
         ...,
         help="[all|List of custom nodes to update]",
         autocompletion=node_or_all_completer,
@@ -541,7 +540,7 @@ def update(
 @app.command(help="Disable custom nodes")
 @tracking.track_command("node")
 def disable(
-    nodes: List[str] = typer.Argument(
+    nodes: list[str] = typer.Argument(
         ...,
         help="[all|List of custom nodes to disable]",
         autocompletion=node_or_all_completer,
@@ -568,7 +567,7 @@ def disable(
 @app.command(help="Enable custom nodes")
 @tracking.track_command("node")
 def enable(
-    nodes: List[str] = typer.Argument(
+    nodes: list[str] = typer.Argument(
         ...,
         help="[all|List of custom nodes to enable]",
         autocompletion=node_or_all_completer,
@@ -595,7 +594,7 @@ def enable(
 @app.command(help="Fix dependencies of custom nodes")
 @tracking.track_command("node")
 def fix(
-    nodes: List[str] = typer.Argument(
+    nodes: list[str] = typer.Argument(
         ...,
         help="[all|List of custom nodes to fix]",
         autocompletion=node_or_all_completer,
