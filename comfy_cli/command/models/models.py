@@ -34,8 +34,7 @@ def get_workspace() -> pathlib.Path:
 
 
 def potentially_strip_param_url(path_name: str) -> str:
-    path_name = path_name.split("?")[0]
-    return path_name
+    return path_name.split("?")[0]
 
 
 def check_huggingface_url(url: str) -> tuple[bool, Optional[str], Optional[str], Optional[str], Optional[str]]:

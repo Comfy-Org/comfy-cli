@@ -69,10 +69,14 @@ target-version = "py39"
 
 line-length = 120
 lint.select = [
-  "E4", # default
-  "E7", # default
-  "E9", # default
-  "F",  # default
-  "I",  # isort-like behavior (import statement sorting)
-  "UP", # pyupgrade
+  "E",      # pycodestyle - Error
+  "F",      # default
+  "I",      # isort-like behavior (import statement sorting)
+  "Q",      # flake8-quotes
+  "RET504", # Unnecessary assignment to {name} before return statement
+  "UP",     # pyupgrade
+  "W",      # pycodestyle - Warning
+]
+lint.extend-ignore = [
+  "E501", # Line too long
 ]

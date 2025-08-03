@@ -197,8 +197,7 @@ class WorkflowExecution:
             if subfolder:
                 filename = os.path.join(subfolder, filename)
 
-            filename = os.path.join(workspace_manager.get_workspace_path()[0], output_type, filename)
-            return filename
+            return os.path.join(workspace_manager.get_workspace_path()[0], output_type, filename)
 
         query = urllib.parse.urlencode(img)
         return f"http://{self.host}:{self.port}/view?{query}"
