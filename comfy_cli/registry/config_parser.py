@@ -214,12 +214,12 @@ def initialize_project_config():
 # classifiers = [
 #     # For OS-independent nodes (works on all operating systems)
 #     "Operating System :: OS Independent",
-# 
+#
 #     # OR for OS-specific nodes, specify the supported systems:
 #     "Operating System :: Microsoft :: Windows",  # Windows specific
 #     "Operating System :: POSIX :: Linux",  # Linux specific
 #     "Operating System :: MacOS",  # macOS specific
-#     
+#
 #     # GPU Accelerator support. Pick the ones that are supported by your extension.
 #     "Environment :: GPU :: NVIDIA CUDA",    # NVIDIA CUDA support
 #     "Environment :: GPU :: AMD ROCm",       # AMD ROCm support

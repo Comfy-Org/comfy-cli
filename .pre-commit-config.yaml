@@ -1,6 +1,19 @@
 repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+    -   id: check-yaml
+        exclude: ^tests/.*$
+    -   id: check-toml
+        exclude: ^tests/.*$
+    -   id: end-of-file-fixer
+        exclude: >-
+          (^.*\.(json|txt)$)|(^tests/.*\.toml$)|(.github/.*TEMPLATE)
+    -   id: trailing-whitespace
+        exclude: >-
+          (^.*\.(json|txt)$)
+
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    # Ruff version.
     rev: v0.6.1
     hooks:
       # Run the linter.
@@ -13,3 +26,4 @@ repos:
     rev: v2.6.0
     hooks:
       - id: pyproject-fmt
+        exclude: ^tests/.*$
