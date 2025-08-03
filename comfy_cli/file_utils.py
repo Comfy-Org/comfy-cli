@@ -25,9 +25,7 @@ def guess_status_code_reason(status_code: int, message: str) -> str:
                     input_data = input_data.decode("utf-8")
 
                 # Parse the string as JSON
-                json_object = json.loads(input_data)
-
-                return json_object
+                return json.loads(input_data)
 
             except json.JSONDecodeError as e:
                 # Handle JSON decoding error

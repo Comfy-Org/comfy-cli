@@ -96,8 +96,7 @@ class RegistryAPI:
         response = requests.get(url)
         if response.status_code == 200:
             raw_nodes = response.json()["nodes"]
-            mapped_nodes = [map_node_to_node_class(node) for node in raw_nodes]
-            return mapped_nodes
+            return [map_node_to_node_class(node) for node in raw_nodes]
         else:
             raise Exception(f"Failed to retrieve nodes: {response.status_code} - {response.text}")
 

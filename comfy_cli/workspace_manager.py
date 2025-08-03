@@ -263,8 +263,7 @@ class WorkspaceManager:
             return None
 
         # To check more robustly, verify up to the `.git` path.
-        manager_path = os.path.join(self.workspace_path, "custom_nodes", "ComfyUI-Manager")
-        return manager_path
+        return os.path.join(self.workspace_path, "custom_nodes", "ComfyUI-Manager")
 
     def is_comfyui_manager_installed(self):
         if self.workspace_path is None:
