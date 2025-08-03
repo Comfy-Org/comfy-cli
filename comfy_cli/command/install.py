@@ -2,7 +2,7 @@ import os
 import platform
 import subprocess
 import sys
-from typing import Dict, List, Optional, TypedDict
+from typing import Optional, TypedDict
 from urllib.parse import urlparse
 
 import requests
@@ -389,7 +389,7 @@ def handle_github_rate_limit(response):
         raise GitHubRateLimitError(message)
 
 
-def fetch_github_releases(repo_owner: str, repo_name: str) -> List[Dict[str, str]]:
+def fetch_github_releases(repo_owner: str, repo_name: str) -> list[dict[str, str]]:
     """
     Fetch the list of releases from the GitHub API.
     Handles rate limiting by logging the wait time.
@@ -425,11 +425,11 @@ class GithubRelease(TypedDict):
     download_url: str
 
 
-def parse_releases(releases: List[Dict[str, str]]) -> List[GithubRelease]:
+def parse_releases(releases: list[dict[str, str]]) -> list[GithubRelease]:
     """
     Parse the list of releases fetched from the GitHub API into a list of GithubRelease objects.
     """
-    parsed_releases: List[GithubRelease] = []
+    parsed_releases: list[GithubRelease] = []
     for release in releases:
         tag = release["tag_name"]
         if tag.lower() in ["latest", "nightly"]:
@@ -441,7 +441,7 @@ def parse_releases(releases: List[Dict[str, str]]) -> List[GithubRelease]:
     return parsed_releases
 
 
-def select_version(releases: List[GithubRelease], version: str) -> Optional[GithubRelease]:
+def select_version(releases: list[GithubRelease], version: str) -> Optional[GithubRelease]:
     """
     Given a list of Github releases, select the release that matches the specified version.
     """

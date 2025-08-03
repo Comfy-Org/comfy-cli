@@ -61,7 +61,7 @@ def test_compile(mock_prompt_select):
     depComp.make_override()
     depComp.compile_core_plus_ext()
 
-    with open(mockReqsDir / "requirements.compiled", "r") as known, open(temp / "requirements.compiled", "r") as test:
+    with open(mockReqsDir / "requirements.compiled") as known, open(temp / "requirements.compiled") as test:
         # compare all non-commented lines in generated file vs reference file
         knownLines, testLines = [
             [line for line in known.readlines() if not line.strip().startswith("#")],

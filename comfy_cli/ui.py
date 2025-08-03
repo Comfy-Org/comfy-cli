@@ -1,5 +1,5 @@
 from enum import Enum
-from typing import Any, Dict, List, Optional, Tuple, TypeVar, Union
+from typing import Any, Optional, TypeVar, Union
 
 import questionary
 import typer
@@ -35,11 +35,11 @@ def show_progress(iterable, total, description="Downloading..."):
             progress.update(task, advance=len(chunk))
 
 
-ChoiceType = Union[str, Choice, Dict[str, Any]]
+ChoiceType = Union[str, Choice, dict[str, Any]]
 
 
 def prompt_autocomplete(
-    question: str, choices: List[ChoiceType], default: ChoiceType = "", force_prompting: bool = False
+    question: str, choices: list[ChoiceType], default: ChoiceType = "", force_prompting: bool = False
 ) -> Optional[ChoiceType]:
     """
     Asks a single select question using questionary and returns the selected response.
@@ -59,7 +59,7 @@ def prompt_autocomplete(
 
 
 def prompt_select(
-    question: str, choices: List[ChoiceType], default: ChoiceType = "", force_prompting: bool = False
+    question: str, choices: list[ChoiceType], default: ChoiceType = "", force_prompting: bool = False
 ) -> Optional[ChoiceType]:
     """
     Asks a single select question using questionary and returns the selected response.
@@ -81,7 +81,7 @@ def prompt_select(
 E = TypeVar("E", bound=Enum)
 
 
-def prompt_select_enum(question: str, choices: List[E], force_prompting: bool = False) -> Optional[E]:
+def prompt_select_enum(question: str, choices: list[E], force_prompting: bool = False) -> Optional[E]:
     """
     Asks a single select question using questionary and returns the selected response.
 
@@ -123,7 +123,7 @@ def prompt_input(question: str, default: str = "", force_prompting: bool = False
     return questionary.text(question, default=default).ask()
 
 
-def prompt_multi_select(prompt: str, choices: List[str]) -> List[str]:
+def prompt_multi_select(prompt: str, choices: list[str]) -> list[str]:
     """
     Prompts the user to select multiple items from a list of choices.
 
@@ -154,7 +154,7 @@ def prompt_confirm_action(prompt: str, default: bool) -> bool:
     return typer.confirm(prompt)
 
 
-def display_table(data: List[Tuple], column_names: List[str], title: str = "") -> None:
+def display_table(data: list[tuple], column_names: list[str], title: str = "") -> None:
     """
     Displays a list of tuples in a table format using Rich.
 

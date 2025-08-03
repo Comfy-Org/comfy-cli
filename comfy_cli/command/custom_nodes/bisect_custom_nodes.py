@@ -3,10 +3,9 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-from typing import Literal, NamedTuple
+from typing import Annotated, Literal, NamedTuple
 
 import typer
-from typing_extensions import Annotated
 
 from comfy_cli.command.custom_nodes.cm_cli_util import execute_cm_cli
 from comfy_cli.command.launch import launch as launch_command

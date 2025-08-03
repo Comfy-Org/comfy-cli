@@ -457,7 +457,7 @@ class DependencyCompiler:
         headless is more suitable for comfy than the gui version, so remove gui if
         headless is present. TODO: add support for contrib pkgs. see: https://github.com/opencv/opencv-python"""
 
-        with open(self.out, "r") as f:
+        with open(self.out) as f:
             lines = f.readlines()
 
         guiFound, headlessFound = False, False
