@@ -22,6 +22,9 @@ on:
       - "!.coveragerc"
       - "!.gitignore"
 
+permissions:
+  contents: read
+
 jobs:
   test-cli-gpu:
     name: "Run Tests on GPU Runners"

@@ -19,6 +19,9 @@ on:
       - "!.coveragerc"
       - "!.gitignore"
 
+permissions:
+  contents: read
+
 jobs:
   test:
     name: "Run Tests on Multiple Platforms"

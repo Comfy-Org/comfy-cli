@@ -6,6 +6,9 @@ on:
     paths:
       - comfy_cli/**
 
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: windows-latest

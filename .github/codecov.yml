@@ -1,6 +1,3 @@
-codecov:
-  allow_coverage_offsets: true  # Avoid "Missing base report" due to committing with "[CI skip]"
-
 comment:
   layout: "diff, files"
 
@@ -9,3 +6,4 @@ coverage:
     project:
       default:
         threshold: 0.1%
+    patch: off
