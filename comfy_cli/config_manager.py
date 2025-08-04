@@ -150,12 +150,6 @@ class ConfigManager:
         del self.config["DEFAULT"][constants.CONFIG_KEY_BACKGROUND]
         self.write_config()
         self.background = None
-        # will remove in this PR, just to test CodeCov comments by token testriction
-        x = 0
-        x = x + 1
-        x = x + 2
-        x = x + 3
-        self.dummy_value = x
 
     def get_cli_version(self):
         # Note: this approach should work for users installing the CLI via
