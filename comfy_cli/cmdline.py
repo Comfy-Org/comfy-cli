@@ -12,7 +12,6 @@ from rich.console import Console
 from comfy_cli import constants, env_checker, logging, tracking, ui, utils
 from comfy_cli.command import custom_nodes
 from comfy_cli.command import install as install_inner
-from comfy_cli.command import pr_command
 from comfy_cli.command import run as run_inner
 from comfy_cli.command.install import validate_version
 from comfy_cli.command.launch import launch as launch_command
@@ -666,5 +665,9 @@ def standalone(
 app.add_typer(models_command.app, name="model", help="Manage models.")
 app.add_typer(custom_nodes.app, name="node", help="Manage custom nodes.")
 app.add_typer(custom_nodes.manager_app, name="manager", help="Manage ComfyUI-Manager.")
+
+# Import pr_command here to avoid circular imports
+from comfy_cli.command import pr_command
+
 app.add_typer(pr_command.app, name="pr-cache", help="Manage PR cache.")
 app.add_typer(tracking.app, name="tracking", help="Manage analytics tracking settings.")
