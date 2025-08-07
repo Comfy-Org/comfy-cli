@@ -10,7 +10,7 @@ from rich import print as rprint
 from rich.console import Console
 
 from comfy_cli import constants, env_checker, logging, tracking, ui, utils
-from comfy_cli.command import custom_nodes
+from comfy_cli.command import custom_nodes, pr_command
 from comfy_cli.command import install as install_inner
 from comfy_cli.command import run as run_inner
 from comfy_cli.command.install import validate_version
@@ -486,9 +486,16 @@ def stop():
 @tracking.track_command()
 def launch(
     background: Annotated[bool, typer.Option(help="Launch ComfyUI in background")] = False,
+    frontend_pr: Annotated[
+        Optional[str],
+        typer.Option(
+            show_default=False,
+            help="Use a specific frontend PR. Supports formats: username:branch, #123, or PR URL",
+        ),
+    ] = None,
     extra: list[str] = typer.Argument(None),
 ):
-    launch_command(background, extra)
+    launch_command(background, extra, frontend_pr)
 
 
 @app.command("set-default", help="Set default ComfyUI path")
@@ -658,4 +665,5 @@ def standalone(
 app.add_typer(models_command.app, name="model", help="Manage models.")
 app.add_typer(custom_nodes.app, name="node", help="Manage custom nodes.")
 app.add_typer(custom_nodes.manager_app, name="manager", help="Manage ComfyUI-Manager.")
+app.add_typer(pr_command.app, name="pr-cache", help="Manage PR cache.")
 app.add_typer(tracking.app, name="tracking", help="Manage analytics tracking settings.")
