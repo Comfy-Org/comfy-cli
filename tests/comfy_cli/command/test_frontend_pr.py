@@ -29,8 +29,6 @@ def sample_frontend_pr_info():
     )
 
 
-
-
 class TestFrontendPRReferenceParsing:
     """Test frontend PR reference parsing functionality"""
 
@@ -127,13 +125,3 @@ class TestNodeToolsVerification:
         mock_run.side_effect = FileNotFoundError("node not found")
 
         assert verify_node_tools() is False
-
-
-
-
-
-
-
-
-
-

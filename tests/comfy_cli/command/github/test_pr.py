@@ -163,7 +163,6 @@ class TestGitHubAPIIntegration:
             fetch_pr_info("comfyanonymous", "ComfyUI", 123)
 
 
-
 class TestGitOperations:
     """Test Git operations for PR checkout"""
 

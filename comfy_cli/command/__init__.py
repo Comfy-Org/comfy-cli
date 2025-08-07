@@ -1,3 +1,3 @@
-from . import custom_nodes, install
+from . import custom_nodes, install, pr_command
 
-__all__ = ["custom_nodes", "install"]
+__all__ = ["custom_nodes", "install", "pr_command"]
