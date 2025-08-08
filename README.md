@@ -123,6 +123,30 @@ Comfy provides commands that allow you to easily run the installed ComfyUI.
   - If you want to run ComfyUI with a specific pull request, you can use the `--pr` option. This will automatically install the specified pull request and run ComfyUI with it.
   - Important: When using --pr, any --version and --commit parameters are ignored. The PR branch will be checked out regardless of version settings.
 
+- To test a frontend pull request:
+
+  ```
+  comfy launch --frontend-pr "#456"
+  comfy launch --frontend-pr "username:branch-name" 
+  comfy launch --frontend-pr "https://github.com/Comfy-Org/ComfyUI_frontend/pull/456"
+  ```
+
+  - The `--frontend-pr` option allows you to test frontend PRs by automatically cloning, building, and using the frontend for that session.
+  - Requirements: Node.js and npm must be installed to build the frontend.
+  - Builds are cached for quick switching between PRs - subsequent uses of the same PR are instant.
+  - Each PR is used only for that launch session. Normal launches use the default frontend.
+
+  **Managing PR cache**:
+  ```
+  comfy pr-cache list              # List cached PR builds
+  comfy pr-cache clean             # Clean all cached builds
+  comfy pr-cache clean 456         # Clean specific PR cache
+  ```
+  
+  - Cache automatically expires after 7 days
+  - Maximum of 10 PR builds are kept (oldest are removed automatically)
+  - Cache limits help manage disk space while keeping recent builds available
+
 ### Managing Custom Nodes
 
 comfy provides a convenient way to manage custom nodes for extending ComfyUI's functionality. Here are some examples:
