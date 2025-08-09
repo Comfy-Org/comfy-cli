@@ -6,6 +6,7 @@ import subprocess
 import sys
 import threading
 import uuid
+from typing import List, Optional  # noqa: UP035
 
 import typer
 from rich import print
@@ -120,8 +121,8 @@ def launch_comfyui(extra, frontend_pr=None):
 
 def launch(
     background: bool = False,
-    extra: list[str] | None = None,
-    frontend_pr: str | None = None,
+    extra: Optional[List[str]] = None,  # noqa: UP006, UP045
+    frontend_pr: Optional[str] = None,  # noqa: UP045
 ):
     check_for_updates()
     resolved_workspace = workspace_manager.workspace_path

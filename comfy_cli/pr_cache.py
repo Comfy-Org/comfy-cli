@@ -8,7 +8,7 @@ import json
 import shutil
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Optional
+from typing import Dict, List, Optional  # noqa: UP035
 
 from rich import print as rprint
 
@@ -153,7 +153,7 @@ class PRCache:
             info["size_mb"] = self._calculate_cache_size_mb(cache_dir)
         return info
 
-    def list_cached_frontends(self) -> list[dict]:
+    def list_cached_frontends(self) -> List[Dict]:  # noqa: UP006
         """List all cached frontend PRs."""
         frontend_cache = self.cache_dir / "frontend"
         if not frontend_cache.exists():
@@ -177,7 +177,7 @@ class PRCache:
         except (ValueError, TypeError):
             return True  # Consider invalid timestamps as expired
 
-    def _get_expired_items(self, cached_items: list[dict]) -> list[dict]:
+    def _get_expired_items(self, cached_items: List[Dict]) -> List[Dict]:  # noqa: UP006
         """Get list of expired cache items."""
         expired = []
         for item in cached_items:
@@ -186,7 +186,7 @@ class PRCache:
                 expired.append(item)
         return expired
 
-    def _get_excess_items(self, cached_items: list[dict], expired_items: list[dict]) -> list[dict]:
+    def _get_excess_items(self, cached_items: List[Dict], expired_items: List[Dict]) -> List[Dict]:  # noqa: UP006
         """Get list of items that exceed the maximum cache limit."""
         remaining_items = [item for item in cached_items if item not in expired_items]
         if len(remaining_items) > self.max_cache_items:
