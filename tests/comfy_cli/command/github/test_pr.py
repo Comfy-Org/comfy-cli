@@ -95,6 +95,28 @@ class TestGitHubAPIIntegration:
         assert result.mergeable is True
 
     @patch("requests.get")
+    def test_fetch_pr_info_not_found(self, mock_get):
+        """Test PR not found (404)"""
+        mock_response = Mock()
+        mock_response.status_code = 404
+        mock_response.raise_for_status.side_effect = requests.HTTPError("404 Not Found")
+        mock_get.return_value = mock_response
+
+        with pytest.raises(Exception, match="Failed to fetch PR"):
+            fetch_pr_info("comfyanonymous", "ComfyUI", 999)
+
+    @patch("requests.get")
+    def test_fetch_pr_info_rate_limit(self, mock_get):
+        """Test GitHub API rate limit handling"""
+        mock_response = Mock()
+        mock_response.status_code = 403
+        mock_response.headers = {"x-ratelimit-remaining": "0"}
+        mock_get.return_value = mock_response
+
+        with pytest.raises(Exception, match="Primary rate limit from Github exceeded!"):
+            fetch_pr_info("comfyanonymous", "ComfyUI", 123)
+
+    @patch("requests.get")
     def test_find_pr_by_branch_success(self, mock_get):
         """Test successful PR search by branch"""
         mock_response = Mock()
@@ -139,28 +161,6 @@ class TestGitHubAPIIntegration:
 
         result = find_pr_by_branch("comfyanonymous", "ComfyUI", "testuser", "test-branch")
         assert result is None
-
-    @patch("requests.get")
-    def test_fetch_pr_info_not_found(self, mock_get):
-        """Test PR not found (404)"""
-        mock_response = Mock()
-        mock_response.status_code = 404
-        mock_response.raise_for_status.side_effect = requests.HTTPError("404 Not Found")
-        mock_get.return_value = mock_response
-
-        with pytest.raises(Exception, match="Failed to fetch PR"):
-            fetch_pr_info("comfyanonymous", "ComfyUI", 999)
-
-    @patch("requests.get")
-    def test_fetch_pr_info_rate_limit(self, mock_get):
-        """Test GitHub API rate limit handling"""
-        mock_response = Mock()
-        mock_response.status_code = 403
-        mock_response.headers = {"x-ratelimit-remaining": "0"}
-        mock_get.return_value = mock_response
-
-        with pytest.raises(Exception, match="Primary rate limit from Github exceeded!"):
-            fetch_pr_info("comfyanonymous", "ComfyUI", 123)
 
 
 class TestGitOperations:
