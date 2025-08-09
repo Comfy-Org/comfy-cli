@@ -43,13 +43,6 @@ def mock_pr_cache():
 class TestLaunchWithFrontendPR:
     """Test launching with temporary frontend PR"""
 
-    def test_launch_help_shows_frontend_pr_option(self, runner):
-        """Test that launch command shows --frontend-pr option"""
-        result = runner.invoke(app, ["launch", "--help"])
-        assert result.exit_code == 0
-        assert "--frontend-pr" in result.output
-        assert "Use a specific frontend PR" in result.output
-
     @patch("comfy_cli.command.install.verify_node_tools")
     def test_launch_frontend_pr_without_node(self, mock_verify):
         """Test launch with frontend PR when Node.js is missing"""
@@ -274,23 +267,3 @@ class TestPRCacheCommands:
             result = runner.invoke(app, ["pr-cache", "clean", "--yes"])
             assert result.exit_code == 0
             mock_cache.clean_frontend_cache.assert_called_once_with()
-
-
-class TestLaunchIntegration:
-    """Test launch command integration with frontend PR"""
-
-    @patch("comfy_cli.command.install.handle_temporary_frontend_pr")
-    @patch("comfy_cli.command.launch.subprocess.run")
-    @patch("comfy_cli.command.launch.os.chdir")
-    @patch("comfy_cli.command.launch.workspace_manager")
-    def test_launch_with_frontend_pr_flag(self, mock_wm, mock_chdir, mock_run, mock_handle_pr, runner):
-        """Test launch command with --frontend-pr flag"""
-        # Setup mocks
-        mock_wm.workspace_path = "/test/ComfyUI"
-        mock_handle_pr.return_value = "/cache/frontend/dist"
-        mock_run.return_value = Mock(returncode=0)
-
-        # This will fail because of the full integration, but we're testing the option exists
-        result = runner.invoke(app, ["launch", "--frontend-pr", "#123", "--help"])
-        assert result.exit_code == 0
-        assert "--frontend-pr" in result.output

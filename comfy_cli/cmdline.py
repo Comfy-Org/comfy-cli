@@ -485,15 +485,16 @@ def stop():
 @app.command(help="Launch ComfyUI: ?[--background] ?[-- <extra args ...>]")
 @tracking.track_command()
 def launch(
+    extra: list[str] = typer.Argument(None),
     background: Annotated[bool, typer.Option(help="Launch ComfyUI in background")] = False,
     frontend_pr: Annotated[
         Optional[str],
         typer.Option(
+            "--frontend-pr",
             show_default=False,
             help="Use a specific frontend PR. Supports formats: username:branch, #123, or PR URL",
         ),
     ] = None,
-    extra: list[str] = typer.Argument(None),
 ):
     launch_command(background, extra, frontend_pr)
 
