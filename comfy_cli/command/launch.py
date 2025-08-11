@@ -4,7 +4,9 @@ import asyncio
 import os
 import subprocess
 import sys
+import tempfile
 import threading
+import time
 import uuid
 
 import typer
@@ -219,18 +221,22 @@ async def launch_and_monitor(cmd, listen, port):
     otherwise, return the log in case of failure.
     """
     logging_flag = False
-    log = []
+    log = None
     logging_lock = threading.Lock()
 
     # NOTE: To prevent encoding error on Windows platform
     env = dict(os.environ, PYTHONIOENCODING="utf-8")
     env["COMFY_CLI_BACKGROUND"] = "true"
+    with tempfile.NamedTemporaryFile(mode="w+", delete=True) as tmp:
+        tmp_file_out = tmp.name
+    with tempfile.NamedTemporaryFile(mode="w+", delete=True) as tmp:
+        tmp_file_err = tmp.name
 
     if sys.platform == "win32":
         process = subprocess.Popen(
             cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stdout=open(tmp_file_out, "w"),
+            stderr=open(tmp_file_err, "w"),
             text=True,
             env=env,
             encoding="utf-8",
@@ -240,41 +246,49 @@ async def launch_and_monitor(cmd, listen, port):
     else:
         process = subprocess.Popen(
             cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stdout=open(tmp_file_out, "w"),
+            stderr=open(tmp_file_err, "w"),
             text=True,
             env=env,
             encoding="utf-8",
         )
 
-    def msg_hook(stream):
+    def msg_hook(temp_file_path):
         nonlocal log
         nonlocal logging_flag
 
         while True:
-            line = stream.readline()
-            if "Launching ComfyUI from:" in line:
+            with open(temp_file_path, 'r', encoding="utf-8") as file:
+                content = file.read()
+            # 检查内容中是否存在特定字符串
+            if "Launching ComfyUI from:" in content:
                 logging_flag = True
-            elif "To see the GUI go to:" in line:
+
+            if "To see the GUI go to:" in content:
                 print(
                     f"[bold yellow]ComfyUI is successfully launched in the background.[/bold yellow]\nTo see the GUI go to: http://{listen}:{port}"
                 )
                 ConfigManager().config["DEFAULT"][constants.CONFIG_KEY_BACKGROUND] = f"{(listen, port, process.pid)}"
                 ConfigManager().write_config()
 
-                # NOTE: os.exit(0) doesn't work.
+                # 注意：os.exit(0) 不起作用。
                 os._exit(0)
 
+            if "error while attempting to bind on address" in content:
+                print(f"Launch Error, [bold red]{listen}:{port}[/bold red] binding failed.")
+                os._exit(-1)
+
+            # 如果需要，将内容添加到日志中
             with logging_lock:
                 if logging_flag:
-                    log.append(line)
+                    log = content
 
-    stdout_thread = threading.Thread(target=msg_hook, args=(process.stdout,))
-    stderr_thread = threading.Thread(target=msg_hook, args=(process.stderr,))
+            time.sleep(0.1)
 
+    stdout_thread = threading.Thread(target=msg_hook, args=(tmp_file_out,))
+    stderr_thread = threading.Thread(target=msg_hook, args=(tmp_file_err,))
     stdout_thread.start()
     stderr_thread.start()
-
     process.wait()
 
     return log
