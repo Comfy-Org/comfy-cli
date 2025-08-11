@@ -118,16 +118,16 @@ class TestGitHubAPIIntegration:
 
     @patch("requests.get")
     def test_find_pr_by_branch_success(self, mock_get):
-        """Test finding PR by branch name"""
+        """Test successful PR search by branch"""
         mock_response = Mock()
         mock_response.status_code = 200
         mock_response.json.return_value = [
             {
-                "number": 123,
-                "title": "Add 3D node loading support",
+                "number": 456,
+                "title": "Test PR",
                 "head": {
-                    "repo": {"clone_url": "https://github.com/jtydhr88/ComfyUI.git", "owner": {"login": "jtydhr88"}},
-                    "ref": "load-3d-nodes",
+                    "repo": {"clone_url": "https://github.com/testuser/ComfyUI.git", "owner": {"login": "testuser"}},
+                    "ref": "test-branch",
                 },
                 "base": {"repo": {"clone_url": "https://github.com/comfyanonymous/ComfyUI.git"}, "ref": "master"},
                 "mergeable": True,
@@ -135,21 +135,31 @@ class TestGitHubAPIIntegration:
         ]
         mock_get.return_value = mock_response
 
-        result = find_pr_by_branch("comfyanonymous", "ComfyUI", "jtydhr88", "load-3d-nodes")
+        result = find_pr_by_branch("comfyanonymous", "ComfyUI", "testuser", "test-branch")
 
         assert result is not None
-        assert result.number == 123
-        assert result.user == "jtydhr88"
+        assert result.number == 456
+        assert result.title == "Test PR"
+        assert result.user == "testuser"
+        assert result.head_branch == "test-branch"
 
     @patch("requests.get")
     def test_find_pr_by_branch_not_found(self, mock_get):
-        """Test branch not found returns None"""
+        """Test PR not found by branch"""
         mock_response = Mock()
         mock_response.status_code = 200
-        mock_response.json.return_value = []  # Empty list
+        mock_response.json.return_value = []
         mock_get.return_value = mock_response
 
-        result = find_pr_by_branch("comfyanonymous", "ComfyUI", "user", "nonexistent-branch")
+        result = find_pr_by_branch("comfyanonymous", "ComfyUI", "testuser", "nonexistent-branch")
+        assert result is None
+
+    @patch("requests.get")
+    def test_find_pr_by_branch_error(self, mock_get):
+        """Test error when searching PR by branch"""
+        mock_get.side_effect = requests.RequestException("Network error")
+
+        result = find_pr_by_branch("comfyanonymous", "ComfyUI", "testuser", "test-branch")
         assert result is None
 
 

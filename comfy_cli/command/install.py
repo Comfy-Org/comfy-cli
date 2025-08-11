@@ -631,3 +631,172 @@ def find_pr_by_branch(repo_owner: str, repo_name: str, username: str, branch: st
 
     except requests.RequestException:
         return None
+
+
+def verify_node_tools() -> bool:
+    """Verify that Node.js, npm, and vite are available"""
+    try:
+        # Check Node.js
+        node_result = subprocess.run(["node", "--version"], capture_output=True, text=True, check=False)
+        if node_result.returncode != 0:
+            rprint("[bold red]Node.js is not installed.[/bold red]")
+            rprint("[yellow]To use --frontend-pr, please install Node.js first:[/yellow]")
+            rprint("  • Download from: https://nodejs.org/")
+            rprint("  • Or use a package manager:")
+            rprint("    - macOS: brew install node")
+            rprint("    - Ubuntu/Debian: sudo apt install nodejs npm")
+            rprint("    - Windows: winget install OpenJS.NodeJS")
+            return False
+
+        node_version = node_result.stdout.strip()
+        rprint(f"[green]Found Node.js {node_version}[/green]")
+
+        # Check npm
+        npm_result = subprocess.run(["npm", "--version"], capture_output=True, text=True, check=False)
+        if npm_result.returncode != 0:
+            rprint("[bold red]npm is not installed.[/bold red]")
+            rprint("[yellow]npm usually comes with Node.js. Try reinstalling Node.js.[/yellow]")
+            return False
+
+        npm_version = npm_result.stdout.strip()
+        rprint(f"[green]Found npm {npm_version}[/green]")
+
+        return True
+    except FileNotFoundError as e:
+        rprint(f"[bold red]Error checking Node.js tools: {e}[/bold red]")
+        return False
+
+
+def handle_temporary_frontend_pr(frontend_pr: str) -> Optional[str]:
+    """Handle temporary frontend PR for launch - returns path to built frontend"""
+    from comfy_cli.pr_cache import PRCache
+
+    rprint("\n[bold blue]Preparing frontend PR for launch...[/bold blue]")
+
+    # Verify Node.js tools first
+    if not verify_node_tools():
+        rprint("[bold red]Cannot build frontend without Node.js and npm[/bold red]")
+        return None
+
+    # Parse frontend PR reference
+    try:
+        repo_owner, repo_name, pr_number = parse_frontend_pr_reference(frontend_pr)
+    except ValueError as e:
+        rprint(f"[bold red]Error parsing frontend PR reference: {e}[/bold red]")
+        return None
+
+    # Fetch PR info
+    try:
+        if pr_number:
+            pr_info = fetch_pr_info(repo_owner, repo_name, pr_number)
+        else:
+            username, branch = frontend_pr.split(":", 1)
+            pr_info = find_pr_by_branch(repo_owner, repo_name, username, branch)
+
+        if not pr_info:
+            rprint(f"[bold red]Frontend PR not found: {frontend_pr}[/bold red]")
+            return None
+    except Exception as e:
+        rprint(f"[bold red]Error fetching frontend PR information: {e}[/bold red]")
+        return None
+
+    # Check cache first
+    cache = PRCache()
+    cached_path = cache.get_cached_frontend_path(pr_info)
+    if cached_path:
+        rprint(f"[bold green]Using cached frontend build for PR #{pr_info.number}[/bold green]")
+        rprint(f"[bold green]PR #{pr_info.number}: {pr_info.title} by {pr_info.user}[/bold green]")
+        return str(cached_path)
+
+    # Need to build - show PR info
+    console.print(
+        Panel(
+            f"[bold]Frontend PR #{pr_info.number}[/bold]: {pr_info.title}\n"
+            f"[yellow]Author[/yellow]: {pr_info.user}\n"
+            f"[yellow]Branch[/yellow]: {pr_info.head_branch}\n"
+            f"[yellow]Source[/yellow]: {pr_info.head_repo_url}",
+            title="[bold blue]Building Frontend PR[/bold blue]",
+            border_style="blue",
+        )
+    )
+
+    # Build in cache directory
+    cache_path = cache.get_frontend_cache_path(pr_info)
+    cache_path.mkdir(parents=True, exist_ok=True)
+
+    # Clone or update repository
+    repo_path = cache_path / "repo"
+    if not (repo_path / ".git").exists():
+        rprint("Cloning frontend repository...")
+        clone_comfyui(url=pr_info.base_repo_url, repo_dir=str(repo_path))
+
+    # Checkout PR
+    rprint(f"Checking out PR #{pr_info.number}...")
+    success = checkout_pr(str(repo_path), pr_info)
+    if not success:
+        rprint("[bold red]Failed to checkout frontend PR[/bold red]")
+        return None
+
+    # Build frontend
+    rprint("\n[bold yellow]Building frontend (this may take a moment)...[/bold yellow]")
+    original_dir = os.getcwd()
+    try:
+        os.chdir(repo_path)
+
+        # Run npm install
+        rprint("Running npm install...")
+        npm_install = subprocess.run(["npm", "install"], capture_output=True, text=True, check=False)
+        if npm_install.returncode != 0:
+            rprint(f"[bold red]npm install failed:[/bold red]\n{npm_install.stderr}")
+            return None
+
+        # Build with vite
+        rprint("Building with vite...")
+        vite_build = subprocess.run(["npx", "vite", "build"], capture_output=True, text=True, check=False)
+        if vite_build.returncode != 0:
+            rprint(f"[bold red]vite build failed:[/bold red]\n{vite_build.stderr}")
+            return None
+
+        # Check if dist exists
+        dist_path = repo_path / "dist"
+        if dist_path.exists():
+            # Save cache info
+            cache.save_cache_info(pr_info, cache_path)
+            rprint("[bold green]✓ Frontend built and cached successfully[/bold green]")
+            rprint(f"[bold green]Using frontend from PR #{pr_info.number}: {pr_info.title}[/bold green]")
+            rprint(f"[dim]Cache will expire in {cache.DEFAULT_MAX_CACHE_AGE_DAYS} days[/dim]")
+            return str(dist_path)
+        else:
+            rprint("[bold red]Frontend build completed but dist folder not found[/bold red]")
+            return None
+
+    finally:
+        os.chdir(original_dir)
+
+
+def parse_frontend_pr_reference(pr_ref: str) -> tuple[str, str, Optional[int]]:
+    """
+    Parse frontend PR reference. Similar to parse_pr_reference but defaults to Comfy-Org/ComfyUI_frontend
+    """
+    pr_ref = pr_ref.strip()
+
+    if pr_ref.startswith("https://github.com/"):
+        parsed = urlparse(pr_ref)
+        if "/pull/" in parsed.path:
+            path_parts = parsed.path.strip("/").split("/")
+            if len(path_parts) >= 4:
+                repo_owner = path_parts[0]
+                repo_name = path_parts[1]
+                pr_number = int(path_parts[3])
+                return repo_owner, repo_name, pr_number
+
+    elif pr_ref.startswith("#"):
+        pr_number = int(pr_ref[1:])
+        return "Comfy-Org", "ComfyUI_frontend", pr_number
+
+    elif ":" in pr_ref:
+        username, branch = pr_ref.split(":", 1)
+        return "Comfy-Org", "ComfyUI_frontend", None
+
+    else:
+        raise ValueError(f"Invalid frontend PR reference format: {pr_ref}")
