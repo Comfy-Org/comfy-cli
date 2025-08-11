@@ -4,11 +4,12 @@ This module provides functionality for caching built frontend PRs to enable
 quick switching between different PR versions without rebuilding.
 """
 
+from __future__ import annotations
+
 import json
 import shutil
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Dict, List, Optional  # noqa: UP035
 
 from rich import print as rprint
 
@@ -95,7 +96,7 @@ class PRCache:
         # Enforce cache limits after saving new cache
         self.enforce_cache_limits()
 
-    def get_cached_frontend_path(self, pr_info) -> Optional[Path]:
+    def get_cached_frontend_path(self, pr_info) -> Path | None:
         """Get path to cached frontend build if valid"""
         cache_path = self.get_frontend_cache_path(pr_info)
         dist_path = cache_path / "repo" / "dist"
@@ -104,7 +105,7 @@ class PRCache:
             return dist_path
         return None
 
-    def _load_cache_info(self, cache_dir: Path) -> Optional[dict]:
+    def _load_cache_info(self, cache_dir: Path) -> dict | None:
         """Load cache info from a directory."""
         info_path = self.get_cache_info_path(cache_dir)
         if not info_path.exists():
@@ -127,7 +128,7 @@ class PRCache:
                 shutil.rmtree(cache_dir)
                 break
 
-    def clean_frontend_cache(self, pr_number: Optional[int] = None) -> None:
+    def clean_frontend_cache(self, pr_number: int | None = None) -> None:
         """Clean frontend cache (specific PR or all)."""
         frontend_cache = self.cache_dir / "frontend"
         if not frontend_cache.exists():
@@ -145,7 +146,7 @@ class PRCache:
         total_size = sum(f.stat().st_size for f in cache_dir.rglob("*") if f.is_file())
         return total_size / (1024 * 1024)
 
-    def _get_cache_info_with_metadata(self, cache_dir: Path) -> Optional[dict]:
+    def _get_cache_info_with_metadata(self, cache_dir: Path) -> dict | None:
         """Get cache info with additional metadata like path and size."""
         info = self._load_cache_info(cache_dir)
         if info:
@@ -153,7 +154,7 @@ class PRCache:
             info["size_mb"] = self._calculate_cache_size_mb(cache_dir)
         return info
 
-    def list_cached_frontends(self) -> List[Dict]:  # noqa: UP006
+    def list_cached_frontends(self) -> list[dict]:
         """List all cached frontend PRs."""
         frontend_cache = self.cache_dir / "frontend"
         if not frontend_cache.exists():
@@ -177,7 +178,7 @@ class PRCache:
         except (ValueError, TypeError):
             return True  # Consider invalid timestamps as expired
 
-    def _get_expired_items(self, cached_items: List[Dict]) -> List[Dict]:  # noqa: UP006
+    def _get_expired_items(self, cached_items: list[dict]) -> list[dict]:
         """Get list of expired cache items."""
         expired = []
         for item in cached_items:
@@ -186,7 +187,7 @@ class PRCache:
                 expired.append(item)
         return expired
 
-    def _get_excess_items(self, cached_items: List[Dict], expired_items: List[Dict]) -> List[Dict]:  # noqa: UP006
+    def _get_excess_items(self, cached_items: list[dict], expired_items: list[dict]) -> list[dict]:
         """Get list of items that exceed the maximum cache limit."""
         remaining_items = [item for item in cached_items if item not in expired_items]
         if len(remaining_items) > self.max_cache_items:
