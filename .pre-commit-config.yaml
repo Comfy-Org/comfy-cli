@@ -27,3 +27,12 @@ repos:
     hooks:
       - id: pyproject-fmt
         exclude: ^tests/.*$
+
+  - repo: https://github.com/astral-sh/uv-pre-commit
+    rev: 0.8.5
+    hooks:
+      - id: uv-lock
+      - id: uv-export
+        args: [ "--output-file=pylock.toml" ]
+      - id: uv-sync
+        args: [ "--all-extras" ]
