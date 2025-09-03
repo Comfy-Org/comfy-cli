@@ -11,6 +11,7 @@ import typer
 from rich import print as rprint
 from rich.console import Console
 from rich.panel import Panel
+from rich.prompt import Confirm
 
 from comfy_cli import constants, ui, utils
 from comfy_cli.command.custom_nodes.command import update_node_id_cache
@@ -634,7 +635,7 @@ def find_pr_by_branch(repo_owner: str, repo_name: str, username: str, branch: st
 
 
 def verify_node_tools() -> bool:
-    """Verify that Node.js, npm, and vite are available"""
+    """Verify that Node.js, npm, and pnpm are available for frontend building"""
     try:
         # Check Node.js
         node_result = subprocess.run(["node", "--version"], capture_output=True, text=True, check=False)
@@ -651,7 +652,7 @@ def verify_node_tools() -> bool:
         node_version = node_result.stdout.strip()
         rprint(f"[green]Found Node.js {node_version}[/green]")
 
-        # Check npm
+        # Check npm (needed for pnpm installation)
         npm_result = subprocess.run(["npm", "--version"], capture_output=True, text=True, check=False)
         if npm_result.returncode != 0:
             rprint("[bold red]npm is not installed.[/bold red]")
@@ -661,9 +662,49 @@ def verify_node_tools() -> bool:
         npm_version = npm_result.stdout.strip()
         rprint(f"[green]Found npm {npm_version}[/green]")
 
+        # Check pnpm (required for modern frontend)
+        pnpm_result = subprocess.run(["pnpm", "--version"], capture_output=True, text=True, check=False)
+        if pnpm_result.returncode != 0:
+            rprint("[yellow]pnpm is not installed but is required for the modern frontend.[/yellow]")
+
+            # Ask user permission to install pnpm
+            install_pnpm = Confirm.ask(
+                "[bold yellow]Install pnpm automatically using npm?[/bold yellow] (This will run: npm install -g pnpm)"
+            )
+
+            if not install_pnpm:
+                rprint("[bold red]Cannot build frontend without pnpm.[/bold red]")
+                rprint("[yellow]To install manually:[/yellow]")
+                rprint("  npm install -g pnpm")
+                return False
+
+            # Install pnpm
+            rprint("[yellow]Installing pnpm...[/yellow]")
+            install_result = subprocess.run(
+                ["npm", "install", "-g", "pnpm"], capture_output=True, text=True, check=False
+            )
+
+            if install_result.returncode != 0:
+                rprint("[bold red]Failed to install pnpm automatically.[/bold red]")
+                rprint(f"[red]Error: {install_result.stderr}[/red]")
+                rprint("[yellow]Please install manually: npm install -g pnpm[/yellow]")
+                return False
+
+            # Verify pnpm installation
+            verify_result = subprocess.run(["pnpm", "--version"], capture_output=True, text=True, check=False)
+            if verify_result.returncode != 0:
+                rprint("[bold red]pnpm installation failed to verify.[/bold red]")
+                return False
+
+            pnpm_version = verify_result.stdout.strip()
+            rprint(f"[green]Successfully installed pnpm {pnpm_version}[/green]")
+        else:
+            pnpm_version = pnpm_result.stdout.strip()
+            rprint(f"[green]Found pnpm {pnpm_version}[/green]")
+
         return True
     except FileNotFoundError as e:
-        rprint(f"[bold red]Error checking Node.js tools: {e}[/bold red]")
+        rprint(f"[bold red]Error checking frontend tools: {e}[/bold red]")
         return False
 
 
@@ -743,11 +784,11 @@ def handle_temporary_frontend_pr(frontend_pr: str) -> Optional[str]:
     try:
         os.chdir(repo_path)
 
-        # Run npm install
-        rprint("Running npm install...")
-        npm_install = subprocess.run(["npm", "install"], capture_output=True, text=True, check=False)
-        if npm_install.returncode != 0:
-            rprint(f"[bold red]npm install failed:[/bold red]\n{npm_install.stderr}")
+        # Run pnpm install
+        rprint("Running pnpm install...")
+        pnpm_install = subprocess.run(["pnpm", "install"], capture_output=True, text=True, check=False)
+        if pnpm_install.returncode != 0:
+            rprint(f"[bold red]pnpm install failed:[/bold red]\n{pnpm_install.stderr}")
             return None
 
         # Build with vite

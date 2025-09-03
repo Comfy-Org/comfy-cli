@@ -78,8 +78,8 @@ class TestNodeToolsVerification:
 
     @patch("subprocess.run")
     def test_verify_node_tools_success(self, mock_run):
-        """Test successful Node.js and npm verification"""
-        # Mock successful node and npm commands
+        """Test successful Node.js, npm, and pnpm verification"""
+        # Mock successful node, npm, and pnpm commands
         node_result = Mock()
         node_result.returncode = 0
         node_result.stdout = "v18.0.0"
@@ -88,10 +88,14 @@ class TestNodeToolsVerification:
         npm_result.returncode = 0
         npm_result.stdout = "9.0.0"
 
-        mock_run.side_effect = [node_result, npm_result]
+        pnpm_result = Mock()
+        pnpm_result.returncode = 0
+        pnpm_result.stdout = "8.0.0"
+
+        mock_run.side_effect = [node_result, npm_result, pnpm_result]
 
         assert verify_node_tools() is True
-        assert mock_run.call_count == 2
+        assert mock_run.call_count == 3
 
     @patch("subprocess.run")
     def test_verify_node_tools_missing_node(self, mock_run):
@@ -118,6 +122,63 @@ class TestNodeToolsVerification:
 
         assert verify_node_tools() is False
         assert mock_run.call_count == 2
+
+    @patch("rich.prompt.Confirm.ask")
+    @patch("subprocess.run")
+    def test_verify_node_tools_auto_install_pnpm(self, mock_run, mock_confirm):
+        """Test automatic pnpm installation when user agrees"""
+        # Mock successful node and npm
+        node_result = Mock()
+        node_result.returncode = 0
+        node_result.stdout = "v18.0.0"
+
+        npm_result = Mock()
+        npm_result.returncode = 0
+        npm_result.stdout = "9.0.0"
+
+        # Mock pnpm not found initially
+        pnpm_missing = Mock()
+        pnpm_missing.returncode = 1
+
+        # Mock successful pnpm installation
+        install_result = Mock()
+        install_result.returncode = 0
+
+        # Mock pnpm verification after install
+        pnpm_verify = Mock()
+        pnpm_verify.returncode = 0
+        pnpm_verify.stdout = "8.0.0"
+
+        mock_run.side_effect = [node_result, npm_result, pnpm_missing, install_result, pnpm_verify]
+        mock_confirm.return_value = True  # User agrees to install
+
+        assert verify_node_tools() is True
+        assert mock_run.call_count == 5
+        mock_confirm.assert_called_once()
+
+    @patch("rich.prompt.Confirm.ask")
+    @patch("subprocess.run")
+    def test_verify_node_tools_user_declines_pnpm_install(self, mock_run, mock_confirm):
+        """Test when user declines pnpm installation"""
+        # Mock successful node and npm
+        node_result = Mock()
+        node_result.returncode = 0
+        node_result.stdout = "v18.0.0"
+
+        npm_result = Mock()
+        npm_result.returncode = 0
+        npm_result.stdout = "9.0.0"
+
+        # Mock pnpm not found
+        pnpm_missing = Mock()
+        pnpm_missing.returncode = 1
+
+        mock_run.side_effect = [node_result, npm_result, pnpm_missing]
+        mock_confirm.return_value = False  # User declines install
+
+        assert verify_node_tools() is False
+        assert mock_run.call_count == 3
+        mock_confirm.assert_called_once()
 
     @patch("subprocess.run")
     def test_verify_node_tools_file_not_found(self, mock_run):
