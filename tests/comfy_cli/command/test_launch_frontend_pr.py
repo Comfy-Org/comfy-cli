@@ -108,7 +108,7 @@ class TestLaunchWithFrontendPR:
 
         # Mock successful build
         mock_run.side_effect = [
-            Mock(returncode=0),  # npm install
+            Mock(returncode=0),  # pnpm install
             Mock(returncode=0),  # vite build
         ]
 
