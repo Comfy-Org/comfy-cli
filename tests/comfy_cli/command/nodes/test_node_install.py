@@ -1,25 +1,35 @@
+import re
 from unittest.mock import patch
 
 from typer.testing import CliRunner
 
 from comfy_cli.command.custom_nodes.command import app
 
-runner = CliRunner()
+runner = CliRunner(mix_stderr=False)
+
+
+def strip_ansi(text):
+    """Remove ANSI escape sequences from text."""
+    ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
+    return ansi_escape.sub('', text)
 
 
 def test_install_no_deps_option_exists():
     """Test that the --no-deps option appears in the help."""
     result = runner.invoke(app, ["install", "--help"])
     assert result.exit_code == 0
-    assert "--no-deps" in result.stdout
-    assert "Skip dependency installation" in result.stdout
+    clean_output = strip_ansi(result.stdout)
+    assert "--no-deps" in clean_output
+    assert "Skip dependency installation" in clean_output
 
 
 def test_install_fast_deps_and_no_deps_mutually_exclusive():
     """Test that --fast-deps and --no-deps cannot be used together."""
     result = runner.invoke(app, ["install", "test-node", "--fast-deps", "--no-deps"])
     assert result.exit_code != 0
-    assert "Cannot use --fast-deps and --no-deps together" in result.stdout
+    # Check both stdout and stderr for the error message
+    output = result.stdout + result.stderr
+    assert "Cannot use --fast-deps and --no-deps together" in output
 
 
 def test_install_no_deps_alone_works():
