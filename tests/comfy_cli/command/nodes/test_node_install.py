@@ -10,8 +10,8 @@ runner = CliRunner(mix_stderr=False)
 
 def strip_ansi(text):
     """Remove ANSI escape sequences from text."""
-    ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
-    return ansi_escape.sub('', text)
+    ansi_escape = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
+    return ansi_escape.sub("", text)
 
 
 def test_install_no_deps_option_exists():
