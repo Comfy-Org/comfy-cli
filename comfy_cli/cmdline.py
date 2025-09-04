@@ -22,7 +22,6 @@ from comfy_cli.env_checker import EnvChecker
 from comfy_cli.standalone import StandalonePython
 from comfy_cli.update import check_for_updates
 from comfy_cli.uv import DependencyCompiler
-from comfy_cli.validators import MutuallyExclusiveValidator
 from comfy_cli.workspace_manager import WorkspaceManager, check_comfy_repo
 
 logging.setup_logging()
@@ -34,6 +33,22 @@ console = Console()
 
 def main():
     app()
+
+
+class MutuallyExclusiveValidator:
+    def __init__(self):
+        self.group = []
+
+    def reset_for_testing(self):
+        self.group.clear()
+
+    def validate(self, _ctx: typer.Context, param: typer.CallbackParam, value: str):
+        # Add cli option to group if it was called with a value
+        if value is not None and param.name not in self.group:
+            self.group.append(param.name)
+        if len(self.group) > 1:
+            raise typer.BadParameter(f"option `{param.name}` is mutually exclusive with option `{self.group.pop()}`")
+        return value
 
 
 g_exclusivity = MutuallyExclusiveValidator()
