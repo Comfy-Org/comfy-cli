@@ -21,7 +21,7 @@ _dependency_cmds = {
 }
 
 
-def execute_cm_cli(args, channel=None, fast_deps=False, mode=None) -> str | None:
+def execute_cm_cli(args, channel=None, fast_deps=False, no_deps=False, mode=None) -> str | None:
     _config_manager = ConfigManager()
 
     workspace_path = workspace_manager.workspace_path
@@ -43,7 +43,7 @@ def execute_cm_cli(args, channel=None, fast_deps=False, mode=None) -> str | None
     if channel is not None:
         cmd += ["--channel", channel]
 
-    if fast_deps:
+    if fast_deps or no_deps:
         cmd += ["--no-deps"]
 
     if mode is not None:
@@ -55,7 +55,7 @@ def execute_cm_cli(args, channel=None, fast_deps=False, mode=None) -> str | None
     new_env["COMFYUI_PATH"] = workspace_path
 
     print(f"Execute from: {workspace_path}")
-
+    print(f"Command: {cmd}")
     try:
         result = subprocess.run(
             cmd, env=new_env, check=True, capture_output=True, text=True, encoding="utf-8", errors="replace"

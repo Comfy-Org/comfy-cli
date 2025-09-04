@@ -26,6 +26,7 @@ from comfy_cli.registry import (
     extract_node_configuration,
     initialize_project_config,
 )
+from comfy_cli.validators import MutuallyExclusiveValidator
 from comfy_cli.workspace_manager import WorkspaceManager
 
 console = Console()
@@ -34,6 +35,9 @@ app.add_typer(bisect_app, name="bisect", help="Bisect custom nodes for culprit n
 manager_app = typer.Typer()
 workspace_manager = WorkspaceManager()
 registry_api = RegistryAPI()
+
+# Global validator for mutually exclusive dependency options
+g_deps_exclusivity = MutuallyExclusiveValidator()
 
 
 def validate_comfyui_manager(_env_checker):
@@ -398,6 +402,16 @@ def install(
             "--fast-deps",
             show_default=False,
             help="Use new fast dependency installer",
+            callback=g_deps_exclusivity.validate,
+        ),
+    ] = False,
+    no_deps: Annotated[
+        bool,
+        typer.Option(
+            "--no-deps",
+            show_default=False,
+            help="Skip dependency installation",
+            callback=g_deps_exclusivity.validate,
         ),
     ] = False,
     exit_on_fail: Annotated[
@@ -424,7 +438,7 @@ def install(
     else:
         cmd = ["install"] + nodes
 
-    execute_cm_cli(cmd, channel=channel, fast_deps=fast_deps, mode=mode)
+    execute_cm_cli(cmd, channel=channel, fast_deps=fast_deps, no_deps=no_deps, mode=mode)
 
 
 @app.command(help="Reinstall custom nodes")
