@@ -400,6 +400,14 @@ def install(
             help="Use new fast dependency installer",
         ),
     ] = False,
+    no_deps: Annotated[
+        bool,
+        typer.Option(
+            "--no-deps",
+            show_default=False,
+            help="Skip dependency installation",
+        ),
+    ] = False,
     exit_on_fail: Annotated[
         bool,
         typer.Option(
@@ -417,6 +425,10 @@ def install(
         typer.echo(f"Invalid command: {mode}. `install all` is not allowed", err=True)
         raise typer.Exit(code=1)
 
+    if fast_deps and no_deps:
+        typer.echo("Cannot use --fast-deps and --no-deps together", err=True)
+        raise typer.Exit(code=1)
+
     validate_mode(mode)
 
     if exit_on_fail:
@@ -424,7 +436,7 @@ def install(
     else:
         cmd = ["install"] + nodes
 
-    execute_cm_cli(cmd, channel=channel, fast_deps=fast_deps, mode=mode)
+    execute_cm_cli(cmd, channel=channel, fast_deps=fast_deps, no_deps=no_deps, mode=mode)
 
 
 @app.command(help="Reinstall custom nodes")
