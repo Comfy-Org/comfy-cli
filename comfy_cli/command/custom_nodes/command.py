@@ -26,7 +26,6 @@ from comfy_cli.registry import (
     extract_node_configuration,
     initialize_project_config,
 )
-from comfy_cli.validators import MutuallyExclusiveValidator
 from comfy_cli.workspace_manager import WorkspaceManager
 
 console = Console()
@@ -35,9 +34,6 @@ app.add_typer(bisect_app, name="bisect", help="Bisect custom nodes for culprit n
 manager_app = typer.Typer()
 workspace_manager = WorkspaceManager()
 registry_api = RegistryAPI()
-
-# Global validator for mutually exclusive dependency options
-g_deps_exclusivity = MutuallyExclusiveValidator()
 
 
 def validate_comfyui_manager(_env_checker):
@@ -402,7 +398,6 @@ def install(
             "--fast-deps",
             show_default=False,
             help="Use new fast dependency installer",
-            callback=g_deps_exclusivity.validate,
         ),
     ] = False,
     no_deps: Annotated[
@@ -411,7 +406,6 @@ def install(
             "--no-deps",
             show_default=False,
             help="Skip dependency installation",
-            callback=g_deps_exclusivity.validate,
         ),
     ] = False,
     exit_on_fail: Annotated[
@@ -429,6 +423,10 @@ def install(
 ):
     if "all" in nodes:
         typer.echo(f"Invalid command: {mode}. `install all` is not allowed", err=True)
+        raise typer.Exit(code=1)
+
+    if fast_deps and no_deps:
+        typer.echo("Cannot use --fast-deps and --no-deps together", err=True)
         raise typer.Exit(code=1)
 
     validate_mode(mode)
