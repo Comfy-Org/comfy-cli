@@ -637,75 +637,101 @@ def find_pr_by_branch(repo_owner: str, repo_name: str, username: str, branch: st
 def verify_node_tools() -> bool:
     """Verify that Node.js, npm, and pnpm are available for frontend building"""
     try:
-        # Check Node.js
         node_result = subprocess.run(["node", "--version"], capture_output=True, text=True, check=False)
-        if node_result.returncode != 0:
-            rprint("[bold red]Node.js is not installed.[/bold red]")
-            rprint("[yellow]To use --frontend-pr, please install Node.js first:[/yellow]")
-            rprint("  • Download from: https://nodejs.org/")
-            rprint("  • Or use a package manager:")
-            rprint("    - macOS: brew install node")
-            rprint("    - Ubuntu/Debian: sudo apt install nodejs npm")
-            rprint("    - Windows: winget install OpenJS.NodeJS")
-            return False
-
-        node_version = node_result.stdout.strip()
-        rprint(f"[green]Found Node.js {node_version}[/green]")
-
-        # Check npm (needed for pnpm installation)
-        npm_result = subprocess.run(["npm", "--version"], capture_output=True, text=True, check=False)
-        if npm_result.returncode != 0:
-            rprint("[bold red]npm is not installed.[/bold red]")
-            rprint("[yellow]npm usually comes with Node.js. Try reinstalling Node.js.[/yellow]")
-            return False
-
-        npm_version = npm_result.stdout.strip()
-        rprint(f"[green]Found npm {npm_version}[/green]")
-
-        # Check pnpm (required for modern frontend)
-        pnpm_result = subprocess.run(["pnpm", "--version"], capture_output=True, text=True, check=False)
-        if pnpm_result.returncode != 0:
-            rprint("[yellow]pnpm is not installed but is required for the modern frontend.[/yellow]")
-
-            # Ask user permission to install pnpm
-            install_pnpm = Confirm.ask(
-                "[bold yellow]Install pnpm automatically using npm?[/bold yellow] (This will run: npm install -g pnpm)"
-            )
-
-            if not install_pnpm:
-                rprint("[bold red]Cannot build frontend without pnpm.[/bold red]")
-                rprint("[yellow]To install manually:[/yellow]")
-                rprint("  npm install -g pnpm")
-                return False
-
-            # Install pnpm
-            rprint("[yellow]Installing pnpm...[/yellow]")
-            install_result = subprocess.run(
-                ["npm", "install", "-g", "pnpm"], capture_output=True, text=True, check=False
-            )
-
-            if install_result.returncode != 0:
-                rprint("[bold red]Failed to install pnpm automatically.[/bold red]")
-                rprint(f"[red]Error: {install_result.stderr}[/red]")
-                rprint("[yellow]Please install manually: npm install -g pnpm[/yellow]")
-                return False
-
-            # Verify pnpm installation
-            verify_result = subprocess.run(["pnpm", "--version"], capture_output=True, text=True, check=False)
-            if verify_result.returncode != 0:
-                rprint("[bold red]pnpm installation failed to verify.[/bold red]")
-                return False
-
-            pnpm_version = verify_result.stdout.strip()
-            rprint(f"[green]Successfully installed pnpm {pnpm_version}[/green]")
-        else:
-            pnpm_version = pnpm_result.stdout.strip()
-            rprint(f"[green]Found pnpm {pnpm_version}[/green]")
-
-        return True
-    except FileNotFoundError as e:
-        rprint(f"[bold red]Error checking frontend tools: {e}[/bold red]")
+    except FileNotFoundError:
+        rprint("[bold red]Node.js is not installed or not found in PATH.[/bold red]")
+        rprint("[yellow]To use --frontend-pr, please install Node.js first:[/yellow]")
+        rprint("  • Download from: https://nodejs.org/")
+        rprint("  • Or use a package manager:")
+        rprint("    - macOS: brew install node")
+        rprint("    - Ubuntu/Debian: sudo apt install nodejs npm")
+        rprint("    - Windows: winget install OpenJS.NodeJS")
         return False
+
+    if node_result.returncode != 0:
+        rprint("[bold red]Node.js is not installed or not working correctly.[/bold red]")
+        rprint("[yellow]To use --frontend-pr, please install Node.js first:[/yellow]")
+        rprint("  • Download from: https://nodejs.org/")
+        rprint("  • Or use a package manager:")
+        rprint("    - macOS: brew install node")
+        rprint("    - Ubuntu/Debian: sudo apt install nodejs npm")
+        rprint("    - Windows: winget install OpenJS.NodeJS")
+        return False
+
+    node_version = (node_result.stdout or node_result.stderr or "").strip()
+    if node_version:
+        rprint(f"[green]Found Node.js {node_version}[/green]")
+    else:
+        rprint("[green]Found Node.js[/green]")
+
+    try:
+        npm_result = subprocess.run(["npm", "--version"], capture_output=True, text=True, check=False)
+    except FileNotFoundError:
+        rprint("[bold red]npm is not installed or not found in PATH.[/bold red]")
+        rprint("[yellow]npm usually comes with Node.js. Try reinstalling Node.js.[/yellow]")
+        return False
+
+    if npm_result.returncode != 0:
+        rprint("[bold red]npm is not installed or not working correctly.[/bold red]")
+        rprint("[yellow]npm usually comes with Node.js. Try reinstalling Node.js.[/yellow]")
+        return False
+
+    npm_version = npm_result.stdout.strip()
+    if npm_version:
+        rprint(f"[green]Found npm {npm_version}[/green]")
+    else:
+        rprint("[green]Found npm[/green]")
+
+    try:
+        pnpm_result = subprocess.run(["pnpm", "--version"], capture_output=True, text=True, check=False)
+        if pnpm_result.returncode == 0:
+            pnpm_version = pnpm_result.stdout.strip()
+            if pnpm_version:
+                rprint(f"[green]Found pnpm {pnpm_version}[/green]")
+            else:
+                rprint("[green]Found pnpm[/green]")
+            return True
+    except FileNotFoundError:
+        pass
+
+    rprint("[yellow]pnpm is not installed but is required for the modern frontend.[/yellow]")
+
+    install_pnpm = Confirm.ask(
+        "[bold yellow]Install pnpm automatically using npm?[/bold yellow] (This will run: npm install -g pnpm)"
+    )
+    if not install_pnpm:
+        rprint("[bold red]Cannot build frontend without pnpm.[/bold red]")
+        rprint("[yellow]To install manually:[/yellow]")
+        rprint("  npm install -g pnpm")
+        return False
+
+    rprint("[yellow]Installing pnpm...[/yellow]")
+    install_result = subprocess.run(["npm", "install", "-g", "pnpm"], capture_output=True, text=True, check=False)
+
+    if install_result.returncode != 0:
+        rprint("[bold red]Failed to install pnpm automatically.[/bold red]")
+        rprint(f"[red]Error: {install_result.stderr}[/red]")
+        rprint("[yellow]Please install manually: npm install -g pnpm[/yellow]")
+        return False
+
+    try:
+        verify_result = subprocess.run(["pnpm", "--version"], capture_output=True, text=True, check=False)
+    except FileNotFoundError:
+        rprint("[bold red]pnpm installation succeeded but pnpm was not found on PATH.[/bold red]")
+        rprint(
+            "[yellow]Try restarting your shell or add npm global bin to PATH, then verify with: pnpm --version[/yellow]"
+        )
+        return False
+
+    if verify_result.returncode != 0:
+        rprint("[bold red]pnpm installation failed to verify.[/bold red]")
+        if verify_result.stderr:
+            rprint(f"[red]{verify_result.stderr.strip()}[/red]")
+        return False
+
+    pnpm_version = verify_result.stdout.strip()
+    rprint(f"[green]Successfully installed pnpm {pnpm_version}[/green]")
+    return True
 
 
 def handle_temporary_frontend_pr(frontend_pr: str) -> Optional[str]:
