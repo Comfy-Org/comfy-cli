@@ -21,7 +21,7 @@ _dependency_cmds = {
 }
 
 
-def execute_cm_cli(args, channel=None, fast_deps=False, no_deps=False, mode=None) -> str | None:
+def execute_cm_cli(args, channel=None, fast_deps=False, no_deps=False, mode=None, raise_on_error=False) -> str | None:
     _config_manager = ConfigManager()
 
     workspace_path = workspace_manager.workspace_path
@@ -70,6 +70,13 @@ def execute_cm_cli(args, channel=None, fast_deps=False, no_deps=False, mode=None
 
         return result.stdout
     except subprocess.CalledProcessError as e:
+        if raise_on_error:
+            if e.stdout:
+                print(e.stdout)
+            if e.stderr:
+                print(e.stderr, file=sys.stderr)
+            raise e
+
         if e.returncode == 1:
             print(f"\n[bold red]Execution error: {cmd}[/bold red]\n", file=sys.stderr)
             return None

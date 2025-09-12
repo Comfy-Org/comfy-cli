@@ -436,7 +436,11 @@ def install(
     else:
         cmd = ["install"] + nodes
 
-    execute_cm_cli(cmd, channel=channel, fast_deps=fast_deps, no_deps=no_deps, mode=mode)
+    try:
+        execute_cm_cli(cmd, channel=channel, fast_deps=fast_deps, no_deps=no_deps, mode=mode, raise_on_error=exit_on_fail)
+    except subprocess.CalledProcessError as e:
+        if exit_on_fail:
+            raise typer.Exit(code=e.returncode)
 
 
 @app.command(help="Reinstall custom nodes")
