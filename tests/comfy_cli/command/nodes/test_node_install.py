@@ -1,4 +1,5 @@
 import re
+import subprocess
 from unittest.mock import patch
 
 from typer.testing import CliRunner
@@ -96,3 +97,24 @@ def test_multiple_commands_work_independently():
         result2 = runner.invoke(app, ["install", "test-node2", "--fast-deps"])
         if result2.exit_code != 0:
             assert "Cannot use --fast-deps and --no-deps together" not in result2.stdout
+
+
+def test_install_exit_on_fail_reraises_and_propagates_code():
+    """
+    When --exit-on-fail is used and the underlying cm-cli install fails,
+    the CalledProcessError is re-raised and the Typer command exits with the same code.
+    """
+    with patch("comfy_cli.command.custom_nodes.command.execute_cm_cli") as mock_execute:
+        # Simulate ComfyUI-Manager's cm-cli failing with a nonzero return code
+        mock_execute.side_effect = subprocess.CalledProcessError(7, "cm-cli")
+
+        result = runner.invoke(app, ["install", "bad-node", "--exit-on-fail"])
+
+        # Typer should exit with the original return code
+        assert result.exit_code == 7
+
+        # Ensure we asked execute_cm_cli to raise on error and forwarded flags correctly
+        assert mock_execute.called
+        args, kwargs = mock_execute.call_args
+        assert kwargs.get("raise_on_error") is True
+        assert args[0][0] == "install" and "--exit-on-fail" in args[0] and "bad-node" in args[0]
