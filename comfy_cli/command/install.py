@@ -13,7 +13,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.prompt import Confirm
 
-from comfy_cli import constants, ui, utils
+from comfy_cli import constants, ui
 from comfy_cli.command.custom_nodes.command import update_node_id_cache
 from comfy_cli.command.github.pr_info import PRInfo
 from comfy_cli.constants import GPU_OPTION
@@ -103,7 +103,7 @@ def pip_install_comfyui_dependencies(
                 "--extra-index-url",
                 "https://download.pytorch.org/whl/xpu",
             ]
-            
+
             # TODO: wrap pip install in a function
             result = subprocess.run(
                 [
