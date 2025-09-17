@@ -13,7 +13,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.prompt import Confirm
 
-from comfy_cli import constants, ui, utils
+from comfy_cli import constants, ui
 from comfy_cli.command.custom_nodes.command import update_node_id_cache
 from comfy_cli.command.github.pr_info import PRInfo
 from comfy_cli.constants import GPU_OPTION
@@ -96,28 +96,24 @@ def pip_install_comfyui_dependencies(
                 base_command,
                 check=False,
             )
-        # Beta support for intel arch based on this PR: https://github.com/comfyanonymous/ComfyUI/pull/3439
+        # Update installation to use upstream torch xpu. ipex is no longer needed for Intel Arc GPUs
+        # https://github.com/comfyanonymous/ComfyUI/pull/7767
         if gpu == GPU_OPTION.INTEL_ARC:
             pip_url = [
                 "--extra-index-url",
-                "https://pytorch-extension.intel.com/release-whl/stable/xpu/us/",
+                "https://download.pytorch.org/whl/xpu",
             ]
-            utils.install_conda_package("libuv")
+
             # TODO: wrap pip install in a function
-            subprocess.run(
-                [sys.executable, "-m", "pip", "install", "mkl", "mkl-dpcpp"],
-                check=True,
-            )
             result = subprocess.run(
                 [
                     sys.executable,
                     "-m",
                     "pip",
                     "install",
-                    "torch==2.1.0.post2",
-                    "torchvision==0.16.0.post2",
-                    "torchaudio==2.1.0.post2",
-                    "intel-extension-for-pytorch==2.1.30",
+                    "torch",
+                    "torchvision",
+                    "torchaudio",
                 ]
                 + pip_url,
                 check=False,
