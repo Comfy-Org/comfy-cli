@@ -55,7 +55,7 @@ def check_unauthorized(url: str, headers: Optional[dict] = None) -> bool:
         bool: True if the response status code is 401, False otherwise.
     """
     try:
-        response = requests.get(url, headers=headers, allow_redirects=True)
+        response = requests.get(url, headers=headers, allow_redirects=True, stream=True)
         return response.status_code == 401
     except requests.RequestException:
         # If there's an error making the request, we can't determine if it's unauthorized
