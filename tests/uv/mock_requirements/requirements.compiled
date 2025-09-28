@@ -3,6 +3,11 @@
 --index-url https://pypi.org/simple
 --extra-index-url https://download.pytorch.org/whl/rocm6.1
 
+colorama==0.4.6
+    # via
+    #   --override override.txt
+    #   tqdm
+    # from https://download.pytorch.org/whl/rocm6.1
 mpmath==1.3.0
     # via
     #   -r /home/tel/git/comfy-cli/tests/uv/mock_requirements/y_reqs.txt

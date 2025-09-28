@@ -3,7 +3,7 @@ import os
 import pathlib
 import subprocess
 import zipfile
-from typing import List, Optional, Union
+from typing import Optional, Union
 
 import httpx
 import requests
@@ -92,7 +92,7 @@ def _load_comfyignore_spec(ignore_filename: str = ".comfyignore") -> Optional[Pa
     if not os.path.exists(ignore_filename):
         return None
     try:
-        with open(ignore_filename, "r", encoding="utf-8") as ignore_file:
+        with open(ignore_filename, encoding="utf-8") as ignore_file:
             patterns = [
                 line.strip()
                 for line in ignore_file
@@ -107,7 +107,7 @@ def _load_comfyignore_spec(ignore_filename: str = ".comfyignore") -> Optional[Pa
     return PathSpec.from_lines("gitwildmatch", patterns)
 
 
-def list_git_tracked_files(base_path: Union[str, os.PathLike] = ".") -> List[str]:
+def list_git_tracked_files(base_path: Union[str, os.PathLike] = ".") -> list[str]:
     try:
         result = subprocess.check_output(
             ["git", "-C", os.fspath(base_path), "ls-files"],
@@ -126,7 +126,7 @@ def _normalize_path(path: str) -> str:
     return rel_path.replace("\\", "/")
 
 
-def _is_force_included(rel_path: str, include_prefixes: List[str]) -> bool:
+def _is_force_included(rel_path: str, include_prefixes: list[str]) -> bool:
     return any(
         rel_path == prefix or rel_path.startswith(prefix + "/")
         for prefix in include_prefixes
@@ -137,7 +137,7 @@ def _is_force_included(rel_path: str, include_prefixes: List[str]) -> bool:
 def zip_files(zip_filename, includes=None):
     """Zip git-tracked files respecting optional .comfyignore patterns."""
     includes = includes or []
-    include_prefixes: List[str] = [
+    include_prefixes: list[str] = [
         _normalize_path(os.path.normpath(include.lstrip("/")))
         for include in includes
     ]
