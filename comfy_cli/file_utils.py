@@ -93,11 +93,7 @@ def _load_comfyignore_spec(ignore_filename: str = ".comfyignore") -> Optional[Pa
         return None
     try:
         with open(ignore_filename, encoding="utf-8") as ignore_file:
-            patterns = [
-                line.strip()
-                for line in ignore_file
-                if line.strip() and not line.lstrip().startswith("#")
-            ]
+            patterns = [line.strip() for line in ignore_file if line.strip() and not line.lstrip().startswith("#")]
     except OSError:
         return None
 
@@ -127,20 +123,13 @@ def _normalize_path(path: str) -> str:
 
 
 def _is_force_included(rel_path: str, include_prefixes: list[str]) -> bool:
-    return any(
-        rel_path == prefix or rel_path.startswith(prefix + "/")
-        for prefix in include_prefixes
-        if prefix
-    )
+    return any(rel_path == prefix or rel_path.startswith(prefix + "/") for prefix in include_prefixes if prefix)
 
 
 def zip_files(zip_filename, includes=None):
     """Zip git-tracked files respecting optional .comfyignore patterns."""
     includes = includes or []
-    include_prefixes: list[str] = [
-        _normalize_path(os.path.normpath(include.lstrip("/")))
-        for include in includes
-    ]
+    include_prefixes: list[str] = [_normalize_path(os.path.normpath(include.lstrip("/"))) for include in includes]
 
     included_paths: set[str] = set()
     git_files: list[str] = []
@@ -185,11 +174,7 @@ def zip_files(zip_filename, includes=None):
             for root, dirs, files in os.walk("."):
                 if ".git" in dirs:
                     dirs.remove(".git")
-                dirs[:] = [
-                    d
-                    for d in dirs
-                    if not should_ignore(_normalize_path(os.path.join(root, d)))
-                ]
+                dirs[:] = [d for d in dirs if not should_ignore(_normalize_path(os.path.join(root, d)))]
                 for file in files:
                     file_path = os.path.join(root, file)
                     rel_path = _normalize_path(file_path)
@@ -215,9 +200,7 @@ def zip_files(zip_filename, includes=None):
                 continue
 
             if not os.path.exists(include_dir):
-                print(
-                    f"Warning: Included directory '{include_dir}' does not exist, creating empty directory"
-                )
+                print(f"Warning: Included directory '{include_dir}' does not exist, creating empty directory")
                 arcname = rel_include or include_dir
                 if not arcname.endswith("/"):
                     arcname = arcname + "/"
@@ -225,11 +208,7 @@ def zip_files(zip_filename, includes=None):
                 continue
 
             for root, dirs, files in os.walk(include_dir):
-                dirs[:] = [
-                    d
-                    for d in dirs
-                    if not should_ignore(_normalize_path(os.path.join(root, d)))
-                ]
+                dirs[:] = [d for d in dirs if not should_ignore(_normalize_path(os.path.join(root, d)))]
                 for file in files:
                     file_path = os.path.join(root, file)
                     rel_path = _normalize_path(file_path)
