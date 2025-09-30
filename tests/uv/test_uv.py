@@ -67,4 +67,13 @@ def test_compile(mock_prompt_select):
             [line for line in known.readlines() if not line.strip().startswith("#")],
             [line for line in test.readlines() if not line.strip().startswith("#")],
         ]
+
+        optionalPrefixes = ("colorama==",)
+
+        def _filter_optional(lines: list[str]) -> list[str]:
+            # drop platform-specific extras (Windows pulls in colorama via tqdm)
+            return [line for line in lines if not any(line.strip().startswith(prefix) for prefix in optionalPrefixes)]
+
+        knownLines, testLines = [_filter_optional(lines) for lines in (knownLines, testLines)]
+
         assert knownLines == testLines
