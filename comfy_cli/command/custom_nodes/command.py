@@ -942,7 +942,7 @@ def registry_install(
 
 @app.command(
     "pack",
-    help="Pack the current node into a zip file. Ignorining .gitignore files.",
+    help="Pack the current node into a zip file using git-tracked files and honoring .comfyignore patterns.",
 )
 @tracking.track_command("pack")
 def pack():

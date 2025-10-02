@@ -11,6 +11,11 @@ def test_valid_model_url_with_version():
     assert check_civitai_url(url) == (True, False, 43331, None)
 
 
+def test_valid_model_url_with_version_and_additional_segments():
+    url = "https://civitai.com/models/43331/majicmix-realistic/extra"
+    assert check_civitai_url(url) == (True, False, 43331, None)
+
+
 def test_valid_model_url_with_query():
     url = "https://civitai.com/models/43331?version=12345"
     assert check_civitai_url(url) == (True, False, 43331, 12345)
@@ -31,8 +36,73 @@ def test_malformed_url():
     assert check_civitai_url(url) == (False, False, None, None)
 
 
+def test_invalid_model_id_url():
+    url = "https://civitai.com/models/invalid_id"
+    assert check_civitai_url(url) == (False, False, None, None)
+
+
 def test_malformed_query_url():
     url = "https://civitai.com/models/43331?version="
+    assert check_civitai_url(url) == (True, False, 43331, None)
+
+
+def test_model_url_with_model_version_id_query():
+    url = "https://civitai.com/models/43331?modelVersionId=485088"
+    assert check_civitai_url(url) == (True, False, 43331, 485088)
+
+
+def test_model_url_with_model_version_id_invalid():
+    url = "https://civitai.com/models/43331?modelVersionId=abc"
+    assert check_civitai_url(url) == (True, False, 43331, None)
+
+
+def test_valid_api_v1_model_versions_url():
+    url = "https://civitai.com/api/v1/model-versions/1617665"
+    assert check_civitai_url(url) == (False, True, None, 1617665)
+
+
+def test_valid_api_v1_model_versions_camelcase_segment():
+    url = "https://civitai.com/api/v1/modelVersions/1617665"
+    assert check_civitai_url(url) == (False, True, None, 1617665)
+
+
+def test_valid_api_download_with_query_params():
+    url = "https://civitai.com/api/download/models/1617665?type=Model&format=SafeTensor"
+    assert check_civitai_url(url) == (False, True, None, 1617665)
+
+
+def test_api_download_trailing_slash_is_ok():
+    url = "https://civitai.com/api/download/models/1617665/"
+    assert check_civitai_url(url) == (False, True, None, 1617665)
+
+
+def test_api_download_non_numeric_id_models_version():
+    url = "https://civitai.com/api/v1/modelVersions/notanumber"
+    assert check_civitai_url(url) == (False, True, None, None)
+
+
+def test_api_download_non_numeric_id():
+    url = "https://civitai.com/api/download/models/notanumber"
+    assert check_civitai_url(url) == (False, True, None, None)
+
+
+def test_model_url_with_slug_and_query():
+    url = "https://civitai.com/models/43331/majicmix-realistic?modelVersionId=485088"
+    assert check_civitai_url(url) == (True, False, 43331, 485088)
+
+
+def test_www_subdomain_is_accepted():
+    url = "https://www.civitai.com/models/43331?version=12345"
+    assert check_civitai_url(url) == (True, False, 43331, 12345)
+
+
+def test_completly_mailformed_civitai_url():
+    url = "https://civitai.com/"
+    assert check_civitai_url(url) == (False, False, None, None)
+
+
+def test_non_evil_civitai_url():
+    url = "https://evilcivitai.com/models/43331?version=12345"
     assert check_civitai_url(url) == (False, False, None, None)
 
 

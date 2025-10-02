@@ -1,8 +1,9 @@
+import contextlib
 import os
 import pathlib
 import sys
 from typing import Annotated, Optional
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 import requests
 import typer
@@ -74,39 +75,65 @@ def check_huggingface_url(url: str) -> tuple[bool, Optional[str], Optional[str],
     return True, repo_id, filename, folder_name, branch_name
 
 
-def check_civitai_url(url: str) -> tuple[bool, bool, int, int]:
+def check_civitai_url(url: str) -> tuple[bool, bool, Optional[int], Optional[int]]:
     """
     Returns:
-        is_civitai_model_url: True if the url is a civitai model url
-        is_civitai_api_url: True if the url is a civitai api url
-        model_id: The model id or None if it's api url
-        version_id: The version id or None if it doesn't have version id info
+        is_civitai_model_url: True if the url is a civitai *web* model url (e.g. /models/12345)
+        is_civitai_api_url: True if the url is a civitai *api* url useful for resolving downloads
+        model_id: The model id (for /models/*), else None
+        version_id: The version id (for /api/download/models/* or ?modelVersionId=), else None
     """
-    prefix = "civitai.com"
     try:
-        if prefix in url:
-            # URL is civitai api download url: https://civitai.com/api/download/models/12345
-            if "civitai.com/api/download" in url:
-                # This is a direct download link
-                version_id = url.strip("/").split("/")[-1]
-                return False, True, None, int(version_id)
+        parsed = urlparse(url)
+        host = (parsed.hostname or "").lower()
+        if host != "civitai.com" and not host.endswith(".civitai.com"):
+            return False, False, None, None
+        p_parts = [p for p in parsed.path.split("/") if p]
+        query = parse_qs(parsed.query)
 
-            # URL is civitai web url (e.g.
-            #   - https://civitai.com/models/43331
-            #   - https://civitai.com/models/43331/majicmix-realistic
-            subpath = url[url.find(prefix) + len(prefix) :].strip("/")
-            url_parts = subpath.split("?")
-            if len(url_parts) > 1:
-                model_id = url_parts[0].split("/")[1]
-                version_id = url_parts[1].split("=")[1]
-                return True, False, int(model_id), int(version_id)
-            else:
-                model_id = subpath.split("/")[1]
-                return True, False, int(model_id), None
-    except (ValueError, IndexError):
+        if len(p_parts) >= 4 and p_parts[0] == "api":
+            # Case 1: /api/download/models/<version_id>
+            # e.g. https://civitai.com/api/download/models/1617665?type=Model&format=SafeTensor
+            if p_parts[1] == "download" and p_parts[2] == "models":
+                try:
+                    version_id = int(p_parts[3])
+                    return False, True, None, version_id
+                except ValueError:
+                    return False, True, None, None
+
+            # Case 2: /api/v1/model-versions/<version_id>
+            if p_parts[1] == "v1" and p_parts[2] in ("model-versions", "modelVersions"):
+                try:
+                    version_id = int(p_parts[3])
+                    return False, True, None, version_id
+                except ValueError:
+                    return False, True, None, None
+
+        # Case 3: /models/<model_id>[/*] with optional ?modelVersionId=<id>
+        # e.g. https://civitai.com/models/43331
+        #      https://civitai.com/models/43331/majicmix-realistic?modelVersionId=485088
+        if len(p_parts) >= 2 and p_parts[0] == "models":
+            try:
+                model_id = int(p_parts[1])
+            except ValueError:
+                return False, False, None, None
+            version_id = None
+            mv = query.get("modelVersionId")
+            if mv and len(mv) > 0:
+                with contextlib.suppress(ValueError):
+                    version_id = int(mv[0])
+            if version_id is None:
+                mv = query.get("version")
+                if mv and len(mv) > 0:
+                    with contextlib.suppress(ValueError):
+                        version_id = int(mv[0])
+            return True, False, model_id, version_id
+
+        return False, False, None, None
+
+    except Exception:
         print("Error parsing CivitAI model URL")
-
-    return False, False, None, None
+        return False, False, None, None
 
 
 def request_civitai_model_version_api(version_id: int, headers: Optional[dict] = None):

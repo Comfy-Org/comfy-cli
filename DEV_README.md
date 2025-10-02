@@ -58,6 +58,32 @@ either run `pip install -e .` again (which will reinstall), or manually
 uninstall `pip uninstall comfy-cli` and reinstall, or even cleaning your conda
 env and reinstalling the package (`pip install -e .`)
 
+## Packaging custom nodes with `.comfyignore`
+
+`comfy node pack` and `comfy node publish` now read an optional `.comfyignore`
+file in the project root. The syntax matches `.gitignore` (implemented with
+`PathSpec`'s `gitwildmatch` rules), so you can reuse familiar patterns to keep
+development-only artifacts out of your published archive.
+
+- Patterns are evaluated against paths relative to the directory you run the
+  command from (usually the repo root).
+- Files required by the pack command itself (e.g. `__init__.py`, `web/*`) are
+  still forced into the archive even if they match an ignore pattern.
+- If no `.comfyignore` is present the command falls back to the original
+  behavior and zips every git-tracked file.
+
+Example `.comfyignore`:
+
+```gitignore
+docs/
+frontend/
+tests/
+*.psd
+```
+
+Commit the file alongside your node so teammates and CI pipelines produce the
+same trimmed package.
+
 ## Adding a new command
 
 - Register it under `comfy_cli/cmdline.py`
