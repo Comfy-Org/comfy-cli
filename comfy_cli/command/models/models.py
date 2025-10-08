@@ -2,7 +2,7 @@ import contextlib
 import os
 import pathlib
 import sys
-from typing import Annotated, Optional
+from typing import Annotated, List, Optional
 from urllib.parse import parse_qs, unquote, urlparse
 
 import requests
@@ -339,7 +339,7 @@ def remove(
         help="The relative path from the current workspace where the models are stored.",
         show_default=True,
     ),
-    model_names: Optional[list[str]] = typer.Option(
+    model_names: Optional[List[str]] = typer.Option(
         None,
         help="List of model filenames to delete, separated by spaces",
         show_default=False,
@@ -394,6 +394,11 @@ def remove(
         typer.echo("Deletion canceled.")
 
 
+def list_models(path: pathlib.Path) -> list:
+    """List all models in the specified directory."""
+    return [file for file in path.iterdir() if file.is_file()]
+
+
 @app.command()
 @tracking.track_command("model")
 def list(
@@ -416,8 +421,3 @@ def list(
     data = [(model.name, f"{model.stat().st_size // 1024} KB") for model in models]
     column_names = ["Model Name", "Size"]
     ui.display_table(data, column_names)
-
-
-def list_models(path: pathlib.Path) -> list:
-    """List all models in the specified directory."""
-    return [file for file in path.iterdir() if file.is_file()]
