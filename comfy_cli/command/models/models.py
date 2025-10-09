@@ -394,6 +394,11 @@ def remove(
         typer.echo("Deletion canceled.")
 
 
+def list_models(path: pathlib.Path) -> list:
+    """List all models in the specified directory."""
+    return [file for file in path.iterdir() if file.is_file()]
+
+
 @app.command()
 @tracking.track_command("model")
 def list(
@@ -416,8 +421,3 @@ def list(
     data = [(model.name, f"{model.stat().st_size // 1024} KB") for model in models]
     column_names = ["Model Name", "Size"]
     ui.display_table(data, column_names)
-
-
-def list_models(path: pathlib.Path) -> list:
-    """List all models in the specified directory."""
-    return [file for file in path.iterdir() if file.is_file()]
