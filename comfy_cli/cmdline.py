@@ -219,7 +219,7 @@ def install(
         typer.Option(
             hidden=True,
             show_default=False,
-            help="(Beta support) install for Intel Arc gpu, based on https://github.com/comfyanonymous/ComfyUI/pull/3439",
+            help="Install for Intel Arc gpu",
             callback=g_gpu_exclusivity.validate,
         ),
     ] = None,
@@ -323,20 +323,6 @@ def install(
                 "What GPU do you have?",
                 [GPU_OPTION.NVIDIA, GPU_OPTION.AMD, GPU_OPTION.INTEL_ARC],
             )
-
-    if gpu == GPU_OPTION.INTEL_ARC:
-        rprint("[bold yellow]Installing on Intel ARC is not yet completely supported[/bold yellow]")
-        env_check = env_checker.EnvChecker()
-        if env_check.conda_env is None:
-            rprint("[bold red]Intel ARC support requires conda environment to be activated.[/bold red]")
-            raise typer.Exit(code=1)
-        if intel_arc is None:
-            confirm_result = ui.prompt_confirm_action(
-                "Are you sure you want to try beta install feature on Intel ARC?", True
-            )
-            if not confirm_result:
-                raise typer.Exit(code=0)
-        rprint("[bold yellow]Installing on Intel ARC is in beta stage.[/bold yellow]")
 
     if gpu is None and not cpu:
         rprint(
