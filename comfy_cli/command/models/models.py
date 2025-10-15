@@ -399,9 +399,9 @@ def list_models(path: pathlib.Path) -> list:
     return [file for file in path.iterdir() if file.is_file()]
 
 
-@app.command()
+@app.command("list")
 @tracking.track_command("model")
-def list(
+def list_command(
     ctx: typer.Context,
     relative_path: str = typer.Option(
         DEFAULT_COMFY_MODEL_PATH,
