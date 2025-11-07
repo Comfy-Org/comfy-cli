@@ -45,7 +45,8 @@ def track_event(event_name: str, properties: any = None):
     if properties is None:
         properties = {}
     logging.debug(f"tracking event called with event_name: {event_name} and properties: {properties}")
-    enable_tracking = config_manager.get(constants.CONFIG_KEY_ENABLE_TRACKING)
+    # enable_tracking = config_manager.get(constants.CONFIG_KEY_ENABLE_TRACKING)
+    enable_tracking = False
     if not enable_tracking:
         return
 
