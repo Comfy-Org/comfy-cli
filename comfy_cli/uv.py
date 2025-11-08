@@ -115,6 +115,7 @@ class DependencyCompiler:
         emit_index_url: bool = True,
         executable: PathLike = sys.executable,
         index_strategy: str = "unsafe-best-match",
+        indexes: Optional[dict[str, str]] = None,
         out: Optional[PathLike] = None,
         override: Optional[PathLike] = None,
         resolve_strategy: Optional[str] = None,
@@ -136,8 +137,21 @@ class DependencyCompiler:
         if emit_index_url:
             cmd.append("--emit-index-url")
 
+        # Use named indexes for better control over package sources
+        # see https://github.com/astral-sh/uv/issues/171
+        if indexes is not None:
+            # First index is the default, rest are additional
+            index_items = list(indexes.items())
+            if index_items:
+                # Use --default-index for the first index (typically PyPI)
+                first_name, first_url = index_items[0]
+                cmd.extend(["--default-index", first_url])
+                # Use --index with names for additional indexes (e.g., PyTorch)
+                for name, url in index_items[1:]:
+                    cmd.extend(["--index", f"{name}={url}"])
+
         # ensures that eg tqdm is latest version, even though an old tqdm is on the amd url
-        # see https://github.com/astral-sh/uv/blob/main/PIP_COMPATIBILITY.md#packages-that-exist-on-multiple-indexes and https://github.com/astral-sh/uv/issues/171
+        # see https://github.com/astral-sh/uv/blob/main/PIP_COMPATIBILITY.md#packages-that-exist-on-multiple-indexes
         if index_strategy is not None:
             cmd.extend(["--index-strategy", "unsafe-best-match"])
 
@@ -386,8 +400,19 @@ class DependencyCompiler:
         self.out: Path = self.outDir / outName
         self.override = self.outDir / "override.txt"
 
+        # Build named indexes dict for pinning packages to specific indexes
+        self.indexes = self._build_indexes()
+
         self.reqFilesCore = reqFilesCore if reqFilesCore is not None else self.find_core_reqs()
         self.reqFilesExt = reqFilesExt if reqFilesExt is not None else self.find_ext_reqs()
+
+    def _build_indexes(self) -> dict[str, str]:
+        """Build a dictionary of named indexes for UV to use"""
+        indexes = {"pypi": "https://pypi.org/simple"}
+        if self.gpuUrl is not None:
+            gpu_name = "nvidia" if self.gpu == GPU_OPTION.NVIDIA else "amd"
+            indexes[gpu_name] = self.gpuUrl
+        return indexes
 
     def find_core_reqs(self):
         return DependencyCompiler.Find_Req_Files(self.cwd)
@@ -411,6 +436,7 @@ class DependencyCompiler:
             emit_index_annotation=False,
             emit_index_url=False,
             executable=self.executable,
+            indexes=self.indexes,
             override=self.override,
         )
 
@@ -439,6 +465,7 @@ class DependencyCompiler:
                     cwd=self.cwd,
                     reqFiles=self.reqFilesCore + self.reqFilesExt + ([reqExtras] if self.extraSpecs else []),
                     executable=self.executable,
+                    indexes=self.indexes,
                     override=self.override,
                     out=self.out,
                     resolve_strategy="ask",
