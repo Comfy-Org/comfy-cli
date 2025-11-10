@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Optional
 
 import git
 import typer
@@ -27,7 +27,7 @@ class ModelPath:
 class Model:
     name: Optional[str] = None
     url: Optional[str] = None
-    paths: List[ModelPath] = field(default_factory=list)
+    paths: list[ModelPath] = field(default_factory=list)
     hash: Optional[str] = None
     type: Optional[str] = None
 
@@ -47,11 +47,11 @@ class CustomNode:
 @dataclass
 class ComfyLockYAMLStruct:
     basics: Basics
-    models: List[Model] = field(default_factory=list)
-    custom_nodes: List[CustomNode] = field(default_factory=list)
+    models: list[Model] = field(default_factory=list)
+    custom_nodes: list[CustomNode] = field(default_factory=list)
 
 
-def check_comfy_repo(path) -> Tuple[bool, Optional[git.Repo]]:
+def check_comfy_repo(path) -> tuple[bool, Optional[git.Repo]]:
     if not os.path.exists(path):
         return False, None
     try:
@@ -194,7 +194,7 @@ class WorkspaceManager:
 
         return os.path.abspath(os.path.expanduser(self.specified_workspace))
 
-    def get_workspace_path(self) -> Tuple[str, WorkspaceType]:
+    def get_workspace_path(self) -> tuple[str, WorkspaceType]:
         """
         Retrieves a workspace path based on user input and defaults. This function does not validate the existence of a validate ComfyUI workspace.
         1. Specified Workspace (--workspace)
@@ -267,8 +267,7 @@ class WorkspaceManager:
             return None
 
         # To check more robustly, verify up to the `.git` path.
-        manager_path = os.path.join(self.workspace_path, "custom_nodes", "ComfyUI-Manager")
-        return manager_path
+        return os.path.join(self.workspace_path, "custom_nodes", "ComfyUI-Manager")
 
     def is_comfyui_manager_installed(self):
         if self.workspace_path is None:
@@ -306,7 +305,7 @@ class WorkspaceManager:
     def load_metadata(self):
         file_path = os.path.join(self.workspace_path, constants.COMFY_LOCK_YAML_FILE)
         if os.path.exists(file_path):
-            with open(file_path, "r", encoding="utf-8") as file:
+            with open(file_path, encoding="utf-8") as file:
                 return yaml.safe_load(file)
         else:
             return {}
@@ -315,12 +314,6 @@ class WorkspaceManager:
         file_path = os.path.join(self.workspace_path, constants.COMFY_LOCK_YAML_FILE)
         save_yaml(file_path, self.metadata)
 
-    def fill_print_table(self, table):
-        table.add_row(
-            "Current selected workspace",
-            f"[bold green]→ {self.workspace_path}[/bold green]",
-        )
-    
     def find_or_create_python_env(self, default_name=".venv"):
         """
         Locates the Conda/virtual environment to use, else creates `.venv`.
@@ -367,3 +360,5 @@ class WorkspaceManager:
             print(f"[bold red]Failed to create virtual environment: {e}[/bold red]")
             raise typer.Exit(code=1)
 
+    def fill_print_table(self):
+        return [("Current selected workspace", f"[bold green]→ {self.workspace_path}[/bold green]")]

@@ -8,15 +8,20 @@ on:
     branches:
       - main
 
+permissions:
+  contents: read
+  statuses: write
+  pull-requests: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v5
 
       - name: Set up Python
-        uses: actions/setup-python@v2
+        uses: actions/setup-python@v6
         with:
           python-version: '3.9'  # Follow the min version in pyproject.toml
 
@@ -31,12 +36,10 @@ jobs:
           PYTHONPATH: ${{ github.workspace }}
         run: |
           pytest --cov=comfy_cli --cov-report=xml .
-      
+
       - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v4
+        uses: codecov/codecov-action@5a1091511ad55cbe89839c7260b706298ca349f7 # v5.5.1
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
-          files: ./coverage.xml
-          flags: unittests
-          name: codecov-umbrella
           fail_ci_if_error: true
+          verbose: true

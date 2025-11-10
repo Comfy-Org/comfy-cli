@@ -1,11 +1,11 @@
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import Optional
 
 
 @dataclass
 class NodeVersion:
     changelog: str
-    dependencies: List[str]
+    dependencies: list[str]
     deprecated: bool
     id: str
     version: str
@@ -21,7 +21,7 @@ class Node:
     license: Optional[str] = None
     icon: Optional[str] = None
     repository: Optional[str] = None
-    tags: List[str] = field(default_factory=list)
+    tags: list[str] = field(default_factory=list)
     latest_version: Optional[NodeVersion] = None
 
 
@@ -50,8 +50,10 @@ class ComfyConfig:
     publisher_id: str = ""
     display_name: str = ""
     icon: str = ""
-    models: List[Model] = field(default_factory=list)
-    includes: List[str] = field(default_factory=list)
+    models: list[Model] = field(default_factory=list)
+    includes: list[str] = field(default_factory=list)
+    banner_url: str = ""
+    web: Optional[str] = None
 
 
 @dataclass
@@ -66,9 +68,13 @@ class ProjectConfig:
     description: str = ""
     version: str = "1.0.0"
     requires_python: str = ">= 3.9"
-    dependencies: List[str] = field(default_factory=list)
+    dependencies: list[str] = field(default_factory=list)
     license: License = field(default_factory=License)
     urls: URLs = field(default_factory=URLs)
+    supported_os: list[str] = field(default_factory=list)
+    supported_accelerators: list[str] = field(default_factory=list)
+    supported_comfyui_version: str = ""
+    supported_comfyui_frontend_version: str = ""
 
 
 @dataclass

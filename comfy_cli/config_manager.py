@@ -1,17 +1,17 @@
 import configparser
 import os
 from importlib.metadata import version
-from typing import Optional, Tuple
+from typing import Optional
 
 from comfy_cli import constants, logging
 from comfy_cli.utils import get_os, is_running, singleton
 
 
 @singleton
-class ConfigManager(object):
+class ConfigManager:
     def __init__(self):
         self.config = configparser.ConfigParser()
-        self.background: Optional[Tuple[str, int, int]] = None
+        self.background: Optional[tuple[str, int, int]] = None
         self.load()
 
     @staticmethod
@@ -43,6 +43,27 @@ class ConfigManager(object):
         """
         return self.config["DEFAULT"].get(key, None)  # Returns None if the key does not exist
 
+    def get_or_override(self, env_key: str, config_key: str, set_value: Optional[str] = None) -> Optional[str]:
+        """
+        Resolves and conditionally stores a config value.
+
+        The selected value and action is determined by the following priority:
+
+        1. Use CLI-provided `--set-*` value (if not None), and save it to config via `set()`.
+        2. Use process environment variable if exists (empty strings are allowed).
+        3. Otherwise, use the current config value via `get()`.
+
+        Returns None if the selected value is an empty string.
+        """
+
+        if set_value is not None:
+            self.set(config_key, set_value)
+            return set_value or None
+        elif env_key in os.environ:
+            return os.environ[env_key] or None
+        else:
+            return self.get(config_key) or None
+
     def load(self):
         config_file_path = self.get_config_file_path()
         if os.path.exists(config_file_path):
@@ -54,59 +75,79 @@ class ConfigManager(object):
         if not os.path.exists(tmp_path):
             os.makedirs(tmp_path)
 
-        if "background" in self.config["DEFAULT"]:
-            bg_info = self.config["DEFAULT"]["background"].strip("()").split(",")
+        if constants.CONFIG_KEY_BACKGROUND in self.config["DEFAULT"]:
+            bg_info = self.config["DEFAULT"][constants.CONFIG_KEY_BACKGROUND].strip("()").split(",")
             bg_info = [item.strip().strip("'") for item in bg_info]
             self.background = bg_info[0], int(bg_info[1]), int(bg_info[2])
 
             if not is_running(self.background[2]):
                 self.remove_background()
 
-    def fill_print_env(self, table):
-        table.add_row("Config Path", self.get_config_file_path())
+    def get_env_data(self):
+        """
+        Get environment data as a list of tuples for display.
+
+        Returns:
+            List[Tuple[str, str]]: List of (key, value) tuples for environment data.
+        """
+        data = []
+        data.append(("Config Path", self.get_config_file_path()))
 
         launch_extras = ""
-        if self.config.has_option("DEFAULT", "default_workspace"):
-            table.add_row(
-                "Default ComfyUI workspace",
-                self.config["DEFAULT"][constants.CONFIG_KEY_DEFAULT_WORKSPACE],
+        if self.config.has_option("DEFAULT", constants.CONFIG_KEY_DEFAULT_WORKSPACE):
+            data.append(
+                (
+                    "Default ComfyUI workspace",
+                    self.config["DEFAULT"][constants.CONFIG_KEY_DEFAULT_WORKSPACE],
+                )
             )
-
             launch_extras = self.config["DEFAULT"].get(constants.CONFIG_KEY_DEFAULT_LAUNCH_EXTRAS, "")
         else:
-            table.add_row("Default ComfyUI workspace", "No default ComfyUI workspace")
+            data.append(("Default ComfyUI workspace", "No default ComfyUI workspace"))
 
         if launch_extras == "":
             launch_extras = "[bold red]None[/bold red]"
 
-        table.add_row("Default ComfyUI launch extra options", launch_extras)
+        data.append(("Default ComfyUI launch extra options", launch_extras))
 
         if self.config.has_option("DEFAULT", constants.CONFIG_KEY_RECENT_WORKSPACE):
-            table.add_row(
-                "Recent ComfyUI workspace",
-                self.config["DEFAULT"][constants.CONFIG_KEY_RECENT_WORKSPACE],
+            data.append(
+                (
+                    "Recent ComfyUI workspace",
+                    self.config["DEFAULT"][constants.CONFIG_KEY_RECENT_WORKSPACE],
+                )
             )
         else:
-            table.add_row("Recent ComfyUI workspace", "No recent run")
+            data.append(("Recent ComfyUI workspace", "No recent run"))
 
-        if self.config.has_option("DEFAULT", "enable_tracking"):
-            table.add_row(
-                "Tracking Analytics",
-                ("Enabled" if self.config["DEFAULT"]["enable_tracking"] == "True" else "Disabled"),
+        if self.config.has_option("DEFAULT", constants.CONFIG_KEY_ENABLE_TRACKING):
+            data.append(
+                (
+                    "Tracking Analytics",
+                    (
+                        "Enabled"
+                        if self.config["DEFAULT"][constants.CONFIG_KEY_ENABLE_TRACKING] == "True"
+                        else "Disabled"
+                    ),
+                )
             )
 
         if self.config.has_option("DEFAULT", constants.CONFIG_KEY_BACKGROUND):
             bg_info = self.background
             if bg_info:
-                table.add_row(
-                    "Background ComfyUI",
-                    f"http://{bg_info[0]}:{bg_info[1]} (pid={bg_info[2]})",
+                data.append(
+                    (
+                        "Background ComfyUI",
+                        f"http://{bg_info[0]}:{bg_info[1]} (pid={bg_info[2]})",
+                    )
                 )
         else:
-            table.add_row("Background ComfyUI", "[bold red]No[/bold red]")
+            data.append(("Background ComfyUI", "[bold red]No[/bold red]"))
+
+        return data
 
     def remove_background(self):
-        del self.config["DEFAULT"]["background"]
+        del self.config["DEFAULT"][constants.CONFIG_KEY_BACKGROUND]
         self.write_config()
         self.background = None
 

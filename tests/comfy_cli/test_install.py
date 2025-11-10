@@ -1,4 +1,3 @@
-from typing import Dict, List
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -125,7 +124,7 @@ def test_parse_releases_mixed():
 
 
 def test_parse_releases_empty_list():
-    input_releases: List[Dict[str, str]] = []
+    input_releases: list[dict[str, str]] = []
 
     result = parse_releases(input_releases)
 
@@ -142,7 +141,7 @@ def test_parse_releases_invalid_semver():
 
 
 # Sample data for tests
-sample_releases: List[GithubRelease] = [
+sample_releases: list[GithubRelease] = [
     {"version": semver.VersionInfo.parse("1.0.0"), "tag": "v1.0.0", "download_url": "url1"},
     {"version": semver.VersionInfo.parse("1.1.0"), "tag": "v1.1.0", "download_url": "url2"},
     {"version": semver.VersionInfo.parse("2.0.0"), "tag": "v2.0.0", "download_url": "url3"},

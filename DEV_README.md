@@ -6,7 +6,7 @@ This guide provides an overview of how to develop in this repository.
 
 1. Clone the repo, create and activate a conda env. Minimum Python version is 3.9.
 
-2. Install the package to local
+2. Install the package to your conda env.
 
 `pip install -e .`
 
@@ -14,15 +14,29 @@ This guide provides an overview of how to develop in this repository.
 
 `export ENVIRONMENT=dev`
 
-4. Test script running
+4. Check if the "comfy" package can run.
 
 `comfy --help`
 
-5. Use pre commit hook
+5. Install the pre-commit hook to ensure that your code won't need reformatting later.
 
 `pre-commit install`
 
-## Debug
+6. To save time during code review, it's recommended that you also manually run
+   the unit tests before submitting a pull request (see below).
+
+## Running the unit tests
+
+1. Install pytest into your conda env. You should preferably be using Python 3.9
+   in your conda env, since it's the version we are targeting for compatibility.
+
+`pip install pytest pytest-cov`
+
+2. Verify that all unit tests run successfully.
+
+`pytest --cov=comfy_cli --cov-report=xml .`
+
+## Debugging
 
 You can add following config to your VSCode `launch.json` to launch debugger.
 
@@ -37,14 +51,40 @@ You can add following config to your VSCode `launch.json` to launch debugger.
 }
 ```
 
-## Make changes to the code base
+## Making changes to the code base
 
 There is a potential need for you to reinstall the package. You can do this by
 either run `pip install -e .` again (which will reinstall), or manually
 uninstall `pip uninstall comfy-cli` and reinstall, or even cleaning your conda
 env and reinstalling the package (`pip install -e .`)
 
-## Add New Command
+## Packaging custom nodes with `.comfyignore`
+
+`comfy node pack` and `comfy node publish` now read an optional `.comfyignore`
+file in the project root. The syntax matches `.gitignore` (implemented with
+`PathSpec`'s `gitwildmatch` rules), so you can reuse familiar patterns to keep
+development-only artifacts out of your published archive.
+
+- Patterns are evaluated against paths relative to the directory you run the
+  command from (usually the repo root).
+- Files required by the pack command itself (e.g. `__init__.py`, `web/*`) are
+  still forced into the archive even if they match an ignore pattern.
+- If no `.comfyignore` is present the command falls back to the original
+  behavior and zips every git-tracked file.
+
+Example `.comfyignore`:
+
+```gitignore
+docs/
+frontend/
+tests/
+*.psd
+```
+
+Commit the file alongside your node so teammates and CI pipelines produce the
+same trimmed package.
+
+## Adding a new command
 
 - Register it under `comfy_cli/cmdline.py`
 
@@ -77,18 +117,18 @@ def remove(name: str):
 
 ```
 
-## Guide
+## Important notes
 
 - Use `typer` for all command args management
 - Use `rich` for all console output
   - For progress reporting, use either [`rich.progress`](https://rich.readthedocs.io/en/stable/progress.html)
 
 ## Develop comfy-cli and ComfyUI-Manager (cm-cli) together
-### Make changes to both
+### Making changes to both
 1. Fork your own branches of `comfy-cli` and `ComfyUI-Manager`, make changes
 2. Be sure to commit any changes to `ComfyUI-Manager` to a new branch, and push to remote
 
-### Try out changes to both
+### Trying changes to both
 1. clone the changed branch of `comfy-cli`, then live install `comfy-cli`:
   - `pip install -e comfy-cli`
 2. Go to a test dir and run:
@@ -97,7 +137,7 @@ def remove(name: str):
   - `cd ComfyUI/custom_nodes/ComfyUI-Manager/ && git checkout <changed-branch> && cd -`
 4. Further changes can be pulled into these copies of the `comfy-cli` and `ComfyUI-Manager` repos
 
-### Debug both simultaneously
+### Debugging both simultaneously
 1. Follow instructions above to get working install with changes
 2. Add breakpoints directly to code: `import ipdb; ipdb.set_trace()`
 3. Execute relevant `comfy-cli` command

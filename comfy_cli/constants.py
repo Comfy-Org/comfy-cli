@@ -42,7 +42,9 @@ CONFIG_KEY_INSTALL_EVENT_TRIGGERED = "install_event_triggered"
 CONFIG_KEY_BACKGROUND = "background"
 
 CIVITAI_API_TOKEN_KEY = "civitai_api_token"
+CIVITAI_API_TOKEN_ENV_KEY = "CIVITAI_API_TOKEN"
 HF_API_TOKEN_KEY = "hf_api_token"
+HF_API_TOKEN_ENV_KEY = "HF_API_TOKEN"
 
 DEFAULT_TRACKING_VALUE = True
 
@@ -60,6 +62,7 @@ COMFY_ORIGIN_URL_CHOICES = [
 
 
 class CUDAVersion(str, Enum):
+    v12_9 = "12.9"
     v12_6 = "12.6"
     v12_4 = "12.4"
     v12_1 = "12.1"

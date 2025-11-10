@@ -8,13 +8,16 @@ on:
     branches:
       - main
 
+permissions:
+  contents: read
+
 jobs:
   ruff_check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v5
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v6
         with:
           python-version: "3.x"
       - name: install ruff
@@ -24,4 +27,4 @@ jobs:
       - name: lint check and then format check with ruff
         run: |
           ruff check
-          ruff format --check
+          ruff format --diff

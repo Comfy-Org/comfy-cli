@@ -2,16 +2,15 @@ import os
 import subprocess
 import sys
 import webbrowser
-from typing import Optional
+from typing import Annotated, Optional
 
 import questionary
 import typer
 from rich import print as rprint
 from rich.console import Console
-from typing_extensions import Annotated, List
 
 from comfy_cli import constants, env_checker, logging, tracking, ui, utils
-from comfy_cli.command import custom_nodes
+from comfy_cli.command import custom_nodes, pr_command
 from comfy_cli.command import install as install_inner
 from comfy_cli.command import run as run_inner
 from comfy_cli.command.install import validate_version
@@ -220,7 +219,7 @@ def install(
         typer.Option(
             hidden=True,
             show_default=False,
-            help="(Beta support) install for Intel Arc gpu, based on https://github.com/comfyanonymous/ComfyUI/pull/3439",
+            help="Install for Intel Arc gpu",
             callback=g_gpu_exclusivity.validate,
         ),
     ] = None,
@@ -246,6 +245,13 @@ def install(
     manager_commit: Annotated[
         Optional[str],
         typer.Option(help="Specify commit hash for ComfyUI-Manager"),
+    ] = None,
+    pr: Annotated[
+        Optional[str],
+        typer.Option(
+            show_default=False,
+            help="Install from a specific PR. Supports formats: username:branch, #123, or PR URL",
+        ),
     ] = None,
 ):
     check_for_updates()
@@ -318,24 +324,14 @@ def install(
                 [GPU_OPTION.NVIDIA, GPU_OPTION.AMD, GPU_OPTION.INTEL_ARC],
             )
 
-    if gpu == GPU_OPTION.INTEL_ARC:
-        rprint("[bold yellow]Installing on Intel ARC is not yet completely supported[/bold yellow]")
-        env_check = env_checker.EnvChecker()
-        if env_check.conda_env is None:
-            rprint("[bold red]Intel ARC support requires conda environment to be activated.[/bold red]")
-            raise typer.Exit(code=1)
-        if intel_arc is None:
-            confirm_result = ui.prompt_confirm_action(
-                "Are you sure you want to try beta install feature on Intel ARC?", True
-            )
-            if not confirm_result:
-                raise typer.Exit(code=0)
-        rprint("[bold yellow]Installing on Intel ARC is in beta stage.[/bold yellow]")
-
     if gpu is None and not cpu:
         rprint(
             "[bold red]No GPU option selected or `--cpu` enabled, use --\\[gpu option] flag (e.g. --nvidia) to pick GPU. use `--cpu` to install for CPU. Exiting...[/bold red]"
         )
+        raise typer.Exit(code=1)
+
+    if pr and version not in {None, "nightly"} or commit:
+        rprint("--pr cannot be used with --version or --commit")
         raise typer.Exit(code=1)
 
     install_inner.execute(
@@ -353,6 +349,7 @@ def install(
         skip_requirement=skip_requirement,
         fast_deps=fast_deps,
         manager_commit=manager_commit,
+        pr=pr,
     )
 
     rprint(f"ComfyUI is installed at: {comfy_path}")
@@ -475,10 +472,18 @@ def stop():
 @app.command(help="Launch ComfyUI: ?[--background] ?[-- <extra args ...>]")
 @tracking.track_command()
 def launch(
+    extra: list[str] = typer.Argument(None),
     background: Annotated[bool, typer.Option(help="Launch ComfyUI in background")] = False,
-    extra: List[str] = typer.Argument(None),
+    frontend_pr: Annotated[
+        Optional[str],
+        typer.Option(
+            "--frontend-pr",
+            show_default=False,
+            help="Use a specific frontend PR. Supports formats: username:branch, #123, or PR URL",
+        ),
+    ] = None,
 ):
-    launch_command(background, extra)
+    launch_command(background, extra, frontend_pr)
 
 
 @app.command("set-default", help="Set default ComfyUI path")
@@ -528,10 +533,14 @@ def which():
 @tracking.track_command()
 def env():
     check_for_updates()
-    _env_checker = EnvChecker()
-    table = _env_checker.fill_print_table()
-    workspace_manager.fill_print_table(table)
-    console.print(table)
+    env_data = EnvChecker().fill_print_table()
+    workspace_data = workspace_manager.fill_print_table()
+    all_data = env_data + workspace_data
+    ui.display_table(
+        data=all_data,
+        column_names=[":laptop_computer: Environment", "Value"],
+        title="Environment Information",
+    )
 
 
 @app.command(hidden=True)
@@ -644,4 +653,7 @@ def standalone(
 app.add_typer(models_command.app, name="model", help="Manage models.")
 app.add_typer(custom_nodes.app, name="node", help="Manage custom nodes.")
 app.add_typer(custom_nodes.manager_app, name="manager", help="Manage ComfyUI-Manager.")
+
+app.add_typer(pr_command.app, name="pr-cache", help="Manage PR cache.")
+
 app.add_typer(tracking.app, name="tracking", help="Manage analytics tracking settings.")

@@ -98,7 +98,7 @@ class ExecutionProgress(Progress):
         )
 
         for task in self.tasks:
-            percent = "[progress.percentage]{task.percentage:>3.0f}%".format(task=task)
+            percent = "[progress.percentage]{task.percentage:>3.0f}%".format(task=task)  # noqa
             if task.fields.get("progress_type") == "overall":
                 overall_table = Table.grid(*table_columns, padding=(0, 1), expand=self.expand)
                 overall_table.add_row(BarColumn().render(task), percent, TimeElapsedColumn().render(task))
@@ -197,8 +197,7 @@ class WorkflowExecution:
             if subfolder:
                 filename = os.path.join(subfolder, filename)
 
-            filename = os.path.join(workspace_manager.get_workspace_path()[0], output_type, filename)
-            return filename
+            return os.path.join(workspace_manager.get_workspace_path()[0], output_type, filename)
 
         query = urllib.parse.urlencode(img)
         return f"http://{self.host}:{self.port}/view?{query}"

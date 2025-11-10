@@ -19,6 +19,9 @@ on:
       - "!.coveragerc"
       - "!.gitignore"
 
+permissions:
+  contents: read
+
 jobs:
   test:
     name: "Run Tests on Multiple Platforms"
@@ -34,10 +37,10 @@ jobs:
 
     steps:
       - name: Check out code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
 

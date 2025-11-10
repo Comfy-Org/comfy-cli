@@ -2,7 +2,8 @@ import os
 import platform
 import subprocess
 import sys
-from typing import Dict, List, Optional, TypedDict
+from typing import Optional, TypedDict
+from urllib.parse import urlparse
 
 import requests
 import semver
@@ -10,11 +11,13 @@ import typer
 from rich import print as rprint
 from rich.console import Console
 from rich.panel import Panel
+from rich.prompt import Confirm
 
-from comfy_cli import constants, ui, utils
+from comfy_cli import constants, ui
 from comfy_cli.command.custom_nodes.command import update_node_id_cache
+from comfy_cli.command.github.pr_info import PRInfo
 from comfy_cli.constants import GPU_OPTION
-from comfy_cli.git_utils import git_checkout_tag
+from comfy_cli.git_utils import checkout_pr, git_checkout_tag
 from comfy_cli.uv import DependencyCompiler
 from comfy_cli.workspace_manager import WorkspaceManager, check_comfy_repo
 
@@ -70,7 +73,12 @@ def pip_install_comfyui_dependencies(
                 "torchaudio",
             ]
 
-            if plat == constants.OS.WINDOWS and cuda_version == constants.CUDAVersion.v12_6:
+            if plat == constants.OS.WINDOWS and cuda_version == constants.CUDAVersion.v12_9:
+                base_command += [
+                    "--extra-index-url",
+                    "https://download.pytorch.org/whl/cu129",
+                ]
+            elif plat == constants.OS.WINDOWS and cuda_version == constants.CUDAVersion.v12_6:
                 base_command += [
                     "--extra-index-url",
                     "https://download.pytorch.org/whl/cu126",
@@ -94,28 +102,24 @@ def pip_install_comfyui_dependencies(
                 base_command,
                 check=False,
             )
-        # Beta support for intel arch based on this PR: https://github.com/comfyanonymous/ComfyUI/pull/3439
+        # Update installation to use upstream torch xpu. ipex is no longer needed for Intel Arc GPUs
+        # https://github.com/comfyanonymous/ComfyUI/pull/7767
         if gpu == GPU_OPTION.INTEL_ARC:
             pip_url = [
                 "--extra-index-url",
-                "https://pytorch-extension.intel.com/release-whl/stable/xpu/us/",
+                "https://download.pytorch.org/whl/xpu",
             ]
-            utils.install_conda_package("libuv")
+
             # TODO: wrap pip install in a function
-            subprocess.run(
-                [python_exe, "-m", "pip", "install", "mkl", "mkl-dpcpp"],
-                check=True,
-            )
             result = subprocess.run(
                 [
                     python_exe,
                     "-m",
                     "pip",
                     "install",
-                    "torch==2.1.0.post2",
-                    "torchvision==0.16.0.post2",
-                    "torchaudio==2.1.0.post2",
-                    "intel-extension-for-pytorch==2.1.30",
+                    "torch",
+                    "torchvision",
+                    "torchaudio",
                 ]
                 + pip_url,
                 check=False,
@@ -178,9 +182,15 @@ def execute(
     skip_torch_or_directml: bool = False,
     skip_requirement: bool = False,
     fast_deps: bool = False,
+    pr: Optional[str] = None,
     *args,
     **kwargs,
 ):
+    # Install ComfyUI from a given PR reference.
+    if pr:
+        url = handle_pr_checkout(pr, comfy_path)
+        version = "nightly"
+
     """
     Install ComfyUI from a given URL.
     """
@@ -275,6 +285,66 @@ def execute(
     rprint("")
 
 
+def handle_pr_checkout(pr_ref: str, comfy_path: str) -> str:
+    try:
+        repo_owner, repo_name, pr_number = parse_pr_reference(pr_ref)
+    except ValueError as e:
+        rprint(f"[bold red]Error parsing PR reference: {e}[/bold red]")
+        raise typer.Exit(code=1)
+
+    try:
+        if pr_number:
+            pr_info = fetch_pr_info(repo_owner, repo_name, pr_number)
+        else:
+            username, branch = pr_ref.split(":", 1)
+            pr_info = find_pr_by_branch("comfyanonymous", "ComfyUI", username, branch)
+
+        if not pr_info:
+            rprint(f"[bold red]PR not found: {pr_ref}[/bold red]")
+            raise typer.Exit(code=1)
+
+    except Exception as e:
+        rprint(f"[bold red]Error fetching PR information: {e}[/bold red]")
+        raise typer.Exit(code=1)
+
+    console.print(
+        Panel(
+            f"[bold]PR #{pr_info.number}[/bold]: {pr_info.title}\n"
+            f"[yellow]Author[/yellow]: {pr_info.user}\n"
+            f"[yellow]Branch[/yellow]: {pr_info.head_branch}\n"
+            f"[yellow]Source[/yellow]: {pr_info.head_repo_url}\n"
+            f"[yellow]Mergeable[/yellow]: {'✓' if pr_info.mergeable else '✗'}",
+            title="[bold blue]Pull Request Information[/bold blue]",
+            border_style="blue",
+        )
+    )
+
+    if not workspace_manager.skip_prompting:
+        if not ui.prompt_confirm_action(f"Install ComfyUI from PR #{pr_info.number}?", True):
+            rprint("Aborting...")
+            raise typer.Exit(code=1)
+
+    parent_path = os.path.abspath(os.path.join(comfy_path, ".."))
+
+    if not os.path.exists(parent_path):
+        os.makedirs(parent_path, exist_ok=True)
+
+    if not os.path.exists(comfy_path):
+        rprint(f"Cloning base repository to {comfy_path}...")
+        clone_comfyui(url=pr_info.base_repo_url, repo_dir=comfy_path)
+
+    rprint(f"Checking out PR #{pr_info.number}: {pr_info.title}")
+    success = checkout_pr(comfy_path, pr_info)
+    if not success:
+        rprint("[bold red]Failed to checkout PR[/bold red]")
+        raise typer.Exit(code=1)
+
+    rprint(f"[bold green]✓ Successfully checked out PR #{pr_info.number}[/bold green]")
+    rprint(f"[bold yellow]Note:[/bold yellow] You are now on branch pr-{pr_info.number}")
+
+    return pr_info.base_repo_url
+
+
 def validate_version(version: str) -> Optional[str]:
     """
     Validates the version string as 'latest', 'nightly', or a semantically version number.
@@ -309,7 +379,22 @@ class GitHubRateLimitError(Exception):
     """Raised when GitHub API rate limit is exceeded"""
 
 
-def fetch_github_releases(repo_owner: str, repo_name: str) -> List[Dict[str, str]]:
+def handle_github_rate_limit(response):
+    # Check rate limit headers
+    remaining = int(response.headers.get("x-ratelimit-remaining", 0))
+    if remaining == 0:
+        reset_time = int(response.headers.get("x-ratelimit-reset", 0))
+        message = f"Primary rate limit from Github exceeded! Please retry after: {reset_time})"
+        raise GitHubRateLimitError(message)
+
+    if "retry-after" in response.headers:
+        wait_seconds = int(response.headers["retry-after"])
+        message = f"Rate limit from Github exceeded! Please wait {wait_seconds} seconds before retrying."
+        rprint(f"[yellow]{message}[/yellow]")
+        raise GitHubRateLimitError(message)
+
+
+def fetch_github_releases(repo_owner: str, repo_name: str) -> list[dict[str, str]]:
     """
     Fetch the list of releases from the GitHub API.
     Handles rate limiting by logging the wait time.
@@ -324,18 +409,7 @@ def fetch_github_releases(repo_owner: str, repo_name: str) -> List[Dict[str, str
 
     # Handle rate limiting
     if response.status_code in (403, 429):
-        # Check rate limit headers
-        remaining = int(response.headers.get("x-ratelimit-remaining", 0))
-        if remaining == 0:
-            reset_time = int(response.headers.get("x-ratelimit-reset", 0))
-            message = f"Primary rate limit from Github exceeded! Please retry after: {reset_time})"
-            raise GitHubRateLimitError(message)
-
-        if "retry-after" in response.headers:
-            wait_seconds = int(response.headers["retry-after"])
-            message = f"Rate limit from Github exceeded! Please wait {wait_seconds} seconds before retrying."
-            rprint(f"[yellow]{message}[/yellow]")
-            raise GitHubRateLimitError(message)
+        handle_github_rate_limit(response)
 
     response.raise_for_status()
     return response.json()
@@ -356,11 +430,11 @@ class GithubRelease(TypedDict):
     download_url: str
 
 
-def parse_releases(releases: List[Dict[str, str]]) -> List[GithubRelease]:
+def parse_releases(releases: list[dict[str, str]]) -> list[GithubRelease]:
     """
     Parse the list of releases fetched from the GitHub API into a list of GithubRelease objects.
     """
-    parsed_releases: List[GithubRelease] = []
+    parsed_releases: list[GithubRelease] = []
     for release in releases:
         tag = release["tag_name"]
         if tag.lower() in ["latest", "nightly"]:
@@ -372,7 +446,7 @@ def parse_releases(releases: List[Dict[str, str]]) -> List[GithubRelease]:
     return parsed_releases
 
 
-def select_version(releases: List[GithubRelease], version: str) -> Optional[GithubRelease]:
+def select_version(releases: list[GithubRelease], version: str) -> Optional[GithubRelease]:
     """
     Given a list of Github releases, select the release that matches the specified version.
     """
@@ -462,3 +536,338 @@ def get_latest_release(repo_owner: str, repo_name: str) -> Optional[GithubReleas
     except requests.RequestException as e:
         rprint(f"Error fetching latest release: {e}")
         return None
+
+
+def parse_pr_reference(pr_ref: str) -> tuple[str, str, Optional[int]]:
+    """
+    support formats：
+    - username:branch-name
+    - #123
+    - https://github.com/comfyanonymous/ComfyUI/pull/123
+
+    Returns:
+        (repo_owner, repo_name, pr_number)
+    """
+    pr_ref = pr_ref.strip()
+
+    if pr_ref.startswith("https://github.com/"):
+        parsed = urlparse(pr_ref)
+        if "/pull/" in parsed.path:
+            path_parts = parsed.path.strip("/").split("/")
+            if len(path_parts) >= 4:
+                repo_owner = path_parts[0]
+                repo_name = path_parts[1]
+                pr_number = int(path_parts[3])
+                return repo_owner, repo_name, pr_number
+
+    elif pr_ref.startswith("#"):
+        pr_number = int(pr_ref[1:])
+        return "comfyanonymous", "ComfyUI", pr_number
+
+    elif ":" in pr_ref:
+        username, branch = pr_ref.split(":", 1)
+        return username, "ComfyUI", None
+
+    else:
+        raise ValueError(f"Invalid PR reference format: {pr_ref}")
+
+
+def fetch_pr_info(repo_owner: str, repo_name: str, pr_number: int) -> PRInfo:
+    url = f"https://api.github.com/repos/{repo_owner}/{repo_name}/pulls/{pr_number}"
+
+    headers = {}
+    if github_token := os.getenv("GITHUB_TOKEN"):
+        headers["Authorization"] = f"Bearer {github_token}"
+
+    try:
+        response = requests.get(url, headers=headers, timeout=10)
+
+        if response is None:
+            raise Exception(f"Failed to fetch PR #{pr_number}: No response from GitHub API")
+
+        if response.status_code in (403, 429):
+            handle_github_rate_limit(response)
+
+        response.raise_for_status()
+        data = response.json()
+
+        return PRInfo(
+            number=data["number"],
+            head_repo_url=data["head"]["repo"]["clone_url"],
+            head_branch=data["head"]["ref"],
+            base_repo_url=data["base"]["repo"]["clone_url"],
+            base_branch=data["base"]["ref"],
+            title=data["title"],
+            user=data["head"]["repo"]["owner"]["login"],
+            mergeable=data.get("mergeable", True),
+        )
+
+    except requests.RequestException as e:
+        raise Exception(f"Failed to fetch PR #{pr_number}: {e}")
+
+
+def find_pr_by_branch(repo_owner: str, repo_name: str, username: str, branch: str) -> Optional[PRInfo]:
+    url = f"https://api.github.com/repos/{repo_owner}/{repo_name}/pulls"
+    params = {"head": f"{username}:{branch}", "state": "open"}
+
+    headers = {}
+    if github_token := os.getenv("GITHUB_TOKEN"):
+        headers["Authorization"] = f"Bearer {github_token}"
+
+    try:
+        response = requests.get(url, headers=headers, params=params, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+
+        if data:
+            pr_data = data[0]
+            return PRInfo(
+                number=pr_data["number"],
+                head_repo_url=pr_data["head"]["repo"]["clone_url"],
+                head_branch=pr_data["head"]["ref"],
+                base_repo_url=pr_data["base"]["repo"]["clone_url"],
+                base_branch=pr_data["base"]["ref"],
+                title=pr_data["title"],
+                user=pr_data["head"]["repo"]["owner"]["login"],
+                mergeable=pr_data.get("mergeable", True),
+            )
+
+        return None
+
+    except requests.RequestException:
+        return None
+
+
+def verify_node_tools() -> bool:
+    """Verify that Node.js, npm, and pnpm are available for frontend building"""
+    try:
+        node_result = subprocess.run(["node", "--version"], capture_output=True, text=True, check=False)
+    except FileNotFoundError:
+        rprint("[bold red]Node.js is not installed or not found in PATH.[/bold red]")
+        rprint("[yellow]To use --frontend-pr, please install Node.js first:[/yellow]")
+        rprint("  • Download from: https://nodejs.org/")
+        rprint("  • Or use a package manager:")
+        rprint("    - macOS: brew install node")
+        rprint("    - Ubuntu/Debian: sudo apt install nodejs npm")
+        rprint("    - Windows: winget install OpenJS.NodeJS")
+        return False
+
+    if node_result.returncode != 0:
+        rprint("[bold red]Node.js is not installed or not working correctly.[/bold red]")
+        rprint("[yellow]To use --frontend-pr, please install Node.js first:[/yellow]")
+        rprint("  • Download from: https://nodejs.org/")
+        rprint("  • Or use a package manager:")
+        rprint("    - macOS: brew install node")
+        rprint("    - Ubuntu/Debian: sudo apt install nodejs npm")
+        rprint("    - Windows: winget install OpenJS.NodeJS")
+        return False
+
+    node_version = (node_result.stdout or node_result.stderr or "").strip()
+    if node_version:
+        rprint(f"[green]Found Node.js {node_version}[/green]")
+    else:
+        rprint("[green]Found Node.js[/green]")
+
+    try:
+        npm_result = subprocess.run(["npm", "--version"], capture_output=True, text=True, check=False)
+    except FileNotFoundError:
+        rprint("[bold red]npm is not installed or not found in PATH.[/bold red]")
+        rprint("[yellow]npm usually comes with Node.js. Try reinstalling Node.js.[/yellow]")
+        return False
+
+    if npm_result.returncode != 0:
+        rprint("[bold red]npm is not installed or not working correctly.[/bold red]")
+        rprint("[yellow]npm usually comes with Node.js. Try reinstalling Node.js.[/yellow]")
+        return False
+
+    npm_version = npm_result.stdout.strip()
+    if npm_version:
+        rprint(f"[green]Found npm {npm_version}[/green]")
+    else:
+        rprint("[green]Found npm[/green]")
+
+    try:
+        pnpm_result = subprocess.run(["pnpm", "--version"], capture_output=True, text=True, check=False)
+        if pnpm_result.returncode == 0:
+            pnpm_version = pnpm_result.stdout.strip()
+            if pnpm_version:
+                rprint(f"[green]Found pnpm {pnpm_version}[/green]")
+            else:
+                rprint("[green]Found pnpm[/green]")
+            return True
+    except FileNotFoundError:
+        pass
+
+    rprint("[yellow]pnpm is not installed but is required for the modern frontend.[/yellow]")
+
+    install_pnpm = Confirm.ask(
+        "[bold yellow]Install pnpm automatically using npm?[/bold yellow] (This will run: npm install -g pnpm)"
+    )
+    if not install_pnpm:
+        rprint("[bold red]Cannot build frontend without pnpm.[/bold red]")
+        rprint("[yellow]To install manually:[/yellow]")
+        rprint("  npm install -g pnpm")
+        return False
+
+    rprint("[yellow]Installing pnpm...[/yellow]")
+    install_result = subprocess.run(["npm", "install", "-g", "pnpm"], capture_output=True, text=True, check=False)
+
+    if install_result.returncode != 0:
+        rprint("[bold red]Failed to install pnpm automatically.[/bold red]")
+        rprint(f"[red]Error: {install_result.stderr}[/red]")
+        rprint("[yellow]Please install manually: npm install -g pnpm[/yellow]")
+        return False
+
+    try:
+        verify_result = subprocess.run(["pnpm", "--version"], capture_output=True, text=True, check=False)
+    except FileNotFoundError:
+        rprint("[bold red]pnpm installation succeeded but pnpm was not found on PATH.[/bold red]")
+        rprint(
+            "[yellow]Try restarting your shell or add npm global bin to PATH, then verify with: pnpm --version[/yellow]"
+        )
+        return False
+
+    if verify_result.returncode != 0:
+        rprint("[bold red]pnpm installation failed to verify.[/bold red]")
+        if verify_result.stderr:
+            rprint(f"[red]{verify_result.stderr.strip()}[/red]")
+        return False
+
+    pnpm_version = verify_result.stdout.strip()
+    rprint(f"[green]Successfully installed pnpm {pnpm_version}[/green]")
+    return True
+
+
+def handle_temporary_frontend_pr(frontend_pr: str) -> Optional[str]:
+    """Handle temporary frontend PR for launch - returns path to built frontend"""
+    from comfy_cli.pr_cache import PRCache
+
+    rprint("\n[bold blue]Preparing frontend PR for launch...[/bold blue]")
+
+    # Verify Node.js tools first
+    if not verify_node_tools():
+        rprint("[bold red]Cannot build frontend without Node.js and npm[/bold red]")
+        return None
+
+    # Parse frontend PR reference
+    try:
+        repo_owner, repo_name, pr_number = parse_frontend_pr_reference(frontend_pr)
+    except ValueError as e:
+        rprint(f"[bold red]Error parsing frontend PR reference: {e}[/bold red]")
+        return None
+
+    # Fetch PR info
+    try:
+        if pr_number:
+            pr_info = fetch_pr_info(repo_owner, repo_name, pr_number)
+        else:
+            username, branch = frontend_pr.split(":", 1)
+            pr_info = find_pr_by_branch(repo_owner, repo_name, username, branch)
+
+        if not pr_info:
+            rprint(f"[bold red]Frontend PR not found: {frontend_pr}[/bold red]")
+            return None
+    except Exception as e:
+        rprint(f"[bold red]Error fetching frontend PR information: {e}[/bold red]")
+        return None
+
+    # Check cache first
+    cache = PRCache()
+    cached_path = cache.get_cached_frontend_path(pr_info)
+    if cached_path:
+        rprint(f"[bold green]Using cached frontend build for PR #{pr_info.number}[/bold green]")
+        rprint(f"[bold green]PR #{pr_info.number}: {pr_info.title} by {pr_info.user}[/bold green]")
+        return str(cached_path)
+
+    # Need to build - show PR info
+    console.print(
+        Panel(
+            f"[bold]Frontend PR #{pr_info.number}[/bold]: {pr_info.title}\n"
+            f"[yellow]Author[/yellow]: {pr_info.user}\n"
+            f"[yellow]Branch[/yellow]: {pr_info.head_branch}\n"
+            f"[yellow]Source[/yellow]: {pr_info.head_repo_url}",
+            title="[bold blue]Building Frontend PR[/bold blue]",
+            border_style="blue",
+        )
+    )
+
+    # Build in cache directory
+    cache_path = cache.get_frontend_cache_path(pr_info)
+    cache_path.mkdir(parents=True, exist_ok=True)
+
+    # Clone or update repository
+    repo_path = cache_path / "repo"
+    if not (repo_path / ".git").exists():
+        rprint("Cloning frontend repository...")
+        clone_comfyui(url=pr_info.base_repo_url, repo_dir=str(repo_path))
+
+    # Checkout PR
+    rprint(f"Checking out PR #{pr_info.number}...")
+    success = checkout_pr(str(repo_path), pr_info)
+    if not success:
+        rprint("[bold red]Failed to checkout frontend PR[/bold red]")
+        return None
+
+    # Build frontend
+    rprint("\n[bold yellow]Building frontend (this may take a moment)...[/bold yellow]")
+    original_dir = os.getcwd()
+    try:
+        os.chdir(repo_path)
+
+        # Run pnpm install
+        rprint("Running pnpm install...")
+        pnpm_install = subprocess.run(["pnpm", "install"], capture_output=True, text=True, check=False)
+        if pnpm_install.returncode != 0:
+            rprint(f"[bold red]pnpm install failed:[/bold red]\n{pnpm_install.stderr}")
+            return None
+
+        # Build with vite
+        rprint("Building with vite...")
+        vite_build = subprocess.run(["npx", "vite", "build"], capture_output=True, text=True, check=False)
+        if vite_build.returncode != 0:
+            rprint(f"[bold red]vite build failed:[/bold red]\n{vite_build.stderr}")
+            return None
+
+        # Check if dist exists
+        dist_path = repo_path / "dist"
+        if dist_path.exists():
+            # Save cache info
+            cache.save_cache_info(pr_info, cache_path)
+            rprint("[bold green]✓ Frontend built and cached successfully[/bold green]")
+            rprint(f"[bold green]Using frontend from PR #{pr_info.number}: {pr_info.title}[/bold green]")
+            rprint(f"[dim]Cache will expire in {cache.DEFAULT_MAX_CACHE_AGE_DAYS} days[/dim]")
+            return str(dist_path)
+        else:
+            rprint("[bold red]Frontend build completed but dist folder not found[/bold red]")
+            return None
+
+    finally:
+        os.chdir(original_dir)
+
+
+def parse_frontend_pr_reference(pr_ref: str) -> tuple[str, str, Optional[int]]:
+    """
+    Parse frontend PR reference. Similar to parse_pr_reference but defaults to Comfy-Org/ComfyUI_frontend
+    """
+    pr_ref = pr_ref.strip()
+
+    if pr_ref.startswith("https://github.com/"):
+        parsed = urlparse(pr_ref)
+        if "/pull/" in parsed.path:
+            path_parts = parsed.path.strip("/").split("/")
+            if len(path_parts) >= 4:
+                repo_owner = path_parts[0]
+                repo_name = path_parts[1]
+                pr_number = int(path_parts[3])
+                return repo_owner, repo_name, pr_number
+
+    elif pr_ref.startswith("#"):
+        pr_number = int(pr_ref[1:])
+        return "Comfy-Org", "ComfyUI_frontend", pr_number
+
+    elif ":" in pr_ref:
+        username, branch = pr_ref.split(":", 1)
+        return "Comfy-Org", "ComfyUI_frontend", None
+
+    else:
+        raise ValueError(f"Invalid frontend PR reference format: {pr_ref}")

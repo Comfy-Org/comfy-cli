@@ -1,13 +1,13 @@
+import contextlib
 import os
 import pathlib
 import sys
-from typing import List, Optional, Tuple
-from urllib.parse import unquote, urlparse
+from typing import Annotated, Optional
+from urllib.parse import parse_qs, unquote, urlparse
 
 import requests
 import typer
 from rich import print
-from typing_extensions import Annotated
 
 from comfy_cli import constants, tracking, ui
 from comfy_cli.config_manager import ConfigManager
@@ -35,11 +35,10 @@ def get_workspace() -> pathlib.Path:
 
 
 def potentially_strip_param_url(path_name: str) -> str:
-    path_name = path_name.split("?")[0]
-    return path_name
+    return path_name.split("?")[0]
 
 
-def check_huggingface_url(url: str) -> Tuple[bool, Optional[str], Optional[str], Optional[str], Optional[str]]:
+def check_huggingface_url(url: str) -> tuple[bool, Optional[str], Optional[str], Optional[str], Optional[str]]:
     """
     Check if the given URL is a Hugging Face URL and extract relevant information.
 
@@ -76,43 +75,69 @@ def check_huggingface_url(url: str) -> Tuple[bool, Optional[str], Optional[str],
     return True, repo_id, filename, folder_name, branch_name
 
 
-def check_civitai_url(url: str) -> Tuple[bool, bool, int, int]:
+def check_civitai_url(url: str) -> tuple[bool, bool, Optional[int], Optional[int]]:
     """
     Returns:
-        is_civitai_model_url: True if the url is a civitai model url
-        is_civitai_api_url: True if the url is a civitai api url
-        model_id: The model id or None if it's api url
-        version_id: The version id or None if it doesn't have version id info
+        is_civitai_model_url: True if the url is a civitai *web* model url (e.g. /models/12345)
+        is_civitai_api_url: True if the url is a civitai *api* url useful for resolving downloads
+        model_id: The model id (for /models/*), else None
+        version_id: The version id (for /api/download/models/* or ?modelVersionId=), else None
     """
-    prefix = "civitai.com"
     try:
-        if prefix in url:
-            # URL is civitai api download url: https://civitai.com/api/download/models/12345
-            if "civitai.com/api/download" in url:
-                # This is a direct download link
-                version_id = url.strip("/").split("/")[-1]
-                return False, True, None, int(version_id)
+        parsed = urlparse(url)
+        host = (parsed.hostname or "").lower()
+        if host != "civitai.com" and not host.endswith(".civitai.com"):
+            return False, False, None, None
+        p_parts = [p for p in parsed.path.split("/") if p]
+        query = parse_qs(parsed.query)
 
-            # URL is civitai web url (e.g.
-            #   - https://civitai.com/models/43331
-            #   - https://civitai.com/models/43331/majicmix-realistic
-            subpath = url[url.find(prefix) + len(prefix) :].strip("/")
-            url_parts = subpath.split("?")
-            if len(url_parts) > 1:
-                model_id = url_parts[0].split("/")[1]
-                version_id = url_parts[1].split("=")[1]
-                return True, False, int(model_id), int(version_id)
-            else:
-                model_id = subpath.split("/")[1]
-                return True, False, int(model_id), None
-    except (ValueError, IndexError):
-        print("Error parsing Civitai model URL")
+        if len(p_parts) >= 4 and p_parts[0] == "api":
+            # Case 1: /api/download/models/<version_id>
+            # e.g. https://civitai.com/api/download/models/1617665?type=Model&format=SafeTensor
+            if p_parts[1] == "download" and p_parts[2] == "models":
+                try:
+                    version_id = int(p_parts[3])
+                    return False, True, None, version_id
+                except ValueError:
+                    return False, True, None, None
 
-    return False, False, None, None
+            # Case 2: /api/v1/model-versions/<version_id>
+            if p_parts[1] == "v1" and p_parts[2] in ("model-versions", "modelVersions"):
+                try:
+                    version_id = int(p_parts[3])
+                    return False, True, None, version_id
+                except ValueError:
+                    return False, True, None, None
+
+        # Case 3: /models/<model_id>[/*] with optional ?modelVersionId=<id>
+        # e.g. https://civitai.com/models/43331
+        #      https://civitai.com/models/43331/majicmix-realistic?modelVersionId=485088
+        if len(p_parts) >= 2 and p_parts[0] == "models":
+            try:
+                model_id = int(p_parts[1])
+            except ValueError:
+                return False, False, None, None
+            version_id = None
+            mv = query.get("modelVersionId")
+            if mv and len(mv) > 0:
+                with contextlib.suppress(ValueError):
+                    version_id = int(mv[0])
+            if version_id is None:
+                mv = query.get("version")
+                if mv and len(mv) > 0:
+                    with contextlib.suppress(ValueError):
+                        version_id = int(mv[0])
+            return True, False, model_id, version_id
+
+        return False, False, None, None
+
+    except Exception:
+        print("Error parsing CivitAI model URL")
+        return False, False, None, None
 
 
 def request_civitai_model_version_api(version_id: int, headers: Optional[dict] = None):
-    # Make a request to the Civitai API to get the model information
+    # Make a request to the CivitAI API to get the model information
     response = requests.get(
         f"https://civitai.com/api/v1/model-versions/{version_id}",
         headers=headers,
@@ -131,7 +156,7 @@ def request_civitai_model_version_api(version_id: int, headers: Optional[dict] =
 
 
 def request_civitai_model_api(model_id: int, version_id: int = None, headers: Optional[dict] = None):
-    # Make a request to the Civitai API to get the model information
+    # Make a request to the CivitAI API to get the model information
     response = requests.get(f"https://civitai.com/api/v1/models/{model_id}", headers=headers, timeout=10)
     response.raise_for_status()  # Raise an error for bad status codes
 
@@ -163,7 +188,7 @@ def download(
     _ctx: typer.Context,
     url: Annotated[
         str,
-        typer.Option(help="The URL from which to download the model", show_default=False),
+        typer.Option(help="The URL from which to download the model.", show_default=False),
     ],
     relative_path: Annotated[
         Optional[str],
@@ -183,7 +208,7 @@ def download(
         Optional[str],
         typer.Option(
             "--set-civitai-api-token",
-            help="Set the CivitAI API token to use for model listing.",
+            help="Set the CivitAI API token to use for model downloading.",
             show_default=False,
         ),
     ] = None,
@@ -191,7 +216,7 @@ def download(
         Optional[str],
         typer.Option(
             "--set-hf-api-token",
-            help="Set the HuggingFace API token to use for model listing.",
+            help="Set the Hugging Face API token to use for model downloading.",
             show_default=False,
         ),
     ] = None,
@@ -201,27 +226,23 @@ def download(
 
     local_filename = None
     headers = None
-    civitai_api_token = None
 
-    if set_civitai_api_token is not None:
-        config_manager.set(constants.CIVITAI_API_TOKEN_KEY, set_civitai_api_token)
-        civitai_api_token = set_civitai_api_token
-
-    if set_hf_api_token is not None:
-        config_manager.set(constants.HF_API_TOKEN_KEY, set_hf_api_token)
-        hf_api_token = set_hf_api_token
-    else:
-        civitai_api_token = config_manager.get(constants.CIVITAI_API_TOKEN_KEY)
-        hf_api_token = config_manager.get(constants.HF_API_TOKEN_KEY)
-
-    if civitai_api_token is not None:
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {civitai_api_token}",
-        }
+    civitai_api_token = config_manager.get_or_override(
+        constants.CIVITAI_API_TOKEN_ENV_KEY, constants.CIVITAI_API_TOKEN_KEY, set_civitai_api_token
+    )
+    hf_api_token = config_manager.get_or_override(
+        constants.HF_API_TOKEN_ENV_KEY, constants.HF_API_TOKEN_KEY, set_hf_api_token
+    )
 
     is_civitai_model_url, is_civitai_api_url, model_id, version_id = check_civitai_url(url)
     is_huggingface_url, repo_id, hf_filename, hf_folder_name, hf_branch_name = check_huggingface_url(url)
+
+    if is_civitai_model_url or is_civitai_api_url:
+        headers = {
+            "Content-Type": "application/json",
+        }
+        if civitai_api_token is not None:
+            headers["Authorization"] = f"Bearer {civitai_api_token}"
 
     if is_civitai_model_url:
         local_filename, url, model_type, basemodel = request_civitai_model_api(model_id, version_id, headers)
@@ -280,7 +301,7 @@ def download(
     if is_huggingface_url and check_unauthorized(url, headers):
         if hf_api_token is None:
             print(
-                "Unauthorized access to Hugging Face model. Please set the HuggingFace API token using --set-hf-api-token"
+                f"Unauthorized access to Hugging Face model. Please set the Hugging Face API token using `comfy model download --set-hf-api-token` or via the `{constants.HF_API_TOKEN_ENV_KEY}` environment variable"
             )
             return
         else:
@@ -318,7 +339,7 @@ def remove(
         help="The relative path from the current workspace where the models are stored.",
         show_default=True,
     ),
-    model_names: Optional[List[str]] = typer.Option(
+    model_names: Optional[list[str]] = typer.Option(
         None,
         help="List of model filenames to delete, separated by spaces",
         show_default=False,
@@ -373,9 +394,14 @@ def remove(
         typer.echo("Deletion canceled.")
 
 
-@app.command()
+def list_models(path: pathlib.Path) -> list:
+    """List all models in the specified directory."""
+    return [file for file in path.iterdir() if file.is_file()]
+
+
+@app.command("list")
 @tracking.track_command("model")
-def list(
+def list_command(
     ctx: typer.Context,
     relative_path: str = typer.Option(
         DEFAULT_COMFY_MODEL_PATH,
@@ -395,8 +421,3 @@ def list(
     data = [(model.name, f"{model.stat().st_size // 1024} KB") for model in models]
     column_names = ["Model Name", "Size"]
     ui.display_table(data, column_names)
-
-
-def list_models(path: pathlib.Path) -> list:
-    """List all models in the specified directory."""
-    return [file for file in path.iterdir() if file.is_file()]

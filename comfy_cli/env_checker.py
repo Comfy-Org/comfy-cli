@@ -7,7 +7,6 @@ import sys
 
 import requests
 from rich.console import Console
-from rich.table import Table
 
 from comfy_cli.config_manager import ConfigManager
 from comfy_cli.utils import singleton
@@ -29,8 +28,8 @@ def format_python_version(version_info):
         str: The formatted Python version string.
     """
     if version_info.major == 3 and version_info.minor > 8:
-        return "{}.{}.{}".format(version_info.major, version_info.minor, version_info.micro)
-    return "[bold red]{}.{}.{}[/bold red]".format(version_info.major, version_info.minor, version_info.micro)
+        return f"{version_info.major}.{version_info.minor}.{version_info.micro}"
+    return f"[bold red]{version_info.major}.{version_info.minor}.{version_info.micro}[/bold red]"
 
 
 def check_comfy_server_running(port=8188, host="localhost"):
@@ -48,7 +47,7 @@ def check_comfy_server_running(port=8188, host="localhost"):
 
 
 @singleton
-class EnvChecker(object):
+class EnvChecker:
     """
     Provides an `EnvChecker` class to check the current environment and print information about it.
 
@@ -89,25 +88,29 @@ class EnvChecker(object):
         self.virtualenv_path = os.environ.get("VIRTUAL_ENV") if os.environ.get("VIRTUAL_ENV") else None
         self.conda_env = os.environ.get("CONDA_DEFAULT_ENV") if os.environ.get("CONDA_DEFAULT_ENV") else None
 
-    # TODO: use ui.display_table
     def fill_print_table(self):
-        table = Table(":laptop_computer: Environment", "Value")
-        table.add_row("Python Version", format_python_version(sys.version_info))
-        table.add_row("Python Executable", sys.executable)
-        table.add_row(
-            "Virtualenv Path",
-            self.virtualenv_path if self.virtualenv_path else "Not Used",
+        data = []
+        data.append(("Python Version", format_python_version(sys.version_info)))
+        data.append(("Python Executable", sys.executable))
+        data.append(
+            (
+                "Virtualenv Path",
+                self.virtualenv_path if self.virtualenv_path else "Not Used",
+            )
         )
-        table.add_row("Conda Env", self.conda_env if self.conda_env else "Not Used")
+        data.append(("Conda Env", self.conda_env if self.conda_env else "Not Used"))
 
-        ConfigManager().fill_print_env(table)
+        config_data = ConfigManager().get_env_data()
+        data.extend(config_data)
 
         if check_comfy_server_running():
-            table.add_row(
-                "Comfy Server Running",
-                "[bold green]Yes[/bold green]\nhttp://localhost:8188",
+            data.append(
+                (
+                    "Comfy Server Running",
+                    "[bold green]Yes[/bold green]\nhttp://localhost:8188",
+                )
             )
         else:
-            table.add_row("Comfy Server Running", "[bold red]No[/bold red]")
+            data.append(("Comfy Server Running", "[bold red]No[/bold red]"))
 
-        return table
+        return data

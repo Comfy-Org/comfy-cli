@@ -22,6 +22,7 @@ terminal.
 - 🗄️ Download checkpoints and save model hash
 - 💻 Cross-platform compatibility (Windows, macOS, Linux)
 - 📖 Comprehensive documentation and examples
+- 🎉 install pull request to ComfyUI automatically
 
 ## Installation
 
@@ -111,6 +112,41 @@ Comfy provides commands that allow you to easily run the installed ComfyUI.
   - Since "Comfy Server Running" in `comfy env` only shows the default port 8188, it doesn't display ComfyUI running on a different port.
   - Background-running ComfyUI can be stopped with `comfy stop`.
 
+- to run ComfyUI with a specific pull request:
+
+  `comfy install --pr "#1234"`
+
+  `comfy install --pr "jtydhr88:load-3d-nodes"`
+
+  `comfy install --pr "https://github.com/comfyanonymous/ComfyUI/pull/1234"`
+
+  - If you want to run ComfyUI with a specific pull request, you can use the `--pr` option. This will automatically install the specified pull request and run ComfyUI with it.
+  - Important: When using --pr, any --version and --commit parameters are ignored. The PR branch will be checked out regardless of version settings.
+
+- To test a frontend pull request:
+
+  ```
+  comfy launch --frontend-pr "#456"
+  comfy launch --frontend-pr "username:branch-name" 
+  comfy launch --frontend-pr "https://github.com/Comfy-Org/ComfyUI_frontend/pull/456"
+  ```
+
+  - The `--frontend-pr` option allows you to test frontend PRs by automatically cloning, building, and using the frontend for that session.
+  - Requirements: Node.js and npm must be installed to build the frontend.
+  - Builds are cached for quick switching between PRs - subsequent uses of the same PR are instant.
+  - Each PR is used only for that launch session. Normal launches use the default frontend.
+
+  **Managing PR cache**:
+  ```
+  comfy pr-cache list              # List cached PR builds
+  comfy pr-cache clean             # Clean all cached builds
+  comfy pr-cache clean 456         # Clean specific PR cache
+  ```
+  
+  - Cache automatically expires after 7 days
+  - Maximum of 10 PR builds are kept (oldest are removed automatically)
+  - Cache limits help manage disk space while keeping recent builds available
+
 ### Managing Custom Nodes
 
 comfy provides a convenient way to manage custom nodes for extending ComfyUI's functionality. Here are some examples:
@@ -161,9 +197,11 @@ the bisect tool can help you pinpoint the custom node that causes the issue.
 
 - Model downloading
 
-  `comfy model download --url <URL> ?[--relative-path <PATH>] ?[--set-civitai-api-token <TOKEN>]`
+  `comfy model download --url <URL> ?[--relative-path <PATH>] ?[--set-civitai-api-token <TOKEN>] ?[--set-hf-api-token <TOKEN>]`
 
-  - URL: CivitAI, huggingface file url, ...
+  - URL: CivitAI page, Hugging Face file URL, etc...
+  - You can also specify your API tokens via the `CIVITAI_API_TOKEN` and `HF_API_TOKEN` environment variables. The order of priority is `--set-X-token` (always highest priority), then the environment variables if they exist, and lastly your config's stored tokens from previous `--set-X-token` usage (which remembers your most recently set token values).
+  - Tokens provided via the environment variables are never stored persistently in your config file. They are intended as a way to easily and safely provide transient secrets.
 
 - Model remove
 
@@ -245,6 +283,6 @@ comfy is released under the [GNU General Public License v3.0](https://github.com
 
 ## Support
 
-If you encounter any issues or have questions about comfy-cli, please [open an issue](https://github.com/comfy-cli/issues) on our GitHub repository or contact us on [Discord](https://discord.gg/comfycontrib). We'll be happy to assist you!
+If you encounter any issues or have questions about comfy-cli, please [open an issue](https://github.com/comfy-cli/issues) on our GitHub repository or contact us on [Discord](https://discord.com/invite/comfyorg). We'll be happy to assist you!
 
 Happy diffusing with ComfyUI and comfy-cli! 🎉

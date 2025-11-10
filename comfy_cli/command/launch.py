@@ -22,7 +22,7 @@ workspace_manager = WorkspaceManager()
 console = Console()
 
 
-def launch_comfyui(extra):
+def launch_comfyui(extra, frontend_pr=None):
     reboot_path = None
 
     new_env = os.environ.copy()
@@ -37,6 +37,20 @@ def launch_comfyui(extra):
     python_exe = workspace_manager.python_exe
 
     extra = extra if extra is not None else []
+
+    # Handle temporary frontend PR
+    if frontend_pr:
+        from comfy_cli.command.install import handle_temporary_frontend_pr
+
+        try:
+            frontend_path = handle_temporary_frontend_pr(frontend_pr)
+            if frontend_path:
+                # Check if --front-end-root is not already specified
+                if not any(arg.startswith("--front-end-root") for arg in extra):
+                    extra = ["--front-end-root", frontend_path] + extra
+        except Exception as e:
+            print(f"[bold red]Failed to prepare frontend PR: {e}[/bold red]")
+            # Continue with default frontend
 
     process = None
 
@@ -109,6 +123,7 @@ def launch_comfyui(extra):
 def launch(
     background: bool = False,
     extra: list[str] | None = None,
+    frontend_pr: str | None = None,
 ):
     check_for_updates()
     resolved_workspace = workspace_manager.workspace_path
@@ -135,12 +150,12 @@ def launch(
 
     os.chdir(resolved_workspace)
     if background:
-        background_launch(extra)
+        background_launch(extra, frontend_pr)
     else:
-        launch_comfyui(extra)
+        launch_comfyui(extra, frontend_pr)
 
 
-def background_launch(extra):
+def background_launch(extra, frontend_pr=None):
     config_background = ConfigManager().background
     if config_background is not None and utils.is_running(config_background[2]):
         console.print(
@@ -173,7 +188,13 @@ def background_launch(extra):
         "comfy",
         f"--workspace={os.path.abspath(os.getcwd())}",
         "launch",
-    ] + extra
+    ]
+
+    # Add frontend PR option if specified
+    if frontend_pr:
+        cmd.extend(["--frontend-pr", frontend_pr])
+
+    cmd.extend(extra)
 
     loop = asyncio.get_event_loop()
     log = loop.run_until_complete(launch_and_monitor(cmd, listen, port))

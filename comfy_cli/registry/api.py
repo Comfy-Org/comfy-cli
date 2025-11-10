@@ -54,10 +54,19 @@ class RegistryAPI:
                 "name": node_config.tool_comfy.display_name,
                 "license": license_json,
                 "repository": node_config.project.urls.repository,
+                "banner_url": node_config.tool_comfy.banner_url,
+                "supported_os": node_config.project.supported_os,
+                "supported_accelerators": node_config.project.supported_accelerators,
+                "supported_comfyui_version": node_config.project.supported_comfyui_version,
+                "supported_comfyui_frontend_version": node_config.project.supported_comfyui_frontend_version,
             },
             "node_version": {
                 "version": node_config.project.version,
                 "dependencies": node_config.project.dependencies,
+                "supported_os": node_config.project.supported_os,
+                "supported_accelerators": node_config.project.supported_accelerators,
+                "supported_comfyui_version": node_config.project.supported_comfyui_version,
+                "supported_comfyui_frontend_version": node_config.project.supported_comfyui_frontend_version,
             },
         }
         print(request_body)
@@ -87,8 +96,7 @@ class RegistryAPI:
         response = requests.get(url)
         if response.status_code == 200:
             raw_nodes = response.json()["nodes"]
-            mapped_nodes = [map_node_to_node_class(node) for node in raw_nodes]
-            return mapped_nodes
+            return [map_node_to_node_class(node) for node in raw_nodes]
         else:
             raise Exception(f"Failed to retrieve nodes: {response.status_code} - {response.text}")
 
