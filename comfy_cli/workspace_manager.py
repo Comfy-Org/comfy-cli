@@ -232,7 +232,7 @@ class WorkspaceManager:
 
         # Check for user-set default workspace
         default_workspace = self.config_manager.get(constants.CONFIG_KEY_DEFAULT_WORKSPACE)
-        valid_default_workspace =  default_workspace and check_comfy_repo(default_workspace)[0]
+        valid_default_workspace = default_workspace and check_comfy_repo(default_workspace)[0]
 
         # Check the current directory for a ComfyUI
         if self.use_here is None:
