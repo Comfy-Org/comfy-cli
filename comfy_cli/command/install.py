@@ -123,6 +123,27 @@ def pip_install_comfyui_dependencies(
                 + pip_url,
                 check=False,
             )
+
+        # install torch for CPU
+        if gpu is None:  # Currently, when install for CPU, gpu is None
+            pip_url = [
+                "--extra-index-url",
+                "https://download.pytorch.org/whl/cpu",
+            ]
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "pip",
+                    "install",
+                    "torch",
+                    "torchvision",
+                    "torchaudio",
+                ]
+                + pip_url,
+                check=False,
+            )
+
         if result and result.returncode != 0:
             rprint("Failed to install PyTorch dependencies. Please check your environment (`comfy env`) and try again")
             sys.exit(1)
