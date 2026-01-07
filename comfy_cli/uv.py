@@ -4,7 +4,7 @@ import sys
 from importlib import metadata
 from pathlib import Path
 from textwrap import dedent
-from typing import Any, Optional, Union, cast
+from typing import Any, cast
 
 from comfy_cli import ui
 from comfy_cli.constants import GPU_OPTION
@@ -15,7 +15,7 @@ def _run(cmd: list[str], cwd: PathLike, check: bool = True) -> subprocess.Comple
     return subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, check=check)
 
 
-def _check_call(cmd: list[str], cwd: Optional[PathLike] = None):
+def _check_call(cmd: list[str], cwd: PathLike | None = None):
     """uses check_call to run pip, as reccomended by the pip maintainers.
     see https://pip.pypa.io/en/stable/user_guide/#using-pip-from-your-program"""
     subprocess.check_call(cmd, cwd=cwd)
@@ -43,7 +43,7 @@ def parse_uv_compile_error(err: str) -> tuple[str, list[str]]:
     return reqName, cast(list[str], reqRe.findall(err))
 
 
-def parse_req_file(rf: PathLike, skips: Optional[list[str]] = None):
+def parse_req_file(rf: PathLike, skips: list[str] | None = None):
     skips = [] if skips is None else skips
 
     reqs: list[str] = []
@@ -115,9 +115,9 @@ class DependencyCompiler:
         emit_index_url: bool = True,
         executable: PathLike = sys.executable,
         index_strategy: str = "unsafe-best-match",
-        out: Optional[PathLike] = None,
-        override: Optional[PathLike] = None,
-        resolve_strategy: Optional[str] = None,
+        out: PathLike | None = None,
+        override: PathLike | None = None,
+        resolve_strategy: str | None = None,
     ) -> subprocess.CompletedProcess[Any]:
         cmd = [
             str(executable),
@@ -182,14 +182,14 @@ class DependencyCompiler:
         cwd: PathLike,
         executable: PathLike = sys.executable,
         dry: bool = False,
-        extra_index_url: Optional[str] = None,
-        find_links: Optional[list[str]] = None,
-        index_strategy: Optional[str] = "unsafe-best-match",
+        extra_index_url: str | None = None,
+        find_links: list[str] | None = None,
+        index_strategy: str | None = "unsafe-best-match",
         no_deps: bool = False,
         no_index: bool = False,
-        override: Optional[PathLike] = None,
-        reqs: Optional[list[str]] = None,
-        reqFile: Optional[list[PathLike]] = None,
+        override: PathLike | None = None,
+        reqs: list[str] | None = None,
+        reqFile: list[PathLike] | None = None,
     ) -> None:
         cmd = [
             str(executable),
@@ -236,7 +236,7 @@ class DependencyCompiler:
         reqFile: list[PathLike],
         dry: bool = False,
         executable: PathLike = sys.executable,
-        extraUrl: Optional[str] = None,
+        extraUrl: str | None = None,
         index_strategy: str = "unsafe-best-match",
     ) -> None:
         cmd = [
@@ -263,11 +263,11 @@ class DependencyCompiler:
     def Download(
         cwd: PathLike,
         executable: PathLike = sys.executable,
-        extraUrl: Optional[str] = None,
+        extraUrl: str | None = None,
         noDeps: bool = False,
-        out: Optional[PathLike] = None,
-        reqs: Optional[list[str]] = None,
-        reqFile: Optional[list[PathLike]] = None,
+        out: PathLike | None = None,
+        reqs: list[str] | None = None,
+        reqFile: list[PathLike] | None = None,
     ) -> None:
         """For now, the `download` cmd has no uv support, so use pip"""
         cmd = [
@@ -299,11 +299,11 @@ class DependencyCompiler:
     def Wheel(
         cwd: PathLike,
         executable: PathLike = sys.executable,
-        extraUrl: Optional[str] = None,
+        extraUrl: str | None = None,
         noDeps: bool = False,
-        out: Optional[PathLike] = None,
-        reqs: Optional[list[str]] = None,
-        reqFile: Optional[list[PathLike]] = None,
+        out: PathLike | None = None,
+        reqs: list[str] | None = None,
+        reqFile: list[PathLike] | None = None,
     ) -> None:
         """For now, the `wheel` cmd has no uv support, so use pip"""
         cmd = [
@@ -332,7 +332,7 @@ class DependencyCompiler:
         return _check_call(cmd, cwd)
 
     @staticmethod
-    def Resolve_Gpu(gpu: Union[GPU_OPTION, None]):
+    def Resolve_Gpu(gpu: GPU_OPTION | None):
         if gpu is None:
             try:
                 tver = metadata.version("torch")
@@ -351,12 +351,12 @@ class DependencyCompiler:
         self,
         cwd: PathLike = ".",
         executable: PathLike = sys.executable,
-        gpu: Union[GPU_OPTION, None] = None,
+        gpu: GPU_OPTION | None = None,
         outDir: PathLike = ".",
         outName: str = "requirements.compiled",
-        reqFilesCore: Optional[list[PathLike]] = None,
-        reqFilesExt: Optional[list[PathLike]] = None,
-        extraSpecs: Optional[list[str]] = None,
+        reqFilesCore: list[PathLike] | None = None,
+        reqFilesExt: list[PathLike] | None = None,
+        extraSpecs: list[str] | None = None,
     ):
         """Compiler/installer of Python dependencies based on uv
 

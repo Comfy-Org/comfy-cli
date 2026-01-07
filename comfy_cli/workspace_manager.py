@@ -4,7 +4,6 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
-from typing import Optional
 
 import git
 import typer
@@ -23,16 +22,16 @@ class ModelPath:
 
 @dataclass
 class Model:
-    name: Optional[str] = None
-    url: Optional[str] = None
+    name: str | None = None
+    url: str | None = None
     paths: list[ModelPath] = field(default_factory=list)
-    hash: Optional[str] = None
-    type: Optional[str] = None
+    hash: str | None = None
+    type: str | None = None
 
 
 @dataclass
 class Basics:
-    name: Optional[str] = None
+    name: str | None = None
     updated_at: datetime = None
 
 
@@ -49,7 +48,7 @@ class ComfyLockYAMLStruct:
     custom_nodes: list[CustomNode] = field(default_factory=list)
 
 
-def check_comfy_repo(path) -> tuple[bool, Optional[git.Repo]]:
+def check_comfy_repo(path) -> tuple[bool, git.Repo | None]:
     if not os.path.exists(path):
         return False, None
     try:
@@ -155,10 +154,10 @@ class WorkspaceManager:
 
     def setup_workspace_manager(
         self,
-        specified_workspace: Optional[str] = None,
-        use_here: Optional[bool] = None,
-        use_recent: Optional[bool] = None,
-        skip_prompting: Optional[bool] = None,
+        specified_workspace: str | None = None,
+        use_here: bool | None = None,
+        use_recent: bool | None = None,
+        skip_prompting: bool | None = None,
     ):
         self.specified_workspace = specified_workspace
         self.use_here = use_here
@@ -184,7 +183,7 @@ class WorkspaceManager:
         """
         self.config_manager.set(constants.CONFIG_KEY_DEFAULT_LAUNCH_EXTRAS, extras.strip())
 
-    def __get_specified_workspace(self) -> Optional[str]:
+    def __get_specified_workspace(self) -> str | None:
         if self.specified_workspace is None:
             return None
 

@@ -2,7 +2,7 @@ import os
 import platform
 import subprocess
 import sys
-from typing import Optional, TypedDict
+from typing import TypedDict
 from urllib.parse import urlparse
 
 import requests
@@ -192,15 +192,15 @@ def execute(
     restore: bool,
     skip_manager: bool,
     version: str,
-    commit: Optional[str] = None,
-    manager_commit: Optional[str] = None,
+    commit: str | None = None,
+    manager_commit: str | None = None,
     gpu: constants.GPU_OPTION = None,
     cuda_version: constants.CUDAVersion = constants.CUDAVersion.v12_6,
     plat: constants.OS = None,
     skip_torch_or_directml: bool = False,
     skip_requirement: bool = False,
     fast_deps: bool = False,
-    pr: Optional[str] = None,
+    pr: str | None = None,
     *args,
     **kwargs,
 ):
@@ -363,7 +363,7 @@ def handle_pr_checkout(pr_ref: str, comfy_path: str) -> str:
     return pr_info.base_repo_url
 
 
-def validate_version(version: str) -> Optional[str]:
+def validate_version(version: str) -> str | None:
     """
     Validates the version string as 'latest', 'nightly', or a semantically version number.
 
@@ -443,7 +443,7 @@ class GithubRelease(TypedDict):
     - download_url: The URL to download the release.
     """
 
-    version: Optional[semver.VersionInfo]
+    version: semver.VersionInfo | None
     tag: str
     download_url: str
 
@@ -464,7 +464,7 @@ def parse_releases(releases: list[dict[str, str]]) -> list[GithubRelease]:
     return parsed_releases
 
 
-def select_version(releases: list[GithubRelease], version: str) -> Optional[GithubRelease]:
+def select_version(releases: list[GithubRelease], version: str) -> GithubRelease | None:
     """
     Given a list of Github releases, select the release that matches the specified version.
     """
@@ -529,7 +529,7 @@ def checkout_stable_comfyui(version: str, repo_dir: str):
             sys.exit(1)
 
 
-def get_latest_release(repo_owner: str, repo_name: str) -> Optional[GithubRelease]:
+def get_latest_release(repo_owner: str, repo_name: str) -> GithubRelease | None:
     """
     Fetch the latest release information from GitHub API.
 
@@ -556,7 +556,7 @@ def get_latest_release(repo_owner: str, repo_name: str) -> Optional[GithubReleas
         return None
 
 
-def parse_pr_reference(pr_ref: str) -> tuple[str, str, Optional[int]]:
+def parse_pr_reference(pr_ref: str) -> tuple[str, str, int | None]:
     """
     support formats：
     - username:branch-name
@@ -624,7 +624,7 @@ def fetch_pr_info(repo_owner: str, repo_name: str, pr_number: int) -> PRInfo:
         raise Exception(f"Failed to fetch PR #{pr_number}: {e}")
 
 
-def find_pr_by_branch(repo_owner: str, repo_name: str, username: str, branch: str) -> Optional[PRInfo]:
+def find_pr_by_branch(repo_owner: str, repo_name: str, username: str, branch: str) -> PRInfo | None:
     url = f"https://api.github.com/repos/{repo_owner}/{repo_name}/pulls"
     params = {"head": f"{username}:{branch}", "state": "open"}
 
@@ -756,7 +756,7 @@ def verify_node_tools() -> bool:
     return True
 
 
-def handle_temporary_frontend_pr(frontend_pr: str) -> Optional[str]:
+def handle_temporary_frontend_pr(frontend_pr: str) -> str | None:
     """Handle temporary frontend PR for launch - returns path to built frontend"""
     from comfy_cli.pr_cache import PRCache
 
@@ -863,7 +863,7 @@ def handle_temporary_frontend_pr(frontend_pr: str) -> Optional[str]:
         os.chdir(original_dir)
 
 
-def parse_frontend_pr_reference(pr_ref: str) -> tuple[str, str, Optional[int]]:
+def parse_frontend_pr_reference(pr_ref: str) -> tuple[str, str, int | None]:
     """
     Parse frontend PR reference. Similar to parse_pr_reference but defaults to Comfy-Org/ComfyUI_frontend
     """
