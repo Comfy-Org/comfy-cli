@@ -4,6 +4,7 @@ import platform
 import subprocess
 import sys
 import uuid
+from enum import Enum
 from typing import Annotated, Optional
 
 import typer
@@ -34,6 +35,17 @@ app.add_typer(bisect_app, name="bisect", help="Bisect custom nodes for culprit n
 manager_app = typer.Typer()
 workspace_manager = WorkspaceManager()
 registry_api = RegistryAPI()
+
+
+# Enum for show command target
+class ShowTarget(str, Enum):
+    INSTALLED = "installed"
+    ENABLED = "enabled"
+    NOT_INSTALLED = "not-installed"
+    DISABLED = "disabled"
+    ALL = "all"
+    SNAPSHOT = "snapshot"
+    SNAPSHOT_LIST = "snapshot-list"
 
 
 def validate_comfyui_manager(_env_checker):
@@ -304,9 +316,8 @@ def validate_mode(mode):
 @app.command(help="Show node list")
 @tracking.track_command("node")
 def show(
-    arg: str = typer.Argument(
-        help="[installed|enabled|not-installed|disabled|all|snapshot|snapshot-list]",
-        autocompletion=show_completer,
+    arg: ShowTarget = typer.Argument(
+        help="Target to display",
     ),
     channel: Annotated[
         Optional[str],
@@ -322,30 +333,16 @@ def show(
         autocompletion=mode_completer,
     ),
 ):
-    valid_commands = [
-        "installed",
-        "enabled",
-        "not-installed",
-        "disabled",
-        "all",
-        "snapshot",
-        "snapshot-list",
-    ]
-    if arg not in valid_commands:
-        typer.echo(f"Invalid command: `show {arg}`", err=True)
-        raise typer.Exit(code=1)
-
     validate_mode(mode)
 
-    execute_cm_cli(["show", arg], channel=channel, mode=mode)
+    execute_cm_cli(["show", arg.value], channel=channel, mode=mode)
 
 
 @app.command("simple-show", help="Show node list (simple mode)")
 @tracking.track_command("node")
 def simple_show(
-    arg: str = typer.Argument(
-        help="[installed|enabled|not-installed|disabled|all|snapshot|snapshot-list]",
-        autocompletion=show_completer,
+    arg: ShowTarget = typer.Argument(
+        help="Target to display",
     ),
     channel: Annotated[
         Optional[str],
@@ -361,22 +358,9 @@ def simple_show(
         autocompletion=mode_completer,
     ),
 ):
-    valid_commands = [
-        "installed",
-        "enabled",
-        "not-installed",
-        "disabled",
-        "all",
-        "snapshot",
-        "snapshot-list",
-    ]
-    if arg not in valid_commands:
-        typer.echo(f"Invalid command: `show {arg}`", err=True)
-        raise typer.Exit(code=1)
-
     validate_mode(mode)
 
-    execute_cm_cli(["simple-show", arg], channel=channel, mode=mode)
+    execute_cm_cli(["simple-show", arg.value], channel=channel, mode=mode)
 
 
 # install, reinstall, uninstall
