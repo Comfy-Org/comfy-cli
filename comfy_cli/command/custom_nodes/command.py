@@ -256,19 +256,6 @@ def clear():
 
 
 # completers
-show_completer = utils.create_choice_completer(
-    [
-        "installed",
-        "enabled",
-        "not-installed",
-        "disabled",
-        "all",
-        "snapshot",
-        "snapshot-list",
-    ]
-)
-
-
 mode_completer = utils.create_choice_completer(["remote", "local", "cache"])
 
 
