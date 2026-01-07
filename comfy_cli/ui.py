@@ -1,5 +1,5 @@
 from enum import Enum
-from typing import Any, Optional, TypeVar, Union
+from typing import Any, TypeVar
 
 import questionary
 import typer
@@ -35,12 +35,12 @@ def show_progress(iterable, total, description="Downloading..."):
             progress.update(task, advance=len(chunk))
 
 
-ChoiceType = Union[str, Choice, dict[str, Any]]
+ChoiceType = str | Choice | dict[str, Any]
 
 
 def prompt_autocomplete(
     question: str, choices: list[ChoiceType], default: ChoiceType = "", force_prompting: bool = False
-) -> Optional[ChoiceType]:
+) -> ChoiceType | None:
     """
     Asks a single select question using questionary and returns the selected response.
 
@@ -60,7 +60,7 @@ def prompt_autocomplete(
 
 def prompt_select(
     question: str, choices: list[ChoiceType], default: ChoiceType = "", force_prompting: bool = False
-) -> Optional[ChoiceType]:
+) -> ChoiceType | None:
     """
     Asks a single select question using questionary and returns the selected response.
 
@@ -81,7 +81,7 @@ def prompt_select(
 E = TypeVar("E", bound=Enum)
 
 
-def prompt_select_enum(question: str, choices: list[E], force_prompting: bool = False) -> Optional[E]:
+def prompt_select_enum(question: str, choices: list[E], force_prompting: bool = False) -> E | None:
     """
     Asks a single select question using questionary and returns the selected response.
 

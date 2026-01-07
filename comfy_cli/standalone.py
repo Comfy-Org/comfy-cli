@@ -1,7 +1,6 @@
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Optional
 
 import requests
 
@@ -26,8 +25,8 @@ _asset_url_prefix = "https://github.com/indygreg/python-build-standalone/release
 
 
 def download_standalone_python(
-    platform: Optional[str] = None,
-    proc: Optional[str] = None,
+    platform: str | None = None,
+    proc: str | None = None,
     version: str = DEFAULT_STANDALONE_PYTHON_DOWNLOAD_VERSION,
     tag: str = "latest",
     flavor: str = "install_only",
@@ -63,8 +62,8 @@ def download_standalone_python(
 class StandalonePython:
     @staticmethod
     def FromDistro(
-        platform: Optional[str] = None,
-        proc: Optional[str] = None,
+        platform: str | None = None,
+        proc: str | None = None,
         version: str = DEFAULT_STANDALONE_PYTHON_DOWNLOAD_VERSION,
         tag: str = "latest",
         flavor: str = "install_only",
@@ -146,7 +145,7 @@ class StandalonePython:
     def dehydrate_comfy_deps(
         self,
         comfyDir: PathLike,
-        extraSpecs: Optional[list[str]] = None,
+        extraSpecs: list[str] | None = None,
         packWheels: bool = False,
     ):
         self.dep_comp = DependencyCompiler(
@@ -171,7 +170,7 @@ class StandalonePython:
         else:
             self.dep_comp.install_deps()
 
-    def to_tarball(self, outPath: Optional[PathLike] = None, show_progress: bool = True):
+    def to_tarball(self, outPath: PathLike | None = None, show_progress: bool = True):
         # remove any __pycache__ before creating archive
         self.clean()
 

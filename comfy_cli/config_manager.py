@@ -1,7 +1,6 @@
 import configparser
 import os
 from importlib.metadata import version
-from typing import Optional
 
 from comfy_cli import constants, logging
 from comfy_cli.utils import get_os, is_running, singleton
@@ -11,7 +10,7 @@ from comfy_cli.utils import get_os, is_running, singleton
 class ConfigManager:
     def __init__(self):
         self.config = configparser.ConfigParser()
-        self.background: Optional[tuple[str, int, int]] = None
+        self.background: tuple[str, int, int] | None = None
         self.load()
 
     @staticmethod
@@ -43,7 +42,7 @@ class ConfigManager:
         """
         return self.config["DEFAULT"].get(key, None)  # Returns None if the key does not exist
 
-    def get_or_override(self, env_key: str, config_key: str, set_value: Optional[str] = None) -> Optional[str]:
+    def get_or_override(self, env_key: str, config_key: str, set_value: str | None = None) -> str | None:
         """
         Resolves and conditionally stores a config value.
 

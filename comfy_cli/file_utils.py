@@ -3,7 +3,6 @@ import os
 import pathlib
 import subprocess
 import zipfile
-from typing import Optional, Union
 
 import httpx
 import requests
@@ -45,7 +44,7 @@ def guess_status_code_reason(status_code: int, message: str) -> str:
     return f"Unknown error occurred (status code: {status_code})"
 
 
-def check_unauthorized(url: str, headers: Optional[dict] = None) -> bool:
+def check_unauthorized(url: str, headers: dict | None = None) -> bool:
     """
     Perform a GET request to the given URL and check if the response status code is 401 (Unauthorized).
 
@@ -64,7 +63,7 @@ def check_unauthorized(url: str, headers: Optional[dict] = None) -> bool:
         return False
 
 
-def download_file(url: str, local_filepath: pathlib.Path, headers: Optional[dict] = None):
+def download_file(url: str, local_filepath: pathlib.Path, headers: dict | None = None):
     """Helper function to download a file."""
     local_filepath.parent.mkdir(parents=True, exist_ok=True)  # Ensure the directory exists
 
@@ -88,7 +87,7 @@ def download_file(url: str, local_filepath: pathlib.Path, headers: Optional[dict
             raise DownloadException(f"Failed to download file.\n{status_reason}")
 
 
-def _load_comfyignore_spec(ignore_filename: str = ".comfyignore") -> Optional[PathSpec]:
+def _load_comfyignore_spec(ignore_filename: str = ".comfyignore") -> PathSpec | None:
     if not os.path.exists(ignore_filename):
         return None
     try:
@@ -103,7 +102,7 @@ def _load_comfyignore_spec(ignore_filename: str = ".comfyignore") -> Optional[Pa
     return PathSpec.from_lines("gitwildmatch", patterns)
 
 
-def list_git_tracked_files(base_path: Union[str, os.PathLike] = ".") -> list[str]:
+def list_git_tracked_files(base_path: str | os.PathLike = ".") -> list[str]:
     try:
         result = subprocess.check_output(
             ["git", "-C", os.fspath(base_path), "ls-files"],

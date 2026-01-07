@@ -18,7 +18,7 @@ maintainers = [
   { name = "Dr.Lt.Data", email = "dr.lt.data@gmail.com" },
 ]
 
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 classifiers = [
   "Development Status :: 4 - Beta",
   "Intended Audience :: Developers",
@@ -28,7 +28,6 @@ classifiers = [
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",
-  "Programming Language :: Python :: 3.14",
 ]
 
 dependencies = [
@@ -65,7 +64,7 @@ where = [ "." ]
 include = [ "comfy_cli*" ]
 
 [tool.ruff]
-target-version = "py39"
+target-version = "py310"
 
 line-length = 120
 lint.select = [

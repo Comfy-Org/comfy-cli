@@ -1,7 +1,6 @@
 import os
 import re
 import subprocess
-from typing import Optional
 
 import tomlkit
 import tomlkit.exceptions
@@ -254,7 +253,7 @@ def initialize_project_config():
 
 def extract_node_configuration(
     path: str = os.path.join(os.getcwd(), "pyproject.toml"),
-) -> Optional[PyProjectConfig]:
+) -> PyProjectConfig | None:
     if not os.path.isfile(path):
         ui.display_error_message("No pyproject.toml file found in the current directory.")
         return None

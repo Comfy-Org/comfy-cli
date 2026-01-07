@@ -127,7 +127,7 @@ Comfy provides commands that allow you to easily run the installed ComfyUI.
 
   ```
   comfy launch --frontend-pr "#456"
-  comfy launch --frontend-pr "username:branch-name" 
+  comfy launch --frontend-pr "username:branch-name"
   comfy launch --frontend-pr "https://github.com/Comfy-Org/ComfyUI_frontend/pull/456"
   ```
 
@@ -142,7 +142,7 @@ Comfy provides commands that allow you to easily run the installed ComfyUI.
   comfy pr-cache clean             # Clean all cached builds
   comfy pr-cache clean 456         # Clean specific PR cache
   ```
-  
+
   - Cache automatically expires after 7 days
   - Maximum of 10 PR builds are kept (oldest are removed automatically)
   - Cache limits help manage disk space while keeping recent builds available
