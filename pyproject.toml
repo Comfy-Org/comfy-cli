@@ -24,11 +24,11 @@ classifiers = [
   "Intended Audience :: Developers",
   "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
   "Programming Language :: Python :: 3 :: Only",
-  "Programming Language :: Python :: 3.9",
   "Programming Language :: Python :: 3.10",
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
 ]
 
 dependencies = [
@@ -55,7 +55,7 @@ dependencies = [
 ]
 
 optional-dependencies.dev = [ "pre-commit", "pytest", "pytest-cov", "ruff" ]
-urls.Repository = "https://github.com/drip-art/comfy-cli.git"
+urls.Repository = "https://github.com/Comfy-Org/comfy-cli.git"
 scripts.comfy = "comfy_cli.__main__:main"
 scripts.comfy-cli = "comfy_cli.__main__:main"
 scripts.comfycli = "comfy_cli.__main__:main"
