@@ -500,22 +500,19 @@ def checkout_stable_comfyui(version: str, repo_dir: str):
     Supports installing stable releases of Comfy (semantic versioning) or the 'latest' version.
     """
     rprint(f"Looking for ComfyUI version '{version}'...")
-    selected_release = None
     if version == "latest":
         selected_release = get_latest_release("comfyanonymous", "ComfyUI")
+        if selected_release is None:
+            rprint(f"Error: No release found for version '{version}'.")
+            sys.exit(1)
+        tag = str(selected_release["tag"])
     else:
-        releases = fetch_github_releases("comfyanonymous", "ComfyUI")
-        parsed_releases = parse_releases(releases)
-        selected_release = select_version(parsed_releases, version)
+        # For specific versions, directly construct the tag (add 'v' prefix if needed)
+        tag = f"v{version}" if not version.startswith("v") else version
 
-    if selected_release is None:
-        rprint(f"Error: No release found for version '{version}'.")
-        sys.exit(1)
-
-    tag = str(selected_release["tag"])
     console.print(
         Panel(
-            f"Checking out ComfyUI version: [bold cyan]{selected_release['tag']}[/bold cyan]",
+            f"Checking out ComfyUI version: [bold cyan]{tag}[/bold cyan]",
             title="[yellow]ComfyUI Checkout[/yellow]",
             border_style="green",
             expand=False,
@@ -525,7 +522,8 @@ def checkout_stable_comfyui(version: str, repo_dir: str):
     with console.status("[bold green]Checking out tag...", spinner="dots"):
         success = git_checkout_tag(repo_dir, tag)
         if not success:
-            console.print("\n[bold red]Failed to checkout tag![/bold red]")
+            console.print(f"\n[bold red]Failed to checkout tag '{tag}'![/bold red]")
+            console.print("[yellow]The version may not exist. Please check available versions.[/yellow]")
             sys.exit(1)
 
 
