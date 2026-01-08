@@ -241,7 +241,7 @@ class WorkspaceManager:
             # If it's in a sub dir of the ComfyUI repo, get the repo working dir
             if found_comfy_repo:
                 w_type = WorkspaceType.CURRENT_DIR
-                if valid_default_workspace and default_workspace == current_directory:
+                if valid_default_workspace and default_workspace == comfy_repo.working_dir:
                     w_type = WorkspaceType.DEFAULT
                 return comfy_repo.working_dir, w_type
 
