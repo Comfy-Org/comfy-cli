@@ -412,27 +412,6 @@ def handle_github_rate_limit(response):
         raise GitHubRateLimitError(message)
 
 
-def fetch_github_releases(repo_owner: str, repo_name: str) -> list[dict[str, str]]:
-    """
-    Fetch the list of releases from the GitHub API.
-    Handles rate limiting by logging the wait time.
-    """
-    url = f"https://api.github.com/repos/{repo_owner}/{repo_name}/releases"
-
-    headers = {}
-    if github_token := os.getenv("GITHUB_TOKEN"):
-        headers["Authorization"] = f"Bearer {github_token}"
-
-    response = requests.get(url, headers=headers, timeout=5)
-
-    # Handle rate limiting
-    if response.status_code in (403, 429):
-        handle_github_rate_limit(response)
-
-    response.raise_for_status()
-    return response.json()
-
-
 class GithubRelease(TypedDict):
     """
     A dictionary representing a GitHub release.
@@ -446,41 +425,6 @@ class GithubRelease(TypedDict):
     version: semver.VersionInfo | None
     tag: str
     download_url: str
-
-
-def parse_releases(releases: list[dict[str, str]]) -> list[GithubRelease]:
-    """
-    Parse the list of releases fetched from the GitHub API into a list of GithubRelease objects.
-    """
-    parsed_releases: list[GithubRelease] = []
-    for release in releases:
-        tag = release["tag_name"]
-        if tag.lower() in ["latest", "nightly"]:
-            parsed_releases.append({"version": None, "download_url": release["zipball_url"], "tag": tag})
-        else:
-            version = semver.VersionInfo.parse(tag.lstrip("v"))
-            parsed_releases.append({"version": version, "download_url": release["zipball_url"], "tag": tag})
-
-    return parsed_releases
-
-
-def select_version(releases: list[GithubRelease], version: str) -> GithubRelease | None:
-    """
-    Given a list of Github releases, select the release that matches the specified version.
-    """
-    if version.lower() == "latest":
-        return next((r for r in releases if r["tag"].lower() == version.lower()), None)
-
-    version = version.lstrip("v")
-
-    try:
-        requested_version = semver.VersionInfo.parse(version)
-        return next(
-            (r for r in releases if isinstance(r["version"], semver.VersionInfo) and r["version"] == requested_version),
-            None,
-        )
-    except ValueError:
-        return None
 
 
 def clone_comfyui(url: str, repo_dir: str):
