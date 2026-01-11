@@ -51,14 +51,17 @@ DEFAULT_TRACKING_VALUE = True
 COMFY_LOCK_YAML_FILE = "comfy.lock.yaml"
 
 # TODO: figure out a better way to check if this is a comfy repo
-COMFY_ORIGIN_URL_CHOICES = [
+COMFY_ORIGIN_URL_CHOICES = {
+    "git@github.com:Comfy-Org/ComfyUI.git",
     "git@github.com:comfyanonymous/ComfyUI.git",
     "git@github.com:drip-art/comfy.git",
+    "https://github.com/Comfy-Org/ComfyUI.git",
     "https://github.com/comfyanonymous/ComfyUI.git",
     "https://github.com/drip-art/ComfyUI.git",
+    "https://github.com/Comfy-Org/ComfyUI",
     "https://github.com/comfyanonymous/ComfyUI",
     "https://github.com/drip-art/ComfyUI",
-]
+}
 
 
 class CUDAVersion(str, Enum):
