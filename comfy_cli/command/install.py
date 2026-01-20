@@ -598,6 +598,92 @@ def find_pr_by_branch(repo_owner: str, repo_name: str, username: str, branch: st
         return None
 
 
+def _print_npm_not_found_help(node_version: str) -> None:
+    """Print detailed help when npm is not found, with OS-specific instructions."""
+    rprint("[bold red]npm is not installed or not found in PATH.[/bold red]")
+    rprint()
+    rprint("[yellow]npm is a package manager that usually comes bundled with Node.js.[/yellow]")
+    rprint(f"[yellow]Your system has Node.js ({node_version}) but npm was not found.[/yellow]")
+    rprint()
+
+    current_os = platform.system()
+
+    if current_os == "Windows":
+        rprint("[bold cyan]How to fix this on Windows:[/bold cyan]")
+        rprint()
+        rprint("  [bold]Step 1:[/bold] Uninstall your current Node.js installation:")
+        rprint("    • Open the Start menu and search for 'Add or remove programs'")
+        rprint("    • Find 'Node.js' in the list and click 'Uninstall'")
+        rprint()
+        rprint("  [bold]Step 2:[/bold] Download and reinstall Node.js:")
+        rprint("    • Go to: [link=https://nodejs.org/]https://nodejs.org/[/link]")
+        rprint("    • Click the green 'Download Node.js (LTS)' button")
+        rprint("    • Run the downloaded installer")
+        rprint("    • [bold]Important:[/bold] Use all default options - do not uncheck anything")
+        rprint()
+        rprint("  [bold]Step 3:[/bold] Restart your terminal:")
+        rprint("    • Close this Command Prompt or PowerShell window completely")
+        rprint("    • Open a new Command Prompt or PowerShell window")
+        rprint()
+        rprint("  [bold]Step 4:[/bold] Verify the installation worked:")
+        rprint("    • Type: [bold]npm --version[/bold]")
+        rprint("    • You should see a version number (e.g., '10.8.0')")
+        rprint()
+
+    elif current_os == "Darwin":  # macOS
+        rprint("[bold cyan]How to fix this on macOS:[/bold cyan]")
+        rprint()
+        rprint("  [bold]Option A - Reinstall Node.js (recommended):[/bold]")
+        rprint()
+        rprint("    [bold]Step 1:[/bold] Download Node.js:")
+        rprint("      • Go to: [link=https://nodejs.org/]https://nodejs.org/[/link]")
+        rprint("      • Click the green 'Download Node.js (LTS)' button")
+        rprint("      • Open the downloaded .pkg file and follow the installer")
+        rprint()
+        rprint("    [bold]Step 2:[/bold] Restart your terminal:")
+        rprint("      • Close this Terminal window completely (Cmd+Q)")
+        rprint("      • Open a new Terminal window")
+        rprint()
+        rprint("  [bold]Option B - If you use Homebrew:[/bold]")
+        rprint("    • Run: [bold]brew install node[/bold]")
+        rprint("    • Then restart your terminal")
+        rprint()
+        rprint("  [bold]Verify the installation:[/bold]")
+        rprint("    • Type: [bold]npm --version[/bold]")
+        rprint("    • You should see a version number (e.g., '10.8.0')")
+        rprint()
+
+    else:  # Linux
+        rprint("[bold cyan]How to fix this on Linux:[/bold cyan]")
+        rprint()
+        rprint("  [bold]Option A - Install npm separately (Ubuntu/Debian):[/bold]")
+        rprint("    • Run: [bold]sudo apt update && sudo apt install npm[/bold]")
+        rprint("    • Enter your password when prompted")
+        rprint()
+        rprint("  [bold]Option B - Reinstall Node.js with npm:[/bold]")
+        rprint()
+        rprint("    [bold]Step 1:[/bold] Remove current Node.js:")
+        rprint("      • Ubuntu/Debian: [bold]sudo apt remove nodejs[/bold]")
+        rprint("      • Fedora: [bold]sudo dnf remove nodejs[/bold]")
+        rprint()
+        rprint("    [bold]Step 2:[/bold] Install Node.js (includes npm):")
+        rprint("      • Go to: [link=https://nodejs.org/]https://nodejs.org/[/link]")
+        rprint("      • Or use NodeSource repository for latest version:")
+        rprint("        [bold]curl -fsSL https://deb.nodesource.com/setup_lts.x | sudo -E bash -[/bold]")
+        rprint("        [bold]sudo apt install -y nodejs[/bold]")
+        rprint()
+        rprint("    [bold]Step 3:[/bold] Restart your terminal:")
+        rprint("      • Close this terminal window and open a new one")
+        rprint()
+        rprint("  [bold]Verify the installation:[/bold]")
+        rprint("    • Type: [bold]npm --version[/bold]")
+        rprint("    • You should see a version number (e.g., '10.8.0')")
+        rprint()
+
+    rprint("[dim]After fixing npm, run your comfy command again.[/dim]")
+    rprint()
+
+
 def verify_node_tools() -> bool:
     """Verify that Node.js, npm, and pnpm are available for frontend building"""
     try:
@@ -631,13 +717,11 @@ def verify_node_tools() -> bool:
     try:
         npm_result = subprocess.run(["npm", "--version"], capture_output=True, text=True, check=False)
     except FileNotFoundError:
-        rprint("[bold red]npm is not installed or not found in PATH.[/bold red]")
-        rprint("[yellow]npm usually comes with Node.js. Try reinstalling Node.js.[/yellow]")
+        _print_npm_not_found_help(node_version)
         return False
 
     if npm_result.returncode != 0:
-        rprint("[bold red]npm is not installed or not working correctly.[/bold red]")
-        rprint("[yellow]npm usually comes with Node.js. Try reinstalling Node.js.[/yellow]")
+        _print_npm_not_found_help(node_version)
         return False
 
     npm_version = npm_result.stdout.strip()
