@@ -47,7 +47,7 @@ dependencies = [
   "ruff",
   "semver~=3.0.2",
   "tomlkit",
-  "typer>=0.9",
+  "typer>=0.12.4",
   "typing-extensions>=4.7",
   "uv",
   "websocket-client",

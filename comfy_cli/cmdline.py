@@ -76,7 +76,6 @@ def entry(
         bool | None,
         typer.Option(
             show_default=False,
-            is_flag=True,
             help="Execute from recent path",
             callback=g_exclusivity.validate,
         ),
@@ -85,7 +84,6 @@ def entry(
         bool | None,
         typer.Option(
             show_default=False,
-            is_flag=True,
             help="Execute from current path",
             callback=g_exclusivity.validate,
         ),
@@ -94,7 +92,6 @@ def entry(
         bool,
         typer.Option(
             show_default=False,
-            is_flag=True,
             help="Do not prompt user for input, use default options",
         ),
     ] = False,
@@ -103,7 +100,6 @@ def entry(
         typer.Option(
             show_default=False,
             hidden=True,
-            is_flag=True,
             help="Enable tracking",
         ),
     ] = False,
@@ -112,7 +108,6 @@ def entry(
         "--version",
         "-v",
         help="Print version and exit",
-        is_flag=True,
     ),
 ):
     if version:
