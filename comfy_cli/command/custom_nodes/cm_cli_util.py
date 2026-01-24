@@ -57,10 +57,24 @@ def execute_cm_cli(args, channel=None, fast_deps=False, no_deps=False, mode=None
     print(f"Execute from: {workspace_path}")
     print(f"Command: {cmd}")
     try:
-        result = subprocess.run(
-            cmd, env=new_env, check=True, capture_output=True, text=True, encoding="utf-8", errors="replace"
+        process = subprocess.Popen(
+            cmd,
+            env=new_env,
+            stdout=subprocess.PIPE,
+            stderr=sys.stderr,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
         )
-        print(result.stdout)
+        stdout_lines = []
+        if process.stdout is not None:
+            for line in process.stdout:
+                print(line, end="")
+                stdout_lines.append(line)
+        return_code = process.wait()
+        stdout_output = "".join(stdout_lines)
+        if return_code != 0:
+            raise subprocess.CalledProcessError(return_code, cmd, output=stdout_output)
 
         if fast_deps and args[0] in _dependency_cmds:
             # we're using the fast_deps behavior and just ran a command that invalidated the dependencies
@@ -68,7 +82,7 @@ def execute_cm_cli(args, channel=None, fast_deps=False, no_deps=False, mode=None
             depComp.compile_deps()
             depComp.install_deps()
 
-        return result.stdout
+        return stdout_output
     except subprocess.CalledProcessError as e:
         if raise_on_error:
             if e.stdout:
