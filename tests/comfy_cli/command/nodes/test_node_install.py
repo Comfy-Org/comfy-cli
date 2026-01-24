@@ -6,7 +6,7 @@ from typer.testing import CliRunner
 
 from comfy_cli.command.custom_nodes.command import app
 
-runner = CliRunner(mix_stderr=False)
+runner = CliRunner()
 
 
 def strip_ansi(text):
@@ -28,9 +28,8 @@ def test_install_fast_deps_and_no_deps_mutually_exclusive():
     """Test that --fast-deps and --no-deps cannot be used together."""
     result = runner.invoke(app, ["install", "test-node", "--fast-deps", "--no-deps"])
     assert result.exit_code != 0
-    # Check both stdout and stderr for the error message
-    output = result.stdout + result.stderr
-    assert "Cannot use --fast-deps and --no-deps together" in output
+    # Check output for the error message
+    assert "Cannot use --fast-deps and --no-deps together" in result.output
 
 
 def test_install_no_deps_alone_works():
