@@ -200,19 +200,16 @@ def restore_snapshot(
     pip_non_url: bool | None = typer.Option(
         default=None,
         show_default=False,
-        is_flag=True,
         help="Restore for pip packages registered on PyPI.",
     ),
     pip_non_local_url: bool | None = typer.Option(
         default=None,
         show_default=False,
-        is_flag=True,
         help="Restore for pip packages registered at web URLs.",
     ),
     pip_local_url: bool | None = typer.Option(
         default=None,
         show_default=False,
-        is_flag=True,
         help="Restore for pip packages specified by local paths.",
     ),
 ):

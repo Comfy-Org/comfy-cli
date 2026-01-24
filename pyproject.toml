@@ -32,7 +32,6 @@ classifiers = [
 
 dependencies = [
   "charset-normalizer>=3",
-  "click<=8.1.8",
   "cookiecutter",
   "gitpython",
   "httpx",
@@ -47,7 +46,7 @@ dependencies = [
   "ruff",
   "semver~=3.0.2",
   "tomlkit",
-  "typer>=0.9",
+  "typer>=0.12.5",
   "typing-extensions>=4.7",
   "uv",
   "websocket-client",
