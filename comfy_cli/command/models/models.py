@@ -358,15 +358,17 @@ def remove(
         typer.echo("No models found to remove.")
         return
 
+    # Build a mapping from display name to path for selection
+    model_path_by_name = {model.name: model for _model_type, model in available_models}
+
     to_delete = []
     # Scenario #1: User provided model names to delete
     if model_names:
         # Validate and filter models to delete based on provided names
         missing_models = []
         for name in model_names:
-            model_path = model_dir / name
-            if model_path.exists():
-                to_delete.append(model_path)
+            if name in model_path_by_name:
+                to_delete.append(model_path_by_name[name])
             else:
                 missing_models.append(name)
 
@@ -377,11 +379,11 @@ def remove(
 
     # Scenario #2: User did not provide model names, prompt for selection
     else:
-        selections = ui.prompt_multi_select("Select models to delete:", [model.name for model in available_models])
+        selections = ui.prompt_multi_select("Select models to delete:", list(model_path_by_name.keys()))
         if not selections:
             typer.echo("No models selected for deletion.")
             return
-        to_delete = [model_dir / selection for selection in selections]
+        to_delete = [model_path_by_name[selection] for selection in selections]
 
     # Confirm deletion
     if to_delete and (
@@ -394,9 +396,29 @@ def remove(
         typer.echo("Deletion canceled.")
 
 
-def list_models(path: pathlib.Path) -> list:
-    """List all models in the specified directory."""
-    return [file for file in path.iterdir() if file.is_file()]
+def list_models(path: pathlib.Path) -> list[tuple[str, pathlib.Path]]:
+    """List all models in the specified directory and its subdirectories.
+
+    Returns a list of tuples (model_type, file_path) where model_type is the
+    subdirectory name with '_models' suffix stripped if present.
+    Files directly in the models directory have an empty type.
+    """
+    models = []
+    if not path.exists():
+        return models
+
+    for item in path.iterdir():
+        if item.is_file():
+            # Files directly in the models directory
+            models.append(("", item))
+        elif item.is_dir():
+            # For subdirectories, find all .safetensors files recursively
+            model_type = item.name
+            if model_type.endswith("_models"):
+                model_type = model_type[:-7]  # Strip "_models" suffix
+            for safetensor in item.rglob("*.safetensors"):
+                models.append((model_type, safetensor))
+    return models
 
 
 @app.command("list")
@@ -418,6 +440,6 @@ def list_command(
         return
 
     # Prepare data for table display
-    data = [(model.name, f"{model.stat().st_size // 1024} KB") for model in models]
-    column_names = ["Model Name", "Size"]
+    data = [(model_type, model.name, f"{model.stat().st_size // 1024} KB") for model_type, model in models]
+    column_names = ["Type", "Model Name", "Size"]
     ui.display_table(data, column_names)
