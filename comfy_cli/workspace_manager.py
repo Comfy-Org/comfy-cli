@@ -1,5 +1,7 @@
 import concurrent.futures
 import os
+import sys
+import subprocess
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
@@ -150,6 +152,7 @@ class WorkspaceManager:
         self.use_recent = None
         self.workspace_path = None
         self.workspace_type = None
+        self.python_exe = None
         self.skip_prompting = None
 
     def setup_workspace_manager(
@@ -163,6 +166,7 @@ class WorkspaceManager:
         self.use_here = use_here
         self.use_recent = use_recent
         self.workspace_path, self.workspace_type = self.get_workspace_path()
+        self.python_exe = self.find_or_create_python_env()
         self.skip_prompting = skip_prompting
 
     def set_recent_workspace(self, path: str):
@@ -308,6 +312,52 @@ class WorkspaceManager:
     def save_metadata(self):
         file_path = os.path.join(self.workspace_path, constants.COMFY_LOCK_YAML_FILE)
         save_yaml(file_path, self.metadata)
+
+    def find_or_create_python_env(self, default_name=".venv"):
+        """
+        Locates the Conda/virtual environment to use, else creates `.venv`.
+        """
+        # Case 1: Find if .venv or venv is present in install directory.
+        for name in [default_name, "venv"]:
+            if utils.get_os() == constants.OS.WINDOWS:
+                venv_path = os.path.join(self.workspace_path, name, "Scripts", "python.exe")
+            else:
+                venv_path = os.path.join(self.workspace_path, name, "bin", "python")
+            if os.path.exists(venv_path):
+                return venv_path
+
+        # Case 2: If CONDA_PREFIX is present, use the conda environment.
+        conda_prefix = os.environ.get("CONDA_PREFIX")
+        if conda_prefix:
+            if utils.get_os() == constants.OS.WINDOWS:
+                return os.path.join(conda_prefix, "python.exe")
+            else:
+                return os.path.join(conda_prefix, "bin", "python")
+
+        
+        # Case 3: Create standalone venv using currently active Python executable.
+        try:
+            print("[bold yellow]Virtual environment not found. Creating...[/bold yellow]")
+            # TODO: Should probably check here if Python version is compatible.
+            subprocess.check_call(
+                [
+                    sys.executable,
+                    "-m",
+                    "venv",
+                    "--copies",
+                    "--upgrade-deps",
+                    "--prompt",
+                    "comfyui",
+                    os.path.join(self.workspace_path, default_name),
+                ]
+            )
+            if utils.get_os() == constants.OS.WINDOWS:
+                return os.path.join(self.workspace_path, default_name, "Scripts", "python.exe")
+            else:
+                return os.path.join(self.workspace_path, default_name, "bin", "python")
+        except subprocess.CalledProcessError as e:
+            print(f"[bold red]Failed to create virtual environment: {e}[/bold red]")
+            raise typer.Exit(code=1)
 
     def fill_print_table(self):
         return [("Current selected workspace", f"[bold green]→ {self.workspace_path}[/bold green]")]
