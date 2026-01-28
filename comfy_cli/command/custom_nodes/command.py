@@ -1,6 +1,7 @@
 import os
 import pathlib
 import platform
+import shutil
 import subprocess
 import sys
 import uuid
@@ -11,9 +12,9 @@ import typer
 from rich import print
 from rich.console import Console
 
-from comfy_cli import logging, tracking, ui, utils
+from comfy_cli import constants, logging, tracking, ui, utils
 from comfy_cli.command.custom_nodes.bisect_custom_nodes import bisect_app
-from comfy_cli.command.custom_nodes.cm_cli_util import execute_cm_cli
+from comfy_cli.command.custom_nodes.cm_cli_util import execute_cm_cli, find_cm_cli
 from comfy_cli.config_manager import ConfigManager
 from comfy_cli.constants import NODE_ZIP_FILENAME
 from comfy_cli.file_utils import (
@@ -48,21 +49,9 @@ class ShowTarget(str, Enum):
     SNAPSHOT_LIST = "snapshot-list"
 
 
-def validate_comfyui_manager(_env_checker):
-    manager_path = _env_checker.get_comfyui_manager_path()
-
-    if manager_path is None:
-        print("[bold red]If ComfyUI is not installed, this feature cannot be used.[/bold red]")
-        raise typer.Exit(code=1)
-    elif not os.path.exists(manager_path):
-        print(
-            f"[bold red]If ComfyUI-Manager is not installed, this feature cannot be used.[/bold red] \\[{manager_path}]"
-        )
-        raise typer.Exit(code=1)
-    elif not os.path.exists(os.path.join(manager_path, ".git")):
-        print(
-            f"[bold red]The ComfyUI-Manager installation is invalid. This feature cannot be used.[/bold red] \\[{manager_path}]"
-        )
+def validate_comfyui_manager(_env_checker=None):
+    if not find_cm_cli():
+        print("[bold red]ComfyUI-Manager is not installed. 'cm-cli' command is not available.[/bold red]")
         raise typer.Exit(code=1)
 
 
@@ -234,16 +223,168 @@ def restore_dependencies():
     execute_cm_cli(["restore-dependencies"])
 
 
-@manager_app.command("disable-gui", help="Disable GUI mode of ComfyUI-Manager")
+@manager_app.command("disable", help="Disable ComfyUI-Manager completely")
 @tracking.track_command("node")
-def disable_gui():
-    execute_cm_cli(["cli-only-mode", "enable"])
+def disable_manager():
+    """Disable ComfyUI-Manager. No manager flags will be passed to ComfyUI."""
+    config_manager = ConfigManager()
+    config_manager.set(constants.CONFIG_KEY_MANAGER_GUI_MODE, "disable")
+    print("[bold yellow]ComfyUI-Manager has been disabled.[/bold yellow]")
+    print("No manager flags will be passed to ComfyUI on next launch.")
 
 
-@manager_app.command("enable-gui", help="Enable GUI mode of ComfyUI-Manager")
+@manager_app.command("enable-gui", help="Enable ComfyUI-Manager with new GUI")
 @tracking.track_command("node")
 def enable_gui():
-    execute_cm_cli(["cli-only-mode", "disable"])
+    """Enable ComfyUI-Manager with new GUI."""
+    config_manager = ConfigManager()
+    config_manager.set(constants.CONFIG_KEY_MANAGER_GUI_MODE, "enable-gui")
+    print("[bold green]ComfyUI-Manager GUI has been enabled.[/bold green]")
+    print("[dim]ComfyUI will launch with: --enable-manager[/dim]")
+
+
+@manager_app.command("disable-gui", help="Enable ComfyUI-Manager without GUI")
+@tracking.track_command("node")
+def disable_gui():
+    """Enable ComfyUI-Manager but disable its GUI."""
+    config_manager = ConfigManager()
+    config_manager.set(constants.CONFIG_KEY_MANAGER_GUI_MODE, "disable-gui")
+    print("[bold green]ComfyUI-Manager enabled with GUI disabled.[/bold green]")
+    print("[dim]ComfyUI will launch with: --enable-manager --disable-manager-ui[/dim]")
+
+
+@manager_app.command("enable-legacy-gui", help="Enable ComfyUI-Manager with legacy GUI")
+@tracking.track_command("node")
+def enable_legacy_gui():
+    """Enable ComfyUI-Manager with legacy GUI."""
+    config_manager = ConfigManager()
+    config_manager.set(constants.CONFIG_KEY_MANAGER_GUI_MODE, "enable-legacy-gui")
+    print("[bold green]ComfyUI-Manager legacy GUI has been enabled.[/bold green]")
+    print("[dim]ComfyUI will launch with: --enable-manager --enable-manager-legacy-ui[/dim]")
+
+
+@manager_app.command("migrate-legacy", help="Migrate legacy git-cloned ComfyUI-Manager to .disabled")
+@tracking.track_command("node")
+def migrate_legacy(
+    yes: Annotated[
+        bool,
+        typer.Option("--yes", "-y", help="Skip confirmation prompt"),
+    ] = False,
+):
+    """
+    Migrate legacy ComfyUI-Manager from custom_nodes/ to custom_nodes/.disabled/
+
+    Detects .enable-cli-only-mode file to set appropriate mode:
+    - If .enable-cli-only-mode exists → mode = disable
+    - Otherwise → mode = enable-gui
+    """
+    if not workspace_manager.workspace_path:
+        print("[bold red]ComfyUI workspace is not set.[/bold red]")
+        print("[dim]Use --workspace or run from a ComfyUI directory.[/dim]")
+        raise typer.Exit(code=1)
+
+    custom_nodes_path = pathlib.Path(workspace_manager.workspace_path) / "custom_nodes"
+
+    # Find legacy manager with case-insensitive matching (must be a real directory, not symlink)
+    legacy_manager_path = None
+    if custom_nodes_path.exists():
+        for item in custom_nodes_path.iterdir():
+            if item.is_dir() and not item.is_symlink() and item.name.lower() == "comfyui-manager":
+                legacy_manager_path = item
+                break
+
+    # Check if legacy manager exists
+    if legacy_manager_path is None:
+        print("[bold yellow]No legacy ComfyUI-Manager found in custom_nodes/[/bold yellow]")
+        print("Nothing to migrate.")
+        return
+
+    # Verify it's a git-cloned repository
+    git_dir = legacy_manager_path / ".git"
+    if not git_dir.exists():
+        print(f"[bold yellow]Warning: {legacy_manager_path.name} does not appear to be a git repository.[/bold yellow]")
+        print("[dim]Expected a git-cloned ComfyUI-Manager. Skipping migration.[/dim]")
+        return
+
+    # Detect CLI-only mode before any changes
+    cli_only_mode_file = legacy_manager_path / ".enable-cli-only-mode"
+    cli_only_mode = cli_only_mode_file.exists()
+
+    # Show what will happen and ask for confirmation
+    print(f"[bold]Found legacy ComfyUI-Manager:[/bold] {legacy_manager_path}")
+    print(f"[dim]CLI-only mode: {cli_only_mode}[/dim]")
+    print()
+    print("[bold]This will:[/bold]")
+    print(f"  1. Move {legacy_manager_path.name} to custom_nodes/.disabled/")
+    print(f"  2. Set manager mode to: {'disable' if cli_only_mode else 'enable-gui'}")
+    print("  3. Install manager_requirements.txt (if present)")
+    print()
+
+    if not yes:
+        confirm = ui.prompt_confirm_action("Proceed with migration?", False)
+        if not confirm:
+            print("[dim]Migration cancelled.[/dim]")
+            return
+
+    # Create .disabled directory
+    disabled_path = custom_nodes_path / ".disabled"
+    disabled_path.mkdir(exist_ok=True)
+
+    # Check if target already exists (case-insensitive)
+    existing_target = None
+    for item in disabled_path.iterdir():
+        if item.is_dir() and item.name.lower() == "comfyui-manager":
+            existing_target = item
+            break
+
+    if existing_target is not None:
+        print(f"[bold red]Target path already exists: {existing_target}[/bold red]")
+        print("Please remove it manually and try again.")
+        raise typer.Exit(code=1)
+
+    # Move legacy manager (preserve original directory name)
+    target_path = disabled_path / legacy_manager_path.name
+    try:
+        shutil.move(str(legacy_manager_path), str(target_path))
+    except OSError as e:
+        print(f"[bold red]Failed to move legacy manager: {e}[/bold red]")
+        raise typer.Exit(code=1)
+
+    # Install manager_requirements.txt if present
+    workspace_path = pathlib.Path(workspace_manager.workspace_path)
+    manager_req_path = workspace_path / constants.MANAGER_REQUIREMENTS_FILE
+    install_success = False  # Default to failure, set True only on success
+    if manager_req_path.exists():
+        print("[dim]Installing ComfyUI-Manager dependencies...[/dim]")
+        result = subprocess.run(
+            [sys.executable, "-m", "pip", "install", "-r", str(manager_req_path)],
+            check=False,
+        )
+        if result.returncode != 0:
+            print("[bold yellow]Warning: Failed to install ComfyUI-Manager dependencies.[/bold yellow]")
+            print("[dim]You may need to run: pip install -r manager_requirements.txt[/dim]")
+        else:
+            install_success = True
+    else:
+        print("[bold yellow]Warning: manager_requirements.txt not found (older ComfyUI version?).[/bold yellow]")
+        print("[dim]ComfyUI-Manager pip package not installed.[/dim]")
+
+    # Set config mode
+    config_manager = ConfigManager()
+    if cli_only_mode or not install_success:
+        config_manager.set(constants.CONFIG_KEY_MANAGER_GUI_MODE, "disable")
+        print("[bold green]Legacy ComfyUI-Manager migrated to .disabled/[/bold green]")
+        if cli_only_mode:
+            print("[dim]Detected .enable-cli-only-mode → Manager set to: disable[/dim]")
+        else:
+            print("[dim]Manager installation failed → Manager set to: disable[/dim]")
+            print("[dim]After fixing installation, run: comfy manager enable-gui[/dim]")
+    else:
+        config_manager.set(constants.CONFIG_KEY_MANAGER_GUI_MODE, "enable-gui")
+        print("[bold green]Legacy ComfyUI-Manager migrated to .disabled/[/bold green]")
+        print("[dim]Manager set to: enable-gui (new GUI)[/dim]")
+
+    print("\n[bold]The new pip-installed ComfyUI-Manager will be used on next launch.[/bold]")
 
 
 @manager_app.command(help="Clear reserved startup action in ComfyUI-Manager")
@@ -479,14 +620,15 @@ def update_node_id_cache():
     config_manager = ConfigManager()
     workspace_path = workspace_manager.workspace_path
 
-    cm_cli_path = os.path.join(workspace_path, "custom_nodes", "ComfyUI-Manager", "cm-cli.py")
+    if not find_cm_cli():
+        raise FileNotFoundError("cm-cli not found")
 
     tmp_path = os.path.join(config_manager.get_config_path(), "tmp")
     if not os.path.exists(tmp_path):
         os.makedirs(tmp_path)
 
     cache_path = os.path.join(tmp_path, "node-cache.list")
-    cmd = [sys.executable, cm_cli_path, "export-custom-node-ids", cache_path]
+    cmd = [sys.executable, "-m", "cm_cli", "export-custom-node-ids", cache_path]
 
     new_env = os.environ.copy()
     new_env["COMFYUI_PATH"] = workspace_path
