@@ -5,6 +5,7 @@ import sys
 from typing import TypedDict
 from urllib.parse import urlparse
 
+import git
 import requests
 import semver
 import typer
@@ -179,21 +180,38 @@ def pip_install_comfyui_dependencies(
         sys.exit(1)
 
 
-# install requirements for manager
-def pip_install_manager_dependencies(repo_dir):
-    os.chdir(os.path.join(repo_dir, "custom_nodes", "ComfyUI-Manager"))
-    subprocess.run([sys.executable, "-m", "pip", "install", "-r", "requirements.txt"], check=True)
+def pip_install_manager(repo_dir):
+    """Install ComfyUI-Manager via manager_requirements.txt."""
+    from comfy_cli.command.custom_nodes.cm_cli_util import find_cm_cli
+
+    manager_req_path = os.path.join(repo_dir, constants.MANAGER_REQUIREMENTS_FILE)
+    if not os.path.exists(manager_req_path):
+        rprint(
+            f"[bold yellow]Warning: {constants.MANAGER_REQUIREMENTS_FILE} not found. "
+            "Skipping manager installation (older ComfyUI version?).[/bold yellow]"
+        )
+        return False
+    result = subprocess.run(
+        [sys.executable, "-m", "pip", "install", "-r", constants.MANAGER_REQUIREMENTS_FILE],
+        cwd=repo_dir,
+        check=False,
+    )
+    if result.returncode != 0:
+        rprint("[bold red]Failed to install ComfyUI-Manager.[/bold red]")
+        return False
+
+    # Clear cache so find_cm_cli() picks up the newly installed module
+    find_cm_cli.cache_clear()
+    return True
 
 
 def execute(
     url: str,
-    manager_url: str,
     comfy_path: str,
     restore: bool,
     skip_manager: bool,
     version: str,
     commit: str | None = None,
-    manager_commit: str | None = None,
     gpu: constants.GPU_OPTION = None,
     cuda_version: constants.CUDAVersion = constants.CUDAVersion.v12_6,
     plat: constants.OS = None,
@@ -238,9 +256,22 @@ def execute(
             sys.exit(1)
 
     elif not check_comfy_repo(repo_dir)[0]:
-        rprint(
-            f"[bold red]'{repo_dir}' already exists. But it is an invalid ComfyUI repository. Remove it and retry.[/bold red]"
-        )
+        # Get actual remote URL for better error message
+        try:
+            repo = git.Repo(repo_dir)
+            remote_urls = [r.url for r in repo.remotes]
+            rprint(
+                f"[bold red]'{repo_dir}' exists but its remote URL is not a recognized ComfyUI repository.[/bold red]"
+            )
+            if remote_urls:
+                rprint(f"[yellow]Found remotes: {', '.join(remote_urls)}[/yellow]")
+            rprint("[yellow]Recognized sources: Comfy-Org, comfyanonymous, drip-art, ltdrdata[/yellow]")
+        except git.InvalidGitRepositoryError:
+            rprint(f"[bold red]'{repo_dir}' exists but is not a valid git repository.[/bold red]")
+        except Exception:
+            rprint(
+                f"[bold red]'{repo_dir}' already exists. But it is an invalid ComfyUI repository. Remove it and retry.[/bold red]"
+            )
         sys.exit(-1)
 
     # checkout specified commit
@@ -259,43 +290,36 @@ def execute(
     # install ComfyUI-Manager
     if skip_manager:
         rprint("Skipping installation of ComfyUI-Manager. (by --skip-manager)")
+        # Save to config so launch doesn't inject --enable-manager
+        from comfy_cli.config_manager import ConfigManager
+
+        ConfigManager().set(constants.CONFIG_KEY_MANAGER_GUI_MODE, "disable")
     else:
-        manager_repo_dir = os.path.join(repo_dir, "custom_nodes", "ComfyUI-Manager")
+        rprint("\nInstalling ComfyUI-Manager..")
+        if not fast_deps:
+            if not pip_install_manager(repo_dir):
+                # Manager installation failed - disable to prevent launch issues
+                from comfy_cli.config_manager import ConfigManager
 
-        if os.path.exists(manager_repo_dir):
-            if restore and not fast_deps:
-                pip_install_manager_dependencies(repo_dir)
-            else:
-                rprint(
-                    f"Directory {manager_repo_dir} already exists. Skipping installation of ComfyUI-Manager.\nIf you want to restore dependencies, add the '--restore' option."
-                )
-        else:
-            rprint("\nInstalling ComfyUI-Manager..")
-
-            if "@" in manager_url:
-                # clone specific branch
-                manager_url, manager_branch = manager_url.rsplit("@", 1)
-                subprocess.run(
-                    ["git", "clone", "-b", manager_branch, manager_url, manager_repo_dir],
-                    check=True,
-                )
-            else:
-                subprocess.run(["git", "clone", manager_url, manager_repo_dir], check=True)
-                if manager_commit is not None:
-                    subprocess.run(["git", "checkout", manager_commit], check=True, cwd=manager_repo_dir)
-
-            if not fast_deps:
-                pip_install_manager_dependencies(repo_dir)
+                ConfigManager().set(constants.CONFIG_KEY_MANAGER_GUI_MODE, "disable")
+                rprint("[yellow]Manager not installed. Launch will run without manager flags.[/yellow]")
 
     if fast_deps:
         depComp = DependencyCompiler(cwd=repo_dir, gpu=gpu)
         depComp.compile_deps()
         depComp.install_deps()
+        # Install manager separately (not included in DependencyCompiler)
+        if not skip_manager:
+            if not pip_install_manager(repo_dir):
+                from comfy_cli.config_manager import ConfigManager
+
+                ConfigManager().set(constants.CONFIG_KEY_MANAGER_GUI_MODE, "disable")
+                rprint("[yellow]Manager not installed. Launch will run without manager flags.[/yellow]")
 
     if not skip_manager:
         try:
             update_node_id_cache()
-        except subprocess.CalledProcessError as e:
+        except (FileNotFoundError, subprocess.CalledProcessError) as e:
             rprint(f"Failed to update node id cache: {e}")
 
     os.chdir(repo_dir)
