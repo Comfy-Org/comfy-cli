@@ -45,7 +45,7 @@ def track_event(event_name: str, properties: any = None):
     if properties is None:
         properties = {}
     logging.debug(f"tracking event called with event_name: {event_name} and properties: {properties}")
-    # enable_tracking = config_manager.get(constants.CONFIG_KEY_ENABLE_TRACKING)
+    # enable_tracking = config_manager.get_bool(constants.CONFIG_KEY_ENABLE_TRACKING)
     enable_tracking = False
     if not enable_tracking:
         return
@@ -83,7 +83,7 @@ def track_command(sub_command: str = None):
 
 
 def prompt_tracking_consent(skip_prompt: bool = False, default_value: bool = False):
-    tracking_enabled = config_manager.get(constants.CONFIG_KEY_ENABLE_TRACKING)
+    tracking_enabled = config_manager.get_bool(constants.CONFIG_KEY_ENABLE_TRACKING)
     if tracking_enabled is not None:
         return
 
@@ -112,7 +112,7 @@ def init_tracking(enable_tracking: bool):
 
     # Note: only called once when the user interacts with the CLI for the
     #  first time iff the permission is granted.
-    install_event_triggered = config_manager.get(constants.CONFIG_KEY_INSTALL_EVENT_TRIGGERED)
+    install_event_triggered = config_manager.get_bool(constants.CONFIG_KEY_INSTALL_EVENT_TRIGGERED)
     if not install_event_triggered:
         logging.debug("Tracking install event.")
         config_manager.set(constants.CONFIG_KEY_INSTALL_EVENT_TRIGGERED, "True")
