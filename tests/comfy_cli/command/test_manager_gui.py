@@ -752,3 +752,245 @@ class TestPipInstallManagerCacheClear:
 
         # Verify failure
         assert result is False
+
+
+class TestFillPrintTable:
+    """Tests for WorkspaceManager.fill_print_table() method."""
+
+    @pytest.fixture()
+    def mock_workspace_config_manager(self):
+        with patch("comfy_cli.workspace_manager.ConfigManager") as mock_cls:
+            instance = MagicMock()
+            mock_cls.return_value = instance
+            yield instance
+
+    def test_fill_print_table_disable_mode(self, mock_workspace_config_manager):
+        """When mode is 'disable', status should show Disabled."""
+        mock_workspace_config_manager.get.return_value = "disable"
+
+        from comfy_cli.workspace_manager import WorkspaceManager
+
+        ws = WorkspaceManager()
+        ws.workspace_path = "/fake/workspace"
+
+        result = ws.fill_print_table()
+
+        assert len(result) == 2
+        assert result[0][0] == "Current selected workspace"
+        assert result[1][0] == "Manager"
+        assert "Disabled" in result[1][1]
+
+    def test_fill_print_table_enable_gui_mode(self, mock_workspace_config_manager):
+        """When mode is 'enable-gui', status should show GUI Enabled."""
+        mock_workspace_config_manager.get.return_value = "enable-gui"
+
+        from comfy_cli.workspace_manager import WorkspaceManager
+
+        ws = WorkspaceManager()
+        ws.workspace_path = "/fake/workspace"
+
+        result = ws.fill_print_table()
+
+        assert result[1][0] == "Manager"
+        assert "GUI Enabled" in result[1][1]
+
+    def test_fill_print_table_disable_gui_mode(self, mock_workspace_config_manager):
+        """When mode is 'disable-gui', status should show GUI Disabled."""
+        mock_workspace_config_manager.get.return_value = "disable-gui"
+
+        from comfy_cli.workspace_manager import WorkspaceManager
+
+        ws = WorkspaceManager()
+        ws.workspace_path = "/fake/workspace"
+
+        result = ws.fill_print_table()
+
+        assert result[1][0] == "Manager"
+        assert "GUI Disabled" in result[1][1]
+
+    def test_fill_print_table_enable_legacy_gui_mode(self, mock_workspace_config_manager):
+        """When mode is 'enable-legacy-gui', status should show Legacy GUI."""
+        mock_workspace_config_manager.get.return_value = "enable-legacy-gui"
+
+        from comfy_cli.workspace_manager import WorkspaceManager
+
+        ws = WorkspaceManager()
+        ws.workspace_path = "/fake/workspace"
+
+        result = ws.fill_print_table()
+
+        assert result[1][0] == "Manager"
+        assert "Legacy GUI" in result[1][1]
+
+    @patch("comfy_cli.command.custom_nodes.cm_cli_util.find_cm_cli", return_value=False)
+    def test_fill_print_table_not_installed(self, mock_find_cm_cli, mock_workspace_config_manager):
+        """When no config and cm-cli not found, status should show Not Installed."""
+        mock_workspace_config_manager.get.return_value = None
+
+        from comfy_cli.workspace_manager import WorkspaceManager
+
+        ws = WorkspaceManager()
+        ws.workspace_path = "/fake/workspace"
+
+        result = ws.fill_print_table()
+
+        assert result[1][0] == "Manager"
+        assert "Not Installed" in result[1][1]
+        mock_find_cm_cli.assert_called_once()
+
+    @patch("comfy_cli.command.custom_nodes.cm_cli_util.find_cm_cli", return_value=True)
+    def test_fill_print_table_backward_compat_false(self, mock_find_cm_cli, mock_workspace_config_manager):
+        """When new mode is None and old value is 'False', should show Disabled."""
+        mock_workspace_config_manager.get.side_effect = lambda key: {
+            constants.CONFIG_KEY_MANAGER_GUI_MODE: None,
+            constants.CONFIG_KEY_MANAGER_GUI_ENABLED: "False",
+        }.get(key)
+
+        from comfy_cli.workspace_manager import WorkspaceManager
+
+        ws = WorkspaceManager()
+        ws.workspace_path = "/fake/workspace"
+
+        result = ws.fill_print_table()
+
+        assert result[1][0] == "Manager"
+        assert "Disabled" in result[1][1]
+
+    @patch("comfy_cli.command.custom_nodes.cm_cli_util.find_cm_cli", return_value=True)
+    def test_fill_print_table_backward_compat_true(self, mock_find_cm_cli, mock_workspace_config_manager):
+        """When new mode is None and old value is 'True', should show GUI Enabled."""
+        mock_workspace_config_manager.get.side_effect = lambda key: {
+            constants.CONFIG_KEY_MANAGER_GUI_MODE: None,
+            constants.CONFIG_KEY_MANAGER_GUI_ENABLED: "True",
+        }.get(key)
+
+        from comfy_cli.workspace_manager import WorkspaceManager
+
+        ws = WorkspaceManager()
+        ws.workspace_path = "/fake/workspace"
+
+        result = ws.fill_print_table()
+
+        assert result[1][0] == "Manager"
+        assert "GUI Enabled" in result[1][1]
+
+    @patch("comfy_cli.command.custom_nodes.cm_cli_util.find_cm_cli", return_value=True)
+    def test_fill_print_table_no_config_with_cmcli(self, mock_find_cm_cli, mock_workspace_config_manager):
+        """When no config at all but cm-cli available, should default to GUI Enabled."""
+        mock_workspace_config_manager.get.return_value = None
+
+        from comfy_cli.workspace_manager import WorkspaceManager
+
+        ws = WorkspaceManager()
+        ws.workspace_path = "/fake/workspace"
+
+        result = ws.fill_print_table()
+
+        assert result[1][0] == "Manager"
+        assert "GUI Enabled" in result[1][1]
+
+    def test_fill_print_table_unknown_mode_defaults_to_enable(self, mock_workspace_config_manager):
+        """When mode is unknown, status should default to GUI Enabled."""
+        mock_workspace_config_manager.get.return_value = "unknown-mode"
+
+        from comfy_cli.workspace_manager import WorkspaceManager
+
+        ws = WorkspaceManager()
+        ws.workspace_path = "/fake/workspace"
+
+        result = ws.fill_print_table()
+
+        assert result[1][0] == "Manager"
+        assert "GUI Enabled" in result[1][1]
+
+
+class TestFindCmCli:
+    """Tests for find_cm_cli() function."""
+
+    def test_find_cm_cli_module_found(self):
+        """When cm_cli module exists, should return True."""
+        with patch("importlib.util.find_spec") as mock_find_spec:
+            mock_find_spec.return_value = MagicMock()  # Non-None means module exists
+            # Clear cache before test
+            from comfy_cli.command.custom_nodes.cm_cli_util import find_cm_cli
+
+            find_cm_cli.cache_clear()
+
+            result = find_cm_cli()
+
+            assert result is True
+            mock_find_spec.assert_called_with("cm_cli")
+
+    def test_find_cm_cli_module_not_found(self):
+        """When cm_cli module doesn't exist, should return False."""
+        with patch("importlib.util.find_spec") as mock_find_spec:
+            mock_find_spec.return_value = None  # None means module not found
+            from comfy_cli.command.custom_nodes.cm_cli_util import find_cm_cli
+
+            find_cm_cli.cache_clear()
+
+            result = find_cm_cli()
+
+            assert result is False
+            mock_find_spec.assert_called_with("cm_cli")
+
+    def test_find_cm_cli_cache_behavior(self):
+        """find_cm_cli should cache results and not call find_spec repeatedly."""
+        with patch("importlib.util.find_spec") as mock_find_spec:
+            mock_find_spec.return_value = MagicMock()
+            from comfy_cli.command.custom_nodes.cm_cli_util import find_cm_cli
+
+            find_cm_cli.cache_clear()
+
+            # Call multiple times
+            result1 = find_cm_cli()
+            result2 = find_cm_cli()
+            result3 = find_cm_cli()
+
+            # All should return True
+            assert result1 is True
+            assert result2 is True
+            assert result3 is True
+            # find_spec should only be called once due to caching
+            assert mock_find_spec.call_count == 1
+
+
+class TestPipInstallManagerEdgeCases:
+    """Additional edge case tests for pip_install_manager()."""
+
+    @patch("comfy_cli.command.install.subprocess.run")
+    @patch("os.path.exists", return_value=False)
+    def test_pip_install_manager_requirements_not_found(self, mock_exists, mock_run):
+        """When requirements file doesn't exist, should return False without calling pip."""
+        from comfy_cli.command.install import pip_install_manager
+
+        result = pip_install_manager("/fake/repo")
+
+        assert result is False
+        # subprocess.run should NOT be called
+        mock_run.assert_not_called()
+
+
+class TestValidateComfyuiManager:
+    """Tests for validate_comfyui_manager() function."""
+
+    @patch("comfy_cli.command.custom_nodes.command.find_cm_cli", return_value=False)
+    def test_validate_comfyui_manager_exits_when_not_found(self, mock_find_cm_cli):
+        """When cm-cli is not found, should raise typer.Exit with code 1."""
+        from comfy_cli.command.custom_nodes.command import validate_comfyui_manager
+
+        with pytest.raises(typer.Exit) as exc_info:
+            validate_comfyui_manager()
+
+        assert exc_info.value.exit_code == 1
+        mock_find_cm_cli.assert_called_once()
+
+    @patch("comfy_cli.command.custom_nodes.command.find_cm_cli", return_value=True)
+    def test_validate_comfyui_manager_passes_when_found(self, mock_find_cm_cli):
+        """When cm-cli is found, should not raise any exception."""
+        from comfy_cli.command.custom_nodes.command import validate_comfyui_manager
+
+        # Should not raise
+        validate_comfyui_manager()
+
+        mock_find_cm_cli.assert_called_once()
