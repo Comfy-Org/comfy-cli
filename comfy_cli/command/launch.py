@@ -31,10 +31,13 @@ def _get_manager_flags() -> list[str]:
     # Backward compatibility: migrate old config
     if mode is None:
         old_value = config_manager.get(constants.CONFIG_KEY_MANAGER_GUI_ENABLED)
-        if old_value == "False":
-            mode = "disable"
-        elif old_value == "True":
-            mode = "enable-gui"
+        if old_value is not None:
+            # Handle both string and boolean values
+            old_str = str(old_value).lower()
+            if old_str in ("false", "0", "off"):
+                mode = "disable"
+            elif old_str in ("true", "1", "on"):
+                mode = "enable-gui"
         else:
             # No config - check if cm-cli is available
             if not find_cm_cli():

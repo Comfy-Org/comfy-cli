@@ -195,9 +195,13 @@ def pip_install_manager(repo_dir):
         [sys.executable, "-m", "pip", "install", "-r", constants.MANAGER_REQUIREMENTS_FILE],
         cwd=repo_dir,
         check=False,
+        capture_output=True,
+        text=True,
     )
     if result.returncode != 0:
         rprint("[bold red]Failed to install ComfyUI-Manager.[/bold red]")
+        if result.stderr:
+            rprint(f"[dim]{result.stderr.strip()}[/dim]")
         return False
 
     # Clear cache so find_cm_cli() picks up the newly installed module

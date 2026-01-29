@@ -1,3 +1,4 @@
+import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -151,6 +152,29 @@ class TestBackwardCompatibility:
 
         assert result == []
         mock_find_cm_cli.assert_called_once()
+
+    def test_old_config_boolean_false_migrates_to_disable(self, mock_launch_config_manager):
+        """Test backward compatibility with actual boolean False value."""
+        mock_launch_config_manager.get.side_effect = lambda key: {
+            constants.CONFIG_KEY_MANAGER_GUI_MODE: None,
+            constants.CONFIG_KEY_MANAGER_GUI_ENABLED: False,  # boolean, not string
+        }.get(key)
+
+        result = _get_manager_flags()
+
+        assert result == []
+
+    @patch("comfy_cli.command.launch.find_cm_cli", return_value=True)
+    def test_old_config_boolean_true_migrates_to_enable_gui(self, mock_find, mock_launch_config_manager):
+        """Test backward compatibility with actual boolean True value."""
+        mock_launch_config_manager.get.side_effect = lambda key: {
+            constants.CONFIG_KEY_MANAGER_GUI_MODE: None,
+            constants.CONFIG_KEY_MANAGER_GUI_ENABLED: True,  # boolean, not string
+        }.get(key)
+
+        result = _get_manager_flags()
+
+        assert result == ["--enable-manager"]
 
 
 class TestLaunchManagerFlagInjection:
@@ -391,12 +415,16 @@ class TestMigrateLegacy:
 
         migrate_legacy(yes=True)
 
-        # Verify pip install was called
+        # Verify pip install was called with correct command
         mock_subprocess_run.assert_called_once()
-        call_args = mock_subprocess_run.call_args
-        assert "-m" in call_args[0][0]
-        assert "pip" in call_args[0][0]
-        assert "install" in call_args[0][0]
+        call_args = mock_subprocess_run.call_args[0][0]
+        assert call_args[0] == sys.executable or "python" in call_args[0].lower()
+        assert "-m" in call_args
+        assert "pip" in call_args
+        assert "install" in call_args
+        assert "-r" in call_args
+        # Verify the requirements file path is included
+        assert any(constants.MANAGER_REQUIREMENTS_FILE in str(arg) for arg in call_args)
 
     @patch("comfy_cli.command.custom_nodes.command.subprocess.run")
     @patch("comfy_cli.command.custom_nodes.command.workspace_manager")
@@ -721,22 +749,23 @@ class TestInstallManagerFailure:
 class TestPipInstallManagerCacheClear:
     """Tests for pip_install_manager cache clearing after successful install."""
 
+    @patch("comfy_cli.command.custom_nodes.cm_cli_util.find_cm_cli")
     @patch("comfy_cli.command.install.subprocess.run")
     @patch("os.path.exists", return_value=True)
-    def test_pip_install_manager_clears_cache_on_success(self, mock_exists, mock_run):
+    def test_pip_install_manager_clears_cache_on_success(self, mock_exists, mock_run, mock_find_cm_cli):
         """When pip install succeeds, find_cm_cli cache should be cleared."""
         from comfy_cli.command.install import pip_install_manager
 
         # Simulate successful pip install
-        mock_run.return_value = MagicMock(returncode=0)
+        mock_run.return_value = MagicMock(returncode=0, stderr="")
 
         # Call pip_install_manager
         result = pip_install_manager("/fake/repo")
 
         # Verify success
         assert result is True
-        # Cache clear is called internally - we can verify by checking the function was imported
-        # The actual cache state test would require more complex setup
+        # Verify cache_clear was called on the mock
+        mock_find_cm_cli.cache_clear.assert_called_once()
 
     @patch("comfy_cli.command.install.subprocess.run")
     @patch("os.path.exists", return_value=True)
