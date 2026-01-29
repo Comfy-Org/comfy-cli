@@ -14,7 +14,8 @@ class PROC(str, Enum):
 
 
 COMFY_GITHUB_URL = "https://github.com/comfyanonymous/ComfyUI"
-COMFY_MANAGER_GITHUB_URL = "https://github.com/ltdrdata/ComfyUI-Manager"
+
+MANAGER_REQUIREMENTS_FILE = "manager_requirements.txt"
 
 DEFAULT_COMFY_MODEL_PATH = "models"
 DEFAULT_COMFY_WORKSPACE = {
@@ -40,6 +41,8 @@ CONFIG_KEY_ENABLE_TRACKING = "enable_tracking"
 CONFIG_KEY_USER_ID = "user_id"
 CONFIG_KEY_INSTALL_EVENT_TRIGGERED = "install_event_triggered"
 CONFIG_KEY_BACKGROUND = "background"
+CONFIG_KEY_MANAGER_GUI_ENABLED = "manager_gui_enabled"  # Legacy, kept for backward compatibility
+CONFIG_KEY_MANAGER_GUI_MODE = "manager_gui_mode"  # Valid: "disable", "enable-gui", "disable-gui", "enable-legacy-gui"
 
 CIVITAI_API_TOKEN_KEY = "civitai_api_token"
 CIVITAI_API_TOKEN_ENV_KEY = "CIVITAI_API_TOKEN"
@@ -55,12 +58,15 @@ COMFY_ORIGIN_URL_CHOICES = {
     "git@github.com:Comfy-Org/ComfyUI.git",
     "git@github.com:comfyanonymous/ComfyUI.git",
     "git@github.com:drip-art/comfy.git",
+    "git@github.com:ltdrdata/ComfyUI.git",
     "https://github.com/Comfy-Org/ComfyUI.git",
     "https://github.com/comfyanonymous/ComfyUI.git",
     "https://github.com/drip-art/ComfyUI.git",
+    "https://github.com/ltdrdata/ComfyUI.git",
     "https://github.com/Comfy-Org/ComfyUI",
     "https://github.com/comfyanonymous/ComfyUI",
     "https://github.com/drip-art/ComfyUI",
+    "https://github.com/ltdrdata/ComfyUI",
 }
 
 
