@@ -2,6 +2,8 @@ import contextlib
 import os
 import pathlib
 import sys
+from itertools import groupby
+from operator import itemgetter
 from typing import Annotated
 from urllib.parse import parse_qs, unquote, urlparse
 
@@ -359,7 +361,12 @@ def remove(
         return
 
     # Build a mapping from display name to path for selection
-    model_path_by_name = {model.name: model for _model_type, model in available_models}
+    sorted_models = sorted(available_models, key=lambda x: x[1].name)
+    #model_path_by_name = {model.name: model for _model_type, model in available_models}
+    model_path_by_name = {
+        name: list(models)
+        for name, models in groupby(sorted_models, key=lambda x: x[1].name)
+    }
 
     to_delete = []
     # Scenario #1: User provided model names to delete
@@ -369,6 +376,12 @@ def remove(
         for name in model_names:
             if name in model_path_by_name:
                 to_delete.append(model_path_by_name[name])
+            elif os.sep in name:
+                # Directly check for file names that match the folder end
+                for model_name in model_path_by_name:
+                    for model in model_path_by_name[model_name]:
+                        if str(model[1]).endswith(name):
+                            to_delete.append([("direct", model[1])])
             else:
                 missing_models.append(name)
 
@@ -385,12 +398,23 @@ def remove(
             return
         to_delete = [model_path_by_name[selection] for selection in selections]
 
+
+    # Flatten to_delete
+    to_delete = [item for sublist in to_delete for item in sublist]
+
+    # Print a list of models to delete:
+    if to_delete:
+        print("These models will be deleted:")
+        for model in to_delete:
+            print(f"  - {model[1]}")
+
     # Confirm deletion
     if to_delete and (
         confirm or ui.prompt_confirm_action("Are you sure you want to delete the selected files?", False)
     ):
-        for model_path in to_delete:
-            model_path.unlink()
+        for model_group in to_delete:
+            model_path = model_group[1]
+            #model_path.unlink()
             typer.echo(f"Deleted: {model_path}")
     else:
         typer.echo("Deletion canceled.")
@@ -412,12 +436,11 @@ def list_models(path: pathlib.Path) -> list[tuple[str, pathlib.Path]]:
             # Files directly in the models directory
             models.append(("", item))
         elif item.is_dir():
-            # For subdirectories, find all .safetensors files recursively
+            # For subdirectories, find all SUPPORTED_PT_EXTENSIONS files recursively
             model_type = item.name
-            if model_type.endswith("_models"):
-                model_type = model_type[:-7]  # Strip "_models" suffix
-            for safetensor in item.rglob("*.safetensors"):
-                models.append((model_type, safetensor))
+            for file in item.rglob("*"):
+                if file.suffix in constants.SUPPORTED_PT_EXTENSIONS:
+                    models.append((model_type, file))
     return models
 
 
