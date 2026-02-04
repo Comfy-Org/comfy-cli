@@ -2,6 +2,8 @@ import contextlib
 import os
 import pathlib
 import sys
+from itertools import groupby
+from operator import itemgetter
 from typing import Annotated
 from urllib.parse import parse_qs, unquote, urlparse
 
@@ -11,7 +13,7 @@ from rich import print
 
 from comfy_cli import constants, tracking, ui
 from comfy_cli.config_manager import ConfigManager
-from comfy_cli.constants import DEFAULT_COMFY_MODEL_PATH
+from comfy_cli.constants import DEFAULT_COMFY_MODEL_PATH, DEFAULT_COMFY_MODEL_MAXDEPTH
 from comfy_cli.file_utils import DownloadException, check_unauthorized, download_file
 from comfy_cli.workspace_manager import WorkspaceManager
 
@@ -339,6 +341,11 @@ def remove(
         help="The relative path from the current workspace where the models are stored.",
         show_default=True,
     ),
+    max_depth: int = typer.Option(
+        DEFAULT_COMFY_MODEL_MAXDEPTH,
+        help="The number of levels the search for models will go deep.",
+        show_default=True,
+    ),
     model_names: list[str] | None = typer.Option(
         None,
         help="List of model filenames to delete, separated by spaces",
@@ -352,11 +359,19 @@ def remove(
 ):
     """Remove one or more downloaded models, either by specifying them directly or through an interactive selection."""
     model_dir = get_workspace() / relative_path
-    available_models = list_models(model_dir)
+    available_models = list_models(model_dir, max_depth)
 
     if not available_models:
         typer.echo("No models found to remove.")
         return
+
+    # Build a mapping from display name to path for selection
+    sorted_models = sorted(available_models, key=lambda x: x[1].name)
+    #model_path_by_name = {model.name: model for _model_type, model in available_models}
+    model_path_by_name = {
+        name: list(models)
+        for name, models in groupby(sorted_models, key=lambda x: x[1].name)
+    }
 
     to_delete = []
     # Scenario #1: User provided model names to delete
@@ -364,9 +379,18 @@ def remove(
         # Validate and filter models to delete based on provided names
         missing_models = []
         for name in model_names:
-            model_path = model_dir / name
-            if model_path.exists():
-                to_delete.append(model_path)
+            if name in model_path_by_name:
+                to_delete.append(model_path_by_name[name])
+            elif os.sep in name:
+                # Directly check for file names that match the folder end
+                found_model = False
+                for model_name in model_path_by_name:
+                    for model in model_path_by_name[model_name]:
+                        if str(model[1]).endswith(name):
+                            to_delete.append([("direct", model[1])])
+                            found_model = True
+                if not found_model:
+                    missing_models.append(name)
             else:
                 missing_models.append(name)
 
@@ -377,26 +401,74 @@ def remove(
 
     # Scenario #2: User did not provide model names, prompt for selection
     else:
-        selections = ui.prompt_multi_select("Select models to delete:", [model.name for model in available_models])
+        selections = ui.prompt_multi_select("Select models to delete:", list(model_path_by_name.keys()))
         if not selections:
             typer.echo("No models selected for deletion.")
             return
-        to_delete = [model_dir / selection for selection in selections]
+        to_delete = [model_path_by_name[selection] for selection in selections]
+
+
+    # Flatten to_delete
+    to_delete = [item for sublist in to_delete for item in sublist]
+
+    # Print a list of models to delete:
+    if to_delete:
+        print("These models will be deleted:")
+        for model in to_delete:
+            print(f"  - {model[1]}")
 
     # Confirm deletion
     if to_delete and (
         confirm or ui.prompt_confirm_action("Are you sure you want to delete the selected files?", False)
     ):
-        for model_path in to_delete:
+        for model_group in to_delete:
+            model_path = model_group[1]
             model_path.unlink()
             typer.echo(f"Deleted: {model_path}")
     else:
         typer.echo("Deletion canceled.")
 
 
-def list_models(path: pathlib.Path) -> list:
-    """List all models in the specified directory."""
-    return [file for file in path.iterdir() if file.is_file()]
+def list_models(path: pathlib.Path, max_depth: int) -> list[tuple[str, pathlib.Path]]:
+    """List all models in the specified directory and its subdirectories.
+
+    Returns a list of tuples (model_type, file_path) where model_type is the
+    subdirectory name with '_models' suffix stripped if present.
+    Files directly in the models directory have an empty type.
+
+    Args:
+        path: The root directory to search
+        max_depth: Maximum depth to search within subdirectories (default: 10)
+    """
+    models = []
+    if not path.exists():
+        return models
+    if max_depth == 0:
+        print("max_depth must be 1 or greather")
+        return []
+
+
+    def _scan_directory(directory: pathlib.Path, model_type: str, current_depth: int):
+        """Recursively scan directory up to max depth."""
+        if current_depth >= max_depth:
+            return
+
+        for item in directory.iterdir():
+            if item.is_file() and item.suffix in constants.SUPPORTED_PT_EXTENSIONS:
+                models.append((model_type, item))
+            elif item.is_dir():
+                _scan_directory(item, model_type, current_depth + 1)
+
+    for item in path.iterdir():
+        if item.is_file() and item.suffix in constants.SUPPORTED_PT_EXTENSIONS:
+            # Files directly in the models directory
+            models.append(("", item))
+        elif item.is_dir():
+            # For subdirectories, find all SUPPORTED_PT_EXTENSIONS files recursively
+            model_type = item.name
+            _scan_directory(item, model_type, current_depth=1)
+
+    return models
 
 
 @app.command("list")
@@ -408,16 +480,21 @@ def list_command(
         help="The relative path from the current workspace where the models are stored.",
         show_default=True,
     ),
+    max_depth: int = typer.Option(
+        DEFAULT_COMFY_MODEL_MAXDEPTH,
+        help="The number of levels the search for models will go deep.",
+        show_default=True,
+    ),
 ):
     """Display a list of all models currently downloaded in a table format."""
     model_dir = get_workspace() / relative_path
-    models = list_models(model_dir)
+    models = list_models(model_dir, max_depth)
 
     if not models:
         typer.echo("No models found.")
         return
 
     # Prepare data for table display
-    data = [(model.name, f"{model.stat().st_size // 1024} KB") for model in models]
-    column_names = ["Model Name", "Size"]
+    data = [(model_type or "<models>", model.name, f"{model.stat().st_size // 1024} KB") for model_type, model in models]
+    column_names = ["Type", "Model Name", "Size"]
     ui.display_table(data, column_names)
