@@ -229,18 +229,22 @@ class WorkspaceManager:
                     WorkspaceType.CURRENT_DIR,
                 )
 
+        # Check for user-set default workspace
+        default_workspace = self.config_manager.get(constants.CONFIG_KEY_DEFAULT_WORKSPACE)
+        valid_default_workspace = default_workspace and check_comfy_repo(default_workspace)[0]
+
         # Check the current directory for a ComfyUI
         if self.use_here is None:
             current_directory = os.getcwd()
             found_comfy_repo, comfy_repo = check_comfy_repo(os.path.join(current_directory))
             # If it's in a sub dir of the ComfyUI repo, get the repo working dir
             if found_comfy_repo:
-                return comfy_repo.working_dir, WorkspaceType.CURRENT_DIR
+                w_type = WorkspaceType.CURRENT_DIR
+                if valid_default_workspace and default_workspace == comfy_repo.working_dir:
+                    w_type = WorkspaceType.DEFAULT
+                return comfy_repo.working_dir, w_type
 
-        # Check for user-set default workspace
-        default_workspace = self.config_manager.get(constants.CONFIG_KEY_DEFAULT_WORKSPACE)
-
-        if default_workspace and check_comfy_repo(default_workspace)[0]:
+        if valid_default_workspace:
             return default_workspace, WorkspaceType.DEFAULT
 
         # Fallback to the most recent workspace if it exists
