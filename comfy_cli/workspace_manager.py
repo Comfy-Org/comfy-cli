@@ -257,21 +257,6 @@ class WorkspaceManager:
         default_workspace = utils.get_not_user_set_default_workspace()
         return default_workspace, WorkspaceType.DEFAULT
 
-    def get_comfyui_manager_path(self):
-        if self.workspace_path is None:
-            return None
-
-        # To check more robustly, verify up to the `.git` path.
-        return os.path.join(self.workspace_path, "custom_nodes", "ComfyUI-Manager")
-
-    def is_comfyui_manager_installed(self):
-        if self.workspace_path is None:
-            return False
-
-        # To check more robustly, verify up to the `.git` path.
-        manager_git_path = os.path.join(self.workspace_path, "custom_nodes", "ComfyUI-Manager", ".git")
-        return os.path.exists(manager_git_path)
-
     def scan_dir(self):
         if not self.workspace_path:
             return []
@@ -310,4 +295,39 @@ class WorkspaceManager:
         save_yaml(file_path, self.metadata)
 
     def fill_print_table(self):
-        return [("Current selected workspace", f"[bold green]→ {self.workspace_path}[/bold green]")]
+        # Lazy import to avoid circular dependency
+        from comfy_cli.command.custom_nodes.cm_cli_util import find_cm_cli
+
+        config_manager = ConfigManager()
+        mode = config_manager.get(constants.CONFIG_KEY_MANAGER_GUI_MODE)
+
+        # Backward compatibility - same logic as launch._get_manager_flags()
+        if mode is None:
+            old_value = config_manager.get(constants.CONFIG_KEY_MANAGER_GUI_ENABLED)
+            if old_value is not None:
+                # Handle both string and boolean values
+                old_str = str(old_value).lower()
+                if old_str in ("false", "0", "off"):
+                    mode = "disable"
+                elif old_str in ("true", "1", "on"):
+                    mode = "enable-gui"
+            else:
+                # No config - check if cm-cli is available
+                if not find_cm_cli():
+                    mode = "not-installed"
+                else:
+                    mode = "enable-gui"
+
+        status_map = {
+            "disable": "[bold red]Disabled[/bold red]",
+            "enable-gui": "[bold green]GUI Enabled[/bold green]",
+            "disable-gui": "[bold yellow]GUI Disabled[/bold yellow]",
+            "enable-legacy-gui": "[bold cyan]Legacy GUI[/bold cyan]",
+            "not-installed": "[dim]Not Installed[/dim]",
+        }
+        manager_status = status_map.get(mode, "[bold green]GUI Enabled[/bold green]")
+
+        return [
+            ("Current selected workspace", f"[bold green]→ {self.workspace_path}[/bold green]"),
+            ("Manager", manager_status),
+        ]

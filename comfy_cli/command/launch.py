@@ -13,6 +13,7 @@ from rich.console import Console
 from rich.panel import Panel
 
 from comfy_cli import constants, utils
+from comfy_cli.command.custom_nodes.cm_cli_util import find_cm_cli
 from comfy_cli.config_manager import ConfigManager
 from comfy_cli.env_checker import check_comfy_server_running
 from comfy_cli.update import check_for_updates
@@ -20,6 +21,48 @@ from comfy_cli.workspace_manager import WorkspaceManager, WorkspaceType
 
 workspace_manager = WorkspaceManager()
 console = Console()
+
+
+def _get_manager_flags() -> list[str]:
+    """Get manager flags based on config mode."""
+    config_manager = ConfigManager()
+    mode = config_manager.get(constants.CONFIG_KEY_MANAGER_GUI_MODE)
+
+    # Backward compatibility: migrate old config
+    if mode is None:
+        old_value = config_manager.get(constants.CONFIG_KEY_MANAGER_GUI_ENABLED)
+        if old_value is not None:
+            # Handle both string and boolean values
+            old_str = str(old_value).lower()
+            if old_str in ("false", "0", "off"):
+                mode = "disable"
+            elif old_str in ("true", "1", "on"):
+                mode = "enable-gui"
+        else:
+            # No config - check if cm-cli is available
+            if not find_cm_cli():
+                return []  # Manager not available, no flags
+            mode = "enable-gui"
+
+    if mode == "disable":
+        return []
+
+    # For enable-* modes, verify cm-cli is available
+    if not find_cm_cli():
+        print(
+            "[bold yellow]Warning: ComfyUI-Manager (cm-cli) not found. "
+            "Manager flags will not be injected.[/bold yellow]"
+        )
+        return []
+
+    if mode == "enable-gui":
+        return ["--enable-manager"]
+    elif mode == "disable-gui":
+        return ["--enable-manager", "--disable-manager-ui"]
+    elif mode == "enable-legacy-gui":
+        return ["--enable-manager", "--enable-manager-legacy-ui"]
+    else:
+        return ["--enable-manager"]  # fallback to default
 
 
 def launch_comfyui(extra, frontend_pr=None):
@@ -147,6 +190,12 @@ def launch(
     workspace_manager.set_recent_workspace(resolved_workspace)
 
     os.chdir(resolved_workspace)
+
+    # Inject manager flags based on config mode
+    manager_flags = _get_manager_flags()
+    if manager_flags:
+        extra = (extra or []) + manager_flags
+
     if background:
         background_launch(extra, frontend_pr)
     else:
