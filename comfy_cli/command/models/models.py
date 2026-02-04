@@ -383,10 +383,14 @@ def remove(
                 to_delete.append(model_path_by_name[name])
             elif os.sep in name:
                 # Directly check for file names that match the folder end
+                found_model = False
                 for model_name in model_path_by_name:
                     for model in model_path_by_name[model_name]:
                         if str(model[1]).endswith(name):
                             to_delete.append([("direct", model[1])])
+                            found_model = True
+                if not found_model:
+                    missing_models.append(name)
             else:
                 missing_models.append(name)
 
