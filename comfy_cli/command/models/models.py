@@ -13,7 +13,7 @@ from rich import print
 
 from comfy_cli import constants, tracking, ui
 from comfy_cli.config_manager import ConfigManager
-from comfy_cli.constants import DEFAULT_COMFY_MODEL_PATH
+from comfy_cli.constants import DEFAULT_COMFY_MODEL_PATH, DEFAULT_COMFY_MODEL_MAXDEPTH
 from comfy_cli.file_utils import DownloadException, check_unauthorized, download_file
 from comfy_cli.workspace_manager import WorkspaceManager
 
@@ -341,6 +341,11 @@ def remove(
         help="The relative path from the current workspace where the models are stored.",
         show_default=True,
     ),
+    max_depth: int = typer.Option(
+        DEFAULT_COMFY_MODEL_MAXDEPTH,
+        help="The number of levels the search for models will go deep.",
+        show_default=True,
+    ),
     model_names: list[str] | None = typer.Option(
         None,
         help="List of model filenames to delete, separated by spaces",
@@ -354,7 +359,7 @@ def remove(
 ):
     """Remove one or more downloaded models, either by specifying them directly or through an interactive selection."""
     model_dir = get_workspace() / relative_path
-    available_models = list_models(model_dir)
+    available_models = list_models(model_dir, max_depth)
 
     if not available_models:
         typer.echo("No models found to remove.")
@@ -414,33 +419,51 @@ def remove(
     ):
         for model_group in to_delete:
             model_path = model_group[1]
-            #model_path.unlink()
+            model_path.unlink()
             typer.echo(f"Deleted: {model_path}")
     else:
         typer.echo("Deletion canceled.")
 
 
-def list_models(path: pathlib.Path) -> list[tuple[str, pathlib.Path]]:
+def list_models(path: pathlib.Path, max_depth: int) -> list[tuple[str, pathlib.Path]]:
     """List all models in the specified directory and its subdirectories.
 
     Returns a list of tuples (model_type, file_path) where model_type is the
     subdirectory name with '_models' suffix stripped if present.
     Files directly in the models directory have an empty type.
+
+    Args:
+        path: The root directory to search
+        max_depth: Maximum depth to search within subdirectories (default: 10)
     """
     models = []
     if not path.exists():
         return models
+    if max_depth == 0:
+        print("max_depth must be 1 or greather")
+        return []
+
+
+    def _scan_directory(directory: pathlib.Path, model_type: str, current_depth: int):
+        """Recursively scan directory up to max depth."""
+        if current_depth >= max_depth:
+            return
+
+        for item in directory.iterdir():
+            if item.is_file() and item.suffix in constants.SUPPORTED_PT_EXTENSIONS:
+                models.append((model_type, item))
+            elif item.is_dir():
+                _scan_directory(item, model_type, current_depth + 1)
 
     for item in path.iterdir():
-        if item.is_file():
+        if item.is_file() and item.suffix in constants.SUPPORTED_PT_EXTENSIONS:
             # Files directly in the models directory
             models.append(("", item))
         elif item.is_dir():
             # For subdirectories, find all SUPPORTED_PT_EXTENSIONS files recursively
             model_type = item.name
-            for file in item.rglob("*"):
-                if file.suffix in constants.SUPPORTED_PT_EXTENSIONS:
-                    models.append((model_type, file))
+            _scan_directory(item, model_type, current_depth=1)
+
     return models
 
 
@@ -453,16 +476,21 @@ def list_command(
         help="The relative path from the current workspace where the models are stored.",
         show_default=True,
     ),
+    max_depth: int = typer.Option(
+        DEFAULT_COMFY_MODEL_MAXDEPTH,
+        help="The number of levels the search for models will go deep.",
+        show_default=True,
+    ),
 ):
     """Display a list of all models currently downloaded in a table format."""
     model_dir = get_workspace() / relative_path
-    models = list_models(model_dir)
+    models = list_models(model_dir, max_depth)
 
     if not models:
         typer.echo("No models found.")
         return
 
     # Prepare data for table display
-    data = [(model_type, model.name, f"{model.stat().st_size // 1024} KB") for model_type, model in models]
+    data = [(model_type or "<models>", model.name, f"{model.stat().st_size // 1024} KB") for model_type, model in models]
     column_names = ["Type", "Model Name", "Size"]
     ui.display_table(data, column_names)
