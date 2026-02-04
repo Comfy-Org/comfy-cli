@@ -25,6 +25,7 @@ def execute_cm_cli(args, channel=None, fast_deps=False, no_deps=False, mode=None
     _config_manager = ConfigManager()
 
     workspace_path = workspace_manager.workspace_path
+    python_exe = workspace_manager.python_exe
 
     if not workspace_path:
         print("\n[bold red]ComfyUI path is not resolved.[/bold red]\n", file=sys.stderr)
@@ -38,7 +39,7 @@ def execute_cm_cli(args, channel=None, fast_deps=False, no_deps=False, mode=None
         )
         raise typer.Exit(code=1)
 
-    cmd = [sys.executable, cm_cli_path] + args
+    cmd = [python_exe, cm_cli_path] + args
 
     if channel is not None:
         cmd += ["--channel", channel]
