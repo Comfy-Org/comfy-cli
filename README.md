@@ -205,11 +205,11 @@ the bisect tool can help you pinpoint the custom node that causes the issue.
 
 - Model remove
 
-  `comfy model remove ?[--relative-path <PATH>] --model-names <model names>`
+  `comfy model remove ?[--relative-path <PATH>] ?[--max-depth <LEVELS] --model-names <model names>`
 
 - Model list
 
-  `comfy model list ?[--relative-path <PATH>]`
+  `comfy model list ?[--relative-path <PATH>] ?[--max-depth <LEVELS>]`
 
 ### Managing ComfyUI-Manager
 
