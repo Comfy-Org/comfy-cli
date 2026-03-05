@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import importlib.util
 import os
 import subprocess
 import sys
 import uuid
+from functools import lru_cache
 
 import typer
 from rich import print
@@ -21,6 +23,21 @@ _dependency_cmds = {
 }
 
 
+@lru_cache(maxsize=1)
+def find_cm_cli() -> bool:
+    """Check if cm_cli module is available in the current Python environment.
+
+    Only checks the currently activated Python environment.
+    Does NOT fallback to PATH lookup to avoid using cm-cli from different environments.
+
+    Results are cached for the session lifetime.
+
+    Returns:
+        True if cm_cli module is importable, False otherwise.
+    """
+    return importlib.util.find_spec("cm_cli") is not None
+
+
 def execute_cm_cli(args, channel=None, fast_deps=False, no_deps=False, mode=None, raise_on_error=False) -> str | None:
     _config_manager = ConfigManager()
 
@@ -30,15 +47,14 @@ def execute_cm_cli(args, channel=None, fast_deps=False, no_deps=False, mode=None
         print("\n[bold red]ComfyUI path is not resolved.[/bold red]\n", file=sys.stderr)
         raise typer.Exit(code=1)
 
-    cm_cli_path = os.path.join(workspace_path, "custom_nodes", "ComfyUI-Manager", "cm-cli.py")
-    if not os.path.exists(cm_cli_path):
+    if not find_cm_cli():
         print(
-            f"\n[bold red]ComfyUI-Manager not found: {cm_cli_path}[/bold red]\n",
+            "\n[bold red]ComfyUI-Manager not found. 'cm-cli' command is not available.[/bold red]\n",
             file=sys.stderr,
         )
         raise typer.Exit(code=1)
 
-    cmd = [sys.executable, cm_cli_path] + args
+    cmd = [sys.executable, "-m", "cm_cli"] + args
 
     if channel is not None:
         cmd += ["--channel", channel]
