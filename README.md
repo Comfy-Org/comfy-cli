@@ -1,4 +1,4 @@
-# Comfy-Cli: A Command Line Tool for ComfyUI
+# comfy-cli: A Command Line Tool for ComfyUI
 
 [![Test ComfyUI Example Workflows](https://github.com/Comfy-Org/ComfyUI-Mirror/actions/workflows/test-workflows.yaml/badge.svg)](https://github.com/Comfy-Org/ComfyUI-Mirror/actions/workflows/test-workflows.yaml)
 
