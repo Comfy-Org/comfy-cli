@@ -22,6 +22,7 @@ DEFAULT_COMFY_WORKSPACE = {
     OS.MACOS: os.path.join(os.path.expanduser("~"), "Documents", "comfy", "ComfyUI"),
     OS.LINUX: os.path.join(os.path.expanduser("~"), "comfy", "ComfyUI"),
 }
+DEFAULT_COMFY_MODEL_MAXDEPTH = 2
 
 DEFAULT_CONFIG = {
     OS.WINDOWS: os.path.join(os.path.expanduser("~"), "AppData", "Local", "comfy-cli"),
