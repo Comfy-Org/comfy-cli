@@ -15,7 +15,7 @@ _platform_targets = {
     (OS.MACOS, PROC.ARM): "aarch64-apple-darwin",
     (OS.MACOS, PROC.X86_64): "x86_64-apple-darwin",
     (OS.LINUX, PROC.X86_64): "x86_64_v3-unknown-linux-gnu",  # x86_64_v3 assumes AVX256 support, no AVX512 support
-    (OS.WINDOWS, PROC.X86_64): "x86_64-pc-windows-msvc-shared",
+    (OS.WINDOWS, PROC.X86_64): "x86_64-pc-windows-msvc",
 }
 
 _latest_release_json_url = (
