@@ -121,7 +121,7 @@ Comfy provides commands that allow you to easily run the installed ComfyUI.
   `comfy install --pr "https://github.com/comfyanonymous/ComfyUI/pull/1234"`
 
   - If you want to run ComfyUI with a specific pull request, you can use the `--pr` option. This will automatically install the specified pull request and run ComfyUI with it.
-  - Important: When using --pr, any --version and --commit parameters are ignored. The PR branch will be checked out regardless of version settings.
+  - Important: The --pr option cannot be combined with --version or --commit and will be rejected if used together.
 
 - To test a frontend pull request:
 
