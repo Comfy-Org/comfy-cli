@@ -269,6 +269,11 @@ def install(
         rprint("[bold red]Python version 3.9 or higher is required to run ComfyUI.[/bold red]")
         rprint(f"You are currently using Python version {env_checker.format_python_version(checker.python_version)}.")
     platform = utils.get_os()
+
+    if pr and (version not in {None, "nightly"} or commit):
+        rprint("--pr cannot be used with --version or --commit")
+        raise typer.Exit(code=1)
+
     if cpu:
         rprint("[bold yellow]Installing for CPU[/bold yellow]")
         install_inner.execute(
@@ -286,6 +291,7 @@ def install(
             skip_requirement=skip_requirement,
             fast_deps=fast_deps,
             manager_commit=manager_commit,
+            pr=pr,
         )
         rprint(f"ComfyUI is installed at: {comfy_path}")
         return None
@@ -323,10 +329,6 @@ def install(
         rprint(
             "[bold red]No GPU option selected or `--cpu` enabled, use --\\[gpu option] flag (e.g. --nvidia) to pick GPU. use `--cpu` to install for CPU. Exiting...[/bold red]"
         )
-        raise typer.Exit(code=1)
-
-    if pr and (version not in {None, "nightly"} or commit):
-        rprint("--pr cannot be used with --version or --commit")
         raise typer.Exit(code=1)
 
     install_inner.execute(
