@@ -1,4 +1,141 @@
-from comfy_cli.command.models.models import check_civitai_url, check_huggingface_url
+import pathlib
+from unittest.mock import patch
+
+import typer.testing
+
+from comfy_cli.command.models.models import app, check_civitai_url, check_huggingface_url, list_models
+
+
+def _make_model_tree(tmp_path: pathlib.Path) -> pathlib.Path:
+    """Create a realistic model directory tree and return its root."""
+    model_dir = tmp_path / "models"
+    (model_dir / "root_model.safetensors").parent.mkdir(parents=True, exist_ok=True)
+    (model_dir / "root_model.safetensors").write_bytes(b"x" * 100)
+    (model_dir / "checkpoints").mkdir()
+    (model_dir / "checkpoints" / "sd15.safetensors").write_bytes(b"x" * 200)
+    (model_dir / "loras" / "SD1.5").mkdir(parents=True)
+    (model_dir / "loras" / "SD1.5" / "detail.safetensors").write_bytes(b"x" * 300)
+    (model_dir / "empty_dir").mkdir()
+    return model_dir
+
+
+def test_list_models_finds_files_in_subdirectories(tmp_path):
+    model_dir = _make_model_tree(tmp_path)
+    result = list_models(model_dir)
+    names = {f.name for f in result}
+    assert "sd15.safetensors" in names
+    deep = [f for f in result if f.name == "detail.safetensors"]
+    assert len(deep) == 1
+    assert deep[0].relative_to(model_dir) == pathlib.Path("loras/SD1.5/detail.safetensors")
+
+
+def test_list_models_finds_root_level_files(tmp_path):
+    model_dir = _make_model_tree(tmp_path)
+    result = list_models(model_dir)
+    names = {f.name for f in result}
+    assert "root_model.safetensors" in names
+
+
+def test_list_models_returns_empty_for_missing_directory(tmp_path):
+    assert list_models(tmp_path / "nonexistent") == []
+
+
+def test_list_models_ignores_directories(tmp_path):
+    model_dir = _make_model_tree(tmp_path)
+    result = list_models(model_dir)
+    assert all(f.is_file() for f in result)
+    dir_names = {f.name for f in result}
+    assert "empty_dir" not in dir_names
+    assert "checkpoints" not in dir_names
+
+
+runner = typer.testing.CliRunner()
+
+
+def test_list_command_shows_type_column(tmp_path):
+    _make_model_tree(tmp_path)
+    with patch("comfy_cli.command.models.models.get_workspace", return_value=tmp_path):
+        result = runner.invoke(app, ["list", "--relative-path", "models"])
+    assert result.exit_code == 0
+    assert "Type" in result.output
+    assert "checkpoints" in result.output
+    assert "loras/SD1.5" in result.output
+    assert "root_model.safetensors" in result.output
+
+
+def test_remove_with_path_traversal_is_rejected(tmp_path):
+    model_dir = tmp_path / "models"
+    model_dir.mkdir()
+    (model_dir / "legit.bin").write_bytes(b"x")
+
+    secret = tmp_path / "secret.txt"
+    secret.write_text("sensitive")
+
+    with patch("comfy_cli.command.models.models.get_workspace", return_value=tmp_path):
+        result = runner.invoke(
+            app,
+            ["remove", "--relative-path", "models", "--model-names", "../secret.txt", "--confirm"],
+        )
+    assert secret.exists()
+    assert "Invalid model path" in result.output
+
+
+def test_remove_deletes_model_in_subdirectory(tmp_path):
+    model_dir = _make_model_tree(tmp_path)
+    target = model_dir / "checkpoints" / "sd15.safetensors"
+    assert target.exists()
+
+    with patch("comfy_cli.command.models.models.get_workspace", return_value=tmp_path):
+        result = runner.invoke(
+            app,
+            ["remove", "--relative-path", "models", "--model-names", "checkpoints/sd15.safetensors", "--confirm"],
+        )
+    assert result.exit_code == 0
+    assert not target.exists()
+
+
+def test_remove_rejects_directory_name(tmp_path):
+    _make_model_tree(tmp_path)
+
+    with patch("comfy_cli.command.models.models.get_workspace", return_value=tmp_path):
+        result = runner.invoke(
+            app,
+            ["remove", "--relative-path", "models", "--model-names", "checkpoints", "--confirm"],
+        )
+    assert (tmp_path / "models" / "checkpoints").is_dir()
+    assert "not found" in result.output
+
+
+def test_remove_deletes_root_level_model(tmp_path):
+    model_dir = _make_model_tree(tmp_path)
+    target = model_dir / "root_model.safetensors"
+    assert target.exists()
+
+    with patch("comfy_cli.command.models.models.get_workspace", return_value=tmp_path):
+        result = runner.invoke(
+            app,
+            ["remove", "--relative-path", "models", "--model-names", "root_model.safetensors", "--confirm"],
+        )
+    assert result.exit_code == 0
+    assert not target.exists()
+
+
+def test_remove_interactive_shows_relative_paths(tmp_path):
+    _make_model_tree(tmp_path)
+
+    with (
+        patch("comfy_cli.command.models.models.get_workspace", return_value=tmp_path),
+        patch("comfy_cli.command.models.models.ui") as mock_ui,
+    ):
+        mock_ui.prompt_multi_select.return_value = ["checkpoints/sd15.safetensors"]
+        mock_ui.prompt_confirm_action.return_value = True
+        runner.invoke(app, ["remove", "--relative-path", "models"])
+
+    choices = mock_ui.prompt_multi_select.call_args[0][1]
+    assert "checkpoints/sd15.safetensors" in choices
+    assert "loras/SD1.5/detail.safetensors" in choices
+    assert "root_model.safetensors" in choices
+    assert not (tmp_path / "models" / "checkpoints" / "sd15.safetensors").exists()
 
 
 def test_valid_model_url():
