@@ -27,6 +27,7 @@ from comfy_cli.registry import (
     extract_node_configuration,
     initialize_project_config,
 )
+from comfy_cli.resolve_python import resolve_workspace_python
 from comfy_cli.workspace_manager import WorkspaceManager
 
 console = Console()
@@ -84,7 +85,8 @@ def get_installed_packages():
 
     if pip_map is None:
         try:
-            result = subprocess.check_output([sys.executable, "-m", "pip", "list"], universal_newlines=True)
+            python = resolve_workspace_python(workspace_manager.workspace_path)
+            result = subprocess.check_output([python, "-m", "pip", "list"], universal_newlines=True)
 
             pip_map = {}
             for line in result.split("\n"):
@@ -159,22 +161,20 @@ def execute_install_script(repo_path):
     # else:
 
     if os.path.exists(requirements_path):
-        # import pdb
-        # pdb.set_trace()
         print("Install: pip packages")
+        python = resolve_workspace_python(workspace_manager.workspace_path)
         with open(requirements_path, encoding="utf-8") as requirements_file:
             for line in requirements_file:
-                # From Yoland: disable pip override
-                # package_name = remap_pip_package(line.strip())
                 package_name = line.strip()
                 if package_name and not package_name.startswith("#"):
-                    install_cmd = [sys.executable, "-m", "pip", "install", package_name]
+                    install_cmd = [python, "-m", "pip", "install", package_name]
                     if package_name.strip() != "":
                         try_install_script(repo_path, install_cmd)
 
     if os.path.exists(install_script_path):
         print("Install: install script")
-        install_cmd = [sys.executable, "install.py"]
+        python = resolve_workspace_python(workspace_manager.workspace_path)
+        install_cmd = [python, "install.py"]
         try_install_script(repo_path, install_cmd)
 
 
@@ -486,7 +486,8 @@ def update_node_id_cache():
         os.makedirs(tmp_path)
 
     cache_path = os.path.join(tmp_path, "node-cache.list")
-    cmd = [sys.executable, cm_cli_path, "export-custom-node-ids", cache_path]
+    python = resolve_workspace_python(workspace_path)
+    cmd = [python, cm_cli_path, "export-custom-node-ids", cache_path]
 
     new_env = os.environ.copy()
     new_env["COMFYUI_PATH"] = workspace_path
