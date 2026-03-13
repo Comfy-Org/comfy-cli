@@ -15,6 +15,7 @@ from rich.panel import Panel
 from comfy_cli import constants, utils
 from comfy_cli.config_manager import ConfigManager
 from comfy_cli.env_checker import check_comfy_server_running
+from comfy_cli.resolve_python import resolve_workspace_python
 from comfy_cli.update import check_for_updates
 from comfy_cli.workspace_manager import WorkspaceManager, WorkspaceType
 
@@ -22,7 +23,7 @@ workspace_manager = WorkspaceManager()
 console = Console()
 
 
-def launch_comfyui(extra, frontend_pr=None):
+def launch_comfyui(extra, frontend_pr=None, python=sys.executable):
     reboot_path = None
 
     new_env = os.environ.copy()
@@ -55,7 +56,7 @@ def launch_comfyui(extra, frontend_pr=None):
     if "COMFY_CLI_BACKGROUND" not in os.environ:
         # If not running in background mode, there's no need to use popen. This can prevent the issue of linefeeds occurring with tqdm.
         while True:
-            res = subprocess.run([sys.executable, "main.py"] + extra, env=new_env, check=False)
+            res = subprocess.run([python, "main.py"] + extra, env=new_env, check=False)
 
             if reboot_path is None:
                 print("[bold red]ComfyUI is not installed.[/bold red]\n")
@@ -84,7 +85,7 @@ def launch_comfyui(extra, frontend_pr=None):
             while True:
                 if sys.platform == "win32":
                     process = subprocess.Popen(
-                        [sys.executable, "main.py"] + extra,
+                        [python, "main.py"] + extra,
                         stdout=subprocess.PIPE,
                         stderr=subprocess.PIPE,
                         text=True,
@@ -95,7 +96,7 @@ def launch_comfyui(extra, frontend_pr=None):
                     )
                 else:
                     process = subprocess.Popen(
-                        [sys.executable, "main.py"] + extra,
+                        [python, "main.py"] + extra,
                         text=True,
                         env=new_env,
                         encoding="utf-8",
@@ -147,10 +148,11 @@ def launch(
     workspace_manager.set_recent_workspace(resolved_workspace)
 
     os.chdir(resolved_workspace)
+    python = resolve_workspace_python(resolved_workspace)
     if background:
         background_launch(extra, frontend_pr)
     else:
-        launch_comfyui(extra, frontend_pr)
+        launch_comfyui(extra, frontend_pr, python=python)
 
 
 def background_launch(extra, frontend_pr=None):

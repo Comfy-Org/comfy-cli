@@ -19,6 +19,7 @@ from comfy_cli.command.models import models as models_command
 from comfy_cli.config_manager import ConfigManager
 from comfy_cli.constants import GPU_OPTION, CUDAVersion
 from comfy_cli.env_checker import EnvChecker
+from comfy_cli.resolve_python import resolve_workspace_python
 from comfy_cli.standalone import StandalonePython
 from comfy_cli.update import check_for_updates
 from comfy_cli.uv import DependencyCompiler
@@ -379,8 +380,9 @@ def update(
             raise typer.Exit(code=1)
         os.chdir(comfy_path)
         subprocess.run(["git", "pull"], check=True)
+        python = resolve_workspace_python(comfy_path)
         subprocess.run(
-            [sys.executable, "-m", "pip", "install", "-r", "requirements.txt"],
+            [python, "-m", "pip", "install", "-r", "requirements.txt"],
             check=True,
         )
 
@@ -588,7 +590,8 @@ def feedback():
 def dependency():
     comfy_path, _ = workspace_manager.get_workspace_path()
 
-    depComp = DependencyCompiler(cwd=comfy_path)
+    python = resolve_workspace_python(comfy_path)
+    depComp = DependencyCompiler(cwd=comfy_path, executable=python)
     depComp.compile_deps()
     depComp.install_deps()
 

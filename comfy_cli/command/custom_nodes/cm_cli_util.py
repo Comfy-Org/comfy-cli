@@ -9,6 +9,7 @@ import typer
 from rich import print
 
 from comfy_cli.config_manager import ConfigManager
+from comfy_cli.resolve_python import resolve_workspace_python
 from comfy_cli.uv import DependencyCompiler
 from comfy_cli.workspace_manager import WorkspaceManager
 
@@ -38,7 +39,8 @@ def execute_cm_cli(args, channel=None, fast_deps=False, no_deps=False, mode=None
         )
         raise typer.Exit(code=1)
 
-    cmd = [sys.executable, cm_cli_path] + args
+    python = resolve_workspace_python(workspace_path)
+    cmd = [python, cm_cli_path] + args
 
     if channel is not None:
         cmd += ["--channel", channel]
@@ -64,7 +66,7 @@ def execute_cm_cli(args, channel=None, fast_deps=False, no_deps=False, mode=None
 
         if fast_deps and args[0] in _dependency_cmds:
             # we're using the fast_deps behavior and just ran a command that invalidated the dependencies
-            depComp = DependencyCompiler(cwd=workspace_path)
+            depComp = DependencyCompiler(cwd=workspace_path, executable=python)
             depComp.compile_deps()
             depComp.install_deps()
 

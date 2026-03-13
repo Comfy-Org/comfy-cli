@@ -18,6 +18,7 @@ from comfy_cli.command.custom_nodes.command import update_node_id_cache
 from comfy_cli.command.github.pr_info import PRInfo
 from comfy_cli.constants import GPU_OPTION
 from comfy_cli.git_utils import checkout_pr, git_checkout_tag
+from comfy_cli.resolve_python import ensure_workspace_python
 from comfy_cli.uv import DependencyCompiler
 from comfy_cli.workspace_manager import WorkspaceManager, check_comfy_repo
 
@@ -38,6 +39,7 @@ def pip_install_comfyui_dependencies(
     cuda_version: constants.CUDAVersion,
     skip_torch_or_directml: bool,
     skip_requirement: bool,
+    python: str = sys.executable,
 ):
     os.chdir(repo_dir)
 
@@ -48,7 +50,7 @@ def pip_install_comfyui_dependencies(
             pip_url = ["--extra-index-url", "https://download.pytorch.org/whl/rocm6.0"]
             result = subprocess.run(
                 [
-                    sys.executable,
+                    python,
                     "-m",
                     "pip",
                     "install",
@@ -63,7 +65,7 @@ def pip_install_comfyui_dependencies(
         # install torch for NVIDIA
         if gpu == GPU_OPTION.NVIDIA:
             base_command = [
-                sys.executable,
+                python,
                 "-m",
                 "pip",
                 "install",
@@ -112,7 +114,7 @@ def pip_install_comfyui_dependencies(
             # TODO: wrap pip install in a function
             result = subprocess.run(
                 [
-                    sys.executable,
+                    python,
                     "-m",
                     "pip",
                     "install",
@@ -132,7 +134,7 @@ def pip_install_comfyui_dependencies(
             ]
             result = subprocess.run(
                 [
-                    sys.executable,
+                    python,
                     "-m",
                     "pip",
                     "install",
@@ -150,13 +152,13 @@ def pip_install_comfyui_dependencies(
 
         # install directml for AMD windows
         if gpu == GPU_OPTION.AMD and plat == constants.OS.WINDOWS:
-            result = subprocess.run([sys.executable, "-m", "pip", "install", "torch-directml"], check=True)
+            result = subprocess.run([python, "-m", "pip", "install", "torch-directml"], check=True)
 
         # install torch for Mac M Series
         if gpu == GPU_OPTION.MAC_M_SERIES:
             result = subprocess.run(
                 [
-                    sys.executable,
+                    python,
                     "-m",
                     "pip",
                     "install",
@@ -173,16 +175,16 @@ def pip_install_comfyui_dependencies(
     # install requirements.txt
     if skip_requirement:
         return
-    result = subprocess.run([sys.executable, "-m", "pip", "install", "-r", "requirements.txt"], check=False)
+    result = subprocess.run([python, "-m", "pip", "install", "-r", "requirements.txt"], check=False)
     if result.returncode != 0:
         rprint("Failed to install ComfyUI dependencies. Please check your environment (`comfy env`) and try again.")
         sys.exit(1)
 
 
 # install requirements for manager
-def pip_install_manager_dependencies(repo_dir):
+def pip_install_manager_dependencies(repo_dir, python=sys.executable):
     os.chdir(os.path.join(repo_dir, "custom_nodes", "ComfyUI-Manager"))
-    subprocess.run([sys.executable, "-m", "pip", "install", "-r", "requirements.txt"], check=True)
+    subprocess.run([python, "-m", "pip", "install", "-r", "requirements.txt"], check=True)
 
 
 def execute(
@@ -248,8 +250,13 @@ def execute(
         os.chdir(repo_dir)
         subprocess.run(["git", "checkout", commit], check=True)
 
+    python = ensure_workspace_python(repo_dir)
+    rprint(f"Using Python: [bold]{python}[/bold]")
+
     if not fast_deps:
-        pip_install_comfyui_dependencies(repo_dir, gpu, plat, cuda_version, skip_torch_or_directml, skip_requirement)
+        pip_install_comfyui_dependencies(
+            repo_dir, gpu, plat, cuda_version, skip_torch_or_directml, skip_requirement, python=python
+        )
 
     WorkspaceManager().set_recent_workspace(repo_dir)
     workspace_manager.setup_workspace_manager(specified_workspace=repo_dir)
@@ -264,7 +271,7 @@ def execute(
 
         if os.path.exists(manager_repo_dir):
             if restore and not fast_deps:
-                pip_install_manager_dependencies(repo_dir)
+                pip_install_manager_dependencies(repo_dir, python=python)
             else:
                 rprint(
                     f"Directory {manager_repo_dir} already exists. Skipping installation of ComfyUI-Manager.\nIf you want to restore dependencies, add the '--restore' option."
@@ -285,10 +292,11 @@ def execute(
                     subprocess.run(["git", "checkout", manager_commit], check=True, cwd=manager_repo_dir)
 
             if not fast_deps:
-                pip_install_manager_dependencies(repo_dir)
+                pip_install_manager_dependencies(repo_dir, python=python)
 
     if fast_deps:
-        depComp = DependencyCompiler(cwd=repo_dir, gpu=gpu)
+        DependencyCompiler.Install_Build_Deps(executable=python)
+        depComp = DependencyCompiler(cwd=repo_dir, executable=python, gpu=gpu)
         depComp.compile_deps()
         depComp.install_deps()
 

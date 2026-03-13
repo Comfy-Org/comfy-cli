@@ -1,7 +1,6 @@
 import contextlib
 import os
 import pathlib
-import sys
 from typing import Annotated
 from urllib.parse import parse_qs, unquote, urlparse
 
@@ -311,7 +310,10 @@ def download(
                 print("huggingface_hub not found. Installing...")
                 import subprocess
 
-                subprocess.check_call([sys.executable, "-m", "pip", "install", "huggingface_hub"])
+                from comfy_cli.resolve_python import resolve_workspace_python
+
+                python = resolve_workspace_python(str(get_workspace()))
+                subprocess.check_call([python, "-m", "pip", "install", "huggingface_hub"])
                 import huggingface_hub
 
             print(f"Downloading model {model_id} from Hugging Face...")
