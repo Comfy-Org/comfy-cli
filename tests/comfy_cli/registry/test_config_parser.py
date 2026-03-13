@@ -1,9 +1,13 @@
+import subprocess
 from unittest.mock import mock_open, patch
 
 import pytest
+import tomlkit
 
 from comfy_cli.registry.config_parser import (
+    _strip_url_credentials,
     extract_node_configuration,
+    initialize_project_config,
     validate_and_extract_accelerator_classifiers,
     validate_and_extract_os_classifiers,
     validate_version,
@@ -329,3 +333,81 @@ def test_validate_version_invalid(mock_echo):
         assert result == "", f"Version {version} should be invalid"
 
     assert mock_echo.call_count == len(invalid_versions)
+
+
+@pytest.mark.parametrize(
+    "url, expected",
+    [
+        ("https://github.com/user/repo.git", "https://github.com/user/repo.git"),
+        ("https://ghp_xxxx@github.com/user/repo.git", "https://github.com/user/repo.git"),
+        ("https://user:ghp_xxxx@github.com/user/repo.git", "https://github.com/user/repo.git"),
+        ("https://oauth2:token@gitlab.com:8443/user/repo.git", "https://gitlab.com:8443/user/repo.git"),
+        ("git@github.com:user/repo.git", "git@github.com:user/repo.git"),
+        ("https://user:@github.com/user/repo.git", "https://github.com/user/repo.git"),
+        ("https://:pass@github.com/user/repo.git", "https://github.com/user/repo.git"),
+        ("http://token@example.com/repo.git", "http://example.com/repo.git"),
+        ("https://user:pass@[::1]:8080/repo.git", "https://[::1]:8080/repo.git"),
+        ("git://github.com/user/repo.git", "git://github.com/user/repo.git"),
+        ("https://github.com:443/user/repo.git", "https://github.com:443/user/repo.git"),
+        ("ssh://git@github.com/user/repo.git", "ssh://git@github.com/user/repo.git"),
+    ],
+)
+def test_strip_url_credentials(url, expected):
+    assert _strip_url_credentials(url) == expected
+
+
+def test_initialize_project_config_strips_credentials(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "remote", "add", "origin", "https://ghp_secret@github.com/user/ComfyUI-MyNode.git"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+    initialize_project_config()
+    with open(tmp_path / "pyproject.toml") as f:
+        data = tomlkit.parse(f.read())
+    urls = data["project"]["urls"]
+    assert urls["Repository"] == "https://github.com/user/ComfyUI-MyNode"
+    assert urls["Documentation"] == "https://github.com/user/ComfyUI-MyNode/wiki"
+    assert urls["Bug Tracker"] == "https://github.com/user/ComfyUI-MyNode/issues"
+    assert "ghp_secret" not in tomlkit.dumps(data)
+
+
+def test_initialize_project_config_clean_https(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "remote", "add", "origin", "https://github.com/user/ComfyUI-MyNode.git"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+    initialize_project_config()
+    with open(tmp_path / "pyproject.toml") as f:
+        data = tomlkit.parse(f.read())
+    urls = data["project"]["urls"]
+    assert urls["Repository"] == "https://github.com/user/ComfyUI-MyNode"
+    assert urls["Documentation"] == "https://github.com/user/ComfyUI-MyNode/wiki"
+    assert urls["Bug Tracker"] == "https://github.com/user/ComfyUI-MyNode/issues"
+
+
+def test_initialize_project_config_ssh_remote(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "remote", "add", "origin", "git@github.com:user/ComfyUI-TestNode.git"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+    initialize_project_config()
+    with open(tmp_path / "pyproject.toml") as f:
+        data = tomlkit.parse(f.read())
+    urls = data["project"]["urls"]
+    assert urls["Repository"] == "https://github.com/user/ComfyUI-TestNode"
+    assert urls["Documentation"] == "https://github.com/user/ComfyUI-TestNode/wiki"
+    assert urls["Bug Tracker"] == "https://github.com/user/ComfyUI-TestNode/issues"
+    assert data["project"]["name"] == "testnode"
+    assert data["tool"]["comfy"]["DisplayName"] == "ComfyUI-TestNode"

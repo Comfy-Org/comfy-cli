@@ -1,6 +1,7 @@
 import os
 import re
 import subprocess
+from urllib.parse import urlparse, urlunparse
 
 import tomlkit
 import tomlkit.exceptions
@@ -162,6 +163,18 @@ def validate_version(version: str, field_name: str) -> str:
     return version
 
 
+def _strip_url_credentials(url: str) -> str:
+    parsed = urlparse(url)
+    if parsed.scheme in ("http", "https") and (parsed.username or parsed.password):
+        netloc = parsed.hostname or ""
+        if ":" in netloc:
+            netloc = f"[{netloc}]"
+        if parsed.port:
+            netloc += f":{parsed.port}"
+        return urlunparse(parsed._replace(netloc=netloc))
+    return url
+
+
 def initialize_project_config():
     create_comfynode_config()
 
@@ -171,6 +184,7 @@ def initialize_project_config():
     # Get the current git remote URL
     try:
         git_remote_url = subprocess.check_output(["git", "remote", "get-url", "origin"]).decode().strip()
+        git_remote_url = _strip_url_credentials(git_remote_url)
     except subprocess.CalledProcessError as e:
         raise Exception("Could not retrieve Git remote URL. Are you in a Git repository?") from e
 
