@@ -56,3 +56,9 @@ jobs:
           TEST_E2E: true
         run: |
           pytest tests/e2e
+
+      - name: Test torch backend compilation
+        env:
+          TEST_TORCH_BACKEND: "true"
+        run: |
+          pytest tests/uv/test_torch_backend_compile.py -xvs
