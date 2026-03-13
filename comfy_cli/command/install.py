@@ -2,7 +2,7 @@ import os
 import platform
 import subprocess
 import sys
-from typing import Optional, TypedDict
+from typing import TypedDict
 from urllib.parse import urlparse
 
 import requests
@@ -123,6 +123,27 @@ def pip_install_comfyui_dependencies(
                 + pip_url,
                 check=False,
             )
+
+        # install torch for CPU
+        if gpu is None:  # Currently, when install for CPU, gpu is None
+            pip_url = [
+                "--extra-index-url",
+                "https://download.pytorch.org/whl/cpu",
+            ]
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "pip",
+                    "install",
+                    "torch",
+                    "torchvision",
+                    "torchaudio",
+                ]
+                + pip_url,
+                check=False,
+            )
+
         if result and result.returncode != 0:
             rprint("Failed to install PyTorch dependencies. Please check your environment (`comfy env`) and try again")
             sys.exit(1)
@@ -171,15 +192,15 @@ def execute(
     restore: bool,
     skip_manager: bool,
     version: str,
-    commit: Optional[str] = None,
-    manager_commit: Optional[str] = None,
+    commit: str | None = None,
+    manager_commit: str | None = None,
     gpu: constants.GPU_OPTION = None,
     cuda_version: constants.CUDAVersion = constants.CUDAVersion.v12_6,
     plat: constants.OS = None,
     skip_torch_or_directml: bool = False,
     skip_requirement: bool = False,
     fast_deps: bool = False,
-    pr: Optional[str] = None,
+    pr: str | None = None,
     *args,
     **kwargs,
 ):
@@ -342,7 +363,7 @@ def handle_pr_checkout(pr_ref: str, comfy_path: str) -> str:
     return pr_info.base_repo_url
 
 
-def validate_version(version: str) -> Optional[str]:
+def validate_version(version: str) -> str | None:
     """
     Validates the version string as 'latest', 'nightly', or a semantically version number.
 
@@ -391,27 +412,6 @@ def handle_github_rate_limit(response):
         raise GitHubRateLimitError(message)
 
 
-def fetch_github_releases(repo_owner: str, repo_name: str) -> list[dict[str, str]]:
-    """
-    Fetch the list of releases from the GitHub API.
-    Handles rate limiting by logging the wait time.
-    """
-    url = f"https://api.github.com/repos/{repo_owner}/{repo_name}/releases"
-
-    headers = {}
-    if github_token := os.getenv("GITHUB_TOKEN"):
-        headers["Authorization"] = f"Bearer {github_token}"
-
-    response = requests.get(url, headers=headers, timeout=5)
-
-    # Handle rate limiting
-    if response.status_code in (403, 429):
-        handle_github_rate_limit(response)
-
-    response.raise_for_status()
-    return response.json()
-
-
 class GithubRelease(TypedDict):
     """
     A dictionary representing a GitHub release.
@@ -422,44 +422,9 @@ class GithubRelease(TypedDict):
     - download_url: The URL to download the release.
     """
 
-    version: Optional[semver.VersionInfo]
+    version: semver.VersionInfo | None
     tag: str
     download_url: str
-
-
-def parse_releases(releases: list[dict[str, str]]) -> list[GithubRelease]:
-    """
-    Parse the list of releases fetched from the GitHub API into a list of GithubRelease objects.
-    """
-    parsed_releases: list[GithubRelease] = []
-    for release in releases:
-        tag = release["tag_name"]
-        if tag.lower() in ["latest", "nightly"]:
-            parsed_releases.append({"version": None, "download_url": release["zipball_url"], "tag": tag})
-        else:
-            version = semver.VersionInfo.parse(tag.lstrip("v"))
-            parsed_releases.append({"version": version, "download_url": release["zipball_url"], "tag": tag})
-
-    return parsed_releases
-
-
-def select_version(releases: list[GithubRelease], version: str) -> Optional[GithubRelease]:
-    """
-    Given a list of Github releases, select the release that matches the specified version.
-    """
-    if version.lower() == "latest":
-        return next((r for r in releases if r["tag"].lower() == version.lower()), None)
-
-    version = version.lstrip("v")
-
-    try:
-        requested_version = semver.VersionInfo.parse(version)
-        return next(
-            (r for r in releases if isinstance(r["version"], semver.VersionInfo) and r["version"] == requested_version),
-            None,
-        )
-    except ValueError:
-        return None
 
 
 def clone_comfyui(url: str, repo_dir: str):
@@ -479,22 +444,19 @@ def checkout_stable_comfyui(version: str, repo_dir: str):
     Supports installing stable releases of Comfy (semantic versioning) or the 'latest' version.
     """
     rprint(f"Looking for ComfyUI version '{version}'...")
-    selected_release = None
     if version == "latest":
         selected_release = get_latest_release("comfyanonymous", "ComfyUI")
+        if selected_release is None:
+            rprint(f"Error: No release found for version '{version}'.")
+            sys.exit(1)
+        tag = str(selected_release["tag"])
     else:
-        releases = fetch_github_releases("comfyanonymous", "ComfyUI")
-        parsed_releases = parse_releases(releases)
-        selected_release = select_version(parsed_releases, version)
+        # For specific versions, directly construct the tag (add 'v' prefix if needed)
+        tag = f"v{version}" if not version.startswith("v") else version
 
-    if selected_release is None:
-        rprint(f"Error: No release found for version '{version}'.")
-        sys.exit(1)
-
-    tag = str(selected_release["tag"])
     console.print(
         Panel(
-            f"Checking out ComfyUI version: [bold cyan]{selected_release['tag']}[/bold cyan]",
+            f"Checking out ComfyUI version: [bold cyan]{tag}[/bold cyan]",
             title="[yellow]ComfyUI Checkout[/yellow]",
             border_style="green",
             expand=False,
@@ -504,11 +466,12 @@ def checkout_stable_comfyui(version: str, repo_dir: str):
     with console.status("[bold green]Checking out tag...", spinner="dots"):
         success = git_checkout_tag(repo_dir, tag)
         if not success:
-            console.print("\n[bold red]Failed to checkout tag![/bold red]")
+            console.print(f"\n[bold red]Failed to checkout tag '{tag}'![/bold red]")
+            console.print("[yellow]The version may not exist. Please check available versions.[/yellow]")
             sys.exit(1)
 
 
-def get_latest_release(repo_owner: str, repo_name: str) -> Optional[GithubRelease]:
+def get_latest_release(repo_owner: str, repo_name: str) -> GithubRelease | None:
     """
     Fetch the latest release information from GitHub API.
 
@@ -535,7 +498,7 @@ def get_latest_release(repo_owner: str, repo_name: str) -> Optional[GithubReleas
         return None
 
 
-def parse_pr_reference(pr_ref: str) -> tuple[str, str, Optional[int]]:
+def parse_pr_reference(pr_ref: str) -> tuple[str, str, int | None]:
     """
     support formats：
     - username:branch-name
@@ -603,7 +566,7 @@ def fetch_pr_info(repo_owner: str, repo_name: str, pr_number: int) -> PRInfo:
         raise Exception(f"Failed to fetch PR #{pr_number}: {e}")
 
 
-def find_pr_by_branch(repo_owner: str, repo_name: str, username: str, branch: str) -> Optional[PRInfo]:
+def find_pr_by_branch(repo_owner: str, repo_name: str, username: str, branch: str) -> PRInfo | None:
     url = f"https://api.github.com/repos/{repo_owner}/{repo_name}/pulls"
     params = {"head": f"{username}:{branch}", "state": "open"}
 
@@ -633,6 +596,92 @@ def find_pr_by_branch(repo_owner: str, repo_name: str, username: str, branch: st
 
     except requests.RequestException:
         return None
+
+
+def _print_npm_not_found_help(node_version: str) -> None:
+    """Print detailed help when npm is not found, with OS-specific instructions."""
+    rprint("[bold red]npm is not installed or not found in PATH.[/bold red]")
+    rprint()
+    rprint("[yellow]npm is a package manager that usually comes bundled with Node.js.[/yellow]")
+    rprint(f"[yellow]Your system has Node.js ({node_version}) but npm was not found.[/yellow]")
+    rprint()
+
+    current_os = platform.system()
+
+    if current_os == "Windows":
+        rprint("[bold cyan]How to fix this on Windows:[/bold cyan]")
+        rprint()
+        rprint("  [bold]Step 1:[/bold] Uninstall your current Node.js installation:")
+        rprint("    • Open the Start menu and search for 'Add or remove programs'")
+        rprint("    • Find 'Node.js' in the list and click 'Uninstall'")
+        rprint()
+        rprint("  [bold]Step 2:[/bold] Download and reinstall Node.js:")
+        rprint("    • Go to: [link=https://nodejs.org/]https://nodejs.org/[/link]")
+        rprint("    • Click the green 'Download Node.js (LTS)' button")
+        rprint("    • Run the downloaded installer")
+        rprint("    • [bold]Important:[/bold] Use all default options - do not uncheck anything")
+        rprint()
+        rprint("  [bold]Step 3:[/bold] Restart your terminal:")
+        rprint("    • Close this Command Prompt or PowerShell window completely")
+        rprint("    • Open a new Command Prompt or PowerShell window")
+        rprint()
+        rprint("  [bold]Step 4:[/bold] Verify the installation worked:")
+        rprint("    • Type: [bold]npm --version[/bold]")
+        rprint("    • You should see a version number (e.g., '10.8.0')")
+        rprint()
+
+    elif current_os == "Darwin":  # macOS
+        rprint("[bold cyan]How to fix this on macOS:[/bold cyan]")
+        rprint()
+        rprint("  [bold]Option A - Reinstall Node.js (recommended):[/bold]")
+        rprint()
+        rprint("    [bold]Step 1:[/bold] Download Node.js:")
+        rprint("      • Go to: [link=https://nodejs.org/]https://nodejs.org/[/link]")
+        rprint("      • Click the green 'Download Node.js (LTS)' button")
+        rprint("      • Open the downloaded .pkg file and follow the installer")
+        rprint()
+        rprint("    [bold]Step 2:[/bold] Restart your terminal:")
+        rprint("      • Close this Terminal window completely (Cmd+Q)")
+        rprint("      • Open a new Terminal window")
+        rprint()
+        rprint("  [bold]Option B - If you use Homebrew:[/bold]")
+        rprint("    • Run: [bold]brew install node[/bold]")
+        rprint("    • Then restart your terminal")
+        rprint()
+        rprint("  [bold]Verify the installation:[/bold]")
+        rprint("    • Type: [bold]npm --version[/bold]")
+        rprint("    • You should see a version number (e.g., '10.8.0')")
+        rprint()
+
+    else:  # Linux
+        rprint("[bold cyan]How to fix this on Linux:[/bold cyan]")
+        rprint()
+        rprint("  [bold]Option A - Install npm separately (Ubuntu/Debian):[/bold]")
+        rprint("    • Run: [bold]sudo apt update && sudo apt install npm[/bold]")
+        rprint("    • Enter your password when prompted")
+        rprint()
+        rprint("  [bold]Option B - Reinstall Node.js with npm:[/bold]")
+        rprint()
+        rprint("    [bold]Step 1:[/bold] Remove current Node.js:")
+        rprint("      • Ubuntu/Debian: [bold]sudo apt remove nodejs[/bold]")
+        rprint("      • Fedora: [bold]sudo dnf remove nodejs[/bold]")
+        rprint()
+        rprint("    [bold]Step 2:[/bold] Install Node.js (includes npm):")
+        rprint("      • Go to: [link=https://nodejs.org/]https://nodejs.org/[/link]")
+        rprint("      • Or use NodeSource repository for latest version:")
+        rprint("        [bold]curl -fsSL https://deb.nodesource.com/setup_lts.x | sudo -E bash -[/bold]")
+        rprint("        [bold]sudo apt install -y nodejs[/bold]")
+        rprint()
+        rprint("    [bold]Step 3:[/bold] Restart your terminal:")
+        rprint("      • Close this terminal window and open a new one")
+        rprint()
+        rprint("  [bold]Verify the installation:[/bold]")
+        rprint("    • Type: [bold]npm --version[/bold]")
+        rprint("    • You should see a version number (e.g., '10.8.0')")
+        rprint()
+
+    rprint("[dim]After fixing npm, run your comfy command again.[/dim]")
+    rprint()
 
 
 def verify_node_tools() -> bool:
@@ -668,13 +717,11 @@ def verify_node_tools() -> bool:
     try:
         npm_result = subprocess.run(["npm", "--version"], capture_output=True, text=True, check=False)
     except FileNotFoundError:
-        rprint("[bold red]npm is not installed or not found in PATH.[/bold red]")
-        rprint("[yellow]npm usually comes with Node.js. Try reinstalling Node.js.[/yellow]")
+        _print_npm_not_found_help(node_version)
         return False
 
     if npm_result.returncode != 0:
-        rprint("[bold red]npm is not installed or not working correctly.[/bold red]")
-        rprint("[yellow]npm usually comes with Node.js. Try reinstalling Node.js.[/yellow]")
+        _print_npm_not_found_help(node_version)
         return False
 
     npm_version = npm_result.stdout.strip()
@@ -735,7 +782,7 @@ def verify_node_tools() -> bool:
     return True
 
 
-def handle_temporary_frontend_pr(frontend_pr: str) -> Optional[str]:
+def handle_temporary_frontend_pr(frontend_pr: str) -> str | None:
     """Handle temporary frontend PR for launch - returns path to built frontend"""
     from comfy_cli.pr_cache import PRCache
 
@@ -842,7 +889,7 @@ def handle_temporary_frontend_pr(frontend_pr: str) -> Optional[str]:
         os.chdir(original_dir)
 
 
-def parse_frontend_pr_reference(pr_ref: str) -> tuple[str, str, Optional[int]]:
+def parse_frontend_pr_reference(pr_ref: str) -> tuple[str, str, int | None]:
     """
     Parse frontend PR reference. Similar to parse_pr_reference but defaults to Comfy-Org/ComfyUI_frontend
     """

@@ -2,7 +2,7 @@ import os
 import subprocess
 import sys
 import webbrowser
-from typing import Annotated, Optional
+from typing import Annotated
 
 import questionary
 import typer
@@ -65,7 +65,7 @@ def help(ctx: typer.Context):
 def entry(
     ctx: typer.Context,
     workspace: Annotated[
-        Optional[str],
+        str | None,
         typer.Option(
             show_default=False,
             help="Path to ComfyUI workspace",
@@ -73,19 +73,17 @@ def entry(
         ),
     ] = None,
     recent: Annotated[
-        Optional[bool],
+        bool | None,
         typer.Option(
             show_default=False,
-            is_flag=True,
             help="Execute from recent path",
             callback=g_exclusivity.validate,
         ),
     ] = None,
     here: Annotated[
-        Optional[bool],
+        bool | None,
         typer.Option(
             show_default=False,
-            is_flag=True,
             help="Execute from current path",
             callback=g_exclusivity.validate,
         ),
@@ -94,7 +92,6 @@ def entry(
         bool,
         typer.Option(
             show_default=False,
-            is_flag=True,
             help="Do not prompt user for input, use default options",
         ),
     ] = False,
@@ -103,7 +100,6 @@ def entry(
         typer.Option(
             show_default=False,
             hidden=True,
-            is_flag=True,
             help="Enable tracking",
         ),
     ] = False,
@@ -112,7 +108,6 @@ def entry(
         "--version",
         "-v",
         help="Print version and exit",
-        is_flag=True,
     ),
 ):
     if version:
@@ -136,7 +131,7 @@ def entry(
     # logging.info(f"scan_dir took {end_time - start_time:.2f} seconds to run")
 
 
-def validate_commit_and_version(commit: Optional[str], ctx: typer.Context) -> Optional[str]:
+def validate_commit_and_version(commit: str | None, ctx: typer.Context) -> str | None:
     """
     Validate that the commit is not specified unless the version is 'nightly'.
     """
@@ -190,7 +185,7 @@ def install(
         bool, typer.Option(show_default=False, help="Skip installing requirements.txt")
     ] = False,
     nvidia: Annotated[
-        Optional[bool],
+        bool | None,
         typer.Option(
             show_default=False,
             help="Install for Nvidia gpu",
@@ -199,7 +194,7 @@ def install(
     ] = None,
     cuda_version: Annotated[CUDAVersion, typer.Option(show_default=True)] = CUDAVersion.v12_6,
     amd: Annotated[
-        Optional[bool],
+        bool | None,
         typer.Option(
             show_default=False,
             help="Install for AMD gpu",
@@ -207,7 +202,7 @@ def install(
         ),
     ] = None,
     m_series: Annotated[
-        Optional[bool],
+        bool | None,
         typer.Option(
             show_default=False,
             help="Install for Mac M-Series gpu",
@@ -215,7 +210,7 @@ def install(
         ),
     ] = None,
     intel_arc: Annotated[
-        Optional[bool],
+        bool | None,
         typer.Option(
             hidden=True,
             show_default=False,
@@ -224,7 +219,7 @@ def install(
         ),
     ] = None,
     cpu: Annotated[
-        Optional[bool],
+        bool | None,
         typer.Option(
             show_default=False,
             help="Install for CPU",
@@ -232,7 +227,7 @@ def install(
         ),
     ] = None,
     commit: Annotated[
-        Optional[str], typer.Option(help="Specify commit hash for ComfyUI", callback=validate_commit_and_version)
+        str | None, typer.Option(help="Specify commit hash for ComfyUI", callback=validate_commit_and_version)
     ] = None,
     fast_deps: Annotated[
         bool,
@@ -243,11 +238,11 @@ def install(
         ),
     ] = False,
     manager_commit: Annotated[
-        Optional[str],
+        str | None,
         typer.Option(help="Specify commit hash for ComfyUI-Manager"),
     ] = None,
     pr: Annotated[
-        Optional[str],
+        str | None,
         typer.Option(
             show_default=False,
             help="Install from a specific PR. Supports formats: username:branch, #123, or PR URL",
@@ -274,6 +269,11 @@ def install(
         rprint("[bold red]Python version 3.9 or higher is required to run ComfyUI.[/bold red]")
         rprint(f"You are currently using Python version {env_checker.format_python_version(checker.python_version)}.")
     platform = utils.get_os()
+
+    if pr and (version not in {None, "nightly"} or commit):
+        rprint("--pr cannot be used with --version or --commit")
+        raise typer.Exit(code=1)
+
     if cpu:
         rprint("[bold yellow]Installing for CPU[/bold yellow]")
         install_inner.execute(
@@ -291,6 +291,7 @@ def install(
             skip_requirement=skip_requirement,
             fast_deps=fast_deps,
             manager_commit=manager_commit,
+            pr=pr,
         )
         rprint(f"ComfyUI is installed at: {comfy_path}")
         return None
@@ -328,10 +329,6 @@ def install(
         rprint(
             "[bold red]No GPU option selected or `--cpu` enabled, use --\\[gpu option] flag (e.g. --nvidia) to pick GPU. use `--cpu` to install for CPU. Exiting...[/bold red]"
         )
-        raise typer.Exit(code=1)
-
-    if pr and version not in {None, "nightly"} or commit:
-        rprint("--pr cannot be used with --version or --commit")
         raise typer.Exit(code=1)
 
     install_inner.execute(
@@ -403,15 +400,15 @@ def run(
         typer.Option(help="Enables verbose output of the execution process."),
     ] = False,
     host: Annotated[
-        Optional[str],
+        str | None,
         typer.Option(help="The IP/hostname where the ComfyUI instance is running, e.g. 127.0.0.1 or localhost."),
     ] = None,
     port: Annotated[
-        Optional[int],
+        int | None,
         typer.Option(help="The port where the ComfyUI instance is running, e.g. 8188."),
     ] = None,
     timeout: Annotated[
-        Optional[int],
+        int | None,
         typer.Option(help="The timeout in seconds for the workflow execution."),
     ] = 30,
 ):
@@ -474,7 +471,7 @@ def launch(
     extra: list[str] = typer.Argument(None),
     background: Annotated[bool, typer.Option(help="Launch ComfyUI in background")] = False,
     frontend_pr: Annotated[
-        Optional[str],
+        str | None,
         typer.Option(
             "--frontend-pr",
             show_default=False,
@@ -614,14 +611,14 @@ def standalone(
         ),
     ] = False,
     platform: Annotated[
-        Optional[constants.OS],
+        constants.OS | None,
         typer.Option(
             show_default=False,
             help="Create standalone Python for specified platform",
         ),
     ] = None,
     proc: Annotated[
-        Optional[constants.PROC],
+        constants.PROC | None,
         typer.Option(
             show_default=False,
             help="Create standalone Python for specified processor",

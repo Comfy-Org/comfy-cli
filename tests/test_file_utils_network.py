@@ -86,6 +86,24 @@ def test_download_file_success(mock_stream, tmp_path):
 
 
 @patch("httpx.stream")
+def test_download_file_success_without_content_length(mock_stream, tmp_path):
+    """Download should succeed when Content-Length header is missing (e.g. chunked/gzip responses)."""
+    mock_response = Mock()
+    mock_response.status_code = 200
+    mock_response.headers = {}
+    mock_response.iter_bytes.return_value = [b"chunk1", b"chunk2"]
+    mock_response.__enter__ = Mock(return_value=mock_response)
+    mock_response.__exit__ = Mock(return_value=None)
+    mock_stream.return_value = mock_response
+
+    test_file = tmp_path / "test.txt"
+    download_file("http://example.com", test_file)
+
+    assert test_file.exists()
+    assert test_file.read_bytes() == b"chunk1chunk2"
+
+
+@patch("httpx.stream")
 def test_download_file_failure(mock_stream):
     mock_response = Mock()
     mock_response.status_code = 404

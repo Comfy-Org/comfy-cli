@@ -1,7 +1,6 @@
 import configparser
 import os
 from importlib.metadata import version
-from typing import Optional
 
 from comfy_cli import constants, logging
 from comfy_cli.utils import get_os, is_running, singleton
@@ -11,7 +10,7 @@ from comfy_cli.utils import get_os, is_running, singleton
 class ConfigManager:
     def __init__(self):
         self.config = configparser.ConfigParser()
-        self.background: Optional[tuple[str, int, int]] = None
+        self.background: tuple[str, int, int] | None = None
         self.load()
 
     @staticmethod
@@ -43,7 +42,18 @@ class ConfigManager:
         """
         return self.config["DEFAULT"].get(key, None)  # Returns None if the key does not exist
 
-    def get_or_override(self, env_key: str, config_key: str, set_value: Optional[str] = None) -> Optional[str]:
+    def get_bool(self, key) -> bool | None:
+        """
+        Get a boolean value from the config file using configparser's built-in
+        getboolean, which accepts: true/false, yes/no, on/off, 1/0 (case-insensitive).
+
+        Returns None if the key does not exist.
+        """
+        if not self.config.has_option("DEFAULT", key):
+            return None
+        return self.config.getboolean("DEFAULT", key)
+
+    def get_or_override(self, env_key: str, config_key: str, set_value: str | None = None) -> str | None:
         """
         Resolves and conditionally stores a config value.
 
@@ -120,15 +130,12 @@ class ConfigManager:
         else:
             data.append(("Recent ComfyUI workspace", "No recent run"))
 
-        if self.config.has_option("DEFAULT", constants.CONFIG_KEY_ENABLE_TRACKING):
+        tracking = self.get_bool(constants.CONFIG_KEY_ENABLE_TRACKING)
+        if tracking is not None:
             data.append(
                 (
                     "Tracking Analytics",
-                    (
-                        "Enabled"
-                        if self.config["DEFAULT"][constants.CONFIG_KEY_ENABLE_TRACKING] == "True"
-                        else "Disabled"
-                    ),
+                    "Enabled" if tracking else "Disabled",
                 )
             )
 

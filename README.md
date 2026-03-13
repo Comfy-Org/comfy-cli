@@ -1,4 +1,4 @@
-# Comfy-Cli: A Command Line Tool for ComfyUI
+# comfy-cli: A Command Line Tool for ComfyUI
 
 [![Test ComfyUI Example Workflows](https://github.com/Comfy-Org/ComfyUI-Mirror/actions/workflows/test-workflows.yaml/badge.svg)](https://github.com/Comfy-Org/ComfyUI-Mirror/actions/workflows/test-workflows.yaml)
 
@@ -121,13 +121,13 @@ Comfy provides commands that allow you to easily run the installed ComfyUI.
   `comfy install --pr "https://github.com/comfyanonymous/ComfyUI/pull/1234"`
 
   - If you want to run ComfyUI with a specific pull request, you can use the `--pr` option. This will automatically install the specified pull request and run ComfyUI with it.
-  - Important: When using --pr, any --version and --commit parameters are ignored. The PR branch will be checked out regardless of version settings.
+  - Important: The --pr option cannot be combined with --version or --commit and will be rejected if used together.
 
 - To test a frontend pull request:
 
   ```
   comfy launch --frontend-pr "#456"
-  comfy launch --frontend-pr "username:branch-name" 
+  comfy launch --frontend-pr "username:branch-name"
   comfy launch --frontend-pr "https://github.com/Comfy-Org/ComfyUI_frontend/pull/456"
   ```
 
@@ -142,7 +142,7 @@ Comfy provides commands that allow you to easily run the installed ComfyUI.
   comfy pr-cache clean             # Clean all cached builds
   comfy pr-cache clean 456         # Clean specific PR cache
   ```
-  
+
   - Cache automatically expires after 7 days
   - Maximum of 10 PR builds are kept (oldest are removed automatically)
   - Cache limits help manage disk space while keeping recent builds available

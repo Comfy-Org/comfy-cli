@@ -4,7 +4,8 @@ import platform
 import subprocess
 import sys
 import uuid
-from typing import Annotated, Optional
+from enum import Enum
+from typing import Annotated
 
 import typer
 from rich import print
@@ -34,6 +35,17 @@ app.add_typer(bisect_app, name="bisect", help="Bisect custom nodes for culprit n
 manager_app = typer.Typer()
 workspace_manager = WorkspaceManager()
 registry_api = RegistryAPI()
+
+
+# Enum for show command target
+class ShowTarget(str, Enum):
+    INSTALLED = "installed"
+    ENABLED = "enabled"
+    NOT_INSTALLED = "not-installed"
+    DISABLED = "disabled"
+    ALL = "all"
+    SNAPSHOT = "snapshot"
+    SNAPSHOT_LIST = "snapshot-list"
 
 
 def validate_comfyui_manager(_env_checker):
@@ -170,7 +182,7 @@ def execute_install_script(repo_path):
 @tracking.track_command("node")
 def save_snapshot(
     output: Annotated[
-        Optional[str],
+        str | None,
         typer.Option(show_default=False, help="Specify the output file path. (.json/.yaml)"),
     ] = None,
 ):
@@ -185,22 +197,19 @@ def save_snapshot(
 @tracking.track_command("node")
 def restore_snapshot(
     path: str,
-    pip_non_url: Optional[bool] = typer.Option(
+    pip_non_url: bool | None = typer.Option(
         default=None,
         show_default=False,
-        is_flag=True,
         help="Restore for pip packages registered on PyPI.",
     ),
-    pip_non_local_url: Optional[bool] = typer.Option(
+    pip_non_local_url: bool | None = typer.Option(
         default=None,
         show_default=False,
-        is_flag=True,
         help="Restore for pip packages registered at web URLs.",
     ),
-    pip_local_url: Optional[bool] = typer.Option(
+    pip_local_url: bool | None = typer.Option(
         default=None,
         show_default=False,
-        is_flag=True,
         help="Restore for pip packages specified by local paths.",
     ),
 ):
@@ -244,19 +253,6 @@ def clear():
 
 
 # completers
-show_completer = utils.create_choice_completer(
-    [
-        "installed",
-        "enabled",
-        "not-installed",
-        "disabled",
-        "all",
-        "snapshot",
-        "snapshot-list",
-    ]
-)
-
-
 mode_completer = utils.create_choice_completer(["remote", "local", "cache"])
 
 
@@ -304,12 +300,11 @@ def validate_mode(mode):
 @app.command(help="Show node list")
 @tracking.track_command("node")
 def show(
-    arg: str = typer.Argument(
-        help="[installed|enabled|not-installed|disabled|all|snapshot|snapshot-list]",
-        autocompletion=show_completer,
+    arg: ShowTarget = typer.Argument(
+        help="Target to display",
     ),
     channel: Annotated[
-        Optional[str],
+        str | None,
         typer.Option(
             show_default=False,
             help="Specify the operation mode",
@@ -322,33 +317,19 @@ def show(
         autocompletion=mode_completer,
     ),
 ):
-    valid_commands = [
-        "installed",
-        "enabled",
-        "not-installed",
-        "disabled",
-        "all",
-        "snapshot",
-        "snapshot-list",
-    ]
-    if arg not in valid_commands:
-        typer.echo(f"Invalid command: `show {arg}`", err=True)
-        raise typer.Exit(code=1)
-
     validate_mode(mode)
 
-    execute_cm_cli(["show", arg], channel=channel, mode=mode)
+    execute_cm_cli(["show", arg.value], channel=channel, mode=mode)
 
 
 @app.command("simple-show", help="Show node list (simple mode)")
 @tracking.track_command("node")
 def simple_show(
-    arg: str = typer.Argument(
-        help="[installed|enabled|not-installed|disabled|all|snapshot|snapshot-list]",
-        autocompletion=show_completer,
+    arg: ShowTarget = typer.Argument(
+        help="Target to display",
     ),
     channel: Annotated[
-        Optional[str],
+        str | None,
         typer.Option(
             show_default=False,
             help="Specify the operation mode",
@@ -361,22 +342,9 @@ def simple_show(
         autocompletion=mode_completer,
     ),
 ):
-    valid_commands = [
-        "installed",
-        "enabled",
-        "not-installed",
-        "disabled",
-        "all",
-        "snapshot",
-        "snapshot-list",
-    ]
-    if arg not in valid_commands:
-        typer.echo(f"Invalid command: `show {arg}`", err=True)
-        raise typer.Exit(code=1)
-
     validate_mode(mode)
 
-    execute_cm_cli(["simple-show", arg], channel=channel, mode=mode)
+    execute_cm_cli(["simple-show", arg.value], channel=channel, mode=mode)
 
 
 # install, reinstall, uninstall
@@ -385,7 +353,7 @@ def simple_show(
 def install(
     nodes: list[str] = typer.Argument(..., help="List of custom nodes to install", autocompletion=node_completer),
     channel: Annotated[
-        Optional[str],
+        str | None,
         typer.Option(
             show_default=False,
             help="Specify the operation mode",
@@ -450,7 +418,7 @@ def install(
 def reinstall(
     nodes: list[str] = typer.Argument(..., help="List of custom nodes to reinstall", autocompletion=node_completer),
     channel: Annotated[
-        Optional[str],
+        str | None,
         typer.Option(
             show_default=False,
             help="Specify the operation mode",
@@ -458,7 +426,7 @@ def reinstall(
         ),
     ] = None,
     fast_deps: Annotated[
-        Optional[bool],
+        bool | None,
         typer.Option(
             "--fast-deps",
             show_default=False,
@@ -485,7 +453,7 @@ def reinstall(
 def uninstall(
     nodes: list[str] = typer.Argument(..., help="List of custom nodes to uninstall", autocompletion=node_completer),
     channel: Annotated[
-        Optional[str],
+        str | None,
         typer.Option(
             show_default=False,
             help="Specify the operation mode",
@@ -535,7 +503,7 @@ def update(
         autocompletion=node_or_all_completer,
     ),
     channel: Annotated[
-        Optional[str],
+        str | None,
         typer.Option(
             show_default=False,
             help="Specify the operation mode",
@@ -564,7 +532,7 @@ def disable(
         autocompletion=node_or_all_completer,
     ),
     channel: Annotated[
-        Optional[str],
+        str | None,
         typer.Option(
             show_default=False,
             help="Specify the operation mode",
@@ -591,7 +559,7 @@ def enable(
         autocompletion=node_or_all_completer,
     ),
     channel: Annotated[
-        Optional[str],
+        str | None,
         typer.Option(
             show_default=False,
             help="Specify the operation mode",
@@ -618,7 +586,7 @@ def fix(
         autocompletion=node_or_all_completer,
     ),
     channel: Annotated[
-        Optional[str],
+        str | None,
         typer.Option(
             show_default=False,
             help="Specify the operation mode",
@@ -643,15 +611,15 @@ def fix(
 @tracking.track_command("node")
 def install_deps(
     deps: Annotated[
-        Optional[str],
+        str | None,
         typer.Option(show_default=False, help="Dependency spec file (.json)"),
     ] = None,
     workflow: Annotated[
-        Optional[str],
+        str | None,
         typer.Option(show_default=False, help="Workflow file (.json/.png)"),
     ] = None,
     channel: Annotated[
-        Optional[str],
+        str | None,
         typer.Option(
             show_default=False,
             help="Specify the operation mode",
@@ -699,7 +667,7 @@ def deps_in_workflow(
     workflow: Annotated[str, typer.Option(show_default=False, help="Workflow file (.json/.png)")],
     output: Annotated[str, typer.Option(show_default=False, help="Output file (.json)")],
     channel: Annotated[
-        Optional[str],
+        str | None,
         typer.Option(
             show_default=False,
             help="Specify the operation mode",
@@ -772,7 +740,7 @@ def validate():
 @app.command("publish", help="Publish node to registry")
 @tracking.track_command("publish")
 def publish(
-    token: Optional[str] = typer.Option(None, "--token", help="Personal Access Token for publishing", hide_input=True),
+    token: str | None = typer.Option(None, "--token", help="Personal Access Token for publishing", hide_input=True),
 ):
     """
     Publish a node with optional validation.
@@ -872,7 +840,7 @@ def display_all_nodes():
 @tracking.track_command("node")
 def registry_install(
     node_id: str,
-    version: Optional[str] = None,
+    version: str | None = None,
     force_download: Annotated[
         bool,
         typer.Option(

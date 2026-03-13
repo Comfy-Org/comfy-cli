@@ -18,13 +18,12 @@ maintainers = [
   { name = "Dr.Lt.Data", email = "dr.lt.data@gmail.com" },
 ]
 
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 classifiers = [
   "Development Status :: 4 - Beta",
   "Intended Audience :: Developers",
   "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
   "Programming Language :: Python :: 3 :: Only",
-  "Programming Language :: Python :: 3.9",
   "Programming Language :: Python :: 3.10",
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
@@ -33,7 +32,6 @@ classifiers = [
 
 dependencies = [
   "charset-normalizer>=3",
-  "click<=8.1.8",
   "cookiecutter",
   "gitpython",
   "httpx",
@@ -48,14 +46,14 @@ dependencies = [
   "ruff",
   "semver~=3.0.2",
   "tomlkit",
-  "typer>=0.9",
+  "typer>=0.12.5",
   "typing-extensions>=4.7",
-  "uv",
+  "uv>=0.6.9",
   "websocket-client",
 ]
 
 optional-dependencies.dev = [ "pre-commit", "pytest", "pytest-cov", "ruff" ]
-urls.Repository = "https://github.com/drip-art/comfy-cli.git"
+urls.Repository = "https://github.com/Comfy-Org/comfy-cli.git"
 scripts.comfy = "comfy_cli.__main__:main"
 scripts.comfy-cli = "comfy_cli.__main__:main"
 scripts.comfycli = "comfy_cli.__main__:main"
@@ -65,7 +63,7 @@ where = [ "." ]
 include = [ "comfy_cli*" ]
 
 [tool.ruff]
-target-version = "py39"
+target-version = "py310"
 
 line-length = 120
 lint.select = [

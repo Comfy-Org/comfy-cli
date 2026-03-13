@@ -1,14 +1,17 @@
+import logging
+import re
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Optional
 
 import requests
 
-from comfy_cli.constants import DEFAULT_STANDALONE_PYTHON_DOWNLOAD_VERSION, OS, PROC
+from comfy_cli.constants import DEFAULT_STANDALONE_PYTHON_MINOR_VERSION, OS, PROC
 from comfy_cli.typing import PathLike
 from comfy_cli.utils import create_tarball, download_url, extract_tarball, get_os, get_proc
 from comfy_cli.uv import DependencyCompiler
+
+logger = logging.getLogger(__name__)
 
 _here = Path(__file__).expanduser().resolve().parent
 
@@ -16,19 +19,47 @@ _platform_targets = {
     (OS.MACOS, PROC.ARM): "aarch64-apple-darwin",
     (OS.MACOS, PROC.X86_64): "x86_64-apple-darwin",
     (OS.LINUX, PROC.X86_64): "x86_64_v3-unknown-linux-gnu",  # x86_64_v3 assumes AVX256 support, no AVX512 support
-    (OS.WINDOWS, PROC.X86_64): "x86_64-pc-windows-msvc-shared",
+    (OS.WINDOWS, PROC.X86_64): "x86_64-pc-windows-msvc",
 }
 
 _latest_release_json_url = (
-    "https://raw.githubusercontent.com/indygreg/python-build-standalone/latest-release/latest-release.json"
+    "https://raw.githubusercontent.com/astral-sh/python-build-standalone/latest-release/latest-release.json"
 )
-_asset_url_prefix = "https://github.com/indygreg/python-build-standalone/releases/download/{tag}"
+_asset_url_prefix = "https://github.com/astral-sh/python-build-standalone/releases/download/{tag}"
+
+
+def _resolve_python_version(asset_url_prefix: str, minor_version: str) -> str:
+    """Resolve the exact patch version for a minor version series from the release SHA256SUMS.
+
+    Downloads the SHA256SUMS file (~45 KB) from the release and parses it to find
+    the available patch version for the requested minor series (e.g. "3.12" -> "3.12.13").
+    """
+    sha256sums_url = f"{asset_url_prefix.rstrip('/')}/SHA256SUMS"
+    response = requests.get(sha256sums_url)
+    response.raise_for_status()
+
+    pattern = re.compile(rf"cpython-({re.escape(minor_version)}\.\d+)\+")
+    versions = set()
+    for line in response.text.splitlines():
+        match = pattern.search(line)
+        if match:
+            versions.add(match.group(1))
+
+    if not versions:
+        raise RuntimeError(
+            f"No Python {minor_version}.x found in release. Available versions can be checked at {sha256sums_url}"
+        )
+
+    # There should be exactly one patch version per minor series in a release, but pick the highest just in case.
+    resolved = max(versions, key=lambda v: tuple(int(x) for x in v.split(".")))
+    logger.info("Resolved Python %s -> %s", minor_version, resolved)
+    return resolved
 
 
 def download_standalone_python(
-    platform: Optional[str] = None,
-    proc: Optional[str] = None,
-    version: str = DEFAULT_STANDALONE_PYTHON_DOWNLOAD_VERSION,
+    platform: str | None = None,
+    proc: str | None = None,
+    version: str = DEFAULT_STANDALONE_PYTHON_MINOR_VERSION,
     tag: str = "latest",
     flavor: str = "install_only",
     cwd: PathLike = ".",
@@ -53,6 +84,11 @@ def download_standalone_python(
     else:
         asset_url_prefix = _asset_url_prefix.format(tag=tag)
 
+    # If version is a minor version (e.g. "3.12"), resolve the exact patch version
+    # from the release metadata. Full versions (e.g. "3.12.13") are used as-is.
+    if version.count(".") == 1:
+        version = _resolve_python_version(asset_url_prefix, version)
+
     name = f"cpython-{version}+{tag}-{target}-{flavor}"
     fname = f"{name}.tar.gz"
     url = f"{asset_url_prefix.rstrip('/')}/{fname.lstrip('/')}"
@@ -63,9 +99,9 @@ def download_standalone_python(
 class StandalonePython:
     @staticmethod
     def FromDistro(
-        platform: Optional[str] = None,
-        proc: Optional[str] = None,
-        version: str = DEFAULT_STANDALONE_PYTHON_DOWNLOAD_VERSION,
+        platform: str | None = None,
+        proc: str | None = None,
+        version: str = DEFAULT_STANDALONE_PYTHON_MINOR_VERSION,
         tag: str = "latest",
         flavor: str = "install_only",
         cwd: PathLike = ".",
@@ -146,7 +182,7 @@ class StandalonePython:
     def dehydrate_comfy_deps(
         self,
         comfyDir: PathLike,
-        extraSpecs: Optional[list[str]] = None,
+        extraSpecs: list[str] | None = None,
         packWheels: bool = False,
     ):
         self.dep_comp = DependencyCompiler(
@@ -171,7 +207,7 @@ class StandalonePython:
         else:
             self.dep_comp.install_deps()
 
-    def to_tarball(self, outPath: Optional[PathLike] = None, show_progress: bool = True):
+    def to_tarball(self, outPath: PathLike | None = None, show_progress: bool = True):
         # remove any __pycache__ before creating archive
         self.clean()
 

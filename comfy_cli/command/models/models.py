@@ -2,7 +2,7 @@ import contextlib
 import os
 import pathlib
 import sys
-from typing import Annotated, Optional
+from typing import Annotated
 from urllib.parse import parse_qs, unquote, urlparse
 
 import requests
@@ -38,7 +38,7 @@ def potentially_strip_param_url(path_name: str) -> str:
     return path_name.split("?")[0]
 
 
-def check_huggingface_url(url: str) -> tuple[bool, Optional[str], Optional[str], Optional[str], Optional[str]]:
+def check_huggingface_url(url: str) -> tuple[bool, str | None, str | None, str | None, str | None]:
     """
     Check if the given URL is a Hugging Face URL and extract relevant information.
 
@@ -75,7 +75,7 @@ def check_huggingface_url(url: str) -> tuple[bool, Optional[str], Optional[str],
     return True, repo_id, filename, folder_name, branch_name
 
 
-def check_civitai_url(url: str) -> tuple[bool, bool, Optional[int], Optional[int]]:
+def check_civitai_url(url: str) -> tuple[bool, bool, int | None, int | None]:
     """
     Returns:
         is_civitai_model_url: True if the url is a civitai *web* model url (e.g. /models/12345)
@@ -136,7 +136,7 @@ def check_civitai_url(url: str) -> tuple[bool, bool, Optional[int], Optional[int
         return False, False, None, None
 
 
-def request_civitai_model_version_api(version_id: int, headers: Optional[dict] = None):
+def request_civitai_model_version_api(version_id: int, headers: dict | None = None):
     # Make a request to the CivitAI API to get the model information
     response = requests.get(
         f"https://civitai.com/api/v1/model-versions/{version_id}",
@@ -155,7 +155,7 @@ def request_civitai_model_version_api(version_id: int, headers: Optional[dict] =
             return model_name, download_url, model_type, basemodel
 
 
-def request_civitai_model_api(model_id: int, version_id: int = None, headers: Optional[dict] = None):
+def request_civitai_model_api(model_id: int, version_id: int = None, headers: dict | None = None):
     # Make a request to the CivitAI API to get the model information
     response = requests.get(f"https://civitai.com/api/v1/models/{model_id}", headers=headers, timeout=10)
     response.raise_for_status()  # Raise an error for bad status codes
@@ -191,21 +191,21 @@ def download(
         typer.Option(help="The URL from which to download the model.", show_default=False),
     ],
     relative_path: Annotated[
-        Optional[str],
+        str | None,
         typer.Option(
             help="The relative path from the current workspace to install the model.",
             show_default=True,
         ),
     ] = None,
     filename: Annotated[
-        Optional[str],
+        str | None,
         typer.Option(
             help="The filename to save the model.",
             show_default=True,
         ),
     ] = None,
     set_civitai_api_token: Annotated[
-        Optional[str],
+        str | None,
         typer.Option(
             "--set-civitai-api-token",
             help="Set the CivitAI API token to use for model downloading.",
@@ -213,7 +213,7 @@ def download(
         ),
     ] = None,
     set_hf_api_token: Annotated[
-        Optional[str],
+        str | None,
         typer.Option(
             "--set-hf-api-token",
             help="Set the Hugging Face API token to use for model downloading.",
@@ -339,7 +339,7 @@ def remove(
         help="The relative path from the current workspace where the models are stored.",
         show_default=True,
     ),
-    model_names: Optional[list[str]] = typer.Option(
+    model_names: list[str] | None = typer.Option(
         None,
         help="List of model filenames to delete, separated by spaces",
         show_default=False,
@@ -358,14 +358,19 @@ def remove(
         typer.echo("No models found to remove.")
         return
 
+    model_dir_resolved = model_dir.resolve()
+
     to_delete = []
     # Scenario #1: User provided model names to delete
     if model_names:
         # Validate and filter models to delete based on provided names
         missing_models = []
         for name in model_names:
-            model_path = model_dir / name
-            if model_path.exists():
+            model_path = (model_dir / name).resolve()
+            if not model_path.is_relative_to(model_dir_resolved):
+                typer.echo(f"Invalid model path: {name}")
+                continue
+            if model_path.is_file():
                 to_delete.append(model_path)
             else:
                 missing_models.append(name)
@@ -377,7 +382,8 @@ def remove(
 
     # Scenario #2: User did not provide model names, prompt for selection
     else:
-        selections = ui.prompt_multi_select("Select models to delete:", [model.name for model in available_models])
+        rel_names = [str(model.relative_to(model_dir)) for model in available_models]
+        selections = ui.prompt_multi_select("Select models to delete:", rel_names)
         if not selections:
             typer.echo("No models selected for deletion.")
             return
@@ -394,9 +400,11 @@ def remove(
         typer.echo("Deletion canceled.")
 
 
-def list_models(path: pathlib.Path) -> list:
-    """List all models in the specified directory."""
-    return [file for file in path.iterdir() if file.is_file()]
+def list_models(path: pathlib.Path) -> list[pathlib.Path]:
+    """List all model files recursively in the specified directory."""
+    if not path.is_dir():
+        return []
+    return sorted(f for f in path.rglob("*") if f.is_file())
 
 
 @app.command("list")
@@ -418,6 +426,10 @@ def list_command(
         return
 
     # Prepare data for table display
-    data = [(model.name, f"{model.stat().st_size // 1024} KB") for model in models]
-    column_names = ["Model Name", "Size"]
+    data = []
+    for model in models:
+        rel = model.relative_to(model_dir)
+        model_type = str(rel.parent) if len(rel.parts) > 1 else ""
+        data.append((model.name, model_type, f"{model.stat().st_size // 1024} KB"))
+    column_names = ["Model Name", "Type", "Size"]
     ui.display_table(data, column_names)

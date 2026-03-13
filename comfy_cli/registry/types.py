@@ -1,5 +1,4 @@
 from dataclasses import dataclass, field
-from typing import Optional
 
 
 @dataclass
@@ -17,12 +16,12 @@ class Node:
     id: str
     name: str
     description: str
-    author: Optional[str] = None
-    license: Optional[str] = None
-    icon: Optional[str] = None
-    repository: Optional[str] = None
+    author: str | None = None
+    license: str | None = None
+    icon: str | None = None
+    repository: str | None = None
     tags: list[str] = field(default_factory=list)
-    latest_version: Optional[NodeVersion] = None
+    latest_version: NodeVersion | None = None
 
 
 @dataclass
@@ -53,7 +52,7 @@ class ComfyConfig:
     models: list[Model] = field(default_factory=list)
     includes: list[str] = field(default_factory=list)
     banner_url: str = ""
-    web: Optional[str] = None
+    web: str | None = None
 
 
 @dataclass

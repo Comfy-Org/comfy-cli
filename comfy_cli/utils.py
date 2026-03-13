@@ -8,7 +8,6 @@ import shutil
 import subprocess
 import tarfile
 from pathlib import Path
-from typing import Optional
 
 import psutil
 import requests
@@ -137,7 +136,7 @@ def download_url(
 
 def extract_tarball(
     inPath: PathLike,
-    outPath: Optional[PathLike] = None,
+    outPath: PathLike | None = None,
     show_progress: bool = True,
 ):
     inPath = Path(inPath).expanduser().resolve()
@@ -192,8 +191,8 @@ def extract_tarball(
 
 def create_tarball(
     inPath: PathLike,
-    outPath: Optional[PathLike] = None,
-    cwd: Optional[PathLike] = None,
+    outPath: PathLike | None = None,
+    cwd: PathLike | None = None,
     show_progress: bool = True,
 ):
     cwd = Path("." if cwd is None else cwd).expanduser().resolve()

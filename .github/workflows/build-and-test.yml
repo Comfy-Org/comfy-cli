@@ -33,11 +33,11 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
-        python-version: ["3.9"]
+        python-version: ["3.10"]
 
     steps:
       - name: Check out code
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -56,3 +56,9 @@ jobs:
           TEST_E2E: true
         run: |
           pytest tests/e2e
+
+      - name: Test torch backend compilation
+        env:
+          TEST_TORCH_BACKEND: "true"
+        run: |
+          pytest tests/uv/test_torch_backend_compile.py -xvs
