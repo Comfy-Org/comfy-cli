@@ -1,3 +1,4 @@
+import logging
 import sys
 from importlib.metadata import metadata
 
@@ -6,22 +7,23 @@ from packaging import version
 from rich.console import Console
 from rich.panel import Panel
 
+logger = logging.getLogger(__name__)
 console = Console()
 
 
 def check_for_newer_pypi_version(package_name, current_version):
     url = f"https://pypi.org/pypi/{package_name}/json"
     try:
-        response = requests.get(url)
-        response.raise_for_status()  # Raises stored HTTPError, if one occurred
+        response = requests.get(url, timeout=5)
+        response.raise_for_status()
         latest_version = response.json()["info"]["version"]
 
         if version.parse(latest_version) > version.parse(current_version):
             return True, latest_version
 
         return False, current_version
-    except requests.RequestException:
-        # print(f"Error checking latest version: {e}")
+    except requests.RequestException as e:
+        logger.warning(f"Failed to check for updates: {e}")
         return False, current_version
 
 
