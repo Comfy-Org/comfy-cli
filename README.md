@@ -1,8 +1,11 @@
 # comfy-cli: A Command Line Tool for ComfyUI
 
-[![Test ComfyUI Example Workflows](https://github.com/Comfy-Org/ComfyUI-Mirror/actions/workflows/test-workflows.yaml/badge.svg)](https://github.com/Comfy-Org/ComfyUI-Mirror/actions/workflows/test-workflows.yaml)
-
+[![Run pytest](https://github.com/Comfy-Org/comfy-cli/actions/workflows/pytest.yml/badge.svg)](https://github.com/Comfy-Org/comfy-cli/actions/workflows/pytest.yml)
 [![codecov](https://codecov.io/github/Comfy-Org/comfy-cli/graph/badge.svg?token=S64WJWD2ZX)](https://codecov.io/github/Comfy-Org/comfy-cli)
+[![PyPI](https://img.shields.io/pypi/v/comfy-cli.svg)](https://pypi.org/project/comfy-cli/)
+[![Downloads](https://static.pepy.tech/badge/comfy-cli/month)](https://pepy.tech/project/comfy-cli)
+[![Python](https://img.shields.io/pypi/pyversions/comfy-cli)](https://pypi.org/project/comfy-cli/)
+[![License](https://img.shields.io/pypi/l/comfy-cli)](https://github.com/Comfy-Org/comfy-cli/blob/main/LICENSE)
 
 comfy-cli is a command line tool that helps users easily install and manage
 [ComfyUI](https://github.com/comfyanonymous/ComfyUI), a powerful open-source
