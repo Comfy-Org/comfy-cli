@@ -110,27 +110,6 @@ def _get_torch_install_cmd(calls):
 
 
 class TestTorchInstallCommands:
-    def test_amd_linux_uses_index_url(self, tmp_path):
-        repo_dir = str(tmp_path)
-        (tmp_path / "requirements.txt").write_text("some-package\n")
-
-        with patch("comfy_cli.command.install.subprocess.run", return_value=MagicMock(returncode=0)) as mock_run:
-            install.pip_install_comfyui_dependencies(
-                repo_dir,
-                gpu=GPU_OPTION.AMD,
-                plat=constants.OS.LINUX,
-                cuda_version=constants.CUDAVersion.v12_6,
-                skip_torch_or_directml=False,
-                skip_requirement=False,
-                python="/usr/bin/python",
-                rocm_version=constants.ROCmVersion.v6_3,
-            )
-
-        cmd = _get_torch_install_cmd(mock_run.call_args_list)
-        assert "--index-url" in cmd
-        assert "--extra-index-url" not in cmd
-        assert "https://download.pytorch.org/whl/rocm6.3" in cmd
-
     @pytest.mark.parametrize(
         "rocm_version,expected_url",
         [
@@ -141,7 +120,7 @@ class TestTorchInstallCommands:
             (constants.ROCmVersion.v6_1, "https://download.pytorch.org/whl/rocm6.1"),
         ],
     )
-    def test_amd_linux_rocm_version_controls_url(self, tmp_path, rocm_version, expected_url):
+    def test_amd_uses_index_url_with_rocm_version(self, tmp_path, rocm_version, expected_url):
         repo_dir = str(tmp_path)
         (tmp_path / "requirements.txt").write_text("some-package\n")
 
@@ -158,4 +137,55 @@ class TestTorchInstallCommands:
             )
 
         cmd = _get_torch_install_cmd(mock_run.call_args_list)
+        assert "--index-url" in cmd
+        assert "--extra-index-url" not in cmd
         assert expected_url in cmd
+
+    @pytest.mark.parametrize(
+        "cuda_version,expected_url",
+        [
+            (constants.CUDAVersion.v12_9, "https://download.pytorch.org/whl/cu129"),
+            (constants.CUDAVersion.v12_6, "https://download.pytorch.org/whl/cu126"),
+            (constants.CUDAVersion.v12_4, "https://download.pytorch.org/whl/cu124"),
+            (constants.CUDAVersion.v12_1, "https://download.pytorch.org/whl/cu121"),
+            (constants.CUDAVersion.v11_8, "https://download.pytorch.org/whl/cu118"),
+        ],
+    )
+    def test_nvidia_uses_index_url_with_cuda_version(self, tmp_path, cuda_version, expected_url):
+        repo_dir = str(tmp_path)
+        (tmp_path / "requirements.txt").write_text("some-package\n")
+
+        with patch("comfy_cli.command.install.subprocess.run", return_value=MagicMock(returncode=0)) as mock_run:
+            install.pip_install_comfyui_dependencies(
+                repo_dir,
+                gpu=GPU_OPTION.NVIDIA,
+                plat=constants.OS.WINDOWS,
+                cuda_version=cuda_version,
+                skip_torch_or_directml=False,
+                skip_requirement=False,
+                python="/usr/bin/python",
+            )
+
+        cmd = _get_torch_install_cmd(mock_run.call_args_list)
+        assert "--index-url" in cmd
+        assert "--extra-index-url" not in cmd
+        assert expected_url in cmd
+
+    def test_nvidia_linux_uses_index_url(self, tmp_path):
+        repo_dir = str(tmp_path)
+        (tmp_path / "requirements.txt").write_text("some-package\n")
+
+        with patch("comfy_cli.command.install.subprocess.run", return_value=MagicMock(returncode=0)) as mock_run:
+            install.pip_install_comfyui_dependencies(
+                repo_dir,
+                gpu=GPU_OPTION.NVIDIA,
+                plat=constants.OS.LINUX,
+                cuda_version=constants.CUDAVersion.v12_6,
+                skip_torch_or_directml=False,
+                skip_requirement=False,
+                python="/usr/bin/python",
+            )
+
+        cmd = _get_torch_install_cmd(mock_run.call_args_list)
+        assert "--index-url" in cmd
+        assert "https://download.pytorch.org/whl/cu126" in cmd

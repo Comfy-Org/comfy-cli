@@ -65,43 +65,19 @@ def pip_install_comfyui_dependencies(
 
         # install torch for NVIDIA
         if gpu == GPU_OPTION.NVIDIA:
-            base_command = [
-                python,
-                "-m",
-                "pip",
-                "install",
-                "torch",
-                "torchvision",
-                "torchaudio",
-            ]
-
-            if plat == constants.OS.WINDOWS and cuda_version == constants.CUDAVersion.v12_9:
-                base_command += [
-                    "--extra-index-url",
-                    "https://download.pytorch.org/whl/cu129",
-                ]
-            elif plat == constants.OS.WINDOWS and cuda_version == constants.CUDAVersion.v12_6:
-                base_command += [
-                    "--extra-index-url",
-                    "https://download.pytorch.org/whl/cu126",
-                ]
-            elif plat == constants.OS.WINDOWS and cuda_version == constants.CUDAVersion.v12_4:
-                base_command += [
-                    "--extra-index-url",
-                    "https://download.pytorch.org/whl/cu124",
-                ]
-            elif plat == constants.OS.WINDOWS and cuda_version == constants.CUDAVersion.v12_1:
-                base_command += [
-                    "--extra-index-url",
-                    "https://download.pytorch.org/whl/cu121",
-                ]
-            elif plat == constants.OS.WINDOWS and cuda_version == constants.CUDAVersion.v11_8:
-                base_command += [
-                    "--extra-index-url",
-                    "https://download.pytorch.org/whl/cu118",
-                ]
+            cuda_tag = f"cu{cuda_version.value.replace('.', '')}"
+            pip_url = ["--index-url", f"https://download.pytorch.org/whl/{cuda_tag}"]
             result = subprocess.run(
-                base_command,
+                [
+                    python,
+                    "-m",
+                    "pip",
+                    "install",
+                    "torch",
+                    "torchvision",
+                    "torchaudio",
+                ]
+                + pip_url,
                 check=False,
             )
         # Update installation to use upstream torch xpu. ipex is no longer needed for Intel Arc GPUs
@@ -305,7 +281,13 @@ def execute(
 
     if fast_deps:
         DependencyCompiler.Install_Build_Deps(executable=python)
-        depComp = DependencyCompiler(cwd=repo_dir, executable=python, gpu=gpu)
+        depComp = DependencyCompiler(
+            cwd=repo_dir,
+            executable=python,
+            gpu=gpu,
+            cuda_version=cuda_version.value,
+            rocm_version=rocm_version.value,
+        )
         depComp.compile_deps()
         depComp.install_deps()
 

@@ -365,6 +365,8 @@ class DependencyCompiler:
         reqFilesCore: list[PathLike] | None = None,
         reqFilesExt: list[PathLike] | None = None,
         extraSpecs: list[str] | None = None,
+        cuda_version: str | None = None,
+        rocm_version: str | None = None,
     ):
         """Compiler/installer of Python dependencies based on uv
 
@@ -386,18 +388,20 @@ class DependencyCompiler:
         self.reqFiles = [Path(reqFile) for reqFile in reqFilesExt] if reqFilesExt is not None else None
         self.extraSpecs = [] if extraSpecs is None else extraSpecs
 
-        self.gpuUrl = (
-            DependencyCompiler.nvidiaPytorchUrl if self.gpu == GPU_OPTION.NVIDIA else
-            DependencyCompiler.rocmPytorchUrl if self.gpu == GPU_OPTION.AMD else
-            DependencyCompiler.cpuPytorchUrl if self.gpu == GPU_OPTION.CPU else
-            None
-        )  # fmt: skip
-        self.torchBackend = (
-            DependencyCompiler.nvidiaTorchBackend if self.gpu == GPU_OPTION.NVIDIA else
-            DependencyCompiler.rocmTorchBackend if self.gpu == GPU_OPTION.AMD else
-            DependencyCompiler.cpuTorchBackend if self.gpu == GPU_OPTION.CPU else
-            None
-        )  # fmt: skip
+        if self.gpu == GPU_OPTION.NVIDIA:
+            tag = f"cu{cuda_version.replace('.', '')}" if cuda_version else DependencyCompiler.nvidiaTorchBackend
+            self.gpuUrl = f"https://download.pytorch.org/whl/{tag}"
+            self.torchBackend = tag
+        elif self.gpu == GPU_OPTION.AMD:
+            tag = f"rocm{rocm_version}" if rocm_version else DependencyCompiler.rocmTorchBackend
+            self.gpuUrl = f"https://download.pytorch.org/whl/{tag}"
+            self.torchBackend = tag
+        elif self.gpu == GPU_OPTION.CPU:
+            self.gpuUrl = DependencyCompiler.cpuPytorchUrl
+            self.torchBackend = DependencyCompiler.cpuTorchBackend
+        else:
+            self.gpuUrl = None
+            self.torchBackend = None
         self.out: Path = self.outDir / outName
         self.override = self.outDir / "override.txt"
 

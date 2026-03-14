@@ -161,3 +161,19 @@ def test_override_file_has_no_extra_index_url():
     content = depComp.override.read_text()
     assert "--extra-index-url" not in content
     assert "torch" in content
+
+
+def test_nvidia_custom_cuda_version():
+    depComp = DependencyCompiler(
+        cwd=temp, gpu=GPU_OPTION.NVIDIA, outDir=temp, reqFilesCore=[], reqFilesExt=[], cuda_version="11.8"
+    )
+    assert depComp.torchBackend == "cu118"
+    assert depComp.gpuUrl == "https://download.pytorch.org/whl/cu118"
+
+
+def test_amd_custom_rocm_version():
+    depComp = DependencyCompiler(
+        cwd=temp, gpu=GPU_OPTION.AMD, outDir=temp, reqFilesCore=[], reqFilesExt=[], rocm_version="7.1"
+    )
+    assert depComp.torchBackend == "rocm7.1"
+    assert depComp.gpuUrl == "https://download.pytorch.org/whl/rocm7.1"
