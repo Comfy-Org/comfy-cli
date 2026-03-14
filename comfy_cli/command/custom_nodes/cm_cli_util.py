@@ -55,6 +55,7 @@ def execute_cm_cli(args, channel=None, fast_deps=False, no_deps=False, mode=None
     session_path = os.path.join(_config_manager.get_config_path(), "tmp", str(uuid.uuid4()))
     new_env["__COMFY_CLI_SESSION__"] = session_path
     new_env["COMFYUI_PATH"] = workspace_path
+    new_env["PYTHONUNBUFFERED"] = "1"
 
     print(f"Execute from: {workspace_path}")
     print(f"Command: {cmd}")

@@ -1,6 +1,7 @@
 import subprocess
 import sys
 import textwrap
+import time
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -134,3 +135,51 @@ class TestExecuteCmCli:
             _run(tmp_path, ["test"], raise_on_error=True)
         assert exc_info.value.returncode == 1
         assert "output before fail" in exc_info.value.output
+
+    def test_output_streams_incrementally(self, tmp_path):
+        _setup_cm_cli(
+            tmp_path,
+            """\
+            import time
+            for i in range(3):
+                print(f"line {i}")
+                time.sleep(0.3)
+        """,
+        )
+        timestamps = []
+        original_write = sys.stdout.write
+
+        def recording_write(s):
+            if s.startswith("line "):
+                timestamps.append(time.monotonic())
+            return original_write(s)
+
+        with patch("sys.stdout") as mock_stdout:
+            mock_stdout.write = recording_write
+            mock_stdout.flush = lambda: None
+            _run(tmp_path, ["test"])
+
+        assert len(timestamps) == 3
+        assert timestamps[2] - timestamps[0] >= 0.4
+
+    def test_pythonunbuffered_set_in_env(self, tmp_path):
+        _setup_cm_cli(tmp_path, 'print("ok")')
+        mock_proc = MagicMock()
+        mock_proc.stdout = iter(["ok\n"])
+        mock_proc.wait.return_value = 0
+
+        with (
+            patch(
+                "comfy_cli.command.custom_nodes.cm_cli_util.resolve_workspace_python",
+                return_value=sys.executable,
+            ),
+            patch.object(cm_cli_util.workspace_manager, "workspace_path", str(tmp_path)),
+            patch.object(cm_cli_util.workspace_manager, "set_recent_workspace"),
+            patch("comfy_cli.command.custom_nodes.cm_cli_util.ConfigManager") as MockConfig,
+            patch("comfy_cli.command.custom_nodes.cm_cli_util.subprocess.Popen", return_value=mock_proc) as mock_popen,
+        ):
+            MockConfig.return_value.get_config_path.return_value = str(tmp_path / "config")
+            cm_cli_util.execute_cm_cli(["show", "installed"])
+
+        env = mock_popen.call_args[1]["env"]
+        assert env["PYTHONUNBUFFERED"] == "1"
