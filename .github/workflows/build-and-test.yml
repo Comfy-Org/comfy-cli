@@ -5,8 +5,8 @@ on:
       - main
     paths:
       - "comfy_cli/**"
+      - "tests/e2e/**"
       - "!.github/**"
-      - "!tests/**"
       - "!.coveragerc"
       - "!.gitignore"
   pull_request:
@@ -14,8 +14,8 @@ on:
       - main
     paths:
       - "comfy_cli/**"
+      - "tests/e2e/**"
       - "!.github/**"
-      - "!tests/**"
       - "!.coveragerc"
       - "!.gitignore"
 
