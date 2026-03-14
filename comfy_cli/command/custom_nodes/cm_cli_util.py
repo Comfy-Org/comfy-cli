@@ -63,16 +63,15 @@ def execute_cm_cli(args, channel=None, fast_deps=False, no_deps=False, mode=None
             cmd,
             env=new_env,
             stdout=subprocess.PIPE,
-            stderr=sys.stderr,
             text=True,
             encoding="utf-8",
             errors="replace",
         )
         stdout_lines = []
-        if process.stdout is not None:
-            for line in process.stdout:
-                print(line, end="")
-                stdout_lines.append(line)
+        for line in process.stdout:
+            sys.stdout.write(line)
+            sys.stdout.flush()
+            stdout_lines.append(line)
         return_code = process.wait()
         stdout_output = "".join(stdout_lines)
         if return_code != 0:
@@ -87,10 +86,6 @@ def execute_cm_cli(args, channel=None, fast_deps=False, no_deps=False, mode=None
         return stdout_output
     except subprocess.CalledProcessError as e:
         if raise_on_error:
-            if e.stdout:
-                print(e.stdout)
-            if e.stderr:
-                print(e.stderr, file=sys.stderr)
             raise e
 
         if e.returncode == 1:
