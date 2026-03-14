@@ -55,14 +55,28 @@ def execute_cm_cli(args, channel=None, fast_deps=False, no_deps=False, mode=None
     session_path = os.path.join(_config_manager.get_config_path(), "tmp", str(uuid.uuid4()))
     new_env["__COMFY_CLI_SESSION__"] = session_path
     new_env["COMFYUI_PATH"] = workspace_path
+    new_env["PYTHONUNBUFFERED"] = "1"
 
     print(f"Execute from: {workspace_path}")
     print(f"Command: {cmd}")
     try:
-        result = subprocess.run(
-            cmd, env=new_env, check=True, capture_output=True, text=True, encoding="utf-8", errors="replace"
+        process = subprocess.Popen(
+            cmd,
+            env=new_env,
+            stdout=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
         )
-        print(result.stdout)
+        stdout_lines = []
+        for line in process.stdout:
+            sys.stdout.write(line)
+            sys.stdout.flush()
+            stdout_lines.append(line)
+        return_code = process.wait()
+        stdout_output = "".join(stdout_lines)
+        if return_code != 0:
+            raise subprocess.CalledProcessError(return_code, cmd, output=stdout_output)
 
         if fast_deps and args[0] in _dependency_cmds:
             # we're using the fast_deps behavior and just ran a command that invalidated the dependencies
@@ -70,13 +84,9 @@ def execute_cm_cli(args, channel=None, fast_deps=False, no_deps=False, mode=None
             depComp.compile_deps()
             depComp.install_deps()
 
-        return result.stdout
+        return stdout_output
     except subprocess.CalledProcessError as e:
         if raise_on_error:
-            if e.stdout:
-                print(e.stdout)
-            if e.stderr:
-                print(e.stderr, file=sys.stderr)
             raise e
 
         if e.returncode == 1:
