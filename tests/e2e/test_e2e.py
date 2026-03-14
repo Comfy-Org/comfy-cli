@@ -95,26 +95,33 @@ def test_model(comfy_cli):
 @e2e_test
 def test_node(comfy_cli, workspace):
     node = "comfyui-animatediff-evolved"
-    proc = exec(
-        f"""
-            {comfy_cli} node install {node}
-        """
-    )
-    assert 0 == proc.returncode
+
+    # Use --exit-on-fail so the CLI returns non-zero on git clone failure
+    # instead of silently succeeding. Retry to handle transient network
+    # errors (GitHub rate-limiting git clones on Actions runners).
+    for attempt in range(3):
+        proc = exec(
+            f"""
+                {comfy_cli} node install --exit-on-fail {node}
+            """
+        )
+        if proc.returncode == 0:
+            break
+    assert proc.returncode == 0, f"node install failed after 3 attempts:\n{proc.stderr}"
 
     proc = exec(
         f"""
             {comfy_cli} node reinstall {node}
         """
     )
-    assert 0 == proc.returncode
+    assert proc.returncode == 0
 
     proc = exec(
         f"""
             {comfy_cli} node show all
         """
     )
-    assert 0 == proc.returncode
+    assert proc.returncode == 0
     assert node in proc.stdout
 
     proc = exec(
