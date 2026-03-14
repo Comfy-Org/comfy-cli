@@ -72,6 +72,14 @@ class CUDAVersion(str, Enum):
     v11_8 = "11.8"
 
 
+class ROCmVersion(str, Enum):
+    v7_1 = "7.1"
+    v7_0 = "7.0"
+    v6_3 = "6.3"
+    v6_2 = "6.2"
+    v6_1 = "6.1"
+
+
 class GPU_OPTION(str, Enum):
     CPU = None
     NVIDIA = "nvidia"

@@ -88,7 +88,7 @@ def test_torch_backend_nvidia():
 
 def test_torch_backend_amd():
     depComp = DependencyCompiler(cwd=temp, gpu=GPU_OPTION.AMD, outDir=temp, reqFilesCore=[], reqFilesExt=[])
-    assert depComp.torchBackend == "rocm6.1"
+    assert depComp.torchBackend == "rocm6.3"
     assert depComp.gpuUrl == DependencyCompiler.rocmPytorchUrl
 
 

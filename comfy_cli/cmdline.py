@@ -17,7 +17,7 @@ from comfy_cli.command.install import validate_version
 from comfy_cli.command.launch import launch as launch_command
 from comfy_cli.command.models import models as models_command
 from comfy_cli.config_manager import ConfigManager
-from comfy_cli.constants import GPU_OPTION, CUDAVersion
+from comfy_cli.constants import GPU_OPTION, CUDAVersion, ROCmVersion
 from comfy_cli.env_checker import EnvChecker
 from comfy_cli.resolve_python import resolve_workspace_python
 from comfy_cli.standalone import StandalonePython
@@ -194,6 +194,7 @@ def install(
         ),
     ] = None,
     cuda_version: Annotated[CUDAVersion, typer.Option(show_default=True)] = CUDAVersion.v12_6,
+    rocm_version: Annotated[ROCmVersion, typer.Option(show_default=True)] = ROCmVersion.v6_3,
     amd: Annotated[
         bool | None,
         typer.Option(
@@ -287,6 +288,7 @@ def install(
             version=version,
             gpu=None,
             cuda_version=cuda_version,
+            rocm_version=rocm_version,
             plat=platform,
             skip_torch_or_directml=skip_torch_or_directml,
             skip_requirement=skip_requirement,
@@ -342,6 +344,7 @@ def install(
         gpu=gpu,
         version=version,
         cuda_version=cuda_version,
+        rocm_version=rocm_version,
         plat=platform,
         skip_torch_or_directml=skip_torch_or_directml,
         skip_requirement=skip_requirement,

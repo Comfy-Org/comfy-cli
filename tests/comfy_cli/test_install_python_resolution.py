@@ -1,7 +1,11 @@
 import sys
 from unittest.mock import MagicMock, patch
 
+import pytest
+
+from comfy_cli import constants
 from comfy_cli.command import install
+from comfy_cli.constants import GPU_OPTION
 
 
 class TestPipInstallComfyuiDependencies:
@@ -94,3 +98,64 @@ class TestExecute:
         MockCompiler.Install_Build_Deps.assert_called_once_with(executable="/resolved/python")
         MockCompiler.assert_called_once()
         assert MockCompiler.call_args[1]["executable"] == "/resolved/python"
+
+
+def _get_torch_install_cmd(calls):
+    """Find the subprocess.run call that installs torch packages."""
+    for c in calls:
+        cmd = c[0][0]
+        if "torch" in cmd and "requirements.txt" not in cmd:
+            return cmd
+    return None
+
+
+class TestTorchInstallCommands:
+    def test_amd_linux_uses_index_url(self, tmp_path):
+        repo_dir = str(tmp_path)
+        (tmp_path / "requirements.txt").write_text("some-package\n")
+
+        with patch("comfy_cli.command.install.subprocess.run", return_value=MagicMock(returncode=0)) as mock_run:
+            install.pip_install_comfyui_dependencies(
+                repo_dir,
+                gpu=GPU_OPTION.AMD,
+                plat=constants.OS.LINUX,
+                cuda_version=constants.CUDAVersion.v12_6,
+                skip_torch_or_directml=False,
+                skip_requirement=False,
+                python="/usr/bin/python",
+                rocm_version=constants.ROCmVersion.v6_3,
+            )
+
+        cmd = _get_torch_install_cmd(mock_run.call_args_list)
+        assert "--index-url" in cmd
+        assert "--extra-index-url" not in cmd
+        assert "https://download.pytorch.org/whl/rocm6.3" in cmd
+
+    @pytest.mark.parametrize(
+        "rocm_version,expected_url",
+        [
+            (constants.ROCmVersion.v7_1, "https://download.pytorch.org/whl/rocm7.1"),
+            (constants.ROCmVersion.v7_0, "https://download.pytorch.org/whl/rocm7.0"),
+            (constants.ROCmVersion.v6_3, "https://download.pytorch.org/whl/rocm6.3"),
+            (constants.ROCmVersion.v6_2, "https://download.pytorch.org/whl/rocm6.2"),
+            (constants.ROCmVersion.v6_1, "https://download.pytorch.org/whl/rocm6.1"),
+        ],
+    )
+    def test_amd_linux_rocm_version_controls_url(self, tmp_path, rocm_version, expected_url):
+        repo_dir = str(tmp_path)
+        (tmp_path / "requirements.txt").write_text("some-package\n")
+
+        with patch("comfy_cli.command.install.subprocess.run", return_value=MagicMock(returncode=0)) as mock_run:
+            install.pip_install_comfyui_dependencies(
+                repo_dir,
+                gpu=GPU_OPTION.AMD,
+                plat=constants.OS.LINUX,
+                cuda_version=constants.CUDAVersion.v12_6,
+                skip_torch_or_directml=False,
+                skip_requirement=False,
+                python="/usr/bin/python",
+                rocm_version=rocm_version,
+            )
+
+        cmd = _get_torch_install_cmd(mock_run.call_args_list)
+        assert expected_url in cmd

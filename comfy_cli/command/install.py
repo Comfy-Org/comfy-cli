@@ -40,6 +40,7 @@ def pip_install_comfyui_dependencies(
     skip_torch_or_directml: bool,
     skip_requirement: bool,
     python: str = sys.executable,
+    rocm_version: constants.ROCmVersion = constants.ROCmVersion.v6_3,
 ):
     os.chdir(repo_dir)
 
@@ -47,7 +48,7 @@ def pip_install_comfyui_dependencies(
     if not skip_torch_or_directml:
         # install torch for AMD Linux
         if gpu == GPU_OPTION.AMD and plat == constants.OS.LINUX:
-            pip_url = ["--extra-index-url", "https://download.pytorch.org/whl/rocm6.0"]
+            pip_url = ["--index-url", f"https://download.pytorch.org/whl/rocm{rocm_version.value}"]
             result = subprocess.run(
                 [
                     python,
@@ -198,6 +199,7 @@ def execute(
     manager_commit: str | None = None,
     gpu: constants.GPU_OPTION = None,
     cuda_version: constants.CUDAVersion = constants.CUDAVersion.v12_6,
+    rocm_version: constants.ROCmVersion = constants.ROCmVersion.v6_3,
     plat: constants.OS = None,
     skip_torch_or_directml: bool = False,
     skip_requirement: bool = False,
@@ -255,7 +257,14 @@ def execute(
 
     if not fast_deps:
         pip_install_comfyui_dependencies(
-            repo_dir, gpu, plat, cuda_version, skip_torch_or_directml, skip_requirement, python=python
+            repo_dir,
+            gpu,
+            plat,
+            cuda_version,
+            skip_torch_or_directml,
+            skip_requirement,
+            python=python,
+            rocm_version=rocm_version,
         )
 
     WorkspaceManager().set_recent_workspace(repo_dir)
