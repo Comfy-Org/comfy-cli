@@ -1,7 +1,6 @@
 import contextlib
 import os
 import pathlib
-import sys
 from typing import Annotated
 from urllib.parse import parse_qs, unquote, urlparse
 
@@ -311,7 +310,10 @@ def download(
                 print("huggingface_hub not found. Installing...")
                 import subprocess
 
-                subprocess.check_call([sys.executable, "-m", "pip", "install", "huggingface_hub"])
+                from comfy_cli.resolve_python import resolve_workspace_python
+
+                python = resolve_workspace_python(str(get_workspace()))
+                subprocess.check_call([python, "-m", "pip", "install", "huggingface_hub"])
                 import huggingface_hub
 
             print(f"Downloading model {model_id} from Hugging Face...")
@@ -358,14 +360,19 @@ def remove(
         typer.echo("No models found to remove.")
         return
 
+    model_dir_resolved = model_dir.resolve()
+
     to_delete = []
     # Scenario #1: User provided model names to delete
     if model_names:
         # Validate and filter models to delete based on provided names
         missing_models = []
         for name in model_names:
-            model_path = model_dir / name
-            if model_path.exists():
+            model_path = (model_dir / name).resolve()
+            if not model_path.is_relative_to(model_dir_resolved):
+                typer.echo(f"Invalid model path: {name}")
+                continue
+            if model_path.is_file():
                 to_delete.append(model_path)
             else:
                 missing_models.append(name)
@@ -377,7 +384,8 @@ def remove(
 
     # Scenario #2: User did not provide model names, prompt for selection
     else:
-        selections = ui.prompt_multi_select("Select models to delete:", [model.name for model in available_models])
+        rel_names = [str(model.relative_to(model_dir)) for model in available_models]
+        selections = ui.prompt_multi_select("Select models to delete:", rel_names)
         if not selections:
             typer.echo("No models selected for deletion.")
             return
@@ -394,9 +402,11 @@ def remove(
         typer.echo("Deletion canceled.")
 
 
-def list_models(path: pathlib.Path) -> list:
-    """List all models in the specified directory."""
-    return [file for file in path.iterdir() if file.is_file()]
+def list_models(path: pathlib.Path) -> list[pathlib.Path]:
+    """List all model files recursively in the specified directory."""
+    if not path.is_dir():
+        return []
+    return sorted(f for f in path.rglob("*") if f.is_file())
 
 
 @app.command("list")
@@ -418,6 +428,10 @@ def list_command(
         return
 
     # Prepare data for table display
-    data = [(model.name, f"{model.stat().st_size // 1024} KB") for model in models]
-    column_names = ["Model Name", "Size"]
+    data = []
+    for model in models:
+        rel = model.relative_to(model_dir)
+        model_type = str(rel.parent) if len(rel.parts) > 1 else ""
+        data.append((model.name, model_type, f"{model.stat().st_size // 1024} KB"))
+    column_names = ["Model Name", "Type", "Size"]
     ui.display_table(data, column_names)

@@ -18,6 +18,12 @@ def runner():
     return CliRunner()
 
 
+@pytest.fixture(autouse=True)
+def mock_tracking_consent():
+    with patch("comfy_cli.tracking.prompt_tracking_consent"):
+        yield
+
+
 @pytest.fixture
 def sample_frontend_pr_info():
     return PRInfo(

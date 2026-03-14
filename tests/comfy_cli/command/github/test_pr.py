@@ -298,6 +298,61 @@ class TestCommandLineIntegration:
 
         assert result.exit_code != 0
 
+    @patch("comfy_cli.command.install.execute")
+    @patch("comfy_cli.cmdline.check_comfy_repo", return_value=(False, None))
+    @patch("comfy_cli.cmdline.workspace_manager")
+    @patch("comfy_cli.tracking.prompt_tracking_consent")
+    def test_commit_without_pr_does_not_conflict(self, mock_track, mock_ws, mock_check, mock_execute, runner):
+        """Test that --commit alone does not trigger --pr conflict error (issue #335)"""
+        mock_ws.get_workspace_path.return_value = ("/tmp/test", None)
+        result = runner.invoke(
+            app, ["--skip-prompt", "install", "--version", "nightly", "--commit", "abc123", "--nvidia"]
+        )
+
+        assert "--pr cannot be used" not in result.stdout
+        assert mock_execute.called
+
+    @patch("comfy_cli.command.install.execute")
+    @patch("comfy_cli.cmdline.check_comfy_repo", return_value=(False, None))
+    @patch("comfy_cli.cmdline.workspace_manager")
+    @patch("comfy_cli.tracking.prompt_tracking_consent")
+    def test_cpu_pr_conflict_with_version(self, mock_track, mock_ws, mock_check, mock_execute, runner):
+        """Test that --cpu --pr with --version is rejected"""
+        mock_ws.get_workspace_path.return_value = ("/tmp/test", None)
+        result = runner.invoke(app, ["--skip-prompt", "install", "--cpu", "--pr", "#123", "--version", "1.0.0"])
+
+        assert result.exit_code != 0
+        assert "--pr cannot be used" in result.stdout
+        assert not mock_execute.called
+
+    @patch("comfy_cli.command.install.execute")
+    @patch("comfy_cli.cmdline.check_comfy_repo", return_value=(False, None))
+    @patch("comfy_cli.cmdline.workspace_manager")
+    @patch("comfy_cli.tracking.prompt_tracking_consent")
+    def test_cpu_pr_conflict_with_commit(self, mock_track, mock_ws, mock_check, mock_execute, runner):
+        """Test that --cpu --pr with --commit is rejected"""
+        mock_ws.get_workspace_path.return_value = ("/tmp/test", None)
+        result = runner.invoke(
+            app, ["--skip-prompt", "install", "--cpu", "--pr", "#123", "--version", "nightly", "--commit", "abc123"]
+        )
+
+        assert result.exit_code != 0
+        assert "--pr cannot be used" in result.stdout
+        assert not mock_execute.called
+
+    @patch("comfy_cli.command.install.execute")
+    @patch("comfy_cli.cmdline.check_comfy_repo", return_value=(False, None))
+    @patch("comfy_cli.cmdline.workspace_manager")
+    @patch("comfy_cli.tracking.prompt_tracking_consent")
+    def test_cpu_pr_passes_pr_to_execute(self, mock_track, mock_ws, mock_check, mock_execute, runner):
+        """Test that --cpu --pr passes pr parameter to install_inner.execute"""
+        mock_ws.get_workspace_path.return_value = ("/tmp/test", None)
+        runner.invoke(app, ["--skip-prompt", "install", "--cpu", "--pr", "#123"])
+
+        assert mock_execute.called
+        call_kwargs = mock_execute.call_args.kwargs
+        assert call_kwargs.get("pr") == "#123"
+
 
 class TestPRInfoDataClass:
     """Test PRInfo data class"""

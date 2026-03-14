@@ -64,13 +64,17 @@ def parse_req_file(rf: PathLike, skips: list[str] | None = None):
 
 
 class DependencyCompiler:
+    cpuPytorchUrl = "https://download.pytorch.org/whl/cpu"
     rocmPytorchUrl = "https://download.pytorch.org/whl/rocm6.1"
     nvidiaPytorchUrl = "https://download.pytorch.org/whl/cu126"
+
+    cpuTorchBackend = "cpu"
+    rocmTorchBackend = "rocm6.1"
+    nvidiaTorchBackend = "cu126"
 
     overrideGpu = dedent(
         """
         # ensure usage of {gpu} version of pytorch
-        --extra-index-url {gpuUrl}
         torch
         torchaudio
         torchsde
@@ -118,6 +122,7 @@ class DependencyCompiler:
         out: PathLike | None = None,
         override: PathLike | None = None,
         resolve_strategy: str | None = None,
+        torch_backend: str | None = None,
     ) -> subprocess.CompletedProcess[Any]:
         cmd = [
             str(executable),
@@ -136,8 +141,11 @@ class DependencyCompiler:
         if emit_index_url:
             cmd.append("--emit-index-url")
 
+        if torch_backend is not None:
+            cmd.extend(["--torch-backend", torch_backend])
+
         # ensures that eg tqdm is latest version, even though an old tqdm is on the amd url
-        # see https://github.com/astral-sh/uv/blob/main/PIP_COMPATIBILITY.md#packages-that-exist-on-multiple-indexes and https://github.com/astral-sh/uv/issues/171
+        # see https://github.com/astral-sh/uv/blob/main/PIP_COMPATIBILITY.md#packages-that-exist-on-multiple-indexes
         if index_strategy is not None:
             cmd.extend(["--index-strategy", "unsafe-best-match"])
 
@@ -381,6 +389,13 @@ class DependencyCompiler:
         self.gpuUrl = (
             DependencyCompiler.nvidiaPytorchUrl if self.gpu == GPU_OPTION.NVIDIA else
             DependencyCompiler.rocmPytorchUrl if self.gpu == GPU_OPTION.AMD else
+            DependencyCompiler.cpuPytorchUrl if self.gpu == GPU_OPTION.CPU else
+            None
+        )  # fmt: skip
+        self.torchBackend = (
+            DependencyCompiler.nvidiaTorchBackend if self.gpu == GPU_OPTION.NVIDIA else
+            DependencyCompiler.rocmTorchBackend if self.gpu == GPU_OPTION.AMD else
+            DependencyCompiler.cpuTorchBackend if self.gpu == GPU_OPTION.CPU else
             None
         )  # fmt: skip
         self.out: Path = self.outDir / outName
@@ -401,8 +416,8 @@ class DependencyCompiler:
         self.override.unlink(missing_ok=True)
 
         with open(self.override, "w") as f:
-            if self.gpu is not None and self.gpuUrl is not None:
-                f.write(DependencyCompiler.overrideGpu.format(gpu=self.gpu, gpuUrl=self.gpuUrl))
+            if self.torchBackend is not None:
+                f.write(DependencyCompiler.overrideGpu.format(gpu=self.gpu))
                 f.write("\n\n")
 
         completed = DependencyCompiler.Compile(
@@ -412,6 +427,7 @@ class DependencyCompiler:
             emit_index_url=False,
             executable=self.executable,
             override=self.override,
+            torch_backend=self.torchBackend,
         )
 
         with open(self.override, "a") as f:
@@ -442,6 +458,7 @@ class DependencyCompiler:
                     override=self.override,
                     out=self.out,
                     resolve_strategy="ask",
+                    torch_backend=self.torchBackend,
                 )
 
                 break

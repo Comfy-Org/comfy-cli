@@ -18,6 +18,7 @@ from comfy_cli.command.custom_nodes.command import update_node_id_cache
 from comfy_cli.command.github.pr_info import PRInfo
 from comfy_cli.constants import GPU_OPTION
 from comfy_cli.git_utils import checkout_pr, git_checkout_tag
+from comfy_cli.resolve_python import ensure_workspace_python
 from comfy_cli.uv import DependencyCompiler
 from comfy_cli.workspace_manager import WorkspaceManager, check_comfy_repo
 
@@ -38,6 +39,7 @@ def pip_install_comfyui_dependencies(
     cuda_version: constants.CUDAVersion,
     skip_torch_or_directml: bool,
     skip_requirement: bool,
+    python: str = sys.executable,
 ):
     os.chdir(repo_dir)
 
@@ -48,7 +50,7 @@ def pip_install_comfyui_dependencies(
             pip_url = ["--extra-index-url", "https://download.pytorch.org/whl/rocm6.0"]
             result = subprocess.run(
                 [
-                    sys.executable,
+                    python,
                     "-m",
                     "pip",
                     "install",
@@ -63,7 +65,7 @@ def pip_install_comfyui_dependencies(
         # install torch for NVIDIA
         if gpu == GPU_OPTION.NVIDIA:
             base_command = [
-                sys.executable,
+                python,
                 "-m",
                 "pip",
                 "install",
@@ -112,7 +114,7 @@ def pip_install_comfyui_dependencies(
             # TODO: wrap pip install in a function
             result = subprocess.run(
                 [
-                    sys.executable,
+                    python,
                     "-m",
                     "pip",
                     "install",
@@ -132,7 +134,7 @@ def pip_install_comfyui_dependencies(
             ]
             result = subprocess.run(
                 [
-                    sys.executable,
+                    python,
                     "-m",
                     "pip",
                     "install",
@@ -150,13 +152,13 @@ def pip_install_comfyui_dependencies(
 
         # install directml for AMD windows
         if gpu == GPU_OPTION.AMD and plat == constants.OS.WINDOWS:
-            result = subprocess.run([sys.executable, "-m", "pip", "install", "torch-directml"], check=True)
+            result = subprocess.run([python, "-m", "pip", "install", "torch-directml"], check=True)
 
         # install torch for Mac M Series
         if gpu == GPU_OPTION.MAC_M_SERIES:
             result = subprocess.run(
                 [
-                    sys.executable,
+                    python,
                     "-m",
                     "pip",
                     "install",
@@ -173,16 +175,16 @@ def pip_install_comfyui_dependencies(
     # install requirements.txt
     if skip_requirement:
         return
-    result = subprocess.run([sys.executable, "-m", "pip", "install", "-r", "requirements.txt"], check=False)
+    result = subprocess.run([python, "-m", "pip", "install", "-r", "requirements.txt"], check=False)
     if result.returncode != 0:
         rprint("Failed to install ComfyUI dependencies. Please check your environment (`comfy env`) and try again.")
         sys.exit(1)
 
 
 # install requirements for manager
-def pip_install_manager_dependencies(repo_dir):
+def pip_install_manager_dependencies(repo_dir, python=sys.executable):
     os.chdir(os.path.join(repo_dir, "custom_nodes", "ComfyUI-Manager"))
-    subprocess.run([sys.executable, "-m", "pip", "install", "-r", "requirements.txt"], check=True)
+    subprocess.run([python, "-m", "pip", "install", "-r", "requirements.txt"], check=True)
 
 
 def execute(
@@ -248,8 +250,13 @@ def execute(
         os.chdir(repo_dir)
         subprocess.run(["git", "checkout", commit], check=True)
 
+    python = ensure_workspace_python(repo_dir)
+    rprint(f"Using Python: [bold]{python}[/bold]")
+
     if not fast_deps:
-        pip_install_comfyui_dependencies(repo_dir, gpu, plat, cuda_version, skip_torch_or_directml, skip_requirement)
+        pip_install_comfyui_dependencies(
+            repo_dir, gpu, plat, cuda_version, skip_torch_or_directml, skip_requirement, python=python
+        )
 
     WorkspaceManager().set_recent_workspace(repo_dir)
     workspace_manager.setup_workspace_manager(specified_workspace=repo_dir)
@@ -264,7 +271,7 @@ def execute(
 
         if os.path.exists(manager_repo_dir):
             if restore and not fast_deps:
-                pip_install_manager_dependencies(repo_dir)
+                pip_install_manager_dependencies(repo_dir, python=python)
             else:
                 rprint(
                     f"Directory {manager_repo_dir} already exists. Skipping installation of ComfyUI-Manager.\nIf you want to restore dependencies, add the '--restore' option."
@@ -285,10 +292,11 @@ def execute(
                     subprocess.run(["git", "checkout", manager_commit], check=True, cwd=manager_repo_dir)
 
             if not fast_deps:
-                pip_install_manager_dependencies(repo_dir)
+                pip_install_manager_dependencies(repo_dir, python=python)
 
     if fast_deps:
-        depComp = DependencyCompiler(cwd=repo_dir, gpu=gpu)
+        DependencyCompiler.Install_Build_Deps(executable=python)
+        depComp = DependencyCompiler(cwd=repo_dir, executable=python, gpu=gpu)
         depComp.compile_deps()
         depComp.install_deps()
 
@@ -598,6 +606,92 @@ def find_pr_by_branch(repo_owner: str, repo_name: str, username: str, branch: st
         return None
 
 
+def _print_npm_not_found_help(node_version: str) -> None:
+    """Print detailed help when npm is not found, with OS-specific instructions."""
+    rprint("[bold red]npm is not installed or not found in PATH.[/bold red]")
+    rprint()
+    rprint("[yellow]npm is a package manager that usually comes bundled with Node.js.[/yellow]")
+    rprint(f"[yellow]Your system has Node.js ({node_version}) but npm was not found.[/yellow]")
+    rprint()
+
+    current_os = platform.system()
+
+    if current_os == "Windows":
+        rprint("[bold cyan]How to fix this on Windows:[/bold cyan]")
+        rprint()
+        rprint("  [bold]Step 1:[/bold] Uninstall your current Node.js installation:")
+        rprint("    • Open the Start menu and search for 'Add or remove programs'")
+        rprint("    • Find 'Node.js' in the list and click 'Uninstall'")
+        rprint()
+        rprint("  [bold]Step 2:[/bold] Download and reinstall Node.js:")
+        rprint("    • Go to: [link=https://nodejs.org/]https://nodejs.org/[/link]")
+        rprint("    • Click the green 'Download Node.js (LTS)' button")
+        rprint("    • Run the downloaded installer")
+        rprint("    • [bold]Important:[/bold] Use all default options - do not uncheck anything")
+        rprint()
+        rprint("  [bold]Step 3:[/bold] Restart your terminal:")
+        rprint("    • Close this Command Prompt or PowerShell window completely")
+        rprint("    • Open a new Command Prompt or PowerShell window")
+        rprint()
+        rprint("  [bold]Step 4:[/bold] Verify the installation worked:")
+        rprint("    • Type: [bold]npm --version[/bold]")
+        rprint("    • You should see a version number (e.g., '10.8.0')")
+        rprint()
+
+    elif current_os == "Darwin":  # macOS
+        rprint("[bold cyan]How to fix this on macOS:[/bold cyan]")
+        rprint()
+        rprint("  [bold]Option A - Reinstall Node.js (recommended):[/bold]")
+        rprint()
+        rprint("    [bold]Step 1:[/bold] Download Node.js:")
+        rprint("      • Go to: [link=https://nodejs.org/]https://nodejs.org/[/link]")
+        rprint("      • Click the green 'Download Node.js (LTS)' button")
+        rprint("      • Open the downloaded .pkg file and follow the installer")
+        rprint()
+        rprint("    [bold]Step 2:[/bold] Restart your terminal:")
+        rprint("      • Close this Terminal window completely (Cmd+Q)")
+        rprint("      • Open a new Terminal window")
+        rprint()
+        rprint("  [bold]Option B - If you use Homebrew:[/bold]")
+        rprint("    • Run: [bold]brew install node[/bold]")
+        rprint("    • Then restart your terminal")
+        rprint()
+        rprint("  [bold]Verify the installation:[/bold]")
+        rprint("    • Type: [bold]npm --version[/bold]")
+        rprint("    • You should see a version number (e.g., '10.8.0')")
+        rprint()
+
+    else:  # Linux
+        rprint("[bold cyan]How to fix this on Linux:[/bold cyan]")
+        rprint()
+        rprint("  [bold]Option A - Install npm separately (Ubuntu/Debian):[/bold]")
+        rprint("    • Run: [bold]sudo apt update && sudo apt install npm[/bold]")
+        rprint("    • Enter your password when prompted")
+        rprint()
+        rprint("  [bold]Option B - Reinstall Node.js with npm:[/bold]")
+        rprint()
+        rprint("    [bold]Step 1:[/bold] Remove current Node.js:")
+        rprint("      • Ubuntu/Debian: [bold]sudo apt remove nodejs[/bold]")
+        rprint("      • Fedora: [bold]sudo dnf remove nodejs[/bold]")
+        rprint()
+        rprint("    [bold]Step 2:[/bold] Install Node.js (includes npm):")
+        rprint("      • Go to: [link=https://nodejs.org/]https://nodejs.org/[/link]")
+        rprint("      • Or use NodeSource repository for latest version:")
+        rprint("        [bold]curl -fsSL https://deb.nodesource.com/setup_lts.x | sudo -E bash -[/bold]")
+        rprint("        [bold]sudo apt install -y nodejs[/bold]")
+        rprint()
+        rprint("    [bold]Step 3:[/bold] Restart your terminal:")
+        rprint("      • Close this terminal window and open a new one")
+        rprint()
+        rprint("  [bold]Verify the installation:[/bold]")
+        rprint("    • Type: [bold]npm --version[/bold]")
+        rprint("    • You should see a version number (e.g., '10.8.0')")
+        rprint()
+
+    rprint("[dim]After fixing npm, run your comfy command again.[/dim]")
+    rprint()
+
+
 def verify_node_tools() -> bool:
     """Verify that Node.js, npm, and pnpm are available for frontend building"""
     try:
@@ -631,13 +725,11 @@ def verify_node_tools() -> bool:
     try:
         npm_result = subprocess.run(["npm", "--version"], capture_output=True, text=True, check=False)
     except FileNotFoundError:
-        rprint("[bold red]npm is not installed or not found in PATH.[/bold red]")
-        rprint("[yellow]npm usually comes with Node.js. Try reinstalling Node.js.[/yellow]")
+        _print_npm_not_found_help(node_version)
         return False
 
     if npm_result.returncode != 0:
-        rprint("[bold red]npm is not installed or not working correctly.[/bold red]")
-        rprint("[yellow]npm usually comes with Node.js. Try reinstalling Node.js.[/yellow]")
+        _print_npm_not_found_help(node_version)
         return False
 
     npm_version = npm_result.stdout.strip()

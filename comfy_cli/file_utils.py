@@ -69,13 +69,18 @@ def download_file(url: str, local_filepath: pathlib.Path, headers: dict | None =
 
     with httpx.stream("GET", url, follow_redirects=True, headers=headers) as response:
         if response.status_code == 200:
-            total = int(response.headers["Content-Length"])
+            content_length = response.headers.get("Content-Length")
+            total = int(content_length) if content_length is not None else None
+            if total is not None:
+                description = f"Downloading {total // 1024 // 1024} MB"
+            else:
+                description = "Downloading..."
             try:
                 with open(local_filepath, "wb") as f:
                     for data in ui.show_progress(
                         response.iter_bytes(),
                         total,
-                        description=f"Downloading {total // 1024 // 1024} MB",
+                        description=description,
                     ):
                         f.write(data)
             except KeyboardInterrupt:

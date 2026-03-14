@@ -32,6 +32,12 @@ def mock_prompt_select_enum():
         yield mock
 
 
+@pytest.fixture(autouse=True)
+def mock_tracking_consent():
+    with patch("comfy_cli.tracking.prompt_tracking_consent"):
+        yield
+
+
 @pytest.mark.parametrize(
     "cmd",
     [

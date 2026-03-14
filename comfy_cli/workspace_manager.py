@@ -48,6 +48,13 @@ class ComfyLockYAMLStruct:
     custom_nodes: list[CustomNode] = field(default_factory=list)
 
 
+def _paths_match(path_a: str, path_b: str) -> bool:
+    try:
+        return os.path.samefile(path_a, path_b)
+    except (FileNotFoundError, OSError):
+        return os.path.realpath(path_a) == os.path.realpath(path_b)
+
+
 def check_comfy_repo(path) -> tuple[bool, git.Repo | None]:
     if not os.path.exists(path):
         return False, None
@@ -195,7 +202,8 @@ class WorkspaceManager:
         1. Specified Workspace (--workspace)
         2. Most Recent (if --recent is True)
         3. Current Directory (if --here is True)
-        4. Current Directory (if current dir is ComfyUI repo and --no-here is not True)
+        4. Current Directory (if current dir is ComfyUI repo and --no-here is not True;
+           returns DEFAULT if cwd matches the configured default workspace)
         5. Default Workspace (if a default workspace has been set using `comfy set-default`)
         6. Most Recent Workspace (if --no-recent is not True)
         7. Fallback Default Workspace ('~/comfy' for linux or ~/Documents/comfy for windows/macos)
@@ -235,6 +243,9 @@ class WorkspaceManager:
             found_comfy_repo, comfy_repo = check_comfy_repo(os.path.join(current_directory))
             # If it's in a sub dir of the ComfyUI repo, get the repo working dir
             if found_comfy_repo:
+                default_workspace = self.config_manager.get(constants.CONFIG_KEY_DEFAULT_WORKSPACE)
+                if default_workspace and _paths_match(comfy_repo.working_dir, default_workspace):
+                    return comfy_repo.working_dir, WorkspaceType.DEFAULT
                 return comfy_repo.working_dir, WorkspaceType.CURRENT_DIR
 
         # Check for user-set default workspace
