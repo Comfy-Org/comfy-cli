@@ -30,14 +30,16 @@ class TestPipInstallComfyuiDependencies:
             assert cmd[0] != sys.executable
 
 
-class TestPipInstallManagerDependencies:
+class TestPipInstallManager:
     def test_uses_python_param(self, tmp_path):
-        manager_dir = tmp_path / "custom_nodes" / "ComfyUI-Manager"
-        manager_dir.mkdir(parents=True)
-        (manager_dir / "requirements.txt").write_text("some-package\n")
+        (tmp_path / "manager_requirements.txt").write_text("comfyui-manager\n")
 
-        with patch("comfy_cli.command.install.subprocess.run") as mock_run:
-            install.pip_install_manager_dependencies(str(tmp_path), python="/resolved/python")
+        with (
+            patch("comfy_cli.command.install.subprocess.run", return_value=MagicMock(returncode=0)) as mock_run,
+            patch("comfy_cli.command.custom_nodes.cm_cli_util.find_cm_cli") as mock_find,
+        ):
+            mock_find.cache_clear = MagicMock()
+            install.pip_install_manager(str(tmp_path), python="/resolved/python")
 
         cmd = mock_run.call_args[0][0]
         assert cmd[0] == "/resolved/python"
@@ -58,7 +60,6 @@ class TestExecute:
         ):
             install.execute(
                 url="https://github.com/test/test.git",
-                manager_url="https://github.com/test/manager.git",
                 comfy_path=repo_dir,
                 restore=False,
                 skip_manager=True,
@@ -87,7 +88,6 @@ class TestExecute:
 
             install.execute(
                 url="https://github.com/test/test.git",
-                manager_url="https://github.com/test/manager.git",
                 comfy_path=repo_dir,
                 restore=False,
                 skip_manager=True,
