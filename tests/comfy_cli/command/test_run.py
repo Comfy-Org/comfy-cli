@@ -114,6 +114,52 @@ class TestWatchExecution:
         mock_execution.watch_execution()
         assert "1" in mock_execution.remaining_nodes
 
+    def test_unknown_node_ids_do_not_crash(self, mock_execution):
+        prompt_id = "test-prompt"
+        mock_execution.prompt_id = prompt_id
+
+        messages = [
+            _make_msg("executing", prompt_id, node="1"),
+            _make_msg("executing", prompt_id, node="406.0.0.428"),
+            json.dumps(
+                {"type": "progress", "data": {"prompt_id": prompt_id, "node": "406.0.0.428", "value": 5, "max": 10}}
+            ),
+            _make_msg("executed", prompt_id, node="406.0.0.428"),
+            json.dumps({"type": "execution_cached", "data": {"prompt_id": prompt_id, "nodes": ["999"]}}),
+            _make_msg("executing", prompt_id, node=None),
+        ]
+        mock_ws = MagicMock()
+        mock_ws.recv.side_effect = messages
+        mock_execution.ws = mock_ws
+
+        mock_execution.watch_execution()
+
+    def test_unknown_node_ids_verbose(self, workflow):
+        prompt_id = "test-prompt"
+        progress = MagicMock()
+        progress.add_task.return_value = 0
+        execution = WorkflowExecution(
+            workflow=workflow,
+            host="127.0.0.1",
+            port=8188,
+            verbose=True,
+            progress=progress,
+            local_paths=False,
+            timeout=30,
+        )
+        execution.prompt_id = prompt_id
+
+        messages = [
+            _make_msg("executing", prompt_id, node="406.0.0.428"),
+            json.dumps({"type": "execution_cached", "data": {"prompt_id": prompt_id, "nodes": ["999"]}}),
+            _make_msg("executing", prompt_id, node=None),
+        ]
+        mock_ws = MagicMock()
+        mock_ws.recv.side_effect = messages
+        execution.ws = mock_ws
+
+        execution.watch_execution()
+
     def test_collects_image_outputs(self, mock_execution):
         prompt_id = "test-prompt"
         mock_execution.prompt_id = prompt_id
