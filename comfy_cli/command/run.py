@@ -178,7 +178,9 @@ class WorkflowExecution:
         self.progress.update(self.overall_task, completed=self.total_nodes - len(self.remaining_nodes))
 
     def get_node_title(self, node_id):
-        node = self.workflow[node_id]
+        node = self.workflow.get(node_id)
+        if node is None:
+            return str(node_id)
         if "_meta" in node and "title" in node["_meta"]:
             return node["_meta"]["title"]
         return node["class_type"]
@@ -187,7 +189,10 @@ class WorkflowExecution:
         if not self.verbose:
             return
 
-        node = self.workflow[node_id]
+        node = self.workflow.get(node_id)
+        if node is None:
+            pprint(f"{type} : [bright_black]({node_id})[/]")
+            return
         class_type = node["class_type"]
         title = self.get_node_title(node_id)
 
