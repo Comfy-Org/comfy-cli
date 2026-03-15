@@ -98,6 +98,36 @@ class TestExecute:
         MockCompiler.Install_Build_Deps.assert_called_once_with(executable="/resolved/python")
         MockCompiler.assert_called_once()
         assert MockCompiler.call_args[1]["executable"] == "/resolved/python"
+        assert MockCompiler.call_args[1].get("skip_torch") in (None, False)
+
+    def test_fast_deps_forwards_skip_torch(self, tmp_path):
+        repo_dir = str(tmp_path)
+
+        with (
+            patch("comfy_cli.command.install.ensure_workspace_python", return_value="/resolved/python"),
+            patch("comfy_cli.command.install.clone_comfyui"),
+            patch("comfy_cli.command.install.check_comfy_repo", return_value=(True, None)),
+            patch("comfy_cli.command.install.DependencyCompiler") as MockCompiler,
+            patch("comfy_cli.command.install.WorkspaceManager"),
+            patch.object(install.workspace_manager, "skip_prompting", True),
+            patch.object(install.workspace_manager, "setup_workspace_manager"),
+        ):
+            MockCompiler.Install_Build_Deps = MagicMock()
+            mock_instance = MagicMock()
+            MockCompiler.return_value = mock_instance
+
+            install.execute(
+                url="https://github.com/test/test.git",
+                manager_url="https://github.com/test/manager.git",
+                comfy_path=repo_dir,
+                restore=False,
+                skip_manager=True,
+                version="nightly",
+                fast_deps=True,
+                skip_torch_or_directml=True,
+            )
+
+        assert MockCompiler.call_args[1]["skip_torch"] is True
 
 
 def _get_torch_install_cmd(calls):

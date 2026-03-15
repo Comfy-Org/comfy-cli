@@ -109,12 +109,15 @@ def test_node(comfy_cli, workspace):
             break
     assert proc.returncode == 0, f"node install failed after 3 attempts:\n{proc.stderr}"
 
-    proc = exec(
-        f"""
-            {comfy_cli} node reinstall {node}
-        """
-    )
-    assert proc.returncode == 0
+    for attempt in range(3):
+        proc = exec(
+            f"""
+                {comfy_cli} node reinstall {node}
+            """
+        )
+        if proc.returncode == 0:
+            break
+    assert proc.returncode == 0, f"node reinstall failed after 3 attempts:\n{proc.stderr}"
 
     proc = exec(
         f"""
@@ -122,7 +125,9 @@ def test_node(comfy_cli, workspace):
         """
     )
     assert proc.returncode == 0
-    assert node in proc.stdout
+    # cm-cli may display the repo name (ComfyUI-AnimateDiff-Evolved) rather
+    # than the registry id (comfyui-animatediff-evolved), so compare lowercase.
+    assert node.lower() in proc.stdout.lower()
 
     proc = exec(
         f"""
