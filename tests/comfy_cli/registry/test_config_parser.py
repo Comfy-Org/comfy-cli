@@ -87,10 +87,14 @@ def test_extract_node_configuration_success(mock_toml_data):
         assert result.tool_comfy.models[0] == Model(location="model1.bin", model_url="https://example.com/model1")
 
 
-def test_extract_node_configuration_license_text():
+@pytest.mark.parametrize(
+    "license_str",
+    ["MIT", "Apache-2.0", "GPL-3.0-or-later", "MIT License"],
+)
+def test_extract_node_configuration_license_spdx_string(license_str):
     mock_data = {
         "project": {
-            "license": "MIT License",
+            "license": license_str,
         },
     }
     with (
@@ -101,7 +105,7 @@ def test_extract_node_configuration_license_text():
         result = extract_node_configuration("fake_path.toml")
         assert result is not None, "Expected PyProjectConfig, got None"
         assert isinstance(result, PyProjectConfig)
-        assert result.project.license == License(text="MIT License")
+        assert result.project.license == License(text=license_str)
 
 
 def test_extract_node_configuration_license_text_dict():
@@ -122,22 +126,6 @@ def test_extract_node_configuration_license_text_dict():
         assert result.project.license == License(
             text="MIT License\n\nCopyright (c) 2023 Example Corp\n\nPermission is hereby granted..."
         )
-
-
-def test_extract_license_incorrect_format():
-    mock_data = {
-        "project": {"license": "MIT"},
-    }
-    with (
-        patch("os.path.isfile", return_value=True),
-        patch("builtins.open", mock_open()),
-        patch("tomlkit.load", return_value=mock_data),
-    ):
-        result = extract_node_configuration("fake_path.toml")
-
-        assert result is not None, "Expected PyProjectConfig, got None"
-        assert isinstance(result, PyProjectConfig)
-        assert result.project.license == License(text="MIT")
 
 
 def test_extract_node_configuration_with_os_classifiers():

@@ -27,7 +27,7 @@ def create_comfynode_config():
     project["description"] = ""
     project["version"] = "1.0.0"
     project["dependencies"] = tomlkit.aot()
-    project["license"] = "LICENSE"
+    project["license"] = "MIT"
 
     urls = tomlkit.table()
     urls["Repository"] = ""
@@ -207,10 +207,8 @@ def initialize_project_config():
     project["description"] = ""
     project["version"] = "1.0.0"
 
-    # Update the license field to comply with pyproject.toml spec
-    license_table = tomlkit.inline_table()
-    license_table["file"] = "LICENSE"
-    project["license"] = license_table
+    # Use PEP 639 SPDX license identifier
+    project["license"] = "MIT"
 
     # [project].classifiers Classifiers uncommentable hint for OS/GPU support
     # Attach classifiers comments to the project, below of "license" field.
@@ -218,7 +216,7 @@ def initialize_project_config():
     #
     # [project]
     # ...
-    # license = {file = "LICENSE"}
+    # license = "MIT"
     # # classifiers = [
     # #     # For OS-independent nodes (works on all operating systems)
     # ...
@@ -304,9 +302,6 @@ def extract_node_configuration(
     license_data = project_data.get("license", {})
     if isinstance(license_data, str):
         license = License(text=license_data)
-        typer.echo(
-            'Warning: License should be in one of these two formats: license = {file = "LICENSE"} OR license = {text = "MIT License"}. Please check the documentation: https://docs.comfy.org/registry/specifications.'
-        )
     elif isinstance(license_data, dict):
         if "file" in license_data or "text" in license_data:
             license = License(file=license_data.get("file", ""), text=license_data.get("text", ""))
