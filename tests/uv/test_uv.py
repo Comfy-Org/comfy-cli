@@ -177,3 +177,35 @@ def test_amd_custom_rocm_version():
     )
     assert depComp.torchBackend == "rocm7.1"
     assert depComp.gpuUrl == "https://download.pytorch.org/whl/rocm7.1"
+
+
+@pytest.mark.parametrize("gpu", [GPU_OPTION.NVIDIA, GPU_OPTION.AMD, GPU_OPTION.CPU])
+def test_skip_torch_disables_gpu_url_and_backend(gpu):
+    depComp = DependencyCompiler(cwd=temp, gpu=gpu, outDir=temp, reqFilesCore=[], reqFilesExt=[], skip_torch=True)
+    assert depComp.torchBackend is None
+    assert depComp.gpuUrl is None
+
+
+def test_skip_torch_override_has_no_torch():
+    depComp = DependencyCompiler(
+        cwd=temp,
+        gpu=GPU_OPTION.NVIDIA,
+        outDir=temp,
+        reqFilesCore=[mockReqsDir / "core_reqs.txt"],
+        reqFilesExt=[],
+        skip_torch=True,
+    )
+    depComp.make_override()
+    content = depComp.override.read_text()
+    assert "torch" not in content
+
+
+def test_skip_torch_install_deps_no_extra_index_url():
+    depComp = DependencyCompiler(
+        cwd=temp, gpu=GPU_OPTION.NVIDIA, outDir=temp, reqFilesCore=[], reqFilesExt=[], skip_torch=True
+    )
+    depComp.out.write_text("requests==2.31.0\n")
+    with patch("comfy_cli.uv._check_call") as mock_check_call:
+        depComp.install_deps()
+    cmd = mock_check_call.call_args[0][0]
+    assert "--extra-index-url" not in cmd

@@ -287,6 +287,7 @@ def execute(
             gpu=gpu,
             cuda_version=cuda_version.value,
             rocm_version=rocm_version.value,
+            skip_torch=skip_torch_or_directml,
         )
         depComp.compile_deps()
         depComp.install_deps()
