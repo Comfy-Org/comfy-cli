@@ -5,6 +5,8 @@ from textwrap import dedent
 
 import pytest
 
+from comfy_cli.resolve_python import resolve_workspace_python
+
 
 def e2e_test(func):
     return pytest.mark.skipif(
@@ -33,21 +35,28 @@ def exec(cmd: str, **kwargs) -> subprocess.CompletedProcess[str]:
 @pytest.fixture(scope="module")
 def workspace():
     ws = os.path.join(os.getcwd(), f"comfy-{datetime.now().timestamp()}")
+    install_flags = os.getenv("TEST_E2E_COMFY_INSTALL_FLAGS", "--cpu")
+    comfy_url = os.getenv("TEST_E2E_COMFY_URL", "")
+    url_flag = f"--url {comfy_url}" if comfy_url else ""
     proc = exec(
         f"""
-            comfy --skip-prompt --workspace {ws} install {os.getenv("TEST_E2E_COMFY_INSTALL_FLAGS", "--cpu")}
+            comfy --skip-prompt --workspace {ws} install {url_flag} {install_flags}
             comfy --skip-prompt set-default {ws}
             comfy --skip-prompt --no-enable-telemetry env
         """
     )
-    assert 0 == proc.returncode
+    assert proc.returncode == 0
+
+    # Populate Manager cache before any node operations (blocking fetch).
+    proc = exec(f"comfy --workspace {ws} node update-cache")
+    assert proc.returncode == 0, f"update-cache failed:\n{proc.stderr}"
 
     proc = exec(
         f"""
         comfy --workspace {ws} launch --background -- {os.getenv("TEST_E2E_COMFY_LAUNCH_FLAGS_EXTRA", "--cpu")}
         """
     )
-    assert 0 == proc.returncode
+    assert proc.returncode == 0
 
     yield ws
 
@@ -56,7 +65,7 @@ def workspace():
         comfy --workspace {ws} stop
         """
     )
-    assert 0 == proc.returncode
+    assert proc.returncode == 0
 
 
 @pytest.fixture()
@@ -74,14 +83,14 @@ def test_model(comfy_cli):
             {comfy_cli} model download --url {url} --relative-path {path} --filename animatediff_models
         """
     )
-    assert 0 == proc.returncode
+    assert proc.returncode == 0
 
     proc = exec(
         f"""
             {comfy_cli} model list --relative-path {path}
         """
     )
-    assert 0 == proc.returncode
+    assert proc.returncode == 0
     assert "animatediff_models" in proc.stdout
 
     proc = exec(
@@ -89,7 +98,7 @@ def test_model(comfy_cli):
             {comfy_cli} model remove --relative-path {path} --model-names animatediff_models --confirm
         """
     )
-    assert 0 == proc.returncode
+    assert proc.returncode == 0
 
 
 @e2e_test
@@ -129,21 +138,21 @@ def test_node(comfy_cli, workspace):
             {comfy_cli} node update {node}
         """
     )
-    assert 0 == proc.returncode
+    assert proc.returncode == 0
 
     proc = exec(
         f"""
             {comfy_cli} node disable {node}
         """
     )
-    assert 0 == proc.returncode
+    assert proc.returncode == 0
 
     proc = exec(
         f"""
             {comfy_cli} node enable {node}
         """
     )
-    assert 0 == proc.returncode
+    assert proc.returncode == 0
 
     pubID = "comfytest123"
     pubToken = "6075cf7b-47e7-4c58-a3de-38f59a9bcc22"
@@ -158,6 +167,78 @@ def test_node(comfy_cli, workspace):
 
 
 @e2e_test
+def test_manager_installed(comfy_cli, workspace):
+    """Verify ComfyUI-Manager was installed via manager_requirements.txt."""
+    proc = exec(
+        f"""
+            {comfy_cli} node show all
+        """
+    )
+    assert proc.returncode == 0, f"node show all failed: {proc.stderr}"
+
+    # Check cm_cli is importable (Manager v4 installed as pip package)
+    ws_python = resolve_workspace_python(workspace)
+    proc = exec(
+        f"""
+            {ws_python} -c "import cm_cli; print('cm_cli OK')"
+        """
+    )
+    assert proc.returncode == 0, f"cm_cli import failed: {proc.stderr}"
+    assert "cm_cli OK" in proc.stdout
+
+
+@e2e_test
+def test_node_uv_compile(comfy_cli):
+    """Test --uv-compile flag for node install (requires Manager v4.1+)."""
+    node = "comfyui-impact-pack"
+    proc = exec(
+        f"""
+            {comfy_cli} node install --uv-compile {node}
+        """
+    )
+    assert proc.returncode == 0
+
+    # Standalone uv-sync command
+    proc = exec(
+        f"""
+            {comfy_cli} node uv-sync
+        """
+    )
+    assert proc.returncode == 0
+
+
+@e2e_test
+def test_uv_compile_default_config(comfy_cli):
+    """Test comfy manager uv-compile-default config command."""
+    proc = exec(
+        f"""
+            {comfy_cli} manager uv-compile-default true
+        """
+    )
+    assert proc.returncode == 0
+    assert "enabled" in proc.stdout.lower()
+
+    # Verify it shows in env
+    proc = exec(
+        """
+            comfy --skip-prompt --no-enable-telemetry env
+        """
+    )
+    assert proc.returncode == 0
+    assert "UV Compile Default" in proc.stdout
+    assert "Enabled" in proc.stdout
+
+    # Disable it back
+    proc = exec(
+        f"""
+            {comfy_cli} manager uv-compile-default false
+        """
+    )
+    assert proc.returncode == 0
+    assert "disabled" in proc.stdout.lower()
+
+
+@e2e_test
 def test_run(comfy_cli):
     url = "https://huggingface.co/Comfy-Org/stable-diffusion-v1-5-archive/resolve/main/v1-5-pruned-emaonly-fp16.safetensors?download=true"
     path = os.path.join("models", "checkpoints")
@@ -167,7 +248,7 @@ def test_run(comfy_cli):
             {comfy_cli} model download --url {url} --relative-path {path} --filename {name}
         """
     )
-    assert 0 == proc.returncode
+    assert proc.returncode == 0
 
     workflow = os.path.join(os.path.dirname(os.path.realpath(__file__)), "workflow.json")
     proc = exec(
@@ -175,4 +256,4 @@ def test_run(comfy_cli):
         {comfy_cli} run --workflow {workflow} --wait --timeout 180
         """
     )
-    assert 0 == proc.returncode
+    assert proc.returncode == 0
