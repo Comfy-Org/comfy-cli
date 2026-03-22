@@ -75,7 +75,7 @@ will simply update the comfy.yaml file to reflect the local setup
 - Example 1: To run the recently executed ComfyUI:
   - `comfy --recent launch`
 - Example 2: To install a package on the ComfyUI in the current directory:
-  - `comfy --here node install ComfyUI-Impact-Pack`
+  - `comfy --here node install comfyui-impact-pack`
 - Example 3: To update the automatically selected path of ComfyUI and custom nodes based on priority:
 
   - `comfy node update all`
@@ -168,7 +168,7 @@ comfy node [show|simple-show] [installed|enabled|not-installed|disabled|all|snap
 
   `comfy node update all`
 
-  `comfy node install ComfyUI-Impact-Pack`
+  `comfy node install comfyui-impact-pack`
 
 - Managing snapshot:
 
@@ -185,6 +185,32 @@ comfy node [show|simple-show] [installed|enabled|not-installed|disabled|all|snap
 - Generate deps:
 
   `comfy node deps-in-workflow --workflow=<workflow .json/.png file> --output=<output deps .json file>`
+
+#### Unified Dependency Resolution (--uv-compile)
+
+Requires ComfyUI-Manager v4.1+. Instead of installing dependencies per-node with
+`pip install`, `--uv-compile` batch-resolves all custom node dependencies via
+`uv pip compile` to avoid version conflicts.
+
+- Install with unified resolution:
+
+  `comfy node install comfyui-impact-pack --uv-compile`
+
+- Available on: `install`, `reinstall`, `update`, `fix`, `restore-snapshot`,
+  `restore-dependencies`, `install-deps`
+
+- Run standalone (resolve all existing custom node dependencies):
+
+  `comfy node uv-sync`
+
+- `--uv-compile` is mutually exclusive with `--fast-deps` and `--no-deps`.
+
+- To make `--uv-compile` the default for all commands, see
+  [uv-compile default](#uv-compile-default) below.
+
+- Use `--no-uv-compile` to override the default for a single command:
+
+  `comfy node install comfyui-impact-pack --no-uv-compile`
 
 #### Bisect custom nodes
 
@@ -216,17 +242,39 @@ the bisect tool can help you pinpoint the custom node that causes the issue.
 
 ### Managing ComfyUI-Manager
 
-- disable GUI of ComfyUI-Manager (disable Manager menu and Server)
+- Disable ComfyUI-Manager completely (no manager flags passed to ComfyUI):
+
+  `comfy manager disable`
+
+- Enable ComfyUI-Manager with new GUI:
+
+  `comfy manager enable-gui`
+
+- Enable ComfyUI-Manager without GUI (manager runs but UI is hidden):
 
   `comfy manager disable-gui`
 
-- enable GUI of ComfyUI-Manager
+- Enable ComfyUI-Manager with legacy GUI:
 
-  `comfy manager enable-gui`
+  `comfy manager enable-legacy-gui`
 
 - Clear reserved startup action:
 
   `comfy manager clear`
+
+#### uv-compile default
+
+Set `--uv-compile` as the default behavior for all custom node operations:
+
+  `comfy manager uv-compile-default true`
+
+When enabled, all node commands (`install`, `reinstall`, `update`, `fix`,
+`restore-snapshot`, `restore-dependencies`, `install-deps`) will automatically
+use `--uv-compile`. Use `--no-uv-compile` on any individual command to override.
+
+To disable:
+
+  `comfy manager uv-compile-default false`
 
 ## Beta Feature: format of comfy-lock.yaml (WIP)
 
