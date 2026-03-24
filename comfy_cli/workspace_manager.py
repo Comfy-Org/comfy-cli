@@ -257,31 +257,18 @@ class WorkspaceManager:
         # Fallback to the most recent workspace if it exists
         if self.use_recent is None:
             recent_workspace = self.config_manager.get(constants.CONFIG_KEY_RECENT_WORKSPACE)
-            if recent_workspace and check_comfy_repo(recent_workspace)[0]:
-                return recent_workspace, WorkspaceType.RECENT
-            else:
-                print(
-                    f"[bold red]warn: The recent workspace {recent_workspace} is not a valid ComfyUI path.[/bold red]"
-                )
+            if recent_workspace:
+                if check_comfy_repo(recent_workspace)[0]:
+                    return recent_workspace, WorkspaceType.RECENT
+                else:
+                    self.config_manager.set(constants.CONFIG_KEY_RECENT_WORKSPACE, "")
+                    print(
+                        f"[bold red]warn: Recent workspace '{recent_workspace}' is not a valid ComfyUI path. Reset.[/bold red]"
+                    )
 
         # Check for comfy-cli default workspace
         default_workspace = utils.get_not_user_set_default_workspace()
         return default_workspace, WorkspaceType.DEFAULT
-
-    def get_comfyui_manager_path(self):
-        if self.workspace_path is None:
-            return None
-
-        # To check more robustly, verify up to the `.git` path.
-        return os.path.join(self.workspace_path, "custom_nodes", "ComfyUI-Manager")
-
-    def is_comfyui_manager_installed(self):
-        if self.workspace_path is None:
-            return False
-
-        # To check more robustly, verify up to the `.git` path.
-        manager_git_path = os.path.join(self.workspace_path, "custom_nodes", "ComfyUI-Manager", ".git")
-        return os.path.exists(manager_git_path)
 
     def scan_dir(self):
         if not self.workspace_path:
@@ -321,4 +308,29 @@ class WorkspaceManager:
         save_yaml(file_path, self.metadata)
 
     def fill_print_table(self):
-        return [("Current selected workspace", f"[bold green]→ {self.workspace_path}[/bold green]")]
+        # Lazy import to avoid circular dependency
+        from comfy_cli.command.custom_nodes.cm_cli_util import resolve_manager_gui_mode
+
+        config_manager = ConfigManager()
+        mode = resolve_manager_gui_mode(not_installed_value="not-installed")
+
+        status_map = {
+            "disable": "[bold red]Disabled[/bold red]",
+            "enable-gui": "[bold green]GUI Enabled[/bold green]",
+            "disable-gui": "[bold yellow]GUI Disabled[/bold yellow]",
+            "enable-legacy-gui": "[bold cyan]Legacy GUI[/bold cyan]",
+            "not-installed": "[dim]Not Installed[/dim]",
+        }
+        manager_status = status_map.get(mode, "[bold green]GUI Enabled[/bold green]")
+
+        uv_compile_value = config_manager.get(constants.CONFIG_KEY_UV_COMPILE_DEFAULT)
+        if uv_compile_value is not None and str(uv_compile_value).lower() == "true":
+            uv_compile_status = "[bold green]Enabled[/bold green]"
+        else:
+            uv_compile_status = "[dim]Disabled[/dim]"
+
+        return [
+            ("Current selected workspace", f"[bold green]→ {self.workspace_path}[/bold green]"),
+            ("Manager", manager_status),
+            ("UV Compile Default", uv_compile_status),
+        ]
