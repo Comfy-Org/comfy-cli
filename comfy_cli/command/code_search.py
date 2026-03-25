@@ -4,6 +4,7 @@ This module provides CLI commands for searching code across ComfyUI
 repositories using the comfy-codesearch API powered by Sourcegraph.
 """
 
+import json
 from typing import Annotated
 
 import requests
@@ -22,7 +23,6 @@ REQUEST_TIMEOUT = 30
 
 
 def _build_query(query: str, repo: str | None, count: int) -> str:
-    """Build a Sourcegraph query string from CLI parameters."""
     parts = []
     if repo:
         # Support both "ComfyUI" and "Comfy-Org/ComfyUI" forms
@@ -36,7 +36,6 @@ def _build_query(query: str, repo: str | None, count: int) -> str:
 
 
 def _fetch_results(query: str) -> dict:
-    """Fetch search results from the codesearch API."""
     response = requests.get(API_URL, params={"query": query}, timeout=REQUEST_TIMEOUT)
     response.raise_for_status()
     return response.json()
@@ -69,12 +68,12 @@ def _format_results(data: dict) -> list[dict]:
         commit_hash = (default_branch.get("target") or {}).get("commit", {}).get("oid", "")
         ref = commit_hash or branch_name
 
+        base_url = f"https://github.com/{clean_name}/blob/{ref}/{file_path}"
         matches = []
         for m in result.get("lineMatches") or []:
             line = m.get("lineNumber", 0) + 1
             preview = m.get("preview", "").rstrip()
-            url = f"https://github.com/{clean_name}/blob/{ref}/{file_path}#L{line}"
-            matches.append({"line": line, "preview": preview, "url": url})
+            matches.append({"line": line, "preview": preview, "url": f"{base_url}#L{line}"})
 
         formatted.append(
             {
@@ -90,7 +89,6 @@ def _format_results(data: dict) -> list[dict]:
 
 
 def _get_stats(data: dict) -> dict:
-    """Extract search stats from API response."""
     search = data.get("data", {}).get("search", {})
     return {
         "approximate_count": search.get("stats", {}).get("approximateResultCount", "0"),
@@ -100,11 +98,8 @@ def _get_stats(data: dict) -> dict:
 
 
 def _print_results(results: list[dict], stats: dict, json_output: bool) -> None:
-    """Print search results to the console."""
-    import json as json_mod
-
     if json_output:
-        console.print(json_mod.dumps({"stats": stats, "results": results}, indent=2))
+        console.print(json.dumps({"stats": stats, "results": results}, indent=2))
         return
 
     if not results:
@@ -145,7 +140,7 @@ def code_search(
         int,
         typer.Option("--count", "-n", help="Maximum number of results"),
     ] = DEFAULT_COUNT,
-    json: Annotated[
+    json_output: Annotated[
         bool,
         typer.Option("--json", "-j", help="Output results as JSON"),
     ] = False,
@@ -168,4 +163,4 @@ def code_search(
 
     results = _format_results(data)
     stats = _get_stats(data)
-    _print_results(results, stats, json_output=json)
+    _print_results(results, stats, json_output=json_output)
