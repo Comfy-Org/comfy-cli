@@ -25,6 +25,7 @@ runner = CliRunner()
 # Fixtures
 # ---------------------------------------------------------------------------
 
+
 @pytest.fixture
 def raw_api_response():
     """A realistic raw Sourcegraph GraphQL response."""
@@ -131,6 +132,7 @@ def limit_hit_response(raw_api_response):
 # _build_query tests
 # ---------------------------------------------------------------------------
 
+
 class TestBuildQuery:
     def test_simple_query(self):
         assert _build_query("LoadImage", None, DEFAULT_COUNT) == "LoadImage"
@@ -155,6 +157,7 @@ class TestBuildQuery:
 # ---------------------------------------------------------------------------
 # _format_results tests
 # ---------------------------------------------------------------------------
+
 
 class TestFormatResults:
     def test_formats_valid_results(self, raw_api_response):
@@ -267,6 +270,7 @@ class TestFormatResults:
 # _get_stats tests
 # ---------------------------------------------------------------------------
 
+
 class TestGetStats:
     def test_extracts_stats(self, raw_api_response):
         stats = _get_stats(raw_api_response)
@@ -289,6 +293,7 @@ class TestGetStats:
 # _fetch_results tests
 # ---------------------------------------------------------------------------
 
+
 class TestFetchResults:
     @patch("comfy_cli.command.code_search.requests.get")
     def test_successful_fetch(self, mock_get, raw_api_response):
@@ -305,9 +310,7 @@ class TestFetchResults:
     @patch("comfy_cli.command.code_search.requests.get")
     def test_http_error_propagates(self, mock_get):
         mock_response = MagicMock()
-        mock_response.raise_for_status.side_effect = requests.HTTPError(
-            response=MagicMock(status_code=500)
-        )
+        mock_response.raise_for_status.side_effect = requests.HTTPError(response=MagicMock(status_code=500))
         mock_get.return_value = mock_response
 
         with pytest.raises(requests.HTTPError):
@@ -331,6 +334,7 @@ class TestFetchResults:
 # ---------------------------------------------------------------------------
 # _print_results tests
 # ---------------------------------------------------------------------------
+
 
 class TestPrintResults:
     def test_json_output(self, capsys, raw_api_response):
@@ -371,6 +375,7 @@ class TestPrintResults:
 # ---------------------------------------------------------------------------
 # CLI integration tests (via typer runner)
 # ---------------------------------------------------------------------------
+
 
 class TestCodeSearchCLI:
     @patch("comfy_cli.command.code_search._fetch_results")

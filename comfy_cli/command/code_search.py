@@ -128,7 +128,9 @@ def _print_results(results: list[dict], stats: dict, json_output: bool) -> None:
         console.print()
 
     limit_msg = " (limit hit — use --count to fetch more)" if stats.get("limit_hit") else ""
-    console.print(f"[dim]{stats['approximate_count']} approximate results, {stats['match_count']} matches returned{limit_msg}[/dim]")
+    console.print(
+        f"[dim]{stats['approximate_count']} approximate results, {stats['match_count']} matches returned{limit_msg}[/dim]"
+    )
 
 
 @app.callback(invoke_without_command=True)
