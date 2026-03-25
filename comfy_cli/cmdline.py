@@ -10,7 +10,7 @@ from rich import print as rprint
 from rich.console import Console
 
 from comfy_cli import constants, env_checker, logging, tracking, ui, utils
-from comfy_cli.command import custom_nodes, pr_command
+from comfy_cli.command import code_search, custom_nodes, pr_command
 from comfy_cli.command import install as install_inner
 from comfy_cli.command import run as run_inner
 from comfy_cli.command.install import validate_version
@@ -657,5 +657,8 @@ app.add_typer(custom_nodes.app, name="node", help="Manage custom nodes.")
 app.add_typer(custom_nodes.manager_app, name="manager", help="Manage ComfyUI-Manager.")
 
 app.add_typer(pr_command.app, name="pr-cache", help="Manage PR cache.")
+
+app.add_typer(code_search.app, name="code-search", help="Search code across ComfyUI repositories.")
+app.add_typer(code_search.app, name="cs", hidden=True)
 
 app.add_typer(tracking.app, name="tracking", help="Manage analytics tracking settings.")
