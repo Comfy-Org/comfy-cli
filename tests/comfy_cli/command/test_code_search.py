@@ -5,7 +5,6 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import requests
-import typer
 from typer.testing import CliRunner
 
 from comfy_cli.command.code_search import (
