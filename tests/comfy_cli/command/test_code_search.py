@@ -455,6 +455,15 @@ class TestCodeSearchCLI:
         assert "503" in result.output
 
     @patch("comfy_cli.command.code_search._fetch_results")
+    def test_http_error_no_response(self, mock_fetch):
+        mock_fetch.side_effect = requests.HTTPError(response=None)
+
+        result = runner.invoke(app, ["LoadImage"])
+
+        assert result.exit_code == 1
+        assert "unknown" in result.output
+
+    @patch("comfy_cli.command.code_search._fetch_results")
     def test_short_options(self, mock_fetch, raw_api_response):
         mock_fetch.return_value = raw_api_response
 

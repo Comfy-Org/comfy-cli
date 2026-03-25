@@ -162,7 +162,8 @@ def code_search(
         console.print("[bold red]Error: Request timed out.[/bold red]")
         raise typer.Exit(code=1)
     except requests.HTTPError as e:
-        console.print(f"[bold red]Error: HTTP {e.response.status_code}[/bold red]")
+        status = e.response.status_code if e.response is not None else "unknown"
+        console.print(f"[bold red]Error: HTTP {status}[/bold red]")
         raise typer.Exit(code=1)
 
     results = _format_results(data)
