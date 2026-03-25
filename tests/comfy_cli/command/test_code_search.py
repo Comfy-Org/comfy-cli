@@ -10,6 +10,7 @@ from typer.testing import CliRunner
 from comfy_cli.command.code_search import (
     API_URL,
     DEFAULT_COUNT,
+    REQUEST_TIMEOUT,
     _build_query,
     _fetch_results,
     _format_results,
@@ -304,7 +305,7 @@ class TestFetchResults:
 
         result = _fetch_results("LoadImage")
 
-        mock_get.assert_called_once_with(API_URL, params={"query": "LoadImage"}, timeout=30)
+        mock_get.assert_called_once_with(API_URL, params={"query": "LoadImage"}, timeout=REQUEST_TIMEOUT)
         assert result == raw_api_response
 
     @patch("comfy_cli.command.code_search.requests.get")
