@@ -10,16 +10,27 @@ from comfy_cli.command.custom_nodes import cm_cli_util
 
 
 def _setup_cm_cli(tmp_path, script_body):
-    """Create a stub cm-cli.py with the given body and patch workspace to tmp_path."""
-    cm_cli_path = tmp_path / "custom_nodes" / "ComfyUI-Manager" / "cm-cli.py"
-    cm_cli_path.parent.mkdir(parents=True)
-    cm_cli_path.write_text(textwrap.dedent(script_body))
+    """Create a stub script and return its path."""
+    stub_script = tmp_path / "stub_cm_cli.py"
+    stub_script.write_text(textwrap.dedent(script_body))
     (tmp_path / "config").mkdir(exist_ok=True)
-    return tmp_path
+    return stub_script
 
 
 def _run(tmp_path, args, *, fast_deps=False, raise_on_error=False):
-    """Call execute_cm_cli with standard patches for workspace/config."""
+    """Call execute_cm_cli with standard patches for workspace/config.
+
+    Patches the cmd construction to run the stub script instead of `python -m cm_cli`.
+    """
+    stub_script = tmp_path / "stub_cm_cli.py"
+    original_popen = subprocess.Popen
+
+    def _patched_popen(cmd, **kwargs):
+        # Replace `python -m cm_cli <args>` with `python <stub_script> <args>`
+        if len(cmd) >= 3 and cmd[1] == "-m" and cmd[2] == "cm_cli":
+            cmd = [cmd[0], str(stub_script)] + cmd[3:]
+        return original_popen(cmd, **kwargs)
+
     with (
         patch(
             "comfy_cli.command.custom_nodes.cm_cli_util.resolve_workspace_python",
@@ -28,6 +39,9 @@ def _run(tmp_path, args, *, fast_deps=False, raise_on_error=False):
         patch.object(cm_cli_util.workspace_manager, "workspace_path", str(tmp_path)),
         patch.object(cm_cli_util.workspace_manager, "set_recent_workspace"),
         patch("comfy_cli.command.custom_nodes.cm_cli_util.ConfigManager") as MockConfig,
+        patch("comfy_cli.command.custom_nodes.cm_cli_util.check_comfy_repo", return_value=(True, None)),
+        patch("comfy_cli.command.custom_nodes.cm_cli_util.find_cm_cli", return_value=True),
+        patch("comfy_cli.command.custom_nodes.cm_cli_util.subprocess.Popen", side_effect=_patched_popen),
     ):
         MockConfig.return_value.get_config_path.return_value = str(tmp_path / "config")
         return cm_cli_util.execute_cm_cli(args, fast_deps=fast_deps, raise_on_error=raise_on_error)
@@ -48,6 +62,8 @@ class TestExecuteCmCli:
             patch.object(cm_cli_util.workspace_manager, "workspace_path", str(tmp_path)),
             patch.object(cm_cli_util.workspace_manager, "set_recent_workspace"),
             patch("comfy_cli.command.custom_nodes.cm_cli_util.ConfigManager") as MockConfig,
+            patch("comfy_cli.command.custom_nodes.cm_cli_util.check_comfy_repo", return_value=(True, None)),
+            patch("comfy_cli.command.custom_nodes.cm_cli_util.find_cm_cli", return_value=True),
             patch("comfy_cli.command.custom_nodes.cm_cli_util.subprocess.Popen", return_value=mock_proc) as mock_popen,
         ):
             MockConfig.return_value.get_config_path.return_value = str(tmp_path / "config")
@@ -71,6 +87,8 @@ class TestExecuteCmCli:
             patch.object(cm_cli_util.workspace_manager, "workspace_path", str(tmp_path)),
             patch.object(cm_cli_util.workspace_manager, "set_recent_workspace"),
             patch("comfy_cli.command.custom_nodes.cm_cli_util.ConfigManager") as MockConfig,
+            patch("comfy_cli.command.custom_nodes.cm_cli_util.check_comfy_repo", return_value=(True, None)),
+            patch("comfy_cli.command.custom_nodes.cm_cli_util.find_cm_cli", return_value=True),
             patch("comfy_cli.command.custom_nodes.cm_cli_util.subprocess.Popen", return_value=mock_proc),
             patch("comfy_cli.command.custom_nodes.cm_cli_util.DependencyCompiler") as MockCompiler,
         ):
@@ -176,6 +194,8 @@ class TestExecuteCmCli:
             patch.object(cm_cli_util.workspace_manager, "workspace_path", str(tmp_path)),
             patch.object(cm_cli_util.workspace_manager, "set_recent_workspace"),
             patch("comfy_cli.command.custom_nodes.cm_cli_util.ConfigManager") as MockConfig,
+            patch("comfy_cli.command.custom_nodes.cm_cli_util.check_comfy_repo", return_value=(True, None)),
+            patch("comfy_cli.command.custom_nodes.cm_cli_util.find_cm_cli", return_value=True),
             patch("comfy_cli.command.custom_nodes.cm_cli_util.subprocess.Popen", return_value=mock_proc) as mock_popen,
         ):
             MockConfig.return_value.get_config_path.return_value = str(tmp_path / "config")

@@ -160,13 +160,6 @@ def install(
             callback=validate_version,
         ),
     ] = "nightly",
-    manager_url: Annotated[
-        str,
-        typer.Option(
-            show_default=False,
-            help="url or local path pointing to the ComfyUI-Manager git repo to be installed. A specific branch can optionally be specified using a setuptools-like syntax, eg https://foo.git@bar",
-        ),
-    ] = constants.COMFY_MANAGER_GITHUB_URL,
     restore: Annotated[
         bool,
         typer.Option(
@@ -239,10 +232,6 @@ def install(
             help="Use new fast dependency installer",
         ),
     ] = False,
-    manager_commit: Annotated[
-        str | None,
-        typer.Option(help="Specify commit hash for ComfyUI-Manager"),
-    ] = None,
     pr: Annotated[
         str | None,
         typer.Option(
@@ -280,7 +269,6 @@ def install(
         rprint("[bold yellow]Installing for CPU[/bold yellow]")
         install_inner.execute(
             url,
-            manager_url,
             comfy_path,
             restore,
             skip_manager,
@@ -293,7 +281,6 @@ def install(
             skip_torch_or_directml=skip_torch_or_directml,
             skip_requirement=skip_requirement,
             fast_deps=fast_deps,
-            manager_commit=manager_commit,
             pr=pr,
         )
         rprint(f"ComfyUI is installed at: {comfy_path}")
@@ -336,7 +323,6 @@ def install(
 
     install_inner.execute(
         url,
-        manager_url,
         comfy_path,
         restore,
         skip_manager,
@@ -349,7 +335,6 @@ def install(
         skip_torch_or_directml=skip_torch_or_directml,
         skip_requirement=skip_requirement,
         fast_deps=fast_deps,
-        manager_commit=manager_commit,
         pr=pr,
     )
 
