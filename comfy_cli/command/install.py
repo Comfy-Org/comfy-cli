@@ -33,6 +33,14 @@ def get_os_details():
     return os_name, os_version
 
 
+def _pip_install_torch(python: str, index_args: list[str]) -> subprocess.CompletedProcess:
+    """Install torch, torchvision, and torchaudio with the given index arguments."""
+    return subprocess.run(
+        [python, "-m", "pip", "install", "torch", "torchvision", "torchaudio"] + index_args,
+        check=False,
+    )
+
+
 def pip_install_comfyui_dependencies(
     repo_dir,
     gpu: GPU_OPTION,
@@ -49,80 +57,23 @@ def pip_install_comfyui_dependencies(
     if not skip_torch_or_directml:
         # install torch for AMD Linux
         if gpu == GPU_OPTION.AMD and plat == constants.OS.LINUX:
-            pip_url = ["--index-url", f"https://download.pytorch.org/whl/rocm{rocm_version.value}"]
-            result = subprocess.run(
-                [
-                    python,
-                    "-m",
-                    "pip",
-                    "install",
-                    "torch",
-                    "torchvision",
-                    "torchaudio",
-                ]
-                + pip_url,
-                check=False,
+            result = _pip_install_torch(
+                python, ["--index-url", f"https://download.pytorch.org/whl/rocm{rocm_version.value}"]
             )
 
         # install torch for NVIDIA
         if gpu == GPU_OPTION.NVIDIA:
             cuda_tag = f"cu{cuda_version.value.replace('.', '')}"
-            pip_url = ["--index-url", f"https://download.pytorch.org/whl/{cuda_tag}"]
-            result = subprocess.run(
-                [
-                    python,
-                    "-m",
-                    "pip",
-                    "install",
-                    "torch",
-                    "torchvision",
-                    "torchaudio",
-                ]
-                + pip_url,
-                check=False,
-            )
-        # Update installation to use upstream torch xpu. ipex is no longer needed for Intel Arc GPUs
+            result = _pip_install_torch(python, ["--index-url", f"https://download.pytorch.org/whl/{cuda_tag}"])
+
+        # install torch for Intel Arc GPUs (upstream torch xpu)
         # https://github.com/comfyanonymous/ComfyUI/pull/7767
         if gpu == GPU_OPTION.INTEL_ARC:
-            pip_url = [
-                "--extra-index-url",
-                "https://download.pytorch.org/whl/xpu",
-            ]
-
-            # TODO: wrap pip install in a function
-            result = subprocess.run(
-                [
-                    python,
-                    "-m",
-                    "pip",
-                    "install",
-                    "torch",
-                    "torchvision",
-                    "torchaudio",
-                ]
-                + pip_url,
-                check=False,
-            )
+            result = _pip_install_torch(python, ["--extra-index-url", "https://download.pytorch.org/whl/xpu"])
 
         # install torch for CPU
-        if gpu is None:  # Currently, when install for CPU, gpu is None
-            pip_url = [
-                "--extra-index-url",
-                "https://download.pytorch.org/whl/cpu",
-            ]
-            result = subprocess.run(
-                [
-                    python,
-                    "-m",
-                    "pip",
-                    "install",
-                    "torch",
-                    "torchvision",
-                    "torchaudio",
-                ]
-                + pip_url,
-                check=False,
-            )
+        if gpu is None:
+            result = _pip_install_torch(python, ["--extra-index-url", "https://download.pytorch.org/whl/cpu"])
 
         if result and result.returncode != 0:
             rprint("Failed to install PyTorch dependencies. Please check your environment (`comfy env`) and try again")
@@ -130,11 +81,11 @@ def pip_install_comfyui_dependencies(
 
         # install directml for AMD windows
         if gpu == GPU_OPTION.AMD and plat == constants.OS.WINDOWS:
-            result = subprocess.run([python, "-m", "pip", "install", "torch-directml"], check=True)
+            subprocess.run([python, "-m", "pip", "install", "torch-directml"], check=True)
 
         # install torch for Mac M Series
         if gpu == GPU_OPTION.MAC_M_SERIES:
-            result = subprocess.run(
+            subprocess.run(
                 [
                     python,
                     "-m",
@@ -526,15 +477,17 @@ def get_latest_release(repo_owner: str, repo_name: str) -> GithubRelease | None:
         return None
 
 
-def parse_pr_reference(pr_ref: str) -> tuple[str, str, int | None]:
-    """
-    support formats：
-    - username:branch-name
-    - #123
-    - https://github.com/comfyanonymous/ComfyUI/pull/123
+def _parse_pr_reference(
+    pr_ref: str,
+    default_owner: str,
+    default_repo: str,
+) -> tuple[str, str, int | None]:
+    """Parse a GitHub PR reference into (repo_owner, repo_name, pr_number).
 
-    Returns:
-        (repo_owner, repo_name, pr_number)
+    Supported formats:
+    - #123                                          → (default_owner, default_repo, 123)
+    - username:branch-name                          → (username, default_repo, None)
+    - https://github.com/owner/repo/pull/123        → (owner, repo, 123)
     """
     pr_ref = pr_ref.strip()
 
@@ -550,14 +503,18 @@ def parse_pr_reference(pr_ref: str) -> tuple[str, str, int | None]:
 
     elif pr_ref.startswith("#"):
         pr_number = int(pr_ref[1:])
-        return "comfyanonymous", "ComfyUI", pr_number
+        return default_owner, default_repo, pr_number
 
     elif ":" in pr_ref:
         username, branch = pr_ref.split(":", 1)
-        return username, "ComfyUI", None
+        return username, default_repo, None
 
     else:
         raise ValueError(f"Invalid PR reference format: {pr_ref}")
+
+
+def parse_pr_reference(pr_ref: str) -> tuple[str, str, int | None]:
+    return _parse_pr_reference(pr_ref, "comfyanonymous", "ComfyUI")
 
 
 def fetch_pr_info(repo_owner: str, repo_name: str, pr_number: int) -> PRInfo:
@@ -834,7 +791,7 @@ def handle_temporary_frontend_pr(frontend_pr: str) -> str | None:
             pr_info = fetch_pr_info(repo_owner, repo_name, pr_number)
         else:
             username, branch = frontend_pr.split(":", 1)
-            pr_info = find_pr_by_branch(repo_owner, repo_name, username, branch)
+            pr_info = find_pr_by_branch("Comfy-Org", "ComfyUI_frontend", username, branch)
 
         if not pr_info:
             rprint(f"[bold red]Frontend PR not found: {frontend_pr}[/bold red]")
@@ -918,28 +875,4 @@ def handle_temporary_frontend_pr(frontend_pr: str) -> str | None:
 
 
 def parse_frontend_pr_reference(pr_ref: str) -> tuple[str, str, int | None]:
-    """
-    Parse frontend PR reference. Similar to parse_pr_reference but defaults to Comfy-Org/ComfyUI_frontend
-    """
-    pr_ref = pr_ref.strip()
-
-    if pr_ref.startswith("https://github.com/"):
-        parsed = urlparse(pr_ref)
-        if "/pull/" in parsed.path:
-            path_parts = parsed.path.strip("/").split("/")
-            if len(path_parts) >= 4:
-                repo_owner = path_parts[0]
-                repo_name = path_parts[1]
-                pr_number = int(path_parts[3])
-                return repo_owner, repo_name, pr_number
-
-    elif pr_ref.startswith("#"):
-        pr_number = int(pr_ref[1:])
-        return "Comfy-Org", "ComfyUI_frontend", pr_number
-
-    elif ":" in pr_ref:
-        username, branch = pr_ref.split(":", 1)
-        return "Comfy-Org", "ComfyUI_frontend", None
-
-    else:
-        raise ValueError(f"Invalid frontend PR reference format: {pr_ref}")
+    return _parse_pr_reference(pr_ref, "Comfy-Org", "ComfyUI_frontend")

@@ -42,7 +42,7 @@ class TestFrontendPRReferenceParsing:
     def test_parse_frontend_user_branch_format(self):
         """Test parsing username:branch format for frontend"""
         repo_owner, repo_name, pr_number = parse_frontend_pr_reference("testuser:feature-branch")
-        assert repo_owner == "Comfy-Org"
+        assert repo_owner == "testuser"
         assert repo_name == "ComfyUI_frontend"
         assert pr_number is None
 
@@ -64,7 +64,7 @@ class TestFrontendPRReferenceParsing:
 
     def test_parse_frontend_invalid_format(self):
         """Test parsing invalid format raises ValueError"""
-        with pytest.raises(ValueError, match="Invalid frontend PR reference format"):
+        with pytest.raises(ValueError, match="Invalid PR reference format"):
             parse_frontend_pr_reference("invalid-format")
 
     def test_parse_frontend_empty_string(self):
