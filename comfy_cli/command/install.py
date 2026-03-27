@@ -430,7 +430,7 @@ def handle_github_rate_limit(response):
     remaining = int(response.headers.get("x-ratelimit-remaining", 0))
     if remaining == 0:
         reset_time = int(response.headers.get("x-ratelimit-reset", 0))
-        message = f"Primary rate limit from Github exceeded! Please retry after: {reset_time})"
+        message = f"Primary rate limit from Github exceeded! Please retry after: {reset_time}"
         raise GitHubRateLimitError(message)
 
     if "retry-after" in response.headers:

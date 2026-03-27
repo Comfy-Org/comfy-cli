@@ -6,7 +6,15 @@ import requests
 from typer.testing import CliRunner
 
 from comfy_cli.cmdline import app, g_exclusivity, g_gpu_exclusivity
-from comfy_cli.command.install import PRInfo, fetch_pr_info, find_pr_by_branch, handle_pr_checkout, parse_pr_reference
+from comfy_cli.command.install import (
+    GitHubRateLimitError,
+    PRInfo,
+    fetch_pr_info,
+    find_pr_by_branch,
+    handle_github_rate_limit,
+    handle_pr_checkout,
+    parse_pr_reference,
+)
 from comfy_cli.git_utils import checkout_pr
 
 
@@ -435,6 +443,33 @@ class TestEdgeCases:
 
         assert result is True
         assert mock_subprocess.call_count == 3
+
+
+class TestHandleGithubRateLimit:
+    def test_primary_rate_limit_message_format(self):
+        """Verify the error message does not contain stray characters."""
+        mock_response = Mock()
+        mock_response.headers = {"x-ratelimit-remaining": "0", "x-ratelimit-reset": "1700000000"}
+
+        with pytest.raises(GitHubRateLimitError) as exc_info:
+            handle_github_rate_limit(mock_response)
+
+        msg = str(exc_info.value)
+        assert "1700000000" in msg
+        assert msg.endswith("1700000000")  # no stray trailing characters
+
+    def test_retry_after_header(self):
+        mock_response = Mock()
+        mock_response.headers = {"x-ratelimit-remaining": "5", "retry-after": "30"}
+
+        with pytest.raises(GitHubRateLimitError, match="30 seconds"):
+            handle_github_rate_limit(mock_response)
+
+    def test_no_rate_limit_does_not_raise(self):
+        mock_response = Mock()
+        mock_response.headers = {"x-ratelimit-remaining": "100"}
+
+        handle_github_rate_limit(mock_response)  # should not raise
 
 
 if __name__ == "__main__":

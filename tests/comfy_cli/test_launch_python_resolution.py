@@ -23,6 +23,20 @@ class TestLaunchComfyui:
         assert cmd[0] == "/resolved/python"
         assert cmd[0] != sys.executable
 
+    @pytest.mark.parametrize("returncode", [0, 1, 42])
+    def test_foreground_exit_code_matches_subprocess(self, returncode):
+        """exit() should receive the subprocess returncode, not the CompletedProcess object."""
+        mock_result = subprocess.CompletedProcess(args=[], returncode=returncode)
+
+        with (
+            patch("comfy_cli.command.launch.ConfigManager"),
+            patch("comfy_cli.command.launch.subprocess.run", return_value=mock_result),
+        ):
+            with pytest.raises(SystemExit) as exc_info:
+                launch.launch_comfyui(extra=[], python="/resolved/python")
+
+        assert exc_info.value.code == returncode
+
 
 class TestLaunchResolvesWorkspacePython:
     def test_resolves_and_passes_python(self):

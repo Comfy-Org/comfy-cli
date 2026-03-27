@@ -601,7 +601,7 @@ def install(
     ),
 ):
     if "all" in nodes:
-        typer.echo(f"Invalid command: {mode}. `install all` is not allowed", err=True)
+        typer.echo("`install all` is not allowed", err=True)
         raise typer.Exit(code=1)
 
     exclusive_flags = [
@@ -670,7 +670,7 @@ def reinstall(
     ),
 ):
     if "all" in nodes:
-        typer.echo(f"Invalid command: {mode}. `reinstall all` is not allowed", err=True)
+        typer.echo("`reinstall all` is not allowed", err=True)
         raise typer.Exit(code=1)
 
     exclusive_flags = [name for name, val in [("--fast-deps", fast_deps), ("--uv-compile", uv_compile)] if val]
@@ -715,7 +715,7 @@ def uninstall(
     ),
 ):
     if "all" in nodes:
-        typer.echo(f"Invalid command: {mode}. `uninstall all` is not allowed", err=True)
+        typer.echo("`uninstall all` is not allowed", err=True)
         raise typer.Exit(code=1)
 
     validate_mode(mode)
@@ -1155,7 +1155,7 @@ def registry_install(
     node_specific_path = custom_nodes_path / node_id  # Subdirectory for the node
     if node_specific_path.exists():
         print(
-            f"[bold red] The node {node_id} already exists in the workspace. This migit delete any model files in the node.[/bold red]"
+            f"[bold red] The node {node_id} already exists in the workspace. This might delete any model files in the node.[/bold red]"
         )
 
         confirm = ui.prompt_confirm_action(
