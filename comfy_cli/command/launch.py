@@ -87,7 +87,7 @@ def launch_comfyui(extra, frontend_pr=None, python=sys.executable):
 
             if reboot_path is None:
                 print("[bold red]ComfyUI is not installed.[/bold red]\n")
-                exit(res)
+                exit(res.returncode)
 
             if not os.path.exists(reboot_path):
                 exit(res.returncode)
@@ -135,10 +135,10 @@ def launch_comfyui(extra, frontend_pr=None, python=sys.executable):
 
                 if reboot_path is None:
                     print("[bold red]ComfyUI is not installed.[/bold red]\n")
-                    os._exit(process.pid)
+                    os._exit(1)
 
                 if not os.path.exists(reboot_path):
-                    os._exit(process.pid)
+                    os._exit(process.returncode)
 
                 os.remove(reboot_path)
         except KeyboardInterrupt:

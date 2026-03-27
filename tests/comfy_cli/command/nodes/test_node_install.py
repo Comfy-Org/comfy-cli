@@ -215,11 +215,15 @@ def test_fix_with_uv_compile():
 def test_uninstall_rejects_all():
     result = runner.invoke(app, ["uninstall", "all"])
     assert result.exit_code != 0
+    assert "`uninstall all` is not allowed" in result.output
+    assert "Invalid command" not in result.output
 
 
 def test_reinstall_rejects_all():
     result = runner.invoke(app, ["reinstall", "all"])
     assert result.exit_code != 0
+    assert "`reinstall all` is not allowed" in result.output
+    assert "Invalid command" not in result.output
 
 
 def test_validate_mode_rejects_invalid():
@@ -310,7 +314,8 @@ def test_install_deps_with_workflow(tmp_path):
 def test_install_rejects_all():
     result = runner.invoke(app, ["install", "all"])
     assert result.exit_code != 0
-    assert "not allowed" in result.output
+    assert "`install all` is not allowed" in result.output
+    assert "Invalid command" not in result.output
 
 
 def test_simple_show_installed():
