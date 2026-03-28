@@ -104,13 +104,22 @@ class TestGlobalPythonInstallExecute:
 
         return mock_ensure, mock_pip, MockCompiler
 
-    def test_fast_deps_uses_global_python(self, tmp_path):
-        mock_ensure, mock_pip, MockCompiler = self._run_execute(tmp_path, fast_deps=True)
+    def test_fast_deps_global_python_skips_install_build_deps(self, tmp_path):
+        mock_ensure, mock_pip, MockCompiler = self._run_execute(tmp_path, fast_deps=True, python=sys.executable)
 
         mock_ensure.assert_called_once_with(str(tmp_path))
         mock_pip.assert_not_called()
-        MockCompiler.Install_Build_Deps.assert_called_once_with(executable="/usr/bin/python3")
-        assert MockCompiler.call_args[1]["executable"] == "/usr/bin/python3"
+        MockCompiler.Install_Build_Deps.assert_not_called()
+        assert MockCompiler.call_args[1]["executable"] == sys.executable
+
+    def test_fast_deps_venv_python_calls_install_build_deps(self, tmp_path):
+        mock_ensure, mock_pip, MockCompiler = self._run_execute(
+            tmp_path, fast_deps=True, python="/workspace/.venv/bin/python"
+        )
+
+        mock_pip.assert_not_called()
+        MockCompiler.Install_Build_Deps.assert_called_once_with(executable="/workspace/.venv/bin/python")
+        assert MockCompiler.call_args[1]["executable"] == "/workspace/.venv/bin/python"
 
     def test_non_fast_deps_uses_global_python(self, tmp_path):
         mock_ensure, mock_pip, MockCompiler = self._run_execute(tmp_path, fast_deps=False)

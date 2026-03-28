@@ -252,7 +252,10 @@ def execute(
                 rprint("[yellow]Manager not installed. Launch will run without manager flags.[/yellow]")
 
     if fast_deps:
-        DependencyCompiler.Install_Build_Deps(executable=python)
+        if python != sys.executable:
+            # Workspace venv needs uv bootstrapped; for the global Python
+            # uv is already available as a comfy-cli dependency.
+            DependencyCompiler.Install_Build_Deps(executable=python)
         depComp = DependencyCompiler(
             cwd=repo_dir,
             executable=python,
