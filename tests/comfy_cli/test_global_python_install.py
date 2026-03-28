@@ -87,6 +87,7 @@ class TestGlobalPythonInstallExecute:
             patch("comfy_cli.command.install.pip_install_comfyui_dependencies") as mock_pip,
             patch("comfy_cli.command.install.DependencyCompiler") as MockCompiler,
             patch("comfy_cli.command.install.WorkspaceManager"),
+            patch("comfy_cli.config_manager.ConfigManager"),
             patch.object(install.workspace_manager, "skip_prompting", True),
             patch.object(install.workspace_manager, "setup_workspace_manager"),
         ):

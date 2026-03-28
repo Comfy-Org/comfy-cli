@@ -1,19 +1,6 @@
-import os
 import zipfile
-from pathlib import Path
-
-import pytest
 
 from comfy_cli import file_utils
-
-
-@pytest.fixture(autouse=True)
-def restore_cwd():
-    original_cwd = Path.cwd()
-    try:
-        yield
-    finally:
-        os.chdir(original_cwd)
 
 
 def test_zip_files_respects_comfyignore(tmp_path, monkeypatch):
