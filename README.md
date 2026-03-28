@@ -70,14 +70,17 @@ will simply update the comfy.yaml file to reflect the local setup
 
 #### Python environment handling
 
-When you run `comfy install`, comfy-cli decides where to install ComfyUI
-dependencies based on how comfy-cli itself was installed:
+When you run `comfy install`, comfy-cli picks a Python environment for ComfyUI
+dependencies using the following precedence:
 
-- **`pip install comfy-cli`** (global / system Python): dependencies are installed directly into 
-  the same Python environment. This is the typical setup inside Docker containers.
-- **`pipx install comfy-cli`** or **`uv tool install comfy-cli`** (isolated tool environment): a `.venv` is created 
-  inside the ComfyUI workspace and dependencies go there. Use `comfy launch` to start ComfyUI with the correct Python.
-- If a **virtualenv** or **conda** environment is already active (`VIRTUAL_ENV` / `CONDA_PREFIX`), that environment is used as-is.
+1. An **active virtualenv or conda** environment (`VIRTUAL_ENV` / `CONDA_PREFIX`) is used as-is.
+2. An **existing `.venv` or `venv`** directory inside the workspace is reused.
+3. Otherwise the choice depends on how comfy-cli was installed:
+   - **`pip install comfy-cli`** (global / system Python): dependencies go
+     directly into the same Python environment. This is the typical Docker setup.
+   - **`pipx install comfy-cli`** or **`uv tool install comfy-cli`** (isolated
+     tool environment): a `.venv` is created inside the ComfyUI workspace.
+     Use `comfy launch` to start ComfyUI with the correct Python.
 
 ### Specifying execution path
 

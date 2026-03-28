@@ -117,10 +117,15 @@ class TestGlobalPythonInstallExecute:
         MockCompiler.assert_not_called()
 
 
+@pytest.mark.skipif(
+    os.environ.get("TEST_TORCH_BACKEND") != "true",
+    reason="Set TEST_TORCH_BACKEND=true to run integration tests that call uv pip compile",
+)
 class TestDependencyCompilerGlobalPython:
-    """Run the real DependencyCompiler compile step (no mocks) using the
-    current Python as if it were a global install.  Verifies the compiled
-    output contains expected packages and correct index URLs."""
+    """Integration tests: run the real DependencyCompiler compile step (no
+    mocks, requires network) using the current Python as if it were a global
+    install.  Verifies the compiled output contains expected packages and
+    correct index URLs."""
 
     @pytest.fixture()
     def workspace(self, tmp_path):
