@@ -55,6 +55,7 @@ class TestExecute:
             patch("comfy_cli.command.install.check_comfy_repo", return_value=(True, None)),
             patch("comfy_cli.command.install.pip_install_comfyui_dependencies") as mock_pip_deps,
             patch("comfy_cli.command.install.WorkspaceManager"),
+            patch("comfy_cli.config_manager.ConfigManager"),
             patch.object(install.workspace_manager, "skip_prompting", True),
             patch.object(install.workspace_manager, "setup_workspace_manager"),
         ):
@@ -79,6 +80,7 @@ class TestExecute:
             patch("comfy_cli.command.install.check_comfy_repo", return_value=(True, None)),
             patch("comfy_cli.command.install.DependencyCompiler") as MockCompiler,
             patch("comfy_cli.command.install.WorkspaceManager"),
+            patch("comfy_cli.config_manager.ConfigManager"),
             patch.object(install.workspace_manager, "skip_prompting", True),
             patch.object(install.workspace_manager, "setup_workspace_manager"),
         ):
@@ -109,6 +111,7 @@ class TestExecute:
             patch("comfy_cli.command.install.check_comfy_repo", return_value=(True, None)),
             patch("comfy_cli.command.install.DependencyCompiler") as MockCompiler,
             patch("comfy_cli.command.install.WorkspaceManager"),
+            patch("comfy_cli.config_manager.ConfigManager"),
             patch.object(install.workspace_manager, "skip_prompting", True),
             patch.object(install.workspace_manager, "setup_workspace_manager"),
         ):
