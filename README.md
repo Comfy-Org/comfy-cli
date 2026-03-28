@@ -68,6 +68,20 @@ will simply update the comfy.yaml file to reflect the local setup
 - `comfy --workspace=<path> install`: Install ComfyUI into `<path>/ComfyUI`.
 - For `comfy install`, if no path specification like `--workspace, --recent, or --here` is provided, it will be implicitly installed in `<HOME>/comfy`.
 
+#### Python environment handling
+
+When you run `comfy install`, comfy-cli picks a Python environment for ComfyUI
+dependencies using the following precedence:
+
+1. An **active virtualenv or conda** environment (`VIRTUAL_ENV` / `CONDA_PREFIX`) is used as-is.
+2. An **existing `.venv` or `venv`** directory inside the workspace is reused.
+3. Otherwise the choice depends on how comfy-cli was installed:
+   - **`pip install comfy-cli`** (global / system Python): dependencies go
+     directly into the same Python environment. This is the typical Docker setup.
+   - **`pipx install comfy-cli`** or **`uv tool install comfy-cli`** (isolated
+     tool environment): a `.venv` is created inside the ComfyUI workspace.
+     Use `comfy launch` to start ComfyUI with the correct Python.
+
 ### Specifying execution path
 
 - You can specify the path of ComfyUI where the command will be applied through path indicators as follows:
