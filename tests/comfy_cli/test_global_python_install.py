@@ -171,7 +171,7 @@ class TestDependencyCompilerGlobalPython:
         compiled = Path(dep.out).read_text().lower()
         assert "torch==" in compiled
         assert "pyyaml==" in compiled
-        assert "pypi.org" in compiled
+        assert "https://pypi.org/simple" in compiled
 
     def test_install_targets_correct_python(self, workspace):
         from comfy_cli.uv import DependencyCompiler
