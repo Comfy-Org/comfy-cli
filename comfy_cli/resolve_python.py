@@ -57,4 +57,11 @@ def ensure_workspace_python(workspace_path: str) -> str:
             if os.path.isfile(python):
                 return python
 
+    # Running from the system/global Python (e.g. Docker root installs, global pip installs)
+    # Safe to install deps directly — no venv needed.
+    if sys.prefix == sys.base_prefix:
+        return sys.executable
+
+    # Running from an isolated tool environment (pipx, uv tool, etc.)
+    # Must create a workspace venv to avoid polluting the tool's env
     return create_workspace_venv(workspace_path)

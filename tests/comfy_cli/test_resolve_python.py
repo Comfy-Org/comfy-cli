@@ -233,12 +233,30 @@ class TestEnsureWorkspacePython:
         assert result == str(venv_python)
         assert not (workspace / ".venv").exists()
 
-    def test_creates_venv_when_nothing_found(self, tmp_path):
+    def test_global_python_returns_sys_executable(self, tmp_path):
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+
+        with _clean_env(), patch("comfy_cli.resolve_python.sys") as mock_sys:
+            mock_sys.executable = "/usr/bin/python3"
+            mock_sys.prefix = "/usr"
+            mock_sys.base_prefix = "/usr"
+            result = ensure_workspace_python(str(workspace))
+
+        assert result == "/usr/bin/python3"
+        assert not (workspace / ".venv").exists()
+
+    def test_creates_venv_when_isolated_env(self, tmp_path):
         workspace = tmp_path / "workspace"
         workspace.mkdir()
 
         with _clean_env():
-            result = ensure_workspace_python(str(workspace))
+            # Simulate isolated env (pipx/uv tool): prefix != base_prefix
+            with patch("comfy_cli.resolve_python.sys") as mock_sys:
+                mock_sys.executable = sys.executable
+                mock_sys.prefix = "/home/user/.local/pipx/venvs/comfy-cli"
+                mock_sys.base_prefix = "/usr"
+                result = ensure_workspace_python(str(workspace))
 
         assert (workspace / ".venv").is_dir()
         assert os.path.isfile(result)
@@ -271,11 +289,25 @@ class TestEnsureWorkspacePython:
             result = ensure_workspace_python(str(workspace))
         assert result == str(venv_python)
 
-    def test_broken_dot_venv_and_no_venv_creates_new(self, tmp_path):
+    def test_broken_dot_venv_global_python_returns_sys_executable(self, tmp_path):
         workspace = tmp_path / "workspace"
         (workspace / ".venv").mkdir(parents=True)
 
-        with _clean_env():
+        with _clean_env(), patch("comfy_cli.resolve_python.sys") as mock_sys:
+            mock_sys.executable = "/usr/bin/python3"
+            mock_sys.prefix = "/usr"
+            mock_sys.base_prefix = "/usr"
+            result = ensure_workspace_python(str(workspace))
+        assert result == "/usr/bin/python3"
+
+    def test_broken_dot_venv_isolated_env_creates_new(self, tmp_path):
+        workspace = tmp_path / "workspace"
+        (workspace / ".venv").mkdir(parents=True)
+
+        with _clean_env(), patch("comfy_cli.resolve_python.sys") as mock_sys:
+            mock_sys.executable = sys.executable
+            mock_sys.prefix = "/home/user/.local/pipx/venvs/comfy-cli"
+            mock_sys.base_prefix = "/usr"
             result = ensure_workspace_python(str(workspace))
         assert os.path.isfile(result)
         assert ".venv" in result
