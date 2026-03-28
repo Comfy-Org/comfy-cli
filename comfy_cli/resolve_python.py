@@ -4,6 +4,7 @@ import os
 import platform
 import subprocess
 import sys
+import sysconfig
 
 from rich import print as rprint
 
@@ -12,6 +13,12 @@ def _get_python_binary(env_path: str) -> str:
     if platform.system() == "Windows":
         return os.path.join(env_path, "Scripts", "python.exe")
     return os.path.join(env_path, "bin", "python")
+
+
+def _is_externally_managed() -> bool:
+    """Detect PEP 668 externally-managed Python (e.g. Ubuntu 24.04 system Python)."""
+    stdlib = sysconfig.get_path("stdlib")
+    return bool(stdlib) and os.path.isfile(os.path.join(stdlib, "EXTERNALLY-MANAGED"))
 
 
 def resolve_workspace_python(workspace_path: str | None = None) -> str:
@@ -57,9 +64,11 @@ def ensure_workspace_python(workspace_path: str) -> str:
             if os.path.isfile(python):
                 return python
 
-    # Running from the system/global Python (e.g. Docker root installs, global pip installs)
-    # Safe to install deps directly — no venv needed.
+    # Running from the system/global Python (e.g. Docker root installs, global pip installs).
     if sys.prefix == sys.base_prefix:
+        if _is_externally_managed():
+            # PEP 668: system Python is locked (e.g. Ubuntu 24.04), need a workspace venv.
+            return create_workspace_venv(workspace_path)
         return sys.executable
 
     # Running from an isolated tool environment (pipx, uv tool, etc.)

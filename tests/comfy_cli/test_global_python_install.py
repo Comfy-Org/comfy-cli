@@ -45,7 +45,11 @@ class TestGlobalPythonDetection:
         workspace = tmp_path / "workspace"
         workspace.mkdir()
 
-        with _clean_env(), patch("comfy_cli.resolve_python.sys") as mock_sys:
+        with (
+            _clean_env(),
+            patch("comfy_cli.resolve_python.sys") as mock_sys,
+            patch("comfy_cli.resolve_python._is_externally_managed", return_value=False),
+        ):
             mock_sys.executable = "/usr/bin/python3"
             mock_sys.prefix = "/usr"
             mock_sys.base_prefix = "/usr"
