@@ -50,6 +50,10 @@ jobs:
           pip install pytest
           pip install -e .
 
+      - name: Test CUDA auto-detection (skips if no GPU)
+        run: |
+          pytest tests/comfy_cli/test_cuda_detect_real.py -v
+
       - name: Test e2e
         env:
           PYTHONPATH: ${{ github.workspace }}
