@@ -111,11 +111,11 @@ def detect_cuda_driver_version() -> tuple[int, int] | None:
             major = raw // 1000
             minor = (raw % 1000) // 10
             return major, minor
+
+        return _detect_via_nvidia_smi()
     finally:
         if saved is not None:
             os.environ["CUDA_VISIBLE_DEVICES"] = saved
-
-    return _detect_via_nvidia_smi()
 
 
 def resolve_cuda_wheel(driver_version: tuple[int, int]) -> str | None:
@@ -128,12 +128,8 @@ def resolve_cuda_wheel(driver_version: tuple[int, int]) -> str | None:
 
     for tag in PYTORCH_CUDA_WHEELS:
         digits = tag[2:]
-        if len(digits) == 3:
-            whl_major = int(digits[0:2])
-            whl_minor = int(digits[2])
-        else:
-            whl_major = int(digits[0:2])
-            whl_minor = int(digits[2:])
+        whl_major = int(digits[:2])
+        whl_minor = int(digits[2:])
 
         if (whl_major, whl_minor) <= (drv_major, drv_minor):
             return tag
