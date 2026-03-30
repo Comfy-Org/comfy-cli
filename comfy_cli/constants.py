@@ -74,6 +74,7 @@ COMFY_ORIGIN_URL_CHOICES = {
 class CUDAVersion(str, Enum):
     v13_0 = "13.0"
     v12_9 = "12.9"
+    v12_8 = "12.8"
     v12_6 = "12.6"
     v12_4 = "12.4"
     v12_1 = "12.1"
