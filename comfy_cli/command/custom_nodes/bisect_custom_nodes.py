@@ -122,6 +122,22 @@ set of nodes to test: {len(self.active)}
 {active_list}"""
 
 
+def parse_cm_output(cm_output: str, pinned_nodes: set[str] | None = None) -> list[str]:
+    """Parse cm_cli simple-show output into a list of node names.
+
+    cm_cli simple-show always formats node entries as ``name@version``
+    (see ComfyUI-Manager cm_cli show_list).  We whitelist on the ``@``
+    separator so any progress/status lines are ignored regardless of
+    their prefix.
+    """
+    pinned = pinned_nodes or set()
+    return [
+        stripped
+        for line in cm_output.strip().split("\n")
+        if (stripped := line.strip()) and "@" in stripped and stripped not in pinned
+    ]
+
+
 @bisect_app.command(
     help="Start a new bisect session with optionally pinned nodes to always enable, and optional ComfyUI launch args."
     + "?[--pinned-nodes PINNED_NODES]"
@@ -145,11 +161,7 @@ def start(
         typer.echo("Failed to fetch the list of nodes.")
         raise typer.Exit()
 
-    nodes_list = [
-        line.strip()
-        for line in cm_output.strip().split("\n")
-        if not line.startswith("FETCH DATA") and line.strip() not in pinned_nodes
-    ]
+    nodes_list = parse_cm_output(cm_output, pinned_nodes)
     state = BisectState(
         status="running",
         all=nodes_list,
