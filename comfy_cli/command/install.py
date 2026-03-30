@@ -45,11 +45,12 @@ def pip_install_comfyui_dependencies(
     repo_dir,
     gpu: GPU_OPTION,
     plat: constants.OS,
-    cuda_version: constants.CUDAVersion,
+    cuda_version: constants.CUDAVersion | None,
     skip_torch_or_directml: bool,
     skip_requirement: bool,
     python: str = sys.executable,
     rocm_version: constants.ROCmVersion = constants.ROCmVersion.v6_3,
+    cuda_tag: str | None = None,
 ):
     os.chdir(repo_dir)
 
@@ -63,7 +64,8 @@ def pip_install_comfyui_dependencies(
 
         # install torch for NVIDIA
         if gpu == GPU_OPTION.NVIDIA:
-            cuda_tag = f"cu{cuda_version.value.replace('.', '')}"
+            if cuda_tag is None:
+                cuda_tag = f"cu{cuda_version.value.replace('.', '')}" if cuda_version else "cu126"
             result = _pip_install_torch(python, ["--index-url", f"https://download.pytorch.org/whl/{cuda_tag}"])
 
         # install torch for Intel Arc GPUs (upstream torch xpu)
@@ -147,7 +149,8 @@ def execute(
     version: str,
     commit: str | None = None,
     gpu: constants.GPU_OPTION = None,
-    cuda_version: constants.CUDAVersion = constants.CUDAVersion.v12_6,
+    cuda_version: constants.CUDAVersion | None = None,
+    cuda_tag: str | None = None,
     rocm_version: constants.ROCmVersion = constants.ROCmVersion.v6_3,
     plat: constants.OS = None,
     skip_torch_or_directml: bool = False,
@@ -227,6 +230,7 @@ def execute(
             skip_requirement,
             python=python,
             rocm_version=rocm_version,
+            cuda_tag=cuda_tag,
         )
 
     WorkspaceManager().set_recent_workspace(repo_dir)
@@ -256,11 +260,12 @@ def execute(
             # Workspace venv needs uv bootstrapped; for the global Python
             # uv is already available as a comfy-cli dependency.
             DependencyCompiler.Install_Build_Deps(executable=python)
+        resolved_cuda = cuda_tag if cuda_tag else (cuda_version.value if cuda_version else None)
         depComp = DependencyCompiler(
             cwd=repo_dir,
             executable=python,
             gpu=gpu,
-            cuda_version=cuda_version.value,
+            cuda_version=resolved_cuda,
             rocm_version=rocm_version.value,
             skip_torch=skip_torch_or_directml,
         )
