@@ -132,6 +132,64 @@ class TestExecute:
 
         assert MockCompiler.call_args[1]["skip_torch"] is True
 
+    def test_fast_deps_cuda_tag_converted_to_dotted_version(self, tmp_path):
+        repo_dir = str(tmp_path)
+
+        with (
+            patch("comfy_cli.command.install.ensure_workspace_python", return_value="/resolved/python"),
+            patch("comfy_cli.command.install.clone_comfyui"),
+            patch("comfy_cli.command.install.check_comfy_repo", return_value=(True, None)),
+            patch("comfy_cli.command.install.DependencyCompiler") as MockCompiler,
+            patch("comfy_cli.command.install.WorkspaceManager"),
+            patch("comfy_cli.config_manager.ConfigManager"),
+            patch.object(install.workspace_manager, "skip_prompting", True),
+            patch.object(install.workspace_manager, "setup_workspace_manager"),
+        ):
+            MockCompiler.Install_Build_Deps = MagicMock()
+            MockCompiler.return_value = MagicMock()
+
+            install.execute(
+                url="https://github.com/test/test.git",
+                comfy_path=repo_dir,
+                restore=False,
+                skip_manager=True,
+                version="nightly",
+                fast_deps=True,
+                gpu=GPU_OPTION.NVIDIA,
+                cuda_tag="cu130",
+            )
+
+        assert MockCompiler.call_args[1]["cuda_version"] == "13.0"
+
+    def test_fast_deps_explicit_cuda_version_no_tag(self, tmp_path):
+        repo_dir = str(tmp_path)
+
+        with (
+            patch("comfy_cli.command.install.ensure_workspace_python", return_value="/resolved/python"),
+            patch("comfy_cli.command.install.clone_comfyui"),
+            patch("comfy_cli.command.install.check_comfy_repo", return_value=(True, None)),
+            patch("comfy_cli.command.install.DependencyCompiler") as MockCompiler,
+            patch("comfy_cli.command.install.WorkspaceManager"),
+            patch("comfy_cli.config_manager.ConfigManager"),
+            patch.object(install.workspace_manager, "skip_prompting", True),
+            patch.object(install.workspace_manager, "setup_workspace_manager"),
+        ):
+            MockCompiler.Install_Build_Deps = MagicMock()
+            MockCompiler.return_value = MagicMock()
+
+            install.execute(
+                url="https://github.com/test/test.git",
+                comfy_path=repo_dir,
+                restore=False,
+                skip_manager=True,
+                version="nightly",
+                fast_deps=True,
+                gpu=GPU_OPTION.NVIDIA,
+                cuda_version=constants.CUDAVersion.v12_6,
+            )
+
+        assert MockCompiler.call_args[1]["cuda_version"] == "12.6"
+
 
 class TestAutoDetectIntegration:
     def test_auto_detected_cuda_tag_used(self, tmp_path):

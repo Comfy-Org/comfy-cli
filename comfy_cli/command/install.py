@@ -260,7 +260,14 @@ def execute(
             # Workspace venv needs uv bootstrapped; for the global Python
             # uv is already available as a comfy-cli dependency.
             DependencyCompiler.Install_Build_Deps(executable=python)
-        resolved_cuda = cuda_tag if cuda_tag else (cuda_version.value if cuda_version else None)
+        if cuda_tag:
+            # DependencyCompiler expects a dotted version like "13.0", not a tag like "cu130"
+            digits = cuda_tag[2:]
+            resolved_cuda = f"{digits[:2]}.{digits[2:]}"
+        elif cuda_version:
+            resolved_cuda = cuda_version.value
+        else:
+            resolved_cuda = None
         depComp = DependencyCompiler(
             cwd=repo_dir,
             executable=python,
