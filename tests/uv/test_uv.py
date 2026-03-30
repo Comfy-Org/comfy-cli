@@ -171,6 +171,14 @@ def test_nvidia_custom_cuda_version():
     assert depComp.gpuUrl == "https://download.pytorch.org/whl/cu118"
 
 
+def test_nvidia_cuda_13():
+    depComp = DependencyCompiler(
+        cwd=temp, gpu=GPU_OPTION.NVIDIA, outDir=temp, reqFilesCore=[], reqFilesExt=[], cuda_version="13.0"
+    )
+    assert depComp.torchBackend == "cu130"
+    assert depComp.gpuUrl == "https://download.pytorch.org/whl/cu130"
+
+
 def test_amd_custom_rocm_version():
     depComp = DependencyCompiler(
         cwd=temp, gpu=GPU_OPTION.AMD, outDir=temp, reqFilesCore=[], reqFilesExt=[], rocm_version="7.1"
