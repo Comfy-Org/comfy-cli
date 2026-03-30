@@ -55,7 +55,20 @@ def _paths_match(path_a: str, path_b: str) -> bool:
         return os.path.realpath(path_a) == os.path.realpath(path_b)
 
 
-def check_comfy_repo(path) -> tuple[bool, git.Repo | None]:
+def _has_comfyui_markers(path: str) -> bool:
+    """Check for ComfyUI-specific files/directories when git metadata isn't available."""
+    markers = ["main.py", "comfy", "nodes.py", "comfy_extras"]
+    return sum(os.path.exists(os.path.join(path, m)) for m in markers) >= 3
+
+
+def check_comfy_repo(path) -> tuple[bool, str | None]:
+    """Check whether *path* is (or is inside) a ComfyUI installation.
+
+    Returns ``(True, resolved_path)`` on success, ``(False, None)`` otherwise.
+    Git remote-URL matching is tried first; if that fails (no ``.git``, fork,
+    mirror, zip download, portable build) a file-based marker check is used as
+    a fallback.
+    """
     if not os.path.exists(path):
         return False, None
     try:
@@ -67,21 +80,27 @@ def check_comfy_repo(path) -> tuple[bool, git.Repo | None]:
             parts = path.split(os.sep)
             try:
                 index = parts.index("custom_nodes")
-                path = os.sep.join(parts[:index])
+                parent = os.sep.join(parts[:index])
 
-                repo = git.Repo(path, search_parent_directories=True)
+                repo = git.Repo(parent, search_parent_directories=True)
                 path_is_comfy_repo = any(remote.url in constants.COMFY_ORIGIN_URL_CHOICES for remote in repo.remotes)
             except ValueError:
                 pass
 
         if path_is_comfy_repo:
-            return path_is_comfy_repo, repo
-        else:
-            return False, None
+            return True, str(repo.working_dir)
     # Not in a git repo at all
     # pylint: disable=E1101  # no-member
     except git.exc.InvalidGitRepositoryError:
-        return False, None
+        pass
+
+    # Fallback: file-based detection for non-git installations (zip downloads,
+    # portable builds, forks with non-standard remotes, etc.)
+    abs_path = os.path.abspath(path)
+    if _has_comfyui_markers(abs_path):
+        return True, abs_path
+
+    return False, None
 
 
 # Generate and update this following method using chatGPT
@@ -228,9 +247,9 @@ class WorkspaceManager:
         # Check for current workspace if requested
         if self.use_here is True:
             current_directory = os.getcwd()
-            found_comfy_repo, comfy_repo = check_comfy_repo(current_directory)
+            found_comfy_repo, comfy_path = check_comfy_repo(current_directory)
             if found_comfy_repo:
-                return comfy_repo.working_dir, WorkspaceType.CURRENT_DIR
+                return comfy_path, WorkspaceType.CURRENT_DIR
             else:
                 return (
                     os.path.join(current_directory, "ComfyUI"),
@@ -240,13 +259,13 @@ class WorkspaceManager:
         # Check the current directory for a ComfyUI
         if self.use_here is None:
             current_directory = os.getcwd()
-            found_comfy_repo, comfy_repo = check_comfy_repo(os.path.join(current_directory))
+            found_comfy_repo, comfy_path = check_comfy_repo(os.path.join(current_directory))
             # If it's in a sub dir of the ComfyUI repo, get the repo working dir
             if found_comfy_repo:
                 default_workspace = self.config_manager.get(constants.CONFIG_KEY_DEFAULT_WORKSPACE)
-                if default_workspace and _paths_match(comfy_repo.working_dir, default_workspace):
-                    return comfy_repo.working_dir, WorkspaceType.DEFAULT
-                return comfy_repo.working_dir, WorkspaceType.CURRENT_DIR
+                if default_workspace and _paths_match(comfy_path, default_workspace):
+                    return comfy_path, WorkspaceType.DEFAULT
+                return comfy_path, WorkspaceType.CURRENT_DIR
 
         # Check for user-set default workspace
         default_workspace = self.config_manager.get(constants.CONFIG_KEY_DEFAULT_WORKSPACE)

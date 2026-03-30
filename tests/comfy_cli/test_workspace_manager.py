@@ -108,9 +108,7 @@ class TestStep1Workspace:
     def test_workspace_overrides_cwd_matching_default(self, mock_getcwd, mock_check):
         """--workspace wins even when cwd is the default workspace."""
         mock_getcwd.return_value = "/home/user/comfy/ComfyUI"
-        mock_repo = MagicMock()
-        mock_repo.working_dir = "/home/user/comfy/ComfyUI"
-        mock_check.return_value = (True, mock_repo)
+        mock_check.return_value = (True, "/home/user/comfy/ComfyUI")
 
         mgr = _make_manager(specified_workspace="/other/ComfyUI")
         _mock_config(mgr, default_workspace="/home/user/comfy/ComfyUI")
@@ -126,9 +124,7 @@ class TestStep3Here:
     def test_here_flag_forces_current_dir_even_if_matches_default(self, mock_getcwd, mock_check):
         """--here always returns CURRENT_DIR, even when cwd IS the default."""
         mock_getcwd.return_value = "/home/user/comfy/ComfyUI"
-        mock_repo = MagicMock()
-        mock_repo.working_dir = "/home/user/comfy/ComfyUI"
-        mock_check.return_value = (True, mock_repo)
+        mock_check.return_value = (True, "/home/user/comfy/ComfyUI")
 
         mgr = _make_manager(use_here=True)
         _mock_config(mgr, default_workspace="/home/user/comfy/ComfyUI")
@@ -158,9 +154,7 @@ class TestStep4AutoDetect:
     def test_cwd_matches_default_returns_default_type(self, mock_getcwd, mock_check):
         """Core fix: cwd is the configured default workspace -> DEFAULT."""
         mock_getcwd.return_value = "/home/user/comfy/ComfyUI"
-        mock_repo = MagicMock()
-        mock_repo.working_dir = "/home/user/comfy/ComfyUI"
-        mock_check.return_value = (True, mock_repo)
+        mock_check.return_value = (True, "/home/user/comfy/ComfyUI")
 
         mgr = _make_manager(use_here=None)
         _mock_config(mgr, default_workspace="/home/user/comfy/ComfyUI")
@@ -176,9 +170,7 @@ class TestStep4AutoDetect:
     def test_cwd_different_repo_returns_current_dir(self, mock_getcwd, mock_check):
         """cwd is a ComfyUI repo but NOT the default -> CURRENT_DIR."""
         mock_getcwd.return_value = "/home/user/other/ComfyUI"
-        mock_repo = MagicMock()
-        mock_repo.working_dir = "/home/user/other/ComfyUI"
-        mock_check.return_value = (True, mock_repo)
+        mock_check.return_value = (True, "/home/user/other/ComfyUI")
 
         mgr = _make_manager(use_here=None)
         _mock_config(mgr, default_workspace="/home/user/comfy/ComfyUI")
@@ -194,9 +186,7 @@ class TestStep4AutoDetect:
     def test_cwd_repo_no_default_configured(self, mock_getcwd, mock_check):
         """cwd is a ComfyUI repo, no default configured -> CURRENT_DIR."""
         mock_getcwd.return_value = "/home/user/comfy/ComfyUI"
-        mock_repo = MagicMock()
-        mock_repo.working_dir = "/home/user/comfy/ComfyUI"
-        mock_check.return_value = (True, mock_repo)
+        mock_check.return_value = (True, "/home/user/comfy/ComfyUI")
 
         mgr = _make_manager(use_here=None)
         _mock_config(mgr, default_workspace=None)
@@ -210,9 +200,7 @@ class TestStep4AutoDetect:
     def test_cwd_repo_empty_default_returns_current_dir(self, mock_getcwd, mock_check):
         """default_workspace is empty string -> treated as not configured."""
         mock_getcwd.return_value = "/home/user/comfy/ComfyUI"
-        mock_repo = MagicMock()
-        mock_repo.working_dir = "/home/user/comfy/ComfyUI"
-        mock_check.return_value = (True, mock_repo)
+        mock_check.return_value = (True, "/home/user/comfy/ComfyUI")
 
         mgr = _make_manager(use_here=None)
         _mock_config(mgr, default_workspace="")
@@ -223,11 +211,9 @@ class TestStep4AutoDetect:
     @patch("comfy_cli.workspace_manager.check_comfy_repo")
     @patch("comfy_cli.workspace_manager.os.getcwd")
     def test_paths_match_called_with_correct_args(self, mock_getcwd, mock_check):
-        """Verify _paths_match receives working_dir and default_workspace."""
+        """Verify _paths_match receives resolved path and default_workspace."""
         mock_getcwd.return_value = "/cwd"
-        mock_repo = MagicMock()
-        mock_repo.working_dir = "/resolved/ComfyUI"
-        mock_check.return_value = (True, mock_repo)
+        mock_check.return_value = (True, "/resolved/ComfyUI")
 
         mgr = _make_manager(use_here=None)
         _mock_config(mgr, default_workspace="/configured/default")
@@ -244,10 +230,7 @@ class TestNoHereSkipsStep4:
     def test_no_here_skips_cwd_detection(self, mock_getcwd, mock_check):
         """--no-here (use_here=False) skips step 4 entirely, falls to step 5."""
         mock_getcwd.return_value = "/home/user/comfy/ComfyUI"
-        # Step 5 calls check_comfy_repo on the default workspace
-        mock_repo = MagicMock()
-        mock_repo.working_dir = "/home/user/comfy/ComfyUI"
-        mock_check.return_value = (True, mock_repo)
+        mock_check.return_value = (True, "/home/user/comfy/ComfyUI")
 
         mgr = _make_manager(use_here=False)
         _mock_config(mgr, default_workspace="/home/user/comfy/ComfyUI")
@@ -267,7 +250,7 @@ class TestStep5ConfiguredDefault:
         """cwd is NOT a ComfyUI repo -> falls through to configured default."""
         mock_getcwd.return_value = "/home/user/projects"
         mock_check.side_effect = lambda path: (
-            (True, MagicMock(working_dir="/home/user/comfy/ComfyUI"))
+            (True, "/home/user/comfy/ComfyUI")
             if path == "/home/user/comfy/ComfyUI"
             else (False, None)
         )
@@ -287,7 +270,7 @@ class TestStep6RecentFallback:
         """No default configured, valid recent workspace -> RECENT."""
         mock_getcwd.return_value = "/home/user/projects"
         mock_check.side_effect = lambda path: (
-            (True, MagicMock(working_dir="/home/user/recent/ComfyUI"))
+            (True, "/home/user/recent/ComfyUI")
             if path == "/home/user/recent/ComfyUI"
             else (False, None)
         )
