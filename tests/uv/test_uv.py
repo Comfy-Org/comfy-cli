@@ -187,6 +187,22 @@ def test_amd_custom_rocm_version():
     assert depComp.gpuUrl == "https://download.pytorch.org/whl/rocm7.1"
 
 
+def test_nvidia_auto_detected_tag():
+    depComp = DependencyCompiler(
+        cwd=temp, gpu=GPU_OPTION.NVIDIA, outDir=temp, reqFilesCore=[], reqFilesExt=[], cuda_version="12.8"
+    )
+    assert depComp.torchBackend == "cu128"
+    assert depComp.gpuUrl == "https://download.pytorch.org/whl/cu128"
+
+
+def test_nvidia_no_cuda_version_uses_default():
+    depComp = DependencyCompiler(
+        cwd=temp, gpu=GPU_OPTION.NVIDIA, outDir=temp, reqFilesCore=[], reqFilesExt=[], cuda_version=None
+    )
+    assert depComp.torchBackend == DependencyCompiler.nvidiaTorchBackend
+    assert depComp.gpuUrl == DependencyCompiler.nvidiaPytorchUrl
+
+
 @pytest.mark.parametrize("gpu", [GPU_OPTION.NVIDIA, GPU_OPTION.AMD, GPU_OPTION.CPU])
 def test_skip_torch_disables_gpu_url_and_backend(gpu):
     depComp = DependencyCompiler(cwd=temp, gpu=gpu, outDir=temp, reqFilesCore=[], reqFilesExt=[], skip_torch=True)
