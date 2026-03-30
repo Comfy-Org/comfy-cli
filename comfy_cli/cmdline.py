@@ -360,7 +360,7 @@ def install(
         )
         raise typer.Exit(code=1)
 
-    cuda_version, cuda_tag = _resolve_cuda(gpu, cuda_version)
+    cuda_version, cuda_tag = _resolve_cuda(gpu, cuda_version) if not skip_torch_or_directml else (cuda_version, None)
 
     install_inner.execute(
         url,

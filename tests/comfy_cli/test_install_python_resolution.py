@@ -230,7 +230,7 @@ class TestAutoDetectIntegration:
         cmd = _get_torch_install_cmd(mock_run.call_args_list)
         assert "https://download.pytorch.org/whl/cu126" in cmd
 
-    def test_explicit_cuda_version_overrides_tag(self, tmp_path):
+    def test_explicit_cuda_version_used_when_no_tag(self, tmp_path):
         repo_dir = str(tmp_path)
         (tmp_path / "requirements.txt").write_text("some-package\n")
 

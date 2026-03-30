@@ -18,6 +18,7 @@ from comfy_cli import constants, ui
 from comfy_cli.command.custom_nodes.command import update_node_id_cache
 from comfy_cli.command.github.pr_info import PRInfo
 from comfy_cli.constants import GPU_OPTION
+from comfy_cli.cuda_detect import DEFAULT_CUDA_TAG
 from comfy_cli.git_utils import checkout_pr, git_checkout_tag
 from comfy_cli.resolve_python import ensure_workspace_python
 from comfy_cli.uv import DependencyCompiler
@@ -65,7 +66,7 @@ def pip_install_comfyui_dependencies(
         # install torch for NVIDIA
         if gpu == GPU_OPTION.NVIDIA:
             if cuda_tag is None:
-                cuda_tag = f"cu{cuda_version.value.replace('.', '')}" if cuda_version else "cu126"
+                cuda_tag = f"cu{cuda_version.value.replace('.', '')}" if cuda_version else DEFAULT_CUDA_TAG
             result = _pip_install_torch(python, ["--index-url", f"https://download.pytorch.org/whl/{cuda_tag}"])
 
         # install torch for Intel Arc GPUs (upstream torch xpu)
