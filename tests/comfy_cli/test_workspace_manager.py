@@ -250,9 +250,7 @@ class TestStep5ConfiguredDefault:
         """cwd is NOT a ComfyUI repo -> falls through to configured default."""
         mock_getcwd.return_value = "/home/user/projects"
         mock_check.side_effect = lambda path: (
-            (True, "/home/user/comfy/ComfyUI")
-            if path == "/home/user/comfy/ComfyUI"
-            else (False, None)
+            (True, "/home/user/comfy/ComfyUI") if path == "/home/user/comfy/ComfyUI" else (False, None)
         )
 
         mgr = _make_manager(use_here=None)
@@ -270,9 +268,7 @@ class TestStep6RecentFallback:
         """No default configured, valid recent workspace -> RECENT."""
         mock_getcwd.return_value = "/home/user/projects"
         mock_check.side_effect = lambda path: (
-            (True, "/home/user/recent/ComfyUI")
-            if path == "/home/user/recent/ComfyUI"
-            else (False, None)
+            (True, "/home/user/recent/ComfyUI") if path == "/home/user/recent/ComfyUI" else (False, None)
         )
 
         mgr = _make_manager(use_here=None, use_recent=None)
