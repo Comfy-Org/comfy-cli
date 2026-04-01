@@ -1,7 +1,15 @@
 import os
 from unittest.mock import MagicMock, patch
 
-from comfy_cli.workspace_manager import WorkspaceType, _paths_match
+import pytest
+
+from comfy_cli.workspace_manager import (
+    WorkspaceType,
+    _find_comfyui_root,
+    _has_comfyui_markers,
+    _paths_match,
+    check_comfy_repo,
+)
 
 
 class TestPathsMatch:
@@ -65,6 +73,52 @@ class TestPathsMatch:
         assert _paths_match(str(real), str(link2))
 
 
+_ALL_MARKERS = ["main.py", "comfy", "nodes.py", "comfy_extras", "comfy_api"]
+_MARKER_DIRS = {"comfy", "comfy_extras", "comfy_api"}
+
+
+def _create_comfyui_markers(path, markers=None):
+    """Create ComfyUI marker files/directories under *path*."""
+    if markers is None:
+        markers = _ALL_MARKERS
+    for m in markers:
+        p = path / m
+        if m in _MARKER_DIRS:
+            p.mkdir(exist_ok=True)
+        else:
+            p.touch()
+
+
+class TestHasComfyuiMarkers:
+    def test_all_five_markers(self, tmp_path):
+        _create_comfyui_markers(tmp_path)
+        assert _has_comfyui_markers(str(tmp_path)) is True
+
+    @pytest.mark.parametrize("omit", _ALL_MARKERS)
+    def test_any_four_of_five_sufficient(self, tmp_path, omit):
+        remaining = [m for m in _ALL_MARKERS if m != omit]
+        _create_comfyui_markers(tmp_path, remaining)
+        assert _has_comfyui_markers(str(tmp_path)) is True
+
+    @pytest.mark.parametrize(
+        "present",
+        [
+            ["main.py", "comfy", "nodes.py"],
+            ["comfy", "comfy_extras", "comfy_api"],
+            ["main.py", "nodes.py", "comfy_api"],
+        ],
+    )
+    def test_three_markers_insufficient(self, tmp_path, present):
+        _create_comfyui_markers(tmp_path, present)
+        assert _has_comfyui_markers(str(tmp_path)) is False
+
+    def test_empty_directory(self, tmp_path):
+        assert _has_comfyui_markers(str(tmp_path)) is False
+
+    def test_nonexistent_path(self):
+        assert _has_comfyui_markers("/nonexistent/path/xyz") is False
+
+
 def _make_manager(*, use_here=None, specified_workspace=None, use_recent=None):
     """Create a fresh WorkspaceManager with reset singleton."""
     from comfy_cli.workspace_manager import WorkspaceManager
@@ -93,6 +147,124 @@ def _mock_config(mgr, default_workspace=None, recent_workspace=None):
     mock_cm.get.side_effect = _get
     mgr.config_manager = mock_cm
     return mock_cm
+
+
+class TestFindComfyuiRoot:
+    """Tests for the upward directory walk in _find_comfyui_root."""
+
+    def test_markers_at_given_path(self, tmp_path):
+        _create_comfyui_markers(tmp_path)
+        assert _find_comfyui_root(str(tmp_path)) == str(tmp_path)
+
+    def test_walks_up_to_parent_with_markers(self, tmp_path):
+        _create_comfyui_markers(tmp_path)
+        subdir = tmp_path / "custom_nodes" / "MyNode"
+        subdir.mkdir(parents=True)
+        assert _find_comfyui_root(str(subdir)) == str(tmp_path)
+
+    def test_walks_up_multiple_levels(self, tmp_path):
+        _create_comfyui_markers(tmp_path)
+        deep = tmp_path / "custom_nodes" / "MyNode" / "lib" / "utils"
+        deep.mkdir(parents=True)
+        assert _find_comfyui_root(str(deep)) == str(tmp_path)
+
+    def test_no_markers_anywhere(self, tmp_path):
+        subdir = tmp_path / "a" / "b"
+        subdir.mkdir(parents=True)
+        assert _find_comfyui_root(str(subdir)) is None
+
+    def test_returns_nearest_root(self, tmp_path):
+        """Nested ComfyUI installs: returns the closest (deepest) match."""
+        outer = tmp_path / "outer"
+        inner = outer / "inner"
+        inner.mkdir(parents=True)
+        _create_comfyui_markers(outer)
+        _create_comfyui_markers(inner)
+        subdir = inner / "custom_nodes"
+        subdir.mkdir()
+        assert _find_comfyui_root(str(subdir)) == str(inner)
+
+
+class TestCheckComfyRepoFallback:
+    """Tests for the marker-based fallback in check_comfy_repo."""
+
+    def test_nonexistent_path(self):
+        found, path = check_comfy_repo("/nonexistent/path/xyz")
+        assert found is False
+        assert path is None
+
+    def test_non_git_dir_with_all_markers(self, tmp_path):
+        _create_comfyui_markers(tmp_path)
+        found, path = check_comfy_repo(str(tmp_path))
+        assert found is True
+        assert path == str(tmp_path)
+
+    def test_non_git_dir_with_four_markers(self, tmp_path):
+        _create_comfyui_markers(tmp_path, ["main.py", "comfy", "nodes.py", "comfy_api"])
+        found, path = check_comfy_repo(str(tmp_path))
+        assert found is True
+        assert path == str(tmp_path)
+
+    def test_non_git_dir_insufficient_markers(self, tmp_path):
+        _create_comfyui_markers(tmp_path, ["main.py", "comfy", "nodes.py"])
+        found, path = check_comfy_repo(str(tmp_path))
+        assert found is False
+        assert path is None
+
+    def test_non_git_empty_dir(self, tmp_path):
+        found, path = check_comfy_repo(str(tmp_path))
+        assert found is False
+        assert path is None
+
+    def test_returned_path_is_absolute(self, tmp_path):
+        """Path with '..' components is resolved to a clean absolute path."""
+        _create_comfyui_markers(tmp_path)
+        subdir = tmp_path / "sub"
+        subdir.mkdir()
+        dotdot_path = os.path.join(str(subdir), "..")
+        found, path = check_comfy_repo(dotdot_path)
+        assert found is True
+        assert os.path.isabs(path)
+        assert ".." not in path
+
+    def test_subdirectory_walks_up_to_root(self, tmp_path):
+        """check_comfy_repo from a subdirectory resolves to the ComfyUI root."""
+        _create_comfyui_markers(tmp_path)
+        subdir = tmp_path / "custom_nodes" / "MyNode"
+        subdir.mkdir(parents=True)
+        found, path = check_comfy_repo(str(subdir))
+        assert found is True
+        assert path == str(tmp_path)
+
+    def test_fork_repo_with_markers_detected(self, tmp_path):
+        """Git repo with non-ComfyUI remote + markers → detected via fallback."""
+        import git as gitmodule
+
+        repo = gitmodule.Repo.init(str(tmp_path))
+        repo.create_remote("origin", "https://github.com/someone/ComfyUI-fork")
+        (tmp_path / "README.md").write_text("fork")
+        repo.index.add(["README.md"])
+        repo.index.commit("init")
+
+        _create_comfyui_markers(tmp_path)
+
+        found, path = check_comfy_repo(str(tmp_path))
+        assert found is True
+        assert path == str(tmp_path)
+
+    def test_fork_repo_without_markers_not_detected(self, tmp_path):
+        """Git repo with non-ComfyUI remote and no markers → not detected."""
+        import git as gitmodule
+
+        repo = gitmodule.Repo.init(str(tmp_path))
+        repo.create_remote("origin", "https://github.com/someone/other-project")
+        (tmp_path / "README.md").write_text("other")
+        repo.index.add(["README.md"])
+        repo.index.commit("init")
+
+        found, path = check_comfy_repo(str(tmp_path))
+        assert found is False
+        assert path is None
 
 
 class TestStep1Workspace:
@@ -420,3 +592,74 @@ class TestFullIntegration:
 
         assert ws_type == WorkspaceType.DEFAULT
         assert path == comfy_dir
+
+    def test_non_git_comfyui_detected_as_cwd(self, tmp_path):
+        """Non-git ComfyUI (zip download) detected when cd'd into it."""
+        comfy_dir = tmp_path / "ComfyUI"
+        comfy_dir.mkdir()
+        _create_comfyui_markers(comfy_dir)
+
+        mgr = _make_manager(use_here=None)
+        _mock_config(mgr, default_workspace=str(comfy_dir))
+
+        with patch("comfy_cli.workspace_manager.os.getcwd", return_value=str(comfy_dir)):
+            path, ws_type = mgr.get_workspace_path()
+
+        assert ws_type == WorkspaceType.DEFAULT
+        assert path == str(comfy_dir)
+
+    def test_non_git_comfyui_as_configured_default(self, tmp_path):
+        """Non-git ComfyUI install works as configured default (step 5)."""
+        comfy_dir = tmp_path / "ComfyUI"
+        comfy_dir.mkdir()
+        _create_comfyui_markers(comfy_dir)
+        plain_dir = tmp_path / "other"
+        plain_dir.mkdir()
+
+        mgr = _make_manager(use_here=None)
+        _mock_config(mgr, default_workspace=str(comfy_dir))
+
+        with patch("comfy_cli.workspace_manager.os.getcwd", return_value=str(plain_dir)):
+            path, ws_type = mgr.get_workspace_path()
+
+        assert ws_type == WorkspaceType.DEFAULT
+        assert path == str(comfy_dir)
+
+    def test_non_git_comfyui_from_subdirectory(self, tmp_path):
+        """Non-git ComfyUI detected when cd'd into custom_nodes/ subdirectory."""
+        comfy_dir = tmp_path / "ComfyUI"
+        comfy_dir.mkdir()
+        _create_comfyui_markers(comfy_dir)
+        subdir = comfy_dir / "custom_nodes" / "MyNode"
+        subdir.mkdir(parents=True)
+
+        mgr = _make_manager(use_here=None)
+        _mock_config(mgr, default_workspace=str(comfy_dir))
+
+        with patch("comfy_cli.workspace_manager.os.getcwd", return_value=str(subdir)):
+            path, ws_type = mgr.get_workspace_path()
+
+        assert ws_type == WorkspaceType.DEFAULT
+        assert path == str(comfy_dir)
+
+    def test_fork_repo_detected_as_comfyui(self, tmp_path):
+        """ComfyUI fork (non-standard remote) detected via marker fallback."""
+        import git as gitmodule
+
+        comfy_dir = tmp_path / "ComfyUI"
+        repo = gitmodule.Repo.init(str(comfy_dir))
+        repo.create_remote("origin", "https://github.com/someone/ComfyUI-fork")
+        (comfy_dir / "README.md").write_text("fork")
+        repo.index.add(["README.md"])
+        repo.index.commit("init")
+
+        _create_comfyui_markers(comfy_dir)
+
+        mgr = _make_manager(use_here=None)
+        _mock_config(mgr, default_workspace=str(comfy_dir))
+
+        with patch("comfy_cli.workspace_manager.os.getcwd", return_value=str(comfy_dir)):
+            path, ws_type = mgr.get_workspace_path()
+
+        assert ws_type == WorkspaceType.DEFAULT
+        assert path == str(comfy_dir)

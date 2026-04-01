@@ -57,8 +57,22 @@ def _paths_match(path_a: str, path_b: str) -> bool:
 
 def _has_comfyui_markers(path: str) -> bool:
     """Check for ComfyUI-specific files/directories when git metadata isn't available."""
-    markers = ["main.py", "comfy", "nodes.py", "comfy_extras"]
-    return sum(os.path.exists(os.path.join(path, m)) for m in markers) >= 3
+    markers = ["main.py", "comfy", "nodes.py", "comfy_extras", "comfy_api"]
+    return sum(os.path.exists(os.path.join(path, m)) for m in markers) >= 4
+
+
+def _find_comfyui_root(path: str) -> str | None:
+    """Walk up from *path* looking for a directory with ComfyUI markers."""
+    cur = os.path.abspath(path)
+    if not os.path.isdir(cur):
+        cur = os.path.dirname(cur)
+    while True:
+        if _has_comfyui_markers(cur):
+            return cur
+        parent = os.path.dirname(cur)
+        if parent == cur:
+            return None
+        cur = parent
 
 
 def check_comfy_repo(path) -> tuple[bool, str | None]:
@@ -96,9 +110,9 @@ def check_comfy_repo(path) -> tuple[bool, str | None]:
 
     # Fallback: file-based detection for non-git installations (zip downloads,
     # portable builds, forks with non-standard remotes, etc.)
-    abs_path = os.path.abspath(path)
-    if _has_comfyui_markers(abs_path):
-        return True, abs_path
+    marker_root = _find_comfyui_root(path)
+    if marker_root is not None:
+        return True, marker_root
 
     return False, None
 
