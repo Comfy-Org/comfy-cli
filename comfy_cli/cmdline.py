@@ -283,7 +283,7 @@ def install(
 
     comfy_path, _ = workspace_manager.get_workspace_path()
 
-    is_comfy_installed_at_path, repo_dir = check_comfy_repo(comfy_path)
+    is_comfy_installed_at_path, resolved_path = check_comfy_repo(comfy_path)
     if is_comfy_installed_at_path and not restore:
         rprint(f"[bold red]ComfyUI is already installed at the specified path:[/bold red] {comfy_path}\n")
         rprint(
@@ -291,8 +291,8 @@ def install(
         )
         raise typer.Exit(code=1)
 
-    if repo_dir is not None:
-        comfy_path = str(repo_dir.working_dir)
+    if resolved_path is not None:
+        comfy_path = resolved_path
 
     if checker.python_version.major < 3 or checker.python_version.minor < 9:
         rprint("[bold red]Python version 3.9 or higher is required to run ComfyUI.[/bold red]")
@@ -529,7 +529,7 @@ def set_default(
         )
         raise typer.Exit(code=1)
 
-    is_comfy_repo, comfy_repo = check_comfy_repo(comfy_path)
+    is_comfy_repo, resolved_path = check_comfy_repo(comfy_path)
     if not is_comfy_repo:
         rprint(
             f"\nSpecified path is not a ComfyUI path: {comfy_path}.\n",
@@ -537,7 +537,7 @@ def set_default(
         )
         raise typer.Exit(code=1)
 
-    comfy_path = comfy_repo.working_dir
+    comfy_path = resolved_path
 
     rprint(f"Specified path is set as default ComfyUI path: {comfy_path} ")
     workspace_manager.set_default_workspace(comfy_path)
