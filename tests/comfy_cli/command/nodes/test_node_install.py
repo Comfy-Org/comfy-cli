@@ -4,7 +4,7 @@ from unittest.mock import patch
 
 from typer.testing import CliRunner
 
-from comfy_cli.command.custom_nodes.command import app
+from comfy_cli.command.custom_nodes.command import app, update_node_id_cache
 
 runner = CliRunner()
 
@@ -274,6 +274,13 @@ def test_update_calls_update_node_id_cache():
         assert result.exit_code == 0
         mock_execute.assert_called_once()
         mock_cache.assert_called_once()
+
+
+def test_update_node_id_cache_skips_gracefully_when_cm_cli_missing():
+    """update_node_id_cache should return without error when cm-cli is not installed."""
+    with patch("comfy_cli.command.custom_nodes.command.find_cm_cli", return_value=False):
+        # Should not raise FileNotFoundError
+        update_node_id_cache()
 
 
 def test_uninstall_calls_execute():

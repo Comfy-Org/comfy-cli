@@ -728,7 +728,8 @@ def update_node_id_cache():
     workspace_path = workspace_manager.workspace_path
 
     if not find_cm_cli():
-        raise FileNotFoundError("cm-cli not found")
+        print("[bold yellow]ComfyUI-Manager is not installed. Skipping node ID cache update.[/bold yellow]")
+        return
 
     tmp_path = os.path.join(config_manager.get_config_path(), "tmp")
     if not os.path.exists(tmp_path):
