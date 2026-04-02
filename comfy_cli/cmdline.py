@@ -267,7 +267,7 @@ def install(
         typer.Option(
             "--fast-deps",
             show_default=False,
-            help="Use new fast dependency installer",
+            help="Use uv instead of pip for dependency resolution (comfy-cli built-in resolver)",
         ),
     ] = False,
     pr: Annotated[
