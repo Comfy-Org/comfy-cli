@@ -66,6 +66,9 @@ will simply update the comfy.yaml file to reflect the local setup
   pip install comfyui-manager==4.1b8          # specific version
   ```
 - `comfy --workspace=<path> install`: Install ComfyUI into `<path>/ComfyUI`.
+- `comfy install --fast-deps`: Use `uv` instead of `pip` for faster dependency resolution
+  during initial ComfyUI installation. comfy-cli's built-in resolver compiles all requirements (core + custom nodes)
+  into a single lockfile and installs from it. Also handles GPU-specific PyTorch wheel selection automatically.
 - For `comfy install`, if no path specification like `--workspace, --recent, or --here` is provided, it will be implicitly installed in `<HOME>/comfy`.
 
 #### Python environment handling
@@ -212,8 +215,9 @@ comfy node [show|simple-show] [installed|enabled|not-installed|disabled|all|snap
 #### Unified Dependency Resolution (--uv-compile)
 
 Requires ComfyUI-Manager v4.1+. Instead of installing dependencies per-node with
-`pip install`, `--uv-compile` batch-resolves all custom node dependencies via
-`uv pip compile` to avoid version conflicts.
+`pip install`, `--uv-compile` delegates to ComfyUI-Manager's unified resolver which batch-resolves
+all custom node dependencies via `uv pip compile` with **cross-node conflict detection** —
+it can identify which node packs have incompatible dependencies and why.
 
 - Install with unified resolution:
 
@@ -234,6 +238,23 @@ Requires ComfyUI-Manager v4.1+. Instead of installing dependencies per-node with
 - Use `--no-uv-compile` to override the default for a single command:
 
   `comfy node install comfyui-impact-pack --no-uv-compile`
+
+#### --fast-deps vs --uv-compile
+
+Both flags use `uv` for faster dependency resolution, but they work differently:
+
+|                       | `--fast-deps`                                   | `--uv-compile`                                |
+|-----------------------|-------------------------------------------------|-----------------------------------------------|
+| **Resolver**          | comfy-cli built-in (`DependencyCompiler`)       | ComfyUI-Manager (`UnifiedDepResolver`)        |
+| **Scope**             | `comfy install`, `comfy node install/reinstall` | Custom node commands only                     |
+| **Conflict handling** | Interactive prompt to pick a version            | Automatic detection with node attribution     |
+| **Config default**    | No                                              | Yes (`comfy manager uv-compile-default true`) |
+| **Requires**          | Only `uv`                                       | ComfyUI-Manager v4.1+                         |
+
+**When to use which:**
+- For initial ComfyUI installation with uv: `comfy install --fast-deps`
+- For custom node management with Manager v4.1+: `--uv-compile` (recommended)
+- For custom node management with older Manager: `--fast-deps`
 
 #### Bisect custom nodes
 
