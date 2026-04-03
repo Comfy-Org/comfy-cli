@@ -66,8 +66,8 @@ will simply update the comfy.yaml file to reflect the local setup
   pip install comfyui-manager==4.1b8          # specific version
   ```
 - `comfy --workspace=<path> install`: Install ComfyUI into `<path>/ComfyUI`.
-- `comfy install --fast-deps`: Use `uv` instead of `pip` for faster dependency resolution 
-  during initial ComfyUI installation. comfy-cli's built-in resolver compiles all requirements (core + custom nodes) 
+- `comfy install --fast-deps`: Use `uv` instead of `pip` for faster dependency resolution
+  during initial ComfyUI installation. comfy-cli's built-in resolver compiles all requirements (core + custom nodes)
   into a single lockfile and installs from it. Also handles GPU-specific PyTorch wheel selection automatically.
 - For `comfy install`, if no path specification like `--workspace, --recent, or --here` is provided, it will be implicitly installed in `<HOME>/comfy`.
 
@@ -215,8 +215,8 @@ comfy node [show|simple-show] [installed|enabled|not-installed|disabled|all|snap
 #### Unified Dependency Resolution (--uv-compile)
 
 Requires ComfyUI-Manager v4.1+. Instead of installing dependencies per-node with
-`pip install`, `--uv-compile` delegates to ComfyUI-Manager's unified resolver which batch-resolves 
-all custom node dependencies via `uv pip compile` with **cross-node conflict detection** — 
+`pip install`, `--uv-compile` delegates to ComfyUI-Manager's unified resolver which batch-resolves
+all custom node dependencies via `uv pip compile` with **cross-node conflict detection** —
 it can identify which node packs have incompatible dependencies and why.
 
 - Install with unified resolution:
