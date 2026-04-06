@@ -1,7 +1,8 @@
 """Tests for aria2 RPC download support."""
 
 import sys
-from unittest.mock import Mock, patch
+from types import ModuleType
+from unittest.mock import MagicMock, Mock, patch
 
 import pytest
 
@@ -21,7 +22,22 @@ def aria2_env(monkeypatch):
 
 
 @pytest.fixture()
-def mock_aria2_success(aria2_env):
+def fake_aria2p():
+    """Inject a fake aria2p module into sys.modules so import aria2p succeeds."""
+    mod = ModuleType("aria2p")
+    mod.Client = MagicMock()
+    mod.API = MagicMock()
+    saved = sys.modules.get("aria2p", _SENTINEL := object())
+    sys.modules["aria2p"] = mod
+    yield mod
+    if saved is _SENTINEL:
+        sys.modules.pop("aria2p", None)
+    else:
+        sys.modules["aria2p"] = saved
+
+
+@pytest.fixture()
+def mock_aria2_success(aria2_env, fake_aria2p):
     """Mock aria2p with a download that completes immediately."""
     mock_download = Mock()
     mock_download.total_length = 1024
@@ -34,17 +50,13 @@ def mock_aria2_success(aria2_env):
     mock_api = Mock()
     mock_api.add_uris.return_value = mock_download
 
-    with (
-        patch("aria2p.Client") as mock_client_cls,
-        patch("aria2p.API") as mock_api_cls,
-    ):
-        mock_api_cls.return_value = mock_api
-        yield {
-            "api": mock_api,
-            "client_cls": mock_client_cls,
-            "api_cls": mock_api_cls,
-            "download": mock_download,
-        }
+    fake_aria2p.API.return_value = mock_api
+    yield {
+        "api": mock_api,
+        "client_cls": fake_aria2p.Client,
+        "api_cls": fake_aria2p.API,
+        "download": mock_download,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -84,9 +96,10 @@ class TestAria2Download:
         opts = mock_aria2_success["api"].add_uris.call_args[1]["options"]
         assert "header" not in opts
 
-    def test_missing_server_env_raises(self, tmp_path, monkeypatch):
+    def test_missing_server_env_raises(self, tmp_path, fake_aria2p, monkeypatch):
         """Error when COMFYUI_MANAGER_ARIA2_SERVER is not set."""
         monkeypatch.delenv(constants.ARIA2_SERVER_ENV_KEY, raising=False)
+        monkeypatch.delenv(constants.ARIA2_SECRET_ENV_KEY, raising=False)
         with pytest.raises(DownloadException, match=constants.ARIA2_SERVER_ENV_KEY):
             _download_file_aria2("http://example.com/f.bin", tmp_path / "f.bin")
 
@@ -96,7 +109,7 @@ class TestAria2Download:
             with pytest.raises(DownloadException, match="aria2p is required"):
                 _download_file_aria2("http://example.com/f.bin", tmp_path / "f.bin")
 
-    def test_download_failure_raises(self, tmp_path, aria2_env):
+    def test_download_failure_raises(self, tmp_path, aria2_env, fake_aria2p):
         """Error when aria2 reports download failed."""
         mock_download = Mock()
         mock_download.total_length = 0
@@ -110,15 +123,12 @@ class TestAria2Download:
 
         mock_api = Mock()
         mock_api.add_uris.return_value = mock_download
+        fake_aria2p.API.return_value = mock_api
 
-        with (
-            patch("aria2p.Client"),
-            patch("aria2p.API", return_value=mock_api),
-        ):
-            with pytest.raises(DownloadException, match="403 Forbidden"):
-                _download_file_aria2("http://example.com/f.bin", tmp_path / "f.bin")
+        with pytest.raises(DownloadException, match="403 Forbidden"):
+            _download_file_aria2("http://example.com/f.bin", tmp_path / "f.bin")
 
-    def test_download_removed_raises(self, tmp_path, aria2_env):
+    def test_download_removed_raises(self, tmp_path, aria2_env, fake_aria2p):
         """Error when aria2 download is removed during progress."""
         mock_download = Mock()
         mock_download.total_length = 0
@@ -130,15 +140,12 @@ class TestAria2Download:
 
         mock_api = Mock()
         mock_api.add_uris.return_value = mock_download
+        fake_aria2p.API.return_value = mock_api
 
-        with (
-            patch("aria2p.Client"),
-            patch("aria2p.API", return_value=mock_api),
-        ):
-            with pytest.raises(DownloadException, match="removed"):
-                _download_file_aria2("http://example.com/f.bin", tmp_path / "f.bin")
+        with pytest.raises(DownloadException, match="removed"):
+            _download_file_aria2("http://example.com/f.bin", tmp_path / "f.bin")
 
-    def test_server_url_parsing(self, tmp_path, monkeypatch):
+    def test_server_url_parsing(self, tmp_path, fake_aria2p, monkeypatch):
         """Server URL is correctly parsed into host and port."""
         monkeypatch.setenv(constants.ARIA2_SERVER_ENV_KEY, "http://myserver:6800")
         monkeypatch.setenv(constants.ARIA2_SECRET_ENV_KEY, "")
@@ -153,15 +160,12 @@ class TestAria2Download:
         )
         mock_api = Mock()
         mock_api.add_uris.return_value = mock_download
+        fake_aria2p.API.return_value = mock_api
 
-        with (
-            patch("aria2p.Client") as mock_client_cls,
-            patch("aria2p.API", return_value=mock_api),
-        ):
-            _download_file_aria2("http://example.com/f.bin", tmp_path / "f.bin")
-            mock_client_cls.assert_called_once_with(host="http://myserver", port=6800, secret="")
+        _download_file_aria2("http://example.com/f.bin", tmp_path / "f.bin")
+        fake_aria2p.Client.assert_called_once_with(host="http://myserver", port=6800, secret="")
 
-    def test_server_url_default_port(self, tmp_path, monkeypatch):
+    def test_server_url_default_port(self, tmp_path, fake_aria2p, monkeypatch):
         """Default port 6800 is used when not specified in URL."""
         monkeypatch.setenv(constants.ARIA2_SERVER_ENV_KEY, "http://myserver")
         monkeypatch.setenv(constants.ARIA2_SECRET_ENV_KEY, "")
@@ -176,15 +180,12 @@ class TestAria2Download:
         )
         mock_api = Mock()
         mock_api.add_uris.return_value = mock_download
+        fake_aria2p.API.return_value = mock_api
 
-        with (
-            patch("aria2p.Client") as mock_client_cls,
-            patch("aria2p.API", return_value=mock_api),
-        ):
-            _download_file_aria2("http://example.com/f.bin", tmp_path / "f.bin")
-            mock_client_cls.assert_called_once_with(host="http://myserver", port=6800, secret="")
+        _download_file_aria2("http://example.com/f.bin", tmp_path / "f.bin")
+        fake_aria2p.Client.assert_called_once_with(host="http://myserver", port=6800, secret="")
 
-    def test_secret_passed_to_client(self, tmp_path, monkeypatch):
+    def test_secret_passed_to_client(self, tmp_path, fake_aria2p, monkeypatch):
         """Secret from env var is passed to aria2p.Client."""
         monkeypatch.setenv(constants.ARIA2_SERVER_ENV_KEY, "http://localhost:6800")
         monkeypatch.setenv(constants.ARIA2_SECRET_ENV_KEY, "supersecret")
@@ -199,13 +200,10 @@ class TestAria2Download:
         )
         mock_api = Mock()
         mock_api.add_uris.return_value = mock_download
+        fake_aria2p.API.return_value = mock_api
 
-        with (
-            patch("aria2p.Client") as mock_client_cls,
-            patch("aria2p.API", return_value=mock_api),
-        ):
-            _download_file_aria2("http://example.com/f.bin", tmp_path / "f.bin")
-            mock_client_cls.assert_called_once_with(host="http://localhost", port=6800, secret="supersecret")
+        _download_file_aria2("http://example.com/f.bin", tmp_path / "f.bin")
+        fake_aria2p.Client.assert_called_once_with(host="http://localhost", port=6800, secret="supersecret")
 
 
 # ---------------------------------------------------------------------------
