@@ -185,6 +185,26 @@ class TestAria2Download:
         _download_file_aria2("http://example.com/f.bin", tmp_path / "f.bin")
         fake_aria2p.Client.assert_called_once_with(host="http://myserver", port=6800, secret="")
 
+    def test_server_url_without_scheme(self, tmp_path, fake_aria2p, monkeypatch):
+        """Server URL without scheme gets http:// prepended."""
+        monkeypatch.setenv(constants.ARIA2_SERVER_ENV_KEY, "myserver:6800")
+        monkeypatch.setenv(constants.ARIA2_SECRET_ENV_KEY, "")
+
+        mock_download = Mock(
+            total_length=100,
+            completed_length=100,
+            is_complete=True,
+            has_failed=False,
+            is_removed=False,
+            update=Mock(),
+        )
+        mock_api = Mock()
+        mock_api.add_uris.return_value = mock_download
+        fake_aria2p.API.return_value = mock_api
+
+        _download_file_aria2("http://example.com/f.bin", tmp_path / "f.bin")
+        fake_aria2p.Client.assert_called_once_with(host="http://myserver", port=6800, secret="")
+
     def test_secret_passed_to_client(self, tmp_path, fake_aria2p, monkeypatch):
         """Secret from env var is passed to aria2p.Client."""
         monkeypatch.setenv(constants.ARIA2_SERVER_ENV_KEY, "http://localhost:6800")
@@ -243,3 +263,8 @@ class TestDownloadFileDispatch:
         with patch("comfy_cli.file_utils._download_file_aria2") as mock_aria2:
             download_file("http://example.com/f.bin", tmp_path / "f.bin", downloader="aria2")
             mock_aria2.assert_called_once_with("http://example.com/f.bin", tmp_path / "f.bin", None)
+
+    def test_invalid_downloader_raises(self, tmp_path):
+        """Invalid downloader value raises DownloadException."""
+        with pytest.raises(DownloadException, match="Unknown downloader"):
+            download_file("http://example.com/f.bin", tmp_path / "f.bin", downloader="foobar")

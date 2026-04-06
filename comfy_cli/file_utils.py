@@ -112,7 +112,7 @@ def _download_file_aria2(url: str, local_filepath: pathlib.Path, headers: dict |
         raise DownloadException(
             "aria2p is required for aria2 downloads. Install it with: pip install aria2p\n"
             "You also need a running aria2c daemon. See: https://aria2.github.io/"
-        )
+        ) from None
 
     server = os.environ.get(constants.ARIA2_SERVER_ENV_KEY)
     if not server:
@@ -125,6 +125,8 @@ def _download_file_aria2(url: str, local_filepath: pathlib.Path, headers: dict |
 
     from urllib.parse import urlparse
 
+    if "://" not in server:
+        server = f"http://{server}"
     parsed = urlparse(server)
     host = f"{parsed.scheme}://{parsed.hostname}"
     port = parsed.port or 6800
@@ -132,7 +134,7 @@ def _download_file_aria2(url: str, local_filepath: pathlib.Path, headers: dict |
     try:
         api = aria2p.API(aria2p.Client(host=host, port=port, secret=secret))
     except Exception as e:
-        raise DownloadException(f"Failed to connect to aria2 RPC server at {server}: {e}")
+        raise DownloadException(f"Failed to connect to aria2 RPC server at {server}: {e}") from e
 
     options = {
         "dir": str(local_filepath.parent),
@@ -145,13 +147,21 @@ def _download_file_aria2(url: str, local_filepath: pathlib.Path, headers: dict |
     try:
         download = api.add_uris([url], options=options)
     except Exception as e:
-        raise DownloadException(f"Failed to add download to aria2: {e}")
+        raise DownloadException(f"Failed to add download to aria2: {e}") from e
 
     _poll_aria2_download(download)
 
 
+_VALID_DOWNLOADERS = {"httpx", "aria2"}
+
+
 def download_file(url: str, local_filepath: pathlib.Path, headers: dict | None = None, downloader: str = "httpx"):
     """Helper function to download a file."""
+    if downloader not in _VALID_DOWNLOADERS:
+        raise DownloadException(
+            f"Unknown downloader: {downloader!r}. Valid options: {', '.join(sorted(_VALID_DOWNLOADERS))}"
+        )
+
     local_filepath.parent.mkdir(parents=True, exist_ok=True)  # Ensure the directory exists
 
     if downloader == "aria2":
