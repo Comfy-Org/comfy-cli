@@ -442,7 +442,13 @@ class DependencyCompiler:
 
         with open(self.override, "a") as f:
             f.write("# ensure that core comfyui deps take precedence over any 3rd party extension deps\n")
-            for line in completed.stdout:
+            for line in completed.stdout.splitlines(keepends=True):
+                # Skip bare cuda-toolkit pins — torch>=2.11 depends on
+                # cuda-toolkit[cublas,cudart,...] and uv --override replaces
+                # the full spec, stripping extras and dropping CUDA runtime
+                # packages (nvidia-cuda-runtime, nvidia-cuda-nvrtc, …). #412
+                if line.strip().startswith("cuda-toolkit=="):
+                    continue
                 f.write(line)
             f.write("\n")
 

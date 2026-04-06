@@ -163,6 +163,73 @@ def test_override_file_has_no_extra_index_url():
     assert "torch" in content
 
 
+def test_make_override_does_not_strip_cuda_toolkit_extras():
+    """Regression test for #412: override must not pin cuda-toolkit without extras.
+
+    torch >= 2.11 depends on cuda-toolkit[cublas,cudart,...]==13.0.2.
+    make_override() appends the first compile's flat output to override.txt,
+    which writes 'cuda-toolkit==13.0.2' (no extras). When compile_core_plus_ext()
+    uses this override, uv replaces torch's extras-bearing requirement with the
+    bare pin, silently dropping nvidia-cuda-runtime, nvidia-cuda-nvrtc, and
+    8 other CUDA packages.
+    """
+    # Simulate torch >= 2.11 first-compile output (flat pins, no extras)
+    mock_stdout = "\n".join([
+        "cuda-bindings==13.2.0",
+        "cuda-pathfinder==1.5.1",
+        "cuda-toolkit==13.0.2",
+        "nvidia-cublas==13.1.0.3",
+        "nvidia-cuda-cupti==13.0.85",
+        "nvidia-cuda-nvrtc==13.0.88",
+        "nvidia-cuda-runtime==13.0.96",
+        "nvidia-cudnn-cu13==9.19.0.56",
+        "nvidia-cufft==12.0.0.61",
+        "nvidia-cufile==1.15.1.6",
+        "nvidia-curand==10.4.0.35",
+        "nvidia-cusolver==12.0.4.66",
+        "nvidia-cusparse==12.6.3.3",
+        "nvidia-cusparselt-cu13==0.8.0",
+        "nvidia-nccl-cu13==2.28.9",
+        "nvidia-nvjitlink==13.0.88",
+        "nvidia-nvshmem-cu13==3.4.5",
+        "nvidia-nvtx==13.0.85",
+        "torch==2.11.0+cu130",
+        "torchaudio==2.11.0+cu130",
+        "torchsde==0.2.6",
+        "torchvision==0.26.0+cu130",
+        "",
+    ])
+    mock_result = type("R", (), {"stdout": mock_stdout, "stderr": "", "returncode": 0})()
+
+    depComp = DependencyCompiler(
+        cwd=temp,
+        gpu=GPU_OPTION.NVIDIA,
+        outDir=temp,
+        reqFilesCore=[mockReqsDir / "core_reqs.txt"],
+        reqFilesExt=[],
+        cuda_version="13.0",
+    )
+
+    with patch.object(DependencyCompiler, "Compile", return_value=mock_result):
+        depComp.make_override()
+
+    override_content = depComp.override.read_text()
+
+    # The override must not contain a bare 'cuda-toolkit==X.Y.Z' pin.
+    # If cuda-toolkit appears, it must include extras like [cublas,cudart,...].
+    # A bare pin causes uv --override to replace torch's extras-bearing
+    # requirement, dropping all extras-only transitive CUDA runtime packages.
+    for line in override_content.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("cuda-toolkit=="):
+            pytest.fail(
+                f"Override contains bare cuda-toolkit pin without extras: {stripped!r}\n"
+                "This causes uv to strip extras from torch's cuda-toolkit dependency, "
+                "dropping nvidia-cuda-runtime, nvidia-cuda-nvrtc, and other CUDA packages.\n"
+                "See: https://github.com/Comfy-Org/comfy-cli/issues/412"
+            )
+
+
 def test_nvidia_custom_cuda_version():
     depComp = DependencyCompiler(
         cwd=temp, gpu=GPU_OPTION.NVIDIA, outDir=temp, reqFilesCore=[], reqFilesExt=[], cuda_version="11.8"

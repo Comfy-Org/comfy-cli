@@ -77,6 +77,42 @@ def test_compile_cpu():
     assert "nvidia-" not in content
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="CUDA toolkit extras are Linux-only")
+def test_compile_nvidia_cu130_preserves_cuda_runtime():
+    """Regression test for #412: cu130 compile must include CUDA runtime packages.
+
+    torch >= 2.11 depends on cuda-toolkit[cublas,cudart,...] for CUDA runtime libs.
+    make_override() must not strip these extras, or nvidia-cuda-runtime and
+    nvidia-cuda-nvrtc will be missing from the final compiled output, causing
+    'libcudart.so: cannot open shared object file' at import time.
+    """
+    dc = DependencyCompiler(
+        cwd=_temp,
+        gpu=GPU_OPTION.NVIDIA,
+        outDir=_temp,
+        reqFilesCore=[_temp / "reqs.txt"],
+        reqFilesExt=[],
+        cuda_version="13.0",
+    )
+    dc.compile_deps()
+    content = dc.out.read_text()
+
+    assert "+cu130" in content, "Expected torch+cu130 in compiled output"
+
+    # These provide libcudart.so and libnvrtc.so — the exact libraries
+    # reported missing in issue #412
+    assert "nvidia-cuda-runtime==" in content, (
+        "nvidia-cuda-runtime missing from compiled output — "
+        "cuda-toolkit extras were likely stripped by the override. "
+        "See: https://github.com/Comfy-Org/comfy-cli/issues/412"
+    )
+    assert "nvidia-cuda-nvrtc==" in content, (
+        "nvidia-cuda-nvrtc missing from compiled output — "
+        "cuda-toolkit extras were likely stripped by the override. "
+        "See: https://github.com/Comfy-Org/comfy-cli/issues/412"
+    )
+
+
 def test_compile_mac():
     content = _compile_for(GPU_OPTION.MAC_M_SERIES)
     assert "torch==" in content
