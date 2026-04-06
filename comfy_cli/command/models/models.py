@@ -219,6 +219,14 @@ def download(
             show_default=False,
         ),
     ] = None,
+    downloader: Annotated[
+        str | None,
+        typer.Option(
+            "--downloader",
+            help="Download backend: 'httpx' (default) or 'aria2' (requires aria2 RPC server).",
+            show_default=False,
+        ),
+    ] = None,
 ):
     if relative_path is not None:
         relative_path = os.path.expanduser(relative_path)
@@ -232,6 +240,8 @@ def download(
     hf_api_token = config_manager.get_or_override(
         constants.HF_API_TOKEN_ENV_KEY, constants.HF_API_TOKEN_KEY, set_hf_api_token
     )
+
+    resolved_downloader = downloader or config_manager.get(constants.CONFIG_KEY_DEFAULT_DOWNLOADER) or "httpx"
 
     is_civitai_model_url, is_civitai_api_url, model_id, version_id = check_civitai_url(url)
     is_huggingface_url, repo_id, hf_filename, hf_folder_name, hf_branch_name = check_huggingface_url(url)
@@ -329,7 +339,7 @@ def download(
             print(f"Model downloaded successfully to: {output_path}")
     else:
         print(f"Start downloading URL: {url} into {local_filepath}")
-        download_file(url, local_filepath, headers)
+        download_file(url, local_filepath, headers, downloader=resolved_downloader)
 
 
 @app.command()

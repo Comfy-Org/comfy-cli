@@ -1,5 +1,5 @@
 import pathlib
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import typer.testing
 
@@ -304,3 +304,111 @@ def test_huggingface_url_with_folder_structure():
         None,
         "main",
     )
+
+
+# ---------------------------------------------------------------------------
+# --downloader CLI option tests
+# ---------------------------------------------------------------------------
+
+runner = typer.testing.CliRunner()
+
+
+class TestDownloadCommandDownloaderOption:
+    def test_downloader_flag_forwarded(self, tmp_path):
+        """--downloader aria2 flag is forwarded to download_file."""
+        with (
+            patch("comfy_cli.command.models.models.get_workspace", return_value=tmp_path),
+            patch("comfy_cli.command.models.models.download_file") as mock_dl,
+            patch("comfy_cli.command.models.models.check_civitai_url", return_value=(False, False, None, None)),
+            patch(
+                "comfy_cli.command.models.models.check_huggingface_url", return_value=(False, None, None, None, None)
+            ),
+            patch("comfy_cli.command.models.models.ui") as mock_ui,
+            patch("comfy_cli.command.models.models.config_manager"),
+            patch("comfy_cli.tracking.track_command", lambda _cmd: lambda fn: fn),
+        ):
+            mock_ui.prompt_input.side_effect = ["mymodel.bin", ""]
+            runner.invoke(
+                app,
+                [
+                    "download",
+                    "--url",
+                    "http://example.com/model.bin",
+                    "--downloader",
+                    "aria2",
+                    "--filename",
+                    "model.bin",
+                ],
+            )
+
+            assert mock_dl.called
+            _, kwargs = mock_dl.call_args
+            assert kwargs.get("downloader") == "aria2"
+
+    def test_default_from_config(self, tmp_path):
+        """Config default_downloader is used when no --downloader flag."""
+        mock_cfg = Mock()
+        mock_cfg.get_or_override.return_value = None
+        mock_cfg.get.return_value = "aria2"
+
+        with (
+            patch("comfy_cli.command.models.models.get_workspace", return_value=tmp_path),
+            patch("comfy_cli.command.models.models.download_file") as mock_dl,
+            patch("comfy_cli.command.models.models.check_civitai_url", return_value=(False, False, None, None)),
+            patch(
+                "comfy_cli.command.models.models.check_huggingface_url", return_value=(False, None, None, None, None)
+            ),
+            patch("comfy_cli.command.models.models.ui") as mock_ui,
+            patch("comfy_cli.command.models.models.config_manager", mock_cfg),
+            patch("comfy_cli.tracking.track_command", lambda _cmd: lambda fn: fn),
+        ):
+            mock_ui.prompt_input.side_effect = ["mymodel.bin", ""]
+            runner.invoke(
+                app,
+                [
+                    "download",
+                    "--url",
+                    "http://example.com/model.bin",
+                    "--filename",
+                    "model.bin",
+                ],
+            )
+
+            assert mock_dl.called
+            _, kwargs = mock_dl.call_args
+            assert kwargs.get("downloader") == "aria2"
+
+    def test_cli_flag_overrides_config(self, tmp_path):
+        """CLI --downloader flag takes precedence over config."""
+        mock_cfg = Mock()
+        mock_cfg.get_or_override.return_value = None
+        mock_cfg.get.return_value = "aria2"
+
+        with (
+            patch("comfy_cli.command.models.models.get_workspace", return_value=tmp_path),
+            patch("comfy_cli.command.models.models.download_file") as mock_dl,
+            patch("comfy_cli.command.models.models.check_civitai_url", return_value=(False, False, None, None)),
+            patch(
+                "comfy_cli.command.models.models.check_huggingface_url", return_value=(False, None, None, None, None)
+            ),
+            patch("comfy_cli.command.models.models.ui") as mock_ui,
+            patch("comfy_cli.command.models.models.config_manager", mock_cfg),
+            patch("comfy_cli.tracking.track_command", lambda _cmd: lambda fn: fn),
+        ):
+            mock_ui.prompt_input.side_effect = ["mymodel.bin", ""]
+            runner.invoke(
+                app,
+                [
+                    "download",
+                    "--url",
+                    "http://example.com/model.bin",
+                    "--downloader",
+                    "httpx",
+                    "--filename",
+                    "model.bin",
+                ],
+            )
+
+            assert mock_dl.called
+            _, kwargs = mock_dl.call_args
+            assert kwargs.get("downloader") == "httpx"
