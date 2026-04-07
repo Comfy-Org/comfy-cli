@@ -63,9 +63,117 @@ def check_unauthorized(url: str, headers: dict | None = None) -> bool:
         return False
 
 
-def download_file(url: str, local_filepath: pathlib.Path, headers: dict | None = None):
+def _poll_aria2_download(download) -> None:
+    """Poll an aria2 download until completion, showing progress."""
+    import time
+
+    from rich.progress import (
+        BarColumn,
+        DownloadColumn,
+        Progress,
+        TimeRemainingColumn,
+        TransferSpeedColumn,
+    )
+
+    with Progress(
+        "[progress.description]{task.description}",
+        BarColumn(),
+        DownloadColumn(),
+        TransferSpeedColumn(),
+        TimeRemainingColumn(),
+    ) as progress:
+        task = progress.add_task("Downloading...", total=None)
+
+        while True:
+            try:
+                download.update()
+            except Exception as e:
+                raise DownloadException(f"Lost connection to aria2 RPC server: {e}") from e
+
+            if download.total_length > 0:
+                progress.update(task, total=download.total_length, completed=download.completed_length)
+
+            if download.is_complete:
+                if download.total_length > 0:
+                    progress.update(task, completed=download.total_length)
+                break
+            elif download.has_failed:
+                raise DownloadException(
+                    f"aria2 download failed: {download.error_message} (code: {download.error_code})"
+                )
+            elif download.is_removed:
+                raise DownloadException("aria2 download was removed before completion")
+
+            time.sleep(0.5)
+
+
+def _download_file_aria2(url: str, local_filepath: pathlib.Path, headers: dict | None = None) -> None:
+    """Download a file using aria2 RPC."""
+    try:
+        import aria2p
+    except ImportError:
+        raise DownloadException(
+            "aria2p is required for aria2 downloads. Install it with: pip install aria2p\n"
+            "You also need a running aria2c daemon. See: https://aria2.github.io/"
+        ) from None
+
+    server = os.environ.get(constants.ARIA2_SERVER_ENV_KEY)
+    if not server:
+        raise DownloadException(
+            f"aria2 downloader selected but {constants.ARIA2_SERVER_ENV_KEY} environment variable is not set.\n"
+            f"Set it to your aria2 RPC server URL, e.g.: export {constants.ARIA2_SERVER_ENV_KEY}=http://localhost:6800"
+        )
+
+    secret = os.environ.get(constants.ARIA2_SECRET_ENV_KEY, "")
+
+    from urllib.parse import urlparse
+
+    if "://" not in server:
+        server = f"http://{server}"
+    parsed = urlparse(server)
+    if not parsed.hostname:
+        raise DownloadException(f"Invalid aria2 server URL (cannot parse hostname): {server}")
+    host = f"{parsed.scheme}://{parsed.hostname}"
+    port = parsed.port or 6800
+
+    try:
+        api = aria2p.API(aria2p.Client(host=host, port=port, secret=secret))
+    except Exception as e:
+        raise DownloadException(f"Failed to connect to aria2 RPC server at {server}: {e}") from e
+
+    options = {
+        "dir": str(local_filepath.parent),
+        "out": local_filepath.name,
+    }
+
+    if headers:
+        options["header"] = [f"{k}: {v}" for k, v in headers.items()]
+
+    try:
+        download = api.add_uris([url], options=options)
+    except Exception as e:
+        raise DownloadException(f"Failed to add download to aria2: {e}") from e
+
+    _poll_aria2_download(download)
+
+    if not local_filepath.exists():
+        raise DownloadException(f"aria2 download completed but file not found at expected path: {local_filepath}")
+
+
+_VALID_DOWNLOADERS = {"httpx", "aria2"}
+
+
+def download_file(url: str, local_filepath: pathlib.Path, headers: dict | None = None, downloader: str = "httpx"):
     """Helper function to download a file."""
+    if downloader not in _VALID_DOWNLOADERS:
+        raise DownloadException(
+            f"Unknown downloader: {downloader!r}. Valid options: {', '.join(sorted(_VALID_DOWNLOADERS))}"
+        )
+
     local_filepath.parent.mkdir(parents=True, exist_ok=True)  # Ensure the directory exists
+
+    if downloader == "aria2":
+        return _download_file_aria2(url, local_filepath, headers)
 
     with httpx.stream("GET", url, follow_redirects=True, headers=headers) as response:
         if response.status_code == 200:
