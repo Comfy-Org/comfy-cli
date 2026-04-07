@@ -21,7 +21,7 @@ def _check_call(cmd: list[str], cwd: PathLike | None = None):
     try:
         subprocess.check_call(cmd, cwd=cwd)
     except subprocess.CalledProcessError:
-        if "uv" in cmd and ("install" in cmd or "sync" in cmd):
+        if len(cmd) >= 5 and cmd[1:4] == ["-m", "uv", "pip"] and cmd[4] in ("install", "sync"):
             from rich import print as rprint
 
             rprint(

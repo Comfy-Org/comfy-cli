@@ -349,3 +349,14 @@ def test_check_call_no_hint_on_uv_compile_failure(capsys):
 
     captured = capsys.readouterr().out
     assert "network filesystem" not in captured
+
+
+def test_check_call_no_hint_for_pip_install_uv(capsys):
+    """'pip install uv' must not trigger the hint even though 'uv' and 'install' are both present."""
+    cmd = ["python", "-m", "pip", "install", "--upgrade", "pip", "uv"]
+    with patch("subprocess.check_call", side_effect=subprocess.CalledProcessError(1, cmd)):
+        with pytest.raises(subprocess.CalledProcessError):
+            _check_call(cmd)
+
+    captured = capsys.readouterr().out
+    assert "network filesystem" not in captured
