@@ -1,4 +1,5 @@
 import shutil
+import subprocess
 from pathlib import Path
 from unittest.mock import patch
 
@@ -6,7 +7,7 @@ import pytest
 
 from comfy_cli import ui
 from comfy_cli.constants import GPU_OPTION
-from comfy_cli.uv import DependencyCompiler
+from comfy_cli.uv import DependencyCompiler, _check_call
 
 hereDir = Path(__file__).parent.resolve()
 mockComfyDir = hereDir / "mock_comfy"
@@ -302,3 +303,60 @@ def test_skip_torch_install_deps_no_extra_index_url():
         depComp.install_deps()
     cmd = mock_check_call.call_args[0][0]
     assert "--extra-index-url" not in cmd
+
+
+def test_check_call_prints_nfs_hint_on_uv_install_failure(capsys):
+    """When a uv pip install command fails, _check_call should print an NFS hint."""
+    cmd = ["python", "-m", "uv", "pip", "install", "--requirement", "reqs.txt"]
+    with patch("subprocess.check_call", side_effect=subprocess.CalledProcessError(2, cmd)):
+        with pytest.raises(subprocess.CalledProcessError):
+            _check_call(cmd)
+
+    captured = capsys.readouterr().out
+    assert "network filesystem" in captured
+    assert "UV_LINK_MODE" in captured
+    assert "UV_CACHE_DIR" in captured
+
+
+def test_check_call_prints_nfs_hint_on_uv_sync_failure(capsys):
+    """When a uv pip sync command fails, _check_call should print an NFS hint."""
+    cmd = ["python", "-m", "uv", "pip", "sync", "reqs.txt"]
+    with patch("subprocess.check_call", side_effect=subprocess.CalledProcessError(2, cmd)):
+        with pytest.raises(subprocess.CalledProcessError):
+            _check_call(cmd)
+
+    captured = capsys.readouterr().out
+    assert "network filesystem" in captured
+
+
+def test_check_call_no_hint_for_non_uv_failure(capsys):
+    """Non-uv commands should not trigger the NFS hint."""
+    cmd = ["python", "-m", "pip", "install", "requests"]
+    with patch("subprocess.check_call", side_effect=subprocess.CalledProcessError(1, cmd)):
+        with pytest.raises(subprocess.CalledProcessError):
+            _check_call(cmd)
+
+    captured = capsys.readouterr().out
+    assert "network filesystem" not in captured
+
+
+def test_check_call_no_hint_on_uv_compile_failure(capsys):
+    """uv pip compile failures should not trigger the NFS hint (only install/sync)."""
+    cmd = ["python", "-m", "uv", "pip", "compile", "reqs.in"]
+    with patch("subprocess.check_call", side_effect=subprocess.CalledProcessError(1, cmd)):
+        with pytest.raises(subprocess.CalledProcessError):
+            _check_call(cmd)
+
+    captured = capsys.readouterr().out
+    assert "network filesystem" not in captured
+
+
+def test_check_call_no_hint_for_pip_install_uv(capsys):
+    """'pip install uv' must not trigger the hint even though 'uv' and 'install' are both present."""
+    cmd = ["python", "-m", "pip", "install", "--upgrade", "pip", "uv"]
+    with patch("subprocess.check_call", side_effect=subprocess.CalledProcessError(1, cmd)):
+        with pytest.raises(subprocess.CalledProcessError):
+            _check_call(cmd)
+
+    captured = capsys.readouterr().out
+    assert "network filesystem" not in captured
