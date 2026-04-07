@@ -310,8 +310,6 @@ def test_huggingface_url_with_folder_structure():
 # --downloader CLI option tests
 # ---------------------------------------------------------------------------
 
-runner = typer.testing.CliRunner()
-
 
 class TestDownloadCommandDownloaderOption:
     def test_downloader_flag_forwarded(self, tmp_path):
