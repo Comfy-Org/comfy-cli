@@ -18,7 +18,21 @@ def _run(cmd: list[str], cwd: PathLike, check: bool = True) -> subprocess.Comple
 def _check_call(cmd: list[str], cwd: PathLike | None = None):
     """uses check_call to run pip, as reccomended by the pip maintainers.
     see https://pip.pypa.io/en/stable/user_guide/#using-pip-from-your-program"""
-    subprocess.check_call(cmd, cwd=cwd)
+    try:
+        subprocess.check_call(cmd, cwd=cwd)
+    except subprocess.CalledProcessError:
+        if "uv" in cmd and ("install" in cmd or "sync" in cmd):
+            from rich import print as rprint
+
+            rprint(
+                "\n[bold yellow]Hint:[/bold yellow] If you are on a network filesystem "
+                "(RunPod, NFS, etc.), this may be caused by a known uv issue.\n"
+                "Try setting one of these environment variables before running comfy:\n"
+                "  [green]export UV_LINK_MODE=copy[/green]\n"
+                "  [green]export UV_CACHE_DIR=<your-workspace>/.cache/uv[/green]\n"
+                "See https://github.com/astral-sh/uv/issues/12036 for details."
+            )
+        raise
 
 
 _req_name_re: re.Pattern[str] = re.compile(r"require\s([\w-]+)")
