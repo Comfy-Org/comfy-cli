@@ -3,6 +3,7 @@ from unittest.mock import Mock, patch
 
 import typer.testing
 
+from comfy_cli import constants
 from comfy_cli.command.models.models import app, check_civitai_url, check_huggingface_url, list_models
 
 
@@ -347,7 +348,7 @@ class TestDownloadCommandDownloaderOption:
         """Config default_downloader is used when no --downloader flag."""
         mock_cfg = Mock()
         mock_cfg.get_or_override.return_value = None
-        mock_cfg.get.return_value = "aria2"
+        mock_cfg.get.side_effect = lambda key: "aria2" if key == constants.CONFIG_KEY_DEFAULT_DOWNLOADER else None
 
         with (
             patch("comfy_cli.command.models.models.get_workspace", return_value=tmp_path),
@@ -380,7 +381,7 @@ class TestDownloadCommandDownloaderOption:
         """CLI --downloader flag takes precedence over config."""
         mock_cfg = Mock()
         mock_cfg.get_or_override.return_value = None
-        mock_cfg.get.return_value = "aria2"
+        mock_cfg.get.side_effect = lambda key: "aria2" if key == constants.CONFIG_KEY_DEFAULT_DOWNLOADER else None
 
         with (
             patch("comfy_cli.command.models.models.get_workspace", return_value=tmp_path),
