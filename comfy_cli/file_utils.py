@@ -85,7 +85,10 @@ def _poll_aria2_download(download) -> None:
         task = progress.add_task("Downloading...", total=None)
 
         while True:
-            download.update()
+            try:
+                download.update()
+            except Exception as e:
+                raise DownloadException(f"Lost connection to aria2 RPC server: {e}") from e
 
             if download.total_length > 0:
                 progress.update(task, total=download.total_length, completed=download.completed_length)
@@ -128,6 +131,8 @@ def _download_file_aria2(url: str, local_filepath: pathlib.Path, headers: dict |
     if "://" not in server:
         server = f"http://{server}"
     parsed = urlparse(server)
+    if not parsed.hostname:
+        raise DownloadException(f"Invalid aria2 server URL (cannot parse hostname): {server}")
     host = f"{parsed.scheme}://{parsed.hostname}"
     port = parsed.port or 6800
 
@@ -150,6 +155,9 @@ def _download_file_aria2(url: str, local_filepath: pathlib.Path, headers: dict |
         raise DownloadException(f"Failed to add download to aria2: {e}") from e
 
     _poll_aria2_download(download)
+
+    if not local_filepath.exists():
+        raise DownloadException(f"aria2 download completed but file not found at expected path: {local_filepath}")
 
 
 _VALID_DOWNLOADERS = {"httpx", "aria2"}

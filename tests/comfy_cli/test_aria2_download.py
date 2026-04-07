@@ -38,7 +38,11 @@ def fake_aria2p():
 
 @pytest.fixture()
 def mock_aria2_success(aria2_env, fake_aria2p):
-    """Mock aria2p with a download that completes immediately."""
+    """Mock aria2p with a download that completes immediately.
+
+    The mock ``add_uris`` side-effect creates the target file on disk so that
+    the post-download verification in ``_download_file_aria2`` passes.
+    """
     mock_download = Mock()
     mock_download.total_length = 1024
     mock_download.completed_length = 1024
@@ -48,7 +52,15 @@ def mock_aria2_success(aria2_env, fake_aria2p):
     mock_download.update = Mock()
 
     mock_api = Mock()
-    mock_api.add_uris.return_value = mock_download
+
+    def _add_uris(_uris, options=None):
+        if options:
+            import pathlib
+
+            pathlib.Path(options["dir"], options["out"]).touch()
+        return mock_download
+
+    mock_api.add_uris.side_effect = _add_uris
 
     fake_aria2p.API.return_value = mock_api
     yield {
@@ -162,7 +174,9 @@ class TestAria2Download:
         mock_api.add_uris.return_value = mock_download
         fake_aria2p.API.return_value = mock_api
 
-        _download_file_aria2("http://example.com/f.bin", tmp_path / "f.bin")
+        target = tmp_path / "f.bin"
+        target.touch()
+        _download_file_aria2("http://example.com/f.bin", target)
         fake_aria2p.Client.assert_called_once_with(host="http://myserver", port=6800, secret="")
 
     def test_server_url_default_port(self, tmp_path, fake_aria2p, monkeypatch):
@@ -182,7 +196,9 @@ class TestAria2Download:
         mock_api.add_uris.return_value = mock_download
         fake_aria2p.API.return_value = mock_api
 
-        _download_file_aria2("http://example.com/f.bin", tmp_path / "f.bin")
+        target = tmp_path / "f.bin"
+        target.touch()
+        _download_file_aria2("http://example.com/f.bin", target)
         fake_aria2p.Client.assert_called_once_with(host="http://myserver", port=6800, secret="")
 
     def test_server_url_without_scheme(self, tmp_path, fake_aria2p, monkeypatch):
@@ -202,7 +218,9 @@ class TestAria2Download:
         mock_api.add_uris.return_value = mock_download
         fake_aria2p.API.return_value = mock_api
 
-        _download_file_aria2("http://example.com/f.bin", tmp_path / "f.bin")
+        target = tmp_path / "f.bin"
+        target.touch()
+        _download_file_aria2("http://example.com/f.bin", target)
         fake_aria2p.Client.assert_called_once_with(host="http://myserver", port=6800, secret="")
 
     def test_secret_passed_to_client(self, tmp_path, fake_aria2p, monkeypatch):
@@ -222,8 +240,54 @@ class TestAria2Download:
         mock_api.add_uris.return_value = mock_download
         fake_aria2p.API.return_value = mock_api
 
-        _download_file_aria2("http://example.com/f.bin", tmp_path / "f.bin")
+        target = tmp_path / "f.bin"
+        target.touch()
+        _download_file_aria2("http://example.com/f.bin", target)
         fake_aria2p.Client.assert_called_once_with(host="http://localhost", port=6800, secret="supersecret")
+
+    def test_malformed_server_url_raises(self, tmp_path, fake_aria2p, monkeypatch):
+        """Malformed server URL with unparseable hostname raises clear error."""
+        monkeypatch.setenv(constants.ARIA2_SERVER_ENV_KEY, "://")
+        monkeypatch.setenv(constants.ARIA2_SECRET_ENV_KEY, "")
+
+        with pytest.raises(DownloadException, match="cannot parse hostname"):
+            _download_file_aria2("http://example.com/f.bin", tmp_path / "f.bin")
+
+    def test_update_connection_error_raises(self, tmp_path, aria2_env, fake_aria2p):
+        """Connection drop during polling raises DownloadException."""
+        mock_download = Mock()
+        mock_download.total_length = 0
+        mock_download.completed_length = 0
+        mock_download.is_complete = False
+        mock_download.has_failed = False
+        mock_download.is_removed = False
+        mock_download.update = Mock(side_effect=ConnectionError("RPC server gone"))
+
+        mock_api = Mock()
+        mock_api.add_uris.return_value = mock_download
+        fake_aria2p.API.return_value = mock_api
+
+        with pytest.raises(DownloadException, match="Lost connection to aria2"):
+            _download_file_aria2("http://example.com/f.bin", tmp_path / "f.bin")
+
+    def test_file_missing_after_download_raises(self, tmp_path, aria2_env, fake_aria2p):
+        """Error when aria2 reports success but file is not on disk."""
+        target = tmp_path / "subdir" / "model.safetensors"
+
+        mock_download = Mock(
+            total_length=100,
+            completed_length=100,
+            is_complete=True,
+            has_failed=False,
+            is_removed=False,
+            update=Mock(),
+        )
+        mock_api = Mock()
+        mock_api.add_uris.return_value = mock_download
+        fake_aria2p.API.return_value = mock_api
+
+        with pytest.raises(DownloadException, match="file not found at expected path"):
+            _download_file_aria2("http://example.com/model.safetensors", target)
 
 
 # ---------------------------------------------------------------------------
