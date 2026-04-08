@@ -25,6 +25,21 @@ class TestUpdateComfy:
         assert pip_call is not None, "pip install call not found"
         assert pip_call[0] == "/resolved/python"
 
+    def test_update_comfy_succeeds_when_cm_cli_missing(self, tmp_path):
+        """Regression test for #403: comfy update must not crash when cm-cli is absent."""
+        with (
+            patch("comfy_cli.cmdline.resolve_workspace_python", return_value="/resolved/python"),
+            patch.object(cmdline.workspace_manager, "workspace_path", str(tmp_path)),
+            patch("comfy_cli.cmdline.os.chdir"),
+            patch("comfy_cli.cmdline.subprocess.run"),
+            patch(
+                "comfy_cli.cmdline.custom_nodes.command.update_node_id_cache",
+                side_effect=FileNotFoundError("cm-cli not found"),
+            ) as mock_cache,
+        ):
+            cmdline.update(target="comfy")
+        mock_cache.assert_called_once()
+
 
 class TestDependency:
     def test_passes_python_to_compiler(self, tmp_path):
