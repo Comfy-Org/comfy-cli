@@ -35,9 +35,10 @@ class TestUpdateComfy:
             patch(
                 "comfy_cli.cmdline.custom_nodes.command.update_node_id_cache",
                 side_effect=FileNotFoundError("cm-cli not found"),
-            ),
+            ) as mock_cache,
         ):
             cmdline.update(target="comfy")
+        mock_cache.assert_called_once()
 
 
 class TestDependency:
