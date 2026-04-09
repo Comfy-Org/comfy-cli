@@ -2,6 +2,7 @@ import json
 import os
 import pathlib
 import subprocess
+import time
 import zipfile
 
 import httpx
@@ -162,6 +163,55 @@ def _download_file_aria2(url: str, local_filepath: pathlib.Path, headers: dict |
 
 _VALID_DOWNLOADERS = {"httpx", "aria2"}
 
+_DOWNLOAD_MAX_RETRIES = 3
+_DOWNLOAD_RETRY_BACKOFF = 2  # seconds multiplier
+_DOWNLOAD_TIMEOUT = httpx.Timeout(10.0, read=300.0)
+_TRANSIENT_EXCEPTIONS = (httpx.TimeoutException, httpx.NetworkError)
+
+
+def _cleanup_partial(filepath: pathlib.Path) -> None:
+    """Remove a partially downloaded file if it exists."""
+    try:
+        filepath.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def _friendly_network_error(exc: Exception) -> str:
+    """Return a user-friendly description of a network error."""
+    if isinstance(exc, httpx.ReadTimeout):
+        return "the server stopped sending data (read timeout)"
+    if isinstance(exc, httpx.ConnectTimeout):
+        return "could not connect to the server (connect timeout)"
+    if isinstance(exc, httpx.TimeoutException):
+        return f"the operation timed out ({type(exc).__name__})"
+    if isinstance(exc, httpx.NetworkError):
+        return f"a network error occurred ({type(exc).__name__}: {exc})"
+    return str(exc)
+
+
+def _download_file_httpx(url: str, local_filepath: pathlib.Path, headers: dict | None = None) -> None:
+    """Download a file using httpx streaming. Raises on HTTP or network errors."""
+    with httpx.stream("GET", url, follow_redirects=True, headers=headers, timeout=_DOWNLOAD_TIMEOUT) as response:
+        if response.status_code != 200:
+            status_reason = guess_status_code_reason(response.status_code, response.read())
+            raise DownloadException(f"Failed to download file.\n{status_reason}")
+
+        content_length = response.headers.get("Content-Length")
+        total = int(content_length) if content_length is not None else None
+        if total is not None:
+            description = f"Downloading {total // 1024 // 1024} MB"
+        else:
+            description = "Downloading..."
+
+        with open(local_filepath, "wb") as f:
+            for data in ui.show_progress(
+                response.iter_bytes(),
+                total,
+                description=description,
+            ):
+                f.write(data)
+
 
 def download_file(url: str, local_filepath: pathlib.Path, headers: dict | None = None, downloader: str = "httpx"):
     """Helper function to download a file."""
@@ -170,34 +220,36 @@ def download_file(url: str, local_filepath: pathlib.Path, headers: dict | None =
             f"Unknown downloader: {downloader!r}. Valid options: {', '.join(sorted(_VALID_DOWNLOADERS))}"
         )
 
-    local_filepath.parent.mkdir(parents=True, exist_ok=True)  # Ensure the directory exists
+    local_filepath.parent.mkdir(parents=True, exist_ok=True)
 
     if downloader == "aria2":
         return _download_file_aria2(url, local_filepath, headers)
 
-    with httpx.stream("GET", url, follow_redirects=True, headers=headers) as response:
-        if response.status_code == 200:
-            content_length = response.headers.get("Content-Length")
-            total = int(content_length) if content_length is not None else None
-            if total is not None:
-                description = f"Downloading {total // 1024 // 1024} MB"
-            else:
-                description = "Downloading..."
-            try:
-                with open(local_filepath, "wb") as f:
-                    for data in ui.show_progress(
-                        response.iter_bytes(),
-                        total,
-                        description=description,
-                    ):
-                        f.write(data)
-            except KeyboardInterrupt:
-                delete_eh = ui.prompt_confirm_action("Download interrupted, cleanup files?", True)
-                if delete_eh:
-                    local_filepath.unlink()
-        else:
-            status_reason = guess_status_code_reason(response.status_code, response.read())
-            raise DownloadException(f"Failed to download file.\n{status_reason}")
+    last_exc: Exception | None = None
+    for attempt in range(_DOWNLOAD_MAX_RETRIES):
+        try:
+            _download_file_httpx(url, local_filepath, headers)
+            return
+        except _TRANSIENT_EXCEPTIONS as exc:
+            last_exc = exc
+            _cleanup_partial(local_filepath)
+            if attempt < _DOWNLOAD_MAX_RETRIES - 1:
+                wait = _DOWNLOAD_RETRY_BACKOFF * (attempt + 1)
+                print(f"Download error (attempt {attempt + 1}/{_DOWNLOAD_MAX_RETRIES}): {_friendly_network_error(exc)}")
+                print(f"Retrying in {wait}s...")
+                time.sleep(wait)
+        except KeyboardInterrupt:
+            _cleanup_partial(local_filepath)
+            raise
+        except DownloadException:
+            _cleanup_partial(local_filepath)
+            raise
+
+    raise DownloadException(
+        f"Download failed after {_DOWNLOAD_MAX_RETRIES} attempts: "
+        f"{_friendly_network_error(last_exc)}\n"
+        f"Please try again later."
+    ) from last_exc
 
 
 def _load_comfyignore_spec(ignore_filename: str = ".comfyignore") -> PathSpec | None:
