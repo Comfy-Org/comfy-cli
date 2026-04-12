@@ -164,12 +164,13 @@ class TestFormatResults:
         assert first["file"] == "nodes.py"
         assert first["branch"] == "main"
         assert first["commit"] == "abc123def456"
+        assert first["file_url"] == "https://github.com/Comfy-Org/ComfyUI/blob/abc123def456/nodes.py"
         assert len(first["matches"]) == 2
 
         match = first["matches"][0]
         assert match["line"] == 42  # lineNumber + 1
         assert match["preview"] == "class LoadImage:"
-        assert "github.com/Comfy-Org/ComfyUI/blob/abc123def456/nodes.py#L42" in match["url"]
+        assert match["url"] == f"{first['file_url']}#L42"
 
     def test_empty_results(self, empty_search):
         assert _format_results(empty_search) == []
@@ -342,7 +343,7 @@ class TestPrintResults:
 
         output = capsys.readouterr().out
         # File URL printed once per file (2 files in fixture).
-        assert output.count("https://github.com/Comfy-Org/ComfyUI/blob/abc123def456/nodes.py\n") >= 0
+        assert output.count("https://github.com/Comfy-Org/ComfyUI/blob/abc123def456/nodes.py") == 1
         assert "blob/abc123def456/nodes.py" in output
         assert "blob/abc123def456/server.py" in output
         # Per-line anchors must NOT appear in non-TTY mode.
