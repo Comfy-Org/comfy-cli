@@ -167,11 +167,6 @@ def test_extract_package_as_zip(tmp_path):
     assert (extract_path / "test.txt").read_text() == "test content"
 
 
-# ---------------------------------------------------------------------------
-# Helpers for download retry/timeout tests
-# ---------------------------------------------------------------------------
-
-
 def _make_ok_response(content=b"data", content_length=None):
     """Create a mock httpx response that succeeds."""
     mock = Mock()
@@ -197,11 +192,6 @@ def _make_failing_iter(data=b"partial", exc=None):
     return factory
 
 
-# ---------------------------------------------------------------------------
-# TestCleanupPartial
-# ---------------------------------------------------------------------------
-
-
 class TestCleanupPartial:
     def test_removes_existing_file(self, tmp_path):
         f = tmp_path / "partial.bin"
@@ -213,11 +203,6 @@ class TestCleanupPartial:
         f = tmp_path / "nonexistent.bin"
         _cleanup_partial(f)  # should not raise
         assert not f.exists()
-
-
-# ---------------------------------------------------------------------------
-# TestFriendlyNetworkError
-# ---------------------------------------------------------------------------
 
 
 class TestFriendlyNetworkError:
@@ -237,14 +222,19 @@ class TestFriendlyNetworkError:
         msg = _friendly_network_error(httpx.ReadError("connection reset"))
         assert "ReadError" in msg
 
+    def test_protocol_error(self):
+        msg = _friendly_network_error(httpx.RemoteProtocolError("peer closed"))
+        assert "protocol error" in msg
+        assert "RemoteProtocolError" in msg
+
+    def test_proxy_error(self):
+        msg = _friendly_network_error(httpx.ProxyError("bad proxy"))
+        assert "proxy error" in msg
+        assert "ProxyError" in msg
+
     def test_other_exception(self):
         msg = _friendly_network_error(RuntimeError("boom"))
         assert msg == "boom"
-
-
-# ---------------------------------------------------------------------------
-# TestDownloadTimeout
-# ---------------------------------------------------------------------------
 
 
 class TestDownloadTimeout:
@@ -259,11 +249,6 @@ class TestDownloadTimeout:
         assert isinstance(timeout, httpx.Timeout)
         assert timeout.read == 300.0
         assert timeout.connect == 10.0
-
-
-# ---------------------------------------------------------------------------
-# TestDownloadRetry
-# ---------------------------------------------------------------------------
 
 
 class TestDownloadRetry:
@@ -298,6 +283,36 @@ class TestDownloadRetry:
 
         assert dest.read_bytes() == b"ok"
         assert mock_stream.call_count == 3
+
+    @patch("comfy_cli.file_utils.time.sleep")
+    @patch("httpx.stream")
+    def test_succeeds_after_protocol_error(self, mock_stream, mock_sleep, tmp_path):
+        """Download retries on RemoteProtocolError (e.g. peer closed connection mid-stream)."""
+        mock_stream.side_effect = [
+            httpx.RemoteProtocolError("peer closed connection"),
+            _make_ok_response(content=b"ok"),
+        ]
+
+        dest = tmp_path / "model.bin"
+        download_file("http://example.com/model.bin", dest)
+
+        assert dest.read_bytes() == b"ok"
+        assert mock_stream.call_count == 2
+
+    @patch("comfy_cli.file_utils.time.sleep")
+    @patch("httpx.stream")
+    def test_succeeds_after_proxy_error(self, mock_stream, mock_sleep, tmp_path):
+        """Download retries on ProxyError."""
+        mock_stream.side_effect = [
+            httpx.ProxyError("bad gateway"),
+            _make_ok_response(content=b"ok"),
+        ]
+
+        dest = tmp_path / "model.bin"
+        download_file("http://example.com/model.bin", dest)
+
+        assert dest.read_bytes() == b"ok"
+        assert mock_stream.call_count == 2
 
     @patch("comfy_cli.file_utils.time.sleep")
     @patch("httpx.stream")
@@ -370,11 +385,6 @@ class TestDownloadRetry:
         assert isinstance(exc_info.value.__cause__, httpx.ReadTimeout)
 
 
-# ---------------------------------------------------------------------------
-# TestDownloadPartialCleanup
-# ---------------------------------------------------------------------------
-
-
 class TestDownloadPartialCleanup:
     @patch("comfy_cli.file_utils.time.sleep")
     @patch("httpx.stream")
@@ -419,8 +429,12 @@ class TestDownloadPartialCleanup:
 
     @patch("comfy_cli.file_utils.time.sleep")
     @patch("httpx.stream")
-    def test_cleanup_on_http_error(self, mock_stream, mock_sleep, tmp_path):
-        """Cleanup is attempted even on non-retryable DownloadException."""
+    def test_preexisting_file_preserved_on_http_error(self, mock_stream, mock_sleep, tmp_path):
+        """A pre-existing file at the destination is NOT touched when the server returns an HTTP error.
+
+        HTTP errors are raised before _download_file_httpx opens the output file, so there is no
+        partial download to clean up. The helper must not destroy unrelated pre-existing data.
+        """
         resp = Mock()
         resp.status_code = 403
         resp.read.return_value = ""
@@ -429,17 +443,57 @@ class TestDownloadPartialCleanup:
         mock_stream.return_value = resp
 
         dest = tmp_path / "model.bin"
-        # Pre-create a file to simulate a previous partial download
-        dest.write_bytes(b"leftover")
+        dest.write_bytes(b"IMPORTANT pre-existing data")
 
         with pytest.raises(DownloadException):
             download_file("http://example.com/model.bin", dest)
 
-        assert not dest.exists()
+        assert dest.exists()
+        assert dest.read_bytes() == b"IMPORTANT pre-existing data"
 
+    @patch("comfy_cli.file_utils.time.sleep")
     @patch("httpx.stream")
-    def test_cleanup_on_keyboard_interrupt(self, mock_stream, tmp_path):
-        """Partial file is cleaned up on KeyboardInterrupt (with skip_prompting)."""
+    def test_preexisting_file_preserved_on_connect_error(self, mock_stream, mock_sleep, tmp_path):
+        """A pre-existing file is NOT deleted when all retries fail with a pre-open transient error.
+
+        ConnectError/ConnectTimeout are raised at httpx.stream() entry, before the output file
+        is opened. Cleanup must not run in that case, or it would wipe out an unrelated
+        pre-existing file at the destination path.
+        """
+        mock_stream.side_effect = httpx.ConnectError("refused")
+
+        dest = tmp_path / "model.bin"
+        dest.write_bytes(b"IMPORTANT pre-existing data")
+
+        with pytest.raises(DownloadException, match="Download failed after 3 attempts"):
+            download_file("http://example.com/model.bin", dest)
+
+        assert dest.exists()
+        assert dest.read_bytes() == b"IMPORTANT pre-existing data"
+
+    @patch("comfy_cli.file_utils.ui.prompt_confirm_action", return_value=True)
+    @patch("httpx.stream")
+    def test_preexisting_file_preserved_on_interrupt_before_open(self, mock_stream, mock_prompt, tmp_path):
+        """KeyboardInterrupt during connection setup (before output file is opened) must not
+        prompt the user or delete an unrelated pre-existing file.
+        """
+        mock_stream.side_effect = KeyboardInterrupt()
+
+        dest = tmp_path / "model.bin"
+        dest.write_bytes(b"IMPORTANT pre-existing data")
+
+        with pytest.raises(KeyboardInterrupt):
+            download_file("http://example.com/model.bin", dest)
+
+        # Prompt should NOT have been shown — the file was never opened this attempt.
+        mock_prompt.assert_not_called()
+        assert dest.exists()
+        assert dest.read_bytes() == b"IMPORTANT pre-existing data"
+
+    @patch("comfy_cli.file_utils.ui.prompt_confirm_action", return_value=True)
+    @patch("httpx.stream")
+    def test_keyboard_interrupt_cleans_up_when_user_confirms(self, mock_stream, mock_prompt, tmp_path):
+        """On KeyboardInterrupt the user is prompted; confirming removes the partial file and re-raises."""
         resp = Mock()
         resp.status_code = 200
         resp.headers = {}
@@ -452,5 +506,25 @@ class TestDownloadPartialCleanup:
         with pytest.raises(KeyboardInterrupt):
             download_file("http://example.com/model.bin", dest)
 
-        # File should be cleaned up (default prompt answer is True with skip_prompting)
+        mock_prompt.assert_called_once()
         assert not dest.exists()
+
+    @patch("comfy_cli.file_utils.ui.prompt_confirm_action", return_value=False)
+    @patch("httpx.stream")
+    def test_keyboard_interrupt_keeps_partial_when_user_declines(self, mock_stream, mock_prompt, tmp_path):
+        """On KeyboardInterrupt the user is prompted; declining keeps the partial file on disk."""
+        resp = Mock()
+        resp.status_code = 200
+        resp.headers = {}
+        resp.iter_bytes = Mock(side_effect=_make_failing_iter(b"partial data", KeyboardInterrupt()))
+        resp.__enter__ = Mock(return_value=resp)
+        resp.__exit__ = Mock(return_value=None)
+        mock_stream.return_value = resp
+
+        dest = tmp_path / "model.bin"
+        with pytest.raises(KeyboardInterrupt):
+            download_file("http://example.com/model.bin", dest)
+
+        mock_prompt.assert_called_once()
+        assert dest.exists()
+        assert dest.read_bytes() == b"partial data"

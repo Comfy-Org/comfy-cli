@@ -166,7 +166,12 @@ _VALID_DOWNLOADERS = {"httpx", "aria2"}
 _DOWNLOAD_MAX_RETRIES = 3
 _DOWNLOAD_RETRY_BACKOFF = 2  # seconds multiplier
 _DOWNLOAD_TIMEOUT = httpx.Timeout(10.0, read=300.0)
-_TRANSIENT_EXCEPTIONS = (httpx.TimeoutException, httpx.NetworkError)
+_TRANSIENT_EXCEPTIONS = (
+    httpx.TimeoutException,
+    httpx.NetworkError,
+    httpx.ProtocolError,
+    httpx.ProxyError,
+)
 
 
 def _cleanup_partial(filepath: pathlib.Path) -> None:
@@ -187,11 +192,28 @@ def _friendly_network_error(exc: Exception) -> str:
         return f"the operation timed out ({type(exc).__name__})"
     if isinstance(exc, httpx.NetworkError):
         return f"a network error occurred ({type(exc).__name__}: {exc})"
+    if isinstance(exc, httpx.ProtocolError):
+        return f"a protocol error occurred ({type(exc).__name__}: {exc})"
+    if isinstance(exc, httpx.ProxyError):
+        return f"a proxy error occurred ({type(exc).__name__}: {exc})"
     return str(exc)
 
 
-def _download_file_httpx(url: str, local_filepath: pathlib.Path, headers: dict | None = None) -> None:
-    """Download a file using httpx streaming. Raises on HTTP or network errors."""
+def _download_file_httpx(
+    url: str,
+    local_filepath: pathlib.Path,
+    headers: dict | None = None,
+    *,
+    state: dict | None = None,
+) -> None:
+    """Download a file using httpx streaming. Raises on HTTP or network errors.
+
+    If ``state`` is provided, ``state["file_opened"]`` is set to True immediately
+    after the output file is opened for writing. Callers use this to distinguish
+    failures raised *before* the destination was touched (HTTP errors, ConnectError,
+    etc.) from failures raised *after* writing started (mid-stream ReadTimeout),
+    so they can avoid deleting an unrelated pre-existing file at the destination.
+    """
     with httpx.stream("GET", url, follow_redirects=True, headers=headers, timeout=_DOWNLOAD_TIMEOUT) as response:
         if response.status_code != 200:
             status_reason = guess_status_code_reason(response.status_code, response.read())
@@ -205,6 +227,8 @@ def _download_file_httpx(url: str, local_filepath: pathlib.Path, headers: dict |
             description = "Downloading..."
 
         with open(local_filepath, "wb") as f:
+            if state is not None:
+                state["file_opened"] = True
             for data in ui.show_progress(
                 response.iter_bytes(),
                 total,
@@ -226,23 +250,32 @@ def download_file(url: str, local_filepath: pathlib.Path, headers: dict | None =
         return _download_file_aria2(url, local_filepath, headers)
 
     last_exc: Exception | None = None
+    state: dict = {"file_opened": False}
+
     for attempt in range(_DOWNLOAD_MAX_RETRIES):
+        state["file_opened"] = False
         try:
-            _download_file_httpx(url, local_filepath, headers)
+            _download_file_httpx(url, local_filepath, headers, state=state)
             return
         except _TRANSIENT_EXCEPTIONS as exc:
             last_exc = exc
-            _cleanup_partial(local_filepath)
+            # Only clean up if _download_file_httpx actually opened the destination —
+            # otherwise we'd delete an unrelated pre-existing file at the same path.
+            if state["file_opened"]:
+                _cleanup_partial(local_filepath)
             if attempt < _DOWNLOAD_MAX_RETRIES - 1:
                 wait = _DOWNLOAD_RETRY_BACKOFF * (attempt + 1)
                 print(f"Download error (attempt {attempt + 1}/{_DOWNLOAD_MAX_RETRIES}): {_friendly_network_error(exc)}")
                 print(f"Retrying in {wait}s...")
                 time.sleep(wait)
         except KeyboardInterrupt:
-            _cleanup_partial(local_filepath)
-            raise
-        except DownloadException:
-            _cleanup_partial(local_filepath)
+            # Only prompt/cleanup if we actually opened the destination this attempt.
+            # If the interrupt arrived during connection setup, there is no partial
+            # file and the destination may hold an unrelated pre-existing file.
+            if state["file_opened"]:
+                delete_eh = ui.prompt_confirm_action("Download interrupted, cleanup files?", True)
+                if delete_eh:
+                    _cleanup_partial(local_filepath)
             raise
 
     raise DownloadException(
