@@ -355,6 +355,7 @@ class TestPrintResults:
     def test_tty_emits_osc8_and_hides_urls(self, search_response):
         """TTY output: OSC 8 escapes present, URLs not shown as plain text."""
         import io
+        import re
 
         from rich.console import Console
 
@@ -371,10 +372,17 @@ class TestPrintResults:
         output = buf.getvalue()
         # OSC 8 hyperlink sequences must be present.
         assert "\x1b]8;" in output
-        # Line-anchor URLs embedded in escapes, not as visible text runs.
-        assert "#L42" in output  # inside OSC 8 payload
-        # Preview text still rendered.
-        assert "class LoadImage:" in output
+
+        # Strip OSC 8 and SGR escape sequences to get visible text only.
+        visible = re.sub(r"\x1b\][^\x1b\x07]*(?:\x07|\x1b\\)", "", output)
+        visible = re.sub(r"\x1b\[[0-9;]*m", "", visible)
+
+        # Raw URLs must NOT appear in visible output (they're inside OSC 8 payloads).
+        assert "https://github.com/" not in visible
+        # Header and line content must be rendered.
+        assert "Comfy-Org/ComfyUI / nodes.py" in visible
+        assert "L   42" in visible
+        assert "class LoadImage:" in visible
 
     def test_non_tty_ignores_force_color_env(self, capsys, search_response, monkeypatch):
         """FORCE_COLOR / TTY_COMPATIBLE must not leak OSC 8 into a piped stream."""
