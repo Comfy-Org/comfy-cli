@@ -476,8 +476,16 @@ def get_latest_release(repo_owner: str, repo_name: str) -> GithubRelease | None:
     """
     url = f"https://api.github.com/repos/{repo_owner}/{repo_name}/releases/latest"
 
+    headers = {}
+    if github_token := os.getenv("GITHUB_TOKEN"):
+        headers["Authorization"] = f"Bearer {github_token}"
+
     try:
-        response = requests.get(url, timeout=5)
+        response = requests.get(url, headers=headers, timeout=5)
+
+        if response.status_code in (403, 429):
+            handle_github_rate_limit(response)
+
         response.raise_for_status()
 
         data = response.json()

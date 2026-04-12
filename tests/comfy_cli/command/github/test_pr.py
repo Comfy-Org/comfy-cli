@@ -11,6 +11,7 @@ from comfy_cli.command.install import (
     PRInfo,
     fetch_pr_info,
     find_pr_by_branch,
+    get_latest_release,
     handle_github_rate_limit,
     handle_pr_checkout,
     parse_pr_reference,
@@ -443,6 +444,57 @@ class TestEdgeCases:
 
         assert result is True
         assert mock_subprocess.call_count == 3
+
+
+class TestGetLatestRelease:
+    """Test get_latest_release GitHub API calls"""
+
+    @patch("requests.get")
+    def test_sends_auth_header_when_token_set(self, mock_get):
+        """Ensure GITHUB_TOKEN is sent as Bearer auth to avoid rate limits (issue #425)"""
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "tag_name": "v0.18.2",
+            "zipball_url": "https://github.com/comfyanonymous/ComfyUI/archive/v0.18.2.zip",
+        }
+        mock_get.return_value = mock_response
+
+        with patch.dict("os.environ", {"GITHUB_TOKEN": "ghp_test123"}):
+            result = get_latest_release("comfyanonymous", "ComfyUI")
+
+        headers = mock_get.call_args.kwargs.get("headers", {})
+        assert headers["Authorization"] == "Bearer ghp_test123"
+        assert result is not None
+        assert result["tag"] == "v0.18.2"
+
+    @patch("requests.get")
+    def test_no_auth_header_without_token(self, mock_get):
+        """Without GITHUB_TOKEN the request has no Authorization header"""
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "tag_name": "v0.18.2",
+            "zipball_url": "https://github.com/comfyanonymous/ComfyUI/archive/v0.18.2.zip",
+        }
+        mock_get.return_value = mock_response
+
+        with patch.dict("os.environ", {}, clear=True):
+            get_latest_release("comfyanonymous", "ComfyUI")
+
+        headers = mock_get.call_args.kwargs.get("headers", {})
+        assert "Authorization" not in headers
+
+    @patch("requests.get")
+    def test_rate_limit_raises_error(self, mock_get):
+        """A 403 with exhausted rate limit raises GitHubRateLimitError"""
+        mock_response = Mock()
+        mock_response.status_code = 403
+        mock_response.headers = {"x-ratelimit-remaining": "0", "x-ratelimit-reset": "1700000000"}
+        mock_get.return_value = mock_response
+
+        with pytest.raises(GitHubRateLimitError):
+            get_latest_release("comfyanonymous", "ComfyUI")
 
 
 class TestHandleGithubRateLimit:
