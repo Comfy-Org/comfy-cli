@@ -120,23 +120,23 @@ def limit_hit_response(limit_hit_search):
 
 class TestBuildQuery:
     def test_simple_query(self):
-        assert _build_query("LoadImage", None, DEFAULT_COUNT) == f"count:{DEFAULT_COUNT} LoadImage"
+        assert _build_query("LoadImage", None, DEFAULT_COUNT) == f"type:file count:{DEFAULT_COUNT} LoadImage"
 
     def test_with_repo_short_name(self):
         result = _build_query("LoadImage", "ComfyUI", DEFAULT_COUNT)
-        assert result == f"repo:^Comfy\\-Org/ComfyUI$ count:{DEFAULT_COUNT} LoadImage"
+        assert result == f"repo:^Comfy\\-Org/ComfyUI$ type:file count:{DEFAULT_COUNT} LoadImage"
 
     def test_with_repo_full_name(self):
         result = _build_query("LoadImage", "Comfy-Org/ComfyUI", DEFAULT_COUNT)
-        assert result == f"repo:^Comfy\\-Org/ComfyUI$ count:{DEFAULT_COUNT} LoadImage"
+        assert result == f"repo:^Comfy\\-Org/ComfyUI$ type:file count:{DEFAULT_COUNT} LoadImage"
 
     def test_with_custom_count(self):
         result = _build_query("LoadImage", None, 50)
-        assert result == "count:50 LoadImage"
+        assert result == "type:file count:50 LoadImage"
 
     def test_with_repo_and_count(self):
         result = _build_query("LoadImage", "ComfyUI", 100)
-        assert result == "repo:^Comfy\\-Org/ComfyUI$ count:100 LoadImage"
+        assert result == "repo:^Comfy\\-Org/ComfyUI$ type:file count:100 LoadImage"
 
 
 # ---------------------------------------------------------------------------
@@ -338,7 +338,7 @@ class TestCodeSearchCLI:
 
         assert result.exit_code == 0
         assert "Comfy-Org/ComfyUI" in result.output
-        mock_fetch.assert_called_once_with(f"count:{DEFAULT_COUNT} LoadImage")
+        mock_fetch.assert_called_once_with(f"type:file count:{DEFAULT_COUNT} LoadImage")
 
     @patch("comfy_cli.command.code_search._fetch_results")
     def test_search_with_repo(self, mock_fetch, raw_api_response):
@@ -347,7 +347,7 @@ class TestCodeSearchCLI:
         result = runner.invoke(app, ["--repo", "ComfyUI", "LoadImage"])
 
         assert result.exit_code == 0
-        mock_fetch.assert_called_once_with(f"repo:^Comfy\\-Org/ComfyUI$ count:{DEFAULT_COUNT} LoadImage")
+        mock_fetch.assert_called_once_with(f"repo:^Comfy\\-Org/ComfyUI$ type:file count:{DEFAULT_COUNT} LoadImage")
 
     @patch("comfy_cli.command.code_search._fetch_results")
     def test_search_with_count(self, mock_fetch, raw_api_response):
@@ -356,7 +356,7 @@ class TestCodeSearchCLI:
         result = runner.invoke(app, ["--count", "50", "LoadImage"])
 
         assert result.exit_code == 0
-        mock_fetch.assert_called_once_with("count:50 LoadImage")
+        mock_fetch.assert_called_once_with("type:file count:50 LoadImage")
 
     @patch("comfy_cli.command.code_search._fetch_results")
     def test_search_json_output(self, mock_fetch, raw_api_response):
@@ -422,7 +422,7 @@ class TestCodeSearchCLI:
         result = runner.invoke(app, ["-r", "ComfyUI", "-n", "30", "-j", "LoadImage"])
 
         assert result.exit_code == 0
-        mock_fetch.assert_called_once_with("repo:^Comfy\\-Org/ComfyUI$ count:30 LoadImage")
+        mock_fetch.assert_called_once_with("repo:^Comfy\\-Org/ComfyUI$ type:file count:30 LoadImage")
         parsed = json.loads(result.output)
         assert "results" in parsed
 

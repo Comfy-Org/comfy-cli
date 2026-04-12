@@ -26,6 +26,7 @@ def _build_query(query: str, repo: str | None, count: int) -> str:
         if "/" not in repo:
             repo = f"Comfy-Org/{repo}"
         parts.append(f"repo:^{re.escape(repo)}$")
+    parts.append("type:file")
     parts.append(f"count:{count}")
     parts.append(query)
     return " ".join(parts)
@@ -56,20 +57,21 @@ def _format_results(search: dict) -> list[dict]:
         commit_hash = (default_branch.get("target") or {}).get("commit", {}).get("oid", "")
         ref = commit_hash or branch_name
 
+        encoded_path = quote(file_path, safe="/")
+        file_url = f"https://github.com/{clean_name}/blob/{ref}/{encoded_path}"
+
         line_matches = result.get("lineMatches") or []
         matches = []
-        if line_matches:
-            encoded_path = quote(file_path, safe="/")
-            base_url = f"https://github.com/{clean_name}/blob/{ref}/{encoded_path}"
-            for m in line_matches:
-                line = m.get("lineNumber", 0) + 1
-                preview = m.get("preview", "").rstrip()
-                matches.append({"line": line, "preview": preview, "url": f"{base_url}#L{line}"})
+        for m in line_matches:
+            line = m.get("lineNumber", 0) + 1
+            preview = m.get("preview", "").rstrip()
+            matches.append({"line": line, "preview": preview, "url": f"{file_url}#L{line}"})
 
         formatted.append(
             {
                 "repository": clean_name,
                 "file": file_path,
+                "file_url": file_url,
                 "branch": branch_name,
                 "commit": commit_hash,
                 "matches": matches,
@@ -96,19 +98,30 @@ def _print_results(results: list[dict], stats: dict, json_output: bool) -> None:
         console.print("[yellow]No results found.[/yellow]")
         return
 
+    is_tty = console.is_terminal
+
     for file_result in results:
+        repo = file_result["repository"]
+        path = file_result["file"]
+        file_url = file_result["file_url"]
+
         header = Text()
-        header.append(file_result["repository"], style="bold cyan")
-        header.append(" / ", style="dim")
-        header.append(file_result["file"], style="bold")
+        if is_tty:
+            # Humans: clickable OSC 8 hyperlink, URL hidden from visible output.
+            header.append(f"{repo} / {path}", style=f"bold cyan link {file_url}")
+        else:
+            # Non-TTY (pipes, AI agents): print the raw URL once per file so
+            # agents can synthesize #L<line> anchors themselves.
+            header.append(f"{repo} / {path}\n")
+            header.append(f"  {file_url}", style="dim")
         console.print(header)
 
         for match in file_result["matches"]:
-            line_text = Text()
-            line_text.append(f"  L{match['line']:>5}", style="green")
+            line_text = Text("  ")
+            line_style = f"green link {match['url']}" if is_tty else "green"
+            line_text.append(f"L{match['line']:>5}", style=line_style)
             line_text.append(f"  {match['preview']}")
             console.print(line_text)
-            console.print(f"        [dim]{match['url']}[/dim]")
 
         console.print()
 
