@@ -216,7 +216,11 @@ def _download_file_httpx(
     """
     with httpx.stream("GET", url, follow_redirects=True, headers=headers, timeout=_DOWNLOAD_TIMEOUT) as response:
         if response.status_code != 200:
-            status_reason = guess_status_code_reason(response.status_code, response.read())
+            try:
+                error_body = response.read()
+            except _TRANSIENT_EXCEPTIONS:
+                error_body = ""
+            status_reason = guess_status_code_reason(response.status_code, error_body)
             raise DownloadException(f"Failed to download file.\n{status_reason}")
 
         content_length = response.headers.get("Content-Length")
