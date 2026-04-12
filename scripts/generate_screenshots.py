@@ -98,6 +98,7 @@ def render_after_pipe(console: Console) -> None:
 
 
 def make_svg(render_fn, title: str) -> str:
+    """Render one output variant into an SVG string using Rich recording."""
     buf = io.StringIO()
     console = Console(
         file=buf,
