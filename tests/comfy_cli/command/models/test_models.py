@@ -4,7 +4,7 @@ from unittest.mock import Mock, patch
 import typer.testing
 
 from comfy_cli import constants
-from comfy_cli.command.models.models import app, check_civitai_url, check_huggingface_url, list_models
+from comfy_cli.command.models.models import _format_elapsed, app, check_civitai_url, check_huggingface_url, list_models
 
 
 def _make_model_tree(tmp_path: pathlib.Path) -> pathlib.Path:
@@ -307,6 +307,29 @@ def test_huggingface_url_with_folder_structure():
     )
 
 
+class TestFormatElapsed:
+    def test_under_one_minute(self):
+        assert _format_elapsed(5.3) == "5.3s"
+
+    def test_fractional_seconds(self):
+        assert _format_elapsed(0.4) == "0.4s"
+
+    def test_rounds_up_to_minute_boundary(self):
+        assert _format_elapsed(59.95) == "1m 0s"
+
+    def test_exactly_sixty_seconds(self):
+        assert _format_elapsed(60) == "1m 0s"
+
+    def test_minutes_and_seconds(self):
+        assert _format_elapsed(154) == "2m 34s"
+
+    def test_over_one_hour(self):
+        assert _format_elapsed(3661) == "1h 1m 1s"
+
+    def test_large_duration(self):
+        assert _format_elapsed(7384) == "2h 3m 4s"
+
+
 # ---------------------------------------------------------------------------
 # --downloader CLI option tests
 # ---------------------------------------------------------------------------
@@ -327,7 +350,7 @@ class TestDownloadCommandDownloaderOption:
             patch("comfy_cli.tracking.track_command", lambda _cmd: lambda fn: fn),
         ):
             mock_ui.prompt_input.side_effect = ["mymodel.bin", ""]
-            runner.invoke(
+            result = runner.invoke(
                 app,
                 [
                     "download",
@@ -343,6 +366,7 @@ class TestDownloadCommandDownloaderOption:
             assert mock_dl.called
             _, kwargs = mock_dl.call_args
             assert kwargs.get("downloader") == "aria2"
+            assert "Done in " in result.output
 
     def test_default_from_config(self, tmp_path):
         """Config default_downloader is used when no --downloader flag."""

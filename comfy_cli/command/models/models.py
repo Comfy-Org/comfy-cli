@@ -1,6 +1,7 @@
 import contextlib
 import os
 import pathlib
+import time
 from typing import Annotated
 from urllib.parse import parse_qs, unquote, urlparse
 
@@ -31,6 +32,18 @@ model_path_map = {
 
 def get_workspace() -> pathlib.Path:
     return pathlib.Path(workspace_manager.workspace_path)
+
+
+def _format_elapsed(seconds: float) -> str:
+    """Format elapsed seconds into a human-readable string."""
+    rounded = round(seconds, 1)
+    if rounded < 60:
+        return f"{rounded:.1f}s"
+    minutes, secs = divmod(int(rounded), 60)
+    if minutes < 60:
+        return f"{minutes}m {secs}s"
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours}h {minutes}m {secs}s"
 
 
 def potentially_strip_param_url(path_name: str) -> str:
@@ -307,6 +320,8 @@ def download(
         print(f"[bold red]File already exists: {local_filepath}[/bold red]")
         return
 
+    start_time = time.monotonic()
+
     if is_huggingface_url and check_unauthorized(url, headers):
         if hf_api_token is None:
             print(
@@ -340,6 +355,9 @@ def download(
     else:
         print(f"Start downloading URL: {url} into {local_filepath}")
         download_file(url, local_filepath, headers, downloader=resolved_downloader)
+
+    elapsed = time.monotonic() - start_time
+    print(f"Done in {_format_elapsed(elapsed)}")
 
 
 @app.command()
