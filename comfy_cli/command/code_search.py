@@ -2,6 +2,7 @@
 
 import json
 import re
+import sys
 from typing import Annotated
 from urllib.parse import quote
 
@@ -20,13 +21,19 @@ DEFAULT_COUNT = 20
 REQUEST_TIMEOUT = 30
 
 
+_TYPE_FILTER_RE = re.compile(r"(^|\s)type:")
+
+
 def _build_query(query: str, repo: str | None, count: int) -> str:
     parts = []
     if repo:
         if "/" not in repo:
             repo = f"Comfy-Org/{repo}"
         parts.append(f"repo:^{re.escape(repo)}$")
-    parts.append("type:file")
+    # Only default to file matches when the user hasn't specified their own
+    # type: filter — otherwise respect whatever they passed (e.g. type:commit).
+    if not _TYPE_FILTER_RE.search(query):
+        parts.append("type:file")
     parts.append(f"count:{count}")
     parts.append(query)
     return " ".join(parts)
@@ -98,7 +105,11 @@ def _print_results(results: list[dict], stats: dict, json_output: bool) -> None:
         console.print("[yellow]No results found.[/yellow]")
         return
 
-    is_tty = console.is_terminal
+    # Use raw isatty() rather than Rich's console.is_terminal: Rich treats
+    # FORCE_COLOR=1 / TTY_COMPATIBLE=1 as terminal-capable even when stdout
+    # is redirected, but OSC 8 escapes in a piped stream defeat the whole
+    # point of this branch (hiding URLs from humans, exposing them to AI).
+    is_tty = sys.stdout.isatty()
 
     for file_result in results:
         repo = file_result["repository"]
@@ -134,7 +145,15 @@ def _print_results(results: list[dict], stats: dict, json_output: bool) -> None:
 @app.callback(invoke_without_command=True)
 @tracking.track_command()
 def code_search(
-    query: Annotated[str, typer.Argument(help="Search query (supports Sourcegraph syntax)")],
+    query: Annotated[
+        str,
+        typer.Argument(
+            help=(
+                "Search query (supports Sourcegraph syntax). Defaults to file matches; "
+                "pass your own `type:` filter (e.g. `type:commit`) to override."
+            ),
+        ),
+    ],
     repo: Annotated[
         str | None,
         typer.Option("--repo", "-r", help="Filter by repository (e.g. ComfyUI, Comfy-Org/ComfyUI)"),

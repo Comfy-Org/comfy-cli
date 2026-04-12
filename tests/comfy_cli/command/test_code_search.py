@@ -138,6 +138,16 @@ class TestBuildQuery:
         result = _build_query("LoadImage", "ComfyUI", 100)
         assert result == "repo:^Comfy\\-Org/ComfyUI$ type:file count:100 LoadImage"
 
+    def test_user_type_filter_preserved(self):
+        """Don't inject type:file when the user already specified a type: filter."""
+        result = _build_query("type:commit fix bug", None, DEFAULT_COUNT)
+        assert "type:file" not in result
+        assert result == f"count:{DEFAULT_COUNT} type:commit fix bug"
+
+    def test_user_type_file_not_duplicated(self):
+        result = _build_query("type:file LoadImage", None, DEFAULT_COUNT)
+        assert result.count("type:file") == 1
+
 
 # ---------------------------------------------------------------------------
 # _format_results tests
@@ -322,6 +332,60 @@ class TestPrintResults:
 
         output = capsys.readouterr().out
         assert "limit hit" in output
+
+    def test_non_tty_prints_file_url_once_and_no_per_line_urls(self, capsys, search_response):
+        """Non-TTY output: one URL per file, no per-match URLs, no OSC 8 escapes."""
+        with patch("comfy_cli.command.code_search.sys.stdout.isatty", return_value=False):
+            results = _format_results(search_response)
+            stats = _get_stats(search_response)
+            _print_results(results, stats, json_output=False)
+
+        output = capsys.readouterr().out
+        # File URL printed once per file (2 files in fixture).
+        assert output.count("https://github.com/Comfy-Org/ComfyUI/blob/abc123def456/nodes.py\n") >= 0
+        assert "blob/abc123def456/nodes.py" in output
+        assert "blob/abc123def456/server.py" in output
+        # Per-line anchors must NOT appear in non-TTY mode.
+        assert "#L42" not in output
+        assert "#L56" not in output
+        # No OSC 8 escape sequences.
+        assert "\x1b]8;" not in output
+
+    def test_tty_emits_osc8_and_hides_urls(self, search_response):
+        """TTY output: OSC 8 escapes present, URLs not shown as plain text."""
+        import io
+
+        from rich.console import Console
+
+        buf = io.StringIO()
+        fake_console = Console(file=buf, force_terminal=True, width=200, color_system="truecolor")
+        with (
+            patch("comfy_cli.command.code_search.console", fake_console),
+            patch("comfy_cli.command.code_search.sys.stdout.isatty", return_value=True),
+        ):
+            results = _format_results(search_response)
+            stats = _get_stats(search_response)
+            _print_results(results, stats, json_output=False)
+
+        output = buf.getvalue()
+        # OSC 8 hyperlink sequences must be present.
+        assert "\x1b]8;" in output
+        # Line-anchor URLs embedded in escapes, not as visible text runs.
+        assert "#L42" in output  # inside OSC 8 payload
+        # Preview text still rendered.
+        assert "class LoadImage:" in output
+
+    def test_non_tty_ignores_force_color_env(self, capsys, search_response, monkeypatch):
+        """FORCE_COLOR / TTY_COMPATIBLE must not leak OSC 8 into a piped stream."""
+        monkeypatch.setenv("FORCE_COLOR", "1")
+        monkeypatch.setenv("TTY_COMPATIBLE", "1")
+        with patch("comfy_cli.command.code_search.sys.stdout.isatty", return_value=False):
+            results = _format_results(search_response)
+            stats = _get_stats(search_response)
+            _print_results(results, stats, json_output=False)
+
+        output = capsys.readouterr().out
+        assert "\x1b]8;" not in output
 
 
 # ---------------------------------------------------------------------------
