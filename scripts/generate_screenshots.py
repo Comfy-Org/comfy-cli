@@ -14,9 +14,21 @@ RESULTS = [
         "file": "nodes.py",
         "file_url": "https://github.com/Comfy-Org/ComfyUI/blob/abc123/nodes.py",
         "matches": [
-            {"line": 1698, "preview": "class LoadImage:", "url": "https://github.com/Comfy-Org/ComfyUI/blob/abc123/nodes.py#L1698"},
-            {"line": 1776, "preview": "class LoadImageMask:", "url": "https://github.com/Comfy-Org/ComfyUI/blob/abc123/nodes.py#L1776"},
-            {"line": 1828, "preview": "class LoadImageOutput(LoadImage):", "url": "https://github.com/Comfy-Org/ComfyUI/blob/abc123/nodes.py#L1828"},
+            {
+                "line": 1698,
+                "preview": "class LoadImage:",
+                "url": "https://github.com/Comfy-Org/ComfyUI/blob/abc123/nodes.py#L1698",
+            },
+            {
+                "line": 1776,
+                "preview": "class LoadImageMask:",
+                "url": "https://github.com/Comfy-Org/ComfyUI/blob/abc123/nodes.py#L1776",
+            },
+            {
+                "line": 1828,
+                "preview": "class LoadImageOutput(LoadImage):",
+                "url": "https://github.com/Comfy-Org/ComfyUI/blob/abc123/nodes.py#L1828",
+            },
         ],
     },
     {
@@ -24,7 +36,11 @@ RESULTS = [
         "file": "comfy_api/input_impl.py",
         "file_url": "https://github.com/Comfy-Org/ComfyUI/blob/abc123/comfy_api/input_impl.py",
         "matches": [
-            {"line": 42, "preview": "from .util import ImageInput, LoadImage", "url": "https://github.com/Comfy-Org/ComfyUI/blob/abc123/comfy_api/input_impl.py#L42"},
+            {
+                "line": 42,
+                "preview": "from .util import ImageInput, LoadImage",
+                "url": "https://github.com/Comfy-Org/ComfyUI/blob/abc123/comfy_api/input_impl.py#L42",
+            },
         ],
     },
 ]
