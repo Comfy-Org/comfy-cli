@@ -10,6 +10,7 @@ from comfy_cli.file_utils import (
     DownloadException,
     _cleanup_partial,
     _friendly_network_error,
+    _TransientHTTPStatusError,
     check_unauthorized,
     download_file,
     extract_package_as_zip,
@@ -192,6 +193,16 @@ def _make_failing_iter(data=b"partial", exc=None):
     return factory
 
 
+def _make_status_response(status_code, body=b""):
+    """Create a mock httpx response for a non-200 status."""
+    mock = Mock()
+    mock.status_code = status_code
+    mock.read.return_value = body
+    mock.__enter__ = Mock(return_value=mock)
+    mock.__exit__ = Mock(return_value=None)
+    return mock
+
+
 class TestCleanupPartial:
     def test_removes_existing_file(self, tmp_path):
         f = tmp_path / "partial.bin"
@@ -235,6 +246,10 @@ class TestFriendlyNetworkError:
     def test_other_exception(self):
         msg = _friendly_network_error(RuntimeError("boom"))
         assert msg == "boom"
+
+    def test_transient_http_status(self):
+        msg = _friendly_network_error(_TransientHTTPStatusError(503, "Service Unavailable"))
+        assert "HTTP 503" in msg
 
 
 class TestDownloadTimeout:
@@ -528,3 +543,195 @@ class TestDownloadPartialCleanup:
         mock_prompt.assert_called_once()
         assert dest.exists()
         assert dest.read_bytes() == b"partial data"
+
+
+class TestDownloadHTTPStatusRetry:
+    """Retry behavior for transient HTTP status codes (5xx, 429, 408)."""
+
+    @patch("comfy_cli.file_utils.time.sleep")
+    @patch("httpx.stream")
+    def test_500_retried_and_succeeds(self, mock_stream, mock_sleep, tmp_path):
+        """Download retries on HTTP 500 and succeeds on the next attempt."""
+        mock_stream.side_effect = [
+            _make_status_response(500),
+            _make_ok_response(content=b"ok"),
+        ]
+
+        dest = tmp_path / "model.bin"
+        download_file("http://example.com/model.bin", dest)
+
+        assert dest.read_bytes() == b"ok"
+        assert mock_stream.call_count == 2
+        mock_sleep.assert_called_once_with(2)
+
+    @patch("comfy_cli.file_utils.time.sleep")
+    @patch("httpx.stream")
+    def test_502_retried(self, mock_stream, mock_sleep, tmp_path):
+        mock_stream.side_effect = [
+            _make_status_response(502),
+            _make_ok_response(content=b"ok"),
+        ]
+
+        dest = tmp_path / "model.bin"
+        download_file("http://example.com/model.bin", dest)
+        assert mock_stream.call_count == 2
+
+    @patch("comfy_cli.file_utils.time.sleep")
+    @patch("httpx.stream")
+    def test_503_retried(self, mock_stream, mock_sleep, tmp_path):
+        mock_stream.side_effect = [
+            _make_status_response(503),
+            _make_ok_response(content=b"ok"),
+        ]
+
+        dest = tmp_path / "model.bin"
+        download_file("http://example.com/model.bin", dest)
+        assert mock_stream.call_count == 2
+
+    @patch("comfy_cli.file_utils.time.sleep")
+    @patch("httpx.stream")
+    def test_504_retried(self, mock_stream, mock_sleep, tmp_path):
+        mock_stream.side_effect = [
+            _make_status_response(504),
+            _make_ok_response(content=b"ok"),
+        ]
+
+        dest = tmp_path / "model.bin"
+        download_file("http://example.com/model.bin", dest)
+        assert mock_stream.call_count == 2
+
+    @patch("comfy_cli.file_utils.time.sleep")
+    @patch("httpx.stream")
+    def test_429_retried(self, mock_stream, mock_sleep, tmp_path):
+        mock_stream.side_effect = [
+            _make_status_response(429),
+            _make_ok_response(content=b"ok"),
+        ]
+
+        dest = tmp_path / "model.bin"
+        download_file("http://example.com/model.bin", dest)
+        assert mock_stream.call_count == 2
+
+    @patch("comfy_cli.file_utils.time.sleep")
+    @patch("httpx.stream")
+    def test_408_retried(self, mock_stream, mock_sleep, tmp_path):
+        mock_stream.side_effect = [
+            _make_status_response(408),
+            _make_ok_response(content=b"ok"),
+        ]
+
+        dest = tmp_path / "model.bin"
+        download_file("http://example.com/model.bin", dest)
+        assert mock_stream.call_count == 2
+
+    @patch("comfy_cli.file_utils.time.sleep")
+    @patch("httpx.stream")
+    def test_all_retries_exhausted_on_500(self, mock_stream, mock_sleep, tmp_path):
+        """After 3 failed attempts on 500, a DownloadException is raised with a friendly message."""
+        mock_stream.side_effect = [
+            _make_status_response(500),
+            _make_status_response(500),
+            _make_status_response(500),
+        ]
+
+        dest = tmp_path / "model.bin"
+        with pytest.raises(DownloadException, match="Download failed after 3 attempts") as exc_info:
+            download_file("http://example.com/model.bin", dest)
+
+        assert "HTTP 500" in str(exc_info.value)
+        assert mock_stream.call_count == 3
+        # The last transient HTTP error must be chained as __cause__ for debuggability.
+        assert isinstance(exc_info.value.__cause__, _TransientHTTPStatusError)
+        assert exc_info.value.__cause__.status_code == 500
+
+    @patch("comfy_cli.file_utils.time.sleep")
+    @patch("httpx.stream")
+    def test_retry_body_read_timeout_still_retries(self, mock_stream, mock_sleep, tmp_path):
+        """If reading the 500 response body itself times out, we still retry the request."""
+        fail_resp = Mock()
+        fail_resp.status_code = 500
+        fail_resp.read.side_effect = httpx.ReadTimeout("body read timed out")
+        fail_resp.__enter__ = Mock(return_value=fail_resp)
+        fail_resp.__exit__ = Mock(return_value=None)
+
+        mock_stream.side_effect = [fail_resp, _make_ok_response(content=b"ok")]
+
+        dest = tmp_path / "model.bin"
+        download_file("http://example.com/model.bin", dest)
+
+        assert dest.read_bytes() == b"ok"
+        assert mock_stream.call_count == 2
+
+    @patch("comfy_cli.file_utils.time.sleep")
+    @patch("httpx.stream")
+    def test_mixed_transient_errors_eventually_succeed(self, mock_stream, mock_sleep, tmp_path):
+        """Retries work across a mix of network-level and HTTP-status errors."""
+        mock_stream.side_effect = [
+            _make_status_response(503),
+            httpx.ReadTimeout("timeout"),
+            _make_ok_response(content=b"finally"),
+        ]
+
+        dest = tmp_path / "model.bin"
+        download_file("http://example.com/model.bin", dest)
+
+        assert dest.read_bytes() == b"finally"
+        assert mock_stream.call_count == 3
+
+    @patch("comfy_cli.file_utils.time.sleep")
+    @patch("httpx.stream")
+    def test_404_not_retried(self, mock_stream, mock_sleep, tmp_path):
+        """404 fails fast without retry."""
+        mock_stream.return_value = _make_status_response(404)
+
+        with pytest.raises(DownloadException, match="Failed to download file"):
+            download_file("http://example.com/model.bin", tmp_path / "model.bin")
+
+        assert mock_stream.call_count == 1
+        mock_sleep.assert_not_called()
+
+    @patch("comfy_cli.file_utils.time.sleep")
+    @patch("httpx.stream")
+    def test_401_not_retried(self, mock_stream, mock_sleep, tmp_path):
+        """401 fails fast without retry."""
+        mock_stream.return_value = _make_status_response(401)
+
+        with pytest.raises(DownloadException, match="Failed to download file"):
+            download_file("http://example.com/model.bin", tmp_path / "model.bin")
+
+        assert mock_stream.call_count == 1
+        mock_sleep.assert_not_called()
+
+    @patch("comfy_cli.file_utils.time.sleep")
+    @patch("httpx.stream")
+    def test_403_not_retried(self, mock_stream, mock_sleep, tmp_path):
+        """403 fails fast without retry."""
+        mock_stream.return_value = _make_status_response(403)
+
+        with pytest.raises(DownloadException, match="Failed to download file"):
+            download_file("http://example.com/model.bin", tmp_path / "model.bin")
+
+        assert mock_stream.call_count == 1
+        mock_sleep.assert_not_called()
+
+    @patch("comfy_cli.file_utils.time.sleep")
+    @patch("httpx.stream")
+    def test_preexisting_file_preserved_on_http_status_retry_exhaust(self, mock_stream, mock_sleep, tmp_path):
+        """A pre-existing file at the destination is NOT deleted when all retries fail on HTTP 500.
+
+        The retriable HTTP status is raised before _download_file_httpx opens the output file.
+        """
+        mock_stream.side_effect = [
+            _make_status_response(500),
+            _make_status_response(500),
+            _make_status_response(500),
+        ]
+
+        dest = tmp_path / "model.bin"
+        dest.write_bytes(b"IMPORTANT pre-existing data")
+
+        with pytest.raises(DownloadException, match="Download failed after 3 attempts"):
+            download_file("http://example.com/model.bin", dest)
+
+        assert dest.exists()
+        assert dest.read_bytes() == b"IMPORTANT pre-existing data"

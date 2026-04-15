@@ -28,7 +28,7 @@ def show_progress(iterable, total, description="Downloading..."):
     Yields:
         bytes: Chunks of data as they are processed.
     """
-    with Progress() as progress:
+    with Progress(transient=True) as progress:
         task = progress.add_task(description, total=total)
         for chunk in iterable:
             yield chunk

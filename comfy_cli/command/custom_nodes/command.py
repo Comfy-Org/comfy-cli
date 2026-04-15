@@ -18,6 +18,7 @@ from comfy_cli.command.custom_nodes.cm_cli_util import execute_cm_cli, find_cm_c
 from comfy_cli.config_manager import ConfigManager
 from comfy_cli.constants import NODE_ZIP_FILENAME
 from comfy_cli.file_utils import (
+    DownloadException,
     download_file,
     extract_package_as_zip,
     upload_file_to_signed_url,
@@ -1168,7 +1169,12 @@ def registry_install(
 
     local_filename = node_specific_path / f"{node_id}-{node_version.version}.zip"
     logging.debug(f"Start downloading the node {node_id} version {node_version.version} to {local_filename}")
-    download_file(node_version.download_url, local_filename)
+    try:
+        download_file(node_version.download_url, local_filename)
+    except DownloadException as e:
+        logging.error(f"Failed to download node {node_id} version {node_version.version}: {e}")
+        ui.display_error_message(f"Failed to download the custom node {node_id}: {e}")
+        return
 
     # Extract the downloaded archive to the custom_node directory on the workspace.
     logging.debug(f"Start extracting the node {node_id} version {node_version.version} to {custom_nodes_path}")

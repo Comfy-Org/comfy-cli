@@ -82,6 +82,7 @@ def _poll_aria2_download(download) -> None:
         DownloadColumn(),
         TransferSpeedColumn(),
         TimeRemainingColumn(),
+        transient=True,
     ) as progress:
         task = progress.add_task("Downloading...", total=None)
 
@@ -172,6 +173,22 @@ _TRANSIENT_EXCEPTIONS = (
     httpx.ProtocolError,
     httpx.ProxyError,
 )
+# HTTP statuses that typically indicate a transient server-side or rate-limit
+# problem worth retrying with backoff. Auth/not-found/redirect statuses stay
+# out of this set so they fail fast.
+_RETRIABLE_STATUSES = frozenset({408, 429, 500, 502, 503, 504})
+
+
+class _TransientHTTPStatusError(Exception):
+    """Retriable HTTP status returned by the server (e.g. 500/503/429)."""
+
+    def __init__(self, status_code: int, reason: str):
+        self.status_code = status_code
+        self.reason = reason
+        super().__init__(f"HTTP {status_code}: {reason}")
+
+
+_RETRIABLE_EXCEPTIONS = _TRANSIENT_EXCEPTIONS + (_TransientHTTPStatusError,)
 
 
 def _cleanup_partial(filepath: pathlib.Path) -> None:
@@ -184,6 +201,8 @@ def _cleanup_partial(filepath: pathlib.Path) -> None:
 
 def _friendly_network_error(exc: Exception) -> str:
     """Return a user-friendly description of a network error."""
+    if isinstance(exc, _TransientHTTPStatusError):
+        return f"the server returned HTTP {exc.status_code}"
     if isinstance(exc, httpx.ReadTimeout):
         return "the server stopped sending data (read timeout)"
     if isinstance(exc, httpx.ConnectTimeout):
@@ -221,6 +240,8 @@ def _download_file_httpx(
             except _TRANSIENT_EXCEPTIONS:
                 error_body = ""
             status_reason = guess_status_code_reason(response.status_code, error_body)
+            if response.status_code in _RETRIABLE_STATUSES:
+                raise _TransientHTTPStatusError(response.status_code, status_reason)
             raise DownloadException(f"Failed to download file.\n{status_reason}")
 
         content_length = response.headers.get("Content-Length")
@@ -261,7 +282,7 @@ def download_file(url: str, local_filepath: pathlib.Path, headers: dict | None =
         try:
             _download_file_httpx(url, local_filepath, headers, state=state)
             return
-        except _TRANSIENT_EXCEPTIONS as exc:
+        except _RETRIABLE_EXCEPTIONS as exc:
             last_exc = exc
             # Only clean up if _download_file_httpx actually opened the destination —
             # otherwise we'd delete an unrelated pre-existing file at the same path.
