@@ -247,9 +247,27 @@ class TestFriendlyNetworkError:
         msg = _friendly_network_error(RuntimeError("boom"))
         assert msg == "boom"
 
-    def test_transient_http_status(self):
-        msg = _friendly_network_error(_TransientHTTPStatusError(503, "Service Unavailable"))
+    def test_transient_http_status_known_code_includes_phrase(self):
+        # HTTP 503 -> "Service Unavailable" (from stdlib http.HTTPStatus).
+        msg = _friendly_network_error(_TransientHTTPStatusError(503, "some reason from body"))
         assert "HTTP 503" in msg
+        assert "Service Unavailable" in msg
+
+    def test_transient_http_status_500_includes_phrase(self):
+        msg = _friendly_network_error(_TransientHTTPStatusError(500, ""))
+        assert "HTTP 500" in msg
+        assert "Internal Server Error" in msg
+
+    def test_transient_http_status_unknown_code_falls_back(self):
+        # 599 is not a standard HTTPStatus; fall back to just the numeric code.
+        msg = _friendly_network_error(_TransientHTTPStatusError(599, "weird"))
+        assert "HTTP 599" in msg
+        # No crash, no stdlib phrase embedded (since there isn't one).
+
+    def test_invalid_url(self):
+        msg = _friendly_network_error(httpx.InvalidURL("Request URL is missing a scheme"))
+        assert "invalid URL" in msg
+        assert "missing a scheme" in msg
 
 
 class TestDownloadTimeout:
@@ -639,6 +657,8 @@ class TestDownloadHTTPStatusRetry:
             download_file("http://example.com/model.bin", dest)
 
         assert "HTTP 500" in str(exc_info.value)
+        # The stdlib HTTPStatus phrase is surfaced so the user knows what 500 means.
+        assert "Internal Server Error" in str(exc_info.value)
         assert mock_stream.call_count == 3
         # The last transient HTTP error must be chained as __cause__ for debuggability.
         assert isinstance(exc_info.value.__cause__, _TransientHTTPStatusError)
@@ -776,6 +796,37 @@ class TestDownloadNonRetriableHTTPError:
 
         assert isinstance(exc_info.value.__cause__, httpx.DecodingError)
         assert mock_stream.call_count == 1
+        mock_sleep.assert_not_called()
+
+    @patch("comfy_cli.file_utils.time.sleep")
+    @patch("httpx.stream")
+    def test_invalid_url_wrapped(self, mock_stream, mock_sleep, tmp_path):
+        """httpx.InvalidURL does NOT subclass httpx.HTTPError — it must still be wrapped
+        as DownloadException so a malformed URL doesn't leak as a Typer traceback."""
+        mock_stream.side_effect = httpx.InvalidURL("Request URL is missing a scheme")
+
+        with pytest.raises(DownloadException, match="Download failed") as exc_info:
+            download_file("no-scheme-url", tmp_path / "model.bin")
+
+        assert isinstance(exc_info.value.__cause__, httpx.InvalidURL)
+        assert "invalid URL" in str(exc_info.value)
+        assert mock_stream.call_count == 1
+        mock_sleep.assert_not_called()
+
+    @patch("httpx.stream")
+    def test_invalid_url_preserves_preexisting_file(self, mock_stream, tmp_path):
+        """InvalidURL is raised before the output file is opened — any pre-existing
+        file at the destination path must be left intact."""
+        mock_stream.side_effect = httpx.InvalidURL("bad")
+
+        dest = tmp_path / "model.bin"
+        dest.write_bytes(b"IMPORTANT pre-existing data")
+
+        with pytest.raises(DownloadException):
+            download_file("not-a-url", dest)
+
+        assert dest.exists()
+        assert dest.read_bytes() == b"IMPORTANT pre-existing data"
 
     @patch("httpx.stream")
     def test_preexisting_file_preserved_on_non_retriable_error(self, mock_stream, tmp_path):

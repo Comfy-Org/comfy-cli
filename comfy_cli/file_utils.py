@@ -4,6 +4,7 @@ import pathlib
 import subprocess
 import time
 import zipfile
+from http import HTTPStatus
 
 import httpx
 import requests
@@ -202,7 +203,13 @@ def _cleanup_partial(filepath: pathlib.Path) -> None:
 def _friendly_network_error(exc: Exception) -> str:
     """Return a user-friendly description of a network error."""
     if isinstance(exc, _TransientHTTPStatusError):
-        return f"the server returned HTTP {exc.status_code}"
+        try:
+            phrase = HTTPStatus(exc.status_code).phrase
+            return f"the server returned HTTP {exc.status_code} {phrase}"
+        except ValueError:
+            return f"the server returned HTTP {exc.status_code}"
+    if isinstance(exc, httpx.InvalidURL):
+        return f"invalid URL ({exc})"
     if isinstance(exc, httpx.ReadTimeout):
         return "the server stopped sending data (read timeout)"
     if isinstance(exc, httpx.ConnectTimeout):
@@ -293,10 +300,12 @@ def download_file(url: str, local_filepath: pathlib.Path, headers: dict | None =
                 print(f"Download error (attempt {attempt + 1}/{_DOWNLOAD_MAX_RETRIES}): {_friendly_network_error(exc)}")
                 print(f"Retrying in {wait}s...")
                 time.sleep(wait)
-        except httpx.HTTPError as exc:
+        except (httpx.HTTPError, httpx.InvalidURL) as exc:
             # Non-retriable httpx errors (e.g. UnsupportedProtocol, TooManyRedirects,
-            # DecodingError). Fail fast and convert to DownloadException so callers
-            # only need to handle one error type.
+            # DecodingError, InvalidURL). Fail fast and convert to DownloadException
+            # so callers only need to handle one error type.
+            # InvalidURL inherits directly from Exception (not HTTPError), hence the
+            # explicit inclusion.
             if state["file_opened"]:
                 _cleanup_partial(local_filepath)
             raise DownloadException(f"Download failed: {_friendly_network_error(exc)}") from exc
