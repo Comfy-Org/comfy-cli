@@ -490,3 +490,19 @@ class TestDownloadCommandErrorHandling:
         result = self._run_with_download_error(tmp_path, DownloadException("boom"))
 
         assert "Done in" not in result.output
+
+    def test_download_exception_with_markup_chars_does_not_crash(self, tmp_path):
+        """A DownloadException message containing rich-markup metacharacters (e.g. from a
+        server JSON body embedded via guess_status_code_reason) must not raise MarkupError
+        nor be silently stripped — the error must render literally and exit cleanly."""
+        from comfy_cli.file_utils import DownloadException
+
+        # Covers both the closing-tag crash case and the bracketed-style stripping case.
+        result = self._run_with_download_error(tmp_path, DownloadException("server said [/] at /path/[id]/resource"))
+
+        assert result.exit_code == 1
+        assert "Traceback" not in result.output
+        assert "MarkupError" not in result.output
+        # Literal markup characters must survive to the output so the user sees the real message.
+        assert "[/]" in result.output
+        assert "[id]" in result.output

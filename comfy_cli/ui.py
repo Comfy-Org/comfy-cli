@@ -181,4 +181,6 @@ def display_error_message(message: str) -> None:
     Args:
         message (str): The error message to display.
     """
-    console.print(f"[red]{message}[/]")
+    # markup=False so a dynamic message containing e.g. "[/]" doesn't raise
+    # MarkupError or silently strip bracketed substrings.
+    console.print(message, style="red", markup=False)
