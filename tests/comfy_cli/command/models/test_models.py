@@ -435,3 +435,74 @@ class TestDownloadCommandDownloaderOption:
             assert mock_dl.called
             _, kwargs = mock_dl.call_args
             assert kwargs.get("downloader") == "httpx"
+
+
+class TestDownloadCommandErrorHandling:
+    """Verify DownloadException is rendered as a friendly one-line error (not a traceback)."""
+
+    def _run_with_download_error(self, tmp_path, exc):
+        with (
+            patch("comfy_cli.command.models.models.get_workspace", return_value=tmp_path),
+            patch("comfy_cli.command.models.models.download_file", side_effect=exc),
+            patch("comfy_cli.command.models.models.check_civitai_url", return_value=(False, False, None, None)),
+            patch(
+                "comfy_cli.command.models.models.check_huggingface_url",
+                return_value=(False, None, None, None, None),
+            ),
+            patch("comfy_cli.command.models.models.ui") as mock_ui,
+            patch("comfy_cli.command.models.models.config_manager"),
+            patch("comfy_cli.tracking.track_command", lambda _cmd: lambda fn: fn),
+        ):
+            mock_ui.prompt_input.side_effect = ["mymodel.bin", ""]
+            return runner.invoke(
+                app,
+                [
+                    "download",
+                    "--url",
+                    "http://example.com/model.bin",
+                    "--filename",
+                    "model.bin",
+                ],
+            )
+
+    def test_download_exception_exits_with_code_1(self, tmp_path):
+        from comfy_cli.file_utils import DownloadException
+
+        result = self._run_with_download_error(tmp_path, DownloadException("boom"))
+
+        assert result.exit_code == 1
+        assert "boom" in result.output
+
+    def test_download_exception_does_not_show_traceback(self, tmp_path):
+        from comfy_cli.file_utils import DownloadException
+
+        result = self._run_with_download_error(tmp_path, DownloadException("boom"))
+
+        assert "Traceback" not in result.output
+        assert "DownloadException" not in result.output
+        # Rich markup must be rendered as styling, not leak through as literal tags.
+        assert "[bold red]" not in result.output
+        assert "[/bold red]" not in result.output
+
+    def test_download_exception_skips_done_message(self, tmp_path):
+        from comfy_cli.file_utils import DownloadException
+
+        result = self._run_with_download_error(tmp_path, DownloadException("boom"))
+
+        assert "Done in" not in result.output
+
+    def test_download_exception_with_markup_chars_does_not_crash(self, tmp_path):
+        """A DownloadException message containing rich-markup metacharacters (e.g. from a
+        server JSON body embedded via guess_status_code_reason) must not raise MarkupError
+        nor be silently stripped — the error must render literally and exit cleanly."""
+        from comfy_cli.file_utils import DownloadException
+
+        # Covers both the closing-tag crash case and the bracketed-style stripping case.
+        result = self._run_with_download_error(tmp_path, DownloadException("server said [/] at /path/[id]/resource"))
+
+        assert result.exit_code == 1
+        assert "Traceback" not in result.output
+        assert "MarkupError" not in result.output
+        # Literal markup characters must survive to the output so the user sees the real message.
+        assert "[/]" in result.output
+        assert "[id]" in result.output

@@ -1,10 +1,11 @@
 import re
 import subprocess
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from typer.testing import CliRunner
 
 from comfy_cli.command.custom_nodes.command import app
+from comfy_cli.file_utils import DownloadException
 
 runner = CliRunner()
 
@@ -334,3 +335,51 @@ def test_show_with_channel():
         mock_execute.assert_called_once()
         _, kwargs = mock_execute.call_args
         assert kwargs.get("channel") == "dev"
+
+
+class TestRegistryInstallDownloadError:
+    """registry-install must catch DownloadException, surface a friendly one-line
+    error via ui.display_error_message, and exit cleanly — never raise a traceback."""
+
+    def _invoke(self, tmp_path, download_side_effect):
+        fake_version = MagicMock(download_url="http://example.com/node.zip", version="1.0.0")
+
+        with (
+            patch("comfy_cli.command.custom_nodes.command.registry_api") as mock_api,
+            patch("comfy_cli.command.custom_nodes.command.workspace_manager") as mock_ws,
+            patch("comfy_cli.command.custom_nodes.command.download_file", side_effect=download_side_effect) as mock_dl,
+            patch("comfy_cli.command.custom_nodes.command.ui") as mock_ui,
+            patch("comfy_cli.command.custom_nodes.command.extract_package_as_zip") as mock_extract,
+            patch("comfy_cli.command.custom_nodes.command.execute_install_script") as mock_script,
+        ):
+            mock_api.install_node.return_value = fake_version
+            mock_ws.workspace_path = str(tmp_path)
+            result = runner.invoke(app, ["registry-install", "test-node"])
+            return result, mock_ui, mock_dl, mock_extract, mock_script
+
+    def test_download_exception_caught_and_reported(self, tmp_path):
+        result, mock_ui, mock_dl, mock_extract, mock_script = self._invoke(
+            tmp_path, DownloadException("server unreachable")
+        )
+
+        # Must exit non-zero so automation / CI can detect the failure.
+        assert result.exit_code == 1
+        mock_dl.assert_called_once()
+        mock_ui.display_error_message.assert_called_once()
+        (msg,), _ = mock_ui.display_error_message.call_args
+        assert "test-node" in msg
+        assert "server unreachable" in msg
+
+    def test_no_extract_or_install_script_after_failure(self, tmp_path):
+        """After a download failure we must not try to unzip or run the install script."""
+        result, _mock_ui, _mock_dl, mock_extract, mock_script = self._invoke(tmp_path, DownloadException("boom"))
+
+        assert result.exit_code == 1
+        mock_extract.assert_not_called()
+        mock_script.assert_not_called()
+
+    def test_no_traceback_in_output(self, tmp_path):
+        result, _mock_ui, _mock_dl, _mock_extract, _mock_script = self._invoke(tmp_path, DownloadException("boom"))
+
+        assert "Traceback" not in result.output
+        assert "DownloadException" not in result.output

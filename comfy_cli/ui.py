@@ -28,7 +28,7 @@ def show_progress(iterable, total, description="Downloading..."):
     Yields:
         bytes: Chunks of data as they are processed.
     """
-    with Progress() as progress:
+    with Progress(transient=True) as progress:
         task = progress.add_task(description, total=total)
         for chunk in iterable:
             yield chunk
@@ -181,4 +181,6 @@ def display_error_message(message: str) -> None:
     Args:
         message (str): The error message to display.
     """
-    console.print(f"[red]{message}[/]")
+    # markup=False so a dynamic message containing e.g. "[/]" doesn't raise
+    # MarkupError or silently strip bracketed substrings.
+    console.print(message, style="red", markup=False)

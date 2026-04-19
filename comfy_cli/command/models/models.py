@@ -8,6 +8,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 import requests
 import typer
 from rich import print
+from rich.markup import escape
 
 from comfy_cli import constants, tracking, ui
 from comfy_cli.config_manager import ConfigManager
@@ -354,7 +355,13 @@ def download(
             print(f"Model downloaded successfully to: {output_path}")
     else:
         print(f"Start downloading URL: {url} into {local_filepath}")
-        download_file(url, local_filepath, headers, downloader=resolved_downloader)
+        try:
+            download_file(url, local_filepath, headers, downloader=resolved_downloader)
+        except DownloadException as e:
+            # escape() so a dynamic error message containing "[/]" or similar
+            # rich-markup syntax doesn't trigger MarkupError or get mis-rendered.
+            print(f"[bold red]{escape(str(e))}[/bold red]")
+            raise typer.Exit(code=1) from None
 
     elapsed = time.monotonic() - start_time
     print(f"Done in {_format_elapsed(elapsed)}")
