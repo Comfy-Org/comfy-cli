@@ -1174,7 +1174,7 @@ def registry_install(
     except DownloadException as e:
         logging.error(f"Failed to download node {node_id} version {node_version.version}: {e}")
         ui.display_error_message(f"Failed to download the custom node {node_id}: {e}")
-        return
+        raise typer.Exit(code=1) from None
 
     # Extract the downloaded archive to the custom_node directory on the workspace.
     logging.debug(f"Start extracting the node {node_id} version {node_version.version} to {custom_nodes_path}")

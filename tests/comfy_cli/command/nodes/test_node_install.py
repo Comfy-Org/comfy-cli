@@ -362,7 +362,8 @@ class TestRegistryInstallDownloadError:
             tmp_path, DownloadException("server unreachable")
         )
 
-        assert result.exit_code == 0
+        # Must exit non-zero so automation / CI can detect the failure.
+        assert result.exit_code == 1
         mock_dl.assert_called_once()
         mock_ui.display_error_message.assert_called_once()
         (msg,), _ = mock_ui.display_error_message.call_args
@@ -373,7 +374,7 @@ class TestRegistryInstallDownloadError:
         """After a download failure we must not try to unzip or run the install script."""
         result, _mock_ui, _mock_dl, mock_extract, mock_script = self._invoke(tmp_path, DownloadException("boom"))
 
-        assert result.exit_code == 0
+        assert result.exit_code == 1
         mock_extract.assert_not_called()
         mock_script.assert_not_called()
 
