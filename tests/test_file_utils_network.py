@@ -735,3 +735,77 @@ class TestDownloadHTTPStatusRetry:
 
         assert dest.exists()
         assert dest.read_bytes() == b"IMPORTANT pre-existing data"
+
+
+class TestDownloadNonRetriableHTTPError:
+    """Non-retriable httpx errors (UnsupportedProtocol, TooManyRedirects, etc.) are wrapped
+    as DownloadException so callers only need to handle one error type and users don't
+    see a raw Python traceback."""
+
+    @patch("comfy_cli.file_utils.time.sleep")
+    @patch("httpx.stream")
+    def test_unsupported_protocol_wrapped(self, mock_stream, mock_sleep, tmp_path):
+        mock_stream.side_effect = httpx.UnsupportedProtocol("Request URL has an unsupported protocol 'ftp://'")
+
+        with pytest.raises(DownloadException, match="Download failed") as exc_info:
+            download_file("ftp://example.com/model.bin", tmp_path / "model.bin")
+
+        assert isinstance(exc_info.value.__cause__, httpx.UnsupportedProtocol)
+        assert mock_stream.call_count == 1
+        mock_sleep.assert_not_called()
+
+    @patch("comfy_cli.file_utils.time.sleep")
+    @patch("httpx.stream")
+    def test_too_many_redirects_wrapped(self, mock_stream, mock_sleep, tmp_path):
+        mock_stream.side_effect = httpx.TooManyRedirects("Exceeded maximum allowed redirects")
+
+        with pytest.raises(DownloadException, match="Download failed") as exc_info:
+            download_file("http://example.com/model.bin", tmp_path / "model.bin")
+
+        assert isinstance(exc_info.value.__cause__, httpx.TooManyRedirects)
+        assert mock_stream.call_count == 1
+        mock_sleep.assert_not_called()
+
+    @patch("comfy_cli.file_utils.time.sleep")
+    @patch("httpx.stream")
+    def test_decoding_error_wrapped(self, mock_stream, mock_sleep, tmp_path):
+        mock_stream.side_effect = httpx.DecodingError("Invalid compressed data")
+
+        with pytest.raises(DownloadException, match="Download failed") as exc_info:
+            download_file("http://example.com/model.bin", tmp_path / "model.bin")
+
+        assert isinstance(exc_info.value.__cause__, httpx.DecodingError)
+        assert mock_stream.call_count == 1
+
+    @patch("httpx.stream")
+    def test_preexisting_file_preserved_on_non_retriable_error(self, mock_stream, tmp_path):
+        """A non-retriable httpx error before the output file is opened must not delete
+        an unrelated pre-existing file at the destination path."""
+        mock_stream.side_effect = httpx.UnsupportedProtocol("nope")
+
+        dest = tmp_path / "model.bin"
+        dest.write_bytes(b"IMPORTANT pre-existing data")
+
+        with pytest.raises(DownloadException):
+            download_file("ftp://example.com/model.bin", dest)
+
+        assert dest.exists()
+        assert dest.read_bytes() == b"IMPORTANT pre-existing data"
+
+    @patch("httpx.stream")
+    def test_partial_file_cleaned_up_on_mid_stream_non_retriable(self, mock_stream, tmp_path):
+        """If a non-retriable error is raised AFTER the output file is opened (mid-stream),
+        the partial file is cleaned up."""
+        resp = Mock()
+        resp.status_code = 200
+        resp.headers = {"Content-Length": "100"}
+        resp.iter_bytes = Mock(side_effect=_make_failing_iter(b"partial", httpx.DecodingError("bad")))
+        resp.__enter__ = Mock(return_value=resp)
+        resp.__exit__ = Mock(return_value=None)
+        mock_stream.return_value = resp
+
+        dest = tmp_path / "model.bin"
+        with pytest.raises(DownloadException):
+            download_file("http://example.com/model.bin", dest)
+
+        assert not dest.exists()

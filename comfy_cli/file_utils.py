@@ -293,6 +293,13 @@ def download_file(url: str, local_filepath: pathlib.Path, headers: dict | None =
                 print(f"Download error (attempt {attempt + 1}/{_DOWNLOAD_MAX_RETRIES}): {_friendly_network_error(exc)}")
                 print(f"Retrying in {wait}s...")
                 time.sleep(wait)
+        except httpx.HTTPError as exc:
+            # Non-retriable httpx errors (e.g. UnsupportedProtocol, TooManyRedirects,
+            # DecodingError). Fail fast and convert to DownloadException so callers
+            # only need to handle one error type.
+            if state["file_opened"]:
+                _cleanup_partial(local_filepath)
+            raise DownloadException(f"Download failed: {_friendly_network_error(exc)}") from exc
         except KeyboardInterrupt:
             # Only prompt/cleanup if we actually opened the destination this attempt.
             # If the interrupt arrived during connection setup, there is no partial
