@@ -171,7 +171,10 @@ def execute_install_script(repo_path):
     if os.path.exists(requirements_path):
         print("Install: pip packages")
         python = resolve_workspace_python(workspace_manager.workspace_path)
-        install_cmd = [python, "-m", "pip", "install", "-r", requirements_path]
+        # Absolute path so pip doesn't re-resolve it against cwd=repo_path
+        # in try_install_script, which would double the path if repo_path
+        # is relative.
+        install_cmd = [python, "-m", "pip", "install", "-r", os.path.abspath(requirements_path)]
         try_install_script(repo_path, install_cmd)
 
     if os.path.exists(install_script_path):

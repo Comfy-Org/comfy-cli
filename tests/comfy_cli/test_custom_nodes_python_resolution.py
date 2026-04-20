@@ -1,3 +1,4 @@
+import os
 from unittest.mock import patch
 
 from comfy_cli.command.custom_nodes import command
@@ -103,6 +104,30 @@ class TestExecuteInstallScript:
         mock_check_call.assert_called_once()
         argv = mock_check_call.call_args[0][0]
         assert argv == ["/resolved/python", "-m", "pip", "install", "-r", str(requirements_path)]
+
+    def test_requirements_path_is_absolute_when_repo_path_is_relative(self, tmp_path, monkeypatch):
+        # try_install_script runs pip with cwd=repo_path. If requirements_path
+        # were relative, pip would resolve `-r <rel>/requirements.txt` against
+        # that cwd, producing a doubled path like <rel>/<rel>/requirements.txt.
+        # Guard: the `-r` target must be absolute regardless of the input.
+        (tmp_path / "requirements.txt").write_text("numpy>=1.0\n")
+        monkeypatch.chdir(tmp_path.parent)
+        relative_repo = tmp_path.name  # e.g. "test_requirements_path..." relative to cwd
+
+        with (
+            patch(
+                "comfy_cli.command.custom_nodes.command.resolve_workspace_python",
+                return_value="/resolved/python",
+            ),
+            patch.object(command.workspace_manager, "workspace_path", str(tmp_path)),
+            patch("comfy_cli.command.custom_nodes.command.subprocess.check_call") as mock_check_call,
+        ):
+            command.execute_install_script(relative_repo)
+
+        argv = mock_check_call.call_args[0][0]
+        target = argv[-1]
+        assert os.path.isabs(target), f"-r target is not absolute: {target!r}"
+        assert target == str(tmp_path / "requirements.txt")
 
 
 class TestUpdateNodeIdCache:
