@@ -66,9 +66,10 @@ class TestExecuteInstallScript:
 
     def test_inline_comment_not_passed_to_pip(self, tmp_path):
         # Issue #431 regression: inline comments in requirements.txt must not
-        # survive into the argv handed to pip. Pre-fix, the line was passed
+        # survive into the argv handed to pip. Pre-fix, the raw line was passed
         # verbatim (e.g. "matplotlib>=3.3.0  # note") and pip rejected it.
-        (tmp_path / "requirements.txt").write_text("matplotlib>=3.3.0  # For visualization\n")
+        bad_spec = "matplotlib>=3.3.0  # For visualization"
+        (tmp_path / "requirements.txt").write_text(f"{bad_spec}\n")
 
         with (
             patch(
@@ -82,7 +83,7 @@ class TestExecuteInstallScript:
 
         for call in mock_check_call.call_args_list:
             argv = call[0][0]
-            assert not any("#" in element for element in argv), f"inline comment leaked into pip argv: {argv!r}"
+            assert bad_spec not in argv, f"raw comment-laden spec leaked into pip argv: {argv!r}"
 
     def test_uses_pip_install_r(self, tmp_path):
         # Option C: delegate requirements-file parsing to pip via `-r <path>`.

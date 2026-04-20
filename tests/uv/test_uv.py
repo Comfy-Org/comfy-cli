@@ -418,3 +418,11 @@ def test_parse_req_file_preserves_double_dash_options(tmp_path):
     rf = tmp_path / "requirements.txt"
     rf.write_text("--extra-index-url https://example.com/simple\nfoo\n")
     assert parse_req_file(rf) == ["--extra-index-url", "https://example.com/simple", "foo"]
+
+
+def test_parse_req_file_handles_crlf_line_endings(tmp_path):
+    # Windows-authored requirements.txt files use CRLF. Verify the comment
+    # stripper + .strip() cleanly handles the trailing \r.
+    rf = tmp_path / "requirements.txt"
+    rf.write_bytes(b"foo>=1.0  # note\r\nbar>=2.0\r\n")
+    assert parse_req_file(rf) == ["foo>=1.0", "bar>=2.0"]

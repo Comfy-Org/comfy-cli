@@ -260,7 +260,12 @@ def initialize_project_config():
                 # options (-r, -e, -c, --index-url, ...) which are not valid
                 # PEP 508 deps and would break downstream build tooling.
                 line = _inline_comment_re.sub("", raw).strip()
-                if not line or line.startswith("-"):
+                if not line:
+                    continue
+                if line.startswith("-"):
+                    print(
+                        f"Warning: skipping pip-only option from requirements.txt (not valid as PEP 508 dep): {line!r}"
+                    )
                     continue
                 dependencies.append(line)
         project["dependencies"] = dependencies

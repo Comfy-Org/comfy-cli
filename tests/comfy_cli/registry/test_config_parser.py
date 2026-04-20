@@ -443,11 +443,12 @@ def test_initialize_project_config_skips_full_line_comments(tmp_path, monkeypatc
     assert deps == ["foo>=1.0", "bar"]
 
 
-def test_initialize_project_config_skips_pip_options(tmp_path, monkeypatch):
+def test_initialize_project_config_skips_pip_options(tmp_path, monkeypatch, capsys):
     # `-r`, `-e`, `-c`, `--index-url`, `--extra-index-url`, `--find-links`
     # are pip-requirements-file syntax, not PEP 508 dep specifiers. They must
     # not land in [project.dependencies] where downstream build tools will
-    # error trying to parse them.
+    # error trying to parse them. Each skipped line must also produce a
+    # visible warning so silent data loss is avoided.
     monkeypatch.chdir(tmp_path)
     _init_git_repo_with_reqs(
         tmp_path,
@@ -463,6 +464,9 @@ def test_initialize_project_config_skips_pip_options(tmp_path, monkeypatch):
         data = tomlkit.parse(f.read())
     deps = [str(d) for d in data["project"]["dependencies"]]
     assert deps == ["foo>=1.0"]
+    out = capsys.readouterr().out
+    for dropped in ["-r other.txt", "-e .", "--index-url", "--extra-index-url", "--find-links"]:
+        assert dropped in out, f"missing skip warning for {dropped!r}"
 
 
 def test_initialize_project_config_preserves_vcs_subdirectory_fragment(tmp_path, monkeypatch):
