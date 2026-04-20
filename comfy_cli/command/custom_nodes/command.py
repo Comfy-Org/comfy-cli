@@ -171,13 +171,8 @@ def execute_install_script(repo_path):
     if os.path.exists(requirements_path):
         print("Install: pip packages")
         python = resolve_workspace_python(workspace_manager.workspace_path)
-        with open(requirements_path, encoding="utf-8") as requirements_file:
-            for line in requirements_file:
-                package_name = line.strip()
-                if package_name and not package_name.startswith("#"):
-                    install_cmd = [python, "-m", "pip", "install", package_name]
-                    if package_name.strip() != "":
-                        try_install_script(repo_path, install_cmd)
+        install_cmd = [python, "-m", "pip", "install", "-r", requirements_path]
+        try_install_script(repo_path, install_cmd)
 
     if os.path.exists(install_script_path):
         print("Install: install script")

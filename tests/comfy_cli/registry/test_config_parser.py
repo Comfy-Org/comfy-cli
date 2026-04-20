@@ -399,3 +399,96 @@ def test_initialize_project_config_ssh_remote(tmp_path, monkeypatch):
     assert urls["Bug Tracker"] == "https://github.com/user/ComfyUI-TestNode/issues"
     assert data["project"]["name"] == "testnode"
     assert data["tool"]["comfy"]["DisplayName"] == "ComfyUI-TestNode"
+
+
+# Issue #431: requirements.txt → pyproject.toml migration must produce
+# valid PEP 508 dependency specifiers. Inline comments, full-line comments,
+# and pip-specific options (-r, -e, --index-url, ...) are not valid deps.
+
+
+def _init_git_repo_with_reqs(tmp_path, requirements_content: str) -> None:
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "remote", "add", "origin", "https://github.com/user/ComfyUI-TestNode.git"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+    (tmp_path / "requirements.txt").write_text(requirements_content)
+
+
+def test_initialize_project_config_strips_inline_comments(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    _init_git_repo_with_reqs(
+        tmp_path,
+        "matplotlib>=3.3.0  # For visualization\nnumpy>=1.0 # trailing\n",
+    )
+    initialize_project_config()
+    with open(tmp_path / "pyproject.toml") as f:
+        data = tomlkit.parse(f.read())
+    deps = [str(d) for d in data["project"]["dependencies"]]
+    assert deps == ["matplotlib>=3.3.0", "numpy>=1.0"]
+
+
+def test_initialize_project_config_skips_full_line_comments(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    _init_git_repo_with_reqs(
+        tmp_path,
+        "# heading comment\nfoo>=1.0\n  # indented comment\nbar\n",
+    )
+    initialize_project_config()
+    with open(tmp_path / "pyproject.toml") as f:
+        data = tomlkit.parse(f.read())
+    deps = [str(d) for d in data["project"]["dependencies"]]
+    assert deps == ["foo>=1.0", "bar"]
+
+
+def test_initialize_project_config_skips_pip_options(tmp_path, monkeypatch):
+    # `-r`, `-e`, `-c`, `--index-url`, `--extra-index-url`, `--find-links`
+    # are pip-requirements-file syntax, not PEP 508 dep specifiers. They must
+    # not land in [project.dependencies] where downstream build tools will
+    # error trying to parse them.
+    monkeypatch.chdir(tmp_path)
+    _init_git_repo_with_reqs(
+        tmp_path,
+        "-r other.txt\n"
+        "-e .\n"
+        "--index-url https://pypi.org/simple\n"
+        "--extra-index-url https://example.com/simple\n"
+        "--find-links ./local-wheels\n"
+        "foo>=1.0\n",
+    )
+    initialize_project_config()
+    with open(tmp_path / "pyproject.toml") as f:
+        data = tomlkit.parse(f.read())
+    deps = [str(d) for d in data["project"]["dependencies"]]
+    assert deps == ["foo>=1.0"]
+
+
+def test_initialize_project_config_preserves_vcs_subdirectory_fragment(tmp_path, monkeypatch):
+    # Regression guard against a naive `split("#")[0]` fix — VCS fragments
+    # must survive because `#` is only a comment marker when preceded by
+    # whitespace (pip's rule).
+    monkeypatch.chdir(tmp_path)
+    _init_git_repo_with_reqs(
+        tmp_path,
+        "git+https://github.com/org/mono.git#subdirectory=pkg\n",
+    )
+    initialize_project_config()
+    with open(tmp_path / "pyproject.toml") as f:
+        data = tomlkit.parse(f.read())
+    deps = [str(d) for d in data["project"]["dependencies"]]
+    assert deps == ["git+https://github.com/org/mono.git#subdirectory=pkg"]
+
+
+def test_initialize_project_config_vcs_with_inline_comment(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    _init_git_repo_with_reqs(
+        tmp_path,
+        "git+https://github.com/org/mono.git#subdirectory=pkg  # monorepo dep\n",
+    )
+    initialize_project_config()
+    with open(tmp_path / "pyproject.toml") as f:
+        data = tomlkit.parse(f.read())
+    deps = [str(d) for d in data["project"]["dependencies"]]
+    assert deps == ["git+https://github.com/org/mono.git#subdirectory=pkg"]

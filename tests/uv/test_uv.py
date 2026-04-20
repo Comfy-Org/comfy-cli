@@ -7,7 +7,7 @@ import pytest
 
 from comfy_cli import ui
 from comfy_cli.constants import GPU_OPTION
-from comfy_cli.uv import DependencyCompiler, _check_call
+from comfy_cli.uv import DependencyCompiler, _check_call, parse_req_file
 
 hereDir = Path(__file__).parent.resolve()
 mockComfyDir = hereDir / "mock_comfy"
@@ -360,3 +360,61 @@ def test_check_call_no_hint_for_pip_install_uv(capsys):
 
     captured = capsys.readouterr().out
     assert "network filesystem" not in captured
+
+
+# Issue #431: parse_req_file feeds its output into pip argv (pip download /
+# pip wheel). Inline comments would be rejected by pip; VCS URL fragments must
+# be preserved verbatim (e.g. `#subdirectory=pkg`, `#egg=foo`).
+
+
+def test_parse_req_file_strips_inline_comments(tmp_path):
+    rf = tmp_path / "requirements.txt"
+    rf.write_text("foo>=1.0  # trailing comment\n")
+    assert parse_req_file(rf) == ["foo>=1.0"]
+
+
+def test_parse_req_file_strips_inline_comment_with_single_space(tmp_path):
+    rf = tmp_path / "requirements.txt"
+    rf.write_text("bar==2.3 # single space before hash\n")
+    assert parse_req_file(rf) == ["bar==2.3"]
+
+
+def test_parse_req_file_skips_full_line_comments(tmp_path):
+    rf = tmp_path / "requirements.txt"
+    rf.write_text("# heading\nfoo>=1.0\n   # indented heading\nbaz\n")
+    assert parse_req_file(rf) == ["foo>=1.0", "baz"]
+
+
+def test_parse_req_file_preserves_vcs_subdirectory_fragment(tmp_path):
+    # Regression guard: any naive `split("#")[0]` would break this. `#` is only
+    # a comment marker when preceded by whitespace (pip's rule).
+    rf = tmp_path / "requirements.txt"
+    rf.write_text("git+https://github.com/org/mono.git#subdirectory=pkg\n")
+    assert parse_req_file(rf) == ["git+https://github.com/org/mono.git#subdirectory=pkg"]
+
+
+def test_parse_req_file_preserves_vcs_egg_fragment(tmp_path):
+    rf = tmp_path / "requirements.txt"
+    rf.write_text("git+https://github.com/org/repo.git@main#egg=foo\n")
+    assert parse_req_file(rf) == ["git+https://github.com/org/repo.git@main#egg=foo"]
+
+
+def test_parse_req_file_preserves_direct_url_hash(tmp_path):
+    rf = tmp_path / "requirements.txt"
+    rf.write_text("foo @ https://host/f.whl#sha256=abc123\n")
+    assert parse_req_file(rf) == ["foo @ https://host/f.whl#sha256=abc123"]
+
+
+def test_parse_req_file_vcs_with_inline_comment_strips_only_comment(tmp_path):
+    # The trickiest case: a VCS spec with a fragment AND a trailing comment.
+    # Comment is preceded by whitespace so it must be stripped; fragment is
+    # part of the URL and must survive.
+    rf = tmp_path / "requirements.txt"
+    rf.write_text("git+https://host/r.git#subdirectory=pkg  # note\n")
+    assert parse_req_file(rf) == ["git+https://host/r.git#subdirectory=pkg"]
+
+
+def test_parse_req_file_preserves_double_dash_options(tmp_path):
+    rf = tmp_path / "requirements.txt"
+    rf.write_text("--extra-index-url https://example.com/simple\nfoo\n")
+    assert parse_req_file(rf) == ["--extra-index-url", "https://example.com/simple", "foo"]

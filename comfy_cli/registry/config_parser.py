@@ -17,6 +17,11 @@ from comfy_cli.registry.types import (
     URLs,
 )
 
+# Mirrors pip's requirements-file comment rule: `#` only starts a comment when
+# preceded by whitespace, so VCS URL fragments (`#subdirectory=`, `#egg=`) and
+# direct-URL hashes (`#sha256=`) survive.
+_inline_comment_re: re.Pattern[str] = re.compile(r"(^|\s+)#.*$")
+
 
 def create_comfynode_config():
     # Create the initial structure of the TOML document
@@ -249,7 +254,15 @@ def initialize_project_config():
     # Handle dependencies
     if os.path.exists("requirements.txt"):
         with open("requirements.txt") as req_file:
-            dependencies = [line.strip() for line in req_file if line.strip()]
+            dependencies: list[str] = []
+            for raw in req_file:
+                # Strip inline/full-line comments, then skip pip-requirements-file
+                # options (-r, -e, -c, --index-url, ...) which are not valid
+                # PEP 508 deps and would break downstream build tooling.
+                line = _inline_comment_re.sub("", raw).strip()
+                if not line or line.startswith("-"):
+                    continue
+                dependencies.append(line)
         project["dependencies"] = dependencies
     else:
         print("Warning: 'requirements.txt' not found. No dependencies will be added.")

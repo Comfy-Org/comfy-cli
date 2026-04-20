@@ -63,6 +63,47 @@ class TestExecuteInstallScript:
         cmd = mock_check_call.call_args[0][0]
         assert cmd == ["/resolved/python", "install.py"]
 
+    def test_inline_comment_not_passed_to_pip(self, tmp_path):
+        # Issue #431 regression: inline comments in requirements.txt must not
+        # survive into the argv handed to pip. Pre-fix, the line was passed
+        # verbatim (e.g. "matplotlib>=3.3.0  # note") and pip rejected it.
+        (tmp_path / "requirements.txt").write_text("matplotlib>=3.3.0  # For visualization\n")
+
+        with (
+            patch(
+                "comfy_cli.command.custom_nodes.command.resolve_workspace_python",
+                return_value="/resolved/python",
+            ),
+            patch.object(command.workspace_manager, "workspace_path", str(tmp_path)),
+            patch("comfy_cli.command.custom_nodes.command.subprocess.check_call") as mock_check_call,
+        ):
+            command.execute_install_script(str(tmp_path))
+
+        for call in mock_check_call.call_args_list:
+            argv = call[0][0]
+            assert not any("#" in element for element in argv), f"inline comment leaked into pip argv: {argv!r}"
+
+    def test_uses_pip_install_r(self, tmp_path):
+        # Option C: delegate requirements-file parsing to pip via `-r <path>`.
+        # This lets pip handle inline comments, line continuations, VCS URL
+        # fragments, env markers, -e, -r, --index-url, etc.
+        requirements_path = tmp_path / "requirements.txt"
+        requirements_path.write_text("numpy>=1.0\n")
+
+        with (
+            patch(
+                "comfy_cli.command.custom_nodes.command.resolve_workspace_python",
+                return_value="/resolved/python",
+            ),
+            patch.object(command.workspace_manager, "workspace_path", str(tmp_path)),
+            patch("comfy_cli.command.custom_nodes.command.subprocess.check_call") as mock_check_call,
+        ):
+            command.execute_install_script(str(tmp_path))
+
+        mock_check_call.assert_called_once()
+        argv = mock_check_call.call_args[0][0]
+        assert argv == ["/resolved/python", "-m", "pip", "install", "-r", str(requirements_path)]
+
 
 class TestUpdateNodeIdCache:
     def test_uses_resolved_python(self, tmp_path):
