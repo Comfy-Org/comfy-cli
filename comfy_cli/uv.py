@@ -37,6 +37,11 @@ def _check_call(cmd: list[str], cwd: PathLike | None = None):
 
 _req_name_re: re.Pattern[str] = re.compile(r"require\s([\w-]+)")
 
+# Mirrors pip's requirements-file comment rule (pip._internal.req.req_file.COMMENT_RE):
+# `#` only starts a comment when preceded by whitespace (or starts the line), so
+# VCS URL fragments like `#subdirectory=pkg` and `#egg=foo` survive.
+_inline_comment_re: re.Pattern[str] = re.compile(r"(^|\s+)#.*$")
+
 
 def _req_re_closure(name: str) -> re.Pattern[str]:
     return re.compile(rf"({name}\S+)")
@@ -64,8 +69,8 @@ def parse_req_file(rf: PathLike, skips: list[str] | None = None):
     opts: list[str] = []
     with open(rf) as f:
         for line in f:
-            line = line.strip()
-            if not line or line.startswith("#"):
+            line = _inline_comment_re.sub("", line).strip()
+            if not line:
                 continue
             elif "==" in line and line.split("==")[0] in skips:
                 continue
