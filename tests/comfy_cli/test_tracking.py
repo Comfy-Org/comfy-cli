@@ -60,6 +60,7 @@ class TestTrackEvent:
         tracking_module.config_manager.set(constants.CONFIG_KEY_ENABLE_TRACKING, "True")
         tracking_module.mp.track.side_effect = RuntimeError("boom")
         tracking_module.track_event("some_event")
+        tracking_module.mp.track.assert_called_once()
 
 
 class TestInitTrackingRoundTrip:
