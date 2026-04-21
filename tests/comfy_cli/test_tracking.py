@@ -21,6 +21,9 @@ def tracking_module(tmp_path):
 
     with (
         patch.object(tracking_mod, "config_manager", cfg),
+        patch.object(tracking_mod, "user_id", None),
+        patch.object(tracking_mod, "cli_version", "test-cli-version"),
+        patch.object(tracking_mod, "tracing_id", "test-tracing-id"),
         patch.object(tracking_mod, "mp", MagicMock()),
     ):
         yield tracking_mod
