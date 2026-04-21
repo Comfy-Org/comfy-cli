@@ -45,8 +45,7 @@ def track_event(event_name: str, properties: any = None):
     if properties is None:
         properties = {}
     logging.debug(f"tracking event called with event_name: {event_name} and properties: {properties}")
-    # enable_tracking = config_manager.get_bool(constants.CONFIG_KEY_ENABLE_TRACKING)
-    enable_tracking = False
+    enable_tracking = config_manager.get_bool(constants.CONFIG_KEY_ENABLE_TRACKING)
     if not enable_tracking:
         return
 
@@ -98,6 +97,7 @@ def init_tracking(enable_tracking: bool):
     """
     Initialize the tracking system by setting the user identifier and tracking enabled status.
     """
+    global user_id
     logging.debug(f"Initializing tracking with enable_tracking: {enable_tracking}")
     config_manager.set(constants.CONFIG_KEY_ENABLE_TRACKING, str(enable_tracking))
     if not enable_tracking:
@@ -109,6 +109,7 @@ def init_tracking(enable_tracking: bool):
         curr_user_id = str(uuid.uuid4())
         config_manager.set(constants.CONFIG_KEY_USER_ID, curr_user_id)
         logging.debug(f'Setting user identifier for tracking user_id: {curr_user_id}."')
+    user_id = curr_user_id
 
     # Note: only called once when the user interacts with the CLI for the
     #  first time iff the permission is granted.
