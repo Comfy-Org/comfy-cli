@@ -87,7 +87,11 @@ class TestInitTrackingRoundTrip:
     def test_enable_generates_user_id(self, tracking_module):
         assert tracking_module.config_manager.get(constants.CONFIG_KEY_USER_ID) is None
         tracking_module.init_tracking(True)
-        assert tracking_module.config_manager.get(constants.CONFIG_KEY_USER_ID) is not None
+        generated_user_id = tracking_module.config_manager.get(constants.CONFIG_KEY_USER_ID)
+        assert generated_user_id is not None
+        assert tracking_module.user_id == generated_user_id
+        _, kwargs = tracking_module.mp.track.call_args
+        assert kwargs["distinct_id"] == generated_user_id
 
     def test_disable_does_not_generate_user_id(self, tracking_module):
         tracking_module.init_tracking(False)

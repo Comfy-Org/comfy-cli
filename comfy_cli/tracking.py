@@ -97,6 +97,7 @@ def init_tracking(enable_tracking: bool):
     """
     Initialize the tracking system by setting the user identifier and tracking enabled status.
     """
+    global user_id
     logging.debug(f"Initializing tracking with enable_tracking: {enable_tracking}")
     config_manager.set(constants.CONFIG_KEY_ENABLE_TRACKING, str(enable_tracking))
     if not enable_tracking:
@@ -108,6 +109,7 @@ def init_tracking(enable_tracking: bool):
         curr_user_id = str(uuid.uuid4())
         config_manager.set(constants.CONFIG_KEY_USER_ID, curr_user_id)
         logging.debug(f'Setting user identifier for tracking user_id: {curr_user_id}."')
+    user_id = curr_user_id
 
     # Note: only called once when the user interacts with the CLI for the
     #  first time iff the permission is granted.
