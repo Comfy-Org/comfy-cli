@@ -244,6 +244,41 @@ def test_non_evil_civitai_url():
     assert check_civitai_url(url) == (False, False, None, None)
 
 
+def test_valid_model_url_red_domain():
+    url = "https://civitai.red/models/43331"
+    assert check_civitai_url(url) == (True, False, 43331, None)
+
+
+def test_valid_model_url_red_with_query():
+    url = "https://civitai.red/models/43331?modelVersionId=485088"
+    assert check_civitai_url(url) == (True, False, 43331, 485088)
+
+
+def test_valid_api_download_url_red_domain():
+    url = "https://civitai.red/api/download/models/1617665?type=Model&format=SafeTensor"
+    assert check_civitai_url(url) == (False, True, None, 1617665)
+
+
+def test_valid_api_v1_model_versions_url_red_domain():
+    url = "https://civitai.red/api/v1/model-versions/1617665"
+    assert check_civitai_url(url) == (False, True, None, 1617665)
+
+
+def test_www_subdomain_red_is_accepted():
+    url = "https://www.civitai.red/models/43331?version=12345"
+    assert check_civitai_url(url) == (True, False, 43331, 12345)
+
+
+def test_non_evil_civitai_red_url():
+    url = "https://evilcivitai.red/models/43331?version=12345"
+    assert check_civitai_url(url) == (False, False, None, None)
+
+
+def test_red_as_spoofed_subdomain_of_other_tld():
+    url = "https://civitai.red.evil.com/models/43331"
+    assert check_civitai_url(url) == (False, False, None, None)
+
+
 def test_valid_huggingface_url():
     url = "https://huggingface.co/CompVis/stable-diffusion-v1-4/resolve/main/sd-v1-4.ckpt"
     assert check_huggingface_url(url) == (True, "CompVis/stable-diffusion-v1-4", "sd-v1-4.ckpt", None, "main")

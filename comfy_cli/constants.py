@@ -47,6 +47,7 @@ CONFIG_KEY_UV_COMPILE_DEFAULT = "uv_compile_default"
 
 CIVITAI_API_TOKEN_KEY = "civitai_api_token"
 CIVITAI_API_TOKEN_ENV_KEY = "CIVITAI_API_TOKEN"
+CIVITAI_ALLOWED_HOSTS: tuple[str, ...] = ("civitai.com", "civitai.red")
 HF_API_TOKEN_KEY = "hf_api_token"
 HF_API_TOKEN_ENV_KEY = "HF_API_TOKEN"
 
