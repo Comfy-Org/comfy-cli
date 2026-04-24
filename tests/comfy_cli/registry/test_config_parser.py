@@ -212,6 +212,576 @@ def test_extract_node_configuration_with_requires_comfyui():
         assert result.project.supported_comfyui_version == "2.0.0"
 
 
+def _write_pyproject(tmp_path, body: str) -> str:
+    """Write a pyproject.toml in tmp_path and return its absolute path as a string."""
+    p = tmp_path / "pyproject.toml"
+    p.write_text(body)
+    return str(p)
+
+
+def test_dynamic_version_resolved_from_double_quoted_literal(tmp_path):
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "__init__.py").write_text('__version__ = "1.2.3"\n')
+    path = _write_pyproject(
+        tmp_path,
+        '[project]\nname = "x"\ndynamic = ["version"]\n\n[tool.comfy.version]\npath = "pkg/__init__.py"\n',
+    )
+    result = extract_node_configuration(path)
+    assert result is not None
+    assert result.project.version == "1.2.3"
+
+
+def test_dynamic_version_resolved_from_VERSION_name(tmp_path):
+    (tmp_path / "_version.py").write_text('VERSION = "2.0.0"\n')
+    path = _write_pyproject(
+        tmp_path,
+        '[project]\nname = "x"\ndynamic = ["version"]\n\n[tool.comfy.version]\npath = "_version.py"\n',
+    )
+    result = extract_node_configuration(path)
+    assert result is not None
+    assert result.project.version == "2.0.0"
+
+
+def test_dynamic_version_resolved_from_single_quotes(tmp_path):
+    (tmp_path / "_v.py").write_text("__version__ = '0.9.1'\n")
+    path = _write_pyproject(
+        tmp_path,
+        '[project]\nname = "x"\ndynamic = ["version"]\n\n[tool.comfy.version]\npath = "_v.py"\n',
+    )
+    result = extract_node_configuration(path)
+    assert result is not None
+    assert result.project.version == "0.9.1"
+
+
+def test_dynamic_version_resolved_with_type_annotation(tmp_path):
+    (tmp_path / "_v.py").write_text('__version__: str = "3.4.5"\n')
+    path = _write_pyproject(
+        tmp_path,
+        '[project]\nname = "x"\ndynamic = ["version"]\n\n[tool.comfy.version]\npath = "_v.py"\n',
+    )
+    result = extract_node_configuration(path)
+    assert result is not None
+    assert result.project.version == "3.4.5"
+
+
+def test_dynamic_version_ignores_commented_line(tmp_path):
+    # The `^` anchor ensures a commented-out line is not matched.
+    (tmp_path / "_v.py").write_text('# __version__ = "9.9.9"\n__version__ = "1.0.0"\n')
+    path = _write_pyproject(
+        tmp_path,
+        '[project]\nname = "x"\ndynamic = ["version"]\n\n[tool.comfy.version]\npath = "_v.py"\n',
+    )
+    result = extract_node_configuration(path)
+    assert result is not None
+    assert result.project.version == "1.0.0"
+
+
+def test_dynamic_version_first_match_wins(tmp_path):
+    (tmp_path / "_v.py").write_text('__version__ = "1.0.0"\n__version__ = "2.0.0"\n')
+    path = _write_pyproject(
+        tmp_path,
+        '[project]\nname = "x"\ndynamic = ["version"]\n\n[tool.comfy.version]\npath = "_v.py"\n',
+    )
+    result = extract_node_configuration(path)
+    assert result is not None
+    assert result.project.version == "1.0.0"
+
+
+def test_static_version_wins_over_tool_comfy_version(tmp_path):
+    # Defensive: if a user accidentally has both, the static `project.version`
+    # wins without ever reading the file (no warning, no resolution).
+    (tmp_path / "_v.py").write_text('__version__ = "9.9.9"\n')
+    path = _write_pyproject(
+        tmp_path,
+        '[project]\nname = "x"\nversion = "1.0.0"\n\n[tool.comfy.version]\npath = "_v.py"\n',
+    )
+    result = extract_node_configuration(path)
+    assert result is not None
+    assert result.project.version == "1.0.0"
+
+
+@patch("typer.echo")
+def test_dynamic_version_without_tool_comfy_version_warns(mock_echo, tmp_path):
+    path = _write_pyproject(tmp_path, '[project]\nname = "x"\ndynamic = ["version"]\n')
+    result = extract_node_configuration(path)
+    assert result is not None
+    assert result.project.version == ""
+    assert any("[tool.comfy.version].path" in str(c) for c in mock_echo.call_args_list)
+
+
+@patch("typer.echo")
+def test_dynamic_version_absolute_path_rejected(mock_echo, tmp_path):
+    path = _write_pyproject(
+        tmp_path,
+        '[project]\nname = "x"\ndynamic = ["version"]\n\n[tool.comfy.version]\npath = "/etc/passwd"\n',
+    )
+    result = extract_node_configuration(path)
+    assert result is not None
+    assert result.project.version == ""
+    assert any("must be relative" in str(c) for c in mock_echo.call_args_list)
+
+
+@patch("typer.echo")
+def test_dynamic_version_windows_absolute_path_rejected(mock_echo, tmp_path):
+    # Ensure a Windows-style absolute path is also rejected when tests run
+    # on POSIX (and vice versa) — the check is OS-agnostic.
+    path = _write_pyproject(
+        tmp_path,
+        '[project]\nname = "x"\ndynamic = ["version"]\n\n[tool.comfy.version]\npath = \'C:\\Windows\\version.py\'\n',
+    )
+    result = extract_node_configuration(path)
+    assert result is not None
+    assert result.project.version == ""
+    assert any("must be relative" in str(c) for c in mock_echo.call_args_list)
+
+
+@patch("typer.echo")
+def test_dynamic_version_path_traversal_rejected(mock_echo, tmp_path):
+    path = _write_pyproject(
+        tmp_path,
+        '[project]\nname = "x"\ndynamic = ["version"]\n\n[tool.comfy.version]\npath = "../../etc/passwd"\n',
+    )
+    result = extract_node_configuration(path)
+    assert result is not None
+    assert result.project.version == ""
+    assert any("inside the project directory" in str(c) for c in mock_echo.call_args_list)
+
+
+@patch("typer.echo")
+def test_dynamic_version_missing_file_warns(mock_echo, tmp_path):
+    path = _write_pyproject(
+        tmp_path,
+        '[project]\nname = "x"\ndynamic = ["version"]\n\n[tool.comfy.version]\npath = "does_not_exist.py"\n',
+    )
+    result = extract_node_configuration(path)
+    assert result is not None
+    assert result.project.version == ""
+    assert any("could not read" in str(c) for c in mock_echo.call_args_list)
+
+
+@patch("typer.echo")
+def test_dynamic_version_no_match_warns(mock_echo, tmp_path):
+    (tmp_path / "_v.py").write_text('other_var = "1.2.3"\nsome_other = 42\n')
+    path = _write_pyproject(
+        tmp_path,
+        '[project]\nname = "x"\ndynamic = ["version"]\n\n[tool.comfy.version]\npath = "_v.py"\n',
+    )
+    result = extract_node_configuration(path)
+    assert result is not None
+    assert result.project.version == ""
+    assert any("could not find" in str(c) for c in mock_echo.call_args_list)
+
+
+def test_dynamic_version_handles_utf8_bom(tmp_path):
+    # Windows editors that write a UTF-8 BOM must not defeat the `^` anchor.
+    (tmp_path / "_v.py").write_bytes(b'\xef\xbb\xbf__version__ = "1.2.3"\n')
+    path = _write_pyproject(
+        tmp_path,
+        '[project]\nname = "x"\ndynamic = ["version"]\n\n[tool.comfy.version]\npath = "_v.py"\n',
+    )
+    result = extract_node_configuration(path)
+    assert result is not None
+    assert result.project.version == "1.2.3"
+
+
+@patch("typer.echo")
+def test_dynamic_version_invalid_utf8_warns(mock_echo, tmp_path):
+    # Non-UTF-8 content must not crash the parser (UnicodeDecodeError is a
+    # ValueError, not an OSError — must be caught explicitly).
+    (tmp_path / "_v.py").write_bytes(b"\xff\xfe\x00\x00garbage bytes")
+    path = _write_pyproject(
+        tmp_path,
+        '[project]\nname = "x"\ndynamic = ["version"]\n\n[tool.comfy.version]\npath = "_v.py"\n',
+    )
+    result = extract_node_configuration(path)
+    assert result is not None
+    assert result.project.version == ""
+    assert any("could not read" in str(c) for c in mock_echo.call_args_list)
+
+
+@patch("typer.echo")
+def test_dynamic_version_scalar_tool_comfy_version_warns(mock_echo, tmp_path):
+    # User misplaced a scalar version under [tool.comfy] instead of [project].
+    # Warning should name the shape problem, not the path problem.
+    path = _write_pyproject(
+        tmp_path,
+        '[project]\nname = "x"\ndynamic = ["version"]\n\n[tool.comfy]\nversion = "1.2.3"\n',
+    )
+    result = extract_node_configuration(path)
+    assert result is not None
+    assert result.project.version == ""
+    assert any("must be a table" in str(c) for c in mock_echo.call_args_list)
+
+
+@patch("typer.echo")
+def test_malformed_dynamic_scalar_string_warns(mock_echo, tmp_path):
+    # User wrote `dynamic = "version"` (scalar) instead of `dynamic = ["version"]`.
+    # Silent-skip would leave them confused; warn explicitly.
+    (tmp_path / "_v.py").write_text('__version__ = "1.0.0"\n')
+    path = _write_pyproject(
+        tmp_path,
+        '[project]\nname = "x"\ndynamic = "version"\n\n[tool.comfy.version]\npath = "_v.py"\n',
+    )
+    result = extract_node_configuration(path)
+    assert result is not None
+    assert result.project.version == ""
+    assert any("must be an array of strings" in str(c) for c in mock_echo.call_args_list)
+
+
+def test_dynamic_version_indented_only_does_not_match(tmp_path):
+    # Regex anchor `^` must reject indented `__version__` assignments (inside
+    # classes/functions). File has ONLY the indented form — expect no match
+    # and empty version.
+    (tmp_path / "_v.py").write_text('class Foo:\n    __version__ = "1.2.3"\n')
+    path = _write_pyproject(
+        tmp_path,
+        '[project]\nname = "x"\ndynamic = ["version"]\n\n[tool.comfy.version]\npath = "_v.py"\n',
+    )
+    result = extract_node_configuration(path)
+    assert result is not None
+    assert result.project.version == ""
+
+
+def test_dynamic_version_trailing_inline_comment_resolves(tmp_path):
+    # `__version__ = "1.2.3"  # stable` must resolve to "1.2.3" (regex stops
+    # capture at the closing quote, trailing comment ignored).
+    (tmp_path / "_v.py").write_text('__version__ = "1.2.3"  # stable release\n')
+    path = _write_pyproject(
+        tmp_path,
+        '[project]\nname = "x"\ndynamic = ["version"]\n\n[tool.comfy.version]\npath = "_v.py"\n',
+    )
+    result = extract_node_configuration(path)
+    assert result is not None
+    assert result.project.version == "1.2.3"
+
+
+@patch("typer.echo")
+def test_dynamic_version_path_is_directory_warns(mock_echo, tmp_path):
+    # `path` pointing at a directory must degrade gracefully (IsADirectoryError
+    # is an OSError subclass) and surface a "could not read" warning.
+    (tmp_path / "subdir").mkdir()
+    path = _write_pyproject(
+        tmp_path,
+        '[project]\nname = "x"\ndynamic = ["version"]\n\n[tool.comfy.version]\npath = "subdir"\n',
+    )
+    result = extract_node_configuration(path)
+    assert result is not None
+    assert result.project.version == ""
+    assert any("could not read" in str(c) for c in mock_echo.call_args_list)
+
+
+def test_padded_static_version_is_stripped(tmp_path):
+    # Static `version = "  1.0.0  "` must be normalized — registries should not
+    # receive whitespace padding.
+    path = _write_pyproject(tmp_path, '[project]\nname = "x"\nversion = "  1.0.0  "\n')
+    result = extract_node_configuration(path)
+    assert result is not None
+    assert result.project.version == "1.0.0"
+
+
+@patch("typer.echo")
+def test_dynamic_version_non_string_path_warns_as_type_error(mock_echo, tmp_path):
+    # A non-string `path` value must produce a type warning, not a misleading
+    # "could not read file `42`" OS error.
+    path = _write_pyproject(
+        tmp_path,
+        '[project]\nname = "x"\ndynamic = ["version"]\n\n[tool.comfy.version]\npath = 42\n',
+    )
+    result = extract_node_configuration(path)
+    assert result is not None
+    assert result.project.version == ""
+    assert any("must be a string" in str(c) for c in mock_echo.call_args_list)
+    # Must NOT fall through to an OS "could not read" warning
+    assert not any("could not read" in str(c) for c in mock_echo.call_args_list)
+
+
+@patch("typer.echo")
+def test_static_version_happy_path_emits_no_version_warnings(mock_echo, tmp_path):
+    # Regression guard for the common case: static version, no dynamic, no
+    # [tool.comfy.version]. Must not emit ANY version/dynamic-related warning
+    # (only unrelated warnings like the pre-existing "License..." one are allowed).
+    path = _write_pyproject(tmp_path, '[project]\nname = "x"\nversion = "1.2.3"\n')
+    result = extract_node_configuration(path)
+    assert result is not None
+    assert result.project.version == "1.2.3"
+    noisy = [
+        str(c)
+        for c in mock_echo.call_args_list
+        if "version" in str(c).lower() or "dynamic" in str(c).lower() or "tool.comfy" in str(c).lower()
+    ]
+    assert noisy == [], f"Unexpected version/dynamic warnings on happy path: {noisy}"
+
+
+# --- Fix K: non-dict `project` / `tool` degrade gracefully ---
+
+
+def test_malformed_toml_does_not_crash(tmp_path):
+    # Invalid TOML (syntax error) must not crash the parser — scanning
+    # contexts would lose the whole pack inventory otherwise.
+    (tmp_path / "pyproject.toml").write_text('[project\nname = "x"\n')  # missing `]`
+    result = extract_node_configuration(str(tmp_path / "pyproject.toml"))
+    assert result is None  # graceful None return, no exception
+
+
+def test_pyproject_with_utf8_bom_parses_successfully(tmp_path):
+    # Windows editors (e.g., Notepad with legacy settings, Visual Studio) write
+    # a UTF-8 BOM on save. `encoding="utf-8-sig"` strips it transparently; without
+    # this, tomlkit sees `﻿` as the first character and reports a cryptic
+    # `Empty key at line 1 col 0`.
+    (tmp_path / "pyproject.toml").write_bytes(b'\xef\xbb\xbf[project]\nname = "x"\nversion = "1.0.0"\n')
+    result = extract_node_configuration(str(tmp_path / "pyproject.toml"))
+    assert result is not None
+    assert result.project.name == "x"
+    assert result.project.version == "1.0.0"
+
+
+def test_pyproject_with_invalid_utf8_returns_none_gracefully(tmp_path):
+    # `UnicodeDecodeError` is a `ValueError`, not an `OSError`, so it must be in
+    # the except tuple explicitly. Without it, a pyproject.toml with non-UTF-8
+    # bytes raises a raw traceback instead of the friendly error shown for every
+    # other file-read failure.
+    (tmp_path / "pyproject.toml").write_bytes(b'[project]\nname = "x"\nx = "\xff\xfe garbage"\n')
+    result = extract_node_configuration(str(tmp_path / "pyproject.toml"))
+    assert result is None
+
+
+@patch("typer.echo")
+def test_static_version_non_string_scalar_rejected(mock_echo, tmp_path):
+    # PEP 621 requires `version` to be a string. A non-string scalar must now
+    # produce a typed warning, not be silently coerced via `str()`.
+    path = _write_pyproject(tmp_path, '[project]\nname = "x"\nversion = 1\n')
+    result = extract_node_configuration(path)
+    assert result is not None
+    assert result.project.version == ""
+    call_strs = [str(c) for c in mock_echo.call_args_list]
+    assert any("`project.version` must be a string" in s for s in call_strs)
+
+
+@patch("typer.echo")
+def test_static_version_array_rejected(mock_echo, tmp_path):
+    # Without the type check, `str(['1', '2'])` would POST `"['1', '2']"` to
+    # the registry. Must be rejected.
+    path = _write_pyproject(tmp_path, '[project]\nname = "x"\nversion = ["1", "2"]\n')
+    result = extract_node_configuration(path)
+    assert result is not None
+    assert result.project.version == ""
+    call_strs = [str(c) for c in mock_echo.call_args_list]
+    assert any("`project.version` must be a string" in s for s in call_strs)
+
+
+@patch("typer.echo")
+def test_static_version_inline_table_rejected(mock_echo, tmp_path):
+    # Users conflating PEP 621 static and our `[tool.comfy.version]` might write
+    # `version = { path = "_v.py" }`. Without the type check this POSTed as
+    # `"{'path': '_v.py'}"`. Catch it up front.
+    path = _write_pyproject(tmp_path, '[project]\nname = "x"\nversion = { path = "_v.py" }\n')
+    result = extract_node_configuration(path)
+    assert result is not None
+    assert result.project.version == ""
+    call_strs = [str(c) for c in mock_echo.call_args_list]
+    assert any("`project.version` must be a string" in s for s in call_strs)
+
+
+@patch("typer.echo")
+def test_project_scalar_at_root_does_not_crash(mock_echo, tmp_path):
+    # Malformed TOML: `project = "hello"` at root. Must not crash — used to
+    # raise AttributeError: 'String' object has no attribute 'get'.
+    path = _write_pyproject(tmp_path, 'project = "hello"\n[tool.comfy]\nPublisherId = "x"\n')
+    result = extract_node_configuration(path)
+    assert result is not None
+    assert result.project.version == ""
+    assert any("`project` in pyproject.toml must be a table" in str(c) for c in mock_echo.call_args_list)
+
+
+@pytest.mark.parametrize("value", ["0", "0.0", "false", "[]", "{}"])
+@patch("typer.echo")
+def test_static_version_falsy_non_string_rejected(mock_echo, tmp_path, value):
+    # Regression guard: the type check must fire for FALSY non-strings too
+    # (`version = 0`, `version = 0.0`, `version = false`, `version = []`,
+    # `version = {}`). Earlier the truthy check (`if static_version:`) gated
+    # the isinstance check, so these silently fell through to the dynamic
+    # branch and the user only saw the downstream "project version is empty"
+    # error.
+    path = _write_pyproject(tmp_path, f'[project]\nname = "x"\nversion = {value}\n')
+    result = extract_node_configuration(path)
+    assert result is not None
+    assert result.project.version == ""
+    call_strs = [str(c) for c in mock_echo.call_args_list]
+    assert any("`project.version` must be a string" in s for s in call_strs), (
+        f"value={value}: no type warning; saw {call_strs}"
+    )
+
+
+# --- Fix A (padded-static): strip semantics, already tested; add padded-dynamic variant ---
+
+
+def test_dynamic_version_padded_literal_is_stripped(tmp_path):
+    # `__version__ = "  1.2.3  "` — the `.strip()` in _resolve_dynamic_version
+    # already handles this, pinning the behavior here for regression safety.
+    (tmp_path / "_v.py").write_text('__version__ = "  1.2.3  "\n')
+    path = _write_pyproject(
+        tmp_path,
+        '[project]\nname = "x"\ndynamic = ["version"]\n\n[tool.comfy.version]\npath = "_v.py"\n',
+    )
+    result = extract_node_configuration(path)
+    assert result is not None
+    assert result.project.version == "1.2.3"
+
+
+# --- Fix N: falsy-but-typed path values must trigger the type warning ---
+
+
+@patch("typer.echo")
+def test_dynamic_version_empty_path_string_warns_as_not_set(mock_echo, tmp_path):
+    # `path = ""` explicitly set to empty string — equivalent to unset.
+    path = _write_pyproject(
+        tmp_path,
+        '[project]\nname = "x"\ndynamic = ["version"]\n\n[tool.comfy.version]\npath = ""\n',
+    )
+    result = extract_node_configuration(path)
+    assert result is not None
+    assert result.project.version == ""
+    assert any("path` is not set" in str(c) for c in mock_echo.call_args_list)
+
+
+@patch("typer.echo")
+def test_dynamic_version_table_missing_path_key_warns_as_not_set(mock_echo, tmp_path):
+    # `[tool.comfy.version]` table exists but has no `path` key.
+    path = _write_pyproject(
+        tmp_path,
+        '[project]\nname = "x"\ndynamic = ["version"]\n\n[tool.comfy.version]\n',
+    )
+    result = extract_node_configuration(path)
+    assert result is not None
+    assert result.project.version == ""
+    assert any("path` is not set" in str(c) for c in mock_echo.call_args_list)
+
+
+@patch("typer.echo")
+def test_falsy_nonstring_path_values_warn_as_type_mismatch(mock_echo, tmp_path):
+    # `path = 0 / false / [] / {}` are all truthy-falsy edge cases. They must
+    # produce a "must be a string" warning, not the misleading "path is not set".
+    for falsy in ["0", "false", "[]", "{}"]:
+        mock_echo.reset_mock()
+        path = _write_pyproject(
+            tmp_path,
+            f'[project]\nname = "x"\ndynamic = ["version"]\n\n[tool.comfy.version]\npath = {falsy}\n',
+        )
+        result = extract_node_configuration(path)
+        assert result is not None
+        assert result.project.version == ""
+        call_strs = [str(c) for c in mock_echo.call_args_list]
+        assert any("must be a string" in s for s in call_strs), f"falsy={falsy}: no type warning"
+        assert not any("path` is not set" in s for s in call_strs), f"falsy={falsy}: got misleading 'not set' warning"
+
+
+# --- Backslash in value: regex rejects, surfaces as "could not find" ---
+
+
+@patch("typer.echo")
+def test_dynamic_version_backslash_in_value_not_matched(mock_echo, tmp_path):
+    # The regex excludes `\` from the value class entirely, so any escape
+    # sequence in the literal causes the regex to fail to match. Users get
+    # a clear "could not find" warning rather than a silently misinterpreted
+    # value. PEP 440 versions are ASCII-only so this is a clean fail-closed
+    # contract; users with auto-generated `__version__` containing escapes
+    # must clean up their source.
+    (tmp_path / "_v.py").write_text('__version__ = "1.0\\n"\n')
+    path = _write_pyproject(
+        tmp_path,
+        '[project]\nname = "x"\ndynamic = ["version"]\n\n[tool.comfy.version]\npath = "_v.py"\n',
+    )
+    result = extract_node_configuration(path)
+    assert result is not None
+    assert result.project.version == ""
+    assert any("could not find" in str(c) for c in mock_echo.call_args_list)
+
+
+# --- H2 (Round 5): adjacent-string-literal concatenation detection ---
+
+
+@patch("typer.echo")
+def test_dynamic_version_adjacent_literals_double_quote_warns(mock_echo, tmp_path):
+    # Python evaluates `"1." "2.3"` as `"1.2.3"` via implicit concatenation.
+    # Without this check, the regex captures only `"1."` and we silently POST
+    # the wrong version. The same-line look-ahead rejects concatenation so the
+    # publish-layer guard exits 1 instead of shipping `"1."` to the registry.
+    (tmp_path / "_v.py").write_text('__version__ = "1." "2.3"\n')
+    path = _write_pyproject(
+        tmp_path,
+        '[project]\nname = "x"\ndynamic = ["version"]\n\n[tool.comfy.version]\npath = "_v.py"\n',
+    )
+    result = extract_node_configuration(path)
+    assert result is not None
+    assert result.project.version == ""
+    call_strs = [str(c) for c in mock_echo.call_args_list]
+    assert any("adjacent-string-literal concatenation" in s for s in call_strs), (
+        f"no concatenation warning; saw {call_strs}"
+    )
+
+
+@patch("typer.echo")
+def test_dynamic_version_adjacent_literals_no_whitespace_warns(mock_echo, tmp_path):
+    # Python accepts `"1.""2.3"` (no whitespace between) — still concatenation.
+    (tmp_path / "_v.py").write_text('__version__ = "1.""2.3"\n')
+    path = _write_pyproject(
+        tmp_path,
+        '[project]\nname = "x"\ndynamic = ["version"]\n\n[tool.comfy.version]\npath = "_v.py"\n',
+    )
+    result = extract_node_configuration(path)
+    assert result is not None
+    assert result.project.version == ""
+    call_strs = [str(c) for c in mock_echo.call_args_list]
+    assert any("adjacent-string-literal concatenation" in s for s in call_strs)
+
+
+@patch("typer.echo")
+def test_dynamic_version_adjacent_literals_single_quote_warns(mock_echo, tmp_path):
+    # Detection must fire for single-quoted literals too.
+    (tmp_path / "_v.py").write_text("__version__ = '1.' '2.3'\n")
+    path = _write_pyproject(
+        tmp_path,
+        '[project]\nname = "x"\ndynamic = ["version"]\n\n[tool.comfy.version]\npath = "_v.py"\n',
+    )
+    result = extract_node_configuration(path)
+    assert result is not None
+    assert result.project.version == ""
+    call_strs = [str(c) for c in mock_echo.call_args_list]
+    assert any("adjacent-string-literal concatenation" in s for s in call_strs)
+
+
+@patch("typer.echo")
+def test_dynamic_version_adjacent_literals_mixed_quotes_warns(mock_echo, tmp_path):
+    # Python allows mixing quote styles across adjacent literals: `"1." '2.3'`
+    # evaluates to `"1.2.3"`. The check must inspect for ANY quote, not just
+    # the matched quote, so a `"..." '...'` or `'...' "..."` pair still fires.
+    (tmp_path / "_v.py").write_text("__version__ = \"1.\" '2.3'\n")
+    path = _write_pyproject(
+        tmp_path,
+        '[project]\nname = "x"\ndynamic = ["version"]\n\n[tool.comfy.version]\npath = "_v.py"\n',
+    )
+    result = extract_node_configuration(path)
+    assert result is not None
+    assert result.project.version == ""
+    call_strs = [str(c) for c in mock_echo.call_args_list]
+    assert any("adjacent-string-literal concatenation" in s for s in call_strs)
+
+
+def test_dynamic_version_semicolon_after_literal_still_resolves(tmp_path):
+    # Negative control: `; x = 1` on the same line must NOT trigger the
+    # concatenation check (`;` isn't a quote). Pins the narrow look-ahead
+    # so a future broadening to "any trailing content" can't silently
+    # regress this case.
+    (tmp_path / "_v.py").write_text('__version__ = "1.2.3"; x = 1\n')
+    path = _write_pyproject(
+        tmp_path,
+        '[project]\nname = "x"\ndynamic = ["version"]\n\n[tool.comfy.version]\npath = "_v.py"\n',
+    )
+    result = extract_node_configuration(path)
+    assert result is not None
+    assert result.project.version == "1.2.3"
+
+
 def test_validate_and_extract_os_classifiers_valid():
     """Test OS validation with valid classifiers."""
     classifiers = [

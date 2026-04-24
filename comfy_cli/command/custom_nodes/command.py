@@ -975,6 +975,17 @@ def validate_node_for_publishing():
     # Perform some validation logic here
     typer.echo("Validating node configuration...")
     config = extract_node_configuration()
+    if config is None:
+        raise typer.Exit(code=1)
+
+    if not config.project.version:
+        # Escape `[` chars so rich doesn't parse `[tool.comfy.version]` and
+        # `["version"]` as markup tags; `]` doesn't need escaping.
+        print(
+            "[red]Error: project version is empty. Set `project.version` in pyproject.toml, "
+            r'or configure `\[tool.comfy.version].path` if using `dynamic = \["version"]`.[/red]'
+        )
+        raise typer.Exit(code=1)
 
     # Run security checks first
     typer.echo("Running security checks...")
