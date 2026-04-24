@@ -26,7 +26,10 @@ jobs:
 
       - name: Extract version from tag
         id: get_version
-        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_ENV
+        run: |
+          VERSION="${GITHUB_REF#refs/tags/}"
+          VERSION="${VERSION#v}"
+          echo "VERSION=${VERSION}" >> $GITHUB_ENV
 
       - name: Update version in pyproject.toml
         run: |
@@ -72,10 +75,22 @@ jobs:
 
       - name: Extract version from tag
         id: get_version
-        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_ENV
+        run: |
+          VERSION="${GITHUB_REF#refs/tags/}"
+          VERSION="${VERSION#v}"
+          echo "VERSION=${VERSION}" >> $GITHUB_ENV
 
       - name: Install Comfy CLI via pip and Test
-        run: pip install comfy-cli==${{env.VERSION}}
+        run: |
+          # PyPI's index can lag behind a successful upload by a minute or
+          # two, so retry before failing the job.
+          for i in 1 2 3 4 5 6 7 8; do
+            pip install --no-cache-dir "comfy-cli==${VERSION}" && exit 0
+            echo "Attempt $i: package not yet available on PyPI, waiting 15s..."
+            sleep 15
+          done
+          echo "::error::Failed to install comfy-cli==${VERSION} after 8 attempts"
+          exit 1
 
       - name: Test Comfy CLI Help
         run: comfy --help
