@@ -21,6 +21,8 @@ app = typer.Typer()
 workspace_manager = WorkspaceManager()
 config_manager = ConfigManager()
 
+_CIVITAI_SUBDOMAIN_SUFFIXES = tuple(f".{h}" for h in constants.CIVITAI_ALLOWED_HOSTS)
+
 
 model_path_map = {
     "lora": "loras",
@@ -99,7 +101,7 @@ def check_civitai_url(url: str) -> tuple[bool, bool, int | None, int | None]:
     try:
         parsed = urlparse(url)
         host = (parsed.hostname or "").lower()
-        if host != "civitai.com" and not host.endswith(".civitai.com"):
+        if host not in constants.CIVITAI_ALLOWED_HOSTS and not host.endswith(_CIVITAI_SUBDOMAIN_SUFFIXES):
             return False, False, None, None
         p_parts = [p for p in parsed.path.split("/") if p]
         query = parse_qs(parsed.query)
