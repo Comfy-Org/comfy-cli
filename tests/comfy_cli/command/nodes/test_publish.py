@@ -3,6 +3,7 @@ from unittest.mock import MagicMock, patch
 from typer.testing import CliRunner
 
 from comfy_cli.command.custom_nodes.command import app
+from comfy_cli.registry.types import ComfyConfig, ProjectConfig, PyProjectConfig
 
 runner = CliRunner()
 
@@ -143,6 +144,36 @@ def test_publish_exits_on_upload_failure():
         assert mock_publish.called
         assert mock_zip.called
         assert mock_upload.called
+
+
+def test_publish_fails_when_config_is_none():
+    # extract_node_configuration returns None when pyproject.toml is missing;
+    # validate_node_for_publishing must exit 1 (not crash on the subsequent
+    # `config.project.version` access).
+    with patch(
+        "comfy_cli.command.custom_nodes.command.extract_node_configuration",
+        return_value=None,
+    ):
+        result = runner.invoke(app, ["validate"])
+        assert result.exit_code == 1
+
+
+def test_publish_fails_when_version_is_empty():
+    # Guards against issue #294: dynamic versions that failed to resolve must
+    # not silently POST an empty `version` to the registry. validate_node_for_publishing
+    # should exit 1 with a user-facing error pointing at [tool.comfy.version].path.
+    empty_version_config = PyProjectConfig(
+        project=ProjectConfig(name="x", version=""),
+        tool_comfy=ComfyConfig(publisher_id="pub"),
+    )
+    with patch(
+        "comfy_cli.command.custom_nodes.command.extract_node_configuration",
+        return_value=empty_version_config,
+    ):
+        result = runner.invoke(app, ["validate"])
+        assert result.exit_code == 1
+        assert "project version is empty" in result.stdout
+        assert "[tool.comfy.version].path" in result.stdout
 
 
 def test_publish_with_includes_parameter():

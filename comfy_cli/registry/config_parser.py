@@ -1,4 +1,5 @@
 import os
+import pathlib
 import re
 import subprocess
 from urllib.parse import urlparse, urlunparse
@@ -21,6 +22,26 @@ from comfy_cli.registry.types import (
 # preceded by whitespace, so VCS URL fragments (`#subdirectory=`, `#egg=`) and
 # direct-URL hashes (`#sha256=`) survive.
 _inline_comment_re: re.Pattern[str] = re.compile(r"(^|\s+)#.*$")
+
+# For `dynamic = ["version"]`: match a top-level `__version__` or `VERSION` assignment in a source file. Anchored
+# to start-of-line (MULTILINE) so single-line comments are skipped. Horizontal whitespace only — no cross-line
+# matching. Supports an optional PEP 526 type annotation. Straight quotes only. Backslash is excluded from the
+# value class — escape sequences (`\n`, `\t`, `\"`, ...) cause the regex to fail to match, surfacing as a
+# "could not find" warning rather than being silently misinterpreted. PEP 440 versions are ASCII-only so this
+# is a clean fail-closed contract; users with auto-generated `__version__` containing escapes must clean up
+# their source. The single-alternative character class also makes catastrophic backtracking impossible.
+#
+# Recommended user layout: a dedicated `_version.py` / `__version__.py` (NOT the package's `__init__.py`), so
+# nothing in the file — module docstrings, assignments referenced in text, etc. — can collide with this regex.
+# This matches hatch/setuptools convention for dynamic-version source files.
+_VERSION_RE: re.Pattern[str] = re.compile(
+    r"""^(?P<name>__version__|VERSION)
+        (?:[\t ]*:[\t ]*[^=\n]+)?
+        [\t ]*=[\t ]*
+        (?:"(?P<dq>[^"\\\n]*)"|'(?P<sq>[^'\\\n]*)')
+        """,
+    re.MULTILINE | re.VERBOSE,
+)
 
 
 def create_comfynode_config():
@@ -281,6 +302,162 @@ def initialize_project_config():
         raise OSError("Failed to write 'pyproject.toml'") from e
 
 
+def _resolve_dynamic_version(pyproject_dir: pathlib.Path, rel_path: str) -> str:
+    """Read a version from a source file referenced by `[tool.comfy.version].path`.
+
+    No Python execution — just text I/O and a regex, matching the contract
+    agreed in issue #294. Returns empty string on any failure and emits a
+    user-visible warning so scanning contexts degrade gracefully.
+    """
+    # Reject paths that are absolute under either POSIX or Windows rules —
+    # `pathlib.Path.is_absolute()` alone is OS-specific (e.g., `/etc/foo` is
+    # not considered absolute on Windows because it has no drive), and we
+    # want identical rejection behavior regardless of the host OS.
+    if pathlib.PurePosixPath(rel_path).is_absolute() or pathlib.PureWindowsPath(rel_path).is_absolute():
+        typer.echo(
+            f"Warning: `[tool.comfy.version].path` must be relative to pyproject.toml "
+            f"(got `{rel_path}`). No version will be populated."
+        )
+        return ""
+    path_obj = pathlib.Path(rel_path)
+
+    pyproject_dir = pyproject_dir.resolve()
+    resolved = (pyproject_dir / path_obj).resolve()
+    try:
+        resolved.relative_to(pyproject_dir)
+    except ValueError:
+        typer.echo(
+            f"Warning: `[tool.comfy.version].path` must point inside the project directory "
+            f"(got `{rel_path}`). No version will be populated."
+        )
+        return ""
+
+    try:
+        # `utf-8-sig` transparently strips a leading BOM — some Windows editors
+        # add one, and it would defeat the `^__version__` anchor otherwise.
+        text = resolved.read_text(encoding="utf-8-sig")
+    except (OSError, UnicodeDecodeError) as e:
+        typer.echo(f"Warning: could not read version file `{rel_path}`: {e}. No version will be populated.")
+        return ""
+
+    match = _VERSION_RE.search(text)
+    if not match:
+        typer.echo(
+            f"Warning: could not find `__version__` or `VERSION` in `{rel_path}`. "
+            f'The version file must contain a line like `__version__ = "1.2.3"`. '
+            f"No version will be populated."
+        )
+        return ""
+
+    # Exactly one of `dq` / `sq` was consumed by the regex. An empty capture
+    # (`""` / `''`) is a valid match the regex accepts; if followed by another
+    # quote the concat check below intercepts it (this also covers the
+    # triple-quoted `"""..."""` case), otherwise we return "" and the
+    # publish-layer guard surfaces it.
+    raw = match.group("dq") if match.group("dq") is not None else match.group("sq")
+
+    # Python concatenates adjacent string literals: `__version__ = "1." "2.3"`
+    # (with or without whitespace between, quote styles freely mixed) evaluates
+    # to "1.2.3". The regex captures only the first literal, so silently
+    # returning `"1."` would POST a wrong version. Look ahead on the same line:
+    # if the first non-whitespace char is a quote, reject the concatenation.
+    # `;` (statement separator) and `#` (comment) are preserved because neither
+    # starts with a quote.
+    rest_of_line = text[match.end() :].split("\n", 1)[0]
+    stripped_rest = rest_of_line.lstrip(" \t")
+    if stripped_rest and stripped_rest[0] in ('"', "'"):
+        typer.echo(
+            f"Warning: `{match.group('name')}` in `{rel_path}` uses adjacent-string-literal "
+            f"concatenation, which is not supported. Use a single assignment like "
+            f'`{match.group("name")} = "1.2.3"`. No version will be populated.'
+        )
+        return ""
+
+    return raw.strip()
+
+
+def _parse_dynamic_fields(project_data) -> list[str]:
+    """Return the `project.dynamic` field as a list of strings.
+
+    Warns and returns `[]` if `dynamic` is present but has the wrong shape
+    (e.g. a scalar string — a common PEP 621 misconfiguration).
+    """
+    dynamic_raw = project_data.get("dynamic", [])
+    # tomlkit.Array inherits from list, so valid arrays (including empty `[]`)
+    # pass through. Everything else is a misconfiguration.
+    if not isinstance(dynamic_raw, (list, tuple)):
+        typer.echo(
+            "Warning: `project.dynamic` must be an array of strings. "
+            'Use `dynamic = ["version"]` instead. '
+            "No dynamic fields will be honored."
+        )
+        return []
+    return [str(d) for d in dynamic_raw]
+
+
+def _extract_version(project_data, comfy_data, pyproject_dir: pathlib.Path) -> str:
+    """Return the project version, honoring PEP 621 `dynamic = ["version"]`.
+
+    - Static `project.version` wins if present.
+    - If absent and `"version"` is in `project.dynamic`, resolve via
+      `[tool.comfy.version].path` (text-read + regex, no Python execution).
+    - Otherwise return empty (existing behavior).
+    """
+    static_version = project_data.get("version", "")
+    dynamic_fields = _parse_dynamic_fields(project_data)
+    # Type-check runs BEFORE the truthy check so falsy non-strings (`version = 0`,
+    # `version = 0.0`, `version = false`, `version = []`, `version = {}`) produce
+    # the same named "must be a string" warning as truthy non-strings (`version = 1`,
+    # `version = ["1","2"]`, `version = { path = "_v.py" }`). With the order reversed,
+    # they would silently fall through to the dynamic branch and the user would
+    # only see the downstream "project version is empty" error at publish time.
+    if not isinstance(static_version, str):
+        typer.echo("Warning: `project.version` must be a string. No version will be populated.")
+        return ""
+    if static_version:
+        # Strip so `version = "  1.0.0  "` doesn't get POSTed with surrounding
+        # whitespace. A whitespace-only `version = "   "` becomes "" and the
+        # publish-layer guard surfaces it as "project version is empty".
+        return static_version.strip()
+
+    if "version" not in dynamic_fields:
+        return ""
+
+    version_cfg = comfy_data.get("version")
+    if version_cfg is None:
+        typer.echo(
+            'Warning: `dynamic = ["version"]` declared but `[tool.comfy.version].path` is not set. '
+            "See https://docs.comfy.org/registry/specifications for dynamic-version setup. "
+            "No version will be populated."
+        )
+        return ""
+    if not isinstance(version_cfg, dict):
+        # A non-table value under `[tool.comfy].version` — the user likely
+        # wrote `version = "x"` scalar (or any other type) instead of a nested
+        # table.
+        typer.echo(
+            "Warning: `[tool.comfy].version` must be a table with a `path` key. "
+            'Use `[tool.comfy.version]` with `path = "..."` instead. '
+            "No version will be populated."
+        )
+        return ""
+    # Order matters: check type BEFORE falsy-ness so that `path = 0` / `false`
+    # / `[]` / `{}` produce a type warning, not a misleading "not set" warning.
+    path_value = version_cfg.get("path")
+    if path_value is not None and not isinstance(path_value, str):
+        typer.echo("Warning: `[tool.comfy.version].path` must be a string. No version will be populated.")
+        return ""
+    if not path_value:
+        typer.echo(
+            "Warning: `[tool.comfy.version].path` is not set. "
+            "See https://docs.comfy.org/registry/specifications for dynamic-version setup. "
+            "No version will be populated."
+        )
+        return ""
+
+    return _resolve_dynamic_version(pyproject_dir, path_value)
+
+
 def extract_node_configuration(
     path: str = os.path.join(os.getcwd(), "pyproject.toml"),
 ) -> PyProjectConfig | None:
@@ -288,12 +465,30 @@ def extract_node_configuration(
         ui.display_error_message("No pyproject.toml file found in the current directory.")
         return None
 
-    with open(path) as file:
-        data = tomlkit.load(file)
+    try:
+        # `utf-8-sig` strips a leading BOM if present — Windows editors sometimes
+        # write one, and tomlkit would otherwise report `Empty key at line 1 col 0`.
+        # `UnicodeDecodeError` must be in the except tuple: it is a `ValueError`,
+        # not an `OSError`, and would otherwise escape and crash the caller.
+        with open(path, encoding="utf-8-sig") as file:
+            data = tomlkit.load(file)
+    except (OSError, UnicodeDecodeError, tomlkit.exceptions.TOMLKitError) as e:
+        ui.display_error_message(f"Could not parse `{path}`: {e}")
+        return None
 
     project_data = data.get("project", {})
+    if not isinstance(project_data, dict):
+        # Degenerate TOML like `project = "hello"` at the root. Keep scanning
+        # contexts alive by treating it as "no project metadata".
+        typer.echo("Warning: `project` in pyproject.toml must be a table. Using defaults.")
+        project_data = {}
     urls_data = project_data.get("urls", {})
-    comfy_data = data.get("tool", {}).get("comfy", {})
+    if not isinstance(urls_data, dict):
+        urls_data = {}
+    tool_data = data.get("tool", {})
+    comfy_data = tool_data.get("comfy", {}) if isinstance(tool_data, dict) else {}
+    if not isinstance(comfy_data, dict):
+        comfy_data = {}
 
     dependencies = project_data.get("dependencies", [])
     supported_comfyui_frontend_version = ""
@@ -307,7 +502,7 @@ def extract_node_configuration(
         dep for dep in dependencies if not (isinstance(dep, str) and dep.startswith("comfyui-frontend-package"))
     ]
 
-    supported_comfyui_version = data.get("tool", {}).get("comfy", {}).get("requires-comfyui", "")
+    supported_comfyui_version = comfy_data.get("requires-comfyui", "")
 
     classifiers = project_data.get("classifiers", [])
     supported_os = validate_and_extract_os_classifiers(classifiers)
@@ -334,10 +529,13 @@ def extract_node_configuration(
             'Warning: License should be in one of these two formats: license = {file = "LICENSE"} OR license = {text = "MIT License"}. Please check the documentation: https://docs.comfy.org/registry/specifications.'
         )
 
+    pyproject_dir = pathlib.Path(path).parent
+    version = _extract_version(project_data, comfy_data, pyproject_dir)
+
     project = ProjectConfig(
         name=project_data.get("name", ""),
         description=project_data.get("description", ""),
-        version=project_data.get("version", ""),
+        version=version,
         requires_python=project_data.get("requires-python", ""),
         dependencies=dependencies,
         license=license,
