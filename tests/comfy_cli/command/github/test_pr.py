@@ -21,7 +21,7 @@ from comfy_cli.command.install import (
     handle_pr_checkout,
     parse_pr_reference,
 )
-from comfy_cli.git_utils import checkout_pr
+from comfy_cli.git_utils import checkout_pr, git_checkout_tag
 
 
 @pytest.fixture(scope="function")
@@ -246,6 +246,95 @@ class TestGitOperations:
         result = checkout_pr("/repo/path", sample_pr_info)
 
         assert result is False
+
+
+class TestGitCheckoutTag:
+    """Cover ``git_checkout_tag``'s skip-fetch-when-tag-is-local behavior.
+
+    The fetch is intentionally avoided when the tag already exists in the
+    local clone, both to skip a redundant network round-trip on the happy
+    path and to let offline installs succeed when the caller (e.g. the
+    `--version latest` resolver) already validated a cached tag.
+    """
+
+    @staticmethod
+    def _init_repo(path):
+        subprocess.run(["git", "init", "-q", str(path)], check=True)
+        subprocess.run(["git", "-C", str(path), "config", "user.email", "x@x"], check=True)
+        subprocess.run(["git", "-C", str(path), "config", "user.name", "x"], check=True)
+        subprocess.run(
+            ["git", "-C", str(path), "commit", "--allow-empty", "-m", "init", "-q"],
+            check=True,
+        )
+
+    def test_succeeds_offline_when_tag_already_local(self, tmp_path):
+        """The bug: cached-tag offline path must not crash on the redundant fetch.
+
+        Repro: tag exists locally + origin is unreachable. Old code would call
+        `git fetch --tags` with check=True and fail; new code skips the fetch
+        because the tag is already present.
+        """
+        self._init_repo(tmp_path)
+        subprocess.run(["git", "-C", str(tmp_path), "tag", "v0.20.1"], check=True)
+        # Point origin at an unreachable path so any fetch attempt would fail.
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "remote", "add", "origin", "file:///nonexistent-repo-path-for-test"],
+            check=True,
+        )
+
+        result = git_checkout_tag(str(tmp_path), "v0.20.1")
+        assert result is True
+
+        # HEAD really moved to the tag
+        head = subprocess.run(
+            ["git", "-C", str(tmp_path), "describe", "--tags", "--exact-match", "HEAD"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        assert head.stdout.strip() == "v0.20.1"
+
+    def test_fetches_when_tag_missing_locally(self, tmp_path):
+        """When the tag isn't local we must still fetch — and an unreachable
+        remote is then a real, surfaced error (not silently swallowed)."""
+        self._init_repo(tmp_path)
+        # Tag is NOT created locally
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "remote", "add", "origin", "file:///nonexistent-repo-path-for-test"],
+            check=True,
+        )
+
+        result = git_checkout_tag(str(tmp_path), "v0.20.1")
+        assert result is False  # fetch failed, surfaced as a checkout failure
+
+    def test_skips_fetch_when_tag_local(self, tmp_path):
+        """Behavior pinned: when the tag is already local, `git fetch` is not
+        invoked at all — saves the redundant round-trip the resolver already
+        paid for and protects the cached-tag offline path."""
+        self._init_repo(tmp_path)
+        subprocess.run(["git", "-C", str(tmp_path), "tag", "v0.20.1"], check=True)
+
+        real_run = subprocess.run
+        fetch_calls = []
+
+        def spy(args, **kwargs):
+            if isinstance(args, list) and len(args) >= 2 and args[0] == "git" and "fetch" in args:
+                fetch_calls.append(args)
+            return real_run(args, **kwargs)
+
+        with patch("comfy_cli.git_utils.subprocess.run", side_effect=spy):
+            result = git_checkout_tag(str(tmp_path), "v0.20.1")
+
+        assert result is True
+        assert fetch_calls == [], f"Expected no `git fetch` calls, got {fetch_calls}"
+
+    def test_unknown_tag_returns_false(self, tmp_path):
+        """No remote and the tag doesn't exist locally → fetch fails (no remote
+        configured returns 0 silently, but checkout of a missing tag fails)."""
+        self._init_repo(tmp_path)
+        # No origin at all; `git fetch --tags` returns 0 silently.
+        result = git_checkout_tag(str(tmp_path), "v9.9.9-doesnotexist")
+        assert result is False  # checkout fails because tag truly doesn't exist
 
 
 class TestHandlePRCheckout:

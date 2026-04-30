@@ -28,9 +28,16 @@ def git_checkout_tag(repo_path: str, tag: str) -> bool:
     """
     Checkout a specific Git tag in the given repository.
 
+    Skips the network ``git fetch --tags`` when the tag already exists locally.
+    This avoids a redundant round-trip on the happy path (the caller usually
+    just cloned the repo or just ran a fetch via the resolver) and lets offline
+    installs proceed when the tag is already cached. Only when the tag is
+    absent locally do we attempt to fetch — and a failed fetch in that case is
+    a real, unrecoverable error (``check=True`` surfaces it as before).
+
     :param repo_path: Path to the Git repository
     :param tag: The tag to checkout
-    :return: The output of the git command if successful, None if an error occurred
+    :return: True if the checkout succeeds, False if any git command failed.
     """
     original_dir = os.getcwd()
     try:
@@ -38,8 +45,18 @@ def git_checkout_tag(repo_path: str, tag: str) -> bool:
 
         os.chdir(repo_path)
 
-        # Fetch the latest tags
-        subprocess.run(["git", "fetch", "--tags"], check=True, capture_output=True, text=True)
+        # Skip the network fetch when the tag is already present locally.
+        tag_present_locally = (
+            subprocess.run(
+                ["git", "rev-parse", "--verify", f"refs/tags/{tag}"],
+                capture_output=True,
+                text=True,
+                check=False,
+            ).returncode
+            == 0
+        )
+        if not tag_present_locally:
+            subprocess.run(["git", "fetch", "--tags"], check=True, capture_output=True, text=True)
 
         # Checkout the specified tag
         subprocess.run(["git", "checkout", tag], check=True, capture_output=True, text=True)

@@ -452,11 +452,11 @@ def _resolve_latest_tag_from_local(repo_dir: str) -> tuple[str | None, bool]:
     60 req/hr per-IP cap; users can pin a specific version with ``--version``
     if needed.
 
-    The subsequent ``git_checkout_tag`` call also runs ``git fetch --tags``
-    before checking out, so on the happy path we fetch twice. The second fetch
-    is essentially a no-op (refs already up-to-date) — kept rather than removed
-    because plumbing a "skip fetch" flag through ``git_checkout_tag`` would
-    complicate the only other caller (``--version <specific>``).
+    ``git_checkout_tag`` skips its own ``git fetch --tags`` when the resolved
+    tag is already present locally, so on the happy path we fetch exactly once
+    here. Crucially, that also lets the cached-tag offline path succeed: if
+    fetch above fails (``fetch_ok=False``) but a tag is found from disk,
+    ``git_checkout_tag`` will not retry the unreachable fetch.
     """
     fetch_ok = False
     try:
