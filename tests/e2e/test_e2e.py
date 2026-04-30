@@ -263,12 +263,11 @@ def test_install_version_latest_no_github_api(tmp_path):
     env = {**os.environ}
     env.pop("GITHUB_TOKEN", None)  # mimic the user from the bug report
 
+    # Keep the command on a single line: bash uses `\` for line continuation but
+    # Windows cmd.exe uses `^` and treats a stray `\` as a positional argument.
     proc = exec(
-        f"""
-            comfy --skip-prompt --workspace {ws} install \\
-                --cpu --version latest \\
-                --skip-manager --skip-torch-or-directml --skip-requirement
-        """,
+        f"comfy --skip-prompt --workspace {ws} install --cpu --version latest "
+        "--skip-manager --skip-torch-or-directml --skip-requirement",
         env=env,
     )
     assert proc.returncode == 0, f"install --version latest failed:\n{proc.stderr}"
