@@ -273,11 +273,12 @@ def test_install_version_latest_no_github_api(tmp_path):
     assert proc.returncode == 0, f"install --version latest failed:\n{proc.stderr}"
 
     # The actual property under test: we did NOT fall back to the GitHub API.
-    # Both fallback messages from checkout_stable_comfyui mention "GitHub API";
-    # if we see either, the resolver path silently failed and we got lucky on
-    # the unauth rate limit instead of fixing the bug.
+    # Both fallback messages from checkout_stable_comfyui mention "GitHub API"
+    # ("querying GitHub API" and "trying GitHub API as a last resort"); catch
+    # either via the shared substring so the assertion stays tight even if the
+    # exact wording changes.
     combined = proc.stdout + proc.stderr
-    assert "querying GitHub API" not in combined, (
+    assert "GitHub API" not in combined, (
         f"Install fell back to the GitHub API — local-tag resolution must have failed.\nOutput:\n{combined}"
     )
 
