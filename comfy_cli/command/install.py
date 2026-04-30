@@ -1,5 +1,6 @@
 import os
 import platform
+import re
 import subprocess
 import sys
 from typing import TypedDict
@@ -189,7 +190,7 @@ def execute(
 
     if version != "nightly":
         try:
-            checkout_stable_comfyui(version=version, repo_dir=repo_dir)
+            checkout_stable_comfyui(version=version, repo_dir=repo_dir, url=url)
         except GitHubRateLimitError as e:
             rprint(f"[bold red]Error checking out ComfyUI version: {e}[/bold red]")
             sys.exit(1)
@@ -498,7 +499,34 @@ def _resolve_latest_tag_from_local(repo_dir: str) -> tuple[str | None, bool]:
     return (best[1] if best else None), fetch_ok
 
 
-def checkout_stable_comfyui(version: str, repo_dir: str):
+_GITHUB_REPO_RE = re.compile(
+    # `github.com[:/]<owner>/<repo>` with optional `.git` and optional setuptools-style
+    # `@branch` suffix (matching what ``clone_comfyui`` accepts via ``rsplit("@", 1)``).
+    # Branch names may contain slashes (`release/1.0`), so the `@<branch>` group is greedy
+    # to end-of-string. The repo segment forbids `@` and `/` to avoid eating those parts.
+    r"github\.com[/:]([^/\s]+)/([^/@\s]+?)(?:\.git)?(?:@.+)?/?$",
+)
+
+
+def _parse_github_owner_repo(url: str | None) -> tuple[str, str] | None:
+    """Parse a GitHub repo URL into ``(owner, repo)``.
+
+    Handles the URL forms ``clone_comfyui`` accepts:
+    - ``https://github.com/owner/repo``
+    - ``https://github.com/owner/repo.git``
+    - ``https://github.com/owner/repo@branch`` (setuptools-style branch suffix)
+    - ``git@github.com:owner/repo`` (SSH form)
+
+    Returns ``None`` for empty input, local paths, or non-GitHub URLs (GitLab,
+    self-hosted, etc.) — the caller decides what to do with that.
+    """
+    if not url:
+        return None
+    match = _GITHUB_REPO_RE.search(url)
+    return (match.group(1), match.group(2)) if match else None
+
+
+def checkout_stable_comfyui(version: str, repo_dir: str, url: str | None = None):
     """
     Supports installing stable releases of Comfy (semantic versioning) or the 'latest' version.
 
@@ -506,6 +534,12 @@ def checkout_stable_comfyui(version: str, repo_dir: str):
     local clone first to avoid burning the unauthenticated GitHub API budget
     (60 req/hr per IP). The ``releases/latest`` API is only consulted when local
     resolution turns up nothing.
+
+    The optional ``url`` is the install URL forwarded from ``execute``; it lets
+    the API fallback query the same repo we cloned from (forks included)
+    instead of always asking upstream. Non-GitHub URLs and missing URLs
+    fall back to ``comfyanonymous/ComfyUI`` so the prior behavior is preserved
+    for users who pass a local path or a non-GitHub remote.
     """
     rprint(f"Looking for ComfyUI version '{version}'...")
     if version == "latest":
@@ -518,7 +552,8 @@ def checkout_stable_comfyui(version: str, repo_dir: str):
                 )
             else:
                 rprint("[yellow]No stable release tags found locally; querying GitHub API.[/yellow]")
-            selected_release = get_latest_release("comfyanonymous", "ComfyUI")
+            owner, repo = _parse_github_owner_repo(url) or ("comfyanonymous", "ComfyUI")
+            selected_release = get_latest_release(owner, repo)
             if selected_release is None:
                 rprint(f"Error: No release found for version '{version}'.")
                 sys.exit(1)

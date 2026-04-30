@@ -11,6 +11,7 @@ from comfy_cli.command import install as install_module
 from comfy_cli.command.install import (
     GitHubRateLimitError,
     PRInfo,
+    _parse_github_owner_repo,
     _resolve_latest_tag_from_local,
     checkout_stable_comfyui,
     fetch_pr_info,
@@ -626,6 +627,57 @@ class TestResolveLatestTagFromLocal:
         assert tag == "0.20.1"
 
 
+class TestParseGithubOwnerRepo:
+    """Cover the URL parser used by the API fallback to query the same repo
+    we cloned from (forks included), instead of always asking upstream."""
+
+    @pytest.mark.parametrize(
+        "url,expected",
+        [
+            # The default URL the install command uses
+            ("https://github.com/comfyanonymous/ComfyUI", ("comfyanonymous", "ComfyUI")),
+            # With .git suffix
+            ("https://github.com/comfyanonymous/ComfyUI.git", ("comfyanonymous", "ComfyUI")),
+            # With trailing slash
+            ("https://github.com/comfyanonymous/ComfyUI/", ("comfyanonymous", "ComfyUI")),
+            # setuptools-style @branch suffix that clone_comfyui supports
+            ("https://github.com/comfyanonymous/ComfyUI@master", ("comfyanonymous", "ComfyUI")),
+            ("https://github.com/comfyanonymous/ComfyUI.git@release/1.0", ("comfyanonymous", "ComfyUI")),
+            # Forks
+            ("https://github.com/myfork/ComfyUI", ("myfork", "ComfyUI")),
+            ("https://github.com/some-user/some-repo.git", ("some-user", "some-repo")),
+            # SSH forms
+            ("git@github.com:comfyanonymous/ComfyUI", ("comfyanonymous", "ComfyUI")),
+            ("git@github.com:comfyanonymous/ComfyUI.git", ("comfyanonymous", "ComfyUI")),
+        ],
+    )
+    def test_parses_github_urls(self, url, expected):
+        assert _parse_github_owner_repo(url) == expected
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            None,
+            "",
+            "/local/path/to/comfyui",  # local path
+            "https://gitlab.com/foo/bar",  # not GitHub
+            "https://example.com/owner/repo",  # not GitHub
+            "https://github.com/owner/repo/pull/123",  # not a repo URL
+            "ftp://github.com/owner/repo",  # exotic scheme — still parses since regex matches `github.com/...`
+        ],
+    )
+    def test_returns_none_for_non_github_urls(self, url):
+        # The PR URL form (last case) intentionally doesn't match — `[^/@]+?` excludes `/`
+        # so `repo/pull/123` cannot be the second capture; we want this to fall through
+        # to the upstream default in the caller.
+        if url == "ftp://github.com/owner/repo":
+            # Edge-case: this DOES match because we don't anchor on the scheme.
+            # That's fine — owner/repo is what matters; the API call uses HTTPS regardless.
+            assert _parse_github_owner_repo(url) == ("owner", "repo")
+        else:
+            assert _parse_github_owner_repo(url) is None
+
+
 class TestCheckoutStableComfyUI:
     """Verify checkout_stable_comfyui prefers local tag resolution over the
     GitHub API for `--version latest` (issue #440), and falls back when local
@@ -684,6 +736,58 @@ class TestCheckoutStableComfyUI:
         mock_local.assert_called_once_with("/repo")
         mock_api.assert_called_once_with("comfyanonymous", "ComfyUI")
         mock_co.assert_called_once_with("/repo", "v0.20.1")
+
+    @patch("comfy_cli.command.install.git_checkout_tag", return_value=True)
+    @patch("comfy_cli.command.install.get_latest_release")
+    @patch("comfy_cli.command.install._resolve_latest_tag_from_local", return_value=(None, True))
+    def test_latest_fallback_uses_fork_owner_repo_from_url(self, mock_local, mock_api, mock_co):
+        """Fork case: API fallback must query the FORK's releases/latest, not upstream's.
+
+        Otherwise we'd ask GitHub for `comfyanonymous/ComfyUI`'s latest tag and
+        try to check it out in a fork that may not have it.
+        """
+        mock_api.return_value = {"tag": "v0.20.1-myfork", "version": None, "download_url": "u"}
+
+        checkout_stable_comfyui("latest", "/repo", url="https://github.com/myfork/ComfyUI")
+
+        mock_api.assert_called_once_with("myfork", "ComfyUI")
+        mock_co.assert_called_once_with("/repo", "v0.20.1-myfork")
+
+    @patch("comfy_cli.command.install.git_checkout_tag", return_value=True)
+    @patch("comfy_cli.command.install.get_latest_release")
+    @patch("comfy_cli.command.install._resolve_latest_tag_from_local", return_value=(None, True))
+    def test_latest_fallback_strips_branch_suffix_from_url(self, mock_local, mock_api, mock_co):
+        """The setuptools-style `@branch` suffix in the install URL must not leak
+        into the API call. `clone_comfyui` already strips it before cloning."""
+        mock_api.return_value = {"tag": "v0.20.1", "version": None, "download_url": "u"}
+
+        checkout_stable_comfyui("latest", "/repo", url="https://github.com/myfork/ComfyUI.git@some-branch")
+
+        mock_api.assert_called_once_with("myfork", "ComfyUI")
+
+    @patch("comfy_cli.command.install.git_checkout_tag", return_value=True)
+    @patch("comfy_cli.command.install.get_latest_release")
+    @patch("comfy_cli.command.install._resolve_latest_tag_from_local", return_value=(None, True))
+    def test_latest_fallback_defaults_to_upstream_for_non_github_url(self, mock_local, mock_api, mock_co):
+        """Non-GitHub URLs (local paths, GitLab, etc.) fall back to upstream defaults
+        — preserves prior behavior for users whose URL we can't parse."""
+        mock_api.return_value = {"tag": "v0.20.1", "version": None, "download_url": "u"}
+
+        checkout_stable_comfyui("latest", "/repo", url="/local/path/to/comfyui")
+
+        mock_api.assert_called_once_with("comfyanonymous", "ComfyUI")
+
+    @patch("comfy_cli.command.install.git_checkout_tag", return_value=True)
+    @patch("comfy_cli.command.install.get_latest_release")
+    @patch("comfy_cli.command.install._resolve_latest_tag_from_local", return_value=(None, True))
+    def test_latest_fallback_defaults_to_upstream_when_url_omitted(self, mock_local, mock_api, mock_co):
+        """Backward compat: omitting the new `url` kwarg yields the prior behavior
+        (querying upstream)."""
+        mock_api.return_value = {"tag": "v0.20.1", "version": None, "download_url": "u"}
+
+        checkout_stable_comfyui("latest", "/repo")  # no url=
+
+        mock_api.assert_called_once_with("comfyanonymous", "ComfyUI")
 
     @patch("comfy_cli.command.install.git_checkout_tag", return_value=True)
     @patch("comfy_cli.command.install.get_latest_release")
