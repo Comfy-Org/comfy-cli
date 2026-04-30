@@ -561,6 +561,24 @@ class TestGetLatestRelease:
         with pytest.raises(GitHubRateLimitError):
             get_latest_release("comfyanonymous", "ComfyUI")
 
+    @patch("requests.get")
+    def test_non_semver_tag_returns_release_with_version_none(self, mock_get):
+        """Forks may use non-semver tags (e.g. `release-2026-04`); the parser
+        must not crash — caller only needs the raw tag string for checkout."""
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "tag_name": "release-2026-04",
+            "zipball_url": "https://example/zip",
+        }
+        mock_get.return_value = mock_response
+
+        result = get_latest_release("some-fork", "ComfyUI")
+
+        assert result is not None
+        assert result["tag"] == "release-2026-04"
+        assert result["version"] is None
+
 
 class TestHandleGithubRateLimit:
     def test_primary_rate_limit_message_format(self):

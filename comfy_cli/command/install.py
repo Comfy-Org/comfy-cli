@@ -610,9 +610,18 @@ def get_latest_release(repo_owner: str, repo_name: str) -> GithubRelease | None:
 
         data = response.json()
 
+        # Forks may use non-semver tags (e.g. "release-2026-04"); the caller
+        # only needs the raw tag string for git checkout, so let `version`
+        # fall back to None instead of crashing.
+        tag_name = data["tag_name"]
+        try:
+            parsed_version = semver.VersionInfo.parse(tag_name.lstrip("v"))
+        except ValueError:
+            parsed_version = None
+
         return GithubRelease(
-            tag=data["tag_name"],
-            version=semver.VersionInfo.parse(data["tag_name"].lstrip("v")),
+            tag=tag_name,
+            version=parsed_version,
             download_url=data["zipball_url"],
         )
 
