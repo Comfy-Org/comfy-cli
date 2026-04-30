@@ -244,6 +244,63 @@ def test_uv_compile_default_config(comfy_cli):
 
 
 @e2e_test
+def test_install_version_latest_no_github_api(tmp_path):
+    """Regression test for issue #440.
+
+    Runs `comfy install --version latest` end-to-end and verifies:
+    - The command succeeds without a GitHub token in the environment.
+    - The resulting clone has a stable semver tag (v*) checked out — proving
+      the local-tag resolver actually picked something instead of failing
+      over to the rate-limited API.
+
+    Slow pip steps are skipped to keep this targeted at the version-resolution
+    path; the real protection is exercising the actual CLI command, so any
+    future refactor that puts `releases/latest` API calls back on this path
+    fails CI loudly.
+    """
+    # Use tmp_path (auto-cleaned) so the clone doesn't leak into cwd.
+    ws = str(tmp_path / "comfy-latest")
+    env = {**os.environ}
+    env.pop("GITHUB_TOKEN", None)  # mimic the user from the bug report
+
+    proc = exec(
+        f"""
+            comfy --skip-prompt --workspace {ws} install \\
+                --cpu --version latest \\
+                --skip-manager --skip-torch-or-directml --skip-requirement
+        """,
+        env=env,
+    )
+    assert proc.returncode == 0, f"install --version latest failed:\n{proc.stderr}"
+
+    # The actual property under test: we did NOT fall back to the GitHub API.
+    # Both fallback messages from checkout_stable_comfyui mention "GitHub API";
+    # if we see either, the resolver path silently failed and we got lucky on
+    # the unauth rate limit instead of fixing the bug.
+    combined = proc.stdout + proc.stderr
+    assert "querying GitHub API" not in combined, (
+        f"Install fell back to the GitHub API — local-tag resolution must have failed.\nOutput:\n{combined}"
+    )
+
+    # `--workspace ws` clones directly into ws (matches the existing fixture's behavior).
+    assert os.path.isdir(os.path.join(ws, ".git")), f"no git repo at {ws}"
+
+    head = subprocess.run(
+        ["git", "-C", ws, "describe", "--tags", "--exact-match", "HEAD"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert head.returncode == 0, (
+        f"HEAD is not on a tag — local tag resolution must have silently failed. stderr: {head.stderr}"
+    )
+    tag = head.stdout.strip()
+    assert tag.startswith("v") and tag.count(".") == 2, f"Expected a v<major>.<minor>.<patch> stable tag, got: {tag!r}"
+    # Pre-releases (v*-rc1, v*-beta) must be skipped to mirror GitHub's releases/latest.
+    assert "-" not in tag, f"Resolver picked a pre-release tag: {tag!r}"
+
+
+@e2e_test
 def test_run(comfy_cli):
     url = "https://huggingface.co/Comfy-Org/stable-diffusion-v1-5-archive/resolve/main/v1-5-pruned-emaonly-fp16.safetensors?download=true"
     path = os.path.join("models", "checkpoints")

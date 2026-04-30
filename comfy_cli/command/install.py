@@ -434,17 +434,102 @@ def clone_comfyui(url: str, repo_dir: str):
         subprocess.run(["git", "clone", url, repo_dir], check=True)
 
 
+def _resolve_latest_tag_from_local(repo_dir: str) -> tuple[str | None, bool]:
+    """Pick the highest stable semver tag from the local clone.
+
+    Returns ``(tag, fetch_ok)``:
+    - ``tag``: the tag string (e.g. ``"v0.20.1"``), or ``None`` when no stable
+      semver tag is available (or the directory isn't a git repo).
+    - ``fetch_ok``: whether ``git fetch --tags`` succeeded. Callers can use this
+      to distinguish "no new releases" from "couldn't reach the remote", which
+      changes the right messaging when falling back to the API.
+
+    Pre-release tags (e.g. ``v1.2.3-rc1``) are skipped to mirror GitHub's
+    ``releases/latest`` behavior. Note that this picks the highest semver tag,
+    which may differ from the release a maintainer has manually marked as
+    "Latest" on GitHub — acceptable trade-off given the unauthenticated API's
+    60 req/hr per-IP cap; users can pin a specific version with ``--version``
+    if needed.
+
+    The subsequent ``git_checkout_tag`` call also runs ``git fetch --tags``
+    before checking out, so on the happy path we fetch twice. The second fetch
+    is essentially a no-op (refs already up-to-date) — kept rather than removed
+    because plumbing a "skip fetch" flag through ``git_checkout_tag`` would
+    complicate the only other caller (``--version <specific>``).
+    """
+    fetch_ok = False
+    try:
+        completed = subprocess.run(
+            ["git", "-C", repo_dir, "fetch", "--tags", "--quiet"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        fetch_ok = completed.returncode == 0
+    except (subprocess.SubprocessError, FileNotFoundError, OSError):
+        # Tolerate timeout / OS-level failure; fall through with whatever's on disk.
+        pass
+
+    try:
+        result = subprocess.run(
+            ["git", "-C", repo_dir, "tag", "--list"],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=10,
+        )
+    except (subprocess.SubprocessError, FileNotFoundError, OSError):
+        return None, fetch_ok
+
+    best: tuple[semver.VersionInfo, str] | None = None
+    for line in result.stdout.splitlines():
+        tag = line.strip()
+        if not tag:
+            continue
+        try:
+            parsed = semver.VersionInfo.parse(tag.lstrip("v"))
+        except ValueError:
+            continue
+        if parsed.prerelease:
+            continue
+        if best is None or parsed > best[0]:
+            best = (parsed, tag)
+
+    return (best[1] if best else None), fetch_ok
+
+
 def checkout_stable_comfyui(version: str, repo_dir: str):
     """
     Supports installing stable releases of Comfy (semantic versioning) or the 'latest' version.
+
+    For ``version="latest"`` we resolve the highest stable semver tag from the
+    local clone first to avoid burning the unauthenticated GitHub API budget
+    (60 req/hr per IP). The ``releases/latest`` API is only consulted when local
+    resolution turns up nothing.
     """
     rprint(f"Looking for ComfyUI version '{version}'...")
     if version == "latest":
-        selected_release = get_latest_release("comfyanonymous", "ComfyUI")
-        if selected_release is None:
-            rprint(f"Error: No release found for version '{version}'.")
-            sys.exit(1)
-        tag = str(selected_release["tag"])
+        tag, fetch_ok = _resolve_latest_tag_from_local(repo_dir)
+        if tag is None:
+            if not fetch_ok:
+                rprint(
+                    "[yellow]Could not refresh tags from the remote (offline or auth failure); "
+                    "trying GitHub API as a last resort.[/yellow]"
+                )
+            else:
+                rprint("[yellow]No stable release tags found locally; querying GitHub API.[/yellow]")
+            selected_release = get_latest_release("comfyanonymous", "ComfyUI")
+            if selected_release is None:
+                rprint(f"Error: No release found for version '{version}'.")
+                sys.exit(1)
+            tag = str(selected_release["tag"])
+        elif not fetch_ok:
+            # Tag list comes from a cached state — flag it so the user knows
+            # they may not be on the actual newest release.
+            rprint(
+                f"[yellow]Warning: could not refresh tags from remote; "
+                f"using cached tag {tag}. Re-run with network access to get the newest release.[/yellow]"
+            )
     else:
         # For specific versions, directly construct the tag (add 'v' prefix if needed)
         tag = f"v{version}" if not version.startswith("v") else version
