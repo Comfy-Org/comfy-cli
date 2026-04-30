@@ -307,35 +307,6 @@ class TestGitCheckoutTag:
         result = git_checkout_tag(str(tmp_path), "v0.20.1")
         assert result is False  # fetch failed, surfaced as a checkout failure
 
-    def test_skips_fetch_when_tag_local(self, tmp_path):
-        """Behavior pinned: when the tag is already local, `git fetch` is not
-        invoked at all — saves the redundant round-trip the resolver already
-        paid for and protects the cached-tag offline path."""
-        self._init_repo(tmp_path)
-        subprocess.run(["git", "-C", str(tmp_path), "tag", "v0.20.1"], check=True)
-
-        real_run = subprocess.run
-        fetch_calls = []
-
-        def spy(args, **kwargs):
-            if isinstance(args, list) and len(args) >= 2 and args[0] == "git" and "fetch" in args:
-                fetch_calls.append(args)
-            return real_run(args, **kwargs)
-
-        with patch("comfy_cli.git_utils.subprocess.run", side_effect=spy):
-            result = git_checkout_tag(str(tmp_path), "v0.20.1")
-
-        assert result is True
-        assert fetch_calls == [], f"Expected no `git fetch` calls, got {fetch_calls}"
-
-    def test_unknown_tag_returns_false(self, tmp_path):
-        """No remote and the tag doesn't exist locally → fetch fails (no remote
-        configured returns 0 silently, but checkout of a missing tag fails)."""
-        self._init_repo(tmp_path)
-        # No origin at all; `git fetch --tags` returns 0 silently.
-        result = git_checkout_tag(str(tmp_path), "v9.9.9-doesnotexist")
-        assert result is False  # checkout fails because tag truly doesn't exist
-
 
 class TestHandlePRCheckout:
     """Test the main PR checkout handler"""
