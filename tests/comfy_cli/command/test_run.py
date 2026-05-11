@@ -375,6 +375,28 @@ class TestExecuteErrorHandling:
         finally:
             os.unlink(path)
 
+    def test_rejects_unreadable_file(self):
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+            f.write("{}")
+            path = f.name
+        try:
+            real_open = open
+
+            def fake_open(file, *args, **kwargs):
+                if file == path:
+                    raise PermissionError(13, "Permission denied", path)
+                return real_open(file, *args, **kwargs)
+
+            with (
+                patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),
+                patch("builtins.open", side_effect=fake_open),
+            ):
+                with pytest.raises(typer.Exit) as exc_info:
+                    execute(path, host="127.0.0.1", port=8188)
+                assert exc_info.value.exit_code == 1
+        finally:
+            os.unlink(path)
+
     def test_progress_stopped_on_error(self, workflow_file):
         with (
             patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),

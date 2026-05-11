@@ -104,6 +104,9 @@ def execute(workflow: str, host, port, wait=True, verbose=False, local_paths=Fal
     try:
         with open(workflow_name, encoding="utf-8") as f:
             raw_workflow = json.load(f)
+    except OSError as e:
+        pprint(f"[bold red]Unable to read workflow file: {e}[/bold red]")
+        raise typer.Exit(code=1) from e
     except json.JSONDecodeError as e:
         pprint(f"[bold red]Specified workflow file is not valid JSON: {e}[/bold red]")
         raise typer.Exit(code=1) from e
