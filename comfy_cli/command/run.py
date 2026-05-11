@@ -19,11 +19,14 @@ from comfy_cli.workspace_manager import WorkspaceManager
 workspace_manager = WorkspaceManager()
 
 
+def is_ui_workflow(workflow) -> bool:
+    return isinstance(workflow, dict) and "nodes" in workflow and "links" in workflow
+
+
 def load_api_workflow(file: str):
     with open(file, encoding="utf-8") as f:
         workflow = json.load(f)
-        # Check for litegraph properties to ensure this isnt a UI workflow file
-        if "nodes" in workflow and "links" in workflow:
+        if is_ui_workflow(workflow):
             return None
 
         # Try validating the first entry to ensure it has a node class property
@@ -35,6 +38,45 @@ def load_api_workflow(file: str):
         return workflow
 
 
+class WorkflowConverterUnavailable(Exception):
+    """The running ComfyUI server doesn't expose /workflow/convert."""
+
+
+def convert_ui_workflow_via_server(workflow: dict, host: str, port: int, timeout: int) -> dict:
+    """POST a UI-format workflow to the server's /workflow/convert and return API-format JSON.
+
+    Raises WorkflowConverterUnavailable if the server doesn't expose the endpoint.
+    Raises typer.Exit on other conversion failures.
+    """
+    url = f"http://{host}:{port}/workflow/convert"
+    req = request.Request(url, json.dumps(workflow).encode("utf-8"))
+    req.add_header("Content-Type", "application/json")
+    try:
+        resp = request.urlopen(req, timeout=timeout)
+    except urllib.error.HTTPError as e:
+        if e.code in (404, 405):
+            raise WorkflowConverterUnavailable() from e
+        body = e.read().decode("utf-8", errors="replace").strip()
+        pprint(f"[bold red]Workflow conversion failed (HTTP {e.code}): {body[:500]}[/bold red]")
+        raise typer.Exit(code=1) from e
+    except urllib.error.URLError as e:
+        pprint(f"[bold red]Workflow conversion failed: {e.reason}[/bold red]")
+        raise typer.Exit(code=1) from e
+    return json.loads(resp.read())
+
+
+def _print_converter_unavailable_help() -> None:
+    pprint(
+        "[bold red]UI-format workflow detected, but the running ComfyUI server[/bold red]\n"
+        "[bold red]doesn't expose a /workflow/convert endpoint to convert it to API format.[/bold red]\n"
+        "\n"
+        "[yellow]Workarounds:[/yellow]\n"
+        "[yellow]  * Install a custom node that adds /workflow/convert on the server[/yellow]\n"
+        "[yellow]  * Or, in the ComfyUI frontend, enable Dev Mode under Settings and use[/yellow]\n"
+        "[yellow]    'Workflow > Export (API)' to save your workflow as API format[/yellow]"
+    )
+
+
 def execute(workflow: str, host, port, wait=True, verbose=False, local_paths=False, timeout=30):
     workflow_name = os.path.abspath(os.path.expanduser(workflow))
     if not os.path.isfile(workflow):
@@ -44,15 +86,25 @@ def execute(workflow: str, host, port, wait=True, verbose=False, local_paths=Fal
         )
         raise typer.Exit(code=1)
 
-    workflow = load_api_workflow(workflow)
-
-    if not workflow:
-        pprint("[bold red]Specified workflow does not appear to be an API workflow json file[/bold red]")
-        raise typer.Exit(code=1)
-
     if not check_comfy_server_running(port, host):
         pprint(f"[bold red]ComfyUI not running on specified address ({host}:{port})[/bold red]")
         raise typer.Exit(code=1)
+
+    with open(workflow_name, encoding="utf-8") as f:
+        raw_workflow = json.load(f)
+
+    if is_ui_workflow(raw_workflow):
+        pprint("[yellow]Detected UI-format workflow, converting via server's /workflow/convert...[/yellow]")
+        try:
+            workflow = convert_ui_workflow_via_server(raw_workflow, host, port, timeout)
+        except WorkflowConverterUnavailable:
+            _print_converter_unavailable_help()
+            raise typer.Exit(code=1)
+    else:
+        workflow = load_api_workflow(workflow_name)
+        if not workflow:
+            pprint("[bold red]Specified workflow does not appear to be an API workflow json file[/bold red]")
+            raise typer.Exit(code=1)
 
     progress = None
     start = time.time()
