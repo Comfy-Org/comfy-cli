@@ -20,7 +20,11 @@ workspace_manager = WorkspaceManager()
 
 
 def is_ui_workflow(workflow) -> bool:
-    return isinstance(workflow, dict) and "nodes" in workflow and "links" in workflow
+    return (
+        isinstance(workflow, dict)
+        and isinstance(workflow.get("nodes"), list)
+        and isinstance(workflow.get("links"), list)
+    )
 
 
 def _validate_api_workflow(workflow):
@@ -87,8 +91,8 @@ def _print_converter_unavailable_help() -> None:
         "\n"
         "[yellow]Workarounds:[/yellow]\n"
         "[yellow]  * Install a custom node that adds /workflow/convert on the server[/yellow]\n"
-        "[yellow]  * Or, in the ComfyUI frontend, enable Dev Mode under Settings and use[/yellow]\n"
-        "[yellow]    'Workflow > Export (API)' to save your workflow as API format[/yellow]"
+        "[yellow]  * Or, in the ComfyUI frontend, use 'File > Export (API)' to save[/yellow]\n"
+        "[yellow]    your workflow as API format[/yellow]"
     )
 
 

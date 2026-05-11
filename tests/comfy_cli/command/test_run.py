@@ -104,6 +104,19 @@ class TestIsUiWorkflow:
         assert not is_ui_workflow({"nodes": []})
         assert not is_ui_workflow({"links": []})
 
+    def test_rejects_api_workflow_with_nodes_and_links_as_keys(self):
+        # A pathological API workflow where node IDs happen to be the strings
+        # "nodes" and "links" should not be mistaken for UI format.
+        api = {
+            "nodes": {"class_type": "Foo", "inputs": {}},
+            "links": {"class_type": "Bar", "inputs": {}},
+        }
+        assert not is_ui_workflow(api)
+
+    def test_rejects_when_values_are_not_lists(self):
+        assert not is_ui_workflow({"nodes": "string", "links": "string"})
+        assert not is_ui_workflow({"nodes": 1, "links": 2})
+
 
 def _make_http_error(code: int, body: bytes = b"") -> urllib.error.HTTPError:
     return urllib.error.HTTPError(
