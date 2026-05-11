@@ -362,6 +362,19 @@ class TestExecuteErrorHandling:
         finally:
             os.unlink(path)
 
+    def test_rejects_malformed_json(self):
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+            f.write("{ this is not valid json")
+            f.flush()
+            path = f.name
+        try:
+            with patch("comfy_cli.command.run.check_comfy_server_running", return_value=True):
+                with pytest.raises(typer.Exit) as exc_info:
+                    execute(path, host="127.0.0.1", port=8188)
+                assert exc_info.value.exit_code == 1
+        finally:
+            os.unlink(path)
+
     def test_progress_stopped_on_error(self, workflow_file):
         with (
             patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),

@@ -101,8 +101,12 @@ def execute(workflow: str, host, port, wait=True, verbose=False, local_paths=Fal
         pprint(f"[bold red]ComfyUI not running on specified address ({host}:{port})[/bold red]")
         raise typer.Exit(code=1)
 
-    with open(workflow_name, encoding="utf-8") as f:
-        raw_workflow = json.load(f)
+    try:
+        with open(workflow_name, encoding="utf-8") as f:
+            raw_workflow = json.load(f)
+    except json.JSONDecodeError as e:
+        pprint(f"[bold red]Specified workflow file is not valid JSON: {e}[/bold red]")
+        raise typer.Exit(code=1) from e
 
     if is_ui_workflow(raw_workflow):
         pprint("[yellow]Detected UI-format workflow, converting via server's /workflow/convert...[/yellow]")
