@@ -23,19 +23,22 @@ def is_ui_workflow(workflow) -> bool:
     return isinstance(workflow, dict) and "nodes" in workflow and "links" in workflow
 
 
+def _validate_api_workflow(workflow):
+    """Return the workflow dict if it has the shape of API format, else None."""
+    if not isinstance(workflow, dict) or not workflow:
+        return None
+    node = workflow[next(iter(workflow))]
+    if not isinstance(node, dict) or "class_type" not in node:
+        return None
+    return workflow
+
+
 def load_api_workflow(file: str):
     with open(file, encoding="utf-8") as f:
         workflow = json.load(f)
-        if is_ui_workflow(workflow):
-            return None
-
-        # Try validating the first entry to ensure it has a node class property
-        node_id = next(iter(workflow))
-        node = workflow[node_id]
-        if "class_type" not in node:
-            return None
-
-        return workflow
+    if is_ui_workflow(workflow):
+        return None
+    return _validate_api_workflow(workflow)
 
 
 class WorkflowConverterUnavailable(Exception):
@@ -109,7 +112,7 @@ def execute(workflow: str, host, port, wait=True, verbose=False, local_paths=Fal
             _print_converter_unavailable_help()
             raise typer.Exit(code=1)
     else:
-        workflow = load_api_workflow(workflow_name)
+        workflow = _validate_api_workflow(raw_workflow)
         if not workflow:
             pprint("[bold red]Specified workflow does not appear to be an API workflow json file[/bold red]")
             raise typer.Exit(code=1)
