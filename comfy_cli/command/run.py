@@ -62,7 +62,15 @@ def convert_ui_workflow_via_server(workflow: dict, host: str, port: int, timeout
     except urllib.error.URLError as e:
         pprint(f"[bold red]Workflow conversion failed: {e.reason}[/bold red]")
         raise typer.Exit(code=1) from e
-    return json.loads(resp.read())
+    try:
+        converted = json.loads(resp.read())
+    except json.JSONDecodeError as e:
+        pprint("[bold red]Workflow conversion failed: server returned invalid JSON[/bold red]")
+        raise typer.Exit(code=1) from e
+    if not isinstance(converted, dict):
+        pprint("[bold red]Workflow conversion failed: expected a JSON object[/bold red]")
+        raise typer.Exit(code=1)
+    return converted
 
 
 def _print_converter_unavailable_help() -> None:
