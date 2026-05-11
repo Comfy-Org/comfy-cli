@@ -168,6 +168,30 @@ class TestConvertUiWorkflowViaServer:
                 convert_ui_workflow_via_server(self.UI, "127.0.0.1", 8188, timeout=30)
             assert exc_info.value.exit_code == 1
 
+    def test_raises_typer_exit_on_empty_object_response(self):
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = b"{}"
+        with patch("comfy_cli.command.run.request.urlopen", return_value=mock_resp):
+            with pytest.raises(typer.Exit) as exc_info:
+                convert_ui_workflow_via_server(self.UI, "127.0.0.1", 8188, timeout=30)
+            assert exc_info.value.exit_code == 1
+
+    def test_raises_typer_exit_when_first_entry_is_not_a_node(self):
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = b'{"1": "not-a-node-dict"}'
+        with patch("comfy_cli.command.run.request.urlopen", return_value=mock_resp):
+            with pytest.raises(typer.Exit) as exc_info:
+                convert_ui_workflow_via_server(self.UI, "127.0.0.1", 8188, timeout=30)
+            assert exc_info.value.exit_code == 1
+
+    def test_raises_typer_exit_when_first_entry_missing_class_type(self):
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = b'{"1": {"inputs": {}}}'
+        with patch("comfy_cli.command.run.request.urlopen", return_value=mock_resp):
+            with pytest.raises(typer.Exit) as exc_info:
+                convert_ui_workflow_via_server(self.UI, "127.0.0.1", 8188, timeout=30)
+            assert exc_info.value.exit_code == 1
+
 
 class TestWatchExecution:
     def test_successful_execution(self, mock_execution):

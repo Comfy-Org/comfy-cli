@@ -70,8 +70,12 @@ def convert_ui_workflow_via_server(workflow: dict, host: str, port: int, timeout
     except json.JSONDecodeError as e:
         pprint("[bold red]Workflow conversion failed: server returned invalid JSON[/bold red]")
         raise typer.Exit(code=1) from e
-    if not isinstance(converted, dict):
-        pprint("[bold red]Workflow conversion failed: expected a JSON object[/bold red]")
+    if not isinstance(converted, dict) or not converted:
+        pprint("[bold red]Workflow conversion failed: expected a non-empty JSON object[/bold red]")
+        raise typer.Exit(code=1)
+    first = converted[next(iter(converted))]
+    if not isinstance(first, dict) or "class_type" not in first:
+        pprint("[bold red]Workflow conversion failed: returned data is not API workflow format[/bold red]")
         raise typer.Exit(code=1)
     return converted
 
