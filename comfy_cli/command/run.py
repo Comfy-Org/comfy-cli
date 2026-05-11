@@ -37,14 +37,6 @@ def _validate_api_workflow(workflow):
     return workflow
 
 
-def load_api_workflow(file: str):
-    with open(file, encoding="utf-8") as f:
-        workflow = json.load(f)
-    if is_ui_workflow(workflow):
-        return None
-    return _validate_api_workflow(workflow)
-
-
 class WorkflowConverterUnavailable(Exception):
     """The running ComfyUI server doesn't expose /workflow/convert."""
 
@@ -86,8 +78,8 @@ def convert_ui_workflow_via_server(workflow: dict, host: str, port: int, timeout
 
 def _print_converter_unavailable_help() -> None:
     pprint(
-        "[bold red]UI-format workflow detected, but the running ComfyUI server[/bold red]\n"
-        "[bold red]doesn't expose a /workflow/convert endpoint to convert it to API format.[/bold red]\n"
+        "[bold red]This ComfyUI server doesn't expose a /workflow/convert endpoint[/bold red]\n"
+        "[bold red]to convert it to API format.[/bold red]\n"
         "\n"
         "[yellow]Workarounds:[/yellow]\n"
         "[yellow]  * Install a custom node that adds /workflow/convert on the server[/yellow]\n"

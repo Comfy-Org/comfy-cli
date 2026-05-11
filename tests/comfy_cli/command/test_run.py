@@ -15,7 +15,6 @@ from comfy_cli.command.run import (
     convert_ui_workflow_via_server,
     execute,
     is_ui_workflow,
-    load_api_workflow,
 )
 
 
@@ -61,32 +60,6 @@ def mock_execution(workflow):
 
 def _make_msg(msg_type, prompt_id, **data_fields):
     return json.dumps({"type": msg_type, "data": {"prompt_id": prompt_id, **data_fields}})
-
-
-class TestLoadApiWorkflow:
-    def test_valid_api_workflow(self, workflow_file):
-        result = load_api_workflow(workflow_file)
-        assert result is not None
-        assert "1" in result
-        assert result["1"]["class_type"] == "EmptyLatentImage"
-
-    def test_rejects_ui_workflow(self):
-        ui_workflow = {"nodes": [], "links": []}
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
-            json.dump(ui_workflow, f)
-            f.flush()
-            result = load_api_workflow(f.name)
-        os.unlink(f.name)
-        assert result is None
-
-    def test_rejects_invalid_node(self):
-        bad_workflow = {"1": {"not_class_type": "Foo"}}
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
-            json.dump(bad_workflow, f)
-            f.flush()
-            result = load_api_workflow(f.name)
-        os.unlink(f.name)
-        assert result is None
 
 
 class TestIsUiWorkflow:
