@@ -104,7 +104,6 @@ def convert_ui_to_api(workflow: dict, object_info: dict) -> dict:
     subgraph_defs = _collect_subgraph_defs(workflow)
     nodes, links, subgraph_ctx = _expand_subgraphs(nodes, links, subgraph_defs)
 
-    link_map = _build_link_map(links)
     links = _rewrite_links_for_subgraphs(links, subgraph_ctx, nodes)
     link_map = _build_link_map(links)
 
