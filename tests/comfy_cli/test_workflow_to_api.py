@@ -672,6 +672,73 @@ class TestMalformedInputHardening:
             # Should not raise, no matter how unhashable the var name is.
             convert_ui_to_api(workflow, object_info)
 
+    def test_unhashable_link_value_in_global_helpers_does_not_crash(self, object_info):
+        # ``link_id in link_map`` raises TypeError on unhashable values, so
+        # _collect_reroute_sources / _collect_get_set_mappings / subgraph
+        # linkIds resolution used to abort the entire conversion when a
+        # single saved Reroute / SetNode / subgraph input had ``link: []``
+        # (or ``{}``, etc.).
+        cases = [
+            (
+                "reroute_list",
+                {
+                    "nodes": [{"id": 1, "type": "Reroute", "inputs": [{"link": []}], "outputs": [], "mode": 0}],
+                    "links": [],
+                },
+            ),
+            (
+                "reroute_dict",
+                {
+                    "nodes": [{"id": 1, "type": "Reroute", "inputs": [{"link": {}}], "outputs": [], "mode": 0}],
+                    "links": [],
+                },
+            ),
+            (
+                "setnode_list",
+                {
+                    "nodes": [
+                        {
+                            "id": 1,
+                            "type": "SetNode",
+                            "inputs": [{"link": []}],
+                            "outputs": [],
+                            "widgets_values": ["myvar"],
+                            "mode": 0,
+                        }
+                    ],
+                    "links": [],
+                },
+            ),
+            (
+                "subgraph_linkIds_list",
+                {
+                    "nodes": [
+                        {
+                            "id": 1,
+                            "type": "11111111-2222-3333-4444-555555555555",
+                            "inputs": [],
+                            "outputs": [],
+                        }
+                    ],
+                    "links": [],
+                    "definitions": {
+                        "subgraphs": [
+                            {
+                                "id": "11111111-2222-3333-4444-555555555555",
+                                "nodes": [],
+                                "links": [],
+                                "inputs": [{"name": "x", "linkIds": [["bad"]]}],
+                                "outputs": [],
+                            }
+                        ]
+                    },
+                },
+            ),
+        ]
+        for _label, workflow in cases:
+            # Should not raise — each malformed link is silently skipped.
+            convert_ui_to_api(workflow, object_info)
+
     def test_subgraph_link_with_unhashable_id_is_skipped(self, object_info):
         # Internal link IDs are dict keys; an unhashable id used to crash
         # the whole subgraph expansion (which runs before the per-node

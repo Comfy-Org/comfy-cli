@@ -335,6 +335,8 @@ def _expand_one_subgraph(
             continue
         targets = []
         for lid in in_def.get("linkIds") or []:
+            if not isinstance(lid, int):
+                continue
             link = internal_link_map.get(lid)
             if isinstance(link, dict):
                 targets.append((link.get("target_id"), link.get("target_slot")))
@@ -346,6 +348,8 @@ def _expand_one_subgraph(
         if not isinstance(out_def, dict):
             continue
         for lid in out_def.get("linkIds") or []:
+            if not isinstance(lid, int):
+                continue
             link = internal_link_map.get(lid)
             if isinstance(link, dict):
                 output_sources[(link.get("origin_id"), link.get("origin_slot"))] = idx
@@ -553,7 +557,11 @@ def _collect_reroute_sources(nodes: list[dict], link_map: dict[int, dict]) -> di
         if not isinstance(inputs, list) or not inputs or not isinstance(inputs[0], dict):
             continue
         link_id = inputs[0].get("link")
-        if link_id is None or link_id not in link_map:
+        # ``link_id in link_map`` raises TypeError on unhashable values
+        # (e.g. ``link: []`` in a malformed saved file). _collect_reroute_sources
+        # runs before the per-node try/except wrapper, so a single bad Reroute
+        # would otherwise abort the entire conversion.
+        if not isinstance(link_id, int) or link_id not in link_map:
             continue
         ld = link_map[link_id]
         out[str(node.get("id"))] = (ld["source_id"], ld["source_slot"])
@@ -582,10 +590,13 @@ def _collect_get_set_mappings(
                 if not isinstance(inp, dict):
                     continue
                 lid = inp.get("link")
-                if lid is not None and lid in link_map:
-                    ld = link_map[lid]
-                    set_sources[var_name] = (ld["source_id"], ld["source_slot"])
-                    break
+                # See _collect_reroute_sources: unhashable lid would crash
+                # the global pre-pass before any per-node guard kicks in.
+                if not isinstance(lid, int) or lid not in link_map:
+                    continue
+                ld = link_map[lid]
+                set_sources[var_name] = (ld["source_id"], ld["source_slot"])
+                break
         elif node_type == "GetNode":
             get_vars[str(node.get("id"))] = var_name
     return set_sources, get_vars
@@ -885,7 +896,7 @@ def _build_api_node(
             continue
         input_name = inp.get("name")
         link_id = inp.get("link")
-        if not input_name or link_id is None or link_id not in tracers.link_map:
+        if not input_name or not isinstance(link_id, int) or link_id not in tracers.link_map:
             continue
         ld = tracers.link_map[link_id]
         actual_id, actual_slot = ld["source_id"], ld["source_slot"]
