@@ -956,25 +956,65 @@ def _fallback_widget_names(node: dict, widget_values: list[Any]) -> list[str | N
     return []
 
 
-def _filter_control_values(widget_values: list[Any]) -> list[Any]:
-    """Drop control_after_generate strings that follow INT widgets in widget_values."""
+def _filter_control_values(
+    widget_values: list[Any],
+    node_type: str | None = None,
+    node: dict | None = None,
+    object_info: dict | None = None,
+) -> list[Any]:
+    """Drop the control_after_generate strings that follow seed-like INT widgets.
+
+    Schema-aware when a schema is available: only a string immediately
+    following an input that declares ``control_after_generate: True`` is
+    treated as a control marker. This avoids false positives on legitimate
+    STRING/COMBO widget values that happen to equal one of the control
+    keywords (e.g. a combo option literally named ``"fixed"``).
+
+    Falls back to a positional string-match heuristic when the schema is
+    unavailable — matches SethRobinson's behavior for unknown node types.
+    """
 
     def is_control(v: Any) -> bool:
         return isinstance(v, str) and v in _CONTROL_AFTER_GENERATE_VALUES
 
-    out: list[Any] = []
-    i = 0
-    while i < len(widget_values):
-        value = widget_values[i]
-        if is_control(value):
-            i += 1
-            continue
-        if i + 1 < len(widget_values) and is_control(widget_values[i + 1]):
+    schema = _schema_for(node_type, node, object_info) if node_type and node and object_info else None
+    if not schema:
+        out: list[Any] = []
+        i = 0
+        while i < len(widget_values):
+            value = widget_values[i]
+            if is_control(value):
+                i += 1
+                continue
+            if i + 1 < len(widget_values) and is_control(widget_values[i + 1]):
+                out.append(value)
+                i += 2
+                continue
             out.append(value)
-            i += 2
+            i += 1
+        return out
+
+    out = []
+    vidx = 0
+    input_def = schema.get("input") or {}
+    for section in ("required", "optional"):
+        section_def = input_def.get(section) or {}
+        if not isinstance(section_def, dict):
             continue
-        out.append(value)
-        i += 1
+        for _input_name, input_spec in section_def.items():
+            if vidx >= len(widget_values):
+                break
+            is_widget, _is_dynamic = _is_widget_input(input_spec)
+            if not is_widget:
+                continue
+            out.append(widget_values[vidx])
+            vidx += 1
+            options = input_spec[1] if len(input_spec) >= 2 and isinstance(input_spec[1], dict) else {}
+            if options.get("control_after_generate") and vidx < len(widget_values) and is_control(widget_values[vidx]):
+                vidx += 1
+    while vidx < len(widget_values):
+        out.append(widget_values[vidx])
+        vidx += 1
     return out
 
 
@@ -1001,7 +1041,7 @@ def _collect_widget_inputs(
         _absorb_dict_widget_values(widget_values, out, link_inputs)
         return out
 
-    filtered = _filter_control_values(widget_values)
+    filtered = _filter_control_values(widget_values, node_type, node, object_info)
     names = _get_widget_name_order(node_type, node, object_info, widget_values)
     if not names:
         if filtered:

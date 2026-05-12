@@ -40,7 +40,7 @@ def object_info():
             "input": {
                 "required": {
                     "model": ["MODEL"],
-                    "seed": ["INT", {"default": 0}],
+                    "seed": ["INT", {"default": 0, "control_after_generate": True}],
                     "steps": ["INT", {"default": 20}],
                     "cfg": ["FLOAT", {"default": 8.0}],
                     "sampler_name": [["euler", "ddim"], {"default": "euler"}],
@@ -744,6 +744,106 @@ class TestMalformedInputHardening:
         # The second node still made it in even though the first crashed.
         assert "2" in result
         assert any("Failed to convert node" in rec.message for rec in caplog.records)
+
+
+class TestControlAfterGenerate:
+    """The control_after_generate filter must be schema-aware so it doesn't
+    silently corrupt legitimate widget values that happen to equal a control
+    keyword.
+    """
+
+    def test_seed_widget_with_control_marker_strips_correctly(self):
+        # KSampler has ``control_after_generate: True`` on seed → the
+        # synthetic marker string after the seed value must be stripped.
+        object_info = {
+            "KSampler": {
+                "input": {
+                    "required": {
+                        "seed": ["INT", {"default": 0, "control_after_generate": True}],
+                        "steps": ["INT", {"default": 20}],
+                        "sampler_name": [["euler", "ddim"]],
+                    }
+                },
+                "input_order": {"required": ["seed", "steps", "sampler_name"]},
+                "output_node": True,
+                "display_name": "KSampler",
+            }
+        }
+        workflow = {
+            "nodes": [
+                {
+                    "id": 1,
+                    "type": "KSampler",
+                    "inputs": [],
+                    "outputs": [],
+                    "widgets_values": [42, "randomize", 20, "euler"],
+                    "mode": 0,
+                }
+            ],
+            "links": [],
+        }
+        result = convert_ui_to_api(workflow, object_info)
+        assert result["1"]["inputs"] == {"seed": 42, "steps": 20, "sampler_name": "euler"}
+
+    def test_legitimate_value_named_fixed_is_preserved(self):
+        # A COMBO option literally named "fixed" used to be stripped by the
+        # naive filter, sliding every later widget out of alignment.
+        object_info = {
+            "ControlLike": {
+                "input": {
+                    "required": {
+                        "mode": [["loose", "fixed", "strict"]],
+                        "label": ["STRING", {}],
+                    }
+                },
+                "input_order": {"required": ["mode", "label"]},
+                "output_node": True,
+                "display_name": "Control-like",
+            }
+        }
+        workflow = {
+            "nodes": [
+                {
+                    "id": 1,
+                    "type": "ControlLike",
+                    "inputs": [],
+                    "outputs": [],
+                    "widgets_values": ["fixed", "hello"],
+                    "mode": 0,
+                }
+            ],
+            "links": [],
+        }
+        result = convert_ui_to_api(workflow, object_info)
+        assert result["1"]["inputs"] == {"mode": "fixed", "label": "hello"}
+
+    def test_unknown_node_falls_back_to_legacy_filter(self):
+        # No schema → no schema-aware filter possible. We fall back to the
+        # positional string-match heuristic, which matches SethRobinson's
+        # reference behavior for unknown nodes.
+        workflow = {
+            "nodes": [
+                {
+                    "id": 1,
+                    "type": "TotallyUnknownNode",
+                    "inputs": [],
+                    "outputs": [{"links": [1]}],
+                    "widgets_values": [42, "randomize", 20],
+                    "mode": 0,
+                },
+                {
+                    "id": 2,
+                    "type": "TotallyUnknownConsumer",
+                    "inputs": [{"name": "x", "link": 1}],
+                    "outputs": [],
+                    "mode": 0,
+                },
+            ],
+            "links": [[1, 1, 0, 2, 0, "*"]],
+        }
+        # Should not raise; widget_values processing for unknown types just
+        # falls back to the legacy filter and produces an empty input map.
+        convert_ui_to_api(workflow, {})
 
 
 class TestFrontendParity:
