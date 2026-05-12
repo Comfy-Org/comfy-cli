@@ -224,7 +224,9 @@ def _collect_subgraph_defs(workflow: dict) -> dict[str, dict]:
         if not isinstance(sg, dict):
             continue
         sg_id = sg.get("id")
-        if sg_id:
+        # sg_id has to be a string both because we use it as a dict key and
+        # because is_subgraph_uuid (used to match instances) only accepts str.
+        if isinstance(sg_id, str) and sg_id:
             defs[sg_id] = sg
     return defs
 
@@ -262,9 +264,14 @@ def _expand_subgraphs(
 
 def _outer_slot_to_input_idx(outer_node: dict, sg_def: dict) -> dict[int, int]:
     """Map the outer node's input slots to subgraph-definition input indices."""
-    sg_input_names = {inp.get("name"): idx for idx, inp in enumerate(sg_def.get("inputs", []))}
+    sg_input_names: dict[Any, int] = {}
+    for idx, inp in enumerate(sg_def.get("inputs") or []):
+        if isinstance(inp, dict):
+            sg_input_names[inp.get("name")] = idx
     mapping: dict[int, int] = {}
-    for outer_idx, outer_input in enumerate(outer_node.get("inputs", []) or []):
+    for outer_idx, outer_input in enumerate(outer_node.get("inputs") or []):
+        if not isinstance(outer_input, dict):
+            continue
         name = outer_input.get("name")
         if name in sg_input_names:
             mapping[outer_idx] = sg_input_names[name]
@@ -299,9 +306,11 @@ def _expand_one_subgraph(
             internal_link_map[old_id] = link
 
     input_targets: dict[int, list[tuple[Any, int]]] = {}
-    for idx, in_def in enumerate(sg_def.get("inputs", []) or []):
+    for idx, in_def in enumerate(sg_def.get("inputs") or []):
+        if not isinstance(in_def, dict):
+            continue
         targets = []
-        for lid in in_def.get("linkIds", []) or []:
+        for lid in in_def.get("linkIds") or []:
             link = internal_link_map.get(lid)
             if isinstance(link, dict):
                 targets.append((link.get("target_id"), link.get("target_slot")))
@@ -309,8 +318,10 @@ def _expand_one_subgraph(
             input_targets[idx] = targets
 
     output_sources: dict[tuple[Any, int], int] = {}
-    for idx, out_def in enumerate(sg_def.get("outputs", []) or []):
-        for lid in out_def.get("linkIds", []) or []:
+    for idx, out_def in enumerate(sg_def.get("outputs") or []):
+        if not isinstance(out_def, dict):
+            continue
+        for lid in out_def.get("linkIds") or []:
             link = internal_link_map.get(lid)
             if isinstance(link, dict):
                 output_sources[(link.get("origin_id"), link.get("origin_slot"))] = idx

@@ -646,6 +646,49 @@ class TestMalformedInputHardening:
             result = convert_ui_to_api(workflow, object_info)
             assert set(result) == {"1", "2"}, f"failed with definitions={bad_defs!r}"
 
+    def test_malformed_subgraph_definition_does_not_crash(self, object_info):
+        # Subgraph expansion runs before the per-node try/except wrapper, so
+        # the defensive checks live in the helpers themselves. Each of these
+        # malformed-definition shapes used to leak an AttributeError/TypeError
+        # before the helpers were guarded.
+        sg_uuid = "11111111-2222-3333-4444-555555555555"
+        cases = [
+            # sg.inputs contains non-dict entries
+            {"id": sg_uuid, "nodes": [], "links": [], "inputs": [None, 42, ["x"]]},
+            # sg.outputs contains non-dict entries
+            {"id": sg_uuid, "nodes": [], "links": [], "outputs": [None, 42]},
+            # sg.id is unhashable; the def is silently dropped
+            {"id": {"weird": True}, "nodes": [], "links": []},
+            {"id": ["x"], "nodes": [], "links": []},
+        ]
+        for sg in cases:
+            workflow = {
+                "nodes": [{"id": 1, "type": sg_uuid, "inputs": [], "outputs": []}],
+                "links": [],
+                "definitions": {"subgraphs": [sg]},
+            }
+            # Should not raise, regardless of how malformed the subgraph def is.
+            convert_ui_to_api(workflow, object_info)
+
+    def test_outer_subgraph_node_with_non_dict_inputs_does_not_crash(self, object_info):
+        sg_uuid = "11111111-2222-3333-4444-555555555555"
+        workflow = {
+            "nodes": [
+                {
+                    "id": 1,
+                    "type": sg_uuid,
+                    "inputs": [None, 42, {"name": "x"}],
+                    "outputs": [],
+                }
+            ],
+            "links": [],
+            "definitions": {
+                "subgraphs": [{"id": sg_uuid, "nodes": [], "links": [], "inputs": [{"name": "x"}], "outputs": []}]
+            },
+        }
+        # Should not raise.
+        convert_ui_to_api(workflow, object_info)
+
     def test_single_bad_node_does_not_abort_conversion(self, object_info, caplog):
         # We can't easily induce _build_api_node to throw on real input, so
         # monkeypatch it for this test.
