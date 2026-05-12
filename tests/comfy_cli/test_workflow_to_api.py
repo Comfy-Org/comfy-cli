@@ -1,7 +1,9 @@
 """Unit tests for the UI -> API workflow converter."""
 
 import json
+import random
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -10,6 +12,7 @@ from comfy_cli.workflow_to_api import (
     convert_ui_to_api,
     is_api_format,
     is_subgraph_uuid,
+    process_dynamic_prompt,
 )
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -1217,6 +1220,178 @@ class TestMutedBypassedSubgraph:
         result = convert_ui_to_api(self._workflow(mode=4, with_external_wires=True), object_info)
         assert "100" not in result  # subgraph instance gone
         assert result["8"]["inputs"]["images"] == ["7", 0]
+
+
+class TestDynamicPrompts:
+    """Port of frontend's processDynamicPrompt behavior (formatUtil.ts).
+
+    Tests pin ``random.choice`` deterministically; the runtime behavior is
+    genuinely random, matching the frontend's ``Math.random()`` semantics.
+    """
+
+    # -- Pure algorithm --------------------------------------------------
+
+    def test_no_braces_passes_through(self):
+        assert process_dynamic_prompt("abcdef") == "abcdef"
+        assert process_dynamic_prompt("") == ""
+
+    def test_strips_line_comments(self):
+        # // to end of line
+        assert process_dynamic_prompt("abc // a comment\nrest") == "abc \nrest"
+
+    def test_strips_block_comments(self):
+        # /* ... */ across or within lines
+        assert process_dynamic_prompt("/*\nStart\n*/Hello /* mid */ world") == "Hello  world"
+
+    def test_picks_one_option_per_group(self):
+        with patch("comfy_cli.workflow_to_api.random.choice", side_effect=lambda opts: opts[0]):
+            assert process_dynamic_prompt("{option1|option2}") == "option1"
+        with patch("comfy_cli.workflow_to_api.random.choice", side_effect=lambda opts: opts[-1]):
+            assert process_dynamic_prompt("{option1|option2}") == "option2"
+
+    def test_handles_empty_alternatives(self):
+        # Trailing empty
+        with patch("comfy_cli.workflow_to_api.random.choice", side_effect=lambda opts: opts[-1]):
+            assert process_dynamic_prompt("{a|}") == ""
+        # Leading empty
+        with patch("comfy_cli.workflow_to_api.random.choice", side_effect=lambda opts: opts[0]):
+            assert process_dynamic_prompt("{|a}") == ""
+        # All empty
+        with patch("comfy_cli.workflow_to_api.random.choice", side_effect=lambda opts: opts[0]):
+            assert process_dynamic_prompt("{||}") == ""
+
+    def test_handles_nested_groups(self):
+        # Always pick first → outer 'a'
+        with patch("comfy_cli.workflow_to_api.random.choice", side_effect=lambda opts: opts[0]):
+            assert process_dynamic_prompt("{a|{b|{c|d}}}") == "a"
+        # Always pick last → innermost 'd'
+        with patch("comfy_cli.workflow_to_api.random.choice", side_effect=lambda opts: opts[-1]):
+            assert process_dynamic_prompt("{a|{b|{c|d}}}") == "d"
+
+    def test_escapes_preserve_literal_characters(self):
+        # Escaped braces remain literal
+        assert process_dynamic_prompt("\\{a|b\\}") == "{a|b}"
+        # Escaped pipe outside group
+        assert process_dynamic_prompt("a\\|b") == "a|b"
+        # Escapes inside group survive
+        with patch("comfy_cli.workflow_to_api.random.choice", side_effect=lambda opts: opts[0]):
+            assert process_dynamic_prompt("{\\{escaped\\}\\|escaped pipe}") == "{escaped}|escaped pipe"
+
+    def test_unterminated_group_degrades_gracefully(self):
+        # Frontend never throws on malformed input; we match that.
+        with patch("comfy_cli.workflow_to_api.random.choice", side_effect=lambda opts: opts[0]):
+            assert process_dynamic_prompt("{option1|option2|{nested1|nested2") == "option1"
+
+    def test_multiple_groups_in_one_string(self):
+        with patch("comfy_cli.workflow_to_api.random.choice", side_effect=lambda opts: opts[1]):
+            assert process_dynamic_prompt("1{a|b|c}2{d|e|f}3") == "1b2e3"
+
+    # -- Integration via convert_ui_to_api -------------------------------
+
+    OI = {
+        "CLIPTextEncode": {
+            "input": {
+                "required": {
+                    "text": ["STRING", {"multiline": True, "dynamicPrompts": True}],
+                    "clip": ["CLIP"],
+                }
+            },
+            "input_order": {"required": ["text", "clip"]},
+            "output_node": False,
+            "output": ["CONDITIONING"],
+            "display_name": "CLIP Text Encode",
+        },
+        "PreviewImage": {
+            "input": {"required": {"images": ["IMAGE"]}},
+            "input_order": {"required": ["images"]},
+            "output_node": True,
+            "display_name": "Preview Image",
+        },
+        "PlainText": {
+            "input": {"required": {"text": ["STRING", {}]}},
+            "input_order": {"required": ["text"]},
+            "output_node": True,
+            "display_name": "Plain Text",
+        },
+    }
+
+    def test_clip_text_encode_resolves_groups(self):
+        with patch("comfy_cli.workflow_to_api.random.choice", side_effect=lambda opts: opts[0]):
+            workflow = {
+                "nodes": [
+                    {
+                        "id": 1,
+                        "type": "CLIPTextEncode",
+                        "inputs": [{"name": "clip", "link": None}],
+                        "outputs": [{"links": [10]}],
+                        "widgets_values": ["a {red|blue} hat"],
+                        "mode": 0,
+                    },
+                    {
+                        "id": 2,
+                        "type": "PreviewImage",
+                        "inputs": [{"name": "images", "link": 10}],
+                        "outputs": [],
+                        "mode": 0,
+                    },
+                ],
+                "links": [[10, 1, 0, 2, 0, "IMAGE"]],
+            }
+            result = convert_ui_to_api(workflow, self.OI)
+            assert result["1"]["inputs"]["text"] == "a red hat"
+
+    def test_widget_without_dynamic_prompts_flag_left_alone(self):
+        # PlainText.text does NOT declare dynamicPrompts → literal passthrough.
+        workflow = {
+            "nodes": [
+                {
+                    "id": 1,
+                    "type": "PlainText",
+                    "inputs": [],
+                    "outputs": [],
+                    "widgets_values": ["a {red|blue} hat"],
+                    "mode": 0,
+                },
+            ],
+            "links": [],
+        }
+        result = convert_ui_to_api(workflow, self.OI)
+        assert result["1"]["inputs"]["text"] == "a {red|blue} hat"
+
+    def test_non_string_value_passes_through_unchanged(self):
+        # Numeric values on a dynamicPrompts input shouldn't be regex'd
+        workflow = {
+            "nodes": [
+                {
+                    "id": 1,
+                    "type": "CLIPTextEncode",
+                    "inputs": [{"name": "clip", "link": None}],
+                    "outputs": [{"links": [10]}],
+                    "widgets_values": [42],
+                    "mode": 0,
+                },
+                {
+                    "id": 2,
+                    "type": "PreviewImage",
+                    "inputs": [{"name": "images", "link": 10}],
+                    "outputs": [],
+                    "mode": 0,
+                },
+            ],
+            "links": [[10, 1, 0, 2, 0, "IMAGE"]],
+        }
+        result = convert_ui_to_api(workflow, self.OI)
+        assert result["1"]["inputs"]["text"] == 42
+
+    def test_random_choice_is_deterministic_under_seed(self):
+        # Sanity: seeding the global RNG fixes the choice — useful for the
+        # rare downstream test/script that wants reproducible runs.
+        random.seed(0)
+        first = process_dynamic_prompt("{alpha|beta|gamma}")
+        random.seed(0)
+        second = process_dynamic_prompt("{alpha|beta|gamma}")
+        assert first == second
+        assert first in {"alpha", "beta", "gamma"}
 
 
 class TestFixtureParity:

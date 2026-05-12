@@ -20,9 +20,15 @@ from __future__ import annotations
 
 import copy
 import logging
+import random
+import re
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+# C-style comments stripped from dynamic-prompt strings before group parsing.
+_DYNAMIC_PROMPT_COMMENT_RE = re.compile(r"/\*[\s\S]*?\*/|//.*")
+_DYNAMIC_PROMPT_UNESCAPE_RE = re.compile(r"\\([{}|])")
 
 
 # Mode values from litegraph: see frontend's LGraphEventMode enum.
@@ -747,6 +753,100 @@ def _wrap_widget_value(value: Any) -> Any:
     return value
 
 
+def process_dynamic_prompt(value: str) -> str:
+    """Resolve the ``{a|b|c}`` syntax used in CLIPTextEncode text widgets.
+
+    Port of the frontend's ``processDynamicPrompt`` (``formatUtil.ts``):
+
+    * Strips ``/* ... */`` and ``// ...`` comments first.
+    * Picks one alternative at random from each top-level ``{a|b|...}``
+      group. Nested groups are recursed into after a choice is made.
+    * ``\\{``, ``\\}``, ``\\|`` escape their literal characters.
+
+    Non-deterministic by design — the backend doesn't process the syntax,
+    so a workflow saved with ``{red|blue} hat`` would otherwise tokenize
+    the braces literally and produce a junk image.
+    """
+    return _resolve_dynamic_prompt(_DYNAMIC_PROMPT_COMMENT_RE.sub("", value))
+
+
+def _resolve_dynamic_prompt(value: str) -> str:
+    out: list[str] = []
+    i = 0
+    n = len(value)
+    while i < n:
+        ch = value[i]
+        i += 1
+        if ch == "\\" and i < n:
+            # Preserve the escape marker so the unescape pass at the end can
+            # restore the literal character without it being consumed earlier.
+            out.append("\\" + value[i])
+            i += 1
+        elif ch == "{":
+            chosen, i = _parse_dynamic_prompt_block(value, i)
+            out.append(_resolve_dynamic_prompt(chosen))
+        else:
+            out.append(ch)
+    return _DYNAMIC_PROMPT_UNESCAPE_RE.sub(r"\1", "".join(out))
+
+
+def _parse_dynamic_prompt_block(value: str, i: int) -> tuple[str, int]:
+    """Parse a ``{a|b|...}`` group starting at index ``i`` (just past the ``{``).
+
+    Returns ``(chosen_option, new_i)``. ``new_i`` points past the closing
+    ``}`` (or past end-of-string if the group is unterminated — the frontend
+    silently degrades on malformed input and we match that).
+    """
+    options: list[str] = []
+    choice: list[str] = []
+    depth = 0
+    n = len(value)
+    while i < n:
+        ch = value[i]
+        i += 1
+        if ch == "\\" and i < n:
+            choice.append("\\" + value[i])
+            i += 1
+            continue
+        if ch == "{":
+            depth += 1
+            choice.append(ch)
+        elif ch == "}":
+            if depth == 0:
+                break
+            depth -= 1
+            choice.append(ch)
+        elif ch == "|" and depth == 0:
+            options.append("".join(choice))
+            choice = []
+        else:
+            choice.append(ch)
+    options.append("".join(choice))
+    return random.choice(options), i
+
+
+def _dynamic_prompt_input_names(node_type: str | None, node: dict | None, object_info: dict) -> set[str]:
+    """Names of inputs whose schema declares ``dynamicPrompts: True``."""
+    if not node_type or not node:
+        return set()
+    schema = _schema_for(node_type, node, object_info)
+    if not schema:
+        return set()
+    input_def = schema.get("input") or {}
+    out: set[str] = set()
+    for section in ("required", "optional"):
+        section_def = input_def.get(section) or {}
+        if not isinstance(section_def, dict):
+            continue
+        for input_name, input_spec in section_def.items():
+            if not isinstance(input_spec, (list, tuple)) or len(input_spec) < 2:
+                continue
+            options = input_spec[1] if isinstance(input_spec[1], dict) else {}
+            if options.get("dynamicPrompts"):
+                out.add(input_name)
+    return out
+
+
 def _build_api_node(
     *,
     node: dict,
@@ -1042,6 +1142,13 @@ def _collect_widget_inputs(
     widget_values = node.get("widgets_values")
     if widget_values is None:
         return {}
+    dynamic_prompt_names = _dynamic_prompt_input_names(node_type, node, object_info)
+
+    def emit(name: str, value: Any) -> Any:
+        if name in dynamic_prompt_names and isinstance(value, str):
+            value = process_dynamic_prompt(value)
+        return _wrap_widget_value(value)
+
     out: dict[str, Any] = {}
     if isinstance(widget_values, dict):
         # Already self-describing; drop UI-only keys and respect link overrides.
@@ -1050,7 +1157,7 @@ def _collect_widget_inputs(
                 continue
             if key in link_inputs:
                 continue
-            out[key] = _wrap_widget_value(value)
+            out[key] = emit(key, value)
         return out
     if not isinstance(widget_values, list):
         return {}
@@ -1075,7 +1182,7 @@ def _collect_widget_inputs(
         name = names[i]
         if not name or name in link_inputs:
             continue
-        out[name] = _wrap_widget_value(value)
+        out[name] = emit(name, value)
     return out
 
 
