@@ -10,10 +10,9 @@ import typer
 from websocket import WebSocketException, WebSocketTimeoutException
 
 from comfy_cli.command.run import (
-    WorkflowConverterUnavailable,
     WorkflowExecution,
-    convert_ui_workflow_via_server,
     execute,
+    fetch_object_info,
     is_ui_workflow,
 )
 
@@ -93,7 +92,7 @@ class TestIsUiWorkflow:
 
 def _make_http_error(code: int, body: bytes = b"") -> urllib.error.HTTPError:
     return urllib.error.HTTPError(
-        url="http://127.0.0.1:8188/workflow/convert",
+        url="http://127.0.0.1:8188/object_info",
         code=code,
         msg=f"HTTP {code}",
         hdrs=None,
@@ -101,81 +100,56 @@ def _make_http_error(code: int, body: bytes = b"") -> urllib.error.HTTPError:
     )
 
 
-class TestConvertUiWorkflowViaServer:
-    UI = {"nodes": [{"id": 1, "type": "X"}], "links": []}
-    CONVERTED = {"1": {"class_type": "X", "inputs": {}}}
+def _ok_response(body: bytes) -> MagicMock:
+    resp = MagicMock()
+    resp.read.return_value = body
+    resp.__enter__ = MagicMock(return_value=resp)
+    resp.__exit__ = MagicMock(return_value=False)
+    return resp
 
-    def test_returns_api_format_on_success(self):
-        mock_resp = MagicMock()
-        mock_resp.read.return_value = json.dumps(self.CONVERTED).encode()
-        with patch("comfy_cli.command.run.request.urlopen", return_value=mock_resp) as mock_open:
-            result = convert_ui_workflow_via_server(self.UI, "127.0.0.1", 8188, timeout=30)
 
-        assert result == self.CONVERTED
-        sent_req = mock_open.call_args[0][0]
-        assert sent_req.full_url == "http://127.0.0.1:8188/workflow/convert"
-        assert json.loads(sent_req.data) == self.UI
+class TestFetchObjectInfo:
+    def test_returns_parsed_json_on_success(self):
+        payload = {"KSampler": {"input": {}, "output_node": False}}
+        with patch(
+            "comfy_cli.command.run.request.urlopen",
+            return_value=_ok_response(json.dumps(payload).encode()),
+        ) as mock_open:
+            result = fetch_object_info("127.0.0.1", 8188, timeout=30)
+        assert result == payload
+        assert mock_open.call_args[0][0] == "http://127.0.0.1:8188/object_info"
 
-    @pytest.mark.parametrize("code", [404, 405])
-    def test_raises_unavailable_on_missing_endpoint(self, code):
-        with patch("comfy_cli.command.run.request.urlopen", side_effect=_make_http_error(code)):
-            with pytest.raises(WorkflowConverterUnavailable):
-                convert_ui_workflow_via_server(self.UI, "127.0.0.1", 8188, timeout=30)
-
-    def test_raises_typer_exit_on_server_error(self):
-        err = _make_http_error(500, b"conversion blew up")
-        with patch("comfy_cli.command.run.request.urlopen", side_effect=err):
+    def test_http_error_exits_cleanly(self):
+        with patch(
+            "comfy_cli.command.run.request.urlopen",
+            side_effect=_make_http_error(500, b"server exploded"),
+        ):
             with pytest.raises(typer.Exit) as exc_info:
-                convert_ui_workflow_via_server(self.UI, "127.0.0.1", 8188, timeout=30)
+                fetch_object_info("127.0.0.1", 8188, timeout=30)
             assert exc_info.value.exit_code == 1
 
-    def test_raises_typer_exit_on_network_error(self):
+    def test_network_error_exits_cleanly(self):
         with patch(
             "comfy_cli.command.run.request.urlopen",
             side_effect=urllib.error.URLError("Connection refused"),
         ):
             with pytest.raises(typer.Exit) as exc_info:
-                convert_ui_workflow_via_server(self.UI, "127.0.0.1", 8188, timeout=30)
+                fetch_object_info("127.0.0.1", 8188, timeout=30)
             assert exc_info.value.exit_code == 1
 
-    def test_raises_typer_exit_on_invalid_json(self):
-        mock_resp = MagicMock()
-        mock_resp.read.return_value = b"<html>not json</html>"
-        with patch("comfy_cli.command.run.request.urlopen", return_value=mock_resp):
+    def test_timeout_exits_cleanly(self):
+        with patch("comfy_cli.command.run.request.urlopen", side_effect=TimeoutError("timed out")):
             with pytest.raises(typer.Exit) as exc_info:
-                convert_ui_workflow_via_server(self.UI, "127.0.0.1", 8188, timeout=30)
+                fetch_object_info("127.0.0.1", 8188, timeout=5)
             assert exc_info.value.exit_code == 1
 
-    def test_raises_typer_exit_on_non_object_response(self):
-        mock_resp = MagicMock()
-        mock_resp.read.return_value = b'["not", "an", "object"]'
-        with patch("comfy_cli.command.run.request.urlopen", return_value=mock_resp):
+    def test_invalid_json_exits_cleanly(self):
+        with patch(
+            "comfy_cli.command.run.request.urlopen",
+            return_value=_ok_response(b"<html>not json</html>"),
+        ):
             with pytest.raises(typer.Exit) as exc_info:
-                convert_ui_workflow_via_server(self.UI, "127.0.0.1", 8188, timeout=30)
-            assert exc_info.value.exit_code == 1
-
-    def test_raises_typer_exit_on_empty_object_response(self):
-        mock_resp = MagicMock()
-        mock_resp.read.return_value = b"{}"
-        with patch("comfy_cli.command.run.request.urlopen", return_value=mock_resp):
-            with pytest.raises(typer.Exit) as exc_info:
-                convert_ui_workflow_via_server(self.UI, "127.0.0.1", 8188, timeout=30)
-            assert exc_info.value.exit_code == 1
-
-    def test_raises_typer_exit_when_first_entry_is_not_a_node(self):
-        mock_resp = MagicMock()
-        mock_resp.read.return_value = b'{"1": "not-a-node-dict"}'
-        with patch("comfy_cli.command.run.request.urlopen", return_value=mock_resp):
-            with pytest.raises(typer.Exit) as exc_info:
-                convert_ui_workflow_via_server(self.UI, "127.0.0.1", 8188, timeout=30)
-            assert exc_info.value.exit_code == 1
-
-    def test_raises_typer_exit_when_first_entry_missing_class_type(self):
-        mock_resp = MagicMock()
-        mock_resp.read.return_value = b'{"1": {"inputs": {}}}'
-        with patch("comfy_cli.command.run.request.urlopen", return_value=mock_resp):
-            with pytest.raises(typer.Exit) as exc_info:
-                convert_ui_workflow_via_server(self.UI, "127.0.0.1", 8188, timeout=30)
+                fetch_object_info("127.0.0.1", 8188, timeout=30)
             assert exc_info.value.exit_code == 1
 
 
@@ -425,8 +399,46 @@ class TestExecuteErrorHandling:
 
 
 class TestExecuteUiWorkflow:
-    UI = {"nodes": [{"id": 1, "type": "X"}], "links": []}
-    CONVERTED = {"1": {"class_type": "EmptyLatentImage", "inputs": {"width": 64, "height": 64, "batch_size": 1}}}
+    UI = {
+        "nodes": [
+            {
+                "id": 1,
+                "type": "EmptyLatentImage",
+                "inputs": [],
+                "outputs": [{"name": "LATENT", "type": "LATENT", "links": [10]}],
+                "widgets_values": [512, 512, 1],
+                "mode": 0,
+            },
+            {
+                "id": 2,
+                "type": "PreviewImage",
+                "inputs": [{"name": "images", "link": 10}],
+                "outputs": [],
+                "mode": 0,
+            },
+        ],
+        "links": [[10, 1, 0, 2, 0, "IMAGE"]],
+    }
+    OBJECT_INFO = {
+        "EmptyLatentImage": {
+            "input": {
+                "required": {
+                    "width": ["INT", {"default": 512}],
+                    "height": ["INT", {"default": 512}],
+                    "batch_size": ["INT", {"default": 1}],
+                }
+            },
+            "input_order": {"required": ["width", "height", "batch_size"]},
+            "output_node": False,
+            "display_name": "Empty Latent Image",
+        },
+        "PreviewImage": {
+            "input": {"required": {"images": ["IMAGE"]}},
+            "input_order": {"required": ["images"]},
+            "output_node": True,
+            "display_name": "Preview Image",
+        },
+    }
 
     @pytest.fixture
     def ui_workflow_file(self):
@@ -438,12 +450,9 @@ class TestExecuteUiWorkflow:
         os.unlink(path)
 
     def test_ui_workflow_is_converted_then_executed(self, ui_workflow_file):
-        mock_resp = MagicMock()
-        mock_resp.read.return_value = json.dumps(self.CONVERTED).encode()
-
         with (
             patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),
-            patch("comfy_cli.command.run.request.urlopen", return_value=mock_resp) as mock_open,
+            patch("comfy_cli.command.run.fetch_object_info", return_value=self.OBJECT_INFO) as mock_fetch,
             patch("comfy_cli.command.run.ExecutionProgress"),
             patch("comfy_cli.command.run.WorkflowExecution") as MockExec,
         ):
@@ -453,16 +462,34 @@ class TestExecuteUiWorkflow:
 
             execute(ui_workflow_file, host="127.0.0.1", port=8188, wait=True, timeout=30)
 
-            sent_req = mock_open.call_args[0][0]
-            assert sent_req.full_url == "http://127.0.0.1:8188/workflow/convert"
-            assert MockExec.call_args.args[0] == self.CONVERTED
+            mock_fetch.assert_called_once_with("127.0.0.1", 8188, 30)
+            api_workflow = MockExec.call_args.args[0]
+            assert set(api_workflow) == {"1", "2"}
+            assert api_workflow["1"]["class_type"] == "EmptyLatentImage"
+            assert api_workflow["2"]["inputs"]["images"] == ["1", 0]
             mock_exec.queue.assert_called_once()
 
-    @pytest.mark.parametrize("code", [404, 405])
-    def test_ui_workflow_exits_when_endpoint_missing(self, ui_workflow_file, code):
+    def test_ui_workflow_exits_when_server_not_running(self, ui_workflow_file):
+        with (
+            patch("comfy_cli.command.run.check_comfy_server_running", return_value=False),
+            patch("comfy_cli.command.run.fetch_object_info") as mock_fetch,
+        ):
+            with pytest.raises(typer.Exit) as exc_info:
+                execute(ui_workflow_file, host="127.0.0.1", port=8188)
+            assert exc_info.value.exit_code == 1
+            mock_fetch.assert_not_called()
+
+    def test_ui_workflow_exits_cleanly_on_unexpected_converter_crash(self, ui_workflow_file):
+        # If the experimental converter crashes with an unexpected error, the
+        # CLI should still exit with code 1 and a friendly message — not let a
+        # Python traceback escape to the user.
         with (
             patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),
-            patch("comfy_cli.command.run.request.urlopen", side_effect=_make_http_error(code)),
+            patch("comfy_cli.command.run.fetch_object_info", return_value=self.OBJECT_INFO),
+            patch(
+                "comfy_cli.command.run.convert_ui_to_api",
+                side_effect=RuntimeError("simulated converter bug"),
+            ),
             patch("comfy_cli.command.run.WorkflowExecution") as MockExec,
         ):
             with pytest.raises(typer.Exit) as exc_info:
@@ -470,12 +497,30 @@ class TestExecuteUiWorkflow:
             assert exc_info.value.exit_code == 1
             MockExec.assert_not_called()
 
-    def test_ui_workflow_exits_when_server_not_running(self, ui_workflow_file):
-        with (
-            patch("comfy_cli.command.run.check_comfy_server_running", return_value=False),
-            patch("comfy_cli.command.run.request.urlopen") as mock_open,
-        ):
-            with pytest.raises(typer.Exit) as exc_info:
-                execute(ui_workflow_file, host="127.0.0.1", port=8188)
-            assert exc_info.value.exit_code == 1
-            mock_open.assert_not_called()
+    def test_ui_workflow_exits_when_conversion_yields_nothing(self):
+        # All nodes are UI-only (Note/PrimitiveNode/Reroute/GetNode/SetNode) and
+        # therefore stripped by the converter → execute() should bail before
+        # ever instantiating WorkflowExecution.
+        empty_ui = {
+            "nodes": [
+                {"id": 1, "type": "Note", "inputs": [], "outputs": [], "widgets_values": ["x"]},
+                {"id": 2, "type": "Reroute", "inputs": [{"link": None}], "outputs": [{"links": []}]},
+            ],
+            "links": [],
+        }
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+            json.dump(empty_ui, f)
+            f.flush()
+            path = f.name
+        try:
+            with (
+                patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),
+                patch("comfy_cli.command.run.fetch_object_info", return_value=self.OBJECT_INFO),
+                patch("comfy_cli.command.run.WorkflowExecution") as MockExec,
+            ):
+                with pytest.raises(typer.Exit) as exc_info:
+                    execute(path, host="127.0.0.1", port=8188, wait=True, timeout=30)
+                assert exc_info.value.exit_code == 1
+                MockExec.assert_not_called()
+        finally:
+            os.unlink(path)
