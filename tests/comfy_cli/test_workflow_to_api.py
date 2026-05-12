@@ -846,6 +846,98 @@ class TestControlAfterGenerate:
         convert_ui_to_api(workflow, {})
 
 
+class TestForceInputHandling:
+    """``forceInput: True`` (and its deprecated alias ``defaultInput``)
+    demotes a widget-type input to a connection-only slot. The frontend
+    doesn't render a widget for it and the saved workflow file has no
+    corresponding entry in ``widgets_values``. Treating it as a widget
+    here would consume a slot that doesn't exist and shift every later
+    widget's value into the wrong input.
+    """
+
+    def test_forceinput_widget_does_not_consume_value_slot(self):
+        object_info = {
+            "Source": {
+                "input": {"required": {}},
+                "input_order": {"required": []},
+                "output_node": False,
+                "output": ["INT"],
+                "display_name": "Source",
+            },
+            "Mixed": {
+                "input": {
+                    "required": {
+                        "input_only": ["INT", {"forceInput": True}],
+                        "widget_a": ["INT", {"default": 0}],
+                        "widget_b": ["STRING", {}],
+                    }
+                },
+                "input_order": {"required": ["input_only", "widget_a", "widget_b"]},
+                "output_node": True,
+                "display_name": "Mixed",
+            },
+        }
+        workflow = {
+            "nodes": [
+                _node(99, "Source", outputs=[{"links": [10]}]),
+                {
+                    "id": 1,
+                    "type": "Mixed",
+                    "inputs": [{"name": "input_only", "type": "INT", "link": 10}],
+                    "outputs": [],
+                    "widgets_values": [42, "hello"],
+                    "mode": 0,
+                },
+            ],
+            "links": [[10, 99, 0, 1, 0, "INT"]],
+        }
+        result = convert_ui_to_api(workflow, object_info)
+        assert result["1"]["inputs"]["widget_a"] == 42
+        assert result["1"]["inputs"]["widget_b"] == "hello"
+        assert result["1"]["inputs"]["input_only"] == ["99", 0]
+
+    def test_legacy_defaultinput_alias_works_the_same(self):
+        # ``defaultInput`` is the deprecated alias the frontend migrates
+        # from. The server's /object_info may still emit it for older
+        # custom nodes that haven't updated.
+        object_info = {
+            "Source": {
+                "input": {"required": {}},
+                "input_order": {"required": []},
+                "output_node": False,
+                "output": ["INT"],
+                "display_name": "Source",
+            },
+            "Mixed": {
+                "input": {
+                    "required": {
+                        "input_only": ["INT", {"defaultInput": True}],
+                        "widget_a": ["INT", {"default": 0}],
+                    }
+                },
+                "input_order": {"required": ["input_only", "widget_a"]},
+                "output_node": True,
+                "display_name": "Mixed",
+            },
+        }
+        workflow = {
+            "nodes": [
+                _node(99, "Source", outputs=[{"links": [10]}]),
+                {
+                    "id": 1,
+                    "type": "Mixed",
+                    "inputs": [{"name": "input_only", "type": "INT", "link": 10}],
+                    "outputs": [],
+                    "widgets_values": [42],
+                    "mode": 0,
+                },
+            ],
+            "links": [[10, 99, 0, 1, 0, "INT"]],
+        }
+        result = convert_ui_to_api(workflow, object_info)
+        assert result["1"]["inputs"]["widget_a"] == 42
+
+
 class TestFrontendParity:
     """Behaviors mirrored from ComfyUI_frontend/src/utils/executionUtil.ts."""
 
@@ -1039,6 +1131,92 @@ class TestFrontendParity:
         with caplog.at_level(logging.WARNING, logger="comfy_cli.workflow_to_api"):
             convert_ui_to_api(workflow, object_info)
         assert any("group node" in record.message.lower() for record in caplog.records)
+
+
+class TestMutedBypassedSubgraph:
+    """Per frontend semantics (executionUtil.ts), if the subgraph *instance*
+    node is itself muted or bypassed, its inner nodes do NOT enter the prompt.
+    Without this we'd unconditionally expand and silently keep running the
+    workflow the user explicitly told to skip.
+    """
+
+    SG_UUID = "11111111-2222-3333-4444-555555555555"
+
+    def _workflow(self, mode, with_external_wires=False):
+        sg_def = {
+            "id": self.SG_UUID,
+            "name": "Inner",
+            "nodes": [
+                {
+                    "id": 1,
+                    "type": "EmptyLatentImage",
+                    "outputs": [{"links": [10]}],
+                    "widgets_values": [512, 512, 1],
+                    "mode": 0,
+                },
+                {
+                    "id": 2,
+                    "type": "PreviewImage",
+                    "inputs": [{"name": "images", "link": 10}],
+                    "outputs": [],
+                    "mode": 0,
+                },
+            ],
+            "links": [
+                {
+                    "id": 10,
+                    "origin_id": 1,
+                    "origin_slot": 0,
+                    "target_id": 2,
+                    "target_slot": 0,
+                    "type": "IMAGE",
+                }
+            ],
+            "inputs": [{"name": "in_img"}] if with_external_wires else [],
+            "outputs": [{"name": "out_img"}] if with_external_wires else [],
+        }
+        nodes = [
+            {
+                "id": 100,
+                "type": self.SG_UUID,
+                "inputs": [{"name": "in_img", "type": "IMAGE", "link": 200}] if with_external_wires else [],
+                "outputs": [{"name": "out_img", "type": "IMAGE", "links": [201]}] if with_external_wires else [],
+                "mode": mode,
+            }
+        ]
+        links = []
+        if with_external_wires:
+            nodes.insert(
+                0,
+                _node(7, "EmptyLatentImage", outputs=[{"links": [200]}], widgets=[512, 512, 1]),
+            )
+            nodes.append(
+                _node(8, "PreviewImage", inputs=[{"name": "images", "type": "IMAGE", "link": 201}], outputs=[]),
+            )
+            links = [[200, 7, 0, 100, 0, "LATENT"], [201, 100, 0, 8, 0, "IMAGE"]]
+        return {"nodes": nodes, "links": links, "definitions": {"subgraphs": [sg_def]}}
+
+    def test_muted_subgraph_drops_inner_nodes(self, object_info):
+        result = convert_ui_to_api(self._workflow(mode=2), object_info)
+        assert result == {}
+
+    def test_bypassed_subgraph_drops_inner_nodes(self, object_info):
+        result = convert_ui_to_api(self._workflow(mode=4), object_info)
+        assert result == {}
+
+    def test_normal_subgraph_still_expands(self, object_info):
+        result = convert_ui_to_api(self._workflow(mode=0), object_info)
+        # Both inner nodes with the subgraph-prefixed IDs.
+        assert "100:1" in result
+        assert "100:2" in result
+
+    def test_bypassed_subgraph_passes_external_input_through(self, object_info):
+        # When the bypassed subgraph has external wires, downstream consumers
+        # should be routed to the subgraph's upstream source (same as bypass
+        # behavior on a regular node).
+        result = convert_ui_to_api(self._workflow(mode=4, with_external_wires=True), object_info)
+        assert "100" not in result  # subgraph instance gone
+        assert result["8"]["inputs"]["images"] == ["7", 0]
 
 
 class TestFixtureParity:

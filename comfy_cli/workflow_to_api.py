@@ -245,6 +245,16 @@ def _expand_subgraphs(
         for node in nodes:
             node_type = node.get("type")
             if is_subgraph_uuid(node_type) and node_type in subgraph_defs:
+                # Frontend semantics (executionUtil.ts): if the subgraph
+                # instance node itself is muted (mode 2) or bypassed (mode 4),
+                # do NOT pull its inner nodes into the prompt. The instance
+                # stays in the node list where the normal mode-check excludes
+                # it from emission; for bypass, downstream consumers route
+                # through ``trace_bypassed`` on the instance's external
+                # inputs, the same way a bypassed regular node is handled.
+                if node.get("mode") in (_MODE_MUTED, _MODE_BYPASS):
+                    expanded.append(node)
+                    continue
                 found_any = True
                 sg_nodes, sg_links, input_map, output_map = _expand_one_subgraph(node, subgraph_defs[node_type], links)
                 expanded.extend(sg_nodes)
@@ -854,6 +864,14 @@ def _get_ordered_input_names(node_type: str, node: dict, object_info: dict) -> l
 def _is_widget_input(input_spec: Any) -> tuple[bool, bool]:
     """Return (is_widget, is_dynamic_combo) for an INPUT_TYPES spec."""
     if not isinstance(input_spec, (list, tuple)) or not input_spec:
+        return False, False
+    # ``forceInput: True`` (legacy alias: ``defaultInput``) explicitly demotes
+    # a widget-type input to a connection-only slot; the frontend doesn't
+    # render a widget for it and the saved workflow has no value for it in
+    # widgets_values. Treating it as a widget here would consume a value-slot
+    # that doesn't exist and shift every later widget out of position.
+    options = input_spec[1] if len(input_spec) >= 2 and isinstance(input_spec[1], dict) else {}
+    if options.get("forceInput") or options.get("defaultInput"):
         return False, False
     input_type = input_spec[0]
     if isinstance(input_type, (list, tuple)):
