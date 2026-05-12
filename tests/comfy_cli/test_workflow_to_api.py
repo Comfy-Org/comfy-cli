@@ -672,6 +672,60 @@ class TestMalformedInputHardening:
             # Should not raise, no matter how unhashable the var name is.
             convert_ui_to_api(workflow, object_info)
 
+    def test_subgraph_link_with_unhashable_id_is_skipped(self, object_info):
+        # Internal link IDs are dict keys; an unhashable id used to crash
+        # the whole subgraph expansion (which runs before the per-node
+        # try/except), aborting conversion before anything could be emitted.
+        SG_UUID = "11111111-2222-3333-4444-555555555555"
+        for bad_id in (["x"], {"k": 1}, None):
+            workflow = {
+                "nodes": [{"id": 1, "type": SG_UUID, "inputs": [], "outputs": []}],
+                "links": [],
+                "definitions": {
+                    "subgraphs": [
+                        {
+                            "id": SG_UUID,
+                            "nodes": [],
+                            "links": [{"id": bad_id, "origin_id": 1, "target_id": 2}],
+                            "inputs": [],
+                            "outputs": [],
+                        }
+                    ]
+                },
+            }
+            # Should not raise — bad link is just dropped.
+            convert_ui_to_api(workflow, object_info)
+
+    def test_inner_node_with_unhashable_link_id_does_not_crash(self, object_info):
+        # An inner subgraph node whose input's ``link`` field is not an int
+        # used to crash _rewrite_internal_input's ``internal_link_map.get``
+        # / ``link_id in link_id_remap`` lookup.
+        SG_UUID = "22222222-3333-4444-5555-666666666666"
+        workflow = {
+            "nodes": [{"id": 1, "type": SG_UUID, "inputs": [], "outputs": []}],
+            "links": [],
+            "definitions": {
+                "subgraphs": [
+                    {
+                        "id": SG_UUID,
+                        "nodes": [
+                            {
+                                "id": 9,
+                                "type": "Foo",
+                                "inputs": [{"link": ["weird"]}],
+                                "outputs": [],
+                            }
+                        ],
+                        "links": [{"id": 5, "origin_id": 1, "target_id": 9}],
+                        "inputs": [],
+                        "outputs": [],
+                    }
+                ]
+            },
+        }
+        # Should not raise.
+        convert_ui_to_api(workflow, object_info)
+
     def test_malformed_subgraph_definition_does_not_crash(self, object_info):
         # Subgraph expansion runs before the per-node try/except wrapper, so
         # the defensive checks live in the helpers themselves. Each of these

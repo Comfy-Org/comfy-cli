@@ -314,12 +314,20 @@ def _expand_one_subgraph(
     link_id_remap: dict[int, int] = {}
     internal_link_map: dict[int, dict] = {}
     for link in internal_links:
-        if isinstance(link, dict):
-            old_id = link.get("id")
-            if old_id is not None:
-                link_id_remap[old_id] = next_id
-                next_id += 1
-            internal_link_map[old_id] = link
+        if not isinstance(link, dict):
+            continue
+        old_id = link.get("id")
+        # Only int IDs are usable here: link_id_remap[old_id] / internal_link_map[old_id]
+        # need a hashable key, and the wider pipeline later does ``link_id in
+        # link_id_remap`` lookups keyed by int link IDs from the outer workflow.
+        # Skip the entry entirely on a missing/unhashable/wrong-typed id so a
+        # bad apple can't crash the whole subgraph expansion (which runs
+        # before the per-node try/except wrapper).
+        if not isinstance(old_id, int):
+            continue
+        link_id_remap[old_id] = next_id
+        next_id += 1
+        internal_link_map[old_id] = link
 
     input_targets: dict[int, list[tuple[Any, int]]] = {}
     for idx, in_def in enumerate(sg_def.get("inputs") or []):
@@ -362,6 +370,8 @@ def _expand_one_subgraph(
         if target_id in (_SUBGRAPH_INPUT_NODE_ID, _SUBGRAPH_OUTPUT_NODE_ID):
             continue
         old_id = link.get("id")
+        if not isinstance(old_id, int):
+            continue
         new_id = link_id_remap.get(old_id, old_id)
         expanded_links.append(
             [
@@ -382,7 +392,10 @@ def _rewrite_internal_input(
 ) -> dict:
     input_copy = input_info.copy()
     link_id = input_info.get("link")
-    if link_id is None:
+    if not isinstance(link_id, int):
+        # Both internal_link_map and link_id_remap are keyed by int IDs; an
+        # unhashable (list/dict) link_id would otherwise crash the lookup
+        # and abort the whole subgraph expansion.
         return input_copy
     link = internal_link_map.get(link_id)
     if not isinstance(link, dict):
