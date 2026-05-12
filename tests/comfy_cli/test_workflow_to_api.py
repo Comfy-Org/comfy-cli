@@ -1222,6 +1222,62 @@ class TestMutedBypassedSubgraph:
         assert result["8"]["inputs"]["images"] == ["7", 0]
 
 
+class TestDynamicComboAfterControlMarker:
+    """Regression: _get_widget_name_order must walk the filtered widget list,
+    not the raw one. Without this, a V3 dynamic combo whose schema sits after
+    a control_after_generate widget reads its selector from the wrong slot
+    (the control marker), fails to identify the option, and silently drops
+    every sub-input value for it.
+
+    Affects 38 stock API nodes that pair a seed with a dynamic combo:
+    Bria*, ByteDance*, Grok*, Kling*, Meshy*, Recraft*, Reve*, Vidu*, Wan2*,
+    HappyHorse*, Tencent*, Quiver*.
+    """
+
+    def test_dynamic_combo_selector_reads_from_filtered_slot(self):
+        object_info = {
+            "VulnerableNode": {
+                "input": {
+                    "required": {
+                        "seed": ["INT", {"default": 0, "control_after_generate": True}],
+                        "shape": [
+                            "COMFY_DYNAMICCOMBO_V3",
+                            {
+                                "options": [
+                                    {"key": "circle", "inputs": {"required": {"radius": ["FLOAT"]}}},
+                                    {"key": "square", "inputs": {"required": {"side": ["FLOAT"]}}},
+                                ]
+                            },
+                        ],
+                    }
+                },
+                "input_order": {"required": ["seed", "shape"]},
+                "output_node": True,
+                "display_name": "VN",
+            }
+        }
+        workflow = {
+            "nodes": [
+                {
+                    "id": 1,
+                    "type": "VulnerableNode",
+                    "inputs": [],
+                    "outputs": [],
+                    # seed, control_marker, shape selector, then sub-input
+                    "widgets_values": [42, "randomize", "square", 10.0],
+                    "mode": 0,
+                }
+            ],
+            "links": [],
+        }
+        result = convert_ui_to_api(workflow, object_info)
+        inputs = result["1"]["inputs"]
+        assert inputs["seed"] == 42
+        assert inputs["shape"] == "square"
+        # Without the fix the sub-input was silently dropped.
+        assert inputs["shape.side"] == 10.0
+
+
 class TestDynamicPrompts:
     """Port of frontend's processDynamicPrompt behavior (formatUtil.ts).
 

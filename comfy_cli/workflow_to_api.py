@@ -1167,7 +1167,12 @@ def _collect_widget_inputs(
         return out
 
     filtered = _filter_control_values(widget_values, node_type, node, object_info)
-    names = _get_widget_name_order(node_type, node, object_info, widget_values)
+    # ``widget_idx`` inside _get_widget_name_order is the position in the
+    # value list it receives, so it must see the *filtered* list — otherwise
+    # a V3 dynamic combo's selector is read from the wrong slot whenever a
+    # control_after_generate marker precedes it (e.g. on the Bria / Kling /
+    # Vidu / Wan2 API nodes that pair a seed with a dynamic combo).
+    names = _get_widget_name_order(node_type, node, object_info, filtered)
     if not names:
         if filtered:
             logger.warning(
