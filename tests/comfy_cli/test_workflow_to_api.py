@@ -646,6 +646,29 @@ class TestMalformedInputHardening:
             result = convert_ui_to_api(workflow, object_info)
             assert set(result) == {"1", "2"}, f"failed with definitions={bad_defs!r}"
 
+    def test_set_get_node_with_unhashable_var_name_does_not_crash(self, object_info):
+        # SetNode/GetNode publish/read a variable name that becomes a dict key
+        # in the tracer. If the saved widgets_values[0] is a list or dict,
+        # using it as a key raises TypeError. _collect_get_set_mappings runs
+        # before the per-node try/except wrapper, so an unguarded SetNode in
+        # particular aborts the whole conversion.
+        for bad_var in (["list-as-var"], {"dict": "as-var"}, None, ""):
+            workflow = {
+                "nodes": [
+                    _node(1, "EmptyLatentImage", outputs=[{"links": [1]}], widgets=[512, 512, 1]),
+                    {
+                        "id": 20,
+                        "type": "SetNode",
+                        "inputs": [{"name": "v", "link": 1}],
+                        "widgets_values": [bad_var],
+                        "mode": 0,
+                    },
+                ],
+                "links": [[1, 1, 0, 20, 0, "LATENT"]],
+            }
+            # Should not raise, no matter how unhashable the var name is.
+            convert_ui_to_api(workflow, object_info)
+
     def test_malformed_subgraph_definition_does_not_crash(self, object_info):
         # Subgraph expansion runs before the per-node try/except wrapper, so
         # the defensive checks live in the helpers themselves. Each of these

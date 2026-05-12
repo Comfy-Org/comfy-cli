@@ -543,6 +543,11 @@ def _collect_get_set_mappings(
         if not isinstance(widgets, list) or not widgets:
             continue
         var_name = widgets[0]
+        # var_name becomes a dict key (set_sources[var_name]) and is later
+        # checked with ``var_name in set_sources`` inside the tracer. Both
+        # require it to be a non-empty string; reject anything else early.
+        if not isinstance(var_name, str) or not var_name:
+            continue
         if node_type == "SetNode":
             for inp in node.get("inputs") or []:
                 if not isinstance(inp, dict):
