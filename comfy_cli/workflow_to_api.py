@@ -1038,6 +1038,14 @@ def _is_widget_input(input_spec: Any) -> tuple[bool, bool]:
     if isinstance(input_type, (list, tuple)):
         return True, False  # combo of choices
     if isinstance(input_type, str):
+        # ``*`` and ``""`` are wildcard *connection* types — the frontend
+        # never renders a widget for them. They slipped through the
+        # lowercase fallback below because they have no cased characters
+        # (``"*".isupper()`` returns ``False``), so we have to filter them
+        # out explicitly. PreviewAny.source: ["*", {}] is the canonical
+        # case this used to mis-handle.
+        if input_type in ("", "*"):
+            return False, False
         if input_type in {"INT", "FLOAT", "STRING", "BOOLEAN", "COMBO"}:
             return True, False
         if input_type.startswith("COMFY_") and "COMBO" in input_type:
@@ -1187,7 +1195,7 @@ def _filter_control_values(
         section_def = input_def.get(section) or {}
         if not isinstance(section_def, dict):
             continue
-        for _input_name, input_spec in section_def.items():
+        for input_name, input_spec in section_def.items():
             if vidx >= len(widget_values):
                 break
             is_widget, _is_dynamic = _is_widget_input(input_spec)
@@ -1195,13 +1203,37 @@ def _filter_control_values(
                 continue
             out.append(widget_values[vidx])
             vidx += 1
-            options = input_spec[1] if len(input_spec) >= 2 and isinstance(input_spec[1], dict) else {}
-            if options.get("control_after_generate") and vidx < len(widget_values) and is_control(widget_values[vidx]):
+            if vidx < len(widget_values) and _has_control_after_generate_companion(
+                input_name, input_spec, widget_values[vidx]
+            ):
                 vidx += 1
     while vidx < len(widget_values):
         out.append(widget_values[vidx])
         vidx += 1
     return out
+
+
+def _has_control_after_generate_companion(input_name: str, input_spec: Any, next_value: Any) -> bool:
+    """True if ``next_value`` should be consumed as a control_after_generate marker.
+
+    Two ways the frontend adds the companion widget:
+
+    * Explicit: the input spec sets ``control_after_generate: True``.
+    * Implicit: the input is named ``seed`` or ``noise_seed`` and is INT-typed.
+      The frontend's ``useIntWidget`` composable adds the companion in that case
+      regardless of the schema flag.
+
+    For the implicit path we peek at the next value: older workflows saved
+    before the companion existed don't have the marker string, so we must
+    verify the slot really is a control keyword before consuming it.
+    """
+    options = input_spec[1] if len(input_spec) >= 2 and isinstance(input_spec[1], dict) else {}
+    if options.get("control_after_generate"):
+        return isinstance(next_value, str) and next_value in _CONTROL_AFTER_GENERATE_VALUES
+    input_type = input_spec[0] if input_spec else None
+    if input_type == "INT" and input_name in ("seed", "noise_seed"):
+        return isinstance(next_value, str) and next_value in _CONTROL_AFTER_GENERATE_VALUES
+    return False
 
 
 def _collect_widget_inputs(

@@ -1067,6 +1067,208 @@ class TestControlAfterGenerate:
         convert_ui_to_api(workflow, {})
 
 
+class TestWildcardInputType:
+    """``*`` and ``""`` are wildcard *connection* types in litegraph. The
+    frontend never renders a widget for them — ``PreviewAny.source`` is the
+    canonical example. They previously slipped through the lowercase-fallback
+    in ``_is_widget_input`` because ``"*".isupper()`` returns ``False`` (no
+    cased characters), so the converter consumed a widgets_values slot for
+    them and shifted every later widget out of alignment.
+    """
+
+    OI = {
+        "Source": {
+            "input": {"required": {}},
+            "input_order": {"required": []},
+            "output_node": False,
+            "output": ["INT"],
+            "display_name": "Source",
+        },
+        "PreviewAny": {
+            "input": {
+                "required": {
+                    "source": ["*", {}],  # wildcard connection — NOT a widget
+                }
+            },
+            "input_order": {"required": ["source"]},
+            "output_node": True,
+            "display_name": "Preview Any",
+        },
+        "WildEmpty": {
+            "input": {
+                "required": {
+                    "anything": ["", {}],  # empty-string wildcard
+                    "actual_widget": ["INT", {"default": 0}],
+                }
+            },
+            "input_order": {"required": ["anything", "actual_widget"]},
+            "output_node": True,
+            "display_name": "WildEmpty",
+        },
+    }
+
+    def test_star_wildcard_not_treated_as_widget(self):
+        workflow = {
+            "nodes": [
+                _node(99, "Source", outputs=[{"links": [10]}]),
+                {
+                    "id": 1,
+                    "type": "PreviewAny",
+                    "inputs": [{"name": "source", "type": "*", "link": 10}],
+                    "outputs": [],
+                    "widgets_values": [],
+                    "mode": 0,
+                },
+            ],
+            "links": [[10, 99, 0, 1, 0, "INT"]],
+        }
+        result = convert_ui_to_api(workflow, self.OI)
+        assert result["1"]["inputs"]["source"] == ["99", 0]
+
+    def test_empty_string_wildcard_does_not_consume_widget_slot(self):
+        # Old behavior would consume widgets_values[0] for the wildcard and
+        # emit nothing for actual_widget. Fixed: wildcard is connection-only,
+        # the single widget value maps to actual_widget.
+        workflow = {
+            "nodes": [
+                {
+                    "id": 1,
+                    "type": "WildEmpty",
+                    "inputs": [{"name": "anything", "type": "", "link": None}],
+                    "outputs": [],
+                    "widgets_values": [42],
+                    "mode": 0,
+                },
+            ],
+            "links": [],
+        }
+        result = convert_ui_to_api(workflow, self.OI)
+        assert result["1"]["inputs"]["actual_widget"] == 42
+        assert "anything" not in result["1"]["inputs"]
+
+
+class TestImplicitSeedCompanion:
+    """The frontend's ``useIntWidget`` composable adds a
+    ``control_after_generate`` companion widget for inputs named ``seed`` or
+    ``noise_seed``, even when the schema doesn't declare the flag. Older
+    workflows saved before this behavior may not have the companion value
+    in widgets_values, so we use peek-based detection to handle both cases.
+    """
+
+    OI = {
+        "Sampler": {
+            "input": {
+                "required": {
+                    "seed": ["INT", {"default": 0}],  # no control_after_generate flag
+                    "steps": ["INT", {"default": 20}],
+                    "sampler_name": [["euler", "ddim"], {}],
+                }
+            },
+            "input_order": {"required": ["seed", "steps", "sampler_name"]},
+            "output_node": True,
+            "display_name": "Sampler",
+        },
+        "NoiseUser": {
+            "input": {
+                "required": {
+                    "noise_seed": ["INT", {"default": 0}],
+                    "denoise": ["FLOAT", {"default": 1.0}],
+                }
+            },
+            "input_order": {"required": ["noise_seed", "denoise"]},
+            "output_node": True,
+            "display_name": "NoiseUser",
+        },
+        "RegularInt": {
+            "input": {
+                "required": {
+                    "value": ["INT", {"default": 0}],
+                    "label": ["STRING", {}],
+                }
+            },
+            "input_order": {"required": ["value", "label"]},
+            "output_node": True,
+            "display_name": "RegularInt",
+        },
+    }
+
+    def test_seed_named_input_strips_implicit_companion(self):
+        workflow = {
+            "nodes": [
+                {
+                    "id": 1,
+                    "type": "Sampler",
+                    "inputs": [],
+                    "outputs": [],
+                    "widgets_values": [42, "randomize", 25, "euler"],
+                    "mode": 0,
+                }
+            ],
+            "links": [],
+        }
+        result = convert_ui_to_api(workflow, self.OI)
+        assert result["1"]["inputs"] == {"seed": 42, "steps": 25, "sampler_name": "euler"}
+
+    def test_noise_seed_named_input_strips_implicit_companion(self):
+        workflow = {
+            "nodes": [
+                {
+                    "id": 1,
+                    "type": "NoiseUser",
+                    "inputs": [],
+                    "outputs": [],
+                    "widgets_values": [12345, "fixed", 0.85],
+                    "mode": 0,
+                }
+            ],
+            "links": [],
+        }
+        result = convert_ui_to_api(workflow, self.OI)
+        assert result["1"]["inputs"] == {"noise_seed": 12345, "denoise": 0.85}
+
+    def test_seed_input_without_companion_still_works(self):
+        # Older saved workflows from before the implicit-companion era don't
+        # have the marker in widgets_values. Peek-based detection avoids
+        # consuming a non-control value.
+        workflow = {
+            "nodes": [
+                {
+                    "id": 1,
+                    "type": "Sampler",
+                    "inputs": [],
+                    "outputs": [],
+                    "widgets_values": [42, 25, "euler"],
+                    "mode": 0,
+                }
+            ],
+            "links": [],
+        }
+        result = convert_ui_to_api(workflow, self.OI)
+        assert result["1"]["inputs"] == {"seed": 42, "steps": 25, "sampler_name": "euler"}
+
+    def test_regular_int_input_does_not_strip_control_value(self):
+        # A non-seed INT input has no implicit companion. A widget value that
+        # happens to equal "randomize" must not be stripped — it slides into
+        # the next slot. The user has bad data, but our filter shouldn't
+        # silently eat it.
+        workflow = {
+            "nodes": [
+                {
+                    "id": 1,
+                    "type": "RegularInt",
+                    "inputs": [],
+                    "outputs": [],
+                    "widgets_values": [99, "randomize"],
+                    "mode": 0,
+                }
+            ],
+            "links": [],
+        }
+        result = convert_ui_to_api(workflow, self.OI)
+        assert result["1"]["inputs"]["value"] == 99
+        assert result["1"]["inputs"]["label"] == "randomize"
+
+
 class TestNodeNameForSAndRAlias:
     """When a node carries ``properties["Node name for S&R"]`` pointing at a
     different class name than its ``type`` field (legacy rename / group-node
