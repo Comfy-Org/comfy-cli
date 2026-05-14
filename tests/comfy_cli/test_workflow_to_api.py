@@ -970,6 +970,96 @@ class TestControlAfterGenerate:
         convert_ui_to_api(workflow, {})
 
 
+class TestNodeNameForSAndRAlias:
+    """When a node carries ``properties["Node name for S&R"]`` pointing at a
+    different class name than its ``type`` field (legacy rename / group-node
+    artifact), the schema lookup honors the alias in widget mapping. Before
+    this fix, ``_meta.title``, default values, combo normalization, and the
+    dead-branch exclusion all consulted ``object_info[node_type]`` directly
+    and missed the schema entirely — silently dropping defaults, leaving
+    combo values un-normalized, and (in some cases) excluding the node as a
+    schemaless dead branch.
+    """
+
+    OI = {
+        "RealClass": {
+            "input": {
+                "required": {
+                    "sampler": [["euler", "ddim"]],
+                    "missing_widget": ["INT", {"default": 99}],
+                }
+            },
+            "input_order": {"required": ["sampler", "missing_widget"]},
+            "output_node": True,
+            "display_name": "Real Sampler",
+        },
+        "Sink": {
+            "input": {"required": {"x": ["ANY"]}},
+            "input_order": {"required": ["x"]},
+            "output_node": True,
+            "display_name": "Sink",
+        },
+    }
+
+    def _aliased_workflow(self, *, widgets_values):
+        return {
+            "nodes": [
+                {
+                    "id": 1,
+                    # `type` is the legacy/aliased name not in object_info.
+                    "type": "OldName",
+                    "properties": {"Node name for S&R": "RealClass"},
+                    "inputs": [],
+                    "outputs": [{"links": [10]}],
+                    "widgets_values": widgets_values,
+                    "mode": 0,
+                },
+                {
+                    "id": 2,
+                    "type": "Sink",
+                    "inputs": [{"name": "x", "link": 10}],
+                    "outputs": [],
+                    "mode": 0,
+                },
+            ],
+            "links": [[10, 1, 0, 2, 0, "ANY"]],
+        }
+
+    def test_meta_title_uses_aliased_schema(self):
+        result = convert_ui_to_api(self._aliased_workflow(widgets_values=["euler"]), self.OI)
+        assert result["1"]["_meta"]["title"] == "Real Sampler"
+
+    def test_combo_normalization_uses_aliased_schema(self):
+        # Wrong-case combo value must still be normalized via the aliased schema.
+        result = convert_ui_to_api(self._aliased_workflow(widgets_values=["EULER"]), self.OI)
+        assert result["1"]["inputs"]["sampler"] == "euler"
+
+    def test_defaults_filled_from_aliased_schema(self):
+        # Only the first widget is provided; the second should come from defaults.
+        result = convert_ui_to_api(self._aliased_workflow(widgets_values=["euler"]), self.OI)
+        assert result["1"]["inputs"]["missing_widget"] == 99
+
+    def test_dead_branch_check_uses_aliased_schema(self):
+        # No connected outputs, but the aliased schema marks it as OUTPUT_NODE
+        # so it must survive the dead-branch exclusion.
+        workflow = {
+            "nodes": [
+                {
+                    "id": 1,
+                    "type": "OldName",
+                    "properties": {"Node name for S&R": "RealClass"},
+                    "inputs": [],
+                    "outputs": [],
+                    "widgets_values": ["euler"],
+                    "mode": 0,
+                }
+            ],
+            "links": [],
+        }
+        result = convert_ui_to_api(workflow, self.OI)
+        assert "1" in result
+
+
 class TestForceInputHandling:
     """``forceInput: True`` (and its deprecated alias ``defaultInput``)
     demotes a widget-type input to a connection-only slot. The frontend

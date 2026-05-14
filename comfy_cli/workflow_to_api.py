@@ -619,7 +619,11 @@ def _collect_excluded(nodes: list[dict], object_info: dict) -> set[str]:
         if outputs and has_connected_output:
             continue
 
-        schema = object_info.get(node_type) if isinstance(node_type, str) else None
+        # _schema_for honors the ``Node name for S&R`` alias the same way
+        # _build_api_node and _collect_widget_inputs do; consulting raw
+        # object_info[node_type] would mark an aliased node as schemaless
+        # and incorrectly exclude it via the dead-branch heuristic.
+        schema = _schema_for(node_type, node, object_info)
         is_output_node = bool(isinstance(schema, dict) and schema.get("output_node"))
         has_connected_input = any(
             isinstance(inp, dict) and inp.get("link") is not None for inp in (node.get("inputs") or [])
@@ -882,11 +886,15 @@ def _build_api_node(
     nodes_to_exclude: set[str],
 ) -> dict:
     api_node: dict = {"inputs": {}, "class_type": node_type}
+    # Resolve the schema once via _schema_for so every consumer
+    # (_meta.title, defaults, combo normalization) sees the same thing
+    # as the widget-mapping path, even on nodes that carry a ``Node name
+    # for S&R`` property pointing at a different class.
+    schema = _schema_for(node_type, node, object_info) or {}
 
     if "title" in node:
         api_node["_meta"] = {"title": node["title"]}
     else:
-        schema = object_info.get(node_type, {})
         api_node["_meta"] = {"title": schema.get("display_name") or node_type}
 
     link_inputs: dict[str, list] = {}
@@ -925,7 +933,7 @@ def _build_api_node(
             link_inputs[input_name] = [actual_id_str, actual_slot]
 
     widget_inputs = _collect_widget_inputs(node, node_type, object_info, link_inputs)
-    default_inputs = _collect_default_inputs(node_type, object_info, widget_inputs, primitive_inputs, link_inputs)
+    default_inputs = _collect_default_inputs(schema, widget_inputs, primitive_inputs, link_inputs)
 
     ordered = _get_ordered_input_names(node_type, node, object_info)
     if ordered:
@@ -948,7 +956,7 @@ def _build_api_node(
             if key not in api_node["inputs"]:
                 api_node["inputs"][key] = value
 
-    _normalize_combo_values(node_type, object_info, api_node["inputs"])
+    _normalize_combo_values(schema, api_node["inputs"])
     return api_node
 
 
@@ -1238,13 +1246,11 @@ def _absorb_dict_widget_values(widget_values: list[Any], out: dict[str, Any], li
 
 
 def _collect_default_inputs(
-    node_type: str,
-    object_info: dict,
+    schema: dict | None,
     widget_inputs: dict[str, Any],
     primitive_inputs: dict[str, Any],
     link_inputs: dict[str, list],
 ) -> dict[str, Any]:
-    schema = object_info.get(node_type) if isinstance(node_type, str) else None
     if not schema:
         return {}
     input_def = schema.get("input") or {}
@@ -1281,8 +1287,7 @@ def _extract_default(input_spec: Any) -> Any:
     return _MISSING
 
 
-def _normalize_combo_values(node_type: str, object_info: dict, inputs: dict[str, Any]) -> None:
-    schema = object_info.get(node_type) if isinstance(node_type, str) else None
+def _normalize_combo_values(schema: dict | None, inputs: dict[str, Any]) -> None:
     if not schema:
         return
     input_def = schema.get("input") or {}
