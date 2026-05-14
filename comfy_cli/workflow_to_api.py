@@ -36,7 +36,9 @@ _MODE_MUTED = 2  # excluded from execution; outputs not produced
 _MODE_BYPASS = 4  # node skipped; inputs passed through to outputs
 
 # Node types that exist only in the UI graph and never appear in API output.
-_UI_ONLY_NODE_TYPES = frozenset({"Note", "PrimitiveNode", "GetNode", "SetNode", "Reroute"})
+# Aligns with cloud-mcp-server's VIRTUAL_NODE_TYPES and the frontend's
+# isVirtualNode set — every type the frontend's graphToPrompt() skips.
+_UI_ONLY_NODE_TYPES = frozenset({"Note", "MarkdownNote", "PrimitiveNode", "GetNode", "SetNode", "Reroute"})
 
 # Sentinel IDs litegraph uses inside a subgraph definition for the synthetic
 # input and output proxy nodes (the boxes the user wires through).
@@ -116,7 +118,7 @@ def convert_ui_to_api(workflow: dict, object_info: dict) -> dict:
     node_by_id = {str(n.get("id")): n for n in nodes}
     primitive_values = _collect_primitive_values(nodes)
     bypassed = _collect_bypassed(nodes)
-    nodes_to_exclude = _collect_excluded(nodes, object_info)
+    nodes_to_exclude = _collect_excluded(nodes)
     reroute_sources = _collect_reroute_sources(nodes, link_map)
     set_sources, get_vars = _collect_get_set_mappings(nodes, link_map)
 
@@ -602,41 +604,25 @@ def _collect_get_set_mappings(
     return set_sources, get_vars
 
 
-def _collect_excluded(nodes: list[dict], object_info: dict) -> set[str]:
-    """Identify UI-only nodes and dead branches that don't belong in the API output."""
-    excluded: set[str] = set()
-    for node in nodes:
-        node_type = node.get("type")
-        node_id_str = str(node.get("id"))
+def _collect_excluded(nodes: list[dict]) -> set[str]:
+    """Identify nodes that should never appear in the API output.
 
-        # LoadImageOutput is a frontend convenience for picking from the output folder.
-        if node_type == "LoadImageOutput":
-            excluded.add(node_id_str)
-            continue
+    Only ``LoadImageOutput`` is excluded here — it's a UI-only file picker
+    for browsing the output folder, with no Python class behind it. All
+    other UI-only types are filtered by name via ``_UI_ONLY_NODE_TYPES``.
 
-        outputs = node.get("outputs") or []
-        has_connected_output = any(isinstance(out, dict) and out.get("links") for out in outputs)
-        if outputs and has_connected_output:
-            continue
+    Matches the frontend's policy (``executionUtil.ts:graphToPrompt``) and
+    cloud-mcp-server's ``shouldIncludeInOutput`` of emitting every
+    non-virtual, non-muted, non-bypassed node regardless of whether its
+    outputs are wired. The executor only runs nodes reachable from sinks
+    (SaveImage, etc.), so unwired nodes are harmless in the prompt.
 
-        # _schema_for honors the ``Node name for S&R`` alias the same way
-        # _build_api_node and _collect_widget_inputs do; consulting raw
-        # object_info[node_type] would mark an aliased node as schemaless
-        # and incorrectly exclude it via the dead-branch heuristic.
-        schema = _schema_for(node_type, node, object_info)
-        is_output_node = bool(isinstance(schema, dict) and schema.get("output_node"))
-        has_connected_input = any(
-            isinstance(inp, dict) and inp.get("link") is not None for inp in (node.get("inputs") or [])
-        )
-
-        # Keep output nodes (SaveImage, PreviewImage) even with no downstream consumer.
-        # Without a schema, keep anything that has at least one wired input — likely a sink.
-        if is_output_node:
-            continue
-        if not schema and has_connected_input:
-            continue
-        excluded.add(node_id_str)
-    return excluded
+    We previously applied a "dead-branch" heuristic that dropped any node
+    with no downstream consumer; that excluded legitimate sources like an
+    unwired ``LoadAudio`` and caused 20+ cloud-mcp oracle fixtures to lose
+    nodes that the live frontend emits.
+    """
+    return {str(n.get("id")) for n in nodes if n.get("type") == "LoadImageOutput"}
 
 
 class _Tracers:

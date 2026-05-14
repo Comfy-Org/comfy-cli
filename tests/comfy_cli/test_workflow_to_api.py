@@ -460,8 +460,13 @@ class TestSpecialNodes:
         result = convert_ui_to_api(workflow, object_info)
         assert "2" in result
 
-    def test_dead_branch_excluded(self, object_info):
-        # Node 99 has neither connected outputs nor a schema marking it as output.
+    def test_unwired_node_still_emitted(self, object_info):
+        # A node with no connected outputs and no schema-declared output_node
+        # used to be dropped by an aggressive "dead-branch" heuristic. The
+        # frontend's graphToPrompt() emits every non-virtual, non-muted,
+        # non-bypassed node regardless — the executor only runs nodes
+        # reachable from sinks, so leftover unwired nodes are harmless.
+        # See cloud-mcp-server/src/converter/nodeFilter.ts shouldIncludeInOutput.
         workflow = {
             "nodes": [
                 _node(
@@ -474,7 +479,66 @@ class TestSpecialNodes:
             "links": [],
         }
         result = convert_ui_to_api(workflow, object_info)
-        assert result == {}
+        assert "99" in result
+        assert result["99"]["class_type"] == "EmptyLatentImage"
+        assert result["99"]["inputs"] == {"width": 64, "height": 64, "batch_size": 1}
+
+    def test_unwired_load_node_still_emitted(self, object_info):
+        # Real cloud-mcp regression: a saved workflow has a LoadAudio that the
+        # user added but didn't yet wire to anything. The frontend's
+        # graphToPrompt() emits it; we used to drop it via dead-branch
+        # exclusion, losing the node entirely from the API output.
+        load_audio_schema = {
+            "LoadAudio": {
+                "input": {
+                    "required": {
+                        "audio": [["song.mp3"], {}],
+                    }
+                },
+                "input_order": {"required": ["audio"]},
+                "output_node": False,
+                "output": ["AUDIO"],
+                "display_name": "Load Audio",
+            }
+        }
+        workflow = {
+            "nodes": [
+                {
+                    "id": 1,
+                    "type": "LoadAudio",
+                    "inputs": [],
+                    "outputs": [{"name": "AUDIO", "type": "AUDIO", "links": None}],
+                    "widgets_values": ["song.mp3"],
+                    "mode": 0,
+                },
+            ],
+            "links": [],
+        }
+        result = convert_ui_to_api(workflow, load_audio_schema)
+        assert "1" in result
+        assert result["1"]["inputs"] == {"audio": "song.mp3"}
+
+    def test_markdown_note_excluded(self, object_info):
+        # MarkdownNote is a UI-only documentation node with no Python class
+        # behind it. Must never appear in the API output even when not
+        # otherwise filtered out by dead-branch logic (which we no longer
+        # apply).
+        workflow = {
+            "nodes": [
+                _node(
+                    1,
+                    "MarkdownNote",
+                    outputs=[],
+                    widgets=["# Heading\n\nSome documentation"],
+                ),
+                _node(2, "EmptyLatentImage", outputs=[{"links": [1]}], widgets=[512, 512, 1]),
+                _node(3, "PreviewImage", inputs=[{"name": "images", "link": 1}], outputs=[]),
+            ],
+            "links": [[1, 2, 0, 3, 0, "IMAGE"]],
+        }
+        result = convert_ui_to_api(workflow, object_info)
+        assert "1" not in result
+        assert {"2", "3"} <= set(result)
 
 
 # ---------------------------------------------------------------------------
@@ -1338,9 +1402,10 @@ class TestNodeNameForSAndRAlias:
         result = convert_ui_to_api(self._aliased_workflow(widgets_values=["euler"]), self.OI)
         assert result["1"]["inputs"]["missing_widget"] == 99
 
-    def test_dead_branch_check_uses_aliased_schema(self):
-        # No connected outputs, but the aliased schema marks it as OUTPUT_NODE
-        # so it must survive the dead-branch exclusion.
+    def test_aliased_node_with_no_connections_still_emits(self):
+        # Even with no wired connections, the node should be emitted (we no
+        # longer apply a dead-branch heuristic). The aliased schema's
+        # display_name and defaults still apply correctly.
         workflow = {
             "nodes": [
                 {
@@ -1357,6 +1422,10 @@ class TestNodeNameForSAndRAlias:
         }
         result = convert_ui_to_api(workflow, self.OI)
         assert "1" in result
+        assert result["1"]["_meta"]["title"] == "Real Sampler"
+        assert result["1"]["inputs"]["sampler"] == "euler"
+        # missing_widget filled from the aliased schema's default.
+        assert result["1"]["inputs"]["missing_widget"] == 99
 
 
 class TestForceInputHandling:
