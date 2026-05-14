@@ -663,106 +663,116 @@ class _Tracers:
         self.get_vars = get_vars
         self.subgraph_ctx = subgraph_ctx
 
-    def trace_reroute(self, src_id: Any, src_slot: Any, _seen: set[str] | None = None) -> tuple[Any, Any]:
-        seen = _seen if _seen is not None else set()
-        key = str(src_id)
-        if key in seen:
-            return src_id, src_slot
-        seen.add(key)
-        if key in self.reroute_sources:
-            actual_id, actual_slot = self.reroute_sources[key]
-            return self.trace_reroute(actual_id, actual_slot, seen)
-        return src_id, src_slot
+    def trace_reroute(self, src_id: Any, src_slot: Any) -> tuple[Any, Any]:
+        # Iterative to avoid Python's recursion limit on long chains. The
+        # body matches a tail-recursive version exactly; the seen-set guards
+        # against cyclic ``Reroute -> Reroute -> ...`` loops.
+        seen: set[str] = set()
+        while True:
+            key = str(src_id)
+            if key in seen or key not in self.reroute_sources:
+                return src_id, src_slot
+            seen.add(key)
+            src_id, src_slot = self.reroute_sources[key]
 
-    def trace_get_set(self, src_id: Any, src_slot: Any, _seen: set[str] | None = None) -> tuple[Any, Any]:
-        seen = _seen if _seen is not None else set()
-        key = str(src_id)
-        if key in seen:
-            return src_id, src_slot
-        seen.add(key)
-        if key in self.get_vars:
+    def trace_get_set(self, src_id: Any, src_slot: Any) -> tuple[Any, Any]:
+        # Same iterative shape as trace_reroute. Hops through one
+        # GetNode -> SetNode pair per step; the seen-set guards against
+        # cycles via repeated variable names.
+        seen: set[str] = set()
+        while True:
+            key = str(src_id)
+            if key in seen or key not in self.get_vars:
+                return src_id, src_slot
+            seen.add(key)
             var_name = self.get_vars[key]
-            if var_name in self.set_sources:
-                actual_id, actual_slot = self.set_sources[var_name]
-                return self.trace_get_set(actual_id, actual_slot, seen)
-        return src_id, src_slot
+            if var_name not in self.set_sources:
+                return src_id, src_slot
+            src_id, src_slot = self.set_sources[var_name]
 
-    def trace_bypassed(self, src_id: Any, src_slot: Any, _seen: set[Any] | None = None) -> tuple[Any, Any]:
-        seen = _seen if _seen is not None else set()
-        if src_id in seen:
-            return src_id, src_slot
-        seen.add(src_id)
-        if str(src_id) not in self.bypassed:
-            return src_id, src_slot
+    def trace_bypassed(self, src_id: Any, src_slot: Any) -> tuple[Any, Any]:
+        # Iterative. Each loop iteration corresponds to walking through one
+        # bypassed node; inner calls to trace_get_set / trace_reroute already
+        # iterate over their respective chains (no recursion).
+        seen: set[Any] = set()
+        while True:
+            if src_id in seen:
+                return src_id, src_slot
+            seen.add(src_id)
+            if str(src_id) not in self.bypassed:
+                return src_id, src_slot
 
-        node = self.node_by_id.get(str(src_id))
-        if not node:
-            return src_id, src_slot
+            node = self.node_by_id.get(str(src_id))
+            if not node:
+                return src_id, src_slot
 
-        outputs = node.get("outputs") or []
-        # Guard the slot index — malformed workflows can have non-numeric slots.
-        try:
-            slot_idx = int(src_slot) if src_slot is not None else 0
-        except (TypeError, ValueError):
-            slot_idx = 0
-        output_type = (
-            outputs[slot_idx].get("type")
-            if 0 <= slot_idx < len(outputs) and isinstance(outputs[slot_idx], dict)
-            else None
-        )
+            outputs = node.get("outputs") or []
+            # Guard the slot index — malformed workflows can have non-numeric slots.
+            try:
+                slot_idx = int(src_slot) if src_slot is not None else 0
+            except (TypeError, ValueError):
+                slot_idx = 0
+            output_type = (
+                outputs[slot_idx].get("type")
+                if 0 <= slot_idx < len(outputs) and isinstance(outputs[slot_idx], dict)
+                else None
+            )
 
-        # Pick the input we'll forward the output through. We mix the frontend's
-        # strict matcher (ExecutableNodeDTO._getBypassSlotIndex) with the
-        # reference converter's permissive fallback, in order of preference:
-        #   1. Same-slot input if its type connects to the output type
-        #   2. First input whose type matches the output type exactly
-        #   3. First input whose type is connection-compatible (handles ``*``
-        #      and ``,``-separated alternatives via LiteGraph.isValidConnection)
-        #   4. First linked input regardless of type — preserves user intent
-        #      when types disagree, matching SethRobinson's reference. The
-        #      executor will surface a type mismatch loudly if it matters.
-        inputs = node.get("inputs") or []
-        chosen_link: int | None = None
-        exact_link: int | None = None
-        compat_link: int | None = None
-        fallback_link: int | None = None
+            # Pick the input we'll forward the output through. We mix the frontend's
+            # strict matcher (ExecutableNodeDTO._getBypassSlotIndex) with the
+            # reference converter's permissive fallback, in order of preference:
+            #   1. Same-slot input if its type connects to the output type
+            #   2. First input whose type matches the output type exactly
+            #   3. First input whose type is connection-compatible (handles ``*``
+            #      and ``,``-separated alternatives via LiteGraph.isValidConnection)
+            #   4. First linked input regardless of type — preserves user intent
+            #      when types disagree, matching SethRobinson's reference. The
+            #      executor will surface a type mismatch loudly if it matters.
+            inputs = node.get("inputs") or []
+            chosen_link: int | None = None
+            exact_link: int | None = None
+            compat_link: int | None = None
+            fallback_link: int | None = None
 
-        same_slot_inp = inputs[slot_idx] if 0 <= slot_idx < len(inputs) and isinstance(inputs[slot_idx], dict) else None
-        if same_slot_inp:
-            lid = same_slot_inp.get("link")
-            if (
-                lid is not None
-                and lid in self.link_map
-                and _is_valid_connection(same_slot_inp.get("type"), output_type)
-            ):
-                chosen_link = lid
+            same_slot_inp = (
+                inputs[slot_idx] if 0 <= slot_idx < len(inputs) and isinstance(inputs[slot_idx], dict) else None
+            )
+            if same_slot_inp:
+                lid = same_slot_inp.get("link")
+                if (
+                    lid is not None
+                    and lid in self.link_map
+                    and _is_valid_connection(same_slot_inp.get("type"), output_type)
+                ):
+                    chosen_link = lid
 
-        if chosen_link is None:
-            for inp in inputs:
-                if not isinstance(inp, dict):
-                    continue
-                lid = inp.get("link")
-                if lid is None or lid not in self.link_map:
-                    continue
-                inp_type = inp.get("type")
-                if fallback_link is None:
-                    fallback_link = lid
-                if output_type and inp_type == output_type and exact_link is None:
-                    exact_link = lid
-                if compat_link is None and _is_valid_connection(inp_type, output_type):
-                    compat_link = lid
-            chosen_link = exact_link if exact_link is not None else compat_link
             if chosen_link is None:
-                chosen_link = fallback_link
+                for inp in inputs:
+                    if not isinstance(inp, dict):
+                        continue
+                    lid = inp.get("link")
+                    if lid is None or lid not in self.link_map:
+                        continue
+                    inp_type = inp.get("type")
+                    if fallback_link is None:
+                        fallback_link = lid
+                    if output_type and inp_type == output_type and exact_link is None:
+                        exact_link = lid
+                    if compat_link is None and _is_valid_connection(inp_type, output_type):
+                        compat_link = lid
+                chosen_link = exact_link if exact_link is not None else compat_link
+                if chosen_link is None:
+                    chosen_link = fallback_link
 
-        if chosen_link is None:
-            return src_id, src_slot
+            if chosen_link is None:
+                return src_id, src_slot
 
-        ld = self.link_map[chosen_link]
-        upstream_id, upstream_slot = ld["source_id"], ld["source_slot"]
-        upstream_id, upstream_slot = self.trace_get_set(upstream_id, upstream_slot)
-        upstream_id, upstream_slot = self.trace_reroute(upstream_id, upstream_slot)
-        return self.trace_bypassed(upstream_id, upstream_slot, seen)
+            ld = self.link_map[chosen_link]
+            upstream_id, upstream_slot = ld["source_id"], ld["source_slot"]
+            upstream_id, upstream_slot = self.trace_get_set(upstream_id, upstream_slot)
+            upstream_id, upstream_slot = self.trace_reroute(upstream_id, upstream_slot)
+            src_id, src_slot = upstream_id, upstream_slot
+            # Loop continues with the new src_id/src_slot.
 
 
 # ---------------------------------------------------------------------------

@@ -1444,6 +1444,106 @@ class TestFrontendParity:
         assert any("group node" in record.message.lower() for record in caplog.records)
 
 
+class TestTracerChainDepth:
+    """The three tracers (``trace_reroute``, ``trace_get_set``, ``trace_bypassed``)
+    used to be tail-recursive. Python's default recursion limit (1000) meant
+    chains longer than ~997 hit ``RecursionError`` which the per-node
+    try/except then swallowed — silently dropping the downstream consumer
+    from the prompt. The iterative rewrite makes them depth-unbounded.
+
+    These tests pick chain lengths well past the old crash threshold so any
+    future regression to the recursive form fails loudly.
+    """
+
+    def _consumer_id(self):
+        return "999999"
+
+    def test_long_reroute_chain(self):
+        N = 2000
+        nodes = [
+            _node(0, "EmptyLatentImage", outputs=[{"links": [0]}], widgets=[256, 256, 1]),
+        ]
+        links = []
+        for i in range(1, N + 1):
+            nodes.append(
+                _node(
+                    i,
+                    "Reroute",
+                    inputs=[{"name": "", "type": "*", "link": i - 1}],
+                    outputs=[{"name": "", "type": "*", "links": [i]}],
+                )
+            )
+            links.append([i - 1, i - 1, 0, i, 0, "*"])
+        nodes.append(_node(int(self._consumer_id()), "PreviewImage", inputs=[{"name": "images", "link": N}]))
+        links.append([N, N, 0, int(self._consumer_id()), 0, "*"])
+        result = convert_ui_to_api({"nodes": nodes, "links": links}, {})
+        # Consumer must be present and wired through to node 0.
+        assert result[self._consumer_id()]["inputs"]["images"] == ["0", 0]
+
+    def test_long_bypass_chain(self):
+        N = 2000
+        nodes = [
+            _node(0, "EmptyLatentImage", outputs=[{"links": [0]}], widgets=[256, 256, 1]),
+        ]
+        links = []
+        prev = 0
+        for i in range(N):
+            nid = 1000 + i
+            nodes.append(
+                {
+                    "id": nid,
+                    "type": "VAEDecode",
+                    "inputs": [
+                        {"name": "samples", "type": "LATENT", "link": prev},
+                        {"name": "vae", "type": "VAE", "link": None},
+                    ],
+                    "outputs": [{"name": "IMAGE", "type": "LATENT", "links": [10000 + i]}],
+                    "mode": 4,  # bypassed
+                }
+            )
+            links.append([prev, prev if i == 0 else 1000 + i - 1, 0, nid, 0, "LATENT"])
+            prev = 10000 + i
+        nodes.append(_node(int(self._consumer_id()), "PreviewImage", inputs=[{"name": "images", "link": prev}]))
+        links.append([prev, 1000 + N - 1, 0, int(self._consumer_id()), 0, "LATENT"])
+        result = convert_ui_to_api({"nodes": nodes, "links": links}, {})
+        assert result[self._consumer_id()]["inputs"]["images"] == ["0", 0]
+
+    def test_long_getset_chain(self):
+        N = 2000
+        nodes = [
+            _node(0, "EmptyLatentImage", outputs=[{"links": [0]}], widgets=[256, 256, 1]),
+        ]
+        links = []
+        prev = 0
+        for i in range(N):
+            sid = 1000 + i
+            gid = 2000 + i
+            nodes.append(
+                {
+                    "id": sid,
+                    "type": "SetNode",
+                    "inputs": [{"name": "value", "link": prev}],
+                    "widgets_values": [f"v{i}"],
+                    "mode": 0,
+                }
+            )
+            nodes.append(
+                {
+                    "id": gid,
+                    "type": "GetNode",
+                    "outputs": [{"links": [10000 + i]}],
+                    "widgets_values": [f"v{i}"],
+                    "mode": 0,
+                }
+            )
+            links.append([prev, prev if i == 0 else 2000 + i - 1, 0, sid, 0, "LATENT"])
+            prev = 10000 + i
+        nodes.append(_node(int(self._consumer_id()), "PreviewImage", inputs=[{"name": "images", "link": prev}]))
+        links.append([prev, 2000 + N - 1, 0, int(self._consumer_id()), 0, "LATENT"])
+        result = convert_ui_to_api({"nodes": nodes, "links": links}, {})
+        assert result[self._consumer_id()]["inputs"]["images"] == ["0", 0]
+
+
 class TestMutedBypassedSubgraph:
     """Per frontend semantics (executionUtil.ts), if the subgraph *instance*
     node is itself muted or bypassed, its inner nodes do NOT enter the prompt.
