@@ -860,7 +860,7 @@ def _dynamic_prompt_input_names(node_type: str | None, node: dict | None, object
     schema = _schema_for(node_type, node, object_info)
     if not schema:
         return set()
-    input_def = schema.get("input") or {}
+    input_def = _schema_input_def(schema)
     out: set[str] = set()
     for section in ("required", "optional"):
         section_def = input_def.get(section) or {}
@@ -974,18 +974,37 @@ def _schema_for(node_type: str, node: dict, object_info: dict) -> dict | None:
     return object_info.get(node_type) if isinstance(node_type, str) else None
 
 
+def _schema_input_def(schema: Any) -> dict:
+    """Return the schema's ``input`` block as a dict, or ``{}`` if absent/malformed.
+
+    Every helper that walks INPUT_TYPES sections needs this guard: the raw
+    ``schema.get("input") or {}`` pattern returns the value as-is when it's
+    truthy, so a malformed schema with ``"input": [...]`` would later crash
+    on ``.get(section)``. In practice ``/object_info`` never sends a non-dict
+    here, but the rest of the converter follows the same defensive contract.
+    """
+    if not isinstance(schema, dict):
+        return {}
+    input_def = schema.get("input")
+    return input_def if isinstance(input_def, dict) else {}
+
+
 def _get_ordered_input_names(node_type: str, node: dict, object_info: dict) -> list[str]:
     schema = _schema_for(node_type, node, object_info)
     if not schema:
         return []
-    input_order = schema.get("input_order") or {}
+    input_order = schema.get("input_order")
+    if not isinstance(input_order, dict):
+        input_order = {}
     out: list[str] = []
     for section in ("required", "optional"):
-        out.extend(input_order.get(section, []) or [])
+        section_order = input_order.get(section)
+        if isinstance(section_order, list):
+            out.extend(section_order)
     if out:
         return out
     # Fall back to whatever order is in the input dict itself.
-    input_def = schema.get("input") or {}
+    input_def = _schema_input_def(schema)
     for section in ("required", "optional"):
         section_def = input_def.get(section) or {}
         if isinstance(section_def, dict):
@@ -1031,7 +1050,14 @@ def _dynamic_combo_sub_inputs(
     for option in options:
         if not isinstance(option, dict) or option.get("key") != selected:
             continue
-        sub_def = option.get("inputs") or {}
+        sub_def = option.get("inputs")
+        # The option's ``inputs`` is supposed to mirror an INPUT_TYPES dict
+        # (``{"required": {...}, "optional": {...}}``). Treat anything else
+        # — typically a malformed third-party V3 node — as having no
+        # sub-inputs rather than letting AttributeError escape into the
+        # per-node wrapper and silently dropping the whole node.
+        if not isinstance(sub_def, dict):
+            return []
         names: list[str] = []
         for section in ("required", "optional"):
             section_def = sub_def.get(section) or {}
@@ -1045,7 +1071,7 @@ def _get_widget_name_order(node_type: str, node: dict, object_info: dict, widget
     """Build the widget-name list that maps positionally to ``widgets_values``."""
     schema = _schema_for(node_type, node, object_info)
     if schema:
-        input_def = schema.get("input") or {}
+        input_def = _schema_input_def(schema)
         names: list[str | None] = []
         widget_idx = 0
         for section in ("required", "optional"):
@@ -1146,7 +1172,7 @@ def _filter_control_values(
 
     out = []
     vidx = 0
-    input_def = schema.get("input") or {}
+    input_def = _schema_input_def(schema)
     for section in ("required", "optional"):
         section_def = input_def.get(section) or {}
         if not isinstance(section_def, dict):
@@ -1253,7 +1279,7 @@ def _collect_default_inputs(
 ) -> dict[str, Any]:
     if not schema:
         return {}
-    input_def = schema.get("input") or {}
+    input_def = _schema_input_def(schema)
     defaults: dict[str, Any] = {}
     for section in ("required", "optional"):
         section_def = input_def.get(section) or {}
@@ -1290,7 +1316,7 @@ def _extract_default(input_spec: Any) -> Any:
 def _normalize_combo_values(schema: dict | None, inputs: dict[str, Any]) -> None:
     if not schema:
         return
-    input_def = schema.get("input") or {}
+    input_def = _schema_input_def(schema)
     for section in ("required", "optional"):
         section_def = input_def.get(section) or {}
         if not isinstance(section_def, dict):

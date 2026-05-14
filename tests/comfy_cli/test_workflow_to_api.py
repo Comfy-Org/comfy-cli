@@ -836,6 +836,103 @@ class TestMalformedInputHardening:
         # Should not raise.
         convert_ui_to_api(workflow, object_info)
 
+    def test_v3_combo_option_with_non_dict_inputs_keeps_node(self):
+        # A V3 dynamic combo option whose ``inputs`` field is malformed
+        # (string / list / etc., not the expected INPUT_TYPES-shaped dict)
+        # used to crash _dynamic_combo_sub_inputs; the per-node wrapper
+        # caught the AttributeError but silently dropped the entire node.
+        # Now we degrade to "no sub-inputs" and keep the rest of the node.
+        object_info = {
+            "Foo": {
+                "input": {
+                    "required": {
+                        "shape": [
+                            "COMFY_DYNAMICCOMBO_V3",
+                            {"options": [{"key": "square", "inputs": "not-a-dict"}]},
+                        ]
+                    }
+                },
+                "input_order": {"required": ["shape"]},
+                "output_node": True,
+                "display_name": "Foo",
+            }
+        }
+        workflow = {
+            "nodes": [
+                {
+                    "id": 1,
+                    "type": "Foo",
+                    "inputs": [],
+                    "outputs": [],
+                    "widgets_values": ["square", 5.0],
+                    "mode": 0,
+                }
+            ],
+            "links": [],
+        }
+        result = convert_ui_to_api(workflow, object_info)
+        # Node emitted, no crash, no silently-dropped node.
+        assert result["1"]["class_type"] == "Foo"
+        assert result["1"]["inputs"]["shape"] == "square"
+
+    def test_malformed_schema_input_does_not_crash(self):
+        # Several helpers do ``schema.get("input") or {}`` then ``.get(section)``.
+        # If "input" was ever a non-dict, ``.get`` would AttributeError before
+        # any per-node wrapper saw it. /object_info doesn't emit malformed
+        # schemas today, but the rest of the converter is paranoid about
+        # exactly this shape — keep the contract uniform.
+        for bad_input in ([], "string", 42):
+            object_info = {
+                "Bar": {
+                    "input": bad_input,
+                    "input_order": {"required": []},
+                    "output_node": True,
+                    "display_name": "Bar",
+                }
+            }
+            workflow = {
+                "nodes": [
+                    {
+                        "id": 1,
+                        "type": "Bar",
+                        "inputs": [],
+                        "outputs": [],
+                        "widgets_values": [],
+                        "mode": 0,
+                    }
+                ],
+                "links": [],
+            }
+            result = convert_ui_to_api(workflow, object_info)
+            assert "1" in result
+
+    def test_malformed_schema_input_order_does_not_crash(self):
+        # Same defensive contract for the ``input_order`` block.
+        for bad_order in ([], "string", 42):
+            object_info = {
+                "Bar": {
+                    "input": {"required": {"x": ["INT", {"default": 0}]}},
+                    "input_order": bad_order,
+                    "output_node": True,
+                    "display_name": "Bar",
+                }
+            }
+            workflow = {
+                "nodes": [
+                    {
+                        "id": 1,
+                        "type": "Bar",
+                        "inputs": [],
+                        "outputs": [],
+                        "widgets_values": [42],
+                        "mode": 0,
+                    }
+                ],
+                "links": [],
+            }
+            result = convert_ui_to_api(workflow, object_info)
+            assert "1" in result
+
     def test_single_bad_node_does_not_abort_conversion(self, object_info, caplog):
         # We can't easily induce _build_api_node to throw on real input, so
         # monkeypatch it for this test.
