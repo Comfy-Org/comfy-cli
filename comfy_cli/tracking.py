@@ -15,6 +15,10 @@ logginglib.getLogger("urllib3").setLevel(logginglib.ERROR)
 MIXPANEL_TOKEN = "93aeab8962b622d431ac19800ccc9f67"
 mp = Mixpanel(MIXPANEL_TOKEN) if MIXPANEL_TOKEN else None
 
+# Kwargs whose values must never reach tracking system.
+# The key is kept (with a redacted marker) so we can still see whether the option was supplied.
+SENSITIVE_TRACKING_KEYS = frozenset({"api_key"})
+
 # Generate a unique tracing ID per command.
 config_manager = ConfigManager()
 cli_version = config_manager.get_cli_version()
@@ -69,7 +73,11 @@ def track_command(sub_command: str = None):
 
             # Copy kwargs to avoid mutating original dictionary
             # Remove context and ctx from the dictionary as they are not needed for tracking and not serializable.
-            filtered_kwargs = {k: v for k, v in kwargs.items() if k != "ctx" and k != "context"}
+            filtered_kwargs = {
+                k: ("<redacted>" if v is not None else None) if k in SENSITIVE_TRACKING_KEYS else v
+                for k, v in kwargs.items()
+                if k != "ctx" and k != "context"
+            }
 
             logging.debug(f"Tracking command: {command_name} with arguments: {filtered_kwargs}")
             track_event(command_name, properties=filtered_kwargs)

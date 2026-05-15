@@ -446,7 +446,23 @@ def run(
         int | None,
         typer.Option(help="The timeout in seconds for the workflow execution."),
     ] = 30,
+    api_key: Annotated[
+        str | None,
+        typer.Option(
+            "--api-key",
+            envvar="COMFY_API_KEY",
+            help=(
+                "Comfy API key for API Nodes (Partner Nodes). "
+                "Embedded in the prompt body as extra_data.api_key_comfy_org on POST /prompt. "
+                "For scripting, prefer the COMFY_API_KEY environment variable so the secret "
+                "stays out of shell history."
+            ),
+        ),
+    ] = None,
 ):
+    if api_key:
+        api_key = api_key.strip() or None
+
     config = ConfigManager()
 
     if host:
@@ -470,7 +486,7 @@ def run(
     if not port:
         port = 8188
 
-    run_inner.execute(workflow, host, port, wait, verbose, local_paths, timeout)
+    run_inner.execute(workflow, host, port, wait, verbose, local_paths, timeout, api_key=api_key)
 
 
 def validate_comfyui(_env_checker):

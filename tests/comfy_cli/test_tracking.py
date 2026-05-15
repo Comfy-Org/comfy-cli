@@ -63,6 +63,41 @@ class TestTrackEvent:
         tracking_module.mp.track.assert_called_once()
 
 
+class TestTrackCommandRedaction:
+    """track_command must redact secret-bearing kwargs before they reach the tracking system."""
+
+    def test_api_key_value_is_redacted(self, tracking_module):
+        tracking_module.config_manager.set(constants.CONFIG_KEY_ENABLE_TRACKING, "True")
+
+        @tracking_module.track_command()
+        def some_cmd(workflow, api_key=None):
+            return None
+
+        some_cmd(workflow="wf.json", api_key="sk-supersecret")
+
+        tracking_module.mp.track.assert_called_once()
+        _, kwargs = tracking_module.mp.track.call_args
+        props = kwargs["properties"]
+        assert props["api_key"] == "<redacted>"
+        assert props["workflow"] == "wf.json"
+        assert "sk-supersecret" not in str(props)
+
+    def test_api_key_none_stays_none(self, tracking_module):
+        # When the user didn't pass --api-key (or set $COMFY_API_KEY), we still
+        # want to be able to see in the analytics that it was absent — not a
+        # "<redacted>" sentinel that would imply they did pass one.
+        tracking_module.config_manager.set(constants.CONFIG_KEY_ENABLE_TRACKING, "True")
+
+        @tracking_module.track_command()
+        def some_cmd(workflow, api_key=None):
+            return None
+
+        some_cmd(workflow="wf.json", api_key=None)
+
+        _, kwargs = tracking_module.mp.track.call_args
+        assert kwargs["properties"]["api_key"] is None
+
+
 class TestInitTrackingRoundTrip:
     """End-to-end: init_tracking() writes the string "False"/"True", and track_event honors it.
 

@@ -65,7 +65,16 @@ def fetch_object_info(host: str, port: int, timeout: int) -> dict:
         raise typer.Exit(code=1) from e
 
 
-def execute(workflow: str, host, port, wait=True, verbose=False, local_paths=False, timeout=30):
+def execute(
+    workflow: str,
+    host,
+    port,
+    wait=True,
+    verbose=False,
+    local_paths=False,
+    timeout=30,
+    api_key: str | None = None,
+):
     workflow_name = os.path.abspath(os.path.expanduser(workflow))
     if not os.path.isfile(workflow):
         pprint(
@@ -128,7 +137,7 @@ def execute(workflow: str, host, port, wait=True, verbose=False, local_paths=Fal
     else:
         print(f"Queuing workflow: {workflow_name}")
 
-    execution = WorkflowExecution(workflow, host, port, verbose, progress, local_paths, timeout)
+    execution = WorkflowExecution(workflow, host, port, verbose, progress, local_paths, timeout, api_key=api_key)
 
     try:
         if wait:
@@ -182,7 +191,7 @@ class ExecutionProgress(Progress):
 
 
 class WorkflowExecution:
-    def __init__(self, workflow, host, port, verbose, progress, local_paths, timeout=30):
+    def __init__(self, workflow, host, port, verbose, progress, local_paths, timeout=30, api_key: str | None = None):
         self.workflow = workflow
         self.host = host
         self.port = port
@@ -201,14 +210,20 @@ class WorkflowExecution:
         self.prompt_id = None
         self.ws = None
         self.timeout = timeout
+        self.api_key = api_key
 
     def connect(self):
         self.ws = WebSocket()
         self.ws.connect(f"ws://{self.host}:{self.port}/ws?clientId={self.client_id}")
 
     def queue(self):
-        data = {"prompt": self.workflow, "client_id": self.client_id}
-        req = request.Request(f"http://{self.host}:{self.port}/prompt", json.dumps(data).encode("utf-8"))
+        data: dict = {"prompt": self.workflow, "client_id": self.client_id}
+        if self.api_key:
+            data["extra_data"] = {"api_key_comfy_org": self.api_key}
+        req = request.Request(
+            f"http://{self.host}:{self.port}/prompt",
+            json.dumps(data).encode("utf-8"),
+        )
         try:
             resp = request.urlopen(req)
             body = json.loads(resp.read())

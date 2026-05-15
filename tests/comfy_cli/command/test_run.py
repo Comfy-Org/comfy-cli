@@ -153,6 +153,51 @@ class TestFetchObjectInfo:
             assert exc_info.value.exit_code == 1
 
 
+class TestWorkflowExecutionAuth:
+    """X-API-Key is the credential the ComfyUI server forwards to Partner Nodes."""
+
+    def _make_exec(self, workflow, api_key=None):
+        progress = MagicMock()
+        progress.add_task.return_value = 0
+        return WorkflowExecution(
+            workflow=workflow,
+            host="127.0.0.1",
+            port=8188,
+            verbose=False,
+            progress=progress,
+            local_paths=False,
+            timeout=30,
+            api_key=api_key,
+        )
+
+    def test_queue_embeds_api_key_in_extra_data(self, workflow):
+        ex = self._make_exec(workflow, api_key="sk-secret")
+        with patch("comfy_cli.command.run.request.urlopen") as mock_open:
+            mock_open.return_value.read.return_value = json.dumps({"prompt_id": "abc"}).encode()
+            ex.queue()
+        req = mock_open.call_args[0][0]
+        body = json.loads(req.data)
+        assert body["extra_data"] == {"api_key_comfy_org": "sk-secret"}
+
+    def test_queue_does_not_send_x_api_key_header(self, workflow):
+        ex = self._make_exec(workflow, api_key="sk-secret")
+        with patch("comfy_cli.command.run.request.urlopen") as mock_open:
+            mock_open.return_value.read.return_value = json.dumps({"prompt_id": "abc"}).encode()
+            ex.queue()
+        req = mock_open.call_args[0][0]
+        assert req.get_header("X-api-key") is None
+
+    def test_queue_omits_extra_data_when_no_api_key(self, workflow):
+        ex = self._make_exec(workflow)
+        with patch("comfy_cli.command.run.request.urlopen") as mock_open:
+            mock_open.return_value.read.return_value = json.dumps({"prompt_id": "abc"}).encode()
+            ex.queue()
+        req = mock_open.call_args[0][0]
+        body = json.loads(req.data)
+        assert "extra_data" not in body
+        assert body == {"prompt": workflow, "client_id": ex.client_id}
+
+
 class TestWatchExecution:
     def test_successful_execution(self, mock_execution):
         prompt_id = "test-prompt"
@@ -496,6 +541,22 @@ class TestExecuteUiWorkflow:
                 execute(ui_workflow_file, host="127.0.0.1", port=8188, wait=True, timeout=30)
             assert exc_info.value.exit_code == 1
             MockExec.assert_not_called()
+
+    def test_ui_workflow_plumbs_api_key_through_to_execution(self, ui_workflow_file):
+        with (
+            patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),
+            patch("comfy_cli.command.run.fetch_object_info", return_value=self.OBJECT_INFO) as mock_fetch,
+            patch("comfy_cli.command.run.ExecutionProgress"),
+            patch("comfy_cli.command.run.WorkflowExecution") as MockExec,
+        ):
+            mock_exec = MagicMock()
+            MockExec.return_value = mock_exec
+            mock_exec.outputs = []
+
+            execute(ui_workflow_file, host="127.0.0.1", port=8188, wait=True, timeout=30, api_key="sk-test")
+
+            mock_fetch.assert_called_once_with("127.0.0.1", 8188, 30)
+            assert MockExec.call_args.kwargs["api_key"] == "sk-test"
 
     def test_ui_workflow_exits_when_conversion_yields_nothing(self):
         # All nodes are UI-only (Note/PrimitiveNode/Reroute/GetNode/SetNode) and
