@@ -14,6 +14,14 @@ from comfy_cli.cmdline import app as cli_app
 from comfy_cli.command.generate import app as gen_app
 
 
+@pytest.fixture(autouse=True)
+def disable_tracking_prompt(monkeypatch):
+    """The mixpanel-consent prompt blocks Typer invocations in CI (no TTY).
+    Existing CLI tests pass --skip-prompt; we do the same here implicitly."""
+    monkeypatch.setattr("comfy_cli.tracking.prompt_tracking_consent", lambda *a, **kw: None)
+    monkeypatch.setattr("comfy_cli.tracking.track_event", lambda *a, **kw: None)
+
+
 @pytest.fixture
 def runner():
     return CliRunner()
