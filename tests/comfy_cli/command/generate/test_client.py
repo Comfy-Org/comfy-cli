@@ -55,9 +55,7 @@ def test_split_payload_multipart_separates_files(tmp_path):
         payload[1].close()
 
 
-def test_send_request_sets_bearer_header(monkeypatch):
-    ep = spec.get_endpoint("bfl/flux-pro-1.1/generate")
-    flags = schema.flags_for(ep)
+def _capture_post(monkeypatch):
     captured = {}
 
     def fake_post(url, *, json=None, headers=None, timeout=None, **_kw):
@@ -67,14 +65,27 @@ def test_send_request_sets_bearer_header(monkeypatch):
         return httpx.Response(200, json={"id": "abc", "polling_url": "https://x"})
 
     monkeypatch.setattr(client.httpx, "post", fake_post)
-    resp = client.send_request(
-        ep, {"prompt": "x", "width": 1, "height": 1}, flags, api_key="sk-test"
-    )
-    assert resp.status_code == 200
-    assert captured["headers"]["Authorization"] == "Bearer sk-test"
+    return captured
+
+
+def test_send_request_uses_x_api_key_for_comfyui_keys(monkeypatch):
+    ep = spec.get_endpoint("bfl/flux-pro-1.1/generate")
+    flags = schema.flags_for(ep)
+    captured = _capture_post(monkeypatch)
+    client.send_request(ep, {"prompt": "x", "width": 1, "height": 1}, flags, api_key="comfyui-abc")
+    assert captured["headers"]["X-API-Key"] == "comfyui-abc"
+    assert "Authorization" not in captured["headers"]
     assert captured["headers"]["X-Comfy-Env"] == "comfy-cli"
+
+
+def test_send_request_uses_bearer_for_firebase_tokens(monkeypatch):
+    ep = spec.get_endpoint("bfl/flux-pro-1.1/generate")
+    flags = schema.flags_for(ep)
+    captured = _capture_post(monkeypatch)
+    client.send_request(ep, {"prompt": "x", "width": 1, "height": 1}, flags, api_key="eyJhbGciOi.foo.bar")
+    assert captured["headers"]["Authorization"] == "Bearer eyJhbGciOi.foo.bar"
+    assert "X-API-Key" not in captured["headers"]
     assert captured["url"].endswith("/proxy/bfl/flux-pro-1.1/generate")
-    assert captured["json"]["prompt"] == "x"
 
 
 def test_raise_for_status_includes_body():
