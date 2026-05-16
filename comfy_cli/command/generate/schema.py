@@ -122,7 +122,7 @@ def _coerce(flag: FlagDef, raw: str) -> Any:
         except json.JSONDecodeError as e:
             raise SchemaError(
                 f"--{flag.name}: expected JSON {flag.kind}, got {raw!r}. "
-                "Wrap the value in quotes, e.g. --{n} '{{\"k\":\"v\"}}'".format(n=flag.name)
+                'Wrap the value in quotes, e.g. --{n} \'{{"k":"v"}}\''.format(n=flag.name)
             ) from e
     if flag.kind == "binary":
         return Path(raw).expanduser()

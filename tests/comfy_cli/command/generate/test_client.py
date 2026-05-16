@@ -1,6 +1,5 @@
 """Tests for the httpx client wrapper — auth header, payload split."""
 
-
 import httpx
 import pytest
 

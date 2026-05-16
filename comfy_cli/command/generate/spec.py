@@ -115,7 +115,7 @@ def resolve_alias(target: str) -> str:
     if target in _ALIASES:
         return _ALIASES[target]
     if target.startswith(PROXY_PREFIX):
-        return target[len(PROXY_PREFIX):]
+        return target[len(PROXY_PREFIX) :]
     return target
 
 

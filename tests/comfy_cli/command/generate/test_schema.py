@@ -87,9 +87,12 @@ def test_parse_args_object_accepts_json():
     values = schema.parse_args(
         flags,
         [
-            "--prompt", "x",
-            "--rendering_speed", "TURBO",
-            "--color_palette", '{"name":"PASTEL"}',
+            "--prompt",
+            "x",
+            "--rendering_speed",
+            "TURBO",
+            "--color_palette",
+            '{"name":"PASTEL"}',
         ],
     )
     assert values["color_palette"] == {"name": "PASTEL"}

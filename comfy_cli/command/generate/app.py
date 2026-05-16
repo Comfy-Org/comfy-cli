@@ -48,8 +48,7 @@ def register_with(parent: typer.Typer) -> None:
         target: Annotated[
             str | None,
             typer.Argument(
-                help="A model alias (e.g. flux-pro, ideogram-edit, dalle) "
-                "or one of: list, schema, refresh, resume.",
+                help="A model alias (e.g. flux-pro, ideogram-edit, dalle) or one of: list, schema, refresh, resume.",
             ),
         ] = None,
     ) -> None:
@@ -203,10 +202,7 @@ def _generate(model: str, extra_args: list[str]) -> None:
             saved = output.save_binary_response(resp, download, request_id)
             output.print_saved([saved])
         else:
-            rprint(
-                "[yellow]Binary image response; nothing saved. "
-                "Pass --download <path> to write it to disk.[/yellow]"
-            )
+            rprint("[yellow]Binary image response; nothing saved. Pass --download <path> to write it to disk.[/yellow]")
         return
 
     try:
@@ -356,7 +352,9 @@ def _print_top_help() -> None:
     rprint("")
     rprint("[bold]Examples:[/bold]")
     rprint('  comfy generate flux-pro --prompt "a cat on the moon" --width 1024 --height 1024 --download cat.png')
-    rprint('  comfy generate ideogram-edit --image cat.png --mask m.png --prompt "add sunglasses" --rendering_speed TURBO')
+    rprint(
+        '  comfy generate ideogram-edit --image cat.png --mask m.png --prompt "add sunglasses" --rendering_speed TURBO'
+    )
     rprint('  comfy generate dalle --prompt "a watercolor whale" --download whale.png')
     rprint("")
     rprint("[bold]Actions:[/bold]")
@@ -366,5 +364,3 @@ def _print_top_help() -> None:
     rprint("  comfy generate resume <model> <job>    Resume an async job")
     rprint("")
     rprint("[dim]Auth: set COMFY_API_KEY or pass --api-key. Get one at https://platform.comfy.org.[/dim]")
-
-

@@ -37,9 +37,8 @@ def _extract_urls(node: Any) -> list[str]:
     def visit(n: Any) -> None:
         if isinstance(n, str):
             low = n.lower()
-            if (
-                n.startswith(("http://", "https://"))
-                and (low.endswith((".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg")) or "image" in low)
+            if n.startswith(("http://", "https://")) and (
+                low.endswith((".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg")) or "image" in low
             ):
                 found.append(n)
             return

@@ -1,6 +1,5 @@
 """Tests for download templating."""
 
-
 import httpx
 
 from comfy_cli.command.generate import output

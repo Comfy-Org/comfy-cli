@@ -28,8 +28,9 @@ def test_poll_bfl_extracts_sample_url():
 
     progress_seen: list[float] = []
 
-    with patch("comfy_cli.command.generate.client.get", side_effect=lambda *a, **kw: next(responses)), patch(
-        "comfy_cli.command.generate.poll._sleep", lambda *_: None
+    with (
+        patch("comfy_cli.command.generate.client.get", side_effect=lambda *a, **kw: next(responses)),
+        patch("comfy_cli.command.generate.poll._sleep", lambda *_: None),
     ):
         result = poll.poll_bfl(
             {"polling_url": "https://api.comfy.org/proxy/bfl/get_result?id=abc"},
@@ -44,8 +45,9 @@ def test_poll_bfl_extracts_sample_url():
 
 def test_poll_bfl_reports_failure():
     responses = iter([_resp({"id": "abc", "status": "Content Moderated", "progress": 0.0})])
-    with patch("comfy_cli.command.generate.client.get", side_effect=lambda *a, **kw: next(responses)), patch(
-        "comfy_cli.command.generate.poll._sleep", lambda *_: None
+    with (
+        patch("comfy_cli.command.generate.client.get", side_effect=lambda *a, **kw: next(responses)),
+        patch("comfy_cli.command.generate.poll._sleep", lambda *_: None),
     ):
         result = poll.poll_bfl(
             {"polling_url": "https://x"},
