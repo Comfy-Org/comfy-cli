@@ -11,6 +11,7 @@ from rich.console import Console
 
 from comfy_cli import constants, env_checker, logging, tracking, ui, utils
 from comfy_cli.command import code_search, custom_nodes, pr_command
+from comfy_cli.command import generate as generate_command
 from comfy_cli.command import install as install_inner
 from comfy_cli.command import run as run_inner
 from comfy_cli.command.install import validate_version
@@ -698,6 +699,7 @@ def standalone(
         sty.to_tarball()
 
 
+generate_command.register_with(app)
 app.add_typer(models_command.app, name="model", help="Manage models.")
 app.add_typer(custom_nodes.app, name="node", help="Manage custom nodes.")
 app.add_typer(custom_nodes.manager_app, name="manager", help="Manage ComfyUI-Manager.")
