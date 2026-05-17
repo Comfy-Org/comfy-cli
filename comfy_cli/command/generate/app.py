@@ -371,7 +371,10 @@ def _apply_upload_transforms(values: dict, flags: list[schema.FlagDef], endpoint
         if flag.upload_mode == "base64":
             import base64 as _base64
 
-            data = path.read_bytes()
+            try:
+                data = path.read_bytes()
+            except OSError as e:
+                raise client.ApiError(0, "", f"Unable to read file for --{name}: {path} ({e})") from e
             values[name] = _base64.b64encode(data).decode("ascii")
             rprint(f"[dim]base64-encoded {path.name} for --{name}[/dim]")
         elif flag.upload_mode == "url":

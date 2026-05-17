@@ -7,7 +7,7 @@
 [![Python](https://img.shields.io/pypi/pyversions/comfy-cli)](https://pypi.org/project/comfy-cli/)
 [![License](https://img.shields.io/pypi/l/comfy-cli)](https://github.com/Comfy-Org/comfy-cli/blob/main/LICENSE)
 
-comfy-cli is a command line tool for installing, running, and extending
+comfy-cli is a command-line tool for installing, running, and extending
 [ComfyUI](https://github.com/comfyanonymous/ComfyUI) — the open-source
 generative-media engine. Set up ComfyUI, install custom nodes and models, run
 workflows, and call hosted partner image models, all from your terminal.

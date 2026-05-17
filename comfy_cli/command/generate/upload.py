@@ -99,7 +99,11 @@ def upload_path(path: Path | str, api_key: str) -> UploadResult:
     p = Path(path).expanduser()
     if not p.is_file():
         raise client.ApiError(0, "", f"File not found: {p}")
-    return upload_bytes(p.read_bytes(), file_name=p.name, api_key=api_key)
+    try:
+        data = p.read_bytes()
+    except OSError as e:
+        raise client.ApiError(0, "", f"Unable to read file: {p} ({e})") from e
+    return upload_bytes(data, file_name=p.name, api_key=api_key)
 
 
 def upload_remote_url(url: str, api_key: str) -> UploadResult:
