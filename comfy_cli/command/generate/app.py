@@ -190,7 +190,7 @@ def _generate(model: str, extra_args: list[str]) -> None:
 
     try:
         _apply_upload_transforms(values, flags, ep, api_key)
-    except client.ApiError as e:
+    except (client.ApiError, httpx.HTTPError) as e:
         rprint(f"[bold red]Upload failed: {e}[/bold red]")
         raise typer.Exit(code=1)
 
@@ -311,15 +311,16 @@ def _refresh() -> None:
 def _upload(extra_args: list[str]) -> None:
     """`comfy generate upload <file-or-url> [--json] [--api-key K]`."""
     try:
-        _, meta = _separate_meta_flags(extra_args)
+        remaining, meta = _separate_meta_flags(extra_args)
     except schema.SchemaError as e:
         rprint(f"[bold red]{e}[/bold red]")
         raise typer.Exit(code=1)
-    positional = [a for a in extra_args if not a.startswith("--")]
-    if not positional:
+    # `remaining` already excludes recognized --meta flags AND their values, so
+    # `comfy generate upload --api-key KEY ./img.png` correctly resolves to "./img.png".
+    if not remaining:
         rprint("[bold red]Usage: comfy generate upload <file-or-url> [--json][/bold red]")
         raise typer.Exit(code=1)
-    target = positional[0]
+    target = remaining[0]
     try:
         api_key = client.resolve_api_key(meta.get("api-key") if isinstance(meta.get("api-key"), str) else None)
     except client.ApiError as e:
@@ -442,7 +443,7 @@ def _print_top_help() -> None:
     rprint("  comfy generate list                    Browse available models")
     rprint("  comfy generate schema <model>          Show parameters for a model")
     rprint("  comfy generate refresh                 Refresh the model catalog")
-    rprint("  comfy generate upload <file-or-url>    Host a local file and print its signed URL")
+    rprint("  comfy generate upload <file-or-url>    Host a local file or remote URL and print its signed URL")
     rprint("  comfy generate resume <model> <job>    Resume an async job")
     rprint("")
     rprint("[dim]Auth: set COMFY_API_KEY or pass --api-key. Get one at https://platform.comfy.org.[/dim]")

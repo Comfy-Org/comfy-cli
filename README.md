@@ -7,11 +7,10 @@
 [![Python](https://img.shields.io/pypi/pyversions/comfy-cli)](https://pypi.org/project/comfy-cli/)
 [![License](https://img.shields.io/pypi/l/comfy-cli)](https://github.com/Comfy-Org/comfy-cli/blob/main/LICENSE)
 
-comfy-cli is a command line tool that helps users easily install and manage
-[ComfyUI](https://github.com/comfyanonymous/ComfyUI), a powerful open-source
-machine learning framework. With comfy-cli, you can quickly set up ComfyUI,
-install packages, and manage custom nodes, all from the convenience of your
-terminal.
+comfy-cli is a command line tool for installing, running, and extending
+[ComfyUI](https://github.com/comfyanonymous/ComfyUI) — the open-source
+generative-media engine. Set up ComfyUI, install custom nodes and models, run
+workflows, and call hosted partner image models, all from your terminal.
 
 ## Demo
 
@@ -19,29 +18,32 @@ terminal.
 
 ## Features
 
-- 🚀 Easy installation of ComfyUI with a single command
-- 📦 Seamless package management for ComfyUI extensions and dependencies
-- 🔧 Custom node management for extending ComfyUI's functionality
-- 🗄️ Download checkpoints and save model hash
-- 💻 Cross-platform compatibility (Windows, macOS, Linux)
-- 📖 Comprehensive documentation and examples
-- 🎉 install pull request to ComfyUI automatically
+- 🚀 One-command ComfyUI install and launch
+- 🎨 Direct calls to partner image nodes (Flux, Ideogram, DALL·E, Recraft, Stability, …) via `comfy generate`, no workflow JSON required
+- 🔧 Custom node management — install, update, snapshot, bisect
+- 📦 Fast dependency resolution with `uv` (`--fast-deps`, `--uv-compile`)
+- 🗄️ Model downloads from CivitAI, Hugging Face, and direct URLs
+- 🎬 Run workflows against a local ComfyUI server, including auto-conversion of UI-format JSON
+- 🧪 Test ComfyUI and frontend pull requests with one flag
+- 💻 Cross-platform: Windows, macOS, Linux
 
 ## Installation
 
-1. (Recommended, but not necessary) Enable virtual environment ([venv](https://docs.python.org/3/library/venv.html)/[conda](https://conda.io/projects/conda/en/latest/user-guide/getting-started.html))
+1. (Recommended) Activate a virtual environment ([venv](https://docs.python.org/3/library/venv.html) or [conda](https://conda.io/projects/conda/en/latest/user-guide/getting-started.html)).
 
-2. To install comfy-cli, make sure you have Python 3.9 or higher installed on your system. Then, run the following command:
+2. Install with `pip` (requires Python 3.10+):
 
-   `pip install comfy-cli`
+   ```bash
+   pip install comfy-cli
+   ```
 
 ### Shell Autocomplete
 
-To install autocompletion hints in your shell run:
+Install shell completion so `comfy <TAB>` expands commands and options:
 
-`comfy --install-completion`
-
-This enables you to type `comfy [TAP]` to autocomplete commands and options
+```bash
+comfy --install-completion
+```
 
 ## Usage
 
@@ -287,15 +289,15 @@ the bisect tool can help you pinpoint the custom node that causes the issue.
 ### Calling partner nodes (`comfy generate`)
 
 `comfy generate` calls Comfy's partner nodes directly from the terminal — no
-local ComfyUI or workflow JSON required. It hits the same hosted partner
-nodes (Flux, Ideogram, DALL·E, Recraft, Stability, Runway, Reve, xAI Grok, …)
-you'd otherwise wire into a ComfyUI workflow, but as one-shot CLI calls.
+local ComfyUI or workflow JSON required. It hits the same hosted partner nodes
+(Flux, Ideogram, DALL·E, Recraft, Stability, Runway, Reve, xAI Grok, …) you'd
+otherwise wire into a ComfyUI workflow, but as one-shot CLI calls.
 
-You'll need a Comfy API key and a credit balance:
+Prerequisites — a Comfy API key and a credit balance:
 
-- Create a key: see [ComfyUI Account API Key Integration](https://docs.comfy.org/development/comfyui-server/api-key-integration).
-- Browse supported models and per-call credit costs: see [Partner Nodes](https://docs.comfy.org/tutorials/partner-nodes/overview) and the [pricing table](https://docs.comfy.org/tutorials/partner-nodes/pricing).
-- Add credits: see [Credits Management](https://docs.comfy.org/interface/credits).
+- [Create an API key](https://docs.comfy.org/development/comfyui-server/api-key-integration)
+- [Browse partner nodes and per-call credit costs](https://docs.comfy.org/tutorials/partner-nodes/overview) · [pricing table](https://docs.comfy.org/tutorials/partner-nodes/pricing)
+- [Add credits](https://docs.comfy.org/interface/credits)
 
 Set the key once, then go:
 
@@ -308,9 +310,9 @@ comfy generate flux-pro --prompt "a cat on the moon" \
     --width 1024 --height 1024 --download cat.png
 ```
 
-Reference images can be passed as local paths to image-edit models — the CLI
-uploads them through the cloud's storage endpoint (or base64-encodes inline, as
-the upstream model requires):
+Reference images can be passed as local paths — the CLI uploads them through
+the cloud's storage endpoint (or base64-encodes inline, as each partner
+requires):
 
 ```bash
 comfy generate flux-kontext --prompt "add a top hat" \
@@ -319,9 +321,8 @@ comfy generate flux-kontext --prompt "add a top hat" \
 comfy generate upload ./photo.jpg                    # explicit upload
 ```
 
-Async models submit a job and the CLI polls until ready by default; pass
-`--async` to return immediately with a job id that
-`comfy generate resume <model> <job_id>` can pick up later.
+Async models block until ready by default. Pass `--async` to return immediately
+with a job id, then resume later with `comfy generate resume <model> <job_id>`.
 
 ### Managing ComfyUI-Manager
 
@@ -408,19 +409,19 @@ Check out the usage here: [Mixpanel Board](https://mixpanel.com/p/13hGfPfEPdRkjP
 
 ## Contributing
 
-We welcome contributions to comfy-cli! If you have any ideas, suggestions, or
-bug reports, please open an issue on our [GitHub
-repository](https://github.com/yoland68/comfy-cli/issues). If you'd like to contribute code,
-please fork the repository and submit a pull request.
+We welcome contributions to comfy-cli! For ideas, suggestions, or bug reports,
+open an issue at [Comfy-Org/comfy-cli](https://github.com/Comfy-Org/comfy-cli/issues).
+For code changes, fork the repo and open a pull request.
 
-Check out the [Dev Guide](/DEV_README.md) for more details.
+See the [Dev Guide](/DEV_README.md) for setup details.
 
 ## License
 
-comfy is released under the [GNU General Public License v3.0](https://github.com/yoland68/comfy-cli/blob/master/LICENSE).
+Released under the [GNU General Public License v3.0](https://github.com/Comfy-Org/comfy-cli/blob/main/LICENSE).
 
 ## Support
 
-If you encounter any issues or have questions about comfy-cli, please [open an issue](https://github.com/comfy-cli/issues) on our GitHub repository or contact us on [Discord](https://discord.com/invite/comfyorg). We'll be happy to assist you!
+Questions or issues? [Open an issue](https://github.com/Comfy-Org/comfy-cli/issues)
+or reach us on [Discord](https://discord.com/invite/comfyorg).
 
 Happy diffusing with ComfyUI and comfy-cli! 🎉

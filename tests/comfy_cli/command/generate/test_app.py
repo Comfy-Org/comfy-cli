@@ -4,6 +4,7 @@ These cover the dispatch table (list/schema/refresh/resume vs. model alias) and
 each major run path with httpx mocked at the boundary.
 """
 
+import base64
 from pathlib import Path
 
 import httpx
@@ -455,6 +456,25 @@ def test_upload_json_output(runner, api_key, tmp_path, monkeypatch):
     assert '"existing_file":true' in flat
 
 
+def test_upload_does_not_mistake_meta_value_for_target(runner, monkeypatch, tmp_path):
+    """`upload --api-key KEY ./img.png` must resolve ./img.png as the target,
+    not KEY — regression check for the positional parsing bug."""
+    img = tmp_path / "x.png"
+    img.write_bytes(b"png-data")
+    captured = {}
+
+    def fake_upload(target, api_key):
+        captured["target"] = target
+        captured["api_key"] = api_key
+        return gen_app.upload.UploadResult(url="https://cdn/x.png", expires_at=None, existing_file=False)
+
+    monkeypatch.setattr("comfy_cli.command.generate.upload.upload_target", fake_upload)
+    r = runner.invoke(cli_app, ["generate", "upload", "--api-key", "comfyui-test", str(img)])
+    assert r.exit_code == 0, r.stdout
+    assert captured["target"] == str(img)
+    assert captured["api_key"] == "comfyui-test"
+
+
 def test_upload_propagates_api_error(runner, api_key, tmp_path, monkeypatch):
     img = tmp_path / "x.png"
     img.write_bytes(b"png-data")
@@ -489,9 +509,7 @@ def test_generate_auto_base64_for_kontext(runner, api_key, tmp_path, monkeypatch
         ["generate", "flux-kontext", "--prompt", "edit it", "--input_image", str(img), "--async"],
     )
     assert r.exit_code == 0, r.stdout
-    import base64 as _b64
-
-    assert captured["body"]["input_image"] == _b64.b64encode(b"\x89PNGfake").decode("ascii")
+    assert captured["body"]["input_image"] == base64.b64encode(b"\x89PNGfake").decode("ascii")
 
 
 def test_generate_auto_upload_leaves_url_alone(runner, api_key, monkeypatch):

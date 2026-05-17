@@ -1,6 +1,5 @@
 """Tests for /customers/storage upload helpers."""
 
-
 import httpx
 import pytest
 

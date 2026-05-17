@@ -57,7 +57,12 @@ def _request_signed_url(
     headers = client._auth_headers(api_key, {"Content-Type": "application/json"})
     resp = httpx.post(url, json=body, headers=headers, timeout=30.0)
     client.raise_for_status(resp)
-    return resp.json()
+    try:
+        return resp.json()
+    except ValueError as e:
+        # Surface the same way other parse errors do — bare ValueError would
+        # leak a traceback into CLI output.
+        raise client.ApiError(resp.status_code, resp.text or str(e), "Storage response was not valid JSON") from e
 
 
 def _put_bytes(upload_url: str, data: bytes, content_type: str) -> None:
