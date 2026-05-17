@@ -1,6 +1,5 @@
 """Tests for the generic config-driven poller and per-partner specs."""
 
-
 import httpx
 import pytest
 
