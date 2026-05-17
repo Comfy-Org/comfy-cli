@@ -578,6 +578,120 @@ def test_generate_auto_upload_skipped_for_multipart(runner, api_key, tmp_path, m
     assert upload_called["hit"] is False
 
 
+# ─── video models (async polling, generic poller path) ─────────────────
+
+
+def test_video_kling_async_path(runner, api_key, monkeypatch):
+    """End-to-end async path through the generic kling poller."""
+    submit = httpx.Response(200, json={"data": {"task_id": "k-xyz"}})
+    finished = httpx.Response(
+        200,
+        json={
+            "data": {
+                "task_status": "succeed",
+                "task_result": {"videos": [{"url": "https://cdn.example/k.mp4"}]},
+            }
+        },
+    )
+    monkeypatch.setattr(gen_app.client.httpx, "post", lambda *a, **kw: submit)
+    monkeypatch.setattr("comfy_cli.command.generate.client.get", lambda *a, **kw: finished)
+    monkeypatch.setattr("comfy_cli.command.generate.poll._sleep", lambda *_: None)
+
+    r = runner.invoke(cli_app, ["generate", "kling", "--prompt", "a cat", "--duration", "5"])
+    assert r.exit_code == 0, r.stdout
+    assert "https://cdn.example/k.mp4" in r.stdout
+
+
+def test_video_luma_async_path(runner, api_key, monkeypatch):
+    submit = httpx.Response(200, json={"id": "luma-1", "state": "queued"})
+    done = httpx.Response(200, json={"id": "luma-1", "state": "completed", "assets": {"video": "https://cdn/l.mp4"}})
+    monkeypatch.setattr(gen_app.client.httpx, "post", lambda *a, **kw: submit)
+    monkeypatch.setattr("comfy_cli.command.generate.client.get", lambda *a, **kw: done)
+    monkeypatch.setattr("comfy_cli.command.generate.poll._sleep", lambda *_: None)
+
+    r = runner.invoke(
+        cli_app,
+        [
+            "generate",
+            "luma",
+            "--prompt",
+            "a cat",
+            "--aspect_ratio",
+            "16:9",
+            "--model",
+            "ray-2",
+            "--resolution",
+            "{}",
+            "--duration",
+            "{}",
+        ],
+    )
+    assert r.exit_code == 0, r.stdout
+    assert "https://cdn/l.mp4" in r.stdout
+
+
+def test_video_runway_failure_surfaces(runner, api_key, monkeypatch):
+    submit = httpx.Response(200, json={"id": "rw-1"})
+    fail = httpx.Response(200, json={"id": "rw-1", "status": "FAILED"})
+    monkeypatch.setattr(gen_app.client.httpx, "post", lambda *a, **kw: submit)
+    monkeypatch.setattr("comfy_cli.command.generate.client.get", lambda *a, **kw: fail)
+    monkeypatch.setattr("comfy_cli.command.generate.poll._sleep", lambda *_: None)
+
+    r = runner.invoke(
+        cli_app,
+        [
+            "generate",
+            "runway-i2v",
+            "--promptImage",
+            '"https://x/img.png"',
+            "--seed",
+            "1",
+            "--model",
+            "gen4_turbo",
+            "--duration",
+            "5",
+            "--ratio",
+            "1280:720",
+        ],
+    )
+    assert r.exit_code == 1
+    assert "FAILED" in r.stdout
+
+
+def test_video_async_submission_shows_resume_alias(runner, api_key, monkeypatch):
+    submit = httpx.Response(200, json={"data": {"task_id": "k-async-1"}})
+    monkeypatch.setattr(gen_app.client.httpx, "post", lambda *a, **kw: submit)
+    r = runner.invoke(cli_app, ["generate", "kling", "--prompt", "x", "--async"])
+    assert r.exit_code == 0, r.stdout
+    assert "k-async-1" in r.stdout
+    assert "comfy generate resume kling k-async-1" in r.stdout
+
+
+def test_video_resume_kling(runner, api_key, monkeypatch):
+    done = httpx.Response(
+        200,
+        json={
+            "data": {
+                "task_status": "succeed",
+                "task_result": {"videos": [{"url": "https://cdn/resumed.mp4"}]},
+            }
+        },
+    )
+    monkeypatch.setattr("comfy_cli.command.generate.client.get", lambda *a, **kw: done)
+    monkeypatch.setattr("comfy_cli.command.generate.poll._sleep", lambda *_: None)
+    r = runner.invoke(cli_app, ["generate", "resume", "kling", "k-async-1"])
+    assert r.exit_code == 0, r.stdout
+    assert "https://cdn/resumed.mp4" in r.stdout
+
+
+def test_list_video_filter(runner):
+    r = runner.invoke(cli_app, ["generate", "list", "--style", "text-to-video"])
+    assert r.exit_code == 0
+    assert "kling" in r.stdout
+    assert "luma" in r.stdout
+    assert "pika" in r.stdout
+
+
 # ─── helpers: _arg_value / _separate_meta_flags ──────────────────────────
 
 
