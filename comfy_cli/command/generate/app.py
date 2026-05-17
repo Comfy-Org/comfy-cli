@@ -223,7 +223,7 @@ def _generate(model: str, extra_args: list[str]) -> None:
         raise typer.Exit(code=1)
 
     if ep.polling:
-        job_id = str(body.get("id") or (body.get("data") or {}).get("task_id") or request_id)
+        job_id = poll.extract_job_id(ep.polling, body) or request_id
         name = spec.preferred_alias(ep.id) or ep.id
         if do_async:
             if as_json:
@@ -241,7 +241,13 @@ def _generate(model: str, extra_args: list[str]) -> None:
             def _on_progress(p: float) -> None:
                 prog.update(task, description=f"Generating ({p * 100:.0f}%)")
 
-            result = poller(body, api_key=api_key, timeout=timeout, on_progress=_on_progress)
+            result = poller(
+                body,
+                api_key=api_key,
+                timeout=timeout,
+                on_progress=_on_progress,
+                create_path=ep.path,
+            )
         _emit_result(result, request_id=job_id, download=download, as_json=as_json)
         return
 
@@ -411,10 +417,10 @@ def _resume(extra_args: list[str]) -> None:
     download = meta.get("download") if isinstance(meta.get("download"), str) else None
     as_json = bool(meta.get("json", False))
 
-    if ep.polling == "bfl":
-        initial = {"polling_url": f"{spec.base_url()}/proxy/bfl/get_result?id={job_id}"}
-    else:
-        rprint(f"[bold red]Resume not implemented for partner {ep.partner}[/bold red]")
+    try:
+        initial = poll.build_synthetic_initial(ep.polling, job_id, base_url=spec.base_url())
+    except client.ApiError as e:
+        rprint(f"[bold red]{e}[/bold red]")
         raise typer.Exit(code=1)
 
     poller = poll.get_poller(ep.polling)
@@ -424,7 +430,13 @@ def _resume(extra_args: list[str]) -> None:
         def _on_progress(p: float) -> None:
             prog.update(task, description=f"Job {job_id} ({p * 100:.0f}%)")
 
-        result = poller(initial, api_key=api_key, timeout=timeout, on_progress=_on_progress)
+        result = poller(
+            initial,
+            api_key=api_key,
+            timeout=timeout,
+            on_progress=_on_progress,
+            create_path=ep.path,
+        )
     _emit_result(result, request_id=job_id, download=download, as_json=as_json)
 
 

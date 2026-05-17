@@ -11,6 +11,7 @@ inside a single CLI invocation don't re-parse the 30k-line YAML.
 from __future__ import annotations
 
 import os
+import re as _re
 import time
 from dataclasses import dataclass
 from functools import lru_cache
@@ -19,10 +20,27 @@ from typing import Any
 
 import yaml
 
-try:
-    from yaml import CSafeLoader as _YamlLoader
-except ImportError:
-    from yaml import SafeLoader as _YamlLoader  # type: ignore[assignment]
+
+class _YamlLoader(yaml.SafeLoader):
+    """SafeLoader that strips YAML 1.1's bool aliases for ``on``/``off``/
+    ``yes``/``no``/``y``/``n``.
+
+    The vendored openapi uses unquoted ``[on, off]`` and similar as **string**
+    enum values (e.g. Kling's ``sound`` field), but PyYAML's default resolvers
+    promote them to ``True``/``False`` — which then breaks our flag-rendering
+    (`'|'.join` on a list with booleans) and the upstream API contract. Limit
+    bool resolution to the YAML 1.2 spelling (``true``/``false`` only)."""
+
+
+_YamlLoader.yaml_implicit_resolvers = {
+    k: [(t, r) for (t, r) in resolvers if t != "tag:yaml.org,2002:bool"]
+    for k, resolvers in yaml.SafeLoader.yaml_implicit_resolvers.items()
+}
+_YamlLoader.add_implicit_resolver(
+    "tag:yaml.org,2002:bool",
+    _re.compile(r"^(?:true|True|TRUE|false|False|FALSE)$"),
+    list("tTfF"),
+)
 
 PROXY_PREFIX = "/proxy/"
 DEFAULT_BASE_URL = "https://api.comfy.org"
@@ -94,6 +112,30 @@ _ALIASES: dict[str, str] = {
     "reve-edit": "reve/v1/image/edit",
     # Runway
     "runway": "runway/text_to_image",
+    # Video — Kling
+    "kling": "kling/v1/videos/text2video",
+    "kling-i2v": "kling/v1/videos/image2video",
+    "kling-extend": "kling/v1/videos/video-extend",
+    "kling-lipsync": "kling/v1/videos/lip-sync",
+    # Video — Luma Dream Machine
+    "luma": "luma/generations",
+    "luma-i2v": "luma/generations/image",
+    # Video — MiniMax / Hailuo
+    "hailuo": "minimax/video_generation",
+    # Video — Runway Gen-3
+    "runway-i2v": "runway/image_to_video",
+    # Video — Moonvalley
+    "moonvalley-t2v": "moonvalley/prompts/text-to-video",
+    "moonvalley-i2v": "moonvalley/prompts/image-to-video",
+    # Video — Pika
+    "pika": "pika/generate/2.2/t2v",
+    "pika-i2v": "pika/generate/2.2/i2v",
+    # Video — Vidu
+    "vidu": "vidu/text2video",
+    "vidu-i2v": "vidu/img2video",
+    "vidu-extend": "vidu/extend",
+    # Video — xAI Grok
+    "grok-video": "xai/v1/videos/generations",
 }
 
 _PREFERRED_ALIAS: dict[str, str] = {v: k for k, v in _ALIASES.items()}
@@ -119,9 +161,10 @@ def resolve_alias(target: str) -> str:
     return target
 
 
-# Curated v1 image allowlist. Tuples of (endpoint_id, category, polling).
+# Curated endpoint allowlist. Tuples of (endpoint_id, category, polling).
+# ``polling`` is the partner-key the poll registry uses (None = sync).
 # Endpoint id is the openapi path with /proxy/ stripped.
-_IMAGE_ALLOWLIST: list[tuple[str, str, str | None]] = [
+_ENDPOINT_ALLOWLIST: list[tuple[str, str, str | None]] = [
     # OpenAI
     ("openai/images/generations", "text-to-image", None),
     ("openai/images/edits", "image-edit", None),
@@ -162,8 +205,32 @@ _IMAGE_ALLOWLIST: list[tuple[str, str, str | None]] = [
     # Reve
     ("reve/v1/image/create", "text-to-image", None),
     ("reve/v1/image/edit", "image-edit", None),
-    # Runway
+    # Runway (image)
     ("runway/text_to_image", "text-to-image", None),
+    # Video — Kling
+    ("kling/v1/videos/text2video", "text-to-video", "kling"),
+    ("kling/v1/videos/image2video", "image-to-video", "kling"),
+    ("kling/v1/videos/video-extend", "video-extend", "kling"),
+    ("kling/v1/videos/lip-sync", "lipsync", "kling"),
+    # Video — Luma
+    ("luma/generations", "text-to-video", "luma"),
+    ("luma/generations/image", "image-to-video", "luma"),
+    # Video — MiniMax / Hailuo
+    ("minimax/video_generation", "text-to-video", "minimax"),
+    # Video — Runway
+    ("runway/image_to_video", "image-to-video", "runway"),
+    # Video — Moonvalley
+    ("moonvalley/prompts/text-to-video", "text-to-video", "moonvalley"),
+    ("moonvalley/prompts/image-to-video", "image-to-video", "moonvalley"),
+    # Video — Pika
+    ("pika/generate/2.2/t2v", "text-to-video", "pika"),
+    ("pika/generate/2.2/i2v", "image-to-video", "pika"),
+    # Video — Vidu
+    ("vidu/text2video", "text-to-video", "vidu"),
+    ("vidu/img2video", "image-to-video", "vidu"),
+    ("vidu/extend", "video-extend", "vidu"),
+    # Video — xAI Grok
+    ("xai/v1/videos/generations", "text-to-video", "xai_video"),
 ]
 
 
@@ -241,7 +308,7 @@ def _registry() -> dict[str, Endpoint]:
     spec = load_raw_spec()
     paths = spec.get("paths") or {}
     registry: dict[str, Endpoint] = {}
-    for endpoint_id, category, polling_hint in _IMAGE_ALLOWLIST:
+    for endpoint_id, category, polling_hint in _ENDPOINT_ALLOWLIST:
         path = PROXY_PREFIX + endpoint_id
         node = paths.get(path)
         if not node:

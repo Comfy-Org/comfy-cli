@@ -19,7 +19,7 @@ workflows, and call hosted partner image models, all from your terminal.
 ## Features
 
 - 🚀 One-command ComfyUI install and launch
-- 🎨 Direct calls to partner image nodes (Flux, Ideogram, DALL·E, Recraft, Stability, …) via `comfy generate`, no workflow JSON required
+- 🎨 Direct calls to partner image and video nodes (Flux, Ideogram, DALL·E, Recraft, Stability, Kling, Luma, Runway, Pika, Vidu, Hailuo, …) via `comfy generate`, no workflow JSON required
 - 🔧 Custom node management — install, update, snapshot, bisect
 - 📦 Fast dependency resolution with `uv` (`--fast-deps`, `--uv-compile`)
 - 🗄️ Model downloads from CivitAI, Hugging Face, and direct URLs
@@ -290,8 +290,11 @@ the bisect tool can help you pinpoint the custom node that causes the issue.
 
 `comfy generate` calls Comfy's partner nodes directly from the terminal — no
 local ComfyUI or workflow JSON required. It hits the same hosted partner nodes
-(Flux, Ideogram, DALL·E, Recraft, Stability, Runway, Reve, xAI Grok, …) you'd
-otherwise wire into a ComfyUI workflow, but as one-shot CLI calls.
+you'd otherwise wire into a ComfyUI workflow, but as one-shot CLI calls. Image
+models (Flux, Ideogram, DALL·E, Recraft, Stability, Runway, Reve, xAI Grok, …)
+and video models (Kling, Luma, Runway Gen-3, Pika, Vidu, Moonvalley, Hailuo,
+Grok video) are all covered; video jobs run async and the CLI polls until the
+result is ready.
 
 Prerequisites — a Comfy API key and a credit balance:
 
@@ -321,8 +324,18 @@ comfy generate flux-kontext --prompt "add a top hat" \
 comfy generate upload ./photo.jpg                    # explicit upload
 ```
 
-Async models block until ready by default. Pass `--async` to return immediately
-with a job id, then resume later with `comfy generate resume <model> <job_id>`.
+Async models (every video model plus the Flux family) block until ready by
+default. Pass `--async` to return immediately with a job id, then resume later
+with `comfy generate resume <model> <job_id>`. Examples:
+
+```bash
+comfy generate kling --prompt "a paper boat drifting on a river at dusk" \
+    --duration 5 --download boat.mp4
+
+comfy generate luma --prompt "..." --aspect_ratio 16:9 --async
+# → prints job id; resume with:
+comfy generate resume luma <job_id> --download out.mp4
+```
 
 ### Managing ComfyUI-Manager
 

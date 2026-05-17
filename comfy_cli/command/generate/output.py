@@ -48,11 +48,21 @@ def _resolve_template(template: str, request_id: str, index: int, ext: str) -> P
 
 
 def save_urls(urls: list[str], template: str, request_id: str) -> list[Path]:
-    """Download each URL and save under the resolved template path. Returns saved paths."""
+    """Download each URL and save under the resolved template path. Returns saved paths.
+
+    Multi-URL responses (a video + thumbnail from Luma, for example) need a
+    per-output filename. If the template has no ``{index}`` placeholder and
+    isn't a directory shorthand, we auto-insert ``_<i>`` before the suffix
+    and switch the extension to whatever the URL actually points at — so a
+    user who typed ``--download out.mp4`` doesn't silently get a thumbnail
+    JPEG written into ``out.mp4`` because the model returned two URLs."""
     saved: list[Path] = []
+    auto_index = len(urls) > 1 and "{index}" not in template and not template.endswith(("/", "\\"))
     for i, url in enumerate(urls):
         ext = _ext_from_url(url)
         dest = _resolve_template(template, request_id, i, ext)
+        if auto_index:
+            dest = dest.with_name(f"{dest.stem}_{i}.{ext}")
         dest.parent.mkdir(parents=True, exist_ok=True)
         data = client.download_bytes(url)
         dest.write_bytes(data)
