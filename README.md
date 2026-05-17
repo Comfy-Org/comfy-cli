@@ -284,6 +284,45 @@ the bisect tool can help you pinpoint the custom node that causes the issue.
 
   `comfy model list ?[--relative-path <PATH>]`
 
+### Calling partner nodes (`comfy generate`)
+
+`comfy generate` calls Comfy's partner nodes directly from the terminal — no
+local ComfyUI or workflow JSON required. It hits the same hosted partner
+nodes (Flux, Ideogram, DALL·E, Recraft, Stability, Runway, Reve, xAI Grok, …)
+you'd otherwise wire into a ComfyUI workflow, but as one-shot CLI calls.
+
+You'll need a Comfy API key and a credit balance:
+
+- Create a key: see [ComfyUI Account API Key Integration](https://docs.comfy.org/development/comfyui-server/api-key-integration).
+- Browse supported models and per-call credit costs: see [Partner Nodes](https://docs.comfy.org/tutorials/partner-nodes/overview) and the [pricing table](https://docs.comfy.org/tutorials/partner-nodes/pricing).
+- Add credits: see [Credits Management](https://docs.comfy.org/interface/credits).
+
+Set the key once, then go:
+
+```bash
+export COMFY_API_KEY=comfyui-...   # or pass --api-key on each call
+
+comfy generate list                                  # browse available models
+comfy generate schema flux-pro                       # see params for one model
+comfy generate flux-pro --prompt "a cat on the moon" \
+    --width 1024 --height 1024 --download cat.png
+```
+
+Reference images can be passed as local paths to image-edit models — the CLI
+uploads them through the cloud's storage endpoint (or base64-encodes inline, as
+the upstream model requires):
+
+```bash
+comfy generate flux-kontext --prompt "add a top hat" \
+    --input_image ./photo.jpg --download out.png
+
+comfy generate upload ./photo.jpg                    # explicit upload
+```
+
+Async models submit a job and the CLI polls until ready by default; pass
+`--async` to return immediately with a job id that
+`comfy generate resume <model> <job_id>` can pick up later.
+
 ### Managing ComfyUI-Manager
 
 - Disable ComfyUI-Manager completely (no manager flags passed to ComfyUI):

@@ -415,6 +415,151 @@ def test_refresh_network_failure(runner, monkeypatch):
     assert "Failed to fetch" in r.stdout
 
 
+# ─── upload subcommand ──────────────────────────────────────────────────
+
+
+def test_upload_missing_arg(runner, api_key):
+    r = runner.invoke(cli_app, ["generate", "upload"])
+    assert r.exit_code == 1
+    assert "Usage" in r.stdout
+
+
+def test_upload_local_file(runner, api_key, tmp_path, monkeypatch):
+    img = tmp_path / "x.png"
+    img.write_bytes(b"png-data")
+    monkeypatch.setattr(
+        "comfy_cli.command.generate.upload.upload_target",
+        lambda target, api_key: gen_app.upload.UploadResult(
+            url="https://cdn/x.png", expires_at="2099-01-01T00:00:00Z", existing_file=False
+        ),
+    )
+    r = runner.invoke(cli_app, ["generate", "upload", str(img)])
+    assert r.exit_code == 0, r.stdout
+    assert "Uploaded" in r.stdout
+    assert "https://cdn/x.png" in r.stdout
+
+
+def test_upload_json_output(runner, api_key, tmp_path, monkeypatch):
+    img = tmp_path / "x.png"
+    img.write_bytes(b"png-data")
+    monkeypatch.setattr(
+        "comfy_cli.command.generate.upload.upload_target",
+        lambda target, api_key: gen_app.upload.UploadResult(
+            url="https://cdn/x.png", expires_at="2099-01-01T00:00:00Z", existing_file=True
+        ),
+    )
+    r = runner.invoke(cli_app, ["generate", "upload", str(img), "--json"])
+    assert r.exit_code == 0
+    flat = "".join(r.stdout.split())
+    assert '"url":"https://cdn/x.png"' in flat
+    assert '"existing_file":true' in flat
+
+
+def test_upload_propagates_api_error(runner, api_key, tmp_path, monkeypatch):
+    img = tmp_path / "x.png"
+    img.write_bytes(b"png-data")
+
+    def boom(*a, **kw):
+        raise gen_app.client.ApiError(500, "fail", "boom")
+
+    monkeypatch.setattr("comfy_cli.command.generate.upload.upload_target", boom)
+    r = runner.invoke(cli_app, ["generate", "upload", str(img)])
+    assert r.exit_code == 1
+    assert "Upload failed" in r.stdout
+
+
+# ─── auto-upload during generate ────────────────────────────────────────
+
+
+def test_generate_auto_base64_for_kontext(runner, api_key, tmp_path, monkeypatch):
+    """flux-kontext's input_image expects a Base64 string — local files should
+    be auto-encoded with no extra steps."""
+    img = tmp_path / "ref.png"
+    img.write_bytes(b"\x89PNGfake")
+
+    captured = {}
+
+    def fake_post(url, *, json=None, headers=None, timeout=None, **_):
+        captured["body"] = json
+        return httpx.Response(200, json={"id": "job-xyz", "polling_url": "https://x/poll"})
+
+    monkeypatch.setattr(gen_app.client.httpx, "post", fake_post)
+    r = runner.invoke(
+        cli_app,
+        ["generate", "flux-kontext", "--prompt", "edit it", "--input_image", str(img), "--async"],
+    )
+    assert r.exit_code == 0, r.stdout
+    import base64 as _b64
+
+    assert captured["body"]["input_image"] == _b64.b64encode(b"\x89PNGfake").decode("ascii")
+
+
+def test_generate_auto_upload_leaves_url_alone(runner, api_key, monkeypatch):
+    """A pre-existing https:// URL must NOT trigger an upload."""
+    upload_called = {"hit": False}
+
+    def fake_upload(*a, **kw):
+        upload_called["hit"] = True
+        return gen_app.upload.UploadResult(url="x", expires_at=None, existing_file=False)
+
+    monkeypatch.setattr("comfy_cli.command.generate.upload.upload_path", fake_upload)
+    captured = {}
+
+    def fake_post(url, *, json=None, headers=None, timeout=None, **_):
+        captured["body"] = json
+        return httpx.Response(200, json={"id": "x", "polling_url": "https://x"})
+
+    monkeypatch.setattr(gen_app.client.httpx, "post", fake_post)
+    r = runner.invoke(
+        cli_app,
+        [
+            "generate",
+            "flux-kontext",
+            "--prompt",
+            "x",
+            "--input_image",
+            "https://existing/url.png",
+            "--async",
+        ],
+    )
+    assert r.exit_code == 0
+    assert upload_called["hit"] is False
+    assert captured["body"]["input_image"] == "https://existing/url.png"
+
+
+def test_generate_auto_upload_skipped_for_multipart(runner, api_key, tmp_path, monkeypatch):
+    """Multipart endpoints (ideogram-edit) already stream files via httpx —
+    they must not be funneled through /customers/storage."""
+    img = tmp_path / "x.png"
+    img.write_bytes(b"png")
+
+    upload_called = {"hit": False}
+    monkeypatch.setattr(
+        "comfy_cli.command.generate.upload.upload_path",
+        lambda *a, **kw: upload_called.__setitem__("hit", True) or gen_app.upload.UploadResult("x", None, False),
+    )
+    monkeypatch.setattr(
+        gen_app.client.httpx,
+        "post",
+        lambda *a, **kw: httpx.Response(200, json={"data": [{"url": "https://x/a.png"}]}),
+    )
+    r = runner.invoke(
+        cli_app,
+        [
+            "generate",
+            "ideogram-edit",
+            "--prompt",
+            "x",
+            "--rendering_speed",
+            "TURBO",
+            "--image",
+            str(img),
+        ],
+    )
+    assert r.exit_code == 0
+    assert upload_called["hit"] is False
+
+
 # ─── helpers: _arg_value / _separate_meta_flags ──────────────────────────
 
 

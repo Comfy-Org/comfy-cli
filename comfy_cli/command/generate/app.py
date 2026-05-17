@@ -1,4 +1,4 @@
-"""``comfy generate`` — call ComfyUI cloud models from the CLI.
+"""``comfy generate`` — call ComfyUI partner nodes from the CLI.
 
 UX shape, modeled on fal-ai's genmedia but creative-user-first:
 
@@ -16,6 +16,7 @@ Anything not in the reserved set falls through to the generate path.
 from __future__ import annotations
 
 import uuid
+from pathlib import Path
 from typing import Annotated
 
 import httpx
@@ -24,9 +25,9 @@ from rich import print as rprint
 from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
 
 from comfy_cli import tracking, ui
-from comfy_cli.command.generate import client, output, poll, schema, spec
+from comfy_cli.command.generate import client, output, poll, schema, spec, upload
 
-_HELP = "Generate images via ComfyUI cloud models (Flux, Ideogram, DALL·E, Recraft, Stability, …)."
+_HELP = "Generate images via ComfyUI partner nodes (Flux, Ideogram, DALL·E, Recraft, Stability, …)."
 
 _CONTEXT_SETTINGS = {
     "allow_extra_args": True,
@@ -48,7 +49,8 @@ def register_with(parent: typer.Typer) -> None:
         target: Annotated[
             str | None,
             typer.Argument(
-                help="A model alias (e.g. flux-pro, ideogram-edit, dalle) or one of: list, schema, refresh, resume.",
+                help="A model alias (e.g. flux-pro, ideogram-edit, dalle) "
+                "or one of: list, schema, refresh, upload, resume.",
             ),
         ] = None,
     ) -> None:
@@ -61,6 +63,8 @@ def register_with(parent: typer.Typer) -> None:
             return _schema(list(ctx.args))
         if target == "refresh":
             return _refresh()
+        if target == "upload":
+            return _upload(list(ctx.args))
         if target == "resume":
             return _resume(list(ctx.args))
         _generate(target, list(ctx.args))
@@ -184,6 +188,12 @@ def _generate(model: str, extra_args: list[str]) -> None:
     download = meta.get("download") if isinstance(meta.get("download"), str) else None
     as_json = bool(meta.get("json", False))
 
+    try:
+        _apply_upload_transforms(values, flags, ep, api_key)
+    except client.ApiError as e:
+        rprint(f"[bold red]Upload failed: {e}[/bold red]")
+        raise typer.Exit(code=1)
+
     request_id = str(uuid.uuid4())[:8]
     try:
         resp = client.send_request(ep, values, flags, api_key, timeout=timeout)
@@ -298,6 +308,77 @@ def _refresh() -> None:
     rprint(f"[bold green]Refreshed model catalog at {path}[/bold green]")
 
 
+def _upload(extra_args: list[str]) -> None:
+    """`comfy generate upload <file-or-url> [--json] [--api-key K]`."""
+    try:
+        _, meta = _separate_meta_flags(extra_args)
+    except schema.SchemaError as e:
+        rprint(f"[bold red]{e}[/bold red]")
+        raise typer.Exit(code=1)
+    positional = [a for a in extra_args if not a.startswith("--")]
+    if not positional:
+        rprint("[bold red]Usage: comfy generate upload <file-or-url> [--json][/bold red]")
+        raise typer.Exit(code=1)
+    target = positional[0]
+    try:
+        api_key = client.resolve_api_key(meta.get("api-key") if isinstance(meta.get("api-key"), str) else None)
+    except client.ApiError as e:
+        rprint(f"[bold red]{e}[/bold red]")
+        raise typer.Exit(code=1)
+    as_json = bool(meta.get("json", False))
+    try:
+        result = upload.upload_target(target, api_key)
+    except (client.ApiError, httpx.HTTPError) as e:
+        rprint(f"[bold red]Upload failed: {e}[/bold red]")
+        raise typer.Exit(code=1)
+    if as_json:
+        output.print_json(
+            {
+                "url": result.url,
+                "expires_at": result.expires_at,
+                "existing_file": result.existing_file,
+                "hint": "Pass this URL as the model's image/input_image field.",
+            }
+        )
+        return
+    rprint(f"[bold green]Uploaded:[/bold green] {result.url}")
+    if result.expires_at:
+        rprint(f"  expires: {result.expires_at}")
+    if result.existing_file:
+        rprint("  [dim](server already had a hash-match; no bytes transferred)[/dim]")
+
+
+def _apply_upload_transforms(values: dict, flags: list[schema.FlagDef], endpoint: spec.Endpoint, api_key: str) -> None:
+    """When the user supplies a local file path for a field that expects a
+    base64 blob or a URL, transform it transparently.
+
+    This only applies to JSON endpoints — multipart endpoints already stream
+    file paths natively via httpx and don't need pre-uploading.
+    """
+    if endpoint.request_content_type != "application/json":
+        return
+    flag_by_name = {f.name: f for f in flags}
+    for name, value in list(values.items()):
+        flag = flag_by_name.get(name)
+        if flag is None or flag.upload_mode is None or not isinstance(value, str):
+            continue
+        if value.startswith(("http://", "https://", "data:")):
+            continue
+        path = Path(value).expanduser()
+        if not path.is_file():
+            continue
+        if flag.upload_mode == "base64":
+            import base64 as _base64
+
+            data = path.read_bytes()
+            values[name] = _base64.b64encode(data).decode("ascii")
+            rprint(f"[dim]base64-encoded {path.name} for --{name}[/dim]")
+        elif flag.upload_mode == "url":
+            rprint(f"[dim]uploading {path.name} for --{name}…[/dim]")
+            result = upload.upload_path(path, api_key)
+            values[name] = result.url
+
+
 def _resume(extra_args: list[str]) -> None:
     if len(extra_args) < 2:
         rprint("[bold red]Usage: comfy generate resume <model> <job_id> [--download PATH] [--json][/bold red]")
@@ -345,7 +426,7 @@ def _resume(extra_args: list[str]) -> None:
 
 def _print_top_help() -> None:
     """Custom help that emphasizes the model-first UX over Typer's auto-help."""
-    rprint("[bold]comfy generate[/bold] — call ComfyUI cloud models")
+    rprint("[bold]comfy generate[/bold] — call ComfyUI partner nodes")
     rprint("")
     rprint("[bold]Usage:[/bold]")
     rprint("  comfy generate <model> [--<param> value]... [--download PATH] [--async] [--api-key KEY]")
@@ -361,6 +442,7 @@ def _print_top_help() -> None:
     rprint("  comfy generate list                    Browse available models")
     rprint("  comfy generate schema <model>          Show parameters for a model")
     rprint("  comfy generate refresh                 Refresh the model catalog")
+    rprint("  comfy generate upload <file-or-url>    Host a local file and print its signed URL")
     rprint("  comfy generate resume <model> <job>    Resume an async job")
     rprint("")
     rprint("[dim]Auth: set COMFY_API_KEY or pass --api-key. Get one at https://platform.comfy.org.[/dim]")

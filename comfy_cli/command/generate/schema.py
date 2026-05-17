@@ -27,6 +27,7 @@ class FlagDef:
     default: Any = None
     enum: list[str] = field(default_factory=list)
     item_kind: str | None = None  # for arrays: kind of items ("binary", "string", ...)
+    upload_mode: str | None = None  # "base64" | "url" | None — auto-upload behavior for local paths
 
 
 class SchemaError(ValueError):
@@ -59,6 +60,32 @@ def _classify(prop: dict[str, Any]) -> tuple[str, str | None]:
     return "string", None
 
 
+_URL_FIELD_NAMES = frozenset({"input_image", "image_url", "image_uri", "init_image", "reference_image", "mask_url"})
+
+
+def _detect_upload_mode(name: str, prop: dict[str, Any]) -> str | None:
+    """Infer whether this string param expects a base64 blob, a URL, or neither.
+
+    JSON-only endpoints sometimes ship a local file via base64 (BFL Kontext,
+    Flux Fill/Canny/Depth/Expand all say "Base64 encoded image" in their
+    descriptions) and sometimes via a signed URL. We sniff three signals in
+    priority order: openapi ``format``, description keywords, then a small
+    allow-list of common field names."""
+    if prop.get("type") != "string":
+        return None
+    desc = (prop.get("description") or "").lower()
+    fmt = (prop.get("format") or "").lower()
+    if "base64" in desc:
+        return "base64"
+    if fmt in {"uri", "url"}:
+        return "url"
+    if "url" in desc or "uri" in desc:
+        return "url"
+    if name.lower() in _URL_FIELD_NAMES:
+        return "url"
+    return None
+
+
 def flags_for(endpoint: Endpoint) -> list[FlagDef]:
     schema = endpoint.request_schema or {}
     props = schema.get("properties") or {}
@@ -68,6 +95,7 @@ def flags_for(endpoint: Endpoint) -> list[FlagDef]:
         if not isinstance(prop, dict):
             continue
         kind, item_kind = _classify(prop)
+        upload_mode = _detect_upload_mode(name, prop) if kind == "string" else None
         out.append(
             FlagDef(
                 name=name,
@@ -77,6 +105,7 @@ def flags_for(endpoint: Endpoint) -> list[FlagDef]:
                 default=prop.get("default"),
                 enum=list(prop.get("enum") or []),
                 item_kind=item_kind,
+                upload_mode=upload_mode,
             )
         )
     return out
