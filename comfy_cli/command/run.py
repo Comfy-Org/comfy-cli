@@ -23,6 +23,19 @@ workspace_manager = WorkspaceManager()
 SCHEMA_VERSION = 1
 
 
+_LOCAL_HOSTS = frozenset({"127.0.0.1", "localhost", "::1", "[::1]", "0.0.0.0"})
+
+
+def is_local_host(host) -> bool:
+    """True iff `host` points at this machine via a well-known loopback
+    or wildcard address. String-match only — no DNS resolution, since
+    we'd rather under-report locality than falsely claim it on a slow
+    or hostile resolver."""
+    if not isinstance(host, str):
+        return False
+    return host.lower() in _LOCAL_HOSTS
+
+
 def _node_errors_to_list(node_errors) -> list[dict]:
     """Transform ComfyUI's dict-keyed `node_errors` payload into a list of self-contained records.
     Each record carries `node_id` as a field, so agents can iterate the result
@@ -759,7 +772,7 @@ class WorkflowExecution:
         subfolder = img.get("subfolder") or ""
         output_type = img.get("type") or "output"
 
-        if self.local_paths:
+        if self.local_paths and is_local_host(self.host):
             display_name = os.path.join(subfolder, filename) if subfolder else filename
             return os.path.join(workspace_manager.get_workspace_path()[0], output_type, display_name)
 
@@ -776,7 +789,7 @@ class WorkflowExecution:
         url = f"http://{self.host}:{self.port}/view?{urllib.parse.urlencode(url_params)}"
 
         local_path = None
-        if self.local_paths:
+        if self.local_paths and is_local_host(self.host):
             try:
                 ws_path = workspace_manager.get_workspace_path()[0]
             except Exception:

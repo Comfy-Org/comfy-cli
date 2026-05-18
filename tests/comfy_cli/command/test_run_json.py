@@ -1115,6 +1115,42 @@ class TestErrorPathCoverage:
         ev = json.loads(capsys.readouterr().out.strip())
         assert ev["outputs"][0]["local_path"] is None
 
+    def test_local_path_null_when_host_not_local_despite_local_paths_true(self, capsys):
+        """Defense-in-depth: local_paths=True but host is non-loopback → local_path null.
+
+        Guards against the case where Cloud (or any remote-host wiring)
+        accidentally inherits local_paths=True — we must not surface a
+        filesystem path the agent can't actually open.
+        """
+        wf = self._make_workflow()
+        e = JsonEmitter(json_mode=True)
+        e.set_workflow(wf)
+        ex = WorkflowExecution(
+            workflow=wf,
+            host="api.comfy.org",
+            port=443,
+            verbose=False,
+            progress=None,
+            local_paths=True,
+            timeout=30,
+            emitter=e,
+        )
+        ex.prompt_id = "p"
+        with patch(
+            "comfy_cli.command.run.workspace_manager.get_workspace_path",
+            return_value=("/fake/workspace", "ok"),
+        ):
+            ex.on_executed(
+                {
+                    "node": "2",
+                    "output": {
+                        "images": [{"filename": "out.png", "subfolder": "", "type": "output"}],
+                    },
+                }
+            )
+        ev = json.loads(capsys.readouterr().out.strip())
+        assert ev["outputs"][0]["local_path"] is None
+
     def test_object_info_timeout_routes_to_connection_error(self, capsys):
         """fetch_object_info(timeout → connection_error). Previously untested."""
         ui_wf = {

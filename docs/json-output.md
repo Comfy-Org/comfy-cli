@@ -385,18 +385,31 @@ cannot be assigned without a `client_id`).
 ### Local paths
 
 `local_path` is non-null only when **all** of:
-- `comfy launch --background` recorded a workspace path the CLI knows about, and
-- the user did not override `--host` or `--port`.
+- `comfy launch --background` registered a running background instance, and
+- the resolved endpoint (after applying any `--host` / `--port`
+  overrides) matches that recorded background entry, with the loopback
+  aliases `127.0.0.1` and `localhost` (and `::1` / `[::1]`) treated as
+  equivalent for the match, and
+- the resolved host is one of the known same-machine addresses
+  (case-insensitive): `127.0.0.1`, `localhost`, `::1`, `[::1]`, or
+  `0.0.0.0`, and
+- the CLI can resolve the running workspace's filesystem path (the
+  workspace lookup did not fail).
 
-If the user passes `--host remote.example.com` or talks to a port the CLI
-didn't launch, `local_path` is `null` — the file likely exists, but not at a
-path the CLI can name with confidence. The `url` field remains valid and
-should be used to fetch the bytes.
+Equivalently: passing `--host 127.0.0.1`, `--host localhost`, or
+`--port <bg_port>` that match the recorded background is OK —
+`local_path` is still filled in. Passing a `--host` or `--port` that
+diverges from the background disqualifies `local_path`, because that
+other endpoint may be serving a different workspace the CLI can't name.
+Pointing at a non-same-machine host (`--host remote.example.com`, cloud
+endpoints, etc.) also yields `null`, since the file lives on a machine
+the CLI can't reach by path.
 
-This is intentional: a non-null `local_path` is a stronger promise than
-"the file is somewhere accessible." Agents that need the bytes can
-unconditionally fetch `url`; agents that prefer direct filesystem access
-can branch on `local_path is not null`.
+The `url` field is always populated and is the only universally-safe
+way to fetch the bytes. A non-null `local_path` is a stronger promise
+("this exact path on this filesystem"); agents that prefer direct
+filesystem access can branch on `local_path is not null` for the bytes
+and fall through to `url` otherwise.
 
 ## Error object
 

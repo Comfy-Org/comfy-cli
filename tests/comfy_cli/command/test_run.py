@@ -587,3 +587,143 @@ class TestExecuteUiWorkflow:
                 MockExec.assert_not_called()
         finally:
             os.unlink(path)
+
+
+class TestIsLocalHost:
+    @pytest.mark.parametrize(
+        "host",
+        ["127.0.0.1", "localhost", "LocalHost", "LOCALHOST", "::1", "[::1]", "0.0.0.0"],
+    )
+    def test_loopback_hosts_are_local(self, host):
+        from comfy_cli.command.run import is_local_host
+
+        assert is_local_host(host) is True
+
+    @pytest.mark.parametrize(
+        "host",
+        ["192.168.1.5", "remote.example.com", "api.comfy.org", "10.0.0.1", "::ffff:192.168.1.5", ""],
+    )
+    def test_non_loopback_hosts_are_not_local(self, host):
+        from comfy_cli.command.run import is_local_host
+
+        assert is_local_host(host) is False
+
+    @pytest.mark.parametrize("host", [None, 123, ["127.0.0.1"], object()])
+    def test_non_string_inputs_return_false(self, host):
+        from comfy_cli.command.run import is_local_host
+
+        assert is_local_host(host) is False
+
+
+class TestResolveRunEndpoint:
+    """Locality decision in cmdline._resolve_run_endpoint covers six cases:
+    no background, exact match, host override matches, port override matches,
+    both override and match, divergent override, non-local background."""
+
+    def _resolve(self, host, port, background):
+        from comfy_cli.cmdline import _resolve_run_endpoint
+
+        return _resolve_run_endpoint(host, port, background)
+
+    def test_no_background_means_no_local_paths(self):
+        h, p, lp = self._resolve(None, None, None)
+        assert (h, p, lp) == (None, None, False)
+
+    def test_default_args_with_local_background_yields_local_paths(self):
+        h, p, lp = self._resolve(None, None, ("127.0.0.1", 8188, 1234))
+        assert (h, p, lp) == ("127.0.0.1", 8188, True)
+
+    def test_explicit_host_matching_background_still_local(self):
+        h, p, lp = self._resolve("127.0.0.1", None, ("127.0.0.1", 8188, 1234))
+        assert (h, p, lp) == ("127.0.0.1", 8188, True)
+
+    def test_explicit_port_matching_background_still_local(self):
+        h, p, lp = self._resolve(None, 8188, ("127.0.0.1", 8188, 1234))
+        assert (h, p, lp) == ("127.0.0.1", 8188, True)
+
+    def test_explicit_host_and_port_matching_background_still_local(self):
+        h, p, lp = self._resolve("127.0.0.1", 8188, ("127.0.0.1", 8188, 1234))
+        assert (h, p, lp) == ("127.0.0.1", 8188, True)
+
+    def test_divergent_host_disables_local_paths(self):
+        h, p, lp = self._resolve("remote.example.com", None, ("127.0.0.1", 8188, 1234))
+        assert (h, p, lp) == ("remote.example.com", 8188, False)
+
+    def test_divergent_port_disables_local_paths(self):
+        h, p, lp = self._resolve(None, 9999, ("127.0.0.1", 8188, 1234))
+        assert (h, p, lp) == ("127.0.0.1", 9999, False)
+
+    def test_non_local_background_yields_no_local_paths_even_on_match(self):
+        # Hypothetical: --background recorded a non-loopback host (unusual,
+        # but possible if launched with --listen=public.ip). We refuse to
+        # mark it local since the address class isn't safely on this box.
+        h, p, lp = self._resolve(None, None, ("192.168.1.5", 8188, 1234))
+        assert (h, p, lp) == ("192.168.1.5", 8188, False)
+
+    @pytest.mark.parametrize(
+        "user_host,bg_host",
+        [
+            ("localhost", "127.0.0.1"),
+            ("127.0.0.1", "localhost"),
+            ("LOCALHOST", "127.0.0.1"),
+            ("::1", "127.0.0.1"),
+            ("[::1]", "::1"),
+        ],
+    )
+    def test_loopback_aliases_match_background(self, user_host, bg_host):
+        h, p, lp = self._resolve(user_host, None, (bg_host, 8188, 1234))
+        assert lp is True
+        assert h == user_host
+
+    def test_non_loopback_user_host_does_not_alias_to_loopback_bg(self):
+        h, p, lp = self._resolve("192.168.1.5", None, ("127.0.0.1", 8188, 1234))
+        assert lp is False
+
+
+class TestRunCommandWiring:
+    """End-to-end: --host / --port passed to `comfy run` reach
+    WorkflowExecution(local_paths=...) via the cmdline → run_inner.execute
+    seam. Regression guard for the helper-to-execute wiring."""
+
+    def _invoke_run(self, host_arg, port_arg, background):
+        from typer.testing import CliRunner
+
+        from comfy_cli.cmdline import app
+        from comfy_cli.config_manager import ConfigManager
+
+        runner = CliRunner()
+        cfg = ConfigManager()
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+            json.dump({"1": {"class_type": "X", "inputs": {}}}, f)
+            workflow_path = f.name
+        try:
+            with (
+                patch.object(cfg, "background", background),
+                patch("comfy_cli.cmdline.run_inner.execute") as mock_execute,
+            ):
+                args = ["run", "--workflow", workflow_path]
+                if host_arg is not None:
+                    args.extend(["--host", host_arg])
+                if port_arg is not None:
+                    args.extend(["--port", str(port_arg)])
+                result = runner.invoke(app, args)
+                assert result.exit_code == 0, result.output
+                return mock_execute.call_args
+        finally:
+            os.unlink(workflow_path)
+
+    def test_explicit_local_host_matching_background_sets_local_paths_true(self):
+        call = self._invoke_run("127.0.0.1", None, ("127.0.0.1", 8188, 1234))
+        assert call.args[5] is True
+
+    def test_explicit_remote_host_sets_local_paths_false(self):
+        call = self._invoke_run("api.comfy.org", 443, ("127.0.0.1", 8188, 1234))
+        assert call.args[5] is False
+
+    def test_loopback_alias_against_background_sets_local_paths_true(self):
+        call = self._invoke_run("localhost", None, ("127.0.0.1", 8188, 1234))
+        assert call.args[5] is True
+
+    def test_no_background_no_overrides_sets_local_paths_false(self):
+        call = self._invoke_run(None, None, None)
+        assert call.args[5] is False
