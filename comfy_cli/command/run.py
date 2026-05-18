@@ -23,19 +23,6 @@ workspace_manager = WorkspaceManager()
 SCHEMA_VERSION = 1
 
 
-_LOCAL_HOSTS = frozenset({"127.0.0.1", "localhost", "::1", "[::1]", "0.0.0.0"})
-
-
-def is_local_host(host) -> bool:
-    """True iff `host` points at this machine via a well-known loopback
-    or wildcard address. String-match only — no DNS resolution, since
-    we'd rather under-report locality than falsely claim it on a slow
-    or hostile resolver."""
-    if not isinstance(host, str):
-        return False
-    return host.lower() in _LOCAL_HOSTS
-
-
 def _node_errors_to_list(node_errors) -> list[dict]:
     """Transform ComfyUI's dict-keyed `node_errors` payload into a list of self-contained records.
     Each record carries `node_id` as a field, so agents can iterate the result
@@ -324,7 +311,6 @@ def execute(
     port,
     wait=True,
     verbose=False,
-    local_paths=False,
     timeout=30,
     api_key: str | None = None,
     json_mode: bool = False,
@@ -457,7 +443,6 @@ def execute(
         port,
         verbose,
         progress,
-        local_paths,
         timeout,
         api_key=api_key,
         emitter=emitter,
@@ -540,7 +525,6 @@ class WorkflowExecution:
         port,
         verbose,
         progress,
-        local_paths,
         timeout=30,
         api_key: str | None = None,
         emitter: JsonEmitter | None = None,
@@ -549,7 +533,6 @@ class WorkflowExecution:
         self.host = host
         self.port = port
         self.verbose = verbose
-        self.local_paths = local_paths
         self.client_id = str(uuid.uuid4())
         self.outputs: list = []
         self.progress = progress
@@ -567,11 +550,6 @@ class WorkflowExecution:
         # Default to a no-op emitter so internal call sites don't need to
         # branch on whether json mode is active.
         self.emitter = emitter if emitter is not None else JsonEmitter(json_mode=False)
-        # Lazy-resolved once per run; workspace_manager.get_workspace_path()
-        # can have side effects (printing warnings, writing config) on the
-        # stale-recent path, so we call it at most once.
-        self._cached_workspace_path: str | None = None
-        self._workspace_resolved = False
 
     def connect(self):
         self.ws = WebSocket()
@@ -776,47 +754,29 @@ class WorkflowExecution:
         pprint(f"{type} : {title}")
 
     def format_image_path(self, img):
-        """Build a single (url|local_path) string for the legacy human output."""
+        """Build a single (local_path|url) string for the legacy human
+        output. Prefers a clickable local path when the host is a known
+        loopback, the workspace resolves, the path stays inside the
+        workspace's per-type output dir, and the file exists on disk.
+        Otherwise falls back to a /view URL."""
         filename = img["filename"]
         subfolder = img.get("subfolder") or ""
         output_type = img.get("type") or "output"
 
-        candidate = self._candidate_local_path(filename, subfolder, output_type)
-        if candidate is not None:
-            return candidate
+        if self.host in ("127.0.0.1", "localhost", "::1", "[::1]"):
+            try:
+                ws_path = workspace_manager.get_workspace_path()[0]
+            except Exception:
+                ws_path = None
+            if ws_path:
+                parts = [subfolder, filename] if subfolder else [filename]
+                type_root = os.path.normpath(os.path.join(ws_path, output_type))
+                candidate = os.path.normpath(os.path.join(type_root, *parts))
+                if (candidate == type_root or candidate.startswith(type_root + os.sep)) and os.path.isfile(candidate):
+                    return candidate
 
         url_params = {"filename": filename, "subfolder": subfolder, "type": output_type}
         return f"http://{self.host}:{self.port}/view?{urllib.parse.urlencode(url_params)}"
-
-    def _resolve_workspace_path(self) -> str | None:
-        if not self._workspace_resolved:
-            try:
-                self._cached_workspace_path = workspace_manager.get_workspace_path()[0]
-            except Exception:
-                self._cached_workspace_path = None
-            self._workspace_resolved = True
-        return self._cached_workspace_path
-
-    def _candidate_local_path(self, filename: str, subfolder: str, file_type: str) -> str | None:
-        """Best-effort `local_path` for an output. Returns the path only when
-        the host is a known same-machine address, the CLI can resolve a
-        workspace, the candidate path is confined to that workspace's
-        per-type output dir (server-controlled `subfolder`/`filename`
-        cannot escape), and the file actually exists where we expect it."""
-        if not is_local_host(self.host):
-            return None
-        ws_path = self._resolve_workspace_path()
-        if not ws_path:
-            return None
-        parts = [subfolder, filename] if subfolder else [filename]
-        type_root = os.path.normpath(os.path.join(ws_path, file_type))
-        candidate = os.path.normpath(os.path.join(type_root, *parts))
-        # Confine to <ws>/<file_type>/. `os.path.join` resets to absolute
-        # on a `/`-leading arg and `..` segments collapse under normpath —
-        # both can hand us a path outside the workspace.
-        if not (candidate == type_root or candidate.startswith(type_root + os.sep)):
-            return None
-        return candidate if os.path.isfile(candidate) else None
 
     def _build_output_object(self, node_id, category, item) -> dict:
         """Construct a structured Output dict for the JSON contract."""
@@ -827,8 +787,6 @@ class WorkflowExecution:
         url_params = {"filename": filename, "subfolder": subfolder, "type": file_type}
         url = f"http://{self.host}:{self.port}/view?{urllib.parse.urlencode(url_params)}"
 
-        local_path = self._candidate_local_path(filename, subfolder, file_type)
-
         return {
             "category": category,
             "node_id": node_id,
@@ -838,7 +796,6 @@ class WorkflowExecution:
             "subfolder": subfolder,
             "type": file_type,
             "url": url,
-            "local_path": local_path,
         }
 
     def on_message(self, message):

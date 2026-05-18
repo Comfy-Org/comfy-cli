@@ -423,35 +423,6 @@ def update(
         rprint(f"[yellow]Failed to update node id cache: {e}[/yellow]")
 
 
-def _hosts_equivalent(a, b) -> bool:
-    """True iff `a` and `b` name the same endpoint after loopback aliasing
-    (e.g., `localhost` and `127.0.0.1`)."""
-    if a == b:
-        return True
-    return run_inner.is_local_host(a) and run_inner.is_local_host(b)
-
-
-def _resolve_run_endpoint(host, port, background):
-    """Combine user-supplied --host/--port with the endpoint recorded by
-    `comfy launch --background`, returning (host, port, local_paths).
-
-    `local_paths` is True only when the resolved endpoint matches the
-    recorded background (with loopback aliasing — `localhost` matches
-    `127.0.0.1`) AND the host is a known loopback. An override that
-    diverges (different host or port) disqualifies local paths, because
-    we don't know which workspace the other endpoint serves.
-    """
-    if not background:
-        return host, port, False
-    bg_host, bg_port = background[0], background[1]
-    host_matches = host is None or _hosts_equivalent(host, bg_host)
-    port_matches = port is None or port == bg_port
-    effective_host = host or bg_host
-    effective_port = port or bg_port
-    local_paths = host_matches and port_matches and run_inner.is_local_host(effective_host)
-    return effective_host, effective_port, local_paths
-
-
 @app.command(
     help=(
         "Run a workflow on the ComfyUI launched by `comfy launch --background`. "
@@ -538,7 +509,12 @@ def run(
         if not port and len(s) == 2:
             port = int(s[1])
 
-    host, port, local_paths = _resolve_run_endpoint(host, port, config.background)
+    if config.background:
+        bg_host, bg_port = config.background[0], config.background[1]
+        if not host:
+            host = bg_host
+        if not port:
+            port = bg_port
 
     if not host:
         host = "127.0.0.1"
@@ -551,7 +527,6 @@ def run(
         port,
         wait,
         verbose,
-        local_paths,
         timeout,
         api_key=api_key,
         json_mode=json_output,

@@ -253,8 +253,7 @@ cached output-bearing node also emits `node_executed` (in addition to
       "filename": "banana_test_00001_.png",
       "subfolder": "",
       "type": "output",
-      "url": "http://127.0.0.1:8188/view?filename=banana_test_00001_.png&subfolder=&type=output",
-      "local_path": "/home/user/comfy/ComfyUI/output/banana_test_00001_.png"
+      "url": "http://127.0.0.1:8188/view?filename=banana_test_00001_.png&subfolder=&type=output"
     }
   ]
 }
@@ -365,8 +364,7 @@ cannot be assigned without a `client_id`).
   "filename": "banana_test_00001_.png",
   "subfolder": "",
   "type": "output",
-  "url": "http://127.0.0.1:8188/view?filename=...",
-  "local_path": "/home/user/comfy/ComfyUI/output/banana_test_00001_.png"
+  "url": "http://127.0.0.1:8188/view?filename=..."
 }
 ```
 
@@ -379,43 +377,22 @@ cannot be assigned without a `client_id`).
 | `filename`   | str         | Raw filename as reported by the server                                                                   |
 | `subfolder`  | str         | Subfolder within the output folder's root (`""` if none)                                                 |
 | `type`       | str         | ComfyUI output folder discriminator. **Open set.** Current ComfyUI versions emit `output`, `temp`, `input`; agents must accept and pass through unknown values. |
-| `url`        | str         | `http(s)://<host>:<port>/view?...` URL — always present                                                  |
-| `local_path` | str \| null | Filesystem path on the same machine, or `null` when the CLI can't verify the file exists at that path (see below) |
+| `url`        | str         | `http(s)://<host>:<port>/view?...` URL — always present, fetch this to get the bytes |
 
-### Local paths
+### Fetching output bytes
 
-`local_path` is non-null only when **all** of:
-- the resolved host is one of the known same-machine addresses
-  (case-insensitive): `127.0.0.1`, `localhost`, `::1`, `[::1]`, or
-  `0.0.0.0`, and
-- the CLI can resolve a workspace filesystem path (via `comfy launch`,
-  `--workspace`, the most-recent workspace, or the default), and
-- a regular file actually exists at the computed path
-  (`<workspace>/<type>/<subfolder>/<filename>`) at emit time.
+The `url` field is the only contractual way to retrieve an output's
+bytes. It points at ComfyUI's `/view` endpoint and works whether the
+agent is on the same machine as ComfyUI, on a different host, or
+talking to Cloud. For the local case, a loopback HTTP fetch from a
+ComfyUI on the same box is cheap — the agent's HTTP client reads
+through the kernel loopback in the same way it'd read a local file.
 
-The existence check is what makes `local_path` a strong promise rather
-than a structural guess. If the running ComfyUI is using a different
-workspace than the one the CLI resolves (e.g., two installs on the
-same machine), the computed path won't resolve to a real file and the
-field is `null`. If you cleared the output dir between runs, same
-thing — `null` rather than a dangling path.
-
-Pointing at a non-same-machine host (`--host remote.example.com`,
-cloud endpoints, etc.) always yields `null`, since the file lives on a
-machine the CLI can't reach by path.
-
-**Lifetime caveat.** `local_path` is verified at emit time. For
-`type == "output"` the file is durable until you delete it. For
-`type == "temp"` ComfyUI may clean it up on its next launch (and a
-few workflow patterns mutate temp files within a single run), so
-agents should treat a `temp` `local_path` as read-immediately-only —
-don't store it and read it minutes later.
-
-The `url` field is always populated and is the only universally-safe
-way to fetch the bytes. A non-null `local_path` is a stronger promise
-("this exact path on this filesystem"); agents that prefer direct
-filesystem access can branch on `local_path is not null` for the bytes
-and fall through to `url` otherwise.
+The CLI used to also emit a `local_path` field for the same-machine
+case, but the heuristic for resolving ComfyUI's output directory was
+unreliable in real setups (manual launches, alternate install paths,
+multi-install machines, containers with bind-mounted volumes). Agents
+should rely on `url` exclusively.
 
 ## Error object
 
@@ -558,8 +535,8 @@ trailing entries.
 {"event":"node_progress","schema_version":1,"node_id":"1","class_type":"GeminiNanoBanana2","title":"Nano Banana 2","value":1,"max":4}
 {"event":"node_progress","schema_version":1,"node_id":"1","class_type":"GeminiNanoBanana2","title":"Nano Banana 2","value":4,"max":4}
 {"event":"node_executing","schema_version":1,"node_id":"2","class_type":"SaveImage","title":"Save Image"}
-{"event":"node_executed","schema_version":1,"node_id":"2","class_type":"SaveImage","title":"Save Image","outputs":[{"category":"images","node_id":"2","class_type":"SaveImage","title":"Save Image","filename":"banana_test_00001_.png","subfolder":"","type":"output","url":"http://127.0.0.1:8188/view?filename=banana_test_00001_.png&subfolder=&type=output","local_path":"/home/user/comfy/ComfyUI/output/banana_test_00001_.png"}]}
-{"event":"completed","schema_version":1,"prompt_id":"9b1c…","client_id":"fe2a…","elapsed_seconds":8.342,"outputs":[{"category":"images","node_id":"2","class_type":"SaveImage","title":"Save Image","filename":"banana_test_00001_.png","subfolder":"","type":"output","url":"http://127.0.0.1:8188/view?filename=banana_test_00001_.png&subfolder=&type=output","local_path":"/home/user/comfy/ComfyUI/output/banana_test_00001_.png"}],"cached_node_ids":[],"executed_node_ids":["1","2"]}
+{"event":"node_executed","schema_version":1,"node_id":"2","class_type":"SaveImage","title":"Save Image","outputs":[{"category":"images","node_id":"2","class_type":"SaveImage","title":"Save Image","filename":"banana_test_00001_.png","subfolder":"","type":"output","url":"http://127.0.0.1:8188/view?filename=banana_test_00001_.png&subfolder=&type=output"}]}
+{"event":"completed","schema_version":1,"prompt_id":"9b1c…","client_id":"fe2a…","elapsed_seconds":8.342,"outputs":[{"category":"images","node_id":"2","class_type":"SaveImage","title":"Save Image","filename":"banana_test_00001_.png","subfolder":"","type":"output","url":"http://127.0.0.1:8188/view?filename=banana_test_00001_.png&subfolder=&type=output"}],"cached_node_ids":[],"executed_node_ids":["1","2"]}
 ```
 
 Exit code: `0`.
