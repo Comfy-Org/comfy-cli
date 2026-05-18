@@ -128,7 +128,7 @@ handle, which can be used to correlate against `/history/{prompt_id}`.
   "schema_version": 1,
   "prompt_id": "9b1c…",
   "client_id": "fe2a…",
-  "validation_warnings": null,
+  "validation_warnings": [],
   "nodes": [
     {"node_id": "1", "class_type": "GeminiNanoBanana2", "title": "Nano Banana 2"},
     {"node_id": "2", "class_type": "SaveImage", "title": "Save Image"}
@@ -142,7 +142,7 @@ handle, which can be used to correlate against `/history/{prompt_id}`.
 | `schema_version`      | int            | `1`                                                          |
 | `prompt_id`           | str            | Server-assigned prompt UUID                                  |
 | `client_id`           | str            | Client-generated UUID (sent with `/prompt`)                  |
-| `validation_warnings` | dict \| null   | Non-empty when ComfyUI accepted the prompt despite partial validation failures; same shape as `validation_error.node_errors` (see below). `null` in the common case. |
+| `validation_warnings` | array of dict  | List of per-node validation issues that ComfyUI reported alongside a successful queue (some output chains validated, others didn't). Same record shape as `validation_error.node_errors` (see below). Empty (`[]`) in the common case. |
 | `nodes`               | array of dict  | Manifest of every node in the submitted (post-conversion) workflow. Each entry has `node_id` (str), `class_type` (str), and `title` (str — `_meta.title` if present, else `class_type`). Lets piped consumers (who don't have the workflow file at hand) render a per-node UI immediately without waiting for `completed`. |
 
 The `validation_warnings` field exists specifically for the case where
@@ -423,7 +423,7 @@ removed without a schema version bump.
 | `conversion_crash`        | UI→API converter raised an unexpected exception                                               | `exception_type` (str)                             |
 | `object_info_unavailable` | `/object_info` returned an HTTP error (needed for UI→API conversion)                          | `status_code` (int), `body` (str)                  |
 | `connection_error`        | ComfyUI server not reachable (URLError / pre-queue socket.timeout, including on `/object_info`)| —                                                 |
-| `validation_error`        | Server returned HTTP 400 with `node_errors`                                                   | `node_errors` (dict; passthrough; see below)       |
+| `validation_error`        | Server returned HTTP 400 with `node_errors`                                                   | `node_errors` (array of dict; see below)           |
 | `client_error`            | Server returned an HTTP 4xx response (not validation)                                         | `status_code` (int, 4xx), `body` (str)             |
 | `server_error`            | Server returned an HTTP 5xx response                                                          | `status_code` (int, 5xx), `body` (str)             |
 | `invalid_response`        | Server returned HTTP 2xx but body was unparseable or lacked `prompt_id`                       | `status_code` (int, 2xx), `body` (str)             |
@@ -459,12 +459,14 @@ characters (the JSON wire-format `\n` escapes are decoded).
 ### `validation_error.node_errors` shape
 
 The same shape is used for `queued.validation_warnings`. The value is
-the raw dict from ComfyUI keyed by node ID. Keys are the same string
-node IDs that appear as `node_id` in `node_*` events. Example shape:
+an array of self-contained records, one per affected node. Each record
+carries `node_id` (str — same identifier as appears in `node_*` events)
+plus the per-node fields ComfyUI emits. Example shape:
 
 ```json
-"node_errors": {
-  "1": {
+"node_errors": [
+  {
+    "node_id": "1",
     "errors": [
       {
         "type": "value_not_in_list",
@@ -479,16 +481,20 @@ node IDs that appear as `node_id` in `node_*` events. Example shape:
     "dependent_outputs": ["2"],
     "class_type": "GeminiNanoBanana2"
   }
-}
+]
 ```
 
-The inner structure is defined by ComfyUI's `validate_prompt()` in
-[`server.py`](https://github.com/comfyanonymous/ComfyUI/blob/master/server.py)
+The inner per-node fields are defined by ComfyUI's `validate_prompt()`
+in [`server.py`](https://github.com/comfyanonymous/ComfyUI/blob/master/server.py)
 and may evolve with ComfyUI versions. **Agents should ignore unknown
 fields.** The CLI guarantees only:
-- the outer value is a dict keyed by node ID, and
-- under current ComfyUI versions, each node entry carries `errors`,
-  `dependent_outputs`, and `class_type`.
+- the outer value is an array of dicts, each carrying a `node_id` (str), and
+- under current ComfyUI versions, each record additionally carries
+  `errors`, `dependent_outputs`, and `class_type`.
+
+The record order matches ComfyUI's response order and is not guaranteed
+to be sorted; consumers that need a specific order should sort
+themselves.
 
 ## Process-level termination
 
@@ -519,7 +525,7 @@ trailing entries.
 
 ```
 {"event":"converted","schema_version":1,"node_count":2}
-{"event":"queued","schema_version":1,"prompt_id":"9b1c…","client_id":"fe2a…","validation_warnings":null,"nodes":[{"node_id":"1","class_type":"GeminiNanoBanana2","title":"Nano Banana 2"},{"node_id":"2","class_type":"SaveImage","title":"Save Image"}]}
+{"event":"queued","schema_version":1,"prompt_id":"9b1c…","client_id":"fe2a…","validation_warnings":[],"nodes":[{"node_id":"1","class_type":"GeminiNanoBanana2","title":"Nano Banana 2"},{"node_id":"2","class_type":"SaveImage","title":"Save Image"}]}
 {"event":"node_executing","schema_version":1,"node_id":"1","class_type":"GeminiNanoBanana2","title":"Nano Banana 2"}
 {"event":"node_progress","schema_version":1,"node_id":"1","class_type":"GeminiNanoBanana2","title":"Nano Banana 2","value":1,"max":4}
 {"event":"node_progress","schema_version":1,"node_id":"1","class_type":"GeminiNanoBanana2","title":"Nano Banana 2","value":4,"max":4}
@@ -538,7 +544,7 @@ server doesn't send an `executed` ws message for it.
 ### `--no-wait` (API-format input)
 
 ```
-{"event":"queued","schema_version":1,"prompt_id":"9b1c…","client_id":"fe2a…","validation_warnings":null,"nodes":[{"node_id":"1","class_type":"GeminiNanoBanana2","title":"Nano Banana 2"},{"node_id":"2","class_type":"SaveImage","title":"Save Image"}]}
+{"event":"queued","schema_version":1,"prompt_id":"9b1c…","client_id":"fe2a…","validation_warnings":[],"nodes":[{"node_id":"1","class_type":"GeminiNanoBanana2","title":"Nano Banana 2"},{"node_id":"2","class_type":"SaveImage","title":"Save Image"}]}
 ```
 
 Exit code: `0`. The agent is responsible for polling
@@ -556,7 +562,7 @@ Exit code: `1`.
 
 ```
 {"event":"converted","schema_version":1,"node_count":2}
-{"event":"failed","schema_version":1,"prompt_id":null,"client_id":"fe2a…","elapsed_seconds":0.45,"error":{"kind":"validation_error","message":"Workflow failed validation","node_errors":{"1":{"errors":[{"type":"value_not_in_list","message":"Value not in list","details":"resolution: '5K' not in ['1K','2K','4K']","extra_info":{"input_name":"resolution","received_value":"5K"}}],"dependent_outputs":["2"],"class_type":"GeminiNanoBanana2"}}}}
+{"event":"failed","schema_version":1,"prompt_id":null,"client_id":"fe2a…","elapsed_seconds":0.45,"error":{"kind":"validation_error","message":"Workflow failed validation","node_errors":[{"node_id":"1","errors":[{"type":"value_not_in_list","message":"Value not in list","details":"resolution: '5K' not in ['1K','2K','4K']","extra_info":{"input_name":"resolution","received_value":"5K"}}],"dependent_outputs":["2"],"class_type":"GeminiNanoBanana2"}]}}
 ```
 
 Exit code: `1`.
@@ -564,7 +570,7 @@ Exit code: `1`.
 ### Failure: node raised during execution
 
 ```
-{"event":"queued","schema_version":1,"prompt_id":"9b1c…","client_id":"fe2a…","validation_warnings":null,"nodes":[{"node_id":"1","class_type":"GeminiNanoBanana2","title":"Nano Banana 2"},{"node_id":"2","class_type":"SaveImage","title":"Save Image"}]}
+{"event":"queued","schema_version":1,"prompt_id":"9b1c…","client_id":"fe2a…","validation_warnings":[],"nodes":[{"node_id":"1","class_type":"GeminiNanoBanana2","title":"Nano Banana 2"},{"node_id":"2","class_type":"SaveImage","title":"Save Image"}]}
 {"event":"node_executing","schema_version":1,"node_id":"1","class_type":"GeminiNanoBanana2","title":"Nano Banana 2"}
 {"event":"failed","schema_version":1,"prompt_id":"9b1c…","client_id":"fe2a…","elapsed_seconds":2.1,"error":{"kind":"execution_error","message":"API key invalid","node_id":"1","class_type":"GeminiNanoBanana2","title":"Nano Banana 2","exception_type":"RuntimeError","traceback":"  File \"/path/to/node.py\", line 42, in execute\n    raise RuntimeError(\"API key invalid\")\n"}}
 ```
@@ -574,7 +580,7 @@ Exit code: `1`.
 ### Failure: websocket timeout
 
 ```
-{"event":"queued","schema_version":1,"prompt_id":"9b1c…","client_id":"fe2a…","validation_warnings":null,"nodes":[{"node_id":"1","class_type":"GeminiNanoBanana2","title":"Nano Banana 2"},{"node_id":"2","class_type":"SaveImage","title":"Save Image"}]}
+{"event":"queued","schema_version":1,"prompt_id":"9b1c…","client_id":"fe2a…","validation_warnings":[],"nodes":[{"node_id":"1","class_type":"GeminiNanoBanana2","title":"Nano Banana 2"},{"node_id":"2","class_type":"SaveImage","title":"Save Image"}]}
 {"event":"node_executing","schema_version":1,"node_id":"1","class_type":"GeminiNanoBanana2","title":"Nano Banana 2"}
 {"event":"failed","schema_version":1,"prompt_id":"9b1c…","client_id":"fe2a…","elapsed_seconds":30.0,"error":{"kind":"timeout","message":"WebSocket timed out after 30s waiting for server response","timeout_seconds":30.0}}
 ```
@@ -584,7 +590,7 @@ Exit code: `1`.
 ### Failure: workflow interrupted
 
 ```
-{"event":"queued","schema_version":1,"prompt_id":"9b1c…","client_id":"fe2a…","validation_warnings":null,"nodes":[{"node_id":"1","class_type":"GeminiNanoBanana2","title":"Nano Banana 2"},{"node_id":"2","class_type":"SaveImage","title":"Save Image"}]}
+{"event":"queued","schema_version":1,"prompt_id":"9b1c…","client_id":"fe2a…","validation_warnings":[],"nodes":[{"node_id":"1","class_type":"GeminiNanoBanana2","title":"Nano Banana 2"},{"node_id":"2","class_type":"SaveImage","title":"Save Image"}]}
 {"event":"node_executing","schema_version":1,"node_id":"1","class_type":"GeminiNanoBanana2","title":"Nano Banana 2"}
 {"event":"failed","schema_version":1,"prompt_id":"9b1c…","client_id":"fe2a…","elapsed_seconds":3.2,"error":{"kind":"interrupted","message":"Workflow execution was interrupted"}}
 ```

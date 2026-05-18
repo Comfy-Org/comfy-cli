@@ -23,6 +23,22 @@ workspace_manager = WorkspaceManager()
 SCHEMA_VERSION = 1
 
 
+def _node_errors_to_list(node_errors) -> list[dict]:
+    """Transform ComfyUI's dict-keyed `node_errors` payload into a list of self-contained records.
+    Each record carries `node_id` as a field, so agents can iterate the result
+    directly without indirecting through dict keys."""
+    if not isinstance(node_errors, dict):
+        return []
+    result = []
+    for node_id, record in node_errors.items():
+        if not isinstance(record, dict):
+            continue
+        entry = {"node_id": str(node_id)}
+        entry.update(record)
+        result.append(entry)
+    return result
+
+
 def is_ui_workflow(workflow) -> bool:
     return (
         isinstance(workflow, dict)
@@ -133,7 +149,7 @@ class JsonEmitter:
             )
         return manifest
 
-    def emit_queued(self, prompt_id: str, validation_warnings) -> None:
+    def emit_queued(self, prompt_id: str, validation_warnings: list[dict]) -> None:
         self.prompt_id = prompt_id
         self._emit(
             {
@@ -615,10 +631,8 @@ class WorkflowExecution:
 
         # 200 may still carry node_errors if some output chains failed
         # validation but others passed — surface as warnings, not a failure.
-        validation_warnings = None
         node_errors = body.get("node_errors") if isinstance(body, dict) else None
-        if isinstance(node_errors, dict) and node_errors:
-            validation_warnings = node_errors
+        validation_warnings = _node_errors_to_list(node_errors)
 
         if self.emitter.json_mode:
             self.emitter.emit_queued(prompt_id, validation_warnings)
@@ -677,7 +691,7 @@ class WorkflowExecution:
             self.emitter.emit_failed(
                 "validation_error",
                 message,
-                node_errors=node_errors,
+                node_errors=_node_errors_to_list(node_errors),
             )
         else:
             pprint(f"[bold red]Error running workflow\n{json.dumps(node_errors, indent=2)}[/bold red]")

@@ -125,23 +125,23 @@ class TestJsonEmitter:
             event = json.loads(line)
             assert event.get("schema_version") == 1, f"Missing schema_version on: {line}"
 
-    def test_queued_includes_validation_warnings_null(self, capsys):
+    def test_queued_includes_validation_warnings_empty(self, capsys):
         e = JsonEmitter(json_mode=True)
         e.set_client_id("c")
-        e.emit_queued("p", None)
+        e.emit_queued("p", [])
         out, _ = capsys.readouterr()
         event = json.loads(out.strip())
         assert event["event"] == "queued"
-        assert event["validation_warnings"] is None
+        assert event["validation_warnings"] == []
         assert event["prompt_id"] == "p"
         assert event["client_id"] == "c"
         # nodes manifest is always present (empty when no workflow set)
         assert event["nodes"] == []
 
-    def test_queued_includes_validation_warnings_dict(self, capsys):
+    def test_queued_includes_validation_warnings_list(self, capsys):
         e = JsonEmitter(json_mode=True)
         e.set_client_id("c")
-        warnings = {"5": {"errors": [{"type": "x", "message": "y"}]}}
+        warnings = [{"node_id": "5", "errors": [{"type": "x", "message": "y"}]}]
         e.emit_queued("p", warnings)
         out, _ = capsys.readouterr()
         event = json.loads(out.strip())
@@ -363,7 +363,7 @@ class TestSuccessfulRun:
         assert len(events) == 1
         assert events[0]["event"] == "queued"
         assert events[0]["prompt_id"] == "p123"
-        assert events[0]["validation_warnings"] is None
+        assert events[0]["validation_warnings"] == []
 
     def test_completed_event_after_success(self, workflow_file, capsys):
         """Mocked WS flow → expect queued + node_* + completed."""
@@ -423,7 +423,9 @@ class TestQueueHttpErrors:
         events = self._setup_and_run(workflow_file, None, capsys, status=400, body=body)
         terminal = events[-1]
         assert terminal["error"]["kind"] == "validation_error"
-        assert "1" in terminal["error"]["node_errors"]
+        node_errors = terminal["error"]["node_errors"]
+        assert isinstance(node_errors, list)
+        assert any(rec["node_id"] == "1" for rec in node_errors)
 
     def test_401_routes_to_client_error(self, workflow_file, capsys):
         events = self._setup_and_run(workflow_file, None, capsys, status=401, body=b"unauthorized")
@@ -506,8 +508,12 @@ class TestQueueHttpErrors:
             ]
             events = _run_execute_capture(workflow_file, capsys)
         queued = next(e for e in events if e["event"] == "queued")
-        assert queued["validation_warnings"] is not None
-        assert "3" in queued["validation_warnings"]
+        warnings = queued["validation_warnings"]
+        assert isinstance(warnings, list)
+        assert any(rec["node_id"] == "3" for rec in warnings)
+        rec = next(rec for rec in warnings if rec["node_id"] == "3")
+        assert rec["class_type"] == "X"
+        assert rec["errors"][0]["message"] == "skipped"
 
 
 class TestWebSocketEvents:
