@@ -833,8 +833,15 @@ class WorkflowExecution:
         }
 
     def on_message(self, message):
-        data = message["data"] if "data" in message else {}
-        if "prompt_id" not in data or data["prompt_id"] != self.prompt_id:
+        # Defensive: a malformed (non-object) JSON frame from the server
+        # must not raise out of the recv loop — that would tear down the
+        # run without a terminal `failed` event and break the contract.
+        if not isinstance(message, dict):
+            return True
+        data = message.get("data")
+        if not isinstance(data, dict):
+            return True
+        if data.get("prompt_id") != self.prompt_id:
             return True
 
         msg_type = message.get("type")
@@ -858,6 +865,11 @@ class WorkflowExecution:
             self.progress.remove_task(self.progress_task)
             self.progress_task = None
 
+        # `node: null` is the documented "execution done" signal. A
+        # missing key is a protocol violation — skip the frame and keep
+        # listening rather than prematurely terminating.
+        if "node" not in data:
+            return True
         if data["node"] is None:
             return False
 

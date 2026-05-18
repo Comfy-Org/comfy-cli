@@ -1386,6 +1386,37 @@ class TestErrorPathCoverage:
         out, _ = capsys.readouterr()
         assert out.strip() == ""
 
+    @pytest.mark.parametrize("malformed", [None, 42, "string", [1, 2, 3], True])
+    def test_on_message_skips_non_dict_payloads(self, capsys, malformed):
+        # A bad JSON frame (scalar, array, etc.) must not raise out of the
+        # recv loop — that would tear down the run without a terminal
+        # `failed` event and break the stream contract.
+        wf = self._make_workflow()
+        ex = self._make_exec(wf)
+        ex.prompt_id = "p"
+        assert ex.on_message(malformed) is True
+        out, _err = capsys.readouterr()
+        assert out == ""
+
+    def test_on_message_skips_when_data_is_not_dict(self, capsys):
+        wf = self._make_workflow()
+        ex = self._make_exec(wf)
+        ex.prompt_id = "p"
+        # message is a dict but `data` is the wrong shape.
+        assert ex.on_message({"type": "executing", "data": "not a dict"}) is True
+        assert ex.on_message({"type": "executing", "data": [1, 2, 3]}) is True
+        assert ex.on_message({"type": "executing", "data": None}) is True
+        out, _err = capsys.readouterr()
+        assert out == ""
+
+    def test_on_executing_skips_when_node_key_missing(self, capsys):
+        # Missing `node` key is a protocol violation; we skip rather than
+        # treating it as None (which means "execution done").
+        wf = self._make_workflow()
+        ex = self._make_exec(wf)
+        ex.prompt_id = "p"
+        assert ex.on_executing({"prompt_id": "p"}) is True
+
     def test_on_cached_skips_none_entries(self, capsys):
         wf = self._make_workflow()
         ex = self._make_exec(wf)
