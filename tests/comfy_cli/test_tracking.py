@@ -187,6 +187,20 @@ class TestPromptTrackingConsent:
         assert persisted is not None
         assert persisted == tracking_module.user_id
 
+    def test_session_only_survives_unwritable_config(self, tracking_module):
+        # Read-only / missing config dir (fresh CI, restricted sandbox) must
+        # not crash the caller mid-typer-callback — otherwise an agent gets
+        # a Python traceback instead of a structured `failed` event.
+        with (
+            patch.object(tracking_module.sys.stdin, "isatty", return_value=False),
+            patch.object(tracking_module.sys.stdout, "isatty", return_value=False),
+            patch.object(tracking_module.config_manager, "set", side_effect=PermissionError("read-only fs")),
+        ):
+            tracking_module.prompt_tracking_consent()
+        # In-memory state is still correct so this process tracks normally.
+        assert tracking_module._session_only_tracking is True
+        assert tracking_module.user_id is not None
+
     def test_session_only_reuses_existing_user_id(self, tracking_module):
         existing_id = "existing-uuid-from-prior-run"
         tracking_module.config_manager.set(constants.CONFIG_KEY_USER_ID, existing_id)

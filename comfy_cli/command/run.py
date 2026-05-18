@@ -924,7 +924,8 @@ class WorkflowExecution:
             self.emitter.emit_node_executed(node_id, structured_outputs)
 
     def on_error(self, data):
-        node_id = data.get("node_id", "")
+        raw_node_id = data.get("node_id", "")
+        node_id = str(raw_node_id) if raw_node_id is not None else ""
         class_type = data.get("node_type") or data.get("class_type") or ""
         exception_type = data.get("exception_type", "")
         raw_tb = data.get("traceback", "")

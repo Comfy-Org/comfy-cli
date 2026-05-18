@@ -586,6 +586,32 @@ class TestWebSocketEvents:
         assert isinstance(terminal["error"]["traceback"], str)
         assert "raise RuntimeError" in terminal["error"]["traceback"]
 
+    def test_execution_error_node_id_coerced_to_str(self, workflow_file, capsys):
+        # If ComfyUI ever sends node_id as an int in execution_error (other
+        # node_id-bearing events all string-coerce defensively), the
+        # contract still requires a string.
+        messages = [
+            json.dumps({"type": "executing", "data": {"prompt_id": "p", "node": "1"}}),
+            json.dumps(
+                {
+                    "type": "execution_error",
+                    "data": {
+                        "prompt_id": "p",
+                        "node_id": 7,
+                        "node_type": "EmptyLatentImage",
+                        "exception_type": "RuntimeError",
+                        "exception_message": "boom",
+                        "traceback": [],
+                    },
+                }
+            ),
+        ]
+        events = self._run_with_ws_messages(workflow_file, messages, capsys)
+        terminal = events[-1]
+        assert terminal["error"]["kind"] == "execution_error"
+        assert terminal["error"]["node_id"] == "7"
+        assert isinstance(terminal["error"]["node_id"], str)
+
     def test_execution_interrupted(self, workflow_file, capsys):
         messages = [
             json.dumps({"type": "executing", "data": {"prompt_id": "p", "node": "1"}}),

@@ -122,7 +122,14 @@ def prompt_tracking_consent(skip_prompt: bool = False, default_value: bool = Fal
         _session_only_tracking = True
         if user_id is None:
             user_id = str(uuid.uuid4())
-            config_manager.set(constants.CONFIG_KEY_USER_ID, user_id)
+            # Best-effort persistence — a read-only config dir (fresh CI,
+            # restricted sandbox) must not crash the caller. If the write
+            # fails we keep the in-memory user_id so this process still
+            # tracks normally; the next run on a writable host will retry.
+            try:
+                config_manager.set(constants.CONFIG_KEY_USER_ID, user_id)
+            except OSError:
+                pass
         return
 
     enable_tracking = ui.prompt_confirm_action("Do you agree to enable tracking to improve the application?", False)
