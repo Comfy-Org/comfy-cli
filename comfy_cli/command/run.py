@@ -345,9 +345,11 @@ def execute(
             )
         raise typer.Exit(code=1)
 
-    # --print-prompt skips the server probe: API-format input doesn't need
-    # a server at all, and UI-format input will surface a connection_error
-    # naturally when fetch_object_info() can't reach the host.
+    # Under --print-prompt we skip this pre-flight probe. API-format input
+    # makes no server calls downstream so it works fully offline; UI-format
+    # input still needs /object_info for the converter, but if it's
+    # unreachable, fetch_object_info() surfaces the same connection_error
+    # kind a few lines later.
     if not print_prompt and not check_comfy_server_running(port, host):
         msg = f"ComfyUI not running at {host}:{port} (override with --host / --port)"
         if json_mode:
