@@ -335,12 +335,12 @@ def execute(
     emitter = JsonEmitter(json_mode=json_mode)
     workflow_name = os.path.abspath(os.path.expanduser(workflow))
 
-    if not os.path.isfile(workflow):
+    if not os.path.isfile(workflow_name):
         if json_mode:
-            emitter.emit_failed("workflow_not_found", f"Workflow file not found: {workflow}")
+            emitter.emit_failed("workflow_not_found", f"Workflow file not found: {workflow_name}")
         else:
             pprint(
-                f"[bold red]Specified workflow file not found: {workflow}[/bold red]",
+                f"[bold red]Specified workflow file not found: {workflow_name}[/bold red]",
                 file=sys.stderr,
             )
         raise typer.Exit(code=1)

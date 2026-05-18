@@ -749,6 +749,28 @@ def ui_workflow_file():
     os.unlink(path)
 
 
+class TestWorkflowPathExpansion:
+    """Regression: `~/wf.json` must be expanded before the existence check.
+    Otherwise scripted callers passing literal `~/...` see a misleading
+    workflow_not_found."""
+
+    def test_tilde_path_is_expanded_before_existence_check(self, capsys, monkeypatch, tmp_path):
+        workflow_path = tmp_path / "wf.json"
+        workflow_path.write_text(json.dumps({"1": {"class_type": "X", "inputs": {}}}))
+        monkeypatch.setenv("HOME", str(tmp_path))
+        events = _run_execute_capture("~/wf.json", capsys, print_prompt=True)
+        assert events[0]["event"] == "prompt_preview", events
+
+    def test_tilde_path_to_missing_file_reports_expanded_path(self, capsys, monkeypatch, tmp_path):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        events = _run_execute_capture("~/missing.json", capsys, print_prompt=True)
+        assert events[0]["event"] == "failed"
+        assert events[0]["error"]["kind"] == "workflow_not_found"
+        # The error message should name the resolved path so the user can
+        # see exactly where we looked.
+        assert str(tmp_path) in events[0]["error"]["message"]
+
+
 class TestPrintPrompt:
     """`--print-prompt` returns the would-be `/prompt` body and exits 0
     without POSTing. UI input still needs `/object_info`; API input
