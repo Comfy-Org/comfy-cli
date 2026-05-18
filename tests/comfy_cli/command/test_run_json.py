@@ -749,6 +749,97 @@ def ui_workflow_file():
     os.unlink(path)
 
 
+class TestPrintPrompt:
+    """`--print-prompt` returns the would-be `/prompt` body and exits 0
+    without POSTing. UI input still needs `/object_info`; API input
+    doesn't touch the server at all."""
+
+    def test_api_input_emits_prompt_preview_and_no_other_events(self, workflow_file, capsys):
+        # No server probe, no /object_info fetch — API input is printed as-is.
+        with (
+            patch("comfy_cli.command.run.check_comfy_server_running") as mock_check,
+            patch("comfy_cli.command.run.fetch_object_info") as mock_fetch,
+            patch("comfy_cli.command.run.request.urlopen") as mock_post,
+        ):
+            events = _run_execute_capture(workflow_file, capsys, print_prompt=True)
+        assert mock_check.call_count == 0
+        assert mock_fetch.call_count == 0
+        assert mock_post.call_count == 0
+        assert len(events) == 1
+        assert events[0]["event"] == "prompt_preview"
+        assert events[0]["schema_version"] == 1
+        assert isinstance(events[0]["prompt"], dict)
+        assert "1" in events[0]["prompt"]
+        assert events[0]["prompt"]["1"]["class_type"] == "EmptyLatentImage"
+
+    def test_ui_input_emits_converted_then_prompt_preview(self, ui_workflow_file, capsys):
+        with (
+            patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),
+            patch("comfy_cli.command.run.fetch_object_info", return_value=OBJECT_INFO),
+            patch("comfy_cli.command.run.request.urlopen") as mock_post,
+        ):
+            events = _run_execute_capture(ui_workflow_file, capsys, print_prompt=True)
+        assert mock_post.call_count == 0
+        assert [e["event"] for e in events] == ["converted", "prompt_preview"]
+        prompt = events[1]["prompt"]
+        assert isinstance(prompt, dict)
+        # The converted prompt should have entries for the UI nodes.
+        assert len(prompt) >= 1
+        for entry in prompt.values():
+            assert "class_type" in entry
+
+    def test_ui_input_with_unreachable_object_info_routes_to_connection_error(self, ui_workflow_file, capsys):
+        # --print-prompt skips the pre-flight server probe, but UI conversion
+        # still needs /object_info, so an unreachable host surfaces here.
+        with (
+            patch("comfy_cli.command.run.request.urlopen", side_effect=urllib.error.URLError("Connection refused")),
+        ):
+            events = _run_execute_capture(ui_workflow_file, capsys, print_prompt=True)
+        assert events[-1]["event"] == "failed"
+        assert events[-1]["error"]["kind"] == "connection_error"
+
+    def test_api_input_works_with_offline_server(self, workflow_file, capsys):
+        # Hard-fail the server probe — the API path must not call it under --print-prompt.
+        with patch(
+            "comfy_cli.command.run.check_comfy_server_running", side_effect=AssertionError("must not be called")
+        ):
+            events = _run_execute_capture(workflow_file, capsys, print_prompt=True)
+        assert len(events) == 1
+        assert events[0]["event"] == "prompt_preview"
+
+    def test_print_prompt_does_not_include_api_key_or_client_id(self, workflow_file, capsys):
+        # The prompt_preview body should only carry the workflow graph,
+        # not the runtime POST envelope (which would otherwise leak the api_key).
+        events = _run_execute_capture(workflow_file, capsys, print_prompt=True, api_key="sk-secret")
+        prompt = events[0]["prompt"]
+        assert "extra_data" not in prompt
+        assert "client_id" not in prompt
+        assert "sk-secret" not in json.dumps(prompt)
+
+    def test_print_prompt_text_mode_pretty_prints_json(self, workflow_file, capsys):
+        try:
+            execute(workflow_file, host="127.0.0.1", port=8188, print_prompt=True, json_mode=False)
+        except typer.Exit:
+            pass
+        out, _err = capsys.readouterr()
+        parsed = json.loads(out)
+        assert "1" in parsed
+        assert parsed["1"]["class_type"] == "EmptyLatentImage"
+
+    def test_print_prompt_does_not_post_when_workflow_invalid(self, capsys):
+        # Pre-flight failures (workflow_not_found, workflow_format_invalid)
+        # still trigger `failed` and exit 1 under --print-prompt.
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+            json.dump({"not": "a workflow"}, f)
+            path = f.name
+        try:
+            events = _run_execute_capture(path, capsys, print_prompt=True)
+            assert events[-1]["event"] == "failed"
+            assert events[-1]["error"]["kind"] == "workflow_format_invalid"
+        finally:
+            os.unlink(path)
+
+
 class TestConvertedAndConversionErrors:
     """UI-input event path and the conversion_error / conversion_crash kinds."""
 

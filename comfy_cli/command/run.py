@@ -149,6 +149,15 @@ class JsonEmitter:
             )
         return manifest
 
+    def emit_prompt_preview(self, prompt: dict) -> None:
+        self._emit(
+            {
+                "event": "prompt_preview",
+                "schema_version": SCHEMA_VERSION,
+                "prompt": prompt,
+            }
+        )
+
     def emit_queued(self, prompt_id: str, validation_warnings: list[dict]) -> None:
         self.prompt_id = prompt_id
         self._emit(
@@ -314,6 +323,7 @@ def execute(
     timeout=30,
     api_key: str | None = None,
     json_mode: bool = False,
+    print_prompt: bool = False,
 ):
     # `0.0.0.0` is a wildcard bind, not a connect address. macOS / Windows
     # clients can't reach it; on Linux it happens to resolve to a loopback.
@@ -335,7 +345,10 @@ def execute(
             )
         raise typer.Exit(code=1)
 
-    if not check_comfy_server_running(port, host):
+    # --print-prompt skips the server probe: API-format input doesn't need
+    # a server at all, and UI-format input will surface a connection_error
+    # naturally when fetch_object_info() can't reach the host.
+    if not print_prompt and not check_comfy_server_running(port, host):
         msg = f"ComfyUI not running at {host}:{port} (override with --host / --port)"
         if json_mode:
             emitter.emit_failed("connection_error", msg)
@@ -427,6 +440,13 @@ def execute(
             raise typer.Exit(code=1)
         workflow = validated
         emitter.set_workflow(workflow)
+
+    if print_prompt:
+        if json_mode:
+            emitter.emit_prompt_preview(workflow)
+        else:
+            print(json.dumps(workflow, indent=2, ensure_ascii=False))
+        return
 
     progress = None
     start = time.time()

@@ -69,6 +69,7 @@ outcome:
 | --------------------------------- | --------------------------------------------------------- |
 | Success                           | `[converted]? + queued + [node_*]* + completed`           |
 | `--no-wait` queued                | `[converted]? + queued`                                   |
+| `--print-prompt`                  | `[converted]? + prompt_preview`                           |
 | Failure mid-execution             | `[converted]? + queued + [node_*]* + failed`              |
 | Failure during submission         | `[converted]? + failed`                                   |
 | Failure pre-flight                | `failed`                                                  |
@@ -98,6 +99,7 @@ feature-detect by field presence rather than version comparison.
 | Event             | When                                              | Terminal |
 | ----------------- | ------------------------------------------------- | -------- |
 | `converted`       | UI-format workflow was client-side converted      |          |
+| `prompt_preview`  | `--print-prompt` mode: the would-be prompt body   | ✓        |
 | `queued`          | Server accepted the prompt (HTTP 200 on `/prompt`)|          |
 | `node_cached`     | Node hit the execution cache and was skipped      |          |
 | `node_executing`  | Node started execution                            |          |
@@ -125,6 +127,27 @@ format.
 | `event`          | str  | `"converted"`                                  |
 | `schema_version` | int  | `1`                                            |
 | `node_count`     | int  | Number of nodes in the converted graph         |
+
+### `prompt_preview`
+
+Terminal event for `--print-prompt` mode. Emitted in place of `queued` +
+`node_*` + `completed`, after the optional `converted` event when the
+input was UI-format. Carries the API-format workflow body that *would*
+have been sent to `POST /prompt`. The CLI exits 0 right after emitting.
+
+```json
+{"event": "prompt_preview", "schema_version": 1, "prompt": {"1": {"class_type": "EmptyLatentImage", "inputs": {"width": 512, "height": 512, "batch_size": 1}}}}
+```
+
+| Field            | Type | Description                                                            |
+| ---------------- | ---- | ---------------------------------------------------------------------- |
+| `event`          | str  | `"prompt_preview"`                                                     |
+| `schema_version` | int  | `1`                                                                    |
+| `prompt`         | dict | The API-format workflow graph keyed by node id. Same shape as the `prompt` field POSTed to `/prompt`. Does NOT include `client_id` or `extra_data` (those are runtime fields, not part of the workflow). |
+
+For UI-format input, `/object_info` must still be reachable (the
+converter consults it). For API-format input, `--print-prompt` makes
+no server requests at all and works against an offline ComfyUI host.
 
 ### `queued`
 

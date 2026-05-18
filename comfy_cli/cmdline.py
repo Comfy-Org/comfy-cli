@@ -497,6 +497,19 @@ def run(
             ),
         ),
     ] = False,
+    print_prompt: Annotated[
+        bool,
+        typer.Option(
+            "--print-prompt",
+            help=(
+                "Print the API-format prompt body that WOULD be sent to /prompt and exit. "
+                "Does not POST and does not execute. For UI-format input the workflow is "
+                "converted first (requires a reachable ComfyUI for /object_info); API input "
+                "is printed as-is with no server hit. In --json mode emits a `prompt_preview` "
+                "event; otherwise pretty-prints to stdout."
+            ),
+        ),
+    ] = False,
 ):
     if api_key:
         api_key = api_key.strip() or None
@@ -530,6 +543,7 @@ def run(
         timeout,
         api_key=api_key,
         json_mode=json_output,
+        print_prompt=print_prompt,
     )
 
 
