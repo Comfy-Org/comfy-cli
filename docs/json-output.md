@@ -22,10 +22,11 @@ machine-readable mode:
   contract: framework-level Python errors, uncaught exceptions, library
   warnings. Agents should not parse stderr; they may discard it or
   capture it for diagnostics.
-- **Exit code** is `0` on a `completed` terminal event and `1` on a
-  `failed` terminal event. Error categorisation is carried in the
-  `error.kind` field of the `failed` event, not in the exit code (see
-  [Stability](#stability-and-exit-codes)).
+- **Exit code** is `0` when the terminal event is `completed`,
+  `queued` (`--no-wait` mode), or `prompt_preview` (`--print-prompt`
+  mode); `1` on a `failed` terminal event. Error categorisation is
+  carried in the `error.kind` field of the `failed` event, not in the
+  exit code (see [Stability](#stability-and-exit-codes)).
 
 In `--json` mode, `--verbose` has no effect: agents receive the full event
 stream regardless.
@@ -53,10 +54,13 @@ Comfy Cloud should expect to use their own client code for now.
 
 Every line on stdout is a JSON object containing a non-empty string
 `event` field acting as a discriminator. Agents must dispatch on this
-field. The stream ends with a terminal event (`completed` or `failed`)
-in wait mode. In `--no-wait` mode the stream ends at `queued`, and the
-agent is responsible for polling `/history/{prompt_id}` to observe
-completion. See [Process-level termination](#process-level-termination)
+field. In normal `--json` execution the stream ends with a terminal
+event (`completed` or `failed`). In `--no-wait` mode the stream ends
+at `queued`, and the agent is responsible for polling
+`/history/{prompt_id}` to observe completion. In `--print-prompt`
+mode the stream ends at `prompt_preview` (no execution happens, so
+`completed`/`failed` would be category-error events about something
+that was never started). See [Process-level termination](#process-level-termination)
 for the edge case where the CLI is killed before emitting its terminal
 event.
 
@@ -542,8 +546,9 @@ cases, no terminal event is emitted and the stream may be truncated.
 
 Agents should treat the run as failed when **both**:
 - the process exit code is non-zero, and
-- the last line on stdout is not a `completed` or `failed` event (or
-  stdout is empty).
+- the last line on stdout is not one of the documented terminal events
+  (`completed`, `failed`, `queued` under `--no-wait`, or `prompt_preview`
+  under `--print-prompt`), or stdout is empty.
 
 Stderr may contain a Python traceback in these cases.
 
@@ -554,8 +559,9 @@ etc.) are illustrative — they reflect specific ComfyUI/partner nodes.
 Agents should not hardcode behavior on specific `class_type` strings;
 the contract guarantees the *shape* of these fields, not their content.
 
-Every line, including the terminal `completed`/`failed`, ends with
-`\n`. Agents using line iteration (`for line in stdout`) are fine;
+Every line, including the terminal event (`completed` / `failed` /
+`queued` under `--no-wait` / `prompt_preview` under `--print-prompt`),
+ends with `\n`. Agents using line iteration (`for line in stdout`) are fine;
 agents using `splitlines()` or `split("\n")` should filter empty
 trailing entries.
 
@@ -668,7 +674,8 @@ than being treated as an additive change.
 
 ### Why exit codes are not granular
 
-In `--json` mode, exit code is always `0` (completed) or `1` (failed).
+In `--json` mode, exit code is always `0` (`completed`, or the
+mode-specific terminal `queued`/`prompt_preview`) or `1` (`failed`).
 This is part of the v1 JSON contract and will not change without a
 `schema_version` bump. Non-`--json` exit codes are documented elsewhere
 and not governed by this contract.
