@@ -1179,6 +1179,86 @@ class TestErrorPathCoverage:
         ev = json.loads(capsys.readouterr().out.strip())
         assert ev["outputs"][0]["local_path"] is None
 
+    def test_workspace_path_resolved_once_per_execution(self, capsys):
+        """workspace_manager.get_workspace_path can have side effects on the
+        stale-recent path; we must call it at most once per run, not per
+        output event."""
+        wf = self._make_workflow()
+        ex = self._make_exec(wf, local_paths=False)
+        ex.prompt_id = "p"
+        with (
+            patch(
+                "comfy_cli.command.run.workspace_manager.get_workspace_path",
+                return_value=("/fake/workspace", "ok"),
+            ) as mock_ws,
+            patch("comfy_cli.command.run.os.path.isfile", return_value=True),
+        ):
+            for i in range(3):
+                ex.on_executed(
+                    {
+                        "node": "2",
+                        "output": {
+                            "images": [{"filename": f"out{i}.png", "subfolder": "", "type": "output"}],
+                        },
+                    }
+                )
+        assert mock_ws.call_count == 1
+
+    @pytest.mark.parametrize(
+        "subfolder,filename",
+        [
+            ("..", "evil.png"),
+            ("../../etc", "passwd"),
+            ("/etc", "passwd"),
+            ("foo/../..", "escape.png"),
+        ],
+    )
+    def test_local_path_rejects_subfolder_escape(self, capsys, subfolder, filename):
+        """Server-controlled subfolder/filename must not produce a local_path
+        outside <ws>/<type>/."""
+        wf = self._make_workflow()
+        ex = self._make_exec(wf, local_paths=False)
+        ex.prompt_id = "p"
+        with (
+            patch(
+                "comfy_cli.command.run.workspace_manager.get_workspace_path",
+                return_value=("/fake/workspace", "ok"),
+            ),
+            patch("comfy_cli.command.run.os.path.isfile", return_value=True),
+        ):
+            ex.on_executed(
+                {
+                    "node": "2",
+                    "output": {
+                        "images": [{"filename": filename, "subfolder": subfolder, "type": "output"}],
+                    },
+                }
+            )
+        ev = json.loads(capsys.readouterr().out.strip())
+        assert ev["outputs"][0]["local_path"] is None
+
+    def test_local_path_accepts_legitimate_subfolder(self, capsys):
+        wf = self._make_workflow()
+        ex = self._make_exec(wf, local_paths=False)
+        ex.prompt_id = "p"
+        with (
+            patch(
+                "comfy_cli.command.run.workspace_manager.get_workspace_path",
+                return_value=("/fake/workspace", "ok"),
+            ),
+            patch("comfy_cli.command.run.os.path.isfile", return_value=True),
+        ):
+            ex.on_executed(
+                {
+                    "node": "2",
+                    "output": {
+                        "images": [{"filename": "out.png", "subfolder": "my/nested/dir", "type": "output"}],
+                    },
+                }
+            )
+        ev = json.loads(capsys.readouterr().out.strip())
+        assert ev["outputs"][0]["local_path"] == "/fake/workspace/output/my/nested/dir/out.png"
+
     def test_object_info_timeout_routes_to_connection_error(self, capsys):
         """fetch_object_info(timeout → connection_error). Previously untested."""
         ui_wf = {

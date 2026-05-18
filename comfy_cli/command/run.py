@@ -329,6 +329,13 @@ def execute(
     api_key: str | None = None,
     json_mode: bool = False,
 ):
+    # `0.0.0.0` is a wildcard bind, not a connect address. macOS / Windows
+    # clients can't reach it; on Linux it happens to resolve to a loopback.
+    # Substitute the canonical loopback so every downstream use (server
+    # probe, /prompt POST, emitted /view URLs) is portable.
+    if host == "0.0.0.0":
+        host = "127.0.0.1"
+
     emitter = JsonEmitter(json_mode=json_mode)
     workflow_name = os.path.abspath(os.path.expanduser(workflow))
 
@@ -560,6 +567,11 @@ class WorkflowExecution:
         # Default to a no-op emitter so internal call sites don't need to
         # branch on whether json mode is active.
         self.emitter = emitter if emitter is not None else JsonEmitter(json_mode=False)
+        # Lazy-resolved once per run; workspace_manager.get_workspace_path()
+        # can have side effects (printing warnings, writing config) on the
+        # stale-recent path, so we call it at most once.
+        self._cached_workspace_path: str | None = None
+        self._workspace_resolved = False
 
     def connect(self):
         self.ws = WebSocket()
@@ -776,22 +788,34 @@ class WorkflowExecution:
         url_params = {"filename": filename, "subfolder": subfolder, "type": output_type}
         return f"http://{self.host}:{self.port}/view?{urllib.parse.urlencode(url_params)}"
 
+    def _resolve_workspace_path(self) -> str | None:
+        if not self._workspace_resolved:
+            try:
+                self._cached_workspace_path = workspace_manager.get_workspace_path()[0]
+            except Exception:
+                self._cached_workspace_path = None
+            self._workspace_resolved = True
+        return self._cached_workspace_path
+
     def _candidate_local_path(self, filename: str, subfolder: str, file_type: str) -> str | None:
         """Best-effort `local_path` for an output. Returns the path only when
         the host is a known same-machine address, the CLI can resolve a
-        workspace, and the file actually exists where we expect it. The
-        existence check guards against multi-install setups where the
-        running ComfyUI uses a different workspace than the CLI resolves."""
+        workspace, the candidate path is confined to that workspace's
+        per-type output dir (server-controlled `subfolder`/`filename`
+        cannot escape), and the file actually exists where we expect it."""
         if not is_local_host(self.host):
             return None
-        try:
-            ws_path = workspace_manager.get_workspace_path()[0]
-        except Exception:
-            return None
+        ws_path = self._resolve_workspace_path()
         if not ws_path:
             return None
         parts = [subfolder, filename] if subfolder else [filename]
-        candidate = os.path.join(ws_path, file_type, *parts)
+        type_root = os.path.normpath(os.path.join(ws_path, file_type))
+        candidate = os.path.normpath(os.path.join(type_root, *parts))
+        # Confine to <ws>/<file_type>/. `os.path.join` resets to absolute
+        # on a `/`-leading arg and `..` segments collapse under normpath —
+        # both can hand us a path outside the workspace.
+        if not (candidate == type_root or candidate.startswith(type_root + os.sep)):
+            return None
         return candidate if os.path.isfile(candidate) else None
 
     def _build_output_object(self, node_id, category, item) -> dict:

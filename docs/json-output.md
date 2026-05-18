@@ -380,7 +380,7 @@ cannot be assigned without a `client_id`).
 | `subfolder`  | str         | Subfolder within the output folder's root (`""` if none)                                                 |
 | `type`       | str         | ComfyUI output folder discriminator. **Open set.** Current ComfyUI versions emit `output`, `temp`, `input`; agents must accept and pass through unknown values. |
 | `url`        | str         | `http(s)://<host>:<port>/view?...` URL — always present                                                  |
-| `local_path` | str \| null | Filesystem path on the same machine, or `null` when the CLI can't verify local access (see below)        |
+| `local_path` | str \| null | Filesystem path on the same machine, or `null` when the CLI can't verify the file exists at that path (see below) |
 
 ### Local paths
 
@@ -403,6 +403,13 @@ thing — `null` rather than a dangling path.
 Pointing at a non-same-machine host (`--host remote.example.com`,
 cloud endpoints, etc.) always yields `null`, since the file lives on a
 machine the CLI can't reach by path.
+
+**Lifetime caveat.** `local_path` is verified at emit time. For
+`type == "output"` the file is durable until you delete it. For
+`type == "temp"` ComfyUI may clean it up on its next launch (and a
+few workflow patterns mutate temp files within a single run), so
+agents should treat a `temp` `local_path` as read-immediately-only —
+don't store it and read it minutes later.
 
 The `url` field is always populated and is the only universally-safe
 way to fetch the bytes. A non-null `local_path` is a stronger promise

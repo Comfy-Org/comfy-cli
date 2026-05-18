@@ -727,3 +727,33 @@ class TestRunCommandWiring:
     def test_no_background_no_overrides_sets_local_paths_false(self):
         call = self._invoke_run(None, None, None)
         assert call.args[5] is False
+
+
+class TestWildcardHostSubstitution:
+    """0.0.0.0 is a wildcard bind that macOS/Windows clients can't connect to;
+    execute() substitutes it with the canonical loopback so downstream uses
+    (server probe, /prompt POST, emitted URLs) are portable."""
+
+    def test_zero_zero_zero_zero_substituted_at_entry(self, workflow_file):
+        captured = {}
+
+        def fake_check(port, host, *args, **kwargs):
+            captured["check_host"] = host
+            return False  # short-circuits execute() with a clean exit
+
+        with patch("comfy_cli.command.run.check_comfy_server_running", side_effect=fake_check):
+            with pytest.raises(typer.Exit):
+                execute(workflow_file, host="0.0.0.0", port=8188, json_mode=True)
+        assert captured["check_host"] == "127.0.0.1"
+
+    def test_other_local_hosts_not_substituted(self, workflow_file):
+        captured = {}
+
+        def fake_check(port, host, *args, **kwargs):
+            captured["check_host"] = host
+            return False
+
+        with patch("comfy_cli.command.run.check_comfy_server_running", side_effect=fake_check):
+            with pytest.raises(typer.Exit):
+                execute(workflow_file, host="localhost", port=8188, json_mode=True)
+        assert captured["check_host"] == "localhost"
