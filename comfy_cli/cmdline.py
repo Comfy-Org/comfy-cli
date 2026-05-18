@@ -423,10 +423,25 @@ def update(
         rprint(f"[yellow]Failed to update node id cache: {e}[/yellow]")
 
 
-@app.command(help="Run API workflow file using the ComfyUI launched by `comfy launch --background`")
+@app.command(
+    help=(
+        "Run a workflow on the ComfyUI launched by `comfy launch --background`. "
+        "Accepts both ComfyUI API format and exported UI workflow JSON; "
+        "UI workflows are converted to API format client-side via /object_info."
+    )
+)
 @tracking.track_command()
 def run(
-    workflow: Annotated[str, typer.Option(help="Path to the workflow API json file.")],
+    workflow: Annotated[
+        str,
+        typer.Option(
+            help=(
+                "Path to the workflow JSON file. Both ComfyUI API format and "
+                "exported UI format are accepted; UI workflows are converted "
+                "to API format client-side."
+            )
+        ),
+    ],
     wait: Annotated[
         bool,
         typer.Option(help="If the command should wait until execution completes."),
@@ -476,7 +491,9 @@ def run(
                 "Emit NDJSON events to stdout instead of human-readable output. "
                 "One JSON object per line, terminated by \\n. See docs/json-output.md "
                 "for the event reference and stability contract. In this mode, "
-                "--verbose has no effect and Rich progress is suppressed."
+                "--verbose has no effect and Rich progress is suppressed. "
+                "Workflow input accepts both API and UI format JSON (UI input "
+                "triggers a `converted` event before `queued`)."
             ),
         ),
     ] = False,

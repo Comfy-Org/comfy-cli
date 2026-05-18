@@ -414,10 +414,13 @@ def execute(
             if json_mode:
                 emitter.emit_failed(
                     "workflow_format_invalid",
-                    "Workflow file does not appear to be an API workflow JSON",
+                    "Workflow file is neither a ComfyUI API workflow nor an exported UI workflow",
                 )
             else:
-                pprint("[bold red]Specified workflow does not appear to be an API workflow json file[/bold red]")
+                pprint(
+                    "[bold red]Specified workflow is neither a ComfyUI API workflow "
+                    "nor an exported UI workflow[/bold red]"
+                )
             raise typer.Exit(code=1)
         workflow = validated
         emitter.set_workflow(workflow)

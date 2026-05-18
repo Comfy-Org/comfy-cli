@@ -30,6 +30,15 @@ machine-readable mode:
 In `--json` mode, `--verbose` has no effect: agents receive the full event
 stream regardless.
 
+**Workflow input format.** `--workflow` accepts both the ComfyUI **API
+format** (the canonical `{node_id: {class_type, inputs, ...}}` graph
+produced by "Save (API Format)") and the **exported UI format** (the
+`{nodes: [...], links: [...]}` shape produced by "Save"). UI workflows
+are converted to API format client-side via `/object_info` before
+queuing; conversion is signalled by a [`converted`](#converted) event
+emitted before [`queued`](#queued). API-format input does not produce a
+`converted` event.
+
 All duration fields in this contract are floats representing seconds.
 Numeric count fields (e.g., `node_progress.value` / `max`) are JSON
 `number` and may be int or float depending on the underlying node.
