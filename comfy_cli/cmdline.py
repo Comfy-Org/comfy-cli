@@ -469,7 +469,7 @@ def run(
                 "indefinitely."
             ),
         ),
-    ] = 30,
+    ] = 120,
     api_key: Annotated[
         str | None,
         typer.Option(
