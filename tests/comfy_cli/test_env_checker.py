@@ -52,11 +52,17 @@ class TestCheckComfyServerRunning:
     def test_custom_port_and_host(self, mock_get):
         mock_get.return_value.status_code = 200
         check_comfy_server_running(port=9999, host="0.0.0.0")
-        # `timeout` is passed defensively so a hung server doesn't block the
-        # caller indefinitely; default value is unimportant here.
         mock_get.assert_called_once()
         assert mock_get.call_args.args == ("http://0.0.0.0:9999/history",)
-        assert "timeout" in mock_get.call_args.kwargs
+        # Pin the default timeout — a silent change to this value would
+        # alter user-visible "is the server up?" behaviour on slow hosts.
+        assert mock_get.call_args.kwargs["timeout"] == 5.0
+
+    @patch("comfy_cli.env_checker.requests.get")
+    def test_caller_can_override_timeout(self, mock_get):
+        mock_get.return_value.status_code = 200
+        check_comfy_server_running(port=8188, host="127.0.0.1", timeout=42)
+        assert mock_get.call_args.kwargs["timeout"] == 42
 
 
 class TestEnvChecker:
