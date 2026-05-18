@@ -754,20 +754,17 @@ class WorkflowExecution:
         pprint(f"{type} : {title}")
 
     def format_image_path(self, img):
-        """Build a single (local_path|url) string for the legacy human
-        output. Prefers a clickable local path when the host is a known
-        loopback, the workspace resolves, the path stays inside the
-        workspace's per-type output dir, and the file exists on disk.
-        Otherwise falls back to a /view URL."""
+        """Build a single human-readable path string for the legacy text
+        output. Prefers a clickable absolute filesystem path when the
+        host is a known loopback, the workspace resolves, the path stays
+        inside the workspace's per-type output dir, and the file exists
+        on disk. Otherwise falls back to a /view URL."""
         filename = img["filename"]
         subfolder = img.get("subfolder") or ""
         output_type = img.get("type") or "output"
 
         if self.host in ("127.0.0.1", "localhost", "::1", "[::1]"):
-            try:
-                ws_path = workspace_manager.get_workspace_path()[0]
-            except Exception:
-                ws_path = None
+            ws_path = self._text_mode_workspace_path()
             if ws_path:
                 parts = [subfolder, filename] if subfolder else [filename]
                 type_root = os.path.normpath(os.path.join(ws_path, output_type))
@@ -777,6 +774,17 @@ class WorkflowExecution:
 
         url_params = {"filename": filename, "subfolder": subfolder, "type": output_type}
         return f"http://{self.host}:{self.port}/view?{urllib.parse.urlencode(url_params)}"
+
+    def _text_mode_workspace_path(self) -> str | None:
+        # workspace_manager.get_workspace_path() can print a warning and
+        # write config on the stale-recent path. Memoize so a workflow
+        # with N outputs doesn't repeat the side effects N times.
+        if not hasattr(self, "_ws_path_cached"):
+            try:
+                self._ws_path_cached = workspace_manager.get_workspace_path()[0]
+            except Exception:
+                self._ws_path_cached = None
+        return self._ws_path_cached
 
     def _build_output_object(self, node_id, category, item) -> dict:
         """Construct a structured Output dict for the JSON contract."""
