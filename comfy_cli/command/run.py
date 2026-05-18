@@ -290,19 +290,18 @@ def fetch_object_info(host, port, timeout, emitter=None):
             pprint(f"[bold red]Failed to fetch /object_info (HTTP {e.code}): {body_text[:500]}[/bold red]")
         raise typer.Exit(code=1) from e
     except urllib.error.URLError as e:
+        msg = f"Failed to fetch /object_info from {host}:{port}: {e.reason} (override with --host / --port)"
         if json_mode:
-            emitter.emit_failed("connection_error", f"Failed to fetch /object_info: {e.reason}")
+            emitter.emit_failed("connection_error", msg)
         else:
-            pprint(f"[bold red]Failed to fetch /object_info: {e.reason}[/bold red]")
+            pprint(f"[bold red]{msg}[/bold red]")
         raise typer.Exit(code=1) from e
     except TimeoutError as e:
+        msg = f"Failed to fetch /object_info from {host}:{port}: timed out after {timeout}s (override with --host / --port)"
         if json_mode:
-            emitter.emit_failed(
-                "connection_error",
-                f"Failed to fetch /object_info: timed out after {timeout}s",
-            )
+            emitter.emit_failed("connection_error", msg)
         else:
-            pprint(f"[bold red]Failed to fetch /object_info: timed out after {timeout}s[/bold red]")
+            pprint(f"[bold red]{msg}[/bold red]")
         raise typer.Exit(code=1) from e
     try:
         return json.loads(body)
@@ -344,13 +343,11 @@ def execute(
         raise typer.Exit(code=1)
 
     if not check_comfy_server_running(port, host):
+        msg = f"ComfyUI not running at {host}:{port} (override with --host / --port)"
         if json_mode:
-            emitter.emit_failed(
-                "connection_error",
-                f"ComfyUI not running on specified address ({host}:{port})",
-            )
+            emitter.emit_failed("connection_error", msg)
         else:
-            pprint(f"[bold red]ComfyUI not running on specified address ({host}:{port})[/bold red]")
+            pprint(f"[bold red]{msg}[/bold red]")
         raise typer.Exit(code=1)
 
     try:
@@ -589,27 +586,27 @@ class WorkflowExecution:
             raise typer.Exit(code=1) from e
         except urllib.error.URLError as e:
             self._stop_progress()
+            msg = f"Cannot reach server at {self.host}:{self.port}: {e.reason}"
             if self.emitter.json_mode:
-                self.emitter.emit_failed(
-                    "connection_error",
-                    f"Cannot reach server: {e.reason}",
-                )
+                self.emitter.emit_failed("connection_error", msg)
             else:
-                pprint(f"[bold red]Cannot reach server: {e.reason}[/bold red]")
+                pprint(f"[bold red]{msg}[/bold red]")
             raise typer.Exit(code=1) from e
         except TimeoutError as e:
             self._stop_progress()
+            msg = f"Connection to {self.host}:{self.port} timed out: {e}"
             if self.emitter.json_mode:
-                self.emitter.emit_failed("connection_error", f"Connection timed out: {e}")
+                self.emitter.emit_failed("connection_error", msg)
             else:
-                pprint(f"[bold red]Connection timed out: {e}[/bold red]")
+                pprint(f"[bold red]{msg}[/bold red]")
             raise typer.Exit(code=1) from e
         except OSError as e:
             self._stop_progress()
+            msg = f"Network error contacting {self.host}:{self.port}: {e}"
             if self.emitter.json_mode:
-                self.emitter.emit_failed("connection_error", f"Network error contacting server: {e}")
+                self.emitter.emit_failed("connection_error", msg)
             else:
-                pprint(f"[bold red]Network error contacting server: {e}[/bold red]")
+                pprint(f"[bold red]{msg}[/bold red]")
             raise typer.Exit(code=1) from e
 
         try:
@@ -772,12 +769,30 @@ class WorkflowExecution:
         subfolder = img.get("subfolder") or ""
         output_type = img.get("type") or "output"
 
-        if self.local_paths and is_local_host(self.host):
-            display_name = os.path.join(subfolder, filename) if subfolder else filename
-            return os.path.join(workspace_manager.get_workspace_path()[0], output_type, display_name)
+        candidate = self._candidate_local_path(filename, subfolder, output_type)
+        if candidate is not None:
+            return candidate
 
         url_params = {"filename": filename, "subfolder": subfolder, "type": output_type}
         return f"http://{self.host}:{self.port}/view?{urllib.parse.urlencode(url_params)}"
+
+    def _candidate_local_path(self, filename: str, subfolder: str, file_type: str) -> str | None:
+        """Best-effort `local_path` for an output. Returns the path only when
+        the host is a known same-machine address, the CLI can resolve a
+        workspace, and the file actually exists where we expect it. The
+        existence check guards against multi-install setups where the
+        running ComfyUI uses a different workspace than the CLI resolves."""
+        if not is_local_host(self.host):
+            return None
+        try:
+            ws_path = workspace_manager.get_workspace_path()[0]
+        except Exception:
+            return None
+        if not ws_path:
+            return None
+        parts = [subfolder, filename] if subfolder else [filename]
+        candidate = os.path.join(ws_path, file_type, *parts)
+        return candidate if os.path.isfile(candidate) else None
 
     def _build_output_object(self, node_id, category, item) -> dict:
         """Construct a structured Output dict for the JSON contract."""
@@ -788,18 +803,7 @@ class WorkflowExecution:
         url_params = {"filename": filename, "subfolder": subfolder, "type": file_type}
         url = f"http://{self.host}:{self.port}/view?{urllib.parse.urlencode(url_params)}"
 
-        local_path = None
-        if self.local_paths and is_local_host(self.host):
-            try:
-                ws_path = workspace_manager.get_workspace_path()[0]
-            except Exception:
-                ws_path = None
-            if ws_path:
-                parts = []
-                if subfolder:
-                    parts.append(subfolder)
-                parts.append(filename)
-                local_path = os.path.join(ws_path, file_type, *parts)
+        local_path = self._candidate_local_path(filename, subfolder, file_type)
 
         return {
             "category": category,

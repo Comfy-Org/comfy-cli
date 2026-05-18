@@ -385,25 +385,24 @@ cannot be assigned without a `client_id`).
 ### Local paths
 
 `local_path` is non-null only when **all** of:
-- `comfy launch --background` registered a running background instance, and
-- the resolved endpoint (after applying any `--host` / `--port`
-  overrides) matches that recorded background entry, with the loopback
-  aliases `127.0.0.1` and `localhost` (and `::1` / `[::1]`) treated as
-  equivalent for the match, and
 - the resolved host is one of the known same-machine addresses
   (case-insensitive): `127.0.0.1`, `localhost`, `::1`, `[::1]`, or
   `0.0.0.0`, and
-- the CLI can resolve the running workspace's filesystem path (the
-  workspace lookup did not fail).
+- the CLI can resolve a workspace filesystem path (via `comfy launch`,
+  `--workspace`, the most-recent workspace, or the default), and
+- a regular file actually exists at the computed path
+  (`<workspace>/<type>/<subfolder>/<filename>`) at emit time.
 
-Equivalently: passing `--host 127.0.0.1`, `--host localhost`, or
-`--port <bg_port>` that match the recorded background is OK —
-`local_path` is still filled in. Passing a `--host` or `--port` that
-diverges from the background disqualifies `local_path`, because that
-other endpoint may be serving a different workspace the CLI can't name.
-Pointing at a non-same-machine host (`--host remote.example.com`, cloud
-endpoints, etc.) also yields `null`, since the file lives on a machine
-the CLI can't reach by path.
+The existence check is what makes `local_path` a strong promise rather
+than a structural guess. If the running ComfyUI is using a different
+workspace than the one the CLI resolves (e.g., two installs on the
+same machine), the computed path won't resolve to a real file and the
+field is `null`. If you cleared the output dir between runs, same
+thing — `null` rather than a dangling path.
+
+Pointing at a non-same-machine host (`--host remote.example.com`,
+cloud endpoints, etc.) always yields `null`, since the file lives on a
+machine the CLI can't reach by path.
 
 The `url` field is always populated and is the only universally-safe
 way to fetch the bytes. A non-null `local_path` is a stronger promise

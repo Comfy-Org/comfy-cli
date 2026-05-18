@@ -1074,14 +1074,17 @@ class TestErrorPathCoverage:
             emitter=e,
         )
 
-    def test_local_path_populated_when_local_paths_true(self, capsys):
-        """Positive case: local_paths=True + valid workspace path → local_path filled."""
+    def test_local_path_populated_when_file_exists_at_workspace(self, capsys):
+        """Positive case: local host + workspace resolvable + file present on disk."""
         wf = self._make_workflow()
-        ex = self._make_exec(wf, local_paths=True)
+        ex = self._make_exec(wf, local_paths=False)
         ex.prompt_id = "p"
-        with patch(
-            "comfy_cli.command.run.workspace_manager.get_workspace_path",
-            return_value=("/fake/workspace", "ok"),
+        with (
+            patch(
+                "comfy_cli.command.run.workspace_manager.get_workspace_path",
+                return_value=("/fake/workspace", "ok"),
+            ),
+            patch("comfy_cli.command.run.os.path.isfile", return_value=True),
         ):
             ex.on_executed(
                 {
@@ -1095,10 +1098,35 @@ class TestErrorPathCoverage:
         out0 = ev["outputs"][0]
         assert out0["local_path"] == "/fake/workspace/output/sf/out.png"
 
-    def test_local_path_null_when_workspace_unavailable(self, capsys):
-        """local_paths=True but workspace_manager raises → local_path is null (defensive)."""
+    def test_local_path_null_when_file_missing_on_disk(self, capsys):
+        """Workspace resolvable but file doesn't exist at the computed path → null
+        (guards against multi-install setups where the running ComfyUI uses a
+        different workspace than the CLI resolves)."""
         wf = self._make_workflow()
-        ex = self._make_exec(wf, local_paths=True)
+        ex = self._make_exec(wf, local_paths=False)
+        ex.prompt_id = "p"
+        with (
+            patch(
+                "comfy_cli.command.run.workspace_manager.get_workspace_path",
+                return_value=("/fake/workspace", "ok"),
+            ),
+            patch("comfy_cli.command.run.os.path.isfile", return_value=False),
+        ):
+            ex.on_executed(
+                {
+                    "node": "2",
+                    "output": {
+                        "images": [{"filename": "out.png", "subfolder": "", "type": "output"}],
+                    },
+                }
+            )
+        ev = json.loads(capsys.readouterr().out.strip())
+        assert ev["outputs"][0]["local_path"] is None
+
+    def test_local_path_null_when_workspace_unavailable(self, capsys):
+        """workspace_manager raises → local_path is null (defensive)."""
+        wf = self._make_workflow()
+        ex = self._make_exec(wf, local_paths=False)
         ex.prompt_id = "p"
         with patch(
             "comfy_cli.command.run.workspace_manager.get_workspace_path",
@@ -1115,13 +1143,10 @@ class TestErrorPathCoverage:
         ev = json.loads(capsys.readouterr().out.strip())
         assert ev["outputs"][0]["local_path"] is None
 
-    def test_local_path_null_when_host_not_local_despite_local_paths_true(self, capsys):
-        """Defense-in-depth: local_paths=True but host is non-loopback → local_path null.
-
-        Guards against the case where Cloud (or any remote-host wiring)
-        accidentally inherits local_paths=True — we must not surface a
-        filesystem path the agent can't actually open.
-        """
+    def test_local_path_null_when_host_not_local(self, capsys):
+        """Defense for Cloud: non-loopback host yields null even when the
+        workspace lookup would succeed and a file with the same name exists
+        on the local box."""
         wf = self._make_workflow()
         e = JsonEmitter(json_mode=True)
         e.set_workflow(wf)
@@ -1136,9 +1161,12 @@ class TestErrorPathCoverage:
             emitter=e,
         )
         ex.prompt_id = "p"
-        with patch(
-            "comfy_cli.command.run.workspace_manager.get_workspace_path",
-            return_value=("/fake/workspace", "ok"),
+        with (
+            patch(
+                "comfy_cli.command.run.workspace_manager.get_workspace_path",
+                return_value=("/fake/workspace", "ok"),
+            ),
+            patch("comfy_cli.command.run.os.path.isfile", return_value=True),
         ):
             ex.on_executed(
                 {
