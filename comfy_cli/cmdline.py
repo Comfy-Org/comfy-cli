@@ -493,7 +493,10 @@ def run(
                 "for the event reference and stability contract. In this mode, "
                 "--verbose has no effect and Rich progress is suppressed. "
                 "Workflow input accepts both API and UI format JSON (UI input "
-                "triggers a `converted` event before `queued`)."
+                "triggers a `converted` event before `queued`). The converted "
+                "prompt body is always emitted as a `prompt_preview` event "
+                "before `queued`, so agents have a full audit trail of what "
+                "the CLI submitted."
             ),
         ),
     ] = False,

@@ -65,14 +65,14 @@ event.
 The stream takes one of these shapes depending on the workflow format and
 outcome:
 
-| Outcome                           | Stream                                                    |
-| --------------------------------- | --------------------------------------------------------- |
-| Success                           | `[converted]? + queued + [node_*]* + completed`           |
-| `--no-wait` queued                | `[converted]? + queued`                                   |
-| `--print-prompt`                  | `[converted]? + prompt_preview`                           |
-| Failure mid-execution             | `[converted]? + queued + [node_*]* + failed`              |
-| Failure during submission         | `[converted]? + failed`                                   |
-| Failure pre-flight                | `failed`                                                  |
+| Outcome                           | Stream                                                              |
+| --------------------------------- | ------------------------------------------------------------------- |
+| Success                           | `[converted]? + prompt_preview + queued + [node_*]* + completed`    |
+| `--no-wait` queued                | `[converted]? + prompt_preview + queued`                            |
+| `--print-prompt`                  | `[converted]? + prompt_preview` (terminal)                          |
+| Failure mid-execution             | `[converted]? + prompt_preview + queued + [node_*]* + failed`       |
+| Failure during submission         | `[converted]? + prompt_preview + failed`                            |
+| Failure pre-flight                | `failed`                                                            |
 
 Where `[node_*]*` is zero or more interleaved `node_cached`,
 `node_executing`, `node_progress`, and `node_executed` events. `[X]?`
@@ -99,7 +99,7 @@ feature-detect by field presence rather than version comparison.
 | Event             | When                                              | Terminal |
 | ----------------- | ------------------------------------------------- | -------- |
 | `converted`       | UI-format workflow was client-side converted      |          |
-| `prompt_preview`  | `--print-prompt` mode: the would-be prompt body   | ✓        |
+| `prompt_preview`  | The API-format prompt body about to be submitted  | (✓ in `--print-prompt`) |
 | `queued`          | Server accepted the prompt (HTTP 200 on `/prompt`)| (✓ in `--no-wait`) |
 | `node_cached`     | Node hit the execution cache and was skipped      |          |
 | `node_executing`  | Node started execution                            |          |
@@ -130,10 +130,17 @@ format.
 
 ### `prompt_preview`
 
-Terminal event for `--print-prompt` mode. Emitted in place of `queued` +
-`node_*` + `completed`, after the optional `converted` event when the
-input was UI-format. Carries the API-format workflow body that *would*
-have been sent to `POST /prompt`. The CLI exits 0 right after emitting.
+**Always emitted in `--json` mode**, immediately after the optional
+`converted` event and immediately before `queued`. Carries the
+API-format workflow body the CLI is about to POST to `/prompt` — the
+same dict that would land in the request's `prompt` field. Gives
+agents a complete audit trail of what was submitted, useful for
+debugging conversions, logging, and post-mortem analysis, without
+needing a separate run.
+
+Under `--print-prompt` this event is also the **terminal** event:
+the CLI emits it and exits 0 without queuing. In normal flow it's
+informational and execution continues with `queued`.
 
 ```json
 {"event": "prompt_preview", "schema_version": 1, "prompt": {"1": {"class_type": "EmptyLatentImage", "inputs": {"width": 512, "height": 512, "batch_size": 1}}}}
@@ -143,11 +150,13 @@ have been sent to `POST /prompt`. The CLI exits 0 right after emitting.
 | ---------------- | ---- | ---------------------------------------------------------------------- |
 | `event`          | str  | `"prompt_preview"`                                                     |
 | `schema_version` | int  | `1`                                                                    |
-| `prompt`         | dict | The API-format workflow graph keyed by node id. Same shape as the `prompt` field POSTed to `/prompt`. Does NOT include `client_id` or `extra_data` (those are runtime fields, not part of the workflow). |
+| `prompt`         | dict | The API-format workflow graph keyed by node id. Same shape as the `prompt` field POSTed to `/prompt`. Does NOT include `client_id` or `extra_data` (those are runtime fields, not part of the workflow — so any `--api-key` value never appears here). |
 
-For UI-format input, `/object_info` must still be reachable (the
-converter consults it). For API-format input, `--print-prompt` makes
-no server requests at all and works against an offline ComfyUI host.
+For UI-format input under `--print-prompt`, `/object_info` must still
+be reachable (the converter consults it). For API-format input under
+`--print-prompt`, no server requests are made and the command works
+fully offline. In normal (non-`--print-prompt`) flow the server is
+always contacted regardless, since execution follows.
 
 ### `queued`
 
@@ -554,6 +563,7 @@ trailing entries.
 
 ```json
 {"event":"converted","schema_version":1,"node_count":2}
+{"event":"prompt_preview","schema_version":1,"prompt":{"1":{"class_type":"GeminiNanoBanana2","inputs":{"prompt":"a banana","width":2048,"height":2048},"_meta":{"title":"Nano Banana 2"}},"2":{"class_type":"SaveImage","inputs":{"filename_prefix":"banana_test","images":["1",0]}}}}
 {"event":"queued","schema_version":1,"prompt_id":"9b1c…","client_id":"fe2a…","validation_warnings":[],"nodes":[{"node_id":"1","class_type":"GeminiNanoBanana2","title":"Nano Banana 2"},{"node_id":"2","class_type":"SaveImage","title":"Save Image"}]}
 {"event":"node_executing","schema_version":1,"node_id":"1","class_type":"GeminiNanoBanana2","title":"Nano Banana 2"}
 {"event":"node_progress","schema_version":1,"node_id":"1","class_type":"GeminiNanoBanana2","title":"Nano Banana 2","value":1,"max":4}
@@ -573,6 +583,7 @@ server doesn't send an `executed` ws message for it.
 ### `--no-wait` (API-format input)
 
 ```json
+{"event":"prompt_preview","schema_version":1,"prompt":{"1":{"class_type":"GeminiNanoBanana2","inputs":{"prompt":"a banana","width":2048,"height":2048}},"2":{"class_type":"SaveImage","inputs":{"filename_prefix":"banana_test","images":["1",0]}}}}
 {"event":"queued","schema_version":1,"prompt_id":"9b1c…","client_id":"fe2a…","validation_warnings":[],"nodes":[{"node_id":"1","class_type":"GeminiNanoBanana2","title":"Nano Banana 2"},{"node_id":"2","class_type":"SaveImage","title":"Save Image"}]}
 ```
 
@@ -591,6 +602,7 @@ Exit code: `1`.
 
 ```json
 {"event":"converted","schema_version":1,"node_count":2}
+{"event":"prompt_preview","schema_version":1,"prompt":{"1":{"class_type":"GeminiNanoBanana2","inputs":{"prompt":"a banana","resolution":"5K"}},"2":{"class_type":"SaveImage","inputs":{"filename_prefix":"banana_test","images":["1",0]}}}}
 {"event":"failed","schema_version":1,"prompt_id":null,"client_id":"fe2a…","elapsed_seconds":0.45,"error":{"kind":"validation_error","message":"Value not in list","node_errors":[{"node_id":"1","errors":[{"type":"value_not_in_list","message":"Value not in list","details":"resolution: '5K' not in ['1K','2K','4K']","extra_info":{"input_name":"resolution","received_value":"5K"}}],"dependent_outputs":["2"],"class_type":"GeminiNanoBanana2"}]}}
 ```
 
@@ -599,6 +611,7 @@ Exit code: `1`.
 ### Failure: node raised during execution
 
 ```json
+{"event":"prompt_preview","schema_version":1,"prompt":{"1":{"class_type":"GeminiNanoBanana2","inputs":{"prompt":"a banana","width":2048,"height":2048}},"2":{"class_type":"SaveImage","inputs":{"filename_prefix":"banana_test","images":["1",0]}}}}
 {"event":"queued","schema_version":1,"prompt_id":"9b1c…","client_id":"fe2a…","validation_warnings":[],"nodes":[{"node_id":"1","class_type":"GeminiNanoBanana2","title":"Nano Banana 2"},{"node_id":"2","class_type":"SaveImage","title":"Save Image"}]}
 {"event":"node_executing","schema_version":1,"node_id":"1","class_type":"GeminiNanoBanana2","title":"Nano Banana 2"}
 {"event":"failed","schema_version":1,"prompt_id":"9b1c…","client_id":"fe2a…","elapsed_seconds":2.1,"error":{"kind":"execution_error","message":"API key invalid","node_id":"1","class_type":"GeminiNanoBanana2","title":"Nano Banana 2","exception_type":"RuntimeError","traceback":"  File \"/path/to/node.py\", line 42, in execute\n    raise RuntimeError(\"API key invalid\")\n"}}
@@ -609,6 +622,7 @@ Exit code: `1`.
 ### Failure: websocket timeout
 
 ```json
+{"event":"prompt_preview","schema_version":1,"prompt":{"1":{"class_type":"GeminiNanoBanana2","inputs":{"prompt":"a banana","width":2048,"height":2048}},"2":{"class_type":"SaveImage","inputs":{"filename_prefix":"banana_test","images":["1",0]}}}}
 {"event":"queued","schema_version":1,"prompt_id":"9b1c…","client_id":"fe2a…","validation_warnings":[],"nodes":[{"node_id":"1","class_type":"GeminiNanoBanana2","title":"Nano Banana 2"},{"node_id":"2","class_type":"SaveImage","title":"Save Image"}]}
 {"event":"node_executing","schema_version":1,"node_id":"1","class_type":"GeminiNanoBanana2","title":"Nano Banana 2"}
 {"event":"failed","schema_version":1,"prompt_id":"9b1c…","client_id":"fe2a…","elapsed_seconds":30.0,"error":{"kind":"timeout","message":"WebSocket timed out after 30s waiting for server response","timeout_seconds":30.0}}
@@ -619,6 +633,7 @@ Exit code: `1`.
 ### Failure: workflow interrupted
 
 ```json
+{"event":"prompt_preview","schema_version":1,"prompt":{"1":{"class_type":"GeminiNanoBanana2","inputs":{"prompt":"a banana","width":2048,"height":2048}},"2":{"class_type":"SaveImage","inputs":{"filename_prefix":"banana_test","images":["1",0]}}}}
 {"event":"queued","schema_version":1,"prompt_id":"9b1c…","client_id":"fe2a…","validation_warnings":[],"nodes":[{"node_id":"1","class_type":"GeminiNanoBanana2","title":"Nano Banana 2"},{"node_id":"2","class_type":"SaveImage","title":"Save Image"}]}
 {"event":"node_executing","schema_version":1,"node_id":"1","class_type":"GeminiNanoBanana2","title":"Nano Banana 2"}
 {"event":"failed","schema_version":1,"prompt_id":"9b1c…","client_id":"fe2a…","elapsed_seconds":3.2,"error":{"kind":"interrupted","message":"Workflow execution was interrupted"}}

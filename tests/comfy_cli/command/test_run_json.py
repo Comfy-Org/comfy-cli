@@ -351,17 +351,19 @@ class TestPreFlightFailures:
 
 
 class TestSuccessfulRun:
-    def test_no_wait_emits_queued_only(self, workflow_file, capsys):
+    def test_no_wait_emits_prompt_preview_then_queued(self, workflow_file, capsys):
         with (
             patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),
             patch("comfy_cli.command.run.request.urlopen") as mock_open,
         ):
             mock_open.return_value.read.return_value = json.dumps({"prompt_id": "p123"}).encode()
             events = _run_execute_capture(workflow_file, capsys, wait=False)
-        assert len(events) == 1
-        assert events[0]["event"] == "queued"
-        assert events[0]["prompt_id"] == "p123"
-        assert events[0]["validation_warnings"] == []
+        # prompt_preview is always emitted in --json before queued so agents
+        # have a full audit trail of the submitted body.
+        assert [e["event"] for e in events] == ["prompt_preview", "queued"]
+        assert events[0]["prompt"]
+        assert events[1]["prompt_id"] == "p123"
+        assert events[1]["validation_warnings"] == []
 
     def test_completed_event_after_success(self, workflow_file, capsys):
         """Mocked WS flow → expect queued + node_* + completed."""
@@ -795,6 +797,74 @@ class TestWorkflowPathExpansion:
         # The error message should name the resolved path so the user can
         # see exactly where we looked.
         assert str(tmp_path) in events[0]["error"]["message"]
+
+
+class TestPromptPreviewAlwaysEmitted:
+    """In JSON mode the converted prompt body is always emitted as a
+    `prompt_preview` event before `queued`. Agents debugging conversions
+    or building an audit trail get full visibility without re-running
+    with a flag."""
+
+    def test_api_input_emits_prompt_preview_before_queued(self, workflow_file, capsys):
+        with (
+            patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),
+            patch("comfy_cli.command.run.request.urlopen") as mock_open,
+            patch("comfy_cli.command.run.WebSocket") as MockWs,
+        ):
+            mock_open.return_value.read.return_value = json.dumps({"prompt_id": "p"}).encode()
+            ws_instance = MagicMock()
+            MockWs.return_value = ws_instance
+            ws_instance.recv.side_effect = [
+                json.dumps({"type": "executing", "data": {"prompt_id": "p", "node": None}}),
+            ]
+            events = _run_execute_capture(workflow_file, capsys)
+        kinds = [e["event"] for e in events]
+        assert kinds[0] == "prompt_preview"
+        assert "queued" in kinds
+        assert kinds.index("prompt_preview") < kinds.index("queued")
+        assert events[0]["prompt"]["1"]["class_type"] == "EmptyLatentImage"
+
+    def test_ui_input_emits_converted_then_prompt_preview_then_queued(self, ui_workflow_file, capsys):
+        with (
+            patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),
+            patch("comfy_cli.command.run.fetch_object_info", return_value=OBJECT_INFO),
+            patch("comfy_cli.command.run.request.urlopen") as mock_post,
+            patch("comfy_cli.command.run.WebSocket") as MockWs,
+        ):
+            mock_post.return_value.read.return_value = json.dumps({"prompt_id": "p"}).encode()
+            ws_instance = MagicMock()
+            MockWs.return_value = ws_instance
+            ws_instance.recv.side_effect = [
+                json.dumps({"type": "executing", "data": {"prompt_id": "p", "node": None}}),
+            ]
+            events = _run_execute_capture(ui_workflow_file, capsys)
+        kinds = [e["event"] for e in events]
+        # Ordering: converted, prompt_preview, queued (then node_* / completed).
+        c = kinds.index("converted")
+        p = kinds.index("prompt_preview")
+        q = kinds.index("queued")
+        assert c < p < q
+
+    def test_prompt_preview_excludes_client_id_and_extra_data(self, workflow_file, capsys):
+        # The audit trail must carry only the workflow graph, never the
+        # POST envelope's runtime fields (client_id, extra_data with api_key).
+        with (
+            patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),
+            patch("comfy_cli.command.run.request.urlopen") as mock_open,
+            patch("comfy_cli.command.run.WebSocket") as MockWs,
+        ):
+            mock_open.return_value.read.return_value = json.dumps({"prompt_id": "p"}).encode()
+            ws_instance = MagicMock()
+            MockWs.return_value = ws_instance
+            ws_instance.recv.side_effect = [
+                json.dumps({"type": "executing", "data": {"prompt_id": "p", "node": None}}),
+            ]
+            events = _run_execute_capture(workflow_file, capsys, api_key="sk-secret")
+        preview = next(e for e in events if e["event"] == "prompt_preview")
+        prompt = preview["prompt"]
+        assert "client_id" not in prompt
+        assert "extra_data" not in prompt
+        assert "sk-secret" not in json.dumps(prompt)
 
 
 class TestPrintPrompt:
