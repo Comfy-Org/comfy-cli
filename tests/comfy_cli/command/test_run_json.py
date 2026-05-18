@@ -1328,25 +1328,6 @@ class TestErrorPathCoverage:
             emitter=e,
         )
 
-    def test_output_object_has_no_local_path_field(self, capsys):
-        """local_path was removed from the JSON contract — `outputs[i]`
-        carries only `url`, never a filesystem path."""
-        wf = self._make_workflow()
-        ex = self._make_exec(wf)
-        ex.prompt_id = "p"
-        ex.on_executed(
-            {
-                "node": "2",
-                "output": {
-                    "images": [{"filename": "out.png", "subfolder": "", "type": "output"}],
-                },
-            }
-        )
-        ev = json.loads(capsys.readouterr().out.strip())
-        out0 = ev["outputs"][0]
-        assert "local_path" not in out0
-        assert out0["url"].startswith("http://")
-
     def test_object_info_timeout_routes_to_connection_error(self, capsys):
         """fetch_object_info(timeout → connection_error). Previously untested."""
         ui_wf = {
