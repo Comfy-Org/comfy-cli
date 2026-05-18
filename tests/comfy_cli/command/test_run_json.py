@@ -799,6 +799,72 @@ class TestWorkflowPathExpansion:
         assert str(tmp_path) in events[0]["error"]["message"]
 
 
+class TestCliRunnerIntegration:
+    """End-to-end: the typer entry callback chain (consent prompt, decorators,
+    config init) must not leak any prose to stdout in JSON mode. Direct
+    `execute()` tests bypass this seam; agents on a fresh machine with
+    no recorded consent are exactly where the original prompt-corrupts-stream
+    bug would have hidden."""
+
+    def _make_workflow_file(self, tmp_path):
+        wf_path = tmp_path / "wf.json"
+        wf_path.write_text(json.dumps({"1": {"class_type": "X", "inputs": {}}}))
+        return str(wf_path)
+
+    def test_cli_json_print_prompt_emits_clean_ndjson(self, tmp_path):
+        # Smoke: default config state, --json --print-prompt → every stdout
+        # line is valid JSON with `event` and `schema_version`.
+        from typer.testing import CliRunner
+
+        from comfy_cli.cmdline import app
+
+        runner = CliRunner()  # non-TTY by default
+        result = runner.invoke(
+            app, ["run", "--workflow", self._make_workflow_file(tmp_path), "--json", "--print-prompt"]
+        )
+        assert result.exit_code == 0, f"stdout={result.stdout!r}\nexc={result.exception!r}"
+        lines = [line for line in result.stdout.splitlines() if line.strip()]
+        assert lines, "expected at least one NDJSON line"
+        for line in lines:
+            event = json.loads(line)
+            assert "event" in event
+            assert "schema_version" in event
+        # Consent prompt text must not appear.
+        assert "Do you agree" not in result.stdout
+        assert "improve the application" not in result.stdout
+
+    def test_cli_json_with_fresh_consent_state_stays_clean(self, tmp_path):
+        # The exact regression scenario: a fresh machine where consent has
+        # never been recorded. The entry callback enables session-only
+        # tracking via the non-TTY branch (mocked Mixpanel client so no
+        # network), and the resulting stdout must still be clean NDJSON.
+        from typer.testing import CliRunner
+
+        from comfy_cli.cmdline import app
+        from comfy_cli.config_manager import ConfigManager
+
+        _Cls = ConfigManager.__closure__[0].cell_contents
+        cfg_dir = tmp_path / "config"
+        cfg_dir.mkdir()
+        with (
+            patch.object(_Cls, "get_config_path", return_value=str(cfg_dir)),
+            patch("comfy_cli.tracking.mp") as mock_mp,
+        ):
+            mock_mp.track.return_value = None
+            runner = CliRunner()
+            result = runner.invoke(
+                app, ["run", "--workflow", self._make_workflow_file(tmp_path), "--json", "--print-prompt"]
+            )
+        assert result.exit_code == 0, f"stdout={result.stdout!r}\nexc={result.exception!r}"
+        for line in result.stdout.splitlines():
+            if not line.strip():
+                continue
+            event = json.loads(line)
+            assert "event" in event
+        assert "Do you agree" not in result.stdout
+        assert "tracking" not in result.stdout.lower()
+
+
 class TestPromptPreviewAlwaysEmitted:
     """In JSON mode the converted prompt body is always emitted as a
     `prompt_preview` event before `queued`. Agents debugging conversions
