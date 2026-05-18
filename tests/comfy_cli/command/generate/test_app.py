@@ -393,7 +393,7 @@ def test_refresh_writes_cache(runner, monkeypatch, tmp_path):
     assert r.exit_code == 0, r.stdout
     assert "Refreshed" in r.stdout
     assert (tmp_path / "openapi-cache.yml").exists()
-    assert captured["headers"].get("X-Comfy-Env") == "comfy-cli"
+    assert captured["headers"].get("Comfy-Env") == "comfy-cli"
 
 
 def test_refresh_network_failure(runner, monkeypatch):

@@ -305,7 +305,7 @@ def _refresh() -> None:
     url = spec.base_url() + "/openapi.yml"
     try:
         with httpx.Client(timeout=30.0, follow_redirects=True) as cli:
-            r = cli.get(url, headers={"X-Comfy-Env": "comfy-cli", "User-Agent": "comfy-cli/api"})
+            r = cli.get(url, headers={"Comfy-Env": "comfy-cli", "User-Agent": "comfy-cli/api"})
             r.raise_for_status()
     except httpx.HTTPError as e:
         rprint(f"[bold red]Failed to fetch {url}: {e}[/bold red]")

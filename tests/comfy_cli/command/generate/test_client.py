@@ -74,7 +74,7 @@ def test_send_request_uses_x_api_key_for_comfyui_keys(monkeypatch):
     client.send_request(ep, {"prompt": "x", "width": 1, "height": 1}, flags, api_key="comfyui-abc")
     assert captured["headers"]["X-API-Key"] == "comfyui-abc"
     assert "Authorization" not in captured["headers"]
-    assert captured["headers"]["X-Comfy-Env"] == "comfy-cli"
+    assert captured["headers"]["Comfy-Env"] == "comfy-cli"
 
 
 def test_send_request_uses_bearer_for_firebase_tokens(monkeypatch):

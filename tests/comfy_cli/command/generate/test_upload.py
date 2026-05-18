@@ -28,7 +28,7 @@ def test_request_signed_url_posts_hash(monkeypatch):
     assert body["upload_url"] == "https://signed/up"
     assert captured["json"] == {"file_name": "cat.png", "content_type": "image/png", "file_hash": "deadbeef"}
     assert captured["headers"]["X-API-Key"] == "comfyui-test"
-    assert captured["headers"]["X-Comfy-Env"] == "comfy-cli"
+    assert captured["headers"]["Comfy-Env"] == "comfy-cli"
     assert captured["url"].endswith("/customers/storage")
 
 
