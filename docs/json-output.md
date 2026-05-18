@@ -100,7 +100,7 @@ feature-detect by field presence rather than version comparison.
 | ----------------- | ------------------------------------------------- | -------- |
 | `converted`       | UI-format workflow was client-side converted      |          |
 | `prompt_preview`  | `--print-prompt` mode: the would-be prompt body   | ✓        |
-| `queued`          | Server accepted the prompt (HTTP 200 on `/prompt`)|          |
+| `queued`          | Server accepted the prompt (HTTP 200 on `/prompt`)| (✓ in `--no-wait`) |
 | `node_cached`     | Node hit the execution cache and was skipped      |          |
 | `node_executing`  | Node started execution                            |          |
 | `node_progress`   | In-flight progress update for the running node    |          |
@@ -175,7 +175,7 @@ handle, which can be used to correlate against `/history/{prompt_id}`.
 | `prompt_id`           | str            | Server-assigned prompt UUID                                  |
 | `client_id`           | str            | Client-generated UUID (sent with `/prompt`)                  |
 | `validation_warnings` | array of dict  | List of per-node validation issues that ComfyUI reported alongside a successful queue (some output chains validated, others didn't). Same record shape as `validation_error.node_errors` (see below). Empty (`[]`) in the common case. |
-| `nodes`               | array of dict  | Manifest of every node in the submitted (post-conversion) workflow. Each entry has `node_id` (str), `class_type` (str), and `title` (str — `_meta.title` if present, else `class_type`). Lets piped consumers (who don't have the workflow file at hand) render a per-node UI immediately without waiting for `completed`. |
+| `nodes`               | array of dict  | Manifest of every node in the submitted (post-conversion) workflow. Each entry has `node_id` (str), `class_type` (str), and `title` (str — `_meta.title` if present, else `class_type`, else `node_id`). Lets piped consumers (who don't have the workflow file at hand) render a per-node UI immediately without waiting for `completed`. |
 
 The `validation_warnings` field exists specifically for the case where
 ComfyUI's `validate_prompt` returns success because at least one output
@@ -206,7 +206,7 @@ See [completed](#completed) for the resulting semantics of
 | `schema_version` | int  | `1`                                         |
 | `node_id`        | str  | Node key in the workflow dict               |
 | `class_type`     | str  | Node class name                             |
-| `title`          | str  | `_meta.title` if present, else `class_type` |
+| `title`          | str  | `_meta.title` if present, else `class_type`, else `node_id` |
 
 ### `node_executing`
 
@@ -243,7 +243,7 @@ recently-emitted `node_executing` event.
 | `schema_version` | int    | `1`                                                         |
 | `node_id`        | str    | Node currently running                                      |
 | `class_type`     | str    | Node class name (duplicated from the workflow so stateless consumers don't need to track the prior `node_executing`) |
-| `title`          | str    | `_meta.title` if present, else `class_type`                 |
+| `title`          | str    | `_meta.title` if present, else `class_type`, else `node_id`                 |
 | `value`          | number | Current progress. Typically int (step count); some custom nodes emit float (fractional progress) |
 | `max`            | number | Total progress; same caveat as `value`                      |
 
@@ -288,7 +288,7 @@ cached output-bearing node also emits `node_executed` (in addition to
 | `schema_version` | int              | `1`                                         |
 | `node_id`        | str              | Node key                                    |
 | `class_type`     | str              | Node class name                             |
-| `title`          | str              | `_meta.title` if present, else `class_type` |
+| `title`          | str              | `_meta.title` if present, else `class_type`, else `node_id` |
 | `outputs`        | array of Output  | File-like outputs (empty if none)           |
 
 `outputs` is populated by iterating each key in ComfyUI's
@@ -323,7 +323,7 @@ output list, and node-execution metadata.
 | `schema_version`    | int             | `1`                                                          |
 | `prompt_id`         | str             | Server-assigned prompt UUID                                  |
 | `client_id`         | str             | Client-generated UUID                                        |
-| `elapsed_seconds`   | float           | Wall-clock duration from prompt POST                         |
+| `elapsed_seconds`   | float           | Wall-clock duration from start of `comfy run` (same clock as `failed.elapsed_seconds`) |
 | `outputs`           | array of Output | All file-like outputs across all nodes (empty if none)       |
 | `cached_node_ids`   | array of str    | Node IDs the server reported as cached (via `execution_cached`) |
 | `executed_node_ids` | array of str    | Node IDs the server executor touched in this run — the union of every `node_id` that appeared in a `node_executing` or `node_executed` event. Includes intermediate compute nodes (CheckpointLoaderSimple, KSampler, etc.) that don't surface output to the client and don't get a dedicated `node_executed` event, in addition to leaf/output nodes that do. |
@@ -396,10 +396,10 @@ cannot be assigned without a `client_id`).
 | `category`   | str         | Output category as keyed by ComfyUI's `executed.output` dict. **Open set.** Current ComfyUI versions emit values like `images`, `audio`, `3d`, `latents`; agents must accept and pass through unknown values. |
 | `node_id`    | str         | Node that produced the output                                                                            |
 | `class_type` | str         | Node class name                                                                                          |
-| `title`      | str         | `_meta.title` if present, else `class_type`                                                              |
+| `title`      | str         | `_meta.title` if present, else `class_type`, else `node_id`                                                              |
 | `filename`   | str         | Raw filename as reported by the server                                                                   |
-| `subfolder`  | str         | Subfolder within the output folder's root (`""` if none)                                                 |
-| `type`       | str         | ComfyUI output folder discriminator. **Open set.** Current ComfyUI versions emit `output`, `temp`, `input`; agents must accept and pass through unknown values. |
+| `subfolder`  | str         | Subfolder within the output folder's root. `""` if the server omits or empties the field.                |
+| `type`       | str         | ComfyUI output folder discriminator. **Open set.** Current ComfyUI versions emit `output`, `temp`, `input`; agents must accept and pass through unknown values. Defaults to `"output"` if the server omits the field. |
 | `url`        | str         | `http(s)://<host>:<port>/view?...` URL — always present, fetch this to get the bytes |
 
 ### Fetching output bytes
@@ -449,8 +449,8 @@ removed without a schema version bump.
 | `workflow_empty`          | Workflow has no executable nodes (UI conversion produced `{}`, or API workflow is `{}`)       | —                                                  |
 | `conversion_error`        | UI→API converter raised `WorkflowConversionError`                                             | —                                                  |
 | `conversion_crash`        | UI→API converter raised an unexpected exception                                               | `exception_type` (str)                             |
-| `object_info_unavailable` | `/object_info` returned an HTTP error (needed for UI→API conversion)                          | `status_code` (int), `body` (str)                  |
-| `connection_error`        | ComfyUI server not reachable (URLError / pre-queue socket.timeout, including on `/object_info`)| —                                                 |
+| `object_info_unavailable` | `/object_info` returned an HTTP error, or an HTTP 200 with an unparseable body                | `status_code` (int), `body` (str)                  |
+| `connection_error`        | ComfyUI server unreachable: `URLError`, `TimeoutError`, or other `OSError` while contacting it (including on `/object_info`) | —                                |
 | `validation_error`        | Server returned HTTP 400 with `node_errors`                                                   | `node_errors` (array of dict; see below)           |
 | `client_error`            | Server returned an HTTP 4xx response (not validation)                                         | `status_code` (int, 4xx), `body` (str)             |
 | `server_error`            | Server returned an HTTP 5xx response                                                          | `status_code` (int, 5xx), `body` (str)             |
@@ -466,9 +466,10 @@ removed without a schema version bump.
 (e.g., metrics bucketing). The format is whatever ComfyUI sends —
 typically the bare class name for builtins (`RuntimeError`,
 `ValueError`) and a dotted module path for non-builtins
-(`comfy.model_management.InterruptProcessingException`). Agents should
-not key retry or routing logic on `exception_type`; use `error.kind`
-for coarse dispatch and `error.message` for human display.
+(`comfy.model_management.InterruptProcessingException`). May be `""`
+when the server omits it. Agents should not key retry or routing
+logic on `exception_type`; use `error.kind` for coarse dispatch and
+`error.message` for human display.
 
 ### `traceback` field
 
@@ -590,7 +591,7 @@ Exit code: `1`.
 
 ```json
 {"event":"converted","schema_version":1,"node_count":2}
-{"event":"failed","schema_version":1,"prompt_id":null,"client_id":"fe2a…","elapsed_seconds":0.45,"error":{"kind":"validation_error","message":"Workflow failed validation","node_errors":[{"node_id":"1","errors":[{"type":"value_not_in_list","message":"Value not in list","details":"resolution: '5K' not in ['1K','2K','4K']","extra_info":{"input_name":"resolution","received_value":"5K"}}],"dependent_outputs":["2"],"class_type":"GeminiNanoBanana2"}]}}
+{"event":"failed","schema_version":1,"prompt_id":null,"client_id":"fe2a…","elapsed_seconds":0.45,"error":{"kind":"validation_error","message":"Value not in list","node_errors":[{"node_id":"1","errors":[{"type":"value_not_in_list","message":"Value not in list","details":"resolution: '5K' not in ['1K','2K','4K']","extra_info":{"input_name":"resolution","received_value":"5K"}}],"dependent_outputs":["2"],"class_type":"GeminiNanoBanana2"}]}}
 ```
 
 Exit code: `1`.
