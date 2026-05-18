@@ -1,5 +1,6 @@
 import functools
 import logging as logginglib
+import sys
 import uuid
 
 import typer
@@ -29,6 +30,13 @@ user_id = config_manager.get(constants.CONFIG_KEY_USER_ID)
 tracing_id = str(uuid.uuid4())
 workspace_manager = WorkspaceManager()
 
+# Process-scoped opt-in used when running non-interactively before the
+# user has ever recorded a consent choice. Captures agentic usage without
+# persisting the consent flag, so a later interactive run can still
+# prompt the human. The anonymous user_id is persisted separately for
+# stable agent identity in analytics.
+_session_only_tracking = False
+
 app = typer.Typer()
 
 
@@ -50,7 +58,7 @@ def track_event(event_name: str, properties: any = None):
         properties = {}
     logging.debug(f"tracking event called with event_name: {event_name} and properties: {properties}")
     enable_tracking = config_manager.get_bool(constants.CONFIG_KEY_ENABLE_TRACKING)
-    if not enable_tracking:
+    if not enable_tracking and not _session_only_tracking:
         return
 
     try:
@@ -90,15 +98,35 @@ def track_command(sub_command: str = None):
 
 
 def prompt_tracking_consent(skip_prompt: bool = False, default_value: bool = False):
+    global _session_only_tracking, user_id
+
+    if _session_only_tracking:
+        return
+
     tracking_enabled = config_manager.get_bool(constants.CONFIG_KEY_ENABLE_TRACKING)
     if tracking_enabled is not None:
         return
 
     if skip_prompt:
         init_tracking(default_value)
-    else:
-        enable_tracking = ui.prompt_confirm_action("Do you agree to enable tracking to improve the application?", False)
-        init_tracking(enable_tracking)
+        return
+
+    # When stdin or stdout is not a TTY (subprocess pipe, redirect, CI),
+    # blocking on the consent prompt would either hang the caller forever
+    # or corrupt their output stream. Enable tracking for this process and
+    # persist a stable anonymous user_id so repeat agentic usage from the
+    # same machine attributes to one identity. The consent flag itself
+    # stays unset so a later interactive run can still ask the human; if
+    # they consent, init_tracking will reuse this user_id.
+    if not sys.stdin.isatty() or not sys.stdout.isatty():
+        _session_only_tracking = True
+        if user_id is None:
+            user_id = str(uuid.uuid4())
+            config_manager.set(constants.CONFIG_KEY_USER_ID, user_id)
+        return
+
+    enable_tracking = ui.prompt_confirm_action("Do you agree to enable tracking to improve the application?", False)
+    init_tracking(enable_tracking)
 
 
 def init_tracking(enable_tracking: bool):

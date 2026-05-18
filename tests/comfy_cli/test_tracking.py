@@ -25,6 +25,7 @@ def tracking_module(tmp_path):
         patch.object(tracking_mod, "cli_version", "test-cli-version"),
         patch.object(tracking_mod, "tracing_id", "test-tracing-id"),
         patch.object(tracking_mod, "mp", MagicMock()),
+        patch.object(tracking_mod, "_session_only_tracking", False),
     ):
         yield tracking_mod
 
@@ -138,3 +139,106 @@ class TestInitTrackingRoundTrip:
         assert tracking_module.mp.track.call_count == 1
         tracking_module.init_tracking(True)
         assert tracking_module.mp.track.call_count == 1
+
+
+class TestPromptTrackingConsent:
+    def test_enables_session_only_when_stdin_not_tty(self, tracking_module):
+        with (
+            patch.object(tracking_module.sys.stdin, "isatty", return_value=False),
+            patch.object(tracking_module.sys.stdout, "isatty", return_value=True),
+            patch.object(tracking_module.ui, "prompt_confirm_action") as mock_prompt,
+        ):
+            tracking_module.prompt_tracking_consent()
+        mock_prompt.assert_not_called()
+        assert tracking_module.config_manager.get_bool(constants.CONFIG_KEY_ENABLE_TRACKING) is None
+        assert tracking_module._session_only_tracking is True
+        assert tracking_module.user_id is not None
+
+    def test_enables_session_only_when_stdout_not_tty(self, tracking_module):
+        with (
+            patch.object(tracking_module.sys.stdin, "isatty", return_value=True),
+            patch.object(tracking_module.sys.stdout, "isatty", return_value=False),
+            patch.object(tracking_module.ui, "prompt_confirm_action") as mock_prompt,
+        ):
+            tracking_module.prompt_tracking_consent()
+        mock_prompt.assert_not_called()
+        assert tracking_module.config_manager.get_bool(constants.CONFIG_KEY_ENABLE_TRACKING) is None
+        assert tracking_module._session_only_tracking is True
+
+    def test_session_only_tracking_fires_track_event(self, tracking_module):
+        with (
+            patch.object(tracking_module.sys.stdin, "isatty", return_value=False),
+            patch.object(tracking_module.sys.stdout, "isatty", return_value=False),
+        ):
+            tracking_module.prompt_tracking_consent()
+        tracking_module.track_event("some_event", {"k": "v"})
+        tracking_module.mp.track.assert_called_once()
+        _, kwargs = tracking_module.mp.track.call_args
+        assert kwargs["event_name"] == "some_event"
+        assert kwargs["distinct_id"] is not None
+
+    def test_session_only_persists_user_id(self, tracking_module):
+        with (
+            patch.object(tracking_module.sys.stdin, "isatty", return_value=False),
+            patch.object(tracking_module.sys.stdout, "isatty", return_value=False),
+        ):
+            tracking_module.prompt_tracking_consent()
+        persisted = tracking_module.config_manager.get(constants.CONFIG_KEY_USER_ID)
+        assert persisted is not None
+        assert persisted == tracking_module.user_id
+
+    def test_session_only_reuses_existing_user_id(self, tracking_module):
+        existing_id = "existing-uuid-from-prior-run"
+        tracking_module.config_manager.set(constants.CONFIG_KEY_USER_ID, existing_id)
+        with (
+            patch.object(tracking_module, "user_id", existing_id),
+            patch.object(tracking_module.sys.stdin, "isatty", return_value=False),
+            patch.object(tracking_module.sys.stdout, "isatty", return_value=False),
+        ):
+            tracking_module.prompt_tracking_consent()
+            assert tracking_module.user_id == existing_id
+        assert tracking_module.config_manager.get(constants.CONFIG_KEY_USER_ID) == existing_id
+
+    def test_prompts_when_both_are_tty(self, tracking_module):
+        with (
+            patch.object(tracking_module.sys.stdin, "isatty", return_value=True),
+            patch.object(tracking_module.sys.stdout, "isatty", return_value=True),
+            patch.object(tracking_module.ui, "prompt_confirm_action", return_value=False) as mock_prompt,
+        ):
+            tracking_module.prompt_tracking_consent()
+        mock_prompt.assert_called_once()
+        assert tracking_module.config_manager.get_bool(constants.CONFIG_KEY_ENABLE_TRACKING) is False
+        assert tracking_module._session_only_tracking is False
+
+    def test_skip_prompt_bypasses_tty_check(self, tracking_module):
+        with (
+            patch.object(tracking_module.sys.stdin, "isatty", return_value=False),
+            patch.object(tracking_module.sys.stdout, "isatty", return_value=False),
+            patch.object(tracking_module.ui, "prompt_confirm_action") as mock_prompt,
+        ):
+            tracking_module.prompt_tracking_consent(skip_prompt=True, default_value=False)
+        mock_prompt.assert_not_called()
+        assert tracking_module.config_manager.get_bool(constants.CONFIG_KEY_ENABLE_TRACKING) is False
+        assert tracking_module._session_only_tracking is False
+
+    def test_no_op_when_already_configured(self, tracking_module):
+        tracking_module.config_manager.set(constants.CONFIG_KEY_ENABLE_TRACKING, "True")
+        with (
+            patch.object(tracking_module.sys.stdin, "isatty", return_value=False),
+            patch.object(tracking_module.sys.stdout, "isatty", return_value=False),
+            patch.object(tracking_module.ui, "prompt_confirm_action") as mock_prompt,
+        ):
+            tracking_module.prompt_tracking_consent()
+        mock_prompt.assert_not_called()
+        assert tracking_module.config_manager.get_bool(constants.CONFIG_KEY_ENABLE_TRACKING) is True
+        assert tracking_module._session_only_tracking is False
+
+    def test_session_only_is_idempotent(self, tracking_module):
+        with (
+            patch.object(tracking_module.sys.stdin, "isatty", return_value=False),
+            patch.object(tracking_module.sys.stdout, "isatty", return_value=False),
+        ):
+            tracking_module.prompt_tracking_consent()
+            first_user_id = tracking_module.user_id
+            tracking_module.prompt_tracking_consent()
+            assert tracking_module.user_id == first_user_id
