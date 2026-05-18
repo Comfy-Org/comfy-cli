@@ -350,7 +350,7 @@ def execute(
     # input still needs /object_info for the converter, but if it's
     # unreachable, fetch_object_info() surfaces the same connection_error
     # kind a few lines later.
-    if not print_prompt and not check_comfy_server_running(port, host):
+    if not print_prompt and not check_comfy_server_running(port, host, timeout=timeout):
         msg = f"ComfyUI not running at {host}:{port} (override with --host / --port)"
         if json_mode:
             emitter.emit_failed("connection_error", msg)

@@ -1375,6 +1375,29 @@ class TestTimeoutAppliesToConnectAndPost:
             timeout_arg = call.args[1]
         assert timeout_arg == 42, f"urlopen not called with timeout=42, got {timeout_arg!r}"
 
+    def test_preflight_probe_passes_timeout(self, workflow_file, capsys):
+        # Pre-flight probe gets the same --timeout as everything else,
+        # otherwise a slow-to-respond ComfyUI would be falsely reported
+        # "not running" by the probe's default 5s.
+        with patch("comfy_cli.command.run.check_comfy_server_running", return_value=False) as mock_probe:
+            try:
+                execute(
+                    workflow_file,
+                    host="127.0.0.1",
+                    port=8188,
+                    timeout=55,
+                    json_mode=True,
+                )
+            except typer.Exit:
+                pass
+            _ = capsys.readouterr()
+        assert mock_probe.called
+        call = mock_probe.call_args
+        timeout_arg = call.kwargs.get("timeout")
+        if timeout_arg is None and len(call.args) >= 3:
+            timeout_arg = call.args[2]
+        assert timeout_arg == 55, f"check_comfy_server_running not called with timeout=55, got {timeout_arg!r}"
+
     def test_connect_passes_timeout_to_ws_connect(self, workflow_file, capsys):
         with (
             patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),
