@@ -507,7 +507,8 @@ class TestExecuteUiWorkflow:
 
             execute(ui_workflow_file, host="127.0.0.1", port=8188, wait=True, timeout=30)
 
-            mock_fetch.assert_called_once_with("127.0.0.1", 8188, 30)
+            mock_fetch.assert_called_once()
+            assert mock_fetch.call_args.args == ("127.0.0.1", 8188, 30)
             api_workflow = MockExec.call_args.args[0]
             assert set(api_workflow) == {"1", "2"}
             assert api_workflow["1"]["class_type"] == "EmptyLatentImage"
@@ -555,7 +556,8 @@ class TestExecuteUiWorkflow:
 
             execute(ui_workflow_file, host="127.0.0.1", port=8188, wait=True, timeout=30, api_key="sk-test")
 
-            mock_fetch.assert_called_once_with("127.0.0.1", 8188, 30)
+            mock_fetch.assert_called_once()
+            assert mock_fetch.call_args.args == ("127.0.0.1", 8188, 30)
             assert MockExec.call_args.kwargs["api_key"] == "sk-test"
 
     def test_ui_workflow_exits_when_conversion_yields_nothing(self):

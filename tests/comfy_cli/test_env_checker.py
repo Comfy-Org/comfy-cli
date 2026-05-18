@@ -52,7 +52,11 @@ class TestCheckComfyServerRunning:
     def test_custom_port_and_host(self, mock_get):
         mock_get.return_value.status_code = 200
         check_comfy_server_running(port=9999, host="0.0.0.0")
-        mock_get.assert_called_with("http://0.0.0.0:9999/history")
+        # `timeout` is passed defensively so a hung server doesn't block the
+        # caller indefinitely; default value is unimportant here.
+        mock_get.assert_called_once()
+        assert mock_get.call_args.args == ("http://0.0.0.0:9999/history",)
+        assert "timeout" in mock_get.call_args.kwargs
 
 
 class TestEnvChecker:

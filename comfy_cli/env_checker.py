@@ -32,15 +32,18 @@ def format_python_version(version_info):
     return f"[bold red]{version_info.major}.{version_info.minor}.{version_info.micro}[/bold red]"
 
 
-def check_comfy_server_running(port=8188, host="localhost"):
+def check_comfy_server_running(port=8188, host="localhost", timeout: float = 5.0):
     """
     Checks if the Comfy server is running by making a GET request to the /history endpoint.
+
+    `timeout` bounds the probe so a TCP-reachable but unresponsive server
+    (e.g., stuck in a CUDA kernel) doesn't hang the caller.
 
     Returns:
         bool: True if the Comfy server is running, False otherwise.
     """
     try:
-        response = requests.get(f"http://{host}:{port}/history")
+        response = requests.get(f"http://{host}:{port}/history", timeout=timeout)
         return response.status_code == 200
     except requests.exceptions.RequestException:
         return False

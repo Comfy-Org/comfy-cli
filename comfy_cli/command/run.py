@@ -19,6 +19,9 @@ from comfy_cli.workspace_manager import WorkspaceManager
 
 workspace_manager = WorkspaceManager()
 
+# JSON output schema version. Bumped only for breaking changes per docs/json-output.md.
+SCHEMA_VERSION = 1
+
 
 def is_ui_workflow(workflow) -> bool:
     return (
@@ -28,40 +31,262 @@ def is_ui_workflow(workflow) -> bool:
     )
 
 
-def _validate_api_workflow(workflow):
-    """Return the workflow dict if it has the shape of API format, else None."""
-    if not isinstance(workflow, dict) or not workflow:
-        return None
-    node = workflow[next(iter(workflow))]
+def _classify_api_workflow(workflow):
+    """Classify a parsed JSON object as API workflow / empty / invalid.
+
+    Returns one of:
+        ("ok", workflow_dict)   — well-formed API workflow with ≥1 node
+        ("empty", None)         — empty dict (caller routes to workflow_empty)
+        ("invalid", None)       — not a dict, or first node lacks class_type
+    """
+    if not isinstance(workflow, dict):
+        return ("invalid", None)
+    if not workflow:
+        return ("empty", None)
+    first_key = next(iter(workflow))
+    node = workflow[first_key]
     if not isinstance(node, dict) or "class_type" not in node:
-        return None
-    return workflow
+        return ("invalid", None)
+    return ("ok", workflow)
 
 
-def fetch_object_info(host: str, port: int, timeout: int) -> dict:
+class JsonEmitter:
+    """NDJSON event emitter for ``comfy run --json``.
+
+    Every ``emit_*`` method is a no-op when ``json_mode=False``, so the
+    same call sites work for both modes. See ``docs/json-output.md``.
+    """
+
+    def __init__(self, json_mode: bool):
+        self.json_mode = json_mode
+        self.start_time = time.monotonic()
+        self.client_id: str | None = None
+        self.prompt_id: str | None = None
+        self.workflow: dict | None = None
+        self.cached_node_ids: list[str] = []
+        self.executed_node_ids: list[str] = []
+        self.outputs: list[dict] = []
+
+    def set_workflow(self, workflow):
+        self.workflow = workflow
+
+    def set_client_id(self, client_id):
+        self.client_id = client_id
+
+    def _elapsed(self) -> float:
+        return time.monotonic() - self.start_time
+
+    def get_title(self, node_id):
+        if not isinstance(self.workflow, dict):
+            return str(node_id)
+        node = self.workflow.get(node_id)
+        if not isinstance(node, dict):
+            return str(node_id)
+        meta = node.get("_meta")
+        if isinstance(meta, dict):
+            title = meta.get("title")
+            if isinstance(title, str) and title:
+                return title
+        class_type = node.get("class_type")
+        return class_type if isinstance(class_type, str) and class_type else str(node_id)
+
+    def get_class_type(self, node_id):
+        if not isinstance(self.workflow, dict):
+            return ""
+        node = self.workflow.get(node_id)
+        if not isinstance(node, dict):
+            return ""
+        return node.get("class_type", "")
+
+    def _emit(self, event: dict) -> None:
+        if not self.json_mode:
+            return
+        line = json.dumps(event, ensure_ascii=True)
+        print(line, flush=True)
+
+    def emit_converted(self, node_count: int) -> None:
+        self._emit(
+            {
+                "event": "converted",
+                "schema_version": SCHEMA_VERSION,
+                "node_count": node_count,
+            }
+        )
+
+    def workflow_manifest(self) -> list[dict]:
+        """Build the `nodes` array for the `queued` event — one entry per
+        node in the submitted (post-conversion) workflow."""
+        if not isinstance(self.workflow, dict):
+            return []
+        manifest: list[dict] = []
+        for node_id, node in self.workflow.items():
+            if not isinstance(node, dict):
+                continue
+            class_type = node.get("class_type", "")
+            class_type = class_type if isinstance(class_type, str) else ""
+            manifest.append(
+                {
+                    "node_id": str(node_id),
+                    "class_type": class_type,
+                    "title": self.get_title(node_id),
+                }
+            )
+        return manifest
+
+    def emit_queued(self, prompt_id: str, validation_warnings) -> None:
+        self.prompt_id = prompt_id
+        self._emit(
+            {
+                "event": "queued",
+                "schema_version": SCHEMA_VERSION,
+                "prompt_id": prompt_id,
+                "client_id": self.client_id,
+                "validation_warnings": validation_warnings,
+                "nodes": self.workflow_manifest(),
+            }
+        )
+
+    def emit_node_cached(self, node_id) -> None:
+        node_id = str(node_id)
+        self.cached_node_ids.append(node_id)
+        self._emit(
+            {
+                "event": "node_cached",
+                "schema_version": SCHEMA_VERSION,
+                "node_id": node_id,
+                "class_type": self.get_class_type(node_id),
+                "title": self.get_title(node_id),
+            }
+        )
+
+    def emit_node_executing(self, node_id) -> None:
+        node_id = str(node_id)
+        # `executed_node_ids` aggregates everything the executor touched —
+        # including intermediate nodes that never fire a server-side `executed` WS event.
+        if node_id not in self.executed_node_ids:
+            self.executed_node_ids.append(node_id)
+        self._emit(
+            {
+                "event": "node_executing",
+                "schema_version": SCHEMA_VERSION,
+                "node_id": node_id,
+                "class_type": self.get_class_type(node_id),
+                "title": self.get_title(node_id),
+            }
+        )
+
+    def emit_node_progress(self, node_id, value, max_val) -> None:
+        node_id = str(node_id)
+        self._emit(
+            {
+                "event": "node_progress",
+                "schema_version": SCHEMA_VERSION,
+                "node_id": node_id,
+                "class_type": self.get_class_type(node_id),
+                "title": self.get_title(node_id),
+                "value": value,
+                "max": max_val,
+            }
+        )
+
+    def emit_node_executed(self, node_id, outputs: list[dict]) -> None:
+        node_id = str(node_id)
+        if node_id not in self.executed_node_ids:
+            self.executed_node_ids.append(node_id)
+        self.outputs.extend(outputs)
+        self._emit(
+            {
+                "event": "node_executed",
+                "schema_version": SCHEMA_VERSION,
+                "node_id": node_id,
+                "class_type": self.get_class_type(node_id),
+                "title": self.get_title(node_id),
+                "outputs": outputs,
+            }
+        )
+
+    def emit_completed(self) -> None:
+        self._emit(
+            {
+                "event": "completed",
+                "schema_version": SCHEMA_VERSION,
+                "prompt_id": self.prompt_id,
+                "client_id": self.client_id,
+                "elapsed_seconds": self._elapsed(),
+                "outputs": self.outputs,
+                "cached_node_ids": self.cached_node_ids,
+                "executed_node_ids": self.executed_node_ids,
+            }
+        )
+
+    def emit_failed(self, kind: str, message: str, **extras) -> None:
+        error = {"kind": kind, "message": message}
+        error.update(extras)
+        self._emit(
+            {
+                "event": "failed",
+                "schema_version": SCHEMA_VERSION,
+                "prompt_id": self.prompt_id,
+                "client_id": self.client_id,
+                "elapsed_seconds": self._elapsed(),
+                "error": error,
+            }
+        )
+
+
+def fetch_object_info(host, port, timeout, emitter=None):
     """GET ``/object_info`` from the running ComfyUI server.
 
     The response describes every loaded node class's input schema and is what
     the converter uses to map widget values to input names, fill defaults, etc.
+
+    In JSON mode, failures emit a structured ``failed`` event via ``emitter``.
+    Either way, a ``typer.Exit(code=1)`` is raised.
     """
     url = f"http://{host}:{port}/object_info"
+    json_mode = bool(emitter and emitter.json_mode)
     try:
         with request.urlopen(url, timeout=timeout) as resp:
             body = resp.read()
     except urllib.error.HTTPError as e:
-        body = e.read().decode("utf-8", errors="replace").strip()
-        pprint(f"[bold red]Failed to fetch /object_info (HTTP {e.code}): {body[:500]}[/bold red]")
+        body_text = e.read().decode("utf-8", errors="replace").strip()
+        if json_mode:
+            emitter.emit_failed(
+                "object_info_unavailable",
+                f"Failed to fetch /object_info (HTTP {e.code})",
+                status_code=e.code,
+                body=body_text[:500],
+            )
+        else:
+            pprint(f"[bold red]Failed to fetch /object_info (HTTP {e.code}): {body_text[:500]}[/bold red]")
         raise typer.Exit(code=1) from e
     except urllib.error.URLError as e:
-        pprint(f"[bold red]Failed to fetch /object_info: {e.reason}[/bold red]")
+        if json_mode:
+            emitter.emit_failed("connection_error", f"Failed to fetch /object_info: {e.reason}")
+        else:
+            pprint(f"[bold red]Failed to fetch /object_info: {e.reason}[/bold red]")
         raise typer.Exit(code=1) from e
     except TimeoutError as e:
-        pprint(f"[bold red]Failed to fetch /object_info: timed out after {timeout}s[/bold red]")
+        if json_mode:
+            emitter.emit_failed(
+                "connection_error",
+                f"Failed to fetch /object_info: timed out after {timeout}s",
+            )
+        else:
+            pprint(f"[bold red]Failed to fetch /object_info: timed out after {timeout}s[/bold red]")
         raise typer.Exit(code=1) from e
     try:
         return json.loads(body)
     except json.JSONDecodeError as e:
-        pprint("[bold red]Failed to fetch /object_info: server returned invalid JSON[/bold red]")
+        if json_mode:
+            emitter.emit_failed(
+                "object_info_unavailable",
+                "Server returned invalid JSON for /object_info",
+                status_code=200,
+                body=body.decode("utf-8", errors="replace")[:500],
+            )
+        else:
+            pprint("[bold red]Failed to fetch /object_info: server returned invalid JSON[/bold red]")
         raise typer.Exit(code=1) from e
 
 
@@ -74,70 +299,134 @@ def execute(
     local_paths=False,
     timeout=30,
     api_key: str | None = None,
+    json_mode: bool = False,
 ):
+    emitter = JsonEmitter(json_mode=json_mode)
     workflow_name = os.path.abspath(os.path.expanduser(workflow))
+
     if not os.path.isfile(workflow):
-        pprint(
-            f"[bold red]Specified workflow file not found: {workflow}[/bold red]",
-            file=sys.stderr,
-        )
+        if json_mode:
+            emitter.emit_failed("workflow_not_found", f"Workflow file not found: {workflow}")
+        else:
+            pprint(
+                f"[bold red]Specified workflow file not found: {workflow}[/bold red]",
+                file=sys.stderr,
+            )
         raise typer.Exit(code=1)
 
     if not check_comfy_server_running(port, host):
-        pprint(f"[bold red]ComfyUI not running on specified address ({host}:{port})[/bold red]")
+        if json_mode:
+            emitter.emit_failed(
+                "connection_error",
+                f"ComfyUI not running on specified address ({host}:{port})",
+            )
+        else:
+            pprint(f"[bold red]ComfyUI not running on specified address ({host}:{port})[/bold red]")
         raise typer.Exit(code=1)
 
     try:
         with open(workflow_name, encoding="utf-8") as f:
             raw_workflow = json.load(f)
-    except OSError as e:
-        pprint(f"[bold red]Unable to read workflow file: {e}[/bold red]")
+    except (OSError, UnicodeDecodeError) as e:
+        if json_mode:
+            emitter.emit_failed("workflow_read_error", f"Unable to read workflow file: {e}")
+        else:
+            pprint(f"[bold red]Unable to read workflow file: {e}[/bold red]")
         raise typer.Exit(code=1) from e
     except json.JSONDecodeError as e:
-        pprint(f"[bold red]Specified workflow file is not valid JSON: {e}[/bold red]")
+        if json_mode:
+            emitter.emit_failed(
+                "workflow_invalid_json",
+                f"Specified workflow file is not valid JSON: {e}",
+            )
+        else:
+            pprint(f"[bold red]Specified workflow file is not valid JSON: {e}[/bold red]")
         raise typer.Exit(code=1) from e
 
     if is_ui_workflow(raw_workflow):
-        pprint("[yellow]Detected UI-format workflow, converting to API format...[/yellow]")
-        object_info = fetch_object_info(host, port, timeout)
+        if not json_mode:
+            pprint("[yellow]Detected UI-format workflow, converting to API format...[/yellow]")
+        object_info = fetch_object_info(host, port, timeout, emitter=emitter)
         try:
             workflow = convert_ui_to_api(raw_workflow, object_info)
         except WorkflowConversionError as e:
-            pprint(f"[bold red]Workflow conversion failed: {e}[/bold red]")
+            if json_mode:
+                emitter.emit_failed("conversion_error", f"Workflow conversion failed: {e}")
+            else:
+                pprint(f"[bold red]Workflow conversion failed: {e}[/bold red]")
             raise typer.Exit(code=1) from e
         except Exception as e:
-            # The converter is experimental; an unexpected crash here is a bug
-            # in our code, not user error. Show a clean message and a pointer.
-            pprint(
-                f"[bold red]Workflow conversion crashed unexpectedly: {type(e).__name__}: {e}[/bold red]\n"
-                "[yellow]The UI-to-API converter is experimental. Please report this at[/yellow]\n"
-                "[yellow]  https://github.com/Comfy-Org/comfy-cli/issues[/yellow]\n"
-                "[yellow]and attach the workflow file if possible.[/yellow]"
-            )
-            if verbose:
-                import traceback
+            if json_mode:
+                emitter.emit_failed(
+                    "conversion_crash",
+                    f"Workflow conversion crashed unexpectedly: {type(e).__name__}: {e}",
+                    exception_type=type(e).__name__,
+                )
+            else:
+                pprint(
+                    f"[bold red]Workflow conversion crashed unexpectedly: {type(e).__name__}: {e}[/bold red]\n"
+                    "[yellow]The UI-to-API converter is experimental. Please report this at[/yellow]\n"
+                    "[yellow]  https://github.com/Comfy-Org/comfy-cli/issues[/yellow]\n"
+                    "[yellow]and attach the workflow file if possible.[/yellow]"
+                )
+                if verbose:
+                    import traceback as _tb
 
-                traceback.print_exc()
+                    _tb.print_exc()
             raise typer.Exit(code=1) from e
         if not workflow:
-            pprint("[bold red]Workflow conversion produced no executable nodes[/bold red]")
+            if json_mode:
+                emitter.emit_failed(
+                    "workflow_empty",
+                    "Workflow conversion produced no executable nodes",
+                )
+            else:
+                pprint("[bold red]Workflow conversion produced no executable nodes[/bold red]")
             raise typer.Exit(code=1)
+        emitter.set_workflow(workflow)
+        if json_mode:
+            emitter.emit_converted(len(workflow))
     else:
-        workflow = _validate_api_workflow(raw_workflow)
-        if not workflow:
-            pprint("[bold red]Specified workflow does not appear to be an API workflow json file[/bold red]")
+        kind, validated = _classify_api_workflow(raw_workflow)
+        if kind == "empty":
+            if json_mode:
+                emitter.emit_failed("workflow_empty", "API workflow contains no nodes")
+            else:
+                pprint("[bold red]Specified API workflow has no nodes[/bold red]")
             raise typer.Exit(code=1)
+        if kind == "invalid":
+            if json_mode:
+                emitter.emit_failed(
+                    "workflow_format_invalid",
+                    "Workflow file does not appear to be an API workflow JSON",
+                )
+            else:
+                pprint("[bold red]Specified workflow does not appear to be an API workflow json file[/bold red]")
+            raise typer.Exit(code=1)
+        workflow = validated
+        emitter.set_workflow(workflow)
 
     progress = None
     start = time.time()
-    if wait:
+    if wait and not json_mode:
         pprint(f"Executing workflow: {workflow_name}")
         progress = ExecutionProgress()
         progress.start()
-    else:
+    elif not wait and not json_mode:
         print(f"Queuing workflow: {workflow_name}")
 
-    execution = WorkflowExecution(workflow, host, port, verbose, progress, local_paths, timeout, api_key=api_key)
+    execution = WorkflowExecution(
+        workflow,
+        host,
+        port,
+        verbose,
+        progress,
+        local_paths,
+        timeout,
+        api_key=api_key,
+        emitter=emitter,
+    )
+    emitter.set_client_id(execution.client_id)
 
     try:
         if wait:
@@ -146,30 +435,47 @@ def execute(
         if wait:
             execution.watch_execution()
             end = time.time()
-            progress.stop()
-            progress = None
+            if progress is not None:
+                progress.stop()
+                progress = None
 
-            if len(execution.outputs) > 0:
-                pprint("[bold green]\nOutputs:[/bold green]")
-
-                for f in execution.outputs:
-                    pprint(f)
-
-            elapsed = timedelta(seconds=end - start)
-            pprint(f"[bold green]\nWorkflow execution completed ({elapsed})[/bold green]")
+            if json_mode:
+                emitter.emit_completed()
+            else:
+                if len(execution.outputs) > 0:
+                    pprint("[bold green]\nOutputs:[/bold green]")
+                    for f in execution.outputs:
+                        pprint(f)
+                elapsed = timedelta(seconds=end - start)
+                pprint(f"[bold green]\nWorkflow execution completed ({elapsed})[/bold green]")
         else:
-            pprint("[bold green]Workflow queued[/bold green]")
+            # --no-wait: queued was already emitted by execution.queue().
+            if not json_mode:
+                pprint("[bold green]Workflow queued[/bold green]")
     except WebSocketTimeoutException:
-        pprint(
-            f"[bold red]Error: WebSocket timed out after {timeout}s waiting for server response.[/bold red]\n"
-            "[yellow]For long-running workflows, increase the timeout: comfy run --workflow <file> --timeout 300[/yellow]"
-        )
+        if json_mode:
+            emitter.emit_failed(
+                "timeout",
+                f"WebSocket timed out after {timeout}s waiting for server response",
+                timeout_seconds=float(timeout),
+            )
+        else:
+            pprint(
+                f"[bold red]Error: WebSocket timed out after {timeout}s waiting for server response.[/bold red]\n"
+                "[yellow]For long-running workflows, increase the timeout: comfy run --workflow <file> --timeout 300[/yellow]"
+            )
         raise typer.Exit(code=1)
     except (WebSocketException, ConnectionError, OSError) as e:
-        pprint(f"[bold red]Error: Lost connection to ComfyUI server: {e}[/bold red]")
+        if json_mode:
+            emitter.emit_failed(
+                "connection_lost",
+                f"Lost connection to ComfyUI server: {e}",
+            )
+        else:
+            pprint(f"[bold red]Error: Lost connection to ComfyUI server: {e}[/bold red]")
         raise typer.Exit(code=1)
     finally:
-        if progress:
+        if progress is not None:
             progress.stop()
 
 
@@ -191,18 +497,29 @@ class ExecutionProgress(Progress):
 
 
 class WorkflowExecution:
-    def __init__(self, workflow, host, port, verbose, progress, local_paths, timeout=30, api_key: str | None = None):
+    def __init__(
+        self,
+        workflow,
+        host,
+        port,
+        verbose,
+        progress,
+        local_paths,
+        timeout=30,
+        api_key: str | None = None,
+        emitter: JsonEmitter | None = None,
+    ):
         self.workflow = workflow
         self.host = host
         self.port = port
         self.verbose = verbose
         self.local_paths = local_paths
         self.client_id = str(uuid.uuid4())
-        self.outputs = []
+        self.outputs: list = []
         self.progress = progress
         self.remaining_nodes = set(self.workflow.keys())
         self.total_nodes = len(self.remaining_nodes)
-        if progress:
+        if progress is not None:
             self.overall_task = self.progress.add_task("", total=self.total_nodes, progress_type="overall")
         self.current_node = None
         self.progress_task = None
@@ -211,10 +528,18 @@ class WorkflowExecution:
         self.ws = None
         self.timeout = timeout
         self.api_key = api_key
+        # Default to a no-op emitter so internal call sites don't need to
+        # branch on whether json mode is active.
+        self.emitter = emitter if emitter is not None else JsonEmitter(json_mode=False)
 
     def connect(self):
         self.ws = WebSocket()
-        self.ws.connect(f"ws://{self.host}:{self.port}/ws?clientId={self.client_id}")
+        # Timeout on the handshake too: a server busy loading a model
+        # can otherwise leave the CLI hung with no terminal event.
+        self.ws.connect(
+            f"ws://{self.host}:{self.port}/ws?clientId={self.client_id}",
+            timeout=self.timeout,
+        )
 
     def queue(self):
         data: dict = {"prompt": self.workflow, "client_id": self.client_id}
@@ -225,36 +550,162 @@ class WorkflowExecution:
             json.dumps(data).encode("utf-8"),
         )
         try:
-            resp = request.urlopen(req)
-            body = json.loads(resp.read())
-
-            self.prompt_id = body["prompt_id"]
+            resp = request.urlopen(req, timeout=self.timeout)
+            raw_body = resp.read()
         except urllib.error.HTTPError as e:
-            message = "An unknown error occurred"
-            if e.status == 500:
-                # This is normally just the generic internal server error
-                message = e.read().decode()
-            elif e.status == 400:
-                # Bad Request - workflow failed validation on the server
-                body = json.loads(e.read())
-                if body["node_errors"].keys():
-                    message = json.dumps(body["node_errors"], indent=2)
+            self._handle_submit_http_error(e)
+            raise typer.Exit(code=1) from e
+        except urllib.error.URLError as e:
+            self._stop_progress()
+            if self.emitter.json_mode:
+                self.emitter.emit_failed(
+                    "connection_error",
+                    f"Cannot reach server: {e.reason}",
+                )
+            else:
+                pprint(f"[bold red]Cannot reach server: {e.reason}[/bold red]")
+            raise typer.Exit(code=1) from e
+        except TimeoutError as e:
+            self._stop_progress()
+            if self.emitter.json_mode:
+                self.emitter.emit_failed("connection_error", f"Connection timed out: {e}")
+            else:
+                pprint(f"[bold red]Connection timed out: {e}[/bold red]")
+            raise typer.Exit(code=1) from e
+        except OSError as e:
+            self._stop_progress()
+            if self.emitter.json_mode:
+                self.emitter.emit_failed("connection_error", f"Network error contacting server: {e}")
+            else:
+                pprint(f"[bold red]Network error contacting server: {e}[/bold red]")
+            raise typer.Exit(code=1) from e
 
-            self.progress.stop()
+        try:
+            body = json.loads(raw_body) if raw_body else None
+        except json.JSONDecodeError as e:
+            self._stop_progress()
+            body_str = raw_body.decode("utf-8", errors="replace")[:500]
+            if self.emitter.json_mode:
+                self.emitter.emit_failed(
+                    "invalid_response",
+                    "Server returned HTTP 200 with unparseable body",
+                    status_code=200,
+                    body=body_str,
+                )
+            else:
+                pprint(f"[bold red]Server returned HTTP 200 with unparseable body: {body_str[:200]}[/bold red]")
+            raise typer.Exit(code=1) from e
 
-            pprint(f"[bold red]Error running workflow\n{message}[/bold red]")
+        prompt_id = body.get("prompt_id") if isinstance(body, dict) else None
+        if not isinstance(prompt_id, str) or not prompt_id:
+            self._stop_progress()
+            body_str = json.dumps(body)[:500] if body is not None else ""
+            if self.emitter.json_mode:
+                self.emitter.emit_failed(
+                    "invalid_response",
+                    "Server returned HTTP 200 without a prompt_id",
+                    status_code=200,
+                    body=body_str,
+                )
+            else:
+                pprint(f"[bold red]Server returned HTTP 200 without a prompt_id: {body_str[:200]}[/bold red]")
             raise typer.Exit(code=1)
+
+        self.prompt_id = prompt_id
+
+        # 200 may still carry node_errors if some output chains failed
+        # validation but others passed — surface as warnings, not a failure.
+        validation_warnings = None
+        node_errors = body.get("node_errors") if isinstance(body, dict) else None
+        if isinstance(node_errors, dict) and node_errors:
+            validation_warnings = node_errors
+
+        if self.emitter.json_mode:
+            self.emitter.emit_queued(prompt_id, validation_warnings)
+
+    def _handle_submit_http_error(self, e: urllib.error.HTTPError) -> None:
+        raw = b""
+        try:
+            raw = e.read()
+        except Exception:
+            pass
+        try:
+            body = json.loads(raw) if raw else None
+        except json.JSONDecodeError:
+            body = None
+        body_str = (raw or b"").decode("utf-8", errors="replace")
+        self._stop_progress()
+
+        code = e.code
+        if code == 400 and isinstance(body, dict) and isinstance(body.get("node_errors"), dict) and body["node_errors"]:
+            self._emit_validation_error(body["node_errors"])
+            return
+        if 400 <= code < 500:
+            kind = "client_error"
+        elif 500 <= code < 600:
+            kind = "server_error"
+        else:
+            kind = "client_error"
+
+        if self.emitter.json_mode:
+            self.emitter.emit_failed(
+                kind,
+                f"Server returned HTTP {code}",
+                status_code=code,
+                body=body_str[:500],
+            )
+        else:
+            if code == 500:
+                pprint(f"[bold red]Error running workflow\n{body_str}[/bold red]")
+            elif code == 400 and isinstance(body, dict):
+                pprint(f"[bold red]Error running workflow\n{json.dumps(body, indent=2)}[/bold red]")
+            else:
+                pprint(f"[bold red]Error running workflow (HTTP {code})\n{body_str[:500]}[/bold red]")
+
+    def _emit_validation_error(self, node_errors: dict) -> None:
+        if self.emitter.json_mode:
+            message = "Workflow failed validation"
+            try:
+                first_node = next(iter(node_errors.values()))
+                errs = first_node.get("errors") if isinstance(first_node, dict) else None
+                if isinstance(errs, list) and errs:
+                    first = errs[0]
+                    if isinstance(first, dict) and isinstance(first.get("message"), str):
+                        message = first["message"]
+            except StopIteration:
+                pass
+            self.emitter.emit_failed(
+                "validation_error",
+                message,
+                node_errors=node_errors,
+            )
+        else:
+            pprint(f"[bold red]Error running workflow\n{json.dumps(node_errors, indent=2)}[/bold red]")
+
+    def _stop_progress(self) -> None:
+        if self.progress is not None:
+            try:
+                self.progress.stop()
+            except Exception:
+                pass
 
     def watch_execution(self):
         self.ws.settimeout(self.timeout)
         while True:
             message = self.ws.recv()
-            if isinstance(message, str):
-                message = json.loads(message)
-                if not self.on_message(message):
-                    break
+            if not isinstance(message, str):
+                continue
+            try:
+                parsed = json.loads(message)
+            except json.JSONDecodeError:
+                # Tolerate malformed frames from misbehaving proxies.
+                continue
+            if not self.on_message(parsed):
+                break
 
     def update_overall_progress(self):
+        if self.progress is None:
+            return
         self.progress.update(self.overall_task, completed=self.total_nodes - len(self.remaining_nodes))
 
     def get_node_title(self, node_id):
@@ -267,6 +718,9 @@ class WorkflowExecution:
 
     def log_node(self, type, node_id):
         if not self.verbose:
+            return
+        if self.emitter.json_mode:
+            # --verbose is a no-op in JSON mode; Rich output would corrupt the stream.
             return
 
         node = self.workflow.get(node_id)
@@ -283,87 +737,185 @@ class WorkflowExecution:
         pprint(f"{type} : {title}")
 
     def format_image_path(self, img):
+        """Build a single (url|local_path) string for the legacy human output."""
         filename = img["filename"]
-        subfolder = img["subfolder"] if "subfolder" in img else None
-        output_type = img["type"] or "output"
+        subfolder = img.get("subfolder") or ""
+        output_type = img.get("type") or "output"
 
         if self.local_paths:
-            if subfolder:
-                filename = os.path.join(subfolder, filename)
+            display_name = os.path.join(subfolder, filename) if subfolder else filename
+            return os.path.join(workspace_manager.get_workspace_path()[0], output_type, display_name)
 
-            return os.path.join(workspace_manager.get_workspace_path()[0], output_type, filename)
+        url_params = {"filename": filename, "subfolder": subfolder, "type": output_type}
+        return f"http://{self.host}:{self.port}/view?{urllib.parse.urlencode(url_params)}"
 
-        query = urllib.parse.urlencode(img)
-        return f"http://{self.host}:{self.port}/view?{query}"
+    def _build_output_object(self, node_id, category, item) -> dict:
+        """Construct a structured Output dict for the JSON contract."""
+        filename = item["filename"]
+        subfolder = item.get("subfolder") or ""
+        file_type = item.get("type") or "output"
+
+        url_params = {"filename": filename, "subfolder": subfolder, "type": file_type}
+        url = f"http://{self.host}:{self.port}/view?{urllib.parse.urlencode(url_params)}"
+
+        local_path = None
+        if self.local_paths:
+            try:
+                ws_path = workspace_manager.get_workspace_path()[0]
+            except Exception:
+                ws_path = None
+            if ws_path:
+                parts = []
+                if subfolder:
+                    parts.append(subfolder)
+                parts.append(filename)
+                local_path = os.path.join(ws_path, file_type, *parts)
+
+        return {
+            "category": category,
+            "node_id": node_id,
+            "class_type": self.emitter.get_class_type(node_id),
+            "title": self.emitter.get_title(node_id),
+            "filename": filename,
+            "subfolder": subfolder,
+            "type": file_type,
+            "url": url,
+            "local_path": local_path,
+        }
 
     def on_message(self, message):
         data = message["data"] if "data" in message else {}
-        # Skip any messages that aren't about our prompt
         if "prompt_id" not in data or data["prompt_id"] != self.prompt_id:
             return True
 
-        if message["type"] == "executing":
+        msg_type = message.get("type")
+        if msg_type == "executing":
             return self.on_executing(data)
-        elif message["type"] == "execution_cached":
+        elif msg_type == "execution_cached":
             self.on_cached(data)
-        elif message["type"] == "progress":
+        elif msg_type == "progress":
             self.on_progress(data)
-        elif message["type"] == "executed":
+        elif msg_type == "executed":
             self.on_executed(data)
-        elif message["type"] == "execution_error":
+        elif msg_type == "execution_error":
             self.on_error(data)
+        elif msg_type == "execution_interrupted":
+            self.on_interrupted(data)
 
         return True
 
     def on_executing(self, data):
-        if self.progress_task:
+        if self.progress_task is not None and self.progress is not None:
             self.progress.remove_task(self.progress_task)
             self.progress_task = None
 
         if data["node"] is None:
             return False
-        else:
-            if self.current_node:
-                self.remaining_nodes.discard(self.current_node)
-                self.update_overall_progress()
-            self.current_node = data["node"]
-            self.log_node("Executing", data["node"])
+
+        node_id = data["node"]
+        if self.current_node:
+            self.remaining_nodes.discard(self.current_node)
+            self.update_overall_progress()
+        self.current_node = node_id
+        self.log_node("Executing", node_id)
+        if self.emitter.json_mode:
+            self.emitter.emit_node_executing(node_id)
         return True
 
     def on_cached(self, data):
-        nodes = data["nodes"]
+        nodes = data.get("nodes") or []
         for n in nodes:
+            if n is None:
+                continue
             self.remaining_nodes.discard(n)
             self.log_node("Cached", n)
+            if self.emitter.json_mode:
+                self.emitter.emit_node_cached(n)
         self.update_overall_progress()
 
     def on_progress(self, data):
-        node = data["node"]
-        if self.progress_node != node:
-            self.progress_node = node
-            if self.progress_task:
-                self.progress.remove_task(self.progress_task)
-
-            self.progress_task = self.progress.add_task(
-                self.get_node_title(node), total=data["max"], progress_type="node"
-            )
-        self.progress.update(self.progress_task, completed=data["value"])
+        node = data.get("node")
+        if node is None:
+            return
+        value = data.get("value", 0)
+        max_val = data.get("max", 0)
+        if self.progress is not None:
+            if self.progress_node != node:
+                self.progress_node = node
+                if self.progress_task is not None:
+                    self.progress.remove_task(self.progress_task)
+                self.progress_task = self.progress.add_task(
+                    self.get_node_title(node), total=max_val, progress_type="node"
+                )
+            self.progress.update(self.progress_task, completed=value)
+        if self.emitter.json_mode:
+            self.emitter.emit_node_progress(node, value, max_val)
 
     def on_executed(self, data):
-        self.remaining_nodes.discard(data["node"])
+        node_id = data.get("node")
+        if node_id is None:
+            return
+        self.remaining_nodes.discard(node_id)
         self.update_overall_progress()
 
-        if "output" not in data:
-            return
+        # node_executed fires whenever the server emits `executed`, even
+        # when there are no file-shaped outputs (outputs=[] in that case).
+        structured_outputs: list[dict] = []
+        output = data.get("output")
+        if isinstance(output, dict):
+            for category, items in output.items():
+                if not isinstance(items, list):
+                    continue
+                for item in items:
+                    if not isinstance(item, dict) or "filename" not in item:
+                        continue
+                    obj = self._build_output_object(node_id, category, item)
+                    structured_outputs.append(obj)
+                    if not self.emitter.json_mode:
+                        # Legacy string list, only consumed by the Rich path.
+                        self.outputs.append(self.format_image_path(item))
 
-        output = data["output"]
-
-        if output is None or "images" not in output:
-            return
-
-        for img in output["images"]:
-            self.outputs.append(self.format_image_path(img))
+        if self.emitter.json_mode:
+            self.emitter.emit_node_executed(node_id, structured_outputs)
 
     def on_error(self, data):
-        pprint(f"[bold red]Error running workflow\n{json.dumps(data, indent=2)}[/bold red]")
+        node_id = data.get("node_id", "")
+        class_type = data.get("node_type") or data.get("class_type") or ""
+        exception_type = data.get("exception_type", "")
+        raw_tb = data.get("traceback", "")
+        if isinstance(raw_tb, list):
+            traceback_str = "".join(str(x) for x in raw_tb)
+        elif isinstance(raw_tb, str):
+            traceback_str = raw_tb
+        else:
+            traceback_str = ""
+        message = data.get("exception_message") or "Workflow execution failed"
+
+        self._stop_progress()
+        if self.emitter.json_mode:
+            title = self.emitter.get_title(node_id) if node_id else ""
+            if not class_type and node_id:
+                class_type = self.emitter.get_class_type(node_id)
+            self.emitter.emit_failed(
+                "execution_error",
+                message,
+                node_id=node_id,
+                class_type=class_type,
+                title=title,
+                exception_type=exception_type,
+                traceback=traceback_str,
+            )
+        else:
+            pprint(f"[bold red]Error running workflow\n{json.dumps(data, indent=2)}[/bold red]")
+        raise typer.Exit(code=1)
+
+    def on_interrupted(self, data):
+        self._stop_progress()
+        if self.emitter.json_mode:
+            self.emitter.emit_failed(
+                "interrupted",
+                "Workflow execution was interrupted",
+            )
+        else:
+            pprint("[yellow]Workflow execution was interrupted[/yellow]")
         raise typer.Exit(code=1)

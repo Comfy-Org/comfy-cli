@@ -445,7 +445,15 @@ def run(
     ] = None,
     timeout: Annotated[
         int | None,
-        typer.Option(help="The timeout in seconds for the workflow execution."),
+        typer.Option(
+            help=(
+                "Per-event timeout in seconds: bails out if the server is silent "
+                "for this long. Also caps HTTP connect, /prompt POST, and websocket "
+                "handshake. NOT a wall-clock execution deadline — a workflow that "
+                "streams progress events faster than the timeout can run "
+                "indefinitely."
+            ),
+        ),
     ] = 30,
     api_key: Annotated[
         str | None,
@@ -460,6 +468,18 @@ def run(
             ),
         ),
     ] = None,
+    json_output: Annotated[
+        bool,
+        typer.Option(
+            "--json",
+            help=(
+                "Emit NDJSON events to stdout instead of human-readable output. "
+                "One JSON object per line, terminated by \\n. See docs/json-output.md "
+                "for the event reference and stability contract. In this mode, "
+                "--verbose has no effect and Rich progress is suppressed."
+            ),
+        ),
+    ] = False,
 ):
     if api_key:
         api_key = api_key.strip() or None
@@ -487,7 +507,17 @@ def run(
     if not port:
         port = 8188
 
-    run_inner.execute(workflow, host, port, wait, verbose, local_paths, timeout, api_key=api_key)
+    run_inner.execute(
+        workflow,
+        host,
+        port,
+        wait,
+        verbose,
+        local_paths,
+        timeout,
+        api_key=api_key,
+        json_mode=json_output,
+    )
 
 
 def validate_comfyui(_env_checker):
