@@ -87,6 +87,12 @@ def _detect_upload_mode(name: str, prop: dict[str, Any]) -> str | None:
 
 
 def flags_for(endpoint: Endpoint) -> list[FlagDef]:
+    # Lazy import: adapters depends on FlagDef, so the top-level import would cycle.
+    from comfy_cli.command.generate import adapters as _adapters
+
+    adapter = _adapters.get(endpoint.id)
+    if adapter is not None:
+        return list(adapter.flags)
     schema = endpoint.request_schema or {}
     props = schema.get("properties") or {}
     required = set(schema.get("required") or [])

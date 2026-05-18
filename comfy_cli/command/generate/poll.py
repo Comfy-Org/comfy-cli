@@ -235,6 +235,14 @@ _POLL_SPECS: dict[str, PollSpec] = {
         success_values=("done",),
         failure_values=(),
     ),
+    "seedance": PollSpec(
+        name="seedance",
+        id_paths=("id",),
+        poll_url="/proxy/byteplus/api/v3/contents/generations/tasks/{id}",
+        status_paths=("status",),
+        success_values=("succeeded",),
+        failure_values=("failed", "cancelled"),
+    ),
 }
 
 

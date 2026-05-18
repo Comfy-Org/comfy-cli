@@ -70,6 +70,25 @@ def save_urls(urls: list[str], template: str, request_id: str) -> list[Path]:
     return saved
 
 
+def save_inline_blobs(blobs: list[tuple[str, bytes]], template: str, request_id: str) -> list[Path]:
+    """Save ``(mime, bytes)`` pairs returned inline (e.g. Gemini's
+    ``inlineData``) under the resolved template path. Same auto-indexing rule
+    as ``save_urls``: if the template has no ``{index}`` placeholder and isn't
+    a directory shorthand, multi-blob responses get ``_<i>`` inserted before
+    the suffix so the first blob doesn't get silently overwritten."""
+    saved: list[Path] = []
+    auto_index = len(blobs) > 1 and "{index}" not in template and not template.endswith(("/", "\\"))
+    for i, (mime, data) in enumerate(blobs):
+        ext = _EXT_FROM_MIME.get(mime) or (mimetypes.guess_extension(mime) or ".png").lstrip(".") or "png"
+        dest = _resolve_template(template, request_id, i, ext)
+        if auto_index:
+            dest = dest.with_name(f"{dest.stem}_{i}.{ext}")
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(data)
+        saved.append(dest)
+    return saved
+
+
 def save_binary_response(resp: httpx.Response, template: str, request_id: str) -> Path:
     """Save a single binary response body (e.g. Stability returns image/* bytes)."""
     ext = _ext_from_response(resp)

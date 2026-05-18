@@ -103,8 +103,15 @@ def send_request(
     timeout: float = 120.0,
 ) -> httpx.Response:
     """Send the initial request for `endpoint` with the given typed values."""
-    url = spec.base_url() + endpoint.path
-    json_body, files, data = _split_payload(values, flags, endpoint.request_content_type)
+    from comfy_cli.command.generate import adapters as _adapters
+
+    adapter = _adapters.get(endpoint.id)
+    url_path = _adapters.resolve_path(endpoint.path, values, adapter) if adapter else endpoint.path
+    url = spec.base_url() + url_path
+    if adapter is not None:
+        json_body, files, data = adapter.build_body(values, api_key), None, None
+    else:
+        json_body, files, data = _split_payload(values, flags, endpoint.request_content_type)
     headers = _auth_headers(api_key)
     try:
         if endpoint.method.lower() == "get":

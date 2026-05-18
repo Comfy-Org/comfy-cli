@@ -25,7 +25,7 @@ from rich import print as rprint
 from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
 
 from comfy_cli import tracking, ui
-from comfy_cli.command.generate import client, output, poll, schema, spec, upload
+from comfy_cli.command.generate import adapters, client, output, poll, schema, spec, upload
 
 _HELP = "Generate images via ComfyUI partner nodes (Flux, Ideogram, DALL·E, Recraft, Stability, …)."
 
@@ -251,6 +251,23 @@ def _generate(model: str, extra_args: list[str]) -> None:
         _emit_result(result, request_id=job_id, download=download, as_json=as_json)
         return
 
+    adapter = adapters.get(ep.id)
+    if adapter is not None and adapter.decode_sync is not None:
+        body = resp.json()
+        if as_json:
+            output.print_json(body)
+            return
+        if not download:
+            rprint("[yellow]Image data returned inline. Pass --download <path> to save.[/yellow]")
+            return
+        saved = adapter.decode_sync(body, download, request_id)
+        if saved:
+            output.print_saved(saved)
+        else:
+            rprint("[yellow]No image data found in response.[/yellow]")
+            output.print_json(body)
+        return
+
     result = poll.sync_result_from_response(resp)
     _emit_result(result, request_id=request_id, download=download, as_json=as_json)
 
@@ -360,8 +377,11 @@ def _apply_upload_transforms(values: dict, flags: list[schema.FlagDef], endpoint
     base64 blob or a URL, transform it transparently.
 
     This only applies to JSON endpoints — multipart endpoints already stream
-    file paths natively via httpx and don't need pre-uploading.
+    file paths natively via httpx and don't need pre-uploading. Endpoints with
+    a custom adapter handle their own asset shaping inside ``build_body``.
     """
+    if adapters.get(endpoint.id) is not None:
+        return
     if endpoint.request_content_type != "application/json":
         return
     flag_by_name = {f.name: f for f in flags}

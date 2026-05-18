@@ -136,6 +136,24 @@ _ALIASES: dict[str, str] = {
     "vidu-extend": "vidu/extend",
     # Video — xAI Grok
     "grok-video": "xai/v1/videos/generations",
+    # Google Gemini Flash Image (nano-banana). The model variant lives in the
+    # URL path; the adapter substitutes ``--model`` at send time.
+    "nano-banana": "vertexai/gemini/{model}",
+    # ByteDance Seedance (video).
+    "seedance": "byteplus/api/v3/contents/generations/tasks",
+}
+
+
+# Used in the `list` table for endpoints whose openapi summary is empty or too
+# generic to convey what the model is.
+_SUMMARY_OVERRIDES: dict[str, str] = {
+    "vertexai/gemini/{model}": (
+        "Google Gemini Flash Image (nano-banana) — text-to-image and image edits "
+        "from a prompt plus optional reference images."
+    ),
+    "byteplus/api/v3/contents/generations/tasks": (
+        "ByteDance Seedance — text-to-video and image-to-video (3–12s clips, up to 1080p)."
+    ),
 }
 
 _PREFERRED_ALIAS: dict[str, str] = {v: k for k, v in _ALIASES.items()}
@@ -231,6 +249,10 @@ _ENDPOINT_ALLOWLIST: list[tuple[str, str, str | None]] = [
     ("vidu/extend", "video-extend", "vidu"),
     # Video — xAI Grok
     ("xai/v1/videos/generations", "text-to-video", "xai_video"),
+    # Google Gemini Flash Image (nano-banana). Sync; adapter decodes inline data.
+    ("vertexai/gemini/{model}", "image-edit", None),
+    # ByteDance Seedance (video) — async, custom poller.
+    ("byteplus/api/v3/contents/generations/tasks", "text-to-video", "seedance"),
 ]
 
 
@@ -341,7 +363,8 @@ def _registry() -> dict[str, Endpoint]:
             path=path,
             method=method,
             partner=partner,
-            summary=str(op.get("summary") or op.get("description") or "").strip(),
+            summary=_SUMMARY_OVERRIDES.get(endpoint_id)
+            or str(op.get("summary") or op.get("description") or "").strip(),
             category=category,
             request_schema=req_schema if isinstance(req_schema, dict) else {},
             request_content_type=ctype,
