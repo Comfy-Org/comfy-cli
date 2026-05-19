@@ -530,6 +530,21 @@ class TestQueueHttpErrors:
         terminal = events[-1]
         assert terminal["error"]["kind"] == "invalid_response"
 
+    def test_200_with_utf16_bom_body_routes_to_invalid_response(self, workflow_file, capsys):
+        # `json.loads(bytes)` sniffs encoding before parsing — a UTF-16 BOM
+        # makes it raise `UnicodeDecodeError`, not `JSONDecodeError`.
+        with (
+            patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),
+            patch("comfy_cli.command.run.request.urlopen") as mock_open,
+            patch("comfy_cli.command.run.WebSocket"),
+        ):
+            mock_open.return_value.read.return_value = b"\x00\x01\xff\xfeNOT JSON \x80\x81"
+            events = _run_execute_capture(workflow_file, capsys)
+        terminal = events[-1]
+        assert terminal["event"] == "failed"
+        assert terminal["error"]["kind"] == "invalid_response"
+        assert terminal["error"]["status_code"] == 200
+
     def test_url_error_routes_to_connection_error(self, workflow_file, capsys):
         with (
             patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),

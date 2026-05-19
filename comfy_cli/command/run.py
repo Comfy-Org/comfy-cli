@@ -610,7 +610,7 @@ class WorkflowExecution:
 
         try:
             body = json.loads(raw_body) if raw_body else None
-        except json.JSONDecodeError as e:
+        except (json.JSONDecodeError, UnicodeDecodeError) as e:
             self._stop_progress()
             body_str = raw_body.decode("utf-8", errors="replace")[:_MAX_BODY_PREVIEW]
             raise self.emitter.fail(
@@ -651,7 +651,7 @@ class WorkflowExecution:
             pass
         try:
             body = json.loads(raw) if raw else None
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, UnicodeDecodeError):
             body = None
         body_str = (raw or b"").decode("utf-8", errors="replace")
         self._stop_progress()
