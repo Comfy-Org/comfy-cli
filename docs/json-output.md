@@ -482,7 +482,7 @@ removed without a schema version bump.
 | `invalid_response`        | Server returned HTTP 2xx but body was unparseable or lacked `prompt_id`                       | `status_code` (int, 2xx), `body` (str)             |
 | `timeout`                 | WebSocket `recv` timed out                                                                    | `timeout_seconds` (float)                          |
 | `connection_lost`         | WebSocket connection dropped mid-execution                                                    | —                                                  |
-| `execution_interrupted`   | Server signaled the workflow was interrupted (`execution_interrupted` WS, e.g., via `/interrupt`) | —                                              |
+| `execution_interrupted`   | Workflow was interrupted — either by the server (`execution_interrupted` WS, e.g., via `/interrupt`) or by the client process receiving `SIGINT` (Ctrl-C) | —              |
 | `execution_error`         | A node raised during execution (server emitted `execution_error`)                             | `node_id` (str), `class_type` (str), `title` (str — display label, see canonical `title` rule), `exception_type` (str), `traceback` (str) |
 
 ### `exception_type` field

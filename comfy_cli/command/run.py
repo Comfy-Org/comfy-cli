@@ -510,6 +510,8 @@ def execute(
             f"Lost connection to ComfyUI server: {e}",
             rich_message=f"Error: Lost connection to ComfyUI server: {e}",
         )
+    except KeyboardInterrupt:
+        raise emitter.fail("execution_interrupted", "Interrupted by user") from None
     finally:
         if progress is not None:
             progress.stop()

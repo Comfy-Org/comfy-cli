@@ -617,6 +617,16 @@ class TestWebSocketEvents:
         terminal = events[-1]
         assert terminal["error"]["kind"] == "connection_lost"
 
+    def test_keyboard_interrupt_emits_execution_interrupted(self, workflow_file, capsys):
+        events = self._run_with_ws_messages(
+            workflow_file,
+            KeyboardInterrupt(),
+            capsys,
+        )
+        terminal = events[-1]
+        assert terminal["event"] == "failed"
+        assert terminal["error"]["kind"] == "execution_interrupted"
+
     def test_malformed_frame_is_skipped_run_completes(self, workflow_file, capsys):
         """We silently skip malformed JSON frames mid-stream. A valid
         executing(node=None) frame following the bad one should still
