@@ -814,6 +814,7 @@ class WorkflowExecution:
 
     def _build_output_object(self, node_id, category, item) -> dict:
         """Construct a structured Output dict for the JSON contract."""
+        node_id = str(node_id)
         filename = item["filename"]
         subfolder = item.get("subfolder") or ""
         file_type = item.get("type") or "output"
@@ -975,7 +976,7 @@ class WorkflowExecution:
         self._stop_progress()
         if self.emitter.json_mode:
             self.emitter.emit_failed(
-                "interrupted",
+                "execution_interrupted",
                 "Workflow execution was interrupted",
             )
         else:

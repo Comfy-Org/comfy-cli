@@ -470,7 +470,7 @@ removed without a schema version bump.
 | `invalid_response`        | Server returned HTTP 2xx but body was unparseable or lacked `prompt_id`                       | `status_code` (int, 2xx), `body` (str)             |
 | `timeout`                 | WebSocket `recv` timed out                                                                    | `timeout_seconds` (float)                          |
 | `connection_lost`         | WebSocket connection dropped mid-execution                                                    | —                                                  |
-| `interrupted`             | Server signaled the workflow was interrupted (`execution_interrupted` WS, e.g., via `/interrupt`) | —                                              |
+| `execution_interrupted`   | Server signaled the workflow was interrupted (`execution_interrupted` WS, e.g., via `/interrupt`) | —                                              |
 | `execution_error`         | A node raised during execution (server emitted `execution_error`)                             | `node_id` (str), `class_type` (str), `title` (str), `exception_type` (str), `traceback` (str) |
 
 ### `exception_type` field
@@ -642,7 +642,7 @@ Exit code: `1`.
 {"event":"prompt_preview","schema_version":1,"prompt":{"1":{"class_type":"GeminiNanoBanana2","inputs":{"prompt":"a banana","width":2048,"height":2048}},"2":{"class_type":"SaveImage","inputs":{"filename_prefix":"banana_test","images":["1",0]}}}}
 {"event":"queued","schema_version":1,"prompt_id":"9b1c…","client_id":"fe2a…","validation_warnings":[],"nodes":[{"node_id":"1","class_type":"GeminiNanoBanana2","title":"Nano Banana 2"},{"node_id":"2","class_type":"SaveImage","title":"Save Image"}]}
 {"event":"node_executing","schema_version":1,"node_id":"1","class_type":"GeminiNanoBanana2","title":"Nano Banana 2"}
-{"event":"failed","schema_version":1,"prompt_id":"9b1c…","client_id":"fe2a…","elapsed_seconds":3.2,"error":{"kind":"interrupted","message":"Workflow execution was interrupted"}}
+{"event":"failed","schema_version":1,"prompt_id":"9b1c…","client_id":"fe2a…","elapsed_seconds":3.2,"error":{"kind":"execution_interrupted","message":"Workflow execution was interrupted"}}
 ```
 
 Exit code: `1`.

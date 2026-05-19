@@ -548,10 +548,10 @@ class TestWebSocketEvents:
         terminal = events[-1]
         assert terminal["error"]["kind"] == "connection_lost"
 
-    def test_connection_lost_on_malformed_frame(self, workflow_file, capsys):
-        """We silently skip malformed frames; if ALL frames are malformed the
-        stream just hangs forever — so the realistic test is: WS raises during
-        recv after a malformed frame. Verify the bad frame doesn't crash."""
+    def test_malformed_frame_is_skipped_run_completes(self, workflow_file, capsys):
+        """We silently skip malformed JSON frames mid-stream. A valid
+        executing(node=None) frame following the bad one should still
+        terminate the run normally with `completed`."""
         events = self._run_with_ws_messages(
             workflow_file,
             ["{not json", json.dumps({"type": "executing", "data": {"prompt_id": "p", "node": None}})],
@@ -621,7 +621,7 @@ class TestWebSocketEvents:
         ]
         events = self._run_with_ws_messages(workflow_file, messages, capsys)
         terminal = events[-1]
-        assert terminal["error"]["kind"] == "interrupted"
+        assert terminal["error"]["kind"] == "execution_interrupted"
 
 
 class TestOutputObject:
@@ -1111,8 +1111,8 @@ class TestObjectInfoFailures:
             patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),
             patch("comfy_cli.command.run.request.urlopen") as mock_open,
         ):
-            mock_open.side_effect = _make_http_error(500, b"internal error")
-            # _make_http_error builds a /prompt URL by default; switch to object_info
+            # _make_http_error builds a /prompt URL by default — build the
+            # /object_info HTTPError inline so the test exercises that path.
             mock_open.side_effect = urllib.error.HTTPError(
                 url="http://127.0.0.1:8188/object_info",
                 code=503,
@@ -1194,6 +1194,28 @@ class TestNodeExecutedFiresEvenWithoutOutputs:
             timeout=30,
             emitter=e,
         )
+
+    def test_output_node_id_coerced_to_str(self, simple_workflow, capsys):
+        # If the server ever sends `node` as an int, every other emit site
+        # coerces — outputs[i].node_id must too, since the contract says
+        # node_id is always str.
+        ex = self._exec(simple_workflow)
+        ex.prompt_id = "p"
+        ex.on_executed(
+            {
+                "node": 2,
+                "output": {"images": [{"filename": "x.png", "subfolder": "", "type": "output"}]},
+            }
+        )
+        events = [json.loads(line) for line in capsys.readouterr().out.splitlines() if line.strip()]
+        executed = next(e for e in events if e["event"] == "node_executed")
+        assert isinstance(executed["node_id"], str)
+        assert executed["outputs"]
+        for out in executed["outputs"]:
+            assert isinstance(out["node_id"], str), (
+                f"outputs[i].node_id leaked non-str: {type(out['node_id']).__name__}"
+            )
+            assert out["node_id"] == "2"
 
     def test_executed_with_missing_output(self, simple_workflow, capsys):
         ex = self._exec(simple_workflow)
