@@ -103,7 +103,7 @@ feature-detect by field presence rather than version comparison.
 | Event             | When                                              | Terminal |
 | ----------------- | ------------------------------------------------- | -------- |
 | `converted`       | UI-format workflow was client-side converted      |          |
-| `prompt_preview`  | The API-format prompt body about to be submitted  | (✓ in `--print-prompt`) |
+| `prompt_preview`  | The API-format workflow graph about to be submitted | (✓ in `--print-prompt`) |
 | `queued`          | Server accepted the prompt (HTTP 200 on `/prompt`)| (✓ in `--no-wait`) |
 | `node_cached`     | Node hit the execution cache and was skipped      |          |
 | `node_executing`  | Node started execution                            |          |
@@ -134,13 +134,17 @@ format.
 
 ### `prompt_preview`
 
-**Always emitted in `--json` mode**, immediately after the optional
-`converted` event and immediately before `queued`. Carries the
-API-format workflow body the CLI is about to POST to `/prompt` — the
-same dict that would land in the request's `prompt` field. Gives
-agents a complete audit trail of what was submitted, useful for
-debugging conversions, logging, and post-mortem analysis, without
-needing a separate run.
+Emitted in `--json` mode once the workflow has been successfully
+loaded, parsed, and (if UI-format) converted — i.e., in every stream
+except the pre-flight failure cases where the workflow was rejected
+before conversion (`workflow_not_found`, `workflow_invalid_json`,
+`workflow_read_error`, `workflow_format_invalid`, `workflow_empty`).
+Fires immediately after the optional `converted` event and immediately
+before `queued`. Carries the API-format workflow graph the CLI is
+about to POST to `/prompt` — the same dict that would land in the
+request's `prompt` field. Gives agents a complete audit trail of what
+was submitted, useful for debugging conversions, logging, and
+post-mortem analysis, without needing a separate run.
 
 Under `--print-prompt` this event is also the **terminal** event:
 the CLI emits it and exits 0 without queuing. In normal flow it's
@@ -218,7 +222,7 @@ See [completed](#completed) for the resulting semantics of
 | `event`          | str  | `"node_cached"`                             |
 | `schema_version` | int  | `1`                                         |
 | `node_id`        | str  | Node key in the workflow dict               |
-| `class_type`     | str  | Node class name                             |
+| `class_type`     | str  | Node class name. **Open set** — current ComfyUI versions emit names like `KSampler`, `SaveImage`, plus arbitrary custom-node class names; agents must accept and pass through unknown values without keying behaviour on specific strings. |
 | `title`          | str  | `_meta.title` if present, else `class_type`, else `node_id` |
 
 ### `node_executing`
@@ -257,8 +261,8 @@ recently-emitted `node_executing` event.
 | `node_id`        | str    | Node currently running                                      |
 | `class_type`     | str    | Node class name (duplicated from the workflow so stateless consumers don't need to track the prior `node_executing`) |
 | `title`          | str    | `_meta.title` if present, else `class_type`, else `node_id`                 |
-| `value`          | number | Current progress. Typically int (step count); some custom nodes emit float (fractional progress) |
-| `max`            | number | Total progress; same caveat as `value`                      |
+| `value`          | number | Current progress. Typically int (step count); some custom nodes emit float (fractional progress). Defaults to `0` when the server omits the field. |
+| `max`            | number | Total progress; same caveat as `value`. Defaults to `0` when the server omits the field. |
 
 Some custom nodes may emit `value > max` near the end of execution.
 Agents rendering a progress bar should clamp `value` to `max`.
@@ -411,8 +415,8 @@ cannot be assigned without a `client_id`).
 | `class_type` | str         | Node class name                                                                                          |
 | `title`      | str         | `_meta.title` if present, else `class_type`, else `node_id`                                                              |
 | `filename`   | str         | Raw filename as reported by the server                                                                   |
-| `subfolder`  | str         | Subfolder within the output folder's root. `""` if the server omits or empties the field.                |
-| `type`       | str         | ComfyUI output folder discriminator. **Open set.** Current ComfyUI versions emit `output`, `temp`, `input`; agents must accept and pass through unknown values. Defaults to `"output"` if the server omits the field. |
+| `subfolder`  | str         | Subfolder within the output folder's root. Defaults to `""` when the server omits or empties the field.   |
+| `type`       | str         | ComfyUI output folder discriminator. **Open set.** Current ComfyUI versions emit `output`, `temp`, `input`; agents must accept and pass through unknown values. Defaults to `"output"` when the server omits or empties the field. |
 | `url`        | str         | `http(s)://<host>:<port>/view?...` URL — always present, fetch this to get the bytes |
 
 ### Fetching output bytes
@@ -471,18 +475,18 @@ removed without a schema version bump.
 | `timeout`                 | WebSocket `recv` timed out                                                                    | `timeout_seconds` (float)                          |
 | `connection_lost`         | WebSocket connection dropped mid-execution                                                    | —                                                  |
 | `execution_interrupted`   | Server signaled the workflow was interrupted (`execution_interrupted` WS, e.g., via `/interrupt`) | —                                              |
-| `execution_error`         | A node raised during execution (server emitted `execution_error`)                             | `node_id` (str), `class_type` (str), `title` (str), `exception_type` (str), `traceback` (str) |
+| `execution_error`         | A node raised during execution (server emitted `execution_error`)                             | `node_id` (str), `class_type` (str), `title` (str — same fallback chain as the per-node events: `_meta.title`, else `class_type`, else `node_id`), `exception_type` (str), `traceback` (str) |
 
 ### `exception_type` field
 
 `exception_type` is provided for diagnostic and observability purposes
-(e.g., metrics bucketing). The format is whatever ComfyUI sends —
-typically the bare class name for builtins (`RuntimeError`,
-`ValueError`) and a dotted module path for non-builtins
-(`comfy.model_management.InterruptProcessingException`). May be `""`
-when the server omits it. Agents should not key retry or routing
-logic on `exception_type`; use `error.kind` for coarse dispatch and
-`error.message` for human display.
+(e.g., metrics bucketing). **Open set** — the format is whatever
+ComfyUI sends, typically the bare class name for builtins
+(`RuntimeError`, `ValueError`) and a dotted module path for non-
+builtins (`comfy.model_management.InterruptProcessingException`). May
+be `""` when the server omits it. Agents should not key retry or
+routing logic on `exception_type`; use `error.kind` for coarse
+dispatch and `error.message` for human display.
 
 ### `traceback` field
 
@@ -662,6 +666,9 @@ For the v1 contract documented here:
   no human-readable progress bar, no headings); stderr is reserved
   for framework-level Python errors, uncaught exceptions, and library
   warnings — agents should not parse it.
+- The 7-bit ASCII encoding of stdout (non-ASCII characters in string
+  fields are emitted as `\uXXXX` JSON escapes, equivalent to
+  `json.dumps(..., ensure_ascii=True)`).
 - The `schema_version: 1` field on every event of v1 streams.
 
 ### What may change in a non-breaking way
