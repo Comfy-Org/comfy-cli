@@ -116,6 +116,13 @@ Agents must ignore events whose `event` value they do not recognise —
 new event kinds may be added in a backward-compatible manner. Agents
 must ignore unknown fields on known events for the same reason.
 
+A handful of fields carry values from a server-defined open set rather
+than a fixed enumeration: `class_type`, `category`, `type`, and
+`exception_type`. Each is flagged **Open set** at one canonical
+description below; the same treatment applies wherever that field
+appears across events. Agents must accept and pass through unknown
+values without keying behaviour on specific strings.
+
 ### `converted`
 
 Emitted once if the input workflow was in UI format and was converted to
@@ -428,11 +435,11 @@ talking to Cloud. For the local case, a loopback HTTP fetch from a
 ComfyUI on the same box is cheap — the agent's HTTP client reads
 through the kernel loopback in the same way it'd read a local file.
 
-The CLI used to also emit a `local_path` field for the same-machine
-case, but the heuristic for resolving ComfyUI's output directory was
-unreliable in real setups (manual launches, alternate install paths,
-multi-install machines, containers with bind-mounted volumes). Agents
-should rely on `url` exclusively.
+An earlier draft of v1 also emitted a `local_path` field for the
+same-machine case; it was removed because resolving ComfyUI's actual
+output directory reliably (across manual launches, alternate install
+paths, multi-install machines, bind-mounted volumes) wasn't feasible.
+Agents should rely on `url` exclusively.
 
 ## Error object
 
