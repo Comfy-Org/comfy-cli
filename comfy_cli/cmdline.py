@@ -459,7 +459,7 @@ def run(
         typer.Option(help="The port where the ComfyUI instance is running, e.g. 8188."),
     ] = None,
     timeout: Annotated[
-        int | None,
+        int,
         typer.Option(
             help=(
                 "Per-event timeout in seconds: bails out if the server is silent "

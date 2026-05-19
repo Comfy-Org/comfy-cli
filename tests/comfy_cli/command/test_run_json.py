@@ -359,7 +359,7 @@ class TestSuccessfulRun:
             mock_open.return_value.read.return_value = json.dumps({"prompt_id": "p123"}).encode()
             events = _run_execute_capture(workflow_file, capsys, wait=False)
         # prompt_preview is always emitted in --json before queued so agents
-        # have a full audit trail of the submitted body.
+        # have a full audit trail of the submitted workflow graph.
         assert [e["event"] for e in events] == ["prompt_preview", "queued"]
         assert events[0]["prompt"]
         assert events[1]["prompt_id"] == "p123"

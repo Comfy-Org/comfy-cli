@@ -320,7 +320,7 @@ def execute(
     port,
     wait=True,
     verbose=False,
-    timeout=30,
+    timeout=120,
     api_key: str | None = None,
     json_mode: bool = False,
     print_prompt: bool = False,
@@ -551,7 +551,7 @@ class WorkflowExecution:
         port,
         verbose,
         progress,
-        timeout=30,
+        timeout=120,
         api_key: str | None = None,
         emitter: JsonEmitter | None = None,
     ):
