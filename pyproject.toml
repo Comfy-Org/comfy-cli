@@ -63,7 +63,7 @@ where = [ "." ]
 include = [ "comfy_cli*" ]
 
 [tool.setuptools.package-data]
-"comfy_cli.command.generate.spec" = [ "openapi.yml" ]
+"comfy_cli.command.generate" = [ "spec/openapi.yml" ]
 
 [tool.ruff]
 target-version = "py310"
