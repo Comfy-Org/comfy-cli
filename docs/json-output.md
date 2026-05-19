@@ -655,8 +655,13 @@ For the v1 contract documented here:
 - The set of event names listed above and the field names within them.
 - The set of `error.kind` values listed above and the per-kind extra
   fields documented for each.
-- The exit code mapping (`0` on `completed`, `1` on `failed`).
-- The stdout/stderr separation (NDJSON on stdout, no progress on stderr).
+- The exit code mapping: `0` when the terminal event is `completed`,
+  `queued` (under `--no-wait`), or `prompt_preview` (under
+  `--print-prompt`); `1` on `failed`.
+- The stdout/stderr separation: stdout carries only NDJSON (no ANSI,
+  no human-readable progress bar, no headings); stderr is reserved
+  for framework-level Python errors, uncaught exceptions, and library
+  warnings — agents should not parse it.
 - The `schema_version: 1` field on every event of v1 streams.
 
 ### What may change in a non-breaking way
