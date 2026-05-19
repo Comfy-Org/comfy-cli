@@ -136,11 +136,11 @@ format.
 
 Emitted in `--json` mode once the workflow has been successfully
 loaded, parsed, and (if UI-format) converted — i.e., in every stream
-except the pre-flight failure cases where the workflow was rejected
-before conversion (`workflow_not_found`, `workflow_invalid_json`,
-`workflow_read_error`, `workflow_format_invalid`, `workflow_empty`).
-Fires immediately after the optional `converted` event and immediately
-before `queued`. Carries the API-format workflow graph the CLI is
+except the **Failure pre-flight** archetype (a `failed`-only stream
+where the CLI bails out before it has a workflow to preview: file
+errors, parse errors, server-probe / `/object_info` failures, UI
+conversion failures, etc.). Fires immediately after the optional
+`converted` event and immediately before `queued`. Carries the API-format workflow graph the CLI is
 about to POST to `/prompt` — the same dict that would land in the
 request's `prompt` field. Gives agents a complete audit trail of what
 was submitted, useful for debugging conversions, logging, and
@@ -468,7 +468,7 @@ removed without a schema version bump.
 | `conversion_crash`        | UI→API converter raised an unexpected exception                                               | `exception_type` (str)                             |
 | `object_info_unavailable` | `/object_info` returned an HTTP error, or an HTTP 200 with an unparseable body                | `status_code` (int), `body` (str)                  |
 | `connection_error`        | ComfyUI server unreachable: `URLError`, `TimeoutError`, or other `OSError` while contacting it (including on `/object_info`) | —                                |
-| `validation_error`        | Server returned HTTP 400 with `node_errors`                                                   | `node_errors` (array of dict; see below)           |
+| `validation_error`        | Server returned HTTP 400 with `node_errors`                                                   | `node_errors` (array of dict; see [shape](#validation_errornode_errors-shape)) |
 | `client_error`            | Server returned an HTTP 4xx response (not validation)                                         | `status_code` (int, 4xx), `body` (str)             |
 | `server_error`            | Server returned an HTTP 5xx response                                                          | `status_code` (int, 5xx), `body` (str)             |
 | `invalid_response`        | Server returned HTTP 2xx but body was unparseable or lacked `prompt_id`                       | `status_code` (int, 2xx), `body` (str)             |
@@ -573,7 +573,7 @@ trailing entries.
 
 ```json
 {"event":"converted","schema_version":1,"node_count":2}
-{"event":"prompt_preview","schema_version":1,"prompt":{"1":{"class_type":"GeminiNanoBanana2","inputs":{"prompt":"a banana","width":2048,"height":2048},"_meta":{"title":"Nano Banana 2"}},"2":{"class_type":"SaveImage","inputs":{"filename_prefix":"banana_test","images":["1",0]}}}}
+{"event":"prompt_preview","schema_version":1,"prompt":{"1":{"class_type":"GeminiNanoBanana2","inputs":{"prompt":"a banana","width":2048,"height":2048},"_meta":{"title":"Nano Banana 2"}},"2":{"class_type":"SaveImage","inputs":{"filename_prefix":"banana_test","images":["1",0]},"_meta":{"title":"Save Image"}}}}
 {"event":"queued","schema_version":1,"prompt_id":"9b1c…","client_id":"fe2a…","validation_warnings":[],"nodes":[{"node_id":"1","class_type":"GeminiNanoBanana2","title":"Nano Banana 2"},{"node_id":"2","class_type":"SaveImage","title":"Save Image"}]}
 {"event":"node_executing","schema_version":1,"node_id":"1","class_type":"GeminiNanoBanana2","title":"Nano Banana 2"}
 {"event":"node_progress","schema_version":1,"node_id":"1","class_type":"GeminiNanoBanana2","title":"Nano Banana 2","value":1,"max":4}
@@ -593,7 +593,7 @@ server doesn't send an `executed` ws message for it.
 ### `--no-wait` (API-format input)
 
 ```json
-{"event":"prompt_preview","schema_version":1,"prompt":{"1":{"class_type":"GeminiNanoBanana2","inputs":{"prompt":"a banana","width":2048,"height":2048}},"2":{"class_type":"SaveImage","inputs":{"filename_prefix":"banana_test","images":["1",0]}}}}
+{"event":"prompt_preview","schema_version":1,"prompt":{"1":{"class_type":"GeminiNanoBanana2","inputs":{"prompt":"a banana","width":2048,"height":2048},"_meta":{"title":"Nano Banana 2"}},"2":{"class_type":"SaveImage","inputs":{"filename_prefix":"banana_test","images":["1",0]},"_meta":{"title":"Save Image"}}}}
 {"event":"queued","schema_version":1,"prompt_id":"9b1c…","client_id":"fe2a…","validation_warnings":[],"nodes":[{"node_id":"1","class_type":"GeminiNanoBanana2","title":"Nano Banana 2"},{"node_id":"2","class_type":"SaveImage","title":"Save Image"}]}
 ```
 
@@ -612,7 +612,7 @@ Exit code: `1`.
 
 ```json
 {"event":"converted","schema_version":1,"node_count":2}
-{"event":"prompt_preview","schema_version":1,"prompt":{"1":{"class_type":"GeminiNanoBanana2","inputs":{"prompt":"a banana","resolution":"5K"}},"2":{"class_type":"SaveImage","inputs":{"filename_prefix":"banana_test","images":["1",0]}}}}
+{"event":"prompt_preview","schema_version":1,"prompt":{"1":{"class_type":"GeminiNanoBanana2","inputs":{"prompt":"a banana","resolution":"5K"},"_meta":{"title":"Nano Banana 2"}},"2":{"class_type":"SaveImage","inputs":{"filename_prefix":"banana_test","images":["1",0]},"_meta":{"title":"Save Image"}}}}
 {"event":"failed","schema_version":1,"prompt_id":null,"client_id":"fe2a…","elapsed_seconds":0.45,"error":{"kind":"validation_error","message":"Value not in list","node_errors":[{"node_id":"1","errors":[{"type":"value_not_in_list","message":"Value not in list","details":"resolution: '5K' not in ['1K','2K','4K']","extra_info":{"input_name":"resolution","received_value":"5K"}}],"dependent_outputs":["2"],"class_type":"GeminiNanoBanana2"}]}}
 ```
 
@@ -621,7 +621,7 @@ Exit code: `1`.
 ### Failure: node raised during execution
 
 ```json
-{"event":"prompt_preview","schema_version":1,"prompt":{"1":{"class_type":"GeminiNanoBanana2","inputs":{"prompt":"a banana","width":2048,"height":2048}},"2":{"class_type":"SaveImage","inputs":{"filename_prefix":"banana_test","images":["1",0]}}}}
+{"event":"prompt_preview","schema_version":1,"prompt":{"1":{"class_type":"GeminiNanoBanana2","inputs":{"prompt":"a banana","width":2048,"height":2048},"_meta":{"title":"Nano Banana 2"}},"2":{"class_type":"SaveImage","inputs":{"filename_prefix":"banana_test","images":["1",0]},"_meta":{"title":"Save Image"}}}}
 {"event":"queued","schema_version":1,"prompt_id":"9b1c…","client_id":"fe2a…","validation_warnings":[],"nodes":[{"node_id":"1","class_type":"GeminiNanoBanana2","title":"Nano Banana 2"},{"node_id":"2","class_type":"SaveImage","title":"Save Image"}]}
 {"event":"node_executing","schema_version":1,"node_id":"1","class_type":"GeminiNanoBanana2","title":"Nano Banana 2"}
 {"event":"failed","schema_version":1,"prompt_id":"9b1c…","client_id":"fe2a…","elapsed_seconds":2.1,"error":{"kind":"execution_error","message":"API key invalid","node_id":"1","class_type":"GeminiNanoBanana2","title":"Nano Banana 2","exception_type":"RuntimeError","traceback":"  File \"/path/to/node.py\", line 42, in execute\n    raise RuntimeError(\"API key invalid\")\n"}}
@@ -632,7 +632,7 @@ Exit code: `1`.
 ### Failure: websocket timeout
 
 ```json
-{"event":"prompt_preview","schema_version":1,"prompt":{"1":{"class_type":"GeminiNanoBanana2","inputs":{"prompt":"a banana","width":2048,"height":2048}},"2":{"class_type":"SaveImage","inputs":{"filename_prefix":"banana_test","images":["1",0]}}}}
+{"event":"prompt_preview","schema_version":1,"prompt":{"1":{"class_type":"GeminiNanoBanana2","inputs":{"prompt":"a banana","width":2048,"height":2048},"_meta":{"title":"Nano Banana 2"}},"2":{"class_type":"SaveImage","inputs":{"filename_prefix":"banana_test","images":["1",0]},"_meta":{"title":"Save Image"}}}}
 {"event":"queued","schema_version":1,"prompt_id":"9b1c…","client_id":"fe2a…","validation_warnings":[],"nodes":[{"node_id":"1","class_type":"GeminiNanoBanana2","title":"Nano Banana 2"},{"node_id":"2","class_type":"SaveImage","title":"Save Image"}]}
 {"event":"node_executing","schema_version":1,"node_id":"1","class_type":"GeminiNanoBanana2","title":"Nano Banana 2"}
 {"event":"failed","schema_version":1,"prompt_id":"9b1c…","client_id":"fe2a…","elapsed_seconds":30.0,"error":{"kind":"timeout","message":"WebSocket timed out after 30s waiting for server response","timeout_seconds":30.0}}
@@ -643,7 +643,7 @@ Exit code: `1`.
 ### Failure: workflow interrupted
 
 ```json
-{"event":"prompt_preview","schema_version":1,"prompt":{"1":{"class_type":"GeminiNanoBanana2","inputs":{"prompt":"a banana","width":2048,"height":2048}},"2":{"class_type":"SaveImage","inputs":{"filename_prefix":"banana_test","images":["1",0]}}}}
+{"event":"prompt_preview","schema_version":1,"prompt":{"1":{"class_type":"GeminiNanoBanana2","inputs":{"prompt":"a banana","width":2048,"height":2048},"_meta":{"title":"Nano Banana 2"}},"2":{"class_type":"SaveImage","inputs":{"filename_prefix":"banana_test","images":["1",0]},"_meta":{"title":"Save Image"}}}}
 {"event":"queued","schema_version":1,"prompt_id":"9b1c…","client_id":"fe2a…","validation_warnings":[],"nodes":[{"node_id":"1","class_type":"GeminiNanoBanana2","title":"Nano Banana 2"},{"node_id":"2","class_type":"SaveImage","title":"Save Image"}]}
 {"event":"node_executing","schema_version":1,"node_id":"1","class_type":"GeminiNanoBanana2","title":"Nano Banana 2"}
 {"event":"failed","schema_version":1,"prompt_id":"9b1c…","client_id":"fe2a…","elapsed_seconds":3.2,"error":{"kind":"execution_interrupted","message":"Workflow execution was interrupted"}}

@@ -443,8 +443,8 @@ def execute(
         workflow = validated
         emitter.set_workflow(workflow)
 
-    # In JSON mode, always emit the converted prompt body so agents have a
-    # complete audit trail of what the CLI is about to submit. The event
+    # In JSON mode, always emit the converted workflow graph so agents have
+    # a complete audit trail of what the CLI is about to submit. The event
     # is non-terminal in normal flow and terminal under --print-prompt.
     if json_mode:
         emitter.emit_prompt_preview(workflow)

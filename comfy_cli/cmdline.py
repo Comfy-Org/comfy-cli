@@ -477,7 +477,7 @@ def run(
             envvar="COMFY_API_KEY",
             help=(
                 "Comfy API key for API Nodes (Partner Nodes). "
-                "Embedded in the prompt body as extra_data.api_key_comfy_org on POST /prompt. "
+                "Embedded in the POST /prompt request body as extra_data.api_key_comfy_org. "
                 "For scripting, prefer the COMFY_API_KEY environment variable so the secret "
                 "stays out of shell history."
             ),
@@ -494,7 +494,7 @@ def run(
                 "--verbose has no effect and Rich progress is suppressed. "
                 "Workflow input accepts both API and UI format JSON (UI input "
                 "triggers a `converted` event before `queued`). The converted "
-                "prompt body is always emitted as a `prompt_preview` event "
+                "workflow graph is always emitted as a `prompt_preview` event "
                 "before `queued`, so agents have a full audit trail of what "
                 "the CLI submitted."
             ),
@@ -505,7 +505,7 @@ def run(
         typer.Option(
             "--print-prompt",
             help=(
-                "Print the API-format prompt body that WOULD be sent to /prompt and exit. "
+                "Print the API-format workflow graph that WOULD be sent to /prompt and exit. "
                 "Does not POST and does not execute. For UI-format input the workflow is "
                 "converted first (requires a reachable ComfyUI for /object_info); API input "
                 "is printed as-is with no server hit. In --json mode emits a `prompt_preview` "

@@ -866,7 +866,7 @@ class TestCliRunnerIntegration:
 
 
 class TestPromptPreviewAlwaysEmitted:
-    """In JSON mode the converted prompt body is always emitted as a
+    """In JSON mode the converted workflow graph is always emitted as a
     `prompt_preview` event before `queued`. Agents debugging conversions
     or building an audit trail get full visibility without re-running
     with a flag."""
