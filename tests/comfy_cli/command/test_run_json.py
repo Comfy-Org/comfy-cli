@@ -8,7 +8,6 @@ The tests cover:
   - stream archetypes from the spec table
   - the duck-typed output filter rule
   - the cached/executed overlap semantics
-  - per-line stdout flushing (so live consumers see events as they happen)
 """
 
 from __future__ import annotations
@@ -90,6 +89,27 @@ def _make_http_error(code: int, body: bytes = b"") -> urllib.error.HTTPError:
         msg=f"HTTP {code}",
         hdrs=None,
         fp=io.BytesIO(body),
+    )
+
+
+def _make_workflow_execution(workflow, *, with_progress: bool = False, json_mode: bool = True):
+    """Build a `WorkflowExecution` with a `JsonEmitter` pre-wired to the
+    workflow. `with_progress=True` attaches a MagicMock progress object —
+    needed by tests that exercise `update_overall_progress`."""
+    e = JsonEmitter(json_mode=json_mode)
+    e.set_workflow(workflow)
+    progress = None
+    if with_progress:
+        progress = MagicMock()
+        progress.add_task.return_value = 0
+    return WorkflowExecution(
+        workflow=workflow,
+        host="127.0.0.1",
+        port=8188,
+        verbose=False,
+        progress=progress,
+        timeout=30,
+        emitter=e,
     )
 
 
@@ -245,6 +265,49 @@ class TestJsonEmitter:
         assert event["client_id"] == "c"
         assert event["prompt_id"] is None  # never set
         assert isinstance(event["elapsed_seconds"], float)
+
+    def test_fail_helper_emits_event_and_returns_exit(self, capsys):
+        # JSON mode: the helper emits a `failed` event, returns a typer.Exit
+        # (not raised — caller raises so `from e` chaining is clean), and
+        # does NOT print prose (stdout stays NDJSON-only).
+        e = JsonEmitter(json_mode=True)
+        e.set_client_id("c")
+        result = e.fail("client_error", "Bad request", status_code=403, body="forbidden")
+        assert isinstance(result, typer.Exit)
+        assert result.exit_code == 1
+        out = capsys.readouterr().out
+        event = json.loads(out.strip())
+        assert event["event"] == "failed"
+        assert event["error"]["kind"] == "client_error"
+        assert event["error"]["message"] == "Bad request"
+        assert event["error"]["status_code"] == 403
+
+    def test_fail_helper_wraps_text_mode_message_in_bold_red(self, capsys):
+        # Non-JSON mode: the helper auto-wraps `message` in
+        # [bold red]...[/bold red] and returns typer.Exit (no event on stdout).
+        e = JsonEmitter(json_mode=False)
+        result = e.fail("client_error", "Bad request")
+        assert isinstance(result, typer.Exit)
+        out = capsys.readouterr().out
+        assert "Bad request" in out
+        # Rich strips markup tags but still applies the formatting; the
+        # message content must reach stdout. No NDJSON in text mode.
+        assert "failed" not in out  # no event was emitted
+
+    def test_fail_helper_rich_message_overrides_text_only(self, capsys):
+        # `rich_message` replaces the auto-wrapped text; JSON event still
+        # carries the original `message`.
+        e = JsonEmitter(json_mode=True)
+        e.set_client_id("c")
+        e.fail("client_error", "machine-readable", rich_message="human-friendly")
+        event = json.loads(capsys.readouterr().out.strip())
+        assert event["error"]["message"] == "machine-readable"
+        # In text mode it'd flip — verify separately.
+        e2 = JsonEmitter(json_mode=False)
+        e2.fail("client_error", "machine-readable", rich_message="human-friendly")
+        out = capsys.readouterr().out
+        assert "human-friendly" in out
+        assert "machine-readable" not in out
 
     def test_title_falls_back_to_class_type(self, simple_workflow):
         e = JsonEmitter(json_mode=True)
@@ -427,31 +490,22 @@ class TestQueueHttpErrors:
         assert isinstance(node_errors, list)
         assert any(rec["node_id"] == "1" for rec in node_errors)
 
-    def test_401_routes_to_client_error(self, workflow_file, capsys):
-        events = self._setup_and_run(workflow_file, None, capsys, status=401, body=b"unauthorized")
+    @pytest.mark.parametrize(
+        "status,body,kind",
+        [
+            (401, b"unauthorized", "client_error"),
+            (403, b"forbidden", "client_error"),
+            (429, b"too many", "client_error"),
+            (500, b"oops", "server_error"),
+            (503, b"down", "server_error"),
+        ],
+    )
+    def test_http_status_routes_to_kind(self, workflow_file, capsys, status, body, kind):
+        events = self._setup_and_run(workflow_file, None, capsys, status=status, body=body)
         terminal = events[-1]
-        assert terminal["error"]["kind"] == "client_error"
-        assert terminal["error"]["status_code"] == 401
-
-    def test_403_routes_to_client_error(self, workflow_file, capsys):
-        events = self._setup_and_run(workflow_file, None, capsys, status=403, body=b"forbidden")
-        assert events[-1]["error"]["kind"] == "client_error"
-        assert events[-1]["error"]["status_code"] == 403
-
-    def test_429_routes_to_client_error(self, workflow_file, capsys):
-        events = self._setup_and_run(workflow_file, None, capsys, status=429, body=b"too many")
-        assert events[-1]["error"]["kind"] == "client_error"
-
-    def test_500_routes_to_server_error(self, workflow_file, capsys):
-        events = self._setup_and_run(workflow_file, None, capsys, status=500, body=b"oops")
-        terminal = events[-1]
-        assert terminal["error"]["kind"] == "server_error"
-        assert terminal["error"]["status_code"] == 500
-        assert terminal["error"]["body"] == "oops"
-
-    def test_503_routes_to_server_error(self, workflow_file, capsys):
-        events = self._setup_and_run(workflow_file, None, capsys, status=503, body=b"down")
-        assert events[-1]["error"]["kind"] == "server_error"
+        assert terminal["error"]["kind"] == kind
+        assert terminal["error"]["status_code"] == status
+        assert terminal["error"]["body"] == body.decode()
 
     def test_200_with_non_json_body_routes_to_invalid_response(self, workflow_file, capsys):
         with (
@@ -626,19 +680,7 @@ class TestWebSocketEvents:
 
 class TestOutputObject:
     def _exec(self, simple_workflow):
-        progress = MagicMock()
-        progress.add_task.return_value = 0
-        e = JsonEmitter(json_mode=True)
-        e.set_workflow(simple_workflow)
-        return WorkflowExecution(
-            workflow=simple_workflow,
-            host="127.0.0.1",
-            port=8188,
-            verbose=False,
-            progress=progress,
-            timeout=30,
-            emitter=e,
-        )
+        return _make_workflow_execution(simple_workflow, with_progress=True)
 
     def test_duck_typed_filter_skips_strings(self, simple_workflow, capsys):
         """ComfyUI's `text` output key emits a list of strings; the filter must skip non-file shapes."""
@@ -1181,19 +1223,7 @@ class TestNodeExecutedFiresEvenWithoutOutputs:
     prompt, even when there's no `output` dict or it's empty (outputs=[])."""
 
     def _exec(self, simple_workflow):
-        progress = MagicMock()
-        progress.add_task.return_value = 0
-        e = JsonEmitter(json_mode=True)
-        e.set_workflow(simple_workflow)
-        return WorkflowExecution(
-            workflow=simple_workflow,
-            host="127.0.0.1",
-            port=8188,
-            verbose=False,
-            progress=progress,
-            timeout=30,
-            emitter=e,
-        )
+        return _make_workflow_execution(simple_workflow, with_progress=True)
 
     def test_output_node_id_coerced_to_str(self, simple_workflow, capsys):
         # If the server ever sends `node` as an int, every other emit site
@@ -1251,19 +1281,7 @@ class TestFormatImagePathDefensive:
     keys — the duck-type filter only requires `filename`."""
 
     def _exec(self, simple_workflow):
-        progress = MagicMock()
-        progress.add_task.return_value = 0
-        e = JsonEmitter(json_mode=True)
-        e.set_workflow(simple_workflow)
-        return WorkflowExecution(
-            workflow=simple_workflow,
-            host="127.0.0.1",
-            port=8188,
-            verbose=False,
-            progress=progress,
-            timeout=30,
-            emitter=e,
-        )
+        return _make_workflow_execution(simple_workflow, with_progress=True)
 
     def test_no_keyerror_on_missing_type(self, simple_workflow):
         ex = self._exec(simple_workflow)
@@ -1338,17 +1356,7 @@ class TestErrorPathCoverage:
         }
 
     def _make_exec(self, workflow):
-        e = JsonEmitter(json_mode=True)
-        e.set_workflow(workflow)
-        return WorkflowExecution(
-            workflow=workflow,
-            host="127.0.0.1",
-            port=8188,
-            verbose=False,
-            progress=None,
-            timeout=30,
-            emitter=e,
-        )
+        return _make_workflow_execution(workflow)
 
     def test_object_info_timeout_routes_to_connection_error(self, capsys):
         """fetch_object_info(timeout → connection_error). Previously untested."""

@@ -123,6 +123,12 @@ description below; the same treatment applies wherever that field
 appears across events. Agents must accept and pass through unknown
 values without keying behaviour on specific strings.
 
+Every event that names a single node also carries a `title` field —
+the human-readable label to show in a per-node UI. The contract for
+`title` is the same wherever it appears: **`_meta.title` if present,
+else `class_type`, else `node_id`**. Per-event field tables list it
+simply as "display label" rather than repeating the chain.
+
 ### `converted`
 
 Emitted once if the input workflow was in UI format and was converted to
@@ -199,7 +205,7 @@ handle, which can be used to correlate against `/history/{prompt_id}`.
 | `prompt_id`           | str            | Server-assigned prompt UUID                                  |
 | `client_id`           | str            | Client-generated UUID (sent with `/prompt`)                  |
 | `validation_warnings` | array of dict  | List of per-node validation issues that ComfyUI reported alongside a successful queue (some output chains validated, others didn't). Same record shape as `validation_error.node_errors` (see below). Empty (`[]`) in the common case. |
-| `nodes`               | array of dict  | Manifest of every node in the submitted (post-conversion) workflow. Each entry has `node_id` (str), `class_type` (str), and `title` (str — `_meta.title` if present, else `class_type`, else `node_id`). Lets piped consumers (who don't have the workflow file at hand) render a per-node UI immediately without waiting for `completed`. |
+| `nodes`               | array of dict  | Manifest of every node in the submitted (post-conversion) workflow. Each entry has `node_id` (str), `class_type` (str), and `title` (str — display label, see canonical `title` rule). Lets piped consumers (who don't have the workflow file at hand) render a per-node UI immediately without waiting for `completed`. |
 
 The `validation_warnings` field exists specifically for the case where
 ComfyUI's `validate_prompt` returns success because at least one output
@@ -230,7 +236,7 @@ See [completed](#completed) for the resulting semantics of
 | `schema_version` | int  | `1`                                         |
 | `node_id`        | str  | Node key in the workflow dict               |
 | `class_type`     | str  | Node class name. **Open set** — current ComfyUI versions emit names like `KSampler`, `SaveImage`, plus arbitrary custom-node class names; agents must accept and pass through unknown values without keying behaviour on specific strings. |
-| `title`          | str  | `_meta.title` if present, else `class_type`, else `node_id` |
+| `title`          | str  | display label (see canonical `title` rule above) |
 
 ### `node_executing`
 
@@ -267,7 +273,7 @@ recently-emitted `node_executing` event.
 | `schema_version` | int    | `1`                                                         |
 | `node_id`        | str    | Node currently running                                      |
 | `class_type`     | str    | Node class name (duplicated from the workflow so stateless consumers don't need to track the prior `node_executing`) |
-| `title`          | str    | `_meta.title` if present, else `class_type`, else `node_id`                 |
+| `title`          | str    | display label (see canonical `title` rule above)                 |
 | `value`          | number | Current progress. Typically int (step count); some custom nodes emit float (fractional progress). Defaults to `0` when the server omits the field. |
 | `max`            | number | Total progress; same caveat as `value`. Defaults to `0` when the server omits the field. |
 
@@ -312,7 +318,7 @@ cached output-bearing node also emits `node_executed` (in addition to
 | `schema_version` | int              | `1`                                         |
 | `node_id`        | str              | Node key                                    |
 | `class_type`     | str              | Node class name                             |
-| `title`          | str              | `_meta.title` if present, else `class_type`, else `node_id` |
+| `title`          | str              | display label (see canonical `title` rule above) |
 | `outputs`        | array of Output  | File-like outputs (empty if none)           |
 
 `outputs` is populated by iterating each key in ComfyUI's
@@ -350,18 +356,13 @@ output list, and node-execution metadata.
 | `elapsed_seconds`   | float           | Wall-clock duration from start of `comfy run` (same clock as `failed.elapsed_seconds`) |
 | `outputs`           | array of Output | All file-like outputs across all nodes (empty if none)       |
 | `cached_node_ids`   | array of str    | Node IDs the server reported as cached (via `execution_cached`) |
-| `executed_node_ids` | array of str    | Node IDs the server executor touched in this run — the union of every `node_id` that appeared in a `node_executing` or `node_executed` event. Includes intermediate compute nodes (CheckpointLoaderSimple, KSampler, etc.) that don't surface output to the client and don't get a dedicated `node_executed` event, in addition to leaf/output nodes that do. |
+| `executed_node_ids` | array of str    | Node IDs the executor *ran* — the union of every `node_id` that appeared in a `node_executing` or `node_executed` event. Named for what the executor did (run a node), broader than the leaf-only `node_executed` event: includes intermediate compute nodes (CheckpointLoaderSimple, KSampler, etc.) that don't surface output to the client. |
 
 `cached_node_ids` and `executed_node_ids` are independent signals about
 what the server reported. **They may overlap**: a cached output-bearing
 node emits both `execution_cached` and `executed`, so it appears in
 both lists. Agents wanting "ran fresh, not from cache" should compute
 `set(executed_node_ids) - set(cached_node_ids)`.
-
-Note: `executed_node_ids` is named for what the executor *did* (run a
-node), not for which event was emitted. The leaf-only `node_executed`
-event remains the per-node signal for "this node produced a visible
-artifact"; the aggregate field here is the broader "this node ran".
 
 ### `failed`
 
@@ -420,7 +421,7 @@ cannot be assigned without a `client_id`).
 | `category`   | str         | Output category as keyed by ComfyUI's `executed.output` dict. **Open set.** Current ComfyUI versions emit values like `images`, `audio`, `3d`, `latents`; agents must accept and pass through unknown values. |
 | `node_id`    | str         | Node that produced the output                                                                            |
 | `class_type` | str         | Node class name                                                                                          |
-| `title`      | str         | `_meta.title` if present, else `class_type`, else `node_id`                                                              |
+| `title`      | str         | display label (see canonical `title` rule above)                                                              |
 | `filename`   | str         | Raw filename as reported by the server                                                                   |
 | `subfolder`  | str         | Subfolder within the output folder's root. Defaults to `""` when the server omits or empties the field.   |
 | `type`       | str         | ComfyUI output folder discriminator. **Open set.** Current ComfyUI versions emit `output`, `temp`, `input`; agents must accept and pass through unknown values. Defaults to `"output"` when the server omits or empties the field. |
@@ -482,7 +483,7 @@ removed without a schema version bump.
 | `timeout`                 | WebSocket `recv` timed out                                                                    | `timeout_seconds` (float)                          |
 | `connection_lost`         | WebSocket connection dropped mid-execution                                                    | —                                                  |
 | `execution_interrupted`   | Server signaled the workflow was interrupted (`execution_interrupted` WS, e.g., via `/interrupt`) | —                                              |
-| `execution_error`         | A node raised during execution (server emitted `execution_error`)                             | `node_id` (str), `class_type` (str), `title` (str — same fallback chain as the per-node events: `_meta.title`, else `class_type`, else `node_id`), `exception_type` (str), `traceback` (str) |
+| `execution_error`         | A node raised during execution (server emitted `execution_error`)                             | `node_id` (str), `class_type` (str), `title` (str — display label, see canonical `title` rule), `exception_type` (str), `traceback` (str) |
 
 ### `exception_type` field
 
@@ -693,14 +694,9 @@ than being treated as an additive change.
 
 ### Why exit codes are not granular
 
-In `--json` mode, exit code is always `0` (`completed`, or the
-mode-specific terminal `queued`/`prompt_preview`) or `1` (`failed`).
-This is part of the v1 JSON contract and will not change without a
-`schema_version` bump. Non-`--json` exit codes are documented elsewhere
-and not governed by this contract.
-
-The `error.kind` string namespace is more expressive than granular exit
-codes — no number bikeshedding, easy to add sub-categories — and it is
-co-located with the rich error context. Granular exit codes can be
+The 0/1 mapping (defined in "What is stable" above) intentionally
+trades resolution for stability. `error.kind` is the expressive,
+extensible discriminator — agents dispatch on it; the exit code is
+just a coarse "did we succeed?" signal. Granular exit codes can be
 introduced later for non-`--json` callers in a separate,
 evidence-driven change without breaking the JSON contract.
