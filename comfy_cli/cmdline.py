@@ -430,7 +430,6 @@ def update(
         "UI workflows are converted to API format client-side via /object_info."
     )
 )
-@tracking.track_command()
 def run(
     workflow: Annotated[
         str,
@@ -514,40 +513,62 @@ def run(
         ),
     ] = False,
 ):
-    if api_key:
-        api_key = api_key.strip() or None
+    # Snapshot kwargs before the body mutates api_key/host/port — analytics should record what user actually supplied.
+    _track_props = tracking.filter_command_kwargs(dict(locals()))
+    tracking.track_event("execution_start", _track_props, mixpanel_name="run")
 
-    config = ConfigManager()
+    try:
+        if api_key:
+            api_key = api_key.strip() or None
 
-    if host:
-        s = host.split(":")
-        host = s[0]
-        if not port and len(s) == 2:
-            port = int(s[1])
+        config = ConfigManager()
 
-    if config.background:
-        bg_host, bg_port = config.background[0], config.background[1]
+        if host:
+            s = host.split(":")
+            host = s[0]
+            if not port and len(s) == 2:
+                port = int(s[1])
+
+        if config.background:
+            bg_host, bg_port = config.background[0], config.background[1]
+            if not host:
+                host = bg_host
+            if not port:
+                port = bg_port
+
         if not host:
-            host = bg_host
+            host = "127.0.0.1"
         if not port:
-            port = bg_port
+            port = 8188
 
-    if not host:
-        host = "127.0.0.1"
-    if not port:
-        port = 8188
-
-    run_inner.execute(
-        workflow,
-        host,
-        port,
-        wait,
-        verbose,
-        timeout,
-        api_key=api_key,
-        json_mode=json_output,
-        print_prompt=print_prompt,
-    )
+        run_inner.execute(
+            workflow,
+            host,
+            port,
+            wait,
+            verbose,
+            timeout,
+            api_key=api_key,
+            json_mode=json_output,
+            print_prompt=print_prompt,
+        )
+    except typer.Exit as e:
+        if (e.exit_code or 0) == 0:
+            tracking.track_event("execution_success", _track_props)
+        else:
+            tracking.track_event(
+                "execution_error",
+                {**_track_props, "error_type": type(e).__name__, "exit_code": e.exit_code},
+            )
+        raise
+    except Exception as e:
+        tracking.track_event(
+            "execution_error",
+            {**_track_props, "error_type": type(e).__name__},
+        )
+        raise
+    else:
+        tracking.track_event("execution_success", _track_props)
 
 
 def validate_comfyui(_env_checker):

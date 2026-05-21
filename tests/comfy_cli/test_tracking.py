@@ -11,7 +11,11 @@ _ConfigManagerCls = ConfigManager.__closure__[0].cell_contents
 
 @pytest.fixture
 def tracking_module(tmp_path):
-    """Yield comfy_cli.tracking with a fresh tmp-path ConfigManager and a mocked Mixpanel client."""
+    """Yield comfy_cli.tracking with a fresh tmp-path ConfigManager and a single
+    mocked TelemetryProvider in PROVIDERS so tests can assert on the fan-out.
+
+    Exposes the mock as ``tracking_mod.provider`` for assertions.
+    """
     config_dir = tmp_path / "comfy-cli"
     config_dir.mkdir()
     with patch.object(_ConfigManagerCls, "get_config_path", return_value=str(config_dir)):
@@ -19,49 +23,70 @@ def tracking_module(tmp_path):
 
     import comfy_cli.tracking as tracking_mod
 
+    fake_provider = MagicMock()
+    fake_provider.enabled = True
+    # Mirror MixpanelProvider's no-op-on-missing-distinct-id behavior so opt-out
+    # paths look identical from the test's perspective.
+    fake_provider.track.return_value = None
+
     with (
         patch.object(tracking_mod, "config_manager", cfg),
         patch.object(tracking_mod, "user_id", None),
         patch.object(tracking_mod, "cli_version", "test-cli-version"),
         patch.object(tracking_mod, "tracing_id", "test-tracing-id"),
-        patch.object(tracking_mod, "mp", MagicMock()),
+        patch.object(tracking_mod, "PROVIDERS", [fake_provider]),
         patch.object(tracking_mod, "_session_only_tracking", False),
     ):
-        yield tracking_mod
+        # Stash the mock on the module for convenient access from tests
+        # without changing the fixture return contract.
+        tracking_mod.provider = fake_provider  # type: ignore[attr-defined]
+        try:
+            yield tracking_mod
+        finally:
+            del tracking_mod.provider
+
+
+def _last_track_call(provider):
+    args, kwargs = provider.track.call_args
+    # Provider.track(event_name, distinct_id=..., properties=...)
+    event_name = args[0] if args else kwargs.get("event_name")
+    distinct_id = kwargs.get("distinct_id", args[1] if len(args) > 1 else None)
+    properties = kwargs.get("properties", args[2] if len(args) > 2 else {})
+    return event_name, distinct_id, properties
 
 
 class TestTrackEvent:
     def test_short_circuits_when_disabled(self, tracking_module):
         tracking_module.config_manager.set(constants.CONFIG_KEY_ENABLE_TRACKING, "False")
         tracking_module.track_event("some_event")
-        tracking_module.mp.track.assert_not_called()
+        tracking_module.provider.track.assert_not_called()
 
     def test_short_circuits_when_not_configured(self, tracking_module):
         tracking_module.track_event("some_event")
-        tracking_module.mp.track.assert_not_called()
+        tracking_module.provider.track.assert_not_called()
 
     def test_fires_when_enabled(self, tracking_module):
         tracking_module.config_manager.set(constants.CONFIG_KEY_ENABLE_TRACKING, "True")
         tracking_module.track_event("some_event", {"k": "v"})
-        tracking_module.mp.track.assert_called_once()
-        _, kwargs = tracking_module.mp.track.call_args
-        assert kwargs["event_name"] == "some_event"
-        assert kwargs["properties"]["k"] == "v"
-        assert "cli_version" in kwargs["properties"]
-        assert "tracing_id" in kwargs["properties"]
+        tracking_module.provider.track.assert_called_once()
+        event_name, _, properties = _last_track_call(tracking_module.provider)
+        assert event_name == "some_event"
+        assert properties["k"] == "v"
+        assert "cli_version" in properties
+        assert "tracing_id" in properties
 
     def test_properties_default_to_empty_dict(self, tracking_module):
         tracking_module.config_manager.set(constants.CONFIG_KEY_ENABLE_TRACKING, "True")
         tracking_module.track_event("some_event")
-        tracking_module.mp.track.assert_called_once()
-        _, kwargs = tracking_module.mp.track.call_args
-        assert set(kwargs["properties"].keys()) == {"cli_version", "tracing_id"}
+        tracking_module.provider.track.assert_called_once()
+        _, _, properties = _last_track_call(tracking_module.provider)
+        assert set(properties.keys()) == {"cli_version", "tracing_id"}
 
-    def test_swallows_mixpanel_errors(self, tracking_module):
+    def test_swallows_provider_errors(self, tracking_module):
         tracking_module.config_manager.set(constants.CONFIG_KEY_ENABLE_TRACKING, "True")
-        tracking_module.mp.track.side_effect = RuntimeError("boom")
+        tracking_module.provider.track.side_effect = RuntimeError("boom")
         tracking_module.track_event("some_event")
-        tracking_module.mp.track.assert_called_once()
+        tracking_module.provider.track.assert_called_once()
 
 
 class TestTrackCommandRedaction:
@@ -76,12 +101,11 @@ class TestTrackCommandRedaction:
 
         some_cmd(workflow="wf.json", api_key="sk-supersecret")
 
-        tracking_module.mp.track.assert_called_once()
-        _, kwargs = tracking_module.mp.track.call_args
-        props = kwargs["properties"]
-        assert props["api_key"] == "<redacted>"
-        assert props["workflow"] == "wf.json"
-        assert "sk-supersecret" not in str(props)
+        tracking_module.provider.track.assert_called_once()
+        _, _, properties = _last_track_call(tracking_module.provider)
+        assert properties["api_key"] == "<redacted>"
+        assert properties["workflow"] == "wf.json"
+        assert "sk-supersecret" not in str(properties)
 
     def test_api_key_none_stays_none(self, tracking_module):
         # When the user didn't pass --api-key (or set $COMFY_API_KEY), we still
@@ -95,8 +119,8 @@ class TestTrackCommandRedaction:
 
         some_cmd(workflow="wf.json", api_key=None)
 
-        _, kwargs = tracking_module.mp.track.call_args
-        assert kwargs["properties"]["api_key"] is None
+        _, _, properties = _last_track_call(tracking_module.provider)
+        assert properties["api_key"] is None
 
 
 class TestInitTrackingRoundTrip:
@@ -109,13 +133,13 @@ class TestInitTrackingRoundTrip:
     def test_disable_is_respected_by_track_event(self, tracking_module):
         tracking_module.init_tracking(False)
         tracking_module.track_event("some_event")
-        tracking_module.mp.track.assert_not_called()
+        tracking_module.provider.track.assert_not_called()
 
     def test_enable_is_respected_by_track_event(self, tracking_module):
         tracking_module.init_tracking(True)
-        tracking_module.mp.track.reset_mock()
+        tracking_module.provider.track.reset_mock()
         tracking_module.track_event("some_event")
-        tracking_module.mp.track.assert_called_once()
+        tracking_module.provider.track.assert_called_once()
 
     def test_disable_persists_as_parseable_bool(self, tracking_module):
         tracking_module.init_tracking(False)
@@ -127,8 +151,8 @@ class TestInitTrackingRoundTrip:
         generated_user_id = tracking_module.config_manager.get(constants.CONFIG_KEY_USER_ID)
         assert generated_user_id is not None
         assert tracking_module.user_id == generated_user_id
-        _, kwargs = tracking_module.mp.track.call_args
-        assert kwargs["distinct_id"] == generated_user_id
+        _, distinct_id, _ = _last_track_call(tracking_module.provider)
+        assert distinct_id == generated_user_id
 
     def test_disable_does_not_generate_user_id(self, tracking_module):
         tracking_module.init_tracking(False)
@@ -136,9 +160,9 @@ class TestInitTrackingRoundTrip:
 
     def test_install_event_fires_once_across_calls(self, tracking_module):
         tracking_module.init_tracking(True)
-        assert tracking_module.mp.track.call_count == 1
+        assert tracking_module.provider.track.call_count == 1
         tracking_module.init_tracking(True)
-        assert tracking_module.mp.track.call_count == 1
+        assert tracking_module.provider.track.call_count == 1
 
 
 class TestPromptTrackingConsent:
@@ -172,10 +196,10 @@ class TestPromptTrackingConsent:
         ):
             tracking_module.prompt_tracking_consent()
         tracking_module.track_event("some_event", {"k": "v"})
-        tracking_module.mp.track.assert_called_once()
-        _, kwargs = tracking_module.mp.track.call_args
-        assert kwargs["event_name"] == "some_event"
-        assert kwargs["distinct_id"] is not None
+        tracking_module.provider.track.assert_called_once()
+        event_name, distinct_id, _ = _last_track_call(tracking_module.provider)
+        assert event_name == "some_event"
+        assert distinct_id is not None
 
     def test_session_only_persists_user_id(self, tracking_module):
         with (

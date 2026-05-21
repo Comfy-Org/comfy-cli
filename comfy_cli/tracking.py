@@ -1,20 +1,36 @@
+from __future__ import annotations
+
+import atexit
 import functools
 import logging as logginglib
+import os
 import sys
 import uuid
+from typing import Any, Protocol
 
 import typer
 from mixpanel import Mixpanel
+from posthog import Posthog
 
 from comfy_cli import constants, logging, ui
 from comfy_cli.config_manager import ConfigManager
 from comfy_cli.workspace_manager import WorkspaceManager
 
-# Ignore logs from urllib3 that Mixpanel uses.
+# Ignore logs from urllib3 that Mixpanel/PostHog use.
 logginglib.getLogger("urllib3").setLevel(logginglib.ERROR)
 
 MIXPANEL_TOKEN = "93aeab8962b622d431ac19800ccc9f67"
-mp = Mixpanel(MIXPANEL_TOKEN) if MIXPANEL_TOKEN else None
+
+# phc_* are public client-side write keys designed for embedding — safe to commit, same as MIXPANEL_TOKEN above.
+# Override with $POSTHOG_API_KEY.
+POSTHOG_TOKEN = os.environ.get(
+    "POSTHOG_API_KEY",
+    "phc_iKfK86id4xVYws9LybMje0h44eGtfwFgRPIBehmy8rO",
+)
+POSTHOG_HOST = "https://t.comfy.org"
+
+# Only these events get the tracing_id --> workflow_run_id alias on PostHog.
+EXECUTION_EVENTS = frozenset({"execution_start", "execution_success", "execution_error"})
 
 # Kwargs whose values must never reach tracking system.
 # The key is kept (with a redacted marker) so we can still see whether the option was supplied.
@@ -37,6 +53,67 @@ workspace_manager = WorkspaceManager()
 # stable agent identity in analytics.
 _session_only_tracking = False
 
+
+class TelemetryProvider(Protocol):
+    enabled: bool
+
+    def track(self, event_name: str, distinct_id: str | None, properties: dict[str, Any]) -> None: ...
+
+    def flush(self) -> None: ...
+
+
+class MixpanelProvider:
+    def __init__(self, token: str):
+        self.client = Mixpanel(token) if token else None
+        self.enabled = self.client is not None
+
+    def track(self, event_name: str, distinct_id: str | None, properties: dict[str, Any]) -> None:
+        if not self.enabled or distinct_id is None:
+            return
+        self.client.track(distinct_id=distinct_id, event_name=event_name, properties=properties)
+
+    def flush(self) -> None:
+        # mixpanel-python ships per-call over sync HTTP; nothing to drain.
+        return
+
+
+class PostHogProvider:
+    _STANDARD_PROPERTIES = {
+        "environment": "cli",
+        "surface": "cli",
+        "source": "cli",
+        "trigger_source": "cli",
+    }
+
+    def __init__(self, token: str, host: str):
+        self.client: Posthog | None = None
+        self.enabled = False
+        if not token:
+            return
+        # disable_geoip=False lets PostHog enrich events with IP-derived location.
+        self.client = Posthog(project_api_key=token, host=host, disable_geoip=False)
+        self.enabled = True
+
+    def track(self, event_name: str, distinct_id: str | None, properties: dict[str, Any]) -> None:
+        if not self.enabled or self.client is None or distinct_id is None:
+            return
+        merged = {**self._STANDARD_PROPERTIES, **properties}
+        if event_name in EXECUTION_EVENTS and "tracing_id" in merged:
+            merged.setdefault("workflow_run_id", merged["tracing_id"])
+        self.client.capture(event=event_name, distinct_id=distinct_id, properties=merged)
+
+    def flush(self) -> None:
+        if self.client is None:
+            return
+        # posthog-python ships asynchronously; without flush, short-lived CLI invocations silently drop in-flight events
+        self.client.flush()
+
+
+PROVIDERS: list[TelemetryProvider] = [
+    MixpanelProvider(MIXPANEL_TOKEN),
+    PostHogProvider(POSTHOG_TOKEN, POSTHOG_HOST),
+]
+
 app = typer.Typer()
 
 
@@ -53,7 +130,12 @@ def disable():
     typer.echo(f"Tracking is now {'disabled'}.")
 
 
-def track_event(event_name: str, properties: any = None):
+def track_event(event_name: str, properties: Any = None, *, mixpanel_name: str | None = None):
+    """Fire ``event_name`` to every enabled telemetry provider.
+
+    ``mixpanel_name``, if supplied, overrides the event name on the Mixpanel pipe only — used to keep
+    legacy Mixpanel event names while PostHog receives the canonical name.
+    """
     if properties is None:
         properties = {}
     logging.debug(f"tracking event called with event_name: {event_name} and properties: {properties}")
@@ -61,12 +143,25 @@ def track_event(event_name: str, properties: any = None):
     if not enable_tracking and not _session_only_tracking:
         return
 
-    try:
-        properties["cli_version"] = cli_version
-        properties["tracing_id"] = tracing_id
-        mp.track(distinct_id=user_id, event_name=event_name, properties=properties)
-    except Exception as e:
-        logging.warning(f"Failed to track event: {e}")  # Log the error but do not raise
+    properties = {**properties, "cli_version": cli_version, "tracing_id": tracing_id}
+
+    for provider in PROVIDERS:
+        provider_event_name = (
+            mixpanel_name if (mixpanel_name is not None and isinstance(provider, MixpanelProvider)) else event_name
+        )
+        try:
+            provider.track(provider_event_name, distinct_id=user_id, properties=dict(properties))
+        except Exception as e:
+            logging.warning(f"Failed to track event via {type(provider).__name__}: {e}")
+
+
+def filter_command_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
+    """Drop ``ctx``/``context`` and redact ``SENSITIVE_TRACKING_KEYS`` values."""
+    return {
+        k: ("<redacted>" if v is not None else None) if k in SENSITIVE_TRACKING_KEYS else v
+        for k, v in kwargs.items()
+        if k != "ctx" and k != "context"
+    }
 
 
 def track_command(sub_command: str = None):
@@ -78,15 +173,7 @@ def track_command(sub_command: str = None):
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
             command_name = f"{sub_command}:{func.__name__}" if sub_command is not None else func.__name__
-
-            # Copy kwargs to avoid mutating original dictionary
-            # Remove context and ctx from the dictionary as they are not needed for tracking and not serializable.
-            filtered_kwargs = {
-                k: ("<redacted>" if v is not None else None) if k in SENSITIVE_TRACKING_KEYS else v
-                for k, v in kwargs.items()
-                if k != "ctx" and k != "context"
-            }
-
+            filtered_kwargs = filter_command_kwargs(kwargs)
             logging.debug(f"Tracking command: {command_name} with arguments: {filtered_kwargs}")
             track_event(command_name, properties=filtered_kwargs)
 
@@ -161,3 +248,14 @@ def init_tracking(enable_tracking: bool):
         logging.debug("Tracking install event.")
         config_manager.set(constants.CONFIG_KEY_INSTALL_EVENT_TRIGGERED, "True")
         track_event("install")
+
+
+def _flush_all_providers() -> None:
+    for provider in PROVIDERS:
+        try:
+            provider.flush()
+        except Exception as e:  # noqa: BLE001
+            logging.warning(f"Failed to flush telemetry provider {type(provider).__name__}: {e}")
+
+
+atexit.register(_flush_all_providers)
