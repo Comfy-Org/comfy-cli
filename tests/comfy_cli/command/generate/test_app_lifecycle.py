@@ -84,6 +84,14 @@ class TestSubActionEvents:
         assert resume_events[0]["model"] is None
         assert resume_events[0]["job_id"] is None
 
+    def test_resume_flag_like_job_id_surfaces_usage_error(self, runner, captured_events):
+        # Keep the telemetry-side flag-rejection (line 75) consistent with what
+        # ``_resume()`` accepts — otherwise ``resume flux-pro --json`` polls a
+        # job called ``--json`` instead of showing the usage hint.
+        r = runner.invoke(cli_app, ["generate", "resume", "flux-pro", "--json"])
+        assert r.exit_code == 1
+        assert "Usage: comfy generate resume" in r.output
+
     def test_refresh_fires_generate_refresh(self, runner, captured_events, monkeypatch):
         # Mock the httpx call so we don't actually hit the network.
         monkeypatch.setattr(

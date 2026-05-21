@@ -505,7 +505,7 @@ def _apply_upload_transforms(values: dict, flags: list[schema.FlagDef], endpoint
 
 
 def _resume(extra_args: list[str]) -> None:
-    if len(extra_args) < 2:
+    if len(extra_args) < 2 or extra_args[0].startswith("-") or extra_args[1].startswith("-"):
         rprint("[bold red]Usage: comfy generate resume <model> <job_id> [--download PATH] [--json][/bold red]")
         raise typer.Exit(code=1)
     model, job_id = extra_args[0], extra_args[1]
