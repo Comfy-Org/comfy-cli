@@ -280,3 +280,101 @@ class TestPromptTrackingConsent:
             first_user_id = tracking_module.user_id
             tracking_module.prompt_tracking_consent()
             assert tracking_module.user_id == first_user_id
+
+
+class TestEnvVarOptOut:
+    @pytest.mark.parametrize("env_var", ["DO_NOT_TRACK", "COMFY_NO_TELEMETRY"])
+    def test_env_var_blocks_track_event_even_when_config_enabled(self, tracking_module, monkeypatch, env_var):
+        tracking_module.config_manager.set(constants.CONFIG_KEY_ENABLE_TRACKING, "True")
+        monkeypatch.setenv(env_var, "1")
+        tracking_module.track_event("some_event", {"k": "v"})
+        tracking_module.provider.track.assert_not_called()
+
+    @pytest.mark.parametrize("env_var", ["DO_NOT_TRACK", "COMFY_NO_TELEMETRY"])
+    def test_env_var_blocks_track_event_under_session_only(self, tracking_module, monkeypatch, env_var):
+        monkeypatch.setenv(env_var, "1")
+        with patch.object(tracking_module, "_session_only_tracking", True):
+            tracking_module.track_event("some_event")
+        tracking_module.provider.track.assert_not_called()
+
+    @pytest.mark.parametrize("falsy", ["", "0"])
+    def test_falsy_values_do_not_block(self, tracking_module, monkeypatch, falsy):
+        tracking_module.config_manager.set(constants.CONFIG_KEY_ENABLE_TRACKING, "True")
+        monkeypatch.setenv("DO_NOT_TRACK", falsy)
+        monkeypatch.setenv("COMFY_NO_TELEMETRY", falsy)
+        tracking_module.track_event("some_event")
+        tracking_module.provider.track.assert_called_once()
+
+    @pytest.mark.parametrize("env_var", ["DO_NOT_TRACK", "COMFY_NO_TELEMETRY"])
+    def test_env_var_short_circuits_consent_prompt(self, tracking_module, monkeypatch, env_var):
+        monkeypatch.setenv(env_var, "1")
+        with (
+            patch.object(tracking_module.sys.stdin, "isatty", return_value=True),
+            patch.object(tracking_module.sys.stdout, "isatty", return_value=True),
+            patch.object(tracking_module.ui, "prompt_confirm_action") as mock_prompt,
+        ):
+            tracking_module.prompt_tracking_consent()
+        mock_prompt.assert_not_called()
+        assert tracking_module.config_manager.get_bool(constants.CONFIG_KEY_ENABLE_TRACKING) is None
+
+    @pytest.mark.parametrize("env_var", ["DO_NOT_TRACK", "COMFY_NO_TELEMETRY"])
+    def test_env_var_blocks_non_tty_auto_enable_and_user_id_persist(self, tracking_module, monkeypatch, env_var):
+        # Reporter's core concern (issue #462): in CI/Docker the non-TTY
+        # branch silently persisted a UUID. Env var must skip that path.
+        monkeypatch.setenv(env_var, "1")
+        with (
+            patch.object(tracking_module.sys.stdin, "isatty", return_value=False),
+            patch.object(tracking_module.sys.stdout, "isatty", return_value=False),
+        ):
+            tracking_module.prompt_tracking_consent()
+        assert tracking_module._session_only_tracking is False
+        assert tracking_module.config_manager.get(constants.CONFIG_KEY_USER_ID) is None
+
+    def test_env_var_does_not_overwrite_existing_consent(self, tracking_module, monkeypatch):
+        # On-disk consent flag must survive an env-var-suppressed run so a
+        # subsequent invocation without the env var keeps the user's choice.
+        tracking_module.config_manager.set(constants.CONFIG_KEY_ENABLE_TRACKING, "True")
+        monkeypatch.setenv("DO_NOT_TRACK", "1")
+        tracking_module.prompt_tracking_consent()
+        assert tracking_module.config_manager.get_bool(constants.CONFIG_KEY_ENABLE_TRACKING) is True
+
+
+class TestTelemetryDisabledByEnvHelper:
+    @pytest.fixture(autouse=True)
+    def _clear_both(self, monkeypatch):
+        monkeypatch.delenv("DO_NOT_TRACK", raising=False)
+        monkeypatch.delenv("COMFY_NO_TELEMETRY", raising=False)
+
+    def test_unset_returns_false(self, tracking_module):
+        import comfy_cli.tracking as tm
+
+        assert tm._telemetry_disabled_by_env() is False
+
+    @pytest.mark.parametrize("env_var", ["DO_NOT_TRACK", "COMFY_NO_TELEMETRY"])
+    @pytest.mark.parametrize(
+        "value,expected",
+        [
+            # consoledonottrack.com spec: empty or "0" allows tracking; anything else opts out.
+            ("", False),
+            ("0", False),
+            ("1", True),
+            ("true", True),
+            ("yes", True),
+            ("00", True),
+            ("false", True),
+        ],
+    )
+    def test_value_semantics(self, tracking_module, monkeypatch, env_var, value, expected):
+        import comfy_cli.tracking as tm
+
+        monkeypatch.setenv(env_var, value)
+        assert tm._telemetry_disabled_by_env() is expected
+
+    def test_either_var_alone_is_sufficient(self, tracking_module, monkeypatch):
+        import comfy_cli.tracking as tm
+
+        monkeypatch.setenv("COMFY_NO_TELEMETRY", "1")
+        assert tm._telemetry_disabled_by_env() is True
+        monkeypatch.delenv("COMFY_NO_TELEMETRY")
+        monkeypatch.setenv("DO_NOT_TRACK", "1")
+        assert tm._telemetry_disabled_by_env() is True

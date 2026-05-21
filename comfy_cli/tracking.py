@@ -54,6 +54,21 @@ workspace_manager = WorkspaceManager()
 _session_only_tracking = False
 
 
+def _telemetry_disabled_by_env() -> bool:
+    """Return True if telemetry is suppressed via environment variable.
+
+    Honors the cross-tool ``DO_NOT_TRACK`` convention
+    (https://consoledonottrack.com/) and the project-specific
+    ``COMFY_NO_TELEMETRY``. Per the spec, any value other than empty or
+    ``"0"`` opts out.
+    """
+    for name in ("DO_NOT_TRACK", "COMFY_NO_TELEMETRY"):
+        val = os.environ.get(name, "")
+        if val and val != "0":
+            return True
+    return False
+
+
 class TelemetryProvider(Protocol):
     enabled: bool
 
@@ -136,6 +151,8 @@ def track_event(event_name: str, properties: Any = None, *, mixpanel_name: str |
     ``mixpanel_name``, if supplied, overrides the event name on the Mixpanel pipe only — used to keep
     legacy Mixpanel event names while PostHog receives the canonical name.
     """
+    if _telemetry_disabled_by_env():
+        return
     if properties is None:
         properties = {}
     logging.debug(f"tracking event called with event_name: {event_name} and properties: {properties}")
@@ -186,6 +203,13 @@ def track_command(sub_command: str = None):
 
 def prompt_tracking_consent(skip_prompt: bool = False, default_value: bool = False):
     global _session_only_tracking, user_id
+
+    # Env-var opt-out short-circuits everything below: no prompt, no
+    # auto-enable in non-TTY, no user_id persistence. Per-process only —
+    # the on-disk consent flag is left untouched so a later run without
+    # the env var still gets the normal prompt path.
+    if _telemetry_disabled_by_env():
+        return
 
     if _session_only_tracking:
         return
