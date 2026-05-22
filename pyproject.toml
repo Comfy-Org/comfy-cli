@@ -38,6 +38,7 @@ dependencies = [
   "mixpanel",
   "packaging",
   "pathspec",
+  "posthog>=6,<8",
   "psutil",
   "pyyaml",
   "questionary",

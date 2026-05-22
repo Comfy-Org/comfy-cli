@@ -917,9 +917,8 @@ class TestCliRunnerIntegration:
         cfg_dir.mkdir()
         with (
             patch.object(_Cls, "get_config_path", return_value=str(cfg_dir)),
-            patch("comfy_cli.tracking.mp") as mock_mp,
+            patch("comfy_cli.tracking.PROVIDERS", []),
         ):
-            mock_mp.track.return_value = None
             runner = CliRunner()
             result = runner.invoke(
                 app, ["run", "--workflow", self._make_workflow_file(tmp_path), "--json", "--print-prompt"],

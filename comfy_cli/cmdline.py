@@ -595,7 +595,6 @@ def update(
 
 
 @app.command(help="Run an API workflow. Submits and returns immediately by default; pass --wait to block.")
-@tracking.track_command()
 def run(
     workflow: Annotated[
         str,
@@ -699,73 +698,95 @@ def run(
         ),
     ] = False,
 ):
-    if api_key:
-        api_key = api_key.strip() or None
-
-    config = ConfigManager()
-    renderer = get_renderer()
+    # Snapshot kwargs before the body mutates api_key/host/port — analytics should record what user actually supplied.
+    _track_props = tracking.filter_command_kwargs(dict(locals()))
+    tracking.track_event("execution_start", _track_props, mixpanel_name="run")
 
     try:
-        decision = where_module.resolve(flag=where, config_value=config.get(where_module.CONFIG_KEY_WHERE_DEFAULT))
-    except ValueError as e:
-        renderer.error(code="where_invalid", message=str(e), hint="use --where local or --where cloud")
-        raise typer.Exit(code=1)
+        if api_key:
+            api_key = api_key.strip() or None
 
-    # Default for --notify: on when a human is at the terminal, off for
-    # agents (they shouldn't get surprise side-channel processes they didn't
-    # ask for). The user can override either way with --notify/--no-notify.
-    effective_notify = notify if notify is not None else (renderer.is_pretty() and not wait)
+        config = ConfigManager()
+        renderer = get_renderer()
 
-    if decision.target is where_module.WhereTarget.CLOUD:
-        err = where_module.cloud_preflight()
-        if err is not None:
-            renderer.error(
-                code=err.code,
-                message=err.message,
-                hint=err.hint,
-                details=err.details,
-            )
+        try:
+            decision = where_module.resolve(flag=where, config_value=config.get(where_module.CONFIG_KEY_WHERE_DEFAULT))
+        except ValueError as e:
+            renderer.error(code="where_invalid", message=str(e), hint="use --where local or --where cloud")
             raise typer.Exit(code=1)
-        # Cloud path uses HTTPS + Bearer auth; host/port aren't applicable.
-        run_inner.execute_cloud(
+
+        # Default for --notify: on when a human is at the terminal, off for
+        # agents (they shouldn't get surprise side-channel processes they didn't
+        # ask for). The user can override either way with --notify/--no-notify.
+        effective_notify = notify if notify is not None else (renderer.is_pretty() and not wait)
+
+        if decision.target is where_module.WhereTarget.CLOUD:
+            err = where_module.cloud_preflight()
+            if err is not None:
+                renderer.error(
+                    code=err.code,
+                    message=err.message,
+                    hint=err.hint,
+                    details=err.details,
+                )
+                raise typer.Exit(code=1)
+            # Cloud path uses HTTPS + Bearer auth; host/port aren't applicable.
+            run_inner.execute_cloud(
+                workflow,
+                wait=wait,
+                verbose=verbose,
+                timeout=timeout or 600,
+                notify=effective_notify,
+            )
+            return
+
+        if host:
+            s = host.split(":")
+            host = s[0]
+            if not port and len(s) == 2:
+                port = int(s[1])
+
+        if config.background:
+            bg_host, bg_port = config.background[0], config.background[1]
+            if not host:
+                host = bg_host
+            if not port:
+                port = bg_port
+
+        if not host:
+            host = "127.0.0.1"
+        if not port:
+            port = 8188
+
+        run_inner.execute(
             workflow,
+            host,
+            port,
             wait=wait,
             verbose=verbose,
-            timeout=timeout or 600,
+            timeout=timeout,
             notify=effective_notify,
+            api_key=api_key,
+            json_mode=json_output,
+            print_prompt=print_prompt,
         )
-        return
-
-    if host:
-        s = host.split(":")
-        host = s[0]
-        if not port and len(s) == 2:
-            port = int(s[1])
-
-    if config.background:
-        bg_host, bg_port = config.background[0], config.background[1]
-        if not host:
-            host = bg_host
-        if not port:
-            port = bg_port
-
-    if not host:
-        host = "127.0.0.1"
-    if not port:
-        port = 8188
-
-    run_inner.execute(
-        workflow,
-        host,
-        port,
-        wait=wait,
-        verbose=verbose,
-        timeout=timeout,
-        notify=effective_notify,
-        api_key=api_key,
-        json_mode=json_output,
-        print_prompt=print_prompt,
-    )
+    except typer.Exit as e:
+        if (e.exit_code or 0) == 0:
+            tracking.track_event("execution_success", _track_props)
+        else:
+            tracking.track_event(
+                "execution_error",
+                {**_track_props, "error_type": type(e).__name__, "exit_code": e.exit_code},
+            )
+        raise
+    except Exception as e:
+        tracking.track_event(
+            "execution_error",
+            {**_track_props, "error_type": type(e).__name__},
+        )
+        raise
+    else:
+        tracking.track_event("execution_success", _track_props)
 
 
 @app.command(help="Upload files to the ComfyUI server's input directory.")
