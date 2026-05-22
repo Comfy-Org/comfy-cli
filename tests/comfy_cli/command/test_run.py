@@ -11,6 +11,8 @@ from websocket import WebSocketException, WebSocketTimeoutException
 
 from comfy_cli.command.run import (
     WorkflowExecution,
+    _detect_partner_nodes,
+    _resolve_partner_credential,
     execute,
     fetch_object_info,
     is_ui_workflow,
@@ -51,6 +53,7 @@ def mock_execution(workflow):
         host="127.0.0.1",
         port=8188,
         verbose=False,
+        local_paths=False,
         progress=progress,
         timeout=30,
     )
@@ -163,6 +166,7 @@ class TestWorkflowExecutionAuth:
             host="127.0.0.1",
             port=8188,
             verbose=False,
+            local_paths=False,
             progress=progress,
             timeout=30,
             api_key=api_key,
@@ -259,6 +263,7 @@ class TestWatchExecution:
             host="127.0.0.1",
             port=8188,
             verbose=True,
+            local_paths=False,
             progress=progress,
             timeout=30,
         )
@@ -274,6 +279,33 @@ class TestWatchExecution:
         execution.ws = mock_ws
 
         execution.watch_execution()
+
+    def test_no_progress_bar_survives_cached_and_executing(self, workflow):
+        """In --json mode the renderer passes progress=None; cached + executing events must not NPE."""
+        prompt_id = "test-prompt"
+        execution = WorkflowExecution(
+            workflow=workflow,
+            host="127.0.0.1",
+            port=8188,
+            verbose=False,
+            progress=None,
+            local_paths=False,
+            timeout=30,
+        )
+        execution.prompt_id = prompt_id
+
+        messages = [
+            json.dumps({"type": "execution_cached", "data": {"prompt_id": prompt_id, "nodes": ["1"]}}),
+            _make_msg("executing", prompt_id, node="2"),
+            _make_msg("executed", prompt_id, node="2"),
+            _make_msg("executing", prompt_id, node=None),
+        ]
+        mock_ws = MagicMock()
+        mock_ws.recv.side_effect = messages
+        execution.ws = mock_ws
+
+        execution.watch_execution()
+        assert len(execution.remaining_nodes) == 0
 
     def test_collects_image_outputs(self, mock_execution):
         prompt_id = "test-prompt"
@@ -440,6 +472,216 @@ class TestExecuteErrorHandling:
             mock_progress.stop.assert_called()
 
 
+class TestDetectPartnerNodes:
+    """Partner-API nodes (category `api node/...`) must be detected before
+    a local submit so we can refuse early instead of failing opaquely at
+    execute time with `Unauthorized: Please login first`."""
+
+    def _info(self, **categories):
+        # Build a minimal /object_info-shape dict from class_type → category.
+        return {ct: {"category": cat} for ct, cat in categories.items()}
+
+    def test_finds_partner_nodes_in_workflow(self):
+        wf = {
+            "1": {"class_type": "Veo3VideoGenerationNode", "inputs": {}},
+            "2": {"class_type": "SaveVideo", "inputs": {}},
+            "3": {"class_type": "KlingImage2VideoNode", "inputs": {}},
+        }
+        info = self._info(
+            Veo3VideoGenerationNode="api node/video/Veo",
+            SaveVideo="video",
+            KlingImage2VideoNode="api node/video/Kling",
+        )
+        assert _detect_partner_nodes(wf, info) == [
+            "KlingImage2VideoNode",
+            "Veo3VideoGenerationNode",
+        ]
+
+    def test_returns_empty_when_no_partner_nodes(self):
+        wf = {
+            "1": {"class_type": "EmptyLatentImage", "inputs": {}},
+            "2": {"class_type": "KSampler", "inputs": {}},
+        }
+        info = self._info(EmptyLatentImage="latent", KSampler="sampling")
+        assert _detect_partner_nodes(wf, info) == []
+
+    def test_ignores_unknown_class_types(self):
+        """A workflow with a class_type the server doesn't advertise (custom
+        node, typo) is not treated as a partner node — we only flag when
+        the server explicitly categorizes it under `api node/*`."""
+        wf = {"1": {"class_type": "SomeUnknownThing", "inputs": {}}}
+        info = self._info(KSampler="sampling")
+        assert _detect_partner_nodes(wf, info) == []
+
+    def test_handles_malformed_workflow_entries(self):
+        wf = {
+            "1": "not-a-dict",
+            "2": {"class_type": None, "inputs": {}},
+            "3": {"inputs": {}},  # no class_type
+            "4": {"class_type": "Veo3VideoGenerationNode", "inputs": {}},
+        }
+        info = self._info(Veo3VideoGenerationNode="api node/video/Veo")
+        assert _detect_partner_nodes(wf, info) == ["Veo3VideoGenerationNode"]
+
+
+class TestResolvePartnerCredential:
+    """The credential the local submit can inject into ``extra_data`` so a
+    partner-API node finds it. Three sources, env > stored key > OAuth."""
+
+    def test_uses_env_var_first(self, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setenv("COMFY_CLOUD_API_KEY", "env-key-123")
+        from comfy_cli.auth import store as auth_store
+        monkeypatch.setattr(auth_store, "get", lambda _: None)
+        assert _resolve_partner_credential() == ("api_key_comfy_org", "env-key-123")
+
+    def test_falls_back_to_stored_provider_key(self, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.delenv("COMFY_CLOUD_API_KEY", raising=False)
+        from comfy_cli.auth import store as auth_store
+        from comfy_cli.target import CLOUD_API_KEY_PROVIDER
+
+        record = MagicMock()
+        record.key = "stored-key-456"
+        monkeypatch.setattr(
+            auth_store,
+            "get",
+            lambda name: record if name == CLOUD_API_KEY_PROVIDER else None,
+        )
+        monkeypatch.setattr(auth_store, "get_cloud_session", lambda: None)
+        assert _resolve_partner_credential() == ("api_key_comfy_org", "stored-key-456")
+
+    def test_falls_back_to_oauth_token(self, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.delenv("COMFY_CLOUD_API_KEY", raising=False)
+        from comfy_cli.auth import store as auth_store
+
+        session = MagicMock()
+        session.is_expired.return_value = False
+        session.access_token = "oauth-bearer-789"
+        monkeypatch.setattr(auth_store, "get", lambda _: None)
+        monkeypatch.setattr(auth_store, "get_cloud_session", lambda: session)
+        assert _resolve_partner_credential() == ("auth_token_comfy_org", "oauth-bearer-789")
+
+    def test_returns_none_when_nothing_configured(self, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.delenv("COMFY_CLOUD_API_KEY", raising=False)
+        from comfy_cli.auth import store as auth_store
+        monkeypatch.setattr(auth_store, "get", lambda _: None)
+        monkeypatch.setattr(auth_store, "get_cloud_session", lambda: None)
+        assert _resolve_partner_credential() is None
+
+    def test_treats_expired_session_as_no_creds(self, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.delenv("COMFY_CLOUD_API_KEY", raising=False)
+        from comfy_cli.auth import store as auth_store
+
+        session = MagicMock()
+        session.is_expired.return_value = True
+        session.access_token = "stale"
+        monkeypatch.setattr(auth_store, "get", lambda _: None)
+        monkeypatch.setattr(auth_store, "get_cloud_session", lambda: session)
+        assert _resolve_partner_credential() is None
+
+
+class TestExecutePartnerNodePreflight:
+    """Submitting a partner-API workflow to a local server with no
+    credentials must fail with the structured envelope error
+    ``partner_node_requires_credential`` before /prompt is hit — not at
+    execute time with an opaque "Unauthorized" string buried in
+    /history."""
+
+    PARTNER_WF = {
+        "1": {"class_type": "Veo3VideoGenerationNode", "inputs": {"prompt": "x"}},
+        "2": {"class_type": "SaveVideo", "inputs": {"video": ["1", 0]}},
+    }
+    OBJECT_INFO = {
+        "Veo3VideoGenerationNode": {"category": "api node/video/Veo"},
+        "SaveVideo": {"category": "video"},
+    }
+
+    def _wf_file(self, tmp_path):
+        path = tmp_path / "partner.json"
+        path.write_text(json.dumps(self.PARTNER_WF))
+        return str(path)
+
+    def test_refuses_when_no_credential(self, tmp_path, monkeypatch: pytest.MonkeyPatch):
+        wf_file = self._wf_file(tmp_path)
+        monkeypatch.delenv("COMFY_CLOUD_API_KEY", raising=False)
+
+        from comfy_cli.auth import store as auth_store
+        monkeypatch.setattr(auth_store, "get", lambda _: None)
+        monkeypatch.setattr(auth_store, "get_cloud_session", lambda: None)
+
+        renderer_errors = []
+        from comfy_cli.output.renderer import Renderer
+        original_error = Renderer.error
+
+        def capture_error(self, *, code, message, hint=None, details=None, exit_code=1):
+            renderer_errors.append({"code": code, "message": message, "hint": hint, "details": details})
+            return original_error(self, code=code, message=message, hint=hint, details=details, exit_code=exit_code)
+
+        monkeypatch.setattr(Renderer, "error", capture_error)
+
+        with (
+            patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),
+            patch("comfy_cli.command.run._fetch_object_info", return_value=self.OBJECT_INFO),
+            patch("comfy_cli.command.run.WorkflowExecution") as MockExec,
+        ):
+            with pytest.raises(typer.Exit) as exc_info:
+                execute(wf_file, host="127.0.0.1", port=8188, wait=True, timeout=30)
+            assert exc_info.value.exit_code == 1
+            # /prompt must NOT be hit — refuse pre-submit.
+            MockExec.assert_not_called()
+
+        codes = [e["code"] for e in renderer_errors]
+        assert "partner_node_requires_credential" in codes, f"got error codes: {codes}"
+        err = next(e for e in renderer_errors if e["code"] == "partner_node_requires_credential")
+        assert "Veo3VideoGenerationNode" in (err["details"] or {}).get("partner_nodes", [])
+
+    def test_proceeds_and_injects_credential_when_available(
+        self, tmp_path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """With creds available, the local submit injects them into
+        ``extra_data`` so the partner-API node can call out — same as the
+        cloud route does. Closes the silent-failure loop."""
+        wf_file = self._wf_file(tmp_path)
+        monkeypatch.setenv("COMFY_CLOUD_API_KEY", "test-key-abc")
+        from comfy_cli.auth import store as auth_store
+        monkeypatch.setattr(auth_store, "get", lambda _: None)
+
+        with (
+            patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),
+            patch("comfy_cli.command.run._fetch_object_info", return_value=self.OBJECT_INFO),
+            patch("comfy_cli.command.run.ExecutionProgress"),
+            patch("comfy_cli.command.run.WorkflowExecution") as MockExec,
+        ):
+            mock_exec = MagicMock()
+            MockExec.return_value = mock_exec
+            mock_exec.outputs = []
+            execute(wf_file, host="127.0.0.1", port=8188, wait=True, timeout=30)
+
+            # WorkflowExecution receives the credential via the
+            # ``extra_data`` constructor kwarg.
+            kwargs = MockExec.call_args.kwargs
+            extra = kwargs.get("extra_data") or {}
+            assert extra.get("api_key_comfy_org") == "test-key-abc"
+
+    def test_non_partner_workflow_skips_preflight(self, workflow_file, monkeypatch):
+        """The preflight must not gate ordinary workflows. ``_fetch_object_info``
+        is allowed to be skipped when no partner nodes are present (or
+        called but the workflow has no api-node class types)."""
+        with (
+            patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),
+            patch(
+                "comfy_cli.command.run._fetch_object_info",
+                return_value={"EmptyLatentImage": {"category": "latent"}, "PreviewAny": {"category": "image"}},
+            ),
+            patch("comfy_cli.command.run.ExecutionProgress"),
+            patch("comfy_cli.command.run.WorkflowExecution") as MockExec,
+        ):
+            mock_exec = MagicMock()
+            MockExec.return_value = mock_exec
+            mock_exec.outputs = []
+            execute(workflow_file, host="127.0.0.1", port=8188, wait=True, timeout=30)
+            MockExec.assert_called_once()
+
+
 class TestExecuteUiWorkflow:
     UI = {
         "nodes": [
@@ -555,7 +797,7 @@ class TestExecuteUiWorkflow:
 
             mock_fetch.assert_called_once()
             assert mock_fetch.call_args.args == ("127.0.0.1", 8188, 30)
-            assert MockExec.call_args.kwargs["api_key"] == "sk-test"
+            assert MockExec.call_args.kwargs["extra_data"]["api_key_comfy_org"] == "sk-test"
 
     def test_ui_workflow_exits_when_conversion_yields_nothing(self):
         # All nodes are UI-only (Note/PrimitiveNode/Reroute/GetNode/SetNode) and

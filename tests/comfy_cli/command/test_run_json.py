@@ -107,6 +107,7 @@ def _make_workflow_execution(workflow, *, with_progress: bool = False, json_mode
         host="127.0.0.1",
         port=8188,
         verbose=False,
+        local_paths=False,
         progress=progress,
         timeout=30,
         emitter=e,
@@ -887,7 +888,8 @@ class TestCliRunnerIntegration:
 
         runner = CliRunner()  # non-TTY by default
         result = runner.invoke(
-            app, ["run", "--workflow", self._make_workflow_file(tmp_path), "--json", "--print-prompt"]
+            app, ["run", "--workflow", self._make_workflow_file(tmp_path), "--json", "--print-prompt"],
+            env={"COMFY_WHERE": "local"},
         )
         assert result.exit_code == 0, f"stdout={result.stdout!r}\nexc={result.exception!r}"
         lines = [line for line in result.stdout.splitlines() if line.strip()]
@@ -920,7 +922,8 @@ class TestCliRunnerIntegration:
             mock_mp.track.return_value = None
             runner = CliRunner()
             result = runner.invoke(
-                app, ["run", "--workflow", self._make_workflow_file(tmp_path), "--json", "--print-prompt"]
+                app, ["run", "--workflow", self._make_workflow_file(tmp_path), "--json", "--print-prompt"],
+                env={"COMFY_WHERE": "local"},
             )
         assert result.exit_code == 0, f"stdout={result.stdout!r}\nexc={result.exception!r}"
         for line in result.stdout.splitlines():
