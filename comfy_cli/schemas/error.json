@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://comfy.org/schemas/error.json",
+  "title": "comfy-cli error block",
+  "type": "object",
+  "required": ["code", "message"],
+  "additionalProperties": false,
+  "properties": {
+    "code": {
+      "type": "string",
+      "description": "Stable machine identifier. Append-only; see error_codes.md.",
+      "pattern": "^[a-z][a-z0-9_]*$"
+    },
+    "message": {
+      "type": "string",
+      "description": "Human-readable sentence."
+    },
+    "hint": {
+      "type": ["string", "null"],
+      "description": "Optional actionable next step."
+    },
+    "details": {
+      "type": ["object", "null"],
+      "description": "Optional structured details (e.g. last_status, parser_message)."
+    }
+  }
+}

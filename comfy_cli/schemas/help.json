@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://comfy.org/schemas/help.json",
+  "title": "comfy --help-json output",
+  "description": "Machine-readable description of the CLI surface. Agents use this to enumerate commands and flags without reading source.",
+  "type": "object",
+  "required": ["prog", "commands", "root"],
+  "additionalProperties": true,
+  "properties": {
+    "prog": {"type": "string"},
+    "root": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "help": {"type": ["string", "null"]},
+        "params": {"type": "array", "items": {"$ref": "#/$defs/param"}}
+      }
+    },
+    "commands": {
+      "type": "object",
+      "additionalProperties": {"$ref": "#/$defs/command"}
+    }
+  },
+  "$defs": {
+    "param": {
+      "type": "object",
+      "required": ["name", "param_kind", "type"],
+      "additionalProperties": true,
+      "properties": {
+        "name": {"type": "string"},
+        "param_kind": {"type": "string", "enum": ["option", "argument"]},
+        "type": {"type": "string"},
+        "choices": {"type": "array", "items": {"type": "string"}},
+        "required": {"type": "boolean"},
+        "hidden": {"type": "boolean"},
+        "default": {},
+        "help": {"type": ["string", "null"]},
+        "is_flag": {"type": "boolean"},
+        "multiple": {"type": "boolean"},
+        "flags": {"type": "array", "items": {"type": "string"}},
+        "envvar": {"type": ["string", "array", "null"]}
+      }
+    },
+    "command": {
+      "type": "object",
+      "required": ["name", "path", "params"],
+      "additionalProperties": true,
+      "properties": {
+        "name": {"type": "string"},
+        "path": {"type": "string"},
+        "help": {"type": ["string", "null"]},
+        "short_help": {"type": ["string", "null"]},
+        "hidden": {"type": "boolean"},
+        "params": {"type": "array", "items": {"$ref": "#/$defs/param"}},
+        "examples": {"type": "array", "items": {"type": "string"}},
+        "subcommands": {
+          "type": "object",
+          "additionalProperties": {"$ref": "#/$defs/command"}
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "comfy nodes *",
+  "description": "Output shape for node introspection commands (ls, show, search, upstream, downstream, path, types, categories).",
+  "type": "object",
+  "properties": {
+    "count": { "type": "integer" },
+    "rows": { "type": "array" },
+    "query": { "type": "string" },
+    "filter": { "type": "object" },
+    "name": { "type": "string" },
+    "paths": { "type": "array" },
+    "types": { "type": "array" }
+  }
+}

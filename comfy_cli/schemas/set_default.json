@@ -1,0 +1,11 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "comfy set-default",
+  "description": "Output shape for the set-default command.",
+  "type": "object",
+  "properties": {
+    "default_workspace": { "type": ["string", "null"] },
+    "default_launch_extras": { "type": ["string", "null"] },
+    "default_where": { "type": ["string", "null"] }
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "comfy skill *",
+  "description": "Output shape for skill management commands.",
+  "type": "object",
+  "properties": {
+    "scope": { "type": "string" },
+    "dry_run": { "type": "boolean" },
+    "results": { "type": "array" },
+    "targets": { "type": "array" },
+    "content": { "type": "string" }
+  }
+}

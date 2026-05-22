@@ -1,0 +1,356 @@
+"""Source of truth for the JSON envelope's ``error.code`` values.
+
+Every code raised by ``renderer.error(code=…)`` must appear here. Two tests
+enforce this both ways:
+
+  - ``tests/comfy_cli/output/test_error_code_registry.py``:
+      every raised code is registered
+      every registered code is raised somewhere
+
+That makes this module the canonical contract for agents. Agents fetch the
+list via ``comfy discover`` and branch on the codes; if you rename, deprecate,
+or remove one, you're breaking the contract and the tests fail before merge.
+
+Codes are snake_case and match ``^[a-z][a-z0-9_]*$``.
+"""
+
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass
+
+CODE_PATTERN = re.compile(r"^[a-z][a-z0-9_]*$")
+
+
+@dataclass(frozen=True)
+class ErrorCode:
+    code: str
+    meaning: str
+    hint: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# The registry.
+#
+# Ordered roughly by subsystem so a reader can scan a logical neighborhood.
+# Appendable; do not repurpose an existing code.
+# ---------------------------------------------------------------------------
+
+REGISTRY: tuple[ErrorCode, ...] = (
+    # --- output / cancellation / lifecycle -----------------------------------
+    ErrorCode(
+        "cancelled",
+        "User pressed Ctrl-C; in-flight work was torn down.",
+    ),
+    ErrorCode(
+        "not_in_workspace",
+        "Resolved no workspace where one was required (e.g. `comfy which`).",
+        "run `comfy install`, or pass `--workspace`",
+    ),
+    # --- workflow loading ----------------------------------------------------
+    ErrorCode(
+        "workflow_not_found",
+        "The `--workflow` path doesn't exist or isn't readable.",
+        "check the path",
+    ),
+    ErrorCode(
+        "workflow_invalid_json",
+        "The file at `--workflow` failed JSON parsing.",
+        "re-export the workflow from ComfyUI (File > Export (API))",
+    ),
+    ErrorCode(
+        "workflow_not_api_format",
+        "Loaded JSON isn't API-format and no converter is available.",
+        "use ComfyUI's `File > Export (API)`",
+    ),
+    # --- local server / WebSocket --------------------------------------------
+    ErrorCode(
+        "server_not_running",
+        "Local ComfyUI server isn't reachable on host:port.",
+        "run `comfy launch`",
+    ),
+    ErrorCode(
+        "connection_error",
+        "Could not connect to the ComfyUI server.",
+        "check the server is running and the host:port is correct",
+    ),
+    ErrorCode(
+        "ws_disconnected",
+        "WebSocket dropped and reconnect failed mid-execution.",
+        "check the server is still running; re-run the command",
+    ),
+    ErrorCode(
+        "ws_timeout",
+        "WebSocket idle past `--timeout` while waiting for the server.",
+        "re-run with a larger `--timeout` (e.g. `--timeout 300`)",
+    ),
+    ErrorCode(
+        "prompt_rejected",
+        "Server returned 400. `details.node_errors` carries the per-node errors.",
+        "inspect `details.node_errors` and fix the workflow",
+    ),
+    ErrorCode(
+        "prompt_not_found",
+        "Asked about a prompt_id the server doesn't know.",
+        "`comfy jobs ls` to find a valid prompt_id",
+    ),
+    ErrorCode(
+        "partner_node_requires_credential",
+        "Workflow uses a partner-API node (category `api node/*` — Veo, Kling, BFL, Gemini, etc.) "
+        "but no `api_key_comfy_org` credential is available. Local submit would succeed at /prompt "
+        "and then fail opaquely at execute time with `Unauthorized: Please login first`.",
+        "re-submit with `--where cloud` (the CLI auto-injects the credential there), or run "
+        "`comfy auth set comfy-cloud-api-key --key …` so the local submit path can inject it too",
+    ),
+    ErrorCode(
+        "workflow_empty",
+        "Workflow JSON is an empty object (no nodes).",
+        "add at least one node to the workflow",
+    ),
+    ErrorCode(
+        "conversion_error",
+        "UI-format workflow could not be converted to API format.",
+        "export your workflow from ComfyUI via 'File > Export (API)' and retry",
+    ),
+    ErrorCode(
+        "conversion_crash",
+        "UI-format workflow conversion crashed unexpectedly.",
+        "export your workflow from ComfyUI via 'File > Export (API)' and retry",
+    ),
+    ErrorCode(
+        "template_not_found",
+        "The requested workflow template was not found.",
+        "check the template name and try again",
+    ),
+    ErrorCode(
+        "gallery_load_failed",
+        "Failed to load the workflow gallery.",
+        "check your network connection and try again",
+    ),
+    ErrorCode(
+        "gallery_fetch_failed",
+        "Failed to fetch gallery data from the remote server.",
+        "check your network connection and try again",
+    ),
+    ErrorCode(
+        "wasm_snapshot_missing",
+        "The bundled WASM object_info snapshot is missing.",
+        "reinstall comfy-cli or pass --input to provide object_info manually",
+    ),
+    ErrorCode(
+        "workflow_unknown_nodes",
+        "Workflow references class_type(s) not present in the server's object_info. "
+        "`details.unknown_nodes` lists each with close_matches.",
+        "fix the class_type names; install missing custom nodes",
+    ),
+    # --- routing / cloud / auth ---------------------------------------------
+    ErrorCode(
+        "where_invalid",
+        "`--where` value was neither `local` nor `cloud`.",
+        "use `--where local` or `--where cloud`",
+    ),
+    ErrorCode(
+        "cloud_not_configured",
+        "`--where cloud` requested without a stored session.",
+        "run `comfy cloud login`",
+    ),
+    ErrorCode(
+        "cloud_unauthorized",
+        "Cloud rejected the bearer token (missing / expired / invalid).",
+        "run `comfy cloud login`",
+    ),
+    ErrorCode(
+        "cloud_http_error",
+        "Cloud returned a non-2xx HTTP error. `details.status` carries the code.",
+        "check `details.body` for the server's message",
+    ),
+    ErrorCode(
+        "cloud_timeout",
+        "Cloud wait_for_completion exceeded `--timeout`.",
+        "raise `--timeout`, or `comfy jobs watch <id> --where cloud`",
+    ),
+    ErrorCode(
+        "cloud_ui_workflow_unsupported",
+        "UI-format workflow on the cloud path; converter isn't wired yet.",
+        "export the workflow via ComfyUI `File > Export (API)`",
+    ),
+    # --- auth (provider keys + cloud session intertwined) --------------------
+    ErrorCode(
+        "auth_invalid_key",
+        "Missing or empty `--key` on `comfy auth set`.",
+        "pass `--key <KEY>`",
+    ),
+    ErrorCode(
+        "auth_not_found",
+        "Tried to remove a provider with no stored key.",
+        "`comfy auth list` to see what's stored",
+    ),
+    ErrorCode(
+        "auth_not_signed_in",
+        "Action requires a Comfy Cloud session.",
+        "run `comfy cloud login`",
+    ),
+    ErrorCode(
+        "auth_use_login_for_cloud",
+        "`comfy auth set comfy-cloud` is no longer the cloud auth path.",
+        "use `comfy cloud login`",
+    ),
+    ErrorCode(
+        "auth_use_logout_for_cloud",
+        "`comfy auth remove comfy-cloud` is no longer the cloud signout path.",
+        "use `comfy cloud logout`",
+    ),
+    # --- oauth ---------------------------------------------------------------
+    ErrorCode(
+        "oauth_register_failed",
+        "Dynamic client registration (RFC 7591) failed.",
+        "check that the cloud server is reachable",
+    ),
+    ErrorCode(
+        "oauth_authorize_failed",
+        "OAuth authorization step failed (user denied, state mismatch, etc.).",
+        "re-run `comfy cloud login`",
+    ),
+    ErrorCode(
+        "oauth_token_failed",
+        "OAuth token exchange failed.",
+        "re-run `comfy cloud login` to start a fresh authorization",
+    ),
+    ErrorCode(
+        "oauth_refresh_failed",
+        "OAuth token refresh failed.",
+        "run `comfy cloud login` to sign in again",
+    ),
+    ErrorCode(
+        "oauth_cancelled",
+        "OAuth flow was cancelled by the user.",
+    ),
+    ErrorCode(
+        "oauth_timeout",
+        "Timed out waiting for browser callback during OAuth login.",
+        "re-run `comfy cloud login` and complete the sign-in in your browser",
+    ),
+    # --- watcher / background jobs -------------------------------------------
+    ErrorCode(
+        "watcher_crashed",
+        "Background watcher process is no longer running; job state is stale.",
+        "re-submit the workflow, or check `comfy jobs status <id>` against the server",
+    ),
+    ErrorCode(
+        "watcher_timeout",
+        "Background watcher gave up after max runtime without a terminal status.",
+    ),
+    ErrorCode(
+        "watcher_poll_error",
+        "Background watcher encountered a transient error polling the server.",
+    ),
+    ErrorCode(
+        "execution_error",
+        "ComfyUI reported an execution error for the workflow.",
+        "inspect the error details or re-run with `--wait --verbose`",
+    ),
+    # --- general argument / mode errors --------------------------------------
+    ErrorCode(
+        "missing_argument",
+        "Required argument(s) not provided.",
+    ),
+    ErrorCode(
+        "json_incompatible",
+        "Requested feature is not available in JSON output mode.",
+    ),
+    # --- skills --------------------------------------------------------------
+    ErrorCode(
+        "unknown_skill",
+        "Requested skill is not in the bundled set.",
+        "run `comfy skill list` to see available skills",
+    ),
+    # --- workflow editor -----------------------------------------------------
+    ErrorCode(
+        "workflow_not_frontend_format",
+        "Workflow editing requires the UI export (with `nodes[]` / `links[]`); "
+        "got API-format. Auto-convert isn't wired yet.",
+        "in ComfyUI, use the regular save (File > Save Workflow) — the API export is for `comfy run`, not for editing",
+    ),
+    ErrorCode(
+        "workflow_slot_invalid",
+        "A slot override failed validation (bad shape, unknown address, etc.).",
+        "see `details` — addresses follow `<instance_id>.<input_name>`",
+    ),
+    ErrorCode(
+        "workflow_variation_invalid",
+        "A variation override was malformed (e.g. `--slot k=value` not parseable as JSON).",
+        'values must be JSON arrays, e.g. `--slot prompt=\'["a","b"]\'`',
+    ),
+    # --- CQL / object_info ---------------------------------------------------
+    ErrorCode(
+        "cql_no_graph",
+        "No object_info source available (no local server, no `--input`).",
+        "pass `--input <path>`, or start the server with `comfy launch`",
+    ),
+    ErrorCode(
+        "cql_query_invalid",
+        "Grammar query failed to parse or evaluate.",
+        "check the grammar; `comfy nodes ls --help` has examples",
+    ),
+    ErrorCode(
+        "node_not_found",
+        "Requested node class isn't in the loaded environment.",
+        "see `details.close_matches` or run `comfy nodes search`",
+    ),
+    # --- file transfer (upload / download) -----------------------------------
+    ErrorCode(
+        "upload_failed",
+        "HTTP error during file upload to the server's input directory.",
+        "check the file exists and the server is reachable",
+    ),
+    ErrorCode(
+        "download_failed",
+        "HTTP error while downloading an output file.",
+        "check that the job completed successfully and the server is reachable",
+    ),
+    ErrorCode(
+        "download_no_outputs",
+        "The job has no output files (yet).",
+        "wait for the job to complete before downloading",
+    ),
+    ErrorCode(
+        "download_no_prompt",
+        "No prompt_id was provided to the download command.",
+        "pass a prompt_id argument, or pipe from `comfy --json run --wait`",
+    ),
+    ErrorCode(
+        "download_job_not_found",
+        "The prompt_id wasn't found in state files or the server API.",
+        "check the prompt_id and ensure the job has completed",
+    ),
+    ErrorCode(
+        "setup_missing_where",
+        "--non-interactive requires --where (local or cloud).",
+        "comfy setup --non-interactive --where cloud --api-key sk-...",
+    ),
+    ErrorCode(
+        "setup_no_auth",
+        "Cloud requires authentication in non-interactive mode.",
+        "pass --api-key sk-... or run `comfy cloud login` first",
+    ),
+)
+
+
+_BY_CODE: dict[str, ErrorCode] = {ec.code: ec for ec in REGISTRY}
+
+
+def is_registered(code: str) -> bool:
+    return code in _BY_CODE
+
+
+def get(code: str) -> ErrorCode | None:
+    return _BY_CODE.get(code)
+
+
+def all_codes() -> list[str]:
+    return [ec.code for ec in REGISTRY]
+
+
+def as_discover_rows() -> list[dict[str, str | None]]:
+    """The shape ``comfy discover`` emits under ``data.error_codes``."""
+    return [{"code": ec.code, "meaning": ec.meaning, "hint": ec.hint} for ec in REGISTRY]

@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "comfy workflow *",
+  "description": "Output shape for workflow editing commands (slots, set-slot, vary).",
+  "type": "object",
+  "properties": {
+    "workflow": { "type": "string" },
+    "count": { "type": "integer" },
+    "slots": { "type": "array" },
+    "applied": { "type": "array" },
+    "warnings": { "type": "array" },
+    "wrote": { "type": "string" },
+    "variations_summary": { "type": "array" }
+  }
+}

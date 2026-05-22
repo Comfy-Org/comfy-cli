@@ -57,6 +57,8 @@ CONFIG_KEY_DEFAULT_DOWNLOADER = "default_downloader"
 
 DEFAULT_TRACKING_VALUE = True
 
+CONFIG_KEY_DEFAULT_PROJECT_DIR = "default_project_dir"
+
 COMFY_LOCK_YAML_FILE = "comfy.lock.yaml"
 
 # TODO: figure out a better way to check if this is a comfy repo

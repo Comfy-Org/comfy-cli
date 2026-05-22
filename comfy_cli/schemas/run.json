@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://comfy.org/schemas/run.json",
+  "title": "comfy run --json data payload",
+  "type": "object",
+  "required": ["workflow", "status"],
+  "additionalProperties": true,
+  "properties": {
+    "workflow": {"type": "string", "description": "Absolute path to the workflow file."},
+    "status": {"type": "string", "enum": ["queued", "completed", "cancelled"]},
+    "prompt_id": {"type": ["string", "null"]},
+    "client_id": {"type": ["string", "null"]},
+    "outputs": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "URLs or local paths to produced artifacts."
+    },
+    "elapsed_seconds": {"type": ["number", "null"]},
+    "host": {"type": "string"},
+    "port": {"type": "integer"}
+  }
+}

@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "comfy upload / comfy download",
+  "description": "Output schema for file transfer commands.",
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "uploads": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "local_path": {"type": "string"},
+              "cloud_name": {"type": "string"},
+              "subfolder": {"type": "string"},
+              "type": {"type": "string"}
+            },
+            "required": ["local_path", "cloud_name"]
+          }
+        }
+      },
+      "required": ["uploads"]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "prompt_id": {"type": "string"},
+        "out_dir": {"type": "string"},
+        "files": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "url": {"type": "string"},
+              "path": {"type": "string"},
+              "size": {"type": "integer"}
+            },
+            "required": ["path"]
+          }
+        }
+      },
+      "required": ["prompt_id", "files"]
+    }
+  ]
+}
