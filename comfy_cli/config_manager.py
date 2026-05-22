@@ -153,6 +153,29 @@ class ConfigManager:
 
         return data
 
+    def get_data(self) -> dict:
+        """Structured snapshot of config, used by ``comfy env --json``.
+
+        Returned values are JSON-serializable; absent keys are null.
+        """
+        default_workspace = self.get(constants.CONFIG_KEY_DEFAULT_WORKSPACE)
+        return {
+            "path": self.get_config_file_path(),
+            "default_workspace": default_workspace,
+            "default_launch_extras": self.get(constants.CONFIG_KEY_DEFAULT_LAUNCH_EXTRAS) or None,
+            "recent_workspace": self.get(constants.CONFIG_KEY_RECENT_WORKSPACE),
+            "tracking_enabled": self.get_bool(constants.CONFIG_KEY_ENABLE_TRACKING),
+            "background": (
+                {
+                    "host": self.background[0],
+                    "port": self.background[1],
+                    "pid": self.background[2],
+                }
+                if self.background is not None
+                else None
+            ),
+        }
+
     def remove_background(self):
         del self.config["DEFAULT"][constants.CONFIG_KEY_BACKGROUND]
         self.write_config()
