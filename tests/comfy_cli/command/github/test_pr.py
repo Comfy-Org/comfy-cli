@@ -376,7 +376,10 @@ class TestCommandLineIntegration:
     @patch("comfy_cli.cmdline.check_comfy_repo", return_value=(False, None))
     @patch("comfy_cli.cmdline.workspace_manager")
     @patch("comfy_cli.tracking.prompt_tracking_consent")
-    def test_commit_without_pr_does_not_conflict(self, mock_track, mock_ws, mock_check, mock_execute, runner):
+    @patch("comfy_cli.cmdline.utils.get_os", return_value="linux")
+    def test_commit_without_pr_does_not_conflict(
+        self, mock_os, mock_track, mock_ws, mock_check, mock_execute, runner
+    ):
         """Test that --commit alone does not trigger --pr conflict error (issue #335)"""
         mock_ws.get_workspace_path.return_value = ("/tmp/test", None)
         result = runner.invoke(

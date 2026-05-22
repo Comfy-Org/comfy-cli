@@ -122,3 +122,9 @@ def print_saved(paths: list[Path]) -> None:
     rprint("[bold green]Saved:[/bold green]")
     for p in paths:
         rprint(f"  {p}")
+
+    # Show inline previews for human users
+    from comfy_cli.output.preview import preview
+
+    for p in paths:
+        preview(p)

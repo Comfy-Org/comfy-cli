@@ -49,10 +49,12 @@ dependencies = [
   "typer>=0.12.5",
   "typing-extensions>=4.7",
   "uv>=0.6.9",
+  "wasmtime>=44.0.0",
   "websocket-client",
 ]
 
 optional-dependencies.dev = [ "pre-commit", "pytest", "pytest-cov", "ruff" ]
+optional-dependencies.preview = [ "term-image>=0.7,<0.8" ]
 urls.Repository = "https://github.com/Comfy-Org/comfy-cli.git"
 scripts.comfy = "comfy_cli.__main__:main"
 scripts.comfy-cli = "comfy_cli.__main__:main"
@@ -63,6 +65,19 @@ where = [ "." ]
 include = [ "comfy_cli*" ]
 
 [tool.setuptools.package-data]
+# Keep this list in sync with BUNDLED_SKILLS in comfy_cli/skills/__init__.py.
+"comfy_cli.skills.comfy" = [ "SKILL.md" ]
+"comfy_cli.skills.image" = [ "SKILL.md" ]
+"comfy_cli.skills.video" = [ "SKILL.md" ]
+"comfy_cli.skills.audio" = [ "SKILL.md" ]
+"comfy_cli.skills.edit" = [ "SKILL.md" ]
+"comfy_cli.skills.condition" = [ "SKILL.md" ]
+"comfy_cli.skills.pipeline" = [ "SKILL.md" ]
+"comfy_cli.skills.debug" = [ "SKILL.md" ]
+"comfy_cli.skills.cloud" = [ "SKILL.md" ]
+"comfy_cli.skills.relay" = [ "SKILL.md" ]
+"comfy_cli.schemas" = [ "*.json", "*.md" ]
+"comfy_cli._wasm" = [ "*.wasm", "data/*.gz" ]
 "comfy_cli.command.generate" = [ "spec/openapi.yml" ]
 
 [tool.ruff]

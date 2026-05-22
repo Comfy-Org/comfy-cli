@@ -2,7 +2,7 @@ from unittest.mock import MagicMock, patch
 
 import requests
 
-from comfy_cli.update import check_for_newer_pypi_version, check_for_updates
+from comfy_cli.update import check_for_newer_pypi_version
 
 
 def _mock_pypi_response(latest_version):
@@ -41,19 +41,7 @@ class TestCheckForNewerPypiVersion:
         mock_get.assert_called_once_with("https://pypi.org/pypi/comfy-cli/json", timeout=5)
 
 
-class TestCheckForUpdates:
-    @patch("comfy_cli.update.notify_update")
-    @patch("comfy_cli.update.get_version_from_pyproject", return_value="1.0.0")
-    @patch("comfy_cli.update.requests.get")
-    def test_notifies_when_update_available(self, mock_get, _mock_ver, mock_notify):
-        mock_get.return_value = _mock_pypi_response("2.0.0")
-        check_for_updates()
-        mock_notify.assert_called_once_with("1.0.0", "2.0.0")
-
-    @patch("comfy_cli.update.notify_update")
-    @patch("comfy_cli.update.get_version_from_pyproject", return_value="1.0.0")
-    @patch("comfy_cli.update.requests.get")
-    def test_no_notification_on_network_error(self, mock_get, _mock_ver, mock_notify):
-        mock_get.side_effect = requests.ConnectionError("offline")
-        check_for_updates()
-        mock_notify.assert_not_called()
+# TestCheckForUpdates was removed alongside the bright-blue
+# "🔔 Update Available!" panel (Task 5 of the CLI UX consistency pass).
+# ``check_for_newer_pypi_version`` is still tested directly above; the
+# welcome banner consumes it inline.

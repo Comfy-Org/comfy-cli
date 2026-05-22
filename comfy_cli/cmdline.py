@@ -1,3 +1,4 @@
+import json
 import os
 import subprocess
 import sys
@@ -6,24 +7,47 @@ from typing import Annotated
 
 import questionary
 import typer
-from rich import print as rprint
 from rich.console import Console
 
-from comfy_cli import constants, env_checker, logging, tracking, ui, utils
-from comfy_cli.command import code_search, custom_nodes, pr_command
+from comfy_cli import cancellation, constants, env_checker, logging, tracking, ui, utils
+from comfy_cli import where as where_module
+from comfy_cli.auth import command as auth_command
+from comfy_cli.cloud import command as cloud_command
+from comfy_cli.command import (
+    code_search,
+    custom_nodes,
+    pr_command,
+)
 from comfy_cli.command import generate as generate_command
 from comfy_cli.command import install as install_inner
+from comfy_cli.command import (
+    jobs as jobs_command,
+)
+from comfy_cli.command import (
+    nodes as nodes_command,
+)
 from comfy_cli.command import run as run_inner
+from comfy_cli.command import run_cli as run_cli_inner
+from comfy_cli.command import (
+    templates as templates_command,
+)
+from comfy_cli.command import transfer as transfer_inner
+from comfy_cli.command import (
+    workflow as workflow_command,
+)
 from comfy_cli.command.install import validate_version
 from comfy_cli.command.launch import launch as launch_command
 from comfy_cli.command.models import models as models_command
 from comfy_cli.config_manager import ConfigManager
 from comfy_cli.constants import GPU_OPTION, CUDAVersion, ROCmVersion
 from comfy_cli.cuda_detect import DEFAULT_CUDA_TAG, detect_cuda_driver_version, resolve_cuda_wheel
+from comfy_cli.discovery import build_discovery
 from comfy_cli.env_checker import EnvChecker
+from comfy_cli.help_json import build_help_json
+from comfy_cli.output import Renderer, get_renderer, rprint, set_renderer
 from comfy_cli.resolve_python import resolve_workspace_python
+from comfy_cli.skills import command as skill_command
 from comfy_cli.standalone import StandalonePython
-from comfy_cli.update import check_for_updates
 from comfy_cli.uv import DependencyCompiler
 from comfy_cli.workspace_manager import WorkspaceManager, check_comfy_repo
 
@@ -35,7 +59,42 @@ console = Console()
 
 
 def main():
-    app()
+    # Install the SIGINT handler BEFORE Typer parses argv and runs the
+    # subcommand. Otherwise a Ctrl-C during the first ~100ms (argv parsing,
+    # the lazy imports of auth/cql/cloud, ConfigManager construction) hits
+    # Python's default handler and the user sees a bare KeyboardInterrupt
+    # traceback instead of the documented `cancelled` envelope.
+    cancellation.install_sigint_handler()
+    # Run the Typer app. If the command path called renderer.error(...) and
+    # returned without raising typer.Exit, we still need to surface the
+    # non-zero exit code at the OS level — otherwise the envelope says
+    # ok:false but the shell sees 0 and downstream tools think we succeeded.
+    try:
+        app()
+    except KeyboardInterrupt:
+        # SIGINT path: emit a cancelled envelope if one hasn't been written yet.
+        try:
+            from comfy_cli.output import get_renderer
+
+            r = get_renderer()
+            if not r._envelope_emitted and r.is_json():
+                r.error(code="cancelled", message="Cancelled by user", exit_code=130)
+        except Exception:
+            pass
+        sys.exit(130)
+    except (typer.Exit, SystemExit):
+        raise
+    # No exception → command returned cleanly. If the renderer recorded a
+    # non-zero exit code (from a `renderer.error(...)` that forgot to also
+    # `raise typer.Exit(...)`), honor it.
+    try:
+        from comfy_cli.output import get_renderer
+
+        rc = get_renderer().exit_code
+    except Exception:  # noqa: BLE001 — never break the success path on renderer issues
+        rc = 0
+    if rc:
+        sys.exit(rc)
 
 
 class MutuallyExclusiveValidator:
@@ -112,9 +171,97 @@ def entry(
         "-v",
         help="Print version and exit",
     ),
+    json_output: Annotated[
+        bool,
+        typer.Option(
+            "--json",
+            show_default=False,
+            help="Emit a structured JSON envelope on stdout. Side messages go to stderr.",
+        ),
+    ] = False,
+    json_stream: Annotated[
+        bool,
+        typer.Option(
+            "--json-stream",
+            show_default=False,
+            help="Emit one NDJSON event per line; final line is the envelope.",
+        ),
+    ] = False,
+    no_json: Annotated[
+        bool,
+        typer.Option(
+            "--no-json",
+            show_default=False,
+            help="Force pretty output even when auto-detection would pick JSON.",
+        ),
+    ] = False,
+    help_json: Annotated[
+        bool,
+        typer.Option(
+            "--help-json",
+            show_default=False,
+            help="Print machine-readable help for the entire CLI and exit.",
+        ),
+    ] = False,
+    where: Annotated[
+        str | None,
+        typer.Option(
+            "--where",
+            show_default=False,
+            help="Routing mode for this invocation: 'local' or 'cloud'. "
+            "Overrides COMFY_WHERE and the persisted default (`comfy set-default --where`). "
+            "Subcommands inherit this — no need to repeat it on each one.",
+        ),
+    ] = None,
 ):
+    # 1. Resolve output mode and install the process-wide renderer. This must
+    #    happen before any rprint() call so all output is routed correctly.
+    cli_version = ConfigManager().get_cli_version()
+    renderer = Renderer.resolve(
+        json_flag=json_output or None,
+        json_stream_flag=json_stream or None,
+        no_json_flag=no_json,
+        command=ctx.invoked_subcommand or "",
+        version=cli_version,
+    )
+    set_renderer(renderer)
+
+    # Global `--where` is sugar over COMFY_WHERE. Setting the env var here so
+    # the existing precedence chain in ``where.resolve()`` picks it up for
+    # every subcommand without each one having to wire its own flag.
+    if where:
+        try:
+            where_module._parse(where)  # validate now — fail fast on `--where cloudy`
+        except ValueError as e:
+            get_renderer().error(code="where_invalid", message=str(e), hint="use --where local or --where cloud")
+            raise typer.Exit(code=1) from e
+        os.environ["COMFY_WHERE"] = where.strip().lower()
+
+    # 2. Install SIGINT → cancellation token. Idempotent; safe to call before
+    #    any long-running operation in subcommands.
+    cancellation.install_sigint_handler()
+
+    # 3. Agentic callers shouldn't get interactive prompts.
+    if renderer.caller.agentic:
+        skip_prompt = True
+
+    if help_json:
+        doc = build_help_json(app)
+        # In JSON mode, wrap in the standard envelope so consumers can parse
+        # the same shape they get from every other command. In pretty mode
+        # (rare for --help-json but possible), emit the raw doc — there's no
+        # envelope to compete with on stdout.
+        if renderer.is_json():
+            renderer.emit(doc, command="help")
+        else:
+            sys.stdout.write(json.dumps(doc, indent=2, default=str) + "\n")
+        ctx.exit(0)
+
     if version:
-        rprint(ConfigManager().get_cli_version())
+        if renderer.is_json():
+            renderer.emit({"version": cli_version}, command="version")
+        else:
+            rprint(cli_version)
         ctx.exit(0)
 
     workspace_manager.setup_workspace_manager(workspace, here, recent, skip_prompt)
@@ -122,8 +269,33 @@ def entry(
     tracking.prompt_tracking_consent(skip_prompt, default_value=enable_telemetry)
 
     if ctx.invoked_subcommand is None:
-        rprint("[bold yellow]Welcome to Comfy CLI![/bold yellow]: https://github.com/Comfy-Org/comfy-cli")
-        rprint(ctx.get_help())
+        if renderer.is_json():
+            renderer.emit(
+                {
+                    "welcome": "Comfy CLI",
+                    "homepage": "https://github.com/Comfy-Org/comfy-cli",
+                    "hint": "run `comfy --help-json` for the full surface or `comfy --help` for human help.",
+                },
+                command="welcome",
+            )
+        else:
+            from comfy_cli.auth import store as _auth_store
+            from comfy_cli.output.branding import intro_banner
+
+            _session = _auth_store.get_cloud_session()
+            _signed_in = _session is not None and not _session.is_expired()
+            _base_url = _session.base_url if _session else ""
+            if not _base_url:
+                from comfy_cli.cloud import get_base_url as _get_base_url
+
+                _base_url = _get_base_url()
+            renderer.console().print(
+                intro_banner(
+                    version=ConfigManager().get_cli_version(),
+                    signed_in=_signed_in,
+                    base_url=_base_url,
+                )
+            )
         ctx.exit()
 
     # TODO: Move this to proper place
@@ -279,7 +451,6 @@ def install(
         ),
     ] = None,
 ):
-    check_for_updates()
     checker = EnvChecker()
 
     comfy_path, _ = workspace_manager.get_workspace_path()
@@ -423,13 +594,7 @@ def update(
         rprint(f"[yellow]Failed to update node id cache: {e}[/yellow]")
 
 
-@app.command(
-    help=(
-        "Run a workflow on the ComfyUI launched by `comfy launch --background`. "
-        "Accepts both ComfyUI API format and exported UI workflow JSON; "
-        "UI workflows are converted to API format client-side via /object_info."
-    )
-)
+@app.command(help="Run an API workflow. Submits and returns immediately by default; pass --wait to block.")
 @tracking.track_command()
 def run(
     workflow: Annotated[
@@ -444,8 +609,20 @@ def run(
     ],
     wait: Annotated[
         bool,
-        typer.Option(help="If the command should wait until execution completes."),
-    ] = True,
+        typer.Option(
+            "--wait",
+            show_default=False,
+            help="Block until the workflow completes (old default). Without this, the command submits and exits.",
+        ),
+    ] = False,
+    notify: Annotated[
+        bool | None,
+        typer.Option(
+            "--notify/--no-notify",
+            show_default=False,
+            help="Fire a desktop notification when a background job completes. Default: on for humans, off for agents.",
+        ),
+    ] = None,
     verbose: Annotated[
         bool,
         typer.Option(help="Enables verbose output of the execution process."),
@@ -470,6 +647,14 @@ def run(
             ),
         ),
     ] = 120,
+    where: Annotated[
+        str | None,
+        typer.Option(
+            "--where",
+            show_default=False,
+            help="Routing target: 'local' (default) or 'cloud'. Cloud is local-only in this build.",
+        ),
+    ] = None,
     api_key: Annotated[
         str | None,
         typer.Option(
@@ -518,6 +703,38 @@ def run(
         api_key = api_key.strip() or None
 
     config = ConfigManager()
+    renderer = get_renderer()
+
+    try:
+        decision = where_module.resolve(flag=where, config_value=config.get(where_module.CONFIG_KEY_WHERE_DEFAULT))
+    except ValueError as e:
+        renderer.error(code="where_invalid", message=str(e), hint="use --where local or --where cloud")
+        raise typer.Exit(code=1)
+
+    # Default for --notify: on when a human is at the terminal, off for
+    # agents (they shouldn't get surprise side-channel processes they didn't
+    # ask for). The user can override either way with --notify/--no-notify.
+    effective_notify = notify if notify is not None else (renderer.is_pretty() and not wait)
+
+    if decision.target is where_module.WhereTarget.CLOUD:
+        err = where_module.cloud_preflight()
+        if err is not None:
+            renderer.error(
+                code=err.code,
+                message=err.message,
+                hint=err.hint,
+                details=err.details,
+            )
+            raise typer.Exit(code=1)
+        # Cloud path uses HTTPS + Bearer auth; host/port aren't applicable.
+        run_inner.execute_cloud(
+            workflow,
+            wait=wait,
+            verbose=verbose,
+            timeout=timeout or 600,
+            notify=effective_notify,
+        )
+        return
 
     if host:
         s = host.split(":")
@@ -541,12 +758,118 @@ def run(
         workflow,
         host,
         port,
-        wait,
-        verbose,
-        timeout,
+        wait=wait,
+        verbose=verbose,
+        timeout=timeout,
+        notify=effective_notify,
         api_key=api_key,
         json_mode=json_output,
         print_prompt=print_prompt,
+    )
+
+
+@app.command(help="Upload files to the ComfyUI server's input directory.")
+@tracking.track_command()
+def upload(
+    files: Annotated[list[str], typer.Argument(help="Local file paths to upload.")],
+    where: Annotated[
+        str | None,
+        typer.Option("--where", show_default=False, help="Routing target: 'local' or 'cloud'."),
+    ] = None,
+    overwrite: Annotated[
+        bool,
+        typer.Option("--overwrite/--no-overwrite", help="Overwrite existing files on the server."),
+    ] = True,
+):
+    config = ConfigManager()
+    renderer = get_renderer()
+    try:
+        decision = where_module.resolve(flag=where, config_value=config.get(where_module.CONFIG_KEY_WHERE_DEFAULT))
+    except ValueError as e:
+        renderer.error(code="where_invalid", message=str(e), hint="use --where local or --where cloud")
+        raise typer.Exit(code=1)
+
+    effective_where = "cloud" if decision.target is where_module.WhereTarget.CLOUD else "local"
+    if effective_where == "cloud":
+        err = where_module.cloud_preflight()
+        if err is not None:
+            renderer.error(code=err.code, message=err.message, hint=err.hint, details=err.details)
+            raise typer.Exit(code=1)
+
+    transfer_inner.execute_upload(files, where=effective_where, overwrite=overwrite)
+
+
+@app.command(help="Download outputs from a completed job. Reads prompt_id from argument or piped stdin.")
+@tracking.track_command()
+def download(
+    prompt_id: Annotated[
+        str | None,
+        typer.Argument(help="Prompt ID to download outputs for. Omit to read from piped stdin.", show_default=False),
+    ] = None,
+    out_dir: Annotated[
+        str,
+        typer.Option("--out-dir", "-o", help="Directory to save outputs to."),
+    ] = "./outputs",
+    where: Annotated[
+        str | None,
+        typer.Option("--where", show_default=False, help="Routing target: 'local' or 'cloud'."),
+    ] = None,
+    url_only: Annotated[
+        bool,
+        typer.Option(
+            "--url-only",
+            show_default=False,
+            help="Emit output URLs without downloading files. Useful for agents that pass URLs to other tools.",
+        ),
+    ] = False,
+):
+    config = ConfigManager()
+    renderer = get_renderer()
+    try:
+        decision = where_module.resolve(flag=where, config_value=config.get(where_module.CONFIG_KEY_WHERE_DEFAULT))
+    except ValueError as e:
+        renderer.error(code="where_invalid", message=str(e), hint="use --where local or --where cloud")
+        raise typer.Exit(code=1)
+
+    effective_where = "cloud" if decision.target is where_module.WhereTarget.CLOUD else "local"
+    if effective_where == "cloud":
+        err = where_module.cloud_preflight()
+        if err is not None:
+            renderer.error(code=err.code, message=err.message, hint=err.hint, details=err.details)
+            raise typer.Exit(code=1)
+
+    transfer_inner.execute_download(prompt_id, out_dir=out_dir, where=effective_where, url_only=url_only)
+
+
+@app.command("run-cli", help="Walk through the CLI surface in realtime with a tiny no-model workflow.")
+@tracking.track_command()
+def run_cli(
+    pause_seconds: Annotated[
+        float,
+        typer.Option(
+            "--pause-seconds",
+            help="Seconds to pause between steps for readability. Use 0 for fast/CI runs.",
+        ),
+    ] = 3.0,
+    no_pause: Annotated[
+        bool,
+        typer.Option("--no-pause", help="Equivalent to --pause-seconds 0."),
+    ] = False,
+    show_agent: Annotated[
+        bool,
+        typer.Option(
+            "--show-agent/--no-show-agent",
+            help="Also show the --json envelope an agent would parse for each command. On by default.",
+        ),
+    ] = True,
+    no_cleanup: Annotated[
+        bool,
+        typer.Option("--no-cleanup", help="Keep the temporary demo workflow file after the run."),
+    ] = False,
+):
+    effective_pause = 0.0 if no_pause else pause_seconds
+    raise typer.Exit(
+        code=run_cli_inner.execute(pause_seconds=effective_pause, no_cleanup=no_cleanup, show_agent=show_agent)
     )
 
 
@@ -594,67 +917,276 @@ def launch(
     launch_command(background, extra, frontend_pr)
 
 
-@app.command("set-default", help="Set default ComfyUI path")
+@app.command("setup", help="Interactive setup wizard — routing, auth, and agent skills in one step.")
+@tracking.track_command()
+def setup(
+    where: Annotated[
+        str | None,
+        typer.Option(
+            "--where", show_default=False, help="Routing target: 'local' or 'cloud'. Skips the interactive prompt."
+        ),
+    ] = None,
+    api_key: Annotated[
+        str | None,
+        typer.Option("--api-key", show_default=False, help="Comfy Cloud API key. Implies --where cloud."),
+    ] = None,
+    project_dir: Annotated[
+        str | None,
+        typer.Option("--project-dir", show_default=False, help="Project directory for workflows, inputs, and outputs."),
+    ] = None,
+    non_interactive: Annotated[
+        bool,
+        typer.Option(
+            "--non-interactive",
+            "-y",
+            show_default=False,
+            help="No prompts — use flags for all choices. For CI, devcontainers, and scripted installs.",
+        ),
+    ] = False,
+    skip_skills: Annotated[
+        bool,
+        typer.Option("--skip-skills", show_default=False, help="Skip agent skill installation."),
+    ] = False,
+    skip_verify: Annotated[
+        bool,
+        typer.Option("--skip-verify", show_default=False, help="Skip connectivity verification."),
+    ] = False,
+):
+    from comfy_cli.command import setup as setup_inner
+
+    setup_inner.execute(
+        where=where,
+        api_key=api_key,
+        project_dir=project_dir,
+        non_interactive=non_interactive,
+        skip_skills=skip_skills,
+        skip_verify=skip_verify,
+    )
+
+
+@app.command("set-default", help="Persist defaults: ComfyUI workspace path and/or `--where` mode.")
 @tracking.track_command()
 def set_default(
-    workspace_path: str,
-    launch_extras: Annotated[str, typer.Option(help="Specify extra options for launch")] = "",
+    workspace_path: Annotated[
+        str | None,
+        typer.Argument(help="Path to ComfyUI workspace (optional — pass to set the default workspace)."),
+    ] = None,
+    launch_extras: Annotated[
+        str | None,
+        typer.Option(help="Extra options forwarded to `comfy launch`."),
+    ] = None,
+    where: Annotated[
+        str | None,
+        typer.Option(
+            "--where",
+            show_default=False,
+            help="Persist the default routing mode: 'local' or 'cloud'. "
+            "Once set, every command honors it without a per-invocation flag.",
+        ),
+    ] = None,
+    clear_where: Annotated[
+        bool,
+        typer.Option(
+            "--clear-where",
+            show_default=False,
+            help="Clear the persisted --where so commands fall back to env / local default.",
+        ),
+    ] = False,
 ):
-    comfy_path = os.path.abspath(os.path.expanduser(workspace_path))
+    renderer = get_renderer()
+    config = ConfigManager()
+    changed_workspace = False
+    changed_where = False
 
-    if not os.path.exists(comfy_path):
-        rprint(
-            f"\nPath not found: {comfy_path}.\n",
-            file=sys.stderr,
+    if where is not None:
+        try:
+            where_module._parse(where)
+        except ValueError as e:
+            renderer.error(code="where_invalid", message=str(e), hint="use --where local or --where cloud")
+            raise typer.Exit(code=1) from e
+        config.set(where_module.CONFIG_KEY_WHERE_DEFAULT, where.strip().lower())
+        changed_where = True
+
+    if clear_where:
+        config.set(where_module.CONFIG_KEY_WHERE_DEFAULT, "")
+        changed_where = True
+
+    if workspace_path is not None:
+        comfy_path = os.path.abspath(os.path.expanduser(workspace_path))
+        if not os.path.exists(comfy_path):
+            renderer.error(
+                code="not_in_workspace", message=f"Path not found: {comfy_path}", hint="pass a real workspace path"
+            )
+            raise typer.Exit(code=1)
+        is_comfy_repo, resolved_path = check_comfy_repo(comfy_path)
+        if not is_comfy_repo:
+            renderer.error(
+                code="not_in_workspace",
+                message=f"Not a ComfyUI workspace: {comfy_path}",
+                hint="`comfy install` to scaffold one, or pass a different path",
+            )
+            raise typer.Exit(code=1)
+        workspace_manager.set_default_workspace(resolved_path)
+        if launch_extras is not None:
+            workspace_manager.set_default_launch_extras(launch_extras)
+        changed_workspace = True
+
+    if not (changed_workspace or changed_where):
+        renderer.error(
+            code="missing_argument",
+            message="set-default needs at least one of: <workspace_path>, --where, or --clear-where.",
+            hint="example: `comfy set-default --where cloud`",
         )
         raise typer.Exit(code=1)
 
-    is_comfy_repo, resolved_path = check_comfy_repo(comfy_path)
-    if not is_comfy_repo:
-        rprint(
-            f"\nSpecified path is not a ComfyUI path: {comfy_path}.\n",
-            file=sys.stderr,
-        )
-        raise typer.Exit(code=1)
-
-    comfy_path = resolved_path
-
-    rprint(f"Specified path is set as default ComfyUI path: {comfy_path} ")
-    workspace_manager.set_default_workspace(comfy_path)
-    workspace_manager.set_default_launch_extras(launch_extras)
+    persisted_where = config.get(where_module.CONFIG_KEY_WHERE_DEFAULT) or None
+    workspace_value = config.get(constants.CONFIG_KEY_DEFAULT_WORKSPACE) if changed_workspace else None
+    if renderer.is_pretty():
+        if changed_workspace:
+            rprint(f"[bold green]✓[/bold green] Default workspace → [cyan]{workspace_value or '?'}[/cyan]")
+        if changed_where:
+            if clear_where:
+                rprint(
+                    "[bold green]✓[/bold green] Cleared persisted [bold]where[/bold] (falls back to env / local default)."
+                )
+            else:
+                rprint(f"[bold green]✓[/bold green] Default [bold]where[/bold] → [cyan]{persisted_where}[/cyan]")
+    renderer.emit(
+        {
+            "default_workspace": workspace_value,
+            "default_launch_extras": launch_extras if changed_workspace else None,
+            "default_where": persisted_where,
+        },
+        command="set-default",
+        changed=True,
+    )
 
 
 @app.command(help="Show which ComfyUI is selected.")
 @tracking.track_command()
 def which():
+    renderer = get_renderer()
     comfy_path = workspace_manager.workspace_path
     if comfy_path is None:
-        rprint(
-            "ComfyUI not found, please run 'comfy install', run 'comfy' in a ComfyUI directory, or specify the workspace path with '--workspace'."
+        renderer.error(
+            code="not_in_workspace",
+            message="ComfyUI not found, please run 'comfy install', run 'comfy' in a ComfyUI directory, or specify the workspace path with '--workspace'.",
+            hint="run: comfy install   (or pass --workspace /path/to/ComfyUI)",
         )
         raise typer.Exit(code=1)
 
-    rprint(f"Target ComfyUI path: {comfy_path}")
+    workspace_type_value = (
+        workspace_manager.workspace_type.value if workspace_manager.workspace_type is not None else None
+    )
+    if renderer.is_pretty():
+        import sys as _sys
+
+        from comfy_cli.output.panels import which_panel
+
+        cfg_bg = ConfigManager().background
+        if cfg_bg is not None:
+            host, port = cfg_bg[0], cfg_bg[1]
+        else:
+            host, port = "127.0.0.1", 8188
+        try:
+            server_running = env_checker.check_comfy_server_running(host=host, port=port, timeout=0.5)
+        except Exception:  # noqa: BLE001
+            server_running = False
+        renderer.console().print(
+            which_panel(
+                workspace_path=str(comfy_path),
+                workspace_type=workspace_type_value,
+                python_executable=_sys.executable,
+                python_version=f"{_sys.version_info.major}.{_sys.version_info.minor}.{_sys.version_info.micro}",
+                server_running=server_running,
+                server_url=f"http://{host}:{port}",
+                version=ConfigManager().get_cli_version(),
+            )
+        )
+    renderer.emit(
+        {
+            "workspace_path": str(comfy_path),
+            "workspace_type": workspace_type_value,
+        },
+        command="which",
+    )
+
+
+@app.command(help="Emit a self-describing surface (commands, schemas, error codes) for agents.")
+@tracking.track_command()
+def discover(
+    schemas_only: Annotated[
+        bool,
+        typer.Option(
+            "--schemas-only",
+            show_default=False,
+            help="Emit only the schemas bundle, omitting the command tree.",
+        ),
+    ] = False,
+):
+    renderer = get_renderer()
+    cli_version = ConfigManager().get_cli_version()
+    doc = build_discovery(app, version=cli_version)
+    if schemas_only:
+        doc = {
+            "prog": doc["prog"],
+            "version": doc["version"],
+            "schemas": doc["schemas"],
+            "command_schemas": doc["command_schemas"],
+            "stream_event_schemas": doc["stream_event_schemas"],
+            "capabilities": doc["capabilities"],
+        }
+    if renderer.is_json():
+        renderer.emit(doc, command="discover")
+        return
+    from comfy_cli.output.panels import discover_panel
+
+    renderer.console().print(discover_panel(doc, command_count=_count_commands(doc.get("commands", {}))))
+
+
+def _count_commands(tree: dict) -> int:
+    total = 0
+    for entry in tree.values():
+        total += 1
+        subs = entry.get("subcommands") if isinstance(entry, dict) else None
+        if subs:
+            total += _count_commands(subs)
+    return total
 
 
 @app.command(help="Print out current environment variables.")
 @tracking.track_command()
 def env():
-    check_for_updates()
-    env_data = EnvChecker().fill_print_table()
-    workspace_data = workspace_manager.fill_print_table()
-    all_data = env_data + workspace_data
-    ui.display_table(
-        data=all_data,
-        column_names=[":laptop_computer: Environment", "Value"],
-        title="Environment Information",
-    )
+    renderer = get_renderer()
+    # Only do the upgrade-check side-effect in pretty mode; agents asking for
+    # a snapshot don't want a network call they didn't request.
+    if renderer.is_pretty():
+        from rich.table import Table
 
+        from comfy_cli.output.branding import branded_panel
 
-@app.command(hidden=True)
-@tracking.track_command()
-def nodes():
-    rprint("\n[bold red] No such command, did you mean 'comfy node' instead?[/bold red]\n")
+        env_data = EnvChecker().fill_print_table()
+        workspace_data = workspace_manager.fill_print_table()
+        all_data = env_data + workspace_data
+
+        tbl = Table(
+            show_header=True,
+            header_style="bold magenta",
+            border_style="dim",
+            pad_edge=False,
+            expand=True,
+        )
+        tbl.add_column("Environment", style="bold cyan", no_wrap=True, overflow="fold")
+        tbl.add_column("Value", overflow="fold")
+        for label, value in all_data:
+            tbl.add_row(label, str(value))
+
+        renderer.console().print(branded_panel(tbl, title="env", version=ConfigManager().get_cli_version()))
+        return
+    # JSON path: collect structured data without printing the table.
+    data = EnvChecker().fill_data()
+    data["workspace"] = workspace_manager.fill_data()
+    renderer.emit(data, command="env")
 
 
 @app.command(hidden=True)
@@ -762,6 +1294,9 @@ def standalone(
 generate_command.register_with(app)
 app.add_typer(models_command.app, name="model", help="Manage models.")
 app.add_typer(custom_nodes.app, name="node", help="Manage custom nodes.")
+app.add_typer(nodes_command.app, name="nodes", help="Introspect ComfyUI node classes (inputs, outputs, categories).")
+app.add_typer(templates_command.app, name="templates", help="Browse the Comfy workflow-template gallery.")
+app.add_typer(workflow_command.app, name="workflow", help="Slot-based editing of frontend-format ComfyUI workflows.")
 app.add_typer(custom_nodes.manager_app, name="manager", help="Manage ComfyUI-Manager.")
 
 app.add_typer(pr_command.app, name="pr-cache", help="Manage PR cache.")
@@ -770,3 +1305,16 @@ app.add_typer(code_search.app, name="code-search", help="Search code across Comf
 app.add_typer(code_search.app, name="cs", hidden=True)
 
 app.add_typer(tracking.app, name="tracking", help="Manage analytics tracking settings.")
+app.add_typer(cloud_command.app, name="cloud", help="Comfy Cloud — sign in, route commands, inspect session.")
+app.add_typer(auth_command.app, name="auth", help="Manage API tokens for model hosts (Civitai, Hugging Face).")
+app.add_typer(jobs_command.app, name="jobs", help="List, inspect, and live-watch ComfyUI prompts.")
+app.add_typer(
+    skill_command.app,
+    name="skill",
+    help="Install the 10 bundled comfy agent skills into Claude Code, Cursor, and AGENTS.md.",
+)
+
+# Hidden: the detached watcher subprocess spawned by `comfy run` when async.
+from comfy_cli.command import job_watcher as _job_watcher  # noqa: E402
+
+app.add_typer(_job_watcher.app, name="_watch", hidden=True)

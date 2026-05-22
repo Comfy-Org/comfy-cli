@@ -9,7 +9,6 @@ from enum import Enum
 from typing import Annotated
 
 import typer
-from rich import print
 from rich.console import Console
 
 from comfy_cli import constants, logging, tracking, ui, utils
@@ -24,6 +23,7 @@ from comfy_cli.file_utils import (
     upload_file_to_signed_url,
     zip_files,
 )
+from comfy_cli.output import rprint as print  # context-aware: stderr in JSON mode
 from comfy_cli.registry import (
     RegistryAPI,
     extract_node_configuration,

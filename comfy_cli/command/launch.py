@@ -8,7 +8,6 @@ import threading
 import uuid
 
 import typer
-from rich import print
 from rich.console import Console
 from rich.panel import Panel
 
@@ -16,8 +15,8 @@ from comfy_cli import constants, utils
 from comfy_cli.command.custom_nodes.cm_cli_util import find_cm_cli, resolve_manager_gui_mode
 from comfy_cli.config_manager import ConfigManager
 from comfy_cli.env_checker import check_comfy_server_running
+from comfy_cli.output import rprint as print  # context-aware print: stderr in JSON mode
 from comfy_cli.resolve_python import resolve_workspace_python
-from comfy_cli.update import check_for_updates
 from comfy_cli.workspace_manager import WorkspaceManager, WorkspaceType
 
 workspace_manager = WorkspaceManager()
@@ -151,7 +150,6 @@ def launch(
     extra: list[str] | None = None,
     frontend_pr: str | None = None,
 ):
-    check_for_updates()
     resolved_workspace = workspace_manager.workspace_path
 
     if not resolved_workspace:
@@ -191,7 +189,7 @@ def launch(
 def background_launch(extra, frontend_pr=None):
     config_background = ConfigManager().background
     if config_background is not None and utils.is_running(config_background[2]):
-        console.print(
+        print(
             "[bold red]ComfyUI is already running in background.\nYou cannot start more than one background service.[/bold red]\n"
         )
         raise typer.Exit(code=1)
@@ -212,9 +210,7 @@ def background_launch(extra, frontend_pr=None):
         extra = []
 
     if check_comfy_server_running(port):
-        console.print(
-            f"[bold red]The {port} port is already in use. A new ComfyUI server cannot be launched.\n[bold red]\n"
-        )
+        print(f"[bold red]The {port} port is already in use. A new ComfyUI server cannot be launched.\n[bold red]\n")
         raise typer.Exit(code=1)
 
     cmd = [
@@ -233,7 +229,7 @@ def background_launch(extra, frontend_pr=None):
     log = loop.run_until_complete(launch_and_monitor(cmd, listen, port))
 
     if log is not None:
-        console.print(
+        print(
             Panel(
                 "".join(log),
                 title="[bold red]Error log during ComfyUI execution[/bold red]",
@@ -241,7 +237,7 @@ def background_launch(extra, frontend_pr=None):
             )
         )
 
-    console.print("\n[bold red]Execution error: failed to launch ComfyUI[/bold red]\n")
+    print("\n[bold red]Execution error: failed to launch ComfyUI[/bold red]\n")
     # NOTE: os.exit(0) doesn't work
     os._exit(1)
 

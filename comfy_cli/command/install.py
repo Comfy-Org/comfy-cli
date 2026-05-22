@@ -10,7 +10,6 @@ import git
 import requests
 import semver
 import typer
-from rich import print as rprint
 from rich.console import Console
 from rich.panel import Panel
 from rich.prompt import Confirm
@@ -21,6 +20,7 @@ from comfy_cli.command.github.pr_info import PRInfo
 from comfy_cli.constants import GPU_OPTION
 from comfy_cli.cuda_detect import DEFAULT_CUDA_TAG
 from comfy_cli.git_utils import checkout_pr, git_checkout_tag
+from comfy_cli.output import rprint
 from comfy_cli.resolve_python import ensure_workspace_python
 from comfy_cli.uv import DependencyCompiler
 from comfy_cli.workspace_manager import WorkspaceManager, check_comfy_repo
