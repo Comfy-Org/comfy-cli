@@ -28,7 +28,7 @@ workflows, and call hosted partner image models, all from your terminal.
 - 💻 Cross-platform: Windows, macOS, Linux
 - ☁️  Route any workflow to **Comfy Cloud** with `--where cloud` (no GPU required)
 - 🤖 Agent-friendly: every command emits structured `--json` envelopes
-- 📚 Bundled skills teach Claude / Cursor / Aider to drive comfy natively
+- 📚 Bundled skills teach Claude / Cursor to drive comfy natively
 
 ## Quick Start
 
