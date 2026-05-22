@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import mimetypes
+import re
 import sys
 import urllib.error
 import urllib.parse
@@ -62,6 +63,34 @@ def _auth_headers(target: Any) -> dict[str, str]:
     return headers
 
 
+# Refuse redirects on upload/download — auth headers must not leak to redirect
+# targets. Mirrors comfy_client._NoRedirectHandler.
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def http_error_301(self, req, fp, code, msg, headers):
+        raise urllib.error.HTTPError(req.full_url, code, "redirect refused (auth leak prevention)", headers, fp)
+
+    http_error_302 = http_error_303 = http_error_307 = http_error_308 = http_error_301
+
+
+_TRANSFER_OPENER = urllib.request.build_opener(_NoRedirectHandler())
+
+
+def _sanitize_multipart_filename(name: str) -> str:
+    """Escape a filename for use in Content-Disposition per RFC 7578.
+
+    Strips characters that break multipart framing (quotes, backslashes,
+    carriage returns, newlines) to prevent header injection.
+    """
+    return re.sub(r'["\\\r\n]', "_", name)
+
+
+def _assert_download_url(url: str) -> None:
+    """Reject download URLs that aren't http(s) to prevent SSRF."""
+    parsed = urllib.parse.urlsplit(url)
+    if parsed.scheme not in ("http", "https"):
+        raise ValueError(f"refusing to download from non-HTTP URL: {url}")
+
+
 # ---------------------------------------------------------------------------
 # Upload
 # ---------------------------------------------------------------------------
@@ -108,7 +137,8 @@ def execute_upload(
         body += (b"true" if overwrite else b"false") + b"\r\n"
         # -- file field
         body += f"--{boundary}\r\n".encode()
-        body += f'Content-Disposition: form-data; name="image"; filename="{filename}"\r\n'.encode()
+        safe_filename = _sanitize_multipart_filename(filename)
+        body += f'Content-Disposition: form-data; name="image"; filename="{safe_filename}"\r\n'.encode()
         body += f"Content-Type: {content_type}\r\n\r\n".encode()
         body += file_data
         body += b"\r\n"
@@ -121,7 +151,7 @@ def execute_upload(
             req.add_header(hdr, val)
 
         try:
-            with urllib.request.urlopen(req) as resp:
+            with _TRANSFER_OPENER.open(req) as resp:
                 result = json.loads(resp.read().decode("utf-8", errors="replace"))
         except urllib.error.HTTPError as e:
             status = e.code
@@ -263,14 +293,23 @@ def execute_download(
         local_name = f"{short_id}_{idx:03d}{ext}"
         local_path = dest / local_name
 
+        try:
+            _assert_download_url(url)
+        except ValueError as e:
+            renderer.error(
+                code="download_failed",
+                message=str(e),
+                hint="output URLs should be http or https",
+                details={"url": url, "index": idx},
+            )
+            raise typer.Exit(code=1)
+
         req = urllib.request.Request(url)
         for hdr, val in auth_hdrs.items():
             req.add_header(hdr, val)
 
         try:
-            # Use default urlopen — follows redirects (needed for signed
-            # storage URLs on cloud).
-            with urllib.request.urlopen(req) as resp:
+            with _TRANSFER_OPENER.open(req) as resp:
                 with open(local_path, "wb") as fp:
                     while True:
                         chunk = resp.read(65536)
