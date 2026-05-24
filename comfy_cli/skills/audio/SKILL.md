@@ -25,11 +25,11 @@ Discover TextEncode inputs: `comfy --json nodes show TextEncodeAceStepAudio1.5`.
 
 Key details:
 
-- Wire both positive AND negative to the same TextEncode output `["2", 0]` when cfg=1.0
+- Wire both positive AND negative to the same TextEncode output `["2", 0]` when using cfg=1.0 (check defaults via `comfy --json nodes show KSampler`)
 - `duration` on TextEncode AND EmptyLatentAudio must match
 - `timesignature`: use `"4"` not `"4/4"`
 - `keyscale` choices: verify via `comfy --json nodes show TextEncodeAceStepAudio1.5`
-- Output format is FLAC (lossless). SaveAudio produces `.flac` files.
+- Output format is FLAC. SaveAudio produces `.flac` files.
 - For instrumental: set `lyrics` to empty string `""`
 - `tags` is a comma/space-separated list of style descriptors (genre, mood, instruments)
 - BPM range: 60–180 typical. Slower = more atmospheric, faster = more energetic
@@ -46,7 +46,7 @@ Key details:
 ## Duration matching
 
 - Generate audio to match your target video length
-- 3 × 10s Kling clips = 30s video → generate 30s audio
+- Match your total video length — e.g. 30s video → generate 30s audio
 - If audio is shorter than video, the end of the video is silent
 - If audio is longer than video, the audio is truncated (you lose the
   ending)

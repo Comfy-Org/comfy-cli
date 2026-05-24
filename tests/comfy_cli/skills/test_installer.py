@@ -40,7 +40,7 @@ def test_comfy_skill_content_has_required_sections():
     text = skill_content("comfy").lower()
     assert "comfy --json discover" in text
     assert "routing" in text or "--where" in text
-    assert "cql" in text
+    assert "nodes ls" in text  # the node introspection surface
     assert "envelope" in text  # the section that documents the output contract
 
 

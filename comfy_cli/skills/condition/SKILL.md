@@ -43,8 +43,6 @@ raw text conditioning.
 
 ## Masks: spatial selection
 
-MASK type = grayscale image where white = selected region.
-
 Common sources:
 ```bash
 comfy --json nodes search "mask" --limit 15
@@ -74,8 +72,7 @@ you provide the exact start and end images — the model fills in between.
 
 ```bash
 comfy --json nodes show KlingStartEndFrameNode
-# Inputs: start_frame (IMAGE), end_frame (IMAGE), prompt, mode, cfg_scale
-# Mode choices: "pro mode / 5s duration / kling-v2-5-turbo", etc.
+# Discover inputs, mode choices, and cfg_scale defaults from the output
 ```
 
 Use `comfy --json nodes show KlingStartEndFrameNode` to discover inputs.

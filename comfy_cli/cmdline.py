@@ -38,6 +38,7 @@ from comfy_cli.command import (
 from comfy_cli.command.install import validate_version
 from comfy_cli.command.launch import launch as launch_command
 from comfy_cli.command.models import models as models_command
+from comfy_cli.command.models import search as models_search_command
 from comfy_cli.config_manager import ConfigManager
 from comfy_cli.constants import GPU_OPTION, CUDAVersion, ROCmVersion
 from comfy_cli.cuda_detect import DEFAULT_CUDA_TAG, detect_cuda_driver_version, resolve_cuda_wheel
@@ -651,7 +652,7 @@ def run(
         typer.Option(
             "--where",
             show_default=False,
-            help="Routing target: 'local' (default) or 'cloud'. Cloud is local-only in this build.",
+            help="Routing target: 'local' or 'cloud'.",
         ),
     ] = None,
     api_key: Annotated[
@@ -787,6 +788,104 @@ def run(
         raise
     else:
         tracking.track_event("execution_success", _track_props)
+
+
+@app.command(help="Validate an API-format workflow without submitting. Checks class_types, input shapes, enum values, and edge wiring.")
+@tracking.track_command()
+def validate(
+    workflow: Annotated[
+        str,
+        typer.Option(help="Path to the API-format workflow JSON file."),
+    ],
+    where: Annotated[
+        str | None,
+        typer.Option("--where", show_default=False, help="Routing target for object_info: 'local' or 'cloud'."),
+    ] = None,
+    host: Annotated[
+        str | None,
+        typer.Option(show_default=False, help="ComfyUI host (default 127.0.0.1)."),
+    ] = None,
+    port: Annotated[
+        int | None,
+        typer.Option(show_default=False, help="ComfyUI port (default 8188)."),
+    ] = None,
+    input_path: Annotated[
+        str | None,
+        typer.Option("--input", show_default=False, help="Path to a saved object_info JSON (offline mode)."),
+    ] = None,
+):
+    from pathlib import Path
+
+    from comfy_cli.cql.engine import Graph, LoadError
+
+    renderer = get_renderer()
+
+    # Load workflow
+    wf_path = Path(workflow).expanduser()
+    if not wf_path.is_file():
+        renderer.error(code="workflow_not_found", message=f"Workflow file not found: {workflow}", hint="check the path")
+        raise typer.Exit(code=1)
+    try:
+        wf_data = json.loads(wf_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as e:
+        renderer.error(code="workflow_invalid_json", message=f"Invalid JSON: {e}", hint="re-export from ComfyUI")
+        raise typer.Exit(code=1) from e
+    if not isinstance(wf_data, dict):
+        renderer.error(code="workflow_not_api_format", message="Workflow must be a JSON object", hint="use File > Export (API)")
+        raise typer.Exit(code=1)
+
+    # Load graph
+    mode = "local"
+    if where:
+        mode = where
+    else:
+        config = ConfigManager()
+        try:
+            decision = where_module.resolve(flag=None, config_value=config.get(where_module.CONFIG_KEY_WHERE_DEFAULT))
+            mode = decision.target.value
+        except Exception:
+            pass
+
+    try:
+        graph = Graph.load(mode=mode, input_path=input_path, host=host or "127.0.0.1", port=port or 8188)
+    except LoadError as e:
+        renderer.error(
+            code="cql_no_graph", message=str(e),
+            hint=e.details.get("hint", "pass --input <object_info.json>, or start the server"),
+            details=e.details,
+        )
+        raise typer.Exit(code=1) from e
+
+    result = graph.validate_workflow(wf_data)
+
+    payload = {
+        "workflow": str(wf_path),
+        "valid": result["valid"],
+        "error_count": len(result["errors"]),
+        "warning_count": len(result["warnings"]),
+        "errors": result["errors"],
+        "warnings": result["warnings"],
+    }
+
+    if renderer.is_pretty():
+        if result["valid"]:
+            rprint(f"[bold green]✓[/bold green] workflow is valid ({len(wf_data)} nodes)")
+            for w in result["warnings"]:
+                rprint(f"  [yellow]⚠[/yellow] {w.get('message', '')}")
+        else:
+            rprint(f"[bold red]✗[/bold red] {len(result['errors'])} error(s)")
+            for e in result["errors"]:
+                msg = e.get("message", "")
+                suggestions = e.get("suggestions", [])
+                if suggestions:
+                    msg += f" (did you mean: {', '.join(suggestions[:3])}?)"
+                rprint(f"  [red]•[/red] node {e.get('node_id', '?')}: {msg}")
+            for w in result["warnings"]:
+                rprint(f"  [yellow]⚠[/yellow] {w.get('message', '')}")
+    renderer.emit(payload, command="validate")
+
+    if not result["valid"]:
+        raise typer.Exit(code=1)
 
 
 @app.command(help="Upload files to the ComfyUI server's input directory.")
@@ -1314,6 +1413,11 @@ def standalone(
 
 generate_command.register_with(app)
 app.add_typer(models_command.app, name="model", help="Manage models.")
+app.add_typer(
+    models_search_command.app,
+    name="models",
+    help="Discover models — folders, files, and the cloud asset catalog.",
+)
 app.add_typer(custom_nodes.app, name="node", help="Manage custom nodes.")
 app.add_typer(nodes_command.app, name="nodes", help="Introspect ComfyUI node classes (inputs, outputs, categories).")
 app.add_typer(templates_command.app, name="templates", help="Browse the Comfy workflow-template gallery.")
@@ -1331,9 +1435,11 @@ app.add_typer(auth_command.app, name="auth", help="Manage API tokens for model h
 app.add_typer(jobs_command.app, name="jobs", help="List, inspect, and live-watch ComfyUI prompts.")
 app.add_typer(
     skill_command.app,
-    name="skill",
-    help="Install the 10 bundled comfy agent skills into Claude Code, Cursor, and AGENTS.md.",
+    name="skills",
+    help="Install the bundled comfy agent skills into Claude Code, Cursor, and AGENTS.md.",
 )
+# Keep the singular alias for backward compat
+app.add_typer(skill_command.app, name="skill", hidden=True)
 
 # Hidden: the detached watcher subprocess spawned by `comfy run` when async.
 from comfy_cli.command import job_watcher as _job_watcher  # noqa: E402

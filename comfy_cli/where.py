@@ -75,7 +75,7 @@ def _has_cloud_credentials() -> bool:
     if auth_store.get(CLOUD_API_KEY_PROVIDER) is not None:
         return True
     session = auth_store.get_cloud_session()
-    return session is not None and not session.is_expired()
+    return session is not None
 
 
 def _parse(value: str) -> WhereTarget:

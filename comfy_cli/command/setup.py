@@ -537,8 +537,10 @@ def _verify_cloud(console) -> None:
         import json
         import subprocess
 
+        import sys
+
         result = subprocess.run(
-            ["comfy", "--where", "cloud", "--json", "nodes", "ls", "--limit", "1"],
+            [sys.executable, "-m", "comfy_cli", "--where", "cloud", "--json", "nodes", "ls", "--limit", "1"],
             capture_output=True,
             text=True,
             timeout=15,

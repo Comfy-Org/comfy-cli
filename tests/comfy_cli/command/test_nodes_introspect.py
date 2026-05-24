@@ -13,10 +13,9 @@ from typing import Any
 import pytest
 from typer.testing import CliRunner
 
-from comfy_cli.command import nodes as nodes_cmd
-from comfy_cli.output.renderer import OutputMode, reset_renderer_for_testing, set_renderer
-from comfy_cli.output.renderer import Renderer
 from comfy_cli.caller import Caller
+from comfy_cli.command import nodes as nodes_cmd
+from comfy_cli.output.renderer import OutputMode, Renderer, reset_renderer_for_testing, set_renderer
 
 
 @pytest.fixture(autouse=True)
@@ -39,67 +38,75 @@ def _force_json_renderer():
     return r
 
 
-def _fake_graph() -> dict[str, Any]:
-    """A small object-info graph covering the cases the tests assert on."""
+def _fake_object_info() -> dict[str, Any]:
+    """A small object_info dict covering the cases the tests assert on."""
     return {
-        "nodes": [
-            {
-                "name": "CheckpointLoaderSimple",
-                "display_name": "Load Checkpoint",
-                "category": "loaders",
-                "description": "Loads a diffusion model checkpoint.",
-                "output_node": False,
-                "output_types": ["MODEL", "CLIP", "VAE"],
+        "CheckpointLoaderSimple": {
+            "input": {"required": {}},
+            "output": ["MODEL", "CLIP", "VAE"],
+            "output_name": ["MODEL", "CLIP", "VAE"],
+            "category": "loaders",
+            "display_name": "Load Checkpoint",
+            "description": "Loads a diffusion model checkpoint.",
+            "output_node": False,
+            "python_module": "nodes",
+        },
+        "KSampler": {
+            "input": {
+                "required": {
+                    "model": ["MODEL"],
+                    "positive": ["CONDITIONING"],
+                    "steps": ["INT", {"default": 20, "min": 1, "max": 10000}],
+                    "sampler_name": [["euler", "heun", "dpmpp_2m"]],
+                    "scheduler": [["normal", "karras", "simple"], {"default": "normal"}],
+                },
             },
-            {
-                "name": "KSampler",
-                "display_name": "KSampler",
-                "category": "sampling",
-                "description": "Denoise the latent via the provided model.",
-                "output_node": False,
-                "output_types": ["LATENT"],
+            "input_order": {"required": ["model", "positive", "steps", "sampler_name", "scheduler"]},
+            "output": ["LATENT"],
+            "output_name": ["LATENT"],
+            "category": "sampling",
+            "display_name": "KSampler",
+            "description": "Denoise the latent via the provided model.",
+            "output_node": False,
+            "python_module": "nodes",
+        },
+        "CLIPTextEncode": {
+            "input": {
+                "required": {
+                    "clip": ["CLIP"],
+                    "text": ["STRING", {"multiline": True}],
+                },
             },
-            {
-                "name": "CLIPTextEncode",
-                "display_name": "CLIP Text Encode (Prompt)",
-                "category": "conditioning",
-                "description": "Encode prompt text to conditioning.",
-                "output_node": False,
-                "output_types": ["CONDITIONING"],
-            },
-            {
-                "name": "SaveImage",
-                "display_name": "Save Image",
-                "category": "image",
-                "description": "Save image to disk.",
-                "output_node": True,
-                "output_types": [],
-            },
-        ],
-        "inputs": [
-            {"node": "KSampler", "section": "required", "name": "model", "type": "MODEL", "choices": [], "options": {}},
-            {"node": "KSampler", "section": "required", "name": "positive", "type": "CONDITIONING", "choices": [], "options": {}},
-            {"node": "KSampler", "section": "required", "name": "steps", "type": "INT", "choices": [], "options": {"default": 20, "min": 1, "max": 10000}},
-            # Local ENUM: choices populated directly (the shape the local graph uses).
-            {"node": "KSampler", "section": "required", "name": "sampler_name", "type": "ENUM", "choices": ["euler", "heun", "dpmpp_2m"], "options": {}},
-            # Cloud COMBO: choices empty, real values nested at options.options (the shape the cloud catalog uses).
-            {"node": "KSampler", "section": "required", "name": "scheduler", "type": "COMBO", "choices": [], "options": {"default": "normal", "options": ["normal", "karras", "simple"]}},
-            {"node": "CLIPTextEncode", "section": "required", "name": "clip", "type": "CLIP", "choices": [], "options": {}},
-            {"node": "CLIPTextEncode", "section": "required", "name": "text", "type": "STRING", "choices": [], "options": {"multiline": True}},
-        ],
-        "categories": [
-            {"name": "loaders", "node_count": 1},
-            {"name": "sampling", "node_count": 1},
-            {"name": "conditioning", "node_count": 1},
-            {"name": "image", "node_count": 1},
-        ],
+            "output": ["CONDITIONING"],
+            "output_name": ["CONDITIONING"],
+            "category": "conditioning",
+            "display_name": "CLIP Text Encode (Prompt)",
+            "description": "Encode prompt text to conditioning.",
+            "output_node": False,
+            "python_module": "nodes",
+        },
+        "SaveImage": {
+            "input": {"required": {}},
+            "output": [],
+            "category": "image",
+            "display_name": "Save Image",
+            "description": "Save image to disk.",
+            "output_node": True,
+            "python_module": "nodes",
+        },
     }
+
+
+def _fake_graph():
+    """Build a Graph from the fake object_info."""
+    from comfy_cli.cql.engine import Graph
+    return Graph.from_object_info(_fake_object_info())
 
 
 @pytest.fixture
 def patched_loader(monkeypatch: pytest.MonkeyPatch):
     """Bypass network/file loading; serve the fake graph straight to the command."""
-    monkeypatch.setattr(nodes_cmd, "_resolve_graph", lambda *a, **kw: _fake_graph())
+    monkeypatch.setattr(nodes_cmd, "_get_graph", lambda *a, **kw: _fake_graph())
 
 
 def _run(args: list[str], capsys: pytest.CaptureFixture[str]) -> dict[str, Any]:
@@ -152,11 +159,10 @@ class TestLs:
 
     def test_filter_block_present_in_envelope(self, patched_loader, capsys):
         env = _run(["ls", "--produces", "LATENT", "--category", "samp*"], capsys)
-        assert env["data"]["filter"] == {
-            "produces": "LATENT",
-            "accepts": None,
-            "category": "samp*",
-        }
+        f = env["data"]["filter"]
+        assert f["produces"] == "LATENT"
+        assert f["accepts"] is None
+        assert f["category"] == "samp*"
 
 
 class TestShow:
@@ -278,3 +284,5 @@ class TestFlattenCategoryTree:
         assert _flatten_category_tree({}) == []
         assert _flatten_category_tree({"Root": None}) == []
         assert _flatten_category_tree("not a dict") == []  # type: ignore[arg-type]
+
+

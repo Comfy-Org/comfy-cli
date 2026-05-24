@@ -85,6 +85,7 @@ def error_panel(
 
 def discover_panel(doc: Mapping[str, Any], *, command_count: int) -> Panel:
     version = doc.get("version") or "(dev)"
+    commands = doc.get("commands") or {}
     schemas = doc.get("schemas") or {}
     error_codes = doc.get("error_codes") or []
     capabilities = doc.get("capabilities") or {}
@@ -118,10 +119,40 @@ def discover_panel(doc: Mapping[str, Any], *, command_count: int) -> Panel:
     else:
         auth_value = f" {_TARGET_DIM_CHAR} ".join(auth_providers) if auth_providers else "—"
 
-    surface = _kv_table(
+    # Build a two-column command table: name (+ subcount) | description
+    visible_cmds = {
+        name: entry
+        for name, entry in sorted(commands.items())
+        if isinstance(entry, dict) and not entry.get("hidden", False)
+    }
+    cmd_table = Table.grid(padding=(0, 2))
+    cmd_table.add_column(style="white", no_wrap=True)  # name
+    cmd_table.add_column(style="dim")  # description
+    for name, entry in visible_cmds.items():
+        subs = entry.get("subcommands") or {}
+        desc = entry.get("short_help") or entry.get("help") or ""
+        # Truncate long descriptions to first sentence
+        if desc:
+            dot = desc.find(".")
+            if dot > 0:
+                desc = desc[: dot + 1]
+            if len(desc) > 60:
+                desc = desc[:57] + "…"
+        if subs:
+            sub_count = len([s for s in subs.values() if isinstance(s, dict) and not s.get("hidden", False)])
+            label = Text.assemble((name, "white"), (f" ({sub_count})", "dim cyan"))
+        else:
+            label = Text(name, style="white")
+        cmd_table.add_row(label, Text(desc, style="dim"))
+
+    # Schema names list
+    schema_names = sorted(schemas.keys())
+    schema_line = f" {_TARGET_DIM_CHAR} ".join(schema_names) if schema_names else "—"
+
+    summary = _kv_table(
         [
-            ("Commands", f"{command_count}"),
-            ("Schemas", f"{len(schemas)}"),
+            ("Commands", f"{len(visible_cmds)} top-level, {command_count} total (incl. subcommands)"),
+            ("Schemas", f"{len(schemas)} — {schema_line}"),
             ("Error codes", f"{len(error_codes)}"),
         ]
     )
@@ -133,14 +164,17 @@ def discover_panel(doc: Mapping[str, Any], *, command_count: int) -> Panel:
     )
 
     body = Group(
-        Text("Surface", style="bold magenta"),
-        surface,
+        Text("Commands", style="bold magenta"),
+        cmd_table,
         Text(""),
         Text("Capabilities", style="bold magenta"),
         caps_grid,
         Text(""),
         Text("Routing", style="bold magenta"),
         routing,
+        Text(""),
+        Text("Summary", style="bold magenta"),
+        summary,
         Text(""),
         Text.assemble(
             ("→ ", "bold yellow"),

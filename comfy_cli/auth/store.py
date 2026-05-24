@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import secrets
 from collections.abc import Iterable
 from dataclasses import asdict, dataclass
@@ -48,7 +49,7 @@ class AuthRecord:
 
 
 def _redact(key: str) -> str:
-    if len(key) <= 8:
+    if len(key) <= 16:
         return "***"
     return f"{key[:4]}…{key[-4:]}"
 
@@ -161,9 +162,14 @@ def get(provider: str) -> AuthRecord | None:
     return AuthRecord(provider=provider, key=key, updated_at=str(body.get("updated_at", "")))
 
 
+_SAFE_PROVIDER = re.compile(r"^[a-zA-Z0-9_\-]{1,64}$")
+
+
 def set(provider: str, key: str) -> AuthRecord:
     if not provider:
         raise ValueError("provider name is required")
+    if not _SAFE_PROVIDER.match(provider):
+        raise ValueError(f"invalid provider name: {provider!r} (must be alphanumeric/dash/underscore, max 64 chars)")
     if not key:
         raise ValueError("key cannot be empty")
     path = secrets_path()

@@ -78,6 +78,19 @@ def test_error_panel_renders_details():
 def test_discover_panel_shows_surface_counts_and_caps():
     doc = {
         "version": "0.0.0",
+        "commands": {
+            "run": {"name": "run", "help": "Run an API workflow.", "hidden": False},
+            "nodes": {
+                "name": "nodes",
+                "help": "Introspect ComfyUI node classes.",
+                "hidden": False,
+                "subcommands": {
+                    "ls": {"name": "ls", "help": "List node classes.", "hidden": False},
+                    "show": {"name": "show", "help": "Show full schema.", "hidden": False},
+                },
+            },
+            "_secret": {"name": "_secret", "hidden": True},
+        },
         "schemas": {"a": {}, "b": {}, "c": {}},
         "error_codes": [{}, {}],
         "capabilities": {
@@ -91,31 +104,34 @@ def test_discover_panel_shows_surface_counts_and_caps():
     out = _render(discover_panel(doc, command_count=42))
     assert "comfy CLI" in out or "comfy-cli" in out
     assert "v0.0.0" in out
-    assert "Surface" in out
-    assert "42" in out  # commands
+    assert "Commands" in out
+    assert "run" in out  # visible command listed
+    assert "nodes (2)" in out  # subcommand count shown
+    assert "_secret" not in out  # hidden command excluded
+    assert "Run an API workflow." in out  # description shown
     assert "Capabilities" in out
     assert "✓ cql" in out
     assert "✓ json_envelope" in out
     assert "Routing" in out
     assert "local · cloud" in out
     assert "comfy-cloud · civitai" in out
-    # Subtitle is now driven by branded_panel: command + brand string.
-    # "agent-aware CLI" moved exclusively to the welcome banner.
+    assert "Summary" in out
+    assert "42 total" in out
     assert "discover" in out
     assert "comfy CLI v0.0.0" in out
 
 
 def test_discover_panel_handles_empty_capabilities():
-    doc = {"version": "0.0.0", "schemas": {}, "error_codes": [], "capabilities": {}}
+    doc = {"version": "0.0.0", "commands": {}, "schemas": {}, "error_codes": [], "capabilities": {}}
     out = _render(discover_panel(doc, command_count=0))
-    assert "Surface" in out
+    assert "Commands" in out
     assert "(none advertised)" in out
 
 
 def test_discover_panel_uses_canonical_branded_subtitle():
     """The chrome (title + subtitle) goes through ``branded_panel`` so
     ``discover`` looks identical to ``env``, ``jobs ls``, etc."""
-    doc = {"version": "0.0.0", "schemas": {}, "error_codes": [], "capabilities": {}}
+    doc = {"version": "0.0.0", "commands": {}, "schemas": {}, "error_codes": [], "capabilities": {}}
     panel = discover_panel(doc, command_count=42)
     assert "discover" in str(panel.title)
     assert "comfy CLI v0.0.0" in str(panel.subtitle)

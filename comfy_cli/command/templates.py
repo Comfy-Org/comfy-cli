@@ -12,7 +12,7 @@ Mirrors the shape of ``comfy nodes`` but queries the curated
 The gallery file ``templates/index.json`` is cached under
 ``~/.cache/comfy-cli/gallery/index.json``. The CLI side here parses the
 index in Python (no WASM needed); for the full CQL grammar over templates
-use the in-repo ``comfygraph`` REPL with ``-gallery``.
+use the flag-based filters for browsing.
 """
 
 from __future__ import annotations
@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import os
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Annotated, Any
@@ -175,84 +176,15 @@ def _ls_via_query(
     refresh: bool,
     limit: int | None,
 ) -> None:
-    """Run a CQL grammar query through comfygraph.wasm. Loads both the
-    bundled object_info snapshot and the gallery index, then issues the
-    query. Same envelope shape as ``comfy nodes ls --query``.
+    """CQL grammar queries over the template gallery are not available.
+    Emit an actionable error pointing the user at the flag-based filters instead.
     """
-    from comfy_cli import comfygraph
-
-    try:
-        cats = _load_gallery(gallery_path, refresh=refresh)
-    except (urllib.error.URLError, OSError, json.JSONDecodeError) as e:
-        renderer.error(code="gallery_load_failed", message=str(e))
-        raise typer.Exit(code=1) from e
-
-    obj_info_bytes = comfygraph._bundled_object_info_bytes()
-    if obj_info_bytes is None:
-        renderer.error(
-            code="wasm_snapshot_missing",
-            message="bundled object_info snapshot not found",
-            hint="rebuild the package, or use the flag filters instead of --query",
-        )
-        raise typer.Exit(code=1)
-    obj_info = json.loads(obj_info_bytes)
-
-    try:
-        result = comfygraph.run_query_with_gallery(query, obj_info, cats)
-    except comfygraph.ComfygraphError as e:
-        renderer.error(
-            code="cql_query_invalid",
-            message=str(e),
-            hint="see `comfygraph -gallery <path> -query` for grammar examples",
-            details=e.details,
-        )
-        raise typer.Exit(code=1) from e
-
-    rows = result.get("Templates") or []
-    if limit is not None:
-        rows = rows[: max(0, limit)]
-    payload = {
-        "query": query,
-        "count": len(rows),
-        "total": result.get("Total", len(rows)),
-        "counted": bool(result.get("Counted")),
-        "limited": bool(result.get("Limited")),
-        "rows": [
-            {
-                "name": r.get("name"),
-                "title": r.get("title"),
-                "output_type": r.get("media_type"),
-                "category_title": r.get("category_title"),
-                "tags": r.get("tags") or [],
-                "models": r.get("models") or [],
-                "providers": r.get("providers") or [],
-                "description": (r.get("description") or "")[:120],
-            }
-            for r in rows
-        ],
-    }
-
-    if renderer.is_pretty():
-        from rich.table import Table
-
-        if not rows:
-            rprint("[dim]0 templates matched.[/dim]")
-        else:
-            tbl = Table(show_header=True, header_style="bold")
-            tbl.add_column("name")
-            tbl.add_column("type", style="dim")
-            tbl.add_column("title")
-            tbl.add_column("tags", style="dim")
-            for r in rows:
-                tbl.add_row(
-                    r.get("name") or "",
-                    r.get("media_type") or "",
-                    r.get("title") or "(untitled)",
-                    ", ".join(r.get("tags") or []),
-                )
-            renderer.console().print(tbl)
-            rprint(f"[dim]{len(rows)} template(s) (Total {result.get('Total')})[/dim]")
-    renderer.emit(payload, command="templates ls")
+    renderer.error(
+        code="cql_query_invalid",
+        message="CQL grammar queries are not available. Use flag-based filtering instead.",
+        hint="comfy templates ls --type image --tag API --model Flux",
+    )
+    raise typer.Exit(code=1)
 
 
 @app.command(
@@ -291,7 +223,7 @@ def ls_cmd(
             "--query",
             "-q",
             show_default=False,
-            help="Power-user: a CQL grammar query (e.g. 'templates type video | sort name | limit 5'). Bypasses the flag filters.",
+            help="A CQL grammar query (e.g. 'templates type video | sort name | limit 5'). Bypasses the flag filters.",
         ),
     ] = None,
     limit: Annotated[
@@ -313,7 +245,7 @@ def ls_cmd(
 ):
     renderer = get_renderer()
 
-    # Power-user path: route through WASM with gallery loaded.
+    # CQL grammar path — routes through WASM with the gallery loaded.
     if query is not None:
         return _ls_via_query(renderer, query, gallery_path, refresh, limit)
 
@@ -466,3 +398,131 @@ def refresh_cmd():
     if renderer.is_pretty():
         rprint(f"[green]✓[/green] cached gallery to {cache} ({len(data)} bytes)")
     renderer.emit(payload, command="templates refresh")
+
+
+# Where the per-template workflow JSONs live on GitHub. The gallery index lists
+# each template by ``name``; the corresponding workflow is at
+# ``Comfy-Org/workflow_templates/templates/<name>.json``.
+_TEMPLATE_WORKFLOW_URL = (
+    "https://raw.githubusercontent.com/Comfy-Org/workflow_templates/main/templates/{name}.json"
+)
+
+
+def _fetch_template_workflow(name: str, *, timeout: float = 15.0) -> bytes:
+    """Pull a single template's workflow JSON from the canonical GitHub raw URL."""
+    url = _TEMPLATE_WORKFLOW_URL.format(name=urllib.parse.quote(name, safe=""))
+    req = urllib.request.Request(url, headers={"User-Agent": "comfy-cli"})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        if resp.status != 200:
+            raise RuntimeError(f"template workflow fetch failed: HTTP {resp.status}")
+        return resp.read()
+
+
+@app.command(
+    "fetch",
+    help=(
+        "Fetch a template's workflow JSON from the curated gallery. "
+        "Verifies the name against the gallery index first, then pulls "
+        "templates/<name>.json from Comfy-Org/workflow_templates."
+    ),
+)
+@tracking.track_command("templates")
+def fetch_cmd(
+    name: Annotated[str, typer.Argument(help="Template name (matches `comfy templates ls` rows).")],
+    out: Annotated[
+        str | None,
+        typer.Option("--out", "-o", show_default=False, help="Write to this file instead of stdout."),
+    ] = None,
+    gallery_path: Annotated[
+        str | None,
+        typer.Option("--gallery", show_default=False, help="Path to a local index.json (skips the cache + fetch)."),
+    ] = None,
+    refresh: Annotated[
+        bool,
+        typer.Option("--refresh", help="Re-fetch the gallery index from GitHub before resolving."),
+    ] = False,
+):
+    renderer = get_renderer()
+
+    # Resolve against the gallery index first so we surface "no such template"
+    # with the same close_matches affordance the rest of the CLI uses, instead
+    # of letting the user hit a raw GitHub 404.
+    try:
+        cats = _load_gallery(gallery_path, refresh=refresh)
+    except (urllib.error.URLError, OSError, json.JSONDecodeError) as e:
+        renderer.error(code="gallery_load_failed", message=str(e))
+        raise typer.Exit(code=1) from e
+
+    rows = _flatten_templates(cats)
+    match = next((r for r in rows if r["name"] == name), None)
+    if match is None:
+        # Build a small list of close matches so the agent can self-correct.
+        lower = name.lower()
+        close = [r["name"] for r in rows if lower in r["name"].lower()][:5]
+        renderer.error(
+            code="template_not_found",
+            message=f"no template named {name!r} in the gallery",
+            hint="try `comfy templates ls --name <substring>` to search",
+            details={"close_matches": close},
+        )
+        raise typer.Exit(code=1)
+
+    try:
+        body = _fetch_template_workflow(name)
+    except (urllib.error.HTTPError, urllib.error.URLError, OSError) as e:
+        status = getattr(e, "code", None)
+        renderer.error(
+            code="template_fetch_failed",
+            message=f"failed to fetch workflow for {name!r}: {e}",
+            hint=(
+                "the gallery index references a template whose workflow JSON "
+                "is missing upstream — report at "
+                "https://github.com/Comfy-Org/workflow_templates/issues"
+                if status == 404
+                else "check network connectivity"
+            ),
+            details={"status": status} if status else None,
+        )
+        raise typer.Exit(code=1) from e
+
+    # Parse so we (a) validate it's well-formed JSON and (b) can report the
+    # node count in the envelope without re-reading.
+    try:
+        wf = json.loads(body)
+    except json.JSONDecodeError as e:
+        renderer.error(
+            code="template_workflow_invalid_json",
+            message=f"upstream returned non-JSON for {name!r}: {e}",
+            hint="report at https://github.com/Comfy-Org/workflow_templates/issues",
+        )
+        raise typer.Exit(code=1) from e
+
+    if out:
+        out_path = Path(out).expanduser()
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_bytes(body)
+        target_repr = str(out_path)
+    else:
+        # In JSON mode, the renderer's emit() is the only thing on stdout — the
+        # raw workflow goes into the envelope under data.workflow. In pretty
+        # mode we print it to stdout so the user can pipe it.
+        if renderer.is_pretty():
+            import sys
+
+            sys.stdout.write(body.decode("utf-8"))
+            sys.stdout.write("\n")
+        target_repr = "stdout" if out is None else str(Path(out).expanduser())
+
+    payload = {
+        "name": name,
+        "title": match["title"],
+        "output_type": match["output_type"],
+        "out": target_repr,
+        "bytes": len(body),
+        # `nodes` count is the only field the agent needs to confirm the
+        # workflow loaded; the full JSON ride-along bloats every envelope.
+        "node_count": len(wf) if isinstance(wf, dict) else None,
+    }
+    if renderer.is_pretty() and out:
+        rprint(f"[green]✓[/green] wrote {len(body):,} bytes ({payload['node_count']} nodes) to {target_repr}")
+    renderer.emit(payload, command="templates fetch")

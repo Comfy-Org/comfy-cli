@@ -41,11 +41,12 @@ Local upscale pipeline (LoadImage → UpscaleModelLoader → ImageUpscaleWithMod
 }
 ```
 
-API upscale (cloud, no local GPU needed):
+API upscale (cloud, no local GPU needed) — discover available API
+upscale nodes:
 ```bash
-comfy --json nodes show MagnificImageUpscalerCreativeNode
-comfy --json nodes show RecraftCrispUpscaleNode
-comfy --json nodes show StabilityUpscaleFastNode
+comfy --json nodes search "upscale" --limit 15
+# Then inspect a specific node:
+comfy --json nodes show <UpscaleNodeName>
 ```
 
 Always check `nodes show` for the available model names and parameters.
@@ -67,7 +68,8 @@ prompt. Check each node's inputs — they vary by provider.
 
 Inpainting flow: Load image → generate/load MASK → feed both into inpainting.
 For KSampler-based inpainting: `VAEEncode → SetLatentNoiseMask` (with the
-mask) → `KSampler` with denoise=0.3-0.6. For API inpainting: nodes like
+mask) → `KSampler` (tune denoise for your use case; discover default via
+`comfy --json nodes show KSampler`). For API inpainting: nodes like
 `FluxProFillNode` take IMAGE + MASK directly. Discover mask generators:
 `comfy --json nodes ls --produces MASK --limit 10`
 

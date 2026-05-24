@@ -12,20 +12,18 @@ All three resolve the graph in this order:
     1. ``--input <path>`` to an object_info dump (offline mode)
     2. ``--host:--port`` live ComfyUI server (default 127.0.0.1:8188)
 
-Backed today by the Python CQL stub (``comfy_cli.cql.loader``). If/when we
-bind to upstream ``comfygraph`` the user-facing surface here stays the
-same — only the backing call changes.
+Backed by the pure-Python CQL engine (``comfy_cli.cql.engine.Graph``).
 """
 
 from __future__ import annotations
 
+import difflib
 from typing import Annotated, Any
 
 import typer
 
 from comfy_cli import tracking
-from comfy_cli.cql.errors import CQLRuntimeError
-from comfy_cli.cql.loader import load_graph
+from comfy_cli.cql.engine import Graph, LoadError
 from comfy_cli.output import get_renderer, rprint
 
 app = typer.Typer(no_args_is_help=True, help="Introspect ComfyUI node classes (inputs, outputs, categories).")
@@ -49,88 +47,35 @@ def _resolved_where(where: str | None) -> str:
     return decision.target.value  # "local" | "cloud"
 
 
-def _resolve_graph(
+def _get_graph(
     input_path: str | None,
     host: str | None,
     port: int | None,
     where: str | None = None,
-) -> dict[str, Any]:
-    """Load the normalized graph for `comfy nodes ls / show / search`.
+) -> Graph:
+    """Load the Graph for ``comfy nodes`` commands.
 
     Routing follows the standard precedence: explicit ``--where`` > env
     (``COMFY_WHERE``) > config (``where_default``) > local default. The
     ``--input <path>`` flag short-circuits everything (offline mode).
     """
-    if input_path:
-        return load_graph(input_path=input_path, host=host, port=port)
-    if _resolved_where(where) == "cloud":
-        raw = _load_raw_object_info(None, None, None, mode="cloud")
-        from comfy_cli.cql.loader import normalize
-
-        return normalize(raw)
-    return load_graph(
-        input_path=None,
-        host=host or "127.0.0.1",
-        port=port or 8188,
-    )
-
-
-def _inputs_index(graph: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
-    """Group inputs by node name for O(1) lookup."""
-    index: dict[str, list[dict[str, Any]]] = {}
-    for row in graph.get("inputs", []):
-        if not isinstance(row, dict):
-            continue
-        node = row.get("node")
-        if isinstance(node, str):
-            index.setdefault(node, []).append(row)
-    return index
-
-
-def _resolve_choices(input_row: dict[str, Any]) -> list[Any]:
-    """Return the enum choices for an input, regardless of where the graph put them.
-
-    Local ENUM inputs surface their values in `choices`. Cloud-API COMBO inputs
-    surface theirs at `options.options`. From the caller's point of view both
-    are the same idea ("what values can I pick?") so we normalize to one field.
-    """
-    direct = input_row.get("choices")
-    if isinstance(direct, list) and direct:
-        return list(direct)
-    options = input_row.get("options") or {}
-    nested = options.get("options") if isinstance(options, dict) else None
-    if isinstance(nested, list):
-        return list(nested)
-    return []
-
-
-def _node_inputs(inputs_index: dict[str, list[dict[str, Any]]], name: str) -> list[dict[str, Any]]:
-    """Return all inputs for a node, sorted by section (required first) then name."""
-    rows = inputs_index.get(name, [])
-    return sorted(
-        rows,
-        key=lambda r: (
-            0 if r.get("section") == "required" else 1 if r.get("section") == "optional" else 2,
-            str(r.get("name") or ""),
-        ),
-    )
-
-
-def _node_accepts_type(inputs_index: dict[str, list[dict[str, Any]]], name: str, type_: str) -> bool:
-    """True if this node has at least one input of `type_` (case-insensitive)."""
-    target = type_.upper()
-    for inp in inputs_index.get(name, []):
-        t = inp.get("type")
-        if isinstance(t, str) and t.upper() == target:
-            return True
-    return False
-
-
-def _node_produces_type(node: dict[str, Any], type_: str) -> bool:
-    """True if this node's output_types contains `type_` (case-insensitive)."""
-    target = type_.upper()
-    outs = node.get("output_types") or []
-    return any(isinstance(t, str) and t.upper() == target for t in outs)
+    mode = _resolved_where(where)
+    try:
+        return Graph.load(
+            mode=mode,
+            input_path=input_path,
+            host=host or "127.0.0.1",
+            port=port or 8188,
+        )
+    except LoadError as e:
+        renderer = get_renderer()
+        renderer.error(
+            code="cql_no_graph",
+            message=str(e),
+            hint=e.details.get("hint", "pass --input <path>, or start the server with `comfy launch`"),
+            details=e.details,
+        )
+        raise typer.Exit(code=1) from e
 
 
 def _category_matches(category: str | None, pat: str) -> bool:
@@ -149,108 +94,9 @@ def _category_matches(category: str | None, pat: str) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def _ls_via_query(
-    renderer,
-    query: str,
-    input_path: str | None,
-    host: str | None,
-    port: int | None,
-    limit: int | None,
-) -> None:
-    """Run a CQL grammar query through comfygraph (wasm) and emit the result."""
-    from comfy_cli import comfygraph
-
-    try:
-        obj_info = _load_raw_object_info(input_path, host, port)
-    except comfygraph.ComfygraphError as e:
-        renderer.error(
-            code="cql_no_graph",
-            message=str(e),
-            hint=e.details.get("hint", "pass --input <path>, or start the server with `comfy launch`"),
-        )
-        raise typer.Exit(code=1) from e
-
-    try:
-        result = comfygraph.run_query(query, obj_info)
-    except comfygraph.ComfygraphError as e:
-        renderer.error(
-            code="cql_query_invalid",
-            message=str(e),
-            hint="check the grammar — see `comfy nodes ls --help` for examples",
-            details=e.details,
-        )
-        raise typer.Exit(code=1) from e
-
-    nodes = result.get("Nodes") or []
-    if limit is not None:
-        nodes = nodes[: max(0, limit)]
-
-    payload = {
-        "query": query,
-        "count": len(nodes),
-        "total": result.get("Total", len(nodes)),
-        "counted": bool(result.get("Counted")),
-        "limited": bool(result.get("Limited")),
-        "hints": list(result.get("Hints") or []),
-        "rows": [
-            {
-                "name": n.get("id"),
-                "category": n.get("category"),
-                "display_name": n.get("display_name"),
-                "description": n.get("description"),
-                "output_types": [
-                    str(p.get("type") if isinstance(p, dict) else p)
-                    for p in (n.get("outputs") or [])
-                    if (p.get("type") if isinstance(p, dict) else p)
-                ],
-            }
-            for n in nodes
-        ],
-    }
-
-    if renderer.is_pretty():
-        from rich.table import Table
-
-        if not nodes:
-            rprint("[dim]0 nodes matched.[/dim]")
-        else:
-            tbl = Table(show_header=True, header_style="bold")
-            tbl.add_column("name")
-            tbl.add_column("category", style="dim")
-            tbl.add_column("description", style="dim")
-            for n in nodes:
-                desc = (n.get("description") or "")[:60]
-                tbl.add_row(str(n.get("id") or ""), n.get("category") or "", desc)
-            renderer.console().print(tbl)
-            rprint(
-                f"[dim]{len(nodes)} node(s){' (of ' + str(result.get('Total')) + ')' if result.get('Total') and result.get('Total') != len(nodes) else ''}[/dim]"
-            )
-        for h in result.get("Hints") or []:
-            rprint(f"[dim]hint:[/dim] {h}")
-    renderer.emit(payload, command="nodes ls")
-
-
-def _load_raw_object_info(
-    input_path: str | None,
-    host: str | None,
-    port: int | None,
-    *,
-    mode: str = "local",
-) -> dict[str, Any]:
-    """Load raw object_info, delegating to the unified loader."""
-    from comfy_cli.comfygraph import load_object_info
-
-    return load_object_info(
-        mode=mode,
-        input_path=input_path,
-        host=host or "127.0.0.1",
-        port=port or 8188,
-    )
-
-
 @app.command(
     "ls",
-    help="List node classes. Filter via --produces/--accepts/--category, or pass --query for the full CQL grammar.",
+    help="List node classes. Filter via --produces/--accepts/--category/--pack/--label or boolean flags.",
 )
 @tracking.track_command("nodes")
 def ls_cmd(
@@ -266,15 +112,31 @@ def ls_cmd(
         str | None,
         typer.Option("--category", help="Glob match on category path (e.g. 'loaders*', 'sampling/*')."),
     ] = None,
-    query: Annotated[
+    pack: Annotated[
         str | None,
-        typer.Option(
-            "--query",
-            "-q",
-            show_default=False,
-            help="Power-user: a CQL grammar query (e.g. 'produces IMAGE | NOT deprecated | sort connections'). Bypasses the flag filters.",
-        ),
+        typer.Option("--pack", help="Filter by custom-node pack name (e.g. 'core', 'comfyui-impact-pack')."),
     ] = None,
+    label: Annotated[
+        str | None,
+        typer.Option("--label", help="Filter by behavioral label (e.g. 'WritesToDisk', 'NetworkAccess')."),
+    ] = None,
+    cloud_disabled: Annotated[
+        bool,
+        typer.Option("--cloud-disabled/--cloud-enabled", show_default=False,
+                     help="Filter by cloud availability."),
+    ] = False,
+    api_only: Annotated[
+        bool,
+        typer.Option("--api-only", show_default=False, help="Only partner API nodes."),
+    ] = False,
+    output_only: Annotated[
+        bool,
+        typer.Option("--output-only", show_default=False, help="Only terminal output nodes."),
+    ] = False,
+    exclude_deprecated: Annotated[
+        bool,
+        typer.Option("--exclude-deprecated", show_default=False, help="Exclude deprecated nodes."),
+    ] = False,
     limit: Annotated[
         int | None,
         typer.Option(show_default=False, help="Cap output to N rows."),
@@ -291,42 +153,49 @@ def ls_cmd(
         int | None,
         typer.Option(show_default=False, help="ComfyUI port (default 8188)."),
     ] = None,
+    where: Annotated[
+        str | None,
+        typer.Option("--where", show_default=False, help="'cloud' to query Comfy Cloud's catalog; default is local."),
+    ] = None,
 ):
     renderer = get_renderer()
+    graph = _get_graph(input_path, host, port, where=where)
 
-    # Power-user path: agent passes a real CQL query. Route through the wasm
-    # grammar (comfygraph) rather than the flag-based filters.
-    if query is not None:
-        return _ls_via_query(renderer, query, input_path, host, port, limit)
+    produces_upper = produces.upper() if produces else None
+    accepts_upper = accepts.upper() if accepts else None
 
-    try:
-        graph = _resolve_graph(input_path, host, port)
-    except CQLRuntimeError as e:
-        renderer.error(
-            code="cql_no_graph",
-            message=str(e),
-            hint="pass --input <path>, or start the server with `comfy launch`",
-            details=e.as_details(),
-        )
-        raise typer.Exit(code=1)
+    nodes = []
+    for m in graph.all_nodes():
+        if produces_upper and not m.has_output(produces_upper):
+            continue
+        if accepts_upper and not m.has_input(accepts_upper):
+            continue
+        if category and not _category_matches(m.category, category):
+            continue
+        if pack and m.pack.lower() != pack.lower():
+            continue
+        if label and label not in m.labels:
+            continue
+        if cloud_disabled and not m.cloud_disabled:
+            continue
+        if api_only and not m.is_api_node:
+            continue
+        if output_only and not m.is_output_node:
+            continue
+        if exclude_deprecated and m.deprecated:
+            continue
+        nodes.append(m)
 
-    inputs_index = _inputs_index(graph) if accepts else {}
-    nodes: list[dict[str, Any]] = []
-    for n in graph.get("nodes", []):
-        if not isinstance(n, dict):
-            continue
-        name = n.get("name")
-        if not isinstance(name, str):
-            continue
-        if produces and not _node_produces_type(n, produces):
-            continue
-        if accepts and not _node_accepts_type(inputs_index, name, accepts):
-            continue
-        if category and not _category_matches(n.get("category"), category):
-            continue
-        nodes.append(n)
+    nodes.sort(key=lambda m: m.id)
 
-    nodes.sort(key=lambda r: str(r.get("name") or ""))
+    # Note: cloud servers pre-filter disabled nodes from object_info, so
+    # --cloud-disabled will always return 0 results against a cloud target.
+    cloud_note = None
+    if cloud_disabled and not nodes:
+        mode = _resolved_where(where)
+        if mode == "cloud":
+            cloud_note = "Cloud server pre-filters disabled nodes; query a local server to see what would be blocked."
+
     total_matched = len(nodes)
     if limit is not None:
         nodes = nodes[: max(0, limit)]
@@ -336,24 +205,35 @@ def ls_cmd(
             "produces": produces,
             "accepts": accepts,
             "category": category,
+            "pack": pack,
+            "label": label,
+            "cloud_disabled": cloud_disabled if cloud_disabled else None,
+            "api_only": api_only if api_only else None,
+            "output_only": output_only if output_only else None,
+            "exclude_deprecated": exclude_deprecated if exclude_deprecated else None,
         },
         "total": total_matched,
         "count": len(nodes),
         "rows": [
             {
-                "name": n.get("name"),
-                "category": n.get("category"),
-                "display_name": n.get("display_name"),
-                "output_types": list(n.get("output_types") or []),
-                "output_node": bool(n.get("output_node")),
+                "name": m.id,
+                "category": m.category,
+                "display_name": m.display_name,
+                "output_types": m.output_types(),
+                "output_node": m.is_output_node,
             }
-            for n in nodes
+            for m in nodes
         ],
     }
+
+    if cloud_note:
+        payload["cloud_note"] = cloud_note
 
     if renderer.is_pretty():
         if not nodes:
             rprint("[dim]0 nodes matched.[/dim]")
+            if cloud_note:
+                rprint(f"[yellow]{cloud_note}[/yellow]")
         else:
             from rich.table import Table
 
@@ -361,9 +241,9 @@ def ls_cmd(
             tbl.add_column("name")
             tbl.add_column("category", style="dim")
             tbl.add_column("outputs")
-            for n in nodes:
-                outs = ", ".join(n.get("output_types") or []) or "[dim]—[/dim]"
-                tbl.add_row(n.get("name") or "", n.get("category") or "", outs)
+            for m in nodes:
+                outs = ", ".join(m.output_types()) or "[dim]—[/dim]"
+                tbl.add_row(m.id, m.category or "", outs)
             renderer.console().print(tbl)
             rprint(f"[dim]{len(nodes)} node(s)[/dim]")
     renderer.emit(payload, command="nodes ls")
@@ -396,27 +276,12 @@ def show_cmd(
     ] = None,
 ):
     renderer = get_renderer()
-    try:
-        graph = _resolve_graph(input_path, host, port, where=where)
-    except CQLRuntimeError as e:
-        renderer.error(
-            code="cql_no_graph",
-            message=str(e),
-            hint="pass --input <path>, or start the server with `comfy launch`",
-            details=e.as_details(),
-        )
-        raise typer.Exit(code=1)
+    graph = _get_graph(input_path, host, port, where=where)
 
-    node = next(
-        (n for n in graph.get("nodes", []) if isinstance(n, dict) and n.get("name") == name),
-        None,
-    )
-    if node is None:
+    m = graph.node(name)
+    if m is None:
         # Surface near-matches so the agent can self-correct from the error.
-        import difflib
-
-        all_names = [n.get("name") for n in graph.get("nodes", []) if isinstance(n, dict)]
-        all_names = [n for n in all_names if isinstance(n, str)]
+        all_names = [n.id for n in graph.all_nodes()]
         close = difflib.get_close_matches(name, all_names, n=5, cutoff=0.6)
         renderer.error(
             code="node_not_found",
@@ -430,25 +295,7 @@ def show_cmd(
         )
         raise typer.Exit(code=1)
 
-    inputs = _node_inputs(_inputs_index(graph), name)
-    payload = {
-        "name": node.get("name"),
-        "display_name": node.get("display_name"),
-        "category": node.get("category"),
-        "description": node.get("description"),
-        "output_node": bool(node.get("output_node")),
-        "output_types": list(node.get("output_types") or []),
-        "inputs": [
-            {
-                "name": i.get("name"),
-                "type": i.get("type"),
-                "section": i.get("section"),
-                "choices": _resolve_choices(i),
-                "options": i.get("options") or {},
-            }
-            for i in inputs
-        ],
-    }
+    payload = graph.morphism_to_dict(m)
 
     if renderer.is_pretty():
         from rich.table import Table
@@ -468,13 +315,13 @@ def show_cmd(
         outs = ", ".join(payload["output_types"]) or "(none)"
         rprint(f"[dim]outputs[/dim]   {outs}")
         rprint("")
-        if inputs:
+        if payload["inputs"]:
             tbl = Table(show_header=True, header_style="bold")
             tbl.add_column("input")
             tbl.add_column("type")
             tbl.add_column("section", style="dim")
             tbl.add_column("default", style="dim")
-            for i in inputs:
+            for i in payload["inputs"]:
                 opts = i.get("options") or {}
                 default = opts.get("default")
                 tbl.add_row(
@@ -509,64 +356,57 @@ def search_cmd(
         int | None,
         typer.Option(show_default=False, help="ComfyUI port (default 8188)."),
     ] = None,
+    where: Annotated[
+        str | None,
+        typer.Option("--where", show_default=False, help="'cloud' to query Comfy Cloud's catalog; default is local."),
+    ] = None,
 ):
     renderer = get_renderer()
-    try:
-        graph = _resolve_graph(input_path, host, port)
-    except CQLRuntimeError as e:
-        renderer.error(
-            code="cql_no_graph",
-            message=str(e),
-            hint="pass --input <path>, or start the server with `comfy launch`",
-            details=e.as_details(),
-        )
-        raise typer.Exit(code=1)
+    graph = _get_graph(input_path, host, port, where=where)
 
     q = query.lower()
-    scored: list[tuple[int, dict[str, Any]]] = []
-    for n in graph.get("nodes", []):
-        if not isinstance(n, dict):
-            continue
-        name = str(n.get("name") or "")
-        display = str(n.get("display_name") or "")
-        desc = str(n.get("description") or "")
+    scored: list[tuple[int, Any]] = []
+    for m in graph.all_nodes():
+        name_l = m.id.lower()
+        display_l = m.display_name.lower()
+        desc_l = m.description.lower()
         # Simple scoring: exact name hit > prefix > substring in name > display > description.
-        if name.lower() == q:
+        if name_l == q:
             score = 0
-        elif name.lower().startswith(q):
+        elif name_l.startswith(q):
             score = 1
-        elif q in name.lower():
+        elif q in name_l:
             score = 2
-        elif q in display.lower():
+        elif q in display_l:
             score = 3
-        elif q in desc.lower():
+        elif q in desc_l:
             score = 4
         else:
             continue
-        scored.append((score, n))
+        scored.append((score, m))
 
-    scored.sort(key=lambda x: (x[0], str(x[1].get("name") or "")))
+    scored.sort(key=lambda x: (x[0], x[1].id))
     total_matched = len(scored)
-    nodes = [n for _, n in scored[: max(0, limit)]]
+    matched = [m for _, m in scored[: max(0, limit)]]
 
     payload = {
         "query": query,
         "total": total_matched,
-        "count": len(nodes),
+        "count": len(matched),
         "rows": [
             {
-                "name": n.get("name"),
-                "category": n.get("category"),
-                "display_name": n.get("display_name"),
-                "description": n.get("description"),
-                "output_types": list(n.get("output_types") or []),
+                "name": m.id,
+                "category": m.category,
+                "display_name": m.display_name,
+                "description": m.description,
+                "output_types": m.output_types(),
             }
-            for n in nodes
+            for m in matched
         ],
     }
 
     if renderer.is_pretty():
-        if not nodes:
+        if not matched:
             rprint(f"[dim]No nodes match {query!r}.[/dim]")
         else:
             from rich.table import Table
@@ -575,11 +415,11 @@ def search_cmd(
             tbl.add_column("name")
             tbl.add_column("category", style="dim")
             tbl.add_column("description", style="dim")
-            for n in nodes:
-                desc = (n.get("description") or "")[:60]
-                tbl.add_row(n.get("name") or "", n.get("category") or "", desc)
+            for m in matched:
+                desc = m.description[:60]
+                tbl.add_row(m.id, m.category or "", desc)
             renderer.console().print(tbl)
-            rprint(f"[dim]{len(nodes)} node(s)[/dim]")
+            rprint(f"[dim]{len(matched)} node(s)[/dim]")
     renderer.emit(payload, command="nodes search")
 
 
@@ -588,36 +428,17 @@ def search_cmd(
 # ---------------------------------------------------------------------------
 
 
-def _wasm_load_or_fail(renderer, input_path, host, port, *, mode="local"):
-    """Fetch object_info (raw) for any wasm-backed command. Returns the dict or exits."""
-    from comfy_cli.comfygraph import ComfygraphError
-
-    try:
-        return _load_raw_object_info(input_path, host, port, mode=mode)
-    except ComfygraphError as e:
-        renderer.error(
-            code="cql_no_graph",
-            message=str(e),
-            hint=e.details.get("hint", "pass --input <path> or start the server with `comfy launch`"),
-        )
-        raise typer.Exit(code=1) from e
-
-
-def _morphism_row(m: dict[str, Any]) -> dict[str, Any]:
-    """Project a Morphism returned by the wasm into our agent-friendly row shape."""
+def _morphism_row(m) -> dict[str, Any]:
+    """Project a Morphism into our agent-friendly row shape."""
     return {
-        "name": m.get("id"),
-        "category": m.get("category"),
-        "display_name": m.get("display_name"),
-        "output_types": [
-            str(p.get("type") if isinstance(p, dict) else p)
-            for p in (m.get("outputs") or [])
-            if (p.get("type") if isinstance(p, dict) else p)
-        ],
+        "name": m.id,
+        "category": m.category,
+        "display_name": m.display_name,
+        "output_types": m.output_types(),
     }
 
 
-@app.command("upstream", help="List nodes that can feed into <name>'s required link inputs.")
+@app.command("upstream", help="List nodes whose outputs can feed into <name>'s link inputs.")
 @tracking.track_command("nodes")
 def upstream_cmd(
     name: Annotated[str, typer.Argument(help="Node class name, e.g. 'KSampler'.")],
@@ -625,21 +446,20 @@ def upstream_cmd(
     input_path: Annotated[str | None, typer.Option("--input", show_default=False)] = None,
     host: Annotated[str | None, typer.Option(show_default=False)] = None,
     port: Annotated[int | None, typer.Option(show_default=False)] = None,
+    where: Annotated[
+        str | None,
+        typer.Option("--where", show_default=False, help="'cloud' to query Comfy Cloud's catalog; default is local."),
+    ] = None,
 ):
-    from comfy_cli import comfygraph
-
     renderer = get_renderer()
-    obj_info = _wasm_load_or_fail(renderer, input_path, host, port)
-    try:
-        nodes = comfygraph.upstream(name, obj_info)
-    except comfygraph.ComfygraphError as e:
-        renderer.error(code="cql_query_invalid", message=str(e), details=e.details)
-        raise typer.Exit(code=1) from e
+    graph = _get_graph(input_path, host, port, where=where)
+    nodes = graph.upstream(name)
 
+    total_upstream = len(nodes)
     if limit is not None:
         nodes = nodes[: max(0, limit)]
-    rows = [_morphism_row(n) for n in nodes]
-    payload = {"name": name, "count": len(rows), "rows": rows}
+    rows = [_morphism_row(m) for m in nodes]
+    payload = {"name": name, "total": total_upstream, "count": len(rows), "rows": rows}
 
     if renderer.is_pretty():
         if not rows:
@@ -655,7 +475,8 @@ def upstream_cmd(
                 outs = ", ".join(r["output_types"]) or "[dim]—[/dim]"
                 tbl.add_row(r["name"] or "", r["category"] or "", outs)
             renderer.console().print(tbl)
-            rprint(f"[dim]{len(rows)} upstream node(s)[/dim]")
+            tail = f" of {total_upstream}" if total_upstream != len(rows) else ""
+            rprint(f"[dim]{len(rows)} upstream node(s){tail}[/dim]")
     renderer.emit(payload, command="nodes upstream")
 
 
@@ -667,21 +488,20 @@ def downstream_cmd(
     input_path: Annotated[str | None, typer.Option("--input", show_default=False)] = None,
     host: Annotated[str | None, typer.Option(show_default=False)] = None,
     port: Annotated[int | None, typer.Option(show_default=False)] = None,
+    where: Annotated[
+        str | None,
+        typer.Option("--where", show_default=False, help="'cloud' to query Comfy Cloud's catalog; default is local."),
+    ] = None,
 ):
-    from comfy_cli import comfygraph
-
     renderer = get_renderer()
-    obj_info = _wasm_load_or_fail(renderer, input_path, host, port)
-    try:
-        nodes = comfygraph.downstream(name, obj_info)
-    except comfygraph.ComfygraphError as e:
-        renderer.error(code="cql_query_invalid", message=str(e), details=e.details)
-        raise typer.Exit(code=1) from e
+    graph = _get_graph(input_path, host, port, where=where)
+    nodes = graph.downstream(name)
 
+    total_downstream = len(nodes)
     if limit is not None:
         nodes = nodes[: max(0, limit)]
-    rows = [_morphism_row(n) for n in nodes]
-    payload = {"name": name, "count": len(rows), "rows": rows}
+    rows = [_morphism_row(m) for m in nodes]
+    payload = {"name": name, "total": total_downstream, "count": len(rows), "rows": rows}
 
     if renderer.is_pretty():
         if not rows:
@@ -697,7 +517,8 @@ def downstream_cmd(
                 outs = ", ".join(r["output_types"]) or "[dim]—[/dim]"
                 tbl.add_row(r["name"] or "", r["category"] or "", outs)
             renderer.console().print(tbl)
-            rprint(f"[dim]{len(rows)} downstream node(s)[/dim]")
+            tail = f" of {total_downstream}" if total_downstream != len(rows) else ""
+            rprint(f"[dim]{len(rows)} downstream node(s){tail}[/dim]")
     renderer.emit(payload, command="nodes downstream")
 
 
@@ -718,17 +539,16 @@ def path_cmd(
     input_path: Annotated[str | None, typer.Option("--input", show_default=False)] = None,
     host: Annotated[str | None, typer.Option(show_default=False)] = None,
     port: Annotated[int | None, typer.Option(show_default=False)] = None,
+    where: Annotated[
+        str | None,
+        typer.Option("--where", show_default=False, help="'cloud' to query Comfy Cloud's catalog; default is local."),
+    ] = None,
 ):
-    from comfy_cli import comfygraph
-
     renderer = get_renderer()
-    obj_info = _wasm_load_or_fail(renderer, input_path, host, port)
-    try:
-        finder = comfygraph.exact_paths if exact else comfygraph.find_paths
-        paths = finder(from_type, to_type, obj_info, max_depth=max_depth, max_paths=max_paths)
-    except comfygraph.ComfygraphError as e:
-        renderer.error(code="cql_query_invalid", message=str(e), details=e.details)
-        raise typer.Exit(code=1) from e
+    graph = _get_graph(input_path, host, port, where=where)
+
+    finder = graph.exact_paths if exact else graph.find_paths
+    paths = finder(from_type, to_type, max_depth=max_depth, max_paths=max_paths)
 
     payload = {
         "from": from_type,
@@ -744,8 +564,8 @@ def path_cmd(
                 "steps": [
                     {
                         "node": s.get("node"),
-                        "input_type": s.get("input_type"),
-                        "output_type": s.get("output_type"),
+                        "from_type": s.get("input_type"),
+                        "to_type": s.get("output_type"),
                     }
                     for s in (p.get("steps") or [])
                 ],
@@ -779,16 +599,14 @@ def types_cmd(
     input_path: Annotated[str | None, typer.Option("--input", show_default=False)] = None,
     host: Annotated[str | None, typer.Option(show_default=False)] = None,
     port: Annotated[int | None, typer.Option(show_default=False)] = None,
+    where: Annotated[
+        str | None,
+        typer.Option("--where", show_default=False, help="'cloud' to query Comfy Cloud's catalog; default is local."),
+    ] = None,
 ):
-    from comfy_cli import comfygraph
-
     renderer = get_renderer()
-    obj_info = _wasm_load_or_fail(renderer, input_path, host, port)
-    try:
-        types = comfygraph.list_types(obj_info)
-    except comfygraph.ComfygraphError as e:
-        renderer.error(code="cql_query_invalid", message=str(e), details=e.details)
-        raise typer.Exit(code=1) from e
+    graph = _get_graph(input_path, host, port, where=where)
+    types = graph.list_types()
 
     if limit is not None:
         types = types[: max(0, limit)]
@@ -803,7 +621,7 @@ def types_cmd(
 
 
 def _flatten_category_tree(tree: dict[str, Any]) -> list[tuple[str, int]]:
-    """Walk the wasm CategoryTree → flat [(full_path, count)].
+    """Walk the CategoryTree → flat [(full_path, count)].
 
     Shape: every node has ``FullPath``, ``Count``, and ``Children`` (a dict
     keyed by name). The root sits under ``Root``.
@@ -843,16 +661,14 @@ def categories_cmd(
     input_path: Annotated[str | None, typer.Option("--input", show_default=False)] = None,
     host: Annotated[str | None, typer.Option(show_default=False)] = None,
     port: Annotated[int | None, typer.Option(show_default=False)] = None,
+    where: Annotated[
+        str | None,
+        typer.Option("--where", show_default=False, help="'cloud' to query Comfy Cloud's catalog; default is local."),
+    ] = None,
 ):
-    from comfy_cli import comfygraph
-
     renderer = get_renderer()
-    obj_info = _wasm_load_or_fail(renderer, input_path, host, port)
-    try:
-        tree = comfygraph.category_tree(obj_info)
-    except comfygraph.ComfygraphError as e:
-        renderer.error(code="cql_query_invalid", message=str(e), details=e.details)
-        raise typer.Exit(code=1) from e
+    graph = _get_graph(input_path, host, port, where=where)
+    tree = graph.category_tree()
 
     flat = _flatten_category_tree(tree)
     if prefix:
@@ -884,16 +700,13 @@ def categories_cmd(
 
 
 # ---------------------------------------------------------------------------
-# refresh — fetch live object_info for the resolved --where, update the cache
+# refresh — object_info is fetched live; nothing to cache
 # ---------------------------------------------------------------------------
 
 
 @app.command(
     "refresh",
-    help=(
-        "Fetch a fresh object_info from the resolved --where (cloud writes to "
-        "the user cache; local always reads live and needs no refresh)."
-    ),
+    help="object_info is fetched live from the server on each command — nothing to refresh.",
 )
 @tracking.track_command("nodes")
 def refresh_cmd(
@@ -902,65 +715,7 @@ def refresh_cmd(
         typer.Option("--where", show_default=False, help="Override the resolved routing mode."),
     ] = None,
 ):
-    """Refresh the catalog cache for the resolved routing mode.
-
-    Cloud → fetch live ``object_info`` from ``cloud.comfy.org`` via the
-    auth-aware client, write to ``<config>/cache/object_info-cloud.json``.
-    Subsequent ``comfy nodes …`` calls read from this cache, taking
-    priority over the bundled snapshot.
-
-    Local → no cache, always reads live from ``127.0.0.1:8188``. This
-    command surfaces that and exits successfully; nothing to refresh.
-    """
-    from comfy_cli import comfygraph
-
+    """Explain that object_info is fetched live and exit."""
     renderer = get_renderer()
-    mode = _resolved_where(where)
-
-    if mode == "local":
-        if renderer.is_pretty():
-            rprint("[dim]Local routing reads `/object_info` live on every call — nothing to cache.[/dim]")
-        renderer.emit(
-            {"mode": "local", "refreshed": False, "reason": "live_local"},
-            command="nodes refresh",
-        )
-        return
-
-    # cloud
-    try:
-        cache_file, n_bytes = comfygraph.refresh_cloud_snapshot()
-    except comfygraph.ComfygraphError as e:
-        renderer.error(
-            code="cql_no_graph",
-            message=str(e),
-            hint="check `comfy auth whoami` — needs X-API-Key or OAuth",
-            details=e.details,
-        )
-        raise typer.Exit(code=1) from e
-    except (OSError, ValueError) as e:
-        renderer.error(
-            code="cloud_http_error",
-            message=f"refresh failed: {e}",
-            hint="check the network and `comfy auth whoami`",
-        )
-        raise typer.Exit(code=1) from e
-
-    if renderer.is_pretty():
-        from rich.text import Text
-
-        rprint(
-            Text.from_markup(
-                f"[bold green]✓[/bold green] Cloud catalog refreshed → "
-                f"[dim]{cache_file}[/dim] ([cyan]{n_bytes / 1024:.0f} KiB[/cyan])"
-            )
-        )
-    renderer.emit(
-        {
-            "mode": "cloud",
-            "refreshed": True,
-            "cache_file": str(cache_file),
-            "bytes": n_bytes,
-        },
-        command="nodes refresh",
-        changed=True,
-    )
+    rprint("[dim]object_info is fetched live from the server on each command — nothing to refresh.[/dim]")
+    renderer.emit({"refreshed": False, "reason": "live_fetch"}, command="nodes refresh")

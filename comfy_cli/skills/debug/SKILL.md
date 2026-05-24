@@ -34,7 +34,7 @@ comfy --json cloud whoami           # confirm signed_in: true (auth_method is "o
 ```
 If you're on a custom env (PR preview), set the base URL first:
 ```
-comfy cloud set-base-url https://fe-pr-12159.testenvs.comfy.org
+comfy cloud set-base-url https://fe-pr-NNNNN.testenvs.comfy.org
 ```
 
 ### `workflow_not_api_format`
@@ -82,20 +82,15 @@ comfy --json-stream jobs watch <prompt_id>   # re-attach
 The local server keeps the job; the CLI just lost its tail.
 
 ### `cql_query_invalid`
-The query syntax is wrong. The CQL grammar is pipe-separated filter directives — *not* SQL. Examples:
-```
-produces IMAGE
-accepts IMAGE | sort connections
-produces LATENT | NOT deprecated
-```
-For "is this node here?" use `comfy nodes search <name>` instead — simpler and the right tool for the job.
-For the full grammar, see `comfy nodes ls --help`.
+The query syntax is wrong. CQL uses pipe-separated filter directives — *not* SQL.
+For "is this node here?" use `comfy nodes search <name>` instead.
+For the full grammar, see the core `comfy` skill or `comfy nodes ls --help`.
 
 ### `cql_no_graph`
 The CLI needs an `object_info.json` to query against. Two options:
 ```
 comfy launch                                        # then re-run the nodes command
-comfy --json nodes ls --query "produces IMAGE" --input /path/to/object_info.json
+comfy --json nodes ls --produces IMAGE --input /path/to/object_info.json
 ```
 
 ## Job-stuck triage
@@ -121,13 +116,12 @@ Three possible answers:
 | `status: running` but no progress events | A long sampler step, or a hung custom node | Wait one sampler-step's worth; if still stuck, interrupt |
 | `status: error` with no `error_message` | Server crashed mid-execution | Check the Comfy Cloud dashboard or server logs (cloud), or the stdout of `comfy launch` (local) |
 
-## Interrupting
+## Interrupting / cancelling
 
 ```
 comfy --json run --workflow X.json    # async by default, returns a prompt_id
 # later, if it's running too long:
-curl -X POST http://127.0.0.1:8188/interrupt  # local
-# cloud: POST /api/interrupt with Bearer auth (no CLI command yet)
+comfy jobs cancel <prompt_id>         # works on both local and cloud
 ```
 
 ## When `--json` makes diagnosis worse, not better

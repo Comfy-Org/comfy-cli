@@ -591,8 +591,17 @@ class TestExecutePartnerNodePreflight:
         "2": {"class_type": "SaveVideo", "inputs": {"video": ["1", 0]}},
     }
     OBJECT_INFO = {
-        "Veo3VideoGenerationNode": {"category": "api node/video/Veo"},
-        "SaveVideo": {"category": "video"},
+        "Veo3VideoGenerationNode": {
+            "category": "api node/video/Veo",
+            "output": ["VIDEO"],
+            "output_name": ["VIDEO"],
+        },
+        "SaveVideo": {
+            "category": "video",
+            "output": [],
+            "output_name": [],
+            "output_node": True,
+        },
     }
 
     def _wf_file(self, tmp_path):
@@ -670,7 +679,10 @@ class TestExecutePartnerNodePreflight:
             patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),
             patch(
                 "comfy_cli.command.run._fetch_object_info",
-                return_value={"EmptyLatentImage": {"category": "latent"}, "PreviewAny": {"category": "image"}},
+                return_value={
+                    "EmptyLatentImage": {"category": "latent", "output": ["LATENT"], "output_name": ["LATENT"]},
+                    "PreviewAny": {"category": "image", "output": [], "output_name": [], "output_node": True},
+                },
             ),
             patch("comfy_cli.command.run.ExecutionProgress"),
             patch("comfy_cli.command.run.WorkflowExecution") as MockExec,
@@ -713,12 +725,16 @@ class TestExecuteUiWorkflow:
                 }
             },
             "input_order": {"required": ["width", "height", "batch_size"]},
+            "output": ["LATENT"],
+            "output_name": ["LATENT"],
             "output_node": False,
             "display_name": "Empty Latent Image",
         },
         "PreviewImage": {
             "input": {"required": {"images": ["IMAGE"]}},
             "input_order": {"required": ["images"]},
+            "output": [],
+            "output_name": [],
             "output_node": True,
             "display_name": "Preview Image",
         },
@@ -856,3 +872,104 @@ class TestWildcardHostSubstitution:
             with pytest.raises(typer.Exit):
                 execute(workflow_file, host="localhost", port=8188, json_mode=True)
         assert captured["check_host"] == "localhost"
+
+
+# ---------------------------------------------------------------------------
+# execute_cloud auto-convert
+# ---------------------------------------------------------------------------
+
+
+class TestExecuteCloudAutoConvert:
+    """The cloud path used to bail with `cloud_ui_workflow_unsupported` on any
+    frontend-format workflow. It now converts via convert_ui_to_api against the
+    cached cloud object_info, mirroring the local path's behavior.
+    """
+
+    UI_WORKFLOW = {
+        "nodes": [{"id": 1, "type": "KSampler", "inputs": [], "outputs": [], "widgets_values": []}],
+        "links": [],
+    }
+    CONVERTED = {"1": {"class_type": "KSampler", "inputs": {"steps": 20}}}
+
+    @pytest.fixture
+    def ui_workflow_file(self, tmp_path):
+        path = tmp_path / "ui.json"
+        path.write_text(json.dumps(self.UI_WORKFLOW))
+        return str(path)
+
+    @pytest.fixture
+    def fake_target(self):
+        from comfy_cli.target import Target
+
+        return Target(
+            kind="cloud",
+            base_url="https://cloud.example.com",
+            path_prefix="/api",
+            history_path="history_v2",
+            jobs_path="jobs",
+            api_key="test-api-key",
+        )
+
+    def test_ui_workflow_converts_and_submits(self, ui_workflow_file, fake_target):
+        from comfy_cli.comfy_client import SubmitResult
+        from comfy_cli.command.run import execute_cloud
+
+        # Wire the conversion path: object_info loader returns a non-empty dict,
+        # convert_ui_to_api returns our pre-cooked API workflow, Client submits
+        # successfully. The watcher subprocess is stubbed so the test doesn't
+        # actually fork.
+        mock_client = MagicMock()
+        mock_client.submit_prompt.return_value = SubmitResult(
+            prompt_id="prompt-abc", number=1, node_errors={}
+        )
+
+        with (
+            patch("comfy_cli.target.resolve_target", return_value=fake_target),
+            patch("comfy_cli.command.run.convert_ui_to_api", return_value=self.CONVERTED) as mock_convert,
+            patch(
+                "comfy_cli.cql.engine._load_from_target",
+                return_value={"KSampler": {}},  # any truthy dict suffices for the converter
+            ),
+            patch("comfy_cli.comfy_client.Client", return_value=mock_client),
+            patch("comfy_cli.command.run._spawn_watcher"),
+        ):
+            execute_cloud(ui_workflow_file, wait=False)
+
+        # Convert was called against our UI workflow + the cloud object_info.
+        assert mock_convert.called
+        # The CONVERTED workflow was passed to the submit call — not the raw UI form.
+        submitted_args, _ = mock_client.submit_prompt.call_args
+        assert submitted_args[0] == self.CONVERTED
+
+    def test_ui_workflow_conversion_failure_surfaces_conversion_error(self, ui_workflow_file, fake_target):
+        from comfy_cli.command.run import execute_cloud
+        from comfy_cli.workflow_to_api import WorkflowConversionError
+
+        with (
+            patch("comfy_cli.target.resolve_target", return_value=fake_target),
+            patch(
+                "comfy_cli.cql.engine._load_from_target",
+                return_value={"KSampler": {}},
+            ),
+            patch(
+                "comfy_cli.command.run.convert_ui_to_api",
+                side_effect=WorkflowConversionError("missing required field"),
+            ),
+        ):
+            with pytest.raises(typer.Exit) as exc_info:
+                execute_cloud(ui_workflow_file, wait=False)
+            assert exc_info.value.exit_code == 1
+
+    def test_ui_workflow_no_object_info_surfaces_cql_no_graph(self, ui_workflow_file, fake_target):
+        from comfy_cli.command.run import execute_cloud
+
+        with (
+            patch("comfy_cli.target.resolve_target", return_value=fake_target),
+            patch(
+                "comfy_cli.cql.engine._load_from_target",
+                side_effect=RuntimeError("no cache and no live server"),
+            ),
+        ):
+            with pytest.raises(typer.Exit) as exc_info:
+                execute_cloud(ui_workflow_file, wait=False)
+            assert exc_info.value.exit_code == 1

@@ -1,0 +1,1205 @@
+"""Pure-Python CQL graph engine.
+
+Parses ComfyUI's ``object_info.json``, builds an indexed compatibility graph,
+and exposes upstream/downstream, path-finding, validation, annotations,
+and widget-order resolution.
+
+Port of ``github.com/Comfy-Org/cql/nodegraph`` (Go).
+"""
+
+from __future__ import annotations
+
+import difflib
+import json
+from collections import defaultdict
+from dataclasses import dataclass, field
+from typing import Any
+
+
+# ---------------------------------------------------------------------------
+# Types — mirrors nodegraph/types.go
+# ---------------------------------------------------------------------------
+
+_IMPLICIT_WIDGET_TYPES = frozenset({"STRING", "INT", "FLOAT", "NUMBER", "BOOLEAN"})
+
+
+@dataclass
+class PortOptions:
+    min: float | None = None
+    max: float | None = None
+    step: float | None = None
+    default: Any = None
+    multiline: bool = False
+    control_after_generate: bool = False
+    force_input: bool = False
+
+
+@dataclass
+class Port:
+    name: str
+    type: str
+    required: bool = False
+    is_link: bool = False
+    enum_values: list[str] = field(default_factory=list)
+    options: PortOptions = field(default_factory=PortOptions)
+
+    def validate_shape(self, value: Any) -> str | None:
+        """Hard-reject on JSON-shape mismatch. Returns error message or None."""
+        if self.type == "INT":
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                return f"{self.name}: expected INT, got {type(value).__name__} {value!r}"
+            if isinstance(value, float) and value != int(value):
+                return f"{self.name}: expected integer, got {value}"
+        elif self.type in ("FLOAT", "NUMBER"):
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                return f"{self.name}: expected {self.type}, got {type(value).__name__}"
+        elif self.type in ("STRING", "COMBO"):
+            if not isinstance(value, str):
+                return f"{self.name}: expected {self.type} (string), got {type(value).__name__}"
+        elif self.type == "BOOLEAN":
+            if not isinstance(value, bool):
+                return f"{self.name}: expected BOOLEAN, got {type(value).__name__}"
+        return None
+
+    def validate_catalog(self, value: Any) -> list[dict]:
+        """Soft checks against catalog snapshot. Returns warnings list."""
+        if self.validate_shape(value) is not None:
+            return []
+        warnings: list[dict] = []
+        if self.type == "COMBO" and self.enum_values:
+            if isinstance(value, str) and value not in self.enum_values:
+                warnings.append({
+                    "code": "unknown_enum_value",
+                    "field": self.name,
+                    "message": f"{value!r} not in {len(self.enum_values)} known options for {self.name}",
+                })
+        if self.type in ("INT", "FLOAT", "NUMBER") and isinstance(value, (int, float)):
+            if self.options.min is not None and value < self.options.min:
+                warnings.append({
+                    "code": "below_min",
+                    "field": self.name,
+                    "message": f"{self.name}={value} below catalog min {self.options.min}",
+                })
+            if self.options.max is not None and value > self.options.max:
+                warnings.append({
+                    "code": "above_max",
+                    "field": self.name,
+                    "message": f"{self.name}={value} above catalog max {self.options.max}",
+                })
+        return warnings
+
+
+@dataclass
+class Morphism:
+    id: str
+    display_name: str = ""
+    description: str = ""
+    category: str = ""
+    inputs: list[Port] = field(default_factory=list)
+    outputs: list[Port] = field(default_factory=list)
+    is_output_node: bool = False
+    is_api_node: bool = False
+    deprecated: bool = False
+    experimental: bool = False
+    search_aliases: list[str] = field(default_factory=list)
+    pack: str = ""
+    labels: list[str] = field(default_factory=list)
+    cloud_disabled: bool = False
+    needs_gpu: bool = True  # default True per Go
+
+    def output_types(self) -> list[str]:
+        seen: set[str] = set()
+        out: list[str] = []
+        for p in self.outputs:
+            if p.type not in seen:
+                seen.add(p.type)
+                out.append(p.type)
+        return out
+
+    def input_link_types(self) -> list[str]:
+        seen: set[str] = set()
+        out: list[str] = []
+        for p in self.inputs:
+            if p.is_link and p.type not in seen:
+                seen.add(p.type)
+                out.append(p.type)
+        return out
+
+    def required_link_types(self) -> list[str]:
+        seen: set[str] = set()
+        out: list[str] = []
+        for p in self.inputs:
+            if p.is_link and p.required and p.type not in seen:
+                seen.add(p.type)
+                out.append(p.type)
+        return out
+
+    def has_input(self, t: str) -> bool:
+        return any(p.is_link and p.type == t for p in self.inputs)
+
+    def has_output(self, t: str) -> bool:
+        return any(p.type == t for p in self.outputs)
+
+    def can_apply(self, available: set[str]) -> bool:
+        return all(t in available for t in self.required_link_types())
+
+
+# ---------------------------------------------------------------------------
+# Parsing — mirrors nodegraph/parse.go
+# ---------------------------------------------------------------------------
+
+
+def _is_link(type_id: str, is_enum: bool, force_input: bool) -> bool:
+    """Determine if an input participates in typed wiring (link) or is inline (widget)."""
+    if is_enum:
+        return False
+    if type_id in _IMPLICIT_WIDGET_TYPES and not force_input and type_id != "*":
+        return False
+    return True
+
+
+def _derive_pack(python_module: str) -> str:
+    if not python_module:
+        return "core"
+    if (python_module.startswith("nodes")
+            or python_module.startswith("comfy_extras")
+            or python_module.startswith("comfy.comfy_types")):
+        return "core"
+    if python_module.startswith("custom_nodes."):
+        parts = python_module.split(".", 3)
+        if len(parts) >= 2:
+            return parts[1]
+    return "core"
+
+
+def _parse_port_options(opts_raw: dict) -> PortOptions:
+    return PortOptions(
+        min=opts_raw.get("min"),
+        max=opts_raw.get("max"),
+        step=opts_raw.get("step"),
+        default=opts_raw.get("default"),
+        multiline=bool(opts_raw.get("multiline", False)),
+        control_after_generate=_control_after_generate_set(opts_raw.get("control_after_generate")),
+        force_input=bool(opts_raw.get("forceInput", False)),
+    )
+
+
+def _control_after_generate_set(val: Any) -> bool:
+    if val is None:
+        return False
+    if isinstance(val, bool):
+        return val
+    if isinstance(val, str):
+        return val != "" and val != "false"
+    return True
+
+
+def _parse_input_spec(spec: Any) -> tuple[str, bool, list[str], PortOptions]:
+    """Returns (type_id, is_enum, enum_values, options)."""
+    if isinstance(spec, str):
+        return spec, False, [], PortOptions()
+
+    if not isinstance(spec, list) or len(spec) == 0:
+        return "UNKNOWN", False, [], PortOptions()
+
+    opts_raw = spec[1] if len(spec) > 1 and isinstance(spec[1], dict) else {}
+    port_opts = _parse_port_options(opts_raw)
+
+    first = spec[0]
+    if isinstance(first, str):
+        return first, False, [], port_opts
+
+    if isinstance(first, list):
+        values = [str(v) if not isinstance(v, str) else v for v in first]
+        return "COMBO", True, values, port_opts
+
+    return "UNKNOWN", False, [], port_opts
+
+
+def _ordered_names(raw: dict, order: list[str] | None) -> list[str]:
+    """Return input names in declared order, falling back to alphabetical."""
+    seen: set[str] = set()
+    out: list[str] = []
+    for name in (order or []):
+        if name in raw and name not in seen:
+            out.append(name)
+            seen.add(name)
+    for name in sorted(raw.keys()):
+        if name not in seen:
+            out.append(name)
+    return out
+
+
+def _parse_inputs(raw: dict, order: list[str] | None, required: bool) -> list[Port]:
+    ports: list[Port] = []
+    for name in _ordered_names(raw, order):
+        spec = raw[name]
+        type_id, is_enum, enum_values, opts = _parse_input_spec(spec)
+        ports.append(Port(
+            name=name,
+            type=type_id,
+            required=required,
+            is_link=_is_link(type_id, is_enum, opts.force_input),
+            enum_values=enum_values,
+            options=opts,
+        ))
+    return ports
+
+
+def _unmarshal_string_list(val: Any) -> list[str]:
+    if isinstance(val, list):
+        return [str(v) for v in val]
+    if isinstance(val, str):
+        return [val]
+    return []
+
+
+def _parse_morphism(node_id: str, raw: dict) -> Morphism:
+    input_block = raw.get("input") or {}
+    input_order = raw.get("input_order") or {}
+    req_raw = input_block.get("required") or {}
+    opt_raw = input_block.get("optional") or {}
+    req_order = input_order.get("required")
+    opt_order = input_order.get("optional")
+
+    inputs = _parse_inputs(req_raw, req_order, required=True)
+    inputs += _parse_inputs(opt_raw, opt_order, required=False)
+
+    raw_outputs = raw.get("output") or []
+    output_names = _unmarshal_string_list(raw.get("output_name"))
+    outputs: list[Port] = []
+    for i, out in enumerate(raw_outputs):
+        name = output_names[i] if i < len(output_names) else ""
+        t = out if isinstance(out, str) else "COMBO"
+        outputs.append(Port(name=name, type=t, required=True, is_link=True))
+
+    return Morphism(
+        id=node_id,
+        display_name=raw.get("display_name") or node_id,
+        description=raw.get("description") or "",
+        category=raw.get("category") or "",
+        inputs=inputs,
+        outputs=outputs,
+        is_output_node=bool(raw.get("output_node", False)),
+        is_api_node=bool(raw.get("api_node", False)),
+        deprecated=bool(raw.get("deprecated", False)),
+        experimental=bool(raw.get("experimental", False)),
+        search_aliases=_unmarshal_string_list(raw.get("search_aliases")),
+        pack=_derive_pack(raw.get("python_module") or ""),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Annotations — mirrors nodegraph/annotations.go
+# ---------------------------------------------------------------------------
+
+
+def parse_supported_nodes(data: bytes) -> tuple[dict[str, str], dict[str, list[str]]]:
+    """Parse supported_nodes.yaml → (node_pack, node_labels)."""
+    try:
+        import yaml
+        cfg = yaml.safe_load(data)
+    except Exception:
+        return {}, {}
+    if not isinstance(cfg, dict):
+        return {}, {}
+    node_pack: dict[str, str] = {}
+    node_labels: dict[str, list[str]] = {}
+    for pack in (cfg.get("node_packs") or []):
+        if not isinstance(pack, dict):
+            continue
+        pack_name = pack.get("name", "")
+        for node_name, labels in (pack.get("node_labels") or {}).items():
+            node_pack[node_name] = pack_name
+            node_labels[node_name] = list(labels) if isinstance(labels, list) else []
+    return node_pack, node_labels
+
+
+def parse_disable_config(data: bytes) -> set[str]:
+    """Parse cloud_disable_config.yaml → set of labels that disable nodes."""
+    try:
+        import yaml
+        cfg = yaml.safe_load(data)
+    except Exception:
+        return set()
+    if not isinstance(cfg, dict):
+        return set()
+    disable = cfg.get("disable_nodes") or {}
+    labels: set[str] = set()
+    for rule in (disable.get("or") or []):
+        if isinstance(rule, dict):
+            for label, enabled in rule.items():
+                if enabled:
+                    labels.add(label)
+    return labels
+
+
+def parse_no_gpu_nodes(data: bytes) -> set[str]:
+    """Parse no_gpu_nodes.json → set of CPU-only node IDs."""
+    try:
+        cfg = json.loads(data)
+    except Exception:
+        return set()
+    if not isinstance(cfg, dict) or cfg.get("schema_version") != 1:
+        return set()
+    return set(cfg.get("no_gpu_nodes") or [])
+
+
+# ---------------------------------------------------------------------------
+# Graph — mirrors nodegraph/graph.go
+# ---------------------------------------------------------------------------
+
+
+class Graph:
+    """Indexed compatibility graph over ComfyUI node classes."""
+
+    def __init__(self) -> None:
+        self._nodes: dict[str, Morphism] = {}
+        self._producers: dict[str, list[Morphism]] = defaultdict(list)
+        self._consumers: dict[str, list[Morphism]] = defaultdict(list)
+        self._types: set[str] = set()
+        self._annotated = False
+
+    @classmethod
+    def from_object_info(cls, object_info: dict[str, Any]) -> Graph:
+        g = cls()
+        for node_id, raw in object_info.items():
+            if not isinstance(raw, dict):
+                continue
+            m = _parse_morphism(node_id, raw)
+            g._nodes[m.id] = m
+            for t in m.output_types():
+                g._producers[t].append(m)
+                g._types.add(t)
+            for t in m.input_link_types():
+                g._consumers[t].append(m)
+                g._types.add(t)
+        # Sort indexes for deterministic output
+        for t in g._producers:
+            g._producers[t].sort(key=lambda m: m.id)
+        for t in g._consumers:
+            g._consumers[t].sort(key=lambda m: m.id)
+        return g
+
+    # -- Annotation --
+
+    def annotate(
+        self,
+        supported_nodes_yaml: bytes | None = None,
+        cloud_disable_yaml: bytes | None = None,
+        no_gpu_json: bytes | None = None,
+    ) -> None:
+        node_pack: dict[str, str] = {}
+        node_labels: dict[str, list[str]] = {}
+        disable_labels: set[str] = set()
+        no_gpu: set[str] = set()
+
+        if supported_nodes_yaml:
+            node_pack, node_labels = parse_supported_nodes(supported_nodes_yaml)
+        if cloud_disable_yaml:
+            disable_labels = parse_disable_config(cloud_disable_yaml)
+        if no_gpu_json:
+            no_gpu = parse_no_gpu_nodes(no_gpu_json)
+
+        for nid, m in self._nodes.items():
+            if nid in node_pack:
+                m.pack = node_pack[nid]
+            if nid in node_labels:
+                m.labels = node_labels[nid]
+            m.cloud_disabled = any(l in disable_labels for l in m.labels)
+            m.needs_gpu = nid not in no_gpu
+        self._annotated = True
+
+    # -- Lookup --
+
+    def node(self, name: str) -> Morphism | None:
+        return self._nodes.get(name)
+
+    def all_nodes(self) -> list[Morphism]:
+        return sorted(self._nodes.values(), key=lambda m: m.id)
+
+    def node_count(self) -> int:
+        return len(self._nodes)
+
+    # -- Traversal --
+
+    def upstream(self, name: str) -> list[Morphism]:
+        m = self._nodes.get(name)
+        if m is None:
+            return []
+        seen: set[str] = set()
+        result: list[Morphism] = []
+        for t in m.input_link_types():
+            for producer in self._producers.get(t, []):
+                if producer.id != name and producer.id not in seen:
+                    seen.add(producer.id)
+                    result.append(producer)
+        result.sort(key=lambda m: m.id)
+        return result
+
+    def downstream(self, name: str) -> list[Morphism]:
+        m = self._nodes.get(name)
+        if m is None:
+            return []
+        seen: set[str] = set()
+        result: list[Morphism] = []
+        for t in m.output_types():
+            for consumer in self._consumers.get(t, []):
+                if consumer.id != name and consumer.id not in seen:
+                    seen.add(consumer.id)
+                    result.append(consumer)
+        result.sort(key=lambda m: m.id)
+        return result
+
+    def pack_nodes(self, pack: str) -> list[Morphism]:
+        """All nodes belonging to a custom-node pack (case-insensitive)."""
+        p = pack.lower()
+        return sorted([m for m in self._nodes.values() if m.pack.lower() == p], key=lambda m: m.id)
+
+    def label_nodes(self, label: str) -> list[Morphism]:
+        """All nodes carrying a specific behavioral label."""
+        return sorted([m for m in self._nodes.values() if label in m.labels], key=lambda m: m.id)
+
+    def cloud_disabled_nodes(self) -> list[Morphism]:
+        """All nodes that are disabled on Comfy Cloud."""
+        return sorted([m for m in self._nodes.values() if m.cloud_disabled], key=lambda m: m.id)
+
+    def cloud_enabled_nodes(self) -> list[Morphism]:
+        """All nodes that are enabled on Comfy Cloud."""
+        return sorted([m for m in self._nodes.values() if not m.cloud_disabled], key=lambda m: m.id)
+
+    def api_nodes(self) -> list[Morphism]:
+        """All partner API nodes."""
+        return sorted([m for m in self._nodes.values() if m.is_api_node], key=lambda m: m.id)
+
+    def output_nodes(self) -> list[Morphism]:
+        """All terminal output nodes (SaveImage, etc.)."""
+        return sorted([m for m in self._nodes.values() if m.is_output_node], key=lambda m: m.id)
+
+    def packs(self) -> list[str]:
+        """All known pack names, sorted."""
+        return sorted(set(m.pack for m in self._nodes.values() if m.pack))
+
+    def known_labels(self) -> list[str]:
+        """All known labels, sorted."""
+        labels: set[str] = set()
+        for m in self._nodes.values():
+            labels.update(m.labels)
+        return sorted(labels)
+
+    def find_paths(
+        self, from_type: str, to_type: str, *, max_depth: int = 4, max_paths: int = 10,
+    ) -> list[dict]:
+        """BFS multi-hop path finding from one type to another."""
+        if from_type == to_type:
+            return []
+        # queue items: (current_type, steps[])
+        queue: list[tuple[str, list[dict]]] = [(from_type, [])]
+        visited: set[str] = {from_type}
+        paths: list[dict] = []
+
+        while queue and len(paths) < max_paths:
+            next_queue: list[tuple[str, list[dict]]] = []
+            for cur_type, steps in queue:
+                if len(steps) >= max_depth:
+                    continue
+                for consumer in self._consumers.get(cur_type, []):
+                    for out_t in consumer.output_types():
+                        if out_t == cur_type:
+                            continue
+                        step = {"node": consumer.id, "input_type": cur_type, "output_type": out_t}
+                        new_steps = steps + [step]
+                        if out_t == to_type:
+                            paths.append({"from": from_type, "to": to_type, "steps": new_steps})
+                            if len(paths) >= max_paths:
+                                return paths
+                        elif out_t not in visited and len(new_steps) < max_depth:
+                            visited.add(out_t)
+                            next_queue.append((out_t, new_steps))
+            queue = next_queue
+        return paths
+
+    def exact_paths(
+        self, from_type: str, to_type: str, *, max_depth: int = 6, max_paths: int = 10,
+    ) -> list[dict]:
+        """Satisfiability-aware BFS: each step's required link inputs must be
+        available from types produced by prior steps."""
+        if from_type == to_type:
+            return []
+        # state: (available_types_frozenset, steps[])
+        initial: frozenset[str] = frozenset({from_type})
+        queue: list[tuple[frozenset[str], list[dict]]] = [(initial, [])]
+        visited: set[frozenset[str]] = {initial}
+        paths: list[dict] = []
+
+        while queue and len(paths) < max_paths:
+            next_queue: list[tuple[frozenset[str], list[dict]]] = []
+            for available, steps in queue:
+                if len(steps) >= max_depth:
+                    continue
+                for m in sorted(self._nodes.values(), key=lambda m: m.id):
+                    if not m.can_apply(available):
+                        continue
+                    new_outs = [t for t in m.output_types() if t not in available and t != "*"]
+                    if not new_outs:
+                        continue
+                    # Pick one representative input type this node consumes from available
+                    input_type = ""
+                    for t in m.required_link_types():
+                        if t in available:
+                            input_type = t
+                            break
+                    for out_t in new_outs:
+                        step = {"node": m.id, "input_type": input_type, "output_type": out_t}
+                        new_steps = steps + [step]
+                        new_avail = available | frozenset(new_outs)
+                        if out_t == to_type:
+                            # Verify the path actually consumes from_type
+                            if any(s["input_type"] == from_type or from_type in available for s in new_steps):
+                                paths.append({"from": from_type, "to": to_type, "steps": new_steps})
+                            if len(paths) >= max_paths:
+                                return paths
+                        elif new_avail not in visited and len(new_steps) < max_depth:
+                            visited.add(new_avail)
+                            next_queue.append((new_avail, new_steps))
+            queue = next_queue
+        return paths
+
+    # -- Browse --
+
+    def list_types(self) -> list[str]:
+        return sorted(self._types)
+
+    def category_tree(self) -> dict:
+        """Build a hierarchical category tree with node counts."""
+        counts: dict[str, int] = defaultdict(int)
+        for m in self._nodes.values():
+            if m.category:
+                counts[m.category] += 1
+
+        root: dict[str, Any] = {"FullPath": "", "Count": 0, "Children": {}}
+        for path, count in sorted(counts.items()):
+            parts = path.split("/")
+            node = root
+            for i, part in enumerate(parts):
+                full = "/".join(parts[: i + 1])
+                if part not in node["Children"]:
+                    node["Children"][part] = {"FullPath": full, "Count": 0, "Children": {}}
+                child = node["Children"][part]
+                child["Count"] += count
+                node = child
+        return {"Root": root}
+
+    # -- Widget order --
+
+    def widget_order(self, class_name: str) -> list[str]:
+        m = self._nodes.get(class_name)
+        if m is None:
+            return []
+        order: list[str] = []
+        for p in m.inputs:
+            if p.is_link:
+                continue
+            order.append(p.name)
+            if p.options.control_after_generate:
+                order.append("control_after_generate")
+        return order
+
+    # -- Validation --
+
+    def validate_workflow(self, workflow: dict[str, Any]) -> dict[str, Any]:
+        """Validate an API-format workflow. Returns {valid, errors, warnings}."""
+        errors: list[dict] = []
+        warnings: list[dict] = []
+        all_names = list(self._nodes.keys())
+
+        for node_id, node_data in workflow.items():
+            if not isinstance(node_data, dict):
+                warnings.append({
+                    "node_id": node_id,
+                    "field": node_id,
+                    "code": "non_node_key",
+                    "message": f"key {node_id!r} is not a workflow node (expected a dict with class_type)",
+                })
+                continue
+            class_type = node_data.get("class_type", "")
+            if not class_type:
+                warnings.append({
+                    "node_id": node_id,
+                    "field": node_id,
+                    "code": "non_node_key",
+                    "message": f"key {node_id!r} has no class_type and will be ignored by the server",
+                })
+                continue
+
+            m = self._nodes.get(class_type)
+            if m is None:
+                close = difflib.get_close_matches(class_type, all_names, n=3, cutoff=0.6)
+                errors.append({
+                    "node_id": node_id,
+                    "code": "unknown_class_type",
+                    "message": f"class_type {class_type!r} not found in object_info",
+                    "hint": f"did you mean: {', '.join(close)}?" if close else "run `comfy nodes search <name>` to find available classes",
+                    "suggestions": close,
+                })
+                continue
+
+            port_by_name = {p.name: p for p in m.inputs}
+            for input_name, value in (node_data.get("inputs") or {}).items():
+                # Link references: [source_node_id, output_index]
+                if isinstance(value, list) and len(value) == 2:
+                    src_id = str(value[0])
+                    out_idx = value[1] if isinstance(value[1], int) else None
+
+                    # (i) source node exists in workflow
+                    src_data = workflow.get(src_id)
+                    if not isinstance(src_data, dict) or not src_data.get("class_type"):
+                        errors.append({
+                            "node_id": node_id,
+                            "field": input_name,
+                            "code": "dangling_edge",
+                            "message": f"input {input_name!r} references node {src_id!r} which does not exist",
+                            "hint": f"add node {src_id!r} to the workflow, or rewire this input to an existing node",
+                        })
+                        continue
+
+                    src_class = src_data["class_type"]
+                    src_m = self._nodes.get(src_class)
+                    if src_m is None:
+                        # Source class_type already flagged by the outer loop
+                        continue
+
+                    # (ii) output index in range
+                    if out_idx is None or out_idx < 0 or out_idx >= len(src_m.outputs):
+                        valid_indices = ", ".join(
+                            f"[{i}]={p.type}" for i, p in enumerate(src_m.outputs)
+                        )
+                        errors.append({
+                            "node_id": node_id,
+                            "field": input_name,
+                            "code": "output_index_out_of_range",
+                            "message": (
+                                f"input {input_name!r} references {src_class}[{value[1]}] "
+                                f"but {src_class} has {len(src_m.outputs)} output(s)"
+                            ),
+                            "hint": f"valid indices for {src_class}: {valid_indices}",
+                        })
+                        continue
+
+                    # (iii) type compatibility — advisory only.
+                    # ComfyUI allows cross-type wiring via reroutes, converters,
+                    # and wildcard ports; the server is the authoritative validator.
+                    port = port_by_name.get(input_name)
+                    if port is not None:
+                        src_type = src_m.outputs[out_idx].type
+                        dst_type = port.type
+                        if src_type != "*" and dst_type != "*" and src_type != dst_type:
+                            # Find the correct index for the expected type
+                            correct = [
+                                f"[{i}]" for i, p in enumerate(src_m.outputs) if p.type == dst_type
+                            ]
+                            hint = (
+                                f"use {src_class}{correct[0]} instead"
+                                if correct
+                                else f"run `comfy nodes ls --produces {dst_type}` to find a source"
+                            )
+                            warnings.append({
+                                "node_id": node_id,
+                                "field": input_name,
+                                "code": "edge_type_mismatch",
+                                "message": (
+                                    f"input {input_name!r} expects {dst_type} but "
+                                    f"{src_class}[{out_idx}] produces {src_type}"
+                                ),
+                                "hint": hint,
+                            })
+                    continue
+
+                port = port_by_name.get(input_name)
+                if port is None:
+                    continue
+                # Shape check (hard error)
+                shape_err = port.validate_shape(value)
+                if shape_err:
+                    errors.append({
+                        "node_id": node_id,
+                        "field": input_name,
+                        "code": "shape_mismatch",
+                        "message": shape_err,
+                        "hint": f"expected {port.type}; check the value type",
+                    })
+                    continue
+                # Catalog checks
+                for w in port.validate_catalog(value):
+                    if w["code"] == "unknown_enum_value":
+                        top = port.enum_values[:5]
+                        errors.append({
+                            "node_id": node_id,
+                            "field": input_name,
+                            "code": "unknown_enum_value",
+                            "message": w["message"],
+                            "hint": f"valid options include: {', '.join(top)}" + (f" (and {len(port.enum_values) - 5} more)" if len(port.enum_values) > 5 else ""),
+                            "suggestions": port.enum_values[:20],
+                        })
+                    else:
+                        w["field"] = f"{node_id}.{class_type}.{w['field']}"
+                        warnings.append(w)
+
+        return {
+            "valid": len(errors) == 0,
+            "errors": errors,
+            "warnings": warnings,
+        }
+
+    # -- Workflow slot editing --
+
+    def get_template_schema(self, template_id: str, workflow: dict) -> dict:
+        """Extract the slot manifest from a frontend-format workflow."""
+        return {"id": template_id, "slots": _extract_frontend_slots(workflow, self)}
+
+    def apply_slots(self, workflow: dict, overrides: dict[str, Any]) -> tuple[dict, list[dict]]:
+        """Apply slot overrides. Returns (modified_workflow, warnings)."""
+        import copy
+        wf = copy.deepcopy(workflow)
+        warnings: list[dict] = []
+        for addr, value in overrides.items():
+            warnings.extend(_apply_one_slot(wf, addr, value, self))
+        return wf, warnings
+
+    def expand_variations(self, workflow: dict, variations: list[dict[str, Any]]) -> tuple[list[dict], list[dict]]:
+        """Apply N override sets, return N independent workflow copies."""
+        results: list[dict] = []
+        all_warnings: list[dict] = []
+        for overrides in variations:
+            modified, warnings = self.apply_slots(workflow, overrides)
+            results.append(modified)
+            all_warnings.extend(warnings)
+        return results, all_warnings
+
+    # -- Source loading (local / cloud / file) --
+
+    @classmethod
+    def load(
+        cls,
+        *,
+        mode: str = "local",
+        input_path: str | None = None,
+        host: str = "127.0.0.1",
+        port: int = 8188,
+        supported_nodes_yaml: bytes | None = None,
+        cloud_disable_yaml: bytes | None = None,
+        no_gpu_json: bytes | None = None,
+    ) -> Graph:
+        """Unified entry point: resolve object_info, build graph, annotate.
+
+        Both local and cloud are the same: fetch ``/object_info`` from the
+        resolved target. The only differences are base URL, path prefix,
+        and auth headers — all handled by ``_load_from_target()``.
+
+        Resolution order:
+          1. ``input_path`` → read from local JSON file
+          2. ``mode`` → resolve a Target via the CLI's routing chain,
+             fetch ``/object_info`` over HTTP (local or cloud).
+
+        Security: loopback-only guard for local, HTTPS-only for cloud,
+        bounded read (64 MB), no-redirect policy.
+        """
+        if input_path is not None:
+            raw = _load_from_file(input_path)
+        else:
+            raw = _load_from_target(mode=mode, host=host, port=port)
+
+        g = cls.from_object_info(raw)
+        if supported_nodes_yaml or cloud_disable_yaml or no_gpu_json:
+            g.annotate(supported_nodes_yaml, cloud_disable_yaml, no_gpu_json)
+        else:
+            g._try_default_annotations()
+        return g
+
+    def _try_default_annotations(self) -> None:
+        """Load bundled annotation files from ``comfy_cli.cql.data``.
+
+        These ship as package data (40 KB total) from Comfy-Org/comfy-complete.
+        They enrich every node with:
+          - pack membership (which custom-node pack it belongs to)
+          - behavioral labels (ReadsArbitraryFile, NetworkAccess, etc.)
+          - cloud_disabled (whether this node is disabled on cloud)
+
+        Useful for BOTH local and cloud: an agent building a workflow on a
+        local server still needs to know which nodes will work on cloud.
+        Local-only custom nodes not in comfy-complete simply get no labels
+        and cloud_disabled=False (safe default).
+        """
+        try:
+            from importlib import resources
+
+            data_pkg = resources.files("comfy_cli.cql.data")
+            sup = (data_pkg / "supported_nodes.yaml").read_bytes()
+            dis = (data_pkg / "cloud_disable_config.yaml").read_bytes()
+            nogpu = (data_pkg / "no_gpu_nodes.json").read_bytes()
+            self.annotate(sup, dis, nogpu)
+        except Exception:
+            pass  # missing package data is non-fatal
+
+    # -- Serialization helpers for CLI compat --
+
+    def morphism_to_dict(self, m: Morphism) -> dict[str, Any]:
+        return {
+            "id": m.id,
+            "name": m.id,
+            "display_name": m.display_name,
+            "description": m.description,
+            "category": m.category,
+            "output_types": m.output_types(),
+            "output_node": m.is_output_node,
+            "is_api_node": m.is_api_node,
+            "deprecated": m.deprecated,
+            "pack": m.pack,
+            "labels": m.labels,
+            "cloud_disabled": m.cloud_disabled,
+            "needs_gpu": m.needs_gpu,
+            "inputs": [
+                {
+                    "name": p.name,
+                    "type": p.type,
+                    "required": p.required,
+                    "is_link": p.is_link,
+                    "section": "required" if p.required else "optional",
+                    "choices": p.enum_values,
+                    "options": {
+                        "min": p.options.min,
+                        "max": p.options.max,
+                        "step": p.options.step,
+                        "default": p.options.default,
+                    },
+                }
+                for p in m.inputs
+            ],
+            "outputs": [{"name": p.name, "type": p.type} for p in m.outputs],
+        }
+
+
+# ---------------------------------------------------------------------------
+# Source loaders
+# ---------------------------------------------------------------------------
+
+import gzip
+import logging
+import urllib.error
+import urllib.parse
+import urllib.request
+
+_logger = logging.getLogger(__name__)
+
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1", "[::1]"})
+_MAX_OBJECT_INFO_BYTES = 64 * 1024 * 1024
+
+
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Refuse redirects — a 302 from /object_info is suspicious."""
+
+    def http_error_301(self, req, fp, code, msg, headers):
+        raise urllib.error.HTTPError(req.full_url, code, "redirect refused", headers, fp)
+
+    http_error_302 = http_error_303 = http_error_307 = http_error_308 = http_error_301
+
+
+_opener = urllib.request.build_opener(_NoRedirectHandler())
+
+
+class LoadError(Exception):
+    """Failed to load object_info from a source."""
+
+    def __init__(self, message: str, *, details: dict[str, Any] | None = None):
+        super().__init__(message)
+        self.details = details or {}
+
+
+def _load_from_file(path: str) -> dict[str, Any]:
+    """Read object_info from a local JSON file."""
+    from pathlib import Path
+
+    p = Path(path).expanduser()
+    try:
+        raw = p.read_text(encoding="utf-8")
+    except OSError as e:
+        raise LoadError(f"cannot read object_info: {p}: {e}", details={"path": str(p)}) from e
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError as e:
+        raise LoadError(f"invalid JSON in {p}: {e}", details={"path": str(p)}) from e
+
+
+def _load_from_target(*, mode: str = "local", host: str = "127.0.0.1", port: int = 8188) -> dict[str, Any]:
+    """Fetch /object_info from the resolved target — local or cloud.
+
+    Both paths are the same HTTP fetch; only the base URL, path prefix,
+    and auth headers differ. The Target abstraction handles all three.
+
+    Security:
+      - Local: loopback-only guard (warn on non-loopback)
+      - Cloud: HTTPS enforced by Target + auth headers
+      - Both: bounded read (64 MB), no-redirect policy
+    """
+    from comfy_cli.target import resolve_target
+
+    target = resolve_target(where=mode, host=host, port=port)
+    url = target.url("object_info")
+
+    # Loopback guard for local targets
+    if not target.is_cloud:
+        parsed_host = urllib.parse.urlsplit(url).hostname or ""
+        if parsed_host.lower() not in _LOOPBACK_HOSTS and not parsed_host.startswith("127."):
+            raise LoadError(
+                f"Refusing to fetch object_info from non-loopback host {parsed_host!r} "
+                f"in local mode (potential SSRF). Use --where cloud for remote targets."
+            )
+
+    req = urllib.request.Request(url)
+    req.add_header("Accept", "application/json")
+
+    # Auth headers (cloud only — local has no auth)
+    if target.is_cloud:
+        if target.api_key:
+            req.add_header("X-API-Key", target.api_key)
+        elif target.auth_token:
+            req.add_header("Authorization", f"Bearer {target.auth_token}")
+
+    try:
+        with _opener.open(req, timeout=30.0) as resp:
+            raw = resp.read(_MAX_OBJECT_INFO_BYTES + 1)
+            if len(raw) > _MAX_OBJECT_INFO_BYTES:
+                raise LoadError(
+                    f"response exceeds {_MAX_OBJECT_INFO_BYTES} bytes",
+                    details={"url": url},
+                )
+            return json.loads(raw)
+    except urllib.error.HTTPError as e:
+        body = ""
+        try:
+            body = e.read().decode("utf-8", errors="replace")[:500]
+        except Exception:
+            pass
+        hint = "run `comfy cloud login`" if target.is_cloud else "run `comfy launch` first"
+        raise LoadError(
+            f"HTTP {e.code} from {url}: {body[:200]}",
+            details={"url": url, "status": e.code, "hint": hint},
+        ) from e
+    except urllib.error.URLError as e:
+        hint = "run `comfy cloud login`" if target.is_cloud else "run `comfy launch` first"
+        raise LoadError(
+            f"cannot reach {url}: {e.reason if hasattr(e, 'reason') else e}",
+            details={"url": url, "mode": mode, "hint": hint},
+        ) from e
+    except (json.JSONDecodeError, OSError) as e:
+        raise LoadError(f"invalid response from {url}: {e}", details={"url": url}) from e
+
+
+# ---------------------------------------------------------------------------
+# Slot editing helpers — port of nodegraph/frontend.go + runtemplate.go
+# ---------------------------------------------------------------------------
+
+
+def _extract_frontend_slots(workflow: dict, graph: Graph) -> list[dict]:
+    """Walk workflow nodes and extract tweakable slots.
+
+    Two modes:
+      1. **Template/subgraph mode** — if subgraph instances exist, expose
+         their declared inputs (the curated parameter list from ``inputs[]``).
+      2. **Direct mode** — if no subgraph instances are found, expose every
+         widget input on every top-level node. This makes ``comfy workflow
+         slots`` and ``comfy workflow vary`` work on any frontend-format
+         workflow, not just published templates.
+    """
+    nodes = workflow.get("nodes") or []
+    defs = (workflow.get("definitions") or {}).get("subgraphs") or []
+    sg_by_type: dict[str, dict] = {}
+    for sg in defs:
+        if isinstance(sg, dict):
+            sg_by_type[sg.get("name") or sg.get("id", "")] = sg
+
+    # --- Template/subgraph mode ---
+    slots: list[dict] = []
+    for node in nodes:
+        if not isinstance(node, dict):
+            continue
+        node_type = node.get("type", "")
+        sg = sg_by_type.get(node_type)
+        if sg is None:
+            continue
+        instance_id = str(node.get("id", ""))
+        for inp in sg.get("inputs") or []:
+            if not isinstance(inp, dict):
+                continue
+            inp_name = inp.get("name", "")
+            inp_type = inp.get("type", {})
+            type_str = inp_type if isinstance(inp_type, str) else str(inp_type)
+            current = _resolve_proxy_value(node, sg, inp_name, graph)
+            slots.append({
+                "address": f"{instance_id}.{inp_name}",
+                "name": inp_name,
+                "type": type_str,
+                "current_value": current,
+                "instance_id": instance_id,
+                "node_type": node_type,
+            })
+
+    if slots:
+        return slots
+
+    # --- Direct mode: no subgraphs → expose widget inputs directly ---
+    for node in nodes:
+        if not isinstance(node, dict):
+            continue
+        node_type = node.get("type", "")
+        m = graph.node(node_type)
+        if m is None:
+            continue
+        instance_id = str(node.get("id", ""))
+        order = graph.widget_order(node_type)
+        widgets = node.get("widgets_values") or []
+        for port in m.inputs:
+            if port.is_link:
+                continue
+            try:
+                idx = order.index(port.name)
+            except ValueError:
+                continue
+            current = widgets[idx] if idx < len(widgets) else None
+            slots.append({
+                "address": f"{instance_id}.{port.name}",
+                "name": port.name,
+                "type": port.type,
+                "current_value": current,
+                "instance_id": instance_id,
+                "node_type": node_type,
+            })
+    return slots
+
+
+def _resolve_proxy_value(instance: dict, subgraph: dict, input_name: str, graph: Graph):
+    """Navigate proxyWidgets to find the current widget value."""
+    proxy = (instance.get("properties") or {}).get("proxyWidgets") or []
+    for entry in proxy:
+        if not isinstance(entry, list) or len(entry) < 2:
+            continue
+        name = entry[1] if isinstance(entry[1], str) else str(entry[1])
+        if name != input_name:
+            continue
+        interior_id = str(entry[0])
+        for inode in subgraph.get("nodes") or []:
+            if not isinstance(inode, dict) or str(inode.get("id", "")) != interior_id:
+                continue
+            interior_class = inode.get("type", "")
+            order = graph.widget_order(interior_class)
+            try:
+                idx = order.index(name)
+            except ValueError:
+                return None
+            widgets = inode.get("widgets_values") or []
+            return widgets[idx] if idx < len(widgets) else None
+        break
+    return None
+
+
+def _apply_one_slot(workflow: dict, addr: str, value: Any, graph: Graph) -> list[dict]:
+    """Apply a single slot override. Returns warnings. Raises ValueError on hard errors.
+
+    Supports two addressing modes:
+      1. **Subgraph/template mode** — if the target node is a subgraph
+         instance, route through ``proxyWidgets`` to the interior node.
+      2. **Direct mode** — if the target node is a regular node, update
+         ``widgets_values`` directly using the widget order.
+    """
+    if "." not in addr:
+        raise ValueError(f"invalid slot address {addr!r} (expected 'instance_id.input_name')")
+    instance_id, input_name = addr.split(".", 1)
+
+    nodes = workflow.get("nodes") or []
+    defs = (workflow.get("definitions") or {}).get("subgraphs") or []
+    sg_by_type: dict[str, dict] = {}
+    for sg in defs:
+        if isinstance(sg, dict):
+            sg_by_type[sg.get("name") or sg.get("id", "")] = sg
+
+    instance = next((n for n in nodes if isinstance(n, dict) and str(n.get("id", "")) == instance_id), None)
+    if instance is None:
+        raise ValueError(f"node {instance_id} not found in workflow")
+
+    node_type = instance.get("type", "")
+    sg = sg_by_type.get(node_type)
+
+    # --- Subgraph/template mode ---
+    if sg is not None:
+        proxy = (instance.get("properties") or {}).get("proxyWidgets") or []
+        interior_id = None
+        widget_name = None
+        for entry in proxy:
+            if not isinstance(entry, list) or len(entry) < 2:
+                continue
+            name = entry[1] if isinstance(entry[1], str) else str(entry[1])
+            if name == input_name:
+                interior_id = str(entry[0])
+                widget_name = name
+                break
+        if interior_id is None:
+            raise ValueError(f"no proxyWidget mapping for {addr}")
+
+        for inode in sg.get("nodes") or []:
+            if not isinstance(inode, dict) or str(inode.get("id", "")) != interior_id:
+                continue
+            interior_class = inode.get("type", "")
+            order = graph.widget_order(interior_class)
+            try:
+                widget_idx = order.index(widget_name)
+            except ValueError:
+                raise ValueError(f"widget {widget_name!r} not in order for {interior_class}")
+            widgets = inode.get("widgets_values") or []
+            if widget_idx >= len(widgets):
+                raise ValueError(f"widget index {widget_idx} out of range for {interior_class}")
+
+            warnings: list[dict] = []
+            m = graph.node(interior_class)
+            if m:
+                port = next((p for p in m.inputs if p.name == widget_name), None)
+                if port:
+                    err = port.validate_shape(value)
+                    if err:
+                        raise ValueError(err)
+                    warnings = port.validate_catalog(value)
+
+            widgets[widget_idx] = value
+            inode["widgets_values"] = widgets
+            return warnings
+
+        raise ValueError(f"interior node {interior_id} not found in subgraph")
+
+    # --- Direct mode: regular node → update widgets_values directly ---
+    m = graph.node(node_type)
+    if m is None:
+        raise ValueError(f"unknown node type {node_type!r} for node {instance_id}")
+    order = graph.widget_order(node_type)
+    try:
+        widget_idx = order.index(input_name)
+    except ValueError:
+        avail = [n for n in order if n != "control_after_generate"]
+        raise ValueError(
+            f"widget {input_name!r} not found on {node_type}; "
+            f"available widgets: {', '.join(avail) if avail else '(none — all inputs are links)'}"
+        )
+    widgets = instance.get("widgets_values") or []
+    if widget_idx >= len(widgets):
+        widgets.extend([None] * (widget_idx + 1 - len(widgets)))
+        instance["widgets_values"] = widgets
+
+    warnings: list[dict] = []
+    port = next((p for p in m.inputs if p.name == input_name), None)
+    if port:
+        err = port.validate_shape(value)
+        if err:
+            raise ValueError(err)
+        warnings = port.validate_catalog(value)
+
+    widgets[widget_idx] = value
+    instance["widgets_values"] = widgets
+    return warnings

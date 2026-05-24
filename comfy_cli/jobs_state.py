@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import secrets as _secrets
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
@@ -52,9 +53,14 @@ def state_dir() -> Path:
     return base
 
 
+_SAFE_PROMPT_ID = re.compile(r"^[a-zA-Z0-9_\-]{1,128}$")
+
+
 def state_path(prompt_id: str) -> Path:
     """Canonical path for one prompt's state file."""
     safe = prompt_id.replace("/", "_").replace("\\", "_")
+    if not _SAFE_PROMPT_ID.match(safe):
+        raise ValueError(f"unsafe prompt_id: {prompt_id!r}")
     return state_dir() / f"{safe}.json"
 
 

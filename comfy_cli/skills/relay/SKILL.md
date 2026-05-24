@@ -63,7 +63,7 @@ before generating files.
 After `comfy run`, distill the envelope into a single line:
 
 ```text
-Submitted (cloud) → 99626e0a-b7fb… · state: ~/Library/Application Support/comfy-cli/jobs/99626e0a-….json
+Submitted (cloud) → 99626e0a-b7fb… · state: <state_file path from envelope>
 ```
 
 Not this (don't dump the full envelope):
@@ -108,7 +108,7 @@ Or on failure:
 
 ## Output presentation
 
-After downloading outputs, present them to the user: use `view_image` for
+After downloading outputs, present them to the user: use `view_media` for
 images, provide the file path for videos. Don't just say "downloaded to
 ./outputs/" — show the artifact.
 

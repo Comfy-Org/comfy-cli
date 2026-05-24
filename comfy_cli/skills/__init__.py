@@ -23,6 +23,8 @@ Bundled skills:
 - ``comfy-audio``    — audio/music generation: ACE-Step, TTS, duration matching
 - ``comfy-pipeline`` — multi-stage orchestration: upload/download composition,
                        parallel fan-out, project layout
+- ``comfy-fragments``— typed reusable workflow fragments + YAML recipe
+                       composition (build large pipelines from small pieces)
 - ``comfy-debug``    — debugging skill for when workflows fail or jobs hang
 - ``comfy-cloud``    — Comfy Cloud–specific story (auth, base-URL pinning,
                        ``--where cloud`` gotchas)
@@ -53,6 +55,7 @@ BUNDLED_SKILLS: tuple[tuple[str, str], ...] = (
     ("comfy-edit", "edit"),
     ("comfy-condition", "condition"),
     ("comfy-pipeline", "pipeline"),
+    ("comfy-fragments", "fragments"),
     ("comfy-debug", "debug"),
     ("comfy-cloud", "cloud"),
     ("comfy-relay", "relay"),
@@ -346,6 +349,7 @@ def _cursor_description_for(skill_name: str) -> str:
         "comfy-edit": "Transform existing assets: upscale, inpaint, style transfer, image editing via comfy CLI.",
         "comfy-condition": "Guide generation: ControlNet, masks, reference images, motion control via comfy CLI.",
         "comfy-pipeline": "Multi-stage pipeline orchestration: upload/download, pipe composition, parallel fan-out via comfy CLI.",
+        "comfy-fragments": "Typed reusable workflow fragments + YAML recipe composition: build large pipelines from small tested pieces via comfy CLI.",
         "comfy-debug": "Debugging skill for the comfy CLI: failed workflows, hung jobs, error envelopes.",
         "comfy-cloud": "Comfy Cloud usage with the comfy CLI: OAuth login, --where cloud, base-URL overrides.",
     }.get(skill_name, f"comfy CLI skill: {skill_name}")

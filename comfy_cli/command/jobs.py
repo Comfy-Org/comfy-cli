@@ -63,6 +63,16 @@ def _is_pid_alive(pid: int) -> bool:
 # ---------------------------------------------------------------------------
 
 
+_UNSAFE_HOST_CHARS = frozenset("/@?#")
+
+
+def _validate_host(host: str) -> str:
+    """Reject host values that could cause URL injection."""
+    if any(c in host for c in _UNSAFE_HOST_CHARS):
+        raise typer.BadParameter(f"invalid host: {host!r} (contains URL-special characters)")
+    return host
+
+
 def _resolve_host_port(host: str | None, port: int | None) -> tuple[str, int]:
     cfg = ConfigManager()
     bg = cfg.background
@@ -70,7 +80,8 @@ def _resolve_host_port(host: str | None, port: int | None) -> tuple[str, int]:
         host = bg[0]
     if not port and bg is not None:
         port = bg[1]
-    return (host or DEFAULT_HOST, int(port or DEFAULT_PORT))
+    h = host or DEFAULT_HOST
+    return (_validate_host(h), int(port or DEFAULT_PORT))
 
 
 def _server_or_error(host: str, port: int, *, raise_on_missing: bool = True) -> bool:
@@ -260,7 +271,12 @@ def _gather_jobs(host: str, port: int, *, limit: int) -> list[JobRow]:
                 status_str = "error"
                 break
         outputs = body.get("outputs") or {}
-        output_count = sum(len(v.get("images") or []) for v in outputs.values() if isinstance(v, dict))
+        output_count = sum(
+            len(items)
+            for v in outputs.values() if isinstance(v, dict)
+            for key in ("images", "gifs", "videos", "audio", "files")
+            for items in [v.get(key) or []] if isinstance(items, list)
+        )
         wf = body.get("prompt") or [None, None, None, None]
         wf_dict = wf[2] if isinstance(wf, list) and len(wf) > 2 else None
         rows.append(
@@ -594,10 +610,11 @@ def _snapshot(host: str, port: int, prompt_id: str) -> dict | None:
     for v in outputs.values():
         if not isinstance(v, dict):
             continue
-        for img in v.get("images") or []:
-            if isinstance(img, dict) and "filename" in img:
-                q = urllib.parse.urlencode({k: img[k] for k in ("filename", "subfolder", "type") if k in img})
-                output_urls.append(f"http://{host}:{port}/view?{q}")
+        for key in ("images", "gifs", "videos", "audio", "files"):
+            for item in v.get(key) or []:
+                if isinstance(item, dict) and "filename" in item:
+                    q = urllib.parse.urlencode({k: item[k] for k in ("filename", "subfolder", "type") if k in item})
+                    output_urls.append(f"http://{host}:{port}/view?{q}")
 
     return {
         "prompt_id": prompt_id,
@@ -645,6 +662,162 @@ def _render_status_pretty(snap: dict, *, host: str, port: int) -> None:
             padding=(0, 1),
         )
     )
+
+
+# ---------------------------------------------------------------------------
+# `jobs cancel` — stop a running or pending prompt, locally or on cloud
+# ---------------------------------------------------------------------------
+
+
+@app.command(
+    "cancel",
+    help="Cancel a job. Idempotent — calling on an already-terminal prompt returns ok.",
+)
+@tracking.track_command("jobs")
+def cancel_cmd(
+    prompt_id: Annotated[str, typer.Argument(help="The prompt_id to cancel.")],
+    host: Annotated[str | None, typer.Option()] = None,
+    port: Annotated[int | None, typer.Option()] = None,
+    where: Annotated[
+        str | None,
+        typer.Option("--where", help="'local' (default) or 'cloud'."),
+    ] = None,
+):
+    if _is_cloud(where):
+        return _cloud_cancel(prompt_id)
+    h, p = _resolve_host_port(host, port)
+    _server_or_error(h, p)
+    return _local_cancel(prompt_id, h, p)
+
+
+def _local_cancel(prompt_id: str, host: str, port: int) -> None:
+    """Cancel a local prompt by removing it from the pending queue AND
+    interrupting any in-flight execution. ComfyUI splits these into two
+    endpoints; we hit both so the call works regardless of phase.
+
+    Returns 200 (ok) regardless of whether the prompt was actually
+    queued/running — mirrors cloud's idempotent behavior.
+    """
+    renderer = get_renderer()
+    base = f"http://{host}:{port}"
+
+    # 1. Remove from the pending queue (no-op if not pending).
+    queue_body = json.dumps({"delete": [prompt_id]}).encode("utf-8")
+    queue_req = urllib.request.Request(
+        f"{base}/queue", data=queue_body, method="POST", headers={"Content-Type": "application/json"}
+    )
+    queue_ok = True
+    try:
+        with urllib.request.urlopen(queue_req, timeout=10) as resp:
+            _ = resp.read()
+    except (urllib.error.HTTPError, urllib.error.URLError, OSError):
+        # Server refused the delete; common when the prompt isn't in queue.
+        # Don't fail the whole command — try the interrupt next.
+        queue_ok = False
+
+    # 2. Interrupt any currently-executing prompt. Note: /interrupt does
+    #    NOT take a prompt_id — it interrupts whatever is running. If the
+    #    user has only one job in flight (the typical agent case), this
+    #    is exactly what they want. With multiple concurrent jobs you'd
+    #    want a /history check first, but ComfyUI doesn't expose
+    #    "interrupt prompt X" anyway.
+    interrupt_req = urllib.request.Request(f"{base}/interrupt", method="POST")
+    interrupt_ok = True
+    try:
+        with urllib.request.urlopen(interrupt_req, timeout=10) as resp:
+            _ = resp.read()
+    except (urllib.error.HTTPError, urllib.error.URLError, OSError):
+        interrupt_ok = False
+
+    if not queue_ok and not interrupt_ok:
+        renderer.error(
+            code="cancel_failed",
+            message=f"both /queue and /interrupt failed on {host}:{port}",
+            hint="check the server is still reachable",
+            details={"host": host, "port": port, "prompt_id": prompt_id},
+        )
+        raise typer.Exit(code=1)
+
+    payload = {
+        "prompt_id": prompt_id,
+        "where": "local",
+        "host": host,
+        "port": port,
+        "queue_delete_ok": queue_ok,
+        "interrupt_ok": interrupt_ok,
+    }
+    if renderer.is_pretty():
+        from rich.text import Text
+
+        msg = Text.from_markup(f"  [bold green]✓[/bold green]  cancel sent for [cyan]{prompt_id[:8]}…[/cyan]")
+        renderer.console().print(msg)
+    renderer.emit(payload, command="jobs cancel")
+
+
+def _cloud_cancel(prompt_id: str) -> None:
+    """Cancel a cloud job via ``POST /api/jobs/<id>/cancel`` — idempotent."""
+    _cloud_preflight_or_exit()
+    renderer = get_renderer()
+
+    from comfy_cli.target import resolve_target
+
+    target = resolve_target(where="cloud")
+    # Quote prompt_id into the path segment so a hostile/malformed value can't
+    # escape (e.g. ``../foo`` → ``%2E%2E%2Ffoo``). Cloud rejects bad UUIDs
+    # upstream too; encoding here is defense in depth.
+    url = target.url("jobs", urllib.parse.quote(prompt_id, safe=""), "cancel")
+    req = urllib.request.Request(url, data=b"", method="POST")
+    if target.api_key:
+        req.add_header("X-API-Key", target.api_key)
+    elif target.auth_token:
+        req.add_header("Authorization", f"Bearer {target.auth_token}")
+
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            body = resp.read()
+    except urllib.error.HTTPError as e:
+        body_text = (e.read() or b"")[:1000].decode("utf-8", "replace")
+        if e.code == 404:
+            renderer.error(
+                code="prompt_not_found",
+                message=f"no cloud job with id {prompt_id!r}",
+                hint="check `comfy jobs ls --where cloud`",
+                details={"prompt_id": prompt_id},
+            )
+        else:
+            renderer.error(
+                code="cloud_http_error",
+                message=f"HTTP {e.code} cancelling {prompt_id}",
+                hint="check auth and that the job exists",
+                details={"status": e.code, "body": body_text, "prompt_id": prompt_id},
+            )
+        raise typer.Exit(code=1) from e
+    except (urllib.error.URLError, OSError) as e:
+        renderer.error(
+            code="cloud_http_error",
+            message=f"cancel failed: {e}",
+            hint="check network / `comfy auth whoami`",
+        )
+        raise typer.Exit(code=1) from e
+
+    parsed: dict | None
+    try:
+        parsed = json.loads(body) if body else None
+    except json.JSONDecodeError:
+        parsed = None
+    payload = {
+        "prompt_id": prompt_id,
+        "where": "cloud",
+        "base_url": target.base_url,
+        "response": parsed if isinstance(parsed, dict) else None,
+    }
+    if renderer.is_pretty():
+        from rich.text import Text
+
+        renderer.console().print(
+            Text.from_markup(f"  [bold green]✓[/bold green]  cancel sent for [cyan]{prompt_id[:8]}…[/cyan]")
+        )
+    renderer.emit(payload, command="jobs cancel", where="cloud")
 
 
 # ---------------------------------------------------------------------------
@@ -726,6 +899,7 @@ def watch_cmd(
                 if snap and snap["status"] in {"completed", "error"}:
                     end_reason = snap["status"]
                     end_details = snap
+                    outputs.extend(snap.get("outputs") or [])
                     break
                 continue
             except (WebSocketException, ConnectionError, OSError) as e:
@@ -784,14 +958,15 @@ def watch_cmd(
                 node = str(data.get("node"))
                 completed_nodes.add(node)
                 output = data.get("output") or {}
-                for img in output.get("images") or []:
-                    if isinstance(img, dict) and "filename" in img:
-                        q = urllib.parse.urlencode({k: img[k] for k in ("filename", "subfolder", "type") if k in img})
-                        url = f"http://{h}:{p}/view?{q}"
-                        outputs.append(url)
-                        if renderer.is_pretty():
-                            renderer.console().print(f"[bold green]✓[/bold green] output: [cyan]{url}[/cyan]")
-                        renderer.event("output", url=url, prompt_id=prompt_id)
+                for key in ("images", "gifs", "videos", "audio", "files"):
+                    for item in output.get(key) or []:
+                        if isinstance(item, dict) and "filename" in item:
+                            q = urllib.parse.urlencode({k: item[k] for k in ("filename", "subfolder", "type") if k in item})
+                            url = f"http://{h}:{p}/view?{q}"
+                            outputs.append(url)
+                            if renderer.is_pretty():
+                                renderer.console().print(f"[bold green]✓[/bold green] output: [cyan]{url}[/cyan]")
+                            renderer.event("output", url=url, prompt_id=prompt_id)
                 renderer.event("executed", node=node, prompt_id=prompt_id)
             elif t == "execution_error":
                 end_reason = "error"

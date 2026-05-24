@@ -133,11 +133,6 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "check your network connection and try again",
     ),
     ErrorCode(
-        "wasm_snapshot_missing",
-        "The bundled WASM object_info snapshot is missing.",
-        "reinstall comfy-cli or pass --input to provide object_info manually",
-    ),
-    ErrorCode(
         "workflow_unknown_nodes",
         "Workflow references class_type(s) not present in the server's object_info. "
         "`details.unknown_nodes` lists each with close_matches.",
@@ -169,10 +164,46 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "Cloud wait_for_completion exceeded `--timeout`.",
         "raise `--timeout`, or `comfy jobs watch <id> --where cloud`",
     ),
+    # --- models / templates introspection ------------------------------------
     ErrorCode(
-        "cloud_ui_workflow_unsupported",
-        "UI-format workflow on the cloud path; converter isn't wired yet.",
-        "export the workflow via ComfyUI `File > Export (API)`",
+        "invalid_argument",
+        "An argument intended for a URL path failed safe-path validation.",
+        "use only alphanumerics, `_`, `-`, or `.` in path-segment arguments",
+    ),
+    ErrorCode(
+        "folder_not_found",
+        "Cloud or local server returned 404 for the requested model folder.",
+        "list available folders via `comfy models list-folders`",
+    ),
+    ErrorCode(
+        "model_not_found",
+        "No asset matched the requested model name exactly. `details.close_matches` lists substring hits.",
+        "use `comfy models search --text <substring>` to find candidates",
+    ),
+    ErrorCode(
+        "models_show_local_unsupported",
+        "`comfy models show` needs the cloud asset catalog; local servers don't have one.",
+        "for local filename listing use `comfy models list-folder <folder>`",
+    ),
+    ErrorCode(
+        "template_fetch_failed",
+        "Fetching the per-template workflow JSON from `Comfy-Org/workflow_templates` failed.",
+        "check network; if 404, the gallery and templates dir are out of sync — report upstream",
+    ),
+    ErrorCode(
+        "template_workflow_invalid_json",
+        "Upstream `templates/<name>.json` was not parseable JSON.",
+        "report at https://github.com/Comfy-Org/workflow_templates/issues",
+    ),
+    ErrorCode(
+        "cancel_failed",
+        "`comfy jobs cancel` could not reach the local server to cancel the prompt.",
+        "check the server is still running on the host/port",
+    ),
+    ErrorCode(
+        "workflow_saved_local_unsupported",
+        "`comfy workflow {list,get,save,delete}` requires Comfy Cloud — local ComfyUI has no /api/workflows.",
+        "for local workflows, manage JSON files on disk via `workflow slots`/`set-slot`/`vary`",
     ),
     # --- auth (provider keys + cloud session intertwined) --------------------
     ErrorCode(
@@ -276,10 +307,38 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "A slot override failed validation (bad shape, unknown address, etc.).",
         "see `details` — addresses follow `<instance_id>.<input_name>`",
     ),
+    # --- workflow fragments / compose ---------------------------------------
     ErrorCode(
-        "workflow_variation_invalid",
-        "A variation override was malformed (e.g. `--slot k=value` not parseable as JSON).",
-        'values must be JSON arrays, e.g. `--slot prompt=\'["a","b"]\'`',
+        "fragment_invalid",
+        "A workflow fragment file failed schema validation "
+        "(bad `_fragment` header, missing fields, dangling `binds`, malformed interior node).",
+        "see `details.path` and the message — run `comfy workflow fragment validate <path>` to re-check",
+    ),
+    ErrorCode(
+        "fragment_lib_not_found",
+        "The fragment library directory doesn't exist.",
+        "create `./fragments/` (default) or pass `--lib <dir>`",
+    ),
+    ErrorCode(
+        "recipe_not_found",
+        "The compose recipe YAML file doesn't exist.",
+        "check the path",
+    ),
+    ErrorCode(
+        "recipe_invalid_yaml",
+        "The recipe file isn't valid YAML.",
+        "lint with `yamllint` or fix the syntax",
+    ),
+    ErrorCode(
+        "recipe_invalid",
+        "The recipe semantically fails to compose: missing required input/param, "
+        "unknown input/param key, duplicate alias, or unresolvable cross-step reference.",
+        "see `details.step_alias` and the message",
+    ),
+    ErrorCode(
+        "recipe_yaml_unavailable",
+        "PyYAML is not installed — `comfy workflow compose` needs it to read recipes.",
+        "pip install pyyaml",
     ),
     # --- CQL / object_info ---------------------------------------------------
     ErrorCode(

@@ -9,7 +9,7 @@ description: Drive Comfy Cloud from the comfy CLI — sign-in via OAuth, pin a c
 
 ```bash
 # (Optional) point at a non-prod env — a PR preview, staging, etc.
-comfy cloud set-base-url https://fe-pr-12159.testenvs.comfy.org
+comfy cloud set-base-url https://fe-pr-NNNNN.testenvs.comfy.org
 
 # Sign in. Opens a browser; completes via OAuth 2.1 + PKCE.
 comfy cloud login
@@ -60,20 +60,20 @@ comfy --json-stream jobs watch "$PID" --where cloud > "$PID.events" &
 
 ## Output URLs
 
-`run` and `jobs status` return `outputs: [...]` of fetchable URLs. Cloud URLs require the bearer token:
+`run` and `jobs status` return `outputs: [...]` of fetchable URLs. Use `comfy download` to retrieve them — it handles auth internally:
 
 ```bash
-curl -H "Authorization: Bearer $TOKEN" "<output-url>" -o image.png
+comfy --json jobs watch "$PID" --where cloud | comfy download --where cloud
 ```
-
-`/view` and `/api/view` both work on cloud — both go to the same handler.
 
 ## What lives where
 
+Use `comfy --json env` to see resolved config and credential paths.
+
 | Stored in | What |
 |---|---|
-| `~/.config/comfy-cli/config.ini` (or platformdirs equivalent) | `cloud_base_url` (set via `cloud set-base-url`) |
-| `~/.config/comfy-cli/credentials.json` (OS keychain on supported platforms) | OAuth session: `access_token`, `refresh_token`, `expires_at`, `base_url` |
+| CLI config file (see `comfy --json env`) | `cloud_base_url` (set via `cloud set-base-url`) |
+| Credentials store (see `comfy --json env`) | OAuth session: `access_token`, `refresh_token`, `expires_at`, `base_url` |
 | `$COMFY_CLOUD_BASE_URL` (env) | Per-shell override of the base URL |
 | `$COMFY_CLOUD_API_KEY` (env, alt path) | Hidden API-key auth bypass for service accounts / testing |
 
@@ -110,7 +110,7 @@ Read [comfy-debug] for the full envelope playbook. The cloud-flavored short vers
 | Not available on cloud | Local alternative |
 |---|---|
 | Real-time WebSocket events for `jobs watch` | ✅ available locally |
-| Auto-convert UI-format workflows (`/workflow/convert`) | ✅ available locally |
+| ~~Auto-convert UI-format workflows~~ (now handled client-side by `comfy run`) | N/A |
 | Custom-node installation | ✅ `comfy node install` (local) |
 | Long sessions past refresh-token expiry | ✅ no auth needed locally |
 

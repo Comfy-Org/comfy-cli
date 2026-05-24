@@ -65,15 +65,15 @@ def test_auth_list_empty_envelope(cli_env):
 
 
 def test_auth_set_then_list_shows_redacted(cli_env):
-    res = _run(["--json", "auth", "set", "civitai", "--key", "abcd1234efgh5678"], cli_env)
+    res = _run(["--json", "auth", "set", "civitai", "--key", "abcd1234efgh5678abcd1234"], cli_env)
     assert res.returncode == 0, res.stderr
     env = _last_json(res.stdout)
     assert env["changed"] is True
     providers = {p["provider"]: p for p in env["data"]["providers"]}
-    assert providers["civitai"]["key"] == "abcd…5678"
+    assert providers["civitai"]["key"] == "abcd…1234"
     assert providers["civitai"]["key_redacted"] is True
     # Plaintext key must not appear in the envelope.
-    assert "abcd1234efgh5678" not in json.dumps(env)
+    assert "abcd1234efgh5678abcd1234" not in json.dumps(env)
 
 
 def test_auth_remove_idempotent(cli_env):

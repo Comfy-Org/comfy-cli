@@ -111,6 +111,8 @@ def _poll_local_once(state: jobs_state.JobState, *, host: str | None, port: int 
         # No record yet — keep polling.
         return False
 
+    # Clear any transient poll error from a previous cycle.
+    state.error = None
     snap_status = str(snap.get("status") or "queued")
     state.status = snap_status
     if snap_status == "completed":
@@ -153,6 +155,8 @@ def _poll_cloud_once(state: jobs_state.JobState, *, client: Any = None) -> bool:
     if record is None:
         return False
 
+    # Clear any transient poll error from a previous cycle.
+    state.error = None
     raw = str(record.get("status") or "queued").lower()
     state.status = _CLOUD_STATUS_MAP.get(raw, raw)
 

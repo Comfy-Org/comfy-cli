@@ -33,9 +33,9 @@ def test_set_creates_file_and_returns_record(isolated_secrets):
 
 
 def test_set_redacts_in_to_dict(isolated_secrets):
-    rec = auth_store.set("civitai", "abcdefgh12345678")
+    rec = auth_store.set("civitai", "abcdefgh12345678extra")
     redacted = rec.to_dict()
-    assert redacted["key"] == "abcd…5678"
+    assert redacted["key"] == "abcd…xtra"
     assert redacted["key_redacted"] is True
 
 

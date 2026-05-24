@@ -1,7 +1,8 @@
 """Loader exception types.
 
-``CQLRuntimeError`` inherits from ``ComfygraphError`` so consumers can catch
-a single base type across both the Python loader and the WASM engine.
+``CQLRuntimeError`` is a standalone exception for the Python-side CQL
+loader / normaliser.  It carries a ``details`` dict for structured error
+envelopes, matching the interface that callers expect.
 """
 
 from __future__ import annotations
@@ -9,16 +10,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from comfy_cli.comfygraph import ComfygraphError
-
 
 @dataclass
-class CQLRuntimeError(ComfygraphError):
-    """Error from the Python-side CQL loader / normalizer.
-
-    Inherits from ``ComfygraphError`` so callers can ``except ComfygraphError``
-    to handle both WASM and Python failures uniformly.
-    """
+class CQLRuntimeError(Exception):
+    """Error from the Python-side CQL loader / normalizer."""
 
     runtime_message: str
     details: dict[str, Any] = field(default_factory=dict)

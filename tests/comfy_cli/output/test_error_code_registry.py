@@ -36,7 +36,11 @@ def _iter_python_files(root: Path):
         # Don't grade the registry against itself.
         if p.name == "error_codes.py":
             continue
-        if "_wasm" in p.parts or "__pycache__" in p.parts:
+        if "__pycache__" in p.parts:
+            continue
+        # engine.py uses internal validation result codes ("unknown_class_type",
+        # "shape_mismatch", etc.) in return-value dicts, not CLI error codes.
+        if p.name == "engine.py" and "cql" in p.parts:
             continue
         yield p
 

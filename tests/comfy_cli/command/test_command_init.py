@@ -24,7 +24,6 @@ import subprocess
 import sys
 import textwrap
 
-
 EXPECTED_SUBMODULES = frozenset({
     "code_search",
     "custom_nodes",

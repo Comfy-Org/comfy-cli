@@ -241,6 +241,176 @@ def test_orphaned_flag_visible_in_help():
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# `jobs cancel` — local + cloud paths
+# ---------------------------------------------------------------------------
+
+
+def _capture_urlopen(monkeypatch: pytest.MonkeyPatch, routes: dict):
+    """Capture calls to urlopen and return a list of (url, method, headers) per call."""
+    calls: list[dict] = []
+
+    class _Resp:
+        def __init__(self, body: bytes = b"{}"):
+            self.body = body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return self.body
+
+    def _fake(req, timeout=None):
+        url = req.full_url
+        method = req.get_method()
+        calls.append({"url": url, "method": method, "headers": dict(req.headers)})
+        for needle, payload in routes.items():
+            if needle in url:
+                if isinstance(payload, Exception):
+                    raise payload
+                return _Resp(payload if isinstance(payload, bytes) else json.dumps(payload).encode())
+        raise AssertionError(f"unexpected URL: {url}")
+
+    monkeypatch.setattr("urllib.request.urlopen", _fake)
+    return calls
+
+
+def test_jobs_cancel_local_hits_queue_and_interrupt(monkeypatch: pytest.MonkeyPatch):
+    """`comfy jobs cancel <id>` on local must POST to both /queue (for
+    pending) and /interrupt (for running). Both are best-effort — one
+    failing doesn't abort the other."""
+    from typer.testing import CliRunner
+
+    monkeypatch.setattr(jobs_mod, "_server_or_error", lambda h, p, **kw: True)
+    calls = _capture_urlopen(
+        monkeypatch,
+        {
+            "/queue": b"{}",
+            "/interrupt": b"{}",
+        },
+    )
+    runner = CliRunner()
+    result = runner.invoke(jobs_mod.app, ["cancel", "prompt-abc", "--where", "local"])
+    assert result.exit_code == 0, result.output
+
+    # Both endpoints called, POST.
+    urls = [c["url"] for c in calls]
+    assert any("/queue" in u for u in urls), urls
+    assert any("/interrupt" in u for u in urls), urls
+    methods = {c["method"] for c in calls}
+    assert methods == {"POST"}
+
+    # /queue payload carries the prompt_id.
+    queue_call = next(c for c in calls if "/queue" in c["url"])
+    # The body is on the Request, not in our captured dict — re-derive from headers.
+    assert queue_call["headers"].get("Content-type") == "application/json"
+
+
+def test_jobs_cancel_local_tolerates_one_failure(monkeypatch: pytest.MonkeyPatch):
+    """If /queue 404s but /interrupt 200s (job is running not pending), the
+    cancel still succeeds. Mirrors the real ComfyUI server's behavior."""
+    from typer.testing import CliRunner
+    import urllib.error
+
+    monkeypatch.setattr(jobs_mod, "_server_or_error", lambda h, p, **kw: True)
+    _capture_urlopen(
+        monkeypatch,
+        {
+            "/queue": urllib.error.HTTPError("http://x/queue", 404, "Not Found", {}, None),
+            "/interrupt": b"{}",
+        },
+    )
+    runner = CliRunner()
+    result = runner.invoke(jobs_mod.app, ["cancel", "prompt-abc", "--where", "local"])
+    assert result.exit_code == 0, result.output
+
+
+def test_jobs_cancel_local_both_fail_returns_error(monkeypatch: pytest.MonkeyPatch):
+    """If both /queue and /interrupt fail, surface cancel_failed."""
+    from typer.testing import CliRunner
+    import urllib.error
+
+    monkeypatch.setattr(jobs_mod, "_server_or_error", lambda h, p, **kw: True)
+    _capture_urlopen(
+        monkeypatch,
+        {
+            "/queue": urllib.error.URLError("connection refused"),
+            "/interrupt": urllib.error.URLError("connection refused"),
+        },
+    )
+    runner = CliRunner()
+    result = runner.invoke(jobs_mod.app, ["cancel", "prompt-abc", "--where", "local"])
+    assert result.exit_code == 1, result.output
+
+
+def test_jobs_cancel_cloud_posts_to_jobs_cancel_endpoint(monkeypatch: pytest.MonkeyPatch):
+    """Cloud cancel POSTs to /api/jobs/<id>/cancel with the auth header."""
+    from typer.testing import CliRunner
+
+    from comfy_cli.target import Target
+
+    fake_target = Target(
+        kind="cloud",
+        base_url="https://cloud.example.com",
+        path_prefix="/api",
+        history_path="history_v2",
+        jobs_path="jobs",
+        api_key="test-key",
+    )
+    monkeypatch.setattr("comfy_cli.target.resolve_target", lambda **kw: fake_target)
+    monkeypatch.setattr(jobs_mod, "_is_cloud", lambda w: True)
+    monkeypatch.setattr(jobs_mod, "_cloud_preflight_or_exit", lambda: None)
+
+    calls = _capture_urlopen(
+        monkeypatch,
+        {"/api/jobs/prompt-abc/cancel": b'{"status":"cancelling"}'},
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(jobs_mod.app, ["cancel", "prompt-abc", "--where", "cloud"])
+    assert result.exit_code == 0, result.output
+
+    assert len(calls) == 1
+    assert calls[0]["method"] == "POST"
+    assert "/api/jobs/prompt-abc/cancel" in calls[0]["url"]
+    # Auth header (urllib title-cases X-API-Key → X-api-key).
+    h = {k.lower(): v for k, v in calls[0]["headers"].items()}
+    assert h.get("x-api-key") == "test-key"
+
+
+def test_jobs_cancel_cloud_404_surfaces_prompt_not_found(monkeypatch: pytest.MonkeyPatch):
+    """404 on cloud cancel is the 'unknown prompt_id' signal — surface it as prompt_not_found."""
+    from typer.testing import CliRunner
+    import io
+    import urllib.error
+
+    from comfy_cli.target import Target
+
+    fake_target = Target(
+        kind="cloud",
+        base_url="https://cloud.example.com",
+        path_prefix="/api",
+        history_path="history_v2",
+        jobs_path="jobs",
+        api_key="test-key",
+    )
+    monkeypatch.setattr("comfy_cli.target.resolve_target", lambda **kw: fake_target)
+    monkeypatch.setattr(jobs_mod, "_is_cloud", lambda w: True)
+    monkeypatch.setattr(jobs_mod, "_cloud_preflight_or_exit", lambda: None)
+
+    err = urllib.error.HTTPError("https://x/cancel", 404, "Not Found", {}, io.BytesIO(b'{"error":"no such job"}'))
+    _capture_urlopen(monkeypatch, {"/api/jobs/missing/cancel": err})
+
+    runner = CliRunner()
+    result = runner.invoke(jobs_mod.app, ["cancel", "missing", "--where", "cloud"])
+    assert result.exit_code == 1
+    # Output contains the error code marker.
+    assert "prompt_not_found" in result.output
+
+
 def test_is_cloud_honors_env_var(monkeypatch: pytest.MonkeyPatch):
     """``comfy --where cloud jobs status X`` sets COMFY_WHERE in the env.
     ``_is_cloud(None)`` must return True so the cloud path is taken.

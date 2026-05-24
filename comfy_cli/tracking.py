@@ -34,7 +34,7 @@ EXECUTION_EVENTS = frozenset({"execution_start", "execution_success", "execution
 
 # Kwargs whose values must never reach tracking system.
 # The key is kept (with a redacted marker) so we can still see whether the option was supplied.
-SENSITIVE_TRACKING_KEYS = frozenset({"api_key"})
+SENSITIVE_TRACKING_KEYS = frozenset({"api_key", "key"})
 
 # Generate a unique tracing ID per command.
 config_manager = ConfigManager()
@@ -222,21 +222,14 @@ def prompt_tracking_consent(skip_prompt: bool = False, default_value: bool = Fal
         init_tracking(default_value)
         return
 
-    # When stdin or stdout is not a TTY (subprocess pipe, redirect, CI),
-    # blocking on the consent prompt would either hang the caller forever
-    # or corrupt their output stream. Enable tracking for this process and
-    # persist a stable anonymous user_id so repeat agentic usage from the
-    # same machine attributes to one identity. The consent flag itself
-    # stays unset so a later interactive run can still ask the human; if
-    # they consent, init_tracking will reuse this user_id.
+    # Non-interactive sessions (pipes, CI, agents) default to no tracking
+    # until the user explicitly consents via an interactive terminal.
+    # Persist a stable anonymous user_id so a later interactive consent
+    # prompt can reuse it, but do NOT auto-enable telemetry — that would
+    # violate the DO_NOT_TRACK convention spirit for OSS tooling.
     if not sys.stdin.isatty() or not sys.stdout.isatty():
-        _session_only_tracking = True
         if user_id is None:
             user_id = str(uuid.uuid4())
-            # Best-effort persistence — a read-only config dir (fresh CI,
-            # restricted sandbox) must not crash the caller. If the write
-            # fails we keep the in-memory user_id so this process still
-            # tracks normally; the next run on a writable host will retry.
             try:
                 config_manager.set(constants.CONFIG_KEY_USER_ID, user_id)
             except OSError:

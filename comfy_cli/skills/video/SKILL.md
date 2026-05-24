@@ -37,9 +37,8 @@ MUST add SaveVideo or the workflow produces no file.
 Discover available I2V nodes and their inputs:
 `comfy --json nodes show KlingImage2VideoNode`
 
-**Choosing a video provider:** Kling (highest quality, 2-5min), Wan/HappyHorse
-(good quality, faster), Veo (text-to-video with audio). Discover all:
-`comfy --json nodes ls --category "api node/video*"`
+**Choosing a video provider:** Discover available providers and their
+capabilities: `comfy --json nodes ls --category "api node/video*"`
 
 Always verify model names, duration choices, and mode options via
 `comfy --json nodes show <NodeName>` — they vary by provider and update
@@ -78,7 +77,7 @@ Critical nodes:
 
 ### THE FPS LESSON (critical, learned the hard way)
 
-- Kling outputs 24fps video. Other models may differ.
+- Check fps via `GetVideoComponents` output index 2; different models use different fps.
 - When assembling, wire the fps FROM the source:
   `"fps": ["4", 2]` (GetVideoComponents output index 2)
 - **NEVER hardcode `"fps": 30.0`** — it will speed up or slow down the
@@ -109,15 +108,15 @@ I2V motion prompts describe **HOW the scene moves**, not WHAT is in it
 Keep motion prompts short and specific. Describe: camera movement,
 subject action, environmental motion.
 
-Always include negative: "blurry, distorted, low quality, watermark,
-text overlay"
+Include a negative prompt appropriate to the model (e.g. quality/artifact
+terms). Check the node's inputs for a dedicated negative field.
 
 ## What NOT to do
 
 - Don't forget SaveVideo — API video nodes are not output nodes
 - Don't hardcode fps — wire it from GetVideoComponents
-- Don't use `"format": "video/mp4"` — the choice is `"mp4"` not a MIME
-  type
+- Don't guess the format string — check valid formats via
+  `comfy --json nodes show SaveVideo`
 - Don't assume all video models output the same fps
 - Don't chain `comfy jobs watch` calls sequentially for independent
   videos — submit all in parallel, then collect (see comfy-pipeline skill)

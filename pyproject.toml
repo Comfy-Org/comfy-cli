@@ -50,7 +50,7 @@ dependencies = [
   "typer>=0.12.5",
   "typing-extensions>=4.7",
   "uv>=0.6.9",
-  "wasmtime>=44.0.0",
+
   "websocket-client",
 ]
 
@@ -78,7 +78,8 @@ include = [ "comfy_cli*" ]
 "comfy_cli.skills.cloud" = [ "SKILL.md" ]
 "comfy_cli.skills.relay" = [ "SKILL.md" ]
 "comfy_cli.schemas" = [ "*.json", "*.md" ]
-"comfy_cli._wasm" = [ "*.wasm", "data/*.gz" ]
+
+"comfy_cli.cql.data" = [ "*.yaml", "*.json" ]
 "comfy_cli.command.generate" = [ "spec/openapi.yml" ]
 
 [tool.ruff]

@@ -166,7 +166,7 @@ class TestInitTrackingRoundTrip:
 
 
 class TestPromptTrackingConsent:
-    def test_enables_session_only_when_stdin_not_tty(self, tracking_module):
+    def test_no_tracking_when_stdin_not_tty(self, tracking_module):
         with (
             patch.object(tracking_module.sys.stdin, "isatty", return_value=False),
             patch.object(tracking_module.sys.stdout, "isatty", return_value=True),
@@ -175,10 +175,10 @@ class TestPromptTrackingConsent:
             tracking_module.prompt_tracking_consent()
         mock_prompt.assert_not_called()
         assert tracking_module.config_manager.get_bool(constants.CONFIG_KEY_ENABLE_TRACKING) is None
-        assert tracking_module._session_only_tracking is True
+        assert tracking_module._session_only_tracking is False
         assert tracking_module.user_id is not None
 
-    def test_enables_session_only_when_stdout_not_tty(self, tracking_module):
+    def test_no_tracking_when_stdout_not_tty(self, tracking_module):
         with (
             patch.object(tracking_module.sys.stdin, "isatty", return_value=True),
             patch.object(tracking_module.sys.stdout, "isatty", return_value=False),
@@ -187,19 +187,16 @@ class TestPromptTrackingConsent:
             tracking_module.prompt_tracking_consent()
         mock_prompt.assert_not_called()
         assert tracking_module.config_manager.get_bool(constants.CONFIG_KEY_ENABLE_TRACKING) is None
-        assert tracking_module._session_only_tracking is True
+        assert tracking_module._session_only_tracking is False
 
-    def test_session_only_tracking_fires_track_event(self, tracking_module):
+    def test_non_tty_does_not_fire_track_event(self, tracking_module):
         with (
             patch.object(tracking_module.sys.stdin, "isatty", return_value=False),
             patch.object(tracking_module.sys.stdout, "isatty", return_value=False),
         ):
             tracking_module.prompt_tracking_consent()
         tracking_module.track_event("some_event", {"k": "v"})
-        tracking_module.provider.track.assert_called_once()
-        event_name, distinct_id, _ = _last_track_call(tracking_module.provider)
-        assert event_name == "some_event"
-        assert distinct_id is not None
+        tracking_module.provider.track.assert_not_called()
 
     def test_session_only_persists_user_id(self, tracking_module):
         with (
@@ -221,8 +218,8 @@ class TestPromptTrackingConsent:
             patch.object(tracking_module.config_manager, "set", side_effect=PermissionError("read-only fs")),
         ):
             tracking_module.prompt_tracking_consent()
-        # In-memory state is still correct so this process tracks normally.
-        assert tracking_module._session_only_tracking is True
+        # Non-TTY sessions do not auto-enable tracking.
+        assert tracking_module._session_only_tracking is False
         assert tracking_module.user_id is not None
 
     def test_session_only_reuses_existing_user_id(self, tracking_module):

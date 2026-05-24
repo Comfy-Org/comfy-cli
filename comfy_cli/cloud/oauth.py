@@ -254,6 +254,7 @@ def _build_handler(
 
 def _pick_free_port() -> int:
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     s.bind((_LOOPBACK_HOST, 0))
     port = s.getsockname()[1]
     s.close()
@@ -425,6 +426,7 @@ def run_login(
         failure_html=_FAILURE_HTML,
     )
     server = http.server.HTTPServer((_LOOPBACK_HOST, port), handler_cls)
+    server.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server_thread = threading.Thread(target=server.handle_request, daemon=True)
     server_thread.start()
 

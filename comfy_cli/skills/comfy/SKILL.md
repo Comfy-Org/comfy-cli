@@ -51,20 +51,32 @@ without `--where`. Mention routing only when the user asks to switch.
 
 ## Error codes — react, don't guess
 
+The four most common error codes and what to do:
+
 | Code | Do this |
 |---|---|
+| `server_not_running` | `comfy launch` to start the local server, or switch to `--where cloud` |
 | `cloud_not_configured` | Ask the user to run `comfy cloud login` (opens browser, OAuth + PKCE) |
-| `cloud_unauthorized`   | Session expired or token rejected. Run `comfy cloud login` again. |
-| `cloud_http_error`     | HTTP failure from cloud — `details.status` + `details.body` carry the why |
-| `auth_not_signed_in`   | Run `comfy cloud login`; the user must complete sign-in in their browser |
-| `oauth_*` (any)        | Surface the message + hint verbatim; the user needs to act in their browser |
-| `server_not_running`   | `comfy launch` to start the local server, or switch to `--where cloud` |
-| `cql_no_graph`         | Pass `--input <path>` to a saved `object_info.json`, or run `comfy launch` |
-| `cql_query_invalid`    | The CQL grammar is pipe-separated directives (e.g. `produces IMAGE \| NOT deprecated`), not SQL. See `comfy nodes ls --help` for examples; for "is X here?" use `nodes search` instead |
-| `node_not_found`       | Read `details.close_matches` — pick the closest match and re-run |
-| `workflow_not_frontend_format` | This command requires the UI export, not the API export. Ask the user to save via `File > Save`. |
-| `auth_not_found`       | Re-list with `comfy --json auth list` to see what's actually stored |
-| `not_in_workspace`     | `comfy install` or pass `--workspace /path/to/ComfyUI` |
+| `cloud_unauthorized` | Session expired or token rejected. Run `comfy cloud login` again. |
+| `node_not_found` | Read `details.close_matches` — pick the closest match and re-run |
+
+For the full error code list and resolution steps, run `comfy --json discover`.
+
+## Routing the request — match the path to the intent
+
+Most creative requests fall into one of three paths. Pick by what
+matches the user's intent best — partner-API providers are often the
+highest-quality option, not the fallback.
+
+| If the user… | Use |
+|---|---|
+| names a partner provider (Flux Pro, Kling, Nano Banana, Veo, Grok, Ideogram, …) | `comfy generate <slug>` — direct dispatch against the provider's API |
+| asks for a shape the **gallery already covers** ("text-to-video", "remove background", "upscale image", "img-to-3D") | `comfy templates ls` → `comfy templates fetch <name>` → slot-edit → `comfy run` |
+| needs LoRAs, ControlNets, multi-step pipelines, or an OSS model the gallery doesn't cover | `comfy models search` to find the right files → build the workflow → `comfy run` |
+
+The middle row is the workhorse — `Comfy-Org/workflow_templates` has
+hundreds of curated workflows that are higher-quality than anything an
+agent would build from raw nodes. **Start there.**
 
 ---
 
@@ -88,13 +100,13 @@ codes, and capabilities. Everything below flows from it.
 ```bash
 comfy --json env             # what's installed locally
 comfy --json which           # workspace path
-comfy --json cloud whoami     # signed_in, auth_method (oauth/api_key), base_url, api_key_source
+comfy --json cloud whoami    # signed_in, auth_method (oauth/api_key), base_url, api_key_source
 comfy --json auth list       # all credentials (redacted)
 ```
 
 ## Nodes — introspect the graph
 
-For most cases use the flag-based verbs:
+Use flag-based filters on `nodes ls` to find nodes by capability:
 
 ```bash
 comfy --json nodes search "checkpoint"           # fuzzy by name/desc
@@ -102,6 +114,11 @@ comfy --json nodes show KSampler                 # full schema
 comfy --json nodes ls --produces MODEL --limit 5 # filter by output type
 comfy --json nodes ls --accepts CONDITIONING     # nodes that take this input
 comfy --json nodes ls --category "loaders*"      # glob on category path
+comfy --json nodes ls --pack comfyui-impact-pack # nodes from a specific pack
+comfy --json nodes ls --api-only                 # only partner-API nodes
+comfy --json nodes ls --output-only              # terminal output nodes (SaveImage, etc.)
+comfy --json nodes ls --exclude-deprecated       # skip deprecated nodes
+comfy --json nodes ls --cloud-disabled           # what cloud refuses to run
 comfy --json nodes upstream KSampler             # what feeds in
 comfy --json nodes downstream CheckpointLoaderSimple  # what follows
 comfy --json nodes path MODEL IMAGE              # routed paths between types
@@ -109,39 +126,98 @@ comfy --json nodes types                         # all connection types
 comfy --json nodes categories                    # full category tree
 ```
 
-For pipeline/boolean grammar, use `--query` (the **CQL** typed query
-language — pipelines, boolean predicates, sorting):
+Combine flags to narrow results:
 
 ```bash
-comfy --json nodes ls --query "produces IMAGE | NOT deprecated | sort connections | limit 10"
-comfy --json nodes ls --query "(produces VIDEO OR produces LATENT) AND NOT api"
+comfy --json nodes ls --produces VIDEO --exclude-deprecated --limit 10
+comfy --json nodes ls --pack core --produces MASK --limit 5
 ```
-
-CQL grammar reference: [github.com/Comfy-Org/cql](https://github.com/Comfy-Org/cql).
 
 If no local server is running and you're not signed into cloud, pass
 `--input <object_info.json>` to query against a saved dump.
 
+## Models — find what's installed, with metadata
+
+On **cloud**, `comfy models search` hits the live asset catalog
+(`/api/assets`) and returns enriched rows: `name`, `type`, `tags`,
+`base_model`, `source_url`, `preview_url`, `size`. On **local**, the same
+command falls back to `/models/<folder>` listings (filenames only).
+
+```bash
+comfy --json models list-folders                 # every model folder (loras, checkpoints, vae, …)
+comfy --json models list-folder loras            # files in a folder, with pathIndex
+comfy --json models search --text "wan2.2" --type lora --limit 10
+comfy --json models search --text "flux"         # text search across the catalog
+comfy --json models show wan2.2_vae.safetensors  # full Asset + projected row
+```
+
+`models search --type <X>` accepts the conventional folder names
+(`lora`/`loras`, `checkpoint`/`checkpoints`, `vae`, `controlnet`,
+`upscale`, `clip`, `clip_vision`, `unet`/`diffusion_models`, …). Use
+`models list-folders` first if you're unsure what types the backend
+exposes.
+
+## Templates — start from a known-good workflow
+
+The curated `Comfy-Org/workflow_templates` gallery is the **canonical
+entry point** for any "build me a workflow that does X" request. Don't
+reinvent.
+
+```bash
+comfy --json templates ls --type video --tag "Image to Video" --limit 10
+comfy --json templates show <name>               # full metadata: models, tags, providers
+comfy --json templates fetch <name> --out my.json # pulls the workflow JSON itself
+```
+
+`templates fetch` validates the name against the gallery index first, so
+typos surface as `template_not_found` with `details.close_matches` — not
+as a raw 404. The downloaded JSON is frontend-format; `comfy run --where
+cloud` auto-converts it to API format on submit.
+
+## Saved workflows on cloud
+
+`comfy workflow {list,save,get,delete}` manages workflows persisted to
+your cloud account via `/api/workflows`. Cloud-only — on local, manage
+JSON files on disk via `workflow slots/set-slot/vary` instead.
+
+```bash
+comfy --json workflow list                             # paginated, sorted by create_time
+comfy --json workflow list --name "wan" --limit 5      # case-insensitive name filter
+comfy --json workflow get <id> --out my.json           # writes workflow JSON
+comfy --json workflow save my.json --name "X" --description "Y"
+comfy --json workflow delete <id>
+```
+
+## Cancel a running job
+
+```bash
+comfy --json jobs cancel <prompt_id>            # auto-routes via --where
+comfy --json jobs cancel <prompt_id> --where cloud
+```
+
+Idempotent on cloud — calling on an already-terminal job returns ok.
+Local cancels both the pending-queue entry and any in-flight execution.
+
 ## The ecosystem is vast — explore before building
 
-ComfyUI is not just image generation. The node graph spans **image, video,
-audio, 3D, and text** — with hundreds of models and 30+ partner API
-providers (BFL, Kling, Runway, ElevenLabs, Meshy, Gemini, Grok, …).
+ComfyUI spans **image, video, audio, 3D, and text** — with hundreds of
+models and many partner API providers (BFL, Kling, Runway, ElevenLabs,
+Meshy, Gemini, Grok, …). Don't guess at counts — discover them:
 
-| What | Count | Discover |
-|---|---|---|
-| Total nodes | 3,400+ | `comfy --json nodes ls --limit 1` → `total` |
-| IMAGE producers | 900+ | `comfy --json nodes ls --produces IMAGE` |
-| VIDEO producers | 80+ | `comfy --json nodes ls --produces VIDEO` |
-| AUDIO producers | 70+ | `comfy --json nodes ls --produces AUDIO` |
-| Partner API nodes | 200+ | `comfy --json nodes ls --category "api node*"` |
-| API providers | 30+ | `comfy --json nodes categories --prefix "api node"` |
-| Checkpoints | 60+ | `comfy --json nodes show CheckpointLoaderSimple` → `choices` |
-| LoRAs | 580+ | `comfy --json nodes show LoraLoader` → `choices` |
-| Connection types | 88 | `comfy --json nodes types` |
+```bash
+comfy --json nodes ls --limit 1                  # check data.total for node count
+comfy --json nodes ls --produces IMAGE --limit 1 # IMAGE producer count
+comfy --json nodes ls --produces VIDEO --limit 1 # VIDEO producer count
+comfy --json nodes ls --produces AUDIO --limit 1 # AUDIO producer count
+comfy --json nodes ls --api-only --limit 1       # partner API node count
+comfy --json nodes categories --prefix "api node"# API provider categories
+comfy --json nodes types                         # all connection types
+comfy --json models list-folders                 # all model folders
+comfy --json templates ls --limit 1              # template count
+```
 
-The `total` field in `nodes ls` and `nodes search` gives the full count
-even when `--limit` caps the returned rows.
+The `total` field in `nodes ls`, `nodes search`, and `models search`
+gives the full count even when `--limit` caps the returned rows.
 
 ## Workflows — what can I tweak?
 
@@ -150,7 +226,9 @@ comfy --json workflow slots path.json   # every addressable slot, by address
 ```
 
 Slot addresses are `<instance_id>.<input_name>`. Feed them to
-`workflow set-slot` / `workflow vary` in the Execution half.
+`workflow set-slot` / `workflow vary` in the Execution half. Works on
+any frontend-format workflow JSON — templates, saved workflows, or
+hand-built files.
 
 ---
 
@@ -187,7 +265,7 @@ comfy --json jobs watch "$PROMPT_ID"
 
 # (b) Read the state file directly once you reason the job should be done.
 #     Cheapest — no extra process. Status is source of truth.
-cat "$STATE_FILE" | jq '{status, outputs, error}'
+jq '{status, outputs, error}' "$STATE_FILE"
 
 # (c) `--wait` on submit: foreground blocks from start to end.
 comfy --json run --workflow path.json --wait
@@ -202,16 +280,20 @@ agent pipelines don't spam).
 Before `comfy run`, verify the workflow will succeed:
 
 ```bash
-# Check every class_type exists on the target
+# Full pre-flight: checks class_types, input shapes, enum values, edge wiring
+comfy --json validate --workflow api.json
+
+# Spot-check a single node class exists on the target
 comfy --json nodes show <ClassName>
 # If error.code == "node_not_found", check details.close_matches
 
-# Check model/checkpoint names against available choices
-comfy --json nodes show CheckpointLoaderSimple | jq '.data.inputs[] | select(.name=="ckpt_name") | .choices'
+# Confirm a model filename is actually available on the resolved backend
+comfy --json models show <filename>
+# If error.code == "model_not_found", check details.close_matches and pick one
 ```
 
-This catches the two most common failures — unknown nodes and missing
-models — before burning cloud compute.
+This catches the most common failures — unknown nodes, missing models,
+bad wiring — before burning cloud compute.
 
 ## Inspect / track jobs
 
@@ -223,25 +305,32 @@ comfy --json jobs watch <prompt_id> # blocks until terminal; emits NDJSON with -
 
 ## Edit workflows in place
 
-Get slot addresses first via `workflow slots` (Discovery), then:
+`workflow slots`, `set-slot`, and `vary` work on any frontend-format
+workflow JSON — not just templates. Get slot addresses first:
 
 ```bash
+# 1. Discover addressable slots
+comfy --json workflow slots path.json
+# → lists every slot as <instance_id>.<input_name> with current values
+
+# 2. Set a single slot
 comfy workflow set-slot path.json 6.text="a cat"
 
+# 3. Generate variations (slot lists are zipped — same length required)
 comfy workflow vary path.json \
     --slot positive_prompt.text='["a cat","a dog","a fox"]' \
     --slot sampler.seed='[1,2,3]' \
     --out-dir ./variants
-# → 3 workflow JSONs in ./variants; slot lists are zipped.
+# → 3 workflow JSONs in ./variants
 ```
 
 ## Auth
 
 ```bash
-comfy --json cloud login                    # browser OAuth + PKCE
+comfy --json cloud login                         # browser OAuth + PKCE
 comfy --json cloud logout
-comfy --json auth set huggingface --key hf-…    # third-party provider key
-comfy --json cloud set-key --key sk-…      # API-key path for cloud
+comfy --json auth set huggingface --key hf-…     # third-party provider key
+comfy --json cloud set-key --key sk-…            # API-key path for cloud
 ```
 
 ## File transfer — upload and download

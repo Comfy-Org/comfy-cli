@@ -63,8 +63,7 @@ def _auth_headers(target: Any) -> dict[str, str]:
     return headers
 
 
-# Refuse redirects on upload/download — auth headers must not leak to redirect
-# targets. Mirrors comfy_client._NoRedirectHandler.
+# Refuse redirects on upload — a 30x from an authenticated POST is suspicious.
 class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
     def http_error_301(self, req, fp, code, msg, headers):
         raise urllib.error.HTTPError(req.full_url, code, "redirect refused (auth leak prevention)", headers, fp)
@@ -72,7 +71,35 @@ class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
     http_error_302 = http_error_303 = http_error_307 = http_error_308 = http_error_301
 
 
+# Stripped on every download redirect so auth never crosses origins.
+_AUTH_HEADERS_TO_STRIP = frozenset({"authorization", "x-api-key", "x-comfy-api-key", "cookie"})
+_MAX_REDIRECTS = 5
+
+
+class _DownloadRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Follow redirects but strip auth headers — cloud's `/api/view` 302s to
+    a signed GCS URL where the signature is the auth."""
+
+    max_redirections = _MAX_REDIRECTS
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        new_req = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if new_req is None:
+            return None
+        scheme = urllib.parse.urlsplit(newurl).scheme
+        if scheme not in ("http", "https"):
+            raise urllib.error.HTTPError(
+                req.full_url, code, f"refusing redirect to non-HTTP scheme: {scheme}", headers, fp
+            )
+        for src in (new_req.headers, new_req.unredirected_hdrs):
+            for key in list(src.keys()):
+                if key.lower() in _AUTH_HEADERS_TO_STRIP:
+                    del src[key]
+        return new_req
+
+
 _TRANSFER_OPENER = urllib.request.build_opener(_NoRedirectHandler())
+_DOWNLOAD_OPENER = urllib.request.build_opener(_DownloadRedirectHandler())
 
 
 def _sanitize_multipart_filename(name: str) -> str:
@@ -125,6 +152,16 @@ def execute_upload(
             raise typer.Exit(code=1)
 
         filename = path.name
+        file_size = path.stat().st_size
+        max_upload = 2 * 1024 * 1024 * 1024  # 2 GB safety cap
+        if file_size > max_upload:
+            renderer.error(
+                code="upload_failed",
+                message=f"File too large: {file_size} bytes (limit {max_upload})",
+                hint="compress or resize the file before uploading",
+                details={"filename": filepath, "size": file_size, "limit": max_upload},
+            )
+            raise typer.Exit(code=1)
         file_data = path.read_bytes()
         content_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
 
@@ -304,17 +341,32 @@ def execute_download(
             )
             raise typer.Exit(code=1)
 
+        # Refuse to overwrite symlinks (could be pointed at arbitrary files).
+        if local_path.is_symlink():
+            renderer.error(
+                code="download_failed",
+                message=f"Refusing to write to symlink: {local_path}",
+                hint="remove the symlink and retry",
+                details={"path": str(local_path), "index": idx},
+            )
+            raise typer.Exit(code=1)
+
         req = urllib.request.Request(url)
         for hdr, val in auth_hdrs.items():
             req.add_header(hdr, val)
 
+        max_download = 10 * 1024 * 1024 * 1024  # 10 GB safety cap
         try:
-            with _TRANSFER_OPENER.open(req) as resp:
+            with _DOWNLOAD_OPENER.open(req) as resp:
+                total = 0
                 with open(local_path, "wb") as fp:
                     while True:
                         chunk = resp.read(65536)
                         if not chunk:
                             break
+                        total += len(chunk)
+                        if total > max_download:
+                            raise ValueError(f"download exceeds {max_download} byte safety limit")
                         fp.write(chunk)
         except urllib.error.HTTPError as e:
             renderer.error(

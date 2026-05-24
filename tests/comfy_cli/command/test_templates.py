@@ -8,8 +8,6 @@ shape, and the not-found error code.
 from __future__ import annotations
 
 import json
-import os
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -23,7 +21,6 @@ from comfy_cli.output.renderer import (
     reset_renderer_for_testing,
     set_renderer,
 )
-
 
 FIXTURE = [
     {
@@ -184,3 +181,95 @@ def test_show_unknown_template_returns_error_code(gallery_file):
     env = _envelope(result.output)
     assert env["ok"] is False
     assert env["error"]["code"] == "template_not_found"
+
+
+# ---------------------------------------------------------------------------
+# templates fetch
+# ---------------------------------------------------------------------------
+
+
+def _stub_template_workflow_fetch(monkeypatch, body_or_exc):
+    """Patch the GitHub workflow-JSON fetch to return a canned body (or raise)."""
+    def _impl(name, timeout=15.0):
+        if isinstance(body_or_exc, Exception):
+            raise body_or_exc
+        return body_or_exc
+
+    monkeypatch.setattr(templates_cmd, "_fetch_template_workflow", _impl)
+
+
+def test_fetch_writes_to_stdout_in_pretty_mode(gallery_file, monkeypatch, capsys):
+    # Pretty mode (default); workflow JSON streams to stdout.
+    reset_renderer_for_testing()
+    workflow_body = json.dumps({"1": {"class_type": "KSampler", "inputs": {}}}).encode()
+    _stub_template_workflow_fetch(monkeypatch, workflow_body)
+
+    runner = CliRunner()
+    result = runner.invoke(templates_cmd.app, ["fetch", "--gallery", gallery_file, "image_flux2"])
+    assert result.exit_code == 0, result.output
+    # The workflow JSON itself was written to stdout (the user can pipe it).
+    assert '"class_type": "KSampler"' in result.output
+
+
+def test_fetch_with_out_writes_to_file(gallery_file, tmp_path: Path, monkeypatch, capsys):
+    _force_json_renderer()
+    workflow_body = json.dumps({"1": {"class_type": "KSampler", "inputs": {}}}).encode()
+    _stub_template_workflow_fetch(monkeypatch, workflow_body)
+
+    out_path = tmp_path / "out" / "wf.json"  # nested to verify parent mkdir
+    runner = CliRunner()
+    result = runner.invoke(
+        templates_cmd.app, ["fetch", "--gallery", gallery_file, "image_flux2", "--out", str(out_path)]
+    )
+    assert result.exit_code == 0, result.output
+    env = _envelope(result.output)
+    assert env["ok"] is True
+    assert env["data"]["name"] == "image_flux2"
+    assert env["data"]["node_count"] == 1
+    assert out_path.exists()
+    assert out_path.read_bytes() == workflow_body
+
+
+def test_fetch_unknown_template_surfaces_template_not_found(gallery_file, monkeypatch, capsys):
+    _force_json_renderer()
+    # The fetch helper should never be called because the gallery check fails first.
+    sentinel_called = {"fired": False}
+
+    def _should_not_fire(name, timeout=15.0):
+        sentinel_called["fired"] = True
+        raise AssertionError("fetch was called for an unknown template")
+
+    monkeypatch.setattr(templates_cmd, "_fetch_template_workflow", _should_not_fire)
+
+    runner = CliRunner()
+    result = runner.invoke(templates_cmd.app, ["fetch", "--gallery", gallery_file, "no_such_template"])
+    assert result.exit_code != 0
+    env = _envelope(result.output)
+    assert env["ok"] is False
+    assert env["error"]["code"] == "template_not_found"
+    assert sentinel_called["fired"] is False
+
+
+def test_fetch_upstream_404_surfaces_template_fetch_failed(gallery_file, monkeypatch, capsys):
+    import urllib.error
+
+    _force_json_renderer()
+    err = urllib.error.HTTPError("https://github/templates/x.json", 404, "Not Found", {}, None)
+    _stub_template_workflow_fetch(monkeypatch, err)
+
+    runner = CliRunner()
+    result = runner.invoke(templates_cmd.app, ["fetch", "--gallery", gallery_file, "image_flux2"])
+    assert result.exit_code != 0
+    env = _envelope(result.output)
+    assert env["error"]["code"] == "template_fetch_failed"
+
+
+def test_fetch_non_json_upstream_surfaces_workflow_invalid(gallery_file, monkeypatch, capsys):
+    _force_json_renderer()
+    _stub_template_workflow_fetch(monkeypatch, b"<html>not json</html>")
+
+    runner = CliRunner()
+    result = runner.invoke(templates_cmd.app, ["fetch", "--gallery", gallery_file, "image_flux2"])
+    assert result.exit_code != 0
+    env = _envelope(result.output)
+    assert env["error"]["code"] == "template_workflow_invalid_json"

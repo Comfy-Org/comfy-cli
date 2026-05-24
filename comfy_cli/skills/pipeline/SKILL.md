@@ -12,9 +12,7 @@ the individual stages.
 
 ## 0. Graph-first: build large workflows, not many small ones
 
-ComfyUI's power is the **workflow graph**. The execution engine
-automatically parallelizes independent branches, manages dependencies,
-and schedules nodes — you don't have to.
+ComfyUI's execution engine parallelizes independent branches automatically.
 
 **Default to building one large workflow** that wires generation,
 transformation, and assembly nodes together in a single graph. Only
@@ -26,6 +24,8 @@ split into separate workflows when:
 
 Anti-pattern: submitting many small workflows with upload/download between
 each. Let ComfyUI's DAG engine handle parallelism.
+
+Verify node class names via `comfy --json nodes show <ClassName>` before submitting.
 
 ```json
 // ✅ GOOD — one workflow graph, ComfyUI handles the DAG
@@ -156,5 +156,5 @@ assembly workflow to skip the missing input or re-wire around it.
 - Don't manually upload/download between nodes that could be wired together
   in the same workflow — every upload/download cycle is latency and fragility
   you don't need.
-- If a single workflow JSON grows past ~200 lines, see the `comfy-subgraphs`
-  skill.
+- If a single workflow JSON grows past ~200 lines, see the `comfy-fragments`
+  skill — typed reusable subgraph fragments + YAML recipe composition.
