@@ -32,6 +32,12 @@ POSTHOG_HOST = "https://t.comfy.org"
 # Only these events get the tracing_id --> workflow_run_id alias on PostHog.
 EXECUTION_EVENTS = frozenset({"execution_start", "execution_success", "execution_error"})
 
+# Namespace applied to event names on PostHog only, matching the
+# app:/hub:/registry: surface-prefix convention in the shared project. Mixpanel
+# keeps the bare legacy names (see ``mixpanel_name`` in track_event) so its
+# historical streams stay continuous.
+POSTHOG_EVENT_PREFIX = "cli:"
+
 # Kwargs whose values must never reach tracking system.
 # The key is kept (with a redacted marker) so we can still see whether the option was supplied.
 SENSITIVE_TRACKING_KEYS = frozenset({"api_key"})
@@ -113,9 +119,11 @@ class PostHogProvider:
         if not self.enabled or self.client is None or distinct_id is None:
             return
         merged = {**self._STANDARD_PROPERTIES, **properties}
+        # Membership check uses the canonical (unprefixed) name; the prefix is
+        # cosmetic to the PostHog taxonomy and applied only at capture time.
         if event_name in EXECUTION_EVENTS and "tracing_id" in merged:
             merged.setdefault("workflow_run_id", merged["tracing_id"])
-        self.client.capture(event=event_name, distinct_id=distinct_id, properties=merged)
+        self.client.capture(event=f"{POSTHOG_EVENT_PREFIX}{event_name}", distinct_id=distinct_id, properties=merged)
 
     def flush(self) -> None:
         if self.client is None:
