@@ -33,7 +33,7 @@ classifiers = [
 dependencies = [
   "charset-normalizer>=3",
   "cookiecutter",
-  "gitpython",
+  "gitpython>=3.1.50",
   "httpx",
   "mixpanel",
   "packaging",
@@ -49,7 +49,7 @@ dependencies = [
   "tomlkit",
   "typer>=0.12.5",
   "typing-extensions>=4.7",
-  "uv>=0.6.9",
+  "uv>=0.11.15",
 
   "websocket-client",
 ]
