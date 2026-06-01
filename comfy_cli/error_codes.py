@@ -320,24 +320,24 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "create `./fragments/` (default) or pass `--lib <dir>`",
     ),
     ErrorCode(
-        "recipe_not_found",
-        "The compose recipe YAML file doesn't exist.",
+        "blueprint_not_found",
+        "The compose blueprint YAML file doesn't exist.",
         "check the path",
     ),
     ErrorCode(
-        "recipe_invalid_yaml",
-        "The recipe file isn't valid YAML.",
+        "blueprint_invalid_yaml",
+        "The blueprint file isn't valid YAML.",
         "lint with `yamllint` or fix the syntax",
     ),
     ErrorCode(
-        "recipe_invalid",
-        "The recipe semantically fails to compose: missing required input/param, "
+        "blueprint_invalid",
+        "The blueprint semantically fails to compose: missing required input/param, "
         "unknown input/param key, duplicate alias, or unresolvable cross-step reference.",
         "see `details.step_alias` and the message",
     ),
     ErrorCode(
-        "recipe_yaml_unavailable",
-        "PyYAML is not installed — `comfy workflow compose` needs it to read recipes.",
+        "blueprint_yaml_unavailable",
+        "PyYAML is not installed — `comfy workflow compose` needs it to read blueprints.",
         "pip install pyyaml",
     ),
     # --- CQL / object_info ---------------------------------------------------

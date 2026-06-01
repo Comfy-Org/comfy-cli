@@ -98,8 +98,8 @@ def test_run_where_cloud_without_key_returns_cloud_not_configured(cli_env, tmp_p
 
 
 def test_run_where_cloud_with_expired_session_returns_unauthorized(cli_env, tmp_path):
-    # Plant an *expired* OAuth session so preflight surfaces unauthorized
-    # without us needing to mock the cloud HTTP path.
+    # Plant an *expired* OAuth session with NO refresh token (so proactive
+    # refresh is skipped — no network) → preflight surfaces unauthorized.
     secrets_path = Path(cli_env["COMFY_SECRETS_PATH"])
     secrets_path.write_text(
         json.dumps(
@@ -113,7 +113,7 @@ def test_run_where_cloud_with_expired_session_returns_unauthorized(cli_env, tmp_
                     "saved_at": "2026-05-15T00:00:00+00:00",
                     "tokens": {
                         "access_token": "fake-access-token-aaaaaaaa",
-                        "refresh_token": "fake-refresh-token-bbbbbbbb",
+                        "refresh_token": None,  # unrefreshable
                         "token_type": "Bearer",
                         "expires_at": 1,  # long expired
                     },
@@ -128,6 +128,37 @@ def test_run_where_cloud_with_expired_session_returns_unauthorized(cli_env, tmp_
     env = _last_json(res.stdout)
     assert env["error"]["code"] == "cloud_unauthorized"
     assert "comfy cloud login" in env["error"]["hint"]
+
+
+def test_cloud_whoami_expired_unrefreshable_session_is_not_signed_in(cli_env):
+    # An expired OAuth session with no refresh token must report signed_in=False
+    # (and expired=True) — not a misleading signed_in=True.
+    secrets_path = Path(cli_env["COMFY_SECRETS_PATH"])
+    secrets_path.write_text(
+        json.dumps(
+            {
+                "providers": {},
+                "cloud_session": {
+                    "base_url": "https://testcloud.comfy.org",
+                    "resource": "https://testcloud.comfy.org/mcp",
+                    "client_id": "mcp-dyn-fake-id",
+                    "scope": "mcp:tools:read",
+                    "saved_at": "2026-05-15T00:00:00+00:00",
+                    "tokens": {
+                        "access_token": "fake-access-token-aaaaaaaa",
+                        "refresh_token": None,  # unrefreshable
+                        "token_type": "Bearer",
+                        "expires_at": 1,  # long expired
+                    },
+                },
+            }
+        )
+    )
+    res = _run(["--json", "cloud", "whoami"], cli_env)
+    assert res.returncode == 0
+    env = _last_json(res.stdout)
+    assert env["data"]["signed_in"] is False
+    assert env["data"]["expired"] is True
 
 
 def test_auth_set_comfy_cloud_rejected(cli_env):

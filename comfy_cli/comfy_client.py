@@ -13,6 +13,7 @@ local-only.
 from __future__ import annotations
 
 import json
+import random
 import re
 import time
 import urllib.error
@@ -24,6 +25,13 @@ from typing import Any
 from comfy_cli.target import Target
 
 _LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1", "[::1]"}
+
+# Transient HTTP failures during polling should back off and retry, not abort.
+# 429 (rate limit) is retried for any method — the request was rejected, not
+# processed, so even a POST is safe to repeat. Transient 5xx is retried for
+# GET only, since a 5xx on a POST may have partially applied (double-submit).
+_MAX_TRANSIENT_RETRIES = 4
+_RETRYABLE_5XX = {502, 503, 504}
 
 # Strip Bearer tokens out of any text we might carry into logs/exceptions.
 _BEARER_RE = re.compile(r"Bearer\s+[A-Za-z0-9._\-]+", re.IGNORECASE)
@@ -155,6 +163,23 @@ class Client:
         except Exception:  # noqa: BLE001 — refresh is best-effort
             return False
 
+    @staticmethod
+    def _retry_delay(exc: urllib.error.HTTPError, attempt: int) -> float:
+        """Seconds to wait before retrying a transient failure.
+
+        Honors a server ``Retry-After`` (seconds) when present; otherwise uses
+        exponential backoff with jitter so concurrent waiters don't synchronize
+        into bursts.
+        """
+        retry_after = exc.headers.get("Retry-After") if getattr(exc, "headers", None) else None
+        if retry_after is not None:
+            try:
+                return min(float(retry_after), 30.0)
+            except (TypeError, ValueError):
+                pass
+        base = min(2 ** attempt, 16)
+        return base + random.uniform(0, base * 0.5)
+
     def _request(
         self,
         method: str,
@@ -163,6 +188,7 @@ class Client:
         body: dict | None = None,
         timeout: float | None = None,
         _retried: bool = False,
+        _attempt: int = 0,
     ) -> Any:
         url = self.target.url(*path_parts)
         # Only enforce https-or-loopback when we're carrying a bearer token.
@@ -203,6 +229,15 @@ class Client:
                 and self._try_refresh_token()
             ):
                 return self._request(method, path_parts, body=body, timeout=timeout, _retried=True)
+            # Transient: back off and retry. 429 for any method (rejected, not
+            # processed); 5xx for idempotent GETs only.
+            retryable = e.code == 429 or (e.code in _RETRYABLE_5XX and method == "GET")
+            if retryable and _attempt < _MAX_TRANSIENT_RETRIES:
+                time.sleep(self._retry_delay(e, _attempt))
+                return self._request(
+                    method, path_parts, body=body, timeout=timeout,
+                    _retried=_retried, _attempt=_attempt + 1,
+                )
             raise HTTPError(e.code, e.reason or "HTTP error", body_text) from e
 
     # ----- submit -----
@@ -298,8 +333,13 @@ class Client:
 
     # ----- polling helpers -----
 
-    def wait_for_completion(self, prompt_id: str, *, poll_interval: float = 1.0, timeout: float = 600.0) -> dict:
-        """Block until the prompt finishes; return the final history record."""
+    def wait_for_completion(self, prompt_id: str, *, poll_interval: float = 2.0, timeout: float = 600.0) -> dict:
+        """Block until the prompt finishes; return the final history record.
+
+        Polls ``get_history`` (transient 429/5xx are retried inside ``_request``).
+        A little jitter on the interval keeps concurrent waiters from
+        synchronizing into request bursts that trip cloud rate limits.
+        """
         deadline = time.time() + timeout
         while True:
             record = self.get_history(prompt_id)
@@ -307,7 +347,8 @@ class Client:
                 return record
             if time.time() >= deadline:
                 raise TimeoutError(f"workflow {prompt_id} did not complete within {timeout}s")
-            time.sleep(min(poll_interval, max(deadline - time.time(), 0.05)))
+            nap = poll_interval + random.uniform(0, min(poll_interval, 1.0) * 0.5)
+            time.sleep(min(nap, max(deadline - time.time(), 0.05)))
 
     # ----- output URL helpers -----
 

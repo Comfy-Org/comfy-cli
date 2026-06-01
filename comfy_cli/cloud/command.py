@@ -151,10 +151,13 @@ def logout_cmd():
 def whoami_cmd():
     import os as _os
 
+    from comfy_cli.cloud.oauth import ensure_fresh_session
     from comfy_cli.target import CLOUD_API_KEY_PROVIDER
 
     renderer = get_renderer()
-    session = store.get_cloud_session()
+    # Refresh first so we report (and persist) a live token rather than a
+    # token that quietly lapsed since the last command.
+    session = ensure_fresh_session()
     configured_base_url = get_base_url()
 
     api_key_source: str | None = None
@@ -167,7 +170,11 @@ def whoami_cmd():
     # When both are present, api_key wins (it's the header the client actually sends).
     has_api_key = api_key_source is not None
     has_oauth = session is not None
-    signed_in = has_api_key or has_oauth
+    expired = session.is_expired() if session else None
+    # `signed_in` must reflect whether we can actually authenticate right now:
+    # an API key, or an OAuth session that isn't expired (after the refresh
+    # attempt above). An expired, unrefreshable OAuth session is NOT signed in.
+    signed_in = has_api_key or (has_oauth and not expired)
     auth_method: str | None
     if has_api_key:
         auth_method = "api_key"
@@ -175,8 +182,6 @@ def whoami_cmd():
         auth_method = "oauth"
     else:
         auth_method = None
-
-    expired = session.is_expired() if session else None
     stale_base_url = (session.base_url != configured_base_url) if session else False
 
     if renderer.is_pretty():

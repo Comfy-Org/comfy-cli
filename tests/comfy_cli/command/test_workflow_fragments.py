@@ -11,12 +11,12 @@ from typer.testing import CliRunner
 
 from comfy_cli.caller import Caller
 from comfy_cli.command import workflow as workflow_cmd
-from comfy_cli.command.workflow_fragments import (
+from comfy_cli.fragments import (
+    BlueprintError,
     Fragment,
     FragmentError,
     Pipeline,
-    RecipeError,
-    compose_recipe,
+    compose_blueprint,
     load_fragment,
     parse_fragment,
 )
@@ -127,14 +127,51 @@ def _image_blend_fragment() -> dict:
     }
 
 
+def _model_producer_fragment() -> dict:
+    """Produces graph-typed outputs (MODEL/LATENT) — like a checkpoint loader."""
+    return {
+        "_fragment": {
+            "name": "model_producer",
+            "version": "1",
+            "inputs": {},
+            "outputs": {
+                "model": {"type": "MODEL", "from": "10", "port": 0},
+                "latent": {"type": "LATENT", "from": "11", "port": 0},
+            },
+            "params": {"ckpt": {"type": "STRING", "binds": "10.ckpt_name", "default": "x.safetensors"}},
+        },
+        "10": {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": "x.safetensors"}},
+        "11": {"class_type": "EmptyLatentImage", "inputs": {"width": 512, "height": 512}},
+    }
+
+
+def _model_consumer_fragment() -> dict:
+    """Consumes graph-typed inputs (MODEL/LATENT) via cross-step refs — like a sampler."""
+    return {
+        "_fragment": {
+            "name": "model_consumer",
+            "version": "1",
+            "inputs": {
+                "model": {"type": "MODEL", "binds": "20.model"},
+                "latent": {"type": "LATENT", "binds": "20.latent_image"},
+            },
+            "outputs": {"latent": {"type": "LATENT", "from": "20", "port": 0}},
+            "params": {},
+        },
+        "20": {"class_type": "KSampler", "inputs": {"model": "PLACEHOLDER", "latent_image": "PLACEHOLDER"}},
+    }
+
+
 @pytest.fixture
 def lib_dir(tmp_path: Path) -> Path:
-    """A `fragments/` library directory pre-populated with three fragments."""
+    """A `fragments/` library directory pre-populated with fragments."""
     d = tmp_path / "fragments"
     d.mkdir()
     (d / "text_encode.json").write_text(json.dumps(_text_encode_fragment()))
     (d / "save_still.json").write_text(json.dumps(_save_still_fragment()))
     (d / "image_blend.json").write_text(json.dumps(_image_blend_fragment()))
+    (d / "model_producer.json").write_text(json.dumps(_model_producer_fragment()))
+    (d / "model_consumer.json").write_text(json.dumps(_model_consumer_fragment()))
     return d
 
 
@@ -174,10 +211,18 @@ class TestParseFragment:
         with pytest.raises(FragmentError, match="name"):
             parse_fragment(data)
 
-    def test_unknown_input_type_rejected(self):
+    def test_graph_socket_input_types_accepted(self):
+        """Graph-only socket types (MODEL/CONDITIONING/LATENT/VAE, custom) are valid inputs."""
+        for t in ("MODEL", "CONDITIONING", "LATENT", "VAE", "CLIP", "CONTROL_NET"):
+            data = _text_encode_fragment()
+            data["_fragment"]["inputs"]["clip"]["type"] = t
+            frag = parse_fragment(data)
+            assert frag.inputs["clip"].type == t
+
+    def test_malformed_input_type_rejected(self):
         data = _text_encode_fragment()
-        data["_fragment"]["inputs"]["clip"]["type"] = "CONDITIONING"
-        with pytest.raises(FragmentError, match="type 'CONDITIONING' not in"):
+        data["_fragment"]["inputs"]["clip"]["type"] = "conditioning"  # lowercase = not a socket type
+        with pytest.raises(FragmentError, match="socket type"):
             parse_fragment(data)
 
     def test_unknown_param_type_rejected(self):
@@ -243,13 +288,13 @@ class TestLoadFragment:
 
 
 # ---------------------------------------------------------------------------
-# Pipeline / compose_recipe — composition behavior
+# Pipeline / compose_blueprint — composition behavior
 # ---------------------------------------------------------------------------
 
 
 class TestCompose:
     def test_single_step_with_terminal_saves_nothing_extra(self, lib_dir: Path):
-        recipe = {
+        blueprint = {
             "pipeline": [
                 {
                     "fragment": "save_still",
@@ -259,7 +304,7 @@ class TestCompose:
                 }
             ]
         }
-        wf, summary = compose_recipe(recipe, lib_dir=lib_dir)
+        wf, summary = compose_blueprint(blueprint, lib_dir=lib_dir)
         # Terminal fragment → no auto-save appended
         save_image_nodes = [n for n in wf.values() if n["class_type"] == "SaveImage"]
         assert len(save_image_nodes) == 1  # the one inside save_still
@@ -274,17 +319,17 @@ class TestCompose:
         assert summary["fragments_used"] == ["save_still"]
 
     def test_default_param_applied_when_omitted(self, lib_dir: Path):
-        recipe = {
+        blueprint = {
             "pipeline": [
                 {"fragment": "text_encode", "alias": "p", "inputs": {"clip": "fake_clip"}}
             ]
         }
-        wf, _ = compose_recipe(recipe, lib_dir=lib_dir)
+        wf, _ = compose_blueprint(blueprint, lib_dir=lib_dir)
         encode = [n for n in wf.values() if n["class_type"] == "CLIPTextEncode"][0]
         assert encode["inputs"]["text"] == "default prompt"
 
     def test_param_override(self, lib_dir: Path):
-        recipe = {
+        blueprint = {
             "pipeline": [
                 {
                     "fragment": "text_encode",
@@ -294,18 +339,18 @@ class TestCompose:
                 }
             ]
         }
-        wf, _ = compose_recipe(recipe, lib_dir=lib_dir)
+        wf, _ = compose_blueprint(blueprint, lib_dir=lib_dir)
         encode = [n for n in wf.values() if n["class_type"] == "CLIPTextEncode"][0]
         assert encode["inputs"]["text"] == "OVERRIDE"
 
     def test_cross_step_ref_wires_to_prior_output(self, lib_dir: Path):
-        recipe = {
+        blueprint = {
             "pipeline": [
                 {"fragment": "text_encode", "alias": "p1", "inputs": {"clip": "clip_a"}, "params": {"text": "first"}},
                 {"fragment": "text_encode", "alias": "p2", "inputs": {"clip": "$p1.conditioning"}, "params": {"text": "second"}},
             ]
         }
-        wf, summary = compose_recipe(recipe, lib_dir=lib_dir)
+        wf, summary = compose_blueprint(blueprint, lib_dir=lib_dir)
         # The second CLIPTextEncode's `clip` input must be a node reference to the first
         encodes = sorted(
             [(nid, n) for nid, n in wf.items() if n["class_type"] == "CLIPTextEncode"],
@@ -317,7 +362,7 @@ class TestCompose:
         assert p2_node["inputs"]["clip"] == [p1_nid, 0]
 
     def test_image_input_injects_loadimage(self, lib_dir: Path):
-        recipe = {
+        blueprint = {
             "pipeline": [
                 {
                     "fragment": "image_blend",
@@ -326,7 +371,7 @@ class TestCompose:
                 }
             ]
         }
-        wf, _ = compose_recipe(recipe, lib_dir=lib_dir)
+        wf, _ = compose_blueprint(blueprint, lib_dir=lib_dir)
         load_nodes = [n for n in wf.values() if n["class_type"] == "LoadImage"]
         assert len(load_nodes) == 2
         loaded_paths = {n["inputs"]["image"] for n in load_nodes}
@@ -334,13 +379,13 @@ class TestCompose:
 
     def test_node_ids_remapped_no_collision(self, lib_dir: Path):
         """Two instances of the same fragment must not collide on interior node IDs."""
-        recipe = {
+        blueprint = {
             "pipeline": [
                 {"fragment": "text_encode", "alias": "a", "inputs": {"clip": "ca"}, "params": {"text": "x"}},
                 {"fragment": "text_encode", "alias": "b", "inputs": {"clip": "cb"}, "params": {"text": "y"}},
             ]
         }
-        wf, _ = compose_recipe(recipe, lib_dir=lib_dir)
+        wf, _ = compose_blueprint(blueprint, lib_dir=lib_dir)
         # Both fragments use interior id "10"; the merged workflow must have two
         # distinct CLIPTextEncode nodes with distinct IDs.
         encode_ids = [nid for nid, n in wf.items() if n["class_type"] == "CLIPTextEncode"]
@@ -348,7 +393,7 @@ class TestCompose:
         assert len(set(encode_ids)) == 2
 
     def test_non_terminal_final_auto_appends_save(self, lib_dir: Path):
-        recipe = {
+        blueprint = {
             "pipeline": [
                 {
                     "fragment": "image_blend",
@@ -358,71 +403,118 @@ class TestCompose:
             ],
             "output_prefix": "myprefix",
         }
-        wf, summary = compose_recipe(recipe, lib_dir=lib_dir)
+        wf, summary = compose_blueprint(blueprint, lib_dir=lib_dir)
         saves = [n for n in wf.values() if n["class_type"] == "SaveImage"]
         assert len(saves) == 1
         assert saves[0]["inputs"]["filename_prefix"] == "myprefix"
         assert summary["save_action"] == {"type": "IMAGE", "prefix": "myprefix"}
 
     def test_missing_input_errors_with_step_alias(self, lib_dir: Path):
-        recipe = {"pipeline": [{"fragment": "text_encode", "alias": "only", "params": {"text": "x"}}]}
-        with pytest.raises(RecipeError) as exc:
-            compose_recipe(recipe, lib_dir=lib_dir)
+        blueprint = {"pipeline": [{"fragment": "text_encode", "alias": "only", "params": {"text": "x"}}]}
+        with pytest.raises(BlueprintError) as exc:
+            compose_blueprint(blueprint, lib_dir=lib_dir)
         assert exc.value.step_alias == "only"
         assert "missing required input" in str(exc.value)
 
     def test_unknown_input_key_errors(self, lib_dir: Path):
-        recipe = {
+        blueprint = {
             "pipeline": [
                 {"fragment": "text_encode", "alias": "x", "inputs": {"clip": "a", "typo": "b"}}
             ]
         }
-        with pytest.raises(RecipeError, match="unknown inputs"):
-            compose_recipe(recipe, lib_dir=lib_dir)
+        with pytest.raises(BlueprintError, match="unknown inputs"):
+            compose_blueprint(blueprint, lib_dir=lib_dir)
 
     def test_unknown_param_key_errors(self, lib_dir: Path):
-        recipe = {
+        blueprint = {
             "pipeline": [
                 {"fragment": "text_encode", "alias": "x", "inputs": {"clip": "a"}, "params": {"typo": 1}}
             ]
         }
-        with pytest.raises(RecipeError, match="unknown params"):
-            compose_recipe(recipe, lib_dir=lib_dir)
+        with pytest.raises(BlueprintError, match="unknown params"):
+            compose_blueprint(blueprint, lib_dir=lib_dir)
 
     def test_duplicate_alias_errors(self, lib_dir: Path):
-        recipe = {
+        blueprint = {
             "pipeline": [
                 {"fragment": "text_encode", "alias": "dup", "inputs": {"clip": "a"}},
                 {"fragment": "text_encode", "alias": "dup", "inputs": {"clip": "b"}},
             ]
         }
-        with pytest.raises(RecipeError, match="dup"):
-            compose_recipe(recipe, lib_dir=lib_dir)
+        with pytest.raises(BlueprintError, match="dup"):
+            compose_blueprint(blueprint, lib_dir=lib_dir)
 
     def test_unknown_alias_in_cross_ref(self, lib_dir: Path):
-        recipe = {
+        blueprint = {
             "pipeline": [
                 {"fragment": "text_encode", "alias": "p2", "inputs": {"clip": "$nope.conditioning"}}
             ]
         }
-        with pytest.raises(RecipeError, match="unknown alias"):
-            compose_recipe(recipe, lib_dir=lib_dir)
+        with pytest.raises(BlueprintError, match="unknown alias"):
+            compose_blueprint(blueprint, lib_dir=lib_dir)
 
     def test_unknown_output_name_in_cross_ref(self, lib_dir: Path):
-        recipe = {
+        blueprint = {
             "pipeline": [
                 {"fragment": "text_encode", "alias": "p1", "inputs": {"clip": "x"}},
                 {"fragment": "text_encode", "alias": "p2", "inputs": {"clip": "$p1.no_such_output"}},
             ]
         }
-        with pytest.raises(RecipeError, match="no output"):
-            compose_recipe(recipe, lib_dir=lib_dir)
+        with pytest.raises(BlueprintError, match="no output"):
+            compose_blueprint(blueprint, lib_dir=lib_dir)
 
     def test_empty_pipeline_errors(self, lib_dir: Path):
-        with pytest.raises(RecipeError, match="pipeline"):
-            compose_recipe({}, lib_dir=lib_dir)
-        with pytest.raises(RecipeError, match="pipeline"):
-            compose_recipe({"pipeline": []}, lib_dir=lib_dir)
+        with pytest.raises(BlueprintError, match="blueprint"):
+            compose_blueprint({}, lib_dir=lib_dir)
+        with pytest.raises(BlueprintError, match="blueprint"):
+            compose_blueprint({"pipeline": []}, lib_dir=lib_dir)
+
+    def test_graph_typed_inputs_wire_via_cross_ref(self, lib_dir: Path):
+        """MODEL/LATENT inputs fed by `$alias.output` wire to the producer's nodes."""
+        blueprint = {
+            "pipeline": [
+                {"fragment": "model_producer", "alias": "base", "params": {"ckpt": "m.safetensors"}},
+                {"fragment": "model_consumer", "alias": "samp",
+                 "inputs": {"model": "$base.model", "latent": "$base.latent"}},
+            ]
+        }
+        wf, _ = compose_blueprint(blueprint, lib_dir=lib_dir)
+        ckpt = next(nid for nid, n in wf.items() if n["class_type"] == "CheckpointLoaderSimple")
+        empty = next(nid for nid, n in wf.items() if n["class_type"] == "EmptyLatentImage")
+        ksampler = next(n for n in wf.values() if n["class_type"] == "KSampler")
+        assert ksampler["inputs"]["model"] == [ckpt, 0]
+        assert ksampler["inputs"]["latent_image"] == [empty, 0]
+
+    def test_graph_typed_input_with_path_literal_errors(self, lib_dir: Path):
+        """A graph-only type can't be loaded from a path — must use a cross-step ref."""
+        blueprint = {
+            "pipeline": [
+                {"fragment": "model_consumer", "alias": "samp",
+                 "inputs": {"model": "some/model.safetensors", "latent": "$samp.latent"}},
+            ]
+        }
+        with pytest.raises(BlueprintError, match="can't be loaded from a path"):
+            compose_blueprint(blueprint, lib_dir=lib_dir)
+
+    def test_malformed_cross_step_ref_errors_clearly(self, lib_dir: Path):
+        """A bad ref like `$ref:p1.x` reports a malformed ref, not a cryptic unknown alias."""
+        blueprint = {
+            "pipeline": [
+                {"fragment": "text_encode", "alias": "p1", "inputs": {"clip": "x"}},
+                {"fragment": "text_encode", "alias": "p2", "inputs": {"clip": "$ref:p1.conditioning"}},
+            ]
+        }
+        with pytest.raises(BlueprintError, match="malformed cross-step ref"):
+            compose_blueprint(blueprint, lib_dir=lib_dir)
+
+    def test_invalid_alias_rejected(self, lib_dir: Path):
+        blueprint = {
+            "pipeline": [
+                {"fragment": "text_encode", "alias": "bad:alias", "inputs": {"clip": "x"}},
+            ]
+        }
+        with pytest.raises(BlueprintError, match="valid identifier"):
+            compose_blueprint(blueprint, lib_dir=lib_dir)
 
 
 # ---------------------------------------------------------------------------
@@ -432,8 +524,8 @@ class TestCompose:
 
 class TestComposeCmd:
     def test_compose_writes_compiled_json(self, lib_dir: Path, tmp_path: Path, capsys):
-        recipe = tmp_path / "demo.yaml"
-        recipe.write_text(textwrap.dedent("""\
+        blueprint = tmp_path / "demo.yaml"
+        blueprint.write_text(textwrap.dedent("""\
             pipeline:
               - fragment: text_encode
                 alias: p
@@ -441,7 +533,7 @@ class TestComposeCmd:
                 params: {text: hello}
         """))
         out = tmp_path / "built.json"
-        envelope = _run(["compose", str(recipe), "-o", str(out), "--lib", str(lib_dir)], capsys)
+        envelope = _run(["compose", str(blueprint), "-o", str(out), "--lib", str(lib_dir)], capsys)
         assert envelope["ok"] is True
         assert envelope["data"]["nodes"] >= 1
         assert out.exists()
@@ -449,33 +541,35 @@ class TestComposeCmd:
         encodes = [n for n in wf.values() if n["class_type"] == "CLIPTextEncode"]
         assert encodes[0]["inputs"]["text"] == "hello"
 
-    def test_compose_missing_recipe(self, tmp_path: Path, capsys):
+    def test_compose_missing_blueprint(self, tmp_path: Path, capsys):
         envelope = _run(["compose", str(tmp_path / "nope.yaml")], capsys)
         assert envelope["ok"] is False
-        assert envelope["error"]["code"] == "recipe_not_found"
+        assert envelope["error"]["code"] == "blueprint_not_found"
 
     def test_compose_invalid_yaml(self, tmp_path: Path, capsys):
-        recipe = tmp_path / "bad.yaml"
-        recipe.write_text("pipeline: [ this is not balanced")
-        envelope = _run(["compose", str(recipe)], capsys)
+        blueprint = tmp_path / "bad.yaml"
+        blueprint.write_text("pipeline: [ this is not balanced")
+        envelope = _run(["compose", str(blueprint)], capsys)
         assert envelope["ok"] is False
-        assert envelope["error"]["code"] == "recipe_invalid_yaml"
+        assert envelope["error"]["code"] == "blueprint_invalid_yaml"
 
-    def test_compose_missing_input_returns_recipe_invalid(self, lib_dir: Path, tmp_path: Path, capsys):
-        recipe = tmp_path / "r.yaml"
-        recipe.write_text("pipeline:\n  - fragment: text_encode\n    alias: x\n    params: {text: y}\n")
-        envelope = _run(["compose", str(recipe), "--lib", str(lib_dir)], capsys)
+    def test_compose_missing_input_returns_blueprint_invalid(self, lib_dir: Path, tmp_path: Path, capsys):
+        blueprint = tmp_path / "r.yaml"
+        blueprint.write_text("pipeline:\n  - fragment: text_encode\n    alias: x\n    params: {text: y}\n")
+        envelope = _run(["compose", str(blueprint), "--lib", str(lib_dir)], capsys)
         assert envelope["ok"] is False
-        assert envelope["error"]["code"] == "recipe_invalid"
+        assert envelope["error"]["code"] == "blueprint_invalid"
         assert "missing required input" in envelope["error"]["message"]
 
 
 class TestFragmentCmds:
-    def test_ls_lists_three(self, lib_dir: Path, capsys):
+    def test_ls_lists_library(self, lib_dir: Path, capsys):
         envelope = _run(["fragment", "ls", "--lib", str(lib_dir)], capsys)
         assert envelope["ok"] is True
         names = {f["name"] for f in envelope["data"]["fragments"]}
-        assert names == {"text_encode", "save_still", "image_blend"}
+        assert names == {
+            "text_encode", "save_still", "image_blend", "model_producer", "model_consumer",
+        }
 
     def test_ls_missing_lib(self, tmp_path: Path, capsys):
         envelope = _run(["fragment", "ls", "--lib", str(tmp_path / "nope")], capsys)
@@ -496,17 +590,3 @@ class TestFragmentCmds:
         envelope = _run(["fragment", "validate", "text_encode", "--lib", str(lib_dir)], capsys)
         assert envelope["ok"] is True
         assert envelope["data"]["valid"] is True
-
-    def test_validate_legacy_subgraph_format_fails_cleanly(self, tmp_path: Path, capsys):
-        """Files using the old `_subgraph` key (not `_fragment`) must fail cleanly."""
-        legacy = {
-            "_subgraph": {"name": "legacy", "inputs": {}, "outputs": {}, "params": {}},
-            "10": {"class_type": "Whatever", "inputs": {}},
-        }
-        d = tmp_path / "fragments"
-        d.mkdir()
-        (d / "legacy.json").write_text(json.dumps(legacy))
-        envelope = _run(["fragment", "validate", "legacy", "--lib", str(d)], capsys)
-        assert envelope["ok"] is False
-        assert envelope["error"]["code"] == "fragment_invalid"
-        assert "_fragment" in envelope["error"]["message"]

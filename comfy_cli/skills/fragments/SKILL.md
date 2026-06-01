@@ -1,6 +1,6 @@
 ---
 name: comfy-fragments
-description: Typed reusable workflow fragments + YAML recipe composition — build large pipelines from small tested pieces. Solves the "I keep hand-merging JSONs" problem.
+description: Typed reusable workflow fragments + YAML blueprint composition — build large pipelines from small tested pieces. Solves the "I keep hand-merging JSONs" problem.
 ---
 
 This skill is the composition layer. Pair it with `comfy-pipeline` (which
@@ -73,11 +73,11 @@ followed by the interior ComfyUI nodes (API-format, just like a workflow).
 
 | field | required | meaning |
 |---|---|---|
-| `name` | yes | Stable identifier. Recipes reference fragments by this name. |
+| `name` | yes | Stable identifier. Blueprints reference fragments by this name. |
 | `version` | yes | String version, semver-ish. Bump when the interface changes. |
 | `description` | recommended | One-line human description shown in `fragment ls`. |
 | `terminal` | optional (default `false`) | `true` if the fragment contains its own `SaveImage`/`SaveVideo`. Stops the composer from appending another save. |
-| `inputs` | yes | Each input has a `type` ∈ {`IMAGE`, `MASK`, `AUDIO`, `VIDEO`, `STRING`} and a `binds: "<interior_node_id>.<input_name>"` pointing at the actual node-field this input feeds. |
+| `inputs` | yes | Each input has a `type` (any ComfyUI socket type — `IMAGE`/`MASK`/`AUDIO`/`VIDEO`/`STRING`, or a graph type like `MODEL`/`CONDITIONING`/`LATENT`/`VAE`/custom) and a `binds: "<interior_node_id>.<input_name>"` pointing at the actual node-field this input feeds. |
 | `outputs` | yes | Each output has a `type` and `from: "<interior_node_id>"` plus optional `port` (default `0`). |
 | `params` | optional | Settable values (text, seed, strength, model name, etc.). Each has `type` ∈ {`STRING`, `INT`, `FLOAT`, `BOOL`, `COMBO`}, a `binds`, and optionally a `default`. |
 
@@ -91,10 +91,10 @@ followed by the interior ComfyUI nodes (API-format, just like a workflow).
 
 ---
 
-## 2. The recipe DSL
+## 2. The blueprint DSL
 
-A recipe is a YAML file describing one composed workflow. The composer reads
-the recipe, instantiates each listed fragment, wires inputs/params, and
+A blueprint is a YAML file describing one composed workflow. The composer reads
+the blueprint, instantiates each listed fragment, wires inputs/params, and
 writes one API-format workflow JSON.
 
 ```yaml
@@ -133,6 +133,10 @@ The composer accepts three things on the right-hand side of an `inputs:` entry:
 - **A literal** — for `STRING` inputs only. Non-string literals for non-STRING
   types are rejected.
 
+Graph-only socket types (`MODEL`, `CONDITIONING`, `LATENT`, `VAE`, and custom
+node sockets) have no loader to inject from a path, so they **must** be fed by
+a cross-step ref — passing a path to one is an error.
+
 ### Cross-step refs work across any output type
 
 `$alias.image`, `$alias.conditioning`, `$alias.mask`, `$alias.audio`,
@@ -151,19 +155,20 @@ workflow alone (your fragment handles saving). Otherwise it appends a
 ## 3. The command surface
 
 ```bash
-comfy workflow compose <recipe.yaml> [-o out.json] [--lib <fragments_dir>]
+comfy workflow compose <blueprint.yaml> [-o out.json] [--lib <fragments_dir>]
 comfy workflow fragment ls            [--lib <dir>]
 comfy workflow fragment show <name|path> [--lib <dir>]
 comfy workflow fragment validate <name|path> [--lib <dir>]
 ```
 
 `--lib` defaults to `./fragments` relative to cwd. `compose`'s default output
-is `<recipe>.compiled.json`.
+is `<blueprint>.compiled.json`.
 
 All commands emit JSON envelopes under `comfy --json`. `compose` and the
 `fragment` commands all exit non-zero on validation errors with structured
-error codes (`fragment_invalid`, `recipe_invalid`, `recipe_not_found`,
-`fragment_lib_not_found`).
+error codes (`fragment_invalid`, `blueprint_invalid`, `blueprint_not_found`,
+`fragment_lib_not_found`). On success, `compose` emits the blueprint path under
+the `blueprint` key alongside `out`, `steps`, `nodes`, and `fragments_used`.
 
 ---
 
@@ -177,7 +182,7 @@ my-project/
     text_encode.json
     sampler.json
     save_still.json
-  recipes/
+  blueprints/
     portrait.yaml
   inputs/
     seed_photo.png
@@ -187,12 +192,12 @@ Compose + submit:
 
 ```bash
 cd my-project
-comfy workflow compose recipes/portrait.yaml -o built/portrait.json
+comfy workflow compose blueprints/portrait.yaml -o built/portrait.json
 comfy run --workflow built/portrait.json --where cloud --wait
 ```
 
-That's the full agent loop. The fragment library is reusable across recipes;
-recipes are small and obvious; the composed workflow is a normal API JSON
+That's the full agent loop. The fragment library is reusable across blueprints;
+blueprints are small and obvious; the composed workflow is a normal API JSON
 that submits like any other.
 
 ---
@@ -209,11 +214,11 @@ first, get it running end-to-end, then carve reusable pieces out:
 4. Copy those nodes into `fragments/<name>.json`, add a `_fragment` header
    declaring its inputs/outputs/params
 5. Run `comfy workflow fragment validate <name>` to confirm it parses
-6. Use it from a recipe; verify the composed workflow matches the original
+6. Use it from a blueprint; verify the composed workflow matches the original
 
-Always test the fragment by composing a recipe and submitting the result
+Always test the fragment by composing a blueprint and submitting the result
 before relying on it. Fragments are reusable, which means a bug in one
-poisons every recipe that uses it.
+poisons every blueprint that uses it.
 
 ---
 
@@ -221,31 +226,30 @@ poisons every recipe that uses it.
 
 | Input type | Use for | The composer does |
 |---|---|---|
-| `IMAGE` | Photos, generated images, reference frames | Injects `LoadImage` when the recipe value is a path; passes through when the value is `$alias.image` |
+| `IMAGE` | Photos, generated images, reference frames | Injects `LoadImage` when the blueprint value is a path; passes through when the value is `$alias.image` |
 | `MASK` | Binary/alpha masks | Injects `LoadImage` + `ImageToMask` (channel: red) for paths |
 | `AUDIO` | WAV/MP3/FLAC | Injects `LoadAudio` for paths |
 | `VIDEO` | MP4/WebM | Injects `LoadVideo` for paths |
 | `STRING` | Prompts, model names, captions, any literal | Pass-through. No loader injection. |
+| `MODEL` / `CONDITIONING` / `LATENT` / `VAE` / custom | Graph-internal sockets passed between fragments | Nothing — these are ref-only. Wire them with `$alias.output`; a path is rejected. |
 
-Use the type that matches what the interior node actually consumes. If
-your interior node expects a `CONDITIONING` directly (no encode step), that
-fragment's input should be modeled as a cross-step ref of `type: STRING` with
-a downstream-encoded value — i.e. fragments don't currently model `CONDITIONING`
-inputs from raw paths because there's nothing useful to auto-inject. Cross-step
-refs (`$alias.conditioning`) work fine, regardless of declared type — the
-composer trusts whatever output the upstream fragment exposes.
+Use the type that matches what the interior node actually consumes, and declare
+graph-internal sockets (`MODEL`, `CONDITIONING`, `LATENT`, `VAE`, or any custom
+node type) by their real type — this is how you build a complex pipeline:
+e.g. a loader fragment exposes `outputs: {model: {type: MODEL, ...}}` and a
+sampler fragment declares `inputs: {model: {type: MODEL, ...}}`, wired in the
+blueprint as `model: $base.model`. Those types have no path loader, so they can
+only be fed by a cross-step ref — the composer wires whatever `[node, port]`
+the upstream fragment exposes.
 
 ---
 
 ## 7. What NOT to do
 
 - **Don't put model loading inside every fragment.** Load `CheckpointLoaderSimple`
-  once in the recipe's first step and pass `model`/`clip`/`vae` outputs by
+  once in the blueprint's first step and pass `model`/`clip`/`vae` outputs by
   cross-step ref. Fragments are about reusable sub-regions; the shared model
   state belongs at the top.
-- **Don't use `_subgraph` as the metadata header.** The canonical key is
-  `_fragment`. (Older project conventions used `_subgraph`; not supported by
-  the CLI composer.)
 - **Don't author huge fragments.** If a fragment has more than ~15 interior
   nodes, it's probably two fragments.
 - **Don't skip `comfy workflow fragment validate`** before submitting a
@@ -253,7 +257,7 @@ composer trusts whatever output the upstream fragment exposes.
   `binds` targets, malformed metadata, and orphan interior nodes locally —
   none of which the cloud server will tell you about clearly.
 - **Don't reuse aliases across steps.** Aliases must be unique within a
-  recipe; the composer rejects duplicates.
+  blueprint; the composer rejects duplicates.
 
 ---
 
@@ -263,9 +267,9 @@ composer trusts whatever output the upstream fragment exposes.
 |---|---|---|
 | `fragment_invalid` | The fragment file itself is malformed (bad `_fragment` header, missing fields, dangling `binds`) | Read the `error` + `hint` fields; fix the fragment JSON |
 | `fragment_lib_not_found` | `--lib` (or default `./fragments`) doesn't exist | Create the directory or pass `--lib <real_path>` |
-| `recipe_not_found` | The recipe YAML path doesn't exist | Check the path |
-| `recipe_invalid_yaml` | The recipe file isn't valid YAML | Run it through `yamllint` |
-| `recipe_invalid` | The recipe semantically fails (missing fragment, missing input, unknown input key, duplicate alias) | Read the `error` field — it names the offending step alias |
+| `blueprint_not_found` | The blueprint YAML path doesn't exist | Check the path |
+| `blueprint_invalid_yaml` | The blueprint file isn't valid YAML | Run it through `yamllint` |
+| `blueprint_invalid` | The blueprint semantically fails (missing fragment, missing input, unknown input key, duplicate alias) | Read the `error` field — it names the offending step alias |
 
 All errors have a `details` field with structured context (offending path,
 step alias, what was expected).

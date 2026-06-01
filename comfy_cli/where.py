@@ -120,7 +120,11 @@ def cloud_preflight() -> CloudError | None:
     if auth_store.get(CLOUD_API_KEY_PROVIDER) is not None:
         return None
 
-    session = auth_store.get_cloud_session()
+    # Proactively refresh an expired-but-refreshable session so work doesn't
+    # die just because the short-lived access token lapsed between commands.
+    from comfy_cli.cloud.oauth import ensure_fresh_session
+
+    session = ensure_fresh_session()
     if session is None:
         return CloudError(
             code="cloud_not_configured",

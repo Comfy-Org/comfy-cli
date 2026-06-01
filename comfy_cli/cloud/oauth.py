@@ -582,6 +582,46 @@ def refresh_tokens(
     return _token_set_from_response(resp)
 
 
+def ensure_fresh_session(*, leeway_s: int = 60):
+    """Return the stored cloud session, refreshing it first when the access
+    token is expired (or within ``leeway_s`` of expiring) and a refresh token
+    is available.
+
+    The access-token lifetime is set by the auth server (short by design);
+    this spends the long-lived refresh token to keep the *session* alive, so a
+    user who keeps working within the refresh window never has to re-run
+    ``comfy cloud login``. Best-effort: on any refresh failure it returns the
+    existing (stale) session so the caller's own expiry check still fires.
+    Returns ``None`` when there is no session at all.
+    """
+    from comfy_cli.auth import store as auth_store
+
+    session = auth_store.get_cloud_session()
+    if session is None or not session.is_expired(leeway_s=leeway_s) or not session.refresh_token:
+        return session
+    try:
+        from comfy_cli.cloud import CLIENT_ID, get_resource_url
+
+        new_tokens = refresh_tokens(
+            base_url=session.base_url,
+            client_id=session.client_id or CLIENT_ID,
+            refresh_token=session.refresh_token,
+            resource=session.resource or get_resource_url(),
+        )
+        return auth_store.save_cloud_session(
+            base_url=session.base_url,
+            resource=session.resource,
+            client_id=session.client_id,
+            scope=session.scope,
+            access_token=new_tokens.access_token,
+            refresh_token=new_tokens.refresh_token or session.refresh_token,
+            token_type=new_tokens.token_type,
+            expires_at=new_tokens.expires_at,
+        )
+    except Exception:  # noqa: BLE001 — refresh is best-effort; fall back to stale session
+        return session
+
+
 # ---------------------------------------------------------------------------
 # Tiny HTTP helpers (stdlib only — no external deps)
 # ---------------------------------------------------------------------------

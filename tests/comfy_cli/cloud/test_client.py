@@ -267,6 +267,70 @@ class TestWaitForCompletion:
                 comfy_client.Client(CLOUD).wait_for_completion("pid", poll_interval=0.01, timeout=0.05)
 
 
+class TestTransientRetry:
+    """A 429 / transient 5xx during polling must back off and retry, not abort
+    the request — this is the bug that killed `comfy run --wait` mid-job."""
+
+    def test_get_retries_on_429_then_succeeds(self):
+        seq = [_http_error(429), _mock_response({"status": "success"})]
+        with patch("comfy_cli.comfy_client.time.sleep"):
+            with patch.object(comfy_client._OPENER, "open", side_effect=seq) as urlopen:
+                result = comfy_client.Client(CLOUD).get_job_status("pid")
+        assert result == {"status": "success"}
+        assert urlopen.call_count == 2
+
+    def test_persistent_429_eventually_raises(self):
+        with patch("comfy_cli.comfy_client.time.sleep"):
+            with patch.object(comfy_client._OPENER, "open", side_effect=_http_error(429)) as urlopen:
+                with pytest.raises(comfy_client.HTTPError) as exc:
+                    comfy_client.Client(CLOUD).get_job_status("pid")
+        assert exc.value.status == 429
+        assert urlopen.call_count == comfy_client._MAX_TRANSIENT_RETRIES + 1
+
+    def test_submit_retries_on_429(self):
+        # 429 means the request was rejected (not processed), so retrying a POST is safe.
+        seq = [_http_error(429), _mock_response({"prompt_id": "pid-1", "node_errors": {}})]
+        with patch("comfy_cli.comfy_client.time.sleep"):
+            with patch.object(comfy_client._OPENER, "open", side_effect=seq) as urlopen:
+                res = comfy_client.Client(CLOUD).submit_prompt({"1": {}}, "cid")
+        assert res.prompt_id == "pid-1"
+        assert urlopen.call_count == 2
+
+    def test_5xx_retried_on_get(self):
+        seq = [_http_error(503), _mock_response({"status": "success"})]
+        with patch("comfy_cli.comfy_client.time.sleep"):
+            with patch.object(comfy_client._OPENER, "open", side_effect=seq) as urlopen:
+                assert comfy_client.Client(CLOUD).get_job_status("pid") == {"status": "success"}
+        assert urlopen.call_count == 2
+
+    def test_5xx_not_retried_on_post(self):
+        # A 5xx on submit could have partially applied — must NOT auto-retry (double-execute risk).
+        with patch("comfy_cli.comfy_client.time.sleep"):
+            with patch.object(comfy_client._OPENER, "open", side_effect=_http_error(503)) as urlopen:
+                with pytest.raises(comfy_client.HTTPError):
+                    comfy_client.Client(CLOUD).submit_prompt({"1": {}}, "cid")
+        assert urlopen.call_count == 1
+
+    def test_honors_retry_after_header(self):
+        from http.client import HTTPMessage
+
+        hdrs = HTTPMessage()
+        hdrs["Retry-After"] = "3"
+        err = urllib.error.HTTPError(url="https://cloud/x", code=429, msg="429", hdrs=hdrs, fp=io.BytesIO(b""))
+        seq = [err, _mock_response({"status": "success"})]
+        with patch("comfy_cli.comfy_client.time.sleep") as sleep:
+            with patch.object(comfy_client._OPENER, "open", side_effect=seq):
+                comfy_client.Client(CLOUD).get_job_status("pid")
+        assert sleep.call_args.args[0] == 3.0
+
+    def test_wait_for_completion_survives_transient_429(self):
+        done = {"status": {"completed": True}, "outputs": {}}
+        seq = [_http_error(429), _mock_response(done)]
+        with patch("comfy_cli.comfy_client.time.sleep"):
+            with patch.object(comfy_client._OPENER, "open", side_effect=seq):
+                assert comfy_client.Client(CLOUD).wait_for_completion("pid", poll_interval=0) == done
+
+
 class TestOutputUrls:
     def test_view_url_uses_api_prefix_for_cloud(self):
         url = comfy_client.Client(CLOUD).view_url({"filename": "a.png", "subfolder": "", "type": "output"})

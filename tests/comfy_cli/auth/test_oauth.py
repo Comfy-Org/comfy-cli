@@ -427,3 +427,64 @@ def test_session_not_expired_when_future():
         saved_at="2026-01-01T00:00:00+00:00",
     )
     assert session.is_expired() is False
+
+
+class TestEnsureFreshSession:
+    """Proactive refresh: keep an expired-but-refreshable session alive without
+    forcing the user to re-run `cloud login`."""
+
+    def _expired(self, refresh: str | None = "RT") -> auth_store.CloudSession:
+        return auth_store.CloudSession(
+            base_url="https://c", resource="https://c/api", client_id="cid", scope="s",
+            access_token="OLD", refresh_token=refresh, token_type="Bearer",
+            expires_at=int(time.time()) - 1, saved_at="2026-01-01T00:00:00+00:00",
+        )
+
+    def test_refreshes_expired_session_with_refresh_token(self, monkeypatch):
+        saved: dict = {}
+        fresh = auth_store.CloudSession(
+            base_url="https://c", resource="https://c/api", client_id="cid", scope="s",
+            access_token="NEW", refresh_token="RT2", token_type="Bearer",
+            expires_at=int(time.time()) + 3600, saved_at="2026-01-01T00:00:01+00:00",
+        )
+        monkeypatch.setattr(auth_store, "get_cloud_session", lambda: self._expired())
+        monkeypatch.setattr(auth_store, "save_cloud_session", lambda **kw: saved.update(kw) or fresh)
+        monkeypatch.setattr(oauth, "refresh_tokens", lambda **kw: oauth.TokenSet(
+            access_token="NEW", refresh_token="RT2", token_type="Bearer",
+            expires_in=3600, expires_at=int(time.time()) + 3600, scope="s"))
+        result = oauth.ensure_fresh_session()
+        assert result.access_token == "NEW"
+        assert result.is_expired() is False
+        assert saved["access_token"] == "NEW"
+
+    def test_no_refresh_token_returns_stale_without_calling_refresh(self, monkeypatch):
+        called = []
+        monkeypatch.setattr(auth_store, "get_cloud_session", lambda: self._expired(refresh=None))
+        monkeypatch.setattr(oauth, "refresh_tokens", lambda **kw: called.append(1))
+        result = oauth.ensure_fresh_session()
+        assert result.is_expired() is True
+        assert called == []
+
+    def test_valid_session_not_refreshed(self, monkeypatch):
+        valid = auth_store.CloudSession(
+            base_url="x", resource="y", client_id="c", scope="s",
+            access_token="AT", refresh_token="RT", token_type="Bearer",
+            expires_at=int(time.time()) + 3600, saved_at="2026-01-01T00:00:00+00:00",
+        )
+        called = []
+        monkeypatch.setattr(auth_store, "get_cloud_session", lambda: valid)
+        monkeypatch.setattr(oauth, "refresh_tokens", lambda **kw: called.append(1))
+        assert oauth.ensure_fresh_session() is valid
+        assert called == []
+
+    def test_refresh_failure_falls_back_to_stale_session(self, monkeypatch):
+        def boom(**kw):
+            raise oauth.OAuthRefreshError("dead", hint="re-login", details={})
+        monkeypatch.setattr(auth_store, "get_cloud_session", lambda: self._expired())
+        monkeypatch.setattr(oauth, "refresh_tokens", boom)
+        result = oauth.ensure_fresh_session()
+        assert result.is_expired() is True  # no crash; caller's expiry check still fires
+
+    def test_none_when_no_session(self, monkeypatch):
+        monkeypatch.setattr(auth_store, "get_cloud_session", lambda: None)
+        assert oauth.ensure_fresh_session() is None
