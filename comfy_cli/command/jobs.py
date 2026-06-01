@@ -273,9 +273,11 @@ def _gather_jobs(host: str, port: int, *, limit: int) -> list[JobRow]:
         outputs = body.get("outputs") or {}
         output_count = sum(
             len(items)
-            for v in outputs.values() if isinstance(v, dict)
+            for v in outputs.values()
+            if isinstance(v, dict)
             for key in ("images", "gifs", "videos", "audio", "files")
-            for items in [v.get(key) or []] if isinstance(items, list)
+            for items in [v.get(key) or []]
+            if isinstance(items, list)
         )
         wf = body.get("prompt") or [None, None, None, None]
         wf_dict = wf[2] if isinstance(wf, list) and len(wf) > 2 else None
@@ -961,7 +963,9 @@ def watch_cmd(
                 for key in ("images", "gifs", "videos", "audio", "files"):
                     for item in output.get(key) or []:
                         if isinstance(item, dict) and "filename" in item:
-                            q = urllib.parse.urlencode({k: item[k] for k in ("filename", "subfolder", "type") if k in item})
+                            q = urllib.parse.urlencode(
+                                {k: item[k] for k in ("filename", "subfolder", "type") if k in item}
+                            )
                             url = f"http://{h}:{p}/view?{q}"
                             outputs.append(url)
                             if renderer.is_pretty():

@@ -190,6 +190,7 @@ def test_show_unknown_template_returns_error_code(gallery_file):
 
 def _stub_template_workflow_fetch(monkeypatch, body_or_exc):
     """Patch the GitHub workflow-JSON fetch to return a canned body (or raise)."""
+
     def _impl(name, timeout=15.0):
         if isinstance(body_or_exc, Exception):
             raise body_or_exc

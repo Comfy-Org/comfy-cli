@@ -6,21 +6,21 @@ No I/O, no CLI invocation — just the engine in isolation.
 
 from __future__ import annotations
 
-import copy
 from typing import Any
 
 import pytest
 
+from comfy_cli.command.run.loader import _classify_api_workflow
 from comfy_cli.cql.engine import (
     Graph,
-    _extract_frontend_slots,
     _apply_one_slot,
+    _extract_frontend_slots,
 )
-
 
 # ---------------------------------------------------------------------------
 # Shared fixture: a small but realistic object_info
 # ---------------------------------------------------------------------------
+
 
 def _object_info() -> dict[str, Any]:
     """Covers: link inputs, widget inputs, COMBO/ENUM, control_after_generate,
@@ -56,10 +56,20 @@ def _object_info() -> dict[str, Any]:
                     "denoise": ["FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0}],
                 },
             },
-            "input_order": {"required": [
-                "model", "positive", "negative", "latent_image",
-                "seed", "steps", "cfg", "sampler_name", "scheduler", "denoise",
-            ]},
+            "input_order": {
+                "required": [
+                    "model",
+                    "positive",
+                    "negative",
+                    "latent_image",
+                    "seed",
+                    "steps",
+                    "cfg",
+                    "sampler_name",
+                    "scheduler",
+                    "denoise",
+                ]
+            },
             "output": ["LATENT"],
             "output_name": ["LATENT"],
             "category": "sampling",
@@ -141,6 +151,7 @@ def graph() -> Graph:
 # Direct-mode workflow fixture
 # ---------------------------------------------------------------------------
 
+
 def _direct_workflow():
     """A regular frontend-format workflow — no subgraphs."""
     return {
@@ -168,6 +179,7 @@ def _direct_workflow():
 # ---------------------------------------------------------------------------
 # Template-mode workflow fixture
 # ---------------------------------------------------------------------------
+
 
 def _template_workflow():
     """A frontend-format workflow with a subgraph instance."""
@@ -222,8 +234,13 @@ class TestWidgetOrder:
     def test_ksampler_order(self, graph: Graph):
         order = graph.widget_order("KSampler")
         assert order == [
-            "seed", "control_after_generate",
-            "steps", "cfg", "sampler_name", "scheduler", "denoise",
+            "seed",
+            "control_after_generate",
+            "steps",
+            "cfg",
+            "sampler_name",
+            "scheduler",
+            "denoise",
         ]
 
     def test_clip_text_encode_order(self, graph: Graph):
@@ -251,15 +268,15 @@ class TestTraversal:
         ups = graph.upstream("KSampler")
         ids = {m.id for m in ups}
         assert "CheckpointLoaderSimple" in ids  # produces MODEL
-        assert "CLIPTextEncode" in ids            # produces CONDITIONING
-        assert "EmptyLatentImage" in ids          # produces LATENT
+        assert "CLIPTextEncode" in ids  # produces CONDITIONING
+        assert "EmptyLatentImage" in ids  # produces LATENT
 
     def test_downstream_checkpoint(self, graph: Graph):
         downs = graph.downstream("CheckpointLoaderSimple")
         ids = {m.id for m in downs}
-        assert "KSampler" in ids       # accepts MODEL
+        assert "KSampler" in ids  # accepts MODEL
         assert "CLIPTextEncode" in ids  # accepts CLIP
-        assert "VAEDecode" in ids       # accepts VAE
+        assert "VAEDecode" in ids  # accepts VAE
 
     def test_upstream_unknown_returns_empty(self, graph: Graph):
         assert graph.upstream("Ghost") == []
@@ -430,7 +447,7 @@ class TestValidateWorkflow:
             "2": {
                 "class_type": "KSampler",
                 "inputs": {
-                    "model": ["1", 0],       # MODEL from CheckpointLoaderSimple[0]
+                    "model": ["1", 0],  # MODEL from CheckpointLoaderSimple[0]
                     "seed": 42,
                     "steps": 20,
                     "cfg": 8.0,
@@ -506,6 +523,7 @@ class TestValidateWorkflow:
         """'*' type on either side should not trigger a mismatch."""
         # Add a wildcard node to the graph for this test
         from comfy_cli.cql.engine import Graph as G
+
         oi = _object_info()
         oi["Reroute"] = {
             "input": {"required": {"input": "*"}},
@@ -539,9 +557,9 @@ class TestValidateWorkflow:
             "1": {
                 "class_type": "KSampler",
                 "inputs": {
-                    "model": ["99", 0],          # dangling
-                    "positive": ["98", 0],       # dangling
-                    "latent_image": ["97", 0],   # dangling
+                    "model": ["99", 0],  # dangling
+                    "positive": ["98", 0],  # dangling
+                    "latent_image": ["97", 0],  # dangling
                 },
             },
         }
@@ -761,9 +779,6 @@ class TestBrowse:
 # ===========================================================================
 # TestClassifyApiWorkflow
 # ===========================================================================
-
-
-from comfy_cli.command.run.loader import _classify_api_workflow
 
 
 class TestClassifyApiWorkflow:

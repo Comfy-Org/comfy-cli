@@ -29,8 +29,20 @@ class TestStepBuilders:
         state = run_cli._DemoState(workflow_path="/tmp/x.json")
         steps = run_cli._build_steps(state)
         titles = " ".join(s.title.lower() for s in steps)
-        for needle in ["env", "which", "discover", "cql", "synchronous", "json envelope",
-                       "async", "jobs ls", "jobs status", "jobs watch", "fleet", "auth"]:
+        for needle in [
+            "env",
+            "which",
+            "discover",
+            "cql",
+            "synchronous",
+            "json envelope",
+            "async",
+            "jobs ls",
+            "jobs status",
+            "jobs watch",
+            "fleet",
+            "auth",
+        ]:
             assert needle in titles, f"missing coverage for: {needle}"
 
     def test_build_steps_includes_parallel_fleet(self):

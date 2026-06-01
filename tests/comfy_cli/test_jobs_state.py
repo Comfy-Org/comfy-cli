@@ -3,12 +3,8 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
-
-import pytest
 
 from comfy_cli import jobs_state
-
 
 # The autouse ``_isolate_jobs_state_dir`` fixture in ``tests/comfy_cli/conftest.py``
 # pins ``jobs_state.state_dir`` to a per-test tmp path. No local fixture needed.

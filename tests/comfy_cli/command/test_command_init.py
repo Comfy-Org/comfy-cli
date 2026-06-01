@@ -24,20 +24,22 @@ import subprocess
 import sys
 import textwrap
 
-EXPECTED_SUBMODULES = frozenset({
-    "code_search",
-    "custom_nodes",
-    "install",
-    "job_watcher",
-    "jobs",
-    "launch",
-    "nodes",
-    "pr_command",
-    "run",
-    "run_cli",
-    "transfer",
-    "workflow",
-})
+EXPECTED_SUBMODULES = frozenset(
+    {
+        "code_search",
+        "custom_nodes",
+        "install",
+        "job_watcher",
+        "jobs",
+        "launch",
+        "nodes",
+        "pr_command",
+        "run",
+        "run_cli",
+        "transfer",
+        "workflow",
+    }
+)
 
 
 def test_command_package_exposes_all_submodules_as_attributes():
@@ -73,9 +75,7 @@ def test_fresh_interpreter_can_from_import_each_submodule():
         check=False,
     )
     assert result.returncode == 0, (
-        f"fresh-interpreter check failed:\n"
-        f"  stdout={result.stdout}\n"
-        f"  stderr={result.stderr}"
+        f"fresh-interpreter check failed:\n  stdout={result.stdout}\n  stderr={result.stderr}"
     )
 
 
@@ -87,7 +87,4 @@ def test_all_lists_every_submodule():
 
     declared = set(getattr(cmd, "__all__", ()))
     missing = EXPECTED_SUBMODULES - declared
-    assert not missing, (
-        f"__all__ is missing: {sorted(missing)}. "
-        "Update __all__ in comfy_cli/command/__init__.py."
-    )
+    assert not missing, f"__all__ is missing: {sorted(missing)}. Update __all__ in comfy_cli/command/__init__.py."

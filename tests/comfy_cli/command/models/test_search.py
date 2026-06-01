@@ -150,9 +150,7 @@ def cloud_target(monkeypatch: pytest.MonkeyPatch):
         api_key="test-api-key",
     )
     monkeypatch.setattr("comfy_cli.target.resolve_target", lambda **kw: fake)
-    monkeypatch.setattr(
-        "comfy_cli.command.models.search.resolve_target", lambda **kw: fake, raising=False
-    )
+    monkeypatch.setattr("comfy_cli.command.models.search.resolve_target", lambda **kw: fake, raising=False)
     return fake
 
 
@@ -169,9 +167,7 @@ def local_target(monkeypatch: pytest.MonkeyPatch):
         port=8188,
     )
     monkeypatch.setattr("comfy_cli.target.resolve_target", lambda **kw: fake)
-    monkeypatch.setattr(
-        "comfy_cli.command.models.search.resolve_target", lambda **kw: fake, raising=False
-    )
+    monkeypatch.setattr("comfy_cli.command.models.search.resolve_target", lambda **kw: fake, raising=False)
     return fake
 
 

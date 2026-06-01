@@ -7,7 +7,6 @@ import re
 import time
 
 from rich.console import Console
-
 from rich.panel import Panel
 
 from comfy_cli.output.branding import (
@@ -20,7 +19,6 @@ from comfy_cli.output.branding import (
     welcome_banner,
     whoami_banner,
 )
-
 
 # ---------------------------------------------------------------------------
 # Task 1 — branded_panel + TAGLINE (the screen-wide chrome contract)
@@ -46,17 +44,13 @@ def test_branded_panel_with_where():
 
 
 def test_branded_panel_with_where_and_host():
-    panel = branded_panel(
-        "body", title="jobs", version="0.0.0", where="local", host="127.0.0.1:8188"
-    )
+    panel = branded_panel("body", title="jobs", version="0.0.0", where="local", host="127.0.0.1:8188")
     assert str(panel.subtitle) == "comfy CLI v0.0.0  ·  local · 127.0.0.1:8188"
 
 
 def test_branded_panel_with_host_no_where():
     """host alone (no where) — used by cloud whoami screen."""
-    panel = branded_panel(
-        "body", title="comfy cloud", version="0.0.0", host="cloud.comfy.org"
-    )
+    panel = branded_panel("body", title="comfy cloud", version="0.0.0", host="cloud.comfy.org")
     assert str(panel.subtitle) == "comfy CLI v0.0.0 · cloud.comfy.org"
 
 

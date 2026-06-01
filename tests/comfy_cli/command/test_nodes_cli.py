@@ -99,6 +99,7 @@ def _fake_object_info() -> dict[str, Any]:
 def _fake_graph():
     """Build a Graph from the fake object_info."""
     from comfy_cli.cql.engine import Graph
+
     return Graph.from_object_info(_fake_object_info())
 
 

@@ -888,7 +888,8 @@ class TestCliRunnerIntegration:
 
         runner = CliRunner()  # non-TTY by default
         result = runner.invoke(
-            app, ["run", "--workflow", self._make_workflow_file(tmp_path), "--json", "--print-prompt"],
+            app,
+            ["run", "--workflow", self._make_workflow_file(tmp_path), "--json", "--print-prompt"],
             env={"COMFY_WHERE": "local"},
         )
         assert result.exit_code == 0, f"stdout={result.stdout!r}\nexc={result.exception!r}"
@@ -921,7 +922,8 @@ class TestCliRunnerIntegration:
         ):
             runner = CliRunner()
             result = runner.invoke(
-                app, ["run", "--workflow", self._make_workflow_file(tmp_path), "--json", "--print-prompt"],
+                app,
+                ["run", "--workflow", self._make_workflow_file(tmp_path), "--json", "--print-prompt"],
                 env={"COMFY_WHERE": "local"},
             )
         assert result.exit_code == 0, f"stdout={result.stdout!r}\nexc={result.exception!r}"

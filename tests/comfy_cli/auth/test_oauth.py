@@ -19,7 +19,6 @@ import pytest
 from comfy_cli.auth import store as auth_store
 from comfy_cli.cloud import oauth
 
-
 # ---------------------------------------------------------------------------
 # PKCE
 # ---------------------------------------------------------------------------
@@ -30,9 +29,7 @@ def test_pkce_pair_satisfies_server_format():
     # Server requires 43-char base64url challenge with S256.
     assert len(challenge) == 43
     # Challenge is base64url(sha256(verifier)) — verify the math.
-    expected = base64.urlsafe_b64encode(
-        hashlib.sha256(verifier.encode("ascii")).digest()
-    ).rstrip(b"=").decode("ascii")
+    expected = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode("ascii")).digest()).rstrip(b"=").decode("ascii")
     assert challenge == expected
 
 
@@ -93,9 +90,7 @@ def _drive_callback(*, expected_state: str, query: str) -> oauth._CallbackCaptur
     t = threading.Thread(target=server.handle_request, daemon=True)
     t.start()
     try:
-        urllib.request.urlopen(
-            f"http://127.0.0.1:{port}{oauth.CALLBACK_PATH}?{query}", timeout=2
-        ).read()
+        urllib.request.urlopen(f"http://127.0.0.1:{port}{oauth.CALLBACK_PATH}?{query}", timeout=2).read()
     except Exception:  # noqa: BLE001 — failure HTML still returns a body
         pass
     t.join(timeout=2)
@@ -307,6 +302,7 @@ def test_run_login_orchestrates_full_flow(monkeypatch: pytest.MonkeyPatch):
         qs = urllib.parse.parse_qs(parsed.query)
         redirect = qs["redirect_uri"][0]
         state = qs["state"][0]
+
         # Hit our own loopback server in a thread so urlopen doesn't deadlock.
         def hit():
             try:
@@ -385,8 +381,14 @@ def test_save_and_get_cloud_session_round_trip(tmp_path, monkeypatch):
 def test_clear_cloud_session_removes_record(tmp_path, monkeypatch):
     monkeypatch.setattr(auth_store, "secrets_path", lambda: tmp_path / "secrets.json")
     auth_store.save_cloud_session(
-        base_url="x", resource="y", client_id="c", scope="s",
-        access_token="AT", refresh_token=None, token_type="Bearer", expires_at=None,
+        base_url="x",
+        resource="y",
+        client_id="c",
+        scope="s",
+        access_token="AT",
+        refresh_token=None,
+        token_type="Bearer",
+        expires_at=None,
     )
     assert auth_store.clear_cloud_session() is True
     assert auth_store.get_cloud_session() is None
@@ -397,7 +399,10 @@ def test_clear_cloud_session_removes_record(tmp_path, monkeypatch):
 def test_session_to_dict_redacts_tokens(tmp_path, monkeypatch):
     monkeypatch.setattr(auth_store, "secrets_path", lambda: tmp_path / "secrets.json")
     session = auth_store.save_cloud_session(
-        base_url="x", resource="y", client_id="c", scope="s",
+        base_url="x",
+        resource="y",
+        client_id="c",
+        scope="s",
         access_token="verysecretaccesstokenAAA",
         refresh_token="verysecretrefreshtokenBBB",
         token_type="Bearer",
@@ -411,8 +416,13 @@ def test_session_to_dict_redacts_tokens(tmp_path, monkeypatch):
 
 def test_session_is_expired_after_window():
     session = auth_store.CloudSession(
-        base_url="x", resource="y", client_id="c", scope="s",
-        access_token="AT", refresh_token="RT", token_type="Bearer",
+        base_url="x",
+        resource="y",
+        client_id="c",
+        scope="s",
+        access_token="AT",
+        refresh_token="RT",
+        token_type="Bearer",
         expires_at=int(time.time()) - 1,  # already past
         saved_at="2026-01-01T00:00:00+00:00",
     )
@@ -421,8 +431,13 @@ def test_session_is_expired_after_window():
 
 def test_session_not_expired_when_future():
     session = auth_store.CloudSession(
-        base_url="x", resource="y", client_id="c", scope="s",
-        access_token="AT", refresh_token="RT", token_type="Bearer",
+        base_url="x",
+        resource="y",
+        client_id="c",
+        scope="s",
+        access_token="AT",
+        refresh_token="RT",
+        token_type="Bearer",
         expires_at=int(time.time()) + 3600,
         saved_at="2026-01-01T00:00:00+00:00",
     )
@@ -435,23 +450,44 @@ class TestEnsureFreshSession:
 
     def _expired(self, refresh: str | None = "RT") -> auth_store.CloudSession:
         return auth_store.CloudSession(
-            base_url="https://c", resource="https://c/api", client_id="cid", scope="s",
-            access_token="OLD", refresh_token=refresh, token_type="Bearer",
-            expires_at=int(time.time()) - 1, saved_at="2026-01-01T00:00:00+00:00",
+            base_url="https://c",
+            resource="https://c/api",
+            client_id="cid",
+            scope="s",
+            access_token="OLD",
+            refresh_token=refresh,
+            token_type="Bearer",
+            expires_at=int(time.time()) - 1,
+            saved_at="2026-01-01T00:00:00+00:00",
         )
 
     def test_refreshes_expired_session_with_refresh_token(self, monkeypatch):
         saved: dict = {}
         fresh = auth_store.CloudSession(
-            base_url="https://c", resource="https://c/api", client_id="cid", scope="s",
-            access_token="NEW", refresh_token="RT2", token_type="Bearer",
-            expires_at=int(time.time()) + 3600, saved_at="2026-01-01T00:00:01+00:00",
+            base_url="https://c",
+            resource="https://c/api",
+            client_id="cid",
+            scope="s",
+            access_token="NEW",
+            refresh_token="RT2",
+            token_type="Bearer",
+            expires_at=int(time.time()) + 3600,
+            saved_at="2026-01-01T00:00:01+00:00",
         )
         monkeypatch.setattr(auth_store, "get_cloud_session", lambda: self._expired())
         monkeypatch.setattr(auth_store, "save_cloud_session", lambda **kw: saved.update(kw) or fresh)
-        monkeypatch.setattr(oauth, "refresh_tokens", lambda **kw: oauth.TokenSet(
-            access_token="NEW", refresh_token="RT2", token_type="Bearer",
-            expires_in=3600, expires_at=int(time.time()) + 3600, scope="s"))
+        monkeypatch.setattr(
+            oauth,
+            "refresh_tokens",
+            lambda **kw: oauth.TokenSet(
+                access_token="NEW",
+                refresh_token="RT2",
+                token_type="Bearer",
+                expires_in=3600,
+                expires_at=int(time.time()) + 3600,
+                scope="s",
+            ),
+        )
         result = oauth.ensure_fresh_session()
         assert result.access_token == "NEW"
         assert result.is_expired() is False
@@ -467,9 +503,15 @@ class TestEnsureFreshSession:
 
     def test_valid_session_not_refreshed(self, monkeypatch):
         valid = auth_store.CloudSession(
-            base_url="x", resource="y", client_id="c", scope="s",
-            access_token="AT", refresh_token="RT", token_type="Bearer",
-            expires_at=int(time.time()) + 3600, saved_at="2026-01-01T00:00:00+00:00",
+            base_url="x",
+            resource="y",
+            client_id="c",
+            scope="s",
+            access_token="AT",
+            refresh_token="RT",
+            token_type="Bearer",
+            expires_at=int(time.time()) + 3600,
+            saved_at="2026-01-01T00:00:00+00:00",
         )
         called = []
         monkeypatch.setattr(auth_store, "get_cloud_session", lambda: valid)
@@ -480,6 +522,7 @@ class TestEnsureFreshSession:
     def test_refresh_failure_falls_back_to_stale_session(self, monkeypatch):
         def boom(**kw):
             raise oauth.OAuthRefreshError("dead", hint="re-login", details={})
+
         monkeypatch.setattr(auth_store, "get_cloud_session", lambda: self._expired())
         monkeypatch.setattr(oauth, "refresh_tokens", boom)
         result = oauth.ensure_fresh_session()

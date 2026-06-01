@@ -199,9 +199,7 @@ class TestLaunchManagerFlagInjection:
     @patch("comfy_cli.command.launch._get_manager_flags", return_value=["--enable-manager"])
     @patch("comfy_cli.command.launch.workspace_manager")
     @patch("os.chdir")
-    def test_launch_injects_enable_manager(
-        self, mock_chdir, mock_ws, mock_get_flags, mock_launch_comfyui
-    ):
+    def test_launch_injects_enable_manager(self, mock_chdir, mock_ws, mock_get_flags, mock_launch_comfyui):
         mock_ws.workspace_path = "/fake/workspace"
         mock_ws.workspace_type = "default"
         mock_ws.config_manager.config = {"DEFAULT": {}}
@@ -219,9 +217,7 @@ class TestLaunchManagerFlagInjection:
     @patch("comfy_cli.command.launch._get_manager_flags", return_value=[])
     @patch("comfy_cli.command.launch.workspace_manager")
     @patch("os.chdir")
-    def test_launch_no_inject_when_disabled(
-        self, mock_chdir, mock_ws, mock_get_flags, mock_launch_comfyui
-    ):
+    def test_launch_no_inject_when_disabled(self, mock_chdir, mock_ws, mock_get_flags, mock_launch_comfyui):
         mock_ws.workspace_path = "/fake/workspace"
         mock_ws.workspace_type = "default"
         mock_ws.config_manager.config = {"DEFAULT": {}}
@@ -238,9 +234,7 @@ class TestLaunchManagerFlagInjection:
     @patch("comfy_cli.command.launch._get_manager_flags", return_value=["--enable-manager"])
     @patch("comfy_cli.command.launch.workspace_manager")
     @patch("os.chdir")
-    def test_launch_injects_when_extra_is_none(
-        self, mock_chdir, mock_ws, mock_get_flags, mock_launch_comfyui
-    ):
+    def test_launch_injects_when_extra_is_none(self, mock_chdir, mock_ws, mock_get_flags, mock_launch_comfyui):
         mock_ws.workspace_path = "/fake/workspace"
         mock_ws.workspace_type = "not_default"
         mock_ws.config_manager.config = {"DEFAULT": {}}
@@ -257,9 +251,7 @@ class TestLaunchManagerFlagInjection:
     @patch("comfy_cli.command.launch._get_manager_flags", return_value=["--enable-manager", "--disable-manager-ui"])
     @patch("comfy_cli.command.launch.workspace_manager")
     @patch("os.chdir")
-    def test_launch_injects_disable_gui_flags(
-        self, mock_chdir, mock_ws, mock_get_flags, mock_launch_comfyui
-    ):
+    def test_launch_injects_disable_gui_flags(self, mock_chdir, mock_ws, mock_get_flags, mock_launch_comfyui):
         mock_ws.workspace_path = "/fake/workspace"
         mock_ws.workspace_type = "not_default"
         mock_ws.config_manager.config = {"DEFAULT": {}}
@@ -279,9 +271,7 @@ class TestLaunchManagerFlagInjection:
     )
     @patch("comfy_cli.command.launch.workspace_manager")
     @patch("os.chdir")
-    def test_launch_injects_legacy_gui_flags(
-        self, mock_chdir, mock_ws, mock_get_flags, mock_launch_comfyui
-    ):
+    def test_launch_injects_legacy_gui_flags(self, mock_chdir, mock_ws, mock_get_flags, mock_launch_comfyui):
         mock_ws.workspace_path = "/fake/workspace"
         mock_ws.workspace_type = "not_default"
         mock_ws.config_manager.config = {"DEFAULT": {}}

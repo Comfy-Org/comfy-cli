@@ -152,7 +152,9 @@ def list_folders_cmd(
         renderer.error(
             code="cloud_http_error" if target.is_cloud else "server_not_running",
             message=f"HTTP {e.code} from {url}",
-            hint="run `comfy auth whoami` to verify auth" if target.is_cloud else "run `comfy launch` to start a local server",
+            hint="run `comfy auth whoami` to verify auth"
+            if target.is_cloud
+            else "run `comfy launch` to start a local server",
             details={"status": e.code, "body": (e.read() or b"")[:1000].decode("utf-8", "replace")},
         )
         raise typer.Exit(code=1) from e
@@ -394,9 +396,20 @@ def _local_search(
                 continue
             if text and text.lower() not in name.lower():
                 continue
-            items.append({"name": name, "type": folder, "tags": [folder], "base_model": None,
-                          "trained_words": None, "source_url": None, "preview_url": None,
-                          "size": None, "is_public": False, "id": None})
+            items.append(
+                {
+                    "name": name,
+                    "type": folder,
+                    "tags": [folder],
+                    "base_model": None,
+                    "trained_words": None,
+                    "source_url": None,
+                    "preview_url": None,
+                    "size": None,
+                    "is_public": False,
+                    "id": None,
+                }
+            )
     total = len(items)
     return items[:limit], total
 
@@ -409,7 +422,9 @@ def _local_search(
 def search_cmd(
     text: Annotated[
         str | None,
-        typer.Option("--text", "-t", show_default=False, help="Substring on the model name (case-insensitive on cloud)."),
+        typer.Option(
+            "--text", "-t", show_default=False, help="Substring on the model name (case-insensitive on cloud)."
+        ),
     ] = None,
     type_: Annotated[
         str | None,

@@ -177,7 +177,7 @@ class Client:
                 return min(float(retry_after), 30.0)
             except (TypeError, ValueError):
                 pass
-        base = min(2 ** attempt, 16)
+        base = min(2**attempt, 16)
         return base + random.uniform(0, base * 0.5)
 
     def _request(
@@ -235,8 +235,12 @@ class Client:
             if retryable and _attempt < _MAX_TRANSIENT_RETRIES:
                 time.sleep(self._retry_delay(e, _attempt))
                 return self._request(
-                    method, path_parts, body=body, timeout=timeout,
-                    _retried=_retried, _attempt=_attempt + 1,
+                    method,
+                    path_parts,
+                    body=body,
+                    timeout=timeout,
+                    _retried=_retried,
+                    _attempt=_attempt + 1,
                 )
             raise HTTPError(e.code, e.reason or "HTTP error", body_text) from e
 

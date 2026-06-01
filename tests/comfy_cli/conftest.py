@@ -52,7 +52,6 @@ def _isolate_config_path(tmp_path, monkeypatch):
     fake_root.mkdir(mode=0o700, parents=True, exist_ok=True)
     # constants.DEFAULT_CONFIG is a dict keyed by OS; patch all entries so
     # whichever ``get_os()`` resolves to lands in our tmp dir.
-    original = dict(constants.DEFAULT_CONFIG)
     for k in list(constants.DEFAULT_CONFIG.keys()):
         monkeypatch.setitem(constants.DEFAULT_CONFIG, k, str(fake_root))
     yield fake_root

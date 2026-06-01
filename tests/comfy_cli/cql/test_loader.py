@@ -9,7 +9,6 @@ import pytest
 from comfy_cli.cql.errors import CQLRuntimeError
 from comfy_cli.cql.loader import load_graph, normalize
 
-
 OBJECT_INFO = {
     "KSampler": {
         "input": {

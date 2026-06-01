@@ -100,6 +100,7 @@ def _fake_object_info() -> dict[str, Any]:
 def _fake_graph():
     """Build a Graph from the fake object_info."""
     from comfy_cli.cql.engine import Graph
+
     return Graph.from_object_info(_fake_object_info())
 
 
@@ -273,6 +274,7 @@ class TestFlattenCategoryTree:
             },
         }
         from comfy_cli.command.nodes import _flatten_category_tree
+
         flat = _flatten_category_tree(tree)
         flat_dict = dict(flat)
         assert flat_dict["loaders"] == 22
@@ -281,8 +283,7 @@ class TestFlattenCategoryTree:
 
     def test_empty_or_malformed_returns_empty(self):
         from comfy_cli.command.nodes import _flatten_category_tree
+
         assert _flatten_category_tree({}) == []
         assert _flatten_category_tree({"Root": None}) == []
         assert _flatten_category_tree("not a dict") == []  # type: ignore[arg-type]
-
-

@@ -11,12 +11,10 @@ import os
 import subprocess
 import sys
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 
 from comfy_cli.command import jobs as jobs_mod
-
 
 # ---------------------------------------------------------------------------
 # Pure data shaping
@@ -25,13 +23,19 @@ from comfy_cli.command import jobs as jobs_mod
 
 _HISTORY_FIXTURE = {
     "abc-1": {
-        "prompt": [0, "abc-1", {"1": {"class_type": "KSampler", "inputs": {}}, "2": {"class_type": "VAEDecode", "inputs": {}}}],
+        "prompt": [
+            0,
+            "abc-1",
+            {"1": {"class_type": "KSampler", "inputs": {}}, "2": {"class_type": "VAEDecode", "inputs": {}}},
+        ],
         "status": {"completed": True, "messages": []},
         "outputs": {
-            "9": {"images": [
-                {"filename": "out.png", "subfolder": "", "type": "output"},
-                {"filename": "out_1.png", "subfolder": "", "type": "output"},
-            ]},
+            "9": {
+                "images": [
+                    {"filename": "out.png", "subfolder": "", "type": "output"},
+                    {"filename": "out_1.png", "subfolder": "", "type": "output"},
+                ]
+            },
         },
     },
     "abc-2": {
@@ -57,9 +61,7 @@ def test_gather_jobs_combines_queue_and_history(monkeypatch: pytest.MonkeyPatch)
     rows = jobs_mod._gather_jobs("h", 8188, limit=10)
 
     assert any(r.prompt_id == "running-id" and r.status == "running" for r in rows)
-    assert any(
-        r.prompt_id == "pending-id" and r.status == "pending" and r.queue_position == 1 for r in rows
-    )
+    assert any(r.prompt_id == "pending-id" and r.status == "pending" and r.queue_position == 1 for r in rows)
     completed = [r for r in rows if r.prompt_id == "abc-1"]
     assert completed and completed[0].status == "completed"
     assert completed[0].outputs == 2  # two images
@@ -202,6 +204,7 @@ def test_orphaned_flag_filters_to_watcher_crashed(monkeypatch):
     # repointed ``jobs_state.state_dir`` at a per-test tmp dir — write
     # state files into whatever it returns.
     from comfy_cli import jobs_state
+
     state_dir = jobs_state.state_dir()
 
     _write_state(state_dir, "healthy-completed", status="completed")
@@ -223,9 +226,7 @@ def test_orphaned_flag_filters_to_watcher_crashed(monkeypatch):
 
     orphans = jobs_mod._gather_local_state_files(limit=100, orphaned_only=True)
     orphan_ids = {r.prompt_id for r in orphans}
-    assert orphan_ids == {"orphan-crashed"}, (
-        f"--orphaned should select only watcher_crashed rows; got {orphan_ids}"
-    )
+    assert orphan_ids == {"orphan-crashed"}, f"--orphaned should select only watcher_crashed rows; got {orphan_ids}"
 
 
 def test_orphaned_flag_visible_in_help():
@@ -312,8 +313,9 @@ def test_jobs_cancel_local_hits_queue_and_interrupt(monkeypatch: pytest.MonkeyPa
 def test_jobs_cancel_local_tolerates_one_failure(monkeypatch: pytest.MonkeyPatch):
     """If /queue 404s but /interrupt 200s (job is running not pending), the
     cancel still succeeds. Mirrors the real ComfyUI server's behavior."""
-    from typer.testing import CliRunner
     import urllib.error
+
+    from typer.testing import CliRunner
 
     monkeypatch.setattr(jobs_mod, "_server_or_error", lambda h, p, **kw: True)
     _capture_urlopen(
@@ -330,8 +332,9 @@ def test_jobs_cancel_local_tolerates_one_failure(monkeypatch: pytest.MonkeyPatch
 
 def test_jobs_cancel_local_both_fail_returns_error(monkeypatch: pytest.MonkeyPatch):
     """If both /queue and /interrupt fail, surface cancel_failed."""
-    from typer.testing import CliRunner
     import urllib.error
+
+    from typer.testing import CliRunner
 
     monkeypatch.setattr(jobs_mod, "_server_or_error", lambda h, p, **kw: True)
     _capture_urlopen(
@@ -383,9 +386,10 @@ def test_jobs_cancel_cloud_posts_to_jobs_cancel_endpoint(monkeypatch: pytest.Mon
 
 def test_jobs_cancel_cloud_404_surfaces_prompt_not_found(monkeypatch: pytest.MonkeyPatch):
     """404 on cloud cancel is the 'unknown prompt_id' signal — surface it as prompt_not_found."""
-    from typer.testing import CliRunner
     import io
     import urllib.error
+
+    from typer.testing import CliRunner
 
     from comfy_cli.target import Target
 
@@ -435,6 +439,7 @@ def test_is_cloud_default_local(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.delenv("COMFY_WHERE", raising=False)
     # Ensure no persisted config interferes with the default-local assumption.
     from comfy_cli.config_manager import ConfigManager
+
     monkeypatch.setattr(ConfigManager(), "get", lambda key: None)
     assert jobs_mod._is_cloud(None) is False
 
@@ -451,10 +456,12 @@ def test_top_level_where_cloud_reaches_preflight(monkeypatch: pytest.MonkeyPatch
     # Force-empty the auth store so preflight reports not-configured even
     # if the developer running the suite is signed in.
     from comfy_cli.auth import store as auth_store
+
     monkeypatch.setattr(auth_store, "get", lambda _: None)
     monkeypatch.setattr(auth_store, "get_cloud_session", lambda: None)
 
     from comfy_cli.cmdline import app
+
     runner = typer.testing.CliRunner()
     result = runner.invoke(app, ["--json", "jobs", "status", "some-id"])
 
@@ -464,8 +471,7 @@ def test_top_level_where_cloud_reaches_preflight(monkeypatch: pytest.MonkeyPatch
     env = json.loads(lines[-1])
     assert env["ok"] is False
     assert env["error"]["code"] == "cloud_not_configured", (
-        f"top-level --where cloud was dropped — got {env['error']['code']!r}; "
-        f"this is the routing-flag-position bug"
+        f"top-level --where cloud was dropped — got {env['error']['code']!r}; this is the routing-flag-position bug"
     )
 
 
@@ -501,12 +507,18 @@ def test_run_default_async_emits_clean_server_not_running(tmp_path):
     is wired through whether async or wait."""
     wf = tmp_path / "wf.json"
     wf.write_text(json.dumps({"1": {"class_type": "Anything", "inputs": {}}}))
-    res = _run([
-        "--json", "run",
-        "--workflow", str(wf),
-        "--host", "127.0.0.1",
-        "--port", "65431",
-    ])
+    res = _run(
+        [
+            "--json",
+            "run",
+            "--workflow",
+            str(wf),
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "65431",
+        ]
+    )
     assert res.returncode != 0
     env = _last_json(res.stdout)
     assert env["error"]["code"] == "server_not_running"

@@ -66,9 +66,7 @@ def test_cloud_preflight_with_valid_session_allows_proceeding(isolated_secrets):
     assert where_module.cloud_preflight() is None
 
 
-def test_cloud_preflight_with_expired_unrefreshable_session_returns_unauthorized(
-    isolated_secrets, monkeypatch
-):
+def test_cloud_preflight_with_expired_unrefreshable_session_returns_unauthorized(isolated_secrets, monkeypatch):
     # Expired session whose refresh fails (dead refresh token) → unauthorized.
     from comfy_cli.cloud import oauth
 
@@ -98,9 +96,18 @@ def test_cloud_preflight_refreshes_expired_session(isolated_secrets, monkeypatch
 
     from comfy_cli.cloud import oauth
 
-    monkeypatch.setattr(oauth, "refresh_tokens", lambda **kw: oauth.TokenSet(
-        access_token="fresh-access-token", refresh_token="fresh-refresh-token",
-        token_type="Bearer", expires_in=3600, expires_at=int(time.time()) + 3600, scope="s"))
+    monkeypatch.setattr(
+        oauth,
+        "refresh_tokens",
+        lambda **kw: oauth.TokenSet(
+            access_token="fresh-access-token",
+            refresh_token="fresh-refresh-token",
+            token_type="Bearer",
+            expires_in=3600,
+            expires_at=int(time.time()) + 3600,
+            scope="s",
+        ),
+    )
     auth_store.save_cloud_session(
         base_url="https://testcloud.comfy.org",
         resource="https://testcloud.comfy.org/mcp",

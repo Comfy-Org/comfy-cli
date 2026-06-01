@@ -49,13 +49,16 @@ def test_global_options_present_on_root():
         assert expected in root_params, f"missing global option: {expected}"
 
 
-@pytest.mark.parametrize("cmd_path", [
-    "env",
-    "which",
-    "install",
-    "run",
-    "launch",
-])
+@pytest.mark.parametrize(
+    "cmd_path",
+    [
+        "env",
+        "which",
+        "install",
+        "run",
+        "launch",
+    ],
+)
 def test_visible_command_has_help_text(cmd_path):
     doc = build_help_json(app)
     cmd = doc["commands"][cmd_path]

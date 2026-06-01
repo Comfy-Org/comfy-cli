@@ -78,7 +78,9 @@ class TestRunApiKeyResolution:
 
     def test_envvar_is_picked_up(self, runner, mock_run_execute, tmp_path):
         wf = _write_workflow(tmp_path)
-        result = runner.invoke(app, ["run", "--workflow", wf], env={"COMFY_API_KEY": "env-key-xyz", "COMFY_WHERE": "local"})
+        result = runner.invoke(
+            app, ["run", "--workflow", wf], env={"COMFY_API_KEY": "env-key-xyz", "COMFY_WHERE": "local"}
+        )
         assert result.exit_code == 0, result.output
         assert mock_run_execute.call_args.kwargs["api_key"] == "env-key-xyz"
 
@@ -101,7 +103,9 @@ class TestRunApiKeyResolution:
 
     def test_envvar_trailing_whitespace_is_stripped(self, runner, mock_run_execute, tmp_path):
         wf = _write_workflow(tmp_path)
-        result = runner.invoke(app, ["run", "--workflow", wf], env={"COMFY_API_KEY": "  sk-abc\n", "COMFY_WHERE": "local"})
+        result = runner.invoke(
+            app, ["run", "--workflow", wf], env={"COMFY_API_KEY": "  sk-abc\n", "COMFY_WHERE": "local"}
+        )
         assert result.exit_code == 0, result.output
         assert mock_run_execute.call_args.kwargs["api_key"] == "sk-abc"
 

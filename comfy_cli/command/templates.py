@@ -403,9 +403,7 @@ def refresh_cmd():
 # Where the per-template workflow JSONs live on GitHub. The gallery index lists
 # each template by ``name``; the corresponding workflow is at
 # ``Comfy-Org/workflow_templates/templates/<name>.json``.
-_TEMPLATE_WORKFLOW_URL = (
-    "https://raw.githubusercontent.com/Comfy-Org/workflow_templates/main/templates/{name}.json"
-)
+_TEMPLATE_WORKFLOW_URL = "https://raw.githubusercontent.com/Comfy-Org/workflow_templates/main/templates/{name}.json"
 
 
 def _fetch_template_workflow(name: str, *, timeout: float = 15.0) -> bytes:

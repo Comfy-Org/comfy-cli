@@ -15,7 +15,6 @@ from comfy_cli.output.panels import (
     which_panel,
 )
 
-
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
 

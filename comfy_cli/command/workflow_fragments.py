@@ -43,7 +43,9 @@ def compose_cmd(
     blueprint: Annotated[Path, typer.Argument(help="Blueprint YAML file.")],
     out: Annotated[
         Path | None,
-        typer.Option("--out", "-o", show_default=False, help="Output workflow JSON path. Defaults to <blueprint>.compiled.json"),
+        typer.Option(
+            "--out", "-o", show_default=False, help="Output workflow JSON path. Defaults to <blueprint>.compiled.json"
+        ),
     ] = None,
     lib: Annotated[
         str | None,
@@ -59,8 +61,11 @@ def compose_cmd(
     try:
         import yaml
     except ImportError as e:  # pragma: no cover
-        renderer.error(code="blueprint_yaml_unavailable", message="PyYAML is required for `compose`",
-                       hint="install with: pip install pyyaml")
+        renderer.error(
+            code="blueprint_yaml_unavailable",
+            message="PyYAML is required for `compose`",
+            hint="install with: pip install pyyaml",
+        )
         raise typer.Exit(code=1) from e
 
     try:
@@ -73,12 +78,12 @@ def compose_cmd(
     try:
         workflow, summary = compose_blueprint(blueprint_data, lib_dir=lib_dir)
     except FragmentError as e:
-        renderer.error(code="fragment_invalid", message=str(e),
-                       hint=e.hint or "", details={"path": e.path})
+        renderer.error(code="fragment_invalid", message=str(e), hint=e.hint or "", details={"path": e.path})
         raise typer.Exit(code=1) from e
     except BlueprintError as e:
-        renderer.error(code="blueprint_invalid", message=str(e),
-                       hint=e.hint or "", details={"step_alias": e.step_alias})
+        renderer.error(
+            code="blueprint_invalid", message=str(e), hint=e.hint or "", details={"step_alias": e.step_alias}
+        )
         raise typer.Exit(code=1) from e
 
     out_path = out or blueprint.with_suffix(".compiled.json")
@@ -127,26 +132,30 @@ def fragment_ls_cmd(
         except FragmentError as e:
             errors.append({"path": str(path), "error": str(e)})
             continue
-        rows.append({
-            "name": frag.name,
-            "version": frag.version,
-            "description": frag.description,
-            "inputs": list(frag.inputs.keys()),
-            "outputs": list(frag.outputs.keys()),
-            "params": list(frag.params.keys()),
-            "terminal": frag.terminal,
-            "path": str(path),
-        })
+        rows.append(
+            {
+                "name": frag.name,
+                "version": frag.version,
+                "description": frag.description,
+                "inputs": list(frag.inputs.keys()),
+                "outputs": list(frag.outputs.keys()),
+                "params": list(frag.params.keys()),
+                "terminal": frag.terminal,
+                "path": str(path),
+            }
+        )
 
     payload = {"lib": str(lib_dir), "count": len(rows), "fragments": rows, "errors": errors}
     if renderer.is_pretty():
         if not rows and not errors:
             rprint("[dim]No fragments found.[/dim]")
         for f in rows:
-            rprint(f"[bold]{f['name']}[/bold]  v{f['version']}  "
-                   f"in={','.join(f['inputs']) or '∅'}  "
-                   f"out={','.join(f['outputs']) or '∅'}  "
-                   f"params={','.join(f['params']) or '∅'}")
+            rprint(
+                f"[bold]{f['name']}[/bold]  v{f['version']}  "
+                f"in={','.join(f['inputs']) or '∅'}  "
+                f"out={','.join(f['outputs']) or '∅'}  "
+                f"params={','.join(f['params']) or '∅'}"
+            )
             if f["description"]:
                 rprint(f"  [dim]{f['description']}[/dim]")
         for e in errors:
@@ -169,8 +178,7 @@ def fragment_show_cmd(
     try:
         frag = load_fragment(path)
     except FragmentError as e:
-        renderer.error(code="fragment_invalid", message=str(e),
-                       hint=e.hint or "", details={"path": e.path})
+        renderer.error(code="fragment_invalid", message=str(e), hint=e.hint or "", details={"path": e.path})
         raise typer.Exit(code=1) from e
 
     payload = {
@@ -181,9 +189,10 @@ def fragment_show_cmd(
         "terminal": frag.terminal,
         "inputs": {n: {"type": p.type, "binds": p.binds} for n, p in frag.inputs.items()},
         "outputs": {n: {"type": p.type, "from": p.from_node, "port": p.port} for n, p in frag.outputs.items()},
-        "params": {n: {"type": p.type, "binds": p.binds,
-                       **({"default": p.default} if p.has_default else {})}
-                   for n, p in frag.params.items()},
+        "params": {
+            n: {"type": p.type, "binds": p.binds, **({"default": p.default} if p.has_default else {})}
+            for n, p in frag.params.items()
+        },
         "node_count": len(frag.nodes),
     }
     if renderer.is_pretty():

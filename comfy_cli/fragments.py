@@ -109,7 +109,7 @@ class BlueprintError(Exception):
 class FragmentPort:
     name: str
     type: str
-    binds: str | None = None   # for inputs and params: "<node_id>.<input_name>"
+    binds: str | None = None  # for inputs and params: "<node_id>.<input_name>"
     from_node: str | None = None  # for outputs
     port: int = 0
     default: Any = None
@@ -325,8 +325,7 @@ class Pipeline:
             ref = value[1:]
             if "." not in ref:
                 raise BlueprintError(
-                    f"[{step_alias}] input {in_name!r}: cross-step ref must be "
-                    f"'$alias.output_name' (got {value!r})",
+                    f"[{step_alias}] input {in_name!r}: cross-step ref must be '$alias.output_name' (got {value!r})",
                     step_alias=step_alias,
                 )
             alias, output_name = ref.split(".", 1)
@@ -344,8 +343,7 @@ class Pipeline:
                 )
             if output_name not in self.outputs[alias]:
                 raise BlueprintError(
-                    f"[{step_alias}] input {in_name!r}: alias {alias!r} has no output "
-                    f"{output_name!r}",
+                    f"[{step_alias}] input {in_name!r}: alias {alias!r} has no output {output_name!r}",
                     step_alias=step_alias,
                     hint=f"alias {alias!r} exposes: {sorted(self.outputs[alias].keys())}",
                 )
@@ -461,9 +459,7 @@ class Pipeline:
         for o_name, port in fragment.outputs.items():
             if port.from_node is None:
                 raise FragmentError(f"output {port.name!r} is missing `from`")
-            self.outputs[alias][o_name] = _StepOutput(
-                node_id=remap[port.from_node], port=port.port, type=port.type
-            )
+            self.outputs[alias][o_name] = _StepOutput(node_id=remap[port.from_node], port=port.port, type=port.type)
         self.last_step_terminal = fragment.terminal
 
     # -- Save-node convenience ----------------------------------------------
@@ -471,8 +467,12 @@ class Pipeline:
     def add_save(self, output: _StepOutput, output_type: str, *, prefix: str) -> None:
         if output_type == "VIDEO":
             class_type, ref_key = "SaveVideo", "video"
-            inputs = {ref_key: [output.node_id, output.port],
-                      "filename_prefix": prefix, "format": "mp4", "codec": "h264"}
+            inputs = {
+                ref_key: [output.node_id, output.port],
+                "filename_prefix": prefix,
+                "format": "mp4",
+                "codec": "h264",
+            }
         else:
             class_type, ref_key = "SaveImage", "images"
             inputs = {ref_key: [output.node_id, output.port], "filename_prefix": prefix}

@@ -122,8 +122,7 @@ def ls_cmd(
     ] = None,
     cloud_disabled: Annotated[
         bool,
-        typer.Option("--cloud-disabled/--cloud-enabled", show_default=False,
-                     help="Filter by cloud availability."),
+        typer.Option("--cloud-disabled/--cloud-enabled", show_default=False, help="Filter by cloud availability."),
     ] = False,
     api_only: Annotated[
         bool,

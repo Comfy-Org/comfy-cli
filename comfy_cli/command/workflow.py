@@ -75,8 +75,8 @@ def _load_workflow_or_fail(renderer, path: str) -> tuple[Path, dict[str, Any]]:
 def _load_object_info_or_fail(renderer, input_path: str | None, host: str | None, port: int | None) -> dict[str, Any]:
     """Fetch object_info via the Python CQL engine, with error envelope on failure."""
     from comfy_cli import where as where_module
-    from comfy_cli.cql.engine import LoadError, _load_from_file, _load_from_target
     from comfy_cli.config_manager import ConfigManager
+    from comfy_cli.cql.engine import LoadError, _load_from_file, _load_from_target
 
     if input_path:
         try:
@@ -251,14 +251,18 @@ def set_slot_cmd(
     try:
         new_workflow, warnings = graph.apply_slots(workflow, overrides_dict)
     except ValueError as e:
-        renderer.error(code="workflow_slot_invalid", message=str(e),
-                       hint="run `comfy workflow slots <file>` to see valid addresses + types")
+        renderer.error(
+            code="workflow_slot_invalid",
+            message=str(e),
+            hint="run `comfy workflow slots <file>` to see valid addresses + types",
+        )
         raise typer.Exit(code=1) from e
 
     serialized = json.dumps(new_workflow, indent=2)
 
     if stdout:
         import sys
+
         sys.stdout.write(serialized)
         sys.stdout.write("\n")
         return
@@ -356,6 +360,7 @@ def vary_cmd(
             written.append(str(target))
     else:
         import sys
+
         for wf in workflows:
             sys.stdout.write(json.dumps(wf))
             sys.stdout.write("\n")
@@ -406,8 +411,9 @@ def _cloud_target_or_local_error(where: str | None, renderer):
     return target
 
 
-def _authed_request(url: str, target, *, method: str = "GET", data: bytes | None = None,
-                    content_type: str | None = None):
+def _authed_request(
+    url: str, target, *, method: str = "GET", data: bytes | None = None, content_type: str | None = None
+):
     """Build an authenticated urllib Request. The return type is annotated
     loosely to keep urllib out of the module's top-level imports."""
     import urllib.request
@@ -422,8 +428,9 @@ def _authed_request(url: str, target, *, method: str = "GET", data: bytes | None
     return req
 
 
-def _http_request(url: str, target, *, method: str = "GET", body: dict | None = None,
-                  timeout: float = 30.0) -> tuple[int, dict | None]:
+def _http_request(
+    url: str, target, *, method: str = "GET", body: dict | None = None, timeout: float = 30.0
+) -> tuple[int, dict | None]:
     """Authed HTTP call returning (status, parsed_json_or_none). Raises
     urllib errors verbatim so callers can surface the right error code."""
     import urllib.request
@@ -451,7 +458,9 @@ def _handle_cloud_http_error(renderer, e, *, operation: str, workflow_id: str | 
         if e.code == 404:
             renderer.error(
                 code="workflow_not_found",
-                message=f"no saved workflow with id {workflow_id!r}" if workflow_id else f"workflow not found ({operation})",
+                message=f"no saved workflow with id {workflow_id!r}"
+                if workflow_id
+                else f"workflow not found ({operation})",
                 hint="list available workflows via `comfy --json workflow list`",
                 details={"workflow_id": workflow_id, "operation": operation},
             )
@@ -525,7 +534,8 @@ def list_cmd(
                 "created_at": r.get("created_at"),
                 "updated_at": r.get("updated_at"),
             }
-            for r in rows if isinstance(r, dict)
+            for r in rows
+            if isinstance(r, dict)
         ],
     }
     if renderer.is_pretty():
@@ -707,6 +717,6 @@ from comfy_cli.command import workflow_fragments as _wfrag  # noqa: E402
 
 app.command(
     "compose",
-    help="Compose a YAML recipe of fragments into a single API-format workflow.",
+    help="Compose a YAML blueprint of fragments into a single API-format workflow.",
 )(_wfrag.compose_cmd)
 app.add_typer(_wfrag.fragment_app, name="fragment")

@@ -15,7 +15,6 @@ from comfy_cli.fragments import (
     BlueprintError,
     Fragment,
     FragmentError,
-    Pipeline,
     compose_blueprint,
     load_fragment,
     parse_fragment,
@@ -68,9 +67,7 @@ def _run(args: list[str], capsys) -> dict:
             return json.loads(line)
         except json.JSONDecodeError:
             continue
-    raise AssertionError(
-        f"no JSON envelope (rc={result.exit_code}, exc={result.exception}, out={captured[:500]!r})"
-    )
+    raise AssertionError(f"no JSON envelope (rc={result.exit_code}, exc={result.exception}, out={captured[:500]!r})")
 
 
 # ---------------------------------------------------------------------------
@@ -319,11 +316,7 @@ class TestCompose:
         assert summary["fragments_used"] == ["save_still"]
 
     def test_default_param_applied_when_omitted(self, lib_dir: Path):
-        blueprint = {
-            "pipeline": [
-                {"fragment": "text_encode", "alias": "p", "inputs": {"clip": "fake_clip"}}
-            ]
-        }
+        blueprint = {"pipeline": [{"fragment": "text_encode", "alias": "p", "inputs": {"clip": "fake_clip"}}]}
         wf, _ = compose_blueprint(blueprint, lib_dir=lib_dir)
         encode = [n for n in wf.values() if n["class_type"] == "CLIPTextEncode"][0]
         assert encode["inputs"]["text"] == "default prompt"
@@ -347,7 +340,12 @@ class TestCompose:
         blueprint = {
             "pipeline": [
                 {"fragment": "text_encode", "alias": "p1", "inputs": {"clip": "clip_a"}, "params": {"text": "first"}},
-                {"fragment": "text_encode", "alias": "p2", "inputs": {"clip": "$p1.conditioning"}, "params": {"text": "second"}},
+                {
+                    "fragment": "text_encode",
+                    "alias": "p2",
+                    "inputs": {"clip": "$p1.conditioning"},
+                    "params": {"text": "second"},
+                },
             ]
         }
         wf, summary = compose_blueprint(blueprint, lib_dir=lib_dir)
@@ -417,19 +415,13 @@ class TestCompose:
         assert "missing required input" in str(exc.value)
 
     def test_unknown_input_key_errors(self, lib_dir: Path):
-        blueprint = {
-            "pipeline": [
-                {"fragment": "text_encode", "alias": "x", "inputs": {"clip": "a", "typo": "b"}}
-            ]
-        }
+        blueprint = {"pipeline": [{"fragment": "text_encode", "alias": "x", "inputs": {"clip": "a", "typo": "b"}}]}
         with pytest.raises(BlueprintError, match="unknown inputs"):
             compose_blueprint(blueprint, lib_dir=lib_dir)
 
     def test_unknown_param_key_errors(self, lib_dir: Path):
         blueprint = {
-            "pipeline": [
-                {"fragment": "text_encode", "alias": "x", "inputs": {"clip": "a"}, "params": {"typo": 1}}
-            ]
+            "pipeline": [{"fragment": "text_encode", "alias": "x", "inputs": {"clip": "a"}, "params": {"typo": 1}}]
         }
         with pytest.raises(BlueprintError, match="unknown params"):
             compose_blueprint(blueprint, lib_dir=lib_dir)
@@ -445,11 +437,7 @@ class TestCompose:
             compose_blueprint(blueprint, lib_dir=lib_dir)
 
     def test_unknown_alias_in_cross_ref(self, lib_dir: Path):
-        blueprint = {
-            "pipeline": [
-                {"fragment": "text_encode", "alias": "p2", "inputs": {"clip": "$nope.conditioning"}}
-            ]
-        }
+        blueprint = {"pipeline": [{"fragment": "text_encode", "alias": "p2", "inputs": {"clip": "$nope.conditioning"}}]}
         with pytest.raises(BlueprintError, match="unknown alias"):
             compose_blueprint(blueprint, lib_dir=lib_dir)
 
@@ -474,8 +462,11 @@ class TestCompose:
         blueprint = {
             "pipeline": [
                 {"fragment": "model_producer", "alias": "base", "params": {"ckpt": "m.safetensors"}},
-                {"fragment": "model_consumer", "alias": "samp",
-                 "inputs": {"model": "$base.model", "latent": "$base.latent"}},
+                {
+                    "fragment": "model_consumer",
+                    "alias": "samp",
+                    "inputs": {"model": "$base.model", "latent": "$base.latent"},
+                },
             ]
         }
         wf, _ = compose_blueprint(blueprint, lib_dir=lib_dir)
@@ -489,8 +480,11 @@ class TestCompose:
         """A graph-only type can't be loaded from a path — must use a cross-step ref."""
         blueprint = {
             "pipeline": [
-                {"fragment": "model_consumer", "alias": "samp",
-                 "inputs": {"model": "some/model.safetensors", "latent": "$samp.latent"}},
+                {
+                    "fragment": "model_consumer",
+                    "alias": "samp",
+                    "inputs": {"model": "some/model.safetensors", "latent": "$samp.latent"},
+                },
             ]
         }
         with pytest.raises(BlueprintError, match="can't be loaded from a path"):
@@ -525,13 +519,15 @@ class TestCompose:
 class TestComposeCmd:
     def test_compose_writes_compiled_json(self, lib_dir: Path, tmp_path: Path, capsys):
         blueprint = tmp_path / "demo.yaml"
-        blueprint.write_text(textwrap.dedent("""\
+        blueprint.write_text(
+            textwrap.dedent("""\
             pipeline:
               - fragment: text_encode
                 alias: p
                 inputs: {clip: clip_a}
                 params: {text: hello}
-        """))
+        """)
+        )
         out = tmp_path / "built.json"
         envelope = _run(["compose", str(blueprint), "-o", str(out), "--lib", str(lib_dir)], capsys)
         assert envelope["ok"] is True
@@ -568,7 +564,11 @@ class TestFragmentCmds:
         assert envelope["ok"] is True
         names = {f["name"] for f in envelope["data"]["fragments"]}
         assert names == {
-            "text_encode", "save_still", "image_blend", "model_producer", "model_consumer",
+            "text_encode",
+            "save_still",
+            "image_blend",
+            "model_producer",
+            "model_consumer",
         }
 
     def test_ls_missing_lib(self, tmp_path: Path, capsys):

@@ -531,6 +531,7 @@ class TestResolvePartnerCredential:
     def test_uses_env_var_first(self, monkeypatch: pytest.MonkeyPatch):
         monkeypatch.setenv("COMFY_CLOUD_API_KEY", "env-key-123")
         from comfy_cli.auth import store as auth_store
+
         monkeypatch.setattr(auth_store, "get", lambda _: None)
         assert _resolve_partner_credential() == ("api_key_comfy_org", "env-key-123")
 
@@ -563,6 +564,7 @@ class TestResolvePartnerCredential:
     def test_returns_none_when_nothing_configured(self, monkeypatch: pytest.MonkeyPatch):
         monkeypatch.delenv("COMFY_CLOUD_API_KEY", raising=False)
         from comfy_cli.auth import store as auth_store
+
         monkeypatch.setattr(auth_store, "get", lambda _: None)
         monkeypatch.setattr(auth_store, "get_cloud_session", lambda: None)
         assert _resolve_partner_credential() is None
@@ -614,11 +616,13 @@ class TestExecutePartnerNodePreflight:
         monkeypatch.delenv("COMFY_CLOUD_API_KEY", raising=False)
 
         from comfy_cli.auth import store as auth_store
+
         monkeypatch.setattr(auth_store, "get", lambda _: None)
         monkeypatch.setattr(auth_store, "get_cloud_session", lambda: None)
 
         renderer_errors = []
         from comfy_cli.output.renderer import Renderer
+
         original_error = Renderer.error
 
         def capture_error(self, *, code, message, hint=None, details=None, exit_code=1):
@@ -643,15 +647,14 @@ class TestExecutePartnerNodePreflight:
         err = next(e for e in renderer_errors if e["code"] == "partner_node_requires_credential")
         assert "Veo3VideoGenerationNode" in (err["details"] or {}).get("partner_nodes", [])
 
-    def test_proceeds_and_injects_credential_when_available(
-        self, tmp_path, monkeypatch: pytest.MonkeyPatch
-    ):
+    def test_proceeds_and_injects_credential_when_available(self, tmp_path, monkeypatch: pytest.MonkeyPatch):
         """With creds available, the local submit injects them into
         ``extra_data`` so the partner-API node can call out — same as the
         cloud route does. Closes the silent-failure loop."""
         wf_file = self._wf_file(tmp_path)
         monkeypatch.setenv("COMFY_CLOUD_API_KEY", "test-key-abc")
         from comfy_cli.auth import store as auth_store
+
         monkeypatch.setattr(auth_store, "get", lambda _: None)
 
         with (
@@ -919,9 +922,7 @@ class TestExecuteCloudAutoConvert:
         # successfully. The watcher subprocess is stubbed so the test doesn't
         # actually fork.
         mock_client = MagicMock()
-        mock_client.submit_prompt.return_value = SubmitResult(
-            prompt_id="prompt-abc", number=1, node_errors={}
-        )
+        mock_client.submit_prompt.return_value = SubmitResult(prompt_id="prompt-abc", number=1, node_errors={})
 
         with (
             patch("comfy_cli.target.resolve_target", return_value=fake_target),

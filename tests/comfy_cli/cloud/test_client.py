@@ -77,7 +77,11 @@ class TestTargetURLs:
 
 class TestSubmitPrompt:
     def test_posts_with_bearer_to_prefixed_url(self):
-        with patch.object(comfy_client._OPENER, "open", return_value=_mock_response({"prompt_id": "pid-1", "number": 7, "node_errors": {}})) as urlopen:
+        with patch.object(
+            comfy_client._OPENER,
+            "open",
+            return_value=_mock_response({"prompt_id": "pid-1", "number": 7, "node_errors": {}}),
+        ) as urlopen:
             client = comfy_client.Client(CLOUD)
             result = client.submit_prompt({"1": {"class_type": "X", "inputs": {}}}, "cid")
         assert result.prompt_id == "pid-1"
@@ -93,7 +97,11 @@ class TestSubmitPrompt:
         }
 
     def test_local_target_has_no_auth_header(self):
-        with patch.object(comfy_client._OPENER, "open", return_value=_mock_response({"prompt_id": "pid-2", "number": 1, "node_errors": {}})) as urlopen:
+        with patch.object(
+            comfy_client._OPENER,
+            "open",
+            return_value=_mock_response({"prompt_id": "pid-2", "number": 1, "node_errors": {}}),
+        ) as urlopen:
             client = comfy_client.Client(LOCAL)
             client.submit_prompt({"1": {"class_type": "X", "inputs": {}}}, "cid")
         req = urlopen.call_args.args[0]
@@ -104,7 +112,11 @@ class TestSubmitPrompt:
         assert body.keys() == {"prompt", "client_id"}
 
     def test_cloud_caller_extra_data_is_merged_not_overwritten(self):
-        with patch.object(comfy_client._OPENER, "open", return_value=_mock_response({"prompt_id": "pid", "number": 1, "node_errors": {}})) as urlopen:
+        with patch.object(
+            comfy_client._OPENER,
+            "open",
+            return_value=_mock_response({"prompt_id": "pid", "number": 1, "node_errors": {}}),
+        ) as urlopen:
             client = comfy_client.Client(CLOUD)
             client.submit_prompt(
                 {"1": {"class_type": "X", "inputs": {}}},
@@ -117,7 +129,11 @@ class TestSubmitPrompt:
         assert body["extra_data"]["auth_token_comfy_org"] == "tok-abc"
 
     def test_cloud_caller_auth_token_is_not_clobbered(self):
-        with patch.object(comfy_client._OPENER, "open", return_value=_mock_response({"prompt_id": "pid", "number": 1, "node_errors": {}})) as urlopen:
+        with patch.object(
+            comfy_client._OPENER,
+            "open",
+            return_value=_mock_response({"prompt_id": "pid", "number": 1, "node_errors": {}}),
+        ) as urlopen:
             client = comfy_client.Client(CLOUD)
             client.submit_prompt(
                 {"1": {"class_type": "X", "inputs": {}}},
@@ -137,7 +153,11 @@ class TestSubmitPrompt:
             jobs_path="jobs",
             api_key="sk-test-1234",
         )
-        with patch.object(comfy_client._OPENER, "open", return_value=_mock_response({"prompt_id": "pid", "number": 1, "node_errors": {}})) as urlopen:
+        with patch.object(
+            comfy_client._OPENER,
+            "open",
+            return_value=_mock_response({"prompt_id": "pid", "number": 1, "node_errors": {}}),
+        ) as urlopen:
             client = comfy_client.Client(cloud_apikey)
             client.submit_prompt({"1": {"class_type": "X", "inputs": {}}}, "cid")
         req = urlopen.call_args.args[0]
@@ -159,7 +179,11 @@ class TestSubmitPrompt:
             auth_token="bearer-token",
             api_key="api-key-1234",
         )
-        with patch.object(comfy_client._OPENER, "open", return_value=_mock_response({"prompt_id": "pid", "number": 1, "node_errors": {}})) as urlopen:
+        with patch.object(
+            comfy_client._OPENER,
+            "open",
+            return_value=_mock_response({"prompt_id": "pid", "number": 1, "node_errors": {}}),
+        ) as urlopen:
             client = comfy_client.Client(cloud_both)
             client.submit_prompt({"1": {"class_type": "X", "inputs": {}}}, "cid")
         req = urlopen.call_args.args[0]
@@ -198,14 +222,22 @@ class TestUnauthenticated:
 
 class TestGetHistory:
     def test_cloud_uses_history_v2_path(self):
-        with patch.object(comfy_client._OPENER, "open", return_value=_mock_response({"pid-1": {"outputs": {"3": {"images": []}}, "status": {"completed": True}}})) as urlopen:
+        with patch.object(
+            comfy_client._OPENER,
+            "open",
+            return_value=_mock_response({"pid-1": {"outputs": {"3": {"images": []}}, "status": {"completed": True}}}),
+        ) as urlopen:
             rec = comfy_client.Client(CLOUD).get_history("pid-1")
         req = urlopen.call_args.args[0]
         assert req.full_url == "https://cloud.example.com/api/history_v2/pid-1"
         assert rec["status"]["completed"] is True
 
     def test_local_uses_history_path(self):
-        with patch.object(comfy_client._OPENER, "open", return_value=_mock_response({"pid-1": {"outputs": {}, "status": {"completed": True}}})) as urlopen:
+        with patch.object(
+            comfy_client._OPENER,
+            "open",
+            return_value=_mock_response({"pid-1": {"outputs": {}, "status": {"completed": True}}}),
+        ) as urlopen:
             comfy_client.Client(LOCAL).get_history("pid-1")
         req = urlopen.call_args.args[0]
         assert req.full_url == "http://127.0.0.1:8188/history/pid-1"
@@ -227,7 +259,9 @@ class TestGetHistory:
 
 class TestListJobs:
     def test_cloud_hits_jobs_endpoint_with_limit(self):
-        with patch.object(comfy_client._OPENER, "open", return_value=_mock_response({"jobs": [{"id": "a"}, {"id": "b"}]})) as urlopen:
+        with patch.object(
+            comfy_client._OPENER, "open", return_value=_mock_response({"jobs": [{"id": "a"}, {"id": "b"}]})
+        ) as urlopen:
             jobs = comfy_client.Client(CLOUD).list_jobs(limit=5)
         req = urlopen.call_args.args[0]
         assert req.full_url == "https://cloud.example.com/api/jobs?limit=5"
@@ -409,7 +443,11 @@ class TestHttpUrlRejectedForCloud:
             jobs_path="jobs",
             auth_token="tok",
         )
-        with patch.object(comfy_client._OPENER, "open", return_value=_mock_response({"prompt_id": "x", "number": 1, "node_errors": {}})):
+        with patch.object(
+            comfy_client._OPENER,
+            "open",
+            return_value=_mock_response({"prompt_id": "x", "number": 1, "node_errors": {}}),
+        ):
             comfy_client.Client(local_cloud).submit_prompt({}, "cid")  # no raise
 
 

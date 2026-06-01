@@ -39,15 +39,18 @@ def _validator_for(name: str) -> jsonschema.Validator:
     return jsonschema.Draft202012Validator(schema, resolver=resolver)
 
 
-@pytest.mark.parametrize("schema_name", [
-    "envelope.json",
-    "error.json",
-    "help.json",
-    "env.json",
-    "which.json",
-    "run.json",
-    "run_event.json",
-])
+@pytest.mark.parametrize(
+    "schema_name",
+    [
+        "envelope.json",
+        "error.json",
+        "help.json",
+        "env.json",
+        "which.json",
+        "run.json",
+        "run_event.json",
+    ],
+)
 def test_schemas_are_well_formed(schema_name):
     schema = _load_schema(schema_name)
     # Will raise if the schema itself is invalid.

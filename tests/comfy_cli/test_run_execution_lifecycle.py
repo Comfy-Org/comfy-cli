@@ -75,7 +75,19 @@ class TestRunHappyPath:
         with patch("comfy_cli.cmdline.run_inner.execute"):
             runner.invoke(
                 app,
-                ["run", "--workflow", "wf.json", "--where", "local", "--timeout", "60", "--host", "1.2.3.4", "--port", "9000"],
+                [
+                    "run",
+                    "--workflow",
+                    "wf.json",
+                    "--where",
+                    "local",
+                    "--timeout",
+                    "60",
+                    "--host",
+                    "1.2.3.4",
+                    "--port",
+                    "9000",
+                ],
             )
 
         for name, props in _events(tracked_run):
