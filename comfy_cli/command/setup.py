@@ -128,6 +128,12 @@ def execute(
     _do_preview(console, non_interactive=non_interactive)
 
     # ------------------------------------------------------------------
+    # 4b. Telemetry consent — the single explicit place the user decides.
+    # ------------------------------------------------------------------
+    console.print()
+    _do_consent(console, non_interactive=non_interactive)
+
+    # ------------------------------------------------------------------
     # 5. Detect agent + install skills
     # ------------------------------------------------------------------
     if not skip_skills:
@@ -191,6 +197,8 @@ def _print_welcome(console) -> None:
         ("Set project directory\n", "white"),
         ("  4 ", f"bold {BRAND_ACCENT}"),
         ("Enable image previews\n", "white"),
+        ("  🔒 ", f"bold {BRAND_ACCENT}"),
+        ("Privacy & telemetry\n", "white"),
         ("  5 ", f"bold {BRAND_ACCENT}"),
         ("Install agent skills\n", "white"),
         ("  6 ", f"bold {BRAND_ACCENT}"),
@@ -396,18 +404,12 @@ def _do_preview(console, *, non_interactive: bool = False) -> None:
     pprint(f"  [bold {BRAND_ACCENT}]🖼  Terminal image previews[/bold {BRAND_ACCENT}]")
     pprint()
 
-    # Check if already installed
-    try:
-        import warnings
+    # Check if already installed (presence check only — don't import the module)
+    import importlib.util
 
-        with warnings.catch_warnings():
-            warnings.filterwarnings("ignore", message=".*not running within a terminal.*")
-            import term_image  # noqa: F401
-
+    if importlib.util.find_spec("term_image") is not None:
         pprint("  [bold green]✓[/bold green] term-image already installed — previews enabled")
         return
-    except ImportError:
-        pass
 
     # Ask user (or auto-install in non-interactive mode)
     if non_interactive:
@@ -442,17 +444,61 @@ def _do_preview(console, *, non_interactive: bool = False) -> None:
         pprint(f"  [dim]{result.stderr.strip()[:200]}[/dim]")
 
 
+def _do_consent(console, *, non_interactive: bool = False) -> None:
+    """Ask for (or report) telemetry consent — the one explicit decision point.
+
+    Precedence: a hard env opt-out wins and is never overridden; an already
+    recorded choice is reported, not re-asked; non-interactive runs leave the
+    flag UNSET so a later interactive session still gets the chance to decide.
+    """
+    from comfy_cli import constants, tracking
+    from comfy_cli.config_manager import ConfigManager
+    from comfy_cli.output.branding import BRAND_ACCENT
+
+    pprint(f"  [bold {BRAND_ACCENT}]🔒 Privacy & telemetry[/bold {BRAND_ACCENT}]")
+    pprint()
+
+    if tracking._telemetry_disabled_by_env():
+        pprint("  [bold green]✓[/bold green] Telemetry disabled via environment (DO_NOT_TRACK)")
+        return
+
+    existing = ConfigManager().get_bool(constants.CONFIG_KEY_ENABLE_TRACKING)
+    if existing is not None:
+        state = "enabled" if existing else "disabled"
+        pprint(f"  [bold green]✓[/bold green] Telemetry already {state}")
+        pprint("  [dim]  Change anytime: comfy tracking enable | disable[/dim]")
+        return
+
+    pprint("  [dim]Anonymous usage data helps improve Comfy CLI.[/dim]")
+    pprint()
+
+    if non_interactive:
+        # No human to ask — leave the flag unset (don't silently opt in or out);
+        # a later interactive run will prompt via the global consent path.
+        pprint("  [dim]Skipped (non-interactive). Opt in anytime: comfy tracking enable[/dim]")
+        return
+
+    import questionary
+
+    agree = bool(questionary.confirm("  Share anonymous usage data to help improve Comfy CLI?", default=True).ask())
+    tracking.init_tracking(agree)
+    if agree:
+        pprint("  [bold green]✓[/bold green] Thanks! Enabled — disable anytime: comfy tracking disable")
+    else:
+        pprint("  [dim]No problem — telemetry stays off. Enable later: comfy tracking enable[/dim]")
+
+
 def _do_skills(console) -> None:
     """Detect agent hosts and install skills."""
     from comfy_cli.output.branding import BRAND_ACCENT
-    from comfy_cli.skills import install
+    from comfy_cli.skills import TargetKind, install
 
     pprint(f"  [bold {BRAND_ACCENT}]⑤ Install agent skills[/bold {BRAND_ACCENT}]")
     pprint()
 
     # Detect which agent targets exist
     home = Path.home()
-    detected: list[str] = []
+    detected: list[TargetKind] = []
     labels: list[str] = []
 
     if (home / ".claude").is_dir():
@@ -516,10 +562,10 @@ def _do_verify(console, where: str) -> None:
 
 def _verify_cloud(console) -> None:
     """Check cloud auth + count available nodes."""
-    try:
-        from comfy_cli.comfy_client import Client, Unauthenticated
-        from comfy_cli.target import resolve_target
+    from comfy_cli.comfy_client import Client, Unauthenticated
+    from comfy_cli.target import resolve_target
 
+    try:
         target = resolve_target(where="cloud")
         client = Client(target)
         client.get_job_status("00000000-0000-0000-0000-000000000000")
@@ -536,7 +582,6 @@ def _verify_cloud(console) -> None:
     try:
         import json
         import subprocess
-
         import sys
 
         result = subprocess.run(

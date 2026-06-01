@@ -8,7 +8,6 @@ patch surface stays stable.
 """
 
 import json
-import os
 import time
 import uuid
 from datetime import timedelta
@@ -220,7 +219,7 @@ def execute(
                 },
             )
             raise typer.Exit(code=1)
-        elif not extra_data:
+        elif cred is not None and not extra_data:
             extra_data = {cred[0]: cred[1]}
 
     # Pre-submit validation via pure-Python CQL engine (checks class_types + input shapes).
@@ -562,7 +561,7 @@ def execute_cloud(
             if not isinstance(record, dict):
                 continue
             ct = record.get("class_type", "unknown")
-            for err in (record.get("errors") or []):
+            for err in record.get("errors") or []:
                 detail = err.get("details", "") or err.get("message", "")
                 hint_lines.append(f"node {nid} ({ct}): {detail}")
         renderer.error(
@@ -594,9 +593,7 @@ def execute_cloud(
                 f"  [dim]state    [/dim]{state_file}"
             )
             if not watcher_spawned:
-                pprint(
-                    "[yellow]⚠ Background watcher could not start; poll manually with `comfy jobs status`[/yellow]"
-                )
+                pprint("[yellow]⚠ Background watcher could not start; poll manually with `comfy jobs status`[/yellow]")
         renderer.emit(
             {
                 "workflow": workflow_name,
@@ -628,7 +625,6 @@ def execute_cloud(
     )
     state_file = jobs_state.write(state)
 
-    token = cancellation.get_token()
     try:
         record = client.wait_for_completion(submit.prompt_id, timeout=float(timeout))
     except TimeoutError as e:
@@ -708,4 +704,3 @@ def execute_cloud(
         command="run",
         where="cloud",
     )
-

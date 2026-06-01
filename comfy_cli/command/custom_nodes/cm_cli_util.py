@@ -152,6 +152,7 @@ def execute_cm_cli(
         stderr_lines: list[str] = []
 
         def _drain_stderr():
+            assert process.stderr is not None
             for line in process.stderr:
                 sys.stderr.write(line)
                 sys.stderr.flush()
@@ -160,6 +161,7 @@ def execute_cm_cli(
         stderr_thread = threading.Thread(target=_drain_stderr, daemon=True)
         stderr_thread.start()
 
+        assert process.stdout is not None
         stdout_lines = []
         for line in process.stdout:
             sys.stdout.write(line)

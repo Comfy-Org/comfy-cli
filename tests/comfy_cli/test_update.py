@@ -1,8 +1,15 @@
+import json
+import time
 from unittest.mock import MagicMock, patch
 
 import requests
 
-from comfy_cli.update import check_for_newer_pypi_version
+from comfy_cli.update import (
+    UPDATE_CHECK_DISABLE_ENV,
+    check_for_newer_pypi_version,
+    latest_upgrade_version,
+    upgrade_cli,
+)
 
 
 def _mock_pypi_response(latest_version):
@@ -44,4 +51,56 @@ class TestCheckForNewerPypiVersion:
 # TestCheckForUpdates was removed alongside the bright-blue
 # "🔔 Update Available!" panel (Task 5 of the CLI UX consistency pass).
 # ``check_for_newer_pypi_version`` is still tested directly above; the
-# welcome banner consumes it inline.
+# welcome banner consumes ``latest_upgrade_version`` (below) inline.
+
+
+class TestLatestUpgradeVersion:
+    @patch("comfy_cli.update.check_for_newer_pypi_version")
+    def test_returns_newer_version_and_writes_cache(self, mock_check, tmp_path):
+        mock_check.return_value = (True, "99.0.0")
+        result = latest_upgrade_version("1.0.0", tmp_path)
+        assert result == "99.0.0"
+        cache = tmp_path / "update-check.json"
+        assert json.loads(cache.read_text())["latest"] == "99.0.0"
+
+    @patch("comfy_cli.update.check_for_newer_pypi_version")
+    def test_returns_none_when_current(self, mock_check, tmp_path):
+        mock_check.return_value = (False, "1.0.0")
+        assert latest_upgrade_version("1.0.0", tmp_path) is None
+
+    @patch("comfy_cli.update.check_for_newer_pypi_version")
+    def test_fresh_cache_skips_network(self, mock_check, tmp_path):
+        cache = tmp_path / "update-check.json"
+        cache.write_text(json.dumps({"checked_at": time.time(), "latest": "99.0.0"}))
+        assert latest_upgrade_version("1.0.0", tmp_path) == "99.0.0"
+        mock_check.assert_not_called()
+
+    @patch("comfy_cli.update.check_for_newer_pypi_version")
+    def test_stale_cache_refreshes(self, mock_check, tmp_path):
+        mock_check.return_value = (True, "99.0.0")
+        cache = tmp_path / "update-check.json"
+        cache.write_text(json.dumps({"checked_at": 0, "latest": "2.0.0"}))
+        assert latest_upgrade_version("1.0.0", tmp_path) == "99.0.0"
+        mock_check.assert_called_once()
+
+    @patch("comfy_cli.update.check_for_newer_pypi_version")
+    def test_disabled_via_env(self, mock_check, tmp_path, monkeypatch):
+        monkeypatch.setenv(UPDATE_CHECK_DISABLE_ENV, "1")
+        assert latest_upgrade_version("1.0.0", tmp_path) is None
+        mock_check.assert_not_called()
+
+    @patch("comfy_cli.update.check_for_newer_pypi_version")
+    def test_corrupt_cache_does_not_raise(self, mock_check, tmp_path):
+        mock_check.return_value = (True, "99.0.0")
+        cache = tmp_path / "update-check.json"
+        cache.write_text("not json")
+        assert latest_upgrade_version("1.0.0", tmp_path) is None
+
+
+class TestUpgradeCli:
+    @patch("comfy_cli.update.subprocess.run")
+    def test_runs_pip_install_upgrade(self, mock_run):
+        upgrade_cli()
+        args = mock_run.call_args[0][0]
+        assert args[1:] == ["-m", "pip", "install", "-U", "comfy-cli"]
+        assert mock_run.call_args[1]["check"] is True

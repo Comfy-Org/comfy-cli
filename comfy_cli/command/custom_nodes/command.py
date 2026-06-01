@@ -1083,12 +1083,12 @@ def display_all_nodes():
     Display all nodes in the registry.
     """
 
-    nodes = None
     try:
         nodes = registry_api.list_all_nodes()
     except Exception as e:
         logging.error(f"Failed to fetch nodes from the registry: {str(e)}")
         ui.display_error_message("Failed to fetch nodes from the registry.")
+        return
 
     # Map Node data class instances to tuples for display
     node_data = [

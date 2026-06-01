@@ -96,12 +96,12 @@ def launch_comfyui(extra, frontend_pr=None, python=sys.executable):
         # If running in background mode without using a popen, broken pipe errors may occur when flushing stdout/stderr.
         def redirector_stderr():
             while True:
-                if process is not None:
+                if process is not None and process.stderr is not None:
                     print(process.stderr.readline(), end="")
 
         def redirector_stdout():
             while True:
-                if process is not None:
+                if process is not None and process.stdout is not None:
                     print(process.stdout.readline(), end="")
 
         threading.Thread(target=redirector_stderr).start()

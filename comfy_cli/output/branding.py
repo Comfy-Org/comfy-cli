@@ -334,6 +334,7 @@ def intro_banner(
     version: str,
     signed_in: bool,
     base_url: str,
+    update_hint: str | None = None,
 ) -> Panel:
     """The branded landing screen shown when a user types just ``comfy``.
 
@@ -373,7 +374,7 @@ def intro_banner(
             ("comfy cloud login", "yellow"),
         )
 
-    body = Group(
+    rows = [
         Align.center(wordmark),
         Align.center(tagline),
         Text(""),
@@ -383,7 +384,17 @@ def intro_banner(
         qs,
         Text(""),
         cloud_line,
-    )
+    ]
+    if update_hint:
+        rows.append(
+            Text.assemble(
+                ("Update ", "dim"),
+                (f"v{update_hint} available", f"bold {BRAND_ACCENT}"),
+                ("   → ", f"bold {BRAND_ACCENT}"),
+                ("comfy update cli", "yellow"),
+            )
+        )
+    body = Group(*rows)
     return Panel(
         body,
         subtitle=Text(f"comfy CLI v{version}", style="dim"),

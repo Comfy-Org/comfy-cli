@@ -89,6 +89,89 @@ class TestTrackEvent:
         tracking_module.provider.track.assert_called_once()
 
 
+class TestSubmitFeedback:
+    def test_sends_even_when_passive_consent_disabled(self, tracking_module):
+        # Feedback is explicit/user-initiated: it ignores the passive-telemetry
+        # consent flag (only the hard env opt-out can block it).
+        tracking_module.config_manager.set(constants.CONFIG_KEY_ENABLE_TRACKING, "False")
+        assert tracking_module.submit_feedback("great tool") is True
+        event_name, distinct_id, properties = _last_track_call(tracking_module.provider)
+        assert event_name == "feedback_submitted"
+        assert properties["message"] == "great tool"
+        assert distinct_id, "feedback must attach a stable distinct_id"
+
+    def test_sends_when_consent_unset(self, tracking_module):
+        # Default state (no consent recorded) — still sends.
+        assert tracking_module.submit_feedback("the run command is great") is True
+        event_name, _, properties = _last_track_call(tracking_module.provider)
+        assert event_name == "feedback_submitted"
+        assert properties["message"] == "the run command is great"
+
+    def test_generates_and_persists_user_id_when_absent(self, tracking_module):
+        assert tracking_module.user_id is None
+        assert tracking_module.config_manager.get(constants.CONFIG_KEY_USER_ID) is None
+        tracking_module.submit_feedback("hi")
+        persisted = tracking_module.config_manager.get(constants.CONFIG_KEY_USER_ID)
+        assert persisted is not None
+        _, distinct_id, _ = _last_track_call(tracking_module.provider)
+        assert distinct_id == persisted
+
+    def test_sends_scores_and_drops_none(self, tracking_module):
+        assert tracking_module.submit_feedback("", scores={"general_satisfaction": "5", "usability_satisfaction": None})
+        _, _, properties = _last_track_call(tracking_module.provider)
+        assert properties["general_satisfaction"] == "5"
+        assert "usability_satisfaction" not in properties
+        assert "message" not in properties
+
+    def test_returns_false_when_nothing_to_send(self, tracking_module):
+        assert tracking_module.submit_feedback("") is False
+        tracking_module.provider.track.assert_not_called()
+
+    @pytest.mark.parametrize("env_var", ["DO_NOT_TRACK", "COMFY_NO_TELEMETRY"])
+    def test_env_opt_out_blocks_feedback(self, tracking_module, monkeypatch, env_var):
+        tracking_module.config_manager.set(constants.CONFIG_KEY_ENABLE_TRACKING, "True")
+        monkeypatch.setenv(env_var, "1")
+        assert tracking_module.submit_feedback("hi") is False
+        tracking_module.provider.track.assert_not_called()
+
+
+class TestSubmitAgentReview:
+    def test_sends_when_consent_enabled(self, tracking_module):
+        tracking_module.config_manager.set(constants.CONFIG_KEY_ENABLE_TRACKING, "True")
+        assert tracking_module.submit_agent_review("user shipped a video after one retry") is True
+        event_name, _, properties = _last_track_call(tracking_module.provider)
+        assert event_name == "agent_review_submitted"
+        assert properties["summary"] == "user shipped a video after one retry"
+
+    def test_blocked_when_consent_disabled(self, tracking_module):
+        # Unlike feedback, an agent review is suppressed when passive consent is off.
+        tracking_module.config_manager.set(constants.CONFIG_KEY_ENABLE_TRACKING, "False")
+        assert tracking_module.submit_agent_review("anything") is False
+        tracking_module.provider.track.assert_not_called()
+
+    def test_blocked_when_consent_unset(self, tracking_module):
+        assert tracking_module.submit_agent_review("anything") is False
+        tracking_module.provider.track.assert_not_called()
+
+    def test_sends_under_session_only_consent(self, tracking_module):
+        tracking_module._session_only_tracking = True
+        assert tracking_module.submit_agent_review("ran fine") is True
+        event_name, _, _ = _last_track_call(tracking_module.provider)
+        assert event_name == "agent_review_submitted"
+
+    def test_returns_false_when_nothing_to_send(self, tracking_module):
+        tracking_module.config_manager.set(constants.CONFIG_KEY_ENABLE_TRACKING, "True")
+        assert tracking_module.submit_agent_review("") is False
+        tracking_module.provider.track.assert_not_called()
+
+    @pytest.mark.parametrize("env_var", ["DO_NOT_TRACK", "COMFY_NO_TELEMETRY"])
+    def test_env_opt_out_blocks_review(self, tracking_module, monkeypatch, env_var):
+        tracking_module.config_manager.set(constants.CONFIG_KEY_ENABLE_TRACKING, "True")
+        monkeypatch.setenv(env_var, "1")
+        assert tracking_module.submit_agent_review("hi") is False
+        tracking_module.provider.track.assert_not_called()
+
+
 class TestTrackCommandRedaction:
     """track_command must redact secret-bearing kwargs before they reach the tracking system."""
 

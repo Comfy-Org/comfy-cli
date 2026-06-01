@@ -69,6 +69,17 @@ def _telemetry_disabled_by_env() -> bool:
     return False
 
 
+def _consent_enabled() -> bool:
+    """Whether passive telemetry may be sent right now: no env opt-out AND the
+    user has consented (persisted flag) or a session-only opt-in is active.
+
+    This is the full gate. Agent-authored data (e.g. session reviews) rides it,
+    so opting out of tracking by any means means nothing is sent."""
+    if _telemetry_disabled_by_env():
+        return False
+    return bool(config_manager.get_bool(constants.CONFIG_KEY_ENABLE_TRACKING)) or _session_only_tracking
+
+
 class TelemetryProvider(Protocol):
     enabled: bool
 
@@ -83,7 +94,7 @@ class MixpanelProvider:
         self.enabled = self.client is not None
 
     def track(self, event_name: str, distinct_id: str | None, properties: dict[str, Any]) -> None:
-        if not self.enabled or distinct_id is None:
+        if self.client is None or distinct_id is None:
             return
         self.client.track(distinct_id=distinct_id, event_name=event_name, properties=properties)
 
@@ -145,6 +156,25 @@ def disable():
     typer.echo(f"Tracking is now {'disabled'}.")
 
 
+def _dispatch(
+    event_name: str, properties: dict[str, Any], *, distinct_id: str | None, mixpanel_name: str | None = None
+):
+    """Fan an event out to every provider. Enriches with cli_version/tracing_id.
+
+    This is the shared send path; callers above own the gating (consent for
+    passive telemetry, env-only for feedback).
+    """
+    properties = {**properties, "cli_version": cli_version, "tracing_id": tracing_id}
+    for provider in PROVIDERS:
+        provider_event_name = (
+            mixpanel_name if (mixpanel_name is not None and isinstance(provider, MixpanelProvider)) else event_name
+        )
+        try:
+            provider.track(provider_event_name, distinct_id=distinct_id, properties=dict(properties))
+        except Exception as e:
+            logging.warning(f"Failed to track event via {type(provider).__name__}: {e}")
+
+
 def track_event(event_name: str, properties: Any = None, *, mixpanel_name: str | None = None):
     """Fire ``event_name`` to every enabled telemetry provider.
 
@@ -160,16 +190,70 @@ def track_event(event_name: str, properties: Any = None, *, mixpanel_name: str |
     if not enable_tracking and not _session_only_tracking:
         return
 
-    properties = {**properties, "cli_version": cli_version, "tracing_id": tracing_id}
+    _dispatch(event_name, properties, distinct_id=user_id, mixpanel_name=mixpanel_name)
 
-    for provider in PROVIDERS:
-        provider_event_name = (
-            mixpanel_name if (mixpanel_name is not None and isinstance(provider, MixpanelProvider)) else event_name
-        )
-        try:
-            provider.track(provider_event_name, distinct_id=user_id, properties=dict(properties))
-        except Exception as e:
-            logging.warning(f"Failed to track event via {type(provider).__name__}: {e}")
+
+def _ensure_user_id() -> str:
+    """Return a stable distinct_id, generating + persisting an anonymous one if
+    the user has never been assigned one. Used by feedback so an explicit,
+    user-initiated submission always has an identity to attach to."""
+    global user_id
+    if user_id:
+        return user_id
+    existing = config_manager.get(constants.CONFIG_KEY_USER_ID)
+    if existing:
+        user_id = existing
+        return user_id
+    user_id = str(uuid.uuid4())
+    try:
+        config_manager.set(constants.CONFIG_KEY_USER_ID, user_id)
+    except OSError:
+        pass
+    return user_id
+
+
+def submit_feedback(message: str = "", *, scores: dict[str, str | None] | None = None) -> bool:
+    """Send user feedback to telemetry (PostHog + Mixpanel) as ``feedback_submitted``.
+
+    Unlike passive command telemetry, feedback is an explicit, user-initiated
+    action — so it is NOT gated on the consent flag. Only the hard env opt-out
+    (``DO_NOT_TRACK`` / ``COMFY_NO_TELEMETRY``) suppresses it. Returns False
+    without sending when opted out or when there's nothing to send, so the
+    caller can tell the user rather than silently drop their words. Fail-fast:
+    no on-disk queue, no retry — best-effort delivery.
+    """
+    if _telemetry_disabled_by_env():
+        return False
+    properties: dict[str, Any] = {}
+    if message:
+        properties["message"] = message
+    if scores:
+        properties.update({k: v for k, v in scores.items() if v is not None})
+    if not properties:
+        return False
+    _dispatch("feedback_submitted", properties, distinct_id=_ensure_user_id())
+    return True
+
+
+def submit_agent_review(summary: str = "", *, properties: dict[str, Any] | None = None) -> bool:
+    """Send an agent-authored summary of how the session went as ``agent_review_submitted``.
+
+    Distinct from :func:`submit_feedback`: this is the agent's assessment, not
+    the user's words, so it is treated like passive telemetry — fully
+    consent-gated. If the user opted out by ANY means (env opt-out, or no
+    consent), nothing is sent and this returns False. No queue, no retry.
+    """
+    if not _consent_enabled():
+        return False
+    payload: dict[str, Any] = {}
+    if summary:
+        payload["summary"] = summary
+    if properties:
+        payload.update({k: v for k, v in properties.items() if v is not None})
+    if not payload:
+        return False
+    _dispatch("agent_review_submitted", payload, distinct_id=user_id)
+    return True
 
 
 def filter_command_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
@@ -181,7 +265,7 @@ def filter_command_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def track_command(sub_command: str = None):
+def track_command(sub_command: str | None = None):
     """
     A decorator factory that logs the command function name and selected arguments when it's called.
     """

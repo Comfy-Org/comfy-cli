@@ -131,7 +131,7 @@ Pretty mode hides the envelope behind a rendered panel. If the rendered output i
 ## What to NOT do
 
 - Don't `chmod` files in the model dirs to "fix" load failures — the path is wrong, not the permissions.
-- Don't delete `.installed.json` or the OAuth session to "reset" — that loses state. Use `comfy cloud logout` and `comfy skill uninstall` instead.
+- Don't delete `.installed.json` or the OAuth session to "reset" — that loses state. Use `comfy cloud logout` and `comfy skills uninstall` instead.
 - Don't paste raw error messages into prompts without the `details` block — the details are usually what disambiguates the fix.
 
 ## Where to look when nothing in the envelope helps

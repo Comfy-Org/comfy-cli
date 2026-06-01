@@ -8,7 +8,7 @@ should see the JSON — not a sentence about the JSON. When you submit it,
 the user should see the prompt_id and routing — not a 200-line envelope.
 
 This skill is about **what to put in chat** while driving the comfy CLI.
-It is paired with `comfy` (the surface) and `comfy-edit` (transforms).
+It is paired with `comfy` (the surface).
 
 ## The rule
 
@@ -16,21 +16,28 @@ It is paired with `comfy` (the surface) and `comfy-edit` (transforms).
 
 | Moment | Show in chat |
 |---|---|
-| Constructing a workflow JSON | The full JSON in a fenced ```json block, before writing to disk |
+| Creating a fragment JSON | The `_fragment` header (inputs/outputs/params) — not the full interior nodes unless small |
+| Writing a blueprint YAML | The full YAML blueprint in a fenced block |
+| Constructing raw JSON (<30 nodes only) | The full JSON in a fenced ```json block |
 | Editing one slot | A one-line diff: `<addr>: <old> → <new>` |
 | Varying multiple slots | The sweep matrix as a small table |
+| Composing a blueprint | The `comfy workflow compose` command + summary (steps, nodes) |
 | Submitting a workflow | `prompt_id`, `state_file`, route (local/cloud), one line |
 | Job terminal | status + the output URL(s) or path(s) — nothing else |
 
-**Anti-pattern:** writing the JSON to `/tmp/foo.json` and saying "I've
-prepared the workflow." The user can't see `/tmp`. They lose all ability
-to spot a bad prompt, wrong slot, or wrong model before the run.
+**Anti-pattern:** building a 100-node raw JSON workflow in chat. Use
+fragments + blueprints — show the blueprint YAML (10-30 lines) instead of
+the compiled workflow (100+ lines). The user can spot bad values in
+a blueprint far more easily than in raw node wiring.
 
-## Constructing — show the JSON inline
+## Constructing — show the blueprint, not the compiled JSON
 
-Show the workflow JSON in a fenced ```json block in chat BEFORE writing to
-disk. The user must be able to spot bad values (wrong model, wrong prompt)
-from what you send. Then call `Write`.
+For fragment-based workflows: show the **blueprint YAML** and the
+**fragment `_fragment` headers** — not the compiled workflow JSON.
+The compiled JSON is a build artifact; the blueprint is the source of truth.
+
+For raw JSON workflows (<30 nodes): show the full JSON in a fenced
+```json block before writing to disk.
 
 ## Editing one slot — show the diff
 

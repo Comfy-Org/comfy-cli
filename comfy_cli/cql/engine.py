@@ -11,16 +11,19 @@ from __future__ import annotations
 
 import difflib
 import json
+import logging
+import urllib.error
+import urllib.parse
+import urllib.request
 from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Any
-
 
 # ---------------------------------------------------------------------------
 # Types — mirrors nodegraph/types.go
 # ---------------------------------------------------------------------------
 
-_IMPLICIT_WIDGET_TYPES = frozenset({"STRING", "INT", "FLOAT", "NUMBER", "BOOLEAN"})
+_IMPLICIT_WIDGET_TYPES = frozenset({"STRING", "INT", "FLOAT", "NUMBER", "BOOLEAN", "COMBO"})
 
 
 @dataclass
@@ -46,12 +49,12 @@ class Port:
     def validate_shape(self, value: Any) -> str | None:
         """Hard-reject on JSON-shape mismatch. Returns error message or None."""
         if self.type == "INT":
-            if isinstance(value, bool) or not isinstance(value, (int, float)):
+            if isinstance(value, bool) or not isinstance(value, int | float):
                 return f"{self.name}: expected INT, got {type(value).__name__} {value!r}"
             if isinstance(value, float) and value != int(value):
                 return f"{self.name}: expected integer, got {value}"
         elif self.type in ("FLOAT", "NUMBER"):
-            if isinstance(value, bool) or not isinstance(value, (int, float)):
+            if isinstance(value, bool) or not isinstance(value, int | float):
                 return f"{self.name}: expected {self.type}, got {type(value).__name__}"
         elif self.type in ("STRING", "COMBO"):
             if not isinstance(value, str):
@@ -68,24 +71,30 @@ class Port:
         warnings: list[dict] = []
         if self.type == "COMBO" and self.enum_values:
             if isinstance(value, str) and value not in self.enum_values:
-                warnings.append({
-                    "code": "unknown_enum_value",
-                    "field": self.name,
-                    "message": f"{value!r} not in {len(self.enum_values)} known options for {self.name}",
-                })
-        if self.type in ("INT", "FLOAT", "NUMBER") and isinstance(value, (int, float)):
+                warnings.append(
+                    {
+                        "code": "unknown_enum_value",
+                        "field": self.name,
+                        "message": f"{value!r} not in {len(self.enum_values)} known options for {self.name}",
+                    }
+                )
+        if self.type in ("INT", "FLOAT", "NUMBER") and isinstance(value, int | float):
             if self.options.min is not None and value < self.options.min:
-                warnings.append({
-                    "code": "below_min",
-                    "field": self.name,
-                    "message": f"{self.name}={value} below catalog min {self.options.min}",
-                })
+                warnings.append(
+                    {
+                        "code": "below_min",
+                        "field": self.name,
+                        "message": f"{self.name}={value} below catalog min {self.options.min}",
+                    }
+                )
             if self.options.max is not None and value > self.options.max:
-                warnings.append({
-                    "code": "above_max",
-                    "field": self.name,
-                    "message": f"{self.name}={value} above catalog max {self.options.max}",
-                })
+                warnings.append(
+                    {
+                        "code": "above_max",
+                        "field": self.name,
+                        "message": f"{self.name}={value} above catalog max {self.options.max}",
+                    }
+                )
         return warnings
 
 
@@ -161,9 +170,11 @@ def _is_link(type_id: str, is_enum: bool, force_input: bool) -> bool:
 def _derive_pack(python_module: str) -> str:
     if not python_module:
         return "core"
-    if (python_module.startswith("nodes")
-            or python_module.startswith("comfy_extras")
-            or python_module.startswith("comfy.comfy_types")):
+    if (
+        python_module.startswith("nodes")
+        or python_module.startswith("comfy_extras")
+        or python_module.startswith("comfy.comfy_types")
+    ):
         return "core"
     if python_module.startswith("custom_nodes."):
         parts = python_module.split(".", 3)
@@ -220,7 +231,7 @@ def _ordered_names(raw: dict, order: list[str] | None) -> list[str]:
     """Return input names in declared order, falling back to alphabetical."""
     seen: set[str] = set()
     out: list[str] = []
-    for name in (order or []):
+    for name in order or []:
         if name in raw and name not in seen:
             out.append(name)
             seen.add(name)
@@ -235,14 +246,16 @@ def _parse_inputs(raw: dict, order: list[str] | None, required: bool) -> list[Po
     for name in _ordered_names(raw, order):
         spec = raw[name]
         type_id, is_enum, enum_values, opts = _parse_input_spec(spec)
-        ports.append(Port(
-            name=name,
-            type=type_id,
-            required=required,
-            is_link=_is_link(type_id, is_enum, opts.force_input),
-            enum_values=enum_values,
-            options=opts,
-        ))
+        ports.append(
+            Port(
+                name=name,
+                type=type_id,
+                required=required,
+                is_link=_is_link(type_id, is_enum, opts.force_input),
+                enum_values=enum_values,
+                options=opts,
+            )
+        )
     return ports
 
 
@@ -298,6 +311,7 @@ def parse_supported_nodes(data: bytes) -> tuple[dict[str, str], dict[str, list[s
     """Parse supported_nodes.yaml → (node_pack, node_labels)."""
     try:
         import yaml
+
         cfg = yaml.safe_load(data)
     except Exception:
         return {}, {}
@@ -305,7 +319,7 @@ def parse_supported_nodes(data: bytes) -> tuple[dict[str, str], dict[str, list[s
         return {}, {}
     node_pack: dict[str, str] = {}
     node_labels: dict[str, list[str]] = {}
-    for pack in (cfg.get("node_packs") or []):
+    for pack in cfg.get("node_packs") or []:
         if not isinstance(pack, dict):
             continue
         pack_name = pack.get("name", "")
@@ -319,6 +333,7 @@ def parse_disable_config(data: bytes) -> set[str]:
     """Parse cloud_disable_config.yaml → set of labels that disable nodes."""
     try:
         import yaml
+
         cfg = yaml.safe_load(data)
     except Exception:
         return set()
@@ -326,7 +341,7 @@ def parse_disable_config(data: bytes) -> set[str]:
         return set()
     disable = cfg.get("disable_nodes") or {}
     labels: set[str] = set()
-    for rule in (disable.get("or") or []):
+    for rule in disable.get("or") or []:
         if isinstance(rule, dict):
             for label, enabled in rule.items():
                 if enabled:
@@ -406,7 +421,7 @@ class Graph:
                 m.pack = node_pack[nid]
             if nid in node_labels:
                 m.labels = node_labels[nid]
-            m.cloud_disabled = any(l in disable_labels for l in m.labels)
+            m.cloud_disabled = any(label in disable_labels for label in m.labels)
             m.needs_gpu = nid not in no_gpu
         self._annotated = True
 
@@ -488,7 +503,12 @@ class Graph:
         return sorted(labels)
 
     def find_paths(
-        self, from_type: str, to_type: str, *, max_depth: int = 4, max_paths: int = 10,
+        self,
+        from_type: str,
+        to_type: str,
+        *,
+        max_depth: int = 4,
+        max_paths: int = 10,
     ) -> list[dict]:
         """BFS multi-hop path finding from one type to another."""
         if from_type == to_type:
@@ -520,7 +540,12 @@ class Graph:
         return paths
 
     def exact_paths(
-        self, from_type: str, to_type: str, *, max_depth: int = 6, max_paths: int = 10,
+        self,
+        from_type: str,
+        to_type: str,
+        *,
+        max_depth: int = 6,
+        max_paths: int = 10,
     ) -> list[dict]:
         """Satisfiability-aware BFS: each step's required link inputs must be
         available from types produced by prior steps."""
@@ -615,33 +640,41 @@ class Graph:
 
         for node_id, node_data in workflow.items():
             if not isinstance(node_data, dict):
-                warnings.append({
-                    "node_id": node_id,
-                    "field": node_id,
-                    "code": "non_node_key",
-                    "message": f"key {node_id!r} is not a workflow node (expected a dict with class_type)",
-                })
+                warnings.append(
+                    {
+                        "node_id": node_id,
+                        "field": node_id,
+                        "code": "non_node_key",
+                        "message": f"key {node_id!r} is not a workflow node (expected a dict with class_type)",
+                    }
+                )
                 continue
             class_type = node_data.get("class_type", "")
             if not class_type:
-                warnings.append({
-                    "node_id": node_id,
-                    "field": node_id,
-                    "code": "non_node_key",
-                    "message": f"key {node_id!r} has no class_type and will be ignored by the server",
-                })
+                warnings.append(
+                    {
+                        "node_id": node_id,
+                        "field": node_id,
+                        "code": "non_node_key",
+                        "message": f"key {node_id!r} has no class_type and will be ignored by the server",
+                    }
+                )
                 continue
 
             m = self._nodes.get(class_type)
             if m is None:
                 close = difflib.get_close_matches(class_type, all_names, n=3, cutoff=0.6)
-                errors.append({
-                    "node_id": node_id,
-                    "code": "unknown_class_type",
-                    "message": f"class_type {class_type!r} not found in object_info",
-                    "hint": f"did you mean: {', '.join(close)}?" if close else "run `comfy nodes search <name>` to find available classes",
-                    "suggestions": close,
-                })
+                errors.append(
+                    {
+                        "node_id": node_id,
+                        "code": "unknown_class_type",
+                        "message": f"class_type {class_type!r} not found in object_info",
+                        "hint": f"did you mean: {', '.join(close)}?"
+                        if close
+                        else "run `comfy nodes search <name>` to find available classes",
+                        "suggestions": close,
+                    }
+                )
                 continue
 
             port_by_name = {p.name: p for p in m.inputs}
@@ -654,13 +687,15 @@ class Graph:
                     # (i) source node exists in workflow
                     src_data = workflow.get(src_id)
                     if not isinstance(src_data, dict) or not src_data.get("class_type"):
-                        errors.append({
-                            "node_id": node_id,
-                            "field": input_name,
-                            "code": "dangling_edge",
-                            "message": f"input {input_name!r} references node {src_id!r} which does not exist",
-                            "hint": f"add node {src_id!r} to the workflow, or rewire this input to an existing node",
-                        })
+                        errors.append(
+                            {
+                                "node_id": node_id,
+                                "field": input_name,
+                                "code": "dangling_edge",
+                                "message": f"input {input_name!r} references node {src_id!r} which does not exist",
+                                "hint": f"add node {src_id!r} to the workflow, or rewire this input to an existing node",
+                            }
+                        )
                         continue
 
                     src_class = src_data["class_type"]
@@ -671,19 +706,19 @@ class Graph:
 
                     # (ii) output index in range
                     if out_idx is None or out_idx < 0 or out_idx >= len(src_m.outputs):
-                        valid_indices = ", ".join(
-                            f"[{i}]={p.type}" for i, p in enumerate(src_m.outputs)
+                        valid_indices = ", ".join(f"[{i}]={p.type}" for i, p in enumerate(src_m.outputs))
+                        errors.append(
+                            {
+                                "node_id": node_id,
+                                "field": input_name,
+                                "code": "output_index_out_of_range",
+                                "message": (
+                                    f"input {input_name!r} references {src_class}[{value[1]}] "
+                                    f"but {src_class} has {len(src_m.outputs)} output(s)"
+                                ),
+                                "hint": f"valid indices for {src_class}: {valid_indices}",
+                            }
                         )
-                        errors.append({
-                            "node_id": node_id,
-                            "field": input_name,
-                            "code": "output_index_out_of_range",
-                            "message": (
-                                f"input {input_name!r} references {src_class}[{value[1]}] "
-                                f"but {src_class} has {len(src_m.outputs)} output(s)"
-                            ),
-                            "hint": f"valid indices for {src_class}: {valid_indices}",
-                        })
                         continue
 
                     # (iii) type compatibility — advisory only.
@@ -695,24 +730,24 @@ class Graph:
                         dst_type = port.type
                         if src_type != "*" and dst_type != "*" and src_type != dst_type:
                             # Find the correct index for the expected type
-                            correct = [
-                                f"[{i}]" for i, p in enumerate(src_m.outputs) if p.type == dst_type
-                            ]
+                            correct = [f"[{i}]" for i, p in enumerate(src_m.outputs) if p.type == dst_type]
                             hint = (
                                 f"use {src_class}{correct[0]} instead"
                                 if correct
                                 else f"run `comfy nodes ls --produces {dst_type}` to find a source"
                             )
-                            warnings.append({
-                                "node_id": node_id,
-                                "field": input_name,
-                                "code": "edge_type_mismatch",
-                                "message": (
-                                    f"input {input_name!r} expects {dst_type} but "
-                                    f"{src_class}[{out_idx}] produces {src_type}"
-                                ),
-                                "hint": hint,
-                            })
+                            warnings.append(
+                                {
+                                    "node_id": node_id,
+                                    "field": input_name,
+                                    "code": "edge_type_mismatch",
+                                    "message": (
+                                        f"input {input_name!r} expects {dst_type} but "
+                                        f"{src_class}[{out_idx}] produces {src_type}"
+                                    ),
+                                    "hint": hint,
+                                }
+                            )
                     continue
 
                 port = port_by_name.get(input_name)
@@ -721,26 +756,31 @@ class Graph:
                 # Shape check (hard error)
                 shape_err = port.validate_shape(value)
                 if shape_err:
-                    errors.append({
-                        "node_id": node_id,
-                        "field": input_name,
-                        "code": "shape_mismatch",
-                        "message": shape_err,
-                        "hint": f"expected {port.type}; check the value type",
-                    })
+                    errors.append(
+                        {
+                            "node_id": node_id,
+                            "field": input_name,
+                            "code": "shape_mismatch",
+                            "message": shape_err,
+                            "hint": f"expected {port.type}; check the value type",
+                        }
+                    )
                     continue
                 # Catalog checks
                 for w in port.validate_catalog(value):
                     if w["code"] == "unknown_enum_value":
                         top = port.enum_values[:5]
-                        errors.append({
-                            "node_id": node_id,
-                            "field": input_name,
-                            "code": "unknown_enum_value",
-                            "message": w["message"],
-                            "hint": f"valid options include: {', '.join(top)}" + (f" (and {len(port.enum_values) - 5} more)" if len(port.enum_values) > 5 else ""),
-                            "suggestions": port.enum_values[:20],
-                        })
+                        errors.append(
+                            {
+                                "node_id": node_id,
+                                "field": input_name,
+                                "code": "unknown_enum_value",
+                                "message": w["message"],
+                                "hint": f"valid options include: {', '.join(top)}"
+                                + (f" (and {len(port.enum_values) - 5} more)" if len(port.enum_values) > 5 else ""),
+                                "suggestions": port.enum_values[:20],
+                            }
+                        )
                     else:
                         w["field"] = f"{node_id}.{class_type}.{w['field']}"
                         warnings.append(w)
@@ -760,6 +800,7 @@ class Graph:
     def apply_slots(self, workflow: dict, overrides: dict[str, Any]) -> tuple[dict, list[dict]]:
         """Apply slot overrides. Returns (modified_workflow, warnings)."""
         import copy
+
         wf = copy.deepcopy(workflow)
         warnings: list[dict] = []
         for addr, value in overrides.items():
@@ -882,12 +923,6 @@ class Graph:
 # ---------------------------------------------------------------------------
 # Source loaders
 # ---------------------------------------------------------------------------
-
-import gzip
-import logging
-import urllib.error
-import urllib.parse
-import urllib.request
 
 _logger = logging.getLogger(__name__)
 
@@ -1035,14 +1070,16 @@ def _extract_frontend_slots(workflow: dict, graph: Graph) -> list[dict]:
             inp_type = inp.get("type", {})
             type_str = inp_type if isinstance(inp_type, str) else str(inp_type)
             current = _resolve_proxy_value(node, sg, inp_name, graph)
-            slots.append({
-                "address": f"{instance_id}.{inp_name}",
-                "name": inp_name,
-                "type": type_str,
-                "current_value": current,
-                "instance_id": instance_id,
-                "node_type": node_type,
-            })
+            slots.append(
+                {
+                    "address": f"{instance_id}.{inp_name}",
+                    "name": inp_name,
+                    "type": type_str,
+                    "current_value": current,
+                    "instance_id": instance_id,
+                    "node_type": node_type,
+                }
+            )
 
     if slots:
         return slots
@@ -1066,14 +1103,16 @@ def _extract_frontend_slots(workflow: dict, graph: Graph) -> list[dict]:
             except ValueError:
                 continue
             current = widgets[idx] if idx < len(widgets) else None
-            slots.append({
-                "address": f"{instance_id}.{port.name}",
-                "name": port.name,
-                "type": port.type,
-                "current_value": current,
-                "instance_id": instance_id,
-                "node_type": node_type,
-            })
+            slots.append(
+                {
+                    "address": f"{instance_id}.{port.name}",
+                    "name": port.name,
+                    "type": port.type,
+                    "current_value": current,
+                    "instance_id": instance_id,
+                    "node_type": node_type,
+                }
+            )
     return slots
 
 

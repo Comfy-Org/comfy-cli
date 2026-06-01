@@ -45,7 +45,7 @@ def _pip_install_torch(python: str, index_args: list[str]) -> subprocess.Complet
 
 def pip_install_comfyui_dependencies(
     repo_dir,
-    gpu: GPU_OPTION,
+    gpu: GPU_OPTION | None,
     plat: constants.OS,
     cuda_version: constants.CUDAVersion | None,
     skip_torch_or_directml: bool,
@@ -150,7 +150,7 @@ def execute(
     skip_manager: bool,
     version: str,
     commit: str | None = None,
-    gpu: constants.GPU_OPTION = None,
+    gpu: constants.GPU_OPTION | None = None,
     cuda_version: constants.CUDAVersion | None = None,
     cuda_tag: str | None = None,
     rocm_version: constants.ROCmVersion = constants.ROCmVersion.v6_3,

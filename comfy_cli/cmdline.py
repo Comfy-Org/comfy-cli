@@ -267,7 +267,11 @@ def entry(
 
     workspace_manager.setup_workspace_manager(workspace, here, recent, skip_prompt)
 
-    tracking.prompt_tracking_consent(skip_prompt, default_value=enable_telemetry)
+    # `comfy setup` owns the telemetry consent decision as a branded wizard step
+    # (with full disclosure). Suppress the bare global prompt for that one command
+    # so the user is asked exactly once, in the right place — not pre-empted here.
+    if ctx.invoked_subcommand != "setup":
+        tracking.prompt_tracking_consent(skip_prompt, default_value=enable_telemetry)
 
     if ctx.invoked_subcommand is None:
         if renderer.is_json():
@@ -282,6 +286,7 @@ def entry(
         else:
             from comfy_cli.auth import store as _auth_store
             from comfy_cli.output.branding import intro_banner
+            from comfy_cli.update import latest_upgrade_version
 
             _session = _auth_store.get_cloud_session()
             _signed_in = _session is not None and not _session.is_expired()
@@ -290,11 +295,13 @@ def entry(
                 from comfy_cli.cloud import get_base_url as _get_base_url
 
                 _base_url = _get_base_url()
+            _update_hint = latest_upgrade_version(cli_version, ConfigManager().get_config_path())
             renderer.console().print(
                 intro_banner(
                     version=ConfigManager().get_cli_version(),
                     signed_in=_signed_in,
                     base_url=_base_url,
+                    update_hint=_update_hint,
                 )
             )
         ctx.exit()
@@ -556,21 +563,28 @@ def install(
     rprint(f"ComfyUI is installed at: {comfy_path}")
 
 
-@app.command(help="Update ComfyUI Environment [all|comfy]")
+@app.command(help="Update ComfyUI Environment [all|comfy|cli]")
 @tracking.track_command()
 def update(
     target: str = typer.Argument(
         "comfy",
-        help="[all|comfy]",
-        autocompletion=utils.create_choice_completer(["all", "comfy"]),
+        help="[all|comfy|cli]",
+        autocompletion=utils.create_choice_completer(["all", "comfy", "cli"]),
     ),
 ):
-    if target not in ["all", "comfy"]:
+    if target not in ["all", "comfy", "cli"]:
         typer.echo(
-            f"Invalid target: {target}. Allowed targets are 'all', 'comfy'.",
+            f"Invalid target: {target}. Allowed targets are 'all', 'comfy', 'cli'.",
             err=True,
         )
         raise typer.Exit(code=1)
+
+    if "cli" == target:
+        from comfy_cli.update import upgrade_cli
+
+        rprint("Updating comfy-cli...")
+        upgrade_cli()
+        return
 
     comfy_path = workspace_manager.workspace_path
 
@@ -790,7 +804,9 @@ def run(
         tracking.track_event("execution_success", _track_props)
 
 
-@app.command(help="Validate an API-format workflow without submitting. Checks class_types, input shapes, enum values, and edge wiring.")
+@app.command(
+    help="Validate an API-format workflow without submitting. Checks class_types, input shapes, enum values, and edge wiring."
+)
 @tracking.track_command()
 def validate(
     workflow: Annotated[
@@ -831,7 +847,9 @@ def validate(
         renderer.error(code="workflow_invalid_json", message=f"Invalid JSON: {e}", hint="re-export from ComfyUI")
         raise typer.Exit(code=1) from e
     if not isinstance(wf_data, dict):
-        renderer.error(code="workflow_not_api_format", message="Workflow must be a JSON object", hint="use File > Export (API)")
+        renderer.error(
+            code="workflow_not_api_format", message="Workflow must be a JSON object", hint="use File > Export (API)"
+        )
         raise typer.Exit(code=1)
 
     # Load graph
@@ -850,7 +868,8 @@ def validate(
         graph = Graph.load(mode=mode, input_path=input_path, host=host or "127.0.0.1", port=port or 8188)
     except LoadError as e:
         renderer.error(
-            code="cql_no_graph", message=str(e),
+            code="cql_no_graph",
+            message=str(e),
             hint=e.details.get("hint", "pass --input <object_info.json>, or start the server"),
             details=e.details,
         )
@@ -1146,6 +1165,7 @@ def set_default(
                 hint="`comfy install` to scaffold one, or pass a different path",
             )
             raise typer.Exit(code=1)
+        assert resolved_path is not None
         workspace_manager.set_default_workspace(resolved_path)
         if launch_extras is not None:
             workspace_manager.set_default_launch_extras(launch_extras)
@@ -1315,33 +1335,107 @@ def models():
     rprint("\n[bold red] No such command, did you mean 'comfy model' instead?[/bold red]\n")
 
 
-@app.command(help="Provide feedback on the Comfy CLI tool.")
+_FEEDBACK_DISABLED_NOTICE = (
+    "[yellow]Feedback not sent — telemetry is opted out via DO_NOT_TRACK / COMFY_NO_TELEMETRY.[/yellow]\n"
+    "Unset that to send, or open an issue: https://github.com/Comfy-Org/comfy-cli/issues/new/choose"
+)
+
+
+def _relay_feedback(renderer: Renderer, sent: bool, *, message: str) -> None:
+    """Surface the feedback outcome: JSON envelope for agents, a line for humans."""
+    if renderer.is_json():
+        renderer.emit({"sent": sent, "message": message}, command="feedback")
+        return
+    rprint("Thank you for your feedback!" if sent else _FEEDBACK_DISABLED_NOTICE)
+
+
+@app.command(help="Provide feedback on the Comfy CLI tool. Pass it inline to send in one shot.")
 @tracking.track_command()
-def feedback():
+def feedback(
+    message: Annotated[
+        str | None,
+        typer.Argument(
+            show_default=False,
+            help='Your feedback, e.g. comfy feedback "run is great but jobs watch needs an ETA". '
+            "Omit (interactive only) to answer a few quick questions.",
+        ),
+    ] = None,
+):
+    renderer = get_renderer()
+
+    # One-shot — the path agents (Claude, etc.) and scripts should use.
+    if message:
+        _relay_feedback(renderer, tracking.submit_feedback(message), message=message)
+        return
+
+    # No inline message: the interactive prompts need a human at a TTY. In
+    # JSON/agentic mode there's nobody to prompt — tell the caller to pass it inline.
+    if not renderer.is_pretty():
+        renderer.error(
+            code="feedback_message_required",
+            message="Feedback requires an inline message in JSON mode.",
+            hint='comfy feedback "your feedback here"',
+        )
+        raise typer.Exit(code=1)
+
     rprint("Feedback Collection for Comfy CLI Tool\n")
 
-    # General Satisfaction
     general_satisfaction_score = ui.prompt_select(
         question="On a scale of 1 to 5, how satisfied are you with the Comfy CLI tool? (1 being very dissatisfied and 5 being very satisfied)",
         choices=["1", "2", "3", "4", "5"],
         force_prompting=True,
     )
-    tracking.track_event("feedback_general_satisfaction", {"score": general_satisfaction_score})
-
-    # Usability and User Experience
     usability_satisfaction_score = ui.prompt_select(
         question="On a scale of 1 to 5,  how satisfied are you with the usability and user experience of the Comfy CLI tool? (1 being very dissatisfied and 5 being very satisfied)",
         choices=["1", "2", "3", "4", "5"],
         force_prompting=True,
     )
-    tracking.track_event("feedback_usability_satisfaction", {"score": usability_satisfaction_score})
+    free_text = ui.prompt_input(
+        question="Anything else you'd like to share? (optional — press Enter to skip)",
+        force_prompting=True,
+    )
 
-    # Additional Feature-Specific Feedback
-    if questionary.confirm("Do you want to provide additional feature-specific feedback on our GitHub page?").ask():
+    sent = tracking.submit_feedback(
+        free_text or "",
+        scores={
+            "general_satisfaction": None if general_satisfaction_score is None else str(general_satisfaction_score),
+            "usability_satisfaction": None
+            if usability_satisfaction_score is None
+            else str(usability_satisfaction_score),
+        },
+    )
+    if (
+        sent
+        and questionary.confirm("Do you want to provide additional feature-specific feedback on our GitHub page?").ask()
+    ):
         tracking.track_event("feedback_additional")
         webbrowser.open("https://github.com/Comfy-Org/comfy-cli/issues/new/choose")
 
-    rprint("Thank you for your feedback!")
+    _relay_feedback(renderer, sent, message=free_text or "")
+
+
+@app.command(
+    name="agent-review",
+    hidden=True,
+    help="For agents: submit a short summary of how the session went. Fully consent-gated.",
+)
+@tracking.track_command()
+def agent_review(
+    summary: Annotated[
+        str,
+        typer.Argument(help="A brief, factual summary of the session — your assessment, not the user's words."),
+    ],
+):
+    renderer = get_renderer()
+    sent = tracking.submit_agent_review(summary)
+    if renderer.is_json():
+        renderer.emit({"sent": sent, "summary": summary}, command="agent-review")
+        return
+    rprint(
+        "Session review recorded — thanks."
+        if sent
+        else "[yellow]Review not sent — telemetry is disabled or opted out.[/yellow]"
+    )
 
 
 @app.command(hidden=True)

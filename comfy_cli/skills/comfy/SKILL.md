@@ -1,6 +1,6 @@
 ---
 name: comfy
-description: Generate images and videos, manage ComfyUI workflows, install models, query the node graph — via a local CLI. No MCP server required.
+description: Generate images, videos, audio, and 3D via ComfyUI — CLI surface, workflow creation hierarchy (template → fragment → raw JSON), domain gotchas, cloud auth, multi-stage orchestration.
 ---
 
 You have access to `comfy`, a local CLI that drives ComfyUI (local install or Comfy Cloud).
@@ -72,11 +72,71 @@ highest-quality option, not the fallback.
 |---|---|
 | names a partner provider (Flux Pro, Kling, Nano Banana, Veo, Grok, Ideogram, …) | `comfy generate <slug>` — direct dispatch against the provider's API |
 | asks for a shape the **gallery already covers** ("text-to-video", "remove background", "upscale image", "img-to-3D") | `comfy templates ls` → `comfy templates fetch <name>` → slot-edit → `comfy run` |
-| needs LoRAs, ControlNets, multi-step pipelines, or an OSS model the gallery doesn't cover | `comfy models search` to find the right files → build the workflow → `comfy run` |
+| needs LoRAs, ControlNets, multi-step pipelines, or an OSS model the gallery doesn't cover | fragments + blueprint → `comfy workflow compose` → `comfy run` (see decision tree below) |
 
 The middle row is the workhorse — `Comfy-Org/workflow_templates` has
 hundreds of curated workflows that are higher-quality than anything an
 agent would build from raw nodes. **Start there.**
+
+## Workflow creation — the decision tree (ALWAYS follow this)
+
+For **every** creative request, follow this hierarchy strictly:
+
+1. **Template first** — `comfy templates ls --type <image|video|audio>`
+   If a match exists → fetch → slot-edit → run. Don't reinvent.
+
+2. **Fragment + blueprint** — if no template fits, this is the **default path**:
+
+   **a. Discover nodes** for each step of the pipeline:
+   ```bash
+   comfy --json nodes show GrokImageNode         # check inputs/outputs
+   comfy --json nodes show KlingImage2VideoNode   # check inputs/outputs
+   ```
+
+   **b. Create one fragment per logical step** — write to `fragments/<name>.json`:
+   Each fragment wraps 1-15 nodes with a `_fragment` header declaring
+   typed inputs, outputs, and params. The interior nodes are standard
+   API-format ComfyUI JSON. Mark caller-supplied values as `"PLACEHOLDER"`.
+
+   **c. Validate each fragment:**
+   ```bash
+   comfy --json workflow fragment validate <name>
+   ```
+
+   **d. Write a YAML blueprint** in `blueprints/<name>.yaml` that wires
+   the fragments together — cross-step refs use `$alias.output_name`:
+   ```yaml
+   output_prefix: outputs/my_project
+   pipeline:
+     - fragment: generate_image
+       alias: hero
+       params:
+         prompt: "a zen garden at dawn"
+         seed: 42
+     - fragment: animate_i2v
+       alias: video
+       inputs:
+         image: $hero.image       # ← wires step 1 output to step 2 input
+       params:
+         motion: "slow camera pan left"
+   ```
+
+   **e. Compose + run:**
+   ```bash
+   comfy workflow compose blueprints/<name>.yaml -o workflows/<name>.json
+   RES=$(comfy --json run --workflow workflows/<name>.json)
+   PROMPT_ID=$(echo "$RES" | jq -r .data.prompt_id)
+   comfy --json jobs watch "$PROMPT_ID"
+   ```
+
+   For the full fragment format and blueprint syntax, load the
+   `comfy-fragments` skill.
+
+3. **Raw JSON** — ONLY for throwaway one-shot workflows under ~30 nodes
+   that will never be reused. Write to `workflows/` and run directly.
+
+**Hard rule: never build raw workflow JSON with >30 nodes. Use fragments.**
+Even for smaller workflows, prefer fragments if any part will be reused.
 
 ---
 
@@ -225,6 +285,11 @@ gives the full count even when `--limit` caps the returned rows.
 comfy --json workflow slots path.json   # every addressable slot, by address
 ```
 
+**Requires a local server** (`comfy launch`) or `--input object_info.json`.
+If you're cloud-only with no local server, skip `workflow slots` — instead
+read the workflow JSON directly to find node inputs, or use
+`comfy --json nodes show <ClassName>` to inspect individual node schemas.
+
 Slot addresses are `<instance_id>.<input_name>`. Feed them to
 `workflow set-slot` / `workflow vary` in the Execution half. Works on
 any frontend-format workflow JSON — templates, saved workflows, or
@@ -244,32 +309,31 @@ quota, or talks to an authenticated backend.
 background and writes the state file as the job progresses through
 `queued → allocated → executing → terminal`.
 
-**Do NOT poll `jobs status` in a loop.** That wastes your turns AND the
-cloud's quota. Use one of the three patterns below.
+**Prefer async-first: submit, then watch separately.** Never poll
+`jobs status` in a loop. There are three ways to wait — pick one:
 
 ```bash
-# 1. Submit. Returns immediately.
+# Step 1: Submit (returns immediately with prompt_id)
 RES=$(comfy --json run --workflow path.json)
 PROMPT_ID=$(echo "$RES" | jq -r .data.prompt_id)
 STATE_FILE=$(echo "$RES" | jq -r .data.state_file)
-```
 
-Pick one to wait — never poll:
-
-```bash
-# (a) Block in the current turn until the prompt is terminal. Best when
-#     you need the outputs to do the next step.
+# (a) Watch — blocks until terminal, returns outputs. The default.
 comfy --json jobs watch "$PROMPT_ID"
-# → returns when status ∈ {completed, error, cancelled}, with outputs in
-#   the final envelope.
+# → returns when status ∈ {completed, error, cancelled}, with outputs
 
-# (b) Read the state file directly once you reason the job should be done.
-#     Cheapest — no extra process. Status is source of truth.
+# (b) Read the state file for a quick non-blocking check
 jq '{status, outputs, error}' "$STATE_FILE"
 
-# (c) `--wait` on submit: foreground blocks from start to end.
+# (c) --wait on submit — foreground blocks start-to-finish. Fine for
+#     one-shot synchronous runs (e.g. the download pipe below).
 comfy --json run --workflow path.json --wait
 ```
+
+**Why prefer async:** submit returns in milliseconds so you can report
+the prompt_id to the user immediately, then watch in a separate step.
+Reach for `--wait` when you want a single blocking call and don't need
+the prompt_id mid-flight (it's hidden until the job finishes).
 
 Pass `--notify` on `comfy run` to fire a desktop notification when the
 job is terminal (handy for human-driven sessions; off by default so
@@ -360,13 +424,19 @@ Default output directory: `./outputs/` (configurable via `--out-dir`).
 
 ```
 my-project/
-├── workflows/     # API-format workflow JSON files
+├── fragments/     # reusable workflow pieces (_fragment JSON files)
+├── blueprints/       # YAML files that compose fragments into workflows
+├── workflows/     # compiled workflow JSON (compose output) or one-shots
 ├── inputs/        # source images, videos, audio for upload
 ├── outputs/       # generated outputs (comfy download writes here)
 └── variants/      # sweep outputs from comfy workflow vary
 ```
 
 All `comfy` commands respect this layout by default.
+
+**Never write workflows, fragments, or outputs to `/tmp`.** Always use
+the project directory. If no project directory exists, create one with
+this layout before building anything.
 
 ## Lifecycle (local installs + persistent config)
 
@@ -376,6 +446,146 @@ comfy launch                               # start the local server
 comfy set-default --where cloud            # persist the routing mode
 comfy set-default --clear-where
 ```
+
+## Relaying user feedback
+
+This channel carries the **user's own words** to the maintainers — never your
+opinion of the tool. You are a relay, not the author.
+
+```bash
+comfy --json feedback "run is great, but jobs watch should show an ETA"
+```
+
+One-shot and non-interactive. The message ships as a `feedback_submitted`
+event; the JSON envelope reports `{"sent": true|false}`. Feedback is
+consent-independent (user-initiated), but the hard opt-out (`DO_NOT_TRACK` /
+`COMFY_NO_TELEMETRY`) still suppresses it → `sent: false`.
+
+**When to ask.** Occasionally — *not* every session — invite feedback after a
+clearly good moment (a job just completed successfully, a multi-step pipeline
+landed). Roughly one session in five; pick randomly so it stays rare. Ask at
+most once per session, and never twice if they ignored or declined the first
+time. One short question, e.g.: *"Quick one — anything about the comfy CLI you'd
+want the maintainers to know? (totally optional)"*
+
+**What to send.** Only what the user actually says, relayed close to verbatim.
+Never invent, embellish, or send your own assessment. If they say nothing or
+brush it off, send nothing. Strip secrets, file contents, and PII. For long or
+sensitive reports, point them to
+`https://github.com/Comfy-Org/comfy-cli/issues/new/choose` instead.
+
+## Agent session review (separate, consent-gated)
+
+Distinct from user feedback above: this is **your** short summary of how the
+session went — what the user tried, what worked, where they got stuck. Send it
+at most once, at the end of a substantive session:
+
+```bash
+comfy --json agent-review "User generated a text-to-video clip; hit a missing-model error on first try, succeeded after switching templates."
+```
+
+**Honors every opt-out.** Unlike user feedback, this is agent-authored, so it's
+treated as passive telemetry: it sends ONLY if the user has telemetry enabled.
+If they opted out by any means (`DO_NOT_TRACK`, `COMFY_NO_TELEMETRY`, or no
+consent), the envelope returns `{"sent": false}` and nothing is transmitted —
+that's expected, don't retry or work around it. Keep it short and factual; no
+secrets, no PII, no user verbatim (that's what `comfy feedback` is for).
+
+---
+
+# Domain gotchas by media type
+
+Hard-won lessons per domain. Not a tutorial — a reference card.
+
+## Image
+
+- Template-first: `comfy templates ls --type image --tag "Text to Image"`
+- Batch sweeps: `comfy workflow vary` for multi-prompt/seed generation
+- Text rendering: use Ideogram (IdeogramV3), NOT Flux — Flux garbles text
+- Partner API shortcut: `comfy generate bfl/flux-pro-1.1-ultra --prompt "..."`
+- Never hardcode checkpoint/LoRA names — discover via `models search`
+
+## Video
+
+- **SaveVideo is REQUIRED** — video API nodes produce VIDEO but are NOT output nodes
+- **Never hardcode fps** — wire from GetVideoComponents output index 2
+- Motion prompts: describe HOW the scene moves, not WHAT is in it
+- Assembly: GetVideoComponents → ImageBatch → CreateVideo → SaveVideo
+- I2V pattern: LoadImage → I2VNode → SaveVideo (check `nodes show` for the I2V node)
+- Audio sync: match durations — short audio = silent ending, long audio = truncated ending
+- Template-first: `comfy templates ls --type video`
+
+## Audio
+
+- ACE-Step: timesignature is `"4"`, NOT `"4/4"`
+- Duration on TextEncode AND EmptyLatentAudio MUST match
+- Output format is FLAC, not MP3
+- For instrumental: set lyrics to empty string `""`
+- Wire both positive AND negative to same TextEncode output when cfg=1.0
+- Template-first: `comfy templates ls --type audio`
+
+## Editing (upscale, inpaint, style transfer)
+
+- FluxProFillNode is REPLACE-ONLY — no denoise/strength param
+- For refinement: use KSampler with denoise=0.15–0.25, not FluxProFill
+- MagnificImageUpscalerCreativeNode: creativity 0–10, resemblance -10–10 (NOT 0–100)
+- MagnificImageRelightNode style="smooth" drains color — use "brighter" or "clean"
+- Local upscale: LoadImage → UpscaleModelLoader → ImageUpscaleWithModel → SaveImage
+- API upscale: discover via `comfy nodes search "upscale"`
+
+## Conditioning (ControlNet, masks, references)
+
+- Preprocessor output ≠ ControlNet model (two separate things)
+- Don't feed raw photos into ControlNet without preprocessing first
+- ImageCompositeMasked: mask MUST match SOURCE size, not destination
+- COMFY_DYNAMICCOMBO_V3: use flat dotted keys (`"model.max_tokens": 800`), not nested
+- First/last frame transitions: wire start_frame + end_frame → I2V node fills in between
+- Wiring: ControlNetApplyAdvanced takes CONDITIONING + IMAGE + CONTROL_NET → modified CONDITIONING
+
+## Cloud
+
+- Auth: `comfy cloud login` (OAuth) or `comfy cloud set-key --key sk-…`
+- Check: `comfy --json cloud whoami`
+- Custom env: `comfy cloud set-base-url <url>` before login
+- CLI auto-injects API keys for partner nodes — never extract manually
+- Session tokens are short-lived (~1h); CLI auto-refreshes on 401
+- HTTP 401 with XML body = CDN catch-all, not ComfyUI — endpoints are under `/api/*`
+- Cloud uses HTTP polling (no WebSocket); `jobs watch` polls `/api/job/<id>/status`
+
+---
+
+# Multi-stage orchestration
+
+Build one large workflow graph when possible — ComfyUI parallelizes
+independent branches automatically. Only split into separate workflows when:
+- An intermediate result needs human review before continuing
+- Different stages need different routing (local vs cloud)
+- The workflow would exceed server memory constraints
+
+For parallel fan-out:
+
+```bash
+PIDS=()
+for f in ./workflows/phase*.json; do
+    PID=$(comfy --json run --workflow "$f" | jq -r .data.prompt_id)
+    PIDS+=("$PID")
+done
+for p in "${PIDS[@]}"; do
+    comfy --json jobs watch "$p" | comfy download --where cloud
+done
+```
+
+Stage handoff (download → upload → re-reference):
+
+```bash
+comfy --json jobs watch "$PID" | comfy download --where cloud
+CLOUD=$(comfy --json upload ./outputs/abc_000.png --where cloud \
+    | jq -r '.data.uploads[0].cloud_name')
+# Use $CLOUD in the next workflow's LoadImage input
+```
+
+Pipeline failure recovery: re-submit only the failed workflow. Use
+`comfy --json jobs status <id>` to identify which failed.
 
 ---
 
@@ -387,7 +597,5 @@ chains and multi-stage pipelines: variable.
 Don't block your turn on a long job — do other useful work while the
 watcher updates the state file, then check when you need the result.
 The three wait patterns are in **Submit a workflow** above (`jobs watch`,
-state file read, `--wait`).
-
-For parallel fan-out, batch sweeps, and multi-stage pipelines, see the
-**comfy-pipeline** skill.
+state file read, `--wait`). The parallel fan-out pattern is in
+**Multi-stage orchestration** above.

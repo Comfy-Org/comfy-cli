@@ -17,7 +17,8 @@ import uuid
 from urllib import request
 
 import typer
-from rich.progress import BarColumn, Column, Progress, Table, TimeElapsedColumn
+from rich.progress import BarColumn, Progress, TimeElapsedColumn
+from rich.table import Column, Table
 
 from comfy_cli.command.run.emitter import JsonEmitter
 from comfy_cli.command.run.loader import _MAX_BODY_PREVIEW, _node_errors_to_list
@@ -237,6 +238,8 @@ class WorkflowExecution:
             self.emitter.emit_queued(prompt_id, validation_warnings)
 
     def watch_execution(self):
+        if self.ws is None:
+            raise RuntimeError("watch_execution called before the websocket was connected")
         self.ws.settimeout(self.timeout)
         while True:
             message = self.ws.recv()

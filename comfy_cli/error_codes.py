@@ -293,7 +293,7 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ErrorCode(
         "unknown_skill",
         "Requested skill is not in the bundled set.",
-        "run `comfy skill list` to see available skills",
+        "run `comfy skills list` to see available skills",
     ),
     # --- workflow editor -----------------------------------------------------
     ErrorCode(
@@ -391,6 +391,12 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "setup_no_auth",
         "Cloud requires authentication in non-interactive mode.",
         "pass --api-key sk-... or run `comfy cloud login` first",
+    ),
+    # --- feedback ------------------------------------------------------------
+    ErrorCode(
+        "feedback_message_required",
+        "`comfy feedback` was run in JSON/non-interactive mode without an inline message.",
+        'comfy feedback "your feedback here"',
     ),
 )
 

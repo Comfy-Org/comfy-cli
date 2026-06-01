@@ -27,7 +27,6 @@ import pytest
 
 from comfy_cli import error_codes
 
-
 SRC_ROOT = Path(__file__).resolve().parents[3] / "comfy_cli"
 
 
@@ -64,7 +63,8 @@ def _extract_codes_from_call(call: ast.Call) -> list[str]:
     # for the small set of callers that use the positional form.
     func = call.func
     if (
-        isinstance(func, ast.Attribute) and func.attr == "error"
+        isinstance(func, ast.Attribute)
+        and func.attr == "error"
         and call.args
         and isinstance(call.args[0], ast.Constant)
         and isinstance(call.args[0].value, str)
@@ -112,8 +112,10 @@ def _extract_dict_code_values(tree: ast.Module) -> list[str]:
             continue
         for key, value in zip(node.keys, node.values):
             if (
-                isinstance(key, ast.Constant) and key.value == "code"
-                and isinstance(value, ast.Constant) and isinstance(value.value, str)
+                isinstance(key, ast.Constant)
+                and key.value == "code"
+                and isinstance(value, ast.Constant)
+                and isinstance(value.value, str)
                 and error_codes.CODE_PATTERN.match(value.value)
             ):
                 codes.append(value.value)
@@ -158,8 +160,7 @@ def test_every_raised_code_is_registered(raised_codes):
         if not error_codes.is_registered(code)
     }
     assert not unregistered, (
-        f"Unregistered error codes raised in source:\n{unregistered}\n"
-        f"Add each to comfy_cli/error_codes.REGISTRY."
+        f"Unregistered error codes raised in source:\n{unregistered}\nAdd each to comfy_cli/error_codes.REGISTRY."
     )
 
 
@@ -170,8 +171,7 @@ def test_every_registered_code_is_raised(raised_codes):
     """
     dead = [c for c in error_codes.all_codes() if c not in raised_codes]
     assert not dead, (
-        f"Registered but never raised:\n{dead}\n"
-        f"Either delete these from comfy_cli/error_codes.REGISTRY or use them."
+        f"Registered but never raised:\n{dead}\nEither delete these from comfy_cli/error_codes.REGISTRY or use them."
     )
 
 
@@ -197,6 +197,7 @@ def test_discover_includes_all_registered_codes():
     that calls `comfy --json discover` sees the full contract.
     """
     from comfy_cli.discovery import load_error_codes
+
     discovered = {row["code"] for row in load_error_codes()}
     expected = set(error_codes.all_codes())
     missing = expected - discovered

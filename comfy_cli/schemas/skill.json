@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "comfy skill *",
+  "title": "comfy skills *",
   "description": "Output shape for skill management commands.",
   "type": "object",
   "properties": {

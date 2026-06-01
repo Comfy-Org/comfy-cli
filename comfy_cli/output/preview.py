@@ -64,6 +64,7 @@ def _show_video(path: Path) -> None:
 
 def _show_video_thumbnail(path: Path) -> None:
     """Extract the first frame via ffmpeg and display it."""
+    tmp_path: str | None = None
     try:
         with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
             tmp_path = tmp.name
@@ -91,10 +92,11 @@ def _show_video_thumbnail(path: Path) -> None:
         # ffmpeg not installed or failed — skip silently
         pass
     finally:
-        try:
-            Path(tmp_path).unlink(missing_ok=True)
-        except Exception:  # noqa: BLE001
-            pass
+        if tmp_path is not None:
+            try:
+                Path(tmp_path).unlink(missing_ok=True)
+            except Exception:  # noqa: BLE001
+                pass
 
 
 def _show_video_info(path: Path) -> None:

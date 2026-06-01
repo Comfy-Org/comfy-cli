@@ -12,22 +12,16 @@ The point: instead of running an MCP server, one command teaches every agent
 on the box how to drive ``comfy`` directly. This is the productized form of
 the agent-first CLI.
 
-Bundled skills:
+Bundled skills (4 total):
 
 - ``comfy``          — the primary driver skill (command surface, output
-                       contract, CQL, ``--where``, etc.)
-- ``comfy-image``    — image generation patterns: t2i, variations, upscaling,
-                       ControlNet, batch sweeps
-- ``comfy-video``    — video generation: I2V, T2V, assembly, fps wiring,
-                       motion prompts
-- ``comfy-audio``    — audio/music generation: ACE-Step, TTS, duration matching
-- ``comfy-pipeline`` — multi-stage orchestration: upload/download composition,
-                       parallel fan-out, project layout
-- ``comfy-fragments``— typed reusable workflow fragments + YAML recipe
+                       contract, routing, discovery, execution, and all
+                       domain patterns: image, video, audio, cloud, edit,
+                       condition, pipeline)
+- ``comfy-fragments``— typed reusable workflow fragments + YAML blueprint
                        composition (build large pipelines from small pieces)
 - ``comfy-debug``    — debugging skill for when workflows fail or jobs hang
-- ``comfy-cloud``    — Comfy Cloud–specific story (auth, base-URL pinning,
-                       ``--where cloud`` gotchas)
+- ``comfy-relay``    — what to put in chat while driving the CLI
 """
 
 from __future__ import annotations
@@ -49,16 +43,23 @@ _SKILL_FILE = "SKILL.md"
 
 BUNDLED_SKILLS: tuple[tuple[str, str], ...] = (
     ("comfy", "comfy"),
-    ("comfy-image", "image"),
-    ("comfy-video", "video"),
-    ("comfy-audio", "audio"),
-    ("comfy-edit", "edit"),
-    ("comfy-condition", "condition"),
-    ("comfy-pipeline", "pipeline"),
     ("comfy-fragments", "fragments"),
     ("comfy-debug", "debug"),
-    ("comfy-cloud", "cloud"),
     ("comfy-relay", "relay"),
+)
+
+
+# Skills we used to bundle and have since folded into the consolidated `comfy`
+# skill. `install()` prunes any of these left behind on disk so machines that
+# installed an older bundle converge to the current 4 on the next install.
+RETIRED_SKILLS: tuple[str, ...] = (
+    "comfy-image",
+    "comfy-video",
+    "comfy-audio",
+    "comfy-edit",
+    "comfy-condition",
+    "comfy-pipeline",
+    "comfy-cloud",
 )
 
 
@@ -290,6 +291,62 @@ def uninstall(
     return results
 
 
+def _agents_block_present(path: Path, skill_name: str) -> bool:
+    if not path.exists():
+        return False
+    text = path.read_text(encoding="utf-8")
+    start, end = _agents_fence(skill_name)
+    return start in text and end in text
+
+
+def _prune_one(name: str, kind: TargetKind, scope: Scope, path: Path, dry_run: bool) -> TargetResult:
+    present = _agents_block_present(path, name) if kind == "agents-md" else path.exists()
+    if dry_run:
+        return TargetResult(
+            skill=name,
+            kind=kind,
+            scope=scope,
+            path=path,
+            action="would_remove" if present else "absent",
+        )
+    if not present:
+        return TargetResult(skill=name, kind=kind, scope=scope, path=path, action="absent")
+    try:
+        if kind == "agents-md":
+            _remove_agents_md_block(path, skill_name=name)
+        else:
+            path.unlink()
+            # Claude skills live in their own <name>/ dir — drop it if now empty.
+            if kind == "claude-code" and not any(path.parent.iterdir()):
+                path.parent.rmdir()
+        return TargetResult(skill=name, kind=kind, scope=scope, path=path, action="removed")
+    except OSError as e:
+        return TargetResult(skill=name, kind=kind, scope=scope, path=path, action="skipped", reason=str(e))
+
+
+def prune_retired(
+    *,
+    scope: Scope = "user",
+    targets: Sequence[TargetKind] | None = None,
+    project_root: Path | None = None,
+    dry_run: bool = False,
+) -> list[TargetResult]:
+    """Remove any retired skills (see ``RETIRED_SKILLS``) left on disk.
+
+    Idempotent and safe when none exist — every absent target reports
+    ``absent``. Lets a machine that installed an older bundle converge to the
+    current set on the next ``install``.
+    """
+    root = project_root or Path.cwd()
+    results: list[TargetResult] = []
+    for name in RETIRED_SKILLS:
+        all_paths = _resolve_paths(skill_name=name, scope=scope, project_root=root)
+        kinds: list[TargetKind] = list(targets) if targets else list(all_paths.keys())
+        for kind in kinds:
+            results.append(_prune_one(name, kind, scope, all_paths[kind], dry_run))
+    return results
+
+
 # ---------------------------------------------------------------------------
 # per-target writers
 # ---------------------------------------------------------------------------
@@ -342,16 +399,10 @@ def _write_claude_skill(path: Path, content: str) -> None:
 
 def _cursor_description_for(skill_name: str) -> str:
     return {
-        "comfy": "comfy CLI for ComfyUI workflows, models, and node-graph queries.",
-        "comfy-image": "Image generation patterns: t2i, variations, upscaling, ControlNet, batch sweeps via comfy CLI.",
-        "comfy-video": "Video generation patterns: I2V, T2V, video assembly, fps wiring, motion prompts via comfy CLI.",
-        "comfy-audio": "Audio/music generation: ACE-Step, TTS, audio loading, duration matching via comfy CLI.",
-        "comfy-edit": "Transform existing assets: upscale, inpaint, style transfer, image editing via comfy CLI.",
-        "comfy-condition": "Guide generation: ControlNet, masks, reference images, motion control via comfy CLI.",
-        "comfy-pipeline": "Multi-stage pipeline orchestration: upload/download, pipe composition, parallel fan-out via comfy CLI.",
-        "comfy-fragments": "Typed reusable workflow fragments + YAML recipe composition: build large pipelines from small tested pieces via comfy CLI.",
+        "comfy": "comfy CLI for ComfyUI workflows, models, node-graph queries, image/video/audio generation, cloud, and pipeline orchestration.",
+        "comfy-fragments": "Typed reusable workflow fragments + YAML blueprint composition: build large pipelines from small tested pieces via comfy CLI.",
         "comfy-debug": "Debugging skill for the comfy CLI: failed workflows, hung jobs, error envelopes.",
-        "comfy-cloud": "Comfy Cloud usage with the comfy CLI: OAuth login, --where cloud, base-URL overrides.",
+        "comfy-relay": "What to put in chat while driving the comfy CLI: show artifacts, surface results, truncation rules.",
     }.get(skill_name, f"comfy CLI skill: {skill_name}")
 
 

@@ -59,10 +59,20 @@ def _object_info():
                     "denoise": ["FLOAT", {"default": 1.0}],
                 },
             },
-            "input_order": {"required": [
-                "model", "positive", "negative", "latent_image",
-                "seed", "steps", "cfg", "sampler_name", "scheduler", "denoise",
-            ]},
+            "input_order": {
+                "required": [
+                    "model",
+                    "positive",
+                    "negative",
+                    "latent_image",
+                    "seed",
+                    "steps",
+                    "cfg",
+                    "sampler_name",
+                    "scheduler",
+                    "denoise",
+                ]
+            },
             "output": ["LATENT"],
             "output_name": ["LATENT"],
             "category": "sampling",
@@ -96,6 +106,32 @@ def _object_info():
             "output_name": ["LATENT"],
             "category": "latent",
             "display_name": "Empty Latent Image",
+            "python_module": "nodes",
+        },
+        "GeminiImage2Node": {
+            "input": {
+                "required": {
+                    "prompt": ["STRING", {"default": ""}],
+                    "model": "COMBO",
+                    "seed": ["INT", {"default": 42, "control_after_generate": True}],
+                    "aspect_ratio": "COMBO",
+                    "resolution": "COMBO",
+                    "response_modalities": "COMBO",
+                },
+                "optional": {
+                    "images": "IMAGE",
+                    "files": "GEMINI_INPUT_FILES",
+                    "system_prompt": ["STRING", {"default": ""}],
+                },
+            },
+            "input_order": {
+                "required": ["prompt", "model", "seed", "aspect_ratio", "resolution", "response_modalities"],
+                "optional": ["images", "files", "system_prompt"],
+            },
+            "output": ["IMAGE", "STRING"],
+            "output_name": ["IMAGE", "STRING"],
+            "category": "api node/image/Gemini",
+            "display_name": "Nano Banana Pro",
             "python_module": "nodes",
         },
     }
@@ -139,6 +175,32 @@ def _direct_workflow():
                 "type": "EmptyLatentImage",
                 "widgets_values": [512, 512, 1],
             },
+        ],
+        "links": [],
+    }
+
+
+def _api_node_workflow():
+    return {
+        "nodes": [
+            {
+                "id": 263,
+                "type": "GeminiImage2Node",
+                "inputs": [
+                    {"name": "images", "type": "IMAGE", "link": None},
+                    {"name": "files", "type": "GEMINI_INPUT_FILES", "link": None},
+                ],
+                "widgets_values": [
+                    "fill the masked region",
+                    "gemini-3-pro-image-preview",
+                    41439150623705,
+                    "randomize",
+                    "auto",
+                    "4K",
+                    "IMAGE+TEXT",
+                    "always produce an image",
+                ],
+            }
         ],
         "links": [],
     }
@@ -198,9 +260,7 @@ def _run(args: list[str], capsys) -> dict[str, Any]:
             return json.loads(line)
         except json.JSONDecodeError:
             continue
-    raise AssertionError(
-        f"no JSON envelope (rc={result.exit_code}, exc={result.exception}, out={captured[:500]})"
-    )
+    raise AssertionError(f"no JSON envelope (rc={result.exit_code}, exc={result.exception}, out={captured[:500]})")
 
 
 # ---------------------------------------------------------------------------
@@ -235,6 +295,18 @@ class TestSlotsDirectMode:
         assert env["ok"] is False
         assert env["error"]["code"] == "workflow_not_found"
 
+    def test_slots_keeps_api_node_dynamic_combo_values_aligned(self, patched_graph, tmp_path, capsys):
+        path = _write_workflow(tmp_path, _api_node_workflow())
+        env = _run(["slots", str(path)], capsys)
+        assert env["ok"] is True
+        slots = {s["address"]: s["current_value"] for s in env["data"]["slots"]}
+        assert slots["263.model"] == "gemini-3-pro-image-preview"
+        assert slots["263.seed"] == 41439150623705
+        assert slots["263.aspect_ratio"] == "auto"
+        assert slots["263.resolution"] == "4K"
+        assert slots["263.response_modalities"] == "IMAGE+TEXT"
+        assert slots["263.system_prompt"] == "always produce an image"
+
 
 # ---------------------------------------------------------------------------
 # set-slot — direct mode
@@ -257,7 +329,7 @@ class TestSetSlotDirectMode:
         # --stdout prints to stdout instead of modifying file
         _force_json_renderer()
         runner = CliRunner()
-        result = runner.invoke(
+        runner.invoke(
             workflow_cmd.app,
             ["set-slot", str(path), '6.text="a dog"', "--stdout"],
             standalone_mode=False,
@@ -287,11 +359,17 @@ class TestVaryDirectMode:
     def test_vary_produces_files(self, patched_graph, tmp_path, capsys):
         path = _write_workflow(tmp_path, _direct_workflow())
         out_dir = tmp_path / "out"
-        env = _run([
-            "vary", str(path),
-            "--slot", "3.seed=[1,2,3]",
-            "--out-dir", str(out_dir),
-        ], capsys)
+        env = _run(
+            [
+                "vary",
+                str(path),
+                "--slot",
+                "3.seed=[1,2,3]",
+                "--out-dir",
+                str(out_dir),
+            ],
+            capsys,
+        )
         assert env["ok"] is True
         assert env["data"]["count"] == 3
         files = sorted(out_dir.glob("*.json"))
@@ -299,22 +377,35 @@ class TestVaryDirectMode:
 
     def test_vary_mismatched_lengths_rejected(self, patched_graph, tmp_path, capsys):
         path = _write_workflow(tmp_path, _direct_workflow())
-        env = _run([
-            "vary", str(path),
-            "--slot", "3.seed=[1,2,3]",
-            "--slot", "3.steps=[10,20]",
-            "--out-dir", str(tmp_path / "out"),
-        ], capsys)
+        env = _run(
+            [
+                "vary",
+                str(path),
+                "--slot",
+                "3.seed=[1,2,3]",
+                "--slot",
+                "3.steps=[10,20]",
+                "--out-dir",
+                str(tmp_path / "out"),
+            ],
+            capsys,
+        )
         assert env["ok"] is False
         assert "same length" in env["error"]["message"].lower()
 
     def test_vary_non_list_rejected(self, patched_graph, tmp_path, capsys):
         path = _write_workflow(tmp_path, _direct_workflow())
-        env = _run([
-            "vary", str(path),
-            "--slot", "3.seed=42",
-            "--out-dir", str(tmp_path / "out"),
-        ], capsys)
+        env = _run(
+            [
+                "vary",
+                str(path),
+                "--slot",
+                "3.seed=42",
+                "--out-dir",
+                str(tmp_path / "out"),
+            ],
+            capsys,
+        )
         assert env["ok"] is False
         assert "array" in env["error"]["message"].lower()
 
@@ -362,11 +453,17 @@ class TestAgentSeedSweepScenario:
 
         # Step 3: produce variants
         out_dir = tmp_path / "variants"
-        env = _run([
-            "vary", str(path),
-            "--slot", f"{seed_addr}=[10,20,30]",
-            "--out-dir", str(out_dir),
-        ], capsys)
+        env = _run(
+            [
+                "vary",
+                str(path),
+                "--slot",
+                f"{seed_addr}=[10,20,30]",
+                "--out-dir",
+                str(out_dir),
+            ],
+            capsys,
+        )
         assert env["ok"] is True
         assert env["data"]["count"] == 3
 
@@ -385,12 +482,19 @@ class TestAgentSeedSweepScenario:
         """Multi-slot sweep: vary both prompt and seed."""
         path = _write_workflow(tmp_path, _direct_workflow())
         out_dir = tmp_path / "variants"
-        env = _run([
-            "vary", str(path),
-            "--slot", '6.text=["cat","dog","fox"]',
-            "--slot", "3.seed=[1,2,3]",
-            "--out-dir", str(out_dir),
-        ], capsys)
+        env = _run(
+            [
+                "vary",
+                str(path),
+                "--slot",
+                '6.text=["cat","dog","fox"]',
+                "--slot",
+                "3.seed=[1,2,3]",
+                "--out-dir",
+                str(out_dir),
+            ],
+            capsys,
+        )
         assert env["ok"] is True
         assert env["data"]["count"] == 3
 

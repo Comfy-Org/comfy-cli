@@ -1,26 +1,17 @@
-"""``comfy skill`` — install the agent skills so Claude / Cursor / Aider can drive comfy directly.
+"""``comfy skills`` — install the agent skills so Claude / Cursor / Aider can drive comfy directly.
 
 The unlock: instead of running an MCP server, this command teaches every
 agent on the machine how to call ``comfy`` natively. One file per skill,
 three targets, zero protocol.
 
-Bundled skills (10 total) — see ``comfy skill list`` for descriptions:
+Bundled skills (4 total) — see ``comfy skills list`` for descriptions:
 
-  Core surface
-  ------------
-  - ``comfy``         — command tree, output contract, CQL, routing
-  - ``comfy-cloud``   — Comfy Cloud usage (auth, base-URL, ``--where cloud``)
-  - ``comfy-pipeline``— multi-stage orchestration (fan-out / collect / assembly)
-  - ``comfy-debug``   — debugging when workflows fail or jobs hang
-  - ``comfy-relay``   — what to put in chat while driving the CLI
-
-  Media generation
-  ----------------
-  - ``comfy-image``     — text-to-image, variations, upscaling, ControlNet
-  - ``comfy-video``     — image-to-video, text-to-video, assembly, audio sync
-  - ``comfy-audio``     — music + speech generation (Sonilo, ElevenLabs, …)
-  - ``comfy-edit``      — transform existing assets (inpaint, restyle, upscale)
-  - ``comfy-condition`` — structural guidance (masks, references, motion control)
+  - ``comfy``           — the consolidated driver skill (command surface,
+                          output contract, routing, discovery, execution,
+                          image, video, audio, cloud, edit, condition, pipeline)
+  - ``comfy-fragments`` — typed reusable workflow fragments + YAML blueprint composition
+  - ``comfy-debug``     — debugging when workflows fail or jobs hang
+  - ``comfy-relay``     — what to put in chat while driving the CLI
 """
 
 from __future__ import annotations
@@ -41,6 +32,9 @@ from comfy_cli.skills import (
 )
 from comfy_cli.skills import (
     install as _install,
+)
+from comfy_cli.skills import (
+    prune_retired as _prune_retired,
 )
 from comfy_cli.skills import (
     uninstall as _uninstall,
@@ -124,7 +118,7 @@ def install_cmd(
         list[str] | None,
         typer.Option(
             "--skill",
-            help="Install only the named skill(s). Repeatable. Default: all 10 bundled skills (see `comfy skill list`).",
+            help="Install only the named skill(s). Repeatable. Default: all 4 bundled skills (see `comfy skills list`).",
         ),
     ] = None,
     dry_run: Annotated[
@@ -139,7 +133,12 @@ def install_cmd(
         _ensure_project_root(cwd)
     kinds = _kinds(target)
     skills = _validate_skills(skill)
-    results = _install(scope=s, targets=kinds, skills=skills, dry_run=dry_run, project_root=cwd)
+    # Prune skills we've since retired so old machines converge on every install.
+    # Surface only the ones that actually changed — `absent` is a non-event.
+    prune_results = [
+        r for r in _prune_retired(scope=s, targets=kinds, dry_run=dry_run, project_root=cwd) if r.action != "absent"
+    ]
+    results = prune_results + _install(scope=s, targets=kinds, skills=skills, dry_run=dry_run, project_root=cwd)
 
     if renderer.is_pretty():
         from rich.console import Group
@@ -291,14 +290,14 @@ def list_cmd():
 def show_cmd(
     name: Annotated[
         str,
-        typer.Argument(help="Which bundled skill to print (see `comfy skill list` for all 10)."),
+        typer.Argument(help="Which bundled skill to print (see `comfy skills list` for all 4)."),
     ] = "comfy",
 ):
     renderer = get_renderer()
     try:
         content = skill_content(name)
     except ValueError as e:
-        renderer.error(code="unknown_skill", message=str(e), hint="run `comfy skill list`")
+        renderer.error(code="unknown_skill", message=str(e), hint="run `comfy skills list`")
         raise typer.Exit(code=1) from e
     if renderer.is_pretty():
         from rich.markdown import Markdown

@@ -48,10 +48,10 @@ COMMAND_SCHEMAS: dict[str, str] = {
     "comfy workflow set-slot": "workflow",
     "comfy workflow vary": "workflow",
     # skill management
-    "comfy skill install": "skill",
-    "comfy skill uninstall": "skill",
-    "comfy skill show": "skill",
-    "comfy skill status": "skill",
+    "comfy skills install": "skill",
+    "comfy skills uninstall": "skill",
+    "comfy skills show": "skill",
+    "comfy skills status": "skill",
     # file transfer
     "comfy upload": "transfer",
     "comfy download": "transfer",

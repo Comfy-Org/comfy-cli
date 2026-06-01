@@ -31,13 +31,12 @@ def fetch_object_info(host, port, timeout, emitter=None):
     Either way, a ``typer.Exit(code=1)`` is raised.
     """
     url = f"http://{host}:{port}/object_info"
-    json_mode = bool(emitter and emitter.json_mode)
     try:
         with request.urlopen(url, timeout=timeout) as resp:
             body = resp.read(64 * 1024 * 1024)
     except urllib.error.HTTPError as e:
         body_text = e.read().decode("utf-8", errors="replace").strip()
-        if json_mode:
+        if emitter is not None and emitter.json_mode:
             emitter.emit_failed(
                 "object_info_unavailable",
                 f"Failed to fetch /object_info (HTTP {e.code})",
@@ -51,14 +50,14 @@ def fetch_object_info(host, port, timeout, emitter=None):
         raise typer.Exit(code=1) from e
     except urllib.error.URLError as e:
         msg = f"Failed to fetch /object_info from {host}:{port}: {e.reason} (override with --host / --port)"
-        if json_mode:
+        if emitter is not None and emitter.json_mode:
             emitter.emit_failed("connection_error", msg)
         else:
             pprint(f"[bold red]{msg}[/bold red]")
         raise typer.Exit(code=1) from e
     except TimeoutError as e:
         msg = f"Failed to fetch /object_info from {host}:{port}: timed out after {timeout}s (override with --host / --port)"
-        if json_mode:
+        if emitter is not None and emitter.json_mode:
             emitter.emit_failed("connection_error", msg)
         else:
             pprint(f"[bold red]{msg}[/bold red]")
@@ -66,7 +65,7 @@ def fetch_object_info(host, port, timeout, emitter=None):
     try:
         return json.loads(body)
     except json.JSONDecodeError as e:
-        if json_mode:
+        if emitter is not None and emitter.json_mode:
             emitter.emit_failed(
                 "object_info_unavailable",
                 "Server returned invalid JSON for /object_info",

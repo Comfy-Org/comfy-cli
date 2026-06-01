@@ -7,25 +7,26 @@ from pathlib import Path
 import pytest
 
 from comfy_cli.skills import (
-    BUNDLED_SKILLS,
+    RETIRED_SKILLS,
     bundled_skill_names,
     install,
     plan_install,
+    prune_retired,
     skill_content,
     uninstall,
 )
-
 
 # ---------------------------------------------------------------------------
 # Bundled skill inventory
 # ---------------------------------------------------------------------------
 
 
-def test_bundles_at_least_comfy_debug_cloud():
+def test_bundles_expected_skills():
     names = bundled_skill_names()
     assert "comfy" in names
+    assert "comfy-fragments" in names
     assert "comfy-debug" in names
-    assert "comfy-cloud" in names
+    assert "comfy-relay" in names
 
 
 def test_bundled_skills_have_required_frontmatter():
@@ -50,10 +51,18 @@ def test_comfy_debug_skill_covers_common_error_codes():
         assert code in text, f"comfy-debug skill should mention {code}"
 
 
-def test_comfy_cloud_skill_covers_setup_and_routing():
-    text = skill_content("comfy-cloud")
-    for needle in ("comfy cloud login", "cloud set-base-url", "--where cloud", "COMFY_CLOUD_BASE_URL"):
-        assert needle in text, f"comfy-cloud skill should mention {needle}"
+def test_comfy_skill_covers_cloud_setup_and_routing():
+    # Cloud guidance was folded into the consolidated `comfy` skill's
+    # "Cloud" gotchas section when the standalone comfy-cloud skill was retired.
+    text = skill_content("comfy")
+    for needle in ("comfy cloud login", "cloud set-base-url", "--where cloud"):
+        assert needle in text, f"comfy skill should mention {needle}"
+
+
+def test_comfy_fragments_skill_covers_composition():
+    text = skill_content("comfy-fragments")
+    for needle in ("workflow compose", "_fragment", "blueprint"):
+        assert needle in text, f"comfy-fragments skill should mention {needle}"
 
 
 def test_skill_content_rejects_unknown_name():
@@ -84,8 +93,8 @@ def test_plan_install_project_scope_paths(tmp_path: Path):
 
 
 def test_plan_install_filters_by_skill(tmp_path: Path):
-    plans = plan_install(scope="project", project_root=tmp_path, skills=["comfy", "comfy-cloud"])
-    assert {p.skill for p in plans} == {"comfy", "comfy-cloud"}
+    plans = plan_install(scope="project", project_root=tmp_path, skills=["comfy", "comfy-fragments"])
+    assert {p.skill for p in plans} == {"comfy", "comfy-fragments"}
 
 
 # ---------------------------------------------------------------------------
@@ -117,11 +126,11 @@ def test_install_one_skill_only(tmp_path: Path):
     install(scope="project", project_root=tmp_path, skills=["comfy-debug"])
     assert (tmp_path / ".claude/skills/comfy-debug/SKILL.md").exists()
     assert not (tmp_path / ".claude/skills/comfy/SKILL.md").exists()
-    assert not (tmp_path / ".claude/skills/comfy-cloud/SKILL.md").exists()
+    assert not (tmp_path / ".claude/skills/comfy-fragments/SKILL.md").exists()
     agents = (tmp_path / "AGENTS.md").read_text(encoding="utf-8")
     assert "<!-- comfy-debug:start -->" in agents
     assert "<!-- comfy:start -->" not in agents
-    assert "<!-- comfy-cloud:start -->" not in agents
+    assert "<!-- comfy-fragments:start -->" not in agents
 
 
 def test_install_is_idempotent_across_skills(tmp_path: Path):
@@ -175,7 +184,7 @@ def test_uninstall_can_target_one_skill(tmp_path: Path):
     uninstall(scope="project", project_root=tmp_path, skills=["comfy-debug"])
     assert not (tmp_path / ".claude/skills/comfy-debug/SKILL.md").exists()
     assert (tmp_path / ".claude/skills/comfy/SKILL.md").exists()
-    assert (tmp_path / ".claude/skills/comfy-cloud/SKILL.md").exists()
+    assert (tmp_path / ".claude/skills/comfy-relay/SKILL.md").exists()
 
 
 def test_uninstall_is_safe_on_clean_tree(tmp_path: Path):
@@ -230,3 +239,74 @@ def test_install_atomic_write_does_not_leave_partial_file(tmp_path: Path, monkey
     leftover = list(skill_path.parent.glob("*.tmp"))
     assert leftover == [], f"tmp not cleaned: {leftover}"
     monkeypatch.setattr("comfy_cli.skills.os.replace", real_replace)
+
+
+# ---------------------------------------------------------------------------
+# Retired-skill pruning (10 → 4 convergence)
+# ---------------------------------------------------------------------------
+
+
+def test_retired_and_bundled_are_disjoint():
+    assert set(RETIRED_SKILLS).isdisjoint(set(bundled_skill_names()))
+
+
+def _seed_retired_orphan(root: Path, name: str) -> tuple[Path, Path, Path]:
+    """Write a stale orphan for `name` across all three targets."""
+    claude = root / ".claude" / "skills" / name / "SKILL.md"
+    cursor = root / ".cursor" / "rules" / f"{name}.mdc"
+    agents = root / "AGENTS.md"
+    claude.parent.mkdir(parents=True, exist_ok=True)
+    cursor.parent.mkdir(parents=True, exist_ok=True)
+    claude.write_text("stale\n", encoding="utf-8")
+    cursor.write_text("stale\n", encoding="utf-8")
+    agents.write_text(f"# keep me\n\n<!-- {name}:start -->\nstale\n<!-- {name}:end -->\n", encoding="utf-8")
+    return claude, cursor, agents
+
+
+def test_prune_retired_removes_orphans(tmp_path: Path):
+    name = RETIRED_SKILLS[0]
+    claude, cursor, agents = _seed_retired_orphan(tmp_path, name)
+
+    results = prune_retired(scope="project", project_root=tmp_path)
+
+    assert not claude.exists()
+    assert not claude.parent.exists()  # empty <name>/ dir cleaned up too
+    assert not cursor.exists()
+    agents_text = agents.read_text(encoding="utf-8")
+    assert f"<!-- {name}:start -->" not in agents_text
+    assert "# keep me" in agents_text  # unrelated content preserved
+    removed = {(r.skill, r.kind) for r in results if r.action == "removed"}
+    assert (name, "claude-code") in removed
+    assert (name, "cursor") in removed
+    assert (name, "agents-md") in removed
+
+
+def test_prune_retired_is_absent_on_clean_tree(tmp_path: Path):
+    results = prune_retired(scope="project", project_root=tmp_path)
+    assert results, "should still report a plan per retired skill/target"
+    assert all(r.action == "absent" for r in results)
+
+
+def test_prune_retired_dry_run_does_not_delete(tmp_path: Path):
+    name = RETIRED_SKILLS[0]
+    claude, _cursor, _agents = _seed_retired_orphan(tmp_path, name)
+
+    results = prune_retired(scope="project", project_root=tmp_path, dry_run=True)
+
+    assert claude.exists(), "dry-run must not delete"
+    assert any(r.action == "would_remove" for r in results)
+
+
+def test_install_converges_old_machine(tmp_path: Path):
+    # Simulate a machine that installed a now-retired skill, then reinstall the
+    # current bundle and prune in one pass (as the install command does).
+    name = RETIRED_SKILLS[0]
+    claude, cursor, _agents = _seed_retired_orphan(tmp_path, name)
+
+    prune_retired(scope="project", project_root=tmp_path)
+    install(scope="project", project_root=tmp_path)
+
+    assert not claude.exists()
+    assert not cursor.exists()
+    for current in bundled_skill_names():
+        assert (tmp_path / ".claude" / "skills" / current / "SKILL.md").exists()
