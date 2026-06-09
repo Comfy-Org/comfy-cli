@@ -19,6 +19,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -186,6 +187,7 @@ class Client:
         path_parts: tuple[str, ...],
         *,
         body: dict | None = None,
+        body_factory: Callable[[], dict] | None = None,
         timeout: float | None = None,
         _retried: bool = False,
         _attempt: int = 0,
@@ -194,20 +196,23 @@ class Client:
         # Only enforce https-or-loopback when we're carrying a bearer token.
         if self.target.is_cloud and (self.target.auth_token or self.target.api_key):
             _assert_safe_url(url)
+        if body_factory is not None:
+            body = body_factory()
         data = json.dumps(body).encode("utf-8") if body is not None else None
         req = urllib.request.Request(url, data=data, method=method)
         req.add_header("Accept", "application/json")
         if data is not None:
             req.add_header("Content-Type", "application/json")
-        # Cloud auth: prefer X-API-Key when set (easier to paste-and-test),
-        # fall back to OAuth Bearer. Only attached on cloud targets so a stray
-        # auth_token on a local target can't leak credentials to a plaintext
-        # server.
+        # Cloud auth: the policy layer (`resolve_target`) is OAuth-first and
+        # populates at most one of api_key / auth_token, so this is just the
+        # mechanic — send whichever field is set. Only attached on cloud
+        # targets so a stray auth_token on a local target can't leak
+        # credentials to a plaintext server.
         if self.target.is_cloud:
-            if self.target.api_key:
-                req.add_header("X-API-Key", self.target.api_key)
-            elif self.target.auth_token:
+            if self.target.auth_token:
                 req.add_header("Authorization", f"Bearer {self.target.auth_token}")
+            elif self.target.api_key:
+                req.add_header("X-API-Key", self.target.api_key)
         try:
             with _OPENER.open(req, timeout=timeout or self.timeout) as resp:
                 text = resp.read().decode("utf-8", errors="replace")
@@ -228,7 +233,14 @@ class Client:
                 and self.target.auth_token
                 and self._try_refresh_token()
             ):
-                return self._request(method, path_parts, body=body, timeout=timeout, _retried=True)
+                return self._request(
+                    method,
+                    path_parts,
+                    body=body,
+                    body_factory=body_factory,
+                    timeout=timeout,
+                    _retried=True,
+                )
             # Transient: back off and retry. 429 for any method (rejected, not
             # processed); 5xx for idempotent GETs only.
             retryable = e.code == 429 or (e.code in _RETRYABLE_5XX and method == "GET")
@@ -238,6 +250,7 @@ class Client:
                     method,
                     path_parts,
                     body=body,
+                    body_factory=body_factory,
                     timeout=timeout,
                     _retried=_retried,
                     _attempt=_attempt + 1,
@@ -264,20 +277,22 @@ class Client:
         header because comfy_api_nodes reads it from ``extra_data``; this is a
         gateway-layer concern, not a header-vs-body choice.
         """
-        payload: dict[str, Any] = {"prompt": workflow, "client_id": client_id}
-        merged_extra: dict[str, Any] = dict(extra_data or {})
-        # Partner-API nodes (BFL, Gemini, Bria, ByteDance, etc.) read the
-        # caller's comfy.org credential out of extra_data. We mirror what the
-        # web UI sends: api_key_comfy_org for the X-API-Key path,
-        # auth_token_comfy_org for the OAuth Bearer path.
-        if self.target.is_cloud:
-            if self.target.api_key:
-                merged_extra.setdefault("api_key_comfy_org", self.target.api_key)
-            elif self.target.auth_token:
-                merged_extra.setdefault("auth_token_comfy_org", self.target.auth_token)
-        if merged_extra:
-            payload["extra_data"] = merged_extra
-        resp = self._request("POST", ("prompt",), body=payload, timeout=timeout)
+        def payload() -> dict[str, Any]:
+            request_payload: dict[str, Any] = {"prompt": workflow, "client_id": client_id}
+            merged_extra: dict[str, Any] = dict(extra_data or {})
+            # Partner-API nodes (BFL, Gemini, Bria, ByteDance, etc.) read the
+            # caller's comfy.org credential out of extra_data. Rebuild this at
+            # send time so an OAuth refresh updates both the header and body.
+            if self.target.is_cloud:
+                if self.target.auth_token:
+                    merged_extra.setdefault("auth_token_comfy_org", self.target.auth_token)
+                elif self.target.api_key:
+                    merged_extra.setdefault("api_key_comfy_org", self.target.api_key)
+            if merged_extra:
+                request_payload["extra_data"] = merged_extra
+            return request_payload
+
+        resp = self._request("POST", ("prompt",), body_factory=payload, timeout=timeout)
         if not isinstance(resp, dict) or "prompt_id" not in resp:
             raise HTTPError(200, "missing prompt_id in response", json.dumps(resp) if resp else "")
         return SubmitResult(
@@ -337,22 +352,45 @@ class Client:
 
     # ----- polling helpers -----
 
-    def wait_for_completion(self, prompt_id: str, *, poll_interval: float = 2.0, timeout: float = 600.0) -> dict:
+    def wait_for_completion(
+        self,
+        prompt_id: str,
+        *,
+        poll_interval: float = 2.0,
+        timeout: float = 600.0,
+        progress_probe=None,
+    ) -> dict:
         """Block until the prompt finishes; return the final history record.
+
+        ``timeout`` is a *silence* deadline: it resets every time
+        ``progress_probe()`` returns a value different from the previous one,
+        so a job that keeps reporting forward progress can run indefinitely
+        and only a server silent for ``timeout`` seconds aborts. When
+        ``progress_probe`` is None it degrades to a wall-clock deadline.
 
         Polls ``get_history`` (transient 429/5xx are retried inside ``_request``).
         A little jitter on the interval keeps concurrent waiters from
         synchronizing into request bursts that trip cloud rate limits.
         """
-        deadline = time.time() + timeout
+        sentinel = object()
+        last_signal = sentinel
+        last_change = time.time()
         while True:
             record = self.get_history(prompt_id)
             if record and _looks_done(record):
                 return record
-            if time.time() >= deadline:
-                raise TimeoutError(f"workflow {prompt_id} did not complete within {timeout}s")
+            if progress_probe is not None:
+                try:
+                    signal = progress_probe()
+                except Exception:  # noqa: BLE001 — a flaky probe must not abort the wait
+                    signal = last_signal
+                if signal != last_signal:
+                    last_signal = signal
+                    last_change = time.time()
+            if time.time() - last_change >= timeout:
+                raise TimeoutError(f"workflow {prompt_id} reported no progress for {timeout}s")
             nap = poll_interval + random.uniform(0, min(poll_interval, 1.0) * 0.5)
-            time.sleep(min(nap, max(deadline - time.time(), 0.05)))
+            time.sleep(nap)
 
     # ----- output URL helpers -----
 

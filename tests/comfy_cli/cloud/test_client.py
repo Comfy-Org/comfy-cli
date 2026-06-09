@@ -144,6 +144,33 @@ class TestSubmitPrompt:
         # setdefault — caller wins.
         assert body["extra_data"]["auth_token_comfy_org"] == "caller-token"
 
+    def test_oauth_refresh_rebuilds_partner_auth_extra_data(self):
+        cloud = Target(
+            kind="cloud",
+            base_url="https://cloud.example.com",
+            path_prefix="/api",
+            history_path="history_v2",
+            jobs_path="jobs",
+            auth_token="expired-token",
+        )
+        client = comfy_client.Client(cloud)
+
+        def refresh():
+            object.__setattr__(cloud, "auth_token", "fresh-token")
+            return True
+
+        seq = [_http_error(401), _mock_response({"prompt_id": "pid", "number": 1, "node_errors": {}})]
+        with patch.object(client, "_try_refresh_token", side_effect=refresh):
+            with patch.object(comfy_client._OPENER, "open", side_effect=seq) as urlopen:
+                client.submit_prompt({"1": {"class_type": "X", "inputs": {}}}, "cid")
+
+        first_req = urlopen.call_args_list[0].args[0]
+        retry_req = urlopen.call_args_list[1].args[0]
+        assert first_req.headers["Authorization"] == "Bearer expired-token"
+        assert json.loads(first_req.data)["extra_data"]["auth_token_comfy_org"] == "expired-token"
+        assert retry_req.headers["Authorization"] == "Bearer fresh-token"
+        assert json.loads(retry_req.data)["extra_data"]["auth_token_comfy_org"] == "fresh-token"
+
     def test_cloud_with_api_key_sends_x_api_key_header(self):
         cloud_apikey = Target(
             kind="cloud",
@@ -168,8 +195,8 @@ class TestSubmitPrompt:
         body = json.loads(req.data)
         assert body["extra_data"] == {"api_key_comfy_org": "sk-test-1234"}
 
-    def test_cloud_api_key_wins_over_bearer_when_both_set(self):
-        """If both are configured, API key wins (testing convenience)."""
+    def test_cloud_oauth_wins_over_api_key_when_both_set(self):
+        """OAuth-first: if both are configured, the Bearer token wins."""
         cloud_both = Target(
             kind="cloud",
             base_url="https://cloud.example.com",
@@ -187,11 +214,11 @@ class TestSubmitPrompt:
             client = comfy_client.Client(cloud_both)
             client.submit_prompt({"1": {"class_type": "X", "inputs": {}}}, "cid")
         req = urlopen.call_args.args[0]
-        assert req.headers["X-api-key"] == "api-key-1234"
-        assert "Authorization" not in req.headers
+        assert req.headers["Authorization"] == "Bearer bearer-token"
+        assert "X-api-key" not in req.headers
         body = json.loads(req.data)
-        assert "api_key_comfy_org" in body["extra_data"]
-        assert "auth_token_comfy_org" not in body["extra_data"]
+        assert "auth_token_comfy_org" in body["extra_data"]
+        assert "api_key_comfy_org" not in body["extra_data"]
 
     def test_raises_http_error_on_4xx(self):
         with patch.object(comfy_client._OPENER, "open", side_effect=_http_error(400, b"bad workflow")):
@@ -395,6 +422,44 @@ class TestOutputUrls:
         assert comfy_client.Client(CLOUD).extract_output_urls({}) == []
         record = {"outputs": {"3": {"images": [{"no_filename": True}, "garbage"]}}}
         assert comfy_client.Client(CLOUD).extract_output_urls(record) == []
+
+
+class TestWaitForCompletionProgressProbe:
+    def test_wait_for_completion_resets_idle_on_progress(self, monkeypatch):
+        import comfy_cli.comfy_client as cc
+
+        client = cc.Client(CLOUD)
+
+        poll_interval = 0.04   # each poll sleeps ~40ms
+        timeout = 0.06         # without reset, the idle timer trips after 60ms
+
+        calls = {"n": 0}
+        done = {"status": {"completed": True}, "outputs": {}}
+
+        def history(pid):
+            calls["n"] += 1
+            return done if calls["n"] >= 5 else {"status": {"status_str": "running"}}
+
+        counter = {"v": 0}
+        def probe():
+            counter["v"] += 1
+            return ("running", counter["v"])  # advances every poll → resets last_change
+
+        monkeypatch.setattr(client, "get_history", history)
+        # ~5 polls × 40ms ≈ 200ms total elapsed, far past the 60ms timeout, but the
+        # idle timer resets each poll because the probe value advances → must NOT raise.
+        rec = client.wait_for_completion(
+            "pid", poll_interval=poll_interval, timeout=timeout, progress_probe=probe
+        )
+        assert rec is done
+
+    def test_wait_for_completion_times_out_on_silence(self, monkeypatch):
+        import comfy_cli.comfy_client as cc
+
+        client = cc.Client(CLOUD)
+        monkeypatch.setattr(client, "get_history", lambda pid: {"status": {"status_str": "running"}})
+        with pytest.raises(TimeoutError):
+            client.wait_for_completion("pid", poll_interval=0, timeout=0.05, progress_probe=lambda: ("running", 1))
 
 
 class TestRedirectRefusal:

@@ -750,7 +750,7 @@ def run(
                 workflow,
                 wait=wait,
                 verbose=verbose,
-                timeout=timeout or 600,
+                timeout=timeout,
                 notify=effective_notify,
             )
             return
