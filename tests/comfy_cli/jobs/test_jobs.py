@@ -522,3 +522,76 @@ def test_run_default_async_emits_clean_server_not_running(tmp_path):
     assert res.returncode != 0
     env = _last_json(res.stdout)
     assert env["error"]["code"] == "server_not_running"
+
+
+# ---------------------------------------------------------------------------
+# Cancelled / interrupted job terminal-state fixes
+# ---------------------------------------------------------------------------
+
+
+def test_snapshot_maps_interrupted_to_cancelled(monkeypatch):
+    """_snapshot must return status='cancelled' when the history record has
+    completed=False and an execution_interrupted message (not execution_error)."""
+    body = {
+        "pid": {
+            "status": {
+                "completed": False,
+                "messages": [["execution_interrupted", {}]],
+            },
+            "outputs": {},
+        }
+    }
+    monkeypatch.setattr(
+        jobs_mod,
+        "_http_get_json",
+        lambda url, **kw: ({} if "/queue" in url else body),
+    )
+    snap = jobs_mod._snapshot("127.0.0.1", 8188, "pid")
+    assert snap is not None
+    assert snap["status"] == "cancelled"
+
+
+def test_poll_local_once_treats_cancelled_as_terminal(monkeypatch):
+    """_poll_local_once must return True (terminal) and set state.status='cancelled'
+    when _snapshot reports status='cancelled'."""
+    from comfy_cli import jobs_state
+    from comfy_cli.command import job_watcher
+
+    monkeypatch.setattr(
+        "comfy_cli.command.jobs._snapshot",
+        lambda h, p, pid: {"prompt_id": pid, "status": "cancelled", "outputs": []},
+    )
+    state = jobs_state.new(prompt_id="pid", client_id="c", workflow="w", where="local")
+    assert job_watcher._poll_local_once(state, host=None, port=None) is True
+    assert state.status == "cancelled"
+
+
+def test_local_cancel_writes_cancelled_state(monkeypatch: pytest.MonkeyPatch):
+    """_local_cancel must persist status='cancelled' to the on-disk state file
+    after successfully POSTing to /queue and /interrupt."""
+    from typer.testing import CliRunner
+
+    from comfy_cli import jobs_state
+
+    # Pre-write a state file so _local_cancel has something to update.
+    st = jobs_state.new(prompt_id="pidX", client_id="c", workflow="w", where="local")
+    jobs_state.write(st)
+    assert jobs_state.read("pidX") is not None
+
+    monkeypatch.setattr(jobs_mod, "_server_or_error", lambda h, p, **kw: True)
+    _capture_urlopen(
+        monkeypatch,
+        {
+            "/queue": b"{}",
+            "/interrupt": b"{}",
+        },
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(jobs_mod.app, ["cancel", "pidX", "--where", "local"])
+    assert result.exit_code == 0, result.output
+
+    # The on-disk state file must now carry status='cancelled'.
+    persisted = jobs_state.read("pidX")
+    assert persisted is not None, "state file was deleted instead of updated"
+    assert persisted.status == "cancelled", f"expected 'cancelled', got {persisted.status!r}"

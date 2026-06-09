@@ -603,10 +603,13 @@ def _snapshot(host: str, port: int, prompt_id: str) -> dict | None:
     status_obj = body.get("status") or {}
     completed = bool(status_obj.get("completed"))
     error_detail = None
+    interrupted = False
     for msg in status_obj.get("messages") or []:
-        if isinstance(msg, list) and msg and msg[0] == "execution_error":
-            error_detail = msg[1] if len(msg) > 1 else None
-            break
+        if isinstance(msg, list) and msg:
+            if msg[0] == "execution_error":
+                error_detail = msg[1] if len(msg) > 1 else None
+            elif msg[0] == "execution_interrupted":
+                interrupted = True
     outputs = body.get("outputs") or {}
     output_urls: list[str] = []
     for v in outputs.values():
@@ -620,7 +623,12 @@ def _snapshot(host: str, port: int, prompt_id: str) -> dict | None:
 
     return {
         "prompt_id": prompt_id,
-        "status": "error" if error_detail else ("completed" if completed else "queued"),
+        "status": (
+            "error" if error_detail
+            else "completed" if completed
+            else "cancelled" if interrupted
+            else "queued"
+        ),
         "workflow_size": None,
         "outputs": output_urls,
         "error": error_detail,
@@ -748,6 +756,13 @@ def _local_cancel(prompt_id: str, host: str, port: int) -> None:
         "queue_delete_ok": queue_ok,
         "interrupt_ok": interrupt_ok,
     }
+    from comfy_cli import jobs_state
+
+    existing = jobs_state.read(prompt_id)
+    if existing is not None:
+        existing.status = "cancelled"
+        jobs_state.write(existing)
+
     if renderer.is_pretty():
         from rich.text import Text
 

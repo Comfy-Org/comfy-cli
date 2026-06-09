@@ -125,6 +125,13 @@ def _poll_local_once(state: jobs_state.JobState, *, host: str | None, port: int 
             "details": snap,
         }
         return True
+    if snap_status == "cancelled":
+        state.error = {
+            "code": "cancelled",
+            "message": "Job was interrupted/cancelled.",
+            "details": {},
+        }
+        return True
     return False
 
 
