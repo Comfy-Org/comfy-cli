@@ -443,6 +443,7 @@ def execute_cloud(
     verbose: bool = False,
     timeout: int = 600,
     notify: bool = False,
+    print_prompt: bool = False,
 ):
     """Run a workflow against Comfy Cloud via the stored OAuth session.
 
@@ -508,6 +509,20 @@ def execute_cloud(
             hint="use 'File > Export (API)' in the ComfyUI frontend",
         )
         raise typer.Exit(code=1)
+
+    if print_prompt:
+        # Documented dry-run: show the API-format graph that WOULD be sent and
+        # exit WITHOUT POSTing. Mirrors local execute()'s print_prompt branch.
+        if renderer.is_pretty():
+            print(json.dumps(parsed_workflow, indent=2, ensure_ascii=False))
+        else:
+            renderer.event("prompt_preview", prompt=parsed_workflow)
+            renderer.emit(
+                {"workflow": workflow_name, "status": "preview", "prompt": parsed_workflow},
+                command="run",
+                where="cloud",
+            )
+        raise typer.Exit(code=0)
 
     # Pre-submit validation via pure-Python CQL engine.
     # Cloud path uses cached/bundled object_info (no live server needed).

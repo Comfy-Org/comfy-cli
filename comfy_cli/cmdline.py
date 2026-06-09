@@ -752,6 +752,7 @@ def run(
                 verbose=verbose,
                 timeout=timeout,
                 notify=effective_notify,
+                print_prompt=print_prompt,
             )
             return
 

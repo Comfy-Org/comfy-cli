@@ -235,5 +235,30 @@ class TestExecute:
         assert len(leftover) == 1 + run_cli.FLEET_SIZE
 
 
+def test_cloud_print_prompt_does_not_submit(monkeypatch, tmp_path):
+    """--print-prompt on the cloud route prints the graph and never submits."""
+    import typer
+    import comfy_cli.comfy_client as cc
+    from comfy_cli.command.run import execute_cloud
+
+    wf = tmp_path / "wf.json"
+    wf.write_text('{"1": {"class_type": "X", "inputs": {}}}')
+
+    class FakeClient:
+        def __init__(self, *a, **k):
+            pass
+        def submit_prompt(self, *a, **k):
+            raise AssertionError("submit_prompt must not be called in --print-prompt mode")
+
+    # execute_cloud does `from comfy_cli.comfy_client import Client`; patching the
+    # attribute on the module makes that import pick up the fake. But the dry-run
+    # should return BEFORE Client is even constructed.
+    monkeypatch.setattr(cc, "Client", FakeClient)
+
+    with pytest.raises(typer.Exit) as exc:
+        execute_cloud(str(wf), wait=True, print_prompt=True, timeout=5)
+    assert exc.value.exit_code == 0
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
