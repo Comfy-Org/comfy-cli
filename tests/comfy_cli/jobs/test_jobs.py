@@ -581,6 +581,25 @@ def test_watcher_timeout_preserves_prior_status(monkeypatch):
     assert state.error["details"]["last_status"] == "running"
 
 
+def test_emit_terminal_verdicts():
+    import typer
+    from comfy_cli.command import jobs
+    from comfy_cli.output.renderer import get_renderer, reset_renderer_for_testing
+
+    def verdict(payload):
+        reset_renderer_for_testing()
+        r = get_renderer()
+        try:
+            jobs._emit_terminal(r, dict(payload), command="jobs watch")
+        except typer.Exit as e:
+            return e.exit_code
+        return 0
+
+    assert verdict({"prompt_id": "p", "status": "error"}) == 1
+    assert verdict({"prompt_id": "p", "status": "cancelled"}) == 130
+    assert verdict({"prompt_id": "p", "status": "completed", "outputs": []}) == 0
+
+
 def test_local_cancel_writes_cancelled_state(monkeypatch: pytest.MonkeyPatch):
     """_local_cancel must persist status='cancelled' to the on-disk state file
     after successfully POSTing to /queue and /interrupt."""

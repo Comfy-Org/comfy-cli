@@ -113,6 +113,43 @@ def _http_get_json(url: str, *, timeout: float = 10.0) -> Any:
 
 
 # ---------------------------------------------------------------------------
+# Terminal job verdict — shared helper for `jobs watch` (local + cloud)
+# ---------------------------------------------------------------------------
+
+# Terminal job status -> (ok, error_code, exit_code). A failed or cancelled job
+# must surface ok:false + non-zero exit so `comfy --json jobs watch $ID && next`
+# stops. Mirrors `run --wait` (command/run/__init__.py).
+_TERMINAL_VERDICT: dict[str, tuple[bool, str | None, int]] = {
+    "completed": (True, None, 0),
+    "error": (False, "execution_error", 1),
+    "cancelled": (False, "cancelled", 130),
+}
+
+
+def _emit_terminal(renderer, payload: dict, *, command: str, where: str | None = None) -> None:
+    """Emit a job's terminal envelope with ok/exit derived from its status.
+
+    completed -> ok:true exit 0; error -> ok:false exit 1; cancelled -> exit 130.
+    Unknown statuses default to ok:true exit 0 (non-terminal/best-effort).
+    """
+    status = str(payload.get("status") or "unknown")
+    ok, code, exit_code = _TERMINAL_VERDICT.get(status, (True, None, 0))
+    if ok:
+        renderer.emit(payload, command=command, where=where)
+        return
+    err = payload.get("error")
+    message = err.get("message") if isinstance(err, dict) and err.get("message") else None
+    renderer.error(
+        code=code or "execution_error",
+        message=message or f"job {payload.get('prompt_id')} ended in status {status!r}",
+        details=payload,
+        exit_code=exit_code,
+        command=command,
+    )
+    raise typer.Exit(code=exit_code)
+
+
+# ---------------------------------------------------------------------------
 # `jobs ls` — combine /queue + /history
 # ---------------------------------------------------------------------------
 
@@ -876,7 +913,7 @@ def watch_cmd(
         if renderer.is_pretty():
             renderer.console().print(f"[dim]Prompt {prompt_id} already {snap['status']}; nothing more to watch.[/dim]")
             _render_status_pretty(snap, host=h, port=p)
-        renderer.emit(snap, command="jobs watch")
+        _emit_terminal(renderer, snap, command="jobs watch")
         return
 
     ws = WebSocket()
@@ -1008,14 +1045,6 @@ def watch_cmd(
         elif final_status == "cancelled":
             renderer.console().print(Text.assemble(("\n⊘ ", "yellow"), ("cancelled", "yellow")))
 
-    if final_status == "cancelled":
-        renderer.error(
-            code="cancelled",
-            message=f"Watch cancelled by user (prompt {prompt_id})",
-            exit_code=130,
-        )
-        raise typer.Exit(code=130)
-
     payload = {
         "prompt_id": prompt_id,
         "status": final_status,
@@ -1029,7 +1058,7 @@ def watch_cmd(
         payload["details"] = end_details if isinstance(end_details, dict) else {"raw": end_details}
     if not saw_any_event and final_status == "unknown":
         payload["hint"] = "watch returned without events; the prompt may already have completed"
-    renderer.emit(payload, command="jobs watch")
+    _emit_terminal(renderer, payload, command="jobs watch")
 
 
 # ---------------------------------------------------------------------------
@@ -1258,7 +1287,7 @@ def _cloud_watch(prompt_id: str, *, poll_interval: float, max_wait: float) -> No
 
     payload = final_snap or {"prompt_id": prompt_id, "status": "cancelled"}
     payload["elapsed_seconds"] = time.time() - start
-    renderer.emit(payload, command="jobs watch", where="cloud")
+    _emit_terminal(renderer, payload, command="jobs watch", where="cloud")
 
 
 def _safe_close_ws(ws) -> None:
