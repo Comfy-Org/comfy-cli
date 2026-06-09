@@ -2,8 +2,11 @@ import json
 import time
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 import requests
 
+from comfy_cli import update
 from comfy_cli.update import (
     UPDATE_CHECK_DISABLE_ENV,
     check_for_newer_pypi_version,
@@ -104,3 +107,25 @@ class TestUpgradeCli:
         args = mock_run.call_args[0][0]
         assert args[1:] == ["-m", "pip", "install", "-U", "comfy-cli"]
         assert mock_run.call_args[1]["check"] is True
+
+
+@pytest.mark.parametrize("payload", ['[]', '"x"', '{"checked_at": "abc"}'])
+def test_latest_upgrade_version_survives_malformed_cache(tmp_path, payload):
+    (tmp_path / "update-check.json").write_text(payload)
+    assert update.latest_upgrade_version("1.0.0", str(tmp_path)) is None
+
+
+@patch("comfy_cli.update.check_for_newer_pypi_version")
+def test_latest_upgrade_version_survives_missing_latest_key(mock_check, tmp_path):
+    # {"checked_at": 0} is stale — triggers refresh; the payload itself lacks "latest"
+    # but refresh returns a valid current_version, so we just confirm no crash.
+    mock_check.return_value = (False, "1.0.0")
+    (tmp_path / "update-check.json").write_text('{"checked_at": 0}')
+    assert update.latest_upgrade_version("1.0.0", str(tmp_path)) is None
+
+
+def test_latest_upgrade_version_survives_unparseable_latest(tmp_path):
+    (tmp_path / "update-check.json").write_text(
+        json.dumps({"checked_at": time.time(), "latest": "unknown"})
+    )
+    assert update.latest_upgrade_version("1.0.0", str(tmp_path)) is None

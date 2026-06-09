@@ -84,10 +84,11 @@ def latest_upgrade_version(current_version, config_path):
     cache_file = Path(config_path) / "update-check.json"
     try:
         latest = _read_fresh_cache(cache_file, now) or _refresh_cache(cache_file, current_version, now)
-    except (OSError, ValueError, KeyError) as e:
+        if latest is None:
+            return None
+        if version.parse(latest) > version.parse(current_version):
+            return latest
+        return None
+    except (OSError, ValueError, TypeError, KeyError) as e:
         logger.debug(f"Update check skipped: {e}")
         return None
-
-    if version.parse(latest) > version.parse(current_version):
-        return latest
-    return None
