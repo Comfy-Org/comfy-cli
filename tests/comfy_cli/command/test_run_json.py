@@ -1685,3 +1685,25 @@ class TestNoWaitQueueErrorRegression:
         terminal = events[-1]
         assert terminal["error"]["kind"] == "validation_error"
         # The big invariant: it didn't crash with AttributeError on `progress.stop()`
+
+
+def test_on_executed_emits_output_event(monkeypatch):
+    from comfy_cli.command.run.execution import WorkflowExecution
+
+    ex = WorkflowExecution(
+        workflow={"9": {}}, host="127.0.0.1", port=8188, verbose=False, progress=None,
+        local_paths=None, timeout=5,
+    )
+    events = []
+    ex.renderer = MagicMock()
+    ex.renderer.event.side_effect = lambda typ, **kw: events.append((typ, kw))
+    ex.emitter = MagicMock(json_mode=False)
+    ex.prompt_id = "p1"
+
+    ex.on_executed({"node": "9", "output": {"images": [{"filename": "a.png", "subfolder": "", "type": "output"}]}})
+
+    output_events = [e for e in events if e[0] == "output"]
+    assert len(output_events) == 1, events
+    assert "a.png" in output_events[0][1]["url"]
+    # And outputs are still recorded exactly once for the state file.
+    assert sum(1 for u in ex.outputs if "a.png" in u) == 1

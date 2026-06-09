@@ -459,19 +459,14 @@ class WorkflowExecution:
                         continue
                     obj = self._build_output_object(node_id, category, item)
                     structured_outputs.append(obj)
-                    # Always populate outputs so state file gets them
-                    # regardless of json_mode.
-                    self.outputs.append(self.format_image_path(item))
+                    url = self.format_image_path(item)
+                    if url not in self.outputs:
+                        # Always record for the state file; emit the NDJSON
+                        # output event at the same point so json consumers see it.
+                        self.outputs.append(url)
+                        self.renderer.event("output", url=url, prompt_id=self.prompt_id)
 
         self.emitter.emit_node_executed(node_id, structured_outputs)
-
-        output = data.get("output")
-        if output is not None and "images" in output:
-            for img in output["images"]:
-                url = self.format_image_path(img)
-                if url not in self.outputs:
-                    self.outputs.append(url)
-                    self.renderer.event("output", url=url, prompt_id=self.prompt_id)
 
     def on_error(self, data):
         self._stop_progress()
