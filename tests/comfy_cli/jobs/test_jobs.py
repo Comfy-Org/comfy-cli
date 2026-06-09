@@ -566,6 +566,21 @@ def test_poll_local_once_treats_cancelled_as_terminal(monkeypatch):
     assert state.status == "cancelled"
 
 
+def test_watcher_timeout_preserves_prior_status(monkeypatch):
+    from comfy_cli.command import job_watcher
+    from comfy_cli import jobs_state
+    state = jobs_state.new(prompt_id="pid", client_id="c", workflow="w", where="local")
+    state.status = "running"
+    # First time() call (start) = 0.0, second (loop check) is past the ceiling.
+    times = iter([0.0, job_watcher._MAX_RUNTIME_S + 1])
+    monkeypatch.setattr(job_watcher.time, "time", lambda: next(times))
+    monkeypatch.setattr(jobs_state, "write", lambda s: None)
+    monkeypatch.setattr(job_watcher, "_notify", lambda s: None)
+    monkeypatch.setattr(jobs_state, "read", lambda pid: state)
+    job_watcher.watch_job("pid", where="local")
+    assert state.error["details"]["last_status"] == "running"
+
+
 def test_local_cancel_writes_cancelled_state(monkeypatch: pytest.MonkeyPatch):
     """_local_cancel must persist status='cancelled' to the on-disk state file
     after successfully POSTing to /queue and /interrupt."""

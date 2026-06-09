@@ -67,11 +67,12 @@ def watch_job(
     start = time.time()
     while True:
         if time.time() - start > _MAX_RUNTIME_S:
+            prior_status = state.status
             state.status = "error"
             state.error = {
                 "code": "watcher_timeout",
                 "message": f"Watcher gave up after {_MAX_RUNTIME_S}s without a terminal status.",
-                "details": {"last_status": state.status},
+                "details": {"last_status": prior_status},
             }
             jobs_state.write(state)
             break
