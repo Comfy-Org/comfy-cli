@@ -847,6 +847,26 @@ class TestExecuteUiWorkflow:
             os.unlink(path)
 
 
+class TestLanHostUsesPlainWs:
+    """LAN hosts (non-loopback, plain HTTP) must connect over ws://, not wss://."""
+
+    def test_lan_host_uses_plain_ws(self, monkeypatch):
+        captured = {}
+        fake_ws = MagicMock()
+        fake_ws.connect.side_effect = lambda url, **kw: captured.setdefault("url", url)
+        import comfy_cli.command.run as run_pkg
+
+        monkeypatch.setattr(run_pkg, "WebSocket", lambda: fake_ws)
+
+        ex = WorkflowExecution(
+            workflow={}, host="192.168.1.50", port=8188, verbose=False, progress=None,
+            local_paths=None, timeout=5,
+        )
+        ex.connect()
+
+        assert captured["url"].startswith("ws://192.168.1.50:8188/ws"), captured["url"]
+
+
 class TestWildcardHostSubstitution:
     """0.0.0.0 is a wildcard bind that macOS/Windows clients can't connect to;
     execute() substitutes it with the canonical loopback so downstream uses

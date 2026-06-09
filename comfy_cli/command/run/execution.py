@@ -101,16 +101,13 @@ class WorkflowExecution:
         from comfy_cli.command import run as _run_pkg
 
         self.ws = _run_pkg.WebSocket()
-        # Timeout on the handshake too: a server busy loading a model
-        # can otherwise leave the CLI hung with no terminal event.
-        _loopback = {"127.0.0.1", "localhost", "::1", "[::1]"}
-        _host_lower = self.host.lower()
-        if _host_lower not in _loopback and not _host_lower.startswith("127."):
-            scheme = "wss"
-        else:
-            scheme = "ws"
+        # The local executor POSTs to http://{host}:{port}/prompt (see queue()),
+        # so the websocket must use the matching plaintext ws:// scheme. Only
+        # upgrade to wss:// when the host is explicitly an https/wss URL.
+        scheme = "wss" if self.host.lower().startswith(("https://", "wss://")) else "ws"
+        bare_host = self.host.split("://", 1)[-1]
         self.ws.connect(
-            f"{scheme}://{self.host}:{self.port}/ws?clientId={self.client_id}",
+            f"{scheme}://{bare_host}:{self.port}/ws?clientId={self.client_id}",
             timeout=self.timeout,
         )
 
