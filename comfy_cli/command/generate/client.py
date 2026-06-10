@@ -85,7 +85,7 @@ def _auth_headers(api_key: str, extra: dict[str, str] | None = None) -> dict[str
     #   - "comfyui-..." API keys → X-API-Key (validated by sha256 lookup)
     #   - Firebase ID tokens     → Authorization: Bearer (validated as a JWT)
     # See comfy-api server/middleware/authentication/comfy_firebase_auth.go.
-    headers = {"User-Agent": "comfy-cli/api", "Comfy-Env": "comfy-cli"}
+    headers = {"User-Agent": "comfy-cli/api", "Comfy-Env": "comfy-cli", "Comfy-Usage-Source": "comfy-cli"}
     if api_key.startswith("comfyui-"):
         headers["X-API-Key"] = api_key
     else:

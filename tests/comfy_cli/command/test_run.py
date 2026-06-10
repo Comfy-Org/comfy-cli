@@ -175,7 +175,7 @@ class TestWorkflowExecutionAuth:
             ex.queue()
         req = mock_open.call_args[0][0]
         body = json.loads(req.data)
-        assert body["extra_data"] == {"api_key_comfy_org": "sk-secret"}
+        assert body["extra_data"] == {"comfy_usage_source": "comfy-cli", "api_key_comfy_org": "sk-secret"}
 
     def test_queue_does_not_send_x_api_key_header(self, workflow):
         ex = self._make_exec(workflow, api_key="sk-secret")
@@ -185,15 +185,26 @@ class TestWorkflowExecutionAuth:
         req = mock_open.call_args[0][0]
         assert req.get_header("X-api-key") is None
 
-    def test_queue_omits_extra_data_when_no_api_key(self, workflow):
+    def test_queue_omits_api_key_when_not_set(self, workflow):
         ex = self._make_exec(workflow)
         with patch("comfy_cli.command.run.request.urlopen") as mock_open:
             mock_open.return_value.read.return_value = json.dumps({"prompt_id": "abc"}).encode()
             ex.queue()
         req = mock_open.call_args[0][0]
         body = json.loads(req.data)
-        assert "extra_data" not in body
-        assert body == {"prompt": workflow, "client_id": ex.client_id}
+        assert body == {
+            "prompt": workflow,
+            "client_id": ex.client_id,
+            "extra_data": {"comfy_usage_source": "comfy-cli"},
+        }
+
+    def test_queue_sends_usage_source_header(self, workflow):
+        ex = self._make_exec(workflow)
+        with patch("comfy_cli.command.run.request.urlopen") as mock_open:
+            mock_open.return_value.read.return_value = json.dumps({"prompt_id": "abc"}).encode()
+            ex.queue()
+        req = mock_open.call_args[0][0]
+        assert req.get_header("Comfy-usage-source") == "comfy-cli"
 
 
 class TestWatchExecution:
