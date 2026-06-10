@@ -72,7 +72,6 @@ include = [ "comfy_cli*" ]
 "comfy_cli.skills.debug" = [ "SKILL.md" ]
 "comfy_cli.skills.relay" = [ "SKILL.md" ]
 "comfy_cli.schemas" = [ "*.json", "*.md" ]
-"comfy_cli.fragments_lib" = [ "*.json" ]
 
 "comfy_cli.cql.data" = [ "*.yaml", "*.json" ]
 "comfy_cli.command.generate" = [ "spec/openapi.yml" ]
