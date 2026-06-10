@@ -187,7 +187,8 @@ class TestSubmitAgentReview:
 
 
 def test_feedback_does_not_persist_user_id_without_consent(monkeypatch):
-    from comfy_cli import tracking, constants
+    from comfy_cli import constants, tracking
+
     sent = {}
     monkeypatch.setattr(tracking, "_telemetry_disabled_by_env", lambda: False)
     monkeypatch.setattr(tracking, "_dispatch", lambda name, props, *, distinct_id: sent.update(id=distinct_id))
@@ -204,7 +205,8 @@ def test_feedback_does_not_persist_user_id_without_consent(monkeypatch):
 
 
 def test_feedback_persists_user_id_with_consent(monkeypatch):
-    from comfy_cli import tracking, constants
+    from comfy_cli import constants, tracking
+
     sent = {}
     monkeypatch.setattr(tracking, "_telemetry_disabled_by_env", lambda: False)
     monkeypatch.setattr(tracking, "_dispatch", lambda name, props, *, distinct_id: sent.update(id=distinct_id))

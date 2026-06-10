@@ -112,7 +112,7 @@ def test_cli_emit_json_mode_prints_workflow(runner, tmp_path, monkeypatch):
         ["generate", "nano-banana", "--prompt", "hi", "--emit-workflow", str(out)],
     )
     assert r.exit_code == 0, r.stdout
-    lines = [l for l in r.stdout.splitlines() if l.strip().startswith("{")]
+    lines = [ln for ln in r.stdout.splitlines() if ln.strip().startswith("{")]
     env = json.loads(lines[-1])
     assert env.get("ok") is True
     assert env["data"]["out"].endswith("wf.json")
@@ -131,7 +131,7 @@ def test_emit_workflow_uses_envelope(runner, monkeypatch, tmp_path):
         ["generate", "flux-pro", "--prompt", "x", "--width", "1024", "--height", "768", "--emit-workflow", str(out)],
     )
     assert r.exit_code == 0, r.stdout
-    lines = [l for l in r.stdout.splitlines() if l.strip().startswith("{")]
+    lines = [ln for ln in r.stdout.splitlines() if ln.strip().startswith("{")]
     env = json.loads(lines[-1])
     assert env.get("ok") is True
     assert "command" in env and "data" in env  # envelope shape, not a bare workflow dict

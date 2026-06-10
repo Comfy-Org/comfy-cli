@@ -567,8 +567,9 @@ def test_poll_local_once_treats_cancelled_as_terminal(monkeypatch):
 
 
 def test_watcher_timeout_preserves_prior_status(monkeypatch):
-    from comfy_cli.command import job_watcher
     from comfy_cli import jobs_state
+    from comfy_cli.command import job_watcher
+
     state = jobs_state.new(prompt_id="pid", client_id="c", workflow="w", where="local")
     state.status = "running"
     # First time() call (start) = 0.0, second (loop check) is past the ceiling.
@@ -583,6 +584,7 @@ def test_watcher_timeout_preserves_prior_status(monkeypatch):
 
 def test_emit_terminal_verdicts():
     import typer
+
     from comfy_cli.command import jobs
     from comfy_cli.output.renderer import get_renderer, reset_renderer_for_testing
 

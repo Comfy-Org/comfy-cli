@@ -238,6 +238,7 @@ class TestExecute:
 def test_cloud_print_prompt_does_not_submit(monkeypatch, tmp_path):
     """--print-prompt on the cloud route prints the graph and never submits."""
     import typer
+
     import comfy_cli.comfy_client as cc
     from comfy_cli.command.run import execute_cloud
 
@@ -247,6 +248,7 @@ def test_cloud_print_prompt_does_not_submit(monkeypatch, tmp_path):
     class FakeClient:
         def __init__(self, *a, **k):
             pass
+
         def submit_prompt(self, *a, **k):
             raise AssertionError("submit_prompt must not be called in --print-prompt mode")
 

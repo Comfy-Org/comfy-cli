@@ -179,7 +179,9 @@ def slots_cmd(
     renderer = get_renderer()
     p, workflow = _load_workflow_or_fail(renderer, file)
     _stale: dict = {}
-    graph = _get_graph(input_path, host, port, on_stale=lambda key, err: _stale.update(stale=True, source=key, reason=err))
+    graph = _get_graph(
+        input_path, host, port, on_stale=lambda key, err: _stale.update(stale=True, source=key, reason=err)
+    )
 
     template_id = template_id or p.stem
     try:
@@ -197,7 +199,9 @@ def slots_cmd(
 
     if _stale:
         payload["stale"] = True
-        payload["warnings"] = [{"code": "object_info_stale", "message": f"served from cache ({_stale['source']}): {_stale['reason']}"}]
+        payload["warnings"] = [
+            {"code": "object_info_stale", "message": f"served from cache ({_stale['source']}): {_stale['reason']}"}
+        ]
 
     if renderer.is_pretty():
         from rich.table import Table
@@ -247,7 +251,9 @@ def set_slot_cmd(
     renderer = get_renderer()
     p, workflow = _load_workflow_or_fail(renderer, file)
     _stale: dict = {}
-    graph = _get_graph(input_path, host, port, on_stale=lambda key, err: _stale.update(stale=True, source=key, reason=err))
+    graph = _get_graph(
+        input_path, host, port, on_stale=lambda key, err: _stale.update(stale=True, source=key, reason=err)
+    )
 
     overrides_dict: dict[str, Any] = {}
     for raw in overrides:
@@ -283,7 +289,9 @@ def set_slot_cmd(
     }
     if _stale:
         payload["stale"] = True
-        payload["warnings"] = list(warnings) + [{"code": "object_info_stale", "message": f"served from cache ({_stale['source']}): {_stale['reason']}"}]
+        payload["warnings"] = list(warnings) + [
+            {"code": "object_info_stale", "message": f"served from cache ({_stale['source']}): {_stale['reason']}"}
+        ]
     if renderer.is_pretty():
         rprint(f"[bold green]✓[/bold green] applied {len(overrides_dict)} slot(s) → [dim]{p}[/dim]")
         for addr in overrides_dict:
@@ -324,7 +332,9 @@ def vary_cmd(
     renderer = get_renderer()
     p, workflow = _load_workflow_or_fail(renderer, file)
     _stale: dict = {}
-    graph = _get_graph(input_path, host, port, on_stale=lambda key, err: _stale.update(stale=True, source=key, reason=err))
+    graph = _get_graph(
+        input_path, host, port, on_stale=lambda key, err: _stale.update(stale=True, source=key, reason=err)
+    )
 
     # Parse each --slot ADDR='[a,b,c]'. Each value must be a JSON list.
     by_addr: dict[str, list[Any]] = {}
@@ -385,7 +395,9 @@ def vary_cmd(
     }
     if _stale:
         payload["stale"] = True
-        payload["warnings"] = list(warnings) + [{"code": "object_info_stale", "message": f"served from cache ({_stale['source']}): {_stale['reason']}"}]
+        payload["warnings"] = list(warnings) + [
+            {"code": "object_info_stale", "message": f"served from cache ({_stale['source']}): {_stale['reason']}"}
+        ]
     if renderer.is_pretty():
         rprint(f"[bold green]✓[/bold green] produced {len(workflows)} variation(s)")
         if written:

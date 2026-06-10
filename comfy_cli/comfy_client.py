@@ -277,6 +277,7 @@ class Client:
         header because comfy_api_nodes reads it from ``extra_data``; this is a
         gateway-layer concern, not a header-vs-body choice.
         """
+
         def payload() -> dict[str, Any]:
             request_payload: dict[str, Any] = {"prompt": workflow, "client_id": client_id}
             merged_extra: dict[str, Any] = dict(extra_data or {})

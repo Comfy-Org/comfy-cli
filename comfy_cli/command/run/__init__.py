@@ -641,15 +641,14 @@ def execute_cloud(
     state_file = jobs_state.write(state)
 
     try:
+
         def _probe():
             st = client.get_job_status(submit.prompt_id)
             if not st:
                 return None
             return (st.get("status"), st.get("progress"), st.get("queue_position"))
 
-        record = client.wait_for_completion(
-            submit.prompt_id, timeout=float(timeout), progress_probe=_probe
-        )
+        record = client.wait_for_completion(submit.prompt_id, timeout=float(timeout), progress_probe=_probe)
     except TimeoutError as e:
         state.status = "error"
         state.error = {"code": "cloud_timeout", "message": str(e)}

@@ -1691,8 +1691,13 @@ def test_on_executed_emits_output_event(monkeypatch):
     from comfy_cli.command.run.execution import WorkflowExecution
 
     ex = WorkflowExecution(
-        workflow={"9": {}}, host="127.0.0.1", port=8188, verbose=False, progress=None,
-        local_paths=None, timeout=5,
+        workflow={"9": {}},
+        host="127.0.0.1",
+        port=8188,
+        verbose=False,
+        progress=None,
+        local_paths=None,
+        timeout=5,
     )
     events = []
     ex.renderer = MagicMock()

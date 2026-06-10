@@ -10,17 +10,17 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from typer.testing import CliRunner
+
 from comfy_cli.caller import Caller
+from comfy_cli.command import workflow as workflow_cmd
+from comfy_cli.cql.engine import Graph
 from comfy_cli.output.renderer import (
     OutputMode,
     Renderer,
     reset_renderer_for_testing,
     set_renderer,
 )
-from typer.testing import CliRunner
-
-from comfy_cli.command import workflow as workflow_cmd
-from comfy_cli.cql.engine import Graph
 
 
 @pytest.fixture(autouse=True)

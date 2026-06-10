@@ -430,8 +430,8 @@ class TestWaitForCompletionProgressProbe:
 
         client = cc.Client(CLOUD)
 
-        poll_interval = 0.04   # each poll sleeps ~40ms
-        timeout = 0.06         # without reset, the idle timer trips after 60ms
+        poll_interval = 0.04  # each poll sleeps ~40ms
+        timeout = 0.06  # without reset, the idle timer trips after 60ms
 
         calls = {"n": 0}
         done = {"status": {"completed": True}, "outputs": {}}
@@ -441,6 +441,7 @@ class TestWaitForCompletionProgressProbe:
             return done if calls["n"] >= 5 else {"status": {"status_str": "running"}}
 
         counter = {"v": 0}
+
         def probe():
             counter["v"] += 1
             return ("running", counter["v"])  # advances every poll → resets last_change
@@ -448,9 +449,7 @@ class TestWaitForCompletionProgressProbe:
         monkeypatch.setattr(client, "get_history", history)
         # ~5 polls × 40ms ≈ 200ms total elapsed, far past the 60ms timeout, but the
         # idle timer resets each poll because the probe value advances → must NOT raise.
-        rec = client.wait_for_completion(
-            "pid", poll_interval=poll_interval, timeout=timeout, progress_probe=probe
-        )
+        rec = client.wait_for_completion("pid", poll_interval=poll_interval, timeout=timeout, progress_probe=probe)
         assert rec is done
 
     def test_wait_for_completion_times_out_on_silence(self, monkeypatch):

@@ -859,8 +859,13 @@ class TestLanHostUsesPlainWs:
         monkeypatch.setattr(run_pkg, "WebSocket", lambda: fake_ws)
 
         ex = WorkflowExecution(
-            workflow={}, host="192.168.1.50", port=8188, verbose=False, progress=None,
-            local_paths=None, timeout=5,
+            workflow={},
+            host="192.168.1.50",
+            port=8188,
+            verbose=False,
+            progress=None,
+            local_paths=None,
+            timeout=5,
         )
         ex.connect()
 

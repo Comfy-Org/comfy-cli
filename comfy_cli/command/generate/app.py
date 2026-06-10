@@ -611,4 +611,6 @@ def _print_top_help() -> None:
     rprint("  comfy generate upload <file-or-url>    Host a local file or remote URL and print its signed URL")
     rprint("  comfy generate resume <model> <job>    Resume an async job")
     rprint("")
-    rprint("[dim]Auth: run `comfy cloud login` (session outranks env var), set COMFY_API_KEY, or pass --api-key. Get one at https://platform.comfy.org.[/dim]")
+    rprint(
+        "[dim]Auth: run `comfy cloud login` (session outranks env var), set COMFY_API_KEY, or pass --api-key. Get one at https://platform.comfy.org.[/dim]"
+    )

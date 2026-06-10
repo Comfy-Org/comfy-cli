@@ -3,7 +3,6 @@ import time
 from unittest.mock import MagicMock, patch
 
 import pytest
-
 import requests
 
 from comfy_cli import update
@@ -109,7 +108,7 @@ class TestUpgradeCli:
         assert mock_run.call_args[1]["check"] is True
 
 
-@pytest.mark.parametrize("payload", ['[]', '"x"', '{"checked_at": "abc"}'])
+@pytest.mark.parametrize("payload", ["[]", '"x"', '{"checked_at": "abc"}'])
 def test_latest_upgrade_version_survives_malformed_cache(tmp_path, payload):
     (tmp_path / "update-check.json").write_text(payload)
     assert update.latest_upgrade_version("1.0.0", str(tmp_path)) is None
@@ -125,7 +124,5 @@ def test_latest_upgrade_version_survives_missing_latest_key(mock_check, tmp_path
 
 
 def test_latest_upgrade_version_survives_unparseable_latest(tmp_path):
-    (tmp_path / "update-check.json").write_text(
-        json.dumps({"checked_at": time.time(), "latest": "unknown"})
-    )
+    (tmp_path / "update-check.json").write_text(json.dumps({"checked_at": time.time(), "latest": "unknown"}))
     assert update.latest_upgrade_version("1.0.0", str(tmp_path)) is None

@@ -983,17 +983,24 @@ def test_slot_address_with_dotted_input_name(graph, monkeypatch):
     real_order = graph.widget_order
     monkeypatch.setattr(graph, "node", lambda nt: _FakeMeta() if nt == "DottedWidgetNode" else real_node(nt))
     monkeypatch.setattr(
-        graph, "widget_order",
+        graph,
+        "widget_order",
         lambda nt: ["images.image0"] if nt == "DottedWidgetNode" else real_order(nt),
     )
 
     wf = {
         "nodes": [{"id": 10, "type": "uuid-dot"}],
-        "definitions": {"subgraphs": [
-            {"id": "uuid-dot", "name": "Sub", "nodes": [
-                {"id": 9, "type": "DottedWidgetNode", "widgets_values": [None]},
-            ]},
-        ]},
+        "definitions": {
+            "subgraphs": [
+                {
+                    "id": "uuid-dot",
+                    "name": "Sub",
+                    "nodes": [
+                        {"id": 9, "type": "DottedWidgetNode", "widgets_values": [None]},
+                    ],
+                },
+            ]
+        },
     }
     # Must NOT raise "interior node images not found"; value lands on node 9's dotted widget.
     engine._apply_one_slot(wf, "10/9.images.image0", "X", graph)

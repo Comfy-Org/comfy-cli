@@ -660,12 +660,7 @@ def _snapshot(host: str, port: int, prompt_id: str) -> dict | None:
 
     return {
         "prompt_id": prompt_id,
-        "status": (
-            "error" if error_detail
-            else "completed" if completed
-            else "cancelled" if interrupted
-            else "queued"
-        ),
+        "status": ("error" if error_detail else "completed" if completed else "cancelled" if interrupted else "queued"),
         "workflow_size": None,
         "outputs": output_urls,
         "error": error_detail,

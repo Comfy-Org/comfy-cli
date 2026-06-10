@@ -243,8 +243,6 @@ def test_resilient_load_reports_stale_via_callback(monkeypatch):
     monkeypatch.setattr(loader, "_default_warn", lambda msg: None)
 
     stale = {}
-    data = loader.resilient_load_object_info(
-        mode="cloud", on_stale=lambda key, err: stale.update(host=key, error=err)
-    )
+    data = loader.resilient_load_object_info(mode="cloud", on_stale=lambda key, err: stale.update(host=key, error=err))
     assert data == {"NodeA": {}}
     assert stale.get("host")  # callback fired with the host key
