@@ -11,8 +11,10 @@ from websocket import WebSocketException, WebSocketTimeoutException
 
 from comfy_cli.command.run import (
     WorkflowExecution,
+    _count_output_nodes,
     _detect_partner_nodes,
     _resolve_partner_credential,
+    _returned_output_node_count,
     execute,
     fetch_object_info,
     is_ui_workflow,
@@ -522,6 +524,76 @@ class TestDetectPartnerNodes:
         }
         info = self._info(Veo3VideoGenerationNode="api node/video/Veo")
         assert _detect_partner_nodes(wf, info) == ["Veo3VideoGenerationNode"]
+
+    def test_finds_partner_nodes_with_partner_prefix(self):
+        """Current cloud/ComfyUI categorizes partner nodes under `partner/...`
+        (e.g. `partner/video/ByteDance`), not the legacy `api node/...`."""
+        wf = {
+            "1": {"class_type": "ByteDanceTextToVideoNode", "inputs": {}},
+            "2": {"class_type": "SaveVideo", "inputs": {}},
+        }
+        info = self._info(
+            ByteDanceTextToVideoNode="partner/video/ByteDance",
+            SaveVideo="video",
+        )
+        assert _detect_partner_nodes(wf, info) == ["ByteDanceTextToVideoNode"]
+
+    def test_finds_partner_nodes_via_api_node_flag(self):
+        """The authoritative signal is `api_node: true`, even if the category
+        doesn't match either prefix."""
+        wf = {"1": {"class_type": "SomePartnerNode", "inputs": {}}}
+        info = {"SomePartnerNode": {"category": "weird/category", "api_node": True}}
+        assert _detect_partner_nodes(wf, info) == ["SomePartnerNode"]
+
+
+class TestPartialExecutionDiff:
+    """The cloud prunes branches that fail server-side validation and still
+    reports `completed`. We diff submitted output nodes against returned ones
+    so a vanished branch surfaces instead of passing as a clean success."""
+
+    def _info(self):
+        return {
+            "SaveVideo": {"category": "video", "output_node": True},
+            "SaveImage": {"category": "image", "output_node": True},
+            "KSampler": {"category": "sampling", "output_node": False},
+        }
+
+    def test_counts_output_nodes(self):
+        wf = {
+            "1": {"class_type": "KSampler", "inputs": {}},
+            "2": {"class_type": "SaveVideo", "inputs": {}},
+            "3": {"class_type": "SaveImage", "inputs": {}},
+        }
+        assert _count_output_nodes(wf, self._info()) == 2
+
+    def test_returns_none_when_object_info_empty(self):
+        wf = {"2": {"class_type": "SaveVideo", "inputs": {}}}
+        assert _count_output_nodes(wf, {}) is None
+
+    def test_returned_output_node_count(self):
+        record = {
+            "outputs": {
+                "2": {"videos": [{"filename": "a.mp4"}]},
+                "3": {},  # produced nothing
+            }
+        }
+        assert _returned_output_node_count(record) == 1
+
+    def test_returned_count_handles_missing_outputs(self):
+        assert _returned_output_node_count({}) == 0
+        assert _returned_output_node_count({"outputs": None}) == 0
+
+    def test_diff_detects_pruned_branch(self):
+        wf = {
+            "1": {"class_type": "SaveVideo", "inputs": {}},
+            "2": {"class_type": "SaveVideo", "inputs": {}},
+        }
+        record = {"outputs": {"1": {"videos": [{"filename": "a.mp4"}]}}}
+        submitted = _count_output_nodes(wf, self._info())
+        returned = _returned_output_node_count(record)
+        assert submitted == 2
+        assert returned == 1
+        assert returned < submitted  # the partial-execution warning trigger
 
 
 class TestResolvePartnerCredential:

@@ -19,7 +19,10 @@ from comfy_cli.command.run.loader import _MAX_BODY_PREVIEW
 from comfy_cli.output import get_renderer
 from comfy_cli.output import rprint as pprint
 
-PARTNER_NODE_CATEGORY_PREFIX = "api node/"
+# Partner-API nodes live under `partner/...` in current ComfyUI/cloud
+# object_info (e.g. `partner/video/ByteDance`). Older servers used the legacy
+# `api node/` prefix — we match both so detection survives the rename.
+PARTNER_NODE_CATEGORY_PREFIXES = ("partner/", "api node/")
 
 
 def fetch_object_info(host, port, timeout):
@@ -119,9 +122,13 @@ def _fetch_object_info(host: str, port: int, timeout: int = 10) -> dict:
 
 
 def _detect_partner_nodes(workflow: dict, object_info: dict) -> list[str]:
-    """Return sorted unique class_types in ``workflow`` whose category in
-    ``object_info`` starts with ``api node/`` (Veo, Kling, BFL, Gemini,
-    Bria, etc.). Pure function — tests pass object_info directly.
+    """Return sorted unique class_types in ``workflow`` that are partner-API
+    nodes (Veo, Kling, BFL, Gemini, ByteDance, Bria, etc.). Pure function —
+    tests pass object_info directly.
+
+    Detection is primarily the authoritative ``api_node: true`` flag in
+    object_info, with a category-prefix fallback (``partner/...``, or the
+    legacy ``api node/...``) for servers that don't surface the flag.
 
     A partner-API node call requires an ``api_key_comfy_org`` (or the
     OAuth-equivalent ``auth_token_comfy_org``) in ``extra_data`` at
@@ -139,7 +146,12 @@ def _detect_partner_nodes(workflow: dict, object_info: dict) -> list[str]:
     out: list[str] = []
     for ct in used:
         info = object_info.get(ct) or {}
-        category = info.get("category") if isinstance(info, dict) else None
-        if isinstance(category, str) and category.startswith(PARTNER_NODE_CATEGORY_PREFIX):
+        if not isinstance(info, dict):
+            continue
+        if info.get("api_node") is True:
+            out.append(ct)
+            continue
+        category = info.get("category")
+        if isinstance(category, str) and category.startswith(PARTNER_NODE_CATEGORY_PREFIXES):
             out.append(ct)
     return sorted(out)

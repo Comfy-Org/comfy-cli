@@ -124,7 +124,7 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ),
     ErrorCode(
         "partner_node_requires_credential",
-        "Workflow uses a partner-API node (category `api node/*` — Veo, Kling, BFL, Gemini, etc.) "
+        "Workflow uses a partner-API node (category `partner/*` — Veo, Kling, BFL, Gemini, etc.) "
         "but no `api_key_comfy_org` credential is available. Local submit would succeed at /prompt "
         "and then fail opaquely at execute time with `Unauthorized: Please login first`.",
         "re-submit with `--where cloud` (the CLI auto-injects the credential there), or run "
@@ -191,6 +191,14 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "cloud_timeout",
         "Cloud wait_for_completion exceeded `--timeout`.",
         "raise `--timeout`, or `comfy jobs watch <id> --where cloud`",
+    ),
+    ErrorCode(
+        "partial_execution",
+        "The cloud reported `completed` but returned outputs for fewer output "
+        "nodes than were submitted — branch(es) were pruned server-side (likely "
+        "failed validation). Surfaced as a non-fatal warning in `data.warnings`.",
+        "inspect the pruned branch's inputs; validate with `comfy --json validate` "
+        "against `--where cloud` before re-running",
     ),
     # --- models / templates introspection ------------------------------------
     ErrorCode(

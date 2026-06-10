@@ -15,6 +15,19 @@
       "items": {"type": "string"},
       "description": "URLs or local paths to produced artifacts."
     },
+    "warnings": {
+      "type": "array",
+      "description": "Non-fatal diagnostics about the run (e.g. partial_execution when the cloud pruned an output branch). Empty when none.",
+      "items": {
+        "type": "object",
+        "required": ["code", "message"],
+        "additionalProperties": true,
+        "properties": {
+          "code": {"type": "string"},
+          "message": {"type": "string"}
+        }
+      }
+    },
     "elapsed_seconds": {"type": ["number", "null"]},
     "host": {"type": "string"},
     "port": {"type": "integer"}

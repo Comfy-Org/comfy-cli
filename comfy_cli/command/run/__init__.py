@@ -33,7 +33,7 @@ from comfy_cli.command.run.loader import _classify_api_workflow as _classify_api
 from comfy_cli.command.run.loader import _load_workflow_file as _load_workflow_file
 from comfy_cli.command.run.loader import _node_errors_to_list as _node_errors_to_list
 from comfy_cli.command.run.loader import is_ui_workflow as is_ui_workflow
-from comfy_cli.command.run.preflight import PARTNER_NODE_CATEGORY_PREFIX as PARTNER_NODE_CATEGORY_PREFIX
+from comfy_cli.command.run.preflight import PARTNER_NODE_CATEGORY_PREFIXES as PARTNER_NODE_CATEGORY_PREFIXES
 from comfy_cli.command.run.preflight import _detect_partner_nodes as _detect_partner_nodes
 from comfy_cli.command.run.preflight import _fetch_object_info as _fetch_object_info
 from comfy_cli.command.run.preflight import _preflight_validate as _preflight_validate
@@ -419,6 +419,32 @@ def execute(
             progress.stop()
 
 
+def _count_output_nodes(workflow: dict, object_info: dict) -> int | None:
+    """Count nodes in ``workflow`` whose class is an output node, per
+    ``object_info``. Returns None when object_info is empty/unknown so callers
+    can skip the diff rather than reporting a bogus 0."""
+    if not object_info:
+        return None
+    count = 0
+    for node in workflow.values():
+        if not isinstance(node, dict):
+            continue
+        ct = node.get("class_type")
+        spec = object_info.get(ct) if isinstance(ct, str) else None
+        if isinstance(spec, dict) and spec.get("output_node") is True:
+            count += 1
+    return count
+
+
+def _returned_output_node_count(record: dict) -> int:
+    """How many distinct nodes actually produced outputs in the cloud history
+    record. The record's ``outputs`` map is keyed by node id."""
+    outputs = record.get("outputs") or {}
+    if not isinstance(outputs, dict):
+        return 0
+    return sum(1 for v in outputs.values() if isinstance(v, dict) and v)
+
+
 def execute_cloud(
     workflow: str,
     *,
@@ -543,6 +569,9 @@ def execute_cloud(
                 submit = client.submit_prompt(parsed_workflow, client_id)
         else:
             submit = client.submit_prompt(parsed_workflow, client_id)
+    except Unauthenticated as e:
+        renderer.error(code="cloud_unauthorized", message=str(e), hint="run: comfy cloud login")
+        raise typer.Exit(code=1) from e
     except HTTPError as e:
         renderer.error(
             code="cloud_http_error",
@@ -643,6 +672,12 @@ def execute_cloud(
             details={"prompt_id": submit.prompt_id},
         )
         raise typer.Exit(code=1) from e
+    except Unauthenticated as e:
+        state.status = "error"
+        state.error = {"code": "cloud_unauthorized", "message": str(e)}
+        jobs_state.write(state)
+        renderer.error(code="cloud_unauthorized", message=str(e), hint="run: comfy cloud login")
+        raise typer.Exit(code=1) from e
     except HTTPError as e:
         state.status = "error"
         state.error = {"code": "cloud_http_error", "message": str(e)}
@@ -688,11 +723,34 @@ def execute_cloud(
 
     end = time.time()
 
+    # Silent-partial-execution guard: the cloud prunes branches that fail
+    # server-side validation and still reports `completed`. Diff the output
+    # nodes we submitted against the ones that actually returned outputs so a
+    # vanished branch surfaces instead of passing as a clean success.
+    warnings: list[dict] = []
+    submitted_outputs = _count_output_nodes(parsed_workflow, cloud_object_info)
+    returned_outputs = _returned_output_node_count(record)
+    if submitted_outputs is not None and returned_outputs < submitted_outputs:
+        warnings.append(
+            {
+                "code": "partial_execution",
+                "message": (
+                    f"submitted {submitted_outputs} output node(s) but the cloud returned outputs "
+                    f"for only {returned_outputs}; {submitted_outputs - returned_outputs} branch(es) "
+                    "were pruned server-side (likely failed validation) and produced nothing"
+                ),
+                "submitted_output_nodes": submitted_outputs,
+                "returned_output_nodes": returned_outputs,
+            }
+        )
+
     if renderer.is_pretty():
         if output_urls:
             pprint("[bold green]\nOutputs:[/bold green]")
             for u in output_urls:
                 pprint(u)
+        for w in warnings:
+            pprint(f"[yellow]⚠ {w['message']}[/yellow]")
         pprint(f"[bold green]\nCloud workflow completed ({timedelta(seconds=end - start)})[/bold green]")
 
     renderer.emit(
@@ -702,6 +760,7 @@ def execute_cloud(
             "prompt_id": submit.prompt_id,
             "client_id": client_id,
             "outputs": output_urls,
+            "warnings": warnings,
             "elapsed_seconds": end - start,
             "base_url": target.base_url,
             "state_file": str(state_file) if state_file else None,
