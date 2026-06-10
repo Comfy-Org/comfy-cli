@@ -298,7 +298,7 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ErrorCode(
         "skill_invalid",
         "A skill path failed format validation (missing SKILL.md, frontmatter name/description, or name/dir mismatch).",
-        "see docs/skills-authoring.md; run `comfy skills validate <path>`",
+        "a skill dir must contain SKILL.md with `name:`/`description:` frontmatter; run `comfy skills validate <path>`",
     ),
     # --- workflow editor -----------------------------------------------------
     ErrorCode(

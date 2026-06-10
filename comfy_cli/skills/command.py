@@ -87,7 +87,7 @@ def _validate_skills(skills: list[str] | None) -> list[str] | None:
                 renderer.error(
                     code="skill_invalid",
                     message=str(e),
-                    hint="see docs/skills-authoring.md for the format",
+                    hint="a skill is a directory named after the skill containing SKILL.md with `name:` and `description:` frontmatter; check with `comfy skills validate <path>`",
                 )
                 raise typer.Exit(code=1) from e
         elif s not in known:
@@ -391,7 +391,7 @@ def validate_cmd(
         renderer.error(
             code="skill_invalid",
             message=str(e),
-            hint="see docs/skills-authoring.md for the format",
+            hint="a skill is a directory named after the skill containing SKILL.md with `name:` and `description:` frontmatter",
         )
         raise typer.Exit(code=1) from e
     payload = {"valid": True, "name": src.name, "bundled": src.bundled, "path": path}
