@@ -109,6 +109,21 @@ def test_discover_schemas_only_strips_command_tree():
     assert "error_codes" not in data
 
 
+def test_models_and_templates_registered():
+    from comfy_cli.discovery import COMMAND_SCHEMAS
+
+    for cmd in (
+        "comfy models search",
+        "comfy models show",
+        "comfy models list-folders",
+        "comfy models list-folder",
+        "comfy templates ls",
+        "comfy templates show",
+        "comfy templates fetch",
+    ):
+        assert cmd in COMMAND_SCHEMAS, cmd
+
+
 def test_discover_pretty_mode_shows_counts():
     proc_env = os.environ.copy()
     proc_env.setdefault("NO_COLOR", "1")

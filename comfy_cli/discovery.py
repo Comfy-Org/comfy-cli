@@ -52,6 +52,15 @@ COMMAND_SCHEMAS: dict[str, str] = {
     "comfy skills uninstall": "skill",
     "comfy skills show": "skill",
     "comfy skills status": "skill",
+    # model discovery (all asset types: checkpoints, loras, controlnets, vae, ...)
+    "comfy models search": "models",
+    "comfy models show": "models",
+    "comfy models list-folders": "models",
+    "comfy models list-folder": "models",
+    # template gallery
+    "comfy templates ls": "templates",
+    "comfy templates show": "templates",
+    "comfy templates fetch": "templates",
     # file transfer
     "comfy upload": "transfer",
     "comfy download": "transfer",
