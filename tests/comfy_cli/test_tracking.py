@@ -107,7 +107,21 @@ class TestSubmitFeedback:
         assert event_name == "feedback_submitted"
         assert properties["message"] == "the run command is great"
 
-    def test_generates_and_persists_user_id_when_absent(self, tracking_module):
+    def test_uses_ephemeral_id_without_consent(self, tracking_module):
+        # When no consent is recorded (get_bool returns None → falsy), feedback
+        # must still send (user-initiated), but must NOT persist a user_id to disk.
+        # Previously this test encoded the old always-persist bug — updated to the
+        # correct privacy contract.
+        assert tracking_module.user_id is None
+        assert tracking_module.config_manager.get(constants.CONFIG_KEY_USER_ID) is None
+        tracking_module.submit_feedback("hi")
+        _, distinct_id, _ = _last_track_call(tracking_module.provider)
+        assert distinct_id  # an id is attached
+        assert tracking_module.config_manager.get(constants.CONFIG_KEY_USER_ID) is None  # NOT persisted
+
+    def test_generates_and_persists_user_id_when_absent_with_consent(self, tracking_module):
+        # With explicit consent on, feedback should persist a stable user_id.
+        tracking_module.config_manager.set(constants.CONFIG_KEY_ENABLE_TRACKING, "True")
         assert tracking_module.user_id is None
         assert tracking_module.config_manager.get(constants.CONFIG_KEY_USER_ID) is None
         tracking_module.submit_feedback("hi")
@@ -170,6 +184,39 @@ class TestSubmitAgentReview:
         monkeypatch.setenv(env_var, "1")
         assert tracking_module.submit_agent_review("hi") is False
         tracking_module.provider.track.assert_not_called()
+
+
+def test_feedback_does_not_persist_user_id_without_consent(monkeypatch):
+    from comfy_cli import tracking, constants
+    sent = {}
+    monkeypatch.setattr(tracking, "_telemetry_disabled_by_env", lambda: False)
+    monkeypatch.setattr(tracking, "_dispatch", lambda name, props, *, distinct_id: sent.update(id=distinct_id))
+    # Consent declined; no persisted user_id; in-memory user_id empty.
+    monkeypatch.setattr(tracking.config_manager, "get_bool", lambda k: False)
+    persisted = {}
+    monkeypatch.setattr(tracking.config_manager, "set", lambda k, v: persisted.update({k: v}))
+    monkeypatch.setattr(tracking.config_manager, "get", lambda k: None)
+    monkeypatch.setattr(tracking, "user_id", "", raising=False)
+
+    assert tracking.submit_feedback("hello") is True
+    assert sent.get("id")  # an id was attached (ephemeral is fine)
+    assert constants.CONFIG_KEY_USER_ID not in persisted  # but NOT persisted to disk
+
+
+def test_feedback_persists_user_id_with_consent(monkeypatch):
+    from comfy_cli import tracking, constants
+    sent = {}
+    monkeypatch.setattr(tracking, "_telemetry_disabled_by_env", lambda: False)
+    monkeypatch.setattr(tracking, "_dispatch", lambda name, props, *, distinct_id: sent.update(id=distinct_id))
+    monkeypatch.setattr(tracking.config_manager, "get_bool", lambda k: True)  # consent ON
+    persisted = {}
+    monkeypatch.setattr(tracking.config_manager, "set", lambda k, v: persisted.update({k: v}))
+    monkeypatch.setattr(tracking.config_manager, "get", lambda k: None)
+    monkeypatch.setattr(tracking, "user_id", "", raising=False)
+
+    assert tracking.submit_feedback("hello") is True
+    assert sent.get("id")
+    assert persisted.get(constants.CONFIG_KEY_USER_ID)  # consent on -> identity persisted
 
 
 class TestTrackCommandRedaction:

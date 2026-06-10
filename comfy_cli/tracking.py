@@ -193,10 +193,11 @@ def track_event(event_name: str, properties: Any = None, *, mixpanel_name: str |
     _dispatch(event_name, properties, distinct_id=user_id, mixpanel_name=mixpanel_name)
 
 
-def _ensure_user_id() -> str:
-    """Return a stable distinct_id, generating + persisting an anonymous one if
-    the user has never been assigned one. Used by feedback so an explicit,
-    user-initiated submission always has an identity to attach to."""
+def _ensure_user_id(*, persist: bool = True) -> str:
+    """Return a distinct_id. Persists a generated anonymous id only when
+    ``persist`` is True (consent on). For an opted-out, user-initiated action
+    we still attach an ephemeral id but never write durable identity to disk.
+    """
     global user_id
     if user_id:
         return user_id
@@ -204,12 +205,14 @@ def _ensure_user_id() -> str:
     if existing:
         user_id = existing
         return user_id
-    user_id = str(uuid.uuid4())
-    try:
-        config_manager.set(constants.CONFIG_KEY_USER_ID, user_id)
-    except OSError:
-        pass
-    return user_id
+    new_id = str(uuid.uuid4())
+    if persist:
+        user_id = new_id
+        try:
+            config_manager.set(constants.CONFIG_KEY_USER_ID, new_id)
+        except OSError:
+            pass
+    return new_id
 
 
 def submit_feedback(message: str = "", *, scores: dict[str, str | None] | None = None) -> bool:
@@ -231,7 +234,8 @@ def submit_feedback(message: str = "", *, scores: dict[str, str | None] | None =
         properties.update({k: v for k, v in scores.items() if v is not None})
     if not properties:
         return False
-    _dispatch("feedback_submitted", properties, distinct_id=_ensure_user_id())
+    consented = config_manager.get_bool(constants.CONFIG_KEY_ENABLE_TRACKING)
+    _dispatch("feedback_submitted", properties, distinct_id=_ensure_user_id(persist=bool(consented)))
     return True
 
 
