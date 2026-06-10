@@ -875,6 +875,38 @@ class TestForeach:
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Bundled fragment library tests
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_fragment_name_falls_back_to_bundled(tmp_path):
+    """A bare name not present in the local lib resolves to the bundled library."""
+    from comfy_cli.fragments import resolve_fragment_name
+
+    p = resolve_fragment_name("kling_i2v", tmp_path)  # empty local lib
+    assert p.is_file()
+    assert "fragments_lib" in str(p)
+
+
+def test_local_lib_shadows_bundled(tmp_path):
+    from comfy_cli.fragments import resolve_fragment_name
+
+    local = tmp_path / "kling_i2v.json"
+    local.write_text("{}")
+    assert resolve_fragment_name("kling_i2v", tmp_path) == local
+
+
+def test_fragment_ls_includes_bundled_without_local_lib(tmp_path, monkeypatch, capsys):
+    """fragment ls from a cwd with no ./fragments dir lists the bundled library."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("COMFY_OUTPUT", "json")
+    envelope = _run(["fragment", "ls"], capsys)
+    assert envelope["ok"] is True
+    names_and_sources = {(f["name"], f["source"]) for f in envelope["data"]["fragments"]}
+    assert ("kling_i2v", "bundled") in names_and_sources
+
+
 def test_foreach_literal_string_param_not_namespaced():
     from comfy_cli.fragments import _substitute_item
 

@@ -257,11 +257,25 @@ def load_fragment(path: Path) -> Fragment:
 
 
 def resolve_fragment_name(name: str, lib_dir: Path) -> Path:
-    """``name`` may be a bare name (``text_card`` → ``<lib>/text_card.json``) or a path."""
+    """``name`` may be a bare name (``text_card`` → ``<lib>/text_card.json``) or a path.
+
+    Bare names resolve against ``lib_dir`` first, then fall back to the bundled
+    library shipped with the CLI (local names shadow bundled ones).
+    """
     candidate = Path(name).expanduser()
     if candidate.is_file():
         return candidate
-    return (lib_dir / f"{name}.json").expanduser()
+    local = (lib_dir / f"{name}.json").expanduser()
+    if local.is_file():
+        return local
+    from comfy_cli.fragments_lib import bundled_fragments_dir
+
+    bundled = bundled_fragments_dir()
+    if bundled is not None:
+        bundled_candidate = bundled / f"{name}.json"
+        if bundled_candidate.is_file():
+            return bundled_candidate
+    return local  # missing: error message points at the local lib path
 
 
 # ---------------------------------------------------------------------------

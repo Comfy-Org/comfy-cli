@@ -1,0 +1,30 @@
+{
+  "_fragment": {
+    "name": "flux_t2i",
+    "version": "1",
+    "description": "BFL Flux text-to-image (Flux.2 [pro]): prompt -> IMAGE.",
+    "terminal": false,
+    "inputs": {},
+    "outputs": {
+      "image": {"type": "IMAGE", "from": "1", "port": 0}
+    },
+    "params": {
+      "prompt": {"type": "STRING", "binds": "1.prompt", "default": ""},
+      "width": {"type": "INT", "binds": "1.width", "default": 1024},
+      "height": {"type": "INT", "binds": "1.height", "default": 768},
+      "seed": {"type": "INT", "binds": "1.seed", "default": 0},
+      "prompt_upsampling": {"type": "BOOL", "binds": "1.prompt_upsampling", "default": true}
+    }
+  },
+  "1": {
+    "class_type": "Flux2ProImageNode",
+    "_meta": {"title": "Flux.2 [pro] Image"},
+    "inputs": {
+      "prompt": "",
+      "width": 1024,
+      "height": 768,
+      "seed": 0,
+      "prompt_upsampling": true
+    }
+  }
+}

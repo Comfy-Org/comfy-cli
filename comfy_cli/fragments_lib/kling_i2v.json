@@ -1,0 +1,37 @@
+{
+  "_fragment": {
+    "name": "kling_i2v",
+    "version": "1",
+    "description": "Kling image-to-video: a start-frame IMAGE + prompt -> VIDEO clip.",
+    "terminal": false,
+    "inputs": {
+      "start_frame": {"type": "IMAGE", "binds": "1.start_frame"}
+    },
+    "outputs": {
+      "video": {"type": "VIDEO", "from": "1", "port": 0}
+    },
+    "params": {
+      "prompt": {"type": "STRING", "binds": "1.prompt", "default": ""},
+      "negative_prompt": {"type": "STRING", "binds": "1.negative_prompt", "default": ""},
+      "model_name": {"type": "STRING", "binds": "1.model_name", "default": "kling-v2-master"},
+      "cfg_scale": {"type": "FLOAT", "binds": "1.cfg_scale", "default": 0.8},
+      "mode": {"type": "STRING", "binds": "1.mode", "default": "std"},
+      "aspect_ratio": {"type": "STRING", "binds": "1.aspect_ratio", "default": "16:9"},
+      "duration": {"type": "STRING", "binds": "1.duration", "default": "5"}
+    }
+  },
+  "1": {
+    "class_type": "KlingImage2VideoNode",
+    "_meta": {"title": "Kling Image (First Frame) to Video"},
+    "inputs": {
+      "start_frame": "PLACEHOLDER",
+      "prompt": "",
+      "negative_prompt": "",
+      "model_name": "kling-v2-master",
+      "cfg_scale": 0.8,
+      "mode": "std",
+      "aspect_ratio": "16:9",
+      "duration": "5"
+    }
+  }
+}

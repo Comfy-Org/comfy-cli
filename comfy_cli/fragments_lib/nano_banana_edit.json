@@ -1,0 +1,31 @@
+{
+  "_fragment": {
+    "name": "nano_banana_edit",
+    "version": "1",
+    "description": "Google Gemini Flash Image (nano-banana) image-edit: prompt + reference image -> edited IMAGE.",
+    "terminal": false,
+    "inputs": {
+      "image": {"type": "IMAGE", "binds": "1.images"}
+    },
+    "outputs": {
+      "image": {"type": "IMAGE", "from": "1", "port": 0}
+    },
+    "params": {
+      "prompt": {"type": "STRING", "binds": "1.prompt", "default": ""},
+      "model": {"type": "STRING", "binds": "1.model", "default": "gemini-2.5-flash-image"},
+      "seed": {"type": "INT", "binds": "1.seed", "default": 42},
+      "aspect_ratio": {"type": "STRING", "binds": "1.aspect_ratio", "default": "auto"}
+    }
+  },
+  "1": {
+    "class_type": "GeminiImageNode",
+    "_meta": {"title": "Nano Banana (Gemini Image)"},
+    "inputs": {
+      "prompt": "",
+      "model": "gemini-2.5-flash-image",
+      "seed": 42,
+      "aspect_ratio": "auto",
+      "images": "PLACEHOLDER"
+    }
+  }
+}

@@ -22,6 +22,7 @@ from comfy_cli.fragments import (
     load_fragment,
     resolve_fragment_name,
 )
+from comfy_cli.fragments_lib import bundled_fragments_dir
 from comfy_cli.output import get_renderer, rprint
 
 # ---------------------------------------------------------------------------
@@ -144,7 +145,9 @@ def fragment_ls_cmd(
 ):
     renderer = get_renderer()
     lib_dir = _default_lib_dir(lib)
-    if not lib_dir.is_dir():
+
+    # An explicit --lib that doesn't exist is always an error.
+    if lib is not None and not lib_dir.is_dir():
         renderer.error(
             code="fragment_lib_not_found",
             message=f"Fragment library directory not found: {lib_dir}",
@@ -152,28 +155,47 @@ def fragment_ls_cmd(
         )
         raise typer.Exit(code=1)
 
+    # Build the scan list: local first (shadows bundled), then bundled.
+    # When --lib is explicitly given, only scan that lib (no bundled fallback).
+    # When using the default (no --lib), scan ./fragments if it exists, then bundled.
+    scanned: list[tuple[Path, str]] = []
+    if lib_dir.is_dir():
+        scanned.append((lib_dir, "local"))
+    if lib is None:
+        bundled = bundled_fragments_dir()
+        if bundled is not None:
+            scanned.append((bundled, "bundled"))
+
     rows: list[dict] = []
     errors: list[dict] = []
-    for path in sorted(lib_dir.glob("*.json")):
-        try:
-            frag = load_fragment(path)
-        except FragmentError as e:
-            errors.append({"path": str(path), "error": str(e)})
-            continue
-        rows.append(
-            {
-                "name": frag.name,
-                "version": frag.version,
-                "description": frag.description,
-                "inputs": list(frag.inputs.keys()),
-                "outputs": list(frag.outputs.keys()),
-                "params": list(frag.params.keys()),
-                "terminal": frag.terminal,
-                "path": str(path),
-            }
-        )
+    seen_names: set[str] = set()
+    for scan_dir, source in scanned:
+        for path in sorted(scan_dir.glob("*.json")):
+            try:
+                frag = load_fragment(path)
+            except FragmentError as e:
+                errors.append({"path": str(path), "error": str(e)})
+                continue
+            # Local names shadow bundled — skip duplicates.
+            if frag.name in seen_names:
+                continue
+            seen_names.add(frag.name)
+            rows.append(
+                {
+                    "name": frag.name,
+                    "version": frag.version,
+                    "description": frag.description,
+                    "inputs": list(frag.inputs.keys()),
+                    "outputs": list(frag.outputs.keys()),
+                    "params": list(frag.params.keys()),
+                    "terminal": frag.terminal,
+                    "path": str(path),
+                    "source": source,
+                }
+            )
 
-    payload = {"lib": str(lib_dir), "count": len(rows), "fragments": rows, "errors": errors}
+    libs = [str(p) for p, _ in scanned]
+    payload = {"libs": libs, "lib": str(lib_dir), "count": len(rows), "fragments": rows, "errors": errors}
     if renderer.is_pretty():
         if not rows and not errors:
             rprint("[dim]No fragments found.[/dim]")
@@ -182,7 +204,8 @@ def fragment_ls_cmd(
                 f"[bold]{f['name']}[/bold]  v{f['version']}  "
                 f"in={','.join(f['inputs']) or '∅'}  "
                 f"out={','.join(f['outputs']) or '∅'}  "
-                f"params={','.join(f['params']) or '∅'}"
+                f"params={','.join(f['params']) or '∅'}  "
+                f"[dim]({f['source']})[/dim]"
             )
             if f["description"]:
                 rprint(f"  [dim]{f['description']}[/dim]")
