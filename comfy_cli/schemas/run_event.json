@@ -7,6 +7,10 @@
   "required": ["type"],
   "additionalProperties": true,
   "properties": {
+    "schema": {
+      "const": "event/1",
+      "description": "Event contract version. Additive optional fields do not bump it; renamed/removed/retyped fields do."
+    },
     "type": {
       "type": "string",
       "enum": [

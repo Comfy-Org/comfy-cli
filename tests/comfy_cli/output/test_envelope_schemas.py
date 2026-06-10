@@ -57,6 +57,22 @@ def test_schemas_are_well_formed(schema_name):
     jsonschema.Draft202012Validator.check_schema(schema)
 
 
+def test_envelope_schema_declares_contract_version():
+    """envelope.json pins the discriminator + version the renderer emits."""
+    from comfy_cli.output.renderer import ENVELOPE_SCHEMA
+
+    props = _load_schema("envelope.json")["properties"]
+    assert props["schema"]["const"] == ENVELOPE_SCHEMA == "envelope/1"
+    assert props["type"]["const"] == "envelope"
+
+
+def test_run_event_schema_declares_contract_version():
+    from comfy_cli.output.renderer import EVENT_SCHEMA
+
+    props = _load_schema("run_event.json")["properties"]
+    assert props["schema"]["const"] == EVENT_SCHEMA == "event/1"
+
+
 def _run_cli(args: list[str], env: dict | None = None) -> dict:
     proc_env = os.environ.copy()
     proc_env.setdefault("NO_COLOR", "1")

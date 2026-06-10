@@ -6,6 +6,7 @@ These are the contract tests: an agent should be able to call ``comfy
 
 from __future__ import annotations
 
+import ast
 import json
 import os
 import subprocess
@@ -16,6 +17,7 @@ import jsonschema
 import pytest
 
 SCHEMAS_DIR = Path(__file__).parent.parent.parent.parent / "comfy_cli" / "schemas"
+SRC_ROOT = Path(__file__).resolve().parents[3] / "comfy_cli"
 
 
 def _validator_for(schema_name: str) -> jsonschema.Validator:
@@ -122,6 +124,104 @@ def test_models_and_templates_registered():
         "comfy templates fetch",
     ):
         assert cmd in COMMAND_SCHEMAS, cmd
+
+
+def test_discover_exposes_output_contract_versions():
+    """Agents negotiate shape on `output_contract`, not the CLI version."""
+    from comfy_cli.output.renderer import ENVELOPE_SCHEMA, EVENT_SCHEMA
+
+    envelope = _run_cli(["--json", "discover"])
+    contract = envelope["data"]["output_contract"]
+    assert contract == {"envelope": ENVELOPE_SCHEMA, "event": EVENT_SCHEMA}
+    assert contract == {"envelope": "envelope/1", "event": "event/1"}
+    # The envelope itself carries the discriminator + version.
+    assert envelope["schema"] == "envelope/1"
+    assert envelope["type"] == "envelope"
+
+
+# ---------------------------------------------------------------------------
+# Registration ratchet: every `renderer.emit(..., command="X")` call site must
+# either be registered in COMMAND_SCHEMAS or sit in the frozen allowlist
+# below. The allowlist may only shrink — new commands must register a schema.
+# (Scan style mirrors tests/comfy_cli/output/test_error_code_registry.py.)
+# ---------------------------------------------------------------------------
+
+# Commands that emitted envelopes before schema registration was enforced.
+# Do NOT add to this set: register the command in COMMAND_SCHEMAS instead.
+LEGACY_UNREGISTERED: frozenset[str] = frozenset(
+    {
+        "agent-review",
+        "cloud set-base-url",
+        "cloud set-key",
+        "feedback",
+        "generate emit-workflow",
+        "jobs cancel",
+        "setup",
+        "welcome",
+    }
+)
+
+
+def _iter_python_files(root: Path):
+    for p in root.rglob("*.py"):
+        if "__pycache__" in p.parts:
+            continue
+        yield p
+
+
+def _collect_emitted_commands() -> dict[str, list[Path]]:
+    """AST-scan comfy_cli for ``.emit(..., command="X")`` literal call sites."""
+    found: dict[str, list[Path]] = {}
+    for path in _iter_python_files(SRC_ROOT):
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+        except (OSError, SyntaxError):
+            continue
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            if not (isinstance(func, ast.Attribute) and func.attr == "emit"):
+                continue
+            for kw in node.keywords:
+                if kw.arg == "command" and isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, str):
+                    found.setdefault(kw.value.value, []).append(path)
+    return found
+
+
+@pytest.fixture(scope="module")
+def emitted_commands() -> dict[str, list[Path]]:
+    return _collect_emitted_commands()
+
+
+def test_every_emitted_command_registers_a_schema(emitted_commands):
+    """If this fails: you added a `renderer.emit(command="X")` call without
+    registering X in COMMAND_SCHEMAS. Register it (comfy_cli/discovery.py),
+    don't grow LEGACY_UNREGISTERED."""
+    from comfy_cli.discovery import COMMAND_SCHEMAS
+
+    assert emitted_commands, "AST scan found no emit(command=...) call sites — scanner broken?"
+    unregistered = {
+        cmd: [str(p.relative_to(SRC_ROOT.parent)) for p in paths]
+        for cmd, paths in sorted(emitted_commands.items())
+        if f"comfy {cmd}" not in COMMAND_SCHEMAS and cmd not in LEGACY_UNREGISTERED
+    }
+    assert not unregistered, (
+        f"Commands emitting envelopes without a registered schema:\n{unregistered}\n"
+        "Add each to COMMAND_SCHEMAS in comfy_cli/discovery.py."
+    )
+
+
+def test_legacy_unregistered_only_shrinks(emitted_commands):
+    """Every allowlisted command must still exist in source. If this fails the
+    command was removed or registered — delete it from LEGACY_UNREGISTERED so
+    the allowlist ratchets down."""
+    from comfy_cli.discovery import COMMAND_SCHEMAS
+
+    stale = sorted(
+        cmd for cmd in LEGACY_UNREGISTERED if cmd not in emitted_commands or f"comfy {cmd}" in COMMAND_SCHEMAS
+    )
+    assert not stale, f"Stale LEGACY_UNREGISTERED entries (no longer emitted, or now registered): {stale}"
 
 
 def test_discover_pretty_mode_shows_counts():

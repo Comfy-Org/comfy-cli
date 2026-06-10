@@ -9,6 +9,14 @@
   "properties": {
     "prog": {"type": "string"},
     "version": {"type": "string"},
+    "output_contract": {
+      "type": "object",
+      "description": "Versioned machine-output contract: negotiate envelope/event shape on these, not on the CLI version.",
+      "properties": {
+        "envelope": {"type": "string"},
+        "event": {"type": "string"}
+      }
+    },
     "commands": {
       "type": "object",
       "description": "Same shape as `comfy --help-json`'s `commands`."

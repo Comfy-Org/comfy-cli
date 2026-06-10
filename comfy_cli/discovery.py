@@ -15,6 +15,7 @@ from importlib import resources
 from typing import Any
 
 from comfy_cli.help_json import build_help_json
+from comfy_cli.output.renderer import ENVELOPE_SCHEMA, EVENT_SCHEMA
 
 # Maps fully-qualified command paths to the schema name (without .json) that
 # the command's envelope ``data`` field validates against. Phase 2 covers the
@@ -34,6 +35,9 @@ COMMAND_SCHEMAS: dict[str, str] = {
     "comfy jobs ls": "jobs",
     "comfy jobs status": "jobs",
     "comfy jobs watch": "jobs",
+    # help / validation
+    "comfy help": "help",
+    "comfy validate": "workflow",
     # nodes introspection
     "comfy nodes ls": "nodes",
     "comfy nodes show": "nodes",
@@ -43,15 +47,33 @@ COMMAND_SCHEMAS: dict[str, str] = {
     "comfy nodes path": "nodes",
     "comfy nodes types": "nodes",
     "comfy nodes categories": "nodes",
+    "comfy nodes refresh": "nodes",
     # workflow editing
     "comfy workflow slots": "workflow",
     "comfy workflow set-slot": "workflow",
     "comfy workflow vary": "workflow",
+    # workflow cloud CRUD + fragment composition
+    "comfy workflow list": "workflow",
+    "comfy workflow get": "workflow",
+    "comfy workflow save": "workflow",
+    "comfy workflow delete": "workflow",
+    "comfy workflow compose": "workflow",
+    "comfy workflow fragment ls": "workflow",
+    "comfy workflow fragment show": "workflow",
+    "comfy workflow fragment validate": "workflow",
     # skill management
     "comfy skills install": "skill",
     "comfy skills uninstall": "skill",
     "comfy skills show": "skill",
     "comfy skills status": "skill",
+    "comfy skills validate": "skill",
+    # `comfy skill` is the hidden singular alias; envelopes from the skills
+    # group carry the singular form in `command`, so both spellings register.
+    "comfy skill install": "skill",
+    "comfy skill uninstall": "skill",
+    "comfy skill list": "skill",
+    "comfy skill show": "skill",
+    "comfy skill status": "skill",
     # model discovery (all asset types: checkpoints, loras, controlnets, vae, ...)
     "comfy models search": "models",
     "comfy models show": "models",
@@ -61,6 +83,7 @@ COMMAND_SCHEMAS: dict[str, str] = {
     "comfy templates ls": "templates",
     "comfy templates show": "templates",
     "comfy templates fetch": "templates",
+    "comfy templates refresh": "templates",
     # file transfer
     "comfy upload": "transfer",
     "comfy download": "transfer",
@@ -155,6 +178,10 @@ def build_discovery(app: Any, *, prog_name: str = "comfy", version: str = "") ->
     return {
         "prog": prog_name,
         "version": version,
+        # Versioned machine-output contract (see comfy_cli/output/renderer.py
+        # for the constants and the bump rule). Agents negotiate shape on
+        # these, not on the CLI `version` above.
+        "output_contract": {"envelope": ENVELOPE_SCHEMA, "event": EVENT_SCHEMA},
         "commands": help_doc["commands"],
         "root": help_doc["root"],
         "schemas": schemas,

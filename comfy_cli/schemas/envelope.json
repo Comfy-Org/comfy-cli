@@ -7,6 +7,14 @@
   "required": ["ok", "command", "version", "where", "data", "error"],
   "additionalProperties": true,
   "properties": {
+    "schema": {
+      "const": "envelope/1",
+      "description": "Envelope contract version. Additive optional fields do not bump it; renamed/removed/retyped fields or changed exit semantics do."
+    },
+    "type": {
+      "const": "envelope",
+      "description": "Line discriminator: in NDJSON streams the final line is the envelope, every other line is an event."
+    },
     "ok": {
       "type": "boolean",
       "description": "True iff the command succeeded. Mirrors a 0 exit code."

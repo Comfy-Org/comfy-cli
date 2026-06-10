@@ -24,6 +24,12 @@ from rich.console import Console
 
 from comfy_cli.caller import Caller, detect_caller
 
+# Machine-output contract versions, surfaced in every envelope/event line and
+# in `comfy discover` (output_contract). Bump rule: additive optional fields =
+# no bump; rename/remove/retype a field or changed exit semantics = bump.
+ENVELOPE_SCHEMA = "envelope/1"
+EVENT_SCHEMA = "event/1"
+
 
 class OutputMode(str, Enum):
     PRETTY = "pretty"
@@ -263,7 +269,7 @@ class Renderer:
         """Emit one NDJSON event line. Only meaningful in NDJSON mode."""
         if not self.is_stream():
             return
-        payload = {"type": type, **fields}
+        payload = {"schema": EVENT_SCHEMA, "type": type, **fields}
         self._write_json_line(payload)
 
     def throttled_event(self, token: str, type: str, *, max_hz: float = 10.0, **fields: Any) -> bool:
@@ -301,6 +307,10 @@ class Renderer:
         error: Mapping[str, Any] | None,
     ) -> dict[str, Any]:
         env: dict[str, Any] = {
+            # Contract discriminator + version first: NDJSON consumers pick
+            # out the final line by `type` and negotiate shape on `schema`.
+            "schema": ENVELOPE_SCHEMA,
+            "type": "envelope",
             "ok": ok,
             "command": command,
             "version": self.version,

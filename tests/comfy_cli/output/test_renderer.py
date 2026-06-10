@@ -72,6 +72,11 @@ def test_envelope_shape_on_success():
     r.emit({"foo": "bar"})
     line = stream.getvalue().strip()
     env = json.loads(line)
+    # Contract versioning: the discriminator + schema version lead the
+    # envelope so NDJSON consumers can pick out the final line by `type`.
+    assert list(env)[:2] == ["schema", "type"]
+    assert env["schema"] == "envelope/1"
+    assert env["type"] == "envelope"
     assert env["ok"] is True
     assert env["command"] == "env"
     assert env["version"] == "1.2.3"
@@ -88,6 +93,8 @@ def test_envelope_shape_on_error():
     r.command = "which"
     r.error("not_in_workspace", "no workspace", hint="run: comfy install")
     env = json.loads(stream.getvalue().strip())
+    assert env["schema"] == "envelope/1"
+    assert env["type"] == "envelope"
     assert env["ok"] is False
     assert env["error"]["code"] == "not_in_workspace"
     assert env["error"]["message"] == "no workspace"
@@ -158,7 +165,7 @@ def test_event_only_in_ndjson():
     r.mode = OutputMode.NDJSON
     r.event("progress", node="K", completed=1, total=2)
     line = json.loads(stream.getvalue().strip())
-    assert line == {"type": "progress", "node": "K", "completed": 1, "total": 2}
+    assert line == {"schema": "event/1", "type": "progress", "node": "K", "completed": 1, "total": 2}
 
 
 def test_throttled_event_drops_within_window():
