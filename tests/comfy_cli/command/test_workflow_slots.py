@@ -619,6 +619,7 @@ class TestSetSlotNestedSubgraph:
 def test_cli_hints_use_id_based_slot_addresses():
     """Slot addresses resolve by node id; hints must not teach title-style addresses."""
     from pathlib import Path
+
     src = (Path(__file__).resolve().parents[3] / "comfy_cli/command/workflow.py").read_text(encoding="utf-8")
     assert "positive_prompt.text" not in src
 
