@@ -904,7 +904,7 @@ def watch_cmd(
     # If the job already finished, just print status and return — there will
     # be no more WS events.
     snap = _snapshot(h, p, prompt_id)
-    if snap and snap["status"] in {"completed", "error"}:
+    if snap and snap["status"] in {"completed", "error", "cancelled"}:
         if renderer.is_pretty():
             renderer.console().print(f"[dim]Prompt {prompt_id} already {snap['status']}; nothing more to watch.[/dim]")
             _render_status_pretty(snap, host=h, port=p)
@@ -945,7 +945,7 @@ def watch_cmd(
             except WebSocketTimeoutException:
                 # If the job moved to completed between recvs, exit cleanly.
                 snap = _snapshot(h, p, prompt_id)
-                if snap and snap["status"] in {"completed", "error"}:
+                if snap and snap["status"] in {"completed", "error", "cancelled"}:
                     end_reason = snap["status"]
                     end_details = snap
                     outputs.extend(snap.get("outputs") or [])
@@ -1261,7 +1261,7 @@ def _cloud_watch(prompt_id: str, *, poll_interval: float, max_wait: float) -> No
                 renderer.console().print(f"[dim]→[/dim] state [bold]{last_state}[/bold]")
             renderer.event("state", prompt_id=prompt_id, status=last_state)
 
-        if snap["status"] in {"completed", "error"}:
+        if snap["status"] in {"completed", "error", "cancelled"}:
             for u in snap.get("outputs") or []:
                 renderer.event("output", url=u, prompt_id=prompt_id)
                 if renderer.is_pretty():

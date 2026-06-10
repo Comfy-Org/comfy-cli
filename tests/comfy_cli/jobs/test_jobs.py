@@ -631,3 +631,28 @@ def test_local_cancel_writes_cancelled_state(monkeypatch: pytest.MonkeyPatch):
     persisted = jobs_state.read("pidX")
     assert persisted is not None, "state file was deleted instead of updated"
     assert persisted.status == "cancelled", f"expected 'cancelled', got {persisted.status!r}"
+
+
+def test_watch_already_cancelled_job_exits_130(monkeypatch):
+    """An already-cancelled local job must short-circuit to exit 130, not hang
+    in the WS loop. Regression for the watch gate omitting 'cancelled'."""
+    import typer  # noqa: F401 — ensures typer.Exit is raised, not SystemExit
+    from typer.testing import CliRunner
+
+    monkeypatch.setattr(jobs_mod, "_server_or_error", lambda h, p, **kw: True)
+    monkeypatch.setattr(
+        jobs_mod,
+        "_snapshot",
+        lambda h, p, pid: {"prompt_id": pid, "status": "cancelled", "outputs": []},
+    )
+
+    # If the gate is broken, watch would try to open a WebSocket. Make
+    # WebSocket construction explode so a fall-through is unmistakable (not a hang).
+    def _boom(*a, **k):
+        raise AssertionError("watch fell through to WebSocket instead of short-circuiting on 'cancelled'")
+
+    monkeypatch.setattr(jobs_mod, "WebSocket", _boom)
+
+    runner = CliRunner()
+    result = runner.invoke(jobs_mod.app, ["watch", "pidX", "--where", "local"])
+    assert result.exit_code == 130, (result.exit_code, result.output)
