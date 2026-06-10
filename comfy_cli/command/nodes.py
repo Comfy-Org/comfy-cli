@@ -52,21 +52,41 @@ def _get_graph(
     host: str | None,
     port: int | None,
     where: str | None = None,
+    on_stale=None,
 ) -> Graph:
     """Load the Graph for ``comfy nodes`` commands.
 
     Routing follows the standard precedence: explicit ``--where`` > env
     (``COMFY_WHERE``) > config (``where_default``) > local default. The
     ``--input <path>`` flag short-circuits everything (offline mode).
+
+    ``on_stale``, if provided, is forwarded to ``resilient_load_object_info``
+    and fired when a stale-cache fallback occurs (see loader for signature).
     """
     mode = _resolved_where(where)
     try:
-        return Graph.load(
+        if input_path is not None:
+            # Explicit offline dump — let Graph.load read + annotate it.
+            return Graph.load(
+                mode=mode,
+                input_path=input_path,
+                host=host or "127.0.0.1",
+                port=port or 8188,
+            )
+        # Live fetch goes through the resilient loader: auto-cache on success,
+        # refresh-and-retry once, then fall back to the last cached dump (with
+        # a stderr warning) when the server/session is briefly unreachable.
+        from comfy_cli.cql.loader import resilient_load_object_info
+
+        raw = resilient_load_object_info(
             mode=mode,
-            input_path=input_path,
             host=host or "127.0.0.1",
             port=port or 8188,
+            on_stale=on_stale,
         )
+        graph = Graph.from_object_info(raw)
+        graph._try_default_annotations()
+        return graph
     except LoadError as e:
         renderer = get_renderer()
         renderer.error(
@@ -158,7 +178,11 @@ def ls_cmd(
     ] = None,
 ):
     renderer = get_renderer()
-    graph = _get_graph(input_path, host, port, where=where)
+    _stale: dict = {}
+    graph = _get_graph(
+        input_path, host, port, where=where,
+        on_stale=lambda key, err: _stale.update(stale=True, source=key, reason=err),
+    )
 
     produces_upper = produces.upper() if produces else None
     accepts_upper = accepts.upper() if accepts else None
@@ -228,6 +252,13 @@ def ls_cmd(
     if cloud_note:
         payload["cloud_note"] = cloud_note
 
+    if _stale:
+        payload["stale"] = True
+        payload["warnings"] = [{
+            "code": "object_info_stale",
+            "message": f"served from cache ({_stale['source']}): {_stale['reason']}",
+        }]
+
     if renderer.is_pretty():
         if not nodes:
             rprint("[dim]0 nodes matched.[/dim]")
@@ -275,7 +306,11 @@ def show_cmd(
     ] = None,
 ):
     renderer = get_renderer()
-    graph = _get_graph(input_path, host, port, where=where)
+    _stale: dict = {}
+    graph = _get_graph(
+        input_path, host, port, where=where,
+        on_stale=lambda key, err: _stale.update(stale=True, source=key, reason=err),
+    )
 
     m = graph.node(name)
     if m is None:
@@ -295,6 +330,13 @@ def show_cmd(
         raise typer.Exit(code=1)
 
     payload = graph.morphism_to_dict(m)
+
+    if _stale:
+        payload["stale"] = True
+        payload["warnings"] = [{
+            "code": "object_info_stale",
+            "message": f"served from cache ({_stale['source']}): {_stale['reason']}",
+        }]
 
     if renderer.is_pretty():
         from rich.table import Table
@@ -361,7 +403,11 @@ def search_cmd(
     ] = None,
 ):
     renderer = get_renderer()
-    graph = _get_graph(input_path, host, port, where=where)
+    _stale: dict = {}
+    graph = _get_graph(
+        input_path, host, port, where=where,
+        on_stale=lambda key, err: _stale.update(stale=True, source=key, reason=err),
+    )
 
     q = query.lower()
     scored: list[tuple[int, Any]] = []
@@ -403,6 +449,13 @@ def search_cmd(
             for m in matched
         ],
     }
+
+    if _stale:
+        payload["stale"] = True
+        payload["warnings"] = [{
+            "code": "object_info_stale",
+            "message": f"served from cache ({_stale['source']}): {_stale['reason']}",
+        }]
 
     if renderer.is_pretty():
         if not matched:
@@ -451,7 +504,11 @@ def upstream_cmd(
     ] = None,
 ):
     renderer = get_renderer()
-    graph = _get_graph(input_path, host, port, where=where)
+    _stale: dict = {}
+    graph = _get_graph(
+        input_path, host, port, where=where,
+        on_stale=lambda key, err: _stale.update(stale=True, source=key, reason=err),
+    )
     nodes = graph.upstream(name)
 
     total_upstream = len(nodes)
@@ -459,6 +516,13 @@ def upstream_cmd(
         nodes = nodes[: max(0, limit)]
     rows = [_morphism_row(m) for m in nodes]
     payload = {"name": name, "total": total_upstream, "count": len(rows), "rows": rows}
+
+    if _stale:
+        payload["stale"] = True
+        payload["warnings"] = [{
+            "code": "object_info_stale",
+            "message": f"served from cache ({_stale['source']}): {_stale['reason']}",
+        }]
 
     if renderer.is_pretty():
         if not rows:
@@ -493,7 +557,11 @@ def downstream_cmd(
     ] = None,
 ):
     renderer = get_renderer()
-    graph = _get_graph(input_path, host, port, where=where)
+    _stale: dict = {}
+    graph = _get_graph(
+        input_path, host, port, where=where,
+        on_stale=lambda key, err: _stale.update(stale=True, source=key, reason=err),
+    )
     nodes = graph.downstream(name)
 
     total_downstream = len(nodes)
@@ -501,6 +569,13 @@ def downstream_cmd(
         nodes = nodes[: max(0, limit)]
     rows = [_morphism_row(m) for m in nodes]
     payload = {"name": name, "total": total_downstream, "count": len(rows), "rows": rows}
+
+    if _stale:
+        payload["stale"] = True
+        payload["warnings"] = [{
+            "code": "object_info_stale",
+            "message": f"served from cache ({_stale['source']}): {_stale['reason']}",
+        }]
 
     if renderer.is_pretty():
         if not rows:
@@ -544,7 +619,11 @@ def path_cmd(
     ] = None,
 ):
     renderer = get_renderer()
-    graph = _get_graph(input_path, host, port, where=where)
+    _stale: dict = {}
+    graph = _get_graph(
+        input_path, host, port, where=where,
+        on_stale=lambda key, err: _stale.update(stale=True, source=key, reason=err),
+    )
 
     finder = graph.exact_paths if exact else graph.find_paths
     paths = finder(from_type, to_type, max_depth=max_depth, max_paths=max_paths)
@@ -572,6 +651,13 @@ def path_cmd(
             for p in paths
         ],
     }
+
+    if _stale:
+        payload["stale"] = True
+        payload["warnings"] = [{
+            "code": "object_info_stale",
+            "message": f"served from cache ({_stale['source']}): {_stale['reason']}",
+        }]
 
     if renderer.is_pretty():
         if not paths:
@@ -604,12 +690,23 @@ def types_cmd(
     ] = None,
 ):
     renderer = get_renderer()
-    graph = _get_graph(input_path, host, port, where=where)
+    _stale: dict = {}
+    graph = _get_graph(
+        input_path, host, port, where=where,
+        on_stale=lambda key, err: _stale.update(stale=True, source=key, reason=err),
+    )
     types = graph.list_types()
 
     if limit is not None:
         types = types[: max(0, limit)]
     payload = {"count": len(types), "types": list(types)}
+
+    if _stale:
+        payload["stale"] = True
+        payload["warnings"] = [{
+            "code": "object_info_stale",
+            "message": f"served from cache ({_stale['source']}): {_stale['reason']}",
+        }]
 
     if renderer.is_pretty():
         from rich.columns import Columns
@@ -666,7 +763,11 @@ def categories_cmd(
     ] = None,
 ):
     renderer = get_renderer()
-    graph = _get_graph(input_path, host, port, where=where)
+    _stale: dict = {}
+    graph = _get_graph(
+        input_path, host, port, where=where,
+        on_stale=lambda key, err: _stale.update(stale=True, source=key, reason=err),
+    )
     tree = graph.category_tree()
 
     flat = _flatten_category_tree(tree)
@@ -681,6 +782,13 @@ def categories_cmd(
         "count": len(flat),
         "rows": [{"category": p, "node_count": c} for p, c in flat],
     }
+
+    if _stale:
+        payload["stale"] = True
+        payload["warnings"] = [{
+            "code": "object_info_stale",
+            "message": f"served from cache ({_stale['source']}): {_stale['reason']}",
+        }]
 
     if renderer.is_pretty():
         if not flat:

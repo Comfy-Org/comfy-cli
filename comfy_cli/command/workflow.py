@@ -72,50 +72,50 @@ def _load_workflow_or_fail(renderer, path: str) -> tuple[Path, dict[str, Any]]:
     return p, data
 
 
-def _load_object_info_or_fail(renderer, input_path: str | None, host: str | None, port: int | None) -> dict[str, Any]:
-    """Fetch object_info via the Python CQL engine, with error envelope on failure."""
-    from comfy_cli import where as where_module
-    from comfy_cli.config_manager import ConfigManager
-    from comfy_cli.cql.engine import LoadError, _load_from_file, _load_from_target
+def _get_graph(input_path: str | None, host: str | None, port: int | None, on_stale=None):
+    """Build a Graph from the resolved object_info source.
 
-    if input_path:
-        try:
-            return _load_from_file(input_path)
-        except LoadError as e:
-            renderer.error(
-                code="cql_no_graph",
-                message=str(e),
-                hint=e.details.get("hint", "check the --input path"),
-            )
-            raise typer.Exit(code=1) from e
+    The live (non-``--input``) fetch goes through ``resilient_load_object_info``,
+    which auto-caches successful fetches, retries once after a session refresh,
+    and falls back to the last cached dump (with a stderr warning) when the
+    server/session is briefly unreachable.
 
-    # Resolve mode from global routing chain
-    decision = where_module.resolve(
-        flag=None,
-        config_value=ConfigManager().get(where_module.CONFIG_KEY_WHERE_DEFAULT),
-    )
-    mode = "cloud" if decision.target is where_module.WhereTarget.CLOUD else "local"
+    ``on_stale``, if provided, is fired when a stale-cache fallback occurs:
+    ``on_stale(host_key, error_str)``.
+    """
+    from comfy_cli.cql.engine import Graph, LoadError
 
+    renderer = get_renderer()
     try:
-        return _load_from_target(mode=mode, host=host or "127.0.0.1", port=port or 8188)
+        if input_path is not None:
+            # Explicit offline dump — Graph.load reads + annotates it.
+            return Graph.load(input_path=input_path, host=host or "127.0.0.1", port=port or 8188)
+        # Live fetch: resolve mode from global routing chain, then use resilient loader.
+        from comfy_cli import where as where_module
+        from comfy_cli.config_manager import ConfigManager
+
+        decision = where_module.resolve(
+            flag=None,
+            config_value=ConfigManager().get(where_module.CONFIG_KEY_WHERE_DEFAULT),
+        )
+        mode = "cloud" if decision.target is where_module.WhereTarget.CLOUD else "local"
+        from comfy_cli.cql.loader import resilient_load_object_info
+
+        raw = resilient_load_object_info(
+            mode=mode,
+            host=host or "127.0.0.1",
+            port=port or 8188,
+            on_stale=on_stale,
+        )
+        graph = Graph.from_object_info(raw)
+        graph._try_default_annotations()
+        return graph
     except LoadError as e:
         renderer.error(
             code="cql_no_graph",
             message=str(e),
-            hint=e.details.get("hint", "pass --input <path>, start the server with `comfy launch`, or switch to cloud"),
+            hint=e.details.get("hint", "pass --input <path>, or start the server with `comfy launch`"),
         )
-        raise typer.Exit(code=1) from e
-
-
-def _get_graph(input_path: str | None, host: str | None, port: int | None):
-    """Build a Graph from the resolved object_info source."""
-    from comfy_cli.cql.engine import Graph, LoadError
-
-    try:
-        return Graph.load(input_path=input_path, host=host or "127.0.0.1", port=port or 8188)
-    except LoadError as e:
-        renderer = get_renderer()
-        renderer.error(code="cql_no_graph", message=str(e), hint=e.details.get("hint", ""))
         raise typer.Exit(code=1) from e
 
 
@@ -178,7 +178,8 @@ def slots_cmd(
 ):
     renderer = get_renderer()
     p, workflow = _load_workflow_or_fail(renderer, file)
-    graph = _get_graph(input_path, host, port)
+    _stale: dict = {}
+    graph = _get_graph(input_path, host, port, on_stale=lambda key, err: _stale.update(stale=True, source=key, reason=err))
 
     template_id = template_id or p.stem
     try:
@@ -193,6 +194,10 @@ def slots_cmd(
         "count": len(schema.get("slots") or []),
         "slots": schema.get("slots") or [],
     }
+
+    if _stale:
+        payload["stale"] = True
+        payload["warnings"] = [{"code": "object_info_stale", "message": f"served from cache ({_stale['source']}): {_stale['reason']}"}]
 
     if renderer.is_pretty():
         from rich.table import Table
@@ -241,7 +246,8 @@ def set_slot_cmd(
 ):
     renderer = get_renderer()
     p, workflow = _load_workflow_or_fail(renderer, file)
-    graph = _get_graph(input_path, host, port)
+    _stale: dict = {}
+    graph = _get_graph(input_path, host, port, on_stale=lambda key, err: _stale.update(stale=True, source=key, reason=err))
 
     overrides_dict: dict[str, Any] = {}
     for raw in overrides:
@@ -275,6 +281,9 @@ def set_slot_cmd(
         "warnings": warnings,
         "wrote": str(p),
     }
+    if _stale:
+        payload["stale"] = True
+        payload["warnings"] = list(warnings) + [{"code": "object_info_stale", "message": f"served from cache ({_stale['source']}): {_stale['reason']}"}]
     if renderer.is_pretty():
         rprint(f"[bold green]✓[/bold green] applied {len(overrides_dict)} slot(s) → [dim]{p}[/dim]")
         for addr in overrides_dict:
@@ -314,7 +323,8 @@ def vary_cmd(
 ):
     renderer = get_renderer()
     p, workflow = _load_workflow_or_fail(renderer, file)
-    graph = _get_graph(input_path, host, port)
+    _stale: dict = {}
+    graph = _get_graph(input_path, host, port, on_stale=lambda key, err: _stale.update(stale=True, source=key, reason=err))
 
     # Parse each --slot ADDR='[a,b,c]'. Each value must be a JSON list.
     by_addr: dict[str, list[Any]] = {}
@@ -373,6 +383,9 @@ def vary_cmd(
         "out_dir": str(Path(out_dir).expanduser()) if out_dir else None,
         "written": written,
     }
+    if _stale:
+        payload["stale"] = True
+        payload["warnings"] = list(warnings) + [{"code": "object_info_stale", "message": f"served from cache ({_stale['source']}): {_stale['reason']}"}]
     if renderer.is_pretty():
         rprint(f"[bold green]✓[/bold green] produced {len(workflows)} variation(s)")
         if written:

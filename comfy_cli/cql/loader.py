@@ -18,7 +18,10 @@ and are short-circuited when no host is provided.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
+import sys
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -255,3 +258,181 @@ def _from_api_workflow(data: dict[str, Any]) -> dict[str, Any]:
                     }
                 )
     return {"nodes": nodes, "inputs": inputs, "categories": []}
+
+
+# ---------------------------------------------------------------------------
+# Resilient object_info loading (cache + refresh-retry + stale fallback)
+# ---------------------------------------------------------------------------
+#
+# The live ``/object_info`` fetch (``comfy nodes``, ``comfy workflow slots``,
+# ``comfy validate``) intermittently returns HTTP 401 / ``cql_no_graph`` mid
+# session when the cloud access token has gone stale. The session token DOES
+# auto-refresh (see ``comfy_cli.cloud.oauth.ensure_fresh_session``), but the
+# raw object_info path didn't leverage it, and there was no offline fallback.
+#
+# ``resilient_load_object_info`` wraps the engine's network fetch with:
+#   1. auto-cache of every successful fetch (per host),
+#   2. one refresh-and-retry on failure, and
+#   3. a stale-cache fallback (with a clear stderr warning) when the retry
+#      still fails — only raising the original error when no cache exists.
+#
+# An explicit ``--input <object_info.json>`` always wins and is never cached.
+
+
+def _cache_dir() -> Path:
+    """Return the per-user cache directory for comfy-cli object_info dumps.
+
+    Honors ``XDG_CACHE_HOME`` (Linux/freedesktop convention) and falls back to
+    ``~/.cache/comfy-cli`` everywhere else. We deliberately use a plain cache
+    dir rather than the config dir: this data is reconstructible and safe to
+    delete at any time.
+    """
+    xdg = os.environ.get("XDG_CACHE_HOME")
+    base = Path(xdg) if xdg else Path.home() / ".cache"
+    return base / "comfy-cli"
+
+
+def _host_key_digest(host_key: str) -> str:
+    """Short, filesystem-safe hash of the target identity.
+
+    ``host_key`` is the resolved base URL (e.g. ``https://api.comfy.org`` or
+    ``http://127.0.0.1:8188``) so local and cloud — and distinct cloud envs —
+    each get their own cache file and never clobber one another.
+    """
+    return hashlib.sha256(host_key.encode("utf-8")).hexdigest()[:16]
+
+
+def object_info_cache_path(host_key: str) -> Path:
+    """Cache-file path for a given target identity."""
+    return _cache_dir() / f"object_info-{_host_key_digest(host_key)}.json"
+
+
+def write_object_info_cache(host_key: str, data: dict[str, Any]) -> None:
+    """Persist a freshly-fetched object_info dump. Best-effort; never raises.
+
+    Written atomically (tmp + ``os.replace``) so a SIGINT mid-write can't leave
+    a half-written file that later loads as garbage.
+    """
+    path = object_info_cache_path(host_key)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(path.suffix + f".{os.getpid()}.tmp")
+        tmp.write_text(json.dumps(data), encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError:
+        # A cache we can't write is not worth failing the command over.
+        try:
+            tmp.unlink()  # type: ignore[possibly-undefined]
+        except (OSError, NameError, UnboundLocalError):
+            pass
+
+
+def read_object_info_cache(host_key: str) -> dict[str, Any] | None:
+    """Return the cached object_info dump for ``host_key``, or ``None``.
+
+    Returns ``None`` on any problem (missing file, unreadable, corrupt JSON,
+    wrong shape) — the caller treats "no usable cache" uniformly.
+    """
+    path = object_info_cache_path(host_key)
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    try:
+        data = json.loads(raw)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _resolve_host_key(mode: str, host: str, port: int) -> str:
+    """Resolve the cache key (the target base URL) without doing any I/O.
+
+    Mirrors how the engine resolves its fetch target so the cache key matches
+    the server actually queried. Falls back to a host:port string if the
+    Target machinery is unavailable (e.g. unconfigured cloud).
+    """
+    try:
+        from comfy_cli.target import resolve_target
+
+        target = resolve_target(where=mode, host=host, port=port)
+        return target.base_url
+    except Exception:  # noqa: BLE001 — never let key resolution break the fetch
+        return f"{mode}:{host}:{port}"
+
+
+def resilient_load_object_info(
+    *,
+    mode: str = "local",
+    host: str = "127.0.0.1",
+    port: int = 8188,
+    input_path: str | None = None,
+    _warn=None,
+    on_stale=None,
+) -> dict[str, Any]:
+    """Fetch ``object_info`` with cache + refresh-retry + stale fallback.
+
+    Resolution order:
+
+    1. ``input_path`` — explicit offline dump always wins; never cached.
+    2. Live fetch via the engine. On success, write the per-host cache.
+    3. On failure: attempt ``ensure_fresh_session`` and retry the fetch ONCE.
+       On success, write the cache.
+    4. Still failing: fall back to the cached dump (if any) with a clear
+       stderr WARNING that it may be stale.
+    5. No cache: re-raise the original ``LoadError`` (callers map it to the
+       ``cql_no_graph`` envelope with their existing hint).
+
+    ``_warn`` is an injectable sink for the stale-cache warning (defaults to
+    stderr); tests pass their own to assert on it.
+    """
+    from comfy_cli.cql.engine import LoadError, _load_from_file, _load_from_target
+
+    if input_path is not None:
+        # Explicit dump wins and is intentionally not cached — the user is
+        # already pinning a known-good file.
+        return _load_from_file(input_path)
+
+    host_key = _resolve_host_key(mode, host, port)
+
+    try:
+        data = _load_from_target(mode=mode, host=host, port=port)
+        write_object_info_cache(host_key, data)
+        return data
+    except LoadError as first_err:
+        # (a) Best-effort token refresh, then retry the fetch exactly once.
+        # Refresh only helps cloud auth, but it's cheap and a no-op locally.
+        try:
+            from comfy_cli.cloud.oauth import ensure_fresh_session
+
+            ensure_fresh_session()
+        except Exception:  # noqa: BLE001 — refresh is best-effort
+            pass
+
+        try:
+            data = _load_from_target(mode=mode, host=host, port=port)
+            write_object_info_cache(host_key, data)
+            return data
+        except LoadError:
+            # Retry failed too — fall through to the cache.
+            pass
+
+        # (b) Stale-cache fallback.
+        cached = read_object_info_cache(host_key)
+        if cached is not None:
+            warn = _warn if _warn is not None else _default_warn
+            warn(
+                f"WARNING: could not refresh object_info from {host_key} "
+                f"({first_err}); using a cached copy that may be stale. "
+                f"Run the command again once the server/session is reachable."
+            )
+            if on_stale is not None:
+                on_stale(host_key, str(first_err))
+            return cached
+
+        # (c) No cache — surface the original error untouched.
+        raise first_err
+
+
+def _default_warn(message: str) -> None:
+    print(message, file=sys.stderr)

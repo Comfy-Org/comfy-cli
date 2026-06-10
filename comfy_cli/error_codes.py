@@ -347,6 +347,13 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "pass `--input <path>`, or start the server with `comfy launch`",
     ),
     ErrorCode(
+        "object_info_stale",
+        "Live object_info fetch failed; the response was served from a cached copy that may be out of date. "
+        "`details.source` has the host key; `details.reason` has the fetch error. "
+        "Surfaced in `data.warnings[]` (not as an error envelope) so the command still succeeds.",
+        "re-run once the server/session is reachable to get a fresh schema",
+    ),
+    ErrorCode(
         "cql_query_invalid",
         "Grammar query failed to parse or evaluate.",
         "check the grammar; `comfy nodes ls --help` has examples",
