@@ -139,6 +139,27 @@ def _object_info() -> dict[str, Any]:
             "output_node": False,
             "python_module": "nodes",
         },
+        # Partner-API video node mirroring the live cloud shape:
+        #  - int-valued combos (`duration`, `fps`) — list-of-ints form
+        #  - dict-form combos (`resolution`) — ["COMBO", {"options": [...]}]
+        "LtxvApiTextToVideo": {
+            "input": {
+                "required": {
+                    "prompt": ["STRING", {"default": ""}],
+                    "duration": [[6, 8, 10, 12], {"default": 8}],
+                    "fps": [[25, 50], {"default": 25}],
+                    "resolution": ["COMBO", {"options": ["1920x1080", "2560x1440"], "default": "1920x1080"}],
+                },
+            },
+            "input_order": {"required": ["prompt", "duration", "fps", "resolution"]},
+            "output": ["VIDEO"],
+            "output_name": ["VIDEO"],
+            "category": "partner/video/LTXV",
+            "display_name": "LTXV Text To Video",
+            "output_node": False,
+            "api_node": True,
+            "python_module": "nodes",
+        },
     }
 
 
@@ -519,6 +540,66 @@ class TestValidateWorkflow:
         assert "CLIP" in warns[0]["message"]
         assert "MODEL" in warns[0]["message"]
 
+    def test_int_valued_combo_accepts_int(self, graph: Graph):
+        """Server combos can be int-valued (LTXV duration/fps). An int value
+        must not be rejected as a shape mismatch."""
+        wf = {
+            "1": {
+                "class_type": "LtxvApiTextToVideo",
+                "inputs": {"prompt": "a boat", "duration": 8, "fps": 25, "resolution": "1920x1080"},
+            },
+        }
+        result = graph.validate_workflow(wf)
+        assert result["valid"] is True
+        assert result["errors"] == []
+
+    def test_int_valued_combo_unknown_option_is_enum_error(self, graph: Graph):
+        """An int outside the combo's options is an unknown_enum_value (same as
+        a bad string combo) — caught by membership, not mislabeled as a shape
+        mismatch."""
+        wf = {
+            "1": {
+                "class_type": "LtxvApiTextToVideo",
+                "inputs": {"prompt": "a boat", "duration": 7, "fps": 25, "resolution": "1920x1080"},
+            },
+        }
+        result = graph.validate_workflow(wf)
+        assert result["valid"] is False
+        # 7 is not in [6, 8, 10, 12]; it's an enum error, not a shape error.
+        errs = [e for e in result["errors"] if e["field"] == "duration"]
+        assert len(errs) == 1
+        assert errs[0]["code"] == "unknown_enum_value"
+
+    def test_combo_rejects_wrong_shape(self, graph: Graph):
+        """A list/dict for a COMBO is still a hard shape mismatch."""
+        wf = {
+            "1": {
+                "class_type": "LtxvApiTextToVideo",
+                "inputs": {"prompt": "x", "duration": {"bad": 1}, "fps": 25, "resolution": "1920x1080"},
+            },
+        }
+        result = graph.validate_workflow(wf)
+        assert result["valid"] is False
+        errs = [e for e in result["errors"] if e["code"] == "shape_mismatch"]
+        assert any(e["field"] == "duration" for e in errs)
+
+    def test_dict_form_combo_keeps_options(self, graph: Graph):
+        """Dict-form COMBO specs (["COMBO", {"options": [...]}]) must retain
+        their enum so unknown values are caught — the partner-node case."""
+        m = graph._nodes["LtxvApiTextToVideo"]
+        resolution = next(p for p in m.inputs if p.name == "resolution")
+        assert resolution.enum_values == ["1920x1080", "2560x1440"]
+
+        wf = {
+            "1": {
+                "class_type": "LtxvApiTextToVideo",
+                "inputs": {"prompt": "x", "duration": 8, "fps": 25, "resolution": "640x480"},
+            },
+        }
+        result = graph.validate_workflow(wf)
+        errs = [e for e in result["errors"] if e["code"] == "unknown_enum_value"]
+        assert any(e["field"] == "resolution" for e in errs)
+
     def test_wildcard_type_compatible(self, graph: Graph):
         """'*' type on either side should not trigger a mismatch."""
         # Add a wildcard node to the graph for this test
@@ -878,7 +959,7 @@ class TestBrowse:
         assert "Root" in tree
 
     def test_node_count(self, graph: Graph):
-        assert graph.node_count() == 6
+        assert graph.node_count() == 7
 
     def test_all_nodes_sorted(self, graph: Graph):
         nodes = graph.all_nodes()

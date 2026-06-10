@@ -58,9 +58,16 @@ class Port:
         elif self.type in ("FLOAT", "NUMBER"):
             if isinstance(value, bool) or not isinstance(value, int | float):
                 return f"{self.name}: expected {self.type}, got {type(value).__name__}"
-        elif self.type in ("STRING", "COMBO"):
+        elif self.type == "STRING":
             if not isinstance(value, str):
-                return f"{self.name}: expected {self.type} (string), got {type(value).__name__}"
+                return f"{self.name}: expected STRING (string), got {type(value).__name__}"
+        elif self.type == "COMBO":
+            # COMBO options are usually strings, but the server also ships
+            # int-valued combos (e.g. LTXV `duration`/`fps`). Accept any
+            # scalar here; membership is the catalog enum check's job. Only
+            # bool and container/None shapes are a true mismatch.
+            if isinstance(value, bool) or not isinstance(value, str | int | float):
+                return f"{self.name}: expected COMBO (string or number), got {type(value).__name__}"
         elif self.type == "BOOLEAN":
             if not isinstance(value, bool):
                 return f"{self.name}: expected BOOLEAN, got {type(value).__name__}"
@@ -72,7 +79,13 @@ class Port:
             return []
         warnings: list[dict] = []
         if self.type == "COMBO" and self.enum_values:
-            if isinstance(value, str) and value not in self.enum_values:
+            # enum_values are stored as strings; the submitted value may be a
+            # string or a number (int-valued combos). Compare on the stringified
+            # form so `8` matches the option "8", and `8.0` matches "8" too.
+            candidates = {value, str(value)}
+            if isinstance(value, float) and value.is_integer():
+                candidates.add(str(int(value)))
+            if not (candidates & set(self.enum_values)):
                 warnings.append(
                     {
                         "code": "unknown_enum_value",
@@ -220,6 +233,16 @@ def _parse_input_spec(spec: Any) -> tuple[str, bool, list[str], PortOptions]:
 
     first = spec[0]
     if isinstance(first, str):
+        # V3 / partner-API combo dialect: the type is the literal string
+        # "COMBO" (or a dynamic-combo type) and the choices live in the
+        # options dict, e.g. ["COMBO", {"options": ["480p", "720p"]}].
+        # Without this, dict-form combos lose their enum and validate can't
+        # enum-check them — exactly the partner nodes (ByteDance, BFL, …)
+        # where the choices array is the precision check.
+        options = opts_raw.get("options")
+        if isinstance(options, list) and options and all(_is_scalar_choice(v) for v in options):
+            values = [v if isinstance(v, str) else str(v) for v in options]
+            return first, True, values, port_opts
         return first, False, [], port_opts
 
     if isinstance(first, list):
@@ -227,6 +250,13 @@ def _parse_input_spec(spec: Any) -> tuple[str, bool, list[str], PortOptions]:
         return "COMBO", True, values, port_opts
 
     return "UNKNOWN", False, [], port_opts
+
+
+def _is_scalar_choice(v: Any) -> bool:
+    """A combo option is enumerable only if it's a scalar. Dynamic combos
+    (COMFY_DYNAMICCOMBO_V3) carry dict options describing sub-inputs — those
+    are not membership choices and must not be flattened into enum_values."""
+    return isinstance(v, str | int | float) and not isinstance(v, bool)
 
 
 def _ordered_names(raw: dict, order: list[str] | None) -> list[str]:
