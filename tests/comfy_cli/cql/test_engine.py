@@ -915,3 +915,52 @@ class TestClassifyApiWorkflow:
         wf = {"_meta": {"class_type": "NotARealNode"}}
         kind, _ = _classify_api_workflow(wf)
         assert kind == "ok"
+
+
+# ===========================================================================
+# TestNullValuedProxy
+# ===========================================================================
+
+
+class TestNullValuedProxy:
+    """A proxy that resolves to a legitimately-null widget value must keep the
+    curated address and must NOT explode into interior-node slots."""
+
+    def test_null_valued_proxy_stays_curated(self, graph: Graph):
+        """CLIPTextEncode.text at index 0 is resolvable; widgets_values=[None]
+        means the widget exists but its value is null — the slot must remain
+        curated with address '10.text' and current_value None."""
+        wf = {
+            "nodes": [
+                {
+                    "id": 10,
+                    "type": "uuid-def-2",
+                    "properties": {"proxyWidgets": [["9", "text"]]},
+                }
+            ],
+            "definitions": {
+                "subgraphs": [
+                    {
+                        "id": "uuid-def-2",
+                        "name": "Sub",
+                        "inputs": [{"name": "text", "type": "STRING"}],
+                        "nodes": [
+                            {
+                                "id": 9,
+                                "type": "CLIPTextEncode",
+                                "widgets_values": [None],
+                            }
+                        ],
+                    }
+                ]
+            },
+        }
+        slots = _extract_frontend_slots(wf, graph)
+        addrs = [s["address"] for s in slots]
+        # Curated address preserved despite null value
+        assert "10.text" in addrs
+        # Value is explicitly None (not missing)
+        by_addr = {s["address"]: s for s in slots}
+        assert by_addr["10.text"]["current_value"] is None
+        # Did NOT explode into interior slots
+        assert not any(a.startswith("10/") for a in addrs)

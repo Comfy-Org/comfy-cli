@@ -1176,6 +1176,14 @@ def _extract_frontend_slots(workflow: dict, graph: Graph) -> list[dict]:
     return slots
 
 
+# Sentinel returned by _resolve_proxy_value when a proxy entry is genuinely
+# unresolvable (interior node missing, widget name not in the node's order, or
+# index past the end of widgets_values).  Callers must use ``is _UNRESOLVED``
+# to distinguish this from a legitimately-null widget value (e.g. seed saved as
+# None, or an optional image input that has not yet been set).
+_UNRESOLVED = object()
+
+
 def _declared_subgraph_slots(instance: dict, sg: dict, instance_id: str, graph: Graph) -> tuple[list[dict], bool]:
     """Build slots for a subgraph instance's curated proxy inputs.
 
@@ -1196,7 +1204,7 @@ def _declared_subgraph_slots(instance: dict, sg: dict, instance_id: str, graph: 
             continue
         any_declared = True
         current = _resolve_proxy_value(instance, sg, inp_name, graph)
-        if current is None:
+        if current is _UNRESOLVED:
             all_resolved = False
             continue
         inp_type = inp.get("type", {})
@@ -1214,7 +1222,15 @@ def _declared_subgraph_slots(instance: dict, sg: dict, instance_id: str, graph: 
 
 
 def _resolve_proxy_value(instance: dict, subgraph: dict, input_name: str, graph: Graph):
-    """Navigate proxyWidgets to find the current widget value."""
+    """Navigate proxyWidgets to find the current widget value.
+
+    Returns the widget's current value (which may be ``None`` for a
+    legitimately-null widget) or the module-level ``_UNRESOLVED`` sentinel when
+    the proxy entry points at a missing/dangling interior node, when the widget
+    name is absent from the node's widget order, or when the index is past the
+    end of ``widgets_values``.  Callers must use ``is _UNRESOLVED`` to test for
+    the unresolvable case so that a real ``None`` value is preserved.
+    """
     proxy = (instance.get("properties") or {}).get("proxyWidgets") or []
     for entry in proxy:
         if not isinstance(entry, list) or len(entry) < 2:
@@ -1231,11 +1247,11 @@ def _resolve_proxy_value(instance: dict, subgraph: dict, input_name: str, graph:
             try:
                 idx = order.index(name)
             except ValueError:
-                return None
+                return _UNRESOLVED
             widgets = inode.get("widgets_values") or []
-            return widgets[idx] if idx < len(widgets) else None
+            return widgets[idx] if idx < len(widgets) else _UNRESOLVED
         break
-    return None
+    return _UNRESOLVED
 
 
 def _write_widget(node: dict, input_name: str, value: Any, graph: Graph, *, extend: bool) -> list[dict]:
