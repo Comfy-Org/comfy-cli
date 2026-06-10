@@ -485,25 +485,19 @@ class Pipeline:
 
 
 # ---------------------------------------------------------------------------
-# Blueprint parsing + compose entry point
+# Blueprint parsing + compose entry points
 # ---------------------------------------------------------------------------
 
+# `$item` / `$item.<field>` placeholders in a `foreach` pipeline template are
+# replaced with the current item's value before the step is composed. A bare
+# `$item` yields the whole item; `$item.<field>` indexes a mapping item.
+_ITEM_RE = re.compile(r"^\$item(?:\.([A-Za-z_][A-Za-z0-9_-]*))?$")
 
-def compose_blueprint(blueprint: dict, *, lib_dir: Path) -> tuple[dict, dict]:
-    """Compose a parsed blueprint dict + fragment library directory into an API workflow.
 
-    Returns ``(workflow, summary)`` where ``summary`` describes the composition
-    (step count, node count, final-save action). Raises ``BlueprintError`` /
-    ``FragmentError`` on any failure.
-    """
-    if not isinstance(blueprint, dict):
-        raise BlueprintError("blueprint must be a YAML mapping")
-    steps = blueprint.get("pipeline")
+def _validate_pipeline_steps(steps: Any) -> list[dict]:
+    """Validate a `pipeline:` list and return it (each step is a mapping)."""
     if not isinstance(steps, list) or not steps:
         raise BlueprintError("blueprint must have a non-empty `pipeline:` list")
-
-    pipeline = Pipeline()
-    used_fragments: list[str] = []
     for i, step in enumerate(steps):
         if not isinstance(step, dict):
             raise BlueprintError(f"pipeline[{i}]: each step must be a mapping")
@@ -511,30 +505,118 @@ def compose_blueprint(blueprint: dict, *, lib_dir: Path) -> tuple[dict, dict]:
         alias = step.get("alias")
         if not isinstance(name, str) or not isinstance(alias, str):
             raise BlueprintError(f"pipeline[{i}]: each step must declare `fragment` and `alias` strings")
-        fragment_path = resolve_fragment_name(name, lib_dir)
-        fragment = load_fragment(fragment_path)
-        used_fragments.append(fragment.name)
-        pipeline.add_step(
-            fragment=fragment,
-            alias=alias,
-            inputs=step.get("inputs") or {},
-            params=step.get("params") or {},
-        )
+    return steps
 
-    final_alias = steps[-1].get("alias")
-    save_action = None
-    if not pipeline.last_step_terminal:
-        # Pick the final step's first IMAGE or VIDEO output to auto-save.
-        # Types were recorded at add_step time, so no fragment reload needed.
-        chosen = None
-        for out in pipeline.outputs[final_alias].values():
-            if out.type in ("IMAGE", "VIDEO"):
-                chosen = out
-                break
-        if chosen:
-            prefix = str(blueprint.get("output_prefix", "composed"))
-            pipeline.add_save(chosen, chosen.type, prefix=prefix)
-            save_action = {"type": chosen.type, "prefix": prefix}
+
+def _substitute_item(value: Any, item: Any, *, ns: str, alias_refs: bool = True) -> Any:
+    """Resolve `$item` placeholders in a blueprint value against ``item``.
+
+    A bare ``$item`` becomes the whole item; ``$item.<field>`` indexes a mapping
+    item. Cross-step refs (``$alias.output``) are namespaced with ``ns`` so each
+    item's branch wires to its own copies, never another item's. Non-``$`` values
+    pass through untouched. Containers (lists/dicts) are recursed.
+
+    ``alias_refs`` controls whether ``$alias.output`` cross-step refs are
+    namespaced. Set to ``False`` for params, which are literal widget values and
+    must never be alias-rewritten.
+    """
+    if isinstance(value, str) and value.startswith("$"):
+        m = _ITEM_RE.match(value)
+        if m:
+            field = m.group(1)
+            if field is None:
+                return item
+            if not isinstance(item, dict):
+                raise BlueprintError(
+                    f"`$item.{field}` requires a mapping item, got {type(item).__name__}",
+                    hint="use `$item` (whole value) for scalar foreach items",
+                )
+            if field not in item:
+                raise BlueprintError(
+                    f"foreach item has no field {field!r} (referenced as `$item.{field}`)",
+                    hint=f"item exposes: {sorted(item.keys())}",
+                )
+            return item[field]
+        # A `$alias.output` cross-step ref — namespace its alias to this branch.
+        # Only valid for INPUTS; params are literal widget values, never refs.
+        if alias_refs and "." in value:
+            alias, _, output = value[1:].partition(".")
+            if _ALIAS_RE.match(alias):
+                return f"${ns}__{alias}.{output}"
+        return value
+    if isinstance(value, list):
+        return [_substitute_item(v, item, ns=ns, alias_refs=alias_refs) for v in value]
+    if isinstance(value, dict):
+        return {k: _substitute_item(v, item, ns=ns, alias_refs=alias_refs) for k, v in value.items()}
+    return value
+
+
+def _add_branch(
+    pipeline: Pipeline,
+    steps: list[dict],
+    *,
+    lib_dir: Path,
+    item: Any = None,
+    ns: str | None = None,
+) -> tuple[str, bool, list[str]]:
+    """Add one pipeline instantiation to ``pipeline``.
+
+    When ``item``/``ns`` are given the steps are treated as a ``foreach`` template:
+    ``$item.*`` placeholders are bound to ``item`` and every alias (its own +
+    cross-step refs) is prefixed with ``ns`` so the branch can't collide with or
+    wire into another item's branch. Returns ``(final_alias, last_terminal,
+    used_fragments)``.
+    """
+    used_fragments: list[str] = []
+    final_alias = ""
+    for step in steps:
+        name = step["fragment"]
+        alias = step["alias"]
+        inputs = step.get("inputs") or {}
+        params = step.get("params") or {}
+        if ns is not None:
+            alias = f"{ns}__{alias}"
+            inputs = {k: _substitute_item(v, item, ns=ns) for k, v in inputs.items()}
+            params = {k: _substitute_item(v, item, ns=ns, alias_refs=False) for k, v in params.items()}
+        fragment = load_fragment(resolve_fragment_name(name, lib_dir))
+        used_fragments.append(fragment.name)
+        pipeline.add_step(fragment=fragment, alias=alias, inputs=inputs, params=params)
+        final_alias = alias
+    return final_alias, pipeline.last_step_terminal, used_fragments
+
+
+def _auto_save(pipeline: Pipeline, final_alias: str, *, terminal: bool, prefix: str) -> dict | None:
+    """Append a save node for a branch's final IMAGE/VIDEO output, unless terminal."""
+    if terminal:
+        return None
+    chosen = None
+    for out in pipeline.outputs[final_alias].values():
+        if out.type in ("IMAGE", "VIDEO"):
+            chosen = out
+            break
+    if chosen is None:
+        return None
+    pipeline.add_save(chosen, chosen.type, prefix=prefix)
+    return {"type": chosen.type, "prefix": prefix}
+
+
+def compose_blueprint(blueprint: dict, *, lib_dir: Path) -> tuple[dict, dict]:
+    """Compose a single-graph (no ``foreach``) blueprint into an API workflow.
+
+    Returns ``(workflow, summary)`` where ``summary`` describes the composition
+    (step count, node count, final-save action). Raises ``BlueprintError`` /
+    ``FragmentError`` on any failure. For ``foreach`` blueprints (and chunking),
+    use :func:`compose_blueprints`, which returns one entry per emitted graph.
+    """
+    if not isinstance(blueprint, dict):
+        raise BlueprintError("blueprint must be a YAML mapping")
+    steps = _validate_pipeline_steps(blueprint.get("pipeline"))
+
+    pipeline = Pipeline()
+    final_alias, terminal, used_fragments = _add_branch(pipeline, steps, lib_dir=lib_dir)
+    save_action = _auto_save(
+        pipeline, final_alias, terminal=terminal, prefix=str(blueprint.get("output_prefix", "composed"))
+    )
 
     summary = {
         "steps": len(steps),
@@ -544,3 +626,115 @@ def compose_blueprint(blueprint: dict, *, lib_dir: Path) -> tuple[dict, dict]:
         "save_action": save_action,
     }
     return pipeline.workflow, summary
+
+
+def _resolve_foreach_items(spec: Any, *, blueprint_dir: Path | None) -> list[Any]:
+    """Resolve a ``foreach:`` value (inline list or ``{$ref: path.yaml}``) to items."""
+    if isinstance(spec, dict) and "$ref" in spec:
+        ref = spec["$ref"]
+        if not isinstance(ref, str):
+            raise BlueprintError("foreach `$ref` must be a path string")
+        if blueprint_dir is None:
+            raise BlueprintError(
+                "foreach `$ref` cannot be resolved without a blueprint directory",
+                hint="`$ref` is resolved relative to the blueprint file; compose from a file, not an in-memory dict",
+            )
+        ref_path = (blueprint_dir / ref).expanduser()
+        if not ref_path.is_file():
+            raise BlueprintError(f"foreach `$ref` file not found: {ref_path}")
+        try:
+            import yaml
+        except ImportError as e:  # pragma: no cover
+            raise BlueprintError("PyYAML is required to resolve foreach `$ref`") from e
+        try:
+            spec = yaml.safe_load(ref_path.read_text(encoding="utf-8"))
+        except yaml.YAMLError as e:
+            raise BlueprintError(f"foreach `$ref` file is not valid YAML: {e}") from e
+    if not isinstance(spec, list) or not spec:
+        raise BlueprintError(
+            "foreach must resolve to a non-empty list of items",
+            hint="provide an inline list or `{$ref: items.yaml}` pointing at a YAML list",
+        )
+    return spec
+
+
+def _item_namespace(item: Any, index: int) -> str:
+    """A unique, alias-safe namespace token for one item's branch."""
+    if isinstance(item, dict) and isinstance(item.get("id"), str | int):
+        raw = re.sub(r"[^A-Za-z0-9_]", "_", str(item["id"]))
+        if raw:
+            return f"i{index}_{raw}"
+    return f"i{index}"
+
+
+def _item_prefix(base: str, item: Any, index: int) -> str:
+    """Per-item terminal/output prefix — uses the item id when present, else index."""
+    if isinstance(item, dict) and item.get("id") is not None:
+        return f"{base}/{item['id']}"
+    return f"{base}/{index}"
+
+
+def compose_blueprints(
+    blueprint: dict,
+    *,
+    lib_dir: Path,
+    blueprint_dir: Path | None = None,
+) -> list[tuple[dict, dict]]:
+    """Compose a blueprint into one or more API workflows.
+
+    Without ``foreach:`` this returns a single ``[(workflow, summary)]`` — the
+    same graph :func:`compose_blueprint` produces. With ``foreach:`` the
+    ``pipeline:`` is a TEMPLATE instantiated once per item; all instantiations
+    land in ONE graph as independent branches (the engine parallelizes them).
+    ``$item`` / ``$item.<field>`` in step ``inputs``/``params`` bind to the item;
+    each branch gets a unique alias namespace so the copies never collide.
+
+    ``chunk: N`` (only when set) splits the items into ``ceil(items/N)`` graphs
+    for memory limits; the default is a single graph. ``foreach: {$ref: x.yaml}``
+    loads items from a YAML list resolved relative to ``blueprint_dir``.
+    """
+    if not isinstance(blueprint, dict):
+        raise BlueprintError("blueprint must be a YAML mapping")
+    steps = _validate_pipeline_steps(blueprint.get("pipeline"))
+
+    if "foreach" not in blueprint:
+        return [compose_blueprint(blueprint, lib_dir=lib_dir)]
+
+    items = _resolve_foreach_items(blueprint["foreach"], blueprint_dir=blueprint_dir)
+    base_prefix = str(blueprint.get("output_prefix", "composed"))
+
+    chunk = blueprint.get("chunk")
+    if chunk is None:
+        chunk_size = len(items)
+    else:
+        if not isinstance(chunk, int) or isinstance(chunk, bool) or chunk < 1:
+            raise BlueprintError("`chunk:` must be a positive integer", hint="omit `chunk` for a single graph")
+        chunk_size = chunk
+
+    enumerated = list(enumerate(items))
+    batches = [enumerated[i : i + chunk_size] for i in range(0, len(enumerated), chunk_size)]
+    total_graphs = len(batches)
+
+    results: list[tuple[dict, dict]] = []
+    for batch in batches:
+        pipeline = Pipeline()
+        save_actions: list[dict] = []
+        used_fragments: list[str] = []
+        for index, item in batch:
+            ns = _item_namespace(item, index)
+            final_alias, terminal, frags = _add_branch(pipeline, steps, lib_dir=lib_dir, item=item, ns=ns)
+            used_fragments.extend(frags)
+            sa = _auto_save(pipeline, final_alias, terminal=terminal, prefix=_item_prefix(base_prefix, item, index))
+            if sa:
+                save_actions.append(sa)
+        summary = {
+            "steps": len(steps),
+            "items": len(batch),
+            "total_items": len(items),
+            "graphs": total_graphs,
+            "nodes": len(pipeline.workflow),
+            "fragments_used": used_fragments,
+            "save_actions": save_actions,
+        }
+        results.append((pipeline.workflow, summary))
+    return results

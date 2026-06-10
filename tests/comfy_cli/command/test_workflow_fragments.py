@@ -16,6 +16,7 @@ from comfy_cli.fragments import (
     Fragment,
     FragmentError,
     compose_blueprint,
+    compose_blueprints,
     load_fragment,
     parse_fragment,
 )
@@ -557,6 +558,80 @@ class TestComposeCmd:
         assert envelope["error"]["code"] == "blueprint_invalid"
         assert "missing required input" in envelope["error"]["message"]
 
+    def test_compose_foreach_single_graph(self, lib_dir: Path, tmp_path: Path, capsys):
+        blueprint = tmp_path / "fan.yaml"
+        blueprint.write_text(
+            textwrap.dedent("""\
+            foreach:
+              - {id: a, prompt: alpha}
+              - {id: b, prompt: beta}
+              - {id: c, prompt: gamma}
+            pipeline:
+              - fragment: text_encode
+                alias: enc
+                inputs: {clip: clip_a}
+                params: {text: $item.prompt}
+        """)
+        )
+        out = tmp_path / "fan.json"
+        envelope = _run(["compose", str(blueprint), "-o", str(out), "--lib", str(lib_dir)], capsys)
+        assert envelope["ok"] is True
+        assert envelope["data"]["graphs"] == 1
+        assert envelope["data"]["items"] == 3
+        wf = json.loads(out.read_text())
+        texts = {n["inputs"]["text"] for n in wf.values() if n["class_type"] == "CLIPTextEncode"}
+        assert texts == {"alpha", "beta", "gamma"}
+
+    def test_compose_chunk_writes_multiple_files(self, lib_dir: Path, tmp_path: Path, capsys):
+        blueprint = tmp_path / "fan.yaml"
+        blueprint.write_text(
+            textwrap.dedent("""\
+            chunk: 2
+            foreach:
+              - {id: a, prompt: alpha}
+              - {id: b, prompt: beta}
+              - {id: c, prompt: gamma}
+            pipeline:
+              - fragment: text_encode
+                alias: enc
+                inputs: {clip: clip_a}
+                params: {text: $item.prompt}
+        """)
+        )
+        out = tmp_path / "fan.json"
+        envelope = _run(["compose", str(blueprint), "-o", str(out), "--lib", str(lib_dir)], capsys)
+        assert envelope["ok"] is True
+        assert envelope["data"]["graphs"] == 2
+        assert len(envelope["data"]["written"]) == 2
+        for path in envelope["data"]["written"]:
+            assert Path(path).exists()
+
+    def test_compose_foreach_ref_resolves_relative_to_blueprint(self, lib_dir: Path, tmp_path: Path, capsys):
+        (tmp_path / "items.yaml").write_text(
+            textwrap.dedent("""\
+            - {id: a, prompt: one}
+            - {id: b, prompt: two}
+        """)
+        )
+        blueprint = tmp_path / "fan.yaml"
+        blueprint.write_text(
+            textwrap.dedent("""\
+            foreach: {$ref: items.yaml}
+            pipeline:
+              - fragment: text_encode
+                alias: enc
+                inputs: {clip: clip_a}
+                params: {text: $item.prompt}
+        """)
+        )
+        out = tmp_path / "fan.json"
+        envelope = _run(["compose", str(blueprint), "-o", str(out), "--lib", str(lib_dir)], capsys)
+        assert envelope["ok"] is True
+        assert envelope["data"]["items"] == 2
+        wf = json.loads(out.read_text())
+        texts = {n["inputs"]["text"] for n in wf.values() if n["class_type"] == "CLIPTextEncode"}
+        assert texts == {"one", "two"}
+
 
 class TestFragmentCmds:
     def test_ls_lists_library(self, lib_dir: Path, capsys):
@@ -590,3 +665,192 @@ class TestFragmentCmds:
         envelope = _run(["fragment", "validate", "text_encode", "--lib", str(lib_dir)], capsys)
         assert envelope["ok"] is True
         assert envelope["data"]["valid"] is True
+
+
+# ---------------------------------------------------------------------------
+# foreach — fan-out a pipeline template over N items into ONE multi-branch graph
+# ---------------------------------------------------------------------------
+
+
+class TestForeach:
+    def test_inline_list_compiles_to_one_graph_with_n_branches(self, lib_dir: Path):
+        """A 3-item foreach instantiates the pipeline 3× as independent branches."""
+        blueprint = {
+            "foreach": [
+                {"id": "a", "prompt": "alpha"},
+                {"id": "b", "prompt": "beta"},
+                {"id": "c", "prompt": "gamma"},
+            ],
+            "pipeline": [
+                {
+                    "fragment": "text_encode",
+                    "alias": "enc",
+                    "inputs": {"clip": "fake_clip"},
+                    "params": {"text": "$item.prompt"},
+                }
+            ],
+        }
+        graphs = compose_blueprints(blueprint, lib_dir=lib_dir)
+        assert len(graphs) == 1
+        wf, summary = graphs[0]
+        encodes = [n for n in wf.values() if n["class_type"] == "CLIPTextEncode"]
+        # 3 independent branches, one per item, each bound to its own prompt.
+        assert len(encodes) == 3
+        assert {n["inputs"]["text"] for n in encodes} == {"alpha", "beta", "gamma"}
+        assert summary["items"] == 3
+        assert summary["graphs"] == 1
+
+    def test_per_item_alias_namespacing_no_collision(self, lib_dir: Path):
+        """The N copies must not collide on interior node IDs."""
+        blueprint = {
+            "foreach": [{"id": "x", "prompt": "p1"}, {"id": "y", "prompt": "p2"}],
+            "pipeline": [
+                {"fragment": "text_encode", "alias": "enc", "inputs": {"clip": "c"}, "params": {"text": "$item.prompt"}}
+            ],
+        }
+        wf, _ = compose_blueprints(blueprint, lib_dir=lib_dir)[0]
+        encode_ids = [nid for nid, n in wf.items() if n["class_type"] == "CLIPTextEncode"]
+        assert len(encode_ids) == len(set(encode_ids)) == 2
+
+    def test_cross_step_ref_stays_within_item_branch(self, lib_dir: Path):
+        """A `$alias.output` ref must resolve to the SAME item's branch, not another item's."""
+        blueprint = {
+            "foreach": [{"id": "a", "prompt": "first"}, {"id": "b", "prompt": "second"}],
+            "pipeline": [
+                {"fragment": "text_encode", "alias": "p1", "inputs": {"clip": "c"}, "params": {"text": "$item.prompt"}},
+                {
+                    "fragment": "text_encode",
+                    "alias": "p2",
+                    "inputs": {"clip": "$p1.conditioning"},
+                    "params": {"text": "x"},
+                },
+            ],
+        }
+        wf, _ = compose_blueprints(blueprint, lib_dir=lib_dir)[0]
+        # Group the p1 encode (has the item prompt) and p2 encode (text "x") per branch.
+        # Each p2 must wire to a p1 in the same branch — i.e. exactly 2 distinct p1 targets.
+        p2_targets = {
+            tuple(n["inputs"]["clip"])
+            for n in wf.values()
+            if n["class_type"] == "CLIPTextEncode" and n["inputs"]["text"] == "x"
+        }
+        assert len(p2_targets) == 2  # each p2 wires to a distinct p1 in its own branch
+
+    def test_item_whole_value_substitution(self, lib_dir: Path):
+        """`$item` (no field) substitutes the whole item value."""
+        blueprint = {
+            "foreach": ["red", "green"],
+            "pipeline": [
+                {"fragment": "text_encode", "alias": "enc", "inputs": {"clip": "c"}, "params": {"text": "$item"}}
+            ],
+        }
+        wf, _ = compose_blueprints(blueprint, lib_dir=lib_dir)[0]
+        texts = {n["inputs"]["text"] for n in wf.values() if n["class_type"] == "CLIPTextEncode"}
+        assert texts == {"red", "green"}
+
+    def test_per_item_output_prefix_uses_item_id(self, lib_dir: Path):
+        """Auto-saved terminal output prefix incorporates the item id."""
+        blueprint = {
+            "output_prefix": "outputs",
+            "foreach": [{"id": "shotA"}, {"id": "shotB"}],
+            "pipeline": [{"fragment": "image_blend", "alias": "b", "inputs": {"image1": "a.png", "image2": "b.png"}}],
+        }
+        wf, _ = compose_blueprints(blueprint, lib_dir=lib_dir)[0]
+        prefixes = {n["inputs"]["filename_prefix"] for n in wf.values() if n["class_type"] == "SaveImage"}
+        assert prefixes == {"outputs/shotA", "outputs/shotB"}
+
+    def test_ref_loads_items_from_external_yaml(self, lib_dir: Path, tmp_path: Path):
+        """foreach: {$ref: items.yaml} resolves relative to the blueprint dir."""
+        import yaml
+
+        items_file = tmp_path / "items.yaml"
+        items_file.write_text(yaml.safe_dump([{"id": "a", "prompt": "one"}, {"id": "b", "prompt": "two"}]))
+        blueprint = {
+            "foreach": {"$ref": "items.yaml"},
+            "pipeline": [
+                {"fragment": "text_encode", "alias": "enc", "inputs": {"clip": "c"}, "params": {"text": "$item.prompt"}}
+            ],
+        }
+        wf, summary = compose_blueprints(blueprint, lib_dir=lib_dir, blueprint_dir=tmp_path)[0]
+        texts = {n["inputs"]["text"] for n in wf.values() if n["class_type"] == "CLIPTextEncode"}
+        assert texts == {"one", "two"}
+        assert summary["items"] == 2
+
+    def test_chunk_splits_into_multiple_graphs(self, lib_dir: Path):
+        """chunk: 2 over 3 items → ceil(3/2) = 2 graphs (2 items, then 1 item)."""
+        blueprint = {
+            "chunk": 2,
+            "foreach": [
+                {"id": "a", "prompt": "alpha"},
+                {"id": "b", "prompt": "beta"},
+                {"id": "c", "prompt": "gamma"},
+            ],
+            "pipeline": [
+                {"fragment": "text_encode", "alias": "enc", "inputs": {"clip": "c"}, "params": {"text": "$item.prompt"}}
+            ],
+        }
+        graphs = compose_blueprints(blueprint, lib_dir=lib_dir)
+        assert len(graphs) == 2
+        counts = [len([n for n in wf.values() if n["class_type"] == "CLIPTextEncode"]) for wf, _ in graphs]
+        assert counts == [2, 1]
+        # Every item's prompt appears exactly once across all graphs.
+        all_texts = set()
+        for wf, _ in graphs:
+            all_texts |= {n["inputs"]["text"] for n in wf.values() if n["class_type"] == "CLIPTextEncode"}
+        assert all_texts == {"alpha", "beta", "gamma"}
+        for _, summary in graphs:
+            assert summary["graphs"] == 2
+
+    def test_no_foreach_returns_single_graph(self, lib_dir: Path):
+        """compose_blueprints without foreach behaves like a single linear graph."""
+        blueprint = {
+            "pipeline": [{"fragment": "text_encode", "alias": "p", "inputs": {"clip": "c"}, "params": {"text": "hi"}}]
+        }
+        graphs = compose_blueprints(blueprint, lib_dir=lib_dir)
+        assert len(graphs) == 1
+        wf, summary = graphs[0]
+        assert [n for n in wf.values() if n["class_type"] == "CLIPTextEncode"][0]["inputs"]["text"] == "hi"
+        assert summary.get("items") is None or summary["items"] == 1
+
+    def test_empty_foreach_errors(self, lib_dir: Path):
+        blueprint = {
+            "foreach": [],
+            "pipeline": [{"fragment": "text_encode", "alias": "p", "inputs": {"clip": "c"}}],
+        }
+        with pytest.raises(BlueprintError, match="foreach"):
+            compose_blueprints(blueprint, lib_dir=lib_dir)
+
+    def test_missing_item_field_errors(self, lib_dir: Path):
+        blueprint = {
+            "foreach": [{"id": "a"}],
+            "pipeline": [
+                {"fragment": "text_encode", "alias": "p", "inputs": {"clip": "c"}, "params": {"text": "$item.prompt"}}
+            ],
+        }
+        with pytest.raises(BlueprintError, match="prompt"):
+            compose_blueprints(blueprint, lib_dir=lib_dir)
+
+    def test_ref_without_blueprint_dir_errors(self, lib_dir: Path):
+        blueprint = {
+            "foreach": {"$ref": "items.yaml"},
+            "pipeline": [{"fragment": "text_encode", "alias": "p", "inputs": {"clip": "c"}}],
+        }
+        with pytest.raises(BlueprintError, match="\\$ref"):
+            compose_blueprints(blueprint, lib_dir=lib_dir)
+
+
+# ---------------------------------------------------------------------------
+# _substitute_item — alias_refs flag prevents namespacing literal string params
+# ---------------------------------------------------------------------------
+
+
+def test_foreach_literal_string_param_not_namespaced():
+    from comfy_cli.fragments import _substitute_item
+
+    # params path: alias-looking literals must NOT be rewritten
+    assert _substitute_item("$brand.tagline", {"x": 1}, ns="i0", alias_refs=False) == "$brand.tagline"
+    # inputs path: $alias.output cross-step refs ARE namespaced (unchanged behavior)
+    assert _substitute_item("$brand.tagline", {"x": 1}, ns="i0", alias_refs=True) == "$i0__brand.tagline"
+    # $item substitution still works on both paths
+    assert _substitute_item("$item.x", {"x": 42}, ns="i0", alias_refs=False) == 42
+    assert _substitute_item("$item.x", {"x": 42}, ns="i0", alias_refs=True) == 42
