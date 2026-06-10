@@ -209,13 +209,10 @@ def whoami_cmd():
             if has_api_key:
                 if oauth_usable:
                     rprint(
-                        f"[dim]OAuth session is preferred; X-API-Key from {api_key_source} "
-                        f"present but unused.[/dim]"
+                        f"[dim]OAuth session is preferred; X-API-Key from {api_key_source} present but unused.[/dim]"
                     )
                 else:
-                    rprint(
-                        f"[dim]OAuth session expired — falling back to X-API-Key from {api_key_source}.[/dim]"
-                    )
+                    rprint(f"[dim]OAuth session expired — falling back to X-API-Key from {api_key_source}.[/dim]")
         else:
             from comfy_cli.output.branding import signed_out_banner
 

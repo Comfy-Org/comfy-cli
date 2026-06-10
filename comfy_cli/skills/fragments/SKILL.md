@@ -229,9 +229,10 @@ All commands emit JSON envelopes under `comfy --json`. The composer
 exits non-zero on validation errors with structured error codes
 (`fragment_invalid`, `blueprint_invalid`, `blueprint_not_found`,
 `fragment_lib_not_found`) — caught at compose time, not after cloud spend.
-`fragment_lib_not_found` is raised by `workflow fragment ls` when an
-explicit `--lib` path doesn't exist; a missing fragment during `compose`
-surfaces as `fragment_invalid` instead.
+`fragment_lib_not_found` is raised by `workflow fragment ls` when the
+library directory (explicit `--lib`, or the default `./fragments`)
+doesn't exist yet — create it when you author your first fragment. A
+missing fragment during `compose` surfaces as `fragment_invalid` instead.
 
 ---
 
@@ -532,7 +533,7 @@ Honest limits:
 | code | what's wrong | what to fix |
 |---|---|---|
 | `fragment_invalid` | The fragment file itself is malformed (bad `_fragment` header, missing fields, dangling `binds`) | Read the error message; fix the fragment JSON |
-| `fragment_lib_not_found` | An explicit `--lib` path passed to `fragment ls` doesn't exist | Pass a valid `--lib <real_path>` or omit to use the bundled library |
+| `fragment_lib_not_found` | The library directory passed to `fragment ls` (explicit `--lib`, or the default `./fragments`) doesn't exist | Create `./fragments/` and author a fragment, or pass a valid `--lib <real_path>` |
 | `blueprint_not_found` | The blueprint YAML path doesn't exist | Check the path |
 | `blueprint_invalid_yaml` | The blueprint file isn't valid YAML | Run it through `yamllint` |
 | `blueprint_invalid` | The blueprint semantically fails (missing fragment, missing input, unknown input key, duplicate alias) | Read the error — it names the offending step alias |

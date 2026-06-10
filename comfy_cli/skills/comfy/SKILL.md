@@ -114,49 +114,46 @@ mechanism by complexity and reuse — not as a quality ranking:
    the next likely step is "make it longer", "add another shot", "vary seeds",
    "reuse this with a different prompt", or "chain another model".
 
-   **a. Discover nodes** for each step of the pipeline:
+   There is no shipped fragment library. A fragment is what YOU write
+   *after* deriving the wiring from live sources — distilled knowledge,
+   kept in the project's `./fragments/`. The loop below is the reusable
+   part; the artifacts it produces depend on what YOUR backend has today.
+
+   **a. Survey the space** — compare OSS, partner, and gallery options
+   before choosing (swap `video`/`VIDEO` for the media type at hand):
    ```bash
-   comfy --json nodes show GrokImageNode         # check inputs/outputs
-   comfy --json nodes show KlingImage2VideoNode   # check inputs/outputs
+   comfy --json templates ls --type video --limit 10        # working exemplar graphs
+   comfy --json nodes ls --produces VIDEO --exclude-deprecated
+   comfy --json nodes ls --category "api node/video*"       # partner providers
    ```
 
-   **b. Create one fragment per logical step** — write to `fragments/<name>.json`:
-   Each fragment wraps 1-15 nodes with a `_fragment` header declaring
-   typed inputs, outputs, and params. The interior nodes are standard
-   API-format ComfyUI JSON. Mark caller-supplied values as `"PLACEHOLDER"`.
+   **b. Learn the wiring from a real graph.** Templates are
+   upstream-curated, *working* workflows — THE reference for how nodes
+   actually wire (positive vs negative conditioning, lora'd CLIP feeding
+   both text encoders, VAE-from-checkpoint, denoise semantics):
+   ```bash
+   comfy templates fetch <name-from-YOUR-survey> --out ref.json
+   comfy --json workflow slots ref.json          # its addressable surface
+   ```
+   Or derive from the type graph directly:
+   ```bash
+   comfy --json nodes show <NodeClass-from-YOUR-survey> --where cloud  # exact schema + enum choices
+   comfy nodes path IMAGE VIDEO                  # what CAN connect these types
+   ```
 
-   **c. Validate each fragment:**
+   **c. Distill into a local fragment** — author `./fragments/<name>.json`
+   capturing the wiring you derived: 1-15 standard API-format nodes wrapped
+   with a `_fragment` header declaring typed inputs, outputs, and params
+   (caller-supplied values marked `"PLACEHOLDER"`). Make EVERY asset/model
+   name a required param with no default, so the next composition
+   re-discovers instead of inheriting. Load the `comfy-fragments` skill for
+   the format, then check your work:
    ```bash
    comfy --json workflow fragment validate <name>
    ```
 
-   **d. Write a YAML blueprint** in `blueprints/<name>.yaml` that wires
-   the fragments together — cross-step refs use `$alias.output_name`.
-   The bundled library (no authoring needed) covers the common t2i → i2v case:
-   ```yaml
-   # video.yaml — t2i → i2v using the BUNDLED fragments (no authoring needed)
-   pipeline:
-     - fragment: flux_t2i          # bundled: text → image (Flux partner node)
-       alias: hero
-       params:
-         prompt: "a fennec fox astronaut, golden hour"
-     - fragment: kling_i2v         # bundled: image → video (Kling partner node)
-       alias: vid
-       inputs:
-         start_frame: $hero.image  # ← flux_t2i output "image" → kling_i2v input "start_frame"
-       params:
-         duration: "5"
-   ```
-   ```bash
-   comfy workflow fragment ls                  # bundled library always available (source: bundled)
-   comfy workflow compose video.yaml -o video.json
-   comfy run --workflow video.json --where cloud
-   ```
-   Bundled today: `flux_t2i`, `kling_i2v`, `seedance_i2v`, `nano_banana_edit` (partner nodes)
-   and `sdxl_t2i_lora` (OSS — checkpoint and lora names are required discoverable params).
-   Local `./fragments/<name>.json` shadows a bundled name.
-
-   **e. Compose + run:**
+   **d. Compose + run** — a YAML blueprint in `blueprints/<name>.yaml`
+   wires your fragments together; cross-step refs use `$alias.output_name`:
    ```bash
    comfy workflow compose blueprints/<name>.yaml -o workflows/<name>.json
    RES=$(comfy --json run --workflow workflows/<name>.json)
@@ -164,8 +161,35 @@ mechanism by complexity and reuse — not as a quality ranking:
    comfy --json jobs watch "$PROMPT_ID"
    ```
 
-   For the full fragment format and blueprint syntax, load the
-   `comfy-fragments` skill.
+   **Trace (video, partner node) — a record of one run of the loop, NOT a
+   recommendation.** On this backend, today, the survey returned what's
+   sketched below; yours WILL differ — pick from YOUR rows:
+   ```bash
+   comfy --json nodes ls --category "api node/video*" --limit 10
+   # → today's rows included an image-to-video partner node; call it <I2VNode>
+   comfy --json nodes show <I2VNode> --where cloud
+   # → schema said: start image + prompt + a duration enum in, VIDEO out
+   comfy nodes path IMAGE VIDEO   # confirmed the route; SaveVideo still required at the end
+   ```
+   The agent then AUTHORED `./fragments/i2v.json` (input `start_frame:
+   IMAGE`; params `prompt`, `duration` — all required) and wired it behind
+   a t2i fragment derived the same way from an image survey:
+   ```yaml
+   # blueprints/video.yaml — both fragments written by the agent, not shipped
+   pipeline:
+     - fragment: t2i             # ./fragments/t2i.json — from YOUR image survey
+       alias: hero
+       params: {prompt: "a fennec fox astronaut, golden hour"}
+     - fragment: i2v             # ./fragments/i2v.json — derived above
+       alias: vid
+       inputs:
+         start_frame: $hero.image   # ← t2i output "image" → i2v input "start_frame"
+       params: {duration: "<a value from the enum nodes show returned>"}
+   ```
+
+   `comfy workflow fragment ls` lists `./fragments` — it errors with
+   `fragment_lib_not_found` until that directory exists, so create it when
+   you author your first fragment.
 
    Prefer a single composed workflow with repeated fragment instances over a
    loop of separate `comfy run` calls. For example, a music video should be a
@@ -263,7 +287,9 @@ exposes.
 **Discover → wire loop — every asset type, never hardcoded names:**
 
 Every asset name (checkpoint, lora, controlnet, vae, upscaler, embedding,
-clip-vision model, …) must be discovered at runtime — never hardcoded. The
+clip-vision model, …) must be discovered at runtime — never hardcoded. Do
+not default to any model family you've seen in examples, either — the
+survey IS the decision input; backends differ and the ecosystem moves. The
 pattern is the same regardless of type:
 
 ```bash
@@ -275,10 +301,7 @@ comfy --json models search --type vae --where cloud --limit 5
 comfy --json models search --type upscale --where cloud --limit 5
 comfy --json models search --type embeddings --where cloud --limit 5
 
-# 2. Take rows[0].name verbatim — paste it into your blueprint param
-# Example: wire a lora into the bundled sdxl_t2i_lora fragment:
-comfy --json models search --type lora --where cloud --text "detail" --limit 5
-# → use rows[0].name as the lora_name param below
+# 2. Take rows[0].name verbatim — paste it into your fragment's required param
 
 # 3. Precision check — what will the server actually accept?
 comfy --json nodes show LoraLoader --where cloud
@@ -286,10 +309,29 @@ comfy --json nodes show LoraLoader --where cloud
 # Same pattern for any loader: ControlNetLoader, VAELoader, UpscaleModelLoader, etc.
 ```
 
-Worked lora instance — using the bundled `sdxl_t2i_lora` fragment:
+**Trace (image, OSS checkpoint + lora) — one run of the loop, NOT a
+recommendation.** On this backend, today, the survey returned the rows
+sketched below; yours will differ — pick from YOUR rows:
+
+```bash
+comfy --json models search --type checkpoint --where cloud --limit 5  # → picked <ckpt> from rows
+comfy --json models search --type lora --where cloud --limit 5        # → picked <lora> from rows
+# Learn the lora wiring from a real graph, not memory — fetch a matching template:
+comfy --json templates ls --type image --model "<family of <ckpt>, from its row>"
+comfy templates fetch <name-from-those-rows> --out ref.json   # read how it wires
+# …or derive it from the type graph:
+comfy --json nodes show LoraLoader --where cloud  # MODEL+CLIP in, MODEL+CLIP out —
+#   the lora'd CLIP must feed BOTH text encoders, not just positive
+comfy nodes path MODEL IMAGE                      # sampler → decode → save spine
+```
+
+The agent then authored `./fragments/<your_name>.json` with `ckpt_name`
+and `lora_name` as required params (no defaults) and drove it from a
+blueprint:
+
 ```yaml
 pipeline:
-  - fragment: sdxl_t2i_lora
+  - fragment: <your_name>        # the fragment YOU just wrote
     alias: out
     params:
       ckpt_name: "<rows[0].name from checkpoint search>"
@@ -726,7 +768,7 @@ foreach:
   - {id: b, prompt: "a neon city"}
   - {id: c, prompt: "a desert at dusk"}
 pipeline:
-  - fragment: flux_t2i          # bundled: text → image (Flux partner node)
+  - fragment: t2i               # ./fragments/t2i.json — a fragment YOU authored via the derivation loop
     alias: shot
     params:
       prompt: $item.prompt
