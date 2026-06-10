@@ -26,6 +26,7 @@ from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
 
 from comfy_cli import tracking, ui
 from comfy_cli.command.generate import adapters, client, emit, output, poll, schema, spec, upload
+from comfy_cli.output.renderer import get_renderer
 
 _HELP = "Generate images via ComfyUI partner nodes (Flux, Ideogram, DALL·E, Recraft, Stability, …)."
 
@@ -229,18 +230,25 @@ def _generate(model: str, extra_args: list[str]) -> None:
             # — no proxy call, no API key required. The artifact is the result.
             name = gen_props["model_alias"] or ep.id
             prefix = meta.get("output-prefix") if isinstance(meta.get("output-prefix"), str) else "generate"
+            renderer = get_renderer()
             try:
                 workflow = emit.write_workflow(name, values, Path(emit_path).expanduser(), output_prefix=prefix)
             except emit.EmitError as e:
-                rprint(f"[bold red]{e}[/bold red]")
                 _track_error("emit", e)
-                raise typer.Exit(code=1)
+                renderer.error(
+                    code="emit_workflow_failed",
+                    message=str(e),
+                    hint="check the model name and that all required inputs are provided",
+                )
+                raise typer.Exit(code=1) from e
             tracking.track_event("generate:emit", {**gen_props, "node_count": len(workflow)})
-            if as_json:
-                output.print_json(workflow)
-            else:
+            if renderer.is_pretty():
                 rprint(f"[bold green]Wrote workflow:[/bold green] {emit_path}")
                 rprint(f"  run it: comfy run --workflow {emit_path}")
+            renderer.emit(
+                {"out": str(Path(emit_path).expanduser()), "model": name, "nodes": len(workflow)},
+                command="generate emit-workflow",
+            )
             return
 
         try:

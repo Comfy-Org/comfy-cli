@@ -399,6 +399,12 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "Cloud requires authentication in non-interactive mode.",
         "pass --api-key sk-... or run `comfy cloud login` first",
     ),
+    # --- generate / emit -----------------------------------------------------
+    ErrorCode(
+        "emit_workflow_failed",
+        "`generate --emit-workflow` could not build the partner-node workflow.",
+        "check the model name and that all required inputs are provided",
+    ),
     # --- feedback ------------------------------------------------------------
     ErrorCode(
         "feedback_message_required",
