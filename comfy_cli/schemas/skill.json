@@ -7,7 +7,23 @@
     "scope": { "type": "string" },
     "dry_run": { "type": "boolean" },
     "results": { "type": "array" },
-    "targets": { "type": "array" },
+    "targets": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "skill": { "type": "string" },
+          "kind": { "type": "string" },
+          "scope": { "type": "string" },
+          "path": { "type": "string" },
+          "installed": { "type": "boolean" },
+          "state": {
+            "type": "string",
+            "enum": ["current", "stale", "modified", "missing", "unmanaged"]
+          }
+        }
+      }
+    },
     "content": { "type": "string" },
     "skills": { "type": "array" },
     "valid": { "type": "boolean" },

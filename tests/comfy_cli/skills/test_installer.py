@@ -441,3 +441,127 @@ def test_validate_command_rejects_evil_name(tmp_path: Path):
         assert envelope["error"]["code"] == "skill_invalid"
     finally:
         reset_renderer_for_testing()
+
+
+# ---------------------------------------------------------------------------
+# Manifest (provenance + staleness) — Task 9
+# ---------------------------------------------------------------------------
+
+
+def test_install_records_manifest(tmp_path: Path):
+    """Installing writes a manifest entry: target path -> {skill, sha256, cli_version}."""
+    import hashlib
+
+    from comfy_cli.skills import manifest_path, read_manifest, skill_content
+
+    results = install(scope="project", project_root=tmp_path, skills=["comfy-debug"], targets=["claude-code"])
+    assert results[0].action == "wrote"
+
+    mpath = manifest_path()
+    assert mpath.exists(), f"manifest file not created at {mpath}"
+    manifest = read_manifest()
+
+    installed_path = str(tmp_path / ".claude" / "skills" / "comfy-debug" / "SKILL.md")
+    assert installed_path in manifest, f"manifest missing entry for {installed_path}"
+    entry = manifest[installed_path]
+    assert entry["skill"] == "comfy-debug"
+    assert "sha256" in entry
+    assert "cli_version" in entry
+
+    expected_sha = hashlib.sha256(skill_content("comfy-debug").encode("utf-8")).hexdigest()
+    assert entry["sha256"] == expected_sha
+
+
+def test_prune_skips_unmanaged_files(tmp_path: Path):
+    """A user-authored skill at a retired-name path is NOT deleted by prune when manifest exists."""
+    from comfy_cli.skills import manifest_path, write_manifest
+
+    # Seed a file at a retired-skill path but do NOT put it in the manifest.
+    retired_name = RETIRED_SKILLS[0]
+    claude_path = tmp_path / ".claude" / "skills" / retired_name / "SKILL.md"
+    claude_path.parent.mkdir(parents=True, exist_ok=True)
+    claude_path.write_text("# user-authored content — must survive\n", encoding="utf-8")
+
+    # Write a manifest that exists but does NOT contain this path.
+    mpath = manifest_path()
+    mpath.parent.mkdir(parents=True, exist_ok=True)
+    write_manifest({"some/other/path": {"skill": "comfy", "sha256": "abc", "cli_version": "0.0.0"}})
+
+    # Run prune — manifest exists but doesn't record this file as comfy-managed.
+    results = prune_retired(scope="project", project_root=tmp_path, targets=["claude-code"])
+
+    assert claude_path.exists(), "prune must NOT delete unmanaged files when manifest exists"
+    result_for_name = [r for r in results if r.skill == retired_name and r.kind == "claude-code"]
+    assert result_for_name, "should still report a result for the retired skill"
+    assert result_for_name[0].action == "absent"
+
+
+def test_status_reports_stale_and_modified(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """status distinguishes current / stale (bundled content moved on) / modified (user edited)."""
+    import hashlib
+    import json as _json
+
+    from comfy_cli.skills import read_manifest, write_manifest
+    from comfy_cli.skills.command import app
+
+    # status_cmd resolves project_root from Path.cwd() — point it at tmp_path.
+    monkeypatch.chdir(tmp_path)
+
+    runner = CliRunner()
+
+    def _invoke_status():
+        """Re-arm the JSON renderer for each CliRunner invocation (each creates a new stdout)."""
+        _force_json_renderer()
+        try:
+            result = runner.invoke(app, ["status", "--scope", "project"])
+        finally:
+            reset_renderer_for_testing()
+        return result
+
+    try:
+        # Step 1: install comfy-debug into claude-code only, then check status.
+        install(scope="project", project_root=tmp_path, skills=["comfy-debug"], targets=["claude-code"])
+        result = _invoke_status()
+        assert result.exit_code == 0, result.output
+        lines = [ln for ln in result.output.splitlines() if ln.strip()]
+        envelope = _json.loads(lines[-1])
+        rows = envelope["data"]["targets"]
+        debug_row = next((r for r in rows if r["skill"] == "comfy-debug" and r["kind"] == "claude-code"), None)
+        assert debug_row is not None
+        assert debug_row["state"] == "current"
+
+        # Step 2: edit the installed file — state should become 'modified'.
+        installed_path = tmp_path / ".claude" / "skills" / "comfy-debug" / "SKILL.md"
+        installed_path.write_text(installed_path.read_text(encoding="utf-8") + "\n# user edit\n", encoding="utf-8")
+
+        result2 = _invoke_status()
+        assert result2.exit_code == 0, result2.output
+        lines2 = [ln for ln in result2.output.splitlines() if ln.strip()]
+        envelope2 = _json.loads(lines2[-1])
+        rows2 = envelope2["data"]["targets"]
+        debug_row2 = next((r for r in rows2 if r["skill"] == "comfy-debug" and r["kind"] == "claude-code"), None)
+        assert debug_row2 is not None
+        assert debug_row2["state"] == "modified"
+
+        # Step 3: restore the file to bundled content but with an old (stale) manifest hash.
+        # file sha == manifest sha != bundled sha  →  state == 'stale'
+        stale_content = "# stale version of the skill\n"
+        installed_path.write_text(stale_content, encoding="utf-8")
+        manifest = read_manifest()
+        manifest[str(installed_path)] = {
+            "skill": "comfy-debug",
+            "sha256": hashlib.sha256(stale_content.encode("utf-8")).hexdigest(),
+            "cli_version": "0.0.0",
+        }
+        write_manifest(manifest)
+
+        result3 = _invoke_status()
+        assert result3.exit_code == 0, result3.output
+        lines3 = [ln for ln in result3.output.splitlines() if ln.strip()]
+        envelope3 = _json.loads(lines3[-1])
+        rows3 = envelope3["data"]["targets"]
+        debug_row3 = next((r for r in rows3 if r["skill"] == "comfy-debug" and r["kind"] == "claude-code"), None)
+        assert debug_row3 is not None
+        assert debug_row3["state"] == "stale"
+    finally:
+        reset_renderer_for_testing()

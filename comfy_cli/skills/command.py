@@ -26,9 +26,11 @@ from comfy_cli.output import get_renderer, rprint
 from comfy_cli.skills import (
     BUNDLED_SKILLS,
     TargetKind,
+    _compute_skill_state,
     bundled_skill_names,
     load_skill_source,
     plan_install,
+    read_manifest,
     skill_content,
 )
 from comfy_cli.skills import (
@@ -332,16 +334,20 @@ def status_cmd(
     renderer = get_renderer()
     s = _scope(scope)
     plans = plan_install(scope=s, project_root=Path.cwd())
-    rows = [
-        {
-            "skill": p.skill,
-            "kind": p.kind,
-            "scope": p.scope,
-            "path": str(p.path),
-            "installed": p.exists,
-        }
-        for p in plans
-    ]
+    manifest = read_manifest()
+    rows = []
+    for p in plans:
+        state = _compute_skill_state(p.path, p.skill, manifest)
+        rows.append(
+            {
+                "skill": p.skill,
+                "kind": p.kind,
+                "scope": p.scope,
+                "path": str(p.path),
+                "installed": p.exists,
+                "state": state,
+            }
+        )
     if renderer.is_pretty():
         from rich.console import Group
         from rich.table import Table
@@ -356,10 +362,17 @@ def status_cmd(
         )
         tbl.add_column("Skill", style="bold cyan", no_wrap=True)
         tbl.add_column("Target", style="bold white", no_wrap=True)
-        tbl.add_column("Installed", no_wrap=True)
+        tbl.add_column("State", no_wrap=True)
         tbl.add_column("Path", style="dim", overflow="fold")
+        _STATE_STYLES = {
+            "current": "[bold green]current[/bold green]",
+            "stale": "[yellow]stale[/yellow]",
+            "modified": "[bold yellow]modified[/bold yellow]",
+            "missing": "[dim]missing[/dim]",
+            "unmanaged": "[cyan]unmanaged[/cyan]",
+        }
         for r in rows:
-            badge = "[bold green]✓[/bold green]" if r["installed"] else "[dim]–[/dim]"
+            badge = _STATE_STYLES.get(r["state"], r["state"])
             tbl.add_row(r["skill"], r["kind"], badge, r["path"])
         header = Text(f"{s} scope", style="dim")
         _print_skill_panel("skill status", Group(header, Text(""), tbl))

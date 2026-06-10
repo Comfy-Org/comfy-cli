@@ -26,6 +26,8 @@ Bundled skills (4 total):
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import re
 from collections.abc import Sequence
@@ -171,6 +173,114 @@ def load_skill_source(token: str) -> SkillSource:
     return SkillSource(name=name, content=content, bundled=False)
 
 
+# ---------------------------------------------------------------------------
+# Install manifest — provenance and staleness tracking
+# ---------------------------------------------------------------------------
+
+
+def manifest_path() -> Path:
+    """Return the path to the skills install manifest (in the CLI config dir)."""
+    from comfy_cli.config_manager import ConfigManager
+
+    return Path(ConfigManager().get_config_path()) / "skills-manifest.json"
+
+
+def read_manifest() -> dict:
+    """Read the manifest; returns {} on missing or corrupt file."""
+    try:
+        return json.loads(manifest_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def write_manifest(manifest: dict) -> None:
+    """Atomically write the manifest (tmp + rename so a SIGINT can't corrupt it)."""
+    path = manifest_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(f".{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def _sha256(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _record_installed(target_path: Path, skill_name: str, content: str) -> None:
+    """Add or update the manifest entry for a successfully installed skill file."""
+    from comfy_cli.config_manager import ConfigManager
+
+    try:
+        cli_version = ConfigManager().get_cli_version()
+    except Exception:
+        cli_version = "0.0.0"
+
+    manifest = read_manifest()
+    manifest[str(target_path)] = {
+        "skill": skill_name,
+        "sha256": _sha256(content),
+        "cli_version": cli_version,
+    }
+    write_manifest(manifest)
+
+
+def _remove_manifest_entry(target_path: Path) -> None:
+    """Remove the manifest entry for an uninstalled skill file (if present)."""
+    manifest = read_manifest()
+    key = str(target_path)
+    if key in manifest:
+        del manifest[key]
+        write_manifest(manifest)
+
+
+SkillState = Literal["current", "stale", "modified", "missing", "unmanaged"]
+
+
+def _compute_skill_state(path: Path, skill_name: str, manifest: dict) -> SkillState:
+    """Compute the provenance state for a single installed skill file.
+
+    States:
+    - missing    — file does not exist on disk
+    - current    — file matches the current bundled content exactly
+    - stale      — file matches the manifest sha (user hasn't edited) but bundled moved on
+    - modified   — file differs from manifest sha (user has edited it)
+    - unmanaged  — file exists, no manifest entry, and differs from bundled content
+    """
+    if not path.exists():
+        return "missing"
+
+    try:
+        file_content = path.read_text(encoding="utf-8")
+    except OSError:
+        return "missing"
+
+    file_sha = _sha256(file_content)
+
+    # Try to get the current bundled content hash for comparison.
+    try:
+        bundled_content = skill_content(skill_name)
+        bundled_sha = _sha256(bundled_content)
+    except ValueError:
+        # Not a bundled skill (path-based) — only manifest tells us if it's unmodified.
+        bundled_sha = None
+
+    if bundled_sha is not None and file_sha == bundled_sha:
+        return "current"
+
+    entry = manifest.get(str(path))
+    if entry is None:
+        # File exists, no manifest, differs from bundled — unmanaged.
+        return "unmanaged"
+
+    manifest_sha = entry.get("sha256", "")
+    if file_sha == manifest_sha:
+        # File matches what was installed (user hasn't edited), but bundled moved on.
+        return "stale"
+
+    # File differs from both manifest and bundled — user edited it.
+    return "modified"
+
+
 def _agents_fence(skill_name: str) -> tuple[str, str]:
     return (f"<!-- {skill_name}:start -->", f"<!-- {skill_name}:end -->")
 
@@ -274,8 +384,10 @@ def install(
             content = content_map[plan.skill]
             if plan.kind == "claude-code":
                 _write_claude_skill(plan.path, content)
+                _record_installed(plan.path, plan.skill, content)
             elif plan.kind == "cursor":
                 _write_cursor_rule(plan.path, content, skill_name=plan.skill)
+                _record_installed(plan.path, plan.skill, content)
             elif plan.kind == "agents-md":
                 _upsert_agents_md_block(plan.path, content, skill_name=plan.skill)
             results.append(
@@ -327,6 +439,7 @@ def uninstall(
             else:
                 if plan.path.exists():
                     plan.path.unlink()
+                    _remove_manifest_entry(plan.path)
                     results.append(
                         TargetResult(
                             skill=plan.skill,
@@ -370,21 +483,35 @@ def _agents_block_present(path: Path, skill_name: str) -> bool:
 
 def _prune_one(name: str, kind: TargetKind, scope: Scope, path: Path, dry_run: bool) -> TargetResult:
     present = _agents_block_present(path, name) if kind == "agents-md" else path.exists()
+    if not present:
+        return TargetResult(skill=name, kind=kind, scope=scope, path=path, action="absent")
+
+    # Manifest guard: only delete a file when:
+    #   (a) the manifest records it as comfy-managed, OR
+    #   (b) no manifest file exists (legacy pre-manifest installs — converge anyway).
+    if kind != "agents-md":
+        mfile = manifest_path()
+        manifest_exists = mfile.exists()
+        if manifest_exists:
+            manifest = read_manifest()
+            if str(path) not in manifest:
+                # File exists but is not comfy-managed — skip to preserve user files.
+                return TargetResult(skill=name, kind=kind, scope=scope, path=path, action="absent")
+
     if dry_run:
         return TargetResult(
             skill=name,
             kind=kind,
             scope=scope,
             path=path,
-            action="would_remove" if present else "absent",
+            action="would_remove",
         )
-    if not present:
-        return TargetResult(skill=name, kind=kind, scope=scope, path=path, action="absent")
     try:
         if kind == "agents-md":
             _remove_agents_md_block(path, skill_name=name)
         else:
             path.unlink()
+            _remove_manifest_entry(path)
             # Claude skills live in their own <name>/ dir — drop it if now empty.
             if kind == "claude-code" and not any(path.parent.iterdir()):
                 path.parent.rmdir()
