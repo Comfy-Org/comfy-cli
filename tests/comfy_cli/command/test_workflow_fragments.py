@@ -606,6 +606,37 @@ class TestComposeCmd:
         for path in envelope["data"]["written"]:
             assert Path(path).exists()
 
+    def test_compose_chunk_clears_stale_unnumbered_file(self, lib_dir: Path, tmp_path: Path, capsys):
+        """chunked compose must unlink any stale unnumbered base_out and set out=None."""
+        blueprint = tmp_path / "fan.yaml"
+        blueprint.write_text(
+            textwrap.dedent("""\
+            chunk: 2
+            foreach:
+              - {id: a, prompt: alpha}
+              - {id: b, prompt: beta}
+              - {id: c, prompt: gamma}
+            pipeline:
+              - fragment: text_encode
+                alias: enc
+                inputs: {clip: clip_a}
+                params: {text: $item.prompt}
+        """)
+        )
+        out = tmp_path / "fan.json"
+        # Pre-write a stale unnumbered file (simulates a prior single-graph compose).
+        out.write_text('{"stale": true}', encoding="utf-8")
+        assert out.exists()  # confirm setup
+
+        envelope = _run(["compose", str(blueprint), "-o", str(out), "--lib", str(lib_dir)], capsys)
+        assert envelope["ok"] is True
+        # The stale unnumbered file must have been removed.
+        assert not out.exists(), "stale unnumbered base_out must be deleted on chunked compose"
+        # out must be None for multi-graph (no single runnable file).
+        assert envelope["data"]["out"] is None, "envelope.data.out must be None for chunked compose"
+        # written must list both chunk files.
+        assert len(envelope["data"]["written"]) == 2
+
     def test_compose_foreach_ref_resolves_relative_to_blueprint(self, lib_dir: Path, tmp_path: Path, capsys):
         (tmp_path / "items.yaml").write_text(
             textwrap.dedent("""\

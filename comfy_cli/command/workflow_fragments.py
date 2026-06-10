@@ -18,7 +18,7 @@ from comfy_cli import tracking
 from comfy_cli.fragments import (
     BlueprintError,
     FragmentError,
-    compose_blueprint,
+    compose_blueprints,
     load_fragment,
     resolve_fragment_name,
 )
@@ -76,7 +76,7 @@ def compose_cmd(
 
     lib_dir = _default_lib_dir(lib)
     try:
-        workflow, summary = compose_blueprint(blueprint_data, lib_dir=lib_dir)
+        graphs = compose_blueprints(blueprint_data, lib_dir=lib_dir, blueprint_dir=blueprint.parent)
     except FragmentError as e:
         renderer.error(code="fragment_invalid", message=str(e), hint=e.hint or "", details={"path": e.path})
         raise typer.Exit(code=1) from e
@@ -86,23 +86,51 @@ def compose_cmd(
         )
         raise typer.Exit(code=1) from e
 
-    out_path = out or blueprint.with_suffix(".compiled.json")
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(json.dumps(workflow, indent=2), encoding="utf-8")
+    base_out = out or blueprint.with_suffix(".compiled.json")
+    base_out.parent.mkdir(parents=True, exist_ok=True)
 
+    # A single graph keeps the simple `<out>` name; `chunk:` fan-out writes one
+    # numbered file per graph (`<stem>.000.json`, `<stem>.001.json`, ...).
+    written: list[str] = []
+    if len(graphs) == 1:
+        workflow, _ = graphs[0]
+        base_out.write_text(json.dumps(workflow, indent=2), encoding="utf-8")
+        written.append(str(base_out))
+        single_out: str | None = str(base_out)
+    else:
+        # Chunked fan-out: numbered files only. Remove any stale unnumbered file
+        # from a prior single-graph compose so `comfy run <out>` can't execute it.
+        if base_out.exists():
+            base_out.unlink()
+        for i, (workflow, _) in enumerate(graphs):
+            target = base_out.with_suffix(f".{i:03d}{base_out.suffix}")
+            target.write_text(json.dumps(workflow, indent=2), encoding="utf-8")
+            written.append(str(target))
+        single_out = None  # no single runnable file; consumers must read `written`
+
+    first_summary = graphs[0][1]
+    total_nodes = sum(s["nodes"] for _, s in graphs)
+    fragments_used = sorted({f for _, s in graphs for f in s["fragments_used"]})
     payload = {
         "blueprint": str(blueprint),
-        "out": str(out_path),
-        **summary,
+        "out": single_out,
+        "graphs": len(graphs),
+        "written": written,
+        "steps": first_summary["steps"],
+        "nodes": total_nodes,
+        "fragments_used": fragments_used,
     }
+    if "total_items" in first_summary:
+        payload["items"] = first_summary["total_items"]
     if renderer.is_pretty():
-        rprint(f"[green]✓[/green] composed [bold]{out_path}[/bold]")
-        rprint(f"  steps     : {summary['steps']}")
-        rprint(f"  nodes     : {summary['nodes']}")
-        rprint(f"  fragments : {', '.join(summary['fragments_used'])}")
-        if summary.get("save_action"):
-            sa = summary["save_action"]
-            rprint(f"  saving    : {sa['type']} → '{sa['prefix']}'")
+        rprint(f"[green]✓[/green] composed [bold]{len(graphs)} graph(s)[/bold]")
+        for path in written:
+            rprint(f"  [dim]→[/dim] {path}")
+        if "total_items" in first_summary:
+            rprint(f"  items     : {first_summary['total_items']}")
+        rprint(f"  steps     : {first_summary['steps']}")
+        rprint(f"  nodes     : {total_nodes}")
+        rprint(f"  fragments : {', '.join(fragments_used)}")
     renderer.emit(payload, command="workflow compose")
 
 
