@@ -886,7 +886,7 @@ class TestWildcardHostSubstitution:
 
         with patch("comfy_cli.command.run.check_comfy_server_running", side_effect=fake_check):
             with pytest.raises(typer.Exit):
-                execute(workflow_file, host="0.0.0.0", port=8188, json_mode=True)
+                execute(workflow_file, host="0.0.0.0", port=8188)
         assert captured["check_host"] == "127.0.0.1"
 
     def test_other_local_hosts_not_substituted(self, workflow_file):
@@ -898,7 +898,7 @@ class TestWildcardHostSubstitution:
 
         with patch("comfy_cli.command.run.check_comfy_server_running", side_effect=fake_check):
             with pytest.raises(typer.Exit):
-                execute(workflow_file, host="localhost", port=8188, json_mode=True)
+                execute(workflow_file, host="localhost", port=8188)
         assert captured["check_host"] == "localhost"
 
 

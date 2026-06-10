@@ -24,12 +24,10 @@ from comfy_cli import cancellation, jobs_state
 
 # Re-exports — names patched by tests live at this namespace.
 from comfy_cli.command.run.credentials import _resolve_partner_credential as _resolve_partner_credential
-from comfy_cli.command.run.emitter import JsonEmitter as JsonEmitter
 from comfy_cli.command.run.execution import ExecutionProgress as ExecutionProgress
 from comfy_cli.command.run.execution import WorkflowExecution as WorkflowExecution
 from comfy_cli.command.run.execution import _safe_close as _safe_close
 from comfy_cli.command.run.loader import _MAX_BODY_PREVIEW as _MAX_BODY_PREVIEW
-from comfy_cli.command.run.loader import SCHEMA_VERSION as SCHEMA_VERSION
 from comfy_cli.command.run.loader import WorkflowLoadError as WorkflowLoadError
 from comfy_cli.command.run.loader import _classify_api_workflow as _classify_api_workflow
 from comfy_cli.command.run.loader import _load_workflow_file as _load_workflow_file
@@ -51,6 +49,48 @@ from comfy_cli.workspace_manager import WorkspaceManager
 workspace_manager = WorkspaceManager()
 
 
+# Mapping from the deleted legacy `comfy run --json` dialect (JsonEmitter,
+# `{"event": …, "error": {"kind": …}}`) to the renderer dialect
+# (`{"schema": "event/1", "type": …}` events + final `type: "envelope"` line).
+#
+#   legacy event       → renderer event (type)
+#   ------------------   ------------------------------------------------------
+#   converted          → converted        {node_count}
+#   prompt_preview     → prompt_preview   {prompt}
+#   queued             → queued           {prompt_id, client_id,
+#                                          validation_warnings, nodes}
+#   node_executing     → executing        {node, class_type, title, prompt_id}
+#   node_cached        → execution_cached {node, class_type, title, prompt_id}
+#   node_progress      → progress         {node, completed, total, prompt_id}
+#   node_executed      → executed         {node, class_type, title, outputs,
+#                                          prompt_id} (+ one `output` {url}
+#                                          event per file output)
+#   completed          → envelope ok=true {data.prompt_id, data.outputs,
+#                                          data.cached_node_ids,
+#                                          data.executed_node_ids, …}
+#   failed             → envelope ok=false {error.code, error.message,
+#                                           error.hint, error.details}
+#
+#   legacy error.kind            → registered error.code      exit
+#   ---------------------------   -------------------------   ----
+#   workflow_not_found           → workflow_not_found          1
+#   workflow_invalid_json        → workflow_invalid_json       1
+#   workflow_read_error          → workflow_read_error         1
+#   workflow_format_invalid      → workflow_not_api_format     1
+#   workflow_empty               → workflow_empty              1
+#   conversion_error             → conversion_error            1
+#   conversion_crash             → conversion_crash            1
+#   connection_error (probe)     → server_not_running          1
+#   connection_error (network)   → connection_error            1
+#   object_info_unavailable      → object_info_unavailable     1
+#   validation_error             → prompt_rejected             1
+#   client_error                 → client_error                1
+#   server_error                 → server_error                1
+#   invalid_response             → invalid_response            1
+#   timeout                      → ws_timeout                  1
+#   connection_lost              → ws_disconnected             1
+#   execution_interrupted        → cancelled                   130
+#   execution_error              → execution_error             1
 def execute(
     workflow: str,
     host,
@@ -62,7 +102,6 @@ def execute(
     timeout: int = 30,
     notify: bool = False,
     api_key: str | None = None,
-    json_mode: bool = False,
     print_prompt: bool = False,
 ):
     # `0.0.0.0` is a wildcard bind, not a connect address. macOS / Windows
@@ -79,21 +118,14 @@ def execute(
         raise typer.BadParameter(f"invalid host: {host!r}")
 
     renderer = get_renderer()
-    emitter = JsonEmitter(json_mode=json_mode)
 
     try:
         raw_workflow, workflow_name, is_ui = _load_workflow_file(workflow)
     except WorkflowLoadError as e:
-        if json_mode:
-            emitter.emit_failed(e.kind, str(e))
-            raise typer.Exit(code=1) from e
-        renderer.error(code=e.kind, message=str(e), hint=e.hint)
+        renderer.error(code=e.code, message=str(e), hint=e.hint)
         raise typer.Exit(code=1) from e
 
     if not print_prompt and not check_comfy_server_running(port, host, timeout=timeout):
-        if json_mode:
-            emitter.emit_failed("connection_error", f"ComfyUI not running on specified address ({host}:{port})")
-            raise typer.Exit(code=1)
         renderer.error(
             code="server_not_running",
             message=f"ComfyUI not running on specified address ({host}:{port})",
@@ -103,15 +135,12 @@ def execute(
         raise typer.Exit(code=1)
 
     if is_ui:
-        if not json_mode and renderer.is_pretty():
+        if renderer.is_pretty():
             pprint("[yellow]Detected UI-format workflow, converting to API format...[/yellow]")
-        object_info = fetch_object_info(host, port, timeout, emitter=emitter if json_mode else None)
+        object_info = fetch_object_info(host, port, timeout)
         try:
             workflow = convert_ui_to_api(raw_workflow, object_info)
         except WorkflowConversionError as e:
-            if json_mode:
-                emitter.emit_failed("conversion_error", f"Workflow conversion failed: {e}")
-                raise typer.Exit(code=1) from e
             renderer.error(
                 code="conversion_error",
                 message=f"Workflow conversion failed: {e}",
@@ -119,48 +148,29 @@ def execute(
             )
             raise typer.Exit(code=1) from e
         except Exception as e:
-            if json_mode:
-                emitter.emit_failed(
-                    "conversion_crash",
-                    f"Workflow conversion crashed unexpectedly: {type(e).__name__}: {e}",
-                    exception_type=type(e).__name__,
-                )
-                raise typer.Exit(code=1) from e
             renderer.error(
                 code="conversion_crash",
                 message=f"Workflow conversion crashed unexpectedly: {type(e).__name__}: {e}",
                 hint="report this at https://github.com/Comfy-Org/comfy-cli/issues",
+                details={"exception_type": type(e).__name__},
             )
             raise typer.Exit(code=1) from e
         if not workflow:
-            if json_mode:
-                emitter.emit_failed("workflow_empty", "Workflow conversion produced no executable nodes")
-                raise typer.Exit(code=1)
             renderer.error(
                 code="workflow_empty",
                 message="Workflow conversion produced no executable nodes",
             )
             raise typer.Exit(code=1)
-        if json_mode:
-            emitter.emit_converted(len(workflow))
+        renderer.event("converted", node_count=len(workflow))
     else:
         kind, validated = _classify_api_workflow(raw_workflow)
         if kind == "empty":
-            if json_mode:
-                emitter.emit_failed("workflow_empty", "API workflow contains no nodes")
-                raise typer.Exit(code=1)
             renderer.error(
                 code="workflow_empty",
                 message="API workflow contains no nodes",
             )
             raise typer.Exit(code=1)
         if kind == "invalid":
-            if json_mode:
-                emitter.emit_failed(
-                    "workflow_format_invalid",
-                    "Specified workflow does not appear to be an API workflow json file",
-                )
-                raise typer.Exit(code=1)
             renderer.error(
                 code="workflow_not_api_format",
                 message="Specified workflow does not appear to be an API workflow json file",
@@ -169,16 +179,20 @@ def execute(
             raise typer.Exit(code=1)
         workflow = validated
 
-    emitter.set_workflow(workflow)
-
-    # In JSON mode, emit the workflow so agents have a complete audit trail.
-    if json_mode:
-        emitter.emit_prompt_preview(workflow)
+    # Stream mode: emit the workflow graph so agents have a complete audit
+    # trail of what the CLI is about to submit (no-op otherwise).
+    renderer.event("prompt_preview", prompt=workflow)
 
     # --print-prompt: emit/print the workflow and exit without submitting.
     if print_prompt:
-        if not json_mode:
+        if renderer.is_pretty():
             print(json.dumps(workflow, indent=2, ensure_ascii=False))
+        else:
+            renderer.emit(
+                {"workflow": workflow_name, "status": "preview", "prompt": workflow},
+                command="run",
+                where="local",
+            )
         return
 
     # Partner-API node preflight. Reject up-front when the workflow
@@ -198,13 +212,6 @@ def execute(
                 "Workflow uses partner-API node(s) that need an `api_key_comfy_org` "
                 "credential the local server doesn't have: " + ", ".join(partner_nodes) + "."
             )
-            if json_mode:
-                emitter.emit_failed(
-                    "partner_node_requires_credential",
-                    msg,
-                    partner_nodes=partner_nodes,
-                )
-                raise typer.Exit(code=1)
             renderer.error(
                 code="partner_node_requires_credential",
                 message=msg,
@@ -223,20 +230,14 @@ def execute(
             extra_data = {cred[0]: cred[1]}
 
     # Pre-submit validation via pure-Python CQL engine (checks class_types + input shapes).
-    _preflight_validate(renderer, workflow, object_info, target_label="server", emitter=emitter)
+    _preflight_validate(renderer, workflow, object_info, target_label="server")
 
     progress = None
     start = time.time()
-    if wait:
-        if not json_mode and renderer.is_pretty():
-            pprint(f"[dim]▸[/dim] Executing [cyan]{workflow_name}[/cyan]")
-            progress = ExecutionProgress()
-            progress.start()
-        elif not json_mode:
-            renderer.event("executing", workflow=workflow_name, host=host, port=port)
-    else:
-        if not json_mode and not renderer.is_pretty():
-            renderer.event("queued", workflow=workflow_name, host=host, port=port)
+    if wait and renderer.is_pretty():
+        pprint(f"[dim]▸[/dim] Executing [cyan]{workflow_name}[/cyan]")
+        progress = ExecutionProgress()
+        progress.start()
 
     execution = WorkflowExecution(
         workflow,
@@ -247,9 +248,7 @@ def execute(
         local_paths,
         timeout,
         extra_data=extra_data,
-        emitter=emitter,
     )
-    emitter.set_client_id(execution.client_id)
     # Wire SIGINT → close the WebSocket so the loop exits promptly.
     token = cancellation.get_token()
     token.on_cancel(lambda: _safe_close(execution))
@@ -258,8 +257,8 @@ def execute(
         if wait:
             execution.connect()
         # Pretty + async: a brief spinner while the submit POST is in flight.
-        # Falls through cleanly on JSON mode (no rendering at all).
-        if not wait and not json_mode and renderer.is_pretty():
+        # Falls through cleanly in machine modes (no rendering at all).
+        if not wait and renderer.is_pretty():
             with renderer.console().status("[cyan]Submitting workflow…", spinner="dots"):
                 execution.queue()
         else:
@@ -272,18 +271,12 @@ def execute(
                 progress = None
 
             if token.is_set():
-                if json_mode:
-                    emitter.emit_failed("execution_interrupted", "Cancelled by user")
-                    raise typer.Exit(code=130)
                 renderer.error(
                     code="cancelled",
                     message="Cancelled by user",
                     exit_code=130,
                 )
                 raise typer.Exit(code=130)
-
-            if json_mode:
-                emitter.emit_completed()
 
             # Foreground (--wait) completion path also writes the state
             # file so the on-disk record is consistent regardless of which
@@ -300,29 +293,30 @@ def execute(
             state.outputs = list(execution.outputs)
             state_file = jobs_state.write(state)
 
-            if not json_mode:
-                if renderer.is_pretty():
-                    if len(execution.outputs) > 0:
-                        pprint("[bold green]\nOutputs:[/bold green]")
-                        for f in execution.outputs:
-                            pprint(f)
-                    elapsed = timedelta(seconds=end - start)
-                    pprint(f"[bold green]\nWorkflow execution completed ({elapsed})[/bold green]")
-                renderer.emit(
-                    {
-                        "workflow": workflow_name,
-                        "status": "completed",
-                        "prompt_id": execution.prompt_id,
-                        "client_id": execution.client_id,
-                        "outputs": list(execution.outputs),
-                        "elapsed_seconds": end - start,
-                        "host": host,
-                        "port": port,
-                        "state_file": str(state_file) if state_file else None,
-                    },
-                    command="run",
-                    where="local",
-                )
+            if renderer.is_pretty():
+                if len(execution.outputs) > 0:
+                    pprint("[bold green]\nOutputs:[/bold green]")
+                    for f in execution.outputs:
+                        pprint(f)
+                elapsed = timedelta(seconds=end - start)
+                pprint(f"[bold green]\nWorkflow execution completed ({elapsed})[/bold green]")
+            renderer.emit(
+                {
+                    "workflow": workflow_name,
+                    "status": "completed",
+                    "prompt_id": execution.prompt_id,
+                    "client_id": execution.client_id,
+                    "outputs": list(execution.outputs),
+                    "cached_node_ids": list(execution.cached_node_ids),
+                    "executed_node_ids": list(execution.executed_node_ids),
+                    "elapsed_seconds": end - start,
+                    "host": host,
+                    "port": port,
+                    "state_file": str(state_file) if state_file else None,
+                },
+                command="run",
+                where="local",
+            )
         else:
             # Async path (the default). Write the initial state file and
             # spawn a detached watcher to keep it updated; the foreground
@@ -338,58 +332,53 @@ def execute(
             state_file = jobs_state.write(state)
             watcher_spawned = _spawn_watcher(execution.prompt_id, where="local", host=host, port=port, notify=notify)
 
-            if not json_mode:
-                if renderer.is_pretty():
-                    from comfy_cli.output.glyphs import status_glyph
+            if renderer.is_pretty():
+                from comfy_cli.output.glyphs import status_glyph
 
-                    pprint(
-                        f"{status_glyph('queued')} [dim]{execution.prompt_id}[/dim]\n"
-                        f"  [dim]workflow [/dim]{workflow_name}\n"
-                        f"  [dim]watch    [/dim][cyan]comfy jobs watch {execution.prompt_id}[/cyan]\n"
-                        f"  [dim]state    [/dim]{state_file}"
-                    )
-                    if not watcher_spawned:
-                        pprint(
-                            "[yellow]⚠ Background watcher could not start; poll manually with `comfy jobs status`[/yellow]"
-                        )
-                renderer.emit(
-                    {
-                        "workflow": workflow_name,
-                        "status": "queued",
-                        "prompt_id": execution.prompt_id,
-                        "client_id": execution.client_id,
-                        "outputs": [],
-                        "elapsed_seconds": None,
-                        "host": host,
-                        "port": port,
-                        "state_file": str(state_file) if state_file else None,
-                        "watcher_spawned": watcher_spawned,
-                    },
-                    command="run",
-                    where="local",
+                pprint(
+                    f"{status_glyph('queued')} [dim]{execution.prompt_id}[/dim]\n"
+                    f"  [dim]workflow [/dim]{workflow_name}\n"
+                    f"  [dim]watch    [/dim][cyan]comfy jobs watch {execution.prompt_id}[/cyan]\n"
+                    f"  [dim]state    [/dim]{state_file}"
                 )
-                # Pretty mode: brief live tail so the user can see the job
-                # move through "allocated → executing → completed" without
-                # having to run `comfy jobs watch`. The background watcher
-                # keeps writing the state file after we return.
-                _tail_state_file(execution.prompt_id)
+                if not watcher_spawned:
+                    pprint(
+                        "[yellow]⚠ Background watcher could not start; poll manually with `comfy jobs status`[/yellow]"
+                    )
+            renderer.emit(
+                {
+                    "workflow": workflow_name,
+                    "status": "queued",
+                    "prompt_id": execution.prompt_id,
+                    "client_id": execution.client_id,
+                    "outputs": [],
+                    "elapsed_seconds": None,
+                    "host": host,
+                    "port": port,
+                    "state_file": str(state_file) if state_file else None,
+                    "watcher_spawned": watcher_spawned,
+                },
+                command="run",
+                where="local",
+            )
+            # Pretty mode: brief live tail so the user can see the job
+            # move through "allocated → executing → completed" without
+            # having to run `comfy jobs watch`. The background watcher
+            # keeps writing the state file after we return.
+            _tail_state_file(execution.prompt_id)
     except KeyboardInterrupt:
         if progress is not None:
             progress.stop()
             progress = None
-        if json_mode:
-            emitter.emit_failed("execution_interrupted", "Workflow execution was interrupted")
-            raise typer.Exit(code=1)
-        pprint("[yellow]Workflow execution was interrupted[/yellow]")
-        raise typer.Exit(code=1)
+        if renderer.is_pretty():
+            pprint("[yellow]Workflow execution was interrupted[/yellow]")
+        renderer.error(
+            code="cancelled",
+            message="Workflow execution was interrupted",
+            exit_code=130,
+        )
+        raise typer.Exit(code=130)
     except WebSocketTimeoutException:
-        if json_mode:
-            emitter.emit_failed(
-                "timeout",
-                f"WebSocket timed out after {timeout}s waiting for server response.",
-                timeout_seconds=float(timeout),
-            )
-            raise typer.Exit(code=1)
         if renderer.is_pretty():
             pprint(
                 f"[bold red]Error: WebSocket timed out after {timeout}s waiting for server response.[/bold red]\n"
@@ -411,18 +400,12 @@ def execute(
         if token.is_set():
             if progress is not None:
                 progress.stop()
-            if json_mode:
-                emitter.emit_failed("execution_interrupted", "Cancelled by user")
-                raise typer.Exit(code=130) from e
             renderer.error(
                 code="cancelled",
                 message="Cancelled by user",
                 exit_code=130,
             )
             raise typer.Exit(code=130) from e
-        if json_mode:
-            emitter.emit_failed("connection_lost", f"Lost connection to ComfyUI server: {e}")
-            raise typer.Exit(code=1)
         if renderer.is_pretty():
             pprint(f"[bold red]Error: Lost connection to ComfyUI server: {e}[/bold red]")
         renderer.error(
@@ -457,7 +440,7 @@ def execute_cloud(
     try:
         raw_workflow, workflow_name, is_ui = _load_workflow_file(workflow)
     except WorkflowLoadError as e:
-        renderer.error(code=e.kind, message=str(e), hint=e.hint)
+        renderer.error(code=e.code, message=str(e), hint=e.hint)
         raise typer.Exit(code=1) from e
 
     if is_ui:

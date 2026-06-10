@@ -1,7 +1,7 @@
 """Pre-submit checks: fetch the server's ``object_info`` and validate the
 workflow before we burn a queue slot.
 
-Three concerns live here: HTTP fetch with emitter-aware error reporting,
+Three concerns live here: HTTP fetch with renderer-routed error reporting,
 pure-Python workflow validation (unknown class_types, shape drift), and
 partner-API node detection (used to inject the right credential into
 ``extra_data`` for local submits — cloud handles this server-side).
@@ -16,70 +16,62 @@ from urllib import request
 import typer
 
 from comfy_cli.command.run.loader import _MAX_BODY_PREVIEW
+from comfy_cli.output import get_renderer
 from comfy_cli.output import rprint as pprint
 
 PARTNER_NODE_CATEGORY_PREFIX = "api node/"
 
 
-def fetch_object_info(host, port, timeout, emitter=None):
+def fetch_object_info(host, port, timeout):
     """GET ``/object_info`` from the running ComfyUI server.
 
     The response describes every loaded node class's input schema and is what
     the converter uses to map widget values to input names, fill defaults, etc.
 
-    In JSON mode, failures emit a structured ``failed`` event via ``emitter``.
-    Either way, a ``typer.Exit(code=1)`` is raised.
+    Failures go through ``renderer.error(...)`` (error envelope in JSON modes,
+    red panel in pretty mode) and raise ``typer.Exit(code=1)``.
     """
+    renderer = get_renderer()
     url = f"http://{host}:{port}/object_info"
     try:
         with request.urlopen(url, timeout=timeout) as resp:
             body = resp.read(64 * 1024 * 1024)
     except urllib.error.HTTPError as e:
         body_text = e.read().decode("utf-8", errors="replace").strip()
-        if emitter is not None and emitter.json_mode:
-            emitter.emit_failed(
-                "object_info_unavailable",
-                f"Failed to fetch /object_info (HTTP {e.code})",
-                status_code=e.code,
-                body=body_text[:_MAX_BODY_PREVIEW],
-            )
-        else:
-            pprint(
-                f"[bold red]Failed to fetch /object_info (HTTP {e.code}): {body_text[:_MAX_BODY_PREVIEW]}[/bold red]"
-            )
+        renderer.error(
+            code="object_info_unavailable",
+            message=f"Failed to fetch /object_info (HTTP {e.code})",
+            hint="check the ComfyUI server logs; restart the server",
+            details={"status": e.code, "body": body_text[:_MAX_BODY_PREVIEW]},
+        )
         raise typer.Exit(code=1) from e
     except urllib.error.URLError as e:
-        msg = f"Failed to fetch /object_info from {host}:{port}: {e.reason} (override with --host / --port)"
-        if emitter is not None and emitter.json_mode:
-            emitter.emit_failed("connection_error", msg)
-        else:
-            pprint(f"[bold red]{msg}[/bold red]")
+        renderer.error(
+            code="connection_error",
+            message=f"Failed to fetch /object_info from {host}:{port}: {e.reason}",
+            hint="override with --host / --port",
+        )
         raise typer.Exit(code=1) from e
     except TimeoutError as e:
-        msg = f"Failed to fetch /object_info from {host}:{port}: timed out after {timeout}s (override with --host / --port)"
-        if emitter is not None and emitter.json_mode:
-            emitter.emit_failed("connection_error", msg)
-        else:
-            pprint(f"[bold red]{msg}[/bold red]")
+        renderer.error(
+            code="connection_error",
+            message=f"Failed to fetch /object_info from {host}:{port}: timed out after {timeout}s",
+            hint="override with --host / --port, or raise --timeout",
+        )
         raise typer.Exit(code=1) from e
     try:
         return json.loads(body)
     except json.JSONDecodeError as e:
-        if emitter is not None and emitter.json_mode:
-            emitter.emit_failed(
-                "object_info_unavailable",
-                "Server returned invalid JSON for /object_info",
-                status_code=200,
-                body=body.decode("utf-8", errors="replace")[:_MAX_BODY_PREVIEW],
-            )
-        else:
-            pprint("[bold red]Failed to fetch /object_info: server returned invalid JSON[/bold red]")
+        renderer.error(
+            code="object_info_unavailable",
+            message="Server returned invalid JSON for /object_info",
+            hint="check that the host:port really is a ComfyUI server",
+            details={"status": 200, "body": body.decode("utf-8", errors="replace")[:_MAX_BODY_PREVIEW]},
+        )
         raise typer.Exit(code=1) from e
 
 
-def _preflight_validate(
-    renderer, workflow: dict, object_info: dict, *, target_label: str = "server", emitter=None
-) -> None:
+def _preflight_validate(renderer, workflow: dict, object_info: dict, *, target_label: str = "server") -> None:
     """Pre-submit validation via the pure-Python CQL engine.
 
     Checks unknown class_types, input shape mismatches, and catalog drift.
@@ -102,14 +94,6 @@ def _preflight_validate(
             if suggestions:
                 line += f" (did you mean: {', '.join(suggestions)}?)"
             hint_parts.append(line)
-        if emitter is not None and emitter.json_mode:
-            emitter.emit_failed(
-                "workflow_unknown_nodes",
-                f"Workflow has {len(errors)} validation error(s)",
-                errors=errors,
-                warnings=validation.get("warnings", []),
-            )
-            raise typer.Exit(code=1)
         renderer.error(
             code="workflow_unknown_nodes",
             message=f"Workflow has {len(errors)} validation error(s)",
@@ -119,8 +103,7 @@ def _preflight_validate(
         raise typer.Exit(code=1)
 
     warnings = validation.get("warnings", [])
-    json_mode = emitter is not None and emitter.json_mode
-    if warnings and not json_mode and renderer.is_pretty():
+    if warnings and renderer.is_pretty():
         for w in warnings:
             pprint(f"[yellow]⚠ {w.get('field', '?')}: {w.get('message', '')}[/yellow]")
 

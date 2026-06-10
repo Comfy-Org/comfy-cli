@@ -63,6 +63,11 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "Loaded JSON isn't API-format and no converter is available.",
         "use ComfyUI's `File > Export (API)`",
     ),
+    ErrorCode(
+        "workflow_read_error",
+        "Workflow file exists but isn't readable as UTF-8 text (OSError / UnicodeDecodeError).",
+        "check file permissions and encoding",
+    ),
     # --- local server / WebSocket --------------------------------------------
     ErrorCode(
         "server_not_running",
@@ -88,6 +93,29 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "prompt_rejected",
         "Server returned 400. `details.node_errors` carries the per-node errors.",
         "inspect `details.node_errors` and fix the workflow",
+    ),
+    ErrorCode(
+        "client_error",
+        "Server rejected the request with an HTTP 4xx that isn't a validation failure "
+        "(401/403/429/…). `details.status` and `details.body` carry the response.",
+        "check `details.body` for the server's message",
+    ),
+    ErrorCode(
+        "server_error",
+        "Server returned an HTTP 5xx while submitting the workflow. "
+        "`details.status` and `details.body` carry the response.",
+        "check the ComfyUI server logs",
+    ),
+    ErrorCode(
+        "invalid_response",
+        "Server returned HTTP 2xx but the body was unparseable or lacked a `prompt_id`.",
+        "check that the host:port really is a ComfyUI server",
+    ),
+    ErrorCode(
+        "object_info_unavailable",
+        "`/object_info` returned an HTTP error, or an HTTP 200 with an unparseable body. "
+        "`details.status` and `details.body` carry the response.",
+        "check the ComfyUI server logs; restart the server",
     ),
     ErrorCode(
         "prompt_not_found",

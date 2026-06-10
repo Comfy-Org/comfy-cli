@@ -2,9 +2,25 @@
 
 The class owns one workflow run end-to-end against a local ComfyUI server:
 HTTP submit to `/prompt`, then a WebSocket session translating server
-events into structured emitter + renderer calls. Also defines
-``ExecutionProgress`` (a Rich Progress subclass with a custom overall row)
-and ``_safe_close`` for cancellation cleanup.
+events into structured renderer calls. Also defines ``ExecutionProgress``
+(a Rich Progress subclass with a custom overall row) and ``_safe_close``
+for cancellation cleanup.
+
+Machine-output dialect (single source of truth — the renderer):
+
+    server WS message     renderer event (`schema: event/1`)
+    -----------------     -----------------------------------------------
+    executing             executing        {node, class_type, title, prompt_id}
+    execution_cached      execution_cached {node, class_type, title, prompt_id}
+    progress              progress         {node, completed, total, prompt_id}  (throttled)
+    executed              executed         {node, class_type, title, outputs, prompt_id}
+                          output           {url, prompt_id}  (one per file output)
+    execution_error       execution_error event + `execution_error` error envelope
+    execution_interrupted `cancelled` error envelope, exit 130
+
+These are the same event names `comfy jobs watch` emits, so the run stream
+and the watch stream speak one dialect. Failures go through
+``renderer.error(code=…)`` with codes from ``comfy_cli.error_codes``.
 """
 
 from __future__ import annotations
@@ -20,7 +36,6 @@ import typer
 from rich.progress import BarColumn, Progress, TimeElapsedColumn
 from rich.table import Column, Table
 
-from comfy_cli.command.run.emitter import JsonEmitter
 from comfy_cli.command.run.loader import _MAX_BODY_PREVIEW, _node_errors_to_list
 from comfy_cli.output import get_renderer
 from comfy_cli.output import rprint as pprint
@@ -68,7 +83,6 @@ class WorkflowExecution:
         *,
         extra_data: dict | None = None,
         api_key: str | None = None,
-        emitter: JsonEmitter | None = None,
     ):
         self.workflow = workflow
         self.host = host
@@ -93,7 +107,13 @@ class WorkflowExecution:
         self.extra_data = dict(extra_data) if extra_data else None
         self.api_key = api_key
         self.renderer = get_renderer()
-        self.emitter = emitter if emitter is not None else JsonEmitter(json_mode=False)
+        # Aggregated node bookkeeping surfaced in the final envelope:
+        # `cached_node_ids` — server said the node came from cache;
+        # `executed_node_ids` — everything the executor *ran* (union of
+        # nodes seen in `executing` or `executed`), including intermediate
+        # compute nodes that never fire a server-side `executed` event.
+        self.cached_node_ids: list[str] = []
+        self.executed_node_ids: list[str] = []
 
     def connect(self):
         # Resolve via the package namespace so tests can patch
@@ -110,6 +130,24 @@ class WorkflowExecution:
             f"{scheme}://{bare_host}:{self.port}/ws?clientId={self.client_id}",
             timeout=self.timeout,
         )
+
+    def workflow_manifest(self) -> list[dict]:
+        """Build the `nodes` array for the `queued` event — one entry per
+        node in the submitted (post-conversion) workflow."""
+        manifest: list[dict] = []
+        for node_id, node in self.workflow.items():
+            if not isinstance(node, dict):
+                continue
+            class_type = node.get("class_type", "")
+            class_type = class_type if isinstance(class_type, str) else ""
+            manifest.append(
+                {
+                    "node_id": str(node_id),
+                    "class_type": class_type,
+                    "title": self.get_node_title(node_id),
+                }
+            )
+        return manifest
 
     def queue(self):
         data: dict = {"prompt": self.workflow, "client_id": self.client_id}
@@ -128,78 +166,45 @@ class WorkflowExecution:
             if self.progress is not None:
                 self.progress.stop()
 
-            if self.emitter.json_mode:
-                if e.status == 400:
-                    try:
-                        parsed = json.loads(body_bytes) if body_bytes else {}
-                    except (json.JSONDecodeError, ValueError):
-                        parsed = {}
-                    node_errors_raw = parsed.get("node_errors", {})
-                    if isinstance(node_errors_raw, dict) and node_errors_raw:
-                        self.emitter.emit_failed(
-                            "validation_error",
-                            f"Workflow has {len(node_errors_raw)} validation error(s)",
-                            node_errors=_node_errors_to_list(node_errors_raw),
-                        )
-                    else:
-                        self.emitter.emit_failed(
-                            "client_error",
-                            f"Error running workflow (HTTP {e.status})",
-                            status_code=e.status,
-                            body=body_text[:_MAX_BODY_PREVIEW],
-                        )
-                elif e.status in (401, 403, 429):
-                    self.emitter.emit_failed(
-                        "client_error",
-                        f"Error running workflow (HTTP {e.status})",
-                        status_code=e.status,
-                        body=body_text[:_MAX_BODY_PREVIEW],
-                    )
-                else:
-                    self.emitter.emit_failed(
-                        "server_error",
-                        f"Error running workflow (HTTP {e.status})",
-                        status_code=e.status,
-                        body=body_text[:_MAX_BODY_PREVIEW],
-                    )
-                raise typer.Exit(code=1)
-
-            message = "An unknown error occurred"
-            details: dict = {"status": e.status}
-            code = "server_error"
-            if e.status == 500:
-                message = body_text
-                details["body"] = message[:2000]
-            elif e.status == 400:
+            if e.status == 400:
                 try:
-                    parsed_body = json.loads(body_bytes)
+                    parsed = json.loads(body_bytes) if body_bytes else {}
                 except (json.JSONDecodeError, ValueError):
-                    parsed_body = {}
-                if isinstance(parsed_body.get("node_errors"), dict) and parsed_body["node_errors"]:
-                    message = json.dumps(parsed_body["node_errors"], indent=2)
-                    details["node_errors"] = parsed_body["node_errors"]
-                    code = "prompt_rejected"
+                    parsed = {}
+                node_errors_raw = parsed.get("node_errors", {}) if isinstance(parsed, dict) else {}
+                if isinstance(node_errors_raw, dict) and node_errors_raw:
+                    node_errors = _node_errors_to_list(node_errors_raw)
+                    if self.renderer.is_pretty():
+                        pprint(f"[bold red]Error running workflow\n{json.dumps(node_errors_raw, indent=2)}[/bold red]")
+                    self.renderer.error(
+                        code="prompt_rejected",
+                        message=f"Workflow has {len(node_errors_raw)} validation error(s)",
+                        hint="inspect `details.node_errors` and fix the workflow",
+                        details={"status": e.status, "node_errors": node_errors},
+                    )
+                    raise typer.Exit(code=1)
 
             if self.renderer.is_pretty():
-                pprint(f"[bold red]Error running workflow\n{message}[/bold red]")
-            self.renderer.error(
-                code=code,
-                message=f"Error running workflow: {message}",
-                hint=(
-                    "fix the highlighted node errors in your workflow"
-                    if code == "prompt_rejected"
-                    else "check the ComfyUI server logs"
-                ),
-                details=details,
-            )
+                pprint(f"[bold red]Error running workflow (HTTP {e.status})\n{body_text}[/bold red]")
+            if e.status < 500:
+                self.renderer.error(
+                    code="client_error",
+                    message=f"Error running workflow (HTTP {e.status})",
+                    hint="check `details.body` for the server's message",
+                    details={"status": e.status, "body": body_text[:_MAX_BODY_PREVIEW]},
+                )
+            else:
+                self.renderer.error(
+                    code="server_error",
+                    message=f"Error running workflow (HTTP {e.status})",
+                    hint="check the ComfyUI server logs",
+                    details={"status": e.status, "body": body_text[:_MAX_BODY_PREVIEW]},
+                )
             raise typer.Exit(code=1)
         except (urllib.error.URLError, TimeoutError, OSError) as e:
             if self.progress is not None:
                 self.progress.stop()
             reason = str(e.reason) if isinstance(e, urllib.error.URLError) else str(e)
-            if self.emitter.json_mode:
-                self.emitter.emit_failed("connection_error", f"Failed to submit workflow: {reason}")
-                raise typer.Exit(code=1)
             if self.renderer.is_pretty():
                 pprint(f"[bold red]Error: Failed to submit workflow: {reason}[/bold red]")
             self.renderer.error(
@@ -218,11 +223,15 @@ class WorkflowExecution:
         if not isinstance(prompt_id, str) or not prompt_id:
             if self.progress is not None:
                 self.progress.stop()
-            raise self.emitter.fail(
-                "invalid_response",
-                "Server returned HTTP 200 without a prompt_id",
-                status_code=200,
+            if self.renderer.is_pretty():
+                pprint("[bold red]Error: Server returned HTTP 200 without a prompt_id[/bold red]")
+            self.renderer.error(
+                code="invalid_response",
+                message="Server returned HTTP 200 without a prompt_id",
+                hint="check that the host:port really is a ComfyUI server",
+                details={"status": 200},
             )
+            raise typer.Exit(code=1)
 
         self.prompt_id = prompt_id
 
@@ -231,8 +240,13 @@ class WorkflowExecution:
         node_errors = body.get("node_errors") if isinstance(body, dict) else None
         validation_warnings = _node_errors_to_list(node_errors)
 
-        if self.emitter.json_mode:
-            self.emitter.emit_queued(prompt_id, validation_warnings)
+        self.renderer.event(
+            "queued",
+            prompt_id=prompt_id,
+            client_id=self.client_id,
+            validation_warnings=validation_warnings,
+            nodes=self.workflow_manifest(),
+        )
 
     def watch_execution(self):
         if self.ws is None:
@@ -256,18 +270,41 @@ class WorkflowExecution:
         self.progress.update(self.overall_task, completed=self.total_nodes - len(self.remaining_nodes))
 
     def get_node_title(self, node_id):
+        """Display label: ``_meta.title`` if present, else ``class_type``,
+        else the node id. Defensive against unknown ids and non-dict nodes."""
         node = self.workflow.get(node_id)
-        if node is None:
+        if node is None and not isinstance(node_id, str):
+            node = self.workflow.get(str(node_id))
+        if not isinstance(node, dict):
             return str(node_id)
-        if "_meta" in node and "title" in node["_meta"]:
-            return node["_meta"]["title"]
-        return node["class_type"]
+        meta = node.get("_meta")
+        if isinstance(meta, dict):
+            title = meta.get("title")
+            if isinstance(title, str) and title:
+                return title
+        class_type = node.get("class_type")
+        return class_type if isinstance(class_type, str) and class_type else str(node_id)
+
+    def _class_type(self, node_id):
+        node = self.workflow.get(node_id)
+        if node is None and not isinstance(node_id, str):
+            node = self.workflow.get(str(node_id))
+        if not isinstance(node, dict):
+            return ""
+        class_type = node.get("class_type")
+        return class_type if isinstance(class_type, str) else ""
+
+    def _track_executed(self, node_id) -> None:
+        node_id = str(node_id)
+        if node_id not in self.executed_node_ids:
+            self.executed_node_ids.append(node_id)
 
     def log_node(self, type, node_id):
         if not self.verbose:
             return
-        if self.emitter.json_mode:
-            # --verbose is a no-op in JSON mode; Rich output would corrupt the stream.
+        if not self.renderer.is_pretty():
+            # --verbose is a no-op in machine modes; the event stream already
+            # carries the same information.
             return
 
         node = self.workflow.get(node_id)
@@ -275,7 +312,7 @@ class WorkflowExecution:
             pprint(f"{type} : [bright_black]({node_id})[/]")
             return
         class_type = node["class_type"]
-        title = self.emitter.get_title(node_id)
+        title = self.get_node_title(node_id)
 
         if title != class_type:
             title += f"[bright_black] - {class_type}[/]"
@@ -320,7 +357,7 @@ class WorkflowExecution:
         return self._ws_path_cached
 
     def _build_output_object(self, node_id, category, item) -> dict:
-        """Construct a structured Output dict for the JSON contract."""
+        """Construct a structured Output dict carried on `executed` events."""
         node_id = str(node_id)
         filename = item["filename"]
         subfolder = item.get("subfolder") or ""
@@ -329,8 +366,8 @@ class WorkflowExecution:
         return {
             "category": category,
             "node_id": node_id,
-            "class_type": self.emitter.get_class_type(node_id),
-            "title": self.emitter.get_title(node_id),
+            "class_type": self._class_type(node_id),
+            "title": self.get_node_title(node_id),
             "filename": filename,
             "subfolder": subfolder,
             "type": file_type,
@@ -340,7 +377,7 @@ class WorkflowExecution:
     def on_message(self, message):
         # Defensive: a malformed (non-object) JSON frame from the server
         # must not raise out of the recv loop — that would tear down the
-        # run without a terminal `failed` event and break the contract.
+        # run without a terminal envelope and break the contract.
         if not isinstance(message, dict):
             return True
         data = message.get("data")
@@ -383,7 +420,7 @@ class WorkflowExecution:
                 self.update_overall_progress()
             self.current_node = data["node"]
             self.log_node("Executing", data["node"])
-            self.emitter.emit_node_executing(data["node"])
+            self._track_executed(data["node"])
             self.renderer.event(
                 "executing",
                 node=str(data["node"]),
@@ -400,10 +437,12 @@ class WorkflowExecution:
                 continue
             self.remaining_nodes.discard(n)
             self.log_node("Cached", n)
-            self.emitter.emit_node_cached(n)
+            node_id = str(n)
+            if node_id not in self.cached_node_ids:
+                self.cached_node_ids.append(node_id)
             self.renderer.event(
                 "execution_cached",
-                node=str(n),
+                node=node_id,
                 title=self.get_node_title(n),
                 class_type=self._class_type(n),
                 prompt_id=self.prompt_id,
@@ -424,7 +463,6 @@ class WorkflowExecution:
                 )
         if self.progress is not None and self.progress_task is not None:
             self.progress.update(self.progress_task, completed=data["value"])
-        self.emitter.emit_node_progress(node, data["value"], data["max"])
         # Throttle the NDJSON torrent (samplers can fire 30+/s).
         self.renderer.throttled_event(
             f"progress:{node}",
@@ -442,11 +480,7 @@ class WorkflowExecution:
             return
         self.remaining_nodes.discard(node_id)
         self.update_overall_progress()
-        self.renderer.event(
-            "executed",
-            node=str(data["node"]),
-            prompt_id=self.prompt_id,
-        )
+        self._track_executed(node_id)
 
         structured_outputs: list[dict] = []
         output = data.get("output")
@@ -459,55 +493,59 @@ class WorkflowExecution:
                         continue
                     obj = self._build_output_object(node_id, category, item)
                     structured_outputs.append(obj)
-                    url = self.format_image_path(item)
-                    if url not in self.outputs:
-                        # Always record for the state file; emit the NDJSON
-                        # output event at the same point so json consumers see it.
-                        self.outputs.append(url)
-                        self.renderer.event("output", url=url, prompt_id=self.prompt_id)
 
-        self.emitter.emit_node_executed(node_id, structured_outputs)
+        self.renderer.event(
+            "executed",
+            node=str(node_id),
+            title=self.get_node_title(node_id),
+            class_type=self._class_type(node_id),
+            outputs=structured_outputs,
+            prompt_id=self.prompt_id,
+        )
+
+        for obj in structured_outputs:
+            url = self.format_image_path(
+                {"filename": obj["filename"], "subfolder": obj["subfolder"], "type": obj["type"]}
+            )
+            if url not in self.outputs:
+                # Always record for the state file; emit the NDJSON
+                # output event at the same point so json consumers see it.
+                self.outputs.append(url)
+                self.renderer.event("output", url=url, prompt_id=self.prompt_id)
 
     def on_error(self, data):
         self._stop_progress()
-        if self.emitter.json_mode:
-            node_id = str(data.get("node_id", "")) if isinstance(data, dict) else ""
-            tb = data.get("traceback", []) if isinstance(data, dict) else []
-            self.emitter.emit_failed(
-                "execution_error",
-                data.get("exception_message", "Workflow execution failed on the server")
-                if isinstance(data, dict)
-                else "Workflow execution failed on the server",
-                node_id=node_id,
-                class_type=data.get("node_type", self.emitter.get_class_type(node_id))
-                if isinstance(data, dict)
-                else "",
-                exception_type=data.get("exception_type", "") if isinstance(data, dict) else "",
-                title=self.emitter.get_title(node_id),
-                traceback="".join(tb) if isinstance(tb, list) else str(tb),
-            )
-            raise typer.Exit(code=1)
+        data = data if isinstance(data, dict) else {}
+        node_id = str(data.get("node_id", ""))
+        tb = data.get("traceback", [])
+        message = data.get("exception_message") or "Workflow execution failed on the server"
         if self.renderer.is_pretty():
             pprint(f"[bold red]Error running workflow\n{json.dumps(data, indent=2)}[/bold red]")
         self.renderer.event("execution_error", prompt_id=self.prompt_id, details=data)
         self.renderer.error(
-            code="prompt_rejected",
-            message="Workflow execution failed on the server",
-            details=data if isinstance(data, dict) else {"raw": data},
-            hint="inspect the per-node errors in details",
+            code="execution_error",
+            message=message,
+            hint="inspect the per-node fields in details; re-run with `--wait --verbose`",
+            details={
+                "node_id": node_id,
+                "class_type": data.get("node_type") or self._class_type(node_id),
+                "title": self.get_node_title(node_id),
+                "exception_type": data.get("exception_type", ""),
+                "traceback": "".join(tb) if isinstance(tb, list) else str(tb),
+            },
         )
         raise typer.Exit(code=1)
 
     def on_interrupted(self, data):
         self._stop_progress()
-        if self.emitter.json_mode:
-            self.emitter.emit_failed(
-                "execution_interrupted",
-                "Workflow execution was interrupted",
-            )
-        else:
+        if self.renderer.is_pretty():
             pprint("[yellow]Workflow execution was interrupted[/yellow]")
-        raise typer.Exit(code=1)
+        self.renderer.error(
+            code="cancelled",
+            message="Workflow execution was interrupted",
+            exit_code=130,
+        )
+        raise typer.Exit(code=130)
 
     def _stop_progress(self) -> None:
         if self.progress is not None:
@@ -515,9 +553,3 @@ class WorkflowExecution:
                 self.progress.stop()
             except Exception:
                 pass
-
-    def _class_type(self, node_id):
-        node = self.workflow.get(node_id)
-        if not isinstance(node, dict):
-            return None
-        return node.get("class_type")

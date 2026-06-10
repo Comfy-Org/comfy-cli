@@ -687,8 +687,10 @@ def run(
         typer.Option(
             "--json",
             help=(
-                "Emit NDJSON events to stdout instead of human-readable output. "
-                "One JSON object per line, terminated by \\n. See docs/json-output.md "
+                "Stream NDJSON events to stdout instead of human-readable output: "
+                'one `{"schema": "event/1", "type": ...}` object per line, '
+                'with a final `type: "envelope"` line carrying ok/error. Same '
+                "dialect as the global --json-stream flag; see docs/json-output.md "
                 "for the event reference and stability contract. In this mode, "
                 "--verbose has no effect and Rich progress is suppressed. "
                 "Workflow input accepts both API and UI format JSON (UI input "
@@ -723,6 +725,13 @@ def run(
 
         config = ConfigManager()
         renderer = get_renderer()
+
+        # Command-local --json means "stream the run": upgrade the renderer
+        # (resolved once in the entry callback) into NDJSON mode so every
+        # renderer.event(...) line plus the final envelope reaches stdout.
+        # One dialect — same shape as the global --json-stream flag.
+        if json_output:
+            renderer.force_stream()
 
         try:
             decision = where_module.resolve(flag=where, config_value=config.get(where_module.CONFIG_KEY_WHERE_DEFAULT))
@@ -783,7 +792,6 @@ def run(
             timeout=timeout,
             notify=effective_notify,
             api_key=api_key,
-            json_mode=json_output,
             print_prompt=print_prompt,
         )
     except typer.Exit as e:

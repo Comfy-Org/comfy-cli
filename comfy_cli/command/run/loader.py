@@ -9,9 +9,6 @@ from __future__ import annotations
 import json
 import os
 
-# JSON output schema version. Bumped only for breaking changes per docs/json-output.md.
-SCHEMA_VERSION = 1
-
 # Maximum bytes of a server response body we surface to the user (or
 # embed in a `failed.error.body` field). Anything longer is truncated.
 _MAX_BODY_PREVIEW = 500
@@ -60,11 +57,15 @@ def _classify_api_workflow(workflow):
 
 
 class WorkflowLoadError(Exception):
-    """Raised by ``_load_workflow_file`` for pre-flight file errors."""
+    """Raised by ``_load_workflow_file`` for pre-flight file errors.
 
-    def __init__(self, kind: str, message: str, hint: str | None = None):
+    ``code`` is a registered ``error_codes`` value — callers pass it straight
+    to ``renderer.error(code=e.code, ...)``.
+    """
+
+    def __init__(self, *, code: str, message: str, hint: str | None = None):
         super().__init__(message)
-        self.kind = kind
+        self.code = code
         self.hint = hint
 
 
@@ -77,8 +78,8 @@ def _load_workflow_file(path: str) -> tuple[dict, str, bool]:
     workflow_name = os.path.abspath(os.path.expanduser(path))
     if not os.path.isfile(workflow_name):
         raise WorkflowLoadError(
-            "workflow_not_found",
-            f"Specified workflow file not found: {workflow_name}",
+            code="workflow_not_found",
+            message=f"Specified workflow file not found: {workflow_name}",
             hint="check the path; pass the API-format JSON exported from ComfyUI",
         )
 
@@ -87,13 +88,13 @@ def _load_workflow_file(path: str) -> tuple[dict, str, bool]:
             raw_workflow = json.load(f)
     except (OSError, UnicodeDecodeError) as e:
         raise WorkflowLoadError(
-            "workflow_read_error",
-            f"Unable to read workflow file: {e}",
+            code="workflow_read_error",
+            message=f"Unable to read workflow file: {e}",
         ) from e
     except json.JSONDecodeError as e:
         raise WorkflowLoadError(
-            "workflow_invalid_json",
-            f"Specified workflow file is not valid JSON: {e}",
+            code="workflow_invalid_json",
+            message=f"Specified workflow file is not valid JSON: {e}",
             hint="re-export the workflow from ComfyUI (File > Export (API))",
         ) from e
 

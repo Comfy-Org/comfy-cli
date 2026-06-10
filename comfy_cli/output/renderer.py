@@ -159,6 +159,17 @@ class Renderer:
     def is_stream(self) -> bool:
         return self.mode is OutputMode.NDJSON
 
+    def force_stream(self) -> None:
+        """Upgrade this renderer to NDJSON streaming mode.
+
+        Used by command-local streaming flags (e.g. ``comfy run --json``)
+        after the global callback has already resolved the mode: the
+        command knows it produces an event stream, so a plain ``--json``
+        on it means "stream NDJSON events + final envelope" rather than
+        the single-envelope JSON mode.
+        """
+        self.mode = OutputMode.NDJSON
+
     # ----- printing -----
 
     def print(self, *args: Any, **kwargs: Any) -> None:
