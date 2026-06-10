@@ -167,19 +167,21 @@ def whoami_cmd():
         api_key_source = "store"
 
     # `signed_in` reflects *any* valid auth path — OAuth session or API key.
-    # When both are present, api_key wins (it's the header the client actually sends).
+    # When both are present, OAuth wins (it's the credential the client sends);
+    # the API key is only used as a fallback when no live session exists.
     has_api_key = api_key_source is not None
     has_oauth = session is not None
     expired = session.is_expired() if session else None
+    oauth_usable = has_oauth and not expired
     # `signed_in` must reflect whether we can actually authenticate right now:
-    # an API key, or an OAuth session that isn't expired (after the refresh
-    # attempt above). An expired, unrefreshable OAuth session is NOT signed in.
-    signed_in = has_api_key or (has_oauth and not expired)
+    # a live (non-expired) OAuth session, or an API key. An expired,
+    # unrefreshable OAuth session is NOT signed in on its own.
+    signed_in = oauth_usable or has_api_key
     auth_method: str | None
-    if has_api_key:
-        auth_method = "api_key"
-    elif has_oauth:
+    if oauth_usable:
         auth_method = "oauth"
+    elif has_api_key:
+        auth_method = "api_key"
     else:
         auth_method = None
     stale_base_url = (session.base_url != configured_base_url) if session else False
@@ -194,7 +196,7 @@ def whoami_cmd():
                     scope=session.scope,
                     client_id=session.client_id,
                     expires_at=session.expires_at,
-                    expired=expired,
+                    expired=bool(expired),
                     version=ConfigManager().get_cli_version(),
                 )
             )
@@ -205,7 +207,15 @@ def whoami_cmd():
                 )
                 rprint("[dim]→ run `comfy cloud login` to mint a fresh session against the new base URL.[/dim]")
             if has_api_key:
-                rprint(f"[dim]Using X-API-Key from {api_key_source}; this wins over OAuth.[/dim]")
+                if oauth_usable:
+                    rprint(
+                        f"[dim]OAuth session is preferred; X-API-Key from {api_key_source} "
+                        f"present but unused.[/dim]"
+                    )
+                else:
+                    rprint(
+                        f"[dim]OAuth session expired — falling back to X-API-Key from {api_key_source}.[/dim]"
+                    )
         else:
             from comfy_cli.output.branding import signed_out_banner
 
@@ -313,7 +323,8 @@ def set_key_cmd(
 
     The key is sent as ``X-API-Key`` on cloud requests and injected as
     ``api_key_comfy_org`` into ``extra_data`` so partner-API nodes can use
-    it. Wins over any OAuth session. Stored at ``secrets.json`` mode 0600.
+    it. Used as a fallback only — a live OAuth session takes precedence.
+    Stored at ``secrets.json`` mode 0600.
     """
     from comfy_cli.target import CLOUD_API_KEY_PROVIDER
 
@@ -328,7 +339,7 @@ def set_key_cmd(
         raise typer.Exit(code=1) from e
     if renderer.is_pretty():
         rprint(f"[bold]Stored Comfy Cloud API key[/bold] [dim]({record.to_dict()['key']})[/dim]")
-        rprint("[dim]→ cloud calls will use X-API-Key; OAuth session (if any) is bypassed[/dim]")
+        rprint("[dim]→ stored as a fallback; a live OAuth session takes precedence[/dim]")
     renderer.emit(
         {
             "provider": CLOUD_API_KEY_PROVIDER,

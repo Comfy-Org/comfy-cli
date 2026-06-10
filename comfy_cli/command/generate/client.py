@@ -26,18 +26,64 @@ class ApiError(RuntimeError):
         self.body = body
 
 
+def _stored_api_key() -> str | None:
+    """Comfy Cloud API key persisted via ``comfy cloud set-key``, if any."""
+    from comfy_cli.auth import store
+    from comfy_cli.target import CLOUD_API_KEY_PROVIDER
+
+    record = store.get(CLOUD_API_KEY_PROVIDER)
+    return record.key if record is not None else None
+
+
+def _oauth_session_token() -> str | None:
+    """Live OAuth session token (a Firebase JWT), refreshed if near expiry.
+
+    The proxy validates a non-``comfyui-`` bearer token as a Firebase JWT
+    (see ``_auth_headers``), so the same session that powers
+    ``comfy run --where cloud`` authenticates partner-API calls too — no
+    separate API key required.
+    """
+    from comfy_cli.cloud.oauth import ensure_fresh_session
+
+    session = ensure_fresh_session()
+    if session is None or session.is_expired():
+        return None
+    return session.access_token
+
+
 def resolve_api_key(explicit: str | None = None) -> str:
-    """Order: explicit flag → COMFY_API_KEY env var. Raise if neither set."""
-    key = explicit.strip() if isinstance(explicit, str) and explicit.strip() else os.environ.get("COMFY_API_KEY", "")
-    key = key.strip()
-    if not key:
-        raise ApiError(
-            401,
-            "",
-            "No API key. Pass --api-key or set COMFY_API_KEY in your environment. "
-            "Generate one at https://platform.comfy.org/api-keys.",
-        )
-    return key
+    """Resolve a credential for the partner-API proxy.
+
+    OAuth-first: when a live OAuth session is present it is preferred over
+    ambient API keys (``COMFY_API_KEY`` env / stored key), because OAuth is
+    the CLI's primary auth path and API keys are on a deprecation path. The
+    only thing that outranks the session is an explicit ``--api-key`` flag —
+    a deliberate per-call override. Resolution order:
+    explicit flag → live OAuth session → ``COMFY_API_KEY`` env → stored key.
+    Raise if none resolve.
+    """
+    explicit_key = explicit.strip() if isinstance(explicit, str) and explicit.strip() else ""
+    if explicit_key:
+        return explicit_key
+
+    session_token = _oauth_session_token()
+    if session_token:
+        return session_token
+
+    env_key = os.environ.get("COMFY_API_KEY", "").strip()
+    if env_key:
+        return env_key
+
+    stored = _stored_api_key()
+    if stored and stored.strip():
+        return stored.strip()
+
+    raise ApiError(
+        401,
+        "",
+        "Not signed in. Run `comfy cloud login`, or pass --api-key / set "
+        "COMFY_API_KEY (get one at https://platform.comfy.org/api-keys).",
+    )
 
 
 def _split_payload(

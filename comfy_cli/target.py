@@ -82,25 +82,27 @@ def resolve_target(
         from comfy_cli.auth import store as auth_store
         from comfy_cli.cloud import get_base_url
 
-        # API key wins over OAuth — easier to paste-and-test from a shell.
-        # Precedence: env var > stored provider key > OAuth session.
-        api_key = os.environ.get("COMFY_CLOUD_API_KEY")
-        if not api_key:
-            record = auth_store.get(CLOUD_API_KEY_PROVIDER)
-            api_key = record.key if record is not None else None
+        # OAuth-first: a live session is preferred over API keys (which are on
+        # a deprecation path). Precedence: OAuth session > env var > stored key.
+        base_url = get_base_url()
         token: str | None = None
-        if not api_key:
-            session = auth_store.get_cloud_session()
-            if session is not None and session.base_url == get_base_url():
-                token = session.access_token
-            # If session.base_url differs from the resolved cloud URL, silently
-            # drop the token so credentials are never replayed to a host the
-            # user didn't authenticate against.  Downstream code will surface
-            # an "unauthenticated" error as usual.
+        session = auth_store.get_cloud_session()
+        if session is not None and session.base_url == base_url and not session.is_expired():
+            token = session.access_token
+        # A session minted for a different base_url (or expired) is ignored so
+        # credentials are never replayed to a host the user didn't authenticate
+        # against; the API-key fallback or a downstream "unauthenticated" error
+        # takes over.
+        api_key: str | None = None
+        if token is None:
+            api_key = os.environ.get("COMFY_CLOUD_API_KEY")
+            if not api_key:
+                record = auth_store.get(CLOUD_API_KEY_PROVIDER)
+                api_key = record.key if record is not None else None
 
         return Target(
             kind="cloud",
-            base_url=get_base_url(),
+            base_url=base_url,
             path_prefix="/api",
             history_path="history_v2",
             jobs_path="jobs",
