@@ -62,30 +62,57 @@ The four most common error codes and what to do:
 
 For the full error code list and resolution steps, run `comfy --json discover`.
 
-## Routing the request — match the path to the intent
+## Routing the request — survey first, then choose
 
-Most creative requests fall into one of three paths. Pick by what
-matches the user's intent best — partner-API providers are often the
-highest-quality option, not the fallback.
+Don't commit to the first approach that fits. The ecosystem spans gallery
+templates, partner-API providers, and thousands of OSS nodes/models. Survey
+the option space before deciding (see "The ecosystem is vast" below for the
+commands). The default is **workflow-first**: even when a partner provider is
+the right model, reach for its *node* inside a fragment/blueprint so the result
+is a reusable, inspectable Job on the graph. What to build — which model,
+provider, and approach — is your judgment to make from what discovery returns;
+this skill teaches you how to look, not what to pick.
 
-| If the user… | Use |
+Once you know what you want, there are three *mechanisms* to build it. Pick
+by structure, not by habit — this is a mechanism map, not a quality ranking:
+
+| Mechanism | When it fits |
 |---|---|
-| names a partner provider (Flux Pro, Kling, Nano Banana, Veo, Grok, Ideogram, …) | `comfy generate <slug>` — direct dispatch against the provider's API |
-| asks for a shape the **gallery already covers** ("text-to-video", "remove background", "upscale image", "img-to-3D") | `comfy templates ls` → `comfy templates fetch <name>` → slot-edit → `comfy run` |
-| needs LoRAs, ControlNets, multi-step pipelines, or an OSS model the gallery doesn't cover | fragments + blueprint → `comfy workflow compose` → `comfy run` (see decision tree below) |
+| `comfy templates ls/fetch` → slot-edit → `comfy run` | A curated gallery workflow already matches the shape you need |
+| fragments + blueprint → one composed workflow → `comfy run` | **Default** — workflows you may extend, fan out, reuse, vary, or explain later; wrap a partner provider's *node* here too |
+| `comfy generate <slug>` | **Escape hatch** — a throwaway one-shot against a single partner provider (a proxy call, not a graph Job) |
 
-The middle row is the workhorse — `Comfy-Org/workflow_templates` has
-hundreds of curated workflows that are higher-quality than anything an
-agent would build from raw nodes. **Start there.**
+Prefer **one larger Comfy workflow** over many separate submissions when the
+steps can run in the same graph. Comfy can parallelize independent branches,
+so use fan-out branches, batch nodes, and shared loaders/references inside one
+workflow before splitting into separate jobs. Split only when a stage needs
+human review, different routing/auth, server memory isolation, or failure
+recovery that is worth losing graph-level parallelism.
 
-## Workflow creation — the decision tree (ALWAYS follow this)
+**Escape hatch — `comfy generate <slug>`:** for a throwaway one-shot
+against a single partner provider, `comfy generate` skips the graph
+entirely. It dispatches to Comfy's partner-API **proxy**
+(`api.comfy.org/proxy/...`), which calls the provider on your behalf and
+bills to your Comfy account (it is **not** a workflow Job — nothing lands
+on the graph and nothing is reusable). Reach for it only when you want a
+quick disposable result; anything you'll reiterate on belongs in a
+workflow.
 
-For **every** creative request, follow this hierarchy strictly:
+## Workflow creation — choosing how to build
 
-1. **Template first** — `comfy templates ls --type <image|video|audio>`
-   If a match exists → fetch → slot-edit → run. Don't reinvent.
+Once discovery has told you *what* to build, choose the construction
+mechanism by complexity and reuse — not as a quality ranking:
 
-2. **Fragment + blueprint** — if no template fits, this is the **default path**:
+1. **Template** — `comfy templates ls --type <image|video|audio>`
+   If a curated workflow matches the shape, fetch it. For one-off smoke tests,
+   slot-edit and run it directly. For anything that may become a longer piece,
+   multiple variations, or a reusable pattern, wrap the useful template region
+   as a fragment and drive it from a blueprint.
+
+2. **Fragment + blueprint** — this is the **default construction path** once
+   the workflow is more than a throwaway. Use it even for simple workflows if
+   the next likely step is "make it longer", "add another shot", "vary seeds",
+   "reuse this with a different prompt", or "chain another model".
 
    **a. Discover nodes** for each step of the pipeline:
    ```bash
@@ -132,11 +159,19 @@ For **every** creative request, follow this hierarchy strictly:
    For the full fragment format and blueprint syntax, load the
    `comfy-fragments` skill.
 
-3. **Raw JSON** — ONLY for throwaway one-shot workflows under ~30 nodes
-   that will never be reused. Write to `workflows/` and run directly.
+   Prefer a single composed workflow with repeated fragment instances over a
+   loop of separate `comfy run` calls. For example, a music video should be a
+   manifest/blueprint that composes one fan-out graph with N video branches and
+   shared character references, then a separate assembly step if final editing
+   needs exact audio sync.
 
-**Hard rule: never build raw workflow JSON with >30 nodes. Use fragments.**
-Even for smaller workflows, prefer fragments if any part will be reused.
+3. **Raw JSON** — ONLY for truly throwaway one-shot workflows under ~10-15
+   nodes where extension is not expected. Write to `workflows/` and run
+   directly.
+
+**Hard rule: never build raw workflow JSON with >30 nodes. Use fragments and a
+blueprint.** Even for smaller workflows, prefer fragments if any part could be
+extended, repeated, or reused.
 
 ---
 
@@ -217,11 +252,12 @@ comfy --json models show wan2.2_vae.safetensors  # full Asset + projected row
 `models list-folders` first if you're unsure what types the backend
 exposes.
 
-## Templates — start from a known-good workflow
+## Templates — one starting point among several
 
-The curated `Comfy-Org/workflow_templates` gallery is the **canonical
-entry point** for any "build me a workflow that does X" request. Don't
-reinvent.
+The curated `Comfy-Org/workflow_templates` gallery is a strong starting
+point *when a template matches your intent* — but it sits beside partner-API
+providers and hand-composed fragments, not above them. Survey all three
+(see "The ecosystem is vast") before committing.
 
 ```bash
 comfy --json templates ls --type video --tag "Image to Video" --limit 10
@@ -339,6 +375,45 @@ Pass `--notify` on `comfy run` to fire a desktop notification when the
 job is terminal (handy for human-driven sessions; off by default so
 agent pipelines don't spam).
 
+**Scope:** the async-first / `jobs watch` / state-file pattern above is the
+**`comfy run`** workflow path only. `comfy generate` (partner-API one-call)
+has its own waiting model — see the next section.
+
+## Partner-API one-call generation (`comfy generate`)
+
+`comfy generate` dispatches straight to a partner provider (BFL Flux, Kling,
+Gemini, Veo, Ideogram, …) and is often the highest-quality route for a single
+image/video/edit — not a fallback. It is a **separate sub-surface** from
+`comfy run`, with its own commands and conventions:
+
+```bash
+comfy generate list                       # enumerate provider models (+ their sync/async mode)
+comfy generate schema <model>             # params for one model (e.g. flux-2, kling-i2v)
+comfy generate <model> --prompt "…" [--<param> v]… --download outputs/x.png
+comfy generate upload <file>              # host a local file → signed URL (for I2V image inputs)
+comfy generate <model> … --async          # submit, returns a job id
+comfy generate resume <model> <job_id> --download outputs/x.mp4
+```
+
+Mechanical contracts that bite agents — encode them, don't rediscover:
+
+- **`comfy generate` does NOT honor the global `--json` envelope.** Unlike the
+  rest of the CLI, the `generate` subtree prints human/Rich output (including an
+  ANSI image preview on stdout) and gives you **no machine-readable envelope**.
+  Do not parse its stdout. The reliable result is the **file** written by
+  `--download` — submit with `--download <path>`, then verify the file exists.
+- **`generate upload` prints `Uploaded: <url>` as pretty text**, and the signed
+  URL soft-wraps across terminal lines. Sanitize before reuse
+  (`sed 's/^Uploaded:[[:space:]]*//' | tr -d '[:space:]'`).
+- **Prefer sync** (plain `--download`, no `--async`): the CLI polls internally
+  and waits for you (that's the tool blocking, not you sleep-polling), so an
+  expensive video gen can't be orphaned. Reach for `--async` + `resume` only
+  when you deliberately want to detach. (`generate resume` for BFL is currently
+  unreliable — if it errors, just re-run sync.)
+- **I2V pattern:** `generate <i2v-model>` needs an image **URL**, so the flow is
+  `generate <image-model> --download still.png` → `generate upload still.png` →
+  `generate <i2v-model> --image <url> --download clip.mp4`.
+
 ## Pre-flight — validate before you submit
 
 Before `comfy run`, verify the workflow will succeed:
@@ -373,19 +448,24 @@ comfy --json jobs watch <prompt_id> # blocks until terminal; emits NDJSON with -
 workflow JSON — not just templates. Get slot addresses first:
 
 ```bash
-# 1. Discover addressable slots
+# 1. Discover addressable slots — addresses are <node_id>.<input>, never titles
 comfy --json workflow slots path.json
-# → lists every slot as <instance_id>.<input_name> with current values
+# → lists every slot as <node_id>.<input_name> with current values
+#   subgraph interiors: <instance_id>/<inner_id>.<input>
+#   copy addresses verbatim from this output
 
 # 2. Set a single slot
 comfy workflow set-slot path.json 6.text="a cat"
 
 # 3. Generate variations (slot lists are zipped — same length required)
-comfy workflow vary path.json \
-    --slot positive_prompt.text='["a cat","a dog","a fox"]' \
-    --slot sampler.seed='[1,2,3]' \
+comfy --json workflow slots wf.json          # discover addresses first
+comfy workflow vary wf.json \
+    --slot '6.text=["a cat","a dog","a fox"]' \
+    --slot '3.seed=[1,2,3]' \
     --out-dir ./variants
 # → 3 workflow JSONs in ./variants
+# NOTE: slot addresses use node ids (numeric or UUID), never titles.
+#       Always run `slots` first and copy addresses verbatim.
 ```
 
 ## Auth
@@ -499,10 +579,10 @@ Hard-won lessons per domain. Not a tutorial — a reference card.
 
 ## Image
 
-- Template-first: `comfy templates ls --type image --tag "Text to Image"`
+- Survey first: `comfy nodes ls --produces IMAGE --api-only` (partner APIs), `comfy templates ls --type image`, `comfy models search --type checkpoint` — then choose
 - Batch sweeps: `comfy workflow vary` for multi-prompt/seed generation
 - Text rendering: use Ideogram (IdeogramV3), NOT Flux — Flux garbles text
-- Partner API shortcut: `comfy generate bfl/flux-pro-1.1-ultra --prompt "..."`
+- Partner API escape hatch (one-shots only, via the proxy — not a workflow Job): `comfy generate bfl/flux-pro-1.1-ultra --prompt "..."`
 - Never hardcode checkpoint/LoRA names — discover via `models search`
 
 ## Video
@@ -513,7 +593,7 @@ Hard-won lessons per domain. Not a tutorial — a reference card.
 - Assembly: GetVideoComponents → ImageBatch → CreateVideo → SaveVideo
 - I2V pattern: LoadImage → I2VNode → SaveVideo (check `nodes show` for the I2V node)
 - Audio sync: match durations — short audio = silent ending, long audio = truncated ending
-- Template-first: `comfy templates ls --type video`
+- Survey first: `comfy nodes ls --produces VIDEO --exclude-deprecated`, `comfy nodes ls --category "api node/video*"`, `comfy templates ls --type video` — compare OSS, partner-API, and gallery before choosing
 
 ## Audio
 
@@ -522,7 +602,7 @@ Hard-won lessons per domain. Not a tutorial — a reference card.
 - Output format is FLAC, not MP3
 - For instrumental: set lyrics to empty string `""`
 - Wire both positive AND negative to same TextEncode output when cfg=1.0
-- Template-first: `comfy templates ls --type audio`
+- Survey first: `comfy nodes ls --produces AUDIO`, `comfy nodes ls --category "api node/audio*"`, `comfy templates ls --type audio` — compare before choosing
 
 ## Editing (upscale, inpaint, style transfer)
 
@@ -562,18 +642,45 @@ independent branches automatically. Only split into separate workflows when:
 - Different stages need different routing (local vs cloud)
 - The workflow would exceed server memory constraints
 
-For parallel fan-out:
+Some steps don't belong in a Comfy graph at all — final assembly, format
+conversion, timing/structure analysis of generated media. Comfy outputs are
+just files; when the graph can't express what the task needs, you're free to
+orchestrate your own tools around those files. How is your call — this skill
+defines what `comfy` does, not the limits of what you can do with its output.
+
+**For parallel generation, don't hand-roll fan-out with shell loops.** The
+engine already parallelizes independent branches, so author **ONE** graph and
+let it run them concurrently. Independent fragment steps in a blueprint
+`pipeline` (those that don't wire into each other) become parallel branches.
+For the same pipeline across many inputs, use `foreach` — it instantiates the
+pipeline once per item into a single graph:
+
+```yaml
+# blueprints/fan_out.yaml — one graph, N parallel branches via foreach
+output_prefix: outputs/sweep
+foreach:
+  - {id: a, prompt: "a zen garden"}
+  - {id: b, prompt: "a neon city"}
+  - {id: c, prompt: "a desert at dusk"}
+pipeline:
+  - fragment: generate_image
+    alias: shot
+    params:
+      prompt: $item.prompt
+```
 
 ```bash
-PIDS=()
-for f in ./workflows/phase*.json; do
-    PID=$(comfy --json run --workflow "$f" | jq -r .data.prompt_id)
-    PIDS+=("$PID")
-done
-for p in "${PIDS[@]}"; do
-    comfy --json jobs watch "$p" | comfy download --where cloud
-done
+comfy workflow compose blueprints/fan_out.yaml -o workflows/fan_out.json
+RES=$(comfy --json run --workflow workflows/fan_out.json)
+comfy --json jobs watch "$(echo "$RES" | jq -r .data.prompt_id)"
 ```
+
+This submits a single Job; the engine runs the independent branches
+concurrently. Avoid the old `PIDS=()` shell-loop pattern — it duplicates
+scheduling the engine already does and gives you N jobs to babysit instead
+of one. (For a pure prompt/seed sweep over the *same* graph, `comfy
+workflow vary` is the right tool; see the `comfy-fragments` skill for the
+full blueprint syntax.)
 
 Stage handoff (download → upload → re-reference):
 
@@ -597,5 +704,6 @@ chains and multi-stage pipelines: variable.
 Don't block your turn on a long job — do other useful work while the
 watcher updates the state file, then check when you need the result.
 The three wait patterns are in **Submit a workflow** above (`jobs watch`,
-state file read, `--wait`). The parallel fan-out pattern is in
-**Multi-stage orchestration** above.
+state file read, `--wait`). For parallelism, author one graph with
+independent (parallel) branches in a single blueprint rather than fanning
+out across jobs — see **Multi-stage orchestration** above.

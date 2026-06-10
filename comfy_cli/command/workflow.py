@@ -149,7 +149,7 @@ def _split_addr_value(arg: str, renderer) -> tuple[str, Any]:
         renderer.error(
             code="workflow_slot_invalid",
             message=f"Expected `ADDR=VALUE`, got {arg!r}",
-            hint='example: `positive_prompt.text="a cat"` (run `comfy workflow slots <file>` for addresses)',
+            hint='example: `6.text="a cat"` — run `comfy workflow slots <file>` first to list real addresses (`<node_id>.<input>`)',
         )
         raise typer.Exit(code=1)
     addr, _, raw = arg.partition("=")
@@ -344,7 +344,7 @@ def vary_cmd(
             renderer.error(
                 code="workflow_slot_invalid",
                 message=f"--slot {addr}: value must be a JSON array (got {type(value).__name__}).",
-                hint='example: --slot positive_prompt.text=\'["a cat","a dog"]\'',
+                hint='example: --slot \'6.text=["a cat","a dog"]\' — run `comfy workflow slots <file>` first to list real addresses (`<node_id>.<input>`)',
             )
             raise typer.Exit(code=1)
         by_addr[addr] = value

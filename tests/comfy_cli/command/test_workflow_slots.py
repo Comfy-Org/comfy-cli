@@ -616,6 +616,13 @@ class TestSetSlotNestedSubgraph:
         assert "not found" in env["error"]["message"].lower()
 
 
+def test_cli_hints_use_id_based_slot_addresses():
+    """Slot addresses resolve by node id; hints must not teach title-style addresses."""
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[3] / "comfy_cli/command/workflow.py").read_text(encoding="utf-8")
+    assert "positive_prompt.text" not in src
+
+
 class TestVaryNestedSubgraph:
     def test_vary_over_nested_prompt(self, patched_subgraph_graph, tmp_path, capsys):
         path = _write_workflow(tmp_path, _subgraph_workflow())
