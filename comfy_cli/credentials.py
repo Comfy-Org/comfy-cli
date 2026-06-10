@@ -61,7 +61,7 @@ class Credential:
         return f"Credential(kind={self.kind!r}, value=***, source={self.source!r})"
 
 
-def get_session(*, refresh: bool = True) -> CloudSession | None:
+def get_session(*, refresh: bool = True, force: bool = False, allow_clear: bool = True) -> CloudSession | None:
     """Read the stored Comfy Cloud OAuth session.
 
     ``refresh=True`` goes through ``ensure_fresh_session`` (spends the
@@ -69,11 +69,20 @@ def get_session(*, refresh: bool = True) -> CloudSession | None:
     ``refresh=False`` reads the store as-is, possibly returning an expired
     session — callers that only display state, or that must never touch the
     network, want this.
+
+    ``force=True`` (implies the refresh path) refreshes unconditionally,
+    ignoring the local expiry check. Reserved for the *reactive* path: after a
+    server 401, the token is known-rejected even if our clock disagrees.
+
+    ``allow_clear=False`` forwards to ``ensure_fresh_session`` so a fatal
+    refresh failure does NOT clear the stored session. Background watchers pass
+    this — they are read-mostly and must never log the user off the shared
+    session; only foreground, user-driven commands own that lifecycle.
     """
-    if refresh:
+    if refresh or force:
         from comfy_cli.cloud import oauth
 
-        return oauth.ensure_fresh_session()
+        return oauth.ensure_fresh_session(force=force, allow_clear=allow_clear)
     from comfy_cli.auth import store as auth_store
 
     return auth_store.get_cloud_session()

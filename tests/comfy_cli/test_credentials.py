@@ -240,6 +240,20 @@ class TestGetSession:
         clean_env.setattr(oauth, "ensure_fresh_session", lambda **kw: pytest.fail("refresh=False must not refresh"))
         assert get_session(refresh=False) is marker
 
+    def test_force_threads_through_to_ensure_fresh_session(self, clean_env):
+        """The reactive 401 path passes force=True; it must reach the refresher
+        even when refresh defaults are otherwise off."""
+        seen = {}
+
+        def _refresh(**kw):
+            seen.update(kw)
+            return _session(token="forced")
+
+        clean_env.setattr(oauth, "ensure_fresh_session", _refresh)
+        cred = get_session(refresh=False, force=True)
+        assert seen.get("force") is True
+        assert cred is not None and cred.access_token == "forced"
+
 
 # ---------------------------------------------------------------------------
 # 2. no-direct-reads ratchet

@@ -51,3 +51,46 @@ def test_reentrant_in_same_process_is_ok(tmp_path: Path):
         pass
     with file_lock(lock_file):
         pass
+
+
+def test_nested_same_path_does_not_self_deadlock(tmp_path: Path):
+    # The OAuth refresh path holds the secrets lock and then calls store
+    # helpers that lock the SAME file. With per-fd flock that would block on
+    # itself; the lock is reentrant within a thread, so this must not hang.
+    lock_file = tmp_path / "nested.lock"
+    reached_inner = False
+    with file_lock(lock_file):
+        with file_lock(lock_file):  # nested — different fd, same path
+            reached_inner = True
+    assert reached_inner
+
+
+def test_nested_different_spelling_same_file_is_reentrant(tmp_path: Path):
+    # Two spellings of the same file (".." in the path) must share one
+    # reentrancy counter so the inner acquire is recognized as nested.
+    target = tmp_path / "sub" / "x.lock"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    alias = tmp_path / "sub" / ".." / "sub" / "x.lock"
+    with file_lock(target):
+        with file_lock(alias):
+            pass
+
+
+def test_lock_released_after_nested_block_exits(tmp_path: Path):
+    # After a nested acquire fully unwinds, the OS lock must be free again so a
+    # second thread can take it (i.e. reentrancy didn't leak the held state).
+    lock_file = tmp_path / "release.lock"
+    with file_lock(lock_file):
+        with file_lock(lock_file):
+            pass
+
+    acquired = threading.Event()
+
+    def worker():
+        with file_lock(lock_file, timeout=2.0):
+            acquired.set()
+
+    t = threading.Thread(target=worker)
+    t.start()
+    t.join(timeout=3.0)
+    assert acquired.is_set()

@@ -85,11 +85,14 @@ def resolve_target(
         # ``base_url=`` arms the replay-guard: a session minted for a different
         # base_url (or expired) is ignored so credentials are never replayed to
         # a host the user didn't authenticate against; the API-key fallback or
-        # a downstream "unauthenticated" error takes over. ``refresh=False``
-        # preserves the historical behavior of this chain (no token refresh at
-        # target-resolution time; the client refreshes on 401 itself).
+        # a downstream "unauthenticated" error takes over. ``refresh=True`` is
+        # the *proactive* leg: a near-expiry access token is refreshed before
+        # it's attached, so the user keeps working across the ~1h token
+        # lifetime without ever hitting a 401. The refresh is a cheap no-op
+        # when the token isn't near expiry (no network), and the client/loader
+        # still force-refresh *reactively* on a server 401 as a backstop.
         base_url = get_base_url()
-        cred = resolve_cloud_credential(purpose="cloud", base_url=base_url, refresh=False)
+        cred = resolve_cloud_credential(purpose="cloud", base_url=base_url, refresh=True)
         token = cred.value if cred is not None and cred.kind == "oauth" else None
         api_key = cred.value if cred is not None and cred.kind == "api_key" else None
 

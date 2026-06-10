@@ -112,9 +112,15 @@ class SubmitResult:
 class Client:
     """Single HTTP client across local + cloud ComfyUI."""
 
-    def __init__(self, target: Target, *, timeout: float = 30.0):
+    def __init__(self, target: Target, *, timeout: float = 30.0, clear_session_on_auth_failure: bool = True):
         self.target = target
         self.timeout = timeout
+        # Whether a fatal OAuth refresh failure (reuse-detection / invalid_grant)
+        # on the reactive 401 path may clear the stored session. Foreground,
+        # user-driven commands leave this True (they own the session lifecycle).
+        # The detached background watcher sets it False: it is read-mostly and
+        # must never log the user off the shared session over a transient blip.
+        self.clear_session_on_auth_failure = clear_session_on_auth_failure
         if target.is_cloud and not (target.auth_token or target.api_key):
             raise Unauthenticated(
                 "cloud target requires credentials — run `comfy cloud login` or set COMFY_CLOUD_API_KEY"
@@ -123,47 +129,59 @@ class Client:
     # ----- low-level -----
 
     def _try_refresh_token(self) -> bool:
-        """Attempt to refresh the OAuth token. Returns True if successful."""
+        """Refresh the OAuth token after a server 401. Returns True if a new
+        access token was obtained and installed on the target.
+
+        This is the *reactive* leg and it shares the single, cross-process
+        locked + double-checked refresh in ``oauth.ensure_fresh_session`` (via
+        ``get_session(force=True)``) — there is no second refresh/persist code
+        path here. Coalescing matters: in a parallel fan-out the first caller
+        refreshes and the rest pick up the rotated token from the store without
+        a second network call, so a consumed refresh token is never replayed.
+
+        Raises ``Unauthenticated`` when the refresh hit reuse-detection /
+        ``invalid_grant``: the family is dead, the session has already been
+        cleared, and retrying is pointless — the caller surfaces the
+        ``cloud_unauthorized`` login guidance exactly once.
+        """
         if not self.target.is_cloud or not self.target.auth_token:
             return False
-        # Only refresh OAuth tokens, not API keys
+        # Only refresh OAuth tokens, not API keys.
         if self.target.api_key:
             return False
-        try:
-            from comfy_cli.auth import store as auth_store
-            from comfy_cli.cloud import CLIENT_ID, get_resource_url
-            from comfy_cli.cloud.oauth import refresh_tokens
-            from comfy_cli.credentials import get_session
 
-            session = get_session(refresh=False)
-            if session is None or not session.refresh_token:
-                return False
+        from comfy_cli.credentials import get_session
 
-            new_tokens = refresh_tokens(
-                base_url=session.base_url,
-                client_id=session.client_id or CLIENT_ID,
-                refresh_token=session.refresh_token,
-                resource=session.resource or get_resource_url(),
-            )
-
-            # Persist the refreshed tokens
-            auth_store.save_cloud_session(
-                base_url=session.base_url,
-                resource=session.resource,
-                client_id=session.client_id,
-                scope=session.scope,
-                access_token=new_tokens.access_token,
-                refresh_token=new_tokens.refresh_token or session.refresh_token,
-                token_type=new_tokens.token_type,
-                expires_at=new_tokens.expires_at,
-            )
-
-            # Update the target's auth token in-place for subsequent requests.
-            # Target is frozen, so we need to work around it.
-            object.__setattr__(self.target, "auth_token", new_tokens.access_token)
+        old_token = self.target.auth_token
+        # Was there a stored OAuth session backing this token? If not (e.g. a
+        # bare token handed to the client directly), there's nothing to refresh
+        # and a cleared store doesn't mean "revoked" — just let the 401 stand.
+        had_session = get_session(refresh=False) is not None
+        # force=True: a server 401 is authoritative even if our local clock
+        # still thinks the access token is valid (skew / no recorded expiry).
+        # allow_clear: foreground commands may clear on a fatal token failure;
+        # the background watcher passes False so a transient/spurious
+        # invalid_grant can't wipe the shared session.
+        session = get_session(refresh=True, force=True, allow_clear=self.clear_session_on_auth_failure)
+        if session is not None and session.access_token and session.access_token != old_token:
+            # Frozen dataclass — install the rotated token for the retry + any
+            # subsequent requests (and the partner-API extra_data rebuild).
+            object.__setattr__(self.target, "auth_token", session.access_token)
             return True
-        except Exception:  # noqa: BLE001 — refresh is best-effort
-            return False
+        if had_session and session is None:
+            # The refresh hit a fatal token error (reuse detected /
+            # invalid_grant). When ``clear_session_on_auth_failure`` is True the
+            # stored session has already been cleared; when False (watcher) it
+            # is deliberately preserved for the foreground command to manage.
+            # Either way, don't loop on a dead token — surface the failure once.
+            raise Unauthenticated(
+                "Comfy Cloud session is no longer valid (refresh token reuse detected or expired) — "
+                "run `comfy cloud login`"
+            )
+        # Same token back (a transient/network refresh failure kept the stale
+        # session), or no stored session to refresh: let the original 401
+        # propagate to the caller's HTTP-error handling.
+        return False
 
     @staticmethod
     def _retry_delay(exc: urllib.error.HTTPError, attempt: int) -> float:

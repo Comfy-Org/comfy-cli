@@ -60,7 +60,12 @@ def watch_job(
             from comfy_cli.target import resolve_target
 
             target = resolve_target(where="cloud")
-            cloud_client = Client(target, timeout=30.0)
+            # Watcher context: read-mostly background poller. A reactive refresh
+            # may freshen the access token, but a *fatal* refresh failure must
+            # never clear the shared session — the foreground command owns the
+            # session lifecycle, and a transient mid-run blip should not log the
+            # user off.
+            cloud_client = Client(target, timeout=30.0, clear_session_on_auth_failure=False)
         except Exception:  # noqa: BLE001
             pass
 
@@ -154,7 +159,9 @@ def _poll_cloud_once(state: jobs_state.JobState, *, client: Any = None) -> bool:
             from comfy_cli.target import resolve_target
 
             target = resolve_target(where="cloud")
-            client = Client(target, timeout=30.0)
+            # Watcher context — never clear the shared session on a fatal
+            # refresh failure (see the note in ``watch_job``).
+            client = Client(target, timeout=30.0, clear_session_on_auth_failure=False)
         record = client.get_job_status(state.prompt_id)
     except Exception as e:  # noqa: BLE001
         state.error = {"code": "watcher_poll_error", "message": str(e), "details": {}}

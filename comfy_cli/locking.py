@@ -15,8 +15,34 @@ from __future__ import annotations
 import contextlib
 import os
 import sys
+import threading
 from collections.abc import Iterator
 from pathlib import Path
+
+# Per-thread reentrancy bookkeeping. ``fcntl.flock`` locks are tied to the open
+# file *description*, so a single thread that opens the same lock file twice
+# (different fds) and tries to take LOCK_EX on both would block on itself —
+# a self-deadlock. That happens for real in the OAuth refresh path:
+# ``ensure_fresh_session`` holds the secrets lock and then calls
+# ``auth_store.get_cloud_session`` / ``save_cloud_session``, which each lock the
+# same file. We make ``file_lock`` reentrant within one thread so those nested
+# acquisitions are cheap no-ops and only the outermost frame touches the OS
+# lock. Cross-process serialization is unchanged.
+_reentrant = threading.local()
+
+
+def _held_depths() -> dict[str, int]:
+    depths = getattr(_reentrant, "depths", None)
+    if depths is None:
+        depths = {}
+        _reentrant.depths = depths
+    return depths
+
+
+def _lock_key(p: Path) -> str:
+    # realpath collapses symlinks / .. so two spellings of the same file share
+    # one reentrancy counter. Works even when the file doesn't exist yet.
+    return os.path.realpath(str(p))
 
 
 @contextlib.contextmanager
@@ -26,12 +52,28 @@ def file_lock(path: str | os.PathLike[str], *, timeout: float | None = None) -> 
     ``timeout`` is a best-effort upper bound; on platforms that don't support
     non-blocking acquire with timeout we block indefinitely.
 
+    Reentrant within a single thread: nesting the same path returns
+    immediately without re-acquiring the OS lock (and the lock is only released
+    when the outermost frame exits).
+
     Note: ``fcntl.flock`` on NFS is silently a no-op on many configurations
     (the lock isn't propagated to the NFS server). Lock files that need
     cross-host serialization should use a different primitive. We keep flock
     for the local case and warn lazily if we detect we're on NFS.
     """
     p = Path(path)
+    key = _lock_key(p)
+    depths = _held_depths()
+    if depths.get(key, 0) > 0:
+        # Already held by this thread — reentrant no-op.
+        depths[key] += 1
+        try:
+            yield
+        finally:
+            depths[key] -= 1
+            if depths[key] == 0:
+                del depths[key]
+        return
     p.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     # Open in append-binary so we don't truncate any existing payload; the
     # lock byte-range is at offset 0 and doesn't affect data.
@@ -44,9 +86,11 @@ def file_lock(path: str | os.PathLike[str], *, timeout: float | None = None) -> 
         pass
     try:
         _acquire(fd, timeout=timeout)
+        depths[key] = 1
         try:
             yield
         finally:
+            depths.pop(key, None)
             _release(fd)
     finally:
         os.close(fd)

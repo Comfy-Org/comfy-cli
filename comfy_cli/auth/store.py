@@ -65,6 +65,25 @@ def secrets_path() -> Path:
     return base / "secrets.json"
 
 
+def lock_path() -> Path:
+    """Stable sidecar path that all secret-store mutations serialize on.
+
+    The lock MUST NOT be the data file itself: ``_write_all`` persists via
+    ``os.replace(tmp, secrets.json)``, which swaps in a *new inode* on every
+    write. ``fcntl.flock`` is bound to the open file description (the inode),
+    so if processes locked ``secrets.json`` directly, a holder mid-refresh
+    would be flocking the now-unlinked old inode while a newcomer opens — and
+    flocks — the freshly-renamed inode. The two would run the critical section
+    simultaneously, replay the same rotated refresh token, and trip the auth
+    server's reuse-detection (wiping the whole token family). A dedicated
+    ``secrets.json.lock`` file is created once and never replaced, so every
+    process serializes on one stable inode regardless of how many times the
+    data file is atomically rewritten underneath it.
+    """
+    p = secrets_path()
+    return p.with_name(p.name + ".lock")
+
+
 _EMPTY: dict[str, Any] = {"providers": {}, "cloud_session": None}
 
 
@@ -136,7 +155,7 @@ def _write_all(path: Path, payload: dict[str, Any]) -> None:
 
 def list_records() -> list[AuthRecord]:
     path = secrets_path()
-    with locking.file_lock(path):
+    with locking.file_lock(lock_path()):
         data = _read_all(path)
     out: list[AuthRecord] = []
     for name, body in data["providers"].items():
@@ -151,7 +170,7 @@ def list_records() -> list[AuthRecord]:
 
 def get(provider: str) -> AuthRecord | None:
     path = secrets_path()
-    with locking.file_lock(path):
+    with locking.file_lock(lock_path()):
         data = _read_all(path)
     body = data["providers"].get(provider)
     if not isinstance(body, dict):
@@ -174,7 +193,7 @@ def set(provider: str, key: str) -> AuthRecord:
         raise ValueError("key cannot be empty")
     path = secrets_path()
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    with locking.file_lock(path):
+    with locking.file_lock(lock_path()):
         data = _read_all(path)
         data["providers"][provider] = {"key": key, "updated_at": now}
         _write_all(path, data)
@@ -183,7 +202,7 @@ def set(provider: str, key: str) -> AuthRecord:
 
 def remove(provider: str) -> bool:
     path = secrets_path()
-    with locking.file_lock(path):
+    with locking.file_lock(lock_path()):
         data = _read_all(path)
         if provider not in data["providers"]:
             return False
@@ -267,7 +286,7 @@ def _session_from_dict(body: dict[str, Any]) -> CloudSession | None:
 
 def get_cloud_session() -> CloudSession | None:
     path = secrets_path()
-    with locking.file_lock(path):
+    with locking.file_lock(lock_path()):
         data = _read_all(path)
     session = data.get("cloud_session")
     if not isinstance(session, dict):
@@ -303,7 +322,7 @@ def save_cloud_session(
             "expires_at": expires_at,
         },
     }
-    with locking.file_lock(path):
+    with locking.file_lock(lock_path()):
         data = _read_all(path)
         data["cloud_session"] = payload
         _write_all(path, data)
@@ -322,7 +341,7 @@ def save_cloud_session(
 
 def clear_cloud_session() -> bool:
     path = secrets_path()
-    with locking.file_lock(path):
+    with locking.file_lock(lock_path()):
         data = _read_all(path)
         if data.get("cloud_session") is None:
             return False

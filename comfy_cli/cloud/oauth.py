@@ -582,7 +582,32 @@ def refresh_tokens(
     return _token_set_from_response(resp)
 
 
-def ensure_fresh_session(*, leeway_s: int = 60):
+# Upper bound on how long a waiter blocks for the refresh lock. The holder
+# only keeps it for one token POST (``_HTTP_TIMEOUT_S`` = 30s), so this leaves
+# headroom for that round-trip plus the read-modify-write. If it's ever
+# exceeded (a wedged peer) we fall back to whatever is persisted rather than
+# racing an in-flight refresh.
+_REFRESH_LOCK_TIMEOUT_S = 45.0
+
+
+def _is_fatal_token_error(exc: OAuthRefreshError) -> bool:
+    """True when a refresh failure means the whole token *family* is dead.
+
+    The auth server rotates refresh tokens and does reuse detection: a spent
+    (or replayed) refresh token comes back as ``invalid_grant`` ("refresh
+    token reuse detected") and the server invalidates the entire family. Any
+    400/401 from the token endpoint is treated as fatal — retrying can only
+    replay a dead token. A status of 0 (network/URLError) is *not* fatal: the
+    token may still be good, so we keep the session and let the caller retry.
+    """
+    status = exc.details.get("status")
+    if status in (400, 401):
+        return True
+    blob = f"{exc.details.get('body', '')} {exc}".lower()
+    return "invalid_grant" in blob or "reuse" in blob
+
+
+def ensure_fresh_session(*, leeway_s: int = 60, force: bool = False, allow_clear: bool = True):
     """Return the stored cloud session, refreshing it first when the access
     token is expired (or within ``leeway_s`` of expiring) and a refresh token
     is available.
@@ -590,36 +615,131 @@ def ensure_fresh_session(*, leeway_s: int = 60):
     The access-token lifetime is set by the auth server (short by design);
     this spends the long-lived refresh token to keep the *session* alive, so a
     user who keeps working within the refresh window never has to re-run
-    ``comfy cloud login``. Best-effort: on any refresh failure it returns the
-    existing (stale) session so the caller's own expiry check still fires.
-    Returns ``None`` when there is no session at all.
+    ``comfy cloud login``. Best-effort: on a *transient* refresh failure it
+    returns the existing (stale) session so the caller's own expiry check still
+    fires. Returns ``None`` when there is no session at all — or when a refresh
+    hit reuse-detection / ``invalid_grant`` (the family is dead, so the stored
+    session is cleared and the caller surfaces the ``cloud_unauthorized``
+    "run ``comfy cloud login``" guidance).
+
+    ``force=True`` refreshes regardless of the *local* expiry check. Use it on
+    the reactive path after a server 401 (which is authoritative): the access
+    token has been rejected even if our clock — skewed, or with no
+    ``expires_at`` recorded — still thinks it is valid. The refresh token is
+    still required; without one this is a no-op.
+
+    ``allow_clear=False`` keeps the stored session on disk even when a refresh
+    hits a fatal token error (reuse-detection / ``invalid_grant``). Background,
+    read-mostly callers (the detached ``comfy run`` watcher) pass this so a
+    single transient blip — or a *spurious* invalid_grant from a token replay —
+    can never wipe the login out from under the foreground command that owns the
+    session lifecycle. The refresh still returns ``None`` so the caller knows it
+    could not freshen the token; it just declines to destroy the shared session.
+
+    Concurrency: the auth server rotates the refresh token on every refresh and
+    invalidates the old one. A parallel ``comfy run`` fan-out (plus background
+    ``jobs watch`` processes) would otherwise have N processes each load the
+    same stored token and POST refresh concurrently — the first wins, the rest
+    replay a consumed token and trip reuse-detection, killing the whole family.
+    To prevent that, the *decide → POST → persist* sequence runs under a
+    cross-process file lock (the same lock the secret store uses) with a
+    double-check after acquisition: if a peer already rotated the token while
+    we waited, we use the freshly persisted one instead of spending ours again.
     """
     from comfy_cli.auth import store as auth_store
 
     session = auth_store.get_cloud_session()
-    if session is None or not session.is_expired(leeway_s=leeway_s) or not session.refresh_token:
+    if session is None or not session.refresh_token:
         return session
-    try:
-        from comfy_cli.cloud import CLIENT_ID, get_resource_url
+    if not force and not session.is_expired(leeway_s=leeway_s):
+        # Fast path: token is comfortably valid. No lock, no network — keeps
+        # the proactive ``resolve_target`` leg cheap on the common case.
+        return session
 
+    # A refresh is indicated. Serialize the whole decide→refresh→persist across
+    # processes so concurrent callers coalesce into a single network refresh
+    # and a rotated refresh token is never replayed by a second waiter.
+    from comfy_cli import locking
+
+    observed_refresh_token = session.refresh_token
+    try:
+        with locking.file_lock(auth_store.lock_path(), timeout=_REFRESH_LOCK_TIMEOUT_S):
+            return _locked_refresh(
+                auth_store,
+                observed_refresh_token=observed_refresh_token,
+                leeway_s=leeway_s,
+                force=force,
+                allow_clear=allow_clear,
+            )
+    except TimeoutError:
+        # A peer has held the lock longer than a refresh should take. Don't
+        # race it — return whatever is persisted now (it may already be the
+        # rotated token) and let the caller's expiry check decide.
+        return auth_store.get_cloud_session() or session
+
+
+def _locked_refresh(auth_store, *, observed_refresh_token: str, leeway_s: int, force: bool, allow_clear: bool = True):
+    """Decide → POST → persist, executed while holding the secrets lock.
+
+    Re-reads the persisted session first (double-checked locking): if a peer
+    rotated the refresh token while we waited for the lock, we adopt the new
+    one rather than spending the now-consumed token we observed before locking.
+    """
+    session = auth_store.get_cloud_session()
+    if session is None or not session.refresh_token:
+        return session
+
+    # Double-check after acquiring the lock. A peer may have refreshed while we
+    # blocked: if the stored refresh token rotated away from what we observed
+    # before locking, the family already advanced — use it, never re-send the
+    # consumed token (that is exactly what trips reuse-detection).
+    if session.refresh_token != observed_refresh_token:
+        return session
+    if not force and not session.is_expired(leeway_s=leeway_s):
+        # Peer advanced the access token's expiry without us noticing a token
+        # rotation (e.g. same token, fresh enough now). Nothing to do.
+        return session
+
+    from comfy_cli.cloud import CLIENT_ID, get_resource_url
+
+    try:
         new_tokens = refresh_tokens(
             base_url=session.base_url,
             client_id=session.client_id or CLIENT_ID,
             refresh_token=session.refresh_token,
             resource=session.resource or get_resource_url(),
         )
-        return auth_store.save_cloud_session(
-            base_url=session.base_url,
-            resource=session.resource,
-            client_id=session.client_id,
-            scope=session.scope,
-            access_token=new_tokens.access_token,
-            refresh_token=new_tokens.refresh_token or session.refresh_token,
-            token_type=new_tokens.token_type,
-            expires_at=new_tokens.expires_at,
-        )
-    except Exception:  # noqa: BLE001 — refresh is best-effort; fall back to stale session
+    except OAuthRefreshError as e:
+        if _is_fatal_token_error(e):
+            # Reuse-detected / invalid_grant: as far as the token endpoint is
+            # concerned the family is dead. Drop the stored tokens so they're
+            # never replayed in a loop, and signal the caller (via ``None``) to
+            # surface the cloud_unauthorized guidance.
+            #
+            # ``allow_clear=False`` (background watcher) declines to wipe the
+            # shared session: the foreground command owns its lifecycle, and a
+            # spurious invalid_grant from a transient blip must not log the user
+            # off mid-run. We still return ``None`` so the watcher knows the
+            # refresh did not produce a usable token.
+            if allow_clear:
+                auth_store.clear_cloud_session()
+            return None
+        return session  # transient (network) — keep the stale session
+    except Exception:  # noqa: BLE001 — any other error is best-effort
         return session
+
+    # Atomic persist of the rotated family before the lock is released, so the
+    # next process reads the new tokens (save_cloud_session writes tmp+rename).
+    return auth_store.save_cloud_session(
+        base_url=session.base_url,
+        resource=session.resource,
+        client_id=session.client_id,
+        scope=session.scope,
+        access_token=new_tokens.access_token,
+        refresh_token=new_tokens.refresh_token or session.refresh_token,
+        token_type=new_tokens.token_type,
+        expires_at=new_tokens.expires_at,
+    )
 
 
 # ---------------------------------------------------------------------------

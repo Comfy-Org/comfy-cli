@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import os
 import threading
 import time
 import urllib.parse
@@ -531,3 +532,595 @@ class TestEnsureFreshSession:
     def test_none_when_no_session(self, monkeypatch):
         monkeypatch.setattr(auth_store, "get_cloud_session", lambda: None)
         assert oauth.ensure_fresh_session() is None
+
+    def _valid(self) -> auth_store.CloudSession:
+        return auth_store.CloudSession(
+            base_url="https://c",
+            resource="https://c/api",
+            client_id="cid",
+            scope="s",
+            access_token="OLD",
+            refresh_token="RT",
+            token_type="Bearer",
+            expires_at=int(time.time()) + 3600,
+            saved_at="2026-01-01T00:00:00+00:00",
+        )
+
+    def test_force_refreshes_even_when_locally_valid(self, monkeypatch):
+        """Reactive path: a server 401 means refresh even if our clock thinks
+        the access token is still good (skew / no recorded expiry)."""
+        saved: dict = {}
+        called = []
+        monkeypatch.setattr(auth_store, "get_cloud_session", lambda: self._valid())
+        monkeypatch.setattr(auth_store, "save_cloud_session", lambda **kw: saved.update(kw) or self._valid())
+
+        def _refresh(**kw):
+            called.append(1)
+            return oauth.TokenSet(
+                access_token="NEW",
+                refresh_token="RT2",
+                token_type="Bearer",
+                expires_in=3600,
+                expires_at=int(time.time()) + 3600,
+                scope="s",
+            )
+
+        monkeypatch.setattr(oauth, "refresh_tokens", _refresh)
+        result = oauth.ensure_fresh_session(force=True)
+        assert called == [1]  # refreshed despite local validity
+        assert saved["access_token"] == "NEW"
+        assert result is not None
+
+    def test_force_without_refresh_token_is_noop(self, monkeypatch):
+        called = []
+        valid_no_rt = auth_store.CloudSession(
+            base_url="https://c",
+            resource="https://c/api",
+            client_id="cid",
+            scope="s",
+            access_token="OLD",
+            refresh_token=None,
+            token_type="Bearer",
+            expires_at=int(time.time()) + 3600,
+            saved_at="2026-01-01T00:00:00+00:00",
+        )
+        monkeypatch.setattr(auth_store, "get_cloud_session", lambda: valid_no_rt)
+        monkeypatch.setattr(oauth, "refresh_tokens", lambda **kw: called.append(1))
+        result = oauth.ensure_fresh_session(force=True)
+        assert result is valid_no_rt
+        assert called == []  # no refresh token → nothing to spend
+
+
+class TestConcurrentRefresh:
+    """Rotation-correct, concurrency-safe refresh.
+
+    The auth server rotates the refresh token on every refresh and trips
+    reuse-detection (invalidating the whole family) if a consumed token is ever
+    replayed. These tests pin the cross-process lock + double-check + atomic
+    persist + reuse handling that guarantee a refresh token is never sent twice.
+    All network is mocked — ``oauth.refresh_tokens`` is the only seam patched.
+    """
+
+    @pytest.fixture
+    def persisted(self, tmp_path, monkeypatch):
+        """A real, on-disk secret store so the file lock and the
+        read-modify-write actually exercise the store (not mocked reads)."""
+        path = tmp_path / "secrets.json"
+        monkeypatch.setattr(auth_store, "secrets_path", lambda: path)
+        return path
+
+    def _persist_expired(self, *, refresh_token: str = "RT0") -> None:
+        auth_store.save_cloud_session(
+            base_url="https://c",
+            resource="https://c/api",
+            client_id="cid",
+            scope="s",
+            access_token="OLD",
+            refresh_token=refresh_token,
+            token_type="Bearer",
+            expires_at=int(time.time()) - 1,  # already expired → refresh path
+        )
+
+    @staticmethod
+    def _token_set(*, access: str, refresh: str) -> oauth.TokenSet:
+        return oauth.TokenSet(
+            access_token=access,
+            refresh_token=refresh,
+            token_type="Bearer",
+            expires_in=3600,
+            expires_at=int(time.time()) + 3600,
+            scope="s",
+        )
+
+    # (a) + (c): two concurrent refreshes coalesce to ONE network call, and the
+    # rotated refresh token is what ends up persisted.
+    def test_concurrent_refresh_coalesces_to_single_network_call(self, persisted, monkeypatch):
+        self._persist_expired(refresh_token="RT0")
+
+        calls: list[str] = []
+        start_barrier = threading.Barrier(2)
+
+        def fake_refresh(**kw):
+            calls.append(kw["refresh_token"])
+            time.sleep(0.15)  # widen the window so the second thread must wait
+            return self._token_set(access="NEW", refresh="RT1")
+
+        monkeypatch.setattr(oauth, "refresh_tokens", fake_refresh)
+
+        results: list = []
+
+        def worker():
+            start_barrier.wait()  # both threads read the stale token first
+            results.append(oauth.ensure_fresh_session())
+
+        threads = [threading.Thread(target=worker) for _ in range(2)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        # Exactly one network refresh — the second waiter saw the rotated token
+        # under the lock (double-check) and never replayed the consumed RT0.
+        assert calls == ["RT0"]
+        # The consumed token was never sent twice.
+        assert "RT0" not in calls[1:]
+        # Both callers end up with the fresh access token.
+        assert all(r is not None and r.access_token == "NEW" for r in results)
+        # (c) Rotation persisted: the store holds the NEW refresh token.
+        stored = auth_store.get_cloud_session()
+        assert stored.refresh_token == "RT1"
+        assert stored.access_token == "NEW"
+
+    # (b) Double-check: if a peer already rotated the token between our pre-lock
+    # read and the post-lock re-read, we adopt it and do NOT refresh again.
+    def test_double_check_skips_refresh_when_peer_already_rotated(self, persisted, monkeypatch):
+        self._persist_expired(refresh_token="RT0")
+
+        # Simulate a peer that rotated RT0 → RT1 while we waited for the lock:
+        # the pre-lock read sees RT0; the post-lock re-read sees a fresh RT1.
+        fresh_peer = auth_store.CloudSession(
+            base_url="https://c",
+            resource="https://c/api",
+            client_id="cid",
+            scope="s",
+            access_token="PEER_NEW",
+            refresh_token="RT1",
+            token_type="Bearer",
+            expires_at=int(time.time()) + 3600,
+            saved_at="2026-01-01T00:00:02+00:00",
+        )
+        reads = [self._stale(), fresh_peer]
+        monkeypatch.setattr(auth_store, "get_cloud_session", lambda: reads.pop(0) if reads else fresh_peer)
+        monkeypatch.setattr(oauth, "refresh_tokens", lambda **kw: pytest.fail("must not refresh after peer rotation"))
+
+        result = oauth.ensure_fresh_session()
+        assert result.refresh_token == "RT1"
+        assert result.access_token == "PEER_NEW"
+
+    def _stale(self) -> auth_store.CloudSession:
+        return auth_store.CloudSession(
+            base_url="https://c",
+            resource="https://c/api",
+            client_id="cid",
+            scope="s",
+            access_token="OLD",
+            refresh_token="RT0",
+            token_type="Bearer",
+            expires_at=int(time.time()) - 1,
+            saved_at="2026-01-01T00:00:00+00:00",
+        )
+
+    # (d) Reuse-detected / invalid_grant is fatal: clear the session, return
+    # None, surface login guidance, and NEVER loop.
+    def test_reuse_detected_clears_session_and_does_not_loop(self, persisted, monkeypatch):
+        self._persist_expired(refresh_token="RT0")
+
+        calls = []
+
+        def boom(**kw):
+            calls.append(1)
+            raise oauth.OAuthRefreshError(
+                "refresh failed: HTTP 400",
+                hint="run `comfy cloud login`",
+                details={
+                    "status": 400,
+                    "body": '{"error":"invalid_grant","error_description":"refresh token reuse detected"}',
+                },
+            )
+
+        monkeypatch.setattr(oauth, "refresh_tokens", boom)
+
+        result = oauth.ensure_fresh_session()
+        assert result is None  # family is dead → caller surfaces cloud_unauthorized
+        assert calls == [1]  # exactly one attempt, no retry loop
+        # Stored session was cleared so the dead token is never replayed again.
+        assert auth_store.get_cloud_session() is None
+
+    def test_is_fatal_token_error_classification(self):
+        def err(status, body=""):
+            return oauth.OAuthRefreshError("refresh failed", details={"status": status, "body": body})
+
+        assert oauth._is_fatal_token_error(err(400, "invalid_grant")) is True
+        assert oauth._is_fatal_token_error(err(401)) is True
+        assert oauth._is_fatal_token_error(err(0, "Connection refused")) is False  # transient network
+        assert oauth._is_fatal_token_error(err(503)) is False  # server hiccup, token may be fine
+        # Message-based detection when status is absent.
+        assert oauth._is_fatal_token_error(oauth.OAuthRefreshError("reuse detected", details={})) is True
+
+    # (d) end-to-end surface: after a reuse clears the session, building a cloud
+    # client with no other credentials raises Unauthenticated (mapped to
+    # cloud_unauthorized by the command layer) — exactly once.
+    def test_reactive_client_raises_unauthenticated_on_reuse(self, persisted, monkeypatch):
+        import comfy_cli.comfy_client as comfy_client
+
+        self._persist_expired(refresh_token="RT0")
+
+        calls = []
+
+        def boom(**kw):
+            calls.append(1)
+            raise oauth.OAuthRefreshError(
+                "refresh failed: HTTP 400",
+                details={"status": 400, "body": "refresh token reuse detected"},
+            )
+
+        monkeypatch.setattr(oauth, "refresh_tokens", boom)
+
+        target = comfy_client.Target(
+            kind="cloud",
+            base_url="https://c",
+            path_prefix="/api",
+            history_path="history_v2",
+            jobs_path="jobs",
+            auth_token="OLD",
+        )
+        client = comfy_client.Client(target)
+        with pytest.raises(comfy_client.Unauthenticated):
+            client._try_refresh_token()
+        assert calls == [1]  # one attempt, no loop
+        assert auth_store.get_cloud_session() is None  # cleared
+
+    def test_transient_network_failure_keeps_session(self, persisted, monkeypatch):
+        """A URLError (status 0) must NOT clear the family — the token is
+        probably still good; keep the stale session for the caller to retry."""
+        self._persist_expired(refresh_token="RT0")
+
+        def boom(**kw):
+            raise oauth.OAuthRefreshError("refresh failed: <urlopen error>", details={"status": 0, "body": ""})
+
+        monkeypatch.setattr(oauth, "refresh_tokens", boom)
+        result = oauth.ensure_fresh_session()
+        assert result is not None and result.refresh_token == "RT0"  # session preserved
+        assert auth_store.get_cloud_session() is not None
+
+
+class TestAtomicPersist:
+    """save_cloud_session must write atomically (temp + rename) so a crash mid
+    write can never leave a half-written / corrupt session file."""
+
+    @pytest.fixture
+    def persisted(self, tmp_path, monkeypatch):
+        path = tmp_path / "secrets.json"
+        monkeypatch.setattr(auth_store, "secrets_path", lambda: path)
+        return path
+
+    def test_uses_temp_then_rename(self, persisted, monkeypatch):
+        seen = {}
+        real_replace = os.replace
+
+        def spy_replace(src, dst):
+            seen["src"] = str(src)
+            seen["dst"] = str(dst)
+            return real_replace(src, dst)
+
+        monkeypatch.setattr(os, "replace", spy_replace)
+        auth_store.save_cloud_session(
+            base_url="b",
+            resource="r",
+            client_id="c",
+            scope="s",
+            access_token="AT",
+            refresh_token="RT",
+            token_type="Bearer",
+            expires_at=int(time.time()) + 3600,
+        )
+        # Wrote to a distinct temp path, then renamed onto the real file.
+        assert seen["src"] != seen["dst"]
+        assert seen["src"].endswith(".tmp")
+        assert seen["dst"] == str(persisted)
+
+    def test_mid_write_failure_leaves_original_intact(self, persisted, monkeypatch):
+        # Seed a known-good session.
+        good = auth_store.save_cloud_session(
+            base_url="b",
+            resource="r",
+            client_id="c",
+            scope="s",
+            access_token="GOOD",
+            refresh_token="RTgood",
+            token_type="Bearer",
+            expires_at=int(time.time()) + 3600,
+        )
+        before = persisted.read_text(encoding="utf-8")
+
+        # Simulate a crash at the rename step of the next write.
+        def boom_replace(src, dst):
+            raise OSError("simulated crash during rename")
+
+        monkeypatch.setattr(os, "replace", boom_replace)
+        with pytest.raises(OSError):
+            auth_store.save_cloud_session(
+                base_url="b",
+                resource="r",
+                client_id="c",
+                scope="s",
+                access_token="HALF",
+                refresh_token="RThalf",
+                token_type="Bearer",
+                expires_at=int(time.time()) + 3600,
+            )
+
+        # The original file is byte-for-byte intact (no partial/corrupt write).
+        assert persisted.read_text(encoding="utf-8") == before
+        # And the half-written temp file was cleaned up.
+        leftovers = list(persisted.parent.glob("secrets.json*.tmp"))
+        assert leftovers == []
+        # The store still reads the good session.
+        reread = auth_store.get_cloud_session()
+        assert reread.access_token == good.access_token == "GOOD"
+
+
+class TestApi401DoesNotClearSession:
+    """Regression: a data/API 401 (a partner-node ``cloud_unauthorized`` blip,
+    or any normal REST endpoint 401) must NOT, by itself, wipe the login.
+
+    The reactive 401 path triggers at most ONE locked refresh-and-retry. The
+    stored session is only ever cleared when the *token endpoint itself* returns
+    a fatal ``invalid_grant`` during that refresh — never because a data request
+    came back 401 after a successful token refresh.
+    """
+
+    @pytest.fixture
+    def persisted(self, tmp_path, monkeypatch):
+        path = tmp_path / "secrets.json"
+        monkeypatch.setattr(auth_store, "secrets_path", lambda: path)
+        return path
+
+    def _persist_valid(self, *, refresh_token: str = "RT0", access: str = "AT0") -> None:
+        auth_store.save_cloud_session(
+            base_url="https://c",
+            resource="https://c/api",
+            client_id="cid",
+            scope="s",
+            access_token=access,
+            refresh_token=refresh_token,
+            token_type="Bearer",
+            expires_at=int(time.time()) + 3600,  # locally valid — force=True drives the refresh
+        )
+
+    def _cloud_target(self, token: str = "AT0"):
+        import comfy_cli.comfy_client as comfy_client
+
+        return comfy_client.Target(
+            kind="cloud",
+            base_url="https://c",
+            path_prefix="/api",
+            history_path="history_v2",
+            jobs_path="jobs",
+            auth_token=token,
+        )
+
+    # (1) Refresh SUCCEEDS, but the API request still 401s → retry happened once,
+    # the session is preserved, and the caller surfaces the unauthorized error.
+    def test_refresh_succeeds_but_api_still_401_does_not_clear(self, persisted, monkeypatch):
+        import comfy_cli.comfy_client as comfy_client
+
+        self._persist_valid(refresh_token="RT0", access="AT0")
+
+        refresh_calls: list[str] = []
+
+        def fake_refresh(**kw):
+            refresh_calls.append(kw["refresh_token"])
+            return oauth.TokenSet(
+                access_token="AT1",  # a genuinely fresh access token
+                refresh_token="RT1",
+                token_type="Bearer",
+                expires_in=3600,
+                expires_at=int(time.time()) + 3600,
+                scope="s",
+            )
+
+        monkeypatch.setattr(oauth, "refresh_tokens", fake_refresh)
+
+        clears: list[int] = []
+        monkeypatch.setattr(
+            auth_store,
+            "clear_cloud_session",
+            lambda: clears.append(1) or False,
+        )
+
+        # The server keeps returning 401 even after a clean token refresh — i.e.
+        # an API/entitlement problem, not a token problem.
+        attempts: list[str] = []
+
+        def always_401(req, timeout=None):
+            attempts.append(req.get_header("Authorization"))
+            raise urllib.error.HTTPError(req.full_url, 401, "Unauthorized", {}, None)
+
+        monkeypatch.setattr(comfy_client._OPENER, "open", always_401)
+
+        client = comfy_client.Client(self._cloud_target("AT0"))
+        with pytest.raises(comfy_client.HTTPError) as exc:
+            client.get_job_status("p1")
+
+        assert exc.value.status == 401  # surfaced as-is to the caller
+        assert refresh_calls == ["RT0"]  # exactly one refresh, with the stored token
+        # The retry carried the rotated access token, proving refresh installed it.
+        assert attempts == ["Bearer AT0", "Bearer AT1"]
+        assert clears == []  # session NEVER cleared on an API-only 401
+        assert auth_store.get_cloud_session() is not None  # still signed in
+        assert auth_store.get_cloud_session().refresh_token == "RT1"
+
+    # (2) Refresh itself returns invalid_grant / reuse → token-endpoint failure
+    # IS fatal: the session is cleared exactly once, with no retry loop.
+    def test_token_endpoint_invalid_grant_clears_once(self, persisted, monkeypatch):
+        import comfy_cli.comfy_client as comfy_client
+
+        self._persist_valid(refresh_token="RT0", access="AT0")
+
+        refresh_calls: list[int] = []
+
+        def boom(**kw):
+            refresh_calls.append(1)
+            raise oauth.OAuthRefreshError(
+                "refresh failed: HTTP 400",
+                details={
+                    "status": 400,
+                    "body": '{"error":"invalid_grant","error_description":"refresh token reuse detected"}',
+                },
+            )
+
+        monkeypatch.setattr(oauth, "refresh_tokens", boom)
+
+        real_clear = auth_store.clear_cloud_session
+        clears: list[int] = []
+
+        def counting_clear():
+            clears.append(1)
+            return real_clear()
+
+        monkeypatch.setattr(auth_store, "clear_cloud_session", counting_clear)
+
+        def first_401(req, timeout=None):
+            raise urllib.error.HTTPError(req.full_url, 401, "Unauthorized", {}, None)
+
+        monkeypatch.setattr(comfy_client._OPENER, "open", first_401)
+
+        client = comfy_client.Client(self._cloud_target("AT0"))
+        with pytest.raises(comfy_client.Unauthenticated):
+            client.get_job_status("p1")
+
+        assert refresh_calls == [1]  # exactly one refresh attempt, no loop
+        assert clears == [1]  # cleared exactly once
+        assert auth_store.get_cloud_session() is None  # family is dead → wiped
+
+
+class TestWatcherContextRefresh:
+    """Background watcher (``clear_session_on_auth_failure=False``): a fatal
+    refresh failure must NEVER clear the shared session. The foreground command
+    owns the session lifecycle; a detached poller hitting a transient/spurious
+    invalid_grant must not log the user off mid-run."""
+
+    @pytest.fixture
+    def persisted(self, tmp_path, monkeypatch):
+        path = tmp_path / "secrets.json"
+        monkeypatch.setattr(auth_store, "secrets_path", lambda: path)
+        return path
+
+    def _persist_valid(self) -> None:
+        auth_store.save_cloud_session(
+            base_url="https://c",
+            resource="https://c/api",
+            client_id="cid",
+            scope="s",
+            access_token="AT0",
+            refresh_token="RT0",
+            token_type="Bearer",
+            expires_at=int(time.time()) + 3600,
+        )
+
+    # (3) allow_clear=False at the oauth layer: invalid_grant returns None but
+    # leaves the stored session intact.
+    def test_ensure_fresh_session_allow_clear_false_keeps_session(self, persisted, monkeypatch):
+        self._persist_valid()
+
+        def boom(**kw):
+            raise oauth.OAuthRefreshError(
+                "refresh failed: HTTP 400",
+                details={"status": 400, "body": "invalid_grant: refresh token reuse detected"},
+            )
+
+        monkeypatch.setattr(oauth, "refresh_tokens", boom)
+
+        result = oauth.ensure_fresh_session(force=True, allow_clear=False)
+        assert result is None  # could not produce a usable token
+        # ...but the shared session is preserved for the foreground command.
+        assert auth_store.get_cloud_session() is not None
+        assert auth_store.get_cloud_session().refresh_token == "RT0"
+
+    # (3) end-to-end: a watcher-context Client surfaces Unauthenticated on a
+    # fatal refresh but does NOT clear the session.
+    def test_watcher_client_does_not_clear_on_fatal_refresh(self, persisted, monkeypatch):
+        import comfy_cli.comfy_client as comfy_client
+
+        self._persist_valid()
+
+        def boom(**kw):
+            raise oauth.OAuthRefreshError(
+                "refresh failed: HTTP 400",
+                details={"status": 400, "body": "refresh token reuse detected"},
+            )
+
+        monkeypatch.setattr(oauth, "refresh_tokens", boom)
+
+        def first_401(req, timeout=None):
+            raise urllib.error.HTTPError(req.full_url, 401, "Unauthorized", {}, None)
+
+        monkeypatch.setattr(comfy_client._OPENER, "open", first_401)
+
+        target = comfy_client.Target(
+            kind="cloud",
+            base_url="https://c",
+            path_prefix="/api",
+            history_path="history_v2",
+            jobs_path="jobs",
+            auth_token="AT0",
+        )
+        client = comfy_client.Client(target, clear_session_on_auth_failure=False)
+        with pytest.raises(comfy_client.Unauthenticated):
+            client.get_job_status("p1")
+
+        # The detached watcher never wiped the shared login.
+        assert auth_store.get_cloud_session() is not None
+        assert auth_store.get_cloud_session().refresh_token == "RT0"
+
+
+class TestLockFileStability:
+    """DEFECT B root cause: the refresh lock must be a stable sidecar file, NOT
+    the data file. ``save_cloud_session`` persists via ``os.replace`` (new
+    inode each write); locking the data file directly breaks ``flock`` mutual
+    exclusion exactly during a refresh, letting two processes replay the same
+    rotated token and trip reuse-detection."""
+
+    def test_lock_path_is_sidecar_not_data_file(self, tmp_path, monkeypatch):
+        path = tmp_path / "secrets.json"
+        monkeypatch.setattr(auth_store, "secrets_path", lambda: path)
+        assert auth_store.lock_path() == tmp_path / "secrets.json.lock"
+        assert auth_store.lock_path() != auth_store.secrets_path()
+
+    def test_lock_inode_survives_atomic_replace(self, tmp_path, monkeypatch):
+        """The lock file's identity (inode) is stable across many session
+        persists, so every process serializes on the same lock."""
+        path = tmp_path / "secrets.json"
+        monkeypatch.setattr(auth_store, "secrets_path", lambda: path)
+
+        def _save(rt: str) -> None:
+            auth_store.save_cloud_session(
+                base_url="https://c",
+                resource="https://c/api",
+                client_id="cid",
+                scope="s",
+                access_token="AT",
+                refresh_token=rt,
+                token_type="Bearer",
+                expires_at=int(time.time()) + 3600,
+            )
+
+        _save("RT0")
+        lock_file = auth_store.lock_path()
+        inode_before = lock_file.stat().st_ino
+        # Many atomic replaces of the *data* file...
+        for i in range(5):
+            _save(f"RT{i + 1}")
+        # ...leave the lock file's inode unchanged (data file inode does change).
+        assert lock_file.stat().st_ino == inode_before

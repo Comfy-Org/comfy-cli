@@ -402,10 +402,16 @@ def resilient_load_object_info(
     except LoadError as first_err:
         # (a) Best-effort token refresh, then retry the fetch exactly once.
         # Refresh only helps cloud auth, but it's cheap and a no-op locally.
+        # ``force=True``: the fetch already failed (typically HTTP 401), and a
+        # server 401 is authoritative — the access token is rejected even if
+        # our local clock still thinks it is valid (skew / no recorded
+        # expiry). A non-forced refresh would no-op in that case and the retry
+        # would re-send the same dead token. Force-refresh spends the refresh
+        # token so the retry carries a brand-new access token.
         try:
             from comfy_cli.credentials import get_session
 
-            get_session(refresh=True)
+            get_session(refresh=True, force=True)
         except Exception:  # noqa: BLE001 — refresh is best-effort
             pass
 

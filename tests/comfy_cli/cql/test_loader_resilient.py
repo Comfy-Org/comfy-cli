@@ -52,7 +52,7 @@ def _fake_refresh(monkeypatch):
     """Install a no-op ``ensure_fresh_session`` and count its calls."""
     calls = {"n": 0}
 
-    def _refresh():
+    def _refresh(**_kw):
         calls["n"] += 1
         return None
 
@@ -107,6 +107,70 @@ def test_failure_then_refresh_retry_succeeds(monkeypatch):
     assert refresh["n"] == 1  # refresh attempted between the two
     # Retry success also caches.
     assert loader.object_info_cache_path("https://test.comfy.org").is_file()
+
+
+def test_401_retry_forces_refresh(monkeypatch):
+    """The reactive retry must FORCE the refresh (force=True): a server 401 is
+    authoritative, so the token must be spent even if the local expiry check
+    still thinks the access token is valid."""
+    import comfy_cli.cloud.oauth as oauth
+    import comfy_cli.cql.engine as engine
+
+    seen_kwargs: list[dict] = []
+
+    def _refresh(**kw):
+        seen_kwargs.append(kw)
+        return None
+
+    monkeypatch.setattr(oauth, "ensure_fresh_session", _refresh)
+
+    attempts = {"n": 0}
+
+    def _flaky(**kw):
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            raise LoadError("HTTP 401 from /object_info", details={"status": 401})
+        return OBJECT_INFO
+
+    monkeypatch.setattr(engine, "_load_from_target", _flaky)
+
+    result = loader.resilient_load_object_info(mode="cloud", host="h", port=1)
+    assert result == OBJECT_INFO
+    # Forced, exactly once. The loader is a foreground command, so it keeps the
+    # default allow_clear=True (a genuine token-endpoint invalid_grant should
+    # still clear the dead session).
+    assert seen_kwargs == [{"force": True, "allow_clear": True}]
+
+
+def test_persistent_401_no_cache_retries_once_then_raises(monkeypatch):
+    """Graceful failure: a refresh token that can't rescue the session must
+    surface the original error exactly once — no infinite refresh/retry loop."""
+    import comfy_cli.cloud.oauth as oauth
+    import comfy_cli.cql.engine as engine
+
+    refresh = {"n": 0}
+
+    def _refresh(**kw):
+        refresh["n"] += 1
+        return None
+
+    monkeypatch.setattr(oauth, "ensure_fresh_session", _refresh)
+
+    attempts = {"n": 0}
+    original = LoadError("HTTP 401 from /object_info", details={"status": 401, "hint": "run `comfy cloud login`"})
+
+    def _always_401(**kw):
+        attempts["n"] += 1
+        raise original
+
+    monkeypatch.setattr(engine, "_load_from_target", _always_401)
+
+    with pytest.raises(LoadError) as excinfo:
+        loader.resilient_load_object_info(mode="cloud", host="h", port=1, _warn=lambda m: None)
+
+    assert excinfo.value is original  # the cloud_unauthorized-style hint survives
+    assert attempts["n"] == 2  # original + exactly one retry — no loop
+    assert refresh["n"] == 1  # refreshed exactly once
 
 
 # ---------------------------------------------------------------------------
