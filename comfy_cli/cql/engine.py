@@ -1360,7 +1360,10 @@ def _apply_one_slot(workflow: dict, addr: str, value: Any, graph: Graph) -> list
     """
     if "." not in addr:
         raise ValueError(f"invalid slot address {addr!r} (expected 'instance_id.input_name')")
-    node_path, input_name = addr.rsplit(".", 1)
+    # Node paths use '/' as separator; node IDs are numeric or UUID (no '.').
+    # Input names may legitimately contain dots (e.g. 'images.image0').
+    # Always split on the FIRST dot so multi-dot input names are preserved.
+    node_path, input_name = addr.split(".", 1)
     segments = node_path.split(_SUBGRAPH_PATH_SEP)
 
     defs_by_id = _subgraph_defs_by_id(workflow)

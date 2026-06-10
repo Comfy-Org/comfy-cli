@@ -964,3 +964,37 @@ class TestNullValuedProxy:
         assert by_addr["10.text"]["current_value"] is None
         # Did NOT explode into interior slots
         assert not any(a.startswith("10/") for a in addrs)
+
+
+# ===========================================================================
+# TestDottedInputName
+# ===========================================================================
+
+
+def test_slot_address_with_dotted_input_name(graph, monkeypatch):
+    """Input names may contain dots; the node path never does, so parse on the
+    FIRST dot: 10/9.images.image0 -> node_path '10/9', input 'images.image0'."""
+    from comfy_cli.cql import engine
+
+    class _FakeMeta:
+        inputs = []  # no declared inputs -> _write_widget skips shape/catalog validation
+
+    real_node = graph.node
+    real_order = graph.widget_order
+    monkeypatch.setattr(graph, "node", lambda nt: _FakeMeta() if nt == "DottedWidgetNode" else real_node(nt))
+    monkeypatch.setattr(
+        graph, "widget_order",
+        lambda nt: ["images.image0"] if nt == "DottedWidgetNode" else real_order(nt),
+    )
+
+    wf = {
+        "nodes": [{"id": 10, "type": "uuid-dot"}],
+        "definitions": {"subgraphs": [
+            {"id": "uuid-dot", "name": "Sub", "nodes": [
+                {"id": 9, "type": "DottedWidgetNode", "widgets_values": [None]},
+            ]},
+        ]},
+    }
+    # Must NOT raise "interior node images not found"; value lands on node 9's dotted widget.
+    engine._apply_one_slot(wf, "10/9.images.image0", "X", graph)
+    assert wf["definitions"]["subgraphs"][0]["nodes"][0]["widgets_values"][0] == "X"
