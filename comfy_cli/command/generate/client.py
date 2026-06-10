@@ -9,7 +9,6 @@ A thin wrapper around httpx that:
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from typing import Any
 
@@ -26,31 +25,6 @@ class ApiError(RuntimeError):
         self.body = body
 
 
-def _stored_api_key() -> str | None:
-    """Comfy Cloud API key persisted via ``comfy cloud set-key``, if any."""
-    from comfy_cli.auth import store
-    from comfy_cli.target import CLOUD_API_KEY_PROVIDER
-
-    record = store.get(CLOUD_API_KEY_PROVIDER)
-    return record.key if record is not None else None
-
-
-def _oauth_session_token() -> str | None:
-    """Live OAuth session token (a Firebase JWT), refreshed if near expiry.
-
-    The proxy validates a non-``comfyui-`` bearer token as a Firebase JWT
-    (see ``_auth_headers``), so the same session that powers
-    ``comfy run --where cloud`` authenticates partner-API calls too — no
-    separate API key required.
-    """
-    from comfy_cli.cloud.oauth import ensure_fresh_session
-
-    session = ensure_fresh_session()
-    if session is None or session.is_expired():
-        return None
-    return session.access_token
-
-
 def resolve_api_key(explicit: str | None = None) -> str:
     """Resolve a credential for the partner-API proxy.
 
@@ -58,25 +32,21 @@ def resolve_api_key(explicit: str | None = None) -> str:
     ambient API keys (``COMFY_API_KEY`` env / stored key), because OAuth is
     the CLI's primary auth path and API keys are on a deprecation path. The
     only thing that outranks the session is an explicit ``--api-key`` flag —
-    a deliberate per-call override. Resolution order:
-    explicit flag → live OAuth session → ``COMFY_API_KEY`` env → stored key.
-    Raise if none resolve.
+    a deliberate per-call override. Resolution order (shared chain in
+    ``comfy_cli.credentials``, ``purpose="partner"``):
+    explicit flag → live OAuth session (refreshed if near expiry) →
+    ``COMFY_API_KEY`` env → stored key. Raise if none resolve.
+
+    The proxy validates a non-``comfyui-`` bearer token as a Firebase JWT
+    (see ``_auth_headers``), so the same session that powers
+    ``comfy run --where cloud`` authenticates partner-API calls too — no
+    separate API key required.
     """
-    explicit_key = explicit.strip() if isinstance(explicit, str) and explicit.strip() else ""
-    if explicit_key:
-        return explicit_key
+    from comfy_cli.credentials import resolve_cloud_credential
 
-    session_token = _oauth_session_token()
-    if session_token:
-        return session_token
-
-    env_key = os.environ.get("COMFY_API_KEY", "").strip()
-    if env_key:
-        return env_key
-
-    stored = _stored_api_key()
-    if stored and stored.strip():
-        return stored.strip()
+    cred = resolve_cloud_credential(purpose="partner", explicit=explicit, refresh=True)
+    if cred is not None:
+        return cred.value
 
     raise ApiError(
         401,

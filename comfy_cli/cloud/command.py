@@ -149,22 +149,21 @@ def logout_cmd():
 @app.command("whoami", help="Show the current Comfy Cloud sign-in status.")
 @tracking.track_command("cloud")
 def whoami_cmd():
-    import os as _os
-
-    from comfy_cli.cloud.oauth import ensure_fresh_session
-    from comfy_cli.target import CLOUD_API_KEY_PROVIDER
+    from comfy_cli.credentials import find_api_key, get_session
 
     renderer = get_renderer()
     # Refresh first so we report (and persist) a live token rather than a
     # token that quietly lapsed since the last command.
-    session = ensure_fresh_session()
+    session = get_session(refresh=True)
     configured_base_url = get_base_url()
 
+    # Ambient API key (env / store), reported even when an OAuth session
+    # outranks it. ``Credential.source`` is "env:<VAR>" / "stored:<provider>";
+    # keep the short "env" / "store" labels the whoami envelope documents.
+    ambient_key = find_api_key(purpose="cloud")
     api_key_source: str | None = None
-    if _os.environ.get("COMFY_CLOUD_API_KEY"):
-        api_key_source = "env"
-    elif store.get(CLOUD_API_KEY_PROVIDER) is not None:
-        api_key_source = "store"
+    if ambient_key is not None:
+        api_key_source = "env" if ambient_key.source.startswith("env:") else "store"
 
     # `signed_in` reflects *any* valid auth path — OAuth session or API key.
     # When both are present, OAuth wins (it's the credential the client sends);
@@ -278,8 +277,10 @@ def set_base_url_cmd(
     cleaned = url.rstrip("/")
     config.set(CONFIG_KEY_BASE_URL, cleaned)
 
+    from comfy_cli.credentials import get_session
+
     cleared_stale_session = False
-    session = store.get_cloud_session()
+    session = get_session(refresh=False)
     if session is not None and session.base_url != cleaned:
         if session.is_expired():
             store.clear_cloud_session()

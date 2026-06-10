@@ -284,11 +284,11 @@ def entry(
                 command="welcome",
             )
         else:
-            from comfy_cli.auth import store as _auth_store
+            from comfy_cli.credentials import get_session as _get_session
             from comfy_cli.output.branding import intro_banner
             from comfy_cli.update import latest_upgrade_version
 
-            _session = _auth_store.get_cloud_session()
+            _session = _get_session(refresh=False)
             _signed_in = _session is not None and not _session.is_expired()
             _base_url = _session.base_url if _session else ""
             if not _base_url:

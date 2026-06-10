@@ -22,7 +22,6 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
-from comfy_cli.auth import store as auth_store
 from comfy_cli.cancellation import get_token  # noqa: F401  — re-exported indirectly
 
 
@@ -65,17 +64,17 @@ def resolve(
 
 
 def _has_cloud_credentials() -> bool:
-    """Return True if any cloud auth path is configured (API key or OAuth)."""
-    import os
+    """Return True if any cloud auth path is configured (API key or OAuth).
 
-    from comfy_cli.target import CLOUD_API_KEY_PROVIDER
+    Presence check, not resolution: an *expired* session still counts (cloud
+    is clearly the configured backend; preflight surfaces the expiry), so this
+    deliberately doesn't use ``resolve_cloud_credential``.
+    """
+    from comfy_cli.credentials import find_api_key, get_session
 
-    if os.environ.get("COMFY_CLOUD_API_KEY"):
+    if find_api_key(purpose="cloud") is not None:
         return True
-    if auth_store.get(CLOUD_API_KEY_PROVIDER) is not None:
-        return True
-    session = auth_store.get_cloud_session()
-    return session is not None
+    return get_session(refresh=False) is not None
 
 
 def _parse(value: str) -> WhereTarget:
@@ -109,22 +108,16 @@ def cloud_preflight() -> CloudError | None:
       - Nothing configured     → ``cloud_not_configured``
       - OAuth session expired  → ``cloud_unauthorized``
     """
-    import os
-
-    from comfy_cli.target import CLOUD_API_KEY_PROVIDER
+    from comfy_cli.credentials import find_api_key, get_session
 
     # API key path — no expiry check, key is either valid or it isn't (server
     # tells us at request time).
-    if os.environ.get("COMFY_CLOUD_API_KEY"):
-        return None
-    if auth_store.get(CLOUD_API_KEY_PROVIDER) is not None:
+    if find_api_key(purpose="cloud") is not None:
         return None
 
     # Proactively refresh an expired-but-refreshable session so work doesn't
     # die just because the short-lived access token lapsed between commands.
-    from comfy_cli.cloud.oauth import ensure_fresh_session
-
-    session = ensure_fresh_session()
+    session = get_session(refresh=True)
     if session is None:
         return CloudError(
             code="cloud_not_configured",

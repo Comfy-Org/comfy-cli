@@ -133,8 +133,9 @@ class Client:
             from comfy_cli.auth import store as auth_store
             from comfy_cli.cloud import CLIENT_ID, get_resource_url
             from comfy_cli.cloud.oauth import refresh_tokens
+            from comfy_cli.credentials import get_session
 
-            session = auth_store.get_cloud_session()
+            session = get_session(refresh=False)
             if session is None or not session.refresh_token:
                 return False
 

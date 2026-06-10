@@ -403,9 +403,9 @@ def resilient_load_object_info(
         # (a) Best-effort token refresh, then retry the fetch exactly once.
         # Refresh only helps cloud auth, but it's cheap and a no-op locally.
         try:
-            from comfy_cli.cloud.oauth import ensure_fresh_session
+            from comfy_cli.credentials import get_session
 
-            ensure_fresh_session()
+            get_session(refresh=True)
         except Exception:  # noqa: BLE001 — refresh is best-effort
             pass
 

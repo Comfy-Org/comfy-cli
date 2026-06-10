@@ -17,9 +17,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-# Provider name under which a Comfy Cloud API key is persisted in the auth
-# store. Hidden / testing-only path; the canonical sign-in is OAuth.
-CLOUD_API_KEY_PROVIDER = "comfy-cloud-api-key"
+# Back-compat re-export: the provider name now lives with the credential
+# resolver. Hidden / testing-only path; the canonical sign-in is OAuth.
+from comfy_cli.credentials import CLOUD_API_KEY_PROVIDER as CLOUD_API_KEY_PROVIDER
 
 
 @dataclass(frozen=True)
@@ -77,28 +77,21 @@ def resolve_target(
     decision = where_module.resolve(flag=where, config_value=config_value)
 
     if decision.target is where_module.WhereTarget.CLOUD:
-        import os
-
-        from comfy_cli.auth import store as auth_store
         from comfy_cli.cloud import get_base_url
+        from comfy_cli.credentials import resolve_cloud_credential
 
         # OAuth-first: a live session is preferred over API keys (which are on
         # a deprecation path). Precedence: OAuth session > env var > stored key.
+        # ``base_url=`` arms the replay-guard: a session minted for a different
+        # base_url (or expired) is ignored so credentials are never replayed to
+        # a host the user didn't authenticate against; the API-key fallback or
+        # a downstream "unauthenticated" error takes over. ``refresh=False``
+        # preserves the historical behavior of this chain (no token refresh at
+        # target-resolution time; the client refreshes on 401 itself).
         base_url = get_base_url()
-        token: str | None = None
-        session = auth_store.get_cloud_session()
-        if session is not None and session.base_url == base_url and not session.is_expired():
-            token = session.access_token
-        # A session minted for a different base_url (or expired) is ignored so
-        # credentials are never replayed to a host the user didn't authenticate
-        # against; the API-key fallback or a downstream "unauthenticated" error
-        # takes over.
-        api_key: str | None = None
-        if token is None:
-            api_key = os.environ.get("COMFY_CLOUD_API_KEY")
-            if not api_key:
-                record = auth_store.get(CLOUD_API_KEY_PROVIDER)
-                api_key = record.key if record is not None else None
+        cred = resolve_cloud_credential(purpose="cloud", base_url=base_url, refresh=False)
+        token = cred.value if cred is not None and cred.kind == "oauth" else None
+        api_key = cred.value if cred is not None and cred.kind == "api_key" else None
 
         return Target(
             kind="cloud",
