@@ -18,7 +18,9 @@ def test_resolve_api_key_explicit_wins(monkeypatch):
 
 def test_resolve_api_key_missing(monkeypatch):
     monkeypatch.delenv("COMFY_API_KEY", raising=False)
-    with pytest.raises(client.ApiError, match="No API key"):
+    # No OAuth session in the isolated test config and no env key -> "no credential"
+    # path. OAuth-over-env precedence is intentional; assert the current message.
+    with pytest.raises(client.ApiError, match="Not signed in"):
         client.resolve_api_key()
 
 
