@@ -295,6 +295,11 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "Requested skill is not in the bundled set.",
         "run `comfy skills list` to see available skills",
     ),
+    ErrorCode(
+        "skill_invalid",
+        "A skill path failed format validation (missing SKILL.md, frontmatter name/description, or name/dir mismatch).",
+        "see docs/skills-authoring.md; run `comfy skills validate <path>`",
+    ),
     # --- workflow editor -----------------------------------------------------
     ErrorCode(
         "workflow_not_frontend_format",

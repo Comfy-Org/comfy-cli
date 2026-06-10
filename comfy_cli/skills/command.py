@@ -22,11 +22,12 @@ from typing import Annotated, Literal
 import typer
 
 from comfy_cli import tracking
-from comfy_cli.output import get_renderer
+from comfy_cli.output import get_renderer, rprint
 from comfy_cli.skills import (
     BUNDLED_SKILLS,
     TargetKind,
     bundled_skill_names,
+    load_skill_source,
     plan_install,
     skill_content,
 )
@@ -69,9 +70,25 @@ def _kinds(targets: list[str] | None) -> list[TargetKind] | None:
 def _validate_skills(skills: list[str] | None) -> list[str] | None:
     if not skills:
         return None
+    import os
+
+    renderer = get_renderer()
     known = bundled_skill_names()
     for s in skills:
-        if s not in known:
+        p = Path(s).expanduser()
+        looks_like_path = os.sep in s or s.startswith((".", "~")) or p.exists()
+        if looks_like_path:
+            # Path-based token: validate it eagerly so we fail fast before any writes.
+            try:
+                load_skill_source(s)
+            except ValueError as e:
+                renderer.error(
+                    code="skill_invalid",
+                    message=str(e),
+                    hint="see docs/skills-authoring.md for the format",
+                )
+                raise typer.Exit(code=1) from e
+        elif s not in known:
             raise typer.BadParameter(f"unknown skill {s!r}; choices: {', '.join(known)}")
     return skills
 
@@ -347,3 +364,24 @@ def status_cmd(
         header = Text(f"{s} scope", style="dim")
         _print_skill_panel("skill status", Group(header, Text(""), tbl))
     renderer.emit({"scope": s, "targets": rows}, command="skill status")
+
+
+@app.command("validate", help="Validate a skill directory or SKILL.md against the format contract.")
+@tracking.track_command("skill")
+def validate_cmd(
+    path: Annotated[str, typer.Argument(help="Skill dir or SKILL.md path.")],
+):
+    renderer = get_renderer()
+    try:
+        src = load_skill_source(path)
+    except ValueError as e:
+        renderer.error(
+            code="skill_invalid",
+            message=str(e),
+            hint="see docs/skills-authoring.md for the format",
+        )
+        raise typer.Exit(code=1) from e
+    payload = {"valid": True, "name": src.name, "bundled": src.bundled, "path": path}
+    if renderer.is_pretty():
+        rprint(f"[green]✓[/green] {src.name} is a valid skill")
+    renderer.emit(payload, command="skills validate")

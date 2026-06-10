@@ -5,7 +5,10 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from typer.testing import CliRunner
 
+from comfy_cli.caller import Caller
+from comfy_cli.output.renderer import OutputMode, Renderer, reset_renderer_for_testing, set_renderer
 from comfy_cli.skills import (
     RETIRED_SKILLS,
     bundled_skill_names,
@@ -15,6 +18,21 @@ from comfy_cli.skills import (
     skill_content,
     uninstall,
 )
+from comfy_cli.skills.command import app
+
+
+def _force_json_renderer():
+    """Pin the renderer to JSON so tests can read envelopes off stdout."""
+    r = Renderer.resolve(
+        is_stdout_tty=False,
+        env={},
+        caller=Caller(kind="user", agentic=False, source_env=None),
+        json_flag=True,
+    )
+    r.mode = OutputMode.JSON
+    set_renderer(r)
+    return r
+
 
 # ---------------------------------------------------------------------------
 # Bundled skill inventory
@@ -310,3 +328,116 @@ def test_install_converges_old_machine(tmp_path: Path):
     assert not cursor.exists()
     for current in bundled_skill_names():
         assert (tmp_path / ".claude" / "skills" / current / "SKILL.md").exists()
+
+
+# ---------------------------------------------------------------------------
+# Path-based (third-party) skill install
+# ---------------------------------------------------------------------------
+
+
+def test_install_accepts_directory_path(tmp_path: Path):
+    """--skill ./my-skill/ (dir containing SKILL.md) installs a third-party skill."""
+    skill_dir = tmp_path / "my-skill"
+    skill_dir.mkdir()
+    skill_content_text = "---\nname: my-skill\ndescription: Test skill.\n---\n\n# My Skill\nBody.\n"
+    (skill_dir / "SKILL.md").write_text(skill_content_text, encoding="utf-8")
+
+    target_root = tmp_path / "target"
+    target_root.mkdir()
+
+    results = install(
+        scope="project",
+        project_root=target_root,
+        skills=[str(skill_dir)],
+        targets=["claude-code"],
+    )
+    assert results, "expected at least one result"
+    assert results[0].action == "wrote"
+
+    installed_path = target_root / ".claude" / "skills" / "my-skill" / "SKILL.md"
+    assert installed_path.exists(), f"expected SKILL.md at {installed_path}"
+    assert installed_path.read_text(encoding="utf-8") == skill_content_text
+
+
+def test_install_rejects_path_with_mismatched_name(tmp_path: Path):
+    """frontmatter name must match the directory name."""
+    skill_dir = tmp_path / "my-skill"
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text("---\nname: other-name\ndescription: d.\n---\nBody.\n", encoding="utf-8")
+    from comfy_cli.skills import load_skill_source
+
+    with pytest.raises(ValueError, match="other-name"):
+        load_skill_source(str(skill_dir))
+
+
+def test_skills_validate_command(tmp_path: Path):
+    """comfy skills validate <path> returns ok:true for a well-formed skill."""
+    import json
+
+    skill_dir = tmp_path / "my-skill"
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: my-skill\ndescription: Test skill.\n---\n\n# My Skill\nBody.\n",
+        encoding="utf-8",
+    )
+
+    _force_json_renderer()
+    try:
+        runner = CliRunner()
+        result = runner.invoke(app, ["validate", str(skill_dir)])
+        assert result.exit_code == 0, f"expected exit 0, got {result.exit_code}\noutput: {result.output}"
+
+        # Last non-empty line is the envelope.
+        lines = [line for line in result.output.splitlines() if line.strip()]
+        envelope = json.loads(lines[-1])
+        assert envelope["ok"] is True
+        assert envelope["data"]["valid"] is True
+        assert envelope["data"]["name"] == "my-skill"
+    finally:
+        reset_renderer_for_testing()
+
+
+# ---------------------------------------------------------------------------
+# Security: slug guard — name must be a simple slug, no path traversal
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("bad_name", ["../../evil", "/tmp/evil", "a/b", "a\\b", ".hidden", ".."])
+def test_load_skill_source_rejects_non_slug_names(tmp_path, bad_name):
+    """Frontmatter name must be a simple slug — traversal/absolute names are rejected
+    even when the token is a direct SKILL.md file path (no dir-match check applies)."""
+    from comfy_cli.skills import load_skill_source
+
+    md = tmp_path / "SKILL.md"
+    md.write_text(f"---\nname: {bad_name}\ndescription: d.\n---\nBody.\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="simple slug"):
+        load_skill_source(str(md))
+
+
+def test_load_skill_source_accepts_slug_names(tmp_path):
+    from comfy_cli.skills import load_skill_source
+
+    md = tmp_path / "SKILL.md"
+    md.write_text("---\nname: anime-video_v2\ndescription: d.\n---\nBody.\n", encoding="utf-8")
+    assert load_skill_source(str(md)).name == "anime-video_v2"
+
+
+def test_validate_command_rejects_evil_name(tmp_path: Path):
+    """comfy skills validate must exit 1 and emit skill_invalid for a traversal name."""
+    import json
+
+    md = tmp_path / "SKILL.md"
+    md.write_text("---\nname: ../../evil\ndescription: d.\n---\nBody.\n", encoding="utf-8")
+
+    _force_json_renderer()
+    try:
+        runner = CliRunner()
+        result = runner.invoke(app, ["validate", str(md)])
+        assert result.exit_code == 1, f"expected exit 1, got {result.exit_code}\noutput: {result.output}"
+
+        lines = [line for line in result.output.splitlines() if line.strip()]
+        envelope = json.loads(lines[-1])
+        assert envelope["ok"] is False
+        assert envelope["error"]["code"] == "skill_invalid"
+    finally:
+        reset_renderer_for_testing()

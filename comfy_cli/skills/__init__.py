@@ -27,6 +27,7 @@ Bundled skills (4 total):
 from __future__ import annotations
 
 import os
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from importlib import resources
@@ -118,6 +119,58 @@ def skill_content(name: str = "comfy") -> str:
     return (pkg / _SKILL_FILE).read_text(encoding="utf-8")
 
 
+# ---------------------------------------------------------------------------
+# Third-party / path-based skill source resolution
+# ---------------------------------------------------------------------------
+
+_FRONTMATTER_NAME_RE = re.compile(r"^name:\s*(\S+)\s*$", re.MULTILINE)
+_FRONTMATTER_DESC_RE = re.compile(r"^description:\s*(.+)$", re.MULTILINE)
+
+
+@dataclass(frozen=True)
+class SkillSource:
+    name: str  # canonical skill name (frontmatter ``name:``)
+    content: str  # full SKILL.md content
+    bundled: bool  # False for path-loaded skills
+
+
+def load_skill_source(token: str) -> SkillSource:
+    """Resolve a --skill token: a bundled name, or a path to a skill dir/SKILL.md.
+
+    Path rules: the path may be a directory containing SKILL.md or the SKILL.md
+    itself. Frontmatter must declare ``name:`` (matching the directory name when
+    a directory is given) and a non-empty ``description:``. Raises ValueError
+    with a human-readable reason on any violation.
+    """
+    p = Path(token).expanduser()
+    looks_like_path = os.sep in token or token.startswith((".", "~")) or p.exists()
+    if not looks_like_path:
+        return SkillSource(name=token, content=skill_content(token), bundled=True)
+
+    md = p / "SKILL.md" if p.is_dir() else p
+    if not md.is_file():
+        raise ValueError(f"no SKILL.md found at {p}")
+    content = md.read_text(encoding="utf-8")
+    if not content.startswith("---"):
+        raise ValueError(f"{md}: missing frontmatter block")
+    name_m = _FRONTMATTER_NAME_RE.search(content)
+    desc_m = _FRONTMATTER_DESC_RE.search(content)
+    if not name_m:
+        raise ValueError(f"{md}: frontmatter must declare `name:`")
+    if not desc_m or not desc_m.group(1).strip():
+        raise ValueError(f"{md}: frontmatter must declare a non-empty `description:`")
+    name = name_m.group(1)
+    # The name becomes a directory component of the install target — restrict it
+    # to a simple slug so a hostile SKILL.md can't traverse out of the skills dir.
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", name):
+        raise ValueError(
+            f"{md}: frontmatter name {name!r} must be a simple slug ([A-Za-z0-9_-], no leading dot/separators)"
+        )
+    if p.is_dir() and p.name != name:
+        raise ValueError(f"{md}: frontmatter name {name!r} must match directory name {p.name!r}")
+    return SkillSource(name=name, content=content, bundled=False)
+
+
 def _agents_fence(skill_name: str) -> tuple[str, str]:
     return (f"<!-- {skill_name}:start -->", f"<!-- {skill_name}:end -->")
 
@@ -142,13 +195,25 @@ def _resolve_paths(*, skill_name: str, scope: Scope, project_root: Path) -> dict
     }
 
 
-def _normalize_skills(skills: Sequence[str] | None) -> list[str]:
+def _normalize_skills(skills: Sequence[str] | None) -> list[SkillSource]:
+    """Resolve a sequence of skill tokens into SkillSource objects.
+
+    Tokens that look like paths are resolved via ``load_skill_source``; plain
+    names are validated against the bundled set.  ``None`` / empty defaults to
+    all bundled skills.
+    """
     if not skills:
-        return [name for name, _ in BUNDLED_SKILLS]
-    out: list[str] = []
+        return [SkillSource(name=name, content=skill_content(name), bundled=True) for name, _ in BUNDLED_SKILLS]
+    out: list[SkillSource] = []
     for s in skills:
-        _resolve_subdir(s)  # validates
-        out.append(s)
+        p = Path(s).expanduser()
+        looks_like_path = os.sep in s or s.startswith((".", "~")) or p.exists()
+        if looks_like_path:
+            # Raises ValueError on invalid path skills — caller handles.
+            out.append(load_skill_source(s))
+        else:
+            _resolve_subdir(s)  # validates bundled name; raises ValueError on unknown
+            out.append(SkillSource(name=s, content=skill_content(s), bundled=True))
     return out
 
 
@@ -165,12 +230,12 @@ def plan_install(
     """
     root = project_root or Path.cwd()
     plans: list[TargetPlan] = []
-    for skill_name in _normalize_skills(skills):
-        all_paths = _resolve_paths(skill_name=skill_name, scope=scope, project_root=root)
+    for source in _normalize_skills(skills):
+        all_paths = _resolve_paths(skill_name=source.name, scope=scope, project_root=root)
         kinds: list[TargetKind] = list(targets) if targets else list(all_paths.keys())
         for kind in kinds:
             path = all_paths[kind]
-            plans.append(TargetPlan(skill=skill_name, kind=kind, scope=scope, path=path, exists=path.exists()))
+            plans.append(TargetPlan(skill=source.name, kind=kind, scope=scope, path=path, exists=path.exists()))
     return plans
 
 
@@ -187,8 +252,12 @@ def install(
     AGENTS.md gets one fenced block per skill (idempotent re-installs replace
     the block). Other targets are full file writes per skill.
     """
+    root = project_root or Path.cwd()
     results: list[TargetResult] = []
-    plans = plan_install(scope=scope, targets=targets, skills=skills, project_root=project_root)
+    sources = _normalize_skills(skills)
+    # Build a per-name content map so path-based skills carry their own content.
+    content_map: dict[str, str] = {src.name: src.content for src in sources}
+    plans = plan_install(scope=scope, targets=targets, skills=skills, project_root=root)
     for plan in plans:
         if dry_run:
             results.append(
@@ -202,7 +271,7 @@ def install(
             )
             continue
         try:
-            content = skill_content(plan.skill)
+            content = content_map[plan.skill]
             if plan.kind == "claude-code":
                 _write_claude_skill(plan.path, content)
             elif plan.kind == "cursor":

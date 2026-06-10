@@ -8,6 +8,11 @@
     "dry_run": { "type": "boolean" },
     "results": { "type": "array" },
     "targets": { "type": "array" },
-    "content": { "type": "string" }
+    "content": { "type": "string" },
+    "skills": { "type": "array" },
+    "valid": { "type": "boolean" },
+    "name": { "type": "string" },
+    "bundled": { "type": "boolean" },
+    "path": { "type": "string" }
   }
 }
