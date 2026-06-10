@@ -25,7 +25,7 @@ from rich import print as rprint
 from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
 
 from comfy_cli import tracking, ui
-from comfy_cli.command.generate import adapters, client, output, poll, schema, spec, upload
+from comfy_cli.command.generate import adapters, client, emit, output, poll, schema, spec, upload
 
 _HELP = "Generate images via ComfyUI partner nodes (Flux, Ideogram, DALL·E, Recraft, Stability, …)."
 
@@ -83,7 +83,7 @@ def register_with(parent: typer.Typer) -> None:
 
 def _separate_meta_flags(extra_args: list[str]) -> tuple[list[str], dict[str, str | bool]]:
     """Pull run-level flags out of the user's argv tail."""
-    meta_names = {"download", "async", "json", "timeout", "api-key"}
+    meta_names = {"download", "async", "json", "timeout", "api-key", "emit-workflow", "output-prefix"}
     meta: dict[str, str | bool] = {}
     remaining: list[str] = []
     i = 0
@@ -210,15 +210,38 @@ def _generate(model: str, extra_args: list[str]) -> None:
         gen_props["async"] = do_async
         gen_props["has_download"] = bool(download)
 
+        emit_path = meta.get("emit-workflow") if isinstance(meta.get("emit-workflow"), str) else None
         flags = schema.flags_for(ep)
         try:
-            values = schema.parse_args(flags, remaining)
+            # In emit mode the partner node carries its own defaults, so don't
+            # force every proxy-required flag — let the user override only what
+            # they want.
+            values = schema.parse_args(flags, remaining, require_all=not emit_path)
         except schema.SchemaError as e:
             rprint(f"[bold red]{e}[/bold red]")
             name = gen_props["model_alias"] or ep.id
             rprint(f"[dim]Run `comfy generate schema {name}` for the full parameter list.[/dim]")
             _track_error("schema", e)
             raise typer.Exit(code=1)
+
+        if emit_path:
+            # Emit a runnable workflow that drives the partner *node* and return
+            # — no proxy call, no API key required. The artifact is the result.
+            name = gen_props["model_alias"] or ep.id
+            prefix = meta.get("output-prefix") if isinstance(meta.get("output-prefix"), str) else "generate"
+            try:
+                workflow = emit.write_workflow(name, values, Path(emit_path).expanduser(), output_prefix=prefix)
+            except emit.EmitError as e:
+                rprint(f"[bold red]{e}[/bold red]")
+                _track_error("emit", e)
+                raise typer.Exit(code=1)
+            tracking.track_event("generate:emit", {**gen_props, "node_count": len(workflow)})
+            if as_json:
+                output.print_json(workflow)
+            else:
+                rprint(f"[bold green]Wrote workflow:[/bold green] {emit_path}")
+                rprint(f"  run it: comfy run --workflow {emit_path}")
+            return
 
         try:
             api_key = client.resolve_api_key(meta.get("api-key") if isinstance(meta.get("api-key"), str) else None)
@@ -568,6 +591,10 @@ def _print_top_help() -> None:
         '  comfy generate ideogram-edit --image cat.png --mask m.png --prompt "add sunglasses" --rendering_speed TURBO'
     )
     rprint('  comfy generate dalle --prompt "a watercolor whale" --download whale.png')
+    rprint(
+        '  comfy generate flux-pro --prompt "a fox" --emit-workflow flux.json   '
+        "[dim]# write a runnable workflow instead of calling the proxy[/dim]"
+    )
     rprint("")
     rprint("[bold]Actions:[/bold]")
     rprint("  comfy generate list                    Browse available models")
@@ -576,4 +603,4 @@ def _print_top_help() -> None:
     rprint("  comfy generate upload <file-or-url>    Host a local file or remote URL and print its signed URL")
     rprint("  comfy generate resume <model> <job>    Resume an async job")
     rprint("")
-    rprint("[dim]Auth: set COMFY_API_KEY or pass --api-key. Get one at https://platform.comfy.org.[/dim]")
+    rprint("[dim]Auth: run `comfy cloud login` (session outranks env var), set COMFY_API_KEY, or pass --api-key. Get one at https://platform.comfy.org.[/dim]")

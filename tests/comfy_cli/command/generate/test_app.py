@@ -133,12 +133,14 @@ def test_per_model_help(runner):
 
 def test_generate_missing_api_key(runner, monkeypatch):
     monkeypatch.delenv("COMFY_API_KEY", raising=False)
+    # No OAuth session in the isolated test config, so this is the "no credential
+    # at all" path. OAuth-over-env precedence is intended; this asserts the new message.
     r = runner.invoke(
         cli_app,
         ["generate", "flux-pro", "--prompt", "x", "--width", "1", "--height", "1"],
     )
     assert r.exit_code == 1
-    assert "No API key" in r.stdout
+    assert "Not signed in" in r.stdout
 
 
 def test_generate_bad_int_suggests_schema(runner, api_key):
