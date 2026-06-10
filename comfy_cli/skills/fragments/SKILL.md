@@ -16,8 +16,15 @@ are how you avoid rebuilding the same 8-node IPAdapter block five times.
 
 ## When to use fragments
 
+Default to fragments + blueprints for workflows that may be extended. A small
+workflow often becomes tomorrow's multi-shot, multi-seed, or multi-provider
+pipeline; starting with a named fragment and a blueprint keeps that next step
+cheap.
+
 Use fragments when **any of**:
 
+- A simple template or node chain might later need another shot, seed sweep,
+  provider swap, refiner, ControlNet, LoRA, or final save variant.
 - A sub-region of a workflow (a ControlNet stack, an IPAdapter block, a
   refiner pass, a save+thumbnail group) is reused across two or more
   workflows — extract it once, instantiate twice.
@@ -30,13 +37,14 @@ Use fragments when **any of**:
 - Multiple model providers are chained (Ideogram + Reve + Flux + Magnific)
   and the chain wiring is the hard part.
 
-Do **NOT** use fragments when:
+Avoid fragments only when:
 
-- A workflow is a one-shot. Hand-built JSON is fine.
+- A workflow is a truly throwaway one-shot and the user explicitly values speed
+  over future extension.
 - You only need to tweak values inside an existing workflow — use
   `comfy workflow slots / set-slot / vary` instead.
-- Small workflows under ~30 nodes where the indirection costs more than
-  it saves.
+- The whole graph is under ~10-15 nodes, will not be varied or reused, and has
+  no natural named sub-region.
 
 ---
 
@@ -108,11 +116,11 @@ followed by the interior ComfyUI nodes (API-format, just like a workflow).
 | field | required | meaning |
 |---|---|---|
 | `name` | yes | Stable identifier. Blueprints reference fragments by this name. |
-| `version` | yes | String version, semver-ish. Bump when the interface changes. |
+| `version` | no (default `"1"`) | String version, semver-ish. Bump when the interface changes. |
 | `description` | recommended | One-line human description. |
 | `terminal` | optional (default `false`) | `true` if the fragment contains its own `SaveImage`/`SaveVideo`. Stops the composer from appending another save. |
-| `inputs` | yes | Each input has a `type` ∈ {`IMAGE`, `MASK`, `AUDIO`, `VIDEO`, `STRING`} and a `binds: "<interior_node_id>.<input_name>"` pointing at the actual node-field this input feeds. |
-| `outputs` | yes | Each output has a `type` and `from: "<interior_node_id>"` plus optional `port` (default `0`). |
+| `inputs` | no (default `{}`) | Each input has a `type` — any UPPER_SNAKE_CASE socket type (`IMAGE`, `MASK`, `AUDIO`, `VIDEO`, `STRING`, `MODEL`, `CONDITIONING`, `LATENT`, `VAE`, `CLIP`, custom types…) — and a `binds: "<interior_node_id>.<input_name>"` pointing at the actual node-field this input feeds. Path-loadable types (`IMAGE`/`MASK`/`AUDIO`/`VIDEO`) accept file paths — the composer injects a loader node. All other socket types must be fed by a cross-step ref (`$alias.output`), never a path. |
+| `outputs` | no (default `{}`) | Each output has a `type` and `from: "<interior_node_id>"` plus optional `port` (default `0`). |
 | `params` | optional | Settable values (text, seed, strength, model name, etc.). Each has `type` ∈ {`STRING`, `INT`, `FLOAT`, `BOOL`, `COMBO`}, a `binds`, and optionally a `default`. |
 
 ### Conventions for interior nodes
@@ -209,10 +217,21 @@ comfy run --workflow built/pipeline.json --where cloud --wait
 `--lib` defaults to `./fragments` relative to cwd. Default output is
 `<blueprint>.compiled.json`.
 
+With `chunk: N` in a `foreach` blueprint, compose splits items into
+N-item batches and writes one numbered file per batch (`<stem>.000.json`,
+`<stem>.001.json`, …). The envelope then reports `out: null` (there is no
+single runnable file) plus `graphs` (count) and `written[]` (all paths) —
+script against `data.written`, not `data.out`, and note any stale
+unnumbered `<stem>.compiled.json` from a previous non-chunked compose is
+deleted automatically.
+
 All commands emit JSON envelopes under `comfy --json`. The composer
 exits non-zero on validation errors with structured error codes
 (`fragment_invalid`, `blueprint_invalid`, `blueprint_not_found`,
 `fragment_lib_not_found`) — caught at compose time, not after cloud spend.
+`fragment_lib_not_found` is raised by `workflow fragment ls` when an
+explicit `--lib` path doesn't exist; a missing fragment during `compose`
+surfaces as `fragment_invalid` instead.
 
 ---
 
@@ -325,13 +344,12 @@ result before relying on it.
 | `VIDEO` | MP4/WebM | Injects `LoadVideo` for paths |
 | `STRING` | Prompts, model names, captions, any literal | Pass-through. No loader injection. |
 
-Use the type that matches what the interior node actually consumes. If
-your interior node expects a `CONDITIONING` directly (no encode step), that
-fragment's input should be modeled as a cross-step ref of `type: STRING` with
-a downstream-encoded value — i.e. fragments don't currently model `CONDITIONING`
-inputs from raw paths because there's nothing useful to auto-inject. Cross-step
-refs (`$alias.conditioning`) work fine, regardless of declared type — the
-composer trusts whatever output the upstream fragment exposes.
+Use the type that matches what the interior node actually consumes.
+`CONDITIONING` (and `MODEL`, `CLIP`, `VAE`, `LATENT`) are first-class input
+types — declare `type: CONDITIONING` and wire it with a cross-step ref like
+`conditioning: $encode.conditioning`. Only path-loadable types (`IMAGE`,
+`MASK`, `AUDIO`, `VIDEO`) accept file paths; all other socket types must
+come from a prior step via `$alias.output_name`.
 
 ---
 
@@ -460,28 +478,7 @@ Flux into it.
 
 ---
 
-## 10. Backward compatibility
-
-The canonical names are `_fragment`, `fragment:`, and `fragments/`. Older
-projects may use the legacy equivalents. The composer supports both:
-
-| Canonical | Legacy | Where |
-|---|---|---|
-| `_fragment` | `_subgraph` | Metadata key in fragment JSON files |
-| `fragment:` | `subgraph:` | Step key in blueprint YAML |
-| `fragments/` | `subgraphs/` | Default `--lib` directory (composer tries `fragments/` first, falls back to `subgraphs/`) |
-
-When reading a fragment JSON, the composer checks for `_fragment` first,
-then `_subgraph`. Both are structurally identical — same fields, same
-semantics. New fragments should always use `_fragment`.
-
-When parsing blueprint YAML, each pipeline step can use either `fragment:`
-or `subgraph:` as the key. Mixing within a single blueprint is allowed but
-discouraged — pick one and be consistent.
-
----
-
-## 11. When the pattern breaks down
+## 10. When the pattern breaks down
 
 Honest limits:
 
@@ -503,7 +500,7 @@ Honest limits:
 
 ---
 
-## 12. What NOT to do
+## 11. What NOT to do
 
 - **Don't put model loading inside every fragment.** Load `CheckpointLoaderSimple`
   once in the blueprint's first step and pass `model`/`clip`/`vae` outputs by
@@ -530,12 +527,12 @@ Honest limits:
 
 ---
 
-## 13. Failure modes and what they mean
+## 12. Failure modes and what they mean
 
 | code | what's wrong | what to fix |
 |---|---|---|
 | `fragment_invalid` | The fragment file itself is malformed (bad `_fragment` header, missing fields, dangling `binds`) | Read the error message; fix the fragment JSON |
-| `fragment_lib_not_found` | `--lib` (or default `./fragments`) doesn't exist | Create the directory or pass `--lib <real_path>` |
+| `fragment_lib_not_found` | An explicit `--lib` path passed to `fragment ls` doesn't exist | Pass a valid `--lib <real_path>` or omit to use the bundled library |
 | `blueprint_not_found` | The blueprint YAML path doesn't exist | Check the path |
 | `blueprint_invalid_yaml` | The blueprint file isn't valid YAML | Run it through `yamllint` |
 | `blueprint_invalid` | The blueprint semantically fails (missing fragment, missing input, unknown input key, duplicate alias) | Read the error — it names the offending step alias |
