@@ -85,6 +85,21 @@ def test_envelope_shape_on_success():
     assert env["where"] is None
 
 
+def test_emit_ok_false_carries_data():
+    """`validate` on an invalid workflow emits its structured payload as data
+    but with ok=False, so the envelope agrees with the exit code."""
+    stream = io.StringIO()
+    r = _resolve()
+    r.mode = OutputMode.JSON
+    r.machine_stream = stream
+    r.command = "validate"
+    r.emit({"valid": False, "error_count": 2}, ok=False)
+    env = json.loads(stream.getvalue().strip())
+    assert env["ok"] is False
+    assert env["data"] == {"valid": False, "error_count": 2}
+    assert env["error"] is None  # the verdict rides in data, not error
+
+
 def test_envelope_shape_on_error():
     stream = io.StringIO()
     r = _resolve()

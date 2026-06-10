@@ -910,7 +910,7 @@ def validate(
                 rprint(f"  [red]•[/red] node {e.get('node_id', '?')}: {msg}")
             for w in result["warnings"]:
                 rprint(f"  [yellow]⚠[/yellow] {w.get('message', '')}")
-    renderer.emit(payload, command="validate")
+    renderer.emit(payload, command="validate", ok=result["valid"])
 
     if not result["valid"]:
         raise typer.Exit(code=1)

@@ -217,9 +217,16 @@ class Renderer:
         command: str | None = None,
         where: str | None = None,
         changed: bool | None = None,
+        ok: bool = True,
     ) -> None:
         """Emit the final envelope. In pretty mode this is a no-op (data was
         already shown by ``print``/``success``/etc).
+
+        ``ok`` defaults to True for the common success path. Commands that
+        carry a structured result *and* a negative verdict (e.g. ``validate``
+        on an invalid workflow, which still emits its error/warning payload as
+        data) pass ``ok=False`` so the envelope's ``ok`` agrees with the
+        process exit code.
         """
         if self.is_pretty():
             return
@@ -227,7 +234,7 @@ class Renderer:
             # Defensive: the harness should only emit once. Don't double-write.
             return
         envelope = self._envelope(
-            ok=True,
+            ok=ok,
             command=command or self.command,
             data=data,
             where=where or self.where,
