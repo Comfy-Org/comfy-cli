@@ -907,6 +907,44 @@ def test_fragment_ls_includes_bundled_without_local_lib(tmp_path, monkeypatch, c
     assert ("kling_i2v", "bundled") in names_and_sources
 
 
+def test_bundled_sdxl_lora_fragment_parameterizes_models():
+    from comfy_cli.fragments import load_fragment
+    from comfy_cli.fragments_lib import bundled_fragments_dir
+
+    frag = load_fragment(bundled_fragments_dir() / "sdxl_t2i_lora.json")
+    assert frag.name == "sdxl_t2i_lora"
+    # model identities are REQUIRED params with NO defaults — never hardcoded
+    ckpt = frag.params["ckpt_name"]
+    assert not ckpt.has_default, "ckpt_name must have no default (agent must discover it)"
+    lora = frag.params["lora_name"]
+    assert not lora.has_default, "lora_name must have no default (agent must discover it)"
+    # image output must exist and be typed IMAGE
+    assert "image" in frag.outputs
+    assert frag.outputs["image"].type == "IMAGE"
+
+
+def test_bundled_sdxl_lora_fragment_has_no_hardcoded_asset_names():
+    """No hardcoded asset filenames (.safetensors or .ckpt as a file extension) may appear in the fragment.
+
+    The ComfyUI widget *name* ``ckpt_name`` is allowed (it is a node input key, not a
+    filename); what is prohibited is a literal filename value like ``my_model.ckpt``
+    or ``lora.safetensors`` that would bake an asset identity into the fragment.
+    We detect this as the extension appearing immediately before a JSON string
+    delimiter (``"``), which is the pattern for a value, not a key suffix.
+    """
+    import re
+
+    from comfy_cli.fragments_lib import bundled_fragments_dir
+
+    raw = (bundled_fragments_dir() / "sdxl_t2i_lora.json").read_text(encoding="utf-8")
+    # Match ".safetensors" or ".ckpt" that are followed by a closing JSON quote —
+    # i.e. the extension is at the end of a string value, not inside a key name.
+    assert not re.search(r"\.(safetensors|ckpt)\"", raw), (
+        "sdxl_t2i_lora.json must not hardcode any asset filenames — "
+        "ckpt_name and lora_name must be supplied by the caller"
+    )
+
+
 def test_foreach_literal_string_param_not_namespaced():
     from comfy_cli.fragments import _substitute_item
 
