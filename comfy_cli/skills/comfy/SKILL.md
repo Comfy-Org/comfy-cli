@@ -124,7 +124,7 @@ mechanism by complexity and reuse — not as a quality ranking:
    ```bash
    comfy --json templates ls --type video --limit 10        # working exemplar graphs
    comfy --json nodes ls --produces VIDEO --exclude-deprecated
-   comfy --json nodes ls --category "api node/video*"       # partner providers
+   comfy --json nodes ls --category "partner/video*"       # partner providers
    ```
 
    **b. Learn the wiring from a real graph.** Templates are
@@ -165,7 +165,7 @@ mechanism by complexity and reuse — not as a quality ranking:
    recommendation.** On this backend, today, the survey returned what's
    sketched below; yours WILL differ — pick from YOUR rows:
    ```bash
-   comfy --json nodes ls --category "api node/video*" --limit 10
+   comfy --json nodes ls --category "partner/video*" --limit 10
    # → today's rows included an image-to-video partner node; call it <I2VNode>
    comfy --json nodes show <I2VNode> --where cloud
    # → schema said: start image + prompt + a duration enum in, VIDEO out
@@ -397,7 +397,7 @@ comfy --json nodes ls --produces IMAGE --limit 1 # IMAGE producer count
 comfy --json nodes ls --produces VIDEO --limit 1 # VIDEO producer count
 comfy --json nodes ls --produces AUDIO --limit 1 # AUDIO producer count
 comfy --json nodes ls --api-only --limit 1       # partner API node count
-comfy --json nodes categories --prefix "api node"# API provider categories
+comfy --json nodes categories --prefix "partner"# API provider categories
 comfy --json nodes types                         # all connection types
 comfy --json models list-folders                 # all model folders
 comfy --json templates ls --limit 1              # template count
@@ -698,7 +698,7 @@ Hard-won lessons per domain. Not a tutorial — a reference card.
 - Assembly: GetVideoComponents → ImageBatch → CreateVideo → SaveVideo
 - I2V pattern: LoadImage → I2VNode → SaveVideo (check `nodes show` for the I2V node)
 - Audio sync: match durations — short audio = silent ending, long audio = truncated ending
-- Survey first: `comfy nodes ls --produces VIDEO --exclude-deprecated`, `comfy nodes ls --category "api node/video*"`, `comfy templates ls --type video` — compare OSS, partner-API, and gallery before choosing
+- Survey first: `comfy nodes ls --produces VIDEO --exclude-deprecated`, `comfy nodes ls --category "partner/video*"`, `comfy templates ls --type video` — compare OSS, partner-API, and gallery before choosing
 
 ## Audio
 
@@ -707,7 +707,7 @@ Hard-won lessons per domain. Not a tutorial — a reference card.
 - Output format is FLAC, not MP3
 - For instrumental: set lyrics to empty string `""`
 - Wire both positive AND negative to same TextEncode output when cfg=1.0
-- Survey first: `comfy nodes ls --produces AUDIO`, `comfy nodes ls --category "api node/audio*"`, `comfy templates ls --type audio` — compare before choosing
+- Survey first: `comfy nodes ls --produces AUDIO`, `comfy nodes ls --category "partner/audio*"`, `comfy templates ls --type audio` — compare before choosing
 
 ## Editing (upscale, inpaint, style transfer)
 
