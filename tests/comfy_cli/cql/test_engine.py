@@ -704,6 +704,116 @@ class TestTemplateModeSlots:
 
 
 # ===========================================================================
+# TestSubgraphIsolation
+# ===========================================================================
+
+
+class TestSubgraphIsolation:
+    """Two instances of one subgraph definition must not alias on interior write."""
+
+    def test_nested_slot_write_isolates_instances(self, graph: Graph):
+        """Writing 10/9.text must not affect instance 12's interior node."""
+        from comfy_cli.cql.engine import _apply_one_slot
+
+        wf = {
+            "nodes": [
+                {"id": 10, "type": "uuid-def-1"},
+                {"id": 12, "type": "uuid-def-1"},
+            ],
+            "definitions": {
+                "subgraphs": [
+                    {
+                        "id": "uuid-def-1",
+                        "name": "Sub",
+                        "nodes": [
+                            {"id": 9, "type": "CLIPTextEncode", "widgets_values": ["orig"]},
+                        ],
+                    },
+                ]
+            },
+        }
+        _apply_one_slot(wf, "10/9.text", "VALUE-FOR-10", graph)
+
+        # Rebuild the definitions index from the (potentially mutated) workflow
+        defs = {d["id"]: d for d in wf["definitions"]["subgraphs"]}
+
+        # Instance 12 must still read 'orig'
+        inst12 = next(n for n in wf["nodes"] if n["id"] == 12)
+        inst12_def = defs[inst12["type"]]
+        assert inst12_def["nodes"][0]["widgets_values"][0] == "orig"
+
+        # Instance 10 got the new value
+        inst10 = next(n for n in wf["nodes"] if n["id"] == 10)
+        inst10_def = defs[inst10["type"]]
+        assert inst10_def["nodes"][0]["widgets_values"][0] == "VALUE-FOR-10"
+
+    def test_second_write_to_same_instance_no_extra_fork(self, graph: Graph):
+        """A second write to the same instance must not create yet another fork."""
+        from comfy_cli.cql.engine import _apply_one_slot
+
+        wf = {
+            "nodes": [
+                {"id": 10, "type": "uuid-def-1"},
+                {"id": 12, "type": "uuid-def-1"},
+            ],
+            "definitions": {
+                "subgraphs": [
+                    {
+                        "id": "uuid-def-1",
+                        "name": "Sub",
+                        "nodes": [
+                            {"id": 9, "type": "CLIPTextEncode", "widgets_values": ["orig"]},
+                        ],
+                    },
+                ]
+            },
+        }
+        _apply_one_slot(wf, "10/9.text", "FIRST", graph)
+        _apply_one_slot(wf, "10/9.text", "SECOND", graph)
+
+        # Should still be exactly 2 definitions total (one fork + one original)
+        assert len(wf["definitions"]["subgraphs"]) == 2
+
+        # Instance 10 has the latest value
+        defs = {d["id"]: d for d in wf["definitions"]["subgraphs"]}
+        inst10 = next(n for n in wf["nodes"] if n["id"] == 10)
+        inst10_def = defs[inst10["type"]]
+        assert inst10_def["nodes"][0]["widgets_values"][0] == "SECOND"
+
+        # Instance 12 still has the original value
+        inst12 = next(n for n in wf["nodes"] if n["id"] == 12)
+        inst12_def = defs[inst12["type"]]
+        assert inst12_def["nodes"][0]["widgets_values"][0] == "orig"
+
+    def test_single_instance_no_fork(self, graph: Graph):
+        """When only one instance of a def exists, no fork is created."""
+        from comfy_cli.cql.engine import _apply_one_slot
+
+        wf = {
+            "nodes": [
+                {"id": 10, "type": "uuid-def-1"},
+            ],
+            "definitions": {
+                "subgraphs": [
+                    {
+                        "id": "uuid-def-1",
+                        "name": "Sub",
+                        "nodes": [
+                            {"id": 9, "type": "CLIPTextEncode", "widgets_values": ["orig"]},
+                        ],
+                    },
+                ]
+            },
+        }
+        _apply_one_slot(wf, "10/9.text", "NEW", graph)
+
+        # No extra definition was appended
+        assert len(wf["definitions"]["subgraphs"]) == 1
+        # The single def got the new value directly
+        assert wf["definitions"]["subgraphs"][0]["nodes"][0]["widgets_values"][0] == "NEW"
+
+
+# ===========================================================================
 # TestExpandVariations
 # ===========================================================================
 

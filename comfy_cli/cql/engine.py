@@ -9,12 +9,14 @@ Port of ``github.com/Comfy-Org/cql/nodegraph`` (Go).
 
 from __future__ import annotations
 
+import copy
 import difflib
 import json
 import logging
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid as _uuid
 from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Any
@@ -1034,86 +1036,181 @@ def _load_from_target(*, mode: str = "local", host: str = "127.0.0.1", port: int
 # Slot editing helpers — port of nodegraph/frontend.go + runtemplate.go
 # ---------------------------------------------------------------------------
 
+# Defends slot recursion against pathological / cyclic subgraph nesting.
+_MAX_SUBGRAPH_DEPTH = 32
+
+
+# Delimiter that separates subgraph-nesting levels in a slot address. The
+# final ``.`` separates the (possibly nested) node path from the input name.
+# Examples:
+#   ``3.seed``          top-level node 3, widget ``seed``
+#   ``10/9.prompt``     subgraph instance 10 → interior node 9, widget ``prompt``
+#   ``10/3/7.value``    instance 10 → interior subgraph node 3 → interior node 7
+# UUID subgraph class_types contain ``-`` but never ``/`` or top-level ``.`` in
+# an instance id, so the delimiters stay unambiguous.
+_SUBGRAPH_PATH_SEP = "/"
+
+
+def _subgraph_defs_by_id(workflow: dict) -> dict[str, dict]:
+    """Index subgraph definitions so an instance's ``type`` resolves to its def.
+
+    A subgraph *instance* node's ``type`` is normally the UUID ``id`` of its
+    definition, so the UUID is the primary key. Real ComfyUI saves can also
+    carry several distinct defs sharing the cosmetic ``name`` "New Subgraph";
+    keying by name alone would silently map instances onto the wrong def, so id
+    always wins. We still register ``name`` as a *fallback* key (only when it
+    doesn't shadow an id and isn't ambiguous across defs) to support older
+    name-typed templates that predate UUID ids.
+    """
+    defs = (workflow.get("definitions") or {}).get("subgraphs") or []
+    by_id: dict[str, dict] = {}
+    name_counts: dict[str, int] = {}
+    name_first: dict[str, dict] = {}
+    for sg in defs:
+        if not isinstance(sg, dict):
+            continue
+        sg_id = sg.get("id")
+        if isinstance(sg_id, str) and sg_id:
+            by_id[sg_id] = sg
+        name = sg.get("name")
+        if isinstance(name, str) and name:
+            name_counts[name] = name_counts.get(name, 0) + 1
+            name_first.setdefault(name, sg)
+    for name, count in name_counts.items():
+        if count == 1 and name not in by_id:
+            by_id[name] = name_first[name]
+    return by_id
+
+
+def _node_widget_slots(node: dict, prefix: str, graph: Graph) -> list[dict]:
+    """Surface a regular node's widget inputs as slots under ``prefix``.
+
+    ``prefix`` is the addressable node path (``"3"`` at top level, ``"10/9"``
+    inside a subgraph). Returns one slot per widget input the schema knows
+    about. Returns ``[]`` for nodes whose type isn't in object_info.
+    """
+    node_type = node.get("type", "")
+    m = graph.node(node_type)
+    if m is None:
+        return []
+    order = graph.widget_order(node_type)
+    widgets = node.get("widgets_values") or []
+    slots: list[dict] = []
+    for port in m.inputs:
+        if port.is_link:
+            continue
+        try:
+            idx = order.index(port.name)
+        except ValueError:
+            continue
+        current = widgets[idx] if idx < len(widgets) else None
+        slots.append(
+            {
+                "address": f"{prefix}.{port.name}",
+                "name": port.name,
+                "type": port.type,
+                "current_value": current,
+                "instance_id": prefix,
+                "node_type": node_type,
+            }
+        )
+    return slots
+
 
 def _extract_frontend_slots(workflow: dict, graph: Graph) -> list[dict]:
     """Walk workflow nodes and extract tweakable slots.
 
-    Two modes:
-      1. **Template/subgraph mode** — if subgraph instances exist, expose
-         their declared inputs (the curated parameter list from ``inputs[]``).
-      2. **Direct mode** — if no subgraph instances are found, expose every
-         widget input on every top-level node. This makes ``comfy workflow
-         slots`` and ``comfy workflow vary`` work on any frontend-format
-         workflow, not just published templates.
+    For every node we surface its widget inputs at ``<nodePath>.<input>``. When
+    a node is a *subgraph instance* (its ``type`` is a UUID matching a def under
+    ``definitions.subgraphs``) we additionally recurse INTO the definition and
+    surface every interior node's widget inputs under a nested, instance-scoped
+    address (``<instanceId>/<interiorId>.<input>``, recursing for deeper
+    subgraphs). This is what lets an agent slot-edit a fetched gallery template
+    whose editable prompt/seed/image live inside an opaque UUID subgraph.
+
+    Curated subgraph ``inputs[]`` (the proxy parameter list) are still exposed
+    at ``<instanceId>.<name>`` for backward compatibility, but the recursion
+    means an agent is never stranded when those proxies are missing or dangle
+    (fetched templates routinely point proxyWidgets at deleted interior ids).
     """
-    nodes = workflow.get("nodes") or []
-    defs = (workflow.get("definitions") or {}).get("subgraphs") or []
-    sg_by_type: dict[str, dict] = {}
-    for sg in defs:
-        if isinstance(sg, dict):
-            sg_by_type[sg.get("name") or sg.get("id", "")] = sg
-
-    # --- Template/subgraph mode ---
+    defs_by_id = _subgraph_defs_by_id(workflow)
     slots: list[dict] = []
-    for node in nodes:
-        if not isinstance(node, dict):
-            continue
-        node_type = node.get("type", "")
-        sg = sg_by_type.get(node_type)
-        if sg is None:
-            continue
-        instance_id = str(node.get("id", ""))
-        for inp in sg.get("inputs") or []:
-            if not isinstance(inp, dict):
-                continue
-            inp_name = inp.get("name", "")
-            inp_type = inp.get("type", {})
-            type_str = inp_type if isinstance(inp_type, str) else str(inp_type)
-            current = _resolve_proxy_value(node, sg, inp_name, graph)
-            slots.append(
-                {
-                    "address": f"{instance_id}.{inp_name}",
-                    "name": inp_name,
-                    "type": type_str,
-                    "current_value": current,
-                    "instance_id": instance_id,
-                    "node_type": node_type,
-                }
-            )
+    seen_addrs: set[str] = set()
 
-    if slots:
-        return slots
+    def add(slot: dict) -> None:
+        addr = slot["address"]
+        if addr in seen_addrs:
+            return
+        seen_addrs.add(addr)
+        slots.append(slot)
 
-    # --- Direct mode: no subgraphs → expose widget inputs directly ---
-    for node in nodes:
-        if not isinstance(node, dict):
-            continue
-        node_type = node.get("type", "")
-        m = graph.node(node_type)
-        if m is None:
-            continue
-        instance_id = str(node.get("id", ""))
-        order = graph.widget_order(node_type)
-        widgets = node.get("widgets_values") or []
-        for port in m.inputs:
-            if port.is_link:
+    def walk(nodes: list, prefix: str, depth: int) -> None:
+        if depth > _MAX_SUBGRAPH_DEPTH:
+            return
+        for node in nodes:
+            if not isinstance(node, dict):
                 continue
-            try:
-                idx = order.index(port.name)
-            except ValueError:
+            node_id = str(node.get("id", ""))
+            node_path = f"{prefix}{_SUBGRAPH_PATH_SEP}{node_id}" if prefix else node_id
+            node_type = node.get("type", "")
+            sg = defs_by_id.get(node_type)
+            if sg is None:
+                for slot in _node_widget_slots(node, node_path, graph):
+                    add(slot)
                 continue
-            current = widgets[idx] if idx < len(widgets) else None
-            slots.append(
-                {
-                    "address": f"{instance_id}.{port.name}",
-                    "name": port.name,
-                    "type": port.type,
-                    "current_value": current,
-                    "instance_id": instance_id,
-                    "node_type": node_type,
-                }
-            )
+
+            # Subgraph instance. A *curated* template (every declared proxy input
+            # resolves to a live interior widget) keeps its clean, hand-picked
+            # parameter view — we surface only its declared inputs and do NOT
+            # recurse, so the agent sees the intended surface. When the proxies
+            # are missing or dangling (the norm for fetched gallery templates,
+            # whose proxyWidgets point at deleted interior ids) we recurse into
+            # the definition so the real editable inner inputs are reachable.
+            declared, fully_curated = _declared_subgraph_slots(node, sg, node_id, graph)
+            for slot in declared:
+                add(slot)
+            if not fully_curated:
+                walk(sg.get("nodes") or [], node_path, depth + 1)
+
+    walk(workflow.get("nodes") or [], "", 0)
     return slots
+
+
+def _declared_subgraph_slots(instance: dict, sg: dict, instance_id: str, graph: Graph) -> tuple[list[dict], bool]:
+    """Build slots for a subgraph instance's curated proxy inputs.
+
+    Returns ``(slots, fully_curated)`` where ``fully_curated`` is True only when
+    the instance declares at least one input and EVERY declared input resolves
+    to a real interior widget value (so the curated surface is complete and the
+    caller can skip recursion).
+    """
+    declared: list[dict] = []
+    inputs = sg.get("inputs") or []
+    any_declared = False
+    all_resolved = True
+    for inp in inputs:
+        if not isinstance(inp, dict):
+            continue
+        inp_name = inp.get("name", "")
+        if not inp_name:
+            continue
+        any_declared = True
+        current = _resolve_proxy_value(instance, sg, inp_name, graph)
+        if current is None:
+            all_resolved = False
+            continue
+        inp_type = inp.get("type", {})
+        declared.append(
+            {
+                "address": f"{instance_id}.{inp_name}",
+                "name": inp_name,
+                "type": inp_type if isinstance(inp_type, str) else str(inp_type),
+                "current_value": current,
+                "instance_id": instance_id,
+                "node_type": instance.get("type", ""),
+            }
+        )
+    return declared, (any_declared and all_resolved)
 
 
 def _resolve_proxy_value(instance: dict, subgraph: dict, input_name: str, graph: Graph):
@@ -1141,82 +1238,17 @@ def _resolve_proxy_value(instance: dict, subgraph: dict, input_name: str, graph:
     return None
 
 
-def _apply_one_slot(workflow: dict, addr: str, value: Any, graph: Graph) -> list[dict]:
-    """Apply a single slot override. Returns warnings. Raises ValueError on hard errors.
+def _write_widget(node: dict, input_name: str, value: Any, graph: Graph, *, extend: bool) -> list[dict]:
+    """Write ``value`` into ``node``'s ``widgets_values`` slot for ``input_name``.
 
-    Supports two addressing modes:
-      1. **Subgraph/template mode** — if the target node is a subgraph
-         instance, route through ``proxyWidgets`` to the interior node.
-      2. **Direct mode** — if the target node is a regular node, update
-         ``widgets_values`` directly using the widget order.
+    Validates against the node's schema and returns catalog warnings. ``extend``
+    pads a short widget list for top-level direct edits (matches prior behavior);
+    interior subgraph nodes always carry a full widget list and are not padded.
     """
-    if "." not in addr:
-        raise ValueError(f"invalid slot address {addr!r} (expected 'instance_id.input_name')")
-    instance_id, input_name = addr.split(".", 1)
-
-    nodes = workflow.get("nodes") or []
-    defs = (workflow.get("definitions") or {}).get("subgraphs") or []
-    sg_by_type: dict[str, dict] = {}
-    for sg in defs:
-        if isinstance(sg, dict):
-            sg_by_type[sg.get("name") or sg.get("id", "")] = sg
-
-    instance = next((n for n in nodes if isinstance(n, dict) and str(n.get("id", "")) == instance_id), None)
-    if instance is None:
-        raise ValueError(f"node {instance_id} not found in workflow")
-
-    node_type = instance.get("type", "")
-    sg = sg_by_type.get(node_type)
-
-    # --- Subgraph/template mode ---
-    if sg is not None:
-        proxy = (instance.get("properties") or {}).get("proxyWidgets") or []
-        interior_id = None
-        widget_name = None
-        for entry in proxy:
-            if not isinstance(entry, list) or len(entry) < 2:
-                continue
-            name = entry[1] if isinstance(entry[1], str) else str(entry[1])
-            if name == input_name:
-                interior_id = str(entry[0])
-                widget_name = name
-                break
-        if interior_id is None:
-            raise ValueError(f"no proxyWidget mapping for {addr}")
-
-        for inode in sg.get("nodes") or []:
-            if not isinstance(inode, dict) or str(inode.get("id", "")) != interior_id:
-                continue
-            interior_class = inode.get("type", "")
-            order = graph.widget_order(interior_class)
-            try:
-                widget_idx = order.index(widget_name)
-            except ValueError:
-                raise ValueError(f"widget {widget_name!r} not in order for {interior_class}")
-            widgets = inode.get("widgets_values") or []
-            if widget_idx >= len(widgets):
-                raise ValueError(f"widget index {widget_idx} out of range for {interior_class}")
-
-            warnings: list[dict] = []
-            m = graph.node(interior_class)
-            if m:
-                port = next((p for p in m.inputs if p.name == widget_name), None)
-                if port:
-                    err = port.validate_shape(value)
-                    if err:
-                        raise ValueError(err)
-                    warnings = port.validate_catalog(value)
-
-            widgets[widget_idx] = value
-            inode["widgets_values"] = widgets
-            return warnings
-
-        raise ValueError(f"interior node {interior_id} not found in subgraph")
-
-    # --- Direct mode: regular node → update widgets_values directly ---
+    node_type = node.get("type", "")
     m = graph.node(node_type)
     if m is None:
-        raise ValueError(f"unknown node type {node_type!r} for node {instance_id}")
+        raise ValueError(f"unknown node type {node_type!r} for node {node.get('id')}")
     order = graph.widget_order(node_type)
     try:
         widget_idx = order.index(input_name)
@@ -1226,10 +1258,11 @@ def _apply_one_slot(workflow: dict, addr: str, value: Any, graph: Graph) -> list
             f"widget {input_name!r} not found on {node_type}; "
             f"available widgets: {', '.join(avail) if avail else '(none — all inputs are links)'}"
         )
-    widgets = instance.get("widgets_values") or []
+    widgets = node.get("widgets_values") or []
     if widget_idx >= len(widgets):
+        if not extend:
+            raise ValueError(f"widget index {widget_idx} out of range for {node_type}")
         widgets.extend([None] * (widget_idx + 1 - len(widgets)))
-        instance["widgets_values"] = widgets
 
     warnings: list[dict] = []
     port = next((p for p in m.inputs if p.name == input_name), None)
@@ -1240,5 +1273,132 @@ def _apply_one_slot(workflow: dict, addr: str, value: Any, graph: Graph) -> list
         warnings = port.validate_catalog(value)
 
     widgets[widget_idx] = value
-    instance["widgets_values"] = widgets
+    node["widgets_values"] = widgets
     return warnings
+
+
+def _resolve_node_path(workflow: dict, segments: list[str], defs_by_id: dict[str, dict]) -> dict:
+    """Walk a ``/``-separated node path into (possibly nested) subgraphs.
+
+    The first segment names a top-level node; each subsequent segment names an
+    interior node of the subgraph definition the previous segment instantiated.
+    Returns the resolved (mutable) node dict, or raises ValueError describing
+    the first hop that couldn't be found.
+    """
+    nodes = workflow.get("nodes") or []
+    node = next((n for n in nodes if isinstance(n, dict) and str(n.get("id", "")) == segments[0]), None)
+    if node is None:
+        raise ValueError(f"node {segments[0]} not found in workflow")
+    for seg in segments[1:]:
+        sg = defs_by_id.get(node.get("type", ""))
+        if sg is None:
+            raise ValueError(f"node {node.get('id')} is not a subgraph; cannot descend to {seg!r}")
+        inner = next((n for n in (sg.get("nodes") or []) if isinstance(n, dict) and str(n.get("id", "")) == seg), None)
+        if inner is None:
+            raise ValueError(f"interior node {seg} not found in subgraph {sg.get('id')}")
+        node = inner
+    return node
+
+
+def _count_instances(workflow: dict, def_id: str) -> int:
+    """Count nodes (top-level + interior-of-definitions) instantiating ``def_id``."""
+    count = 0
+    for n in workflow.get("nodes") or []:
+        if isinstance(n, dict) and str(n.get("type", "")) == def_id:
+            count += 1
+    for sg in (workflow.get("definitions") or {}).get("subgraphs") or []:
+        if isinstance(sg, dict):
+            for n in sg.get("nodes") or []:
+                if isinstance(n, dict) and str(n.get("type", "")) == def_id:
+                    count += 1
+    return count
+
+
+def _isolate_shared_subgraph(workflow: dict, instance: dict, defs_by_id: dict[str, dict]) -> None:
+    """If ``instance``'s subgraph definition is shared with another instance,
+    deep-copy it under a fresh id and repoint ``instance`` so an interior write
+    can't alias sibling instances. No-op when the instance already owns its def.
+    """
+    def_id = str(instance.get("type", ""))
+    sg = defs_by_id.get(def_id)
+    if sg is None or _count_instances(workflow, def_id) <= 1:
+        return
+    new_sg = copy.deepcopy(sg)
+    new_id = str(_uuid.uuid4())
+    new_sg["id"] = new_id
+    workflow.setdefault("definitions", {}).setdefault("subgraphs", []).append(new_sg)
+    instance["type"] = new_id
+
+
+def _apply_one_slot(workflow: dict, addr: str, value: Any, graph: Graph) -> list[dict]:
+    """Apply a single slot override. Returns warnings. Raises ValueError on hard errors.
+
+    Address forms (see ``_extract_frontend_slots`` / ``_SUBGRAPH_PATH_SEP``):
+      * ``<id>.<input>``                 — top-level node widget (direct mode).
+      * ``<id>.<declaredInput>``         — curated subgraph proxy input, routed
+                                           through ``proxyWidgets`` to its interior
+                                           node (legacy template mode).
+      * ``<instanceId>/<innerId>.<input>`` (and deeper) — a widget on an interior
+                                           node reached by descending into the
+                                           subgraph definition(s).
+    """
+    if "." not in addr:
+        raise ValueError(f"invalid slot address {addr!r} (expected 'instance_id.input_name')")
+    node_path, input_name = addr.rsplit(".", 1)
+    segments = node_path.split(_SUBGRAPH_PATH_SEP)
+
+    defs_by_id = _subgraph_defs_by_id(workflow)
+
+    # --- Nested form: descend the subgraph path and write the interior widget. ---
+    if len(segments) > 1:
+        root = next(
+            (n for n in (workflow.get("nodes") or []) if isinstance(n, dict) and str(n.get("id", "")) == segments[0]),
+            None,
+        )
+        if root is None:
+            raise ValueError(f"node {segments[0]} not found in workflow")
+        # Fork a shared definition before mutating so sibling instances stay independent.
+        _isolate_shared_subgraph(workflow, root, defs_by_id)
+        defs_by_id = _subgraph_defs_by_id(workflow)  # rebuild: root.type may have changed
+        # TODO: deep-nest isolation — only the first-hop definition is forked here;
+        # deeper nesting like ``10/3/7`` where interior subgraph node 3 is itself
+        # shared across multiple parent instances is a known follow-up.
+        target = _resolve_node_path(workflow, segments, defs_by_id)
+        return _write_widget(target, input_name, value, graph, extend=False)
+
+    instance_id = segments[0]
+    nodes = workflow.get("nodes") or []
+    instance = next((n for n in nodes if isinstance(n, dict) and str(n.get("id", "")) == instance_id), None)
+    if instance is None:
+        raise ValueError(f"node {instance_id} not found in workflow")
+
+    node_type = instance.get("type", "")
+    sg = defs_by_id.get(node_type)
+
+    # --- Curated subgraph proxy input (legacy ``<id>.<declaredInput>``). ---
+    if sg is not None:
+        proxy = (instance.get("properties") or {}).get("proxyWidgets") or []
+        interior_id = None
+        for entry in proxy:
+            if not isinstance(entry, list) or len(entry) < 2:
+                continue
+            name = entry[1] if isinstance(entry[1], str) else str(entry[1])
+            if name == input_name:
+                interior_id = str(entry[0])
+                break
+        if interior_id is None:
+            raise ValueError(
+                f"no proxyWidget mapping for {addr}; "
+                f"address an interior input directly, e.g. {instance_id}/<innerId>.<input> "
+                f"(run `comfy workflow slots` to list them)"
+            )
+        inode = next(
+            (n for n in (sg.get("nodes") or []) if isinstance(n, dict) and str(n.get("id", "")) == interior_id),
+            None,
+        )
+        if inode is None:
+            raise ValueError(f"interior node {interior_id} not found in subgraph")
+        return _write_widget(inode, input_name, value, graph, extend=False)
+
+    # --- Direct mode: regular top-level node. ---
+    return _write_widget(instance, input_name, value, graph, extend=True)
