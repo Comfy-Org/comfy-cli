@@ -131,22 +131,30 @@ mechanism by complexity and reuse — not as a quality ranking:
    ```
 
    **d. Write a YAML blueprint** in `blueprints/<name>.yaml` that wires
-   the fragments together — cross-step refs use `$alias.output_name`:
+   the fragments together — cross-step refs use `$alias.output_name`.
+   The bundled library (no authoring needed) covers the common t2i → i2v case:
    ```yaml
-   output_prefix: outputs/my_project
+   # video.yaml — t2i → i2v using the BUNDLED fragments (no authoring needed)
    pipeline:
-     - fragment: generate_image
+     - fragment: flux_t2i          # bundled: text → image (Flux partner node)
        alias: hero
        params:
-         prompt: "a zen garden at dawn"
-         seed: 42
-     - fragment: animate_i2v
-       alias: video
+         prompt: "a fennec fox astronaut, golden hour"
+     - fragment: kling_i2v         # bundled: image → video (Kling partner node)
+       alias: vid
        inputs:
-         image: $hero.image       # ← wires step 1 output to step 2 input
+         start_frame: $hero.image  # ← flux_t2i output "image" → kling_i2v input "start_frame"
        params:
-         motion: "slow camera pan left"
+         duration: "5"
    ```
+   ```bash
+   comfy workflow fragment ls                  # bundled library always available (source: bundled)
+   comfy workflow compose video.yaml -o video.json
+   comfy run --workflow video.json --where cloud
+   ```
+   Bundled today: `flux_t2i`, `kling_i2v`, `seedance_i2v`, `nano_banana_edit` (partner nodes)
+   and `sdxl_t2i_lora` (OSS — checkpoint and lora names are required discoverable params).
+   Local `./fragments/<name>.json` shadows a bundled name.
 
    **e. Compose + run:**
    ```bash
@@ -243,7 +251,7 @@ comfy --json models list-folders                 # every model folder (loras, ch
 comfy --json models list-folder loras            # files in a folder, with pathIndex
 comfy --json models search --text "wan2.2" --type lora --limit 10
 comfy --json models search --text "flux"         # text search across the catalog
-comfy --json models show wan2.2_vae.safetensors  # full Asset + projected row
+comfy --json models show <rows[0].name>          # full Asset + projected row (cloud-only)
 ```
 
 `models search --type <X>` accepts the conventional folder names
@@ -251,6 +259,47 @@ comfy --json models show wan2.2_vae.safetensors  # full Asset + projected row
 `upscale`, `clip`, `clip_vision`, `unet`/`diffusion_models`, …). Use
 `models list-folders` first if you're unsure what types the backend
 exposes.
+
+**Discover → wire loop — every asset type, never hardcoded names:**
+
+Every asset name (checkpoint, lora, controlnet, vae, upscaler, embedding,
+clip-vision model, …) must be discovered at runtime — never hardcoded. The
+pattern is the same regardless of type:
+
+```bash
+# 1. Discover available assets for any type
+comfy --json models search --type lora --where cloud --text "detail" --limit 5
+comfy --json models search --type controlnet --where cloud --limit 5
+comfy --json models search --type checkpoint --where cloud --limit 5
+comfy --json models search --type vae --where cloud --limit 5
+comfy --json models search --type upscale --where cloud --limit 5
+comfy --json models search --type embeddings --where cloud --limit 5
+
+# 2. Take rows[0].name verbatim — paste it into your blueprint param
+# Example: wire a lora into the bundled sdxl_t2i_lora fragment:
+comfy --json models search --type lora --where cloud --text "detail" --limit 5
+# → use rows[0].name as the lora_name param below
+
+# 3. Precision check — what will the server actually accept?
+comfy --json nodes show LoraLoader --where cloud
+# → the lora_name input's "choices" array is the exact list the server accepts
+# Same pattern for any loader: ControlNetLoader, VAELoader, UpscaleModelLoader, etc.
+```
+
+Worked lora instance — using the bundled `sdxl_t2i_lora` fragment:
+```yaml
+pipeline:
+  - fragment: sdxl_t2i_lora
+    alias: out
+    params:
+      ckpt_name: "<rows[0].name from checkpoint search>"
+      lora_name: "<rows[0].name from lora search>"
+      prompt: "a detailed portrait"
+```
+
+The `choices` array from `nodes show` is the universal precision check: it
+reflects exactly what `<server>/object_info` reports — authoritative for
+any loader node on that target.
 
 ## Templates — one starting point among several
 
@@ -321,10 +370,12 @@ gives the full count even when `--limit` caps the returned rows.
 comfy --json workflow slots path.json   # every addressable slot, by address
 ```
 
-**Requires a local server** (`comfy launch`) or `--input object_info.json`.
-If you're cloud-only with no local server, skip `workflow slots` — instead
-read the workflow JSON directly to find node inputs, or use
-`comfy --json nodes show <ClassName>` to inspect individual node schemas.
+`workflow slots`/`set-slot`/`vary` and all `nodes` commands resolve
+object_info through the routing chain with a cached fallback — cloud-signed-in
+works with no local server. If the live fetch fails, the command still succeeds
+from cache and the envelope carries `data.stale: true` +
+`warnings[] {code: "object_info_stale"}` — treat results as possibly outdated
+and run `comfy nodes refresh --where cloud` to refresh.
 
 Slot addresses are `<instance_id>.<input_name>`. Feed them to
 `workflow set-slot` / `workflow vary` in the Execution half. Works on
@@ -356,7 +407,9 @@ STATE_FILE=$(echo "$RES" | jq -r .data.state_file)
 
 # (a) Watch — blocks until terminal, returns outputs. The default.
 comfy --json jobs watch "$PROMPT_ID"
-# → returns when status ∈ {completed, error, cancelled}, with outputs
+# → exit 0 / ok:true only on completed; failed job exits 1 / ok:false /
+#   error.code=execution_error (payload under error.details); cancelled exits 130.
+# `&& next-step` therefore only proceeds on success.
 
 # (b) Read the state file for a quick non-blocking check
 jq '{status, outputs, error}' "$STATE_FILE"
@@ -371,9 +424,9 @@ the prompt_id to the user immediately, then watch in a separate step.
 Reach for `--wait` when you want a single blocking call and don't need
 the prompt_id mid-flight (it's hidden until the job finishes).
 
-Pass `--notify` on `comfy run` to fire a desktop notification when the
-job is terminal (handy for human-driven sessions; off by default so
-agent pipelines don't spam).
+`--notify` fires a desktop notification when the job is terminal.
+It defaults **on** in pretty/human async mode, and **off** in JSON/agent
+contexts and with `--wait`. Override explicitly with `--notify` or `--no-notify`.
 
 **Scope:** the async-first / `jobs watch` / state-file pattern above is the
 **`comfy run`** workflow path only. `comfy generate` (partner-API one-call)
@@ -397,28 +450,37 @@ comfy generate resume <model> <job_id> --download outputs/x.mp4
 
 Mechanical contracts that bite agents — encode them, don't rediscover:
 
-- **`comfy generate` does NOT honor the global `--json` envelope.** Unlike the
-  rest of the CLI, the `generate` subtree prints human/Rich output (including an
-  ANSI image preview on stdout) and gives you **no machine-readable envelope**.
-  Do not parse its stdout. The reliable result is the **file** written by
-  `--download` — submit with `--download <path>`, then verify the file exists.
-- **`generate upload` prints `Uploaded: <url>` as pretty text**, and the signed
-  URL soft-wraps across terminal lines. Sanitize before reuse
-  (`sed 's/^Uploaded:[[:space:]]*//' | tr -d '[:space:]'`).
+- **Machine-readable output:** `generate <model> --json` prints the raw API
+  response as JSON; `generate upload <file> --json` emits structured
+  `{url, expires_at, …}`; `generate <model> --emit-workflow out.json` goes
+  through the full renderer envelope (`command: "generate emit-workflow"`,
+  error code `emit_workflow_failed`) — the output is a runnable partner-node
+  workflow you can compose with (fragments+`run` route, no extra API key).
+  The default pretty path (no flags) is still human-only — do not parse it.
+- **`--emit-workflow` resolves the escape-hatch vs. quality tradeoff:**
+  fragments+`run` is the default for graph work; `generate` is the
+  highest-quality single-shot for partner models. With
+  `--emit-workflow out.json` you get a runnable workflow you can extend,
+  compose with other fragments, or iterate on — it's not a dead end.
+- **`generate upload --json`** returns structured JSON; without `--json` the
+  signed URL may soft-wrap across terminal lines — use `--json` in scripts.
 - **Prefer sync** (plain `--download`, no `--async`): the CLI polls internally
   and waits for you (that's the tool blocking, not you sleep-polling), so an
   expensive video gen can't be orphaned. Reach for `--async` + `resume` only
-  when you deliberately want to detach. (`generate resume` for BFL is currently
-  unreliable — if it errors, just re-run sync.)
+  when you deliberately want to detach.
 - **I2V pattern:** `generate <i2v-model>` needs an image **URL**, so the flow is
-  `generate <image-model> --download still.png` → `generate upload still.png` →
-  `generate <i2v-model> --image <url> --download clip.mp4`.
+  `generate <image-model> --download still.png` → `generate upload still.png --json`
+  → `generate <i2v-model> --image <url> --download clip.mp4`.
 
 ## Pre-flight — validate before you submit
 
 Before `comfy run`, verify the workflow will succeed:
 
 ```bash
+# Free dry-run: prints the exact API-format graph that WOULD be submitted,
+# exits without POSTing — works on both local and cloud routes.
+comfy run --workflow wf.json --print-prompt
+
 # Full pre-flight: checks class_types, input shapes, enum values, edge wiring
 comfy --json validate --workflow api.json
 
@@ -426,7 +488,8 @@ comfy --json validate --workflow api.json
 comfy --json nodes show <ClassName>
 # If error.code == "node_not_found", check details.close_matches
 
-# Confirm a model filename is actually available on the resolved backend
+# Confirm a model filename is actually available on the resolved backend (cloud-only)
+# On local: use `comfy models list-folder <type>` instead
 comfy --json models show <filename>
 # If error.code == "model_not_found", check details.close_matches and pick one
 ```
@@ -582,7 +645,7 @@ Hard-won lessons per domain. Not a tutorial — a reference card.
 - Survey first: `comfy nodes ls --produces IMAGE --api-only` (partner APIs), `comfy templates ls --type image`, `comfy models search --type checkpoint` — then choose
 - Batch sweeps: `comfy workflow vary` for multi-prompt/seed generation
 - Text rendering: use Ideogram (IdeogramV3), NOT Flux — Flux garbles text
-- Partner API escape hatch (one-shots only, via the proxy — not a workflow Job): `comfy generate bfl/flux-pro-1.1-ultra --prompt "..."`
+- Partner API escape hatch (one-shots only, via the proxy — not a workflow Job): `comfy generate flux-ultra --prompt "..."`
 - Never hardcode checkpoint/LoRA names — discover via `models search`
 
 ## Video
@@ -663,7 +726,7 @@ foreach:
   - {id: b, prompt: "a neon city"}
   - {id: c, prompt: "a desert at dusk"}
 pipeline:
-  - fragment: generate_image
+  - fragment: flux_t2i          # bundled: text → image (Flux partner node)
     alias: shot
     params:
       prompt: $item.prompt
@@ -682,10 +745,16 @@ of one. (For a pure prompt/seed sweep over the *same* graph, `comfy
 workflow vary` is the right tool; see the `comfy-fragments` skill for the
 full blueprint syntax.)
 
+With `chunk: N` in a `foreach` blueprint, compose splits items into
+N-item batches and writes one numbered file per batch. The envelope then
+reports `out: null` plus `written[]` (all paths) — script against
+`data.written`, not `data.out`.
+
 Stage handoff (download → upload → re-reference):
 
 ```bash
-comfy --json jobs watch "$PID" | comfy download --where cloud
+# `jobs watch` exits 0 only on completion — use && to chain safely:
+comfy --json jobs watch "$PID" && comfy --json download "$PID" --where cloud
 CLOUD=$(comfy --json upload ./outputs/abc_000.png --where cloud \
     | jq -r '.data.uploads[0].cloud_name')
 # Use $CLOUD in the next workflow's LoadImage input

@@ -70,7 +70,7 @@ before generating files.
 After `comfy run`, distill the envelope into a single line:
 
 ```text
-Submitted (cloud) → 99626e0a-b7fb… · state: <state_file path from envelope>
+Submitted (cloud) → 99626e0a-b7fb-4c21-a9f3-d8e1052c7a34 · state: <state_file path from envelope>
 ```
 
 Not this (don't dump the full envelope):
