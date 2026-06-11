@@ -15,12 +15,16 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import urllib.error
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated
 
 import typer
 
 from comfy_cli import tracking
+from comfy_cli.command.transfer import _upload_file
 from comfy_cli.output import get_renderer, rprint
 from comfy_cli.project import (
     CONVENTIONAL_DIRS,
@@ -31,11 +35,29 @@ from comfy_cli.project import (
     read_journal,
     unknown_dirs,
 )
+from comfy_cli.target import resolve_target
 
 app = typer.Typer(
     no_args_is_help=True,
     help="Project conventions: init and status.",
 )
+
+# `comfy assets` lives in this module too: assets are a project/1 concept
+# (the lock is project state under .comfy/), not a generic transfer.
+assets_app = typer.Typer(
+    no_args_is_help=True,
+    help="Project assets: push assets/ to the run target over its HTTP upload API.",
+)
+
+
+@assets_app.callback()
+def _assets_callback():
+    """Project assets — push and track.
+
+    (Also keeps Typer from collapsing the single-command group, so the
+    command stays ``comfy assets push``, not a bare ``comfy assets``.)
+    """
+
 
 # The marker `comfy project init` writes — deliberately literal and minimal.
 # The where default is resolved at init time (flag, else auto-detect) so a
@@ -127,6 +149,122 @@ def status_cmd():
 
 
 # ---------------------------------------------------------------------------
+# comfy assets push
+# ---------------------------------------------------------------------------
+
+
+@assets_app.command("push", help="Upload changed files under assets/ to the run target; record them in the lock.")
+@tracking.track_command("assets")
+def assets_push_cmd(
+    where: Annotated[
+        str | None,
+        typer.Option(
+            "--where",
+            show_default=False,
+            help="Push target (local|cloud). Omitted: the usual chain — env, project default, config, auto.",
+        ),
+    ] = None,
+    force: Annotated[
+        bool,
+        typer.Option("--force", help="Re-push every file, even when the lock says it is already current."),
+    ] = False,
+):
+    """Sync ``assets/`` to the resolved target's input directory.
+
+    Uploads go through the server's ``/upload/image`` HTTP API only — the CLI
+    never writes into a ComfyUI install's folders. Each pushed file is
+    recorded in ``.comfy/assets.lock.json`` with its sha256 and the
+    server-returned name; a file whose lock entry matches (same sha256 AND
+    same target) is skipped unless ``--force``.
+    """
+    renderer = get_renderer()
+    project = find_project()
+    if project is None:
+        renderer.error(
+            code="project_not_found",
+            message="No comfy.yaml project (schema project/1) governs this directory.",
+            hint="run: comfy project init",
+        )
+        raise typer.Exit(code=1)
+
+    try:
+        target = resolve_target(where=where)
+    except ValueError as e:
+        renderer.error(code="invalid_argument", message=str(e))
+        raise typer.Exit(code=1) from e
+    where_kind = target.kind
+
+    assets_dir = project.root / "assets"
+    lock_path = project.root / ".comfy" / "assets.lock.json"
+    lock_assets = _read_assets_lock(project)
+
+    pushed: list[dict] = []
+    skipped = 0
+    for path in sorted(assets_dir.rglob("*")) if assets_dir.is_dir() else []:
+        if not path.is_file():
+            continue
+        rel = path.relative_to(assets_dir)
+        if any(part.startswith(".") for part in rel.parts):
+            continue
+        name = rel.as_posix()
+        sha = hashlib.sha256(path.read_bytes()).hexdigest()
+        locked = lock_assets.get(name)
+        if not force and isinstance(locked, dict) and locked.get("sha256") == sha and locked.get("where") == where_kind:
+            skipped += 1
+            continue
+        try:
+            result = _upload_file(path, target, overwrite=True)
+        except urllib.error.HTTPError as e:
+            renderer.error(
+                code="upload_failed",
+                message=f"Failed to push {name}: HTTP {e.code}",
+                hint="check the server is reachable (and `comfy cloud login` for cloud)",
+                details={"status": e.code, "name": name, "where": where_kind},
+            )
+            raise typer.Exit(code=1) from e
+        # `cloud_name` = the name on the push target (the server-returned
+        # name), whatever the target kind — the key project status joins on.
+        cloud_name = result.get("name", path.name)
+        size = path.stat().st_size
+        lock_assets[name] = {
+            "sha256": sha,
+            "cloud_name": cloud_name,
+            "size": size,
+            "pushed_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "where": where_kind,
+        }
+        pushed.append({"name": name, "sha256": sha, "cloud_name": cloud_name, "size": size})
+
+    if pushed:
+        _write_assets_lock(lock_path, lock_assets)
+
+    if renderer.is_pretty():
+        for entry in pushed:
+            rprint(f"[green]✓[/green] pushed {entry['name']} → {entry['cloud_name']}")
+        rprint(f"[dim]{len(pushed)} pushed, {skipped} skipped ({where_kind}) → {lock_path}[/dim]")
+    renderer.emit(
+        {"pushed": pushed, "skipped": skipped, "lock": str(lock_path), "where": where_kind},
+        command="assets push",
+        changed=bool(pushed),
+    )
+
+
+def _write_assets_lock(path: Path, assets: dict) -> None:
+    """Atomically rewrite the lock (tmp + fsync + rename, the jobs_state
+    pattern) so a crash mid-push can't leave a torn JSON file."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    doc = {"schema": ASSETS_LOCK_SCHEMA, "assets": assets}
+    tmp = path.with_suffix(f".{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(doc, indent=2, sort_keys=True), encoding="utf-8")
+    fd = os.open(str(tmp), os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    os.replace(tmp, path)
+
+
+# ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------
 
@@ -151,7 +289,11 @@ def _read_assets_lock(project: Project) -> dict:
         parsed = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError, ValueError):
         return {}
-    if isinstance(parsed, dict) and parsed.get("schema") == ASSETS_LOCK_SCHEMA and isinstance(parsed.get("assets"), dict):
+    if (
+        isinstance(parsed, dict)
+        and parsed.get("schema") == ASSETS_LOCK_SCHEMA
+        and isinstance(parsed.get("assets"), dict)
+    ):
         return parsed["assets"]
     return {}
 

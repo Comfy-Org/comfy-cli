@@ -90,6 +90,7 @@ COMMAND_SCHEMAS: dict[str, str] = {
     # project convention
     "comfy project init": "project",
     "comfy project status": "project",
+    "comfy assets push": "assets",
     # config
     "comfy set-default": "set_default",
     "comfy version": "version",

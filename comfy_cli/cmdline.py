@@ -1541,6 +1541,11 @@ app.add_typer(auth_command.app, name="auth", help="Manage API tokens for model h
 app.add_typer(jobs_command.app, name="jobs", help="List, inspect, and live-watch ComfyUI prompts.")
 app.add_typer(project_command.app, name="project", help="Project conventions: init and status.")
 app.add_typer(
+    project_command.assets_app,
+    name="assets",
+    help="Push project assets to the run target (local or cloud) and track them in the lock.",
+)
+app.add_typer(
     skill_command.app,
     name="skills",
     help="Install the bundled comfy agent skills into Claude Code, Cursor, and AGENTS.md.",
