@@ -1168,9 +1168,14 @@ def _cloud_status_snapshot(prompt_id: str) -> dict | None:
     if status is None:
         return None
     raw = (status.get("status") or "").lower()
-    state = {"success": "completed", "completed": "completed", "failed": "error", "error": "error"}.get(
-        raw, raw or "pending"
-    )
+    state = {
+        "success": "completed",
+        "completed": "completed",
+        "failed": "error",
+        "error": "error",
+        "non_retryable_error": "error",
+        "lost": "error",
+    }.get(raw, raw or "pending")
 
     outputs: list[str] = []
     if state == "completed":

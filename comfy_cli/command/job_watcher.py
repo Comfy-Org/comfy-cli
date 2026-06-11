@@ -146,6 +146,8 @@ _CLOUD_STATUS_MAP = {
     "completed": "completed",
     "failed": "error",
     "error": "error",
+    "non_retryable_error": "error",
+    "lost": "error",
     "cancelled": "cancelled",
     "canceled": "cancelled",
 }

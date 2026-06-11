@@ -582,6 +582,50 @@ def test_watcher_timeout_preserves_prior_status(monkeypatch):
     assert state.error["details"]["last_status"] == "running"
 
 
+class _FakeCloudClient:
+    """Minimal stand-in for comfy_client.Client used by cloud status paths."""
+
+    def __init__(self, status_payload):
+        self._status_payload = status_payload
+        self.target = type("T", (), {"base_url": "https://cloud.example"})()
+
+    def get_job_status(self, prompt_id):
+        return dict(self._status_payload)
+
+    def get_history(self, prompt_id):  # pragma: no cover — error paths never fetch
+        raise AssertionError("get_history must not be called for failed jobs")
+
+    def extract_output_urls(self, record):  # pragma: no cover
+        return []
+
+
+@pytest.mark.parametrize("raw_status", ["non_retryable_error", "lost"])
+def test_cloud_status_snapshot_maps_fatal_statuses_to_error(monkeypatch, raw_status):
+    """Cloud statuses like non_retryable_error/lost must snapshot to 'error',
+    not leak through raw (which makes `jobs watch` poll forever)."""
+    payload = {"status": raw_status, "error_message": "RIP to the server"}
+    monkeypatch.setattr(jobs_mod, "_cloud_client", lambda: _FakeCloudClient(payload))
+    snap = jobs_mod._cloud_status_snapshot("pid-1")
+    assert snap is not None
+    assert snap["status"] == "error"
+    assert snap["error_message"] == "RIP to the server"
+
+
+@pytest.mark.parametrize("raw_status", ["non_retryable_error", "lost"])
+def test_poll_cloud_once_treats_fatal_statuses_as_terminal(raw_status):
+    """The watcher must treat non_retryable_error/lost as terminal errors and
+    stop polling, recording state.error."""
+    from comfy_cli import jobs_state
+    from comfy_cli.command import job_watcher
+
+    client = _FakeCloudClient({"status": raw_status, "error_message": "RIP to the server"})
+    state = jobs_state.new(prompt_id="pid", client_id="c", workflow="w", where="cloud")
+    assert job_watcher._poll_cloud_once(state, client=client) is True
+    assert state.status == "error"
+    assert state.error is not None
+    assert state.error["message"] == "RIP to the server"
+
+
 def test_emit_terminal_verdicts():
     import typer
 
