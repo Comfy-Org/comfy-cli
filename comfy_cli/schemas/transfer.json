@@ -34,7 +34,9 @@
             "properties": {
               "url": {"type": "string"},
               "path": {"type": "string"},
-              "size": {"type": "integer"}
+              "size": {"type": "integer"},
+              "node_id": {"type": "string", "description": "id of the workflow node that produced this output (omitted when the job state has no final record to join against)"},
+              "item": {"type": "string", "description": "compose foreach item key this output belongs to (omitted without an item_map); item-mapped files are named <item>_<nnn>.<ext> with a per-item counter"}
             },
             "required": ["path"]
           }

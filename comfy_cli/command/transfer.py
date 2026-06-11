@@ -23,7 +23,7 @@ from typing import Any
 import typer
 
 from comfy_cli import jobs_state
-from comfy_cli.comfy_client import Client, Unauthenticated
+from comfy_cli.comfy_client import Client, Unauthenticated, extract_output_entries
 from comfy_cli.output import get_renderer
 from comfy_cli.output import rprint as pprint
 from comfy_cli.target import resolve_target
@@ -116,6 +116,53 @@ def _assert_download_url(url: str) -> None:
     parsed = urllib.parse.urlsplit(url)
     if parsed.scheme not in ("http", "https"):
         raise ValueError(f"refusing to download from non-HTTP URL: {url}")
+
+
+def _sanitize_item_name(item: str) -> str:
+    """A filesystem-safe token for an item key used in download filenames."""
+    return re.sub(r"[^A-Za-z0-9._-]", "_", item) or "item"
+
+
+def _annotate_output_urls(output_urls: list[str], state) -> list[tuple[str | None, str | None]]:
+    """Per output URL: ``(node_id, item)`` provenance, ``None`` when unknown.
+
+    Joins URLs back to the state file's final history ``record`` on the
+    (filename, subfolder, type) query-param triple — the same triple
+    ``Client.view_url`` encodes — so matching survives base_url drift between
+    submit and download. ``node_id -> item`` comes from the compose
+    ``item_map`` (a node belongs to an item when it appears in the item's
+    ``nodes`` list or is its ``save_node``). Without a record everything is
+    ``(None, None)`` and the caller falls back to legacy naming.
+    """
+    if state is None or not isinstance(state.record, dict):
+        return [(None, None)] * len(output_urls)
+
+    key_to_node: dict[tuple[str, str, str], str] = {}
+    for entry in extract_output_entries(state.record):
+        key_to_node.setdefault((entry["filename"], entry["subfolder"], entry["type"]), entry["node_id"])
+
+    node_to_item: dict[str, str] = {}
+    for item, entry in (state.item_map or {}).items():
+        if not isinstance(entry, dict):
+            continue
+        members = list(entry.get("nodes") or [])
+        if entry.get("save_node") is not None:
+            members.append(entry["save_node"])
+        for node_id in members:
+            node_to_item[str(node_id)] = str(item)
+
+    annotations: list[tuple[str | None, str | None]] = []
+    for url in output_urls:
+        qs = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
+        key = (
+            qs.get("filename", [""])[0],
+            qs.get("subfolder", [""])[0],
+            qs.get("type", ["output"])[0],
+        )
+        node_id = key_to_node.get(key)
+        item = node_to_item.get(node_id) if node_id is not None else None
+        annotations.append((node_id, item))
+    return annotations
 
 
 # ---------------------------------------------------------------------------
@@ -259,13 +306,15 @@ def execute_download(
     target = resolve_target(where=where)
 
     # -- Resolve output URLs --------------------------------------------------
+    # The state file is read regardless of the URL source: its `record` +
+    # `item_map` (when present) drive item-aware file naming below.
+    state = jobs_state.read(prompt_id)
     output_urls: list[str] = []
 
     if piped_urls:
         output_urls = list(piped_urls)
     else:
         # Try the on-disk state file first
-        state = jobs_state.read(prompt_id)
         if state is not None and state.outputs:
             output_urls = list(state.outputs)
         else:
@@ -321,13 +370,26 @@ def execute_download(
     saved_paths: list[str] = []
     short_id = prompt_id[:8]
 
+    # Provenance per URL (node id + compose foreach item) from the state
+    # file's record/item_map. Item-mapped outputs are named `<item>_<nnn>`
+    # with a PER-ITEM counter; everything else keeps `<prompt8>_<idx>`.
+    annotations = _annotate_output_urls(output_urls, state)
+    item_counters: dict[str, int] = {}
+
     for idx, url in enumerate(output_urls):
         # Derive extension from the URL's filename query param
         parsed = urllib.parse.urlparse(url)
         qs = urllib.parse.parse_qs(parsed.query)
         remote_name = qs.get("filename", ["output.png"])[0]
         ext = Path(remote_name).suffix or ".png"
-        local_name = f"{short_id}_{idx:03d}{ext}"
+        node_id, item = annotations[idx]
+        if item is not None:
+            safe_item = _sanitize_item_name(item)
+            n = item_counters.get(safe_item, 0)
+            item_counters[safe_item] = n + 1
+            local_name = f"{safe_item}_{n:03d}{ext}"
+        else:
+            local_name = f"{short_id}_{idx:03d}{ext}"
         local_path = dest / local_name
 
         try:
@@ -378,13 +440,17 @@ def execute_download(
             raise typer.Exit(code=1)
 
         file_size = local_path.stat().st_size
-        saved_files.append(
-            {
-                "url": url,
-                "path": str(local_path.resolve()),
-                "size": file_size,
-            }
-        )
+        entry: dict[str, Any] = {
+            "url": url,
+            "path": str(local_path.resolve()),
+            "size": file_size,
+        }
+        # Optional provenance keys — present only when known (no nulls).
+        if node_id is not None:
+            entry["node_id"] = node_id
+        if item is not None:
+            entry["item"] = item
+        saved_files.append(entry)
         saved_paths.append(str(local_path.resolve()))
 
     pprint(f"✓ downloaded {len(saved_files)} file(s) to {dest}")

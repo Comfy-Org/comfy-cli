@@ -1,0 +1,214 @@
+"""Tests for `comfy download` item-aware naming and output provenance.
+
+When the job state file carries BOTH the final history record and a compose
+item_map (stashed by `comfy run` from the workflow's `_meta`), downloads are
+named `<item>_<nnn>.<ext>` with a per-item counter and `files[]` entries gain
+`node_id`/`item`. Without the map, naming stays `<prompt8>_<idx>` and the new
+keys are omitted.
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from unittest.mock import patch
+
+import pytest
+
+from comfy_cli import comfy_client, jobs_state
+from comfy_cli.comfy_client import extract_output_entries
+from comfy_cli.command import transfer
+from comfy_cli.output import Renderer, set_renderer
+from comfy_cli.output.renderer import OutputMode, reset_renderer_for_testing
+from comfy_cli.target import Target
+
+
+@pytest.fixture(autouse=True)
+def reset_renderer():
+    reset_renderer_for_testing()
+    yield
+    reset_renderer_for_testing()
+
+
+@pytest.fixture
+def fake_target():
+    return Target(
+        kind="cloud",
+        base_url="https://cloud.example.com",
+        path_prefix="/api",
+        history_path="history_v2",
+        jobs_path="jobs",
+        api_key="test-api-key",
+    )
+
+
+PROMPT_ID = "prompt-dl-12345"
+SHORT_ID = PROMPT_ID[:8]
+
+RECORD = {
+    "status": {"completed": True, "status_str": "success"},
+    "outputs": {
+        "5": {
+            "images": [
+                {"filename": "ComfyUI_a.png", "subfolder": "", "type": "output"},
+                {"filename": "ComfyUI_b.png", "subfolder": "", "type": "output"},
+            ]
+        },
+        "9": {"images": [{"filename": "ComfyUI_c.png", "subfolder": "", "type": "output"}]},
+        # Node 12 produced an output but belongs to no foreach item.
+        "12": {"images": [{"filename": "stray.png", "subfolder": "", "type": "output"}]},
+    },
+}
+
+ITEM_MAP = {
+    "s1": {"nodes": ["3", "5"], "save_node": "5", "prefix": "o/s1"},
+    # save_node listed outside `nodes` — membership must include it anyway.
+    "s2": {"nodes": ["8"], "save_node": "9", "prefix": "o/s2"},
+}
+
+
+def _urls(target: Target) -> list[str]:
+    return comfy_client.Client(target).extract_output_urls(RECORD)
+
+
+def _write_state(target: Target, *, record=None, item_map=None) -> list[str]:
+    urls = _urls(target)
+    state = jobs_state.JobState(
+        prompt_id=PROMPT_ID,
+        client_id=None,
+        workflow="/abs/composed.json",
+        where="cloud",
+        base_url=target.base_url,
+        status="completed",
+        outputs=urls,
+        record=record,
+        item_map=item_map,
+    )
+    assert jobs_state.write(state) is not None
+    return urls
+
+
+class _FakeResp:
+    """Context-manager response yielding one chunk then EOF."""
+
+    def __init__(self, data: bytes = b"\x89PNG-fake"):
+        self._chunks = [data]
+
+    def read(self, n: int) -> bytes:
+        return self._chunks.pop(0) if self._chunks else b""
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def _run_download(fake_target, tmp_path, capsys) -> tuple[list[str], dict]:
+    """Run execute_download with mocked target + HTTP; return (paths, envelope data)."""
+    set_renderer(Renderer(mode=OutputMode.NDJSON, command="download"))
+    with (
+        patch("comfy_cli.command.transfer.resolve_target", return_value=fake_target),
+        patch.object(transfer._DOWNLOAD_OPENER, "open", side_effect=lambda req: _FakeResp()),
+    ):
+        paths = transfer.execute_download(PROMPT_ID, out_dir=str(tmp_path / "out"))
+    lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]
+    envelope = json.loads(lines[-1])
+    assert envelope["type"] == "envelope"
+    return paths, envelope["data"]
+
+
+class TestItemNamedDownloads:
+    def test_files_named_by_item_with_per_item_counter(self, fake_target, tmp_path, capsys):
+        _write_state(fake_target, record=RECORD, item_map=ITEM_MAP)
+        paths, data = _run_download(fake_target, tmp_path, capsys)
+
+        names = [Path(p).name for p in paths]
+        # Per-item counters restart at 000; the unmapped node 12 output keeps
+        # the legacy <prompt8>_<global idx> name.
+        assert names == ["s1_000.png", "s1_001.png", "s2_000.png", f"{SHORT_ID}_003.png"]
+        for p in paths:
+            assert Path(p).is_file()
+        assert data["out_dir"] == str((tmp_path / "out").resolve())
+
+    def test_files_entries_carry_node_id_and_item(self, fake_target, tmp_path, capsys):
+        _write_state(fake_target, record=RECORD, item_map=ITEM_MAP)
+        _, data = _run_download(fake_target, tmp_path, capsys)
+
+        files = data["files"]
+        assert [(f.get("node_id"), f.get("item")) for f in files] == [
+            ("5", "s1"),
+            ("5", "s1"),
+            ("9", "s2"),
+            ("12", None),
+        ]
+        # The unmapped entry has a node_id but NO item key (omitted, not null).
+        assert "item" not in files[3]
+
+    def test_legacy_names_without_record_or_map(self, fake_target, tmp_path, capsys):
+        _write_state(fake_target, record=None, item_map=None)
+        paths, data = _run_download(fake_target, tmp_path, capsys)
+
+        names = [Path(p).name for p in paths]
+        assert names == [f"{SHORT_ID}_{i:03d}.png" for i in range(4)]
+        for f in data["files"]:
+            assert "node_id" not in f
+            assert "item" not in f
+
+    def test_record_without_item_map_still_carries_node_id(self, fake_target, tmp_path, capsys):
+        _write_state(fake_target, record=RECORD, item_map=None)
+        paths, data = _run_download(fake_target, tmp_path, capsys)
+
+        # No map → legacy names throughout, but node provenance is known.
+        names = [Path(p).name for p in paths]
+        assert names == [f"{SHORT_ID}_{i:03d}.png" for i in range(4)]
+        assert [f["node_id"] for f in data["files"]] == ["5", "5", "9", "12"]
+        assert all("item" not in f for f in data["files"])
+
+    def test_download_data_validates_against_transfer_schema(self, fake_target, tmp_path, capsys):
+        import jsonschema
+
+        _write_state(fake_target, record=RECORD, item_map=ITEM_MAP)
+        _, data = _run_download(fake_target, tmp_path, capsys)
+
+        schema_path = Path(__file__).parents[3] / "comfy_cli" / "schemas" / "transfer.json"
+        schema = json.loads(schema_path.read_text())
+        jsonschema.Draft202012Validator.check_schema(schema)
+        jsonschema.Draft202012Validator(schema).validate(data)
+        # The new keys are part of the documented contract, not just tolerated.
+        download_files = schema["oneOf"][1]["properties"]["files"]["items"]["properties"]
+        assert "node_id" in download_files
+        assert "item" in download_files
+
+
+class TestExtractOutputEntries:
+    """Module-level pure flatten — the record half of Client.extract_outputs,
+    usable without a Target (download joins URLs to it by query params)."""
+
+    def test_flattens_record_with_node_ids(self):
+        entries = extract_output_entries(RECORD)
+        assert [(e["node_id"], e["filename"]) for e in entries] == [
+            ("5", "ComfyUI_a.png"),
+            ("5", "ComfyUI_b.png"),
+            ("9", "ComfyUI_c.png"),
+            ("12", "stray.png"),
+        ]
+        for e in entries:
+            assert e["subfolder"] == ""
+            assert e["type"] == "output"
+
+    def test_tolerates_malformed_records(self):
+        assert extract_output_entries({}) == []
+        assert extract_output_entries({"outputs": "garbage"}) == []
+        assert extract_output_entries({"outputs": {"1": "garbage", "2": {"images": "nope"}}}) == []
+        # Items without a filename are skipped.
+        assert extract_output_entries({"outputs": {"1": {"images": [{"type": "output"}]}}}) == []
+
+    def test_client_extract_outputs_delegates(self, fake_target):
+        client = comfy_client.Client(fake_target)
+        outputs = client.extract_outputs(RECORD)
+        entries = extract_output_entries(RECORD)
+        assert [o["node_id"] for o in outputs] == [e["node_id"] for e in entries]
+        assert [o["filename"] for o in outputs] == [e["filename"] for e in entries]
+        # URLs are the view_url of each entry — same triple, same encoding.
+        assert outputs[0]["url"] == "https://cloud.example.com/api/view?filename=ComfyUI_a.png&subfolder=&type=output"

@@ -428,34 +428,56 @@ class Client:
         """Flatten a node-keyed history record into one dict per artifact.
 
         Each entry is ``{"node_id", "url", "filename", "type"}`` — the node
-        association that flat URL lists drop. Ordering is stable: record
-        ``outputs`` insertion order, then media-key order, then item order.
+        association that flat URL lists drop. The record half of the flatten
+        is the pure module-level :func:`extract_output_entries`; this method
+        adds the fetchable ``url`` (which needs the client's Target).
         """
-        results: list[dict] = []
-        outputs = record.get("outputs") or {}
-        if not isinstance(outputs, dict):
-            return results
-        for node_id, node_output in outputs.items():
-            if not isinstance(node_output, dict):
-                continue
-            for key in ("images", "gifs", "videos", "audio", "files"):
-                items = node_output.get(key) or []
-                if not isinstance(items, list):
-                    continue
-                for item in items:
-                    if isinstance(item, dict) and "filename" in item:
-                        results.append(
-                            {
-                                "node_id": str(node_id),
-                                "url": self.view_url(item),
-                                "filename": str(item.get("filename", "")),
-                                "type": str(item.get("type", "output")),
-                            }
-                        )
-        return results
+        return [
+            {
+                "node_id": entry["node_id"],
+                "url": self.view_url(entry),
+                "filename": entry["filename"],
+                "type": entry["type"],
+            }
+            for entry in extract_output_entries(record)
+        ]
 
     def extract_output_urls(self, record: dict) -> list[str]:
         return [o["url"] for o in self.extract_outputs(record)]
+
+
+def extract_output_entries(record: dict) -> list[dict]:
+    """Flatten a node-keyed history record into one entry per artifact —
+    ``{"node_id", "filename", "subfolder", "type"}`` (all strings).
+
+    Pure function, no Target needed: consumers that already hold output URLs
+    (e.g. ``comfy download`` reading a state file) can join them back to
+    producing nodes on the (filename, subfolder, type) triple — the same one
+    :meth:`Client.view_url` encodes as query params. Ordering is stable:
+    record ``outputs`` insertion order, then media-key order, then item order.
+    """
+    results: list[dict] = []
+    outputs = record.get("outputs") or {}
+    if not isinstance(outputs, dict):
+        return results
+    for node_id, node_output in outputs.items():
+        if not isinstance(node_output, dict):
+            continue
+        for key in ("images", "gifs", "videos", "audio", "files"):
+            items = node_output.get(key) or []
+            if not isinstance(items, list):
+                continue
+            for item in items:
+                if isinstance(item, dict) and "filename" in item:
+                    results.append(
+                        {
+                            "node_id": str(node_id),
+                            "filename": str(item.get("filename", "")),
+                            "subfolder": str(item.get("subfolder", "")),
+                            "type": str(item.get("type", "output")),
+                        }
+                    )
+    return results
 
 
 def _group_outputs(
