@@ -458,6 +458,51 @@ class Client:
         return [o["url"] for o in self.extract_outputs(record)]
 
 
+def _group_outputs(
+    outputs: list[dict], item_map: dict | None
+) -> tuple[dict[str, list[str]], dict[str, list[str]]]:
+    """Group ``Client.extract_outputs`` entries by node and by foreach item.
+
+    Returns ``(outputs_by_node, outputs_by_item)``. ``item_map`` is the
+    blueprint compose map ``{item: {"nodes": [ids], "save_node": id, …}}``
+    stashed on the job state; a node belongs to an item when it appears in
+    the item's ``nodes`` list or is its ``save_node``. When ``item_map`` is
+    falsy, ``outputs_by_item`` is ``{}``. Items that produced nothing keep an
+    explicit empty list — a pruned branch should be visible, not absent.
+    URL ordering follows ``outputs`` ordering in both groupings.
+    """
+    by_node: dict[str, list[str]] = {}
+    by_item: dict[str, list[str]] = {}
+
+    node_to_item: dict[str, str] = {}
+    if item_map:
+        for item_id, entry in item_map.items():
+            by_item[str(item_id)] = []
+            if not isinstance(entry, dict):
+                continue
+            members = list(entry.get("nodes") or [])
+            save_node = entry.get("save_node")
+            if save_node is not None:
+                members.append(save_node)
+            for node_id in members:
+                node_to_item[str(node_id)] = str(item_id)
+
+    for entry in outputs:
+        if not isinstance(entry, dict):
+            continue
+        node_id = entry.get("node_id")
+        url = entry.get("url")
+        if node_id is None or not url:
+            continue
+        node_id = str(node_id)
+        by_node.setdefault(node_id, []).append(url)
+        item = node_to_item.get(node_id)
+        if item is not None:
+            by_item[item].append(url)
+
+    return by_node, by_item
+
+
 def _looks_done(record: dict) -> bool:
     status = record.get("status") or record.get("execution_status") or {}
     if isinstance(status, dict):

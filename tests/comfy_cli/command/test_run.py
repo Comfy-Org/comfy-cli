@@ -1145,3 +1145,67 @@ class TestExecuteCloudWait:
         assert state is not None
         assert state.status == "completed"
         assert state.record == self.RECORD
+
+    def _wait_envelope(self, workflow_file, fake_target, client, capsys):
+        """Run --wait with an NDJSON renderer and return the final envelope."""
+        from comfy_cli.output import Renderer, set_renderer
+        from comfy_cli.output.renderer import OutputMode
+
+        set_renderer(Renderer(mode=OutputMode.NDJSON, command="run"))
+        self._run_wait(workflow_file, fake_target, client)
+        lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]
+        envelope = json.loads(lines[-1])
+        assert envelope["type"] == "envelope"
+        return envelope
+
+    def test_wait_envelope_has_outputs_by_node(self, api_workflow_file, fake_target, capsys):
+        client = self._client(fake_target)
+        env = self._wait_envelope(api_workflow_file, fake_target, client, capsys)
+
+        data = env["data"]
+        url_a = "https://cloud.example.com/api/view?filename=a.png&subfolder=&type=output"
+        url_v = "https://cloud.example.com/api/view?filename=v.mp4&subfolder=&type=output"
+        assert data["outputs"] == [url_a, url_v]  # flat list untouched
+        assert data["outputs_by_node"] == {"9": [url_a], "12": [url_v]}
+        # No item_map on the state → key present, empty dict.
+        assert data["outputs_by_item"] == {}
+
+    def test_wait_envelope_groups_outputs_by_item_when_item_map_present(
+        self, api_workflow_file, fake_target, capsys, monkeypatch
+    ):
+        from comfy_cli import jobs_state
+
+        orig_new = jobs_state.new
+
+        def new_with_item_map(*args, **kwargs):
+            state = orig_new(*args, **kwargs)
+            state.item_map = {
+                "s1": {"nodes": ["1", "9"], "save_node": "9", "prefix": "outputs/s1"},
+                "s2": {"nodes": ["12"], "save_node": "12", "prefix": "outputs/s2"},
+            }
+            return state
+
+        monkeypatch.setattr(jobs_state, "new", new_with_item_map)
+
+        client = self._client(fake_target)
+        env = self._wait_envelope(api_workflow_file, fake_target, client, capsys)
+
+        url_a = "https://cloud.example.com/api/view?filename=a.png&subfolder=&type=output"
+        url_v = "https://cloud.example.com/api/view?filename=v.mp4&subfolder=&type=output"
+        assert env["data"]["outputs_by_item"] == {"s1": [url_a], "s2": [url_v]}
+
+    def test_wait_envelope_data_validates_against_run_schema(self, api_workflow_file, fake_target, capsys):
+        import jsonschema
+
+        from pathlib import Path
+
+        client = self._client(fake_target)
+        env = self._wait_envelope(api_workflow_file, fake_target, client, capsys)
+
+        schema_path = Path(__file__).parents[3] / "comfy_cli" / "schemas" / "run.json"
+        schema = json.loads(schema_path.read_text())
+        jsonschema.Draft202012Validator.check_schema(schema)
+        jsonschema.Draft202012Validator(schema).validate(env["data"])
+        # The new keys are part of the documented contract, not just tolerated.
+        assert "outputs_by_node" in schema["properties"]
+        assert "outputs_by_item" in schema["properties"]

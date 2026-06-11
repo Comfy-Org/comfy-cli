@@ -459,7 +459,7 @@ def execute_cloud(
     Uses the unified :class:`comfy_cli.comfy_client.Client` — same surface as
     local, just a different :class:`comfy_cli.target.Target`.
     """
-    from comfy_cli.comfy_client import Client, HTTPError, Unauthenticated
+    from comfy_cli.comfy_client import Client, HTTPError, Unauthenticated, _group_outputs
     from comfy_cli.target import resolve_target
 
     renderer = get_renderer()
@@ -695,7 +695,8 @@ def execute_cloud(
         raise typer.Exit(code=130)
 
     # Determine the terminal status from the record.
-    output_urls = client.extract_output_urls(record)
+    node_outputs = client.extract_outputs(record)
+    output_urls = [o["url"] for o in node_outputs]
     exec_status = record.get("status") or record.get("execution_status") or {}
     if isinstance(exec_status, dict):
         status_str = exec_status.get("status_str", "")
@@ -756,6 +757,10 @@ def execute_cloud(
             pprint(f"[yellow]⚠ {w['message']}[/yellow]")
         pprint(f"[bold green]\nCloud workflow completed ({timedelta(seconds=end - start)})[/bold green]")
 
+    # Grouped views of the same artifacts: by producing node always, and by
+    # blueprint foreach item when compose stashed an item_map at submit.
+    outputs_by_node, outputs_by_item = _group_outputs(node_outputs, state.item_map)
+
     renderer.emit(
         {
             "workflow": workflow_name,
@@ -763,6 +768,8 @@ def execute_cloud(
             "prompt_id": submit.prompt_id,
             "client_id": client_id,
             "outputs": output_urls,
+            "outputs_by_node": outputs_by_node,
+            "outputs_by_item": outputs_by_item,
             "warnings": warnings,
             "elapsed_seconds": end - start,
             "base_url": target.base_url,

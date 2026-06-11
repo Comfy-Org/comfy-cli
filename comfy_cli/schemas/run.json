@@ -15,6 +15,16 @@
       "items": {"type": "string"},
       "description": "URLs or local paths to produced artifacts."
     },
+    "outputs_by_node": {
+      "type": "object",
+      "description": "Cloud --wait only: the same artifact URLs grouped by the node id that produced them.",
+      "additionalProperties": {"type": "array", "items": {"type": "string"}}
+    },
+    "outputs_by_item": {
+      "type": "object",
+      "description": "Cloud --wait only: artifact URLs grouped by blueprint foreach item (via the compose item_map). Empty object when no item_map exists.",
+      "additionalProperties": {"type": "array", "items": {"type": "string"}}
+    },
     "warnings": {
       "type": "array",
       "description": "Non-fatal diagnostics about the run (e.g. partial_execution when the cloud pruned an output branch). Empty when none.",

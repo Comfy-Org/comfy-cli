@@ -484,6 +484,63 @@ class TestOutputUrls:
         assert client.extract_output_urls(record) == [o["url"] for o in client.extract_outputs(record)]
 
 
+class TestGroupOutputs:
+    """_group_outputs: pure grouping of extract_outputs entries by node and
+    (via an item_map) by blueprint foreach item."""
+
+    OUTPUTS = [
+        {"node_id": "9", "url": "https://x/a.png", "filename": "a.png", "type": "output"},
+        {"node_id": "9", "url": "https://x/b.png", "filename": "b.png", "type": "output"},
+        {"node_id": "12", "url": "https://x/v.mp4", "filename": "v.mp4", "type": "output"},
+    ]
+
+    def test_groups_by_node(self):
+        by_node, by_item = comfy_client._group_outputs(self.OUTPUTS, None)
+        assert by_node == {"9": ["https://x/a.png", "https://x/b.png"], "12": ["https://x/v.mp4"]}
+        assert by_item == {}
+
+    def test_groups_by_item_via_item_map_nodes(self):
+        item_map = {
+            "s1": {"nodes": ["7", "9"], "save_node": "9", "prefix": "outputs/s1"},
+            "s2": {"nodes": ["10", "12"], "save_node": "12", "prefix": "outputs/s2"},
+        }
+        _by_node, by_item = comfy_client._group_outputs(self.OUTPUTS, item_map)
+        assert by_item == {
+            "s1": ["https://x/a.png", "https://x/b.png"],
+            "s2": ["https://x/v.mp4"],
+        }
+
+    def test_item_with_no_outputs_keeps_empty_list(self):
+        # A pruned branch (item produced nothing) must still be visible.
+        item_map = {
+            "s1": {"nodes": ["9"], "save_node": "9", "prefix": "p"},
+            "s2": {"nodes": ["99"], "save_node": "99", "prefix": "p"},
+        }
+        _by_node, by_item = comfy_client._group_outputs(self.OUTPUTS[:1], item_map)
+        assert by_item == {"s1": ["https://x/a.png"], "s2": []}
+
+    def test_save_node_membership_counts_even_outside_nodes_list(self):
+        item_map = {"s1": {"nodes": ["7"], "save_node": "9", "prefix": "p"}}
+        _by_node, by_item = comfy_client._group_outputs(self.OUTPUTS[:1], item_map)
+        assert by_item == {"s1": ["https://x/a.png"]}
+
+    def test_empty_inputs(self):
+        assert comfy_client._group_outputs([], None) == ({}, {})
+        assert comfy_client._group_outputs([], {}) == ({}, {})
+
+    def test_skips_malformed_entries(self):
+        outputs = [
+            "garbage",
+            {"url": "https://x/no-node.png"},
+            {"node_id": "9"},
+            {"node_id": "9", "url": "https://x/a.png"},
+        ]
+        item_map = {"s1": {"nodes": ["9"]}, "bad": "not-a-dict"}
+        by_node, by_item = comfy_client._group_outputs(outputs, item_map)
+        assert by_node == {"9": ["https://x/a.png"]}
+        assert by_item == {"s1": ["https://x/a.png"], "bad": []}
+
+
 class TestWaitForCompletionProgressProbe:
     def test_wait_for_completion_resets_idle_on_progress(self, monkeypatch):
         import comfy_cli.comfy_client as cc
