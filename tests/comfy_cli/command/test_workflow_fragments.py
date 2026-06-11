@@ -125,6 +125,26 @@ def _image_blend_fragment() -> dict:
     }
 
 
+def _av_mux_fragment() -> dict:
+    """VIDEO + AUDIO path inputs — literal/$asset values must materialize the
+    loaders with their REAL input keys (LoadVideo.file, LoadAudio.audio per
+    the server's object_info), not invented ones."""
+    return {
+        "_fragment": {
+            "name": "av_mux",
+            "version": "1",
+            "terminal": True,
+            "inputs": {
+                "clip": {"type": "VIDEO", "binds": "10.video"},
+                "track": {"type": "AUDIO", "binds": "10.audio"},
+            },
+            "outputs": {},
+            "params": {},
+        },
+        "10": {"class_type": "SaveVideo", "inputs": {"video": "P", "audio": "P"}},
+    }
+
+
 def _model_producer_fragment() -> dict:
     """Produces graph-typed outputs (MODEL/LATENT) — like a checkpoint loader."""
     return {
@@ -170,6 +190,7 @@ def lib_dir(tmp_path: Path) -> Path:
     (d / "image_blend.json").write_text(json.dumps(_image_blend_fragment()))
     (d / "model_producer.json").write_text(json.dumps(_model_producer_fragment()))
     (d / "model_consumer.json").write_text(json.dumps(_model_consumer_fragment()))
+    (d / "av_mux.json").write_text(json.dumps(_av_mux_fragment()))
     return d
 
 
@@ -397,6 +418,62 @@ class TestCompose:
         loaded_paths = {n["inputs"]["image"] for n in load_nodes}
         assert loaded_paths == {"a.png", "b.png"}
 
+    def test_video_input_injects_loadvideo_with_file_key(self, lib_dir: Path):
+        """LoadVideo's only input is `file` (COMBO, per cloud object_info).
+        Wiring `video` validates client-side then burns the cloud run
+        server-side (ImageDownloadError) — fennec friction #7."""
+        blueprint = {
+            "pipeline": [
+                {
+                    "fragment": "av_mux",
+                    "alias": "m",
+                    "inputs": {"clip": "s1.mp4", "track": "score.flac"},
+                }
+            ]
+        }
+        wf, _ = compose_blueprint(blueprint, lib_dir=lib_dir)
+        load_videos = [n for n in wf.values() if n["class_type"] == "LoadVideo"]
+        assert len(load_videos) == 1
+        assert load_videos[0]["inputs"] == {"file": "s1.mp4"}
+
+    def test_audio_input_injects_loadaudio_with_audio_key(self, lib_dir: Path):
+        """LoadAudio's real input key is `audio` (COMBO, per cloud object_info)."""
+        blueprint = {
+            "pipeline": [
+                {
+                    "fragment": "av_mux",
+                    "alias": "m",
+                    "inputs": {"clip": "s1.mp4", "track": "score.flac"},
+                }
+            ]
+        }
+        wf, _ = compose_blueprint(blueprint, lib_dir=lib_dir)
+        load_audios = [n for n in wf.values() if n["class_type"] == "LoadAudio"]
+        assert len(load_audios) == 1
+        assert load_audios[0]["inputs"] == {"audio": "score.flac"}
+
+    def test_asset_resolved_video_and_audio_use_real_loader_keys(self, lib_dir: Path):
+        """$asset values fall through to the SAME loader materialization a
+        literal filename gets — same real input keys."""
+        blueprint = {
+            "pipeline": [
+                {
+                    "fragment": "av_mux",
+                    "alias": "m",
+                    "inputs": {"clip": "$asset.clips/s1.mp4", "track": "$asset.score.flac"},
+                }
+            ]
+        }
+        wf, _ = compose_blueprint(
+            blueprint,
+            lib_dir=lib_dir,
+            asset_resolver=lambda name: f"cloud-{Path(name).name}",
+        )
+        load_videos = [n for n in wf.values() if n["class_type"] == "LoadVideo"]
+        load_audios = [n for n in wf.values() if n["class_type"] == "LoadAudio"]
+        assert load_videos[0]["inputs"] == {"file": "cloud-s1.mp4"}
+        assert load_audios[0]["inputs"] == {"audio": "cloud-score.flac"}
+
     def test_node_ids_remapped_no_collision(self, lib_dir: Path):
         """Two instances of the same fragment must not collide on interior node IDs."""
         blueprint = {
@@ -600,7 +677,9 @@ class TestComposeCmd:
         assert envelope["data"]["graphs"] == 1
         assert envelope["data"]["items"] == 3
         wf = json.loads(out.read_text())
-        texts = {n["inputs"]["text"] for n in wf.values() if isinstance(n, dict) and n.get("class_type") == "CLIPTextEncode"}
+        texts = {
+            n["inputs"]["text"] for n in wf.values() if isinstance(n, dict) and n.get("class_type") == "CLIPTextEncode"
+        }
         assert texts == {"alpha", "beta", "gamma"}
 
     def test_compose_chunk_writes_multiple_files(self, lib_dir: Path, tmp_path: Path, capsys):
@@ -681,7 +760,9 @@ class TestComposeCmd:
         assert envelope["ok"] is True
         assert envelope["data"]["items"] == 2
         wf = json.loads(out.read_text())
-        texts = {n["inputs"]["text"] for n in wf.values() if isinstance(n, dict) and n.get("class_type") == "CLIPTextEncode"}
+        texts = {
+            n["inputs"]["text"] for n in wf.values() if isinstance(n, dict) and n.get("class_type") == "CLIPTextEncode"
+        }
         assert texts == {"one", "two"}
 
 
@@ -696,6 +777,7 @@ class TestFragmentCmds:
             "image_blend",
             "model_producer",
             "model_consumer",
+            "av_mux",
         }
 
     def test_ls_missing_lib(self, tmp_path: Path, capsys):
@@ -901,9 +983,7 @@ class TestItemMap:
         return {
             "output_prefix": "story",
             "foreach": [{"id": "s1"}, {"id": "s2"}],
-            "pipeline": [
-                {"fragment": "image_blend", "alias": "b", "inputs": {"image1": "a.png", "image2": "b.png"}}
-            ],
+            "pipeline": [{"fragment": "image_blend", "alias": "b", "inputs": {"image1": "a.png", "image2": "b.png"}}],
         }
 
     def test_item_map_disjoint_nodes_with_save_inside(self, lib_dir: Path):
@@ -938,9 +1018,7 @@ class TestItemMap:
     def test_item_map_terminal_branch_has_no_save_node(self, lib_dir: Path):
         blueprint = {
             "foreach": [{"id": "s1"}],
-            "pipeline": [
-                {"fragment": "save_still", "alias": "save", "inputs": {"images": "inputs/p.png"}}
-            ],
+            "pipeline": [{"fragment": "save_still", "alias": "save", "inputs": {"images": "inputs/p.png"}}],
         }
         wf, summary = compose_blueprints(blueprint, lib_dir=lib_dir)[0]
         entry = summary["item_map"]["s1"]

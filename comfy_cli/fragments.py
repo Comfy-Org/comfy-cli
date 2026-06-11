@@ -78,6 +78,18 @@ _RESERVED_REF_PREFIXES = (ASSET_REF_PREFIX, VAR_REF_PREFIX)
 # and any custom socket type) is "graph-only": valid as a fragment input, but
 # it can only be fed by a cross-step ref (`$alias.output`), never a path.
 LOADABLE_INPUT_TYPES = {"IMAGE", "MASK", "AUDIO", "VIDEO"}
+
+# Loader class + its REAL input key per path-loadable modality, exactly as the
+# server's object_info publishes them (verified against live cloud
+# object_info: LoadImage.image, LoadAudio.audio, LoadVideo.file — all COMBO).
+# An invented key (e.g. LoadVideo "video") passes client-side validation and
+# then burns the cloud run in input staging, so this table is the single
+# source of truth. MASK rides IMAGE: LoadImage → ImageToMask.
+PATH_LOADERS = {
+    "IMAGE": ("LoadImage", "image"),
+    "AUDIO": ("LoadAudio", "audio"),
+    "VIDEO": ("LoadVideo", "file"),
+}
 KNOWN_PARAM_TYPES = {"STRING", "INT", "FLOAT", "BOOL", "BOOLEAN", "COMBO"}
 
 # A ComfyUI socket type is UPPER_SNAKE_CASE (IMAGE, MODEL, CONTROL_NET, ...).
@@ -454,16 +466,14 @@ class Pipeline:
                 step_alias=step_alias,
             )
 
-        # Loadable modalities — materialize the path with the right loader node.
-        if decl_type == "IMAGE":
-            return [self._add_loader("LoadImage", "image", value, title=f"load {Path(value).name}"), 0]
+        # Loadable modalities — materialize the path with the right loader
+        # node, wired through its real input key (see PATH_LOADERS).
+        if decl_type in PATH_LOADERS:
+            loader_class, loader_key = PATH_LOADERS[decl_type]
+            return [self._add_loader(loader_class, loader_key, value, title=f"load {Path(value).name}"), 0]
         if decl_type == "MASK":
             load_id = self._add_loader("LoadImage", "image", value, title=f"load {Path(value).name}")
             return [self._add_image_to_mask([load_id, 0]), 0]
-        if decl_type == "AUDIO":
-            return [self._add_loader("LoadAudio", "audio", value, title=f"load {Path(value).name}"), 0]
-        if decl_type == "VIDEO":
-            return [self._add_loader("LoadVideo", "video", value, title=f"load {Path(value).name}"), 0]
 
         # Graph-only socket types (MODEL, CONDITIONING, LATENT, VAE, custom):
         # there is no loader to inject — they must come from a prior step.
