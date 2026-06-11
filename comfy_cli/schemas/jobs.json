@@ -17,6 +17,16 @@
     "queue_position": {"type": ["integer", "null"]},
     "workflow_size": {"type": ["integer", "null"]},
     "outputs": {"type": "array", "items": {"type": "string"}},
+    "outputs_by_node": {
+      "type": "object",
+      "description": "Cloud status/watch terminal: the same artifact URLs grouped by the node id that produced them.",
+      "additionalProperties": {"type": "array", "items": {"type": "string"}}
+    },
+    "outputs_by_item": {
+      "type": "object",
+      "description": "Cloud status/watch terminal: artifact URLs grouped by blueprint foreach item (via the compose item_map on the job state file). Empty object when no item_map exists.",
+      "additionalProperties": {"type": "array", "items": {"type": "string"}}
+    },
     "elapsed_seconds": {"type": ["number", "null"]},
     "completed_nodes": {"type": "array", "items": {"type": "string"}},
     "count": {"type": "integer"},

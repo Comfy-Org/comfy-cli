@@ -1167,6 +1167,9 @@ def _cloud_ls(*, limit: int) -> None:
 
 def _cloud_status_snapshot(prompt_id: str) -> dict | None:
     """Compose a cloud snapshot from /api/job/<id>/status + /api/history_v2/<id>."""
+    from comfy_cli import jobs_state
+    from comfy_cli.comfy_client import _group_outputs
+
     client = _cloud_client()
     status = client.get_job_status(prompt_id)
     if status is None:
@@ -1182,15 +1185,25 @@ def _cloud_status_snapshot(prompt_id: str) -> dict | None:
     }.get(raw, raw or "pending")
 
     outputs: list[str] = []
+    outputs_by_node: dict[str, list[str]] = {}
+    outputs_by_item: dict[str, list[str]] = {}
     if state == "completed":
         record = client.get_history(prompt_id)
         if record:
-            outputs = client.extract_output_urls(record)
+            node_outputs = client.extract_outputs(record)
+            outputs = [o["url"] for o in node_outputs]
+            # The compose item_map (foreach item -> node ids) lives on the
+            # job state file, written at submit time by `comfy run`.
+            job = jobs_state.read(prompt_id)
+            item_map = job.item_map if job is not None else None
+            outputs_by_node, outputs_by_item = _group_outputs(node_outputs, item_map)
 
     return {
         "prompt_id": prompt_id,
         "status": state,
         "outputs": outputs,
+        "outputs_by_node": outputs_by_node,
+        "outputs_by_item": outputs_by_item,
         "assigned_inference": status.get("assigned_inference"),
         "error_message": status.get("error_message"),
         "created_at": status.get("created_at"),

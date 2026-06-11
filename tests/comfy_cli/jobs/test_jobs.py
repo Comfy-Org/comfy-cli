@@ -626,6 +626,166 @@ def test_poll_cloud_once_treats_fatal_statuses_as_terminal(raw_status):
     assert state.error["message"] == "RIP to the server"
 
 
+_CLOUD_RECORD = {
+    "status": {"completed": True, "status_str": "success"},
+    "outputs": {
+        "9": {"images": [{"filename": "a.png", "subfolder": "", "type": "output"}]},
+        "12": {"videos": [{"filename": "v.mp4", "subfolder": "", "type": "output"}]},
+    },
+}
+
+
+class _CompletedCloudClient:
+    """Fake cloud client for a job that finished successfully."""
+
+    target = type("T", (), {"base_url": "https://cloud.example"})()
+
+    def __init__(self, record=None):
+        self._record = record if record is not None else _CLOUD_RECORD
+
+    def get_job_status(self, prompt_id):
+        return {"status": "success"}
+
+    def get_history(self, prompt_id):
+        return dict(self._record)
+
+    def extract_outputs(self, record):
+        # Mirrors Client.extract_outputs' shape; URL plumbing is the real
+        # client's concern (covered in tests/comfy_cli/cloud/test_client.py).
+        out = []
+        for node_id, node_output in (record.get("outputs") or {}).items():
+            for key in ("images", "gifs", "videos", "audio", "files"):
+                for item in node_output.get(key) or []:
+                    out.append(
+                        {
+                            "node_id": str(node_id),
+                            "url": f"https://cloud.example/view/{item['filename']}",
+                            "filename": item["filename"],
+                            "type": item.get("type", "output"),
+                        }
+                    )
+        return out
+
+
+def test_cloud_status_snapshot_groups_outputs_by_node_and_item(monkeypatch):
+    """With a state file carrying an item_map, the cloud snapshot exposes
+    outputs grouped by producing node and by blueprint foreach item."""
+    from comfy_cli import jobs_state
+
+    monkeypatch.setattr(jobs_mod, "_cloud_client", lambda: _CompletedCloudClient())
+    state = jobs_state.new(prompt_id="pid-grouped", client_id="c", workflow="w", where="cloud")
+    state.item_map = {
+        "s1": {"nodes": ["9"], "save_node": "9", "prefix": "outputs/s1"},
+        "s2": {"nodes": ["12"], "save_node": "12", "prefix": "outputs/s2"},
+    }
+    jobs_state.write(state)
+
+    snap = jobs_mod._cloud_status_snapshot("pid-grouped")
+    assert snap is not None
+    assert snap["status"] == "completed"
+    assert snap["outputs"] == ["https://cloud.example/view/a.png", "https://cloud.example/view/v.mp4"]
+    assert snap["outputs_by_node"] == {
+        "9": ["https://cloud.example/view/a.png"],
+        "12": ["https://cloud.example/view/v.mp4"],
+    }
+    assert snap["outputs_by_item"] == {
+        "s1": ["https://cloud.example/view/a.png"],
+        "s2": ["https://cloud.example/view/v.mp4"],
+    }
+
+
+def test_cloud_status_snapshot_without_item_map_emits_empty_by_item(monkeypatch):
+    """No state file (or no item_map) → outputs_by_item stays {} while
+    outputs_by_node is still grouped from the history record."""
+    monkeypatch.setattr(jobs_mod, "_cloud_client", lambda: _CompletedCloudClient())
+
+    snap = jobs_mod._cloud_status_snapshot("pid-no-map")
+    assert snap is not None
+    assert snap["outputs_by_node"] == {
+        "9": ["https://cloud.example/view/a.png"],
+        "12": ["https://cloud.example/view/v.mp4"],
+    }
+    assert snap["outputs_by_item"] == {}
+
+
+def test_cloud_status_snapshot_non_terminal_keeps_empty_groupings(monkeypatch):
+    """In-flight jobs have no record to group — keys present, empty dicts."""
+
+    class _RunningClient(_CompletedCloudClient):
+        def get_job_status(self, prompt_id):
+            return {"status": "running"}
+
+        def get_history(self, prompt_id):  # pragma: no cover — must not be called
+            raise AssertionError("history must not be fetched for in-flight jobs")
+
+    monkeypatch.setattr(jobs_mod, "_cloud_client", lambda: _RunningClient())
+    snap = jobs_mod._cloud_status_snapshot("pid-running")
+    assert snap is not None
+    assert snap["outputs_by_node"] == {}
+    assert snap["outputs_by_item"] == {}
+
+
+def test_jobs_status_cloud_envelope_carries_grouped_outputs(monkeypatch, capsys):
+    """End-to-end through `jobs status --where cloud`: the envelope data
+    carries outputs_by_node / outputs_by_item."""
+    from comfy_cli import jobs_state
+    from comfy_cli.output import Renderer, set_renderer
+    from comfy_cli.output.renderer import OutputMode
+
+    monkeypatch.setattr(jobs_mod, "_cloud_preflight_or_exit", lambda: None)
+    monkeypatch.setattr(jobs_mod, "_cloud_client", lambda: _CompletedCloudClient())
+    state = jobs_state.new(prompt_id="pid-env", client_id="c", workflow="w", where="cloud")
+    state.item_map = {"s1": {"nodes": ["9", "12"], "save_node": "12", "prefix": "outputs/s1"}}
+    jobs_state.write(state)
+
+    set_renderer(Renderer(mode=OutputMode.NDJSON, command="jobs status"))
+    jobs_mod._cloud_status("pid-env")
+    lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]
+    env = json.loads(lines[-1])
+    assert env["type"] == "envelope" and env["ok"] is True
+    assert env["data"]["outputs_by_node"]["9"] == ["https://cloud.example/view/a.png"]
+    assert env["data"]["outputs_by_item"]["s1"] == [
+        "https://cloud.example/view/a.png",
+        "https://cloud.example/view/v.mp4",
+    ]
+
+
+def test_jobs_watch_cloud_terminal_envelope_carries_grouped_outputs(monkeypatch, capsys):
+    """`jobs watch --where cloud` reaches terminal via the same snapshot —
+    the grouped keys must flow through to the terminal envelope."""
+    from comfy_cli import jobs_state
+    from comfy_cli.output import Renderer, set_renderer
+    from comfy_cli.output.renderer import OutputMode
+
+    monkeypatch.setattr(jobs_mod, "_cloud_preflight_or_exit", lambda: None)
+    monkeypatch.setattr(jobs_mod, "_cloud_client", lambda: _CompletedCloudClient())
+    state = jobs_state.new(prompt_id="pid-watch", client_id="c", workflow="w", where="cloud")
+    state.item_map = {"s1": {"nodes": ["9"], "save_node": "9", "prefix": "outputs/s1"}}
+    jobs_state.write(state)
+
+    set_renderer(Renderer(mode=OutputMode.NDJSON, command="jobs watch"))
+    jobs_mod._cloud_watch("pid-watch", poll_interval=0.01, max_wait=5)
+    lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]
+    env = json.loads(lines[-1])
+    assert env["type"] == "envelope" and env["ok"] is True
+    assert env["data"]["status"] == "completed"
+    assert env["data"]["outputs_by_node"] == {
+        "9": ["https://cloud.example/view/a.png"],
+        "12": ["https://cloud.example/view/v.mp4"],
+    }
+    assert env["data"]["outputs_by_item"] == {"s1": ["https://cloud.example/view/a.png"]}
+
+
+def test_jobs_schema_documents_grouped_outputs():
+    """schemas/jobs.json carries the additive grouped-output keys."""
+    schema_path = Path(__file__).parents[3] / "comfy_cli" / "schemas" / "jobs.json"
+    schema = json.loads(schema_path.read_text())
+    for key in ("outputs_by_node", "outputs_by_item"):
+        prop = schema["properties"][key]
+        assert prop["type"] == "object"
+        assert prop["additionalProperties"] == {"type": "array", "items": {"type": "string"}}
+
+
 def test_poll_cloud_once_stashes_history_record_on_completion():
     """When the watcher fetches history at terminal, the full node-keyed
     record must be stashed on state.record so later consumers (grouped
