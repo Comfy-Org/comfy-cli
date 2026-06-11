@@ -168,17 +168,36 @@ class TestMixpanelLegacyNameAlias:
         _, mp_kwargs = mp_provider.client.track.call_args
         assert mp_kwargs["event_name"] == "run"
 
+        # PostHog receives the canonical name, prefixed; Mixpanel keeps "run".
         ph_kwargs = _posthog_capture_kwargs(ph_provider.client)
-        assert ph_kwargs["event"] == "execution_start"
+        assert ph_kwargs["event"] == "cli:execution_start"
 
-    def test_without_alias_both_providers_get_same_name(self, tracking_with_two_providers):
+    def test_posthog_prefixes_event_while_mixpanel_stays_bare(self, tracking_with_two_providers):
         tracking_mod, mp_provider, ph_provider = tracking_with_two_providers
         tracking_mod.track_event("execution_success")
 
         _, mp_kwargs = mp_provider.client.track.call_args
         ph_kwargs = _posthog_capture_kwargs(ph_provider.client)
+        # Mixpanel keeps the bare name for stream continuity; PostHog is namespaced.
         assert mp_kwargs["event_name"] == "execution_success"
-        assert ph_kwargs["event"] == "execution_success"
+        assert ph_kwargs["event"] == "cli:execution_success"
+
+
+class TestPostHogEventPrefix:
+    def test_top_level_event_is_prefixed(self, tracking_with_two_providers):
+        tracking_mod, mp_provider, ph_provider = tracking_with_two_providers
+        tracking_mod.track_event("install")
+
+        # Mixpanel bare, PostHog namespaced.
+        _, mp_kwargs = mp_provider.client.track.call_args
+        assert mp_kwargs["event_name"] == "install"
+        assert _posthog_capture_kwargs(ph_provider.client)["event"] == "cli:install"
+
+    def test_sub_namespaced_event_composes_with_prefix(self, tracking_with_two_providers):
+        tracking_mod, _, ph_provider = tracking_with_two_providers
+        tracking_mod.track_event("node:install")
+
+        assert _posthog_capture_kwargs(ph_provider.client)["event"] == "cli:node:install"
 
 
 class TestProviderConstruction:

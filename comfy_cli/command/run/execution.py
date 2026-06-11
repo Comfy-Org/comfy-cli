@@ -156,11 +156,15 @@ class WorkflowExecution:
 
     def queue(self):
         data: dict = {"prompt": self.workflow, "client_id": self.client_id}
+        # Usage-source attribution rides extra_data so the server can tell
+        # CLI-originated executions apart from web-UI ones (upstream #468).
+        data["extra_data"] = {"comfy_usage_source": "comfy-cli"}
         if self.extra_data:
-            data["extra_data"] = dict(self.extra_data)
+            data["extra_data"].update(self.extra_data)
         elif self.api_key:
-            data["extra_data"] = {"api_key_comfy_org": self.api_key}
+            data["extra_data"]["api_key_comfy_org"] = self.api_key
         req = request.Request(f"http://{self.host}:{self.port}/prompt", json.dumps(data).encode("utf-8"))
+        req.add_header("Comfy-Usage-Source", "comfy-cli")
         try:
             resp = request.urlopen(req, timeout=self.timeout)
             raw_body = resp.read()

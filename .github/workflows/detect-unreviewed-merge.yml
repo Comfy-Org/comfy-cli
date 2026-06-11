@@ -1,0 +1,41 @@
+# Caller workflow for source repos. Copy this file to
+# .github/workflows/detect-unreviewed-merge.yml in each monitored repo.
+#
+# The detection logic lives in the reusable workflow at
+# Comfy-Org/github-workflows. Updating it there propagates to every caller
+# on its next run.
+#
+# What to customize per repo:
+# - `branches`: list the default branch(es) of your repo (main, master, or both)
+# - `approval-mode`:
+#     - 'latest-per-reviewer' (default) — for OSS repos with branch protection
+#       set to "dismiss stale reviews on new commits". A dismissed approval
+#       does NOT count.
+#     - 'any-approval' — for private repos without stale-dismissal. Any
+#       historical APPROVED review counts (approve-then-push-then-merge is OK).
+#
+# Pin to a full commit SHA with the version as a trailing comment — bare
+# tag refs (e.g. @v1) fail pin-validation checks (pinact, zizmor) in
+# stricter repos. Bump the SHA via Dependabot/Renovate.
+
+name: Detect Unreviewed Merge
+
+on:
+  push:
+    branches: [main, master]
+
+concurrency:
+  group: detect-unreviewed-merge-${{ github.sha }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  detect:
+    uses: Comfy-Org/github-workflows/.github/workflows/detect-unreviewed-merge.yml@4d9cb6b87f953bb7cd69954280e1465fb9bd2040 # v1
+    with:
+      approval-mode: latest-per-reviewer
+    secrets:
+      UNREVIEWED_MERGES_TOKEN: ${{ secrets.UNREVIEWED_MERGES_TOKEN }}

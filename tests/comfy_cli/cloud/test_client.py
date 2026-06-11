@@ -93,8 +93,10 @@ class TestSubmitPrompt:
         assert body == {
             "prompt": {"1": {"class_type": "X", "inputs": {}}},
             "client_id": "cid",
-            "extra_data": {"auth_token_comfy_org": "tok-abc"},
+            "extra_data": {"auth_token_comfy_org": "tok-abc", "comfy_usage_source": "comfy-cli"},
         }
+        # Usage-source attribution header on every request (#468).
+        assert req.headers["Comfy-usage-source"] == "comfy-cli"
 
     def test_local_target_has_no_auth_header(self):
         with patch.object(
@@ -108,8 +110,10 @@ class TestSubmitPrompt:
         assert req.full_url == "http://127.0.0.1:8188/prompt"
         assert "Authorization" not in req.headers
         body = json.loads(req.data)
-        # Local submissions stay lean — no body-level token injection.
-        assert body.keys() == {"prompt", "client_id"}
+        # Local submissions get no body-level token injection — only the
+        # usage-source attribution rides extra_data (#468).
+        assert body.keys() == {"prompt", "client_id", "extra_data"}
+        assert body["extra_data"] == {"comfy_usage_source": "comfy-cli"}
 
     def test_cloud_caller_extra_data_is_merged_not_overwritten(self):
         with patch.object(
@@ -193,7 +197,7 @@ class TestSubmitPrompt:
         assert "Authorization" not in req.headers
         # Partner-API extra_data uses api_key_comfy_org for the key path.
         body = json.loads(req.data)
-        assert body["extra_data"] == {"api_key_comfy_org": "sk-test-1234"}
+        assert body["extra_data"] == {"api_key_comfy_org": "sk-test-1234", "comfy_usage_source": "comfy-cli"}
 
     def test_cloud_oauth_wins_over_api_key_when_both_set(self):
         """OAuth-first: if both are configured, the Bearer token wins."""

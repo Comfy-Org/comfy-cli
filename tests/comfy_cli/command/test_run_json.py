@@ -826,7 +826,7 @@ class TestCliRunnerIntegration:
     def test_cli_json_with_fresh_consent_state_stays_clean(self, tmp_path):
         # The exact regression scenario: a fresh machine where consent has
         # never been recorded. The entry callback enables session-only
-        # tracking via the non-TTY branch (mocked Mixpanel client so no
+        # tracking via the non-TTY branch (PROVIDERS swapped out so no
         # network), and the resulting stdout must still be clean NDJSON.
         from typer.testing import CliRunner
 

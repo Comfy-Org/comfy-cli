@@ -265,6 +265,9 @@ class Client:
         data = json.dumps(body).encode("utf-8") if body is not None else None
         req = urllib.request.Request(url, data=data, method=method)
         req.add_header("Accept", "application/json")
+        # Usage-source attribution on every ComfyUI/cloud API request so the
+        # server can tell CLI-originated traffic apart from the web UI (#468).
+        req.add_header("Comfy-Usage-Source", "comfy-cli")
         if data is not None:
             req.add_header("Content-Type", "application/json")
         # Cloud auth: the policy layer (`resolve_target`) is OAuth-first and
@@ -350,6 +353,9 @@ class Client:
         def payload() -> dict[str, Any]:
             request_payload: dict[str, Any] = {"prompt": workflow, "client_id": client_id}
             merged_extra: dict[str, Any] = dict(extra_data or {})
+            # Usage-source attribution rides extra_data too — the execution
+            # record keeps it even when the HTTP header is dropped by proxies.
+            merged_extra.setdefault("comfy_usage_source", "comfy-cli")
             # Partner-API nodes (BFL, Gemini, Bria, ByteDance, etc.) read the
             # caller's comfy.org credential out of extra_data. Rebuild this at
             # send time so an OAuth refresh updates both the header and body.
