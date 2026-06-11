@@ -139,6 +139,10 @@ def _emit_terminal(renderer, payload: dict, *, command: str, where: str | None =
         return
     err = payload.get("error")
     message = err.get("message") if isinstance(err, dict) and err.get("message") else None
+    if not message:
+        # Cloud snapshots (_cloud_status_snapshot) carry the failure text at
+        # top-level `error_message` rather than in a structured error dict.
+        message = payload.get("error_message") or None
     renderer.error(
         code=code or "execution_error",
         message=message or f"job {payload.get('prompt_id')} ended in status {status!r}",

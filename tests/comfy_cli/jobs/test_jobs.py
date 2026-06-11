@@ -646,6 +646,44 @@ def test_emit_terminal_verdicts():
     assert verdict({"prompt_id": "p", "status": "completed", "outputs": []}) == 0
 
 
+def test_emit_terminal_falls_back_to_top_level_error_message(capsys):
+    """Cloud snapshots carry failure text at top-level `error_message`, not in
+    an `error` dict — _emit_terminal must surface it in the error envelope."""
+    import typer
+
+    from comfy_cli.command import jobs
+    from comfy_cli.output.renderer import OutputMode, Renderer
+
+    renderer = Renderer(mode=OutputMode.JSON)
+    payload = {"prompt_id": "p", "status": "error", "error_message": "OOM on worker"}
+    with pytest.raises(typer.Exit) as exc_info:
+        jobs._emit_terminal(renderer, payload, command="jobs watch")
+    assert exc_info.value.exit_code == 1
+    env = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert env["ok"] is False
+    assert "OOM on worker" in env["error"]["message"]
+
+
+def test_emit_terminal_prefers_error_dict_message(capsys):
+    """When both are present, the structured error dict's message wins."""
+    import typer
+
+    from comfy_cli.command import jobs
+    from comfy_cli.output.renderer import OutputMode, Renderer
+
+    renderer = Renderer(mode=OutputMode.JSON)
+    payload = {
+        "prompt_id": "p",
+        "status": "error",
+        "error": {"code": "execution_error", "message": "node 5 exploded"},
+        "error_message": "OOM on worker",
+    }
+    with pytest.raises(typer.Exit):
+        jobs._emit_terminal(renderer, payload, command="jobs watch")
+    env = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert env["error"]["message"] == "node 5 exploded"
+
+
 def test_local_cancel_writes_cancelled_state(monkeypatch: pytest.MonkeyPatch):
     """_local_cancel must persist status='cancelled' to the on-disk state file
     after successfully POSTing to /queue and /interrupt."""
