@@ -214,6 +214,68 @@ class TestExtractOutputEntries:
         assert outputs[0]["url"] == "https://cloud.example.com/api/view?filename=ComfyUI_a.png&subfolder=&type=output"
 
 
+class TestPipedErrorEnvelope:
+    """`comfy --json run --wait | comfy download` is the SKILL.md-recommended
+    pattern, so download must survive a failed upstream: an error envelope
+    (`"data": null`) used to crash with a raw AttributeError (fennec friction
+    #1). Bad stdin of any shape → structured error envelope + exit 1."""
+
+    def _download_with_stdin(self, stdin_text: str, monkeypatch, capsys) -> dict:
+        import io
+
+        import typer
+
+        set_renderer(Renderer(mode=OutputMode.JSON, command="download"))
+        monkeypatch.setattr("sys.stdin", io.StringIO(stdin_text))
+        with pytest.raises(typer.Exit) as excinfo:
+            transfer.execute_download(None)
+        assert excinfo.value.exit_code == 1
+        out_lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]
+        envelope = json.loads(out_lines[-1])
+        assert envelope["type"] == "envelope"
+        assert envelope["ok"] is False
+        return envelope
+
+    def test_error_envelope_with_null_data_no_traceback(self, monkeypatch, capsys):
+        upstream = {
+            "schema": "envelope/1",
+            "type": "envelope",
+            "ok": False,
+            "command": "run",
+            "version": "1.0.0",
+            "where": "cloud",
+            "data": None,
+            "error": {
+                "code": "cloud_http_error",
+                "message": "Cloud server error while polling (HTTP 429): Too Many Requests",
+                "hint": None,
+                "details": {"status": 429, "prompt_id": "d4f68191-de90-49e1-ba0f-2668b9c5b30f"},
+            },
+        }
+        envelope = self._download_with_stdin(json.dumps(upstream), monkeypatch, capsys)
+
+        err = envelope["error"]
+        assert err["code"] == "download_no_prompt"  # registered code, not a crash
+        assert "ok=false" in err["message"]
+        # The upstream failure and its prompt_id surface for recovery.
+        assert err["details"]["upstream_error"]["code"] == "cloud_http_error"
+        assert err["details"]["prompt_id"] == "d4f68191-de90-49e1-ba0f-2668b9c5b30f"
+
+    def test_ok_envelope_without_prompt_id_errors_cleanly(self, monkeypatch, capsys):
+        upstream = {"schema": "envelope/1", "type": "envelope", "ok": True, "data": {}, "error": None}
+        envelope = self._download_with_stdin(json.dumps(upstream), monkeypatch, capsys)
+        assert envelope["error"]["code"] == "download_no_prompt"
+
+    def test_non_envelope_stdin_errors_cleanly(self, monkeypatch, capsys):
+        envelope = self._download_with_stdin("this is not json {", monkeypatch, capsys)
+        assert envelope["error"]["code"] == "download_no_prompt"
+
+    def test_json_scalar_stdin_errors_cleanly(self, monkeypatch, capsys):
+        # Valid JSON but not an envelope object (e.g. a bare list of URLs).
+        envelope = self._download_with_stdin('["https://x/view?filename=a.png"]', monkeypatch, capsys)
+        assert envelope["error"]["code"] == "download_no_prompt"
+
+
 class TestMachineModeStdoutPurity:
     """`comfy --json download` consumers pipe stdout into jq/json.load: stdout
     must carry NOTHING but JSON (envelope last), and the human "✓ downloaded"

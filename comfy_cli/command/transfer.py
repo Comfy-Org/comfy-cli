@@ -314,13 +314,48 @@ def execute_download(
     piped_urls: list[str] = []
 
     # -- Try reading from stdin if prompt_id wasn't given explicitly ----------
+    # `comfy --json run --wait | comfy download` is the documented pipe
+    # pattern, so this must survive whatever the upstream wrote: an error
+    # envelope (`"data": null`), a non-envelope JSON value, or non-JSON
+    # garbage — never a traceback.
     if prompt_id is None and not sys.stdin.isatty():
         try:
             envelope = json.load(sys.stdin)
         except (json.JSONDecodeError, ValueError):
             envelope = {}
-        prompt_id = envelope.get("data", {}).get("prompt_id")
-        piped_urls = envelope.get("data", {}).get("outputs", []) or []
+        if not isinstance(envelope, dict):
+            envelope = {}
+        data = envelope.get("data")
+        if not isinstance(data, dict):
+            data = {}
+        if envelope.get("ok") is False:
+            # Upstream command failed — surface its error (and prompt_id when
+            # it carried one, e.g. a --wait poll failure on a still-running
+            # job) so the caller can recover instead of guessing.
+            upstream_error = envelope.get("error") if isinstance(envelope.get("error"), dict) else None
+            upstream_details = (upstream_error or {}).get("details")
+            if not isinstance(upstream_details, dict):
+                upstream_details = {}
+            upstream_prompt_id = data.get("prompt_id") or upstream_details.get("prompt_id")
+            details: dict[str, Any] = {"upstream_command": envelope.get("command")}
+            if upstream_error is not None:
+                details["upstream_error"] = upstream_error
+            if upstream_prompt_id:
+                details["prompt_id"] = upstream_prompt_id
+            renderer.error(
+                code="download_no_prompt",
+                message="Piped envelope reports a failed upstream command (ok=false) — nothing to download",
+                hint=(
+                    f"the upstream job may still exist; check `comfy jobs status {upstream_prompt_id}` "
+                    f"and retry `comfy download {upstream_prompt_id}`"
+                    if upstream_prompt_id
+                    else "fix the upstream failure (see details.upstream_error), then re-run the pipe"
+                ),
+                details=details,
+            )
+            raise typer.Exit(code=1)
+        prompt_id = data.get("prompt_id")
+        piped_urls = data.get("outputs") or []
 
     if not prompt_id:
         renderer.error(
