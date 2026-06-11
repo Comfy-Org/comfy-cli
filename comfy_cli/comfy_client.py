@@ -424,12 +424,18 @@ class Client:
         # Use the target's path_prefix so cloud goes to /api/view and local to /view.
         return f"{self.target.url('view')}?{urllib.parse.urlencode(params)}"
 
-    def extract_output_urls(self, record: dict) -> list[str]:
-        urls: list[str] = []
+    def extract_outputs(self, record: dict) -> list[dict]:
+        """Flatten a node-keyed history record into one dict per artifact.
+
+        Each entry is ``{"node_id", "url", "filename", "type"}`` — the node
+        association that flat URL lists drop. Ordering is stable: record
+        ``outputs`` insertion order, then media-key order, then item order.
+        """
+        results: list[dict] = []
         outputs = record.get("outputs") or {}
         if not isinstance(outputs, dict):
-            return urls
-        for node_output in outputs.values():
+            return results
+        for node_id, node_output in outputs.items():
             if not isinstance(node_output, dict):
                 continue
             for key in ("images", "gifs", "videos", "audio", "files"):
@@ -438,8 +444,18 @@ class Client:
                     continue
                 for item in items:
                     if isinstance(item, dict) and "filename" in item:
-                        urls.append(self.view_url(item))
-        return urls
+                        results.append(
+                            {
+                                "node_id": str(node_id),
+                                "url": self.view_url(item),
+                                "filename": str(item.get("filename", "")),
+                                "type": str(item.get("type", "output")),
+                            }
+                        )
+        return results
+
+    def extract_output_urls(self, record: dict) -> list[str]:
+        return [o["url"] for o in self.extract_outputs(record)]
 
 
 def _looks_done(record: dict) -> bool:

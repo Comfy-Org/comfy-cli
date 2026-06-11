@@ -423,6 +423,66 @@ class TestOutputUrls:
         record = {"outputs": {"3": {"images": [{"no_filename": True}, "garbage"]}}}
         assert comfy_client.Client(CLOUD).extract_output_urls(record) == []
 
+    def test_extract_outputs_keeps_node_association(self):
+        """extract_outputs returns one dict per artifact with the producing
+        node id — the node association that flat URL lists drop."""
+        record = {
+            "outputs": {
+                "9": {
+                    "images": [
+                        {"filename": "a.png", "subfolder": "", "type": "output"},
+                        {"filename": "b.png", "subfolder": "sub", "type": "temp"},
+                    ]
+                },
+                "12": {"videos": [{"filename": "v.mp4", "subfolder": "", "type": "output"}]},
+            }
+        }
+        out = comfy_client.Client(CLOUD).extract_outputs(record)
+        assert out == [
+            {
+                "node_id": "9",
+                "url": "https://cloud.example.com/api/view?filename=a.png&subfolder=&type=output",
+                "filename": "a.png",
+                "type": "output",
+            },
+            {
+                "node_id": "9",
+                "url": "https://cloud.example.com/api/view?filename=b.png&subfolder=sub&type=temp",
+                "filename": "b.png",
+                "type": "temp",
+            },
+            {
+                "node_id": "12",
+                "url": "https://cloud.example.com/api/view?filename=v.mp4&subfolder=&type=output",
+                "filename": "v.mp4",
+                "type": "output",
+            },
+        ]
+
+    def test_extract_outputs_skips_non_dict_noise(self):
+        record = {
+            "outputs": {
+                "3": "garbage-not-a-dict",
+                "4": {"images": [{"no_filename": True}, "garbage", None]},
+                "5": {"images": "not-a-list"},
+                "6": {"images": [{"filename": "ok.png", "subfolder": "", "type": "output"}]},
+            }
+        }
+        out = comfy_client.Client(CLOUD).extract_outputs(record)
+        assert [o["node_id"] for o in out] == ["6"]
+        assert comfy_client.Client(CLOUD).extract_outputs({}) == []
+        assert comfy_client.Client(CLOUD).extract_outputs({"outputs": "nope"}) == []
+
+    def test_extract_output_urls_delegates_to_extract_outputs(self):
+        record = {
+            "outputs": {
+                "9": {"images": [{"filename": "a.png", "subfolder": "", "type": "output"}]},
+                "12": {"videos": [{"filename": "v.mp4", "subfolder": "", "type": "output"}]},
+            }
+        }
+        client = comfy_client.Client(CLOUD)
+        assert client.extract_output_urls(record) == [o["url"] for o in client.extract_outputs(record)]
+
 
 class TestWaitForCompletionProgressProbe:
     def test_wait_for_completion_resets_idle_on_progress(self, monkeypatch):
