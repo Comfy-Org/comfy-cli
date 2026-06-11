@@ -1192,10 +1192,45 @@ class TestExecuteCloudWait:
         url_v = "https://cloud.example.com/api/view?filename=v.mp4&subfolder=&type=output"
         assert env["data"]["outputs_by_item"] == {"s1": [url_a], "s2": [url_v]}
 
-    def test_wait_envelope_data_validates_against_run_schema(self, api_workflow_file, fake_target, capsys):
-        import jsonschema
+    def test_wait_permanent_500_fails_with_cloud_http_error_after_budget(self, api_workflow_file, fake_target, capsys):
+        """Transient 429/5xx mid-poll back off and retry (fennec friction #2);
+        a PERMANENT 500 exhausts the poll budget and lands on the existing
+        cloud_http_error path — never a traceback."""
+        import typer
 
+        from comfy_cli import comfy_client
+        from comfy_cli.comfy_client import SubmitResult
+        from comfy_cli.command.run import execute_cloud
+        from comfy_cli.output import Renderer, set_renderer
+        from comfy_cli.output.renderer import OutputMode
+
+        client = comfy_client.Client(fake_target)
+        client.submit_prompt = MagicMock(return_value=SubmitResult(prompt_id="prompt-500", number=1, node_errors={}))
+        client.get_job_status = MagicMock(return_value=None)
+        client.get_history = MagicMock(side_effect=comfy_client.HTTPError(500, "Internal Server Error"))
+
+        set_renderer(Renderer(mode=OutputMode.NDJSON, command="run"))
+        with (
+            patch("comfy_cli.target.resolve_target", return_value=fake_target),
+            patch("comfy_cli.cql.engine._load_from_target", return_value={}),
+            patch("comfy_cli.comfy_client.Client", return_value=client),
+            patch("comfy_cli.comfy_client.time.sleep"),
+        ):
+            with pytest.raises(typer.Exit) as excinfo:
+                execute_cloud(api_workflow_file, wait=True, timeout=5)
+
+        assert excinfo.value.exit_code == 1
+        lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]
+        envelope = json.loads(lines[-1])
+        assert envelope["ok"] is False
+        assert envelope["error"]["code"] == "cloud_http_error"
+        # The poll budget was actually spent before giving up.
+        assert client.get_history.call_count == comfy_client._MAX_POLL_FAILURES
+
+    def test_wait_envelope_data_validates_against_run_schema(self, api_workflow_file, fake_target, capsys):
         from pathlib import Path
+
+        import jsonschema
 
         client = self._client(fake_target)
         env = self._wait_envelope(api_workflow_file, fake_target, client, capsys)
@@ -1350,9 +1385,7 @@ class TestRunStripsComposeMeta:
         from comfy_cli.command.run import execute_cloud
 
         client = comfy_client.Client(fake_target)
-        client.submit_prompt = MagicMock(
-            return_value=SubmitResult(prompt_id="prompt-meta-w", number=1, node_errors={})
-        )
+        client.submit_prompt = MagicMock(return_value=SubmitResult(prompt_id="prompt-meta-w", number=1, node_errors={}))
         client.wait_for_completion = MagicMock(return_value=self.RECORD)
         client.get_job_status = MagicMock(return_value=None)
 

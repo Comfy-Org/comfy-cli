@@ -34,6 +34,15 @@ _LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1", "[::1]"}
 _MAX_TRANSIENT_RETRIES = 4
 _RETRYABLE_5XX = {502, 503, 504}
 
+# Poll-level resilience for wait_for_completion: a sustained 429 storm (or a
+# plain 500, which the in-request layer never retries) must not abort a wait
+# for a job that is still running. Backoff doubles from 2s up to 60s with
+# jitter; only _MAX_POLL_FAILURES CONSECUTIVE failed polls give up and
+# surface the HTTPError to the caller's existing error path.
+_MAX_POLL_FAILURES = 5
+_POLL_BACKOFF_BASE = 2.0
+_POLL_BACKOFF_CAP = 60.0
+
 # Strip Bearer tokens out of any text we might carry into logs/exceptions.
 _BEARER_RE = re.compile(r"Bearer\s+[A-Za-z0-9._\-]+", re.IGNORECASE)
 _TOKEN_KEYS_RE = re.compile(
@@ -49,10 +58,28 @@ def _redact(text: str) -> str:
     return _TOKEN_KEYS_RE.sub(r"\1***\2", _BEARER_RE.sub("Bearer ***", text))
 
 
-class HTTPError(Exception):
-    """Server returned a non-2xx response."""
+def _parse_retry_after(headers: Any) -> float | None:
+    """Parse a ``Retry-After`` header (seconds form) to a float, else None."""
+    if headers is None:
+        return None
+    value = headers.get("Retry-After")
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
-    def __init__(self, status: int, message: str, body: str = ""):
+
+class HTTPError(Exception):
+    """Server returned a non-2xx response.
+
+    ``retry_after`` carries the server's ``Retry-After`` header (seconds)
+    when one was present, so retry layers above ``_request`` (e.g. the
+    wait_for_completion poll loop) can honor it.
+    """
+
+    def __init__(self, status: int, message: str, body: str = "", *, retry_after: float | None = None):
         # Redact before super().__init__ so str(self) is safe to log.
         message = _redact(message)
         body = _redact(body)
@@ -60,6 +87,7 @@ class HTTPError(Exception):
         self.status = status
         self.message = message
         self.body = body
+        self.retry_after = retry_after
 
 
 class Unauthenticated(Exception):
@@ -191,19 +219,30 @@ class Client:
 
     @staticmethod
     def _retry_delay(exc: urllib.error.HTTPError, attempt: int) -> float:
-        """Seconds to wait before retrying a transient failure.
+        """Seconds to wait before retrying a transient failure in-request.
 
         Honors a server ``Retry-After`` (seconds) when present; otherwise uses
         exponential backoff with jitter so concurrent waiters don't synchronize
         into bursts.
         """
-        retry_after = exc.headers.get("Retry-After") if getattr(exc, "headers", None) else None
+        retry_after = _parse_retry_after(getattr(exc, "headers", None))
         if retry_after is not None:
-            try:
-                return min(float(retry_after), 30.0)
-            except (TypeError, ValueError):
-                pass
+            return min(retry_after, 30.0)
         base = min(2**attempt, 16)
+        return base + random.uniform(0, base * 0.5)
+
+    @staticmethod
+    def _poll_retry_delay(exc: HTTPError, attempt: int) -> float:
+        """Seconds to wait before the next poll after a transient poll failure.
+
+        Same shape as ``_retry_delay`` but tuned for the long-lived
+        wait_for_completion loop: ``Retry-After`` is honored (capped), else
+        exponential backoff from ``_POLL_BACKOFF_BASE`` up to
+        ``_POLL_BACKOFF_CAP`` with jitter.
+        """
+        if exc.retry_after is not None:
+            return min(exc.retry_after, _POLL_BACKOFF_CAP)
+        base = min(_POLL_BACKOFF_BASE * (2**attempt), _POLL_BACKOFF_CAP)
         return base + random.uniform(0, base * 0.5)
 
     def _request(
@@ -280,7 +319,12 @@ class Client:
                     _retried=_retried,
                     _attempt=_attempt + 1,
                 )
-            raise HTTPError(e.code, e.reason or "HTTP error", body_text) from e
+            raise HTTPError(
+                e.code,
+                e.reason or "HTTP error",
+                body_text,
+                retry_after=_parse_retry_after(getattr(e, "headers", None)),
+            ) from e
 
     # ----- submit -----
 
@@ -394,15 +438,32 @@ class Client:
         and only a server silent for ``timeout`` seconds aborts. When
         ``progress_probe`` is None it degrades to a wall-clock deadline.
 
-        Polls ``get_history`` (transient 429/5xx are retried inside ``_request``).
-        A little jitter on the interval keeps concurrent waiters from
-        synchronizing into request bursts that trip cloud rate limits.
+        Polls ``get_history``. Quick transient blips are retried inside
+        ``_request``; on top of that the loop itself absorbs 429/5xx poll
+        failures (a rate-limit storm, or a plain 500 the in-request layer
+        never retries) with exponential backoff — base 2s, cap 60s, jitter,
+        ``Retry-After`` honored — and only ``_MAX_POLL_FAILURES`` CONSECUTIVE
+        failures re-raise to the caller's error path. A failed poll says
+        nothing about the job, which is usually still running. A little
+        jitter on the interval keeps concurrent waiters from synchronizing
+        into request bursts that trip cloud rate limits.
         """
         sentinel = object()
         last_signal = sentinel
         last_change = time.time()
+        consecutive_failures = 0
         while True:
-            record = self.get_history(prompt_id)
+            try:
+                record = self.get_history(prompt_id)
+            except HTTPError as e:
+                if e.status != 429 and not (500 <= e.status < 600):
+                    raise
+                consecutive_failures += 1
+                if consecutive_failures >= _MAX_POLL_FAILURES:
+                    raise
+                time.sleep(self._poll_retry_delay(e, consecutive_failures - 1))
+                continue
+            consecutive_failures = 0
             if record and _looks_done(record):
                 return record
             if progress_probe is not None:
@@ -486,9 +547,7 @@ def extract_output_entries(record: dict) -> list[dict]:
     return results
 
 
-def _group_outputs(
-    outputs: list[dict], item_map: dict | None
-) -> tuple[dict[str, list[str]], dict[str, list[str]]]:
+def _group_outputs(outputs: list[dict], item_map: dict | None) -> tuple[dict[str, list[str]], dict[str, list[str]]]:
     """Group ``Client.extract_outputs`` entries by node and by foreach item.
 
     Returns ``(outputs_by_node, outputs_by_item)``. ``item_map`` is the

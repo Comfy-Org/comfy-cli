@@ -392,6 +392,137 @@ class TestTransientRetry:
                 assert comfy_client.Client(CLOUD).wait_for_completion("pid", poll_interval=0) == done
 
 
+class TestPollLevelBackoff:
+    """In-request retries cover quick blips, but once a poll's request budget
+    is spent — or on a plain 500, which the in-request layer never retries —
+    the whole `run --wait` used to abort for a job that was still fine
+    (fennec friction #2). wait_for_completion owns a poll-level budget:
+    exponential backoff (base 2s, cap 60s, jitter, Retry-After honored) and
+    only ~5 CONSECUTIVE poll failures surface the existing HTTPError path."""
+
+    DONE = {"status": {"completed": True}, "outputs": {}}
+
+    @staticmethod
+    def _history_side_effect(events):
+        """Each event is an Exception (raised) or a record (returned)."""
+        it = iter(events)
+
+        def _next(prompt_id, **kwargs):
+            value = next(it)
+            if isinstance(value, Exception):
+                raise value
+            return value
+
+        return _next
+
+    def test_429_twice_then_success_completes(self):
+        client = comfy_client.Client(CLOUD)
+        events = [
+            comfy_client.HTTPError(429, "Too Many Requests"),
+            comfy_client.HTTPError(429, "Too Many Requests"),
+            self.DONE,
+        ]
+        with (
+            patch("comfy_cli.comfy_client.time.sleep") as sleep,
+            patch.object(client, "get_history", side_effect=self._history_side_effect(events)) as gh,
+        ):
+            assert client.wait_for_completion("pid", poll_interval=0) == self.DONE
+        assert gh.call_count == 3
+        assert sleep.call_count >= 2  # backed off between failed polls
+
+    def test_500_twice_then_success_completes(self):
+        # Plain 500 is NOT retried by the in-request layer; the poller must
+        # absorb it instead of aborting the wait.
+        client = comfy_client.Client(CLOUD)
+        events = [
+            comfy_client.HTTPError(500, "Internal Server Error"),
+            comfy_client.HTTPError(500, "Internal Server Error"),
+            self.DONE,
+        ]
+        with (
+            patch("comfy_cli.comfy_client.time.sleep"),
+            patch.object(client, "get_history", side_effect=self._history_side_effect(events)) as gh,
+        ):
+            assert client.wait_for_completion("pid", poll_interval=0) == self.DONE
+        assert gh.call_count == 3
+
+    def test_permanent_500_fails_after_retry_budget(self):
+        client = comfy_client.Client(CLOUD)
+        with (
+            patch("comfy_cli.comfy_client.time.sleep"),
+            patch.object(client, "get_history", side_effect=comfy_client.HTTPError(500, "boom")) as gh,
+        ):
+            with pytest.raises(comfy_client.HTTPError) as exc:
+                client.wait_for_completion("pid", poll_interval=0)
+        assert exc.value.status == 500
+        assert gh.call_count == comfy_client._MAX_POLL_FAILURES
+
+    def test_backoff_is_exponential_with_cap(self):
+        client = comfy_client.Client(CLOUD)
+        with (
+            patch("comfy_cli.comfy_client.time.sleep") as sleep,
+            patch("comfy_cli.comfy_client.random.uniform", return_value=0.0),
+            patch.object(client, "get_history", side_effect=comfy_client.HTTPError(429, "rl")),
+        ):
+            with pytest.raises(comfy_client.HTTPError):
+                client.wait_for_completion("pid", poll_interval=0)
+        backoffs = [c.args[0] for c in sleep.call_args_list if c.args[0] > 0]
+        assert backoffs == [2.0, 4.0, 8.0, 16.0]  # base 2s, doubling, jitter zeroed
+        assert all(b <= 60.0 for b in backoffs)
+
+    def test_retry_after_overrides_backoff(self):
+        client = comfy_client.Client(CLOUD)
+        events = [
+            comfy_client.HTTPError(429, "rl", retry_after=7.0),
+            self.DONE,
+        ]
+        with (
+            patch("comfy_cli.comfy_client.time.sleep") as sleep,
+            patch.object(client, "get_history", side_effect=self._history_side_effect(events)),
+        ):
+            assert client.wait_for_completion("pid", poll_interval=0) == self.DONE
+        assert 7.0 in [c.args[0] for c in sleep.call_args_list]
+
+    def test_failure_counter_resets_on_successful_poll(self):
+        client = comfy_client.Client(CLOUD)
+        budget = comfy_client._MAX_POLL_FAILURES
+        events = (
+            [comfy_client.HTTPError(429, "rl")] * (budget - 1)
+            + [None]  # successful poll (job not done yet) resets the counter
+            + [comfy_client.HTTPError(429, "rl")] * (budget - 1)
+            + [self.DONE]
+        )
+        with (
+            patch("comfy_cli.comfy_client.time.sleep"),
+            patch.object(client, "get_history", side_effect=self._history_side_effect(events)) as gh,
+        ):
+            assert client.wait_for_completion("pid", poll_interval=0, timeout=600) == self.DONE
+        assert gh.call_count == len(events)
+
+    def test_non_transient_http_error_propagates_immediately(self):
+        client = comfy_client.Client(CLOUD)
+        with (
+            patch("comfy_cli.comfy_client.time.sleep") as sleep,
+            patch.object(client, "get_history", side_effect=comfy_client.HTTPError(403, "forbidden")) as gh,
+        ):
+            with pytest.raises(comfy_client.HTTPError) as exc:
+                client.wait_for_completion("pid", poll_interval=0)
+        assert exc.value.status == 403
+        assert gh.call_count == 1
+        assert sleep.call_count == 0
+
+    def test_request_attaches_retry_after_to_http_error(self):
+        from http.client import HTTPMessage
+
+        hdrs = HTTPMessage()
+        hdrs["Retry-After"] = "12"
+        err = urllib.error.HTTPError(url="https://cloud/x", code=500, msg="500", hdrs=hdrs, fp=io.BytesIO(b""))
+        with patch.object(comfy_client._OPENER, "open", side_effect=err):
+            with pytest.raises(comfy_client.HTTPError) as exc:
+                comfy_client.Client(CLOUD).submit_prompt({"1": {}}, "cid")
+        assert exc.value.retry_after == 12.0
+
+
 class TestOutputUrls:
     def test_view_url_uses_api_prefix_for_cloud(self):
         url = comfy_client.Client(CLOUD).view_url({"filename": "a.png", "subfolder": "", "type": "output"})
