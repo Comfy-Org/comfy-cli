@@ -199,6 +199,11 @@ def assets_push_cmd(
     lock_assets = read_assets_lock(project)
 
     pushed: list[dict] = []
+    # Assets verified already-current on this target (lock hit). Listed in the
+    # envelope so a script can assert its files are on the server from the
+    # push result alone (pushed ∪ current) — a truthful `pushed: []` after a
+    # peer already pushed otherwise reads as failure.
+    current: list[str] = []
     skipped = 0
     for path in sorted(assets_dir.rglob("*")) if assets_dir.is_dir() else []:
         if not path.is_file():
@@ -211,6 +216,7 @@ def assets_push_cmd(
         locked = lock_assets.get(name)
         if not force and isinstance(locked, dict) and locked.get("sha256") == sha and locked.get("where") == where_kind:
             skipped += 1
+            current.append(name)
             continue
         try:
             result = _upload_file(path, target, overwrite=True)
@@ -243,7 +249,13 @@ def assets_push_cmd(
             rprint(f"[green]✓[/green] pushed {entry['name']} → {entry['cloud_name']}")
         rprint(f"[dim]{len(pushed)} pushed, {skipped} skipped ({where_kind}) → {lock_path}[/dim]")
     renderer.emit(
-        {"pushed": pushed, "skipped": skipped, "lock": str(lock_path), "where": where_kind},
+        {
+            "pushed": pushed,
+            "current": current,
+            "skipped": skipped,
+            "lock": str(lock_path),
+            "where": where_kind,
+        },
         command="assets push",
         changed=bool(pushed),
     )

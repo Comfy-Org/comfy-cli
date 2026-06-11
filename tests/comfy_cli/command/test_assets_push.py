@@ -148,6 +148,7 @@ def test_push_uploads_and_writes_lock(proj, uploads, capsys):
     data = env["data"]
     assert data["where"] == "local"
     assert data["skipped"] == 0
+    assert data["current"] == []
     assert data["lock"] == str(proj / ".comfy" / "assets.lock.json")
     by_name = {p["name"]: p for p in data["pushed"]}
     assert set(by_name) == {"keyframes/s1.png", "flat.png"}
@@ -188,6 +189,11 @@ def test_second_push_skips_unchanged(proj, uploads, capsys):
     assert env["changed"] is False
     assert env["data"]["pushed"] == []
     assert env["data"]["skipped"] == 1
+    # `current` lists every asset verified up-to-date on this target, so a
+    # script can assert "my files are on the server" from the push envelope
+    # alone: pushed ∪ current ⊇ my files. (A truthful pushed:[] previously
+    # read as failure to agents whose peer had already pushed.)
+    assert env["data"]["current"] == ["a.png"]
     assert uploads == []
 
 

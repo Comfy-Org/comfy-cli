@@ -21,6 +21,11 @@
         }
       }
     },
+    "current": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "Asset names verified already-current on this target (lock hit, not re-uploaded). pushed ∪ current = everything now on the server, so scripts can assert their files landed without treating a truthful pushed:[] as failure."
+    },
     "skipped": {"type": "integer", "description": "Files whose lock entry already matched (same sha256 and same target)."},
     "lock": {"type": "string", "description": "Absolute path of .comfy/assets.lock.json."},
     "where": {"type": "string", "enum": ["local", "cloud"], "description": "Resolved push target."}
