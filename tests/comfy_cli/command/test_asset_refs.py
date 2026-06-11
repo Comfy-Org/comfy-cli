@@ -43,6 +43,23 @@ def reset_singleton():
     reset_renderer_for_testing()
 
 
+def _text_overlay_fragment() -> dict:
+    """STRING + INT params — exercises $asset resolution on the param path."""
+    return {
+        "_fragment": {
+            "name": "text_overlay",
+            "version": "1",
+            "inputs": {"image": {"type": "IMAGE", "binds": "10.image"}},
+            "outputs": {"image": {"type": "IMAGE", "from": "10", "port": 0}},
+            "params": {
+                "label": {"type": "STRING", "binds": "10.label", "default": "x"},
+                "size": {"type": "INT", "binds": "10.size", "default": 12},
+            },
+        },
+        "10": {"class_type": "TextOverlay", "inputs": {"image": "P", "label": "x", "size": 12}},
+    }
+
+
 def _image_blend_fragment() -> dict:
     return {
         "_fragment": {
@@ -64,6 +81,7 @@ def lib_dir(tmp_path: Path) -> Path:
     d = tmp_path / "fragments"
     d.mkdir()
     (d / "image_blend.json").write_text(json.dumps(_image_blend_fragment()))
+    (d / "text_overlay.json").write_text(json.dumps(_text_overlay_fragment()))
     return d
 
 
@@ -127,6 +145,102 @@ class TestAssetResolution:
         workflow = graphs[0][0]
         loaded = {n["inputs"]["image"] for n in workflow.values() if n["class_type"] == "LoadImage"}
         assert loaded == {"srv-a.png", "srv-b.png"}
+
+
+# ---------------------------------------------------------------------------
+# params: whole-value $asset refs resolve to widget values too
+# ---------------------------------------------------------------------------
+
+
+def _overlay_blueprint(params: dict) -> dict:
+    return {
+        "pipeline": [
+            {
+                "fragment": "text_overlay",
+                "alias": "t",
+                "inputs": {"image": "base.png"},
+                "params": params,
+            }
+        ]
+    }
+
+
+def _overlay_node(workflow: dict) -> dict:
+    nodes = [n for n in workflow.values() if n.get("class_type") == "TextOverlay"]
+    assert len(nodes) == 1
+    return nodes[0]
+
+
+class TestAssetParamResolution:
+    def test_string_param_asset_ref_resolves_to_cloud_name(self, lib_dir):
+        wf, _ = compose_blueprint(
+            _overlay_blueprint({"label": "$asset.fonts/x.ttf"}),
+            lib_dir=lib_dir,
+            asset_resolver=lambda name: f"srv-{name}",
+        )
+        assert _overlay_node(wf)["inputs"]["label"] == "srv-fonts/x.ttf"
+
+    def test_param_asset_ref_without_resolver_is_blueprint_error(self, lib_dir):
+        """Same error + hint as the inputs path — one shared resolution helper."""
+        with pytest.raises(BlueprintError) as exc:
+            compose_blueprint(_overlay_blueprint({"label": "$asset.x.ttf"}), lib_dir=lib_dir)
+        assert "$asset.x.ttf" in str(exc.value)
+        assert "comfy project init" in (exc.value.hint or "")
+        assert "comfy assets push" in (exc.value.hint or "")
+
+    def test_embedded_asset_ref_mid_string_is_not_a_reference(self, lib_dir):
+        """Whole-value only: `$asset.` mid-string is plain text, no resolver
+        consulted, value untouched (there is no interpolation/templating)."""
+        wf, _ = compose_blueprint(
+            _overlay_blueprint({"label": "use $asset.x here"}),
+            lib_dir=lib_dir,  # no resolver — must not raise either
+        )
+        assert _overlay_node(wf)["inputs"]["label"] == "use $asset.x here"
+
+    def test_int_param_asset_ref_resolves_and_lands_as_string(self, lib_dir):
+        """Resolution happens regardless of the declared param type; there is
+        no client-side widget-type validation, so the resolved STRING lands in
+        the INT widget and the server complains at run time. Deterministic and
+        documented — the staleness checks still fire identically."""
+        wf, _ = compose_blueprint(
+            _overlay_blueprint({"size": "$asset.x"}),
+            lib_dir=lib_dir,
+            asset_resolver=lambda name: f"srv-{name}",
+        )
+        assert _overlay_node(wf)["inputs"]["size"] == "srv-x"
+
+    def test_param_resolver_asset_error_propagates(self, lib_dir):
+        def stale(name: str) -> str:
+            raise AssetError(f"asset {name!r} is stale", code="asset_stale", hint="run: comfy assets push")
+
+        with pytest.raises(AssetError) as exc:
+            compose_blueprint(_overlay_blueprint({"label": "$asset.x.ttf"}), lib_dir=lib_dir, asset_resolver=stale)
+        assert exc.value.code == "asset_stale"
+
+    def test_foreach_item_field_asset_ref_resolves_per_item(self, lib_dir):
+        """Order: $item substitution first, then $asset resolution on the
+        resulting whole-value string — an item field can carry an asset ref
+        that a `$item.<field>` param receives and resolves."""
+        blueprint = {
+            "foreach": [
+                {"id": "s1", "first": "$asset.k/s1.png"},
+                {"id": "s2", "first": "$asset.k/s2.png"},
+            ],
+            "pipeline": [
+                {
+                    "fragment": "text_overlay",
+                    "alias": "t",
+                    "inputs": {"image": "base.png"},
+                    "params": {"label": "$item.first"},
+                }
+            ],
+        }
+        graphs = compose_blueprints(blueprint, lib_dir=lib_dir, asset_resolver=lambda name: f"srv-{name}")
+        assert len(graphs) == 1
+        workflow = graphs[0][0]
+        labels = {n["inputs"]["label"] for n in workflow.values() if n.get("class_type") == "TextOverlay"}
+        assert labels == {"srv-k/s1.png", "srv-k/s2.png"}
+        assert "__asset" not in json.dumps(workflow)
 
 
 # ---------------------------------------------------------------------------
@@ -264,6 +378,25 @@ class TestComposeCli:
         rc, env = _invoke(["compose", str(bp), "--lib", str(project_tree / "fragments")], capsys)
         assert rc == 1
         assert env["error"]["code"] == "asset_not_pushed"
+        assert env["error"]["hint"] == "run: comfy assets push"
+
+    def test_compose_stale_asset_via_param_exits_1_with_asset_stale(self, project_tree, capsys):
+        """Staleness checks fire identically when the ref sits in `params:`."""
+        _write_lock(project_tree, "0" * 64)  # lock sha != on-disk sha
+        (project_tree / "fragments" / "text_overlay.json").write_text(json.dumps(_text_overlay_fragment()))
+        bp = project_tree / "blueprints" / "overlay.yaml"
+        bp.write_text(
+            "pipeline:\n"
+            "  - fragment: text_overlay\n"
+            "    alias: t\n"
+            "    inputs:\n"
+            "      image: base.png\n"
+            "    params:\n"
+            "      label: $asset.s1.png\n"
+        )
+        rc, env = _invoke(["compose", str(bp), "--lib", str(project_tree / "fragments")], capsys)
+        assert rc == 1
+        assert env["error"]["code"] == "asset_stale"
         assert env["error"]["hint"] == "run: comfy assets push"
 
     def test_compose_outside_project_keeps_blueprint_invalid(self, tmp_path, capsys):

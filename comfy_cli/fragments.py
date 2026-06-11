@@ -62,9 +62,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-# `$asset.<name>` input references resolve through an injected resolver
-# (lock-keyed name → server-side filename). The prefix is reserved: it is
-# never a cross-step alias and foreach namespacing must leave it untouched.
+# `$asset.<name>` references resolve through an injected resolver (lock-keyed
+# name → server-side filename) wherever a whole-value string can appear: graph
+# inputs, step params, and foreach item field values. The prefix is reserved:
+# it is never a cross-step alias and foreach namespacing must leave it
+# untouched. Whole-value only — `$asset.` embedded mid-string is plain text.
 ASSET_REF_PREFIX = "$asset."
 
 # Input modalities the composer can materialize from a bare file path by
@@ -343,21 +345,38 @@ class Pipeline:
         }
         return node_id
 
+    # -- Reserved whole-value references ($asset.<name>) ----------------------
+
+    def _resolve_value_ref(self, value: Any, *, step_alias: str, site: str) -> Any:
+        """Resolve a reserved whole-value reference string; pass through the rest.
+
+        WHOLE-VALUE ONLY: a reference is the ENTIRE string ("$asset.x"). An
+        embedded occurrence ("a $asset.x b") is plain text — there is no
+        interpolation/templating, so it passes through untouched and no
+        resolver is consulted. The one shared prefix-parser for both the
+        graph-input path (:meth:`_resolve_input`) and the param path
+        (:meth:`add_step`), so the two never drift.
+        """
+        if not isinstance(value, str):
+            return value
+        if value.startswith(ASSET_REF_PREFIX):
+            name = value[len(ASSET_REF_PREFIX) :]
+            if self.asset_resolver is None:
+                raise BlueprintError(
+                    f"[{step_alias}] {site}: $asset.{name} requires a project with a pushed assets lock",
+                    step_alias=step_alias,
+                    hint="run: comfy project init, add the file under assets/, then: comfy assets push",
+                )
+            return self.asset_resolver(name)
+        return value
+
     def _resolve_input(self, value: Any, decl_type: str, *, step_alias: str, in_name: str):
         """Return the [node_id, port] (or literal) the input should bind to."""
         # `$asset.<name>` — resolve through the project's push lock BEFORE the
         # cross-step parse ($asset is a reserved prefix, never an alias), then
         # fall through: the resolved server-side filename gets the exact same
         # loader materialization a literal filename does.
-        if isinstance(value, str) and value.startswith(ASSET_REF_PREFIX):
-            name = value[len(ASSET_REF_PREFIX) :]
-            if self.asset_resolver is None:
-                raise BlueprintError(
-                    f"[{step_alias}] input {in_name!r}: $asset.{name} requires a project with a pushed assets lock",
-                    step_alias=step_alias,
-                    hint="run: comfy project init, add the file under assets/, then: comfy assets push",
-                )
-            value = self.asset_resolver(name)
+        value = self._resolve_value_ref(value, step_alias=step_alias, site=f"input {in_name!r}")
 
         # Cross-step ref — wires to a prior step's output, whatever its type.
         if isinstance(value, str) and value.startswith("$"):
@@ -482,7 +501,18 @@ class Pipeline:
             if port.binds is None:
                 raise FragmentError(f"param {port.name!r} is missing `binds`")
             old_id, input_name = port.binds.split(".", 1)
-            new_nodes[remap[old_id]]["inputs"][input_name] = full_params[p_name]
+            # Reserved whole-value refs ($asset.<name>) resolve in PARAM values
+            # too — before the value lands as a widget value, so the resolved
+            # server-side filename is what the node sees and the resolver's
+            # staleness checks fire identically to the inputs path. Params have
+            # no client-side widget-type validation: an INT-typed param fed a
+            # `$asset.` ref deterministically receives the resolved STRING (the
+            # server rejects it at run time). In `foreach`, `$item.<field>`
+            # substitution has already run, so an item field carrying a ref
+            # resolves here per item.
+            new_nodes[remap[old_id]]["inputs"][input_name] = self._resolve_value_ref(
+                full_params[p_name], step_alias=alias, site=f"param {p_name!r}"
+            )
         for in_name, port in fragment.inputs.items():
             if port.binds is None:
                 raise FragmentError(f"input {port.name!r} is missing `binds`")
