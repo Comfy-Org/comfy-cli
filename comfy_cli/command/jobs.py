@@ -627,6 +627,8 @@ def _snapshot(host: str, port: int, prompt_id: str) -> dict | None:
                     "status": state,
                     "workflow_size": len(wf) if isinstance(wf, dict) else None,
                     "outputs": [],
+                    "outputs_by_node": {},
+                    "outputs_by_item": {},
                     "host": host,
                     "port": port,
                 }
@@ -651,22 +653,33 @@ def _snapshot(host: str, port: int, prompt_id: str) -> dict | None:
                 error_detail = msg[1] if len(msg) > 1 else None
             elif msg[0] == "execution_interrupted":
                 interrupted = True
-    outputs = body.get("outputs") or {}
-    output_urls: list[str] = []
-    for v in outputs.values():
-        if not isinstance(v, dict):
-            continue
-        for key in ("images", "gifs", "videos", "audio", "files"):
-            for item in v.get(key) or []:
-                if isinstance(item, dict) and "filename" in item:
-                    q = urllib.parse.urlencode({k: item[k] for k in ("filename", "subfolder", "type") if k in item})
-                    output_urls.append(f"http://{host}:{port}/view?{q}")
+    # Flatten the node-keyed /history outputs into URL entries that keep
+    # their producing-node association — same flatten the cloud snapshot
+    # uses, so the grouped keys match the cloud envelope shape exactly.
+    from comfy_cli import jobs_state
+    from comfy_cli.comfy_client import _group_outputs, extract_output_entries
+
+    node_outputs: list[dict] = []
+    for entry in extract_output_entries(body):
+        q = urllib.parse.urlencode({k: entry[k] for k in ("filename", "subfolder", "type")})
+        node_outputs.append({**entry, "url": f"http://{host}:{port}/view?{q}"})
+    output_urls = [o["url"] for o in node_outputs]
+    # The compose item_map (foreach item -> node ids) lives on the job state
+    # file, written at submit time by `comfy run`.
+    try:
+        job = jobs_state.read(prompt_id)
+    except ValueError:  # unsafe prompt_id — no state file to join against
+        job = None
+    item_map = job.item_map if job is not None else None
+    outputs_by_node, outputs_by_item = _group_outputs(node_outputs, item_map)
 
     return {
         "prompt_id": prompt_id,
         "status": ("error" if error_detail else "completed" if completed else "cancelled" if interrupted else "queued"),
         "workflow_size": None,
         "outputs": output_urls,
+        "outputs_by_node": outputs_by_node,
+        "outputs_by_item": outputs_by_item,
         "error": error_detail,
         "host": host,
         "port": port,

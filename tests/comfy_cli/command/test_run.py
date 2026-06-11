@@ -1394,3 +1394,112 @@ class TestRunStripsComposeMeta:
         assert "_meta" not in submitted
         # Node-interior `_meta` titles survive untouched.
         assert submitted["1"]["_meta"] == {"title": "latent"}
+
+
+class TestLocalExecuteItemMapAndGroupedOutputs:
+    """Local-path parity with execute_cloud: `execute` stashes the compose
+    item_map on the job state file (both --wait and async paths) and the
+    --wait envelope carries outputs_by_node / outputs_by_item grouped from
+    the execution's node-keyed output entries."""
+
+    ITEMS = {
+        "s1": {"nodes": ["1", "9"], "save_node": "9", "prefix": "o/s1"},
+        "s2": {"nodes": ["12"], "save_node": "12", "prefix": "o/s2"},
+    }
+    META = {"schema": "compose/1", "blueprint": "/abs/b.yaml", "items": ITEMS}
+    API_WORKFLOW = {
+        "1": {"class_type": "KSampler", "inputs": {}},
+        "9": {"class_type": "SaveImage", "inputs": {"images": ["1", 0]}},
+    }
+    URL_A = "http://127.0.0.1:8188/view?filename=a.png&subfolder=&type=output"
+    URL_V = "http://127.0.0.1:8188/view?filename=v.mp4&subfolder=&type=output"
+
+    @pytest.fixture
+    def composed_workflow_file(self, tmp_path):
+        wf = dict(self.API_WORKFLOW)
+        wf["_meta"] = dict(self.META)
+        path = tmp_path / "composed_local.json"
+        path.write_text(json.dumps(wf))
+        return str(path)
+
+    def _mock_exec(self, prompt_id):
+        mock_exec = MagicMock()
+        mock_exec.prompt_id = prompt_id
+        mock_exec.client_id = "cid-local"
+        mock_exec.outputs = []
+        mock_exec.output_entries = []
+        mock_exec.cached_node_ids = []
+        mock_exec.executed_node_ids = []
+        return mock_exec
+
+    def _run(self, workflow_file, mock_exec, *, wait, extra_patches=()):
+        with (
+            patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),
+            patch("comfy_cli.command.run._fetch_object_info", return_value={}),
+            patch("comfy_cli.command.run.ExecutionProgress"),
+            patch("comfy_cli.command.run.WorkflowExecution", return_value=mock_exec),
+            patch("comfy_cli.command.run._spawn_watcher", return_value=True),
+            patch("comfy_cli.command.run._tail_state_file"),
+        ):
+            execute(workflow_file, host="127.0.0.1", port=8188, wait=wait, timeout=30)
+
+    def test_local_wait_stashes_item_map(self, composed_workflow_file):
+        from comfy_cli import jobs_state
+
+        mock_exec = self._mock_exec("local-meta-wait")
+        self._run(composed_workflow_file, mock_exec, wait=True)
+
+        state = jobs_state.read("local-meta-wait")
+        assert state is not None
+        assert state.status == "completed"
+        assert state.item_map == self.ITEMS
+
+    def test_local_async_stashes_item_map(self, composed_workflow_file):
+        from comfy_cli import jobs_state
+
+        mock_exec = self._mock_exec("local-meta-async")
+        self._run(composed_workflow_file, mock_exec, wait=False)
+
+        state = jobs_state.read("local-meta-async")
+        assert state is not None
+        assert state.item_map == self.ITEMS
+
+    def _wait_envelope(self, workflow_file, mock_exec, capsys):
+        from comfy_cli.output import Renderer, set_renderer
+        from comfy_cli.output.renderer import OutputMode
+
+        set_renderer(Renderer(mode=OutputMode.NDJSON, command="run"))
+        self._run(workflow_file, mock_exec, wait=True)
+        lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]
+        envelope = json.loads(lines[-1])
+        assert envelope["type"] == "envelope"
+        return envelope
+
+    def test_local_wait_envelope_groups_by_node_and_item(self, composed_workflow_file, capsys):
+        mock_exec = self._mock_exec("local-grouped")
+        mock_exec.outputs = [self.URL_A, self.URL_V]
+        mock_exec.output_entries = [
+            {"node_id": "9", "url": self.URL_A, "filename": "a.png", "type": "output"},
+            {"node_id": "12", "url": self.URL_V, "filename": "v.mp4", "type": "output"},
+        ]
+
+        env = self._wait_envelope(composed_workflow_file, mock_exec, capsys)
+
+        data = env["data"]
+        assert data["outputs"] == [self.URL_A, self.URL_V]  # flat list untouched
+        assert data["outputs_by_node"] == {"9": [self.URL_A], "12": [self.URL_V]}
+        assert data["outputs_by_item"] == {"s1": [self.URL_A], "s2": [self.URL_V]}
+
+    def test_local_wait_envelope_without_item_map_has_empty_by_item(self, tmp_path, capsys):
+        # Plain workflow (no _meta) → outputs_by_node still grouped from the
+        # node-keyed entries, outputs_by_item stays {}.
+        path = tmp_path / "plain.json"
+        path.write_text(json.dumps(self.API_WORKFLOW))
+        mock_exec = self._mock_exec("local-plain")
+        mock_exec.outputs = [self.URL_A]
+        mock_exec.output_entries = [{"node_id": "9", "url": self.URL_A, "filename": "a.png", "type": "output"}]
+
+        env = self._wait_envelope(str(path), mock_exec, capsys)
+
+        assert env["data"]["outputs_by_node"] == {"9": [self.URL_A]}
+        assert env["data"]["outputs_by_item"] == {}

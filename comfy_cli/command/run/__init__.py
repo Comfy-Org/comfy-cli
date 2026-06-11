@@ -135,6 +135,7 @@ def execute(
         )
         raise typer.Exit(code=1)
 
+    compose_meta: dict | None = None
     if is_ui:
         if renderer.is_pretty():
             pprint("[yellow]Detected UI-format workflow, converting to API format...[/yellow]")
@@ -180,8 +181,9 @@ def execute(
             raise typer.Exit(code=1)
         workflow = validated
         # Strip the compose/1 provenance block before preflight + submit; the
-        # server would reject (or warn on) a top-level non-node key.
-        pop_compose_meta(workflow)
+        # server would reject (or warn on) a top-level non-node key. Keep its
+        # foreach item map to stash on the job state at submit time.
+        compose_meta = pop_compose_meta(workflow)
 
     # Stream mode: emit the workflow graph so agents have a complete audit
     # trail of what the CLI is about to submit (no-op otherwise).
@@ -295,6 +297,7 @@ def execute(
             )
             state.status = "completed"
             state.outputs = list(execution.outputs)
+            state.item_map = (compose_meta or {}).get("items")
             state_file = jobs_state.write(state)
 
             if renderer.is_pretty():
@@ -304,6 +307,14 @@ def execute(
                         pprint(f)
                 elapsed = timedelta(seconds=end - start)
                 pprint(f"[bold green]\nWorkflow execution completed ({elapsed})[/bold green]")
+
+            # Grouped views of the same artifacts — local parity with the
+            # cloud --wait envelope: by producing node always, and by
+            # blueprint foreach item when compose embedded an item map.
+            from comfy_cli.comfy_client import _group_outputs
+
+            outputs_by_node, outputs_by_item = _group_outputs(list(execution.output_entries), state.item_map)
+
             renderer.emit(
                 {
                     "workflow": workflow_name,
@@ -311,6 +322,8 @@ def execute(
                     "prompt_id": execution.prompt_id,
                     "client_id": execution.client_id,
                     "outputs": list(execution.outputs),
+                    "outputs_by_node": outputs_by_node,
+                    "outputs_by_item": outputs_by_item,
                     "cached_node_ids": list(execution.cached_node_ids),
                     "executed_node_ids": list(execution.executed_node_ids),
                     "elapsed_seconds": end - start,
@@ -333,6 +346,7 @@ def execute(
                 host=host,
                 port=port,
             )
+            state.item_map = (compose_meta or {}).get("items")
             state_file = jobs_state.write(state)
             watcher_spawned = _spawn_watcher(execution.prompt_id, where="local", host=host, port=port, notify=notify)
 

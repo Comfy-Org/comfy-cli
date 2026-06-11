@@ -90,6 +90,11 @@ class WorkflowExecution:
         self.verbose = verbose
         self.client_id = str(uuid.uuid4())
         self.outputs: list = []
+        # Node-keyed companion to the flat `outputs` URLs — one
+        # {"node_id", "url", "filename", "type"} entry per recorded URL, in
+        # the same order. Local parity with the cloud history record so
+        # `run --wait` can group outputs by node / foreach item.
+        self.output_entries: list[dict] = []
         self.progress = progress
         self.remaining_nodes = set(self.workflow.keys())
         self.total_nodes = len(self.remaining_nodes)
@@ -511,6 +516,14 @@ class WorkflowExecution:
                 # Always record for the state file; emit the NDJSON
                 # output event at the same point so json consumers see it.
                 self.outputs.append(url)
+                self.output_entries.append(
+                    {
+                        "node_id": obj["node_id"],
+                        "url": url,
+                        "filename": obj["filename"],
+                        "type": obj["type"],
+                    }
+                )
                 self.renderer.event("output", url=url, prompt_id=self.prompt_id)
 
     def on_error(self, data):

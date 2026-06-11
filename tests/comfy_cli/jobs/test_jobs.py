@@ -113,6 +113,74 @@ def test_snapshot_missing_returns_none(monkeypatch: pytest.MonkeyPatch):
     assert jobs_mod._snapshot("h", 8188, "ghost") is None
 
 
+class TestLocalSnapshotGroupedOutputs:
+    """Local-path parity with the cloud snapshot: `_snapshot` exposes the
+    node-keyed /history outputs grouped by producing node and — when the
+    state file carries a compose item_map — by blueprint foreach item."""
+
+    _HISTORY_BODY = {
+        "status": {"completed": True, "messages": []},
+        "outputs": {
+            "9": {"images": [{"filename": "a.png", "subfolder": "", "type": "output"}]},
+            "12": {"videos": [{"filename": "v.mp4", "subfolder": "", "type": "output"}]},
+        },
+    }
+    URL_A = "http://h:8188/view?filename=a.png&subfolder=&type=output"
+    URL_V = "http://h:8188/view?filename=v.mp4&subfolder=&type=output"
+
+    def _patch_history(self, monkeypatch, prompt_id):
+        def fake_get(url, timeout=10.0):
+            if url.endswith("/queue"):
+                return {"queue_running": [], "queue_pending": []}
+            if url.endswith(f"/history/{prompt_id}"):
+                return {prompt_id: self._HISTORY_BODY}
+            raise AssertionError(url)
+
+        monkeypatch.setattr(jobs_mod, "_http_get_json", fake_get)
+
+    def test_history_snapshot_groups_by_node_and_item(self, monkeypatch):
+        from comfy_cli import jobs_state
+
+        state = jobs_state.new(prompt_id="grp-local", client_id="c", workflow="w", where="local", host="h", port=8188)
+        state.item_map = {
+            "s1": {"nodes": ["9"], "save_node": "9", "prefix": "outputs/s1"},
+            "s2": {"nodes": ["12"], "save_node": "12", "prefix": "outputs/s2"},
+        }
+        jobs_state.write(state)
+        self._patch_history(monkeypatch, "grp-local")
+
+        snap = jobs_mod._snapshot("h", 8188, "grp-local")
+        assert snap is not None
+        assert snap["status"] == "completed"
+        assert snap["outputs"] == [self.URL_A, self.URL_V]  # flat list untouched
+        assert snap["outputs_by_node"] == {"9": [self.URL_A], "12": [self.URL_V]}
+        assert snap["outputs_by_item"] == {"s1": [self.URL_A], "s2": [self.URL_V]}
+
+    def test_history_snapshot_without_item_map_emits_empty_by_item(self, monkeypatch):
+        self._patch_history(monkeypatch, "grp-nomap")
+
+        snap = jobs_mod._snapshot("h", 8188, "grp-nomap")
+        assert snap is not None
+        assert snap["outputs_by_node"] == {"9": [self.URL_A], "12": [self.URL_V]}
+        assert snap["outputs_by_item"] == {}
+
+    def test_queue_snapshot_keeps_empty_groupings(self, monkeypatch):
+        """In-flight jobs have nothing to group — keys present, empty dicts
+        (same shape as the cloud snapshot)."""
+
+        def fake_get(url, timeout=10.0):
+            if url.endswith("/queue"):
+                return {"queue_running": [[0, "grp-live", {"a": {}}, {}, {}]], "queue_pending": []}
+            raise AssertionError(url)
+
+        monkeypatch.setattr(jobs_mod, "_http_get_json", fake_get)
+        snap = jobs_mod._snapshot("h", 8188, "grp-live")
+        assert snap is not None
+        assert snap["status"] == "running"
+        assert snap["outputs_by_node"] == {}
+        assert snap["outputs_by_item"] == {}
+
+
 def test_safe_queue_entry_handles_short_rows():
     assert jobs_mod._safe_queue_entry([0, "id", {"node": {}}]) == ("id", {"node": {}})
     assert jobs_mod._safe_queue_entry([])[0] == "?"

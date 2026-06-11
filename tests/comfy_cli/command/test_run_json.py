@@ -1635,6 +1635,36 @@ def test_on_executed_emits_output_event():
     assert sum(1 for u in ex.outputs if "a.png" in u) == 1
 
 
+def test_on_executed_records_node_keyed_output_entries():
+    """Local parity with the cloud history record: the execution keeps a
+    node-keyed `output_entries` list alongside the flat `outputs` URLs so
+    `run --wait` can group local outputs by node / foreach item."""
+    from comfy_cli.command.run.execution import WorkflowExecution
+
+    ex = WorkflowExecution(
+        workflow={"9": {}, "12": {}},
+        host="127.0.0.1",
+        port=8188,
+        verbose=False,
+        progress=None,
+        local_paths=None,
+        timeout=5,
+    )
+    ex.renderer = MagicMock()
+    ex.prompt_id = "p1"
+
+    ex.on_executed({"node": "9", "output": {"images": [{"filename": "a.png", "subfolder": "", "type": "output"}]}})
+    ex.on_executed({"node": "12", "output": {"videos": [{"filename": "v.mp4", "subfolder": "", "type": "output"}]}})
+    # Duplicate frame: outputs and entries both stay deduped.
+    ex.on_executed({"node": "9", "output": {"images": [{"filename": "a.png", "subfolder": "", "type": "output"}]}})
+
+    assert [e["node_id"] for e in ex.output_entries] == ["9", "12"]
+    assert ex.output_entries[0]["filename"] == "a.png"
+    assert ex.output_entries[0]["type"] == "output"
+    # Entry URLs are the same values recorded in the flat list (1:1, in order).
+    assert [e["url"] for e in ex.output_entries] == ex.outputs
+
+
 def test_cloud_route_load_failure_emits_envelope(tmp_path, capsys):
     """execute_cloud must emit a workflow_not_found envelope, not crash on e.code."""
     import json
