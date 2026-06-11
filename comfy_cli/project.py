@@ -25,12 +25,16 @@ This module is pure domain logic — no Typer, no renderer (mirror of
 
 from __future__ import annotations
 
+import hashlib
 import json
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
 import yaml
+
+from comfy_cli.fragments import AssetError
 
 PROJECT_MARKER = "comfy.yaml"
 PROJECT_SCHEMA = "project/1"
@@ -104,6 +108,68 @@ def journal(project: Project, **event) -> None:
             fh.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
     except Exception:  # noqa: BLE001 — journaling can never fail a run
         pass
+
+
+ASSETS_LOCK_SCHEMA = "assets-lock/1"
+_ASSETS_PUSH_HINT = "run: comfy assets push"
+
+
+def read_assets_lock(project: Project) -> dict:
+    """The ``assets-lock/1`` map ``{name: {sha256, cloud_name, …}}`` written
+    by ``comfy assets push``; ``{}`` when absent or malformed. Never raises."""
+    path = project.root / ".comfy" / "assets.lock.json"
+    try:
+        parsed = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, ValueError):
+        return {}
+    if (
+        isinstance(parsed, dict)
+        and parsed.get("schema") == ASSETS_LOCK_SCHEMA
+        and isinstance(parsed.get("assets"), dict)
+    ):
+        return parsed["assets"]
+    return {}
+
+
+def make_asset_resolver(project: Project) -> Callable[[str], str]:
+    """Resolver for ``$asset.<name>`` blueprint refs, backed by the push lock.
+
+    Loads ``.comfy/assets.lock.json`` once; per referenced name (hashing is
+    lazy — only names actually referenced are hashed):
+
+    - no lock entry, or the file is missing under ``assets/`` →
+      :class:`~comfy_cli.fragments.AssetError` ``asset_not_pushed``
+    - on-disk sha256 differs from the lock → ``asset_stale``
+    - otherwise → the lock entry's ``cloud_name`` (the server-side filename
+      on the push target).
+    """
+    lock = read_assets_lock(project)
+
+    def resolve(name: str) -> str:
+        entry = lock.get(name)
+        if not isinstance(entry, dict) or not entry.get("cloud_name"):
+            raise AssetError(
+                f"asset {name!r} has not been pushed (no entry in .comfy/assets.lock.json)",
+                code="asset_not_pushed",
+                hint=_ASSETS_PUSH_HINT,
+            )
+        path = project.root / "assets" / name
+        if not path.is_file():
+            raise AssetError(
+                f"asset {name!r} is in the lock but missing from assets/",
+                code="asset_not_pushed",
+                hint=_ASSETS_PUSH_HINT,
+            )
+        sha = hashlib.sha256(path.read_bytes()).hexdigest()
+        if sha != entry.get("sha256"):
+            raise AssetError(
+                f"asset {name!r} changed on disk after its last push (sha256 mismatch)",
+                code="asset_stale",
+                hint=_ASSETS_PUSH_HINT,
+            )
+        return str(entry["cloud_name"])
+
+    return resolve
 
 
 def read_journal(project: Project, limit: int = 20) -> list[dict]:

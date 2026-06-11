@@ -57,9 +57,15 @@ from __future__ import annotations
 import copy
 import json
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+# `$asset.<name>` input references resolve through an injected resolver
+# (lock-keyed name → server-side filename). The prefix is reserved: it is
+# never a cross-step alias and foreach namespacing must leave it untouched.
+ASSET_REF_PREFIX = "$asset."
 
 # Input modalities the composer can materialize from a bare file path by
 # injecting a loader node. Everything else (MODEL, CONDITIONING, LATENT, VAE,
@@ -98,6 +104,22 @@ class BlueprintError(Exception):
         super().__init__(message)
         self.step_alias = step_alias
         self.hint = hint
+
+
+class AssetError(BlueprintError):
+    """A ``$asset.<name>`` reference can't be resolved from the push lock.
+
+    Raised by the asset resolver :func:`comfy_cli.project.make_asset_resolver`
+    injects into compose. Carries the envelope error code
+    (``asset_not_pushed`` | ``asset_stale``) so the CLI surface maps it 1:1.
+    Lives here (not in ``project.py``) so both pure modules can use it
+    without an import cycle — ``project.py`` imports fragments, never the
+    reverse.
+    """
+
+    def __init__(self, message: str, *, code: str, hint: str | None = None):
+        super().__init__(message, hint=hint)
+        self.code = code
 
 
 # ---------------------------------------------------------------------------
@@ -285,11 +307,14 @@ class Pipeline:
     merged workflow dict. The Typer command wraps this for I/O.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, asset_resolver: Callable[[str], str] | None = None) -> None:
         self.workflow: dict[str, dict] = {}
         self.next_id: int = 100
         self.outputs: dict[str, dict[str, _StepOutput]] = {}
         self.last_step_terminal: bool = False
+        # `$asset.<name>` → server-side filename; injected by the CLI shell
+        # from the project's push lock. None = no governing project.
+        self.asset_resolver = asset_resolver
 
     # -- ID allocation -------------------------------------------------------
 
@@ -320,6 +345,20 @@ class Pipeline:
 
     def _resolve_input(self, value: Any, decl_type: str, *, step_alias: str, in_name: str):
         """Return the [node_id, port] (or literal) the input should bind to."""
+        # `$asset.<name>` — resolve through the project's push lock BEFORE the
+        # cross-step parse ($asset is a reserved prefix, never an alias), then
+        # fall through: the resolved server-side filename gets the exact same
+        # loader materialization a literal filename does.
+        if isinstance(value, str) and value.startswith(ASSET_REF_PREFIX):
+            name = value[len(ASSET_REF_PREFIX) :]
+            if self.asset_resolver is None:
+                raise BlueprintError(
+                    f"[{step_alias}] input {in_name!r}: $asset.{name} requires a project with a pushed assets lock",
+                    step_alias=step_alias,
+                    hint="run: comfy project init, add the file under assets/, then: comfy assets push",
+                )
+            value = self.asset_resolver(name)
+
         # Cross-step ref — wires to a prior step's output, whatever its type.
         if isinstance(value, str) and value.startswith("$"):
             ref = value[1:]
@@ -522,6 +561,11 @@ def _substitute_item(value: Any, item: Any, *, ns: str, alias_refs: bool = True)
     namespaced. Set to ``False`` for params, which are literal widget values and
     must never be alias-rewritten.
     """
+    # `$asset.<name>` is a reserved ref resolved later by `_resolve_input`;
+    # without this guard the alias-namespacing below would mangle it into
+    # `$<ns>__asset.<name>` and the reference would be lost.
+    if isinstance(value, str) and value.startswith(ASSET_REF_PREFIX):
+        return value
     if isinstance(value, str) and value.startswith("$"):
         m = _ITEM_RE.match(value)
         if m:
@@ -587,9 +631,7 @@ def _add_branch(
     return final_alias, pipeline.last_step_terminal, used_fragments
 
 
-def _auto_save(
-    pipeline: Pipeline, final_alias: str, *, terminal: bool, prefix: str
-) -> tuple[dict | None, str | None]:
+def _auto_save(pipeline: Pipeline, final_alias: str, *, terminal: bool, prefix: str) -> tuple[dict | None, str | None]:
     """Append a save node for a branch's final IMAGE/VIDEO output, unless terminal.
 
     Returns ``(save_action, save_node_id)`` — both ``None`` when no node was
@@ -608,7 +650,12 @@ def _auto_save(
     return {"type": chosen.type, "prefix": prefix}, save_node
 
 
-def compose_blueprint(blueprint: dict, *, lib_dir: Path) -> tuple[dict, dict]:
+def compose_blueprint(
+    blueprint: dict,
+    *,
+    lib_dir: Path,
+    asset_resolver: Callable[[str], str] | None = None,
+) -> tuple[dict, dict]:
     """Compose a single-graph (no ``foreach``) blueprint into an API workflow.
 
     Returns ``(workflow, summary)`` where ``summary`` describes the composition
@@ -620,7 +667,7 @@ def compose_blueprint(blueprint: dict, *, lib_dir: Path) -> tuple[dict, dict]:
         raise BlueprintError("blueprint must be a YAML mapping")
     steps = _validate_pipeline_steps(blueprint.get("pipeline"))
 
-    pipeline = Pipeline()
+    pipeline = Pipeline(asset_resolver=asset_resolver)
     final_alias, terminal, used_fragments = _add_branch(pipeline, steps, lib_dir=lib_dir)
     save_action, _ = _auto_save(
         pipeline, final_alias, terminal=terminal, prefix=str(blueprint.get("output_prefix", "composed"))
@@ -694,6 +741,7 @@ def compose_blueprints(
     *,
     lib_dir: Path,
     blueprint_dir: Path | None = None,
+    asset_resolver: Callable[[str], str] | None = None,
 ) -> list[tuple[dict, dict]]:
     """Compose a blueprint into one or more API workflows.
 
@@ -713,7 +761,7 @@ def compose_blueprints(
     steps = _validate_pipeline_steps(blueprint.get("pipeline"))
 
     if "foreach" not in blueprint:
-        return [compose_blueprint(blueprint, lib_dir=lib_dir)]
+        return [compose_blueprint(blueprint, lib_dir=lib_dir, asset_resolver=asset_resolver)]
 
     items = _resolve_foreach_items(blueprint["foreach"], blueprint_dir=blueprint_dir)
     base_prefix = str(blueprint.get("output_prefix", "composed"))
@@ -732,7 +780,7 @@ def compose_blueprints(
 
     results: list[tuple[dict, dict]] = []
     for batch in batches:
-        pipeline = Pipeline()
+        pipeline = Pipeline(asset_resolver=asset_resolver)
         save_actions: list[dict] = []
         used_fragments: list[str] = []
         # Per-item provenance: which node ids each foreach item produced, the

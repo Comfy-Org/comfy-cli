@@ -228,3 +228,98 @@ class TestJournal:
         assert "import typer" not in src
         assert "comfy_cli.output" not in src
         assert project_mod.__name__ in sys.modules
+
+
+# ---------------------------------------------------------------------------
+# make_asset_resolver — `$asset.<name>` → cloud_name via the push lock
+# ---------------------------------------------------------------------------
+
+
+def _write_lock(root, assets: dict) -> None:
+    (root / ".comfy").mkdir(exist_ok=True)
+    (root / ".comfy" / "assets.lock.json").write_text(json.dumps({"schema": "assets-lock/1", "assets": assets}))
+
+
+def _add_asset(root, name: str, data: bytes) -> str:
+    path = root / "assets" / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(data)
+    import hashlib
+
+    return hashlib.sha256(data).hexdigest()
+
+
+class TestMakeAssetResolver:
+    def test_asset_error_is_a_blueprint_error(self):
+        from comfy_cli.fragments import AssetError, BlueprintError
+
+        assert issubclass(AssetError, BlueprintError)
+
+    def test_resolves_pushed_asset_to_cloud_name(self, tmp_path):
+        p = _make_project(tmp_path)
+        sha = _add_asset(p.root, "keyframes/s1.png", b"png-bytes")
+        _write_lock(p.root, {"keyframes/s1.png": {"sha256": sha, "cloud_name": "ab12.png"}})
+
+        resolve = project_mod.make_asset_resolver(p)
+        assert resolve("keyframes/s1.png") == "ab12.png"
+
+    def test_missing_lock_file_raises_not_pushed(self, tmp_path):
+        from comfy_cli.fragments import AssetError
+
+        p = _make_project(tmp_path)
+        _add_asset(p.root, "a.png", b"x")
+
+        resolve = project_mod.make_asset_resolver(p)
+        with pytest.raises(AssetError) as exc:
+            resolve("a.png")
+        assert exc.value.code == "asset_not_pushed"
+        assert exc.value.hint == "run: comfy assets push"
+
+    def test_name_missing_from_lock_raises_not_pushed(self, tmp_path):
+        from comfy_cli.fragments import AssetError
+
+        p = _make_project(tmp_path)
+        sha = _add_asset(p.root, "a.png", b"x")
+        _write_lock(p.root, {"other.png": {"sha256": sha, "cloud_name": "zz.png"}})
+
+        with pytest.raises(AssetError) as exc:
+            project_mod.make_asset_resolver(p)("a.png")
+        assert exc.value.code == "asset_not_pushed"
+        assert exc.value.hint == "run: comfy assets push"
+
+    def test_file_missing_on_disk_raises_not_pushed(self, tmp_path):
+        from comfy_cli.fragments import AssetError
+
+        p = _make_project(tmp_path)
+        _write_lock(p.root, {"ghost.png": {"sha256": "0" * 64, "cloud_name": "gh.png"}})
+
+        with pytest.raises(AssetError) as exc:
+            project_mod.make_asset_resolver(p)("ghost.png")
+        assert exc.value.code == "asset_not_pushed"
+        assert exc.value.hint == "run: comfy assets push"
+
+    def test_sha_mismatch_raises_stale(self, tmp_path):
+        from comfy_cli.fragments import AssetError
+
+        p = _make_project(tmp_path)
+        _add_asset(p.root, "a.png", b"new-content")
+        _write_lock(p.root, {"a.png": {"sha256": "0" * 64, "cloud_name": "old.png"}})
+
+        with pytest.raises(AssetError) as exc:
+            project_mod.make_asset_resolver(p)("a.png")
+        assert exc.value.code == "asset_stale"
+        assert exc.value.hint == "run: comfy assets push"
+
+    def test_hashing_is_lazy_per_referenced_name(self, tmp_path):
+        """A broken lock entry for an UNREFERENCED name must not matter."""
+        p = _make_project(tmp_path)
+        sha = _add_asset(p.root, "good.png", b"good")
+        _write_lock(
+            p.root,
+            {
+                "good.png": {"sha256": sha, "cloud_name": "good-srv.png"},
+                "ghost.png": {"sha256": "0" * 64, "cloud_name": "gh.png"},  # no file on disk
+            },
+        )
+
+        assert project_mod.make_asset_resolver(p)("good.png") == "good-srv.png"

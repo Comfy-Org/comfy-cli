@@ -27,11 +27,13 @@ from comfy_cli import tracking
 from comfy_cli.command.transfer import _upload_file
 from comfy_cli.output import get_renderer, rprint
 from comfy_cli.project import (
+    ASSETS_LOCK_SCHEMA,
     CONVENTIONAL_DIRS,
     PROJECT_MARKER,
     PROJECT_SCHEMA,
     Project,
     find_project,
+    read_assets_lock,
     read_journal,
     unknown_dirs,
 )
@@ -63,8 +65,6 @@ def _assets_callback():
 # The where default is resolved at init time (flag, else auto-detect) so a
 # local-only machine never gets a project that routes every command to cloud.
 MARKER_TEMPLATE = "schema: project/1\ndefaults:\n  where: {where}\n"
-
-ASSETS_LOCK_SCHEMA = "assets-lock/1"
 
 
 @app.command("init", help="Initialize the project/1 convention here: comfy.yaml marker + conventional dirs.")
@@ -196,7 +196,7 @@ def assets_push_cmd(
 
     assets_dir = project.root / "assets"
     lock_path = project.root / ".comfy" / "assets.lock.json"
-    lock_assets = _read_assets_lock(project)
+    lock_assets = read_assets_lock(project)
 
     pushed: list[dict] = []
     skipped = 0
@@ -281,23 +281,6 @@ def _blueprint_names(project: Project) -> list[str]:
     return sorted(p.name for p in bp_dir.glob("*.yaml") if p.is_file())
 
 
-def _read_assets_lock(project: Project) -> dict:
-    """The ``assets-lock/1`` map ``{name: {sha256, cloud_name, …}}`` written
-    by ``comfy assets push``; ``{}`` when absent or malformed."""
-    path = project.root / ".comfy" / "assets.lock.json"
-    try:
-        parsed = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError, ValueError):
-        return {}
-    if (
-        isinstance(parsed, dict)
-        and parsed.get("schema") == ASSETS_LOCK_SCHEMA
-        and isinstance(parsed.get("assets"), dict)
-    ):
-        return parsed["assets"]
-    return {}
-
-
 def _asset_entries(project: Project) -> list[dict]:
     """One entry per file under ``assets/`` (recursive, dotfiles skipped),
     joined against the push lock: ``pushed`` = name present in the lock,
@@ -305,7 +288,7 @@ def _asset_entries(project: Project) -> list[dict]:
     assets_dir = project.root / "assets"
     if not assets_dir.is_dir():
         return []
-    lock = _read_assets_lock(project)
+    lock = read_assets_lock(project)
     entries: list[dict] = []
     for path in sorted(assets_dir.rglob("*")):
         if not path.is_file():

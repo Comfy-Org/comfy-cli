@@ -456,6 +456,17 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "No comfy.yaml (schema project/1) governs the current directory.",
         "run: comfy project init",
     ),
+    ErrorCode(
+        "asset_not_pushed",
+        "A blueprint references `$asset.<name>` with no matching entry in .comfy/assets.lock.json "
+        "(or the file is missing under assets/).",
+        "run: comfy assets push",
+    ),
+    ErrorCode(
+        "asset_stale",
+        "A referenced asset changed on disk after its last push — its sha256 no longer matches the lock.",
+        "run: comfy assets push",
+    ),
     # --- generate / emit -----------------------------------------------------
     ErrorCode(
         "emit_workflow_failed",

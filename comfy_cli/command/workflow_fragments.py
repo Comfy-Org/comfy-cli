@@ -16,6 +16,7 @@ import typer
 
 from comfy_cli import tracking
 from comfy_cli.fragments import (
+    AssetError,
     BlueprintError,
     FragmentError,
     compose_blueprints,
@@ -74,11 +75,25 @@ def compose_cmd(
         renderer.error(code="blueprint_invalid_yaml", message=f"Blueprint is not valid YAML: {e}")
         raise typer.Exit(code=1) from e
 
+    # `$asset.<name>` refs resolve through the governing project's push lock
+    # (anchored at the blueprint's dir, like the journal). No project, no
+    # resolver — fragments.py stays project-unaware and errors with the hint.
+    from comfy_cli.project import find_project, make_asset_resolver
+
+    project = find_project(blueprint.resolve().parent)
+    asset_resolver = make_asset_resolver(project) if project is not None else None
+
     lib_dir = _default_lib_dir(lib)
     try:
-        graphs = compose_blueprints(blueprint_data, lib_dir=lib_dir, blueprint_dir=blueprint.parent)
+        graphs = compose_blueprints(
+            blueprint_data, lib_dir=lib_dir, blueprint_dir=blueprint.parent, asset_resolver=asset_resolver
+        )
     except FragmentError as e:
         renderer.error(code="fragment_invalid", message=str(e), hint=e.hint or "", details={"path": e.path})
+        raise typer.Exit(code=1) from e
+    except AssetError as e:
+        # Before BlueprintError — AssetError subclasses it and carries its own code.
+        renderer.error(code=e.code, message=str(e), hint=e.hint or "")
         raise typer.Exit(code=1) from e
     except BlueprintError as e:
         renderer.error(
