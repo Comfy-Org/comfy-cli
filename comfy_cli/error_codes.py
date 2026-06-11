@@ -467,6 +467,11 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "A referenced asset changed on disk after its last push — its sha256 no longer matches the lock.",
         "run: comfy assets push",
     ),
+    ErrorCode(
+        "var_not_defined",
+        "A blueprint references `$var.<name>` with no matching entry under `vars:` in the project's comfy.yaml.",
+        "add the name under `vars:` in <root>/comfy.yaml, then re-compose",
+    ),
     # --- generate / emit -----------------------------------------------------
     ErrorCode(
         "emit_workflow_failed",

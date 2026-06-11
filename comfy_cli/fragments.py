@@ -62,12 +62,16 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-# `$asset.<name>` references resolve through an injected resolver (lock-keyed
-# name → server-side filename) wherever a whole-value string can appear: graph
-# inputs, step params, and foreach item field values. The prefix is reserved:
-# it is never a cross-step alias and foreach namespacing must leave it
-# untouched. Whole-value only — `$asset.` embedded mid-string is plain text.
+# Reserved `$`-reference prefixes. Both resolve through injected resolvers
+# wherever a whole-value string can appear: graph inputs, step params, and
+# foreach item field values. `$asset.<name>` → server-side filename via the
+# push lock; `$var.<name>` → raw scalar from the project comfy.yaml `vars:`
+# block. The prefixes are reserved: never a cross-step alias, and foreach
+# namespacing must leave them untouched. Whole-value only — a prefix embedded
+# mid-string is plain text (no interpolation/templating).
 ASSET_REF_PREFIX = "$asset."
+VAR_REF_PREFIX = "$var."
+_RESERVED_REF_PREFIXES = (ASSET_REF_PREFIX, VAR_REF_PREFIX)
 
 # Input modalities the composer can materialize from a bare file path by
 # injecting a loader node. Everything else (MODEL, CONDITIONING, LATENT, VAE,
@@ -108,20 +112,33 @@ class BlueprintError(Exception):
         self.hint = hint
 
 
-class AssetError(BlueprintError):
-    """A ``$asset.<name>`` reference can't be resolved from the push lock.
-
-    Raised by the asset resolver :func:`comfy_cli.project.make_asset_resolver`
-    injects into compose. Carries the envelope error code
-    (``asset_not_pushed`` | ``asset_stale``) so the CLI surface maps it 1:1.
+class RefResolutionError(BlueprintError):
+    """A reserved whole-value reference (``$asset.`` / ``$var.``) failed to
+    resolve. Carries the envelope error code so the CLI surface maps it 1:1.
     Lives here (not in ``project.py``) so both pure modules can use it
     without an import cycle — ``project.py`` imports fragments, never the
-    reverse.
-    """
+    reverse."""
 
     def __init__(self, message: str, *, code: str, hint: str | None = None):
         super().__init__(message, hint=hint)
         self.code = code
+
+
+class AssetError(RefResolutionError):
+    """A ``$asset.<name>`` reference can't be resolved from the push lock.
+
+    Raised by the asset resolver :func:`comfy_cli.project.make_asset_resolver`
+    injects into compose. Codes: ``asset_not_pushed`` | ``asset_stale``.
+    """
+
+
+class VarError(RefResolutionError):
+    """A ``$var.<name>`` reference names nothing under the project
+    comfy.yaml ``vars:`` block.
+
+    Raised by the var resolver :func:`comfy_cli.project.make_var_resolver`
+    injects into compose. Code: ``var_not_defined``.
+    """
 
 
 # ---------------------------------------------------------------------------
@@ -309,14 +326,21 @@ class Pipeline:
     merged workflow dict. The Typer command wraps this for I/O.
     """
 
-    def __init__(self, *, asset_resolver: Callable[[str], str] | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        asset_resolver: Callable[[str], str] | None = None,
+        var_resolver: Callable[[str], Any] | None = None,
+    ) -> None:
         self.workflow: dict[str, dict] = {}
         self.next_id: int = 100
         self.outputs: dict[str, dict[str, _StepOutput]] = {}
         self.last_step_terminal: bool = False
-        # `$asset.<name>` → server-side filename; injected by the CLI shell
-        # from the project's push lock. None = no governing project.
+        # `$asset.<name>` → server-side filename (push lock) and
+        # `$var.<name>` → raw scalar (comfy.yaml `vars:`); both injected by
+        # the CLI shell. None = no governing project.
         self.asset_resolver = asset_resolver
+        self.var_resolver = var_resolver
 
     # -- ID allocation -------------------------------------------------------
 
@@ -345,17 +369,19 @@ class Pipeline:
         }
         return node_id
 
-    # -- Reserved whole-value references ($asset.<name>) ----------------------
+    # -- Reserved whole-value references ($asset.<name> / $var.<name>) --------
 
     def _resolve_value_ref(self, value: Any, *, step_alias: str, site: str) -> Any:
         """Resolve a reserved whole-value reference string; pass through the rest.
 
-        WHOLE-VALUE ONLY: a reference is the ENTIRE string ("$asset.x"). An
-        embedded occurrence ("a $asset.x b") is plain text — there is no
-        interpolation/templating, so it passes through untouched and no
-        resolver is consulted. The one shared prefix-parser for both the
-        graph-input path (:meth:`_resolve_input`) and the param path
-        (:meth:`add_step`), so the two never drift.
+        WHOLE-VALUE ONLY: a reference is the ENTIRE string ("$asset.x",
+        "$var.style"). An embedded occurrence ("a $asset.x b") is plain text —
+        there is no interpolation/templating, so it passes through untouched
+        and no resolver is consulted. `$var` returns the resolver's RAW scalar
+        (never str()'d) so INT/FLOAT/BOOL params keep their types. The one
+        shared prefix-parser for both the graph-input path
+        (:meth:`_resolve_input`) and the param path (:meth:`add_step`), so the
+        two never drift.
         """
         if not isinstance(value, str):
             return value
@@ -368,13 +394,22 @@ class Pipeline:
                     hint="run: comfy project init, add the file under assets/, then: comfy assets push",
                 )
             return self.asset_resolver(name)
+        if value.startswith(VAR_REF_PREFIX):
+            name = value[len(VAR_REF_PREFIX) :]
+            if self.var_resolver is None:
+                raise BlueprintError(
+                    f"[{step_alias}] {site}: $var.{name} requires a project — vars live in comfy.yaml",
+                    step_alias=step_alias,
+                    hint="run `comfy project init`, then declare the name under `vars:` in the project's comfy.yaml",
+                )
+            return self.var_resolver(name)
         return value
 
     def _resolve_input(self, value: Any, decl_type: str, *, step_alias: str, in_name: str):
         """Return the [node_id, port] (or literal) the input should bind to."""
-        # `$asset.<name>` — resolve through the project's push lock BEFORE the
-        # cross-step parse ($asset is a reserved prefix, never an alias), then
-        # fall through: the resolved server-side filename gets the exact same
+        # `$asset.<name>` / `$var.<name>` — resolve through the project
+        # resolvers BEFORE the cross-step parse (reserved prefixes, never an
+        # alias), then fall through: the resolved value gets the exact same
         # loader materialization a literal filename does.
         value = self._resolve_value_ref(value, step_alias=step_alias, site=f"input {in_name!r}")
 
@@ -501,15 +536,16 @@ class Pipeline:
             if port.binds is None:
                 raise FragmentError(f"param {port.name!r} is missing `binds`")
             old_id, input_name = port.binds.split(".", 1)
-            # Reserved whole-value refs ($asset.<name>) resolve in PARAM values
-            # too — before the value lands as a widget value, so the resolved
-            # server-side filename is what the node sees and the resolver's
-            # staleness checks fire identically to the inputs path. Params have
-            # no client-side widget-type validation: an INT-typed param fed a
-            # `$asset.` ref deterministically receives the resolved STRING (the
-            # server rejects it at run time). In `foreach`, `$item.<field>`
-            # substitution has already run, so an item field carrying a ref
-            # resolves here per item.
+            # Reserved whole-value refs ($asset.<name> / $var.<name>) resolve
+            # in PARAM values too — before the value lands as a widget value,
+            # so the resolved value is what the node sees and the asset
+            # resolver's staleness checks fire identically to the inputs path.
+            # Params have no client-side widget-type validation: an INT-typed
+            # param fed a `$asset.` ref deterministically receives the resolved
+            # STRING (the server rejects it at run time), while `$var` returns
+            # the raw scalar so INT/FLOAT/BOOL params keep their types. In
+            # `foreach`, `$item.<field>` substitution has already run, so an
+            # item field carrying a ref resolves here per item.
             new_nodes[remap[old_id]]["inputs"][input_name] = self._resolve_value_ref(
                 full_params[p_name], step_alias=alias, site=f"param {p_name!r}"
             )
@@ -591,10 +627,11 @@ def _substitute_item(value: Any, item: Any, *, ns: str, alias_refs: bool = True)
     namespaced. Set to ``False`` for params, which are literal widget values and
     must never be alias-rewritten.
     """
-    # `$asset.<name>` is a reserved ref resolved later by `_resolve_input`;
-    # without this guard the alias-namespacing below would mangle it into
-    # `$<ns>__asset.<name>` and the reference would be lost.
-    if isinstance(value, str) and value.startswith(ASSET_REF_PREFIX):
+    # `$asset.<name>` / `$var.<name>` are reserved refs resolved later by
+    # `_resolve_value_ref`; without this guard the alias-namespacing below
+    # would mangle them into `$<ns>__asset.<name>` / `$<ns>__var.<name>` and
+    # the reference would be lost.
+    if isinstance(value, str) and value.startswith(_RESERVED_REF_PREFIXES):
         return value
     if isinstance(value, str) and value.startswith("$"):
         m = _ITEM_RE.match(value)
@@ -685,6 +722,7 @@ def compose_blueprint(
     *,
     lib_dir: Path,
     asset_resolver: Callable[[str], str] | None = None,
+    var_resolver: Callable[[str], Any] | None = None,
 ) -> tuple[dict, dict]:
     """Compose a single-graph (no ``foreach``) blueprint into an API workflow.
 
@@ -697,7 +735,7 @@ def compose_blueprint(
         raise BlueprintError("blueprint must be a YAML mapping")
     steps = _validate_pipeline_steps(blueprint.get("pipeline"))
 
-    pipeline = Pipeline(asset_resolver=asset_resolver)
+    pipeline = Pipeline(asset_resolver=asset_resolver, var_resolver=var_resolver)
     final_alias, terminal, used_fragments = _add_branch(pipeline, steps, lib_dir=lib_dir)
     save_action, _ = _auto_save(
         pipeline, final_alias, terminal=terminal, prefix=str(blueprint.get("output_prefix", "composed"))
@@ -772,6 +810,7 @@ def compose_blueprints(
     lib_dir: Path,
     blueprint_dir: Path | None = None,
     asset_resolver: Callable[[str], str] | None = None,
+    var_resolver: Callable[[str], Any] | None = None,
 ) -> list[tuple[dict, dict]]:
     """Compose a blueprint into one or more API workflows.
 
@@ -791,7 +830,7 @@ def compose_blueprints(
     steps = _validate_pipeline_steps(blueprint.get("pipeline"))
 
     if "foreach" not in blueprint:
-        return [compose_blueprint(blueprint, lib_dir=lib_dir, asset_resolver=asset_resolver)]
+        return [compose_blueprint(blueprint, lib_dir=lib_dir, asset_resolver=asset_resolver, var_resolver=var_resolver)]
 
     items = _resolve_foreach_items(blueprint["foreach"], blueprint_dir=blueprint_dir)
     base_prefix = str(blueprint.get("output_prefix", "composed"))
@@ -810,7 +849,7 @@ def compose_blueprints(
 
     results: list[tuple[dict, dict]] = []
     for batch in batches:
-        pipeline = Pipeline(asset_resolver=asset_resolver)
+        pipeline = Pipeline(asset_resolver=asset_resolver, var_resolver=var_resolver)
         save_actions: list[dict] = []
         used_fragments: list[str] = []
         # Per-item provenance: which node ids each foreach item produced, the

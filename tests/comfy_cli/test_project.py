@@ -323,3 +323,63 @@ class TestMakeAssetResolver:
         )
 
         assert project_mod.make_asset_resolver(p)("good.png") == "good-srv.png"
+
+
+# ---------------------------------------------------------------------------
+# make_var_resolver — `$var.<name>` → scalar from comfy.yaml `vars:`
+# ---------------------------------------------------------------------------
+
+
+def _make_project_with_vars(tmp_path, vars_yaml: str) -> Project:
+    root = tmp_path / "proj"
+    root.mkdir(exist_ok=True)
+    (root / "comfy.yaml").write_text(MARKER + vars_yaml)
+    p = find_project(root)
+    assert p is not None
+    return p
+
+
+class TestMakeVarResolver:
+    def test_var_error_is_a_blueprint_error_with_code(self):
+        from comfy_cli.fragments import BlueprintError, VarError
+
+        assert issubclass(VarError, BlueprintError)
+
+    def test_resolves_scalars_with_raw_types(self, tmp_path):
+        """$var returns the raw YAML scalar — int stays int, bool stays bool —
+        so non-STRING params keep their widget types."""
+        p = _make_project_with_vars(
+            tmp_path,
+            "vars:\n  style: cinematic, golden hour\n  steps: 28\n  cfg: 4.5\n  hires: true\n",
+        )
+        resolve = project_mod.make_var_resolver(p)
+        assert resolve("style") == "cinematic, golden hour"
+        assert resolve("steps") == 28 and isinstance(resolve("steps"), int)
+        assert resolve("cfg") == 4.5
+        assert resolve("hires") is True
+
+    def test_missing_name_raises_var_not_defined(self, tmp_path):
+        from comfy_cli.fragments import VarError
+
+        p = _make_project_with_vars(tmp_path, "vars:\n  style: x\n")
+        with pytest.raises(VarError) as exc:
+            project_mod.make_var_resolver(p)("nope")
+        assert exc.value.code == "var_not_defined"
+        assert "vars:" in (exc.value.hint or "")
+        assert str(p.root / "comfy.yaml") in (exc.value.hint or "")
+
+    def test_no_vars_block_treated_as_empty(self, tmp_path):
+        from comfy_cli.fragments import VarError
+
+        p = _make_project(tmp_path)
+        with pytest.raises(VarError) as exc:
+            project_mod.make_var_resolver(p)("style")
+        assert exc.value.code == "var_not_defined"
+
+    def test_non_mapping_vars_block_treated_as_empty(self, tmp_path):
+        from comfy_cli.fragments import VarError
+
+        p = _make_project_with_vars(tmp_path, "vars: [a, b]\n")
+        with pytest.raises(VarError) as exc:
+            project_mod.make_var_resolver(p)("a")
+        assert exc.value.code == "var_not_defined"

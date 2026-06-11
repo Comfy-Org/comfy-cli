@@ -162,18 +162,47 @@ pipeline:
       text_prompt: "...details..."
 ```
 
-### Input binding values
+### The `$`-reference algebra
 
-The composer accepts four things on the right-hand side of an `inputs:` entry:
+Four reference kinds, each with ONE resolution source, all resolved at
+compose time. **Whole-value only**: a `$`-ref must be the ENTIRE string —
+`"a $asset.x b"` is plain text, there is no interpolation/templating.
 
-- **`$alias.output_name`** — reference a prior step's named output. Resolved
-  to `[node_id, port]` automatically.
+| Reference | Resolves from | Where it works |
+|---|---|---|
+| `$alias.output` | a prior step's named output → `[node_id, port]` wire | inputs |
+| `$item.field` | the current `foreach` item (see foreach below) | inputs + params |
+| `$asset.<relative/path>` | the project push lock → server-side filename | inputs + params + item field values |
+| `$var.<name>` | the project comfy.yaml `vars:` block | inputs + params + item field values |
+
 - **`$asset.<relative/path>`** — a file under the governing project's
   `assets/` dir (project/1 — see the core `comfy` skill), resolved through
-  the push lock (`comfy assets push`) to the server-side filename, then
-  materialized like a path (loader injected). **Inputs only, never params.**
-  Compose fails closed with `asset_not_pushed` / `asset_stale` when the file
-  was never pushed or changed since — the hint says exactly what to run.
+  the push lock (`comfy assets push`) to the server-side filename. On an
+  input it is then materialized like a path (loader injected); on a param
+  the resolved filename lands as the widget value. Compose fails closed
+  with `asset_not_pushed` / `asset_stale` when the file was never pushed or
+  changed since — the hint says exactly what to run.
+- **`$var.<name>`** — a project constant from a top-level `vars:` mapping
+  in `comfy.yaml` (scalars: str/int/float/bool). Resolves to the RAW scalar,
+  so an `INT` param fed `$var.steps` stays an int. Undefined name →
+  `var_not_defined` (add it under `vars:`). Referenced vars are snapshotted
+  into the compiled JSON's `_meta.vars` for provenance. Use it for the
+  style/prompt constants every scene shares:
+
+  ```yaml
+  # comfy.yaml
+  vars:
+    house_style: "<your shared style suffix>, golden hour"
+  # blueprint params — every scene appends the same style, edited in ONE place:
+  #   params: {prompt: $var.house_style}
+  ```
+
+- In a `foreach`, an item FIELD value may itself be a `$asset.`/`$var.` ref:
+  `$item.first` substitutes the field first, then the resulting whole-value
+  string resolves per item.
+
+Besides refs, an `inputs:` entry also accepts:
+
 - **A path string** — for `IMAGE`, `MASK`, `AUDIO`, `VIDEO` inputs the composer
   injects the appropriate loader (`LoadImage` / `LoadAudio` / `LoadVideo`,
   plus `ImageToMask` for `MASK`). The value must be a filename the *server*
@@ -556,6 +585,7 @@ Honest limits:
 | `blueprint_invalid` | The blueprint semantically fails (missing fragment, missing input, unknown input key, duplicate alias) | Read the error — it names the offending step alias |
 | `asset_not_pushed` | A `$asset.<name>` ref has no entry in `.comfy/assets.lock.json` (or the file vanished from `assets/`) | `comfy assets push`, then re-compose |
 | `asset_stale` | The file under `assets/` changed since its last push (sha256 mismatch with the lock) | `comfy assets push`, then re-compose |
+| `var_not_defined` | A `$var.<name>` ref names nothing under `vars:` in the project's comfy.yaml | Add the name under `vars:`, then re-compose |
 
 ---
 

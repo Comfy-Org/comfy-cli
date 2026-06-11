@@ -156,7 +156,8 @@ mechanism by complexity and reuse — not as a quality ranking:
 
    **d. Compose + run** — a YAML blueprint in `blueprints/<name>.yaml`
    wires your fragments together; cross-step refs use `$alias.output_name`,
-   project assets use `$asset.<relative/path>` (inputs only):
+   project assets use `$asset.<relative/path>`, project constants use
+   `$var.<name>` (the full `$`-reference algebra is in the Projects section):
    ```bash
    comfy workflow compose blueprints/<name>.yaml   # → blueprints/<name>.compiled.json
    RES=$(comfy --json run --workflow blueprints/<name>.compiled.json)
@@ -456,7 +457,7 @@ The loop:
 comfy project init                     # marker + the five dirs; --where sets the default
 cp ~/ref.png assets/s1_first.png       # drop source files under assets/ (subdirs fine)
 comfy --json assets push               # upload new/changed files, record them in the lock
-# blueprint INPUTS reference assets by path relative to assets/:
+# blueprints reference assets by path relative to assets/ (inputs or params):
 #   inputs: {start_frame: $asset.s1_first.png}
 comfy workflow compose blueprints/<name>.yaml          # → blueprints/<name>.compiled.json
 comfy --json run --workflow blueprints/<name>.compiled.json
@@ -468,16 +469,32 @@ comfy --json project status            # THE state query — root, defaults, blu
 
 What the convention buys you:
 
-- **`$asset.<relative/path>`** in blueprint **inputs** (inputs only, never
-  params) resolves through the push lock to the server-side filename — no
-  manual upload-then-paste. The lock (`.comfy/assets.lock.json`) records
-  sha256 + server name + push target per file, so local and cloud both
-  work; `assets push` skips files whose content AND target are unchanged
-  (`--force` re-pushes everything), and `--where` picks the push target.
+- **The `$`-reference algebra.** Four reference kinds in blueprints, each
+  with ONE resolution source, all resolved at compose time:
+
+  | Reference | Resolves from | Where it works |
+  |---|---|---|
+  | `$alias.output` | a prior step's graph output (a wire) | inputs |
+  | `$item.field` | the current `foreach` item | inputs + params |
+  | `$asset.<relative/path>` | the push lock → server-side filename | inputs + params + item field values |
+  | `$var.<name>` | the `vars:` block in `comfy.yaml` | inputs + params + item field values |
+
+  **Whole-value only**: a `$`-ref must be the ENTIRE string. `"a $asset.x b"`
+  is plain text — there is no interpolation. `$var` returns the raw scalar
+  (int stays int); `$asset` resolves through the lock with staleness checks.
+- **`$asset` kills upload-then-paste.** The lock (`.comfy/assets.lock.json`)
+  records sha256 + server name + push target per file, so local and cloud
+  both work; `assets push` skips files whose content AND target are
+  unchanged (`--force` re-pushes everything), `--where` picks the target.
+- **`$var` kills copy-pasted constants.** Declare a top-level `vars:`
+  mapping (str/int/float/bool scalars) in `comfy.yaml`; blueprints reference
+  `$var.<name>`. Compose snapshots the referenced names + values into the
+  compiled JSON's `_meta.vars` — provenance for what this compilation used.
 - **Errors are instructions.** Compose fails closed with `asset_not_pushed`
-  (no lock entry / file gone) or `asset_stale` (file changed since its last
-  push) — both hint exactly `run: comfy assets push`. Run it, re-compose.
-  `$asset` outside a project hints `comfy project init` first.
+  (no lock entry / file gone), `asset_stale` (file changed since its last
+  push) — both hint exactly `run: comfy assets push` — or `var_not_defined`
+  (add the name under `vars:`). Run the hint, re-compose. `$asset` / `$var`
+  outside a project hint `comfy project init` first.
 - **Provenance is queryable state, not prose.** compose and run append to
   the `.comfy/runs.jsonl` journal automatically (best-effort, never fails a
   run); `comfy --json project status` joins assets against the lock and

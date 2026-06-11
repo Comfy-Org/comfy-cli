@@ -31,10 +31,11 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 import yaml
 
-from comfy_cli.fragments import AssetError
+from comfy_cli.fragments import AssetError, VarError
 
 PROJECT_MARKER = "comfy.yaml"
 PROJECT_SCHEMA = "project/1"
@@ -168,6 +169,32 @@ def make_asset_resolver(project: Project) -> Callable[[str], str]:
                 hint=_ASSETS_PUSH_HINT,
             )
         return str(entry["cloud_name"])
+
+    return resolve
+
+
+def make_var_resolver(project: Project) -> Callable[[str], Any]:
+    """Resolver for ``$var.<name>`` blueprint refs, backed by the project's
+    ``comfy.yaml`` top-level ``vars:`` block (name → scalar str/int/float/bool).
+
+    Returns the RAW scalar (never ``str()``'d) so non-STRING params keep
+    their widget types. A missing/non-mapping ``vars:`` block is treated as
+    empty; an undefined name raises
+    :class:`~comfy_cli.fragments.VarError` ``var_not_defined`` with a hint
+    pointing at the project's ``comfy.yaml``.
+    """
+    vars_block = project.config.get("vars")
+    if not isinstance(vars_block, dict):
+        vars_block = {}
+
+    def resolve(name: str) -> Any:
+        if name not in vars_block:
+            raise VarError(
+                f"var {name!r} is not defined in the project's `vars:` block",
+                code="var_not_defined",
+                hint=f"add it under `vars:` in {project.root / PROJECT_MARKER}",
+            )
+        return vars_block[name]
 
     return resolve
 

@@ -10,15 +10,15 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 import typer
 
 from comfy_cli import tracking
 from comfy_cli.fragments import (
-    AssetError,
     BlueprintError,
     FragmentError,
+    RefResolutionError,
     compose_blueprints,
     load_fragment,
     resolve_fragment_name,
@@ -76,23 +76,38 @@ def compose_cmd(
         raise typer.Exit(code=1) from e
 
     # `$asset.<name>` refs resolve through the governing project's push lock
-    # (anchored at the blueprint's dir, like the journal). No project, no
-    # resolver — fragments.py stays project-unaware and errors with the hint.
-    from comfy_cli.project import find_project, make_asset_resolver
+    # and `$var.<name>` refs through its comfy.yaml `vars:` block (anchored
+    # at the blueprint's dir, like the journal). No project, no resolvers —
+    # fragments.py stays project-unaware and errors with the hint. The var
+    # resolver is wrapped to record which vars this compilation actually
+    # referenced, so `_meta.vars` can snapshot the values used (provenance).
+    from comfy_cli.project import find_project, make_asset_resolver, make_var_resolver
 
     project = find_project(blueprint.resolve().parent)
     asset_resolver = make_asset_resolver(project) if project is not None else None
+    var_resolver = None
+    used_vars: dict[str, Any] = {}
+    if project is not None:
+        _resolve_var = make_var_resolver(project)
+
+        def var_resolver(name: str) -> Any:
+            used_vars[name] = _resolve_var(name)
+            return used_vars[name]
 
     lib_dir = _default_lib_dir(lib)
     try:
         graphs = compose_blueprints(
-            blueprint_data, lib_dir=lib_dir, blueprint_dir=blueprint.parent, asset_resolver=asset_resolver
+            blueprint_data,
+            lib_dir=lib_dir,
+            blueprint_dir=blueprint.parent,
+            asset_resolver=asset_resolver,
+            var_resolver=var_resolver,
         )
     except FragmentError as e:
         renderer.error(code="fragment_invalid", message=str(e), hint=e.hint or "", details={"path": e.path})
         raise typer.Exit(code=1) from e
-    except AssetError as e:
-        # Before BlueprintError — AssetError subclasses it and carries its own code.
+    except RefResolutionError as e:
+        # Before BlueprintError — AssetError/VarError subclass it and carry their own code.
         renderer.error(code=e.code, message=str(e), hint=e.hint or "")
         raise typer.Exit(code=1) from e
     except BlueprintError as e:
@@ -114,6 +129,10 @@ def compose_cmd(
         meta: dict = {"schema": "compose/1", "blueprint": blueprint_abs}
         if summary.get("item_map"):
             meta["items"] = summary["item_map"]
+        # Vars this compilation referenced, with the values used — provenance,
+        # same spirit as `items`. Only referenced names; raw scalars.
+        if used_vars:
+            meta["vars"] = dict(used_vars)
         return meta
 
     # A single graph keeps the simple `<out>` name; `chunk:` fan-out writes one
