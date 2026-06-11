@@ -626,6 +626,82 @@ def test_poll_cloud_once_treats_fatal_statuses_as_terminal(raw_status):
     assert state.error["message"] == "RIP to the server"
 
 
+def test_watcher_unknown_status_stall_writes_error(monkeypatch):
+    """A cloud status the CLI does not recognize (and that never changes) must
+    not hang the watcher for the full 6h ceiling — after _UNKNOWN_STALL_S it
+    writes terminal status='error' with code 'unknown_status_stall'."""
+    from comfy_cli import jobs_state
+    from comfy_cli.command import job_watcher
+
+    class _WeirdClient:
+        target = type("T", (), {"base_url": "https://cloud.example"})()
+
+        def get_job_status(self, prompt_id):
+            return {"status": "weird_new_state"}
+
+    state = jobs_state.new(prompt_id="pid", client_id="c", workflow="w", where="cloud")
+    monkeypatch.setattr(jobs_state, "read", lambda pid: state)
+    monkeypatch.setattr(jobs_state, "write", lambda s: None)
+    monkeypatch.setattr(job_watcher, "_notify", lambda s: None)
+    monkeypatch.setattr("comfy_cli.target.resolve_target", lambda where: object())
+    monkeypatch.setattr("comfy_cli.comfy_client.Client", lambda target, **kw: _WeirdClient())
+    # Fake clock: each time() call advances 150s; sleep is a no-op. The guard
+    # window (300s) elapses after a couple of polls instead of for real.
+    clock = {"t": 0.0}
+
+    def fake_time():
+        clock["t"] += 150.0
+        return clock["t"]
+
+    monkeypatch.setattr(job_watcher.time, "time", fake_time)
+    monkeypatch.setattr(job_watcher.time, "sleep", lambda s: None)
+
+    job_watcher.watch_job("pid", where="cloud")
+
+    assert state.status == "error"
+    assert state.error is not None
+    assert state.error["code"] == "unknown_status_stall"
+    assert "weird_new_state" in state.error["message"]
+
+
+def test_watcher_known_inflight_status_never_stalls(monkeypatch):
+    """Known in-flight statuses (queued/running/...) must not trip the
+    unknown-status stall guard even when unchanged past the window."""
+    from comfy_cli import jobs_state
+    from comfy_cli.command import job_watcher
+
+    statuses = iter(["running"] * 5 + ["success"])
+
+    class _SlowClient:
+        target = type("T", (), {"base_url": "https://cloud.example"})()
+
+        def get_job_status(self, prompt_id):
+            return {"status": next(statuses)}
+
+        def get_history(self, prompt_id):
+            return None
+
+    state = jobs_state.new(prompt_id="pid", client_id="c", workflow="w", where="cloud")
+    monkeypatch.setattr(jobs_state, "read", lambda pid: state)
+    monkeypatch.setattr(jobs_state, "write", lambda s: None)
+    monkeypatch.setattr(job_watcher, "_notify", lambda s: None)
+    monkeypatch.setattr("comfy_cli.target.resolve_target", lambda where: object())
+    monkeypatch.setattr("comfy_cli.comfy_client.Client", lambda target, **kw: _SlowClient())
+    clock = {"t": 0.0}
+
+    def fake_time():
+        clock["t"] += 150.0
+        return clock["t"]
+
+    monkeypatch.setattr(job_watcher.time, "time", fake_time)
+    monkeypatch.setattr(job_watcher.time, "sleep", lambda s: None)
+
+    job_watcher.watch_job("pid", where="cloud")
+
+    assert state.status == "completed"
+    assert state.error is None
+
+
 def test_emit_terminal_verdicts():
     import typer
 

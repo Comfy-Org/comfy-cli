@@ -33,6 +33,13 @@ _POLL_INTERVAL_S = 2.0
 # Absolute ceiling. A job that hasn't moved in this long → give up and let
 # the file's last status stand. Equivalent to a stuck-process timeout.
 _MAX_RUNTIME_S = 60 * 60 * 6  # 6 hours
+# Statuses we recognize as legitimately in-flight: local snapshot values plus
+# raw cloud statuses that pass through _CLOUD_STATUS_MAP unmapped. Anything
+# else that is non-terminal is "unknown" — see the stall guard in watch_job.
+_KNOWN_INFLIGHT_STATUSES = {"queued", "pending", "running", "executing", "allocated", "uploading"}
+# An unknown status unchanged for this long → terminal error instead of
+# letting the watcher idle for the full 6h ceiling on a status we can't map.
+_UNKNOWN_STALL_S = 300.0
 
 
 @app.command("_watch-job")
@@ -70,6 +77,10 @@ def watch_job(
             pass
 
     start = time.time()
+    # Unknown-status stall guard bookkeeping: the unrecognized status we are
+    # currently watching, and when we first saw it.
+    unknown_status: str | None = None
+    unknown_since = 0.0
     while True:
         if time.time() - start > _MAX_RUNTIME_S:
             prior_status = state.status
@@ -90,6 +101,31 @@ def watch_job(
         jobs_state.write(state)
         if terminal:
             break
+
+        # Stall guard: a non-terminal status we do not recognize (a future
+        # cloud status missing from _CLOUD_STATUS_MAP) must not hang the
+        # watcher for the full 6h ceiling. Unchanged for _UNKNOWN_STALL_S →
+        # declare a terminal error naming the raw status.
+        if state.status in _KNOWN_INFLIGHT_STATUSES:
+            unknown_status = None
+        else:
+            now = time.time()
+            if state.status != unknown_status:
+                unknown_status = state.status
+                unknown_since = now
+            elif now - unknown_since >= _UNKNOWN_STALL_S:
+                state.status = "error"
+                state.error = {
+                    "code": "unknown_status_stall",
+                    "message": (
+                        f"cloud reported unrecognized status {unknown_status!r} and it "
+                        f"did not change within {_UNKNOWN_STALL_S:.0f}s; giving up"
+                    ),
+                    "details": {"raw_status": unknown_status, "stall_window_s": _UNKNOWN_STALL_S},
+                }
+                jobs_state.write(state)
+                break
+
         time.sleep(_POLL_INTERVAL_S)
 
     if notify:

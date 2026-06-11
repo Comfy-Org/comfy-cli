@@ -312,6 +312,11 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "Background watcher encountered a transient error polling the server.",
     ),
     ErrorCode(
+        "unknown_status_stall",
+        "Cloud reported a status the CLI does not recognize and it did not change within the stall window.",
+        "check `comfy jobs status <id> --where cloud`; report the status so it can be mapped",
+    ),
+    ErrorCode(
         "execution_error",
         "ComfyUI reported an execution error for the workflow.",
         "inspect the error details or re-run with `--wait --verbose`",
