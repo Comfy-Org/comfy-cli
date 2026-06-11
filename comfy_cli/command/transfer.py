@@ -181,6 +181,45 @@ def _annotate_output_urls(output_urls: list[str], state) -> list[tuple[str | Non
 # ---------------------------------------------------------------------------
 
 
+def _upload_file(path: Path, target: Any, *, overwrite: bool) -> dict:
+    """POST one local file to ``target``'s ``/upload/image`` endpoint.
+
+    This is the ONLY ingestion path the CLI uses — files always travel over
+    the server's HTTP API, never by writing into a ComfyUI install's folders.
+    Returns the server's parsed JSON response (``name``/``subfolder``/``type``).
+    Raises ``urllib.error.HTTPError`` on a non-2xx response; callers own the
+    envelope/error rendering.
+    """
+    filename = path.name
+    file_data = path.read_bytes()
+    content_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+
+    # Build multipart/form-data body
+    boundary = uuid.uuid4().hex
+    body = b""
+    # -- overwrite field
+    body += f"--{boundary}\r\n".encode()
+    body += b'Content-Disposition: form-data; name="overwrite"\r\n\r\n'
+    body += (b"true" if overwrite else b"false") + b"\r\n"
+    # -- file field
+    body += f"--{boundary}\r\n".encode()
+    safe_filename = _sanitize_multipart_filename(filename)
+    body += f'Content-Disposition: form-data; name="image"; filename="{safe_filename}"\r\n'.encode()
+    body += f"Content-Type: {content_type}\r\n\r\n".encode()
+    body += file_data
+    body += b"\r\n"
+    body += f"--{boundary}--\r\n".encode()
+
+    url = target.url("upload/image")
+    req = urllib.request.Request(url, data=body, method="POST")
+    req.add_header("Content-Type", f"multipart/form-data; boundary={boundary}")
+    for hdr, val in _auth_headers(target).items():
+        req.add_header(hdr, val)
+
+    with _TRANSFER_OPENER.open(req) as resp:
+        return json.loads(resp.read().decode("utf-8", errors="replace"))
+
+
 def execute_upload(
     files: list[str],
     *,
@@ -220,34 +259,8 @@ def execute_upload(
                 details={"filename": filepath, "size": file_size, "limit": max_upload},
             )
             raise typer.Exit(code=1)
-        file_data = path.read_bytes()
-        content_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
-
-        # Build multipart/form-data body
-        boundary = uuid.uuid4().hex
-        body = b""
-        # -- overwrite field
-        body += f"--{boundary}\r\n".encode()
-        body += b'Content-Disposition: form-data; name="overwrite"\r\n\r\n'
-        body += (b"true" if overwrite else b"false") + b"\r\n"
-        # -- file field
-        body += f"--{boundary}\r\n".encode()
-        safe_filename = _sanitize_multipart_filename(filename)
-        body += f'Content-Disposition: form-data; name="image"; filename="{safe_filename}"\r\n'.encode()
-        body += f"Content-Type: {content_type}\r\n\r\n".encode()
-        body += file_data
-        body += b"\r\n"
-        body += f"--{boundary}--\r\n".encode()
-
-        url = target.url("upload/image")
-        req = urllib.request.Request(url, data=body, method="POST")
-        req.add_header("Content-Type", f"multipart/form-data; boundary={boundary}")
-        for hdr, val in _auth_headers(target).items():
-            req.add_header(hdr, val)
-
         try:
-            with _TRANSFER_OPENER.open(req) as resp:
-                result = json.loads(resp.read().decode("utf-8", errors="replace"))
+            result = _upload_file(path, target, overwrite=overwrite)
         except urllib.error.HTTPError as e:
             status = e.code
             renderer.error(
