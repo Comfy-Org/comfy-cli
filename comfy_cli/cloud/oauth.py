@@ -589,22 +589,83 @@ def refresh_tokens(
 # racing an in-flight refresh.
 _REFRESH_LOCK_TIMEOUT_S = 45.0
 
+# OAuth2 token-endpoint error codes that mean the refresh-token *family* is
+# truly dead — only a fresh ``comfy cloud login`` can recover, so we clear the
+# stored session. Everything else is deliberately NOT fatal (see below).
+_FATAL_TOKEN_ERROR_CODES = ("invalid_grant", "invalid_token")
+
 
 def _is_fatal_token_error(exc: OAuthRefreshError) -> bool:
-    """True when a refresh failure means the whole token *family* is dead.
+    """True only when a refresh failure means the whole token *family* is dead.
 
     The auth server rotates refresh tokens and does reuse detection: a spent
     (or replayed) refresh token comes back as ``invalid_grant`` ("refresh
-    token reuse detected") and the server invalidates the entire family. Any
-    400/401 from the token endpoint is treated as fatal — retrying can only
-    replay a dead token. A status of 0 (network/URLError) is *not* fatal: the
-    token may still be good, so we keep the session and let the caller retry.
+    token reuse detected") and the server invalidates the entire family. That,
+    and an explicit ``invalid_token`` / reuse signal, are the only failures that
+    justify wiping the login.
+
+    This is gated on the *error code in the response body*, NOT the bare HTTP
+    status. A previous version treated every 400/401 as fatal, which logged the
+    user out on recoverable failures: a 401 ``invalid_client`` (the
+    dynamically-registered client was GC'd server-side → re-register, don't
+    re-login) or a 400 ``invalid_request`` / ``invalid_scope`` (a config/audience
+    bug) would needlessly destroy a perfectly good session. A status of 0
+    (network/URLError) or a 5xx is transient and likewise never fatal.
+
+    Unknown / unparseable 4xx is treated as NON-fatal so a single odd response
+    can't wipe the login: the reactive path retries at most once and then
+    surfaces the 401, and the proactive path falls back to the local expiry
+    check — neither can loop on a dead token, so keeping the session is safe.
     """
-    status = exc.details.get("status")
-    if status in (400, 401):
-        return True
     blob = f"{exc.details.get('body', '')} {exc}".lower()
-    return "invalid_grant" in blob or "reuse" in blob
+    if "reuse" in blob:
+        return True
+    return any(code in blob for code in _FATAL_TOKEN_ERROR_CODES)
+
+
+# The reason from the most recent fatal refresh, stashed per-thread so the
+# caller (which only sees ``ensure_fresh_session`` return ``None``) can surface
+# the auth server's *actual* error_description instead of a canned guess. The
+# refresh and the caller that reports it run in the same thread/call-stack, so a
+# thread-local is the right scope — and it can't leak a stale reason across
+# unrelated commands the way a module global would.
+_last_fatal = threading.local()
+
+
+def _describe_token_error(exc: OAuthRefreshError) -> str | None:
+    """Pull a short, human-facing reason out of an RFC 6749 §5.2 token-error
+    body — e.g. ``invalid_grant: workspace membership lost``. Returns ``None``
+    when the body carries nothing useful (network error, empty body)."""
+    body = exc.details.get("body", "")
+    err = desc = None
+    if isinstance(body, str) and body.strip():
+        try:
+            data = json.loads(body)
+        except (ValueError, TypeError):
+            data = None
+        if isinstance(data, dict):
+            err = data.get("error")
+            desc = data.get("error_description")
+    if err and desc:
+        return f"{err}: {desc}"
+    if err:
+        return str(err)
+    if desc:
+        return str(desc)
+    return None
+
+
+def _record_fatal_refresh(exc: OAuthRefreshError) -> None:
+    _last_fatal.reason = _describe_token_error(exc)
+
+
+def take_last_fatal_refresh_reason() -> str | None:
+    """Return (and clear) the reason recorded by the most recent fatal refresh
+    on this thread. One-shot: a second call returns ``None`` so a stale reason
+    can never attach to an unrelated later failure."""
+    reason = getattr(_last_fatal, "reason", None)
+    _last_fatal.reason = None
+    return reason
 
 
 def ensure_fresh_session(*, leeway_s: int = 60, force: bool = False, allow_clear: bool = True):
@@ -673,9 +734,13 @@ def ensure_fresh_session(*, leeway_s: int = 60, force: bool = False, allow_clear
             )
     except TimeoutError:
         # A peer has held the lock longer than a refresh should take. Don't
-        # race it — return whatever is persisted now (it may already be the
-        # rotated token) and let the caller's expiry check decide.
-        return auth_store.get_cloud_session() or session
+        # race it (a refresh outside the lock could replay a token a peer is
+        # mid-rotation on) and don't re-read the store here — get_cloud_session
+        # re-acquires this same lock with no timeout and could block past our
+        # budget. Return the pre-lock session; the caller's own expiry check
+        # decides, and at worst one stale-token 401 surfaces — the session is
+        # preserved, never wiped.
+        return session
 
 
 def _locked_refresh(auth_store, *, observed_refresh_token: str, leeway_s: int, force: bool, allow_clear: bool = True):
@@ -716,11 +781,18 @@ def _locked_refresh(auth_store, *, observed_refresh_token: str, leeway_s: int, f
             # never replayed in a loop, and signal the caller (via ``None``) to
             # surface the cloud_unauthorized guidance.
             #
+            # Record the server's actual error_description (e.g. "workspace
+            # membership lost", "resource state changed", "refresh token reuse
+            # detected") so the caller can report *why* instead of a canned
+            # guess — these look identical to the user otherwise but point at
+            # very different root causes.
+            #
             # ``allow_clear=False`` (background watcher) declines to wipe the
             # shared session: the foreground command owns its lifecycle, and a
             # spurious invalid_grant from a transient blip must not log the user
             # off mid-run. We still return ``None`` so the watcher knows the
             # refresh did not produce a usable token.
+            _record_fatal_refresh(e)
             if allow_clear:
                 auth_store.clear_cloud_session()
             return None
@@ -730,13 +802,24 @@ def _locked_refresh(auth_store, *, observed_refresh_token: str, leeway_s: int, f
 
     # Atomic persist of the rotated family before the lock is released, so the
     # next process reads the new tokens (save_cloud_session writes tmp+rename).
+    #
+    # This server rotates the refresh token on every successful refresh and does
+    # reuse detection — the whole lock design above relies on that. So once the
+    # refresh succeeds the token we sent is *spent*; we must NOT fall back to
+    # re-persisting it if the response somehow omits a new one (an old
+    # ``... or session.refresh_token`` fallback). Re-saving the consumed token
+    # would guarantee an ``invalid_grant`` (and a forced logout) on the very
+    # next use. Persisting ``None`` instead keeps the user authenticated on the
+    # fresh access token and degrades to a clean re-login when it expires,
+    # rather than tripping reuse-detection mid-use.
+    _last_fatal.reason = None  # success — drop any reason from an earlier attempt
     return auth_store.save_cloud_session(
         base_url=session.base_url,
         resource=session.resource,
         client_id=session.client_id,
         scope=session.scope,
         access_token=new_tokens.access_token,
-        refresh_token=new_tokens.refresh_token or session.refresh_token,
+        refresh_token=new_tokens.refresh_token,
         token_type=new_tokens.token_type,
         expires_at=new_tokens.expires_at,
     )

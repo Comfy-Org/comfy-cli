@@ -242,13 +242,14 @@ def welcome_banner(
     info_tbl.add_column(overflow="fold")
     info_tbl.add_row("Scope", Text(scope, style="white"))
     info_tbl.add_row(
-        "Expires",
+        "Access token",
         Text.assemble(
             (_humanize_relative(expires_at), f"bold {BRAND_ACCENT}"),
             ("   ", ""),
             (_iso(expires_at), "dim"),
         ),
     )
+    info_tbl.add_row("", Text("renews automatically while you keep using the CLI", style="dim"))
     info_tbl.add_row("Client", Text(client_id, style="white"))
 
     signed_in_line = Text.assemble(
@@ -311,13 +312,15 @@ def whoami_banner(
     info_tbl.add_column(overflow="fold")
     info_tbl.add_row("Scope", Text(scope, style="white"))
     info_tbl.add_row(
-        "Expires",
+        "Access token",
         Text.assemble(
             (_humanize_relative(expires_at), f"bold {BRAND_ACCENT}"),
             ("   ", ""),
             (_iso(expires_at), "dim"),
         ),
     )
+    if not expired:
+        info_tbl.add_row("", Text("renews automatically while you keep using the CLI", style="dim"))
     info_tbl.add_row("Client", Text(client_id, style="white"))
 
     return branded_panel(

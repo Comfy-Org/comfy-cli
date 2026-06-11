@@ -740,12 +740,41 @@ class TestConcurrentRefresh:
         def err(status, body=""):
             return oauth.OAuthRefreshError("refresh failed", details={"status": status, "body": body})
 
+        # Fatal: the refresh-token family is genuinely dead → re-login required.
         assert oauth._is_fatal_token_error(err(400, "invalid_grant")) is True
-        assert oauth._is_fatal_token_error(err(401)) is True
+        assert oauth._is_fatal_token_error(err(400, '{"error":"invalid_token"}')) is True
+        # Gated on the body, NOT the bare status: recoverable 4xx must NOT wipe
+        # the session (re-register / fix config instead of forcing re-login).
+        assert oauth._is_fatal_token_error(err(401, '{"error":"invalid_client"}')) is False
+        assert oauth._is_fatal_token_error(err(400, '{"error":"invalid_request"}')) is False
+        assert oauth._is_fatal_token_error(err(400, '{"error":"invalid_scope"}')) is False
+        assert oauth._is_fatal_token_error(err(401)) is False  # bare 401, no error code
         assert oauth._is_fatal_token_error(err(0, "Connection refused")) is False  # transient network
         assert oauth._is_fatal_token_error(err(503)) is False  # server hiccup, token may be fine
         # Message-based detection when status is absent.
         assert oauth._is_fatal_token_error(oauth.OAuthRefreshError("reuse detected", details={})) is True
+
+    def test_describe_token_error_extracts_server_reason(self):
+        def err(body):
+            return oauth.OAuthRefreshError("refresh failed", details={"status": 400, "body": body})
+
+        # error + error_description → "code: description".
+        assert (
+            oauth._describe_token_error(err('{"error":"invalid_grant","error_description":"workspace membership lost"}'))
+            == "invalid_grant: workspace membership lost"
+        )
+        # error only.
+        assert oauth._describe_token_error(err('{"error":"invalid_grant"}')) == "invalid_grant"
+        # Nothing useful (network error, empty body) → None so the caller falls
+        # back to its generic phrasing.
+        assert oauth._describe_token_error(err("")) is None
+        assert oauth._describe_token_error(err("not json")) is None
+
+    def test_take_last_fatal_refresh_reason_is_one_shot(self):
+        oauth._last_fatal.reason = "invalid_grant: resource state changed"
+        assert oauth.take_last_fatal_refresh_reason() == "invalid_grant: resource state changed"
+        # Cleared after read — a later unrelated failure can't inherit it.
+        assert oauth.take_last_fatal_refresh_reason() is None
 
     # (d) end-to-end surface: after a reuse clears the session, building a cloud
     # client with no other credentials raises Unauthenticated (mapped to
@@ -780,6 +809,37 @@ class TestConcurrentRefresh:
         assert calls == [1]  # one attempt, no loop
         assert auth_store.get_cloud_session() is None  # cleared
 
+    def test_unauthenticated_message_surfaces_server_reason(self, persisted, monkeypatch):
+        """The user-facing failure carries the auth server's real
+        error_description (not the canned "reuse detected" guess), so a logout
+        caused by e.g. lost workspace membership is diagnosable."""
+        import comfy_cli.comfy_client as comfy_client
+
+        self._persist_expired(refresh_token="RT0")
+
+        def boom(**kw):
+            raise oauth.OAuthRefreshError(
+                "refresh failed: HTTP 400",
+                details={
+                    "status": 400,
+                    "body": '{"error":"invalid_grant","error_description":"workspace membership lost"}',
+                },
+            )
+
+        monkeypatch.setattr(oauth, "refresh_tokens", boom)
+
+        target = comfy_client.Target(
+            kind="cloud",
+            base_url="https://c",
+            path_prefix="/api",
+            history_path="history_v2",
+            jobs_path="jobs",
+            auth_token="OLD",
+        )
+        client = comfy_client.Client(target)
+        with pytest.raises(comfy_client.Unauthenticated, match="workspace membership lost"):
+            client._try_refresh_token()
+
     def test_transient_network_failure_keeps_session(self, persisted, monkeypatch):
         """A URLError (status 0) must NOT clear the family — the token is
         probably still good; keep the stale session for the caller to retry."""
@@ -792,6 +852,31 @@ class TestConcurrentRefresh:
         result = oauth.ensure_fresh_session()
         assert result is not None and result.refresh_token == "RT0"  # session preserved
         assert auth_store.get_cloud_session() is not None
+
+    def test_successful_refresh_never_repersists_spent_token(self, persisted, monkeypatch):
+        """Rotating server: once a refresh SUCCEEDS the token we sent is spent.
+        If the response omits a new refresh token we must persist ``None`` — never
+        fall back to re-saving the consumed one (that would guarantee an
+        invalid_grant / forced logout on the very next use)."""
+        self._persist_expired(refresh_token="RT0")
+
+        def no_rotation(**kw):
+            # 200 OK with a fresh access token but NO new refresh token.
+            return oauth.TokenSet(
+                access_token="NEW_AT",
+                refresh_token=None,
+                token_type="Bearer",
+                expires_in=3600,
+                expires_at=int(time.time()) + 3600,
+                scope="s",
+            )
+
+        monkeypatch.setattr(oauth, "refresh_tokens", no_rotation)
+        result = oauth.ensure_fresh_session()
+        assert result is not None and result.access_token == "NEW_AT"
+        # The spent RT0 is gone — not re-persisted.
+        assert result.refresh_token is None
+        assert auth_store.get_cloud_session().refresh_token is None
 
 
 class TestAtomicPersist:

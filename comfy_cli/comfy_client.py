@@ -169,15 +169,21 @@ class Client:
             object.__setattr__(self.target, "auth_token", session.access_token)
             return True
         if had_session and session is None:
-            # The refresh hit a fatal token error (reuse detected /
-            # invalid_grant). When ``clear_session_on_auth_failure`` is True the
-            # stored session has already been cleared; when False (watcher) it
-            # is deliberately preserved for the foreground command to manage.
-            # Either way, don't loop on a dead token — surface the failure once.
-            raise Unauthenticated(
-                "Comfy Cloud session is no longer valid (refresh token reuse detected or expired) — "
-                "run `comfy cloud login`"
-            )
+            # The refresh hit a fatal token error. When
+            # ``clear_session_on_auth_failure`` is True the stored session has
+            # already been cleared; when False (watcher) it is deliberately
+            # preserved for the foreground command to manage. Either way, don't
+            # loop on a dead token — surface the failure once.
+            #
+            # Report the auth server's *actual* reason when we have it (e.g.
+            # "invalid_grant: workspace membership lost") instead of guessing
+            # "reuse detected" — these failures look identical to the user but
+            # have very different root causes.
+            from comfy_cli.cloud import oauth
+
+            reason = oauth.take_last_fatal_refresh_reason()
+            detail = reason or "refresh token reuse detected or expired"
+            raise Unauthenticated(f"Comfy Cloud session is no longer valid ({detail}) — run `comfy cloud login`")
         # Same token back (a transient/network refresh failure kept the stale
         # session), or no stored session to refresh: let the original 401
         # propagate to the caller's HTTP-error handling.
