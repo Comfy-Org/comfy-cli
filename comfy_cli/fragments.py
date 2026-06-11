@@ -66,7 +66,7 @@ from typing import Any
 # and any custom socket type) is "graph-only": valid as a fragment input, but
 # it can only be fed by a cross-step ref (`$alias.output`), never a path.
 LOADABLE_INPUT_TYPES = {"IMAGE", "MASK", "AUDIO", "VIDEO"}
-KNOWN_PARAM_TYPES = {"STRING", "INT", "FLOAT", "BOOL", "COMBO"}
+KNOWN_PARAM_TYPES = {"STRING", "INT", "FLOAT", "BOOL", "BOOLEAN", "COMBO"}
 
 # A ComfyUI socket type is UPPER_SNAKE_CASE (IMAGE, MODEL, CONTROL_NET, ...).
 # We accept any such token as an input type so fragments can model the full

@@ -229,6 +229,27 @@ class TestParseFragment:
         with pytest.raises(FragmentError, match="TENSOR"):
             parse_fragment(data)
 
+    def test_boolean_param_type_accepted(self):
+        """Node schemas print BOOLEAN; fragments copied from `nodes show` must parse."""
+        data = _text_encode_fragment()
+        data["_fragment"]["params"]["text"]["type"] = "BOOLEAN"
+        data["_fragment"]["params"]["text"]["default"] = True
+        frag = parse_fragment(data)
+        assert frag.params["text"].type == "BOOLEAN"
+
+    def test_bool_param_type_still_accepted(self):
+        data = _text_encode_fragment()
+        data["_fragment"]["params"]["text"]["type"] = "BOOL"
+        data["_fragment"]["params"]["text"]["default"] = False
+        frag = parse_fragment(data)
+        assert frag.params["text"].type == "BOOL"
+
+    def test_junk_param_type_still_rejected(self):
+        data = _text_encode_fragment()
+        data["_fragment"]["params"]["text"]["type"] = "WIBBLE"
+        with pytest.raises(FragmentError, match="WIBBLE"):
+            parse_fragment(data)
+
     def test_binds_without_dot_rejected(self):
         data = _text_encode_fragment()
         data["_fragment"]["inputs"]["clip"]["binds"] = "10"
