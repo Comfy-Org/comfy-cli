@@ -16,6 +16,7 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
+from typing import Annotated
 
 import typer
 
@@ -37,16 +38,38 @@ app = typer.Typer(
 )
 
 # The marker `comfy project init` writes — deliberately literal and minimal.
-MARKER_CONTENT = "schema: project/1\ndefaults:\n  where: cloud\n"
+# The where default is resolved at init time (flag, else auto-detect) so a
+# local-only machine never gets a project that routes every command to cloud.
+MARKER_TEMPLATE = "schema: project/1\ndefaults:\n  where: {where}\n"
 
 ASSETS_LOCK_SCHEMA = "assets-lock/1"
 
 
 @app.command("init", help="Initialize the project/1 convention here: comfy.yaml marker + conventional dirs.")
 @tracking.track_command("project")
-def init_cmd():
+def init_cmd(
+    where: Annotated[
+        str | None,
+        typer.Option(
+            "--where",
+            help="Default backend for this project (local|cloud). Omitted: auto-detect "
+            "(cloud if cloud credentials are configured, else local).",
+        ),
+    ] = None,
+):
     renderer = get_renderer()
     cwd = Path.cwd().resolve()
+
+    from comfy_cli import where as where_module
+
+    try:
+        # project_value=None: a project can't govern its own init; resolve from
+        # flag → env → config → auto-detect, same chain every routed command uses.
+        decision = where_module.resolve(flag=where, project_value=None)
+    except ValueError as e:
+        renderer.error(code="invalid_argument", message=str(e))
+        raise typer.Exit(code=1) from e
+    default_where = decision.target.value
 
     existing = find_project(cwd)
     if existing is not None:
@@ -58,7 +81,7 @@ def init_cmd():
         )
         raise typer.Exit(code=1)
 
-    (cwd / PROJECT_MARKER).write_text(MARKER_CONTENT, encoding="utf-8")
+    (cwd / PROJECT_MARKER).write_text(MARKER_TEMPLATE.format(where=default_where), encoding="utf-8")
     created = [PROJECT_MARKER]
     for d in CONVENTIONAL_DIRS:
         (cwd / d).mkdir(exist_ok=True)
@@ -69,7 +92,7 @@ def init_cmd():
         for name in created:
             rprint(f"  [dim]created[/dim] {name}")
     renderer.emit(
-        {"root": str(cwd), "created": created, "action": "init"},
+        {"root": str(cwd), "created": created, "action": "init", "where_default": default_where},
         command="project init",
         changed=True,
     )

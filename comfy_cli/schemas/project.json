@@ -8,6 +8,11 @@
   "additionalProperties": true,
   "properties": {
     "action": {"type": "string", "enum": ["init", "status"]},
+    "where_default": {
+      "type": "string",
+      "enum": ["local", "cloud"],
+      "description": "Backend default written into comfy.yaml by `project init` (--where flag, else auto-detected from configured credentials)."
+    },
     "root": {"type": "string", "description": "Absolute path of the project root (the dir holding comfy.yaml)."},
     "created": {
       "type": "array",

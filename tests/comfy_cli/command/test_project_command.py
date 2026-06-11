@@ -63,7 +63,9 @@ def _last_json(stdout: str) -> dict:
 
 
 def test_init_creates_marker_and_conventional_dirs(proj_dir):
-    res = _run(["--json", "project", "init"], proj_dir)
+    # Pin the backend via the flag: auto-detect depends on whether the host
+    # machine has cloud credentials, and tests must not.
+    res = _run(["--json", "project", "init", "--where", "cloud"], proj_dir)
     assert res.returncode == 0, res.stderr
     env = _last_json(res.stdout)
     _validator_for("envelope.json").validate(env)
@@ -72,6 +74,7 @@ def test_init_creates_marker_and_conventional_dirs(proj_dir):
     assert env["changed"] is True
     assert env["data"]["action"] == "init"
     assert env["data"]["root"] == str(proj_dir.resolve())
+    assert env["data"]["where_default"] == "cloud"
 
     marker = proj_dir / "comfy.yaml"
     assert marker.is_file()
@@ -79,6 +82,23 @@ def test_init_creates_marker_and_conventional_dirs(proj_dir):
     assert "where: cloud" in marker.read_text()
     for d in CONVENTIONAL:
         assert (proj_dir / d).is_dir(), d
+
+
+def test_init_where_local_writes_local_default(proj_dir):
+    res = _run(["--json", "project", "init", "--where", "local"], proj_dir)
+    assert res.returncode == 0, res.stderr
+    env = _last_json(res.stdout)
+    assert env["data"]["where_default"] == "local"
+    assert "where: local" in (proj_dir / "comfy.yaml").read_text()
+
+
+def test_init_invalid_where_errors(proj_dir):
+    res = _run(["--json", "project", "init", "--where", "marsbase"], proj_dir)
+    assert res.returncode == 1
+    env = _last_json(res.stdout)
+    assert env["ok"] is False
+    assert env["error"]["code"] == "invalid_argument"
+    assert not (proj_dir / "comfy.yaml").exists()
 
 
 def test_reinit_errors_with_project_already_exists(proj_dir):
