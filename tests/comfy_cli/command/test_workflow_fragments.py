@@ -556,7 +556,7 @@ class TestComposeCmd:
         assert envelope["data"]["nodes"] >= 1
         assert out.exists()
         wf = json.loads(out.read_text())
-        encodes = [n for n in wf.values() if n["class_type"] == "CLIPTextEncode"]
+        encodes = [n for n in wf.values() if isinstance(n, dict) and n.get("class_type") == "CLIPTextEncode"]
         assert encodes[0]["inputs"]["text"] == "hello"
 
     def test_compose_missing_blueprint(self, tmp_path: Path, capsys):
@@ -600,7 +600,7 @@ class TestComposeCmd:
         assert envelope["data"]["graphs"] == 1
         assert envelope["data"]["items"] == 3
         wf = json.loads(out.read_text())
-        texts = {n["inputs"]["text"] for n in wf.values() if n["class_type"] == "CLIPTextEncode"}
+        texts = {n["inputs"]["text"] for n in wf.values() if isinstance(n, dict) and n.get("class_type") == "CLIPTextEncode"}
         assert texts == {"alpha", "beta", "gamma"}
 
     def test_compose_chunk_writes_multiple_files(self, lib_dir: Path, tmp_path: Path, capsys):
@@ -681,7 +681,7 @@ class TestComposeCmd:
         assert envelope["ok"] is True
         assert envelope["data"]["items"] == 2
         wf = json.loads(out.read_text())
-        texts = {n["inputs"]["text"] for n in wf.values() if n["class_type"] == "CLIPTextEncode"}
+        texts = {n["inputs"]["text"] for n in wf.values() if isinstance(n, dict) and n.get("class_type") == "CLIPTextEncode"}
         assert texts == {"one", "two"}
 
 
@@ -889,6 +889,162 @@ class TestForeach:
         }
         with pytest.raises(BlueprintError, match="\\$ref"):
             compose_blueprints(blueprint, lib_dir=lib_dir)
+
+
+# ---------------------------------------------------------------------------
+# item_map — per-item provenance in compose summaries and _meta embedding
+# ---------------------------------------------------------------------------
+
+
+class TestItemMap:
+    def _foreach_blend_blueprint(self) -> dict:
+        return {
+            "output_prefix": "story",
+            "foreach": [{"id": "s1"}, {"id": "s2"}],
+            "pipeline": [
+                {"fragment": "image_blend", "alias": "b", "inputs": {"image1": "a.png", "image2": "b.png"}}
+            ],
+        }
+
+    def test_item_map_disjoint_nodes_with_save_inside(self, lib_dir: Path):
+        wf, summary = compose_blueprints(self._foreach_blend_blueprint(), lib_dir=lib_dir)[0]
+        im = summary["item_map"]
+        assert set(im) == {"s1", "s2"}
+        s1, s2 = set(im["s1"]["nodes"]), set(im["s2"]["nodes"])
+        # Node sets are disjoint and together cover the whole graph.
+        assert s1.isdisjoint(s2)
+        assert s1 | s2 == set(wf)
+        for key in ("s1", "s2"):
+            entry = im[key]
+            # Node lists are sorted numerically.
+            assert entry["nodes"] == sorted(entry["nodes"], key=int)
+            # The auto-appended save node belongs to its item's node set.
+            assert entry["save_node"] in entry["nodes"]
+            assert wf[entry["save_node"]]["class_type"] == "SaveImage"
+            # The per-item prefix follows the `_item_prefix` rule (base/id).
+            assert entry["prefix"] == f"story/{key}"
+            assert wf[entry["save_node"]]["inputs"]["filename_prefix"] == entry["prefix"]
+
+    def test_item_map_keys_fall_back_to_index_for_scalar_items(self, lib_dir: Path):
+        blueprint = {
+            "foreach": ["red", "green"],
+            "pipeline": [
+                {"fragment": "text_encode", "alias": "enc", "inputs": {"clip": "c"}, "params": {"text": "$item"}}
+            ],
+        }
+        _, summary = compose_blueprints(blueprint, lib_dir=lib_dir)[0]
+        assert set(summary["item_map"]) == {"0", "1"}
+
+    def test_item_map_terminal_branch_has_no_save_node(self, lib_dir: Path):
+        blueprint = {
+            "foreach": [{"id": "s1"}],
+            "pipeline": [
+                {"fragment": "save_still", "alias": "save", "inputs": {"images": "inputs/p.png"}}
+            ],
+        }
+        wf, summary = compose_blueprints(blueprint, lib_dir=lib_dir)[0]
+        entry = summary["item_map"]["s1"]
+        assert entry["save_node"] is None
+        assert set(entry["nodes"]) == set(wf)
+
+    def test_chunked_item_map_covers_only_its_batch(self, lib_dir: Path):
+        blueprint = {
+            "chunk": 2,
+            "foreach": [{"id": "a", "prompt": "x"}, {"id": "b", "prompt": "y"}, {"id": "c", "prompt": "z"}],
+            "pipeline": [
+                {"fragment": "text_encode", "alias": "enc", "inputs": {"clip": "c"}, "params": {"text": "$item.prompt"}}
+            ],
+        }
+        graphs = compose_blueprints(blueprint, lib_dir=lib_dir)
+        assert len(graphs) == 2
+        assert set(graphs[0][1]["item_map"]) == {"a", "b"}
+        assert set(graphs[1][1]["item_map"]) == {"c"}
+
+    def test_non_foreach_summary_has_no_item_map(self, lib_dir: Path):
+        blueprint = {
+            "pipeline": [{"fragment": "text_encode", "alias": "p", "inputs": {"clip": "c"}, "params": {"text": "hi"}}]
+        }
+        _, summary = compose_blueprints(blueprint, lib_dir=lib_dir)[0]
+        assert not summary.get("item_map")
+
+
+class TestComposeCmdMeta:
+    """compose_cmd embeds a `_meta` provenance block in every written workflow."""
+
+    def test_written_workflow_carries_meta_with_items(self, lib_dir: Path, tmp_path: Path, capsys):
+        blueprint = tmp_path / "fan.yaml"
+        blueprint.write_text(
+            textwrap.dedent("""\
+            output_prefix: story
+            foreach:
+              - {id: s1}
+              - {id: s2}
+            pipeline:
+              - fragment: image_blend
+                alias: b
+                inputs: {image1: a.png, image2: b.png}
+        """)
+        )
+        out = tmp_path / "fan.json"
+        envelope = _run(["compose", str(blueprint), "-o", str(out), "--lib", str(lib_dir)], capsys)
+        assert envelope["ok"] is True
+        wf = json.loads(out.read_text())
+        meta = wf["_meta"]
+        assert meta["schema"] == "compose/1"
+        assert meta["blueprint"] == str(blueprint.resolve())
+        assert set(meta["items"]) == {"s1", "s2"}
+        for key, entry in meta["items"].items():
+            assert entry["save_node"] in entry["nodes"]
+            assert entry["prefix"] == f"story/{key}"
+        # The same map rides the envelope payload.
+        assert set(envelope["data"]["item_map"]) == {"s1", "s2"}
+
+    def test_non_foreach_blueprint_still_gets_meta(self, lib_dir: Path, tmp_path: Path, capsys):
+        blueprint = tmp_path / "single.yaml"
+        blueprint.write_text(
+            textwrap.dedent("""\
+            pipeline:
+              - fragment: text_encode
+                alias: p
+                inputs: {clip: clip_a}
+                params: {text: hello}
+        """)
+        )
+        out = tmp_path / "single.json"
+        envelope = _run(["compose", str(blueprint), "-o", str(out), "--lib", str(lib_dir)], capsys)
+        assert envelope["ok"] is True
+        wf = json.loads(out.read_text())
+        meta = wf["_meta"]
+        assert meta["schema"] == "compose/1"
+        assert meta["blueprint"] == str(blueprint.resolve())
+        assert "items" not in meta
+        assert "item_map" not in envelope["data"]
+
+    def test_chunked_files_carry_only_their_batch_items(self, lib_dir: Path, tmp_path: Path, capsys):
+        blueprint = tmp_path / "fan.yaml"
+        blueprint.write_text(
+            textwrap.dedent("""\
+            chunk: 2
+            foreach:
+              - {id: a, prompt: alpha}
+              - {id: b, prompt: beta}
+              - {id: c, prompt: gamma}
+            pipeline:
+              - fragment: text_encode
+                alias: enc
+                inputs: {clip: clip_a}
+                params: {text: $item.prompt}
+        """)
+        )
+        out = tmp_path / "fan.json"
+        envelope = _run(["compose", str(blueprint), "-o", str(out), "--lib", str(lib_dir)], capsys)
+        assert envelope["ok"] is True
+        written = envelope["data"]["written"]
+        assert len(written) == 2
+        items_per_file = [set(json.loads(Path(p).read_text())["_meta"]["items"]) for p in written]
+        assert items_per_file == [{"a", "b"}, {"c"}]
+        # Envelope-level map is the union across batches.
+        assert set(envelope["data"]["item_map"]) == {"a", "b", "c"}
 
 
 # ---------------------------------------------------------------------------

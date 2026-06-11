@@ -464,7 +464,8 @@ class Pipeline:
 
     # -- Save-node convenience ----------------------------------------------
 
-    def add_save(self, output: _StepOutput, output_type: str, *, prefix: str) -> None:
+    def add_save(self, output: _StepOutput, output_type: str, *, prefix: str) -> str:
+        """Append a SaveImage/SaveVideo node and return its node id."""
         if output_type == "VIDEO":
             class_type, ref_key = "SaveVideo", "video"
             inputs = {
@@ -482,6 +483,7 @@ class Pipeline:
             "_meta": {"title": f"save composed final ({output_type.lower()})"},
             "inputs": inputs,
         }
+        return node_id
 
 
 # ---------------------------------------------------------------------------
@@ -585,19 +587,25 @@ def _add_branch(
     return final_alias, pipeline.last_step_terminal, used_fragments
 
 
-def _auto_save(pipeline: Pipeline, final_alias: str, *, terminal: bool, prefix: str) -> dict | None:
-    """Append a save node for a branch's final IMAGE/VIDEO output, unless terminal."""
+def _auto_save(
+    pipeline: Pipeline, final_alias: str, *, terminal: bool, prefix: str
+) -> tuple[dict | None, str | None]:
+    """Append a save node for a branch's final IMAGE/VIDEO output, unless terminal.
+
+    Returns ``(save_action, save_node_id)`` — both ``None`` when no node was
+    appended (terminal step, or no saveable output type).
+    """
     if terminal:
-        return None
+        return None, None
     chosen = None
     for out in pipeline.outputs[final_alias].values():
         if out.type in ("IMAGE", "VIDEO"):
             chosen = out
             break
     if chosen is None:
-        return None
-    pipeline.add_save(chosen, chosen.type, prefix=prefix)
-    return {"type": chosen.type, "prefix": prefix}
+        return None, None
+    save_node = pipeline.add_save(chosen, chosen.type, prefix=prefix)
+    return {"type": chosen.type, "prefix": prefix}, save_node
 
 
 def compose_blueprint(blueprint: dict, *, lib_dir: Path) -> tuple[dict, dict]:
@@ -614,7 +622,7 @@ def compose_blueprint(blueprint: dict, *, lib_dir: Path) -> tuple[dict, dict]:
 
     pipeline = Pipeline()
     final_alias, terminal, used_fragments = _add_branch(pipeline, steps, lib_dir=lib_dir)
-    save_action = _auto_save(
+    save_action, _ = _auto_save(
         pipeline, final_alias, terminal=terminal, prefix=str(blueprint.get("output_prefix", "composed"))
     )
 
@@ -667,11 +675,18 @@ def _item_namespace(item: Any, index: int) -> str:
     return f"i{index}"
 
 
+def _item_key(item: Any, index: int) -> str:
+    """Stable key for one foreach item — ``str(item["id"])`` when present, else
+    ``str(index)``. The SAME rule ``_item_prefix`` uses, so ``item_map`` keys
+    and per-item output filenames always agree."""
+    if isinstance(item, dict) and item.get("id") is not None:
+        return str(item["id"])
+    return str(index)
+
+
 def _item_prefix(base: str, item: Any, index: int) -> str:
     """Per-item terminal/output prefix — uses the item id when present, else index."""
-    if isinstance(item, dict) and item.get("id") is not None:
-        return f"{base}/{item['id']}"
-    return f"{base}/{index}"
+    return f"{base}/{_item_key(item, index)}"
 
 
 def compose_blueprints(
@@ -720,13 +735,25 @@ def compose_blueprints(
         pipeline = Pipeline()
         save_actions: list[dict] = []
         used_fragments: list[str] = []
+        # Per-item provenance: which node ids each foreach item produced, the
+        # auto-appended save node (if any), and the per-item output prefix.
+        # Keys follow the `_item_key` / `_item_prefix` rule so map keys and
+        # output filenames agree. Each graph's map covers only ITS batch.
+        item_map: dict[str, dict] = {}
         for index, item in batch:
             ns = _item_namespace(item, index)
+            before = set(pipeline.workflow)
             final_alias, terminal, frags = _add_branch(pipeline, steps, lib_dir=lib_dir, item=item, ns=ns)
             used_fragments.extend(frags)
-            sa = _auto_save(pipeline, final_alias, terminal=terminal, prefix=_item_prefix(base_prefix, item, index))
+            prefix = _item_prefix(base_prefix, item, index)
+            sa, save_node = _auto_save(pipeline, final_alias, terminal=terminal, prefix=prefix)
             if sa:
                 save_actions.append(sa)
+            item_map[_item_key(item, index)] = {
+                "nodes": sorted(set(pipeline.workflow) - before, key=int),
+                "save_node": save_node,
+                "prefix": prefix,
+            }
         summary = {
             "steps": len(steps),
             "items": len(batch),
@@ -735,6 +762,7 @@ def compose_blueprints(
             "nodes": len(pipeline.workflow),
             "fragments_used": used_fragments,
             "save_actions": save_actions,
+            "item_map": item_map,
         }
         results.append((pipeline.workflow, summary))
     return results

@@ -89,11 +89,24 @@ def compose_cmd(
     base_out = out or blueprint.with_suffix(".compiled.json")
     base_out.parent.mkdir(parents=True, exist_ok=True)
 
+    # Provenance block embedded in every written workflow (`compose/1`). The
+    # one artifact that travels (the compiled JSON) carries which blueprint
+    # produced it and — for foreach — which item produced which nodes.
+    # `comfy run` strips `_meta` before submitting (see run/loader.py).
+    blueprint_abs = str(blueprint.resolve())
+
+    def _meta_block(summary: dict) -> dict:
+        meta: dict = {"schema": "compose/1", "blueprint": blueprint_abs}
+        if summary.get("item_map"):
+            meta["items"] = summary["item_map"]
+        return meta
+
     # A single graph keeps the simple `<out>` name; `chunk:` fan-out writes one
     # numbered file per graph (`<stem>.000.json`, `<stem>.001.json`, ...).
     written: list[str] = []
     if len(graphs) == 1:
-        workflow, _ = graphs[0]
+        workflow, summary = graphs[0]
+        workflow["_meta"] = _meta_block(summary)
         base_out.write_text(json.dumps(workflow, indent=2), encoding="utf-8")
         written.append(str(base_out))
         single_out: str | None = str(base_out)
@@ -102,7 +115,8 @@ def compose_cmd(
         # from a prior single-graph compose so `comfy run <out>` can't execute it.
         if base_out.exists():
             base_out.unlink()
-        for i, (workflow, _) in enumerate(graphs):
+        for i, (workflow, summary) in enumerate(graphs):
+            workflow["_meta"] = _meta_block(summary)  # each file: only ITS batch's items
             target = base_out.with_suffix(f".{i:03d}{base_out.suffix}")
             target.write_text(json.dumps(workflow, indent=2), encoding="utf-8")
             written.append(str(target))
@@ -122,6 +136,11 @@ def compose_cmd(
     }
     if "total_items" in first_summary:
         payload["items"] = first_summary["total_items"]
+    # Union of every graph's per-item provenance (keys are unique across
+    # batches, so a plain merge is lossless).
+    item_map = {k: v for _, s in graphs for k, v in (s.get("item_map") or {}).items()}
+    if item_map:
+        payload["item_map"] = item_map
     if renderer.is_pretty():
         rprint(f"[green]✓[/green] composed [bold]{len(graphs)} graph(s)[/bold]")
         for path in written:
