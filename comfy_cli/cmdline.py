@@ -26,6 +26,9 @@ from comfy_cli.command import (
 from comfy_cli.command import (
     nodes as nodes_command,
 )
+from comfy_cli.command import (
+    project as project_command,
+)
 from comfy_cli.command import run as run_inner
 from comfy_cli.command import run_cli as run_cli_inner
 from comfy_cli.command import (
@@ -1536,6 +1539,7 @@ app.add_typer(tracking.app, name="tracking", help="Manage analytics tracking set
 app.add_typer(cloud_command.app, name="cloud", help="Comfy Cloud — sign in, route commands, inspect session.")
 app.add_typer(auth_command.app, name="auth", help="Manage API tokens for model hosts (Civitai, Hugging Face).")
 app.add_typer(jobs_command.app, name="jobs", help="List, inspect, and live-watch ComfyUI prompts.")
+app.add_typer(project_command.app, name="project", help="Project conventions: init and status.")
 app.add_typer(
     skill_command.app,
     name="skills",

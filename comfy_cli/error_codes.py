@@ -445,6 +445,17 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "Cloud requires authentication in non-interactive mode.",
         "pass --api-key sk-... or run `comfy cloud login` first",
     ),
+    # --- project (project/1 convention) ---------------------------------------
+    ErrorCode(
+        "project_already_exists",
+        "`comfy project init` ran in a directory already governed by a comfy.yaml project (`details.root`).",
+        "use the existing project, or init outside it",
+    ),
+    ErrorCode(
+        "project_not_found",
+        "No comfy.yaml (schema project/1) governs the current directory.",
+        "run: comfy project init",
+    ),
     # --- generate / emit -----------------------------------------------------
     ErrorCode(
         "emit_workflow_failed",

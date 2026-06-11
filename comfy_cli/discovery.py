@@ -87,6 +87,9 @@ COMMAND_SCHEMAS: dict[str, str] = {
     # file transfer
     "comfy upload": "transfer",
     "comfy download": "transfer",
+    # project convention
+    "comfy project init": "project",
+    "comfy project status": "project",
     # config
     "comfy set-default": "set_default",
     "comfy version": "version",
