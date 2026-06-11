@@ -48,6 +48,37 @@ class TestRoundTrip:
         path.write_text("{ not valid json")
         assert jobs_state.read("garbage") is None
 
+    def test_record_and_item_map_round_trip(self):
+        record = {
+            "status": {"completed": True, "status_str": "success"},
+            "outputs": {"9": {"images": [{"filename": "a.png", "subfolder": "", "type": "output"}]}},
+        }
+        item_map = {"s1": {"nodes": ["7", "9"], "save_node": "9", "prefix": "outputs/story/s1"}}
+        s = jobs_state.new(prompt_id="rt", client_id=None, workflow="/w.json", where="cloud")
+        s.status = "completed"
+        s.record = record
+        s.item_map = item_map
+        jobs_state.write(s)
+        loaded = jobs_state.read("rt")
+        assert loaded is not None
+        assert loaded.record == record
+        assert loaded.item_map == item_map
+
+    def test_legacy_file_without_record_fields_reads_none(self):
+        # State files written before record/item_map existed must load with
+        # both defaulting to None — not crash, not KeyError.
+        s = jobs_state.new(prompt_id="legacy", client_id=None, workflow="/w.json", where="cloud")
+        jobs_state.write(s)
+        path = jobs_state.state_path("legacy")
+        data = json.loads(path.read_text())
+        data.pop("record", None)
+        data.pop("item_map", None)
+        path.write_text(json.dumps(data))
+        loaded = jobs_state.read("legacy")
+        assert loaded is not None
+        assert loaded.record is None
+        assert loaded.item_map is None
+
 
 class TestTerminal:
     def test_completed_marks_completed_at(self):

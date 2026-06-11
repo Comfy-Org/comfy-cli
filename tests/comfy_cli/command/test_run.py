@@ -1071,3 +1071,77 @@ class TestExecuteCloudAutoConvert:
             with pytest.raises(typer.Exit) as exc_info:
                 execute_cloud(ui_workflow_file, wait=False)
             assert exc_info.value.exit_code == 1
+
+
+# ---------------------------------------------------------------------------
+# execute_cloud --wait terminal handling
+# ---------------------------------------------------------------------------
+
+
+class TestExecuteCloudWait:
+    """The --wait success path: the final cloud history record is stashed on
+    the state file (state.record) so downstream consumers (grouped outputs,
+    item-named downloads) don't need a second API call."""
+
+    API_WORKFLOW = {
+        "1": {"class_type": "KSampler", "inputs": {}},
+        "9": {"class_type": "SaveImage", "inputs": {"images": ["1", 0]}},
+    }
+    RECORD = {
+        "status": {"completed": True, "status_str": "success"},
+        "outputs": {
+            "9": {"images": [{"filename": "a.png", "subfolder": "", "type": "output"}]},
+            "12": {"videos": [{"filename": "v.mp4", "subfolder": "", "type": "output"}]},
+        },
+    }
+
+    @pytest.fixture
+    def api_workflow_file(self, tmp_path):
+        path = tmp_path / "api.json"
+        path.write_text(json.dumps(self.API_WORKFLOW))
+        return str(path)
+
+    @pytest.fixture
+    def fake_target(self):
+        from comfy_cli.target import Target
+
+        return Target(
+            kind="cloud",
+            base_url="https://cloud.example.com",
+            path_prefix="/api",
+            history_path="history_v2",
+            jobs_path="jobs",
+            api_key="test-api-key",
+        )
+
+    def _client(self, fake_target, record=None):
+        """A real Client (real extract_* helpers) with the network calls mocked."""
+        from comfy_cli import comfy_client
+        from comfy_cli.comfy_client import SubmitResult
+
+        client = comfy_client.Client(fake_target)
+        client.submit_prompt = MagicMock(return_value=SubmitResult(prompt_id="prompt-wait", number=1, node_errors={}))
+        client.wait_for_completion = MagicMock(return_value=record or self.RECORD)
+        client.get_job_status = MagicMock(return_value=None)
+        return client
+
+    def _run_wait(self, workflow_file, fake_target, client):
+        from comfy_cli.command.run import execute_cloud
+
+        with (
+            patch("comfy_cli.target.resolve_target", return_value=fake_target),
+            patch("comfy_cli.cql.engine._load_from_target", return_value={}),
+            patch("comfy_cli.comfy_client.Client", return_value=client),
+        ):
+            execute_cloud(workflow_file, wait=True, timeout=5)
+
+    def test_wait_success_stashes_record_in_state_file(self, api_workflow_file, fake_target):
+        from comfy_cli import jobs_state
+
+        client = self._client(fake_target)
+        self._run_wait(api_workflow_file, fake_target, client)
+
+        state = jobs_state.read("prompt-wait")
+        assert state is not None
+        assert state.status == "completed"
+        assert state.record == self.RECORD

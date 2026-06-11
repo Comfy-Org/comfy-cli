@@ -626,6 +626,37 @@ def test_poll_cloud_once_treats_fatal_statuses_as_terminal(raw_status):
     assert state.error["message"] == "RIP to the server"
 
 
+def test_poll_cloud_once_stashes_history_record_on_completion():
+    """When the watcher fetches history at terminal, the full node-keyed
+    record must be stashed on state.record so later consumers (grouped
+    outputs, item-named downloads) don't need a second API call."""
+    from comfy_cli import jobs_state
+    from comfy_cli.command import job_watcher
+
+    history = {
+        "status": {"completed": True, "status_str": "success"},
+        "outputs": {"9": {"images": [{"filename": "a.png", "subfolder": "", "type": "output"}]}},
+    }
+
+    class _DoneClient:
+        target = type("T", (), {"base_url": "https://cloud.example"})()
+
+        def get_job_status(self, prompt_id):
+            return {"status": "success"}  # no inline outputs → history fetch
+
+        def get_history(self, prompt_id):
+            return dict(history)
+
+        def extract_output_urls(self, record):
+            return ["https://cloud.example/api/view?filename=a.png&subfolder=&type=output"]
+
+    state = jobs_state.new(prompt_id="pid", client_id="c", workflow="w", where="cloud")
+    assert job_watcher._poll_cloud_once(state, client=_DoneClient()) is True
+    assert state.status == "completed"
+    assert state.record == history
+    assert state.outputs == ["https://cloud.example/api/view?filename=a.png&subfolder=&type=output"]
+
+
 def test_watcher_unknown_status_stall_writes_error(monkeypatch):
     """A cloud status the CLI does not recognize (and that never changes) must
     not hang the watcher for the full 6h ceiling — after _UNKNOWN_STALL_S it

@@ -22,8 +22,15 @@ State-file contract (the same shape across local and cloud):
       "status": "queued" | "running" | "completed" | "error" | "cancelled",
       "outputs": [<url>, ...],
       "error": {"code": "...", "message": "...", "details": {...}} | null,
-      "watcher_pid": <int> | null
+      "watcher_pid": <int> | null,
+      "record": {<full final cloud history record>} | null,
+      "item_map": {<item>: {"nodes": [...], "save_node": "...", "prefix": "..."}} | null
     }
+
+``record`` is the node-keyed history record stashed when a cloud job reaches
+a terminal state; ``item_map`` maps blueprint foreach items to the node ids
+they produced (written at submit by ``comfy run``). Both are null for older
+files and local runs — readers must tolerate their absence.
 
 Terminal states (``completed``, ``error``, ``cancelled``) mean the file
 won't change further; agents can stop polling.
@@ -80,6 +87,11 @@ class JobState:
     outputs: list[Any] = field(default_factory=list)
     error: dict[str, Any] | None = None
     watcher_pid: int | None = None
+    # Full final cloud history record (node-keyed outputs), stashed at terminal.
+    record: dict[str, Any] | None = None
+    # foreach item -> {"nodes": [...], "save_node": ..., "prefix": ...} map,
+    # written at submit time by `comfy run` for composed workflows.
+    item_map: dict[str, Any] | None = None
 
     @property
     def is_terminal(self) -> bool:

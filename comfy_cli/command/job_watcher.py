@@ -223,6 +223,9 @@ def _poll_cloud_once(state: jobs_state.JobState, *, client: Any = None) -> bool:
             try:
                 history = client.get_history(state.prompt_id)
                 if history:
+                    # Stash the full node-keyed record so downstream consumers
+                    # (grouped outputs, item-named downloads) need no extra call.
+                    state.record = history
                     state.outputs = client.extract_output_urls(history)
             except Exception:  # noqa: BLE001 — best effort, state already terminal
                 pass

@@ -719,6 +719,9 @@ def execute_cloud(
     # Success path.
     state.status = "completed"
     state.outputs = output_urls
+    # Stash the full node-keyed history record for downstream consumers
+    # (grouped outputs, item-named downloads).
+    state.record = record
     state_file = jobs_state.write(state)
 
     end = time.time()
