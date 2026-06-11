@@ -134,6 +134,26 @@ def _sanitize_item_name(item: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]", "_", item) or "item"
 
 
+def _collision_safe_path(path: Path) -> Path:
+    """Never overwrite an existing download: ``name.ext`` → ``name.1.ext``,
+    ``name.2.ext``, … (deterministic, first free slot).
+
+    A retry fan-out reusing the same item ids re-downloads into the same
+    out-dir, and the per-job counters restart at 000 — without this, attempt
+    2 silently clobbers attempt 1. Symlinks (including dangling ones) count
+    as taken so the suffix walk can never be steered into writing through
+    one.
+    """
+    if not path.exists() and not path.is_symlink():
+        return path
+    n = 1
+    while True:
+        candidate = path.with_name(f"{path.stem}.{n}{path.suffix}")
+        if not candidate.exists() and not candidate.is_symlink():
+            return candidate
+        n += 1
+
+
 def _annotate_output_urls(output_urls: list[str], state) -> list[tuple[str | None, str | None]]:
     """Per output URL: ``(node_id, item)`` provenance, ``None`` when unknown.
 
@@ -452,7 +472,8 @@ def execute_download(
             local_name = f"{safe_item}_{n:03d}{ext}"
         else:
             local_name = f"{short_id}_{idx:03d}{ext}"
-        local_path = dest / local_name
+        # Suffix deterministically instead of overwriting a prior attempt.
+        local_path = _collision_safe_path(dest / local_name)
 
         try:
             _assert_download_url(url)

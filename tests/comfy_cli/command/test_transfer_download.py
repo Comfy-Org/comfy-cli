@@ -214,6 +214,54 @@ class TestExtractOutputEntries:
         assert outputs[0]["url"] == "https://cloud.example.com/api/view?filename=ComfyUI_a.png&subfolder=&type=output"
 
 
+class TestCollisionSafeNaming:
+    """A retry fan-out reusing the same item ids re-downloads into the same
+    out-dir; attempt 1 must never be silently clobbered (fennec friction #3,
+    P1 — lost the rejected frames). Existing destinations get a deterministic
+    numeric suffix: s1_000.png → s1_000.1.png → s1_000.2.png …"""
+
+    def test_item_named_existing_file_gets_numeric_suffix(self, fake_target, tmp_path, capsys):
+        _write_state(fake_target, record=RECORD, item_map=ITEM_MAP)
+        out = tmp_path / "out"
+        out.mkdir(parents=True)
+        (out / "s1_000.png").write_bytes(b"attempt-1-keep-me")
+
+        paths, data = _run_download(fake_target, tmp_path, capsys)
+
+        names = [Path(p).name for p in paths]
+        assert names == ["s1_000.1.png", "s1_001.png", "s2_000.png", f"{SHORT_ID}_003.png"]
+        # The prior attempt is untouched; the new download lives beside it.
+        assert (out / "s1_000.png").read_bytes() == b"attempt-1-keep-me"
+        assert (out / "s1_000.1.png").is_file()
+        # files[] reports the path that was ACTUALLY written.
+        assert data["files"][0]["path"] == str((out / "s1_000.1.png").resolve())
+
+    def test_suffix_increments_past_prior_retries(self, fake_target, tmp_path, capsys):
+        _write_state(fake_target, record=RECORD, item_map=ITEM_MAP)
+        out = tmp_path / "out"
+        out.mkdir(parents=True)
+        (out / "s1_000.png").write_bytes(b"attempt-1")
+        (out / "s1_000.1.png").write_bytes(b"attempt-2")
+
+        paths, _ = _run_download(fake_target, tmp_path, capsys)
+
+        assert Path(paths[0]).name == "s1_000.2.png"
+        assert (out / "s1_000.png").read_bytes() == b"attempt-1"
+        assert (out / "s1_000.1.png").read_bytes() == b"attempt-2"
+
+    def test_legacy_prompt8_naming_also_never_overwrites(self, fake_target, tmp_path, capsys):
+        _write_state(fake_target, record=None, item_map=None)
+        out = tmp_path / "out"
+        out.mkdir(parents=True)
+        (out / f"{SHORT_ID}_000.png").write_bytes(b"attempt-1")
+
+        paths, _ = _run_download(fake_target, tmp_path, capsys)
+
+        names = [Path(p).name for p in paths]
+        assert names == [f"{SHORT_ID}_000.1.png"] + [f"{SHORT_ID}_{i:03d}.png" for i in range(1, 4)]
+        assert (out / f"{SHORT_ID}_000.png").read_bytes() == b"attempt-1"
+
+
 class TestPipedErrorEnvelope:
     """`comfy --json run --wait | comfy download` is the SKILL.md-recommended
     pattern, so download must survive a failed upstream: an error envelope
