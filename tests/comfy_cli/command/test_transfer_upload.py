@@ -112,3 +112,36 @@ def test_upload_file_sanitizes_hostile_filename(tmp_path, monkeypatch):
     transfer._upload_file(hostile, _local_target(), overwrite=False)
 
     assert b'filename="a_b.png"' in opener.requests[0].data
+
+
+class TestUploadMachineModeStdoutPurity:
+    """Same contract as download: in machine modes stdout carries only JSON
+    (envelope last) and the human "✓ uploaded" line is pretty-mode-only."""
+
+    @pytest.fixture(autouse=True)
+    def reset_renderer(self):
+        from comfy_cli.output.renderer import reset_renderer_for_testing
+
+        reset_renderer_for_testing()
+        yield
+        reset_renderer_for_testing()
+
+    def test_json_mode_stdout_is_pure_json_no_human_line(self, asset, monkeypatch, capsys):
+        from comfy_cli.output import Renderer, set_renderer
+        from comfy_cli.output.renderer import OutputMode
+
+        opener = _FakeOpener()
+        monkeypatch.setattr(transfer, "_TRANSFER_OPENER", opener)
+        monkeypatch.setattr(transfer, "resolve_target", lambda where=None: _local_target())
+        set_renderer(Renderer(mode=OutputMode.JSON, command="upload"))
+
+        transfer.execute_upload([str(asset)], where="local")
+
+        captured = capsys.readouterr()
+        out_lines = [ln for ln in captured.out.splitlines() if ln.strip()]
+        assert out_lines, "the envelope must land on stdout"
+        parsed = [json.loads(ln) for ln in out_lines]
+        assert parsed[-1]["type"] == "envelope"
+        assert parsed[-1]["data"]["uploads"][0]["cloud_name"] == "ab12.png"
+        assert "uploaded" not in captured.out
+        assert "uploaded" not in captured.err

@@ -284,7 +284,10 @@ def execute_upload(
                 "type": file_type,
             }
         )
-        pprint(f"✓ uploaded {filename} → {cloud_name} ({file_type})")
+        # Human progress line is pretty-mode-only: machine consumers read the
+        # envelope, and stdout must stay pure JSON for `| jq` pipelines.
+        if renderer.is_pretty():
+            pprint(f"✓ uploaded {filename} → {cloud_name} ({file_type})")
 
     renderer.emit({"uploads": uploads}, command="upload")
     return cloud_names
@@ -477,10 +480,12 @@ def execute_download(
         saved_files.append(entry)
         saved_paths.append(str(local_path.resolve()))
 
-    pprint(f"✓ downloaded {len(saved_files)} file(s) to {dest}")
-
-    # Show inline previews for human users (skipped in JSON/agent mode)
+    # Human progress line + inline previews are pretty-mode-only: machine
+    # consumers read the envelope, and `comfy --json download | jq` requires
+    # stdout to carry nothing but JSON (envelope as the last line).
     if renderer.is_pretty():
+        pprint(f"✓ downloaded {len(saved_files)} file(s) to {dest}")
+
         from comfy_cli.output.preview import preview
 
         for sf in saved_files:

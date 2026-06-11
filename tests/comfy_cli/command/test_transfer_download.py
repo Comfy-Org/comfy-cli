@@ -214,6 +214,60 @@ class TestExtractOutputEntries:
         assert outputs[0]["url"] == "https://cloud.example.com/api/view?filename=ComfyUI_a.png&subfolder=&type=output"
 
 
+class TestMachineModeStdoutPurity:
+    """`comfy --json download` consumers pipe stdout into jq/json.load: stdout
+    must carry NOTHING but JSON (envelope last), and the human "✓ downloaded"
+    progress line is pretty-mode-only — it must not appear at all in machine
+    modes (fennec friction #4/#5)."""
+
+    def _download(self, fake_target, tmp_path):
+        with (
+            patch("comfy_cli.command.transfer.resolve_target", return_value=fake_target),
+            patch.object(transfer._DOWNLOAD_OPENER, "open", side_effect=lambda req: _FakeResp()),
+        ):
+            transfer.execute_download(PROMPT_ID, out_dir=str(tmp_path / "out"))
+
+    def test_json_mode_stdout_is_pure_json_envelope_last(self, fake_target, tmp_path, capsys):
+        from comfy_cli.caller import Caller
+
+        _write_state(fake_target, record=RECORD, item_map=ITEM_MAP)
+        # Resolve the mode the way the entrypoint does, from COMFY_OUTPUT=json.
+        renderer = Renderer.resolve(
+            env={"COMFY_OUTPUT": "json"},
+            is_stdout_tty=False,
+            caller=Caller(kind="user", agentic=False, source_env=None),
+            command="download",
+        )
+        assert renderer.mode is OutputMode.JSON
+        set_renderer(renderer)
+
+        self._download(fake_target, tmp_path)
+
+        captured = capsys.readouterr()
+        out_lines = [ln for ln in captured.out.splitlines() if ln.strip()]
+        assert out_lines, "the envelope must land on stdout"
+        parsed = [json.loads(ln) for ln in out_lines]  # every line is JSON
+        assert parsed[-1]["type"] == "envelope"
+        assert parsed[-1]["ok"] is True
+        # The human progress line is pretty-mode-only: not on stdout, and not
+        # duplicated to stderr either — the envelope already says everything.
+        assert "downloaded" not in captured.out
+        assert "downloaded" not in captured.err
+
+    def test_ndjson_mode_emits_no_human_progress_line(self, fake_target, tmp_path, capsys):
+        _write_state(fake_target, record=RECORD, item_map=ITEM_MAP)
+        set_renderer(Renderer(mode=OutputMode.NDJSON, command="download"))
+
+        self._download(fake_target, tmp_path)
+
+        captured = capsys.readouterr()
+        for ln in captured.out.splitlines():
+            if ln.strip():
+                json.loads(ln)
+        assert "downloaded" not in captured.out
+        assert "downloaded" not in captured.err
+
+
 # ---------------------------------------------------------------------------
 # _default_out_dir — project/1 root wins over the legacy config key
 # ---------------------------------------------------------------------------
