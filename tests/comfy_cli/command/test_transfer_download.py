@@ -212,3 +212,48 @@ class TestExtractOutputEntries:
         assert [o["filename"] for o in outputs] == [e["filename"] for e in entries]
         # URLs are the view_url of each entry — same triple, same encoding.
         assert outputs[0]["url"] == "https://cloud.example.com/api/view?filename=ComfyUI_a.png&subfolder=&type=output"
+
+
+# ---------------------------------------------------------------------------
+# _default_out_dir — project/1 root wins over the legacy config key
+# ---------------------------------------------------------------------------
+
+
+class TestDefaultOutDir:
+    def test_prefers_governing_project_outputs(self, tmp_path, monkeypatch):
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        (proj / "comfy.yaml").write_text("schema: project/1\ndefaults:\n  where: cloud\n")
+        monkeypatch.chdir(proj)
+
+        assert transfer._default_out_dir() == str(proj.resolve() / "outputs")
+
+    def test_falls_back_to_config_key_outside_project(self, tmp_path, monkeypatch):
+        plain = tmp_path / "plain"
+        plain.mkdir()
+        monkeypatch.chdir(plain)
+        legacy = tmp_path / "legacy"
+        (legacy / "outputs").mkdir(parents=True)
+
+        class _FakeCM:
+            def get(self, key):
+                return str(legacy)
+
+        import comfy_cli.config_manager as config_manager
+
+        monkeypatch.setattr(config_manager, "ConfigManager", _FakeCM)
+        assert transfer._default_out_dir() == str(legacy / "outputs")
+
+    def test_defaults_to_relative_outputs(self, tmp_path, monkeypatch):
+        plain = tmp_path / "plain"
+        plain.mkdir()
+        monkeypatch.chdir(plain)
+
+        class _FakeCM:
+            def get(self, key):
+                return None
+
+        import comfy_cli.config_manager as config_manager
+
+        monkeypatch.setattr(config_manager, "ConfigManager", _FakeCM)
+        assert transfer._default_out_dir() == "./outputs"

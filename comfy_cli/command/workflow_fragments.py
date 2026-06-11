@@ -122,6 +122,10 @@ def compose_cmd(
             written.append(str(target))
         single_out = None  # no single runnable file; consumers must read `written`
 
+    # Provenance journal: one line into the governing project, if any
+    # (anchored at the blueprint's dir, not cwd). Best-effort by contract.
+    _journal_compose(blueprint, written)
+
     first_summary = graphs[0][1]
     total_nodes = sum(s["nodes"] for _, s in graphs)
     fragments_used = sorted({f for _, s in graphs for f in s["fragments_used"]})
@@ -151,6 +155,19 @@ def compose_cmd(
         rprint(f"  nodes     : {total_nodes}")
         rprint(f"  fragments : {', '.join(fragments_used)}")
     renderer.emit(payload, command="workflow compose")
+
+
+def _journal_compose(blueprint: Path, written: list[str]) -> None:
+    """Append the compose event to the governing project's run journal.
+    Wrapped end-to-end: a journaling failure can never fail the compose."""
+    try:
+        from comfy_cli import project as project_module
+
+        p = project_module.find_project(blueprint.resolve().parent)
+        if p is not None:
+            project_module.journal(p, cmd="compose", blueprint=str(blueprint), written=list(written))
+    except Exception:  # noqa: BLE001 — best-effort by contract
+        pass
 
 
 @fragment_app.command("ls", help="List fragments in a library directory.")

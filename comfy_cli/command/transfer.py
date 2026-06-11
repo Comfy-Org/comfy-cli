@@ -30,7 +30,18 @@ from comfy_cli.target import resolve_target
 
 
 def _default_out_dir() -> str:
-    """Return the configured project outputs dir, or ./outputs as fallback."""
+    """Return the governing project/1 root's ``outputs/`` dir, else the
+    legacy ``default_project_dir`` config key's outputs dir, else ./outputs."""
+    # project/1 convention first: downloads land in <root>/outputs by
+    # contract (execute_download mkdirs the dest, so it need not exist yet).
+    try:
+        from comfy_cli.project import find_project
+
+        p = find_project()
+        if p is not None:
+            return str(p.root / "outputs")
+    except Exception:  # noqa: BLE001
+        pass
     try:
         from comfy_cli.config_manager import ConfigManager
         from comfy_cli.constants import CONFIG_KEY_DEFAULT_PROJECT_DIR

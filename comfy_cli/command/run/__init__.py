@@ -269,6 +269,7 @@ def execute(
                 execution.queue()
         else:
             execution.queue()
+        _journal_run(workflow_name, execution.prompt_id, "local")
         if wait:
             execution.watch_execution()
             end = time.time()
@@ -435,6 +436,20 @@ def execute(
     finally:
         if progress is not None:
             progress.stop()
+
+
+def _journal_run(workflow: str, prompt_id, where: str) -> None:
+    """Append the run-submit event to the governing project's run journal
+    (anchored at cwd). Wrapped end-to-end: a journaling failure can never
+    fail the run."""
+    try:
+        from comfy_cli import project as project_module
+
+        p = project_module.find_project()
+        if p is not None:
+            project_module.journal(p, cmd="run", workflow=str(workflow), prompt_id=prompt_id, where=where)
+    except Exception:  # noqa: BLE001 — best-effort by contract
+        pass
 
 
 def _count_output_nodes(workflow: dict, object_info: dict) -> int | None:
@@ -631,6 +646,7 @@ def execute_cloud(
         )
         state.item_map = (compose_meta or {}).get("items")
         state_file = jobs_state.write(state)
+        _journal_run(workflow_name, submit.prompt_id, "cloud")
         watcher_spawned = _spawn_watcher(submit.prompt_id, where="cloud", notify=notify)
 
         if renderer.is_pretty():
@@ -675,6 +691,7 @@ def execute_cloud(
     )
     state.item_map = (compose_meta or {}).get("items")
     state_file = jobs_state.write(state)
+    _journal_run(workflow_name, submit.prompt_id, "cloud")
 
     try:
 

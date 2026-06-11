@@ -1503,3 +1503,122 @@ class TestLocalExecuteItemMapAndGroupedOutputs:
 
         assert env["data"]["outputs_by_node"] == {"9": [self.URL_A]}
         assert env["data"]["outputs_by_item"] == {}
+
+
+class TestRunJournal:
+    """Successful submits journal one runs.jsonl line into the governing
+    project (cwd-anchored); failures of the journal itself never fail the run."""
+
+    API_WORKFLOW = {
+        "1": {"class_type": "KSampler", "inputs": {}},
+        "9": {"class_type": "SaveImage", "inputs": {"images": ["1", 0]}},
+    }
+
+    @pytest.fixture
+    def proj_dir(self, tmp_path, monkeypatch):
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        (proj / "comfy.yaml").write_text("schema: project/1\ndefaults:\n  where: cloud\n")
+        monkeypatch.chdir(proj)
+        return proj
+
+    @pytest.fixture
+    def fake_target(self):
+        from comfy_cli.target import Target
+
+        return Target(
+            kind="cloud",
+            base_url="https://cloud.example.com",
+            path_prefix="/api",
+            history_path="history_v2",
+            jobs_path="jobs",
+            api_key="test-api-key",
+        )
+
+    def _workflow_file(self, proj_dir):
+        path = proj_dir / "wf.json"
+        path.write_text(json.dumps(self.API_WORKFLOW))
+        return str(path)
+
+    def _journal_events(self, proj_dir):
+        path = proj_dir / ".comfy" / "runs.jsonl"
+        if not path.exists():
+            return []
+        return [json.loads(ln) for ln in path.read_text().splitlines() if ln.strip()]
+
+    def _execute_cloud_nowait(self, workflow_file, fake_target):
+        from comfy_cli.comfy_client import SubmitResult
+        from comfy_cli.command.run import execute_cloud
+
+        mock_client = MagicMock()
+        mock_client.submit_prompt.return_value = SubmitResult(prompt_id="prompt-journal", number=1, node_errors={})
+        with (
+            patch("comfy_cli.target.resolve_target", return_value=fake_target),
+            patch("comfy_cli.cql.engine._load_from_target", return_value={}),
+            patch("comfy_cli.comfy_client.Client", return_value=mock_client),
+            patch("comfy_cli.command.run._spawn_watcher"),
+        ):
+            execute_cloud(workflow_file, wait=False)
+
+    def test_cloud_submit_journals_inside_project(self, proj_dir, fake_target):
+        workflow_file = self._workflow_file(proj_dir)
+        self._execute_cloud_nowait(workflow_file, fake_target)
+
+        events = self._journal_events(proj_dir)
+        assert len(events) == 1
+        ev = events[0]
+        assert ev["cmd"] == "run"
+        assert ev["workflow"] == workflow_file
+        assert ev["prompt_id"] == "prompt-journal"
+        assert ev["where"] == "cloud"
+        assert "ts" in ev
+
+    def test_local_submit_journals_inside_project(self, proj_dir):
+        workflow_file = self._workflow_file(proj_dir)
+        mock_exec = MagicMock()
+        mock_exec.prompt_id = "prompt-local-journal"
+        mock_exec.client_id = "cid"
+        mock_exec.outputs = []
+        mock_exec.output_entries = []
+        with (
+            patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),
+            patch("comfy_cli.command.run._fetch_object_info", return_value={}),
+            patch("comfy_cli.command.run.ExecutionProgress"),
+            patch("comfy_cli.command.run.WorkflowExecution", return_value=mock_exec),
+            patch("comfy_cli.command.run._spawn_watcher", return_value=True),
+            patch("comfy_cli.command.run._tail_state_file"),
+        ):
+            execute(workflow_file, host="127.0.0.1", port=8188, wait=False, timeout=30)
+
+        events = self._journal_events(proj_dir)
+        assert len(events) == 1
+        ev = events[0]
+        assert ev["cmd"] == "run"
+        assert ev["workflow"] == workflow_file
+        assert ev["prompt_id"] == "prompt-local-journal"
+        assert ev["where"] == "local"
+
+    def test_run_outside_project_writes_no_journal(self, tmp_path, monkeypatch, fake_target):
+        plain = tmp_path / "plain"
+        plain.mkdir()
+        monkeypatch.chdir(plain)
+        workflow_file = plain / "wf.json"
+        workflow_file.write_text(json.dumps(self.API_WORKFLOW))
+        self._execute_cloud_nowait(str(workflow_file), fake_target)
+        assert not (plain / ".comfy").exists()
+
+    def test_journal_failure_does_not_fail_run(self, proj_dir, fake_target, monkeypatch):
+        import comfy_cli.project as project_mod
+
+        def _boom(*a, **kw):
+            raise RuntimeError("journal exploded")
+
+        monkeypatch.setattr(project_mod, "journal", _boom)
+        workflow_file = self._workflow_file(proj_dir)
+        # Must not raise — the wrapped hook swallows the failure.
+        self._execute_cloud_nowait(workflow_file, fake_target)
+
+        from comfy_cli import jobs_state
+
+        state = jobs_state.read("prompt-journal")
+        assert state is not None  # submit completed normally

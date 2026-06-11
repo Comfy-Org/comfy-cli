@@ -1062,3 +1062,69 @@ def test_foreach_literal_string_param_not_namespaced():
     # $item substitution still works on both paths
     assert _substitute_item("$item.x", {"x": 42}, ns="i0", alias_refs=False) == 42
     assert _substitute_item("$item.x", {"x": 42}, ns="i0", alias_refs=True) == 42
+
+
+# ---------------------------------------------------------------------------
+# compose journals into the governing project (best-effort)
+# ---------------------------------------------------------------------------
+
+
+class TestComposeJournal:
+    """Inside a project/1 tree, compose appends one runs.jsonl line; outside,
+    nothing is written; a journaling failure never fails the command."""
+
+    BLUEPRINT = textwrap.dedent("""\
+        pipeline:
+          - fragment: text_encode
+            alias: p
+            inputs: {clip: clip_a}
+            params: {text: hello}
+    """)
+
+    def _project(self, tmp_path: Path) -> Path:
+        proj = tmp_path / "proj"
+        (proj / "blueprints").mkdir(parents=True)
+        (proj / "comfy.yaml").write_text("schema: project/1\ndefaults:\n  where: cloud\n")
+        return proj
+
+    def test_compose_inside_project_appends_journal_line(self, lib_dir: Path, tmp_path: Path, capsys):
+        proj = self._project(tmp_path)
+        blueprint = proj / "blueprints" / "demo.yaml"
+        blueprint.write_text(self.BLUEPRINT)
+        out = proj / "built.json"
+
+        envelope = _run(["compose", str(blueprint), "-o", str(out), "--lib", str(lib_dir)], capsys)
+        assert envelope["ok"] is True
+
+        lines = (proj / ".comfy" / "runs.jsonl").read_text().splitlines()
+        assert len(lines) == 1
+        ev = json.loads(lines[0])
+        assert ev["cmd"] == "compose"
+        assert ev["blueprint"] == str(blueprint)
+        assert ev["written"] == [str(out)]
+        assert "ts" in ev
+
+    def test_compose_outside_project_writes_no_journal(self, lib_dir: Path, tmp_path: Path, capsys):
+        blueprint = tmp_path / "demo.yaml"
+        blueprint.write_text(self.BLUEPRINT)
+        out = tmp_path / "built.json"
+
+        envelope = _run(["compose", str(blueprint), "-o", str(out), "--lib", str(lib_dir)], capsys)
+        assert envelope["ok"] is True
+        assert not (tmp_path / ".comfy").exists()
+
+    def test_journal_failure_does_not_fail_compose(self, lib_dir: Path, tmp_path: Path, capsys, monkeypatch):
+        import comfy_cli.project as project_mod
+
+        def _boom(*a, **kw):
+            raise RuntimeError("journal exploded")
+
+        monkeypatch.setattr(project_mod, "journal", _boom)
+        proj = self._project(tmp_path)
+        blueprint = proj / "blueprints" / "demo.yaml"
+        blueprint.write_text(self.BLUEPRINT)
+        out = proj / "built.json"
+
+        envelope = _run(["compose", str(blueprint), "-o", str(out), "--lib", str(lib_dir)], capsys)
+        assert envelope["ok"] is True
+        assert out.exists()

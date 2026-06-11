@@ -44,6 +44,72 @@ def test_resolve_invalid_raises():
     assert "hybrid" in str(exc_info.value)
 
 
+# ---------------------------------------------------------------------------
+# project/1 precedence: flag → env → project → config → auto
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_flag_beats_project():
+    r = where_module.resolve(flag="local", env={}, project_value="cloud")
+    assert r.target is where_module.WhereTarget.LOCAL
+    assert r.source == "flag"
+
+
+def test_resolve_env_beats_project():
+    r = where_module.resolve(flag=None, env={"COMFY_WHERE": "local"}, project_value="cloud")
+    assert r.target is where_module.WhereTarget.LOCAL
+    assert r.source == "env"
+
+
+def test_resolve_project_beats_config():
+    r = where_module.resolve(flag=None, env={}, project_value="cloud", config_value="local")
+    assert r.target is where_module.WhereTarget.CLOUD
+    assert r.source == "project"
+
+
+def test_resolve_explicit_none_project_value_disables_lookup(monkeypatch):
+    """``project_value=None`` opts out entirely — no filesystem discovery."""
+    import comfy_cli.project as project_mod
+
+    def _boom(*a, **kw):  # pragma: no cover — must not be called
+        raise AssertionError("find_project must not be called when project_value=None")
+
+    monkeypatch.setattr(project_mod, "find_project", _boom)
+    r = where_module.resolve(flag=None, env={}, project_value=None, config_value="cloud")
+    assert r.target is where_module.WhereTarget.CLOUD
+    assert r.source == "config"
+
+
+def test_resolve_default_sentinel_discovers_project(tmp_path, monkeypatch):
+    """Left unset, resolve() looks up the governing project's defaults.where —
+    the ~10 existing call sites get project routing without changes."""
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (proj / "comfy.yaml").write_text("schema: project/1\ndefaults:\n  where: cloud\n")
+    monkeypatch.chdir(proj)
+
+    r = where_module.resolve(flag=None, env={}, config_value="local")
+    assert r.target is where_module.WhereTarget.CLOUD
+    assert r.source == "project"
+
+
+def test_resolve_no_project_falls_through_to_config(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)  # no comfy.yaml anywhere up a tmp tree
+    r = where_module.resolve(flag=None, env={}, config_value="cloud")
+    assert r.target is where_module.WhereTarget.CLOUD
+    assert r.source == "config"
+
+
+def test_resolve_project_without_where_default_falls_through(tmp_path, monkeypatch):
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (proj / "comfy.yaml").write_text("schema: project/1\n")
+    monkeypatch.chdir(proj)
+    r = where_module.resolve(flag=None, env={}, config_value="cloud")
+    assert r.target is where_module.WhereTarget.CLOUD
+    assert r.source == "config"
+
+
 def test_cloud_preflight_without_session_returns_not_configured(isolated_secrets):
     err = where_module.cloud_preflight()
     assert err is not None

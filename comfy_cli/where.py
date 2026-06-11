@@ -9,8 +9,10 @@ Precedence for ``--where``:
 
 1. Explicit ``--where`` flag.
 2. ``COMFY_WHERE`` environment variable.
-3. ``where_default`` in the config file.
-4. Auto-detect: ``cloud`` if any cloud credential is configured
+3. ``defaults.where`` in the governing project/1 ``comfy.yaml``
+   (see :mod:`comfy_cli.project`).
+4. ``where_default`` in the config file.
+5. Auto-detect: ``cloud`` if any cloud credential is configured
    (API key env/store, or active OAuth session), else ``local``.
 """
 
@@ -38,7 +40,14 @@ CONFIG_KEY_WHERE_DEFAULT = "where_default"
 @dataclass
 class WhereResolution:
     target: WhereTarget
-    source: str  # "flag" | "env" | "config" | "default"
+    source: str  # "flag" | "env" | "project" | "config" | "default"
+
+
+# Sentinel: "caller didn't say" — resolve() then looks up the governing
+# project itself, so the existing call sites get project routing without
+# changes. Pass ``project_value=None`` to disable the lookup explicitly
+# (tests / deliberately project-unaware callers).
+_UNSET: Any = object()
 
 
 def resolve(
@@ -46,6 +55,7 @@ def resolve(
     flag: str | None = None,
     env: Mapping[str, str] | None = None,
     config_value: str | None = None,
+    project_value: str | None = _UNSET,
 ) -> WhereResolution:
     """Pick the target. Invalid values raise ``ValueError`` with a clear message."""
     e = env if env is not None else os.environ
@@ -54,6 +64,10 @@ def resolve(
     env_choice = e.get(ENV_DEFAULT)
     if env_choice:
         return WhereResolution(target=_parse(env_choice), source="env")
+    if project_value is _UNSET:
+        project_value = _project_where_default()
+    if project_value:
+        return WhereResolution(target=_parse(project_value), source="project")
     if config_value:
         return WhereResolution(target=_parse(config_value), source="config")
 
@@ -61,6 +75,22 @@ def resolve(
     if _has_cloud_credentials():
         return WhereResolution(target=WhereTarget.CLOUD, source="auto")
     return WhereResolution(target=WhereTarget.LOCAL, source="default")
+
+
+def _project_where_default() -> str | None:
+    """``defaults.where`` from the project/1 ``comfy.yaml`` governing cwd, if
+    any. Discovery itself never raises (see :mod:`comfy_cli.project`); a
+    present-but-invalid value is parsed by the caller like any other source."""
+    # Lazy import: keep `where` cheap for the common no-project path and
+    # avoid import cycles.
+    from comfy_cli.project import find_project
+
+    project = find_project()
+    if project is None:
+        return None
+    defaults = project.config.get("defaults")
+    value = defaults.get("where") if isinstance(defaults, dict) else None
+    return value if isinstance(value, str) and value else None
 
 
 def _has_cloud_credentials() -> bool:
