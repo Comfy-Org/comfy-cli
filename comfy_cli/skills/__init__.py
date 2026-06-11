@@ -44,11 +44,14 @@ _SKILL_PACKAGE_ROOT = "comfy_cli.skills"
 _SKILL_FILE = "SKILL.md"
 
 
+# (name, subdir) — the subdir is named after the skill, same as the rule
+# `skills validate` enforces on third-party skills (directory == frontmatter
+# name). The bundled skills must satisfy their own convention.
 BUNDLED_SKILLS: tuple[tuple[str, str], ...] = (
     ("comfy", "comfy"),
-    ("comfy-fragments", "fragments"),
-    ("comfy-debug", "debug"),
-    ("comfy-relay", "relay"),
+    ("comfy-fragments", "comfy-fragments"),
+    ("comfy-debug", "comfy-debug"),
+    ("comfy-relay", "comfy-relay"),
 )
 
 

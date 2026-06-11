@@ -66,11 +66,10 @@ where = [ "." ]
 include = [ "comfy_cli*" ]
 
 [tool.setuptools.package-data]
-# Keep this list in sync with BUNDLED_SKILLS in comfy_cli/skills/__init__.py.
-"comfy_cli.skills.comfy" = [ "SKILL.md" ]
-"comfy_cli.skills.fragments" = [ "SKILL.md" ]
-"comfy_cli.skills.debug" = [ "SKILL.md" ]
-"comfy_cli.skills.relay" = [ "SKILL.md" ]
+# Bundled skills: subdirs of comfy_cli.skills named after each skill (kept in
+# sync with BUNDLED_SKILLS). Hyphenated dirs aren't importable packages, so
+# they're plain data dirs matched by glob from the parent package.
+"comfy_cli.skills" = [ "*/SKILL.md" ]
 "comfy_cli.schemas" = [ "*.json", "*.md" ]
 
 "comfy_cli.cql.data" = [ "*.yaml", "*.json" ]
