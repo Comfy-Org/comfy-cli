@@ -833,6 +833,26 @@ independent branches automatically. Only split into separate workflows when:
 - Different stages need different routing (local vs cloud)
 - The workflow would exceed server memory constraints
 
+**Video productions: prefer ONE graph from keyframes to finished film.**
+Generated VIDEO flows between nodes as wires — no save/upload round-trip —
+so clips + music + assembly belong in a single graph:
+
+```
+LoadImage($asset.s1_first.png) ×N  →  N× first/last-frame i2v nodes
+  ├→ per-scene SaveVideo            (side-taps: each clip saved for review)
+  └→ N× GetVideoComponents → BatchImagesNode(images.image0…N, scene order)
+       → CreateVideo(fps ← GetVideoComponents, audio ← music node) → SaveVideo
+```
+
+The side-taps mean ONE job emits both the reviewable clips AND the
+assembled film; if review fails a scene, fix and re-run the graph (the
+extra assembly cost is small next to the video generations). The
+job-boundary alternative (save clips → download → `assets push` →
+LoadVideo in a second graph) is the fallback for a genuine review gate —
+and note its current limit: pushed *images* appear in LoadImage's choices,
+pushed *videos* are not yet catalogued for LoadVideo on cloud, so the
+cross-job video handoff requires local assembly today.
+
 Some steps don't belong in a Comfy graph at all — final assembly, format
 conversion, timing/structure analysis of generated media. Comfy outputs are
 just files; when the graph can't express what the task needs, you're free to
