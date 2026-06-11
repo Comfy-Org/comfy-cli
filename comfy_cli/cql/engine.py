@@ -48,6 +48,20 @@ class Port:
     enum_values: list[str] = field(default_factory=list)
     options: PortOptions = field(default_factory=PortOptions)
 
+    @property
+    def is_autogrow(self) -> bool:
+        """V3 autogrow input (e.g. BatchImagesNode.images): the schema declares
+        ONE input, but the server expects autogrown slot keys —
+        ``images.image0``, ``images.image1``, … one per connection."""
+        return self.type.startswith("COMFY_AUTOGROW")
+
+    def autogrow_slot_example(self) -> str:
+        """Best-effort slot-key example for hints. The element name comes from
+        the node's V3 definition and isn't in object_info; the observed server
+        convention is the singular of the input name (images → image0)."""
+        stem = self.name[:-1] if self.name.endswith("s") else self.name
+        return f"{self.name}.{stem}0, {self.name}.{stem}1, …"
+
     def validate_shape(self, value: Any) -> str | None:
         """Hard-reject on JSON-shape mismatch. Returns error message or None."""
         if self.type == "INT":
@@ -710,7 +724,35 @@ class Graph:
                 continue
 
             port_by_name = {p.name: p for p in m.inputs}
+            # V3 autogrow inputs are declared once (e.g. `images`) but wired as
+            # slot keys (`images.image0`, `images.image1`, …). Track which
+            # autogrow ports actually received a slot so the required-but-empty
+            # case surfaces here instead of as a cryptic server reject.
+            autogrow_ports = {p.name: p for p in m.inputs if p.is_autogrow}
+            autogrow_seen: set[str] = set()
             for input_name, value in (node_data.get("inputs") or {}).items():
+                if autogrow_ports and "." in input_name:
+                    base = input_name.split(".", 1)[0]
+                    if base in autogrow_ports:
+                        autogrow_seen.add(base)
+                if input_name in autogrow_ports and isinstance(value, list) and len(value) == 2:
+                    port = autogrow_ports[input_name]
+                    errors.append(
+                        {
+                            "node_id": node_id,
+                            "field": input_name,
+                            "code": "autogrow_bare_input",
+                            "message": (
+                                f"input {input_name!r} is an autogrow input ({port.type}) and cannot be "
+                                f"wired as a single connection — the server expects one slot key per "
+                                f"connection"
+                            ),
+                            "hint": f"wire one key per connection: {port.autogrow_slot_example()} "
+                            f"(e.g. \"{input_name}.{input_name[:-1] if input_name.endswith('s') else input_name}0\": "
+                            f"[{value[0]!r}, {value[1]!r}])",
+                        }
+                    )
+                    continue
                 # Link references: [source_node_id, output_index]
                 if isinstance(value, list) and len(value) == 2:
                     src_id = str(value[0])
@@ -816,6 +858,21 @@ class Graph:
                     else:
                         w["field"] = f"{node_id}.{class_type}.{w['field']}"
                         warnings.append(w)
+
+            for base, port in autogrow_ports.items():
+                if port.required and base not in autogrow_seen and base not in (node_data.get("inputs") or {}):
+                    errors.append(
+                        {
+                            "node_id": node_id,
+                            "field": base,
+                            "code": "autogrow_no_slots",
+                            "message": (
+                                f"required autogrow input {base!r} has no connected slots — "
+                                f"the server will reject this node"
+                            ),
+                            "hint": f"wire one key per connection: {port.autogrow_slot_example()}",
+                        }
+                    )
 
         return {
             "valid": len(errors) == 0,
@@ -945,6 +1002,13 @@ class Graph:
                         "step": p.options.step,
                         "default": p.options.default,
                     },
+                    # Autogrow inputs wire as one slot key per connection;
+                    # surface that here so `nodes show` is self-documenting.
+                    **(
+                        {"autogrow": True, "wire_as": p.autogrow_slot_example()}
+                        if p.is_autogrow
+                        else {}
+                    ),
                 }
                 for p in m.inputs
             ],

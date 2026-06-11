@@ -778,7 +778,10 @@ Hard-won lessons per domain. Not a tutorial — a reference card.
 - **SaveVideo is REQUIRED** — video API nodes produce VIDEO but are NOT output nodes
 - **Never hardcode fps** — wire from GetVideoComponents output index 2
 - Motion prompts: describe HOW the scene moves, not WHAT is in it
-- Assembly: GetVideoComponents → ImageBatch → CreateVideo → SaveVideo
+- Assembly: GetVideoComponents → BatchImagesNode → CreateVideo → SaveVideo (ImageBatch is deprecated)
+- Autogrow inputs (type COMFY_AUTOGROW_*, e.g. BatchImagesNode `images`): wire ONE slot key per
+  connection — `"images.image0": [..], "images.image1": [..]` — never a single `images` link.
+  `nodes show` prints the `wire_as` form; `comfy validate` rejects the bare form before submit.
 - I2V pattern: LoadImage → I2VNode → SaveVideo (check `nodes show` for the I2V node)
 - Audio sync: match durations — short audio = silent ending, long audio = truncated ending
 - Survey first: `comfy nodes ls --produces VIDEO --exclude-deprecated`, `comfy nodes ls --category "partner/video*"`, `comfy templates ls --type video` — compare OSS, partner-API, and gallery before choosing

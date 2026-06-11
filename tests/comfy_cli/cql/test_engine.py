@@ -139,6 +139,23 @@ def _object_info() -> dict[str, Any]:
             "output_node": False,
             "python_module": "nodes",
         },
+        # V3 autogrow node mirroring the live cloud BatchImagesNode shape:
+        # one declared input `images` (COMFY_AUTOGROW_V3), but the server
+        # expects autogrown slot keys `images.image0`, `images.image1`, …
+        "BatchImagesNode": {
+            "input": {
+                "required": {
+                    "images": ["COMFY_AUTOGROW_V3", {}],
+                },
+            },
+            "input_order": {"required": ["images"]},
+            "output": ["IMAGE"],
+            "output_name": ["IMAGE"],
+            "category": "image",
+            "display_name": "Batch Images",
+            "output_node": False,
+            "python_module": "nodes",
+        },
         # Partner-API video node mirroring the live cloud shape:
         #  - int-valued combos (`duration`, `fps`) — list-of-ints form
         #  - dict-form combos (`resolution`) — ["COMBO", {"options": [...]}]
@@ -673,6 +690,76 @@ class TestValidateWorkflow:
         assert "above_max" in codes
 
 
+class TestAutogrowInputs:
+    """COMFY_AUTOGROW_V3 inputs (e.g. BatchImagesNode.images): the schema
+    declares ONE input, the server expects autogrown slot keys
+    `images.image0`, `images.image1`, … — one per connection."""
+
+    def _loaders(self) -> dict:
+        # Two IMAGE producers from the fixture catalog (VAEDecode → IMAGE).
+        return {
+            "10": {"class_type": "VAEDecode", "inputs": {}},
+            "11": {"class_type": "VAEDecode", "inputs": {}},
+        }
+
+    def test_dotted_slots_validate_clean(self, graph: Graph):
+        wf = {
+            **self._loaders(),
+            "20": {
+                "class_type": "BatchImagesNode",
+                "inputs": {"images.image0": ["10", 0], "images.image1": ["11", 0]},
+            },
+        }
+        result = graph.validate_workflow(wf)
+        assert result["valid"] is True, result["errors"]
+        # The dotted slots must not trip type-mismatch or unknown-input noise.
+        assert result["warnings"] == []
+
+    def test_bare_link_wiring_errors_with_slot_hint(self, graph: Graph):
+        wf = {
+            **self._loaders(),
+            "20": {
+                "class_type": "BatchImagesNode",
+                "inputs": {"images": ["10", 0]},
+            },
+        }
+        result = graph.validate_workflow(wf)
+        assert result["valid"] is False
+        err = next(e for e in result["errors"] if e["code"] == "autogrow_bare_input")
+        assert err["node_id"] == "20"
+        assert "images.image0" in err["hint"]
+
+    def test_required_autogrow_with_no_slots_errors(self, graph: Graph):
+        wf = {
+            "20": {"class_type": "BatchImagesNode", "inputs": {}},
+        }
+        result = graph.validate_workflow(wf)
+        assert result["valid"] is False
+        err = next(e for e in result["errors"] if e["code"] == "autogrow_no_slots")
+        assert err["node_id"] == "20"
+        assert "images.image0" in err["hint"]
+
+    def test_dangling_dotted_slot_still_checked(self, graph: Graph):
+        wf = {
+            "20": {
+                "class_type": "BatchImagesNode",
+                "inputs": {"images.image0": ["99", 0]},
+            },
+        }
+        result = graph.validate_workflow(wf)
+        codes = [e["code"] for e in result["errors"]]
+        assert "dangling_edge" in codes
+
+    def test_describe_marks_autogrow(self, graph: Graph):
+        desc = graph.morphism_to_dict(graph.node("BatchImagesNode"))
+        images = next(i for i in desc["inputs"] if i["name"] == "images")
+        assert images["autogrow"] is True
+        assert "images.image0" in images["wire_as"]
+        # Non-autogrow inputs don't carry the keys.
+        ks = graph.morphism_to_dict(graph.node("KSampler"))
+        assert all("autogrow" not in i for i in ks["inputs"])
+
+
 # ===========================================================================
 # TestDirectModeSlots
 # ===========================================================================
@@ -959,7 +1046,7 @@ class TestBrowse:
         assert "Root" in tree
 
     def test_node_count(self, graph: Graph):
-        assert graph.node_count() == 7
+        assert graph.node_count() == 8
 
     def test_all_nodes_sorted(self, graph: Graph):
         nodes = graph.all_nodes()
