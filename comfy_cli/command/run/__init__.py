@@ -33,6 +33,7 @@ from comfy_cli.command.run.loader import _classify_api_workflow as _classify_api
 from comfy_cli.command.run.loader import _load_workflow_file as _load_workflow_file
 from comfy_cli.command.run.loader import _node_errors_to_list as _node_errors_to_list
 from comfy_cli.command.run.loader import is_ui_workflow as is_ui_workflow
+from comfy_cli.command.run.loader import pop_compose_meta as pop_compose_meta
 from comfy_cli.command.run.preflight import PARTNER_NODE_CATEGORY_PREFIXES as PARTNER_NODE_CATEGORY_PREFIXES
 from comfy_cli.command.run.preflight import _detect_partner_nodes as _detect_partner_nodes
 from comfy_cli.command.run.preflight import _fetch_object_info as _fetch_object_info
@@ -178,6 +179,9 @@ def execute(
             )
             raise typer.Exit(code=1)
         workflow = validated
+        # Strip the compose/1 provenance block before preflight + submit; the
+        # server would reject (or warn on) a top-level non-node key.
+        pop_compose_meta(workflow)
 
     # Stream mode: emit the workflow graph so agents have a complete audit
     # trail of what the CLI is about to submit (no-op otherwise).
@@ -519,6 +523,10 @@ def execute_cloud(
         )
         raise typer.Exit(code=1)
 
+    # Strip the compose/1 provenance block before preflight + submit, keeping
+    # its foreach item map to stash on the job state at submit time.
+    compose_meta = pop_compose_meta(parsed_workflow)
+
     if print_prompt:
         # Documented dry-run: show the API-format graph that WOULD be sent and
         # exit WITHOUT POSTing. Mirrors local execute()'s print_prompt branch.
@@ -607,6 +615,7 @@ def execute_cloud(
             where="cloud",
             base_url=target.base_url,
         )
+        state.item_map = (compose_meta or {}).get("items")
         state_file = jobs_state.write(state)
         watcher_spawned = _spawn_watcher(submit.prompt_id, where="cloud", notify=notify)
 
@@ -650,6 +659,7 @@ def execute_cloud(
         where="cloud",
         base_url=target.base_url,
     )
+    state.item_map = (compose_meta or {}).get("items")
     state_file = jobs_state.write(state)
 
     try:

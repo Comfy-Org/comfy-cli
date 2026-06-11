@@ -1170,25 +1170,23 @@ class TestExecuteCloudWait:
         # No item_map on the state → key present, empty dict.
         assert data["outputs_by_item"] == {}
 
-    def test_wait_envelope_groups_outputs_by_item_when_item_map_present(
-        self, api_workflow_file, fake_target, capsys, monkeypatch
-    ):
-        from comfy_cli import jobs_state
-
-        orig_new = jobs_state.new
-
-        def new_with_item_map(*args, **kwargs):
-            state = orig_new(*args, **kwargs)
-            state.item_map = {
+    def test_wait_envelope_groups_outputs_by_item_when_item_map_present(self, tmp_path, fake_target, capsys):
+        # The real mechanism: compose embeds `_meta.items` in the compiled
+        # workflow; run pops it at submit and stashes it on the state file.
+        wf = dict(self.API_WORKFLOW)
+        wf["_meta"] = {
+            "schema": "compose/1",
+            "blueprint": "/abs/story.yaml",
+            "items": {
                 "s1": {"nodes": ["1", "9"], "save_node": "9", "prefix": "outputs/s1"},
                 "s2": {"nodes": ["12"], "save_node": "12", "prefix": "outputs/s2"},
-            }
-            return state
-
-        monkeypatch.setattr(jobs_state, "new", new_with_item_map)
+            },
+        }
+        composed_file = tmp_path / "composed.json"
+        composed_file.write_text(json.dumps(wf))
 
         client = self._client(fake_target)
-        env = self._wait_envelope(api_workflow_file, fake_target, client, capsys)
+        env = self._wait_envelope(str(composed_file), fake_target, client, capsys)
 
         url_a = "https://cloud.example.com/api/view?filename=a.png&subfolder=&type=output"
         url_v = "https://cloud.example.com/api/view?filename=v.mp4&subfolder=&type=output"
@@ -1209,3 +1207,190 @@ class TestExecuteCloudWait:
         # The new keys are part of the documented contract, not just tolerated.
         assert "outputs_by_node" in schema["properties"]
         assert "outputs_by_item" in schema["properties"]
+
+
+# ---------------------------------------------------------------------------
+# pop_compose_meta — strip compose provenance before preflight/submit
+# ---------------------------------------------------------------------------
+
+
+class TestPopComposeMeta:
+    """`compose` embeds `_meta` (compose/1 provenance) in the compiled
+    workflow; `run` must pop it before validation and POST. A node that is
+    legitimately keyed "_meta" (has a class_type) must be left alone."""
+
+    ITEMS = {"s1": {"nodes": ["1", "9"], "save_node": "9", "prefix": "o/s1"}}
+
+    def test_pops_meta_dict_without_class_type(self):
+        from comfy_cli.command.run.loader import pop_compose_meta
+
+        meta = {"schema": "compose/1", "blueprint": "/abs/b.yaml", "items": self.ITEMS}
+        wf = {"_meta": dict(meta), "1": {"class_type": "KSampler", "inputs": {}}}
+        popped = pop_compose_meta(wf)
+        assert popped == meta
+        assert "_meta" not in wf
+        assert "1" in wf  # nodes untouched
+
+    def test_returns_none_when_absent(self):
+        from comfy_cli.command.run.loader import pop_compose_meta
+
+        wf = {"1": {"class_type": "KSampler", "inputs": {}}}
+        assert pop_compose_meta(wf) is None
+        assert wf == {"1": {"class_type": "KSampler", "inputs": {}}}
+
+    def test_node_keyed_meta_with_class_type_is_preserved(self):
+        from comfy_cli.command.run.loader import pop_compose_meta
+
+        node = {"class_type": "Note", "inputs": {"text": "hi"}}
+        wf = {"_meta": node, "1": {"class_type": "KSampler", "inputs": {}}}
+        assert pop_compose_meta(wf) is None
+        assert wf["_meta"] is node
+
+    def test_non_dict_meta_left_alone(self):
+        from comfy_cli.command.run.loader import pop_compose_meta
+
+        wf = {"_meta": "garbage", "1": {"class_type": "KSampler", "inputs": {}}}
+        assert pop_compose_meta(wf) is None
+        assert wf["_meta"] == "garbage"
+
+    def test_node_level_meta_titles_not_confused_with_top_level(self):
+        from comfy_cli.command.run.loader import pop_compose_meta
+
+        # Per-node `_meta: {title}` blocks live INSIDE nodes — not stripped.
+        wf = {"1": {"class_type": "KSampler", "inputs": {}, "_meta": {"title": "K"}}}
+        assert pop_compose_meta(wf) is None
+        assert wf["1"]["_meta"] == {"title": "K"}
+
+    def test_preflight_sees_no_meta_warning_after_strip(self):
+        """With `_meta` stripped, CQL validation emits no `_meta` warning.
+
+        Control: WITHOUT the strip the validator warns about the key, which
+        proves this test would catch a regression."""
+        from comfy_cli.command.run.loader import pop_compose_meta
+        from comfy_cli.cql.engine import Graph
+
+        object_info = {"KSampler": {"output": ["LATENT"], "output_name": ["LATENT"], "input": {"required": {}}}}
+        graph = Graph.from_object_info(object_info)
+
+        def meta_warnings(validation):
+            return [w for w in validation.get("warnings", []) if "_meta" in str(w)]
+
+        wf = {"_meta": {"schema": "compose/1"}, "1": {"class_type": "KSampler", "inputs": {}}}
+        # Control: unstripped workflow DOES warn about the `_meta` key.
+        assert meta_warnings(graph.validate_workflow(dict(wf)))
+
+        pop_compose_meta(wf)
+        assert not meta_warnings(graph.validate_workflow(wf))
+
+
+class TestRunStripsComposeMeta:
+    """Both submit paths strip `_meta` before the POST and stash its `items`
+    map on the job state file so downstream consumers (grouped outputs,
+    item-named downloads) can join outputs back to foreach items."""
+
+    ITEMS = {"s1": {"nodes": ["1", "9"], "save_node": "9", "prefix": "o/s1"}}
+    META = {"schema": "compose/1", "blueprint": "/abs/b.yaml", "items": ITEMS}
+    API_WORKFLOW = {
+        "1": {"class_type": "KSampler", "inputs": {}},
+        "9": {"class_type": "SaveImage", "inputs": {"images": ["1", 0]}},
+    }
+    RECORD = {
+        "status": {"completed": True, "status_str": "success"},
+        "outputs": {"9": {"images": [{"filename": "a.png", "subfolder": "", "type": "output"}]}},
+    }
+
+    @pytest.fixture
+    def composed_workflow_file(self, tmp_path):
+        wf = dict(self.API_WORKFLOW)
+        wf["_meta"] = dict(self.META)
+        path = tmp_path / "composed.json"
+        path.write_text(json.dumps(wf))
+        return str(path)
+
+    @pytest.fixture
+    def fake_target(self):
+        from comfy_cli.target import Target
+
+        return Target(
+            kind="cloud",
+            base_url="https://cloud.example.com",
+            path_prefix="/api",
+            history_path="history_v2",
+            jobs_path="jobs",
+            api_key="test-api-key",
+        )
+
+    def test_cloud_nowait_strips_meta_and_stashes_item_map(self, composed_workflow_file, fake_target):
+        from comfy_cli import jobs_state
+        from comfy_cli.comfy_client import SubmitResult
+        from comfy_cli.command.run import execute_cloud
+
+        mock_client = MagicMock()
+        mock_client.submit_prompt.return_value = SubmitResult(prompt_id="prompt-meta-nw", number=1, node_errors={})
+
+        with (
+            patch("comfy_cli.target.resolve_target", return_value=fake_target),
+            patch("comfy_cli.cql.engine._load_from_target", return_value={}),
+            patch("comfy_cli.comfy_client.Client", return_value=mock_client),
+            patch("comfy_cli.command.run._spawn_watcher"),
+        ):
+            execute_cloud(composed_workflow_file, wait=False)
+
+        submitted = mock_client.submit_prompt.call_args.args[0]
+        assert "_meta" not in submitted
+        assert set(submitted) == set(self.API_WORKFLOW)
+
+        state = jobs_state.read("prompt-meta-nw")
+        assert state is not None
+        assert state.item_map == self.ITEMS
+
+    def test_cloud_wait_strips_meta_and_stashes_item_map(self, composed_workflow_file, fake_target):
+        from comfy_cli import comfy_client, jobs_state
+        from comfy_cli.comfy_client import SubmitResult
+        from comfy_cli.command.run import execute_cloud
+
+        client = comfy_client.Client(fake_target)
+        client.submit_prompt = MagicMock(
+            return_value=SubmitResult(prompt_id="prompt-meta-w", number=1, node_errors={})
+        )
+        client.wait_for_completion = MagicMock(return_value=self.RECORD)
+        client.get_job_status = MagicMock(return_value=None)
+
+        with (
+            patch("comfy_cli.target.resolve_target", return_value=fake_target),
+            patch("comfy_cli.cql.engine._load_from_target", return_value={}),
+            patch("comfy_cli.comfy_client.Client", return_value=client),
+        ):
+            execute_cloud(composed_workflow_file, wait=True, timeout=5)
+
+        submitted = client.submit_prompt.call_args.args[0]
+        assert "_meta" not in submitted
+
+        state = jobs_state.read("prompt-meta-w")
+        assert state is not None
+        assert state.status == "completed"
+        assert state.item_map == self.ITEMS
+
+    def test_local_execute_strips_meta_before_submit(self, tmp_path):
+        wf = {
+            "1": {"class_type": "EmptyLatentImage", "inputs": {}, "_meta": {"title": "latent"}},
+            "_meta": dict(self.META),
+        }
+        path = tmp_path / "composed_local.json"
+        path.write_text(json.dumps(wf))
+
+        with (
+            patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),
+            patch("comfy_cli.command.run._fetch_object_info", return_value={}),
+            patch("comfy_cli.command.run.ExecutionProgress"),
+            patch("comfy_cli.command.run.WorkflowExecution") as MockExec,
+        ):
+            mock_exec = MagicMock()
+            MockExec.return_value = mock_exec
+            mock_exec.outputs = []
+            execute(str(path), host="127.0.0.1", port=8188, wait=True, timeout=30)
+
+        submitted = MockExec.call_args.args[0]
+        assert "_meta" not in submitted
+        # Node-interior `_meta` titles survive untouched.
+        assert submitted["1"]["_meta"] == {"title": "latent"}

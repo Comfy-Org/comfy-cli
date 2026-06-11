@@ -56,6 +56,28 @@ def _classify_api_workflow(workflow):
     return ("invalid", None)
 
 
+def pop_compose_meta(workflow: dict) -> dict | None:
+    """Pop and return the compose-embedded ``_meta`` provenance block.
+
+    ``comfy workflow compose`` writes ``workflow["_meta"] = {"schema":
+    "compose/1", "blueprint": …, "items": …}`` into the compiled JSON. The
+    server would treat that key as a (broken) node, so ``run`` strips it
+    before preflight validation and submit.
+
+    Only a dict WITHOUT a ``class_type`` key is stripped — a node that is
+    legitimately keyed ``"_meta"`` (i.e. has a class_type) is left alone.
+    Per-node ``_meta: {title}`` blocks live inside nodes and are never
+    touched. Returns the popped block, or ``None`` when nothing was popped.
+    """
+    if not isinstance(workflow, dict):
+        return None
+    meta = workflow.get("_meta")
+    if isinstance(meta, dict) and "class_type" not in meta:
+        del workflow["_meta"]
+        return meta
+    return None
+
+
 class WorkflowLoadError(Exception):
     """Raised by ``_load_workflow_file`` for pre-flight file errors.
 
