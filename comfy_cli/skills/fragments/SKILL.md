@@ -146,8 +146,8 @@ pipeline:
   - fragment: text_card           # name (looked up in ./fragments/)
     alias:    headline            # unique handle for downstream refs
     inputs:
-      destination_image: inputs/base.png        # raw path → LoadImage injected
-      source_mask:       inputs/mask_top.png    # type MASK → LoadImage + ImageToMask
+      destination_image: $asset.base.png        # project asset → resolved via the push lock
+      source_mask:       $asset.mask_top.png    # type MASK → LoadImage + ImageToMask
     params:
       text_prompt: "BREAKING NEWS"
       comp_x: 140
@@ -157,20 +157,28 @@ pipeline:
     alias:    subhead
     inputs:
       destination_image: $headline.image        # ← previous step's output
-      source_mask:       inputs/mask_sub.png
+      source_mask:       $asset.mask_sub.png
     params:
       text_prompt: "...details..."
 ```
 
 ### Input binding values
 
-The composer accepts three things on the right-hand side of an `inputs:` entry:
+The composer accepts four things on the right-hand side of an `inputs:` entry:
 
 - **`$alias.output_name`** — reference a prior step's named output. Resolved
   to `[node_id, port]` automatically.
+- **`$asset.<relative/path>`** — a file under the governing project's
+  `assets/` dir (project/1 — see the core `comfy` skill), resolved through
+  the push lock (`comfy assets push`) to the server-side filename, then
+  materialized like a path (loader injected). **Inputs only, never params.**
+  Compose fails closed with `asset_not_pushed` / `asset_stale` when the file
+  was never pushed or changed since — the hint says exactly what to run.
 - **A path string** — for `IMAGE`, `MASK`, `AUDIO`, `VIDEO` inputs the composer
   injects the appropriate loader (`LoadImage` / `LoadAudio` / `LoadVideo`,
-  plus `ImageToMask` for `MASK`). For `STRING` inputs the value passes through
+  plus `ImageToMask` for `MASK`). The value must be a filename the *server*
+  can see in its input dir — in a project, prefer `$asset` so push and
+  resolution are handled for you. For `STRING` inputs the value passes through
   as a literal.
 - **A literal** — for `STRING` inputs only. Non-string literals for non-STRING
   types are rejected.
@@ -196,10 +204,10 @@ Fragment composition is built into the `comfy` CLI:
 
 ```bash
 # Compose a blueprint into a single workflow JSON
-comfy workflow compose blueprints/my_pipeline.yaml -o built/pipeline.json
+comfy workflow compose blueprints/my_pipeline.yaml   # → blueprints/my_pipeline.compiled.json
 
-# Specify a custom fragments directory (default: ./fragments)
-comfy workflow compose blueprints/my_pipeline.yaml --lib ./my_fragments -o built/pipeline.json
+# Specify a custom fragments directory (default: ./fragments) or output path
+comfy workflow compose blueprints/my_pipeline.yaml --lib ./my_fragments -o pipeline.json
 
 # List fragments in a library
 comfy --json workflow fragment ls [--lib DIR]
@@ -211,11 +219,18 @@ comfy --json workflow fragment show <name_or_path>
 comfy --json workflow fragment validate <name_or_path>
 
 # Then submit the composed workflow
-comfy run --workflow built/pipeline.json --where cloud --wait
+comfy run --workflow blueprints/my_pipeline.compiled.json --wait
 ```
 
 `--lib` defaults to `./fragments` relative to cwd. Default output is
-`<blueprint>.compiled.json`.
+`<blueprint>.compiled.json`, next to the blueprint.
+
+Compose embeds `_meta` (`schema: compose/1`) provenance in the compiled
+JSON — the blueprint path and, for `foreach`, which nodes belong to which
+item (also `item_map` in the envelope). `comfy run` strips it before
+submit (old servers unaffected) and uses the map to report
+`outputs_by_item` and to name downloaded files `<item>_<nnn>.<ext>` —
+never identify fan-out outputs by array order.
 
 With `chunk: N` in a `foreach` blueprint, compose splits items into
 N-item batches and writes one numbered file per batch (`<stem>.000.json`,
@@ -238,26 +253,28 @@ missing fragment during `compose` surfaces as `fragment_invalid` instead.
 
 ## 4. End-to-end example
 
-Project layout:
+Project layout (project/1 — `comfy project init`):
 
 ```
 my-project/
+  comfy.yaml          # schema: project/1 + defaults.where
   fragments/
     text_encode.json
     sampler.json
     save_still.json
   blueprints/
     portrait.yaml
-  inputs/
-    seed_photo.png
+  assets/
+    seed_photo.png    # referenced as $asset.seed_photo.png
 ```
 
-Compose + submit:
+Push, compose, submit:
 
 ```bash
 cd my-project
-comfy workflow compose blueprints/portrait.yaml -o workflows/portrait.json
-comfy run --workflow workflows/portrait.json --where cloud --wait
+comfy --json assets push                      # upload changed assets, update the lock
+comfy workflow compose blueprints/portrait.yaml
+comfy run --workflow blueprints/portrait.compiled.json --wait
 ```
 
 That's the full agent loop. The fragment library is reusable across blueprints;
@@ -537,6 +554,8 @@ Honest limits:
 | `blueprint_not_found` | The blueprint YAML path doesn't exist | Check the path |
 | `blueprint_invalid_yaml` | The blueprint file isn't valid YAML | Run it through `yamllint` |
 | `blueprint_invalid` | The blueprint semantically fails (missing fragment, missing input, unknown input key, duplicate alias) | Read the error — it names the offending step alias |
+| `asset_not_pushed` | A `$asset.<name>` ref has no entry in `.comfy/assets.lock.json` (or the file vanished from `assets/`) | `comfy assets push`, then re-compose |
+| `asset_stale` | The file under `assets/` changed since its last push (sha256 mismatch with the lock) | `comfy assets push`, then re-compose |
 
 ---
 

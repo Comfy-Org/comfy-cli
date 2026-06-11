@@ -39,8 +39,10 @@ When `error` is present, **read the `hint` and act on it**. Don't guess.
 ## Routing
 
 The CLI auto-detects: `cloud` if credentials are configured (API key or
-OAuth session), else `local`. Override with `--where`, `COMFY_WHERE` env,
-or `comfy set-default --where cloud`. Check routing:
+OAuth session), else `local`. Precedence: `--where` flag → `COMFY_WHERE`
+env → the governing project's `defaults.where` (`comfy.yaml`, see
+Projects) → `comfy set-default --where …` config → auto-detect. A local
+`--where` always beats the project default. Check routing:
 
 ```bash
 comfy --json cloud whoami   # signed_in, auth_method, base_url
@@ -153,10 +155,11 @@ mechanism by complexity and reuse — not as a quality ranking:
    ```
 
    **d. Compose + run** — a YAML blueprint in `blueprints/<name>.yaml`
-   wires your fragments together; cross-step refs use `$alias.output_name`:
+   wires your fragments together; cross-step refs use `$alias.output_name`,
+   project assets use `$asset.<relative/path>` (inputs only):
    ```bash
-   comfy workflow compose blueprints/<name>.yaml -o workflows/<name>.json
-   RES=$(comfy --json run --workflow workflows/<name>.json)
+   comfy workflow compose blueprints/<name>.yaml   # → blueprints/<name>.compiled.json
+   RES=$(comfy --json run --workflow blueprints/<name>.compiled.json)
    PROMPT_ID=$(echo "$RES" | jq -r .data.prompt_id)
    comfy --json jobs watch "$PROMPT_ID"
    ```
@@ -193,12 +196,12 @@ mechanism by complexity and reuse — not as a quality ranking:
 
    Prefer a single composed workflow with repeated fragment instances over a
    loop of separate `comfy run` calls. For example, a music video should be a
-   manifest/blueprint that composes one fan-out graph with N video branches and
+   blueprint that composes one fan-out graph with N video branches and
    shared character references, then a separate assembly step if final editing
    needs exact audio sync.
 
 3. **Raw JSON** — ONLY for truly throwaway one-shot workflows under ~10-15
-   nodes where extension is not expected. Write to `workflows/` and run
+   nodes where extension is not expected. Write the file and run it
    directly.
 
 **Hard rule: never build raw workflow JSON with >30 nodes. Use fragments and a
@@ -431,6 +434,62 @@ hand-built files.
 State-changing. Each of these submits work, edits files, charges cloud
 quota, or talks to an authenticated backend.
 
+## Projects (project/1) — the working convention
+
+Anything beyond a one-shot lives in a project: a directory with a
+`comfy.yaml` marker (`schema: project/1`, plus `defaults.where`) and five
+conventional dirs. The convention is the contract — like the envelope.
+
+```
+my-project/
+├── comfy.yaml     # marker: schema project/1 + defaults (e.g. defaults.where)
+├── assets/        # source files — reference as $asset.<relative/path>
+├── fragments/     # fragments YOU author (_fragment JSON)
+├── blueprints/    # blueprint YAML; compose writes <name>.compiled.json beside it
+├── outputs/       # downloads land here by default
+└── .comfy/        # machine-owned: assets.lock.json + runs.jsonl journal
+```
+
+The loop:
+
+```bash
+comfy project init                     # marker + the five dirs; --where sets the default
+cp ~/ref.png assets/s1_first.png       # drop source files under assets/ (subdirs fine)
+comfy --json assets push               # upload new/changed files, record them in the lock
+# blueprint INPUTS reference assets by path relative to assets/:
+#   inputs: {start_frame: $asset.s1_first.png}
+comfy workflow compose blueprints/<name>.yaml          # → blueprints/<name>.compiled.json
+comfy --json run --workflow blueprints/<name>.compiled.json
+comfy --json jobs watch <prompt_id>    # terminal envelope: outputs_by_item / outputs_by_node
+comfy --json download <prompt_id>      # → outputs/, item-named files
+comfy --json project status            # THE state query — root, defaults, blueprints,
+                                       #   assets {pushed, stale}, recent_runs, warnings
+```
+
+What the convention buys you:
+
+- **`$asset.<relative/path>`** in blueprint **inputs** (inputs only, never
+  params) resolves through the push lock to the server-side filename — no
+  manual upload-then-paste. The lock (`.comfy/assets.lock.json`) records
+  sha256 + server name + push target per file, so local and cloud both
+  work; `assets push` skips files whose content AND target are unchanged
+  (`--force` re-pushes everything), and `--where` picks the push target.
+- **Errors are instructions.** Compose fails closed with `asset_not_pushed`
+  (no lock entry / file gone) or `asset_stale` (file changed since its last
+  push) — both hint exactly `run: comfy assets push`. Run it, re-compose.
+  `$asset` outside a project hints `comfy project init` first.
+- **Provenance is queryable state, not prose.** compose and run append to
+  the `.comfy/runs.jsonl` journal automatically (best-effort, never fails a
+  run); `comfy --json project status` joins assets against the lock and
+  returns `recent_runs`. Never hand-write a manifest.md.
+- **Routing**: `defaults.where` in `comfy.yaml` routes every command run
+  inside the project tree (discovery walks up from cwd). The precedence
+  chain in Ground rules applies — flag and env always win over the project.
+- `project status` warns on unknown top-level dirs (warnings only, nothing
+  enforces). `comfy project init` inside an existing project errors with
+  `project_already_exists`; `project status` / `assets push` outside one
+  error with `project_not_found`.
+
 ## Submit a workflow
 
 `comfy run` is **async by default** — returns a `prompt_id` and
@@ -547,6 +606,13 @@ comfy --json jobs status <prompt_id>
 comfy --json jobs watch <prompt_id> # blocks until terminal; emits NDJSON with --json-stream
 ```
 
+Terminal envelopes (`run --wait`, `jobs status`, `jobs watch`) carry the
+flat `outputs` list plus grouped views of the same artifacts:
+`outputs_by_node: {node_id: [url]}` always, and `outputs_by_item:
+{item: [url]}` when the workflow came from a `foreach` blueprint (compose
+embeds the item map — see Multi-stage orchestration). **Never identify
+fan-out outputs by array order** — read `outputs_by_item`.
+
 ## Edit workflows in place
 
 `workflow slots`, `set-slot`, and `vary` work on any frontend-format
@@ -586,42 +652,42 @@ comfy --json cloud set-key --key sk-…            # API-key path for cloud
 
 **Never extract API keys manually.** The CLI handles auth internally.
 
-```bash
-# Upload local files to the server's input directory
-comfy --json upload photo.png video.mp4 --where cloud
-# → {"uploads": [{"local_path": "...", "cloud_name": "abc123.png", ...}]}
+**In a project, prefer `comfy assets push`** — it uploads new/changed files
+under `assets/`, records server names in the lock, and blueprints just say
+`$asset.<relative/path>` (see Projects). The raw commands remain as the
+non-project fallback:
 
-# Download outputs from a completed job
-comfy --json download <prompt_id> --where cloud
-# → saves to ./outputs/<prompt_id[:8]>_000.png, etc.
+```bash
+# Non-project upload fallback: take data.uploads[0].cloud_name from the envelope
+comfy --json upload photo.png --where cloud
+
+# Download outputs from a completed job (works in or out of a project)
+comfy --json download <prompt_id>
 
 # Pipe pattern — the idiomatic way to generate + collect:
-comfy --json run --workflow flux.json --where cloud --wait | comfy download --where cloud
-# → submits, waits, downloads outputs to ./outputs/ in one pipeline
+comfy --json run --workflow blueprints/<name>.compiled.json --wait | comfy download
+# → submits, waits, downloads outputs in one pipeline
 ```
 
 `comfy download` reads prompt_id + output URLs from piped stdin
 automatically — no manual extraction, no `jq`, no API key exposure.
 
-Default output directory: `./outputs/` (configurable via `--out-dir`).
+Output directory: the governing project's `outputs/`, else `./outputs/`
+(override with `--out-dir`). Naming: outputs from a `foreach` blueprint
+are named by originating item — `<item>_<nnn>.<ext>` with a per-item
+counter — and `files[]` entries carry `node_id`/`item` when known;
+everything else keeps `<prompt8>_<idx>.<ext>`.
 
 ## Project layout convention
 
-```
-my-project/
-├── fragments/     # reusable workflow pieces (_fragment JSON files)
-├── blueprints/       # YAML files that compose fragments into workflows
-├── workflows/     # compiled workflow JSON (compose output) or one-shots
-├── inputs/        # source images, videos, audio for upload
-├── outputs/       # generated outputs (comfy download writes here)
-└── variants/      # sweep outputs from comfy workflow vary
-```
+The project/1 convention above IS the layout: `comfy.yaml` +
+`assets/ fragments/ blueprints/ outputs/ .comfy/`. Lay it down with
+`comfy project init`; `comfy --json project status` reports unknown
+top-level dirs as warnings (warnings only, nothing enforces).
 
-All `comfy` commands respect this layout by default.
-
-**Never write workflows, fragments, or outputs to `/tmp`.** Always use
-the project directory. If no project directory exists, create one with
-this layout before building anything.
+**Never write workflows, fragments, or outputs to `/tmp`.** Always work
+inside a project. If none governs the directory, run `comfy project init`
+before building anything.
 
 ## Lifecycle (local installs + persistent config)
 
@@ -775,13 +841,19 @@ pipeline:
 ```
 
 ```bash
-comfy workflow compose blueprints/fan_out.yaml -o workflows/fan_out.json
-RES=$(comfy --json run --workflow workflows/fan_out.json)
+comfy workflow compose blueprints/fan_out.yaml   # → blueprints/fan_out.compiled.json
+RES=$(comfy --json run --workflow blueprints/fan_out.compiled.json)
 comfy --json jobs watch "$(echo "$RES" | jq -r .data.prompt_id)"
 ```
 
 This submits a single Job; the engine runs the independent branches
-concurrently. Avoid the old `PIDS=()` shell-loop pattern — it duplicates
+concurrently. Compose embeds `_meta` (`schema: compose/1`) provenance in
+the compiled workflow — blueprint path plus which nodes belong to which
+`foreach` item. `comfy run` strips it before submit (old servers are
+unaffected) and stashes the map on the job state, so the terminal
+envelopes report `outputs_by_item: {item: [url]}` and `comfy download`
+names files `<item>_<nnn>.<ext>`. Read outputs by item, never by array
+order. Avoid the old `PIDS=()` shell-loop pattern — it duplicates
 scheduling the engine already does and gives you N jobs to babysit instead
 of one. (For a pure prompt/seed sweep over the *same* graph, `comfy
 workflow vary` is the right tool; see the `comfy-fragments` skill for the
@@ -792,15 +864,21 @@ N-item batches and writes one numbered file per batch. The envelope then
 reports `out: null` plus `written[]` (all paths) — script against
 `data.written`, not `data.out`.
 
-Stage handoff (download → upload → re-reference):
+Stage handoff (download → promote into assets/ → push → `$asset`):
 
 ```bash
 # `jobs watch` exits 0 only on completion — use && to chain safely:
-comfy --json jobs watch "$PID" && comfy --json download "$PID" --where cloud
-CLOUD=$(comfy --json upload ./outputs/abc_000.png --where cloud \
-    | jq -r '.data.uploads[0].cloud_name')
-# Use $CLOUD in the next workflow's LoadImage input
+comfy --json jobs watch "$PID" && comfy --json download "$PID"
+# downloads land in outputs/ (item-named) — promote the keepers:
+cp outputs/s1_000.png assets/s1_first.png
+comfy --json assets push
+# the next stage's blueprint references it directly in its inputs:
+#   inputs: {start_frame: $asset.s1_first.png}
 ```
+
+Outside a project, the legacy handoff still works: `comfy --json upload
+<file> --where cloud`, take `data.uploads[0].cloud_name`, paste it into
+the next workflow's LoadImage input — but prefer the project flow.
 
 Pipeline failure recovery: re-submit only the failed workflow. Use
 `comfy --json jobs status <id>` to identify which failed.
