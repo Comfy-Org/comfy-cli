@@ -760,7 +760,9 @@ class TestConcurrentRefresh:
 
         # error + error_description → "code: description".
         assert (
-            oauth._describe_token_error(err('{"error":"invalid_grant","error_description":"workspace membership lost"}'))
+            oauth._describe_token_error(
+                err('{"error":"invalid_grant","error_description":"workspace membership lost"}')
+            )
             == "invalid_grant: workspace membership lost"
         )
         # error only.

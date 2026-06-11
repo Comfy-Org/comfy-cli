@@ -748,7 +748,7 @@ class Graph:
                                 f"connection"
                             ),
                             "hint": f"wire one key per connection: {port.autogrow_slot_example()} "
-                            f"(e.g. \"{input_name}.{input_name[:-1] if input_name.endswith('s') else input_name}0\": "
+                            f'(e.g. "{input_name}.{input_name[:-1] if input_name.endswith("s") else input_name}0": '
                             f"[{value[0]!r}, {value[1]!r}])",
                         }
                     )
@@ -1004,11 +1004,7 @@ class Graph:
                     },
                     # Autogrow inputs wire as one slot key per connection;
                     # surface that here so `nodes show` is self-documenting.
-                    **(
-                        {"autogrow": True, "wire_as": p.autogrow_slot_example()}
-                        if p.is_autogrow
-                        else {}
-                    ),
+                    **({"autogrow": True, "wire_as": p.autogrow_slot_example()} if p.is_autogrow else {}),
                 }
                 for p in m.inputs
             ],

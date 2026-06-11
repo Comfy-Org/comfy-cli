@@ -612,7 +612,7 @@ def test_snapshot_maps_interrupted_to_cancelled(monkeypatch):
     monkeypatch.setattr(
         jobs_mod,
         "_http_get_json",
-        lambda url, **kw: ({} if "/queue" in url else body),
+        lambda url, **kw: {} if "/queue" in url else body,
     )
     snap = jobs_mod._snapshot("127.0.0.1", 8188, "pid")
     assert snap is not None
