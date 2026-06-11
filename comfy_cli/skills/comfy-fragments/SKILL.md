@@ -121,7 +121,7 @@ followed by the interior ComfyUI nodes (API-format, just like a workflow).
 | `terminal` | optional (default `false`) | `true` if the fragment contains its own `SaveImage`/`SaveVideo`. Stops the composer from appending another save. |
 | `inputs` | no (default `{}`) | Each input has a `type` — any UPPER_SNAKE_CASE socket type (`IMAGE`, `MASK`, `AUDIO`, `VIDEO`, `STRING`, `MODEL`, `CONDITIONING`, `LATENT`, `VAE`, `CLIP`, custom types…) — and a `binds: "<interior_node_id>.<input_name>"` pointing at the actual node-field this input feeds. Path-loadable types (`IMAGE`/`MASK`/`AUDIO`/`VIDEO`) accept file paths — the composer injects a loader node. All other socket types must be fed by a cross-step ref (`$alias.output`), never a path. |
 | `outputs` | no (default `{}`) | Each output has a `type` and `from: "<interior_node_id>"` plus optional `port` (default `0`). |
-| `params` | optional | Settable values (text, seed, strength, model name, etc.). Each has `type` ∈ {`STRING`, `INT`, `FLOAT`, `BOOL`, `COMBO`}, a `binds`, and optionally a `default`. |
+| `params` | optional | Settable values (text, seed, strength, model name, etc.). Each has `type` ∈ {`STRING`, `INT`, `FLOAT`, `BOOLEAN`, `COMBO`} (the node-schema vocabulary, exactly as `nodes show` prints it), a `binds`, and optionally a `default`. |
 
 ### Conventions for interior nodes
 

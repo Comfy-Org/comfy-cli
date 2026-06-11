@@ -107,7 +107,7 @@ class WorkflowExecution:
         self.ws = None
         self.timeout = timeout
         # Credentials injected into ``extra_data`` so partner-API nodes
-        # (api node/* category) can authenticate at execute time —
+        # (partner/* category) can authenticate at execute time —
         # mirrors what ``comfy_client.submit_prompt`` does for cloud.
         self.extra_data = dict(extra_data) if extra_data else None
         self.api_key = api_key

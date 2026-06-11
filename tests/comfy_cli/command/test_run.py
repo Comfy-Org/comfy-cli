@@ -475,9 +475,10 @@ class TestExecuteErrorHandling:
 
 
 class TestDetectPartnerNodes:
-    """Partner-API nodes (category `api node/...`) must be detected before
-    a local submit so we can refuse early instead of failing opaquely at
-    execute time with `Unauthorized: Please login first`."""
+    """Partner-API nodes (category `partner/...` or the authoritative
+    `api_node: true` flag) must be detected before a local submit so we can
+    refuse early instead of failing opaquely at execute time with
+    `Unauthorized: Please login first`."""
 
     def _info(self, **categories):
         # Build a minimal /object_info-shape dict from class_type → category.
@@ -490,9 +491,9 @@ class TestDetectPartnerNodes:
             "3": {"class_type": "KlingImage2VideoNode", "inputs": {}},
         }
         info = self._info(
-            Veo3VideoGenerationNode="api node/video/Veo",
+            Veo3VideoGenerationNode="partner/video/Veo",
             SaveVideo="video",
-            KlingImage2VideoNode="api node/video/Kling",
+            KlingImage2VideoNode="partner/video/Kling",
         )
         assert _detect_partner_nodes(wf, info) == [
             "KlingImage2VideoNode",
@@ -510,7 +511,7 @@ class TestDetectPartnerNodes:
     def test_ignores_unknown_class_types(self):
         """A workflow with a class_type the server doesn't advertise (custom
         node, typo) is not treated as a partner node — we only flag when
-        the server explicitly categorizes it under `api node/*`."""
+        the server explicitly categorizes it under `partner/*`."""
         wf = {"1": {"class_type": "SomeUnknownThing", "inputs": {}}}
         info = self._info(KSampler="sampling")
         assert _detect_partner_nodes(wf, info) == []
@@ -522,12 +523,12 @@ class TestDetectPartnerNodes:
             "3": {"inputs": {}},  # no class_type
             "4": {"class_type": "Veo3VideoGenerationNode", "inputs": {}},
         }
-        info = self._info(Veo3VideoGenerationNode="api node/video/Veo")
+        info = self._info(Veo3VideoGenerationNode="partner/video/Veo")
         assert _detect_partner_nodes(wf, info) == ["Veo3VideoGenerationNode"]
 
     def test_finds_partner_nodes_with_partner_prefix(self):
         """Current cloud/ComfyUI categorizes partner nodes under `partner/...`
-        (e.g. `partner/video/ByteDance`), not the legacy `api node/...`."""
+        (e.g. `partner/video/ByteDance`)."""
         wf = {
             "1": {"class_type": "ByteDanceTextToVideoNode", "inputs": {}},
             "2": {"class_type": "SaveVideo", "inputs": {}},
@@ -544,6 +545,14 @@ class TestDetectPartnerNodes:
         wf = {"1": {"class_type": "SomePartnerNode", "inputs": {}}}
         info = {"SomePartnerNode": {"category": "weird/category", "api_node": True}}
         assert _detect_partner_nodes(wf, info) == ["SomePartnerNode"]
+
+    def test_legacy_api_node_prefix_no_longer_detected(self):
+        """One name per concept: the legacy `api node/...` category alias is
+        dropped — current servers publish `partner/*` and the authoritative
+        `api_node: true` flag, and the CLI speaks only those."""
+        wf = {"1": {"class_type": "OldServerNode", "inputs": {}}}
+        info = self._info(OldServerNode="api node/video/Veo")
+        assert _detect_partner_nodes(wf, info) == []
 
 
 class TestPartialExecutionDiff:
@@ -666,7 +675,7 @@ class TestExecutePartnerNodePreflight:
     }
     OBJECT_INFO = {
         "Veo3VideoGenerationNode": {
-            "category": "api node/video/Veo",
+            "category": "partner/video/Veo",
             "output": ["VIDEO"],
             "output_name": ["VIDEO"],
         },

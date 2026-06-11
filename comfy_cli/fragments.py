@@ -90,7 +90,9 @@ PATH_LOADERS = {
     "AUDIO": ("LoadAudio", "audio"),
     "VIDEO": ("LoadVideo", "file"),
 }
-KNOWN_PARAM_TYPES = {"STRING", "INT", "FLOAT", "BOOL", "BOOLEAN", "COMBO"}
+# Param types use the node-schema vocabulary exactly as `nodes show` prints
+# it (BOOLEAN, never a BOOL alias) so types copy straight across.
+KNOWN_PARAM_TYPES = {"STRING", "INT", "FLOAT", "BOOLEAN", "COMBO"}
 
 # A ComfyUI socket type is UPPER_SNAKE_CASE (IMAGE, MODEL, CONTROL_NET, ...).
 # We accept any such token as an input type so fragments can model the full
@@ -390,7 +392,7 @@ class Pipeline:
         "$var.style"). An embedded occurrence ("a $asset.x b") is plain text —
         there is no interpolation/templating, so it passes through untouched
         and no resolver is consulted. `$var` returns the resolver's RAW scalar
-        (never str()'d) so INT/FLOAT/BOOL params keep their types. The one
+        (never str()'d) so INT/FLOAT/BOOLEAN params keep their types. The one
         shared prefix-parser for both the graph-input path
         (:meth:`_resolve_input`) and the param path (:meth:`add_step`), so the
         two never drift.
@@ -553,7 +555,7 @@ class Pipeline:
             # Params have no client-side widget-type validation: an INT-typed
             # param fed a `$asset.` ref deterministically receives the resolved
             # STRING (the server rejects it at run time), while `$var` returns
-            # the raw scalar so INT/FLOAT/BOOL params keep their types. In
+            # the raw scalar so INT/FLOAT/BOOLEAN params keep their types. In
             # `foreach`, `$item.<field>` substitution has already run, so an
             # item field carrying a ref resolves here per item.
             new_nodes[remap[old_id]]["inputs"][input_name] = self._resolve_value_ref(

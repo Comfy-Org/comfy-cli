@@ -19,10 +19,10 @@ from comfy_cli.command.run.loader import _MAX_BODY_PREVIEW
 from comfy_cli.output import get_renderer
 from comfy_cli.output import rprint as pprint
 
-# Partner-API nodes live under `partner/...` in current ComfyUI/cloud
-# object_info (e.g. `partner/video/ByteDance`). Older servers used the legacy
-# `api node/` prefix — we match both so detection survives the rename.
-PARTNER_NODE_CATEGORY_PREFIXES = ("partner/", "api node/")
+# Partner-API nodes live under `partner/...` in ComfyUI/cloud object_info
+# (e.g. `partner/video/ByteDance`). The category prefix is only the fallback —
+# the authoritative signal is the `api_node: true` flag.
+PARTNER_NODE_CATEGORY_PREFIXES = ("partner/",)
 
 
 def fetch_object_info(host, port, timeout):
@@ -127,8 +127,8 @@ def _detect_partner_nodes(workflow: dict, object_info: dict) -> list[str]:
     tests pass object_info directly.
 
     Detection is primarily the authoritative ``api_node: true`` flag in
-    object_info, with a category-prefix fallback (``partner/...``, or the
-    legacy ``api node/...``) for servers that don't surface the flag.
+    object_info, with a ``partner/...`` category-prefix fallback for servers
+    that don't surface the flag.
 
     A partner-API node call requires an ``api_key_comfy_org`` (or the
     OAuth-equivalent ``auth_token_comfy_org``) in ``extra_data`` at

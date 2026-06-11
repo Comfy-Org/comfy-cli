@@ -258,12 +258,14 @@ class TestParseFragment:
         frag = parse_fragment(data)
         assert frag.params["text"].type == "BOOLEAN"
 
-    def test_bool_param_type_still_accepted(self):
+    def test_legacy_bool_param_type_rejected(self):
+        """One name per concept: node schemas print BOOLEAN, so the fragment
+        grammar speaks BOOLEAN only — the BOOL alias is gone, and the error
+        lists the accepted set."""
         data = _text_encode_fragment()
         data["_fragment"]["params"]["text"]["type"] = "BOOL"
-        data["_fragment"]["params"]["text"]["default"] = False
-        frag = parse_fragment(data)
-        assert frag.params["text"].type == "BOOL"
+        with pytest.raises(FragmentError, match=r"'BOOL' not in .*BOOLEAN"):
+            parse_fragment(data)
 
     def test_junk_param_type_still_rejected(self):
         data = _text_encode_fragment()
