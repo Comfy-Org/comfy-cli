@@ -52,6 +52,7 @@ BUNDLED_SKILLS: tuple[tuple[str, str], ...] = (
     ("comfy-fragments", "comfy-fragments"),
     ("comfy-debug", "comfy-debug"),
     ("comfy-relay", "comfy-relay"),
+    ("comfy-director", "comfy-director"),
 )
 
 
