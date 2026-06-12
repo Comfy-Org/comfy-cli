@@ -1,3 +1,6 @@
+import contextlib
+import io
+import json
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -69,6 +72,61 @@ class TestRegistryAPI(unittest.TestCase):
         with self.assertRaises(Exception) as context:
             self.registry_api.publish_node_version(self.node_config, self.token)
         self.assertIn("Failed to publish node version", str(context.exception))
+
+    def _mock_publish_response(self, changelog=""):
+        mock_response = MagicMock()
+        mock_response.status_code = 201
+        mock_response.json.return_value = {
+            "node_version": {
+                "id": "7f2d0a4e-0000-4000-8000-000000000001",
+                "version": "0.1.0",
+                "changelog": changelog,
+                "dependencies": ["dep1", "dep2"],
+                "deprecated": False,
+                "downloadUrl": "https://example.com/download",
+            },
+            "signedUrl": "https://example.com/signed",
+        }
+        return mock_response
+
+    @patch("requests.post")
+    def test_publish_node_version_sends_changelog_verbatim(self, mock_post):
+        changelog = "## 0.1.0\n\n- Fixed flux capacitor ⚡\n- Added docs"
+        mock_post.return_value = self._mock_publish_response(changelog=changelog)
+
+        response = self.registry_api.publish_node_version(self.node_config, self.token, changelog=changelog)
+
+        sent_body = json.loads(mock_post.call_args[1]["data"])
+        self.assertEqual(sent_body["node_version"]["changelog"], changelog)
+        self.assertEqual(response.node_version.changelog, changelog)
+
+    @patch("requests.post")
+    def test_publish_node_version_omits_changelog_when_not_given(self, mock_post):
+        mock_post.return_value = self._mock_publish_response()
+
+        self.registry_api.publish_node_version(self.node_config, self.token)
+
+        sent_body = json.loads(mock_post.call_args[1]["data"])
+        self.assertNotIn("changelog", sent_body["node_version"])
+
+    @patch("requests.post")
+    def test_publish_node_version_omits_changelog_when_empty(self, mock_post):
+        mock_post.return_value = self._mock_publish_response()
+
+        self.registry_api.publish_node_version(self.node_config, self.token, changelog="")
+
+        sent_body = json.loads(mock_post.call_args[1]["data"])
+        self.assertNotIn("changelog", sent_body["node_version"])
+
+    @patch("requests.post")
+    def test_publish_node_version_does_not_print_token(self, mock_post):
+        mock_post.return_value = self._mock_publish_response()
+
+        captured = io.StringIO()
+        with contextlib.redirect_stdout(captured):
+            self.registry_api.publish_node_version(self.node_config, self.token, changelog="notes")
+
+        self.assertNotIn(self.token, captured.getvalue())
 
     @patch("requests.get")
     def test_list_all_nodes_success(self, mock_get):
