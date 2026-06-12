@@ -9,7 +9,6 @@ from enum import Enum
 from typing import Annotated
 
 import typer
-from click.core import ParameterSource
 from rich import print
 from rich.console import Console
 
@@ -1024,21 +1023,23 @@ def validate():
     # print("[green]✓ All validation checks passed successfully[/green]")
 
 
-def resolve_publish_changelog(ctx: typer.Context, changelog: str | None, changelog_file: str | None) -> str:
+def resolve_publish_changelog(changelog: str | None, changelog_file: str | None) -> str:
     """
-    Resolve the changelog text from --changelog/COMFY_NODE_CHANGELOG or --changelog-file.
+    Resolve the changelog text from --changelog, --changelog-file, or COMFY_NODE_CHANGELOG.
 
-    `--changelog-file -` reads stdin. An explicit --changelog-file overrides an
-    env-provided changelog; combining it with an explicit --changelog is an error.
+    `--changelog-file -` reads stdin. The env var is read manually (not via the
+    option's `envvar`) so that either explicit flag overrides it and the two
+    flags only conflict when both are actually passed on the command line.
     """
     if changelog is not None and changelog_file is not None:
-        if ctx.get_parameter_source("changelog") == ParameterSource.COMMANDLINE:
-            print("[red]Error: --changelog and --changelog-file are mutually exclusive.[/red]")
-            raise typer.Exit(code=1)
-        changelog = None
+        print("[red]Error: --changelog and --changelog-file are mutually exclusive.[/red]")
+        raise typer.Exit(code=1)
+
+    if changelog is not None:
+        return changelog.strip()
 
     if changelog_file is None:
-        return (changelog or "").strip()
+        return os.environ.get("COMFY_NODE_CHANGELOG", "").strip()
 
     if changelog_file == "-":
         try:
@@ -1059,13 +1060,12 @@ def resolve_publish_changelog(ctx: typer.Context, changelog: str | None, changel
 @app.command("publish", help="Publish node to registry")
 @tracking.track_command("publish")
 def publish(
-    ctx: typer.Context,
     token: str | None = typer.Option(None, "--token", help="Personal Access Token for publishing", hide_input=True),
     changelog: str | None = typer.Option(
         None,
         "--changelog",
-        envvar="COMFY_NODE_CHANGELOG",
-        help="Changelog text for this version, shown in the registry's Updates section.",
+        help="Changelog text for this version, shown in the registry's Updates section "
+        "(env var: COMFY_NODE_CHANGELOG).",
     ),
     changelog_file: str | None = typer.Option(
         None,
@@ -1077,7 +1077,7 @@ def publish(
     """
     Publish a node with optional validation.
     """
-    changelog_text = resolve_publish_changelog(ctx, changelog, changelog_file)
+    changelog_text = resolve_publish_changelog(changelog, changelog_file)
 
     config = validate_node_for_publishing()
 
