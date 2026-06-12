@@ -53,16 +53,19 @@ without `--where`. Mention routing only when the user asks to switch.
 
 ## Error codes — react, don't guess
 
-The four most common error codes and what to do:
+The most common error codes and what to do:
 
 | Code | Do this |
 |---|---|
 | `server_not_running` | `comfy launch` to start the local server, or switch to `--where cloud` |
 | `cloud_not_configured` | Ask the user to run `comfy cloud login` (opens browser, OAuth + PKCE) |
-| `cloud_unauthorized` | Session expired or token rejected. Run `comfy cloud login` again. |
+| `cloud_unauthorized` | Your CLI session expired or token rejected *before submission*. Run `comfy cloud login` again. |
+| `transient_auth` | A cloud job died mid-run with "Unauthorized: Please login first to use this node" — server-side token expiry, NOT your login. Resubmit the same workflow; do NOT re-login. |
 | `node_not_found` | Read `details.close_matches` — pick the closest match and re-run |
 
 For the full error code list and resolution steps, run `comfy --json discover`.
+When any *job* fails (an `execution_error`-family envelope), invoke the
+`comfy-debug` skill before improvising — it maps every failure code to a fix.
 
 ## Routing the request — survey first, then choose
 
@@ -783,6 +786,12 @@ Hard-won lessons per domain. Not a tutorial — a reference card.
   connection — `"images.image0": [..], "images.image1": [..]` — never a single `images` link.
   `nodes show` prints the `wire_as` form; `comfy validate` rejects the bare form before submit.
 - I2V pattern: LoadImage → I2VNode → SaveVideo (check `nodes show` for the I2V node)
+- **Model enums mix t2v and i2v variants** — a node's `model` choices may include
+  image-to-video-only models (e.g. `grok-imagine-video-1.5`) that fail at runtime
+  without an `image` input. Capability isn't in the metadata: if the model name
+  hints at i2v/image, wire an image or pick another model before burning a cloud run
+- Provider clips come back off-spec (e.g. 5.042s @ 1924x1076) — ffprobe and
+  normalize (crop/trim) every clip before concat/conform
 - Audio sync: match durations — short audio = silent ending, long audio = truncated ending
 - Survey first: `comfy nodes ls --produces VIDEO --exclude-deprecated`, `comfy nodes ls --category "partner/video*"`, `comfy templates ls --type video` — compare OSS, partner-API, and gallery before choosing
 

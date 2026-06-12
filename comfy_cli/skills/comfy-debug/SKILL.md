@@ -37,6 +37,14 @@ If you're on a custom env (PR preview), set the base URL first:
 ```
 comfy cloud set-base-url https://fe-pr-NNNNN.testenvs.comfy.org
 ```
+**Do not confuse this with `transient_auth` (below).** `cloud_unauthorized` happens before submission (your CLI session); an "Unauthorized" that appears as a *job failure* is the server-side token expiry and re-login does nothing.
+
+### `transient_auth` (cloud job failed with "Unauthorized: Please login first to use this node")
+An API node's **server-side** session token expired mid-execution. It is transient and has nothing to do with your local credentials — `comfy cloud login` will NOT fix it, and your auth was fine at submit time (often it strikes minutes into a long render, sometimes a whole batch at once).
+```
+comfy --json run --workflow same_workflow.json --where cloud   # just resubmit — succeeds on retry
+```
+If several jobs from one batch died together with this code, resubmit them all; one retry each is normally enough.
 
 ### `workflow_not_api_format`
 UI-format workflows are converted to API format **client-side** using object_info (no server conversion endpoint exists). If conversion fails with `conversion_error`, re-export via `File > Export (API)` in ComfyUI; if object_info can't be fetched (`cql_no_graph`), run `comfy nodes refresh --where cloud` or start a local server.

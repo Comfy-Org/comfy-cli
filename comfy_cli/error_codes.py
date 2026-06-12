@@ -321,6 +321,12 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "ComfyUI reported an execution error for the workflow.",
         "inspect the error details or re-run with `--wait --verbose`",
     ),
+    ErrorCode(
+        "transient_auth",
+        "An API node's server-side session token expired mid-execution "
+        '("Unauthorized: Please login first to use this node"). Transient — not a local credential problem.',
+        "resubmit the same workflow — it succeeds on retry; `comfy cloud login` will not help",
+    ),
     # --- general argument / mode errors --------------------------------------
     ErrorCode(
         "missing_argument",

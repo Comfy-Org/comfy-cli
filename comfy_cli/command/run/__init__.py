@@ -20,7 +20,7 @@ from websocket import (  # noqa: F401 — patch target for tests (run.WebSocket)
     WebSocketTimeoutException,
 )
 
-from comfy_cli import cancellation, jobs_state
+from comfy_cli import cancellation, execution_errors, jobs_state
 
 # Re-exports — names patched by tests live at this namespace.
 from comfy_cli.command.run.credentials import _resolve_partner_credential as _resolve_partner_credential
@@ -745,16 +745,19 @@ def execute_cloud(
         status_str = str(exec_status).lower()
 
     if status_str in ("error", "failed"):
+        verdict = execution_errors.classify(record.get("error_message") or status_str)
         state.status = "error"
         state.error = {
-            "code": "execution_error",
-            "message": record.get("error_message", status_str),
+            "code": verdict["code"],
+            "message": verdict["message"],
+            "details": verdict["details"],
         }
         state_file = jobs_state.write(state)
         renderer.error(
-            code="cloud_http_error",
-            message=f"Workflow execution failed: {state.error['message']}",
-            details={"prompt_id": submit.prompt_id, "status": status_str},
+            code=verdict["code"],
+            message=verdict["message"],
+            hint=verdict["hint"],
+            details={"prompt_id": submit.prompt_id, "status": status_str, **verdict["details"]},
         )
         raise typer.Exit(code=1)
 

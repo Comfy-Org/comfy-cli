@@ -32,7 +32,7 @@ from typing import Annotated, Any
 import typer
 from websocket import WebSocket, WebSocketException, WebSocketTimeoutException
 
-from comfy_cli import cancellation, tracking
+from comfy_cli import cancellation, execution_errors, tracking
 from comfy_cli.config_manager import ConfigManager
 from comfy_cli.env_checker import check_comfy_server_running
 from comfy_cli.output import get_renderer
@@ -138,14 +138,30 @@ def _emit_terminal(renderer, payload: dict, *, command: str, where: str | None =
         renderer.emit(payload, command=command, where=where)
         return
     err = payload.get("error")
-    message = err.get("message") if isinstance(err, dict) and err.get("message") else None
-    if not message:
+    raw = err.get("message") if isinstance(err, dict) and err.get("message") else None
+    if not raw:
         # Cloud snapshots (_cloud_status_snapshot) carry the failure text at
-        # top-level `error_message` rather than in a structured error dict.
-        message = payload.get("error_message") or None
+        # top-level `error_message`; the local WS path carries the decoded
+        # execution_error event dict under `details`.
+        raw = payload.get("error_message") or payload.get("details")
+    message = raw if isinstance(raw, str) else None
+    hint = None
+    if status == "error":
+        verdict = execution_errors.classify(raw)
+        code, message, hint = verdict["code"], verdict["message"], verdict["hint"]
+        # The raw server text repeats the full traceback; keep the envelope to
+        # the one-line cause + structured tail and leave the full record to
+        # `jobs status`.
+        if payload.get("error_message"):
+            payload["error_message"] = verdict["message"]
+        if isinstance(payload.get("details"), dict) and "traceback" in payload["details"]:
+            payload["details"] = verdict["details"]
+        if isinstance(err, dict):
+            payload["error"] = {**err, "code": code, "message": verdict["message"], "details": verdict["details"]}
     renderer.error(
         code=code or "execution_error",
         message=message or f"job {payload.get('prompt_id')} ended in status {status!r}",
+        hint=hint,
         details=payload,
         exit_code=exit_code,
         command=command,
@@ -1135,13 +1151,20 @@ def _cloud_job_to_row(j: dict) -> JobRow:
 
 
 def _cloud_client():
-    """Construct a unified Client targeting cloud. Raises if not signed in."""
+    """Construct a unified Client targeting cloud. Raises if not signed in.
+
+    Observer commands (status/ls/watch snapshots) must never clear the shared
+    OAuth session on a fatal refresh error: batch workloads run dozens of these
+    concurrently, and one spurious invalid_grant wiping the login mid-run turns
+    a transient hiccup into a hard logout. Session lifecycle belongs to
+    login/logout and the foreground submit path.
+    """
     from comfy_cli.comfy_client import Client, Unauthenticated
     from comfy_cli.target import resolve_target
 
     target = resolve_target(where="cloud")
     try:
-        return Client(target)
+        return Client(target, clear_session_on_auth_failure=False)
     except Unauthenticated as e:
         renderer = get_renderer()
         renderer.error(code="cloud_unauthorized", message=str(e), hint="run: comfy auth login")

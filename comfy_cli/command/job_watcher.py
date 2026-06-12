@@ -22,7 +22,7 @@ from typing import Annotated, Any
 
 import typer
 
-from comfy_cli import jobs_state
+from comfy_cli import execution_errors, jobs_state
 
 app = typer.Typer(hidden=True)
 
@@ -230,10 +230,22 @@ def _poll_cloud_once(state: jobs_state.JobState, *, client: Any = None) -> bool:
             except Exception:  # noqa: BLE001 — best effort, state already terminal
                 pass
         return True
-    if state.status in {"error", "cancelled"}:
+    if state.status == "error":
+        verdict = execution_errors.classify(record.get("error_message"))
         state.error = {
-            "code": "execution_error",
-            "message": record.get("error_message") or "Cloud job ended in a non-success state.",
+            "code": verdict["code"],
+            "message": verdict["message"],
+            "hint": verdict["hint"],
+            "details": {
+                **verdict["details"],
+                **{k: record.get(k) for k in ("assigned_inference", "created_at", "updated_at")},
+            },
+        }
+        return True
+    if state.status == "cancelled":
+        state.error = {
+            "code": "cancelled",
+            "message": record.get("error_message") or "Cloud job was cancelled.",
             "details": {k: record.get(k) for k in ("assigned_inference", "created_at", "updated_at")},
         }
         return True

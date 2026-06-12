@@ -36,6 +36,7 @@ import typer
 from rich.progress import BarColumn, Progress, TimeElapsedColumn
 from rich.table import Column, Table
 
+from comfy_cli import execution_errors
 from comfy_cli.command.run.loader import _MAX_BODY_PREVIEW, _node_errors_to_list
 from comfy_cli.output import get_renderer
 from comfy_cli.output import rprint as pprint
@@ -534,21 +535,20 @@ class WorkflowExecution:
         self._stop_progress()
         data = data if isinstance(data, dict) else {}
         node_id = str(data.get("node_id", ""))
-        tb = data.get("traceback", [])
-        message = data.get("exception_message") or "Workflow execution failed on the server"
         if self.renderer.is_pretty():
             pprint(f"[bold red]Error running workflow\n{json.dumps(data, indent=2)}[/bold red]")
+        # The event keeps the full server payload (incl. complete traceback);
+        # the error envelope carries the classified one-line verdict.
         self.renderer.event("execution_error", prompt_id=self.prompt_id, details=data)
+        verdict = execution_errors.classify(data)
         self.renderer.error(
-            code="execution_error",
-            message=message,
-            hint="inspect the per-node fields in details; re-run with `--wait --verbose`",
+            code=verdict["code"],
+            message=verdict["message"],
+            hint=verdict["hint"],
             details={
-                "node_id": node_id,
+                **verdict["details"],
                 "class_type": data.get("node_type") or self._class_type(node_id),
                 "title": self.get_node_title(node_id),
-                "exception_type": data.get("exception_type", ""),
-                "traceback": "".join(tb) if isinstance(tb, list) else str(tb),
             },
         )
         raise typer.Exit(code=1)

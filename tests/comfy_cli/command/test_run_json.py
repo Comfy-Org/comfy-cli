@@ -544,14 +544,17 @@ class TestWebSocketEvents:
         assert any(e["type"] == "execution_error" for e in _events(lines))
         env = _envelope(lines)
         assert env["error"]["code"] == "execution_error"
-        assert env["error"]["message"] == "boom"
+        assert env["error"]["message"] == "EmptyLatentImage (node 1): boom"
         details = env["error"]["details"]
         assert details["node_id"] == "1"
         assert details["class_type"] == "EmptyLatentImage"
         assert details["exception_type"] == "RuntimeError"
         assert details["title"] == "Latent"  # from _meta.title
-        assert isinstance(details["traceback"], str)
-        assert "raise RuntimeError" in details["traceback"]
+        # The envelope carries only the traceback tail; the full traceback
+        # stays on the execution_error event.
+        assert isinstance(details["traceback_tail"], list)
+        assert any("raise RuntimeError" in frame for frame in details["traceback_tail"])
+        assert "traceback" not in details
 
     def test_execution_error_node_id_coerced_to_str(self, workflow_file, capsys):
         # If ComfyUI ever sends node_id as an int, the contract still
