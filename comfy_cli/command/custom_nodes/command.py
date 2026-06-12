@@ -9,6 +9,7 @@ from enum import Enum
 from typing import Annotated
 
 import typer
+from click.core import ParameterSource
 from rich import print
 from rich.console import Console
 
@@ -1023,14 +1024,61 @@ def validate():
     # print("[green]✓ All validation checks passed successfully[/green]")
 
 
+def resolve_publish_changelog(ctx: typer.Context, changelog: str | None, changelog_file: str | None) -> str:
+    """
+    Resolve the changelog text from --changelog/COMFY_NODE_CHANGELOG or --changelog-file.
+
+    `--changelog-file -` reads stdin. An explicit --changelog-file overrides an
+    env-provided changelog; combining it with an explicit --changelog is an error.
+    """
+    if changelog is not None and changelog_file is not None:
+        if ctx.get_parameter_source("changelog") == ParameterSource.COMMANDLINE:
+            print("[red]Error: --changelog and --changelog-file are mutually exclusive.[/red]")
+            raise typer.Exit(code=1)
+        changelog = None
+
+    if changelog_file is None:
+        return (changelog or "").strip()
+
+    if changelog_file == "-":
+        try:
+            return sys.stdin.buffer.read().decode("utf-8-sig").strip()
+        except (OSError, UnicodeDecodeError) as e:
+            print(f"[red]Error: could not read changelog from stdin: {e}[/red]")
+            raise typer.Exit(code=1)
+
+    try:
+        # `utf-8-sig` strips a leading BOM, mirroring pyproject.toml parsing.
+        with open(changelog_file, encoding="utf-8-sig") as f:
+            return f.read().strip()
+    except (OSError, UnicodeDecodeError) as e:
+        print(f"[red]Error: could not read changelog file `{changelog_file}`: {e}[/red]")
+        raise typer.Exit(code=1)
+
+
 @app.command("publish", help="Publish node to registry")
 @tracking.track_command("publish")
 def publish(
+    ctx: typer.Context,
     token: str | None = typer.Option(None, "--token", help="Personal Access Token for publishing", hide_input=True),
+    changelog: str | None = typer.Option(
+        None,
+        "--changelog",
+        envvar="COMFY_NODE_CHANGELOG",
+        help="Changelog text for this version, shown in the registry's Updates section.",
+    ),
+    changelog_file: str | None = typer.Option(
+        None,
+        "--changelog-file",
+        help="Read the changelog for this version from a file; use '-' to read stdin. "
+        "Mutually exclusive with --changelog.",
+    ),
 ):
     """
     Publish a node with optional validation.
     """
+    changelog_text = resolve_publish_changelog(ctx, changelog, changelog_file)
+
     config = validate_node_for_publishing()
 
     # Prompt for API Key
@@ -1043,7 +1091,12 @@ def publish(
     # Call API to fetch node version with the token in the body
     typer.echo("Publishing node version...")
     try:
-        response = registry_api.publish_node_version(config, token)
+        response = registry_api.publish_node_version(config, token, changelog=changelog_text)
+        if changelog_text and (response.node_version.changelog or "").strip() != changelog_text:
+            print(
+                "[yellow]Warning: the registry did not echo the changelog back; "
+                "the Updates section may not show it for this version.[/yellow]"
+            )
         # Zip up all files in the current directory, respecting .gitignore files.
         signed_url = response.signedUrl
         zip_filename = NODE_ZIP_FILENAME
