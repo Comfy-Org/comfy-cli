@@ -400,9 +400,11 @@ def execute_download(
         if state is not None and state.outputs:
             output_urls = list(state.outputs)
         else:
-            # Fall back to querying the API
+            # Fall back to querying the API. Download is an observer command —
+            # often running in concurrent retry loops — so it must never clear
+            # the shared OAuth session on a fatal refresh error.
             try:
-                client = Client(target)
+                client = Client(target, clear_session_on_auth_failure=False)
                 record = client.get_history(prompt_id)
                 if record is not None:
                     output_urls = client.extract_output_urls(record)
