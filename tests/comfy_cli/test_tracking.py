@@ -122,6 +122,22 @@ class TestTrackCommandRedaction:
         _, _, properties = _last_track_call(tracking_module.provider)
         assert properties["api_key"] is None
 
+    def test_publish_token_and_changelog_values_are_redacted(self, tracking_module):
+        tracking_module.config_manager.set(constants.CONFIG_KEY_ENABLE_TRACKING, "True")
+
+        @tracking_module.track_command("publish")
+        def publish(token=None, changelog=None, changelog_file=None):
+            return None
+
+        publish(token="pat-supersecret", changelog="## 1.0\n- fix things", changelog_file=None)
+
+        _, _, properties = _last_track_call(tracking_module.provider)
+        assert properties["token"] == "<redacted>"
+        assert properties["changelog"] == "<redacted>"
+        assert properties["changelog_file"] is None
+        assert "pat-supersecret" not in str(properties)
+        assert "fix things" not in str(properties)
+
 
 class TestInitTrackingRoundTrip:
     """End-to-end: init_tracking() writes the string "False"/"True", and track_event honors it.

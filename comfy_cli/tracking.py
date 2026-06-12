@@ -40,7 +40,9 @@ POSTHOG_EVENT_PREFIX = "cli:"
 
 # Kwargs whose values must never reach tracking system.
 # The key is kept (with a redacted marker) so we can still see whether the option was supplied.
-SENSITIVE_TRACKING_KEYS = frozenset({"api_key"})
+# `token` is the registry publisher PAT; `changelog` is bulky free text (up to a whole
+# GitHub release body) with no analytics value beyond its presence.
+SENSITIVE_TRACKING_KEYS = frozenset({"api_key", "token", "changelog"})
 
 # Generate a unique tracing ID per command.
 config_manager = ConfigManager()
