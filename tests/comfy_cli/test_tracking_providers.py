@@ -241,6 +241,35 @@ class TestRedactionThroughFanOut:
         assert "sk-supersecret" not in str(mp_kwargs["properties"])
         assert "sk-supersecret" not in str(ph_kwargs["properties"])
 
+    def test_download_credentials_never_reach_either_provider(self, tracking_with_two_providers):
+        # BE-992 kwarg shape: before the suffix matcher and the underscore
+        # filter, the un-redacted token still shipped to PostHog because its
+        # client coerces the unserializable _ctx instead of raising the way
+        # Mixpanel's does.
+        import click
+
+        tracking_mod, mp_provider, ph_provider = tracking_with_two_providers
+
+        @tracking_mod.track_command("model")
+        def download(_ctx=None, url=None, set_civitai_api_token=None, set_hf_api_token=None):
+            return None
+
+        download(
+            _ctx=click.Context(click.Command("download")),
+            url="https://example.com/model.safetensors",
+            set_civitai_api_token="civ-secret",
+            set_hf_api_token="hf-secret",
+        )
+
+        _, mp_kwargs = mp_provider.client.track.call_args
+        ph_kwargs = _posthog_capture_kwargs(ph_provider.client)
+        for properties in (mp_kwargs["properties"], ph_kwargs["properties"]):
+            assert "_ctx" not in properties
+            assert properties["set_civitai_api_token"] == "<redacted>"
+            assert properties["set_hf_api_token"] == "<redacted>"
+            assert "civ-secret" not in str(properties)
+            assert "hf-secret" not in str(properties)
+
 
 class TestAtexitFlush:
     def test_flush_all_providers_calls_each_flush(self):

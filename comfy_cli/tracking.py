@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import atexit
 import functools
+import json
 import logging as logginglib
 import os
 import sys
@@ -38,11 +39,47 @@ EXECUTION_EVENTS = frozenset({"execution_start", "execution_success", "execution
 # historical streams stay continuous.
 POSTHOG_EVENT_PREFIX = "cli:"
 
-# Kwargs whose values must never reach tracking system.
-# The key is kept (with a redacted marker) so we can still see whether the option was supplied.
-# `token` is the registry publisher PAT; `changelog` is bulky free text (up to a whole
-# GitHub release body) with no analytics value beyond its presence.
-SENSITIVE_TRACKING_KEYS = frozenset({"api_key", "token", "changelog"})
+# Sanitize command kwargs before sending them as telemetry: _is_sensitive()
+# masks credential-bearing names, _is_trackable() drops ctx/private/unserializable
+# values, and _scrub_value() strips query strings off URL values.
+
+_SENSITIVE_SUFFIXES = ("_token", "_api_key", "_secret", "_password")
+# `token` is the publish PAT; `changelog` is bulky free text with no analytics
+# value beyond its presence. Sensitive values become "<redacted>" (the key is
+# kept so we can still tell the option was supplied).
+_SENSITIVE_EXACT = frozenset({"api_key", "token", "password", "secret", "changelog"})
+
+
+def _is_sensitive(name: str) -> bool:
+    """True if *name* looks like a credential. Case-insensitive; matches the
+    snake_case suffixes only (Typer kwargs are always snake_case)."""
+    lower = name.lower()
+    return lower in _SENSITIVE_EXACT or lower.endswith(_SENSITIVE_SUFFIXES)
+
+
+def _is_trackable(name: str, value: object) -> bool:
+    """True if the (name, value) kwarg is safe to send. Drops ctx/context,
+    underscore-prefixed names, and values json can't serialize -- posthog-python
+    coerces unserializable values and ships them (e.g. a Click Context) rather
+    than raising the way Mixpanel does, so we must reject them ourselves."""
+    if name in ("ctx", "context"):
+        return False
+    if name.startswith("_"):
+        return False
+    try:
+        json.dumps(value)
+    except (TypeError, ValueError, OverflowError, RecursionError):
+        return False
+    return True
+
+
+def _scrub_value(value: object) -> object:
+    """Strip the query string and fragment from URL values; CivitAI download
+    links carry the token as ?token=. Only top-level http(s) strings are touched."""
+    if isinstance(value, str) and value.startswith(("http://", "https://")):
+        return value.partition("?")[0].partition("#")[0]
+    return value
+
 
 # Generate a unique tracing ID per command.
 config_manager = ConfigManager()
@@ -183,11 +220,13 @@ def track_event(event_name: str, properties: Any = None, *, mixpanel_name: str |
 
 
 def filter_command_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
-    """Drop ``ctx``/``context`` and redact ``SENSITIVE_TRACKING_KEYS`` values."""
+    """Drop untrackable kwargs (see ``_is_trackable``), redact sensitive values
+    (see ``_is_sensitive``), and strip credentials embedded in URL values
+    (see ``_scrub_value``)."""
     return {
-        k: ("<redacted>" if v is not None else None) if k in SENSITIVE_TRACKING_KEYS else v
+        k: ("<redacted>" if v is not None else None) if _is_sensitive(k) else _scrub_value(v)
         for k, v in kwargs.items()
-        if k != "ctx" and k != "context"
+        if _is_trackable(k, v)
     }
 
 

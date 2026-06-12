@@ -138,6 +138,213 @@ class TestTrackCommandRedaction:
         assert "pat-supersecret" not in str(properties)
         assert "fix things" not in str(properties)
 
+    def test_set_civitai_api_token_is_redacted(self, tracking_module):
+        tracking_module.config_manager.set(constants.CONFIG_KEY_ENABLE_TRACKING, "True")
+
+        @tracking_module.track_command("model")
+        def download(url, set_civitai_api_token=None, set_hf_api_token=None):
+            return None
+
+        download(url="https://example.com", set_civitai_api_token="civ-real-token")
+
+        tracking_module.provider.track.assert_called_once()
+        _, _, properties = _last_track_call(tracking_module.provider)
+        assert properties["set_civitai_api_token"] == "<redacted>"
+        assert "civ-real-token" not in str(properties)
+
+    def test_set_hf_api_token_is_redacted(self, tracking_module):
+        tracking_module.config_manager.set(constants.CONFIG_KEY_ENABLE_TRACKING, "True")
+
+        @tracking_module.track_command("model")
+        def download(url, set_civitai_api_token=None, set_hf_api_token=None):
+            return None
+
+        download(url="https://example.com", set_hf_api_token="hf_real-token")
+
+        tracking_module.provider.track.assert_called_once()
+        _, _, properties = _last_track_call(tracking_module.provider)
+        assert properties["set_hf_api_token"] == "<redacted>"
+        assert "hf_real-token" not in str(properties)
+
+    def test_bare_token_kwarg_is_redacted(self, tracking_module):
+        tracking_module.config_manager.set(constants.CONFIG_KEY_ENABLE_TRACKING, "True")
+
+        @tracking_module.track_command()
+        def some_cmd(workflow, token=None):
+            return None
+
+        some_cmd(workflow="wf.json", token="my-secret-token")
+
+        tracking_module.provider.track.assert_called_once()
+        _, _, properties = _last_track_call(tracking_module.provider)
+        assert properties["token"] == "<redacted>"
+        assert "my-secret-token" not in str(properties)
+
+    def test_underscore_ctx_is_excluded(self, tracking_module):
+        import click
+
+        tracking_module.config_manager.set(constants.CONFIG_KEY_ENABLE_TRACKING, "True")
+
+        @tracking_module.track_command("model")
+        def download(_ctx, url, set_civitai_api_token=None):
+            return None
+
+        ctx = click.Context(click.Command("download"))
+        download(_ctx=ctx, url="https://example.com")
+
+        tracking_module.provider.track.assert_called_once()
+        _, _, properties = _last_track_call(tracking_module.provider)
+        assert "_ctx" not in properties
+        assert properties["url"] == "https://example.com"
+
+    def test_non_serializable_value_is_excluded(self, tracking_module):
+        tracking_module.config_manager.set(constants.CONFIG_KEY_ENABLE_TRACKING, "True")
+
+        @tracking_module.track_command()
+        def some_cmd(workflow, callback=None):
+            return None
+
+        some_cmd(workflow="wf.json", callback=lambda x: x)
+
+        tracking_module.provider.track.assert_called_once()
+        _, _, properties = _last_track_call(tracking_module.provider)
+        assert "callback" not in properties
+        assert properties["workflow"] == "wf.json"
+
+    def test_url_query_string_is_scrubbed(self, tracking_module):
+        # CivitAI download links carry the API key as `?token=`.
+        tracking_module.config_manager.set(constants.CONFIG_KEY_ENABLE_TRACKING, "True")
+
+        @tracking_module.track_command("model")
+        def download(url=None, relative_path=None):
+            return None
+
+        download(url="https://civitai.com/api/download/models/12345?token=civ-url-secret")
+
+        _, _, properties = _last_track_call(tracking_module.provider)
+        assert properties["url"] == "https://civitai.com/api/download/models/12345"
+        assert "civ-url-secret" not in str(properties)
+
+    def test_url_without_query_is_unchanged(self, tracking_module):
+        tracking_module.config_manager.set(constants.CONFIG_KEY_ENABLE_TRACKING, "True")
+
+        @tracking_module.track_command("model")
+        def download(url=None):
+            return None
+
+        download(url="https://huggingface.co/org/repo/resolve/main/m.safetensors")
+
+        _, _, properties = _last_track_call(tracking_module.provider)
+        assert properties["url"] == "https://huggingface.co/org/repo/resolve/main/m.safetensors"
+
+
+class TestSensitiveNameMatcher:
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "api_key",
+            "token",
+            "password",
+            "secret",
+            "changelog",
+            "set_civitai_api_token",
+            "set_hf_api_token",
+            "access_token",
+            "client_secret",
+            "admin_password",
+            "API_KEY",
+            "Set_HF_Api_Token",
+        ],
+    )
+    def test_matches(self, name):
+        import comfy_cli.tracking as tm
+
+        assert tm._is_sensitive(name) is True
+
+    @pytest.mark.parametrize("name", ["url", "workflow", "changelog_file", "max_tokens", "tokenizer", "relative_path"])
+    def test_does_not_match(self, name):
+        import comfy_cli.tracking as tm
+
+        assert tm._is_sensitive(name) is False
+
+
+class TestCliParamNameDriftGate:
+    """BE-992 happened because credential flags were added after the redaction
+    set was written. Walk the real CLI tree so the next one cannot land
+    unredacted."""
+
+    # Params whose names merely contain a credential-ish substring but are
+    # reviewed as safe to track verbatim go here.
+    ALLOWLIST = frozenset()
+
+    def test_credentialish_cli_params_are_redacted(self):
+        import click
+        from typer.main import get_command
+
+        import comfy_cli.tracking as tm
+        from comfy_cli.cmdline import app
+
+        suspicious = ("token", "secret", "password", "api_key", "apikey", "credential")
+
+        def walk(cmd, path):
+            if isinstance(cmd, click.Group):
+                for name, sub in cmd.commands.items():
+                    yield from walk(sub, [*path, name])
+                return
+            for param in cmd.params:
+                if param.name:
+                    yield " ".join(path), param.name
+
+        offenders = sorted(
+            {
+                (path, pname)
+                for path, pname in walk(get_command(app), ["comfy"])
+                if any(s in pname.lower() for s in suspicious)
+                and pname not in self.ALLOWLIST
+                and not tm._is_sensitive(pname)
+            }
+        )
+        assert offenders == [], f"credential-looking CLI params not redacted by _is_sensitive: {offenders}"
+
+
+class TestTrackCommandRealTyperWiring:
+    def test_model_download_kwargs_are_filtered_and_redacted(self, tracking_module):
+        # `model download` is the command whose `_ctx` + credential kwarg
+        # combination motivated BE-992; invoke it through Typer for real so
+        # the Click context actually lands in the tracked kwargs.
+        from typer.testing import CliRunner
+
+        import comfy_cli.command.models.models as models
+
+        tracking_module.config_manager.set(constants.CONFIG_KEY_ENABLE_TRACKING, "True")
+
+        with (
+            patch.object(models, "config_manager", MagicMock()),
+            patch.object(models, "check_civitai_url", side_effect=RuntimeError("halt after tracking")),
+        ):
+            result = CliRunner().invoke(
+                models.app,
+                [
+                    "download",
+                    "--url",
+                    "https://example.com/model.safetensors?token=url-secret",
+                    "--set-civitai-api-token",
+                    "civ-secret",
+                ],
+            )
+
+        # The command body aborted at the patched helper, after tracking fired.
+        assert isinstance(result.exception, RuntimeError)
+
+        tracking_module.provider.track.assert_called_once()
+        event_name, _, properties = _last_track_call(tracking_module.provider)
+        assert event_name == "model:download"
+        assert "_ctx" not in properties
+        assert properties["set_civitai_api_token"] == "<redacted>"
+        assert "civ-secret" not in str(properties)
+        assert properties["url"] == "https://example.com/model.safetensors"
+        assert "url-secret" not in str(properties)
+
 
 class TestInitTrackingRoundTrip:
     """End-to-end: init_tracking() writes the string "False"/"True", and track_event honors it.
