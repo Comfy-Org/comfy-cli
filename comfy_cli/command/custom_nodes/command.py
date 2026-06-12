@@ -1077,6 +1077,13 @@ def publish(
     """
     Publish a node with optional validation.
     """
+    if changelog_file == "-" and not token:
+        print(
+            "[red]Error: reading the changelog from stdin requires --token "
+            "(the API-key prompt cannot read from stdin).[/red]"
+        )
+        raise typer.Exit(code=1)
+
     changelog_text = resolve_publish_changelog(changelog, changelog_file)
 
     config = validate_node_for_publishing()

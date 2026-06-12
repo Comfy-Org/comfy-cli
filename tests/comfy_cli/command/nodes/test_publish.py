@@ -278,6 +278,20 @@ def test_publish_changelog_stdin_strips_bom():
     assert mocks.publish.call_args.kwargs["changelog"] == "piped notes"
 
 
+def test_publish_changelog_stdin_without_token_fails_before_consuming_stdin():
+    with publish_flow_mocks() as mocks:
+        result = runner.invoke(
+            app,
+            ["publish", "--changelog-file", "-"],
+            input="notes\n",
+        )
+
+    assert result.exit_code == 1
+    assert "requires --token" in flatten(result.stdout)
+    assert not mocks.extract.called
+    assert not mocks.publish.called
+
+
 def test_publish_changelog_stdin_invalid_utf8_fails():
     with publish_flow_mocks() as mocks:
         result = runner.invoke(
