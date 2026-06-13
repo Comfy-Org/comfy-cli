@@ -118,7 +118,11 @@ def _command_to_dict(cmd: click.Command, *, path: list[str]) -> dict[str, Any]:
         "params": params,
         "examples": HELP_EXAMPLES.get(fqp, []),
     }
-    if isinstance(cmd, click.Group):
+    # Duck-type the group capability instead of ``isinstance(cmd, click.Group)``.
+    # typer >= 0.13 / click >= 8.2 ship a ``TyperGroup`` that no longer subclasses
+    # ``click.Group`` (its MRO is ``TyperGroup -> click.Command``), so the isinstance
+    # check silently returned no subcommands and produced an empty command tree.
+    if hasattr(cmd, "list_commands") and hasattr(cmd, "get_command"):
         subs: dict[str, Any] = {}
         for sub_name in sorted(cmd.list_commands(ctx=None)):  # type: ignore[arg-type]
             sub = cmd.get_command(None, sub_name)  # type: ignore[arg-type]

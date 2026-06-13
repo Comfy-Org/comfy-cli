@@ -354,7 +354,7 @@ class TestCommandLineIntegration:
         """Test install command with --pr parameter"""
         result = runner.invoke(app, ["install", "--pr", "jtydhr88:load-3d-nodes", "--nvidia", "--skip-prompt"])
 
-        assert "Invalid PR reference format" not in result.stdout
+        assert "Invalid PR reference format" not in result.output
 
         if mock_execute.called:
             call_args = mock_execute.call_args
@@ -384,7 +384,7 @@ class TestCommandLineIntegration:
             app, ["--skip-prompt", "install", "--version", "nightly", "--commit", "abc123", "--nvidia"]
         )
 
-        assert "--pr cannot be used" not in result.stdout
+        assert "--pr cannot be used" not in result.output
         assert mock_execute.called
 
     @patch("comfy_cli.command.install.execute")
@@ -397,7 +397,9 @@ class TestCommandLineIntegration:
         result = runner.invoke(app, ["--skip-prompt", "install", "--cpu", "--pr", "#123", "--version", "1.0.0"])
 
         assert result.exit_code != 0
-        assert "--pr cannot be used" in result.stdout
+        # ``result.output`` (not ``.stdout``): click >= 8.2 keeps stderr out of
+        # ``.stdout`` in CliRunner, and the conflict error is emitted on stderr.
+        assert "--pr cannot be used" in result.output
         assert not mock_execute.called
 
     @patch("comfy_cli.command.install.execute")
@@ -412,7 +414,7 @@ class TestCommandLineIntegration:
         )
 
         assert result.exit_code != 0
-        assert "--pr cannot be used" in result.stdout
+        assert "--pr cannot be used" in result.output
         assert not mock_execute.called
 
     @patch("comfy_cli.command.install.execute")

@@ -1050,7 +1050,15 @@ class TestFindCmCli:
 
     def test_find_cm_cli_module_found(self):
         """When cm_cli module exists, should return True."""
-        with patch("importlib.util.find_spec") as mock_find_spec:
+        from comfy_cli.command.custom_nodes import cm_cli_util as _cm_cli_util
+
+        # Pin workspace_path to None so we exercise the find_spec fallback rather
+        # than the workspace-Python subprocess branch (which would skip find_spec
+        # whenever the developer has a workspace configured).
+        with (
+            patch("importlib.util.find_spec") as mock_find_spec,
+            patch.object(_cm_cli_util.workspace_manager, "workspace_path", None),
+        ):
             mock_find_spec.return_value = MagicMock()  # Non-None means module exists
             # Clear cache before test
             from comfy_cli.command.custom_nodes.cm_cli_util import find_cm_cli
@@ -1082,7 +1090,12 @@ class TestFindCmCli:
 
     def test_find_cm_cli_cache_behavior(self):
         """find_cm_cli should cache results and not call find_spec repeatedly."""
-        with patch("importlib.util.find_spec") as mock_find_spec:
+        from comfy_cli.command.custom_nodes import cm_cli_util as _cm_cli_util
+
+        with (
+            patch("importlib.util.find_spec") as mock_find_spec,
+            patch.object(_cm_cli_util.workspace_manager, "workspace_path", None),
+        ):
             mock_find_spec.return_value = MagicMock()
             from comfy_cli.command.custom_nodes.cm_cli_util import find_cm_cli
 
