@@ -19,6 +19,14 @@ def exec(cmd: str, **kwargs) -> subprocess.CompletedProcess[str]:
     cmd = dedent(cmd).strip()
     print(f"cmd: {cmd}")
 
+    # These e2e tests assert on the human-readable (pretty) output. The CLI now
+    # auto-selects JSON mode when stdout isn't a TTY (and subprocess pipes never
+    # are), which would route human messages to stderr and emit envelopes on
+    # stdout. Pin COMFY_OUTPUT=pretty so the assertions keep matching; the JSON
+    # auto-selection path is covered by the unit tests in tests/comfy_cli/output.
+    run_env = dict(kwargs.pop("env", None) or os.environ)
+    run_env.setdefault("COMFY_OUTPUT", "pretty")
+
     proc = subprocess.run(
         args=cmd,
         capture_output=True,
@@ -26,6 +34,7 @@ def exec(cmd: str, **kwargs) -> subprocess.CompletedProcess[str]:
         shell=True,
         encoding="utf-8",
         check=False,
+        env=run_env,
         **kwargs,
     )
     print(proc.stdout, proc.stderr)
