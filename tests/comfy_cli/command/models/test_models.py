@@ -541,3 +541,346 @@ class TestDownloadCommandErrorHandling:
         # Literal markup characters must survive to the output so the user sees the real message.
         assert "[/]" in result.output
         assert "[id]" in result.output
+
+
+class TestDownloadCommandExtraModelPaths:
+    """Verify extra_model_paths.yaml integration in `comfy model download`."""
+
+    _CIVITAI_URL = "https://civitai.com/models/43331?version=12345"
+    _DEFAULT_API_RETURN = ("api_default.bin", "http://x/file.bin", "checkpoint", "SDXL")
+
+    def _civitai_invoke(self, tmp_path, *, args, civitai_return=None):
+        if civitai_return is None:
+            civitai_return = self._DEFAULT_API_RETURN
+        captured: list = []
+
+        def fake_dl(url, local_filepath, headers, downloader):
+            local_filepath.parent.mkdir(parents=True, exist_ok=True)
+            local_filepath.write_bytes(b"x")
+            captured.append(local_filepath)
+
+        with (
+            patch("comfy_cli.command.models.models.get_workspace", return_value=tmp_path),
+            patch("comfy_cli.command.models.models.request_civitai_model_api", return_value=civitai_return),
+            patch("comfy_cli.command.models.models.download_file", side_effect=fake_dl),
+            patch("comfy_cli.tracking.track_command", lambda _cmd: lambda fn: fn),
+        ):
+            return runner.invoke(app, args), captured
+
+    def test_no_extras_uses_workspace_path(self, tmp_path):
+        result, captured = self._civitai_invoke(
+            tmp_path,
+            args=["download", "--url", self._CIVITAI_URL, "--filename", "x.bin"],
+        )
+        assert result.exit_code == 0
+        assert captured == [tmp_path / "models" / "checkpoints" / "SDXL" / "x.bin"]
+
+    def test_extras_routes_to_configured_path(self, tmp_path):
+        ext_root = tmp_path / "ext"
+        (tmp_path / "extra_model_paths.yaml").write_text(f"comfyui:\n    base_path: {ext_root}\n    checkpoints: cp\n")
+        result, captured = self._civitai_invoke(
+            tmp_path,
+            args=["download", "--url", self._CIVITAI_URL, "--filename", "x.bin"],
+        )
+        assert result.exit_code == 0
+        assert captured == [ext_root / "cp" / "SDXL" / "x.bin"]
+
+    def test_explicit_relative_path_overrides_extras(self, tmp_path):
+        ext_root = tmp_path / "ext"
+        (tmp_path / "extra_model_paths.yaml").write_text(f"comfyui:\n    base_path: {ext_root}\n    checkpoints: cp\n")
+        manual = tmp_path / "manual"
+        result, captured = self._civitai_invoke(
+            tmp_path,
+            args=[
+                "download",
+                "--url",
+                self._CIVITAI_URL,
+                "--relative-path",
+                str(manual),
+                "--filename",
+                "x.bin",
+            ],
+        )
+        assert result.exit_code == 0
+        assert captured == [manual / "x.bin"]
+
+    def test_no_extra_model_paths_flag_disables_extras(self, tmp_path):
+        ext_root = tmp_path / "ext"
+        (tmp_path / "extra_model_paths.yaml").write_text(f"comfyui:\n    base_path: {ext_root}\n    checkpoints: cp\n")
+        result, captured = self._civitai_invoke(
+            tmp_path,
+            args=[
+                "download",
+                "--url",
+                self._CIVITAI_URL,
+                "--filename",
+                "x.bin",
+                "--no-extra-model-paths",
+            ],
+        )
+        assert result.exit_code == 0
+        assert captured == [tmp_path / "models" / "checkpoints" / "SDXL" / "x.bin"]
+
+    def test_extras_for_other_category_falls_back(self, tmp_path):
+        ext_root = tmp_path / "ext"
+        (tmp_path / "extra_model_paths.yaml").write_text(f"comfyui:\n    base_path: {ext_root}\n    loras: l\n")
+        result, captured = self._civitai_invoke(
+            tmp_path,
+            args=["download", "--url", self._CIVITAI_URL, "--filename", "x.bin"],
+        )
+        assert result.exit_code == 0
+        assert captured == [tmp_path / "models" / "checkpoints" / "SDXL" / "x.bin"]
+
+    def test_extra_model_paths_config_flag_loads_external_yaml(self, tmp_path):
+        ext_root = tmp_path / "ext"
+        external = tmp_path / "external.yaml"
+        external.write_text(f"comfyui:\n    base_path: {ext_root}\n    checkpoints: cp\n")
+        result, captured = self._civitai_invoke(
+            tmp_path,
+            args=[
+                "download",
+                "--url",
+                self._CIVITAI_URL,
+                "--filename",
+                "x.bin",
+                "--extra-model-paths-config",
+                str(external),
+            ],
+        )
+        assert result.exit_code == 0
+        assert captured == [ext_root / "cp" / "SDXL" / "x.bin"]
+
+    def test_is_default_priority_picks_marked_section(self, tmp_path):
+        primary = tmp_path / "primary"
+        fallback = tmp_path / "fallback"
+        (tmp_path / "extra_model_paths.yaml").write_text(
+            f"first:\n    base_path: {fallback}\n    checkpoints: cp\n"
+            f"second:\n    base_path: {primary}\n    is_default: true\n    checkpoints: cp\n"
+        )
+        result, captured = self._civitai_invoke(
+            tmp_path,
+            args=["download", "--url", self._CIVITAI_URL, "--filename", "x.bin"],
+        )
+        assert result.exit_code == 0
+        assert captured == [primary / "cp" / "SDXL" / "x.bin"]
+
+    def test_huggingface_url_routes_to_extras(self, tmp_path):
+        ext_root = tmp_path / "ext"
+        (tmp_path / "extra_model_paths.yaml").write_text(f"comfyui:\n    base_path: {ext_root}\n    checkpoints: cp\n")
+        captured: list = []
+
+        def fake_dl(url, local_filepath, headers, downloader):
+            local_filepath.parent.mkdir(parents=True, exist_ok=True)
+            local_filepath.write_bytes(b"x")
+            captured.append(local_filepath)
+
+        with (
+            patch("comfy_cli.command.models.models.get_workspace", return_value=tmp_path),
+            patch("comfy_cli.command.models.models.download_file", side_effect=fake_dl),
+            patch("comfy_cli.command.models.models.check_civitai_url", return_value=(False, False, None, None)),
+            patch(
+                "comfy_cli.command.models.models.check_huggingface_url",
+                return_value=(True, "foo/bar", "x.safetensors", None, None),
+            ),
+            patch("comfy_cli.command.models.models.check_unauthorized", return_value=False),
+            patch("comfy_cli.command.models.models.ui") as mock_ui,
+            patch("comfy_cli.tracking.track_command", lambda _cmd: lambda fn: fn),
+        ):
+            mock_ui.prompt_input.side_effect = ["checkpoints", "SDXL"]
+            result = runner.invoke(
+                app,
+                [
+                    "download",
+                    "--url",
+                    "https://huggingface.co/foo/bar/resolve/main/x.safetensors",
+                    "--filename",
+                    "x.bin",
+                ],
+            )
+        assert result.exit_code == 0
+        assert captured == [ext_root / "cp" / "SDXL" / "x.bin"]
+
+    def test_invalid_extras_yaml_warns_and_falls_back(self, tmp_path):
+        (tmp_path / "extra_model_paths.yaml").write_text("comfyui:\n  base_path: /a\n    checkpoints: cp\n")
+        result, captured = self._civitai_invoke(
+            tmp_path,
+            args=["download", "--url", self._CIVITAI_URL, "--filename", "x.bin"],
+        )
+        assert result.exit_code == 0
+        assert "extra_model_paths" in result.output
+        assert captured == [tmp_path / "models" / "checkpoints" / "SDXL" / "x.bin"]
+
+
+class TestListCommandExtraModelPaths:
+    """Verify extra_model_paths.yaml integration in `comfy model list`."""
+
+    def _setup_workspace_models(self, tmp_path):
+        (tmp_path / "models" / "checkpoints").mkdir(parents=True)
+        (tmp_path / "models" / "checkpoints" / "ws_only.safetensors").write_bytes(b"x" * 100)
+
+    def _setup_extras_root(self, tmp_path):
+        ext_root = tmp_path / "ext"
+        (ext_root / "cp" / "SDXL").mkdir(parents=True)
+        (ext_root / "cp" / "SDXL" / "ext_only.safetensors").write_bytes(b"x" * 200)
+        return ext_root
+
+    def test_no_extras_baseline_unchanged(self, tmp_path):
+        self._setup_workspace_models(tmp_path)
+        with patch("comfy_cli.command.models.models.get_workspace", return_value=tmp_path):
+            result = runner.invoke(app, ["list", "--relative-path", "models"])
+        assert result.exit_code == 0
+        assert "ws_only.safetensors" in result.output
+        assert "Source" not in result.output
+
+    def test_extras_files_appear(self, tmp_path):
+        self._setup_workspace_models(tmp_path)
+        ext_root = self._setup_extras_root(tmp_path)
+        (tmp_path / "extra_model_paths.yaml").write_text(f"comfyui:\n    base_path: {ext_root}\n    checkpoints: cp\n")
+        with patch("comfy_cli.command.models.models.get_workspace", return_value=tmp_path):
+            result = runner.invoke(app, ["list", "--relative-path", "models"])
+        assert result.exit_code == 0
+        assert "ws_only.safetensors" in result.output
+        assert "ext_only.safetensors" in result.output
+
+    def test_multi_root_adds_source_column(self, tmp_path):
+        self._setup_workspace_models(tmp_path)
+        ext_root = self._setup_extras_root(tmp_path)
+        (tmp_path / "extra_model_paths.yaml").write_text(f"comfyui:\n    base_path: {ext_root}\n    checkpoints: cp\n")
+        with patch("comfy_cli.command.models.models.get_workspace", return_value=tmp_path):
+            result = runner.invoke(app, ["list", "--relative-path", "models"])
+        assert result.exit_code == 0
+        assert "Source" in result.output
+
+    def test_type_column_prepends_category_for_extras_files(self, tmp_path):
+        ext_root = self._setup_extras_root(tmp_path)
+        (tmp_path / "models").mkdir()
+        (tmp_path / "extra_model_paths.yaml").write_text(f"comfyui:\n    base_path: {ext_root}\n    checkpoints: cp\n")
+        with patch("comfy_cli.command.models.models.get_workspace", return_value=tmp_path):
+            result = runner.invoke(app, ["list", "--relative-path", "models"])
+        assert result.exit_code == 0
+        assert "checkpoints/SDXL" in result.output
+
+    def test_dedup_when_extras_root_overlaps_workspace(self, tmp_path):
+        self._setup_workspace_models(tmp_path)
+        (tmp_path / "extra_model_paths.yaml").write_text(
+            f"comfyui:\n    base_path: {tmp_path}\n    checkpoints: models/checkpoints\n"
+        )
+        with patch("comfy_cli.command.models.models.get_workspace", return_value=tmp_path):
+            result = runner.invoke(app, ["list", "--relative-path", "models"])
+        assert result.exit_code == 0
+        assert result.output.count("ws_only.safetensors") == 1
+
+    def test_no_extra_model_paths_flag_disables(self, tmp_path):
+        self._setup_workspace_models(tmp_path)
+        ext_root = self._setup_extras_root(tmp_path)
+        (tmp_path / "extra_model_paths.yaml").write_text(f"comfyui:\n    base_path: {ext_root}\n    checkpoints: cp\n")
+        with patch("comfy_cli.command.models.models.get_workspace", return_value=tmp_path):
+            result = runner.invoke(app, ["list", "--relative-path", "models", "--no-extra-model-paths"])
+        assert result.exit_code == 0
+        assert "ws_only.safetensors" in result.output
+        assert "ext_only.safetensors" not in result.output
+
+
+class TestRemoveCommandExtraModelPaths:
+    """Verify extra_model_paths.yaml integration in `comfy model remove`."""
+
+    def test_remove_target_in_extras_root_deletes(self, tmp_path):
+        ext_root = tmp_path / "ext"
+        (ext_root / "cp").mkdir(parents=True)
+        target = ext_root / "cp" / "x.safetensors"
+        target.write_bytes(b"x")
+        (tmp_path / "models").mkdir()
+        (tmp_path / "extra_model_paths.yaml").write_text(f"comfyui:\n    base_path: {ext_root}\n    checkpoints: cp\n")
+        with patch("comfy_cli.command.models.models.get_workspace", return_value=tmp_path):
+            result = runner.invoke(
+                app,
+                [
+                    "remove",
+                    "--relative-path",
+                    "models",
+                    "--model-names",
+                    str(target),
+                    "--confirm",
+                ],
+            )
+        assert result.exit_code == 0
+        assert not target.exists()
+
+    def test_remove_model_names_ambiguous_errors(self, tmp_path):
+        # Same filename in workspace AND in an extras root
+        (tmp_path / "models").mkdir()
+        ws_target = tmp_path / "models" / "dup.safetensors"
+        ws_target.write_bytes(b"x")
+        ext_root = tmp_path / "ext"
+        ext_target = ext_root / "cp" / "dup.safetensors"
+        ext_target.parent.mkdir(parents=True)
+        ext_target.write_bytes(b"x")
+        # Configure extras root that, joined with "dup.safetensors", finds /ext/dup.safetensors
+        # — which doesn't exist. To force ambiguity we point the extras root AT the file's
+        # parent directly.
+        (tmp_path / "extra_model_paths.yaml").write_text(
+            f"comfyui:\n    base_path: {tmp_path}\n    checkpoints: |\n        models\n        ext/cp\n"
+        )
+        with patch("comfy_cli.command.models.models.get_workspace", return_value=tmp_path):
+            result = runner.invoke(
+                app,
+                [
+                    "remove",
+                    "--relative-path",
+                    "models",
+                    "--model-names",
+                    "dup.safetensors",
+                    "--confirm",
+                ],
+            )
+        assert "Ambiguous" in result.output
+        assert ws_target.exists()
+        assert ext_target.exists()
+
+    def test_remove_traversal_protection_with_extras(self, tmp_path):
+        (tmp_path / "models").mkdir()
+        (tmp_path / "models" / "legit.safetensors").write_bytes(b"x")
+        secret = tmp_path / "secret.txt"
+        secret.write_text("sensitive")
+        ext_root = tmp_path / "ext"
+        (ext_root / "cp").mkdir(parents=True)
+        (ext_root / "cp" / "extras_file.safetensors").write_bytes(b"x")
+        (tmp_path / "extra_model_paths.yaml").write_text(f"comfyui:\n    base_path: {ext_root}\n    checkpoints: cp\n")
+        with patch("comfy_cli.command.models.models.get_workspace", return_value=tmp_path):
+            result = runner.invoke(
+                app,
+                [
+                    "remove",
+                    "--relative-path",
+                    "models",
+                    "--model-names",
+                    "../secret.txt",
+                    "--confirm",
+                ],
+            )
+        assert secret.exists()
+        assert "Invalid model path" in result.output
+
+    def test_remove_no_extra_model_paths_disables(self, tmp_path):
+        ext_root = tmp_path / "ext"
+        (ext_root / "cp").mkdir(parents=True)
+        ext_target = ext_root / "cp" / "x.safetensors"
+        ext_target.write_bytes(b"x")
+        (tmp_path / "models").mkdir()
+        (tmp_path / "models" / "ws_file.safetensors").write_bytes(b"x")
+        (tmp_path / "extra_model_paths.yaml").write_text(f"comfyui:\n    base_path: {ext_root}\n    checkpoints: cp\n")
+        with patch("comfy_cli.command.models.models.get_workspace", return_value=tmp_path):
+            result = runner.invoke(
+                app,
+                [
+                    "remove",
+                    "--relative-path",
+                    "models",
+                    "--model-names",
+                    str(ext_target),
+                    "--confirm",
+                    "--no-extra-model-paths",
+                ],
+            )
+        assert ext_target.exists()
+        assert "Invalid model path" in result.output
