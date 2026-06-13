@@ -194,14 +194,13 @@ app = typer.Typer()
 @app.command()
 def enable():
     init_tracking(True)
-    typer.echo(f"Tracking is now {'enabled'}.")
-    init_tracking(True)
+    typer.echo("Tracking is now enabled.")
 
 
 @app.command()
 def disable():
     init_tracking(False)
-    typer.echo(f"Tracking is now {'disabled'}.")
+    typer.echo("Tracking is now disabled.")
 
 
 def _dispatch(
