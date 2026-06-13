@@ -530,29 +530,43 @@ def show_cmd(
         )
         raise typer.Exit(code=1)
 
-    qs = urllib.parse.urlencode({"include_tags": "models", "name_contains": name, "limit": 50})
-    url = target.url("assets") + "?" + qs
-    try:
-        body = _http_get_json(url, target)
-    except urllib.error.HTTPError as e:
-        renderer.error(
-            code="cloud_http_error",
-            message=f"HTTP {e.code} from {url}",
-            hint="check auth and network",
-            details={"status": e.code},
+    # `name_contains` is a server-side substring filter, so for a common
+    # substring the requested exact name can land on page 2+. Page through the
+    # results (honoring the server's `has_more` flag) and run the exact-name
+    # check client-side on every page until we find it or the server runs out.
+    candidates: list[dict] = []
+    match = None
+    offset = 0
+    page_size = 200
+    max_pages = 50  # safety cap (10k results) so a misbehaving server can't loop forever
+    for _ in range(max_pages):
+        qs = urllib.parse.urlencode(
+            {"include_tags": "models", "name_contains": name, "limit": page_size, "offset": offset}
         )
-        raise typer.Exit(code=1) from e
-    except (urllib.error.URLError, OSError, json.JSONDecodeError) as e:
-        renderer.error(code="cloud_http_error", message=f"models show failed: {e}")
-        raise typer.Exit(code=1) from e
+        url = target.url("assets") + "?" + qs
+        try:
+            body = _http_get_json(url, target)
+        except urllib.error.HTTPError as e:
+            renderer.error(
+                code="cloud_http_error",
+                message=f"HTTP {e.code} from {url}",
+                hint="check auth and network",
+                details={"status": e.code},
+            )
+            raise typer.Exit(code=1) from e
+        except (urllib.error.URLError, OSError, json.JSONDecodeError) as e:
+            renderer.error(code="cloud_http_error", message=f"models show failed: {e}")
+            raise typer.Exit(code=1) from e
 
-    candidates = body.get("assets") or []
-    # First exact match wins. `name_contains` is a server-side substring filter;
-    # we still need an exact-name pass client-side.
-    match = next(
-        (a for a in candidates if isinstance(a, dict) and (a.get("name") == name or a.get("display_name") == name)),
-        None,
-    )
+        page = [a for a in (body.get("assets") or []) if isinstance(a, dict)]
+        candidates.extend(page)
+        # First exact match wins (name or display_name).
+        match = next((a for a in page if a.get("name") == name or a.get("display_name") == name), None)
+        if match is not None:
+            break
+        offset += len(page)
+        if not page or not body.get("has_more"):
+            break
     if match is None:
         renderer.error(
             code="model_not_found",

@@ -416,14 +416,14 @@ def execute_download(
                         details={"prompt_id": prompt_id},
                     )
                     raise typer.Exit(code=1)
-            except Unauthenticated:
+            except Unauthenticated as exc:
                 renderer.error(
                     code="download_job_not_found",
                     message=f"Job {prompt_id} not found in local state files and cloud auth is missing",
                     hint="run 'comfy cloud login' or check the prompt_id",
                     details={"prompt_id": prompt_id},
                 )
-                raise typer.Exit(code=1)
+                raise typer.Exit(code=1) from exc
 
     if not output_urls:
         renderer.error(

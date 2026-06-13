@@ -179,7 +179,12 @@ def build_workflow(model: str, values: dict[str, Any], *, output_prefix: str = "
         raw = values.get(flag)
         if raw is None:
             continue
-        path = str(raw)
+        if isinstance(raw, (list, tuple)):
+            raise EmitError(
+                f"--{flag} received multiple files, but emit-workflow currently "
+                "maps this input to a single LoadImage node."
+            )
+        path = str(Path(raw).expanduser())
         loader_id = str(next_id)
         next_id += 1
         workflow[loader_id] = {

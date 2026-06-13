@@ -216,7 +216,10 @@ def _parse_port(name: str, spec: dict, role: str) -> FragmentPort:
         if not isinstance(frm, str):
             raise FragmentError(f"output {name!r}: `from` must be a string node id (got {frm!r})")
         port.from_node = frm
-        port.port = int(spec.get("port", 0))
+        try:
+            port.port = int(spec.get("port", 0))
+        except (TypeError, ValueError) as e:
+            raise FragmentError(f"output {name!r}: `port` must be an integer (got {spec.get('port')!r})") from e
     if role == "param" and "default" in spec:
         port.default = spec["default"]
         port.has_default = True
@@ -242,9 +245,9 @@ def parse_fragment(data: dict, *, source_path: str = "") -> Fragment:
     if not isinstance(name, str) or not name:
         raise FragmentError("`_fragment.name` is required (non-empty string)", path=source_path)
 
-    inputs_raw = meta.get("inputs") or {}
-    outputs_raw = meta.get("outputs") or {}
-    params_raw = meta.get("params") or {}
+    inputs_raw = meta.get("inputs", {})
+    outputs_raw = meta.get("outputs", {})
+    params_raw = meta.get("params", {})
     for label, raw in (("inputs", inputs_raw), ("outputs", outputs_raw), ("params", params_raw)):
         if not isinstance(raw, dict):
             raise FragmentError(f"`_fragment.{label}` must be an object", path=source_path)
@@ -270,6 +273,11 @@ def parse_fragment(data: dict, *, source_path: str = "") -> Fragment:
         if not isinstance(v, dict) or "class_type" not in v:
             raise FragmentError(
                 f"interior key {k!r}: expected a node object with `class_type`",
+                path=source_path,
+            )
+        if not str(k).isdigit():
+            raise FragmentError(
+                f"interior key {k!r}: node id must be a numeric string",
                 path=source_path,
             )
         frag.nodes[k] = v
@@ -316,6 +324,8 @@ def resolve_fragment_name(name: str, lib_dir: Path) -> Path:
     candidate = Path(name).expanduser()
     if candidate.is_file():
         return candidate
+    if name.endswith(".json"):
+        return (lib_dir / name).expanduser()
     return (lib_dir / f"{name}.json").expanduser()
 
 
@@ -845,6 +855,15 @@ def compose_blueprints(
         return [compose_blueprint(blueprint, lib_dir=lib_dir, asset_resolver=asset_resolver, var_resolver=var_resolver)]
 
     items = _resolve_foreach_items(blueprint["foreach"], blueprint_dir=blueprint_dir)
+    # Item keys drive `item_map` provenance and per-item output prefixes; a
+    # duplicate id would silently overwrite a map entry and collide outputs.
+    keys = [_item_key(item, index) for index, item in enumerate(items)]
+    dup_keys = sorted({k for k in keys if keys.count(k) > 1})
+    if dup_keys:
+        raise BlueprintError(
+            f"foreach items contain duplicate id/key values: {dup_keys}",
+            hint="ensure each item `id` is unique (or remove duplicate ids)",
+        )
     base_prefix = str(blueprint.get("output_prefix", "composed"))
 
     chunk = blueprint.get("chunk")

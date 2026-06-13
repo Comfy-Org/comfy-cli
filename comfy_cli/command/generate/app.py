@@ -233,12 +233,17 @@ def _generate(model: str, extra_args: list[str]) -> None:
             renderer = get_renderer()
             try:
                 workflow = emit.write_workflow(name, values, Path(emit_path).expanduser(), output_prefix=prefix)
-            except emit.EmitError as e:
+            except (emit.EmitError, OSError) as e:
                 _track_error("emit", e)
+                hint = (
+                    "check destination path permissions and parent directory"
+                    if isinstance(e, OSError)
+                    else "check the model name and that all required inputs are provided"
+                )
                 renderer.error(
                     code="emit_workflow_failed",
                     message=str(e),
-                    hint="check the model name and that all required inputs are provided",
+                    hint=hint,
                 )
                 raise typer.Exit(code=1) from e
             tracking.track_event("generate:emit", {**gen_props, "node_count": len(workflow)})

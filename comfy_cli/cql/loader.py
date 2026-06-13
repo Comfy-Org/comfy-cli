@@ -19,6 +19,7 @@ and are short-circuited when no host is provided.
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
 import os
 import sys
@@ -94,7 +95,14 @@ def _load_from_server(host: str, port: int, *, timeout: float) -> dict[str, Any]
     # silently sending traffic to a remote box. (Cloud CQL goes through its
     # own path; this loader is local-only by design.)
     parsed = urllib.parse.urlsplit(url)
-    if (parsed.hostname or "").lower() not in {"localhost", "127.0.0.1", "::1"} and not host.startswith("127."):
+    hostname = (parsed.hostname or "").strip().lower()
+    is_loopback = hostname == "localhost"
+    if not is_loopback:
+        try:
+            is_loopback = ipaddress.ip_address(hostname).is_loopback
+        except ValueError:
+            is_loopback = False
+    if not is_loopback:
         raise CQLRuntimeError(
             f"refusing non-loopback CQL server target: {host}",
             details={"hint": "pass --input <path> for remote object_info dumps"},
@@ -152,18 +160,13 @@ def _looks_like_object_info(data: dict[str, Any]) -> bool:
     # "display_name": "...", "description": "...", "output": [...], ... }
     if not data:
         return False
-    for v in data.values():
-        if isinstance(v, dict) and ("input" in v or "category" in v):
-            return True
-        break
-    return False
+    return any(isinstance(v, dict) and ("input" in v or "category" in v) for v in data.values())
 
 
 def _looks_like_api_workflow(data: dict[str, Any]) -> bool:
     if not data:
         return False
-    first = next(iter(data.values()))
-    return isinstance(first, dict) and "class_type" in first
+    return any(isinstance(v, dict) and "class_type" in v for v in data.values())
 
 
 def _from_object_info(data: dict[str, Any]) -> dict[str, Any]:
@@ -228,6 +231,7 @@ def _normalize_input(class_name: str, section: str, name: str, spec: Any) -> dic
 def _from_api_workflow(data: dict[str, Any]) -> dict[str, Any]:
     nodes: list[dict[str, Any]] = []
     inputs: list[dict[str, Any]] = []
+    node_ids = {str(k) for k in data}
     for nid, node in data.items():
         if not isinstance(node, dict):
             continue
@@ -245,7 +249,13 @@ def _from_api_workflow(data: dict[str, Any]) -> dict[str, Any]:
         raw_inputs = node.get("inputs") or {}
         if isinstance(raw_inputs, dict):
             for in_name, value in raw_inputs.items():
-                ref = isinstance(value, list) and len(value) == 2
+                ref = (
+                    isinstance(value, list)
+                    and len(value) == 2
+                    and isinstance(value[1], int)
+                    and not isinstance(value[1], bool)
+                    and str(value[0]) in node_ids
+                )
                 inputs.append(
                     {
                         "node_id": nid,

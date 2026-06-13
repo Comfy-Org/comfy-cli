@@ -26,4 +26,4 @@ class CQLRuntimeError(Exception):
         return self.runtime_message
 
     def as_details(self) -> dict[str, Any]:
-        return {"runtime_message": self.runtime_message, **self.details}
+        return {**self.details, "runtime_message": self.runtime_message}

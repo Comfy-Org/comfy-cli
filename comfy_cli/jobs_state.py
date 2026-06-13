@@ -152,7 +152,11 @@ def read(prompt_id: str) -> JobState | None:
     # Tolerant load: drop unknown keys, fill defaults for missing ones.
     known = {f.name for f in JobState.__dataclass_fields__.values()}
     filtered = {k: v for k, v in data.items() if k in known}
-    return JobState(**filtered)
+    try:
+        return JobState(**filtered)
+    except TypeError:
+        # Required fields missing (e.g. truncated/legacy file) — treat as absent.
+        return None
 
 
 def new(

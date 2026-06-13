@@ -23,7 +23,7 @@ import typer
 
 from comfy_cli import tracking
 from comfy_cli.auth import store
-from comfy_cli.cloud import CLIENT_ID, CLIENT_NAME, get_base_url, get_resource_url, get_scopes
+from comfy_cli.cloud import CLIENT_ID, CLIENT_NAME, CONFIG_KEY_BASE_URL, get_base_url, get_resource_url, get_scopes
 from comfy_cli.cloud.oauth import OAuthError, run_login
 from comfy_cli.config_manager import ConfigManager
 from comfy_cli.output import get_renderer, rprint
@@ -258,9 +258,6 @@ def set_base_url_cmd(
         typer.Option("--clear", help="Clear the persisted base URL (falls back to env var, then default)."),
     ] = False,
 ):
-    from comfy_cli.cloud import CONFIG_KEY_BASE_URL
-    from comfy_cli.config_manager import ConfigManager
-
     renderer = get_renderer()
     config = ConfigManager()
     if clear or not url:

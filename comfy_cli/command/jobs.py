@@ -27,6 +27,7 @@ import urllib.parse
 import urllib.request
 import uuid
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Annotated, Any
 
 import typer
@@ -80,8 +81,12 @@ def _resolve_host_port(host: str | None, port: int | None) -> tuple[str, int]:
         host = bg[0]
     if not port and bg is not None:
         port = bg[1]
-    h = host or DEFAULT_HOST
-    return (_validate_host(h), int(port or DEFAULT_PORT))
+    h = _validate_host(host or DEFAULT_HOST)
+    # Bracket IPv6 literals so callers building "http://{host}:{port}" /
+    # "ws://{host}:{port}" produce valid URLs (e.g. "::1" -> "[::1]").
+    if ":" in h and not h.startswith("["):
+        h = f"[{h}]"
+    return (h, int(port or DEFAULT_PORT))
 
 
 def _server_or_error(host: str, port: int, *, raise_on_missing: bool = True) -> bool:
@@ -253,6 +258,16 @@ def _gather_local_state_files(*, limit: int, orphaned_only: bool = False) -> lis
     return rows
 
 
+def _parse_epoch(ts: str | None) -> float:
+    """Parse an ISO ``updated_at`` to epoch seconds; 0.0 if missing/unparseable."""
+    if not ts:
+        return 0.0
+    try:
+        return datetime.fromisoformat(ts).timestamp()
+    except (ValueError, TypeError):
+        return 0.0
+
+
 def _merge_jobs(state_rows: list[JobRow], server_rows: list[JobRow]) -> list[JobRow]:
     """Server's view wins for prompts it knows about (fresher status); state
     files fill in everything else (jobs the server doesn't see, e.g. cloud
@@ -263,10 +278,13 @@ def _merge_jobs(state_rows: list[JobRow], server_rows: list[JobRow]) -> list[Job
         by_id[r.prompt_id] = r
 
     # Sort: non-terminal first (running/pending/allocated/executing), then
-    # by updated_at desc for terminal ones.
-    def sort_key(r: JobRow) -> tuple[int, str]:
+    # terminal ones by updated_at desc (freshest completions first, so the
+    # caller's slice keeps the newest results).
+    def sort_key(r: JobRow) -> tuple[int, float | str]:
         terminal = r.status in {"completed", "error", "cancelled"}
-        return (1 if terminal else 0, "" if not r.updated_at else r.updated_at)
+        if terminal:
+            return (1, -_parse_epoch(r.updated_at))
+        return (0, "" if not r.updated_at else r.updated_at)
 
     return sorted(by_id.values(), key=sort_key, reverse=False)
 
@@ -790,24 +808,32 @@ def _local_cancel(prompt_id: str, host: str, port: int) -> None:
         # Don't fail the whole command — try the interrupt next.
         queue_ok = False
 
-    # 2. Interrupt any currently-executing prompt. Note: /interrupt does
-    #    NOT take a prompt_id — it interrupts whatever is running. If the
-    #    user has only one job in flight (the typical agent case), this
-    #    is exactly what they want. With multiple concurrent jobs you'd
-    #    want a /history check first, but ComfyUI doesn't expose
-    #    "interrupt prompt X" anyway.
-    interrupt_req = urllib.request.Request(f"{base}/interrupt", method="POST")
+    # 2. Interrupt only if THIS prompt is the one currently executing.
+    #    /interrupt takes NO prompt_id — it kills whatever is running — so
+    #    blindly posting it after a pending-job delete would also abort an
+    #    unrelated running job ("cancel B" silently cancelling A). Gate on
+    #    /queue's queue_running list; the queue delete above already covers
+    #    pending jobs.
     interrupt_ok = True
     try:
-        with urllib.request.urlopen(interrupt_req, timeout=10) as resp:
-            _ = resp.read()
-    except (urllib.error.HTTPError, urllib.error.URLError, OSError):
-        interrupt_ok = False
+        queue = _http_get_json(f"{base}/queue")
+        queue_reachable = True
+    except RuntimeError:
+        queue = {}
+        queue_reachable = False
+    running_ids = {str(_safe_queue_entry(entry)[0]) for entry in (queue.get("queue_running") or [])}
+    if prompt_id in running_ids:
+        interrupt_req = urllib.request.Request(f"{base}/interrupt", method="POST")
+        try:
+            with urllib.request.urlopen(interrupt_req, timeout=10) as resp:
+                _ = resp.read()
+        except (urllib.error.HTTPError, urllib.error.URLError, OSError):
+            interrupt_ok = False
 
-    if not queue_ok and not interrupt_ok:
+    if not queue_ok and not queue_reachable:
         renderer.error(
             code="cancel_failed",
-            message=f"both /queue and /interrupt failed on {host}:{port}",
+            message=f"both /queue delete and /queue status failed on {host}:{port}",
             hint="check the server is still reachable",
             details={"host": host, "port": port, "prompt_id": prompt_id},
         )
@@ -964,6 +990,7 @@ def watch_cmd(
     completed_nodes: set[str] = set()
     outputs: list[str] = []
     saw_any_event = False
+    missing_deadline: float | None = None
     end_reason: str | None = None
     end_details: Any = None
     start = time.time()
@@ -983,6 +1010,24 @@ def watch_cmd(
                     end_details = snap
                     outputs.extend(snap.get("outputs") or [])
                     break
+                # Bounded wait for an unknown prompt: if the server has never
+                # heard of this prompt_id (no snapshot) and no events have
+                # arrived, don't loop forever on a typoed/already-pruned id —
+                # mirror the cloud path's deadline and surface prompt_not_found.
+                if snap is None and not saw_any_event:
+                    if missing_deadline is None:
+                        missing_deadline = time.time() + max(timeout, 1)
+                    elif time.time() >= missing_deadline:
+                        # The enclosing `finally` closes the socket.
+                        renderer.error(
+                            code="prompt_not_found",
+                            message=f"prompt {prompt_id} not found on {h}:{p}",
+                            hint="check the prompt_id; it may be a typo or already pruned",
+                            details={"prompt_id": prompt_id, "host": h, "port": p},
+                        )
+                        raise typer.Exit(code=1)
+                else:
+                    missing_deadline = None
                 continue
             except (WebSocketException, ConnectionError, OSError) as e:
                 # Cancellation closes the socket out from under recv(). Check

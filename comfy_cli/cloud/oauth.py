@@ -246,8 +246,12 @@ def _build_handler(
             # No caching — these are one-shot pages.
             self.send_header("Cache-Control", "no-store")
             self.end_headers()
-            self.wfile.write(payload)
-            capture.received_event.set()
+            try:
+                self.wfile.write(payload)
+            except OSError:
+                pass
+            finally:
+                capture.received_event.set()
 
     return CallbackHandler
 
@@ -414,9 +418,8 @@ def run_login(
     verifier, challenge = generate_pkce_pair()
     state = generate_state()
 
-    # 3. Stand up the loopback server before we send the URL.
-    port = _pick_free_port()
-    redirect_uri = f"http://{_LOOPBACK_HOST}:{port}{_CALLBACK_PATH}"
+    # 3. Stand up the loopback server before we send the URL. Bind to port 0
+    #    and read back the OS-assigned port to avoid a pick-then-bind TOCTOU race.
     capture = _CallbackCapture()
     success_html = _SUCCESS_HTML.replace("__HOST__", urllib.parse.urlsplit(base_url).netloc or base_url)
     handler_cls = _build_handler(
@@ -425,8 +428,10 @@ def run_login(
         success_html=success_html,
         failure_html=_FAILURE_HTML,
     )
-    server = http.server.HTTPServer((_LOOPBACK_HOST, port), handler_cls)
+    server = http.server.HTTPServer((_LOOPBACK_HOST, 0), handler_cls)
     server.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    port = int(server.server_address[1])
+    redirect_uri = f"http://{_LOOPBACK_HOST}:{port}{_CALLBACK_PATH}"
     server_thread = threading.Thread(target=server.handle_request, daemon=True)
     server_thread.start()
 

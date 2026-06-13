@@ -99,7 +99,7 @@ def _preflight_validate(renderer, workflow: dict, object_info: dict, *, target_l
             hint_parts.append(line)
         renderer.error(
             code="workflow_unknown_nodes",
-            message=f"Workflow has {len(errors)} validation error(s)",
+            message=f"Workflow has {len(errors)} validation error(s) against {target_label}",
             hint="\n".join(hint_parts),
             details={"errors": errors, "warnings": validation.get("warnings", [])},
         )
@@ -111,7 +111,7 @@ def _preflight_validate(renderer, workflow: dict, object_info: dict, *, target_l
             pprint(f"[yellow]⚠ {w.get('field', '?')}: {w.get('message', '')}[/yellow]")
 
 
-def _fetch_object_info(host: str, port: int, timeout: int = 10) -> dict:
+def _fetch_object_info(host: str, port: int) -> dict:
     """Fetch object_info for partner-node detection + validation. Fail open."""
     try:
         from comfy_cli.cql.engine import _load_from_target

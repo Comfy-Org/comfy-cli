@@ -52,6 +52,32 @@ assets_app = typer.Typer(
 )
 
 
+def _sha256_file(path: Path, chunk_size: int = 1024 * 1024) -> str:
+    """Stream a file through SHA-256 in fixed-size chunks so large assets don't
+    get loaded fully into memory."""
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(chunk_size), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _iter_asset_files(assets_dir: Path):
+    """Yield (path, relative-name) for real files under ``assets/``, skipping
+    dotfiles, symlinks, and anything whose resolved path escapes ``assets/``
+    (a symlink could otherwise leak files from outside the project)."""
+    assets_root = assets_dir.resolve()
+    for path in sorted(assets_dir.rglob("*")):
+        if path.is_symlink() or not path.is_file():
+            continue
+        if not path.resolve().is_relative_to(assets_root):
+            continue
+        rel = path.relative_to(assets_dir)
+        if any(part.startswith(".") for part in rel.parts):
+            continue
+        yield path, rel.as_posix()
+
+
 @assets_app.callback()
 def _assets_callback():
     """Project assets — push and track.
@@ -205,14 +231,8 @@ def assets_push_cmd(
     # peer already pushed otherwise reads as failure.
     current: list[str] = []
     skipped = 0
-    for path in sorted(assets_dir.rglob("*")) if assets_dir.is_dir() else []:
-        if not path.is_file():
-            continue
-        rel = path.relative_to(assets_dir)
-        if any(part.startswith(".") for part in rel.parts):
-            continue
-        name = rel.as_posix()
-        sha = hashlib.sha256(path.read_bytes()).hexdigest()
+    for path, name in _iter_asset_files(assets_dir) if assets_dir.is_dir() else []:
+        sha = _sha256_file(path)
         locked = lock_assets.get(name)
         if not force and isinstance(locked, dict) and locked.get("sha256") == sha and locked.get("where") == where_kind:
             skipped += 1
@@ -302,14 +322,8 @@ def _asset_entries(project: Project) -> list[dict]:
         return []
     lock = read_assets_lock(project)
     entries: list[dict] = []
-    for path in sorted(assets_dir.rglob("*")):
-        if not path.is_file():
-            continue
-        rel = path.relative_to(assets_dir)
-        if any(part.startswith(".") for part in rel.parts):
-            continue
-        name = rel.as_posix()
-        sha = hashlib.sha256(path.read_bytes()).hexdigest()
+    for path, name in _iter_asset_files(assets_dir):
+        sha = _sha256_file(path)
         locked = lock.get(name)
         pushed = isinstance(locked, dict)
         stale = pushed and locked.get("sha256") != sha

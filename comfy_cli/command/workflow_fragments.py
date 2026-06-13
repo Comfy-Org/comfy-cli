@@ -74,6 +74,9 @@ def compose_cmd(
     except yaml.YAMLError as e:
         renderer.error(code="blueprint_invalid_yaml", message=f"Blueprint is not valid YAML: {e}")
         raise typer.Exit(code=1) from e
+    except OSError as e:
+        renderer.error(code="compose_io_error", message=f"Unable to read blueprint file: {e}")
+        raise typer.Exit(code=1) from e
 
     # `$asset.<name>` refs resolve through the governing project's push lock
     # and `$var.<name>` refs through its comfy.yaml `vars:` block (anchored
@@ -117,7 +120,11 @@ def compose_cmd(
         raise typer.Exit(code=1) from e
 
     base_out = out or blueprint.with_suffix(".compiled.json")
-    base_out.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        base_out.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        renderer.error(code="compose_io_error", message=f"Failed preparing output path: {e}")
+        raise typer.Exit(code=1) from e
 
     # Provenance block embedded in every written workflow (`compose/1`). The
     # one artifact that travels (the compiled JSON) carries which blueprint
@@ -138,23 +145,27 @@ def compose_cmd(
     # A single graph keeps the simple `<out>` name; `chunk:` fan-out writes one
     # numbered file per graph (`<stem>.000.json`, `<stem>.001.json`, ...).
     written: list[str] = []
-    if len(graphs) == 1:
-        workflow, summary = graphs[0]
-        workflow["_meta"] = _meta_block(summary)
-        base_out.write_text(json.dumps(workflow, indent=2), encoding="utf-8")
-        written.append(str(base_out))
-        single_out: str | None = str(base_out)
-    else:
-        # Chunked fan-out: numbered files only. Remove any stale unnumbered file
-        # from a prior single-graph compose so `comfy run <out>` can't execute it.
-        if base_out.exists():
-            base_out.unlink()
-        for i, (workflow, summary) in enumerate(graphs):
-            workflow["_meta"] = _meta_block(summary)  # each file: only ITS batch's items
-            target = base_out.with_suffix(f".{i:03d}{base_out.suffix}")
-            target.write_text(json.dumps(workflow, indent=2), encoding="utf-8")
-            written.append(str(target))
-        single_out = None  # no single runnable file; consumers must read `written`
+    try:
+        if len(graphs) == 1:
+            workflow, summary = graphs[0]
+            workflow["_meta"] = _meta_block(summary)
+            base_out.write_text(json.dumps(workflow, indent=2), encoding="utf-8")
+            written.append(str(base_out))
+            single_out: str | None = str(base_out)
+        else:
+            # Chunked fan-out: numbered files only. Remove any stale unnumbered file
+            # from a prior single-graph compose so `comfy run <out>` can't execute it.
+            if base_out.exists():
+                base_out.unlink()
+            for i, (workflow, summary) in enumerate(graphs):
+                workflow["_meta"] = _meta_block(summary)  # each file: only ITS batch's items
+                target = base_out.with_suffix(f".{i:03d}{base_out.suffix}")
+                target.write_text(json.dumps(workflow, indent=2), encoding="utf-8")
+                written.append(str(target))
+            single_out = None  # no single runnable file; consumers must read `written`
+    except OSError as e:
+        renderer.error(code="compose_io_error", message=f"Failed writing composed workflow: {e}")
+        raise typer.Exit(code=1) from e
 
     # Provenance journal: one line into the governing project, if any
     # (anchored at the blueprint's dir, not cwd). Best-effort by contract.

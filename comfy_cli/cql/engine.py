@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import copy
 import difflib
+import ipaddress
 import json
 import logging
 import urllib.error
@@ -423,6 +424,11 @@ class Graph:
 
     @classmethod
     def from_object_info(cls, object_info: dict[str, Any]) -> Graph:
+        if not isinstance(object_info, dict):
+            raise LoadError(
+                "object_info must be a JSON object",
+                details={"top_level_type": type(object_info).__name__},
+            )
         g = cls()
         for node_id, raw in object_info.items():
             if not isinstance(raw, dict):
@@ -625,9 +631,10 @@ class Graph:
                         new_steps = steps + [step]
                         new_avail = available | frozenset(new_outs)
                         if out_t == to_type:
-                            # Verify the path actually consumes from_type
-                            if any(s["input_type"] == from_type or from_type in available for s in new_steps):
-                                paths.append({"from": from_type, "to": to_type, "steps": new_steps})
+                            # ``from_type`` seeds ``available`` and the set only
+                            # grows, so every reachable path originates from it by
+                            # construction — no extra consumption guard needed.
+                            paths.append({"from": from_type, "to": to_type, "steps": new_steps})
                             if len(paths) >= max_paths:
                                 return paths
                         elif new_avail not in visited and len(new_steps) < max_depth:
@@ -1076,7 +1083,14 @@ def _load_from_target(*, mode: str = "local", host: str = "127.0.0.1", port: int
     # Loopback guard for local targets
     if not target.is_cloud:
         parsed_host = urllib.parse.urlsplit(url).hostname or ""
-        if parsed_host.lower() not in _LOOPBACK_HOSTS and not parsed_host.startswith("127."):
+        host_l = parsed_host.lower()
+        is_loopback = host_l in _LOOPBACK_HOSTS
+        if not is_loopback:
+            try:
+                is_loopback = ipaddress.ip_address(host_l).is_loopback
+            except ValueError:
+                is_loopback = False
+        if not is_loopback:
             raise LoadError(
                 f"Refusing to fetch object_info from non-loopback host {parsed_host!r} "
                 f"in local mode (potential SSRF). Use --where cloud for remote targets."
@@ -1390,12 +1404,20 @@ def _resolve_node_path(workflow: dict, segments: list[str], defs_by_id: dict[str
     interior node of the subgraph definition the previous segment instantiated.
     Returns the resolved (mutable) node dict, or raises ValueError describing
     the first hop that couldn't be found.
+
+    Isolation: every non-terminal hop is forked (if its subgraph definition is
+    shared) before descending, so interior writes at any depth can't alias
+    sibling instances — not just the first hop.
     """
     nodes = workflow.get("nodes") or []
     node = next((n for n in nodes if isinstance(n, dict) and str(n.get("id", "")) == segments[0]), None)
     if node is None:
         raise ValueError(f"node {segments[0]} not found in workflow")
     for seg in segments[1:]:
+        # ``node`` is a non-terminal hop we are about to descend into: fork its
+        # shared definition first so the write below this hop stays isolated.
+        _isolate_shared_subgraph(workflow, node, defs_by_id)
+        defs_by_id = _subgraph_defs_by_id(workflow)  # rebuild: node.type may have changed
         sg = defs_by_id.get(node.get("type", ""))
         if sg is None:
             raise ValueError(f"node {node.get('id')} is not a subgraph; cannot descend to {seg!r}")
@@ -1460,18 +1482,9 @@ def _apply_one_slot(workflow: dict, addr: str, value: Any, graph: Graph) -> list
 
     # --- Nested form: descend the subgraph path and write the interior widget. ---
     if len(segments) > 1:
-        root = next(
-            (n for n in (workflow.get("nodes") or []) if isinstance(n, dict) and str(n.get("id", "")) == segments[0]),
-            None,
-        )
-        if root is None:
-            raise ValueError(f"node {segments[0]} not found in workflow")
-        # Fork a shared definition before mutating so sibling instances stay independent.
-        _isolate_shared_subgraph(workflow, root, defs_by_id)
-        defs_by_id = _subgraph_defs_by_id(workflow)  # rebuild: root.type may have changed
-        # TODO: deep-nest isolation — only the first-hop definition is forked here;
-        # deeper nesting like ``10/3/7`` where interior subgraph node 3 is itself
-        # shared across multiple parent instances is a known follow-up.
+        # _resolve_node_path forks every shared definition along the path (each
+        # non-terminal hop) before the terminal write, so sibling instances at
+        # any nesting depth stay independent.
         target = _resolve_node_path(workflow, segments, defs_by_id)
         return _write_widget(target, input_name, value, graph, extend=False)
 

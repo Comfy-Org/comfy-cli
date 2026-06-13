@@ -37,13 +37,24 @@ app = typer.Typer(no_args_is_help=True, help="Introspect ComfyUI node classes (i
 def _resolved_where(where: str | None) -> str:
     """Apply the full precedence chain: per-command flag > env > config > default."""
     from comfy_cli import where as where_module
-    from comfy_cli.config_manager import ConfigManager
 
-    cfg = ConfigManager()
-    decision = where_module.resolve(
-        flag=where,
-        config_value=cfg.get(where_module.CONFIG_KEY_WHERE_DEFAULT),
-    )
+    # Mirror comfy_cli.target.resolve_target()'s defensive fallback: a corrupt
+    # config must not take the whole `comfy nodes *` surface down with a
+    # traceback before the structured renderer ever runs.
+    config_value: str | None = None
+    try:
+        from comfy_cli.config_manager import ConfigManager
+
+        config_value = ConfigManager().get(where_module.CONFIG_KEY_WHERE_DEFAULT)
+    except Exception:  # noqa: BLE001 — never break routing on a bad config
+        config_value = None
+
+    try:
+        decision = where_module.resolve(flag=where, config_value=config_value)
+    except ValueError:
+        # An invalid persisted where_default shouldn't be fatal; fall back to
+        # the flag (if valid) or auto-detect with the bad config value dropped.
+        decision = where_module.resolve(flag=where, config_value=None)
     return decision.target.value  # "local" | "cloud"
 
 

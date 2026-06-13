@@ -107,6 +107,10 @@ if sys.platform == "win32":
         deadline = None if timeout is None else (time.monotonic() + timeout)
         while True:
             try:
+                # Lock/unlock are relative to the file position; seek to 0 so
+                # _acquire and _release always target the same byte (mirrors
+                # _release) even if the fd position ever drifts.
+                os.lseek(fd, 0, os.SEEK_SET)
                 msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
                 return
             except OSError:

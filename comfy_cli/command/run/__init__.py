@@ -206,7 +206,7 @@ def execute(
     # credential to inject. If we DO have a credential, plumb it into
     # extra_data so the partner node finds it server-side — same shape
     # the cloud submit path uses.
-    object_info = _fetch_object_info(host, port, timeout)
+    object_info = _fetch_object_info(host, port)
     partner_nodes = _detect_partner_nodes(workflow, object_info)
     extra_data: dict | None = None
     if api_key:

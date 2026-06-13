@@ -75,12 +75,16 @@ class CancellationToken:
 
 _TOKEN: CancellationToken | None = None
 _INSTALLED = False
+_TOKEN_LOCK = threading.Lock()
+_PREVIOUS_SIGINT_HANDLER = None
 
 
 def get_token() -> CancellationToken:
     global _TOKEN
     if _TOKEN is None:
-        _TOKEN = CancellationToken()
+        with _TOKEN_LOCK:
+            if _TOKEN is None:
+                _TOKEN = CancellationToken()
     return _TOKEN
 
 
@@ -90,12 +94,13 @@ def install_sigint_handler() -> CancellationToken:
     The previous handler is preserved and re-raised after the token fires, so
     Python's default ``KeyboardInterrupt`` propagation still works.
     """
-    global _INSTALLED
+    global _INSTALLED, _PREVIOUS_SIGINT_HANDLER
     token = get_token()
     if _INSTALLED:
         return token
 
     previous = signal.getsignal(signal.SIGINT)
+    _PREVIOUS_SIGINT_HANDLER = previous
 
     def _handler(signum: int, frame: object) -> None:
         token.cancel()
@@ -112,6 +117,9 @@ def install_sigint_handler() -> CancellationToken:
 
 
 def reset_for_testing() -> None:
-    global _TOKEN, _INSTALLED
+    global _TOKEN, _INSTALLED, _PREVIOUS_SIGINT_HANDLER
     _TOKEN = None
     _INSTALLED = False
+    if _PREVIOUS_SIGINT_HANDLER is not None:
+        signal.signal(signal.SIGINT, _PREVIOUS_SIGINT_HANDLER)
+        _PREVIOUS_SIGINT_HANDLER = None

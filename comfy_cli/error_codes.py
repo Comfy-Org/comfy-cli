@@ -392,6 +392,12 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "PyYAML is not installed — `comfy workflow compose` needs it to read blueprints.",
         "pip install pyyaml",
     ),
+    ErrorCode(
+        "compose_io_error",
+        "Reading the blueprint or writing the composed workflow failed with an OSError "
+        "(permissions, missing parent dir, disk full, unreadable encoding).",
+        "check the path is readable/writable and the disk has space",
+    ),
     # --- CQL / object_info ---------------------------------------------------
     ErrorCode(
         "cql_no_graph",

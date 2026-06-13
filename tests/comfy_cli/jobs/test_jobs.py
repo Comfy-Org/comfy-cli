@@ -351,7 +351,13 @@ def _capture_urlopen(monkeypatch: pytest.MonkeyPatch, routes: dict):
         method = req.get_method()
         calls.append({"url": url, "method": method, "headers": dict(req.headers)})
         for needle, payload in routes.items():
-            if needle in url:
+            # A needle may be "<METHOD> <substring>" to match on verb too;
+            # plain substrings (no space) match any method.
+            want_method = None
+            sub = needle
+            if " " in needle:
+                want_method, sub = needle.split(" ", 1)
+            if sub in url and (want_method is None or want_method == method):
                 if isinstance(payload, Exception):
                     raise payload
                 return _Resp(payload if isinstance(payload, bytes) else json.dumps(payload).encode())
@@ -362,16 +368,19 @@ def _capture_urlopen(monkeypatch: pytest.MonkeyPatch, routes: dict):
 
 
 def test_jobs_cancel_local_hits_queue_and_interrupt(monkeypatch: pytest.MonkeyPatch):
-    """`comfy jobs cancel <id>` on local must POST to both /queue (for
-    pending) and /interrupt (for running). Both are best-effort — one
-    failing doesn't abort the other."""
+    """`comfy jobs cancel <id>` on local POSTs the queue delete (for pending),
+    then GETs /queue and — because this prompt is the running one — POSTs
+    /interrupt. /interrupt is gated on queue_running so cancelling a pending
+    job never kills an unrelated running job."""
     from typer.testing import CliRunner
 
     monkeypatch.setattr(jobs_mod, "_server_or_error", lambda h, p, **kw: True)
     calls = _capture_urlopen(
         monkeypatch,
         {
-            "/queue": b"{}",
+            # GET /queue reports prompt-abc as the running job.
+            "GET /queue": {"queue_running": [[0, "prompt-abc", {}, {}, {}]], "queue_pending": []},
+            "POST /queue": b"{}",
             "/interrupt": b"{}",
         },
     )
@@ -379,22 +388,23 @@ def test_jobs_cancel_local_hits_queue_and_interrupt(monkeypatch: pytest.MonkeyPa
     result = runner.invoke(jobs_mod.app, ["cancel", "prompt-abc", "--where", "local"])
     assert result.exit_code == 0, result.output
 
-    # Both endpoints called, POST.
+    # Queue delete (POST), queue status (GET), and interrupt (POST) all hit.
     urls = [c["url"] for c in calls]
     assert any("/queue" in u for u in urls), urls
     assert any("/interrupt" in u for u in urls), urls
     methods = {c["method"] for c in calls}
-    assert methods == {"POST"}
+    assert methods == {"POST", "GET"}
 
-    # /queue payload carries the prompt_id.
-    queue_call = next(c for c in calls if "/queue" in c["url"])
+    # /queue delete payload carries the prompt_id.
+    queue_call = next(c for c in calls if "/queue" in c["url"] and c["method"] == "POST")
     # The body is on the Request, not in our captured dict — re-derive from headers.
     assert queue_call["headers"].get("Content-type") == "application/json"
 
 
 def test_jobs_cancel_local_tolerates_one_failure(monkeypatch: pytest.MonkeyPatch):
-    """If /queue 404s but /interrupt 200s (job is running not pending), the
-    cancel still succeeds. Mirrors the real ComfyUI server's behavior."""
+    """If the queue delete 404s but the job is running (queue_running lists it)
+    and /interrupt 200s, the cancel still succeeds. Mirrors the real ComfyUI
+    server's behavior for a running-not-pending job."""
     import urllib.error
 
     from typer.testing import CliRunner
@@ -403,13 +413,38 @@ def test_jobs_cancel_local_tolerates_one_failure(monkeypatch: pytest.MonkeyPatch
     _capture_urlopen(
         monkeypatch,
         {
-            "/queue": urllib.error.HTTPError("http://x/queue", 404, "Not Found", {}, None),
+            "POST /queue": urllib.error.HTTPError("http://x/queue", 404, "Not Found", {}, None),
+            "GET /queue": {"queue_running": [[0, "prompt-abc", {}, {}, {}]], "queue_pending": []},
             "/interrupt": b"{}",
         },
     )
     runner = CliRunner()
     result = runner.invoke(jobs_mod.app, ["cancel", "prompt-abc", "--where", "local"])
     assert result.exit_code == 0, result.output
+
+
+def test_jobs_cancel_local_pending_job_does_not_interrupt(monkeypatch: pytest.MonkeyPatch):
+    """Cancelling a *pending* job (a different prompt is running) must NOT POST
+    /interrupt — otherwise 'cancel B' would also kill the running 'A'."""
+    from typer.testing import CliRunner
+
+    monkeypatch.setattr(jobs_mod, "_server_or_error", lambda h, p, **kw: True)
+    calls = _capture_urlopen(
+        monkeypatch,
+        {
+            # prompt-pending is queued; a *different* prompt is running.
+            "GET /queue": {"queue_running": [[0, "prompt-running", {}, {}, {}]], "queue_pending": []},
+            "POST /queue": b"{}",
+            "/interrupt": b"{}",
+        },
+    )
+    runner = CliRunner()
+    result = runner.invoke(jobs_mod.app, ["cancel", "prompt-pending", "--where", "local"])
+    assert result.exit_code == 0, result.output
+
+    urls = [c["url"] for c in calls]
+    assert any("/queue" in u for u in urls), urls
+    assert not any("/interrupt" in u for u in urls), f"must not interrupt a pending job: {urls}"
 
 
 def test_jobs_cancel_local_both_fail_returns_error(monkeypatch: pytest.MonkeyPatch):
