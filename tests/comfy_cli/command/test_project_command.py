@@ -137,7 +137,10 @@ def test_status_outside_project_errors(proj_dir):
 
 
 def test_status_inside_project_envelope_validates(proj_dir):
-    assert _run(["--json", "project", "init"], proj_dir).returncode == 0
+    # Pin --where so the marker's default doesn't fall through to credential
+    # auto-detect, which would resolve to "cloud" on a machine with cloud
+    # creds but "local" on a clean CI runner.
+    assert _run(["--json", "project", "init", "--where", "cloud"], proj_dir).returncode == 0
     (proj_dir / "blueprints" / "story.yaml").write_text("pipeline: []\n")
     asset = proj_dir / "assets" / "keyframes" / "s1.png"
     asset.parent.mkdir(parents=True)

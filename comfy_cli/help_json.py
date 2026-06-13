@@ -75,7 +75,12 @@ def _param_to_dict(param: click.Parameter) -> dict[str, Any]:
     info["type"] = type_info["type"]
     if "choices" in type_info:
         info["choices"] = type_info["choices"]
-    if isinstance(param, click.Option):
+    # Duck-type "is this an option?" via ``param_type_name`` rather than
+    # ``isinstance(param, click.Option)``: typer >= 0.13 ships ``TyperOption`` /
+    # ``TyperArgument`` whose MRO is ``-> click.Parameter`` (they no longer
+    # subclass click.Option/Argument), so the isinstance check silently dropped
+    # ``flags``/``envvar`` from every option in the help JSON contract.
+    if param.param_type_name == "option":
         info["flags"] = list(param.opts) + list(param.secondary_opts)
         info["envvar"] = param.envvar
     return info

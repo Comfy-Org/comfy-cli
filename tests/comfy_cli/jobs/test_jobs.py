@@ -297,12 +297,26 @@ def test_orphaned_flag_filters_to_watcher_crashed(monkeypatch):
     assert orphan_ids == {"orphan-crashed"}, f"--orphaned should select only watcher_crashed rows; got {orphan_ids}"
 
 
+def _command_flags(*path: str) -> list[str]:
+    """Flags exposed for a command path via the machine-readable help contract.
+
+    This is the surface agents actually consume (``comfy --help-json``), and it
+    is render-independent — unlike scraping the rich-formatted ``--help`` text,
+    whose wrapping/styling varies with the CI terminal and silently hid flags.
+    """
+    from comfy_cli.cmdline import app
+    from comfy_cli.help_json import build_help_json
+
+    node: dict = {"subcommands": build_help_json(app)["commands"]}
+    for part in path:
+        node = node["subcommands"][part]
+    return [flag for param in node.get("params", []) for flag in (param.get("flags") or [])]
+
+
 def test_orphaned_flag_visible_in_help():
-    """The flag must be documented on `jobs ls --help` so agents can
+    """The flag must be documented on `jobs ls` so agents can
     discover it without reading source."""
-    res = _run(["jobs", "ls", "--help"])
-    assert res.returncode == 0
-    assert "--orphaned" in res.stdout
+    assert "--orphaned" in _command_flags("jobs", "ls")
 
 
 # ---------------------------------------------------------------------------
@@ -565,8 +579,7 @@ def test_jobs_commands_in_discover():
 
 def test_run_wait_flag_visible_in_help():
     """Async is the default; --wait is the documented opt-in for blocking."""
-    res = _run(["run", "--help"])
-    assert "--wait" in res.stdout
+    assert "--wait" in _command_flags("run")
 
 
 def test_run_default_async_emits_clean_server_not_running(tmp_path):
