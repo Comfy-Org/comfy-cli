@@ -54,7 +54,7 @@ dependencies = [
   "websocket-client",
 ]
 
-optional-dependencies.dev = [ "pre-commit", "pytest", "pytest-cov", "ruff" ]
+optional-dependencies.dev = [ "jsonschema", "pre-commit", "pytest", "pytest-cov", "ruff" ]
 optional-dependencies.preview = [ "term-image>=0.7,<0.8" ]
 urls.Repository = "https://github.com/Comfy-Org/comfy-cli.git"
 scripts.comfy = "comfy_cli.__main__:main"
