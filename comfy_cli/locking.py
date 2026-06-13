@@ -79,11 +79,14 @@ def file_lock(path: str | os.PathLike[str], *, timeout: float | None = None) -> 
     # lock byte-range is at offset 0 and doesn't affect data.
     fd = os.open(p, os.O_CREAT | os.O_RDWR, 0o600)
     # Re-tighten perms if the file existed with looser mode (covers the case
-    # where an older build wrote the lock file world-readable).
-    try:
-        os.fchmod(fd, 0o600)
-    except OSError:
-        pass
+    # where an older build wrote the lock file world-readable). ``os.fchmod`` is
+    # POSIX-only — it doesn't exist on Windows (which uses ACLs, not mode bits),
+    # so guard on the attribute to avoid an AttributeError there.
+    if hasattr(os, "fchmod"):
+        try:
+            os.fchmod(fd, 0o600)
+        except OSError:
+            pass
     try:
         _acquire(fd, timeout=timeout)
         depths[key] = 1
