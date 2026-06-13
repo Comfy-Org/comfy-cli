@@ -1023,14 +1023,69 @@ def validate():
     # print("[green]✓ All validation checks passed successfully[/green]")
 
 
+def resolve_publish_changelog(changelog: str | None, changelog_file: str | None) -> str:
+    """
+    Resolve the changelog text from --changelog, --changelog-file, or COMFY_NODE_CHANGELOG.
+
+    `--changelog-file -` reads stdin. The env var is read manually (not via the
+    option's `envvar`) so that either explicit flag overrides it and the two
+    flags only conflict when both are actually passed on the command line.
+    """
+    if changelog is not None and changelog_file is not None:
+        print("[red]Error: --changelog and --changelog-file are mutually exclusive.[/red]")
+        raise typer.Exit(code=1)
+
+    if changelog is not None:
+        return changelog.strip()
+
+    if changelog_file is None:
+        return os.environ.get("COMFY_NODE_CHANGELOG", "").strip()
+
+    if changelog_file == "-":
+        try:
+            return sys.stdin.buffer.read().decode("utf-8-sig").strip()
+        except (OSError, UnicodeDecodeError) as e:
+            print(f"[red]Error: could not read changelog from stdin: {e}[/red]")
+            raise typer.Exit(code=1)
+
+    try:
+        # `utf-8-sig` strips a leading BOM, mirroring pyproject.toml parsing.
+        with open(changelog_file, encoding="utf-8-sig") as f:
+            return f.read().strip()
+    except (OSError, UnicodeDecodeError) as e:
+        print(f"[red]Error: could not read changelog file `{changelog_file}`: {e}[/red]")
+        raise typer.Exit(code=1)
+
+
 @app.command("publish", help="Publish node to registry")
 @tracking.track_command("publish")
 def publish(
     token: str | None = typer.Option(None, "--token", help="Personal Access Token for publishing", hide_input=True),
+    changelog: str | None = typer.Option(
+        None,
+        "--changelog",
+        help="Changelog text for this version, shown in the registry's Updates section "
+        "(env var: COMFY_NODE_CHANGELOG).",
+    ),
+    changelog_file: str | None = typer.Option(
+        None,
+        "--changelog-file",
+        help="Read the changelog for this version from a file; use '-' to read stdin. "
+        "Mutually exclusive with --changelog.",
+    ),
 ):
     """
     Publish a node with optional validation.
     """
+    if changelog_file == "-" and not token:
+        print(
+            "[red]Error: reading the changelog from stdin requires --token "
+            "(the API-key prompt cannot read from stdin).[/red]"
+        )
+        raise typer.Exit(code=1)
+
+    changelog_text = resolve_publish_changelog(changelog, changelog_file)
+
     config = validate_node_for_publishing()
 
     # Prompt for API Key
@@ -1043,7 +1098,12 @@ def publish(
     # Call API to fetch node version with the token in the body
     typer.echo("Publishing node version...")
     try:
-        response = registry_api.publish_node_version(config, token)
+        response = registry_api.publish_node_version(config, token, changelog=changelog_text)
+        if changelog_text and (response.node_version.changelog or "").strip() != changelog_text:
+            print(
+                "[yellow]Warning: the registry did not echo the changelog back; "
+                "the Updates section may not show it for this version.[/yellow]"
+            )
         # Zip up all files in the current directory, respecting .gitignore files.
         signed_url = response.signedUrl
         zip_filename = NODE_ZIP_FILENAME

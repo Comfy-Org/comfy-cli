@@ -27,13 +27,17 @@ class RegistryAPI:
         else:
             return "https://api.comfy.org"
 
-    def publish_node_version(self, node_config: PyProjectConfig, token) -> PublishNodeVersionResponse:
+    def publish_node_version(
+        self, node_config: PyProjectConfig, token, changelog: str | None = None
+    ) -> PublishNodeVersionResponse:
         """
         Publishes a new version of a node.
 
         Args:
           node_config (PyProjectConfig): The node configuration.
           token (str): The token to authenticate with the API server.
+          changelog (str | None): Optional changelog text stored on the published
+            version and shown in the registry's Updates section.
 
         Returns:
         PublishNodeVersionResponse: The response object from the API server.
@@ -69,7 +73,8 @@ class RegistryAPI:
                 "supported_comfyui_frontend_version": node_config.project.supported_comfyui_frontend_version,
             },
         }
-        print(request_body)
+        if changelog:
+            request_body["node_version"]["changelog"] = changelog
         url = f"{self.base_url}/publishers/{node_config.tool_comfy.publisher_id}/nodes/{node_config.project.name}/versions"
         headers = {"Content-Type": "application/json"}
         body = request_body
