@@ -2,7 +2,7 @@
 
 **Date:** 2026-06-14
 **Author:** Kishore (with Claude)
-**Status:** Design — awaiting review
+**Status:** Built — v2 (proper) shipped as `keyframe-relay/outputs/UNMADE_final.mp4`
 **Routing:** Comfy Cloud (signed in, OAuth)
 
 ## 1. Problem & goal
@@ -162,3 +162,39 @@ Relay segments, once anchors exist, can fan out in parallel.
   remain a documented fallback only.
 - Generalizing into a reusable parameterized tool — that is a possible *next*
   project once the one-off demo proves the technique.
+
+---
+
+## v2 — the "proper" technique (research-grounded, as built)
+
+Web research into the continuous-transformation genre (esp. Seungho Yeo /
+@seungho__yeo "Cosmic Dust", and the documented WAN-VACE first/last workflow)
+established that the pro method is **WAN-VACE first/last frame, CHAINED on the
+real rendered last frame** — not concatenated clean anchors.
+
+**What changed from v1:**
+- **True last-frame relay (spine, not reserve):** segment k's *actual final
+  rendered frame* becomes segment k+1's start frame (uploaded back to cloud),
+  so joins are frame-exact. Eliminates the seam-pop of anchor concatenation.
+  Pipeline is therefore serial.
+- **Reference pin confirmed mandatory:** the no-reference test (5abcdfe4)
+  dissolved mid-morph into a flower field; `WanVaceToVideo.reference_image` =
+  the clean start anchor of each morph holds the creature through the middle.
+- **Shorter segments (49f / ~3s):** less unconstrained middle to hallucinate.
+- **Story layer:** "Unmade" — one creature survives the end of its world over
+  and over by remaking its body from the wreckage (paper→glass→coral→circuit→
+  moss = birth→fire→flood→cold death→rebirth). The relay *is* the narrative.
+- **Audio:** Stable Audio 2.5 score (one arc) + 5 per-world ambience beds,
+  crossfaded to each world's time window, mixed and loudness-normalized to
+  -14 LUFS.
+- **Finish:** 1.5s/2.0s intro/outro holds + ffmpeg `minterpolate` 16→32fps
+  (RIFE-equivalent, QC'd clean).
+
+**Final:** `keyframe-relay/outputs/UNMADE_final.mp4` — 832x480, 32fps, 15.7s,
+H.264 + AAC. Full job ledger in `keyframe-relay/job_ids.txt`, event log in
+`keyframe-relay/LOG.md`.
+
+**Known limits / next:** 832x480 is demo-res (add a Topaz/ESRGAN upscale for
+finals); a real RIFE-VFI cloud pass would beat `minterpolate` on the brightest
+transition flashes; segment length is fixed (Stage-B clip-extend could give any
+world more screen time).
