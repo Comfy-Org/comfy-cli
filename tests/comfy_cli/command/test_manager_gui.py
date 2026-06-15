@@ -776,14 +776,14 @@ class TestPipInstallManagerCacheClear:
     """Tests for pip_install_manager cache clearing after successful install."""
 
     @patch("comfy_cli.command.custom_nodes.cm_cli_util.find_cm_cli")
-    @patch("comfy_cli.command.install.subprocess.run")
+    @patch("comfy_cli.command.install.run_pip_install")
     @patch("os.path.exists", return_value=True)
-    def test_pip_install_manager_clears_cache_on_success(self, mock_exists, mock_run, mock_find_cm_cli):
+    def test_pip_install_manager_clears_cache_on_success(self, mock_exists, mock_install, mock_find_cm_cli):
         """When pip install succeeds, find_cm_cli cache should be cleared."""
         from comfy_cli.command.install import pip_install_manager
 
         # Simulate successful pip install
-        mock_run.return_value = MagicMock(returncode=0, stderr="")
+        mock_install.return_value = MagicMock(returncode=0, stderr="")
 
         # Call pip_install_manager
         result = pip_install_manager("/fake/repo")
@@ -793,14 +793,14 @@ class TestPipInstallManagerCacheClear:
         # Verify cache_clear was called on the mock
         mock_find_cm_cli.cache_clear.assert_called_once()
 
-    @patch("comfy_cli.command.install.subprocess.run")
+    @patch("comfy_cli.command.install.run_pip_install")
     @patch("os.path.exists", return_value=True)
-    def test_pip_install_manager_no_cache_clear_on_failure(self, mock_exists, mock_run):
+    def test_pip_install_manager_no_cache_clear_on_failure(self, mock_exists, mock_install):
         """When pip install fails, cache should not be affected (function returns early)."""
         from comfy_cli.command.install import pip_install_manager
 
         # Simulate failed pip install
-        mock_run.return_value = MagicMock(returncode=1)
+        mock_install.return_value = MagicMock(returncode=1)
 
         # Call pip_install_manager
         result = pip_install_manager("/fake/repo")
@@ -1119,17 +1119,16 @@ class TestFindCmCli:
 class TestPipInstallManagerEdgeCases:
     """Additional edge case tests for pip_install_manager()."""
 
-    @patch("comfy_cli.command.install.subprocess.run")
+    @patch("comfy_cli.command.install.run_pip_install")
     @patch("os.path.exists", return_value=False)
-    def test_pip_install_manager_requirements_not_found(self, mock_exists, mock_run):
+    def test_pip_install_manager_requirements_not_found(self, mock_exists, mock_install):
         """When requirements file doesn't exist, should return False without calling pip."""
         from comfy_cli.command.install import pip_install_manager
 
         result = pip_install_manager("/fake/repo")
 
         assert result is False
-        # subprocess.run should NOT be called
-        mock_run.assert_not_called()
+        mock_install.assert_not_called()
 
 
 class TestValidateComfyuiManager:

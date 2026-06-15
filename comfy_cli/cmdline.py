@@ -24,7 +24,7 @@ from comfy_cli.env_checker import EnvChecker
 from comfy_cli.resolve_python import resolve_workspace_python
 from comfy_cli.standalone import StandalonePython
 from comfy_cli.update import check_for_updates
-from comfy_cli.uv import DependencyCompiler
+from comfy_cli.uv import DependencyCompiler, run_pip_install
 from comfy_cli.workspace_manager import WorkspaceManager, check_comfy_repo
 
 logging.setup_logging()
@@ -412,10 +412,7 @@ def update(
         os.chdir(comfy_path)
         subprocess.run(["git", "pull"], check=True)
         python = resolve_workspace_python(comfy_path)
-        subprocess.run(
-            [python, "-m", "pip", "install", "-r", "requirements.txt"],
-            check=True,
-        )
+        run_pip_install(executable=python, args=["-r", "requirements.txt"], check=True)
 
     try:
         custom_nodes.command.update_node_id_cache()

@@ -87,6 +87,16 @@ dependencies using the following precedence:
      tool environment): a `.venv` is created inside the ComfyUI workspace.
      Use `comfy launch` to start ComfyUI with the correct Python.
 
+ComfyUI and ComfyUI-Manager dependency installs use uv's pip-compatible installer
+when uv is available, targeting the selected environment explicitly. This means
+workspace virtual environments created by uv do not need pip installed inside
+them. This avoids `No module named pip` failures when the workspace environment
+is otherwise valid but was created by uv without pip. It also keeps the default
+`comfy install` and `comfy update` paths aligned with comfy-cli's uv support,
+instead of requiring users to switch to a separate manual restore flow.
+
+If uv is unavailable, comfy-cli falls back to `python -m pip`.
+
 ### Specifying execution path
 
 - You can specify the path of ComfyUI where the command will be applied through path indicators as follows:

@@ -22,7 +22,7 @@ from comfy_cli.constants import GPU_OPTION
 from comfy_cli.cuda_detect import DEFAULT_CUDA_TAG
 from comfy_cli.git_utils import checkout_pr, git_checkout_tag
 from comfy_cli.resolve_python import ensure_workspace_python
-from comfy_cli.uv import DependencyCompiler
+from comfy_cli.uv import DependencyCompiler, run_pip_install
 from comfy_cli.workspace_manager import WorkspaceManager, check_comfy_repo
 
 workspace_manager = WorkspaceManager()
@@ -37,8 +37,9 @@ def get_os_details():
 
 def _pip_install_torch(python: str, index_args: list[str]) -> subprocess.CompletedProcess:
     """Install torch, torchvision, and torchaudio with the given index arguments."""
-    return subprocess.run(
-        [python, "-m", "pip", "install", "torch", "torchvision", "torchaudio"] + index_args,
+    return run_pip_install(
+        executable=python,
+        args=["torch", "torchvision", "torchaudio", *index_args],
         check=False,
     )
 
@@ -85,16 +86,13 @@ def pip_install_comfyui_dependencies(
 
         # install directml for AMD windows
         if gpu == GPU_OPTION.AMD and plat == constants.OS.WINDOWS:
-            subprocess.run([python, "-m", "pip", "install", "torch-directml"], check=True)
+            run_pip_install(executable=python, args=["torch-directml"], check=True)
 
         # install torch for Mac M Series
         if gpu == GPU_OPTION.MAC_M_SERIES:
-            subprocess.run(
-                [
-                    python,
-                    "-m",
-                    "pip",
-                    "install",
+            run_pip_install(
+                executable=python,
+                args=[
                     "--pre",
                     "torch",
                     "torchvision",
@@ -108,7 +106,7 @@ def pip_install_comfyui_dependencies(
     # install requirements.txt
     if skip_requirement:
         return
-    result = subprocess.run([python, "-m", "pip", "install", "-r", "requirements.txt"], check=False)
+    result = run_pip_install(executable=python, args=["-r", "requirements.txt"], check=False)
     if result.returncode != 0:
         rprint("Failed to install ComfyUI dependencies. Please check your environment (`comfy env`) and try again.")
         sys.exit(1)
@@ -125,8 +123,9 @@ def pip_install_manager(repo_dir, python=sys.executable):
             "Skipping manager installation (older ComfyUI version?).[/bold yellow]"
         )
         return False
-    result = subprocess.run(
-        [python, "-m", "pip", "install", "-r", constants.MANAGER_REQUIREMENTS_FILE],
+    result = run_pip_install(
+        executable=python,
+        args=["-r", constants.MANAGER_REQUIREMENTS_FILE],
         cwd=repo_dir,
         check=False,
         capture_output=True,

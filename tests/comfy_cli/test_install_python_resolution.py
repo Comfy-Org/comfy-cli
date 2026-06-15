@@ -13,7 +13,7 @@ class TestPipInstallComfyuiDependencies:
         repo_dir = str(tmp_path)
         (tmp_path / "requirements.txt").write_text("some-package\n")
 
-        with patch("comfy_cli.command.install.subprocess.run", return_value=MagicMock(returncode=0)) as mock_run:
+        with patch("comfy_cli.command.install.run_pip_install", return_value=MagicMock(returncode=0)) as mock_install:
             install.pip_install_comfyui_dependencies(
                 repo_dir,
                 gpu=None,
@@ -24,10 +24,10 @@ class TestPipInstallComfyuiDependencies:
                 python="/resolved/python",
             )
 
-        for c in mock_run.call_args_list:
-            cmd = c[0][0]
-            assert cmd[0] == "/resolved/python", f"Expected /resolved/python but got {cmd[0]} in {cmd}"
-            assert cmd[0] != sys.executable
+        for c in mock_install.call_args_list:
+            executable = c.kwargs["executable"]
+            assert executable == "/resolved/python"
+            assert executable != sys.executable
 
 
 class TestPipInstallManager:
@@ -35,14 +35,13 @@ class TestPipInstallManager:
         (tmp_path / "manager_requirements.txt").write_text("comfyui-manager\n")
 
         with (
-            patch("comfy_cli.command.install.subprocess.run", return_value=MagicMock(returncode=0)) as mock_run,
+            patch("comfy_cli.command.install.run_pip_install", return_value=MagicMock(returncode=0)) as mock_install,
             patch("comfy_cli.command.custom_nodes.cm_cli_util.find_cm_cli") as mock_find,
         ):
             mock_find.cache_clear = MagicMock()
             install.pip_install_manager(str(tmp_path), python="/resolved/python")
 
-        cmd = mock_run.call_args[0][0]
-        assert cmd[0] == "/resolved/python"
+        assert mock_install.call_args.kwargs["executable"] == "/resolved/python"
 
 
 class TestExecute:
@@ -196,7 +195,7 @@ class TestAutoDetectIntegration:
         repo_dir = str(tmp_path)
         (tmp_path / "requirements.txt").write_text("some-package\n")
 
-        with patch("comfy_cli.command.install.subprocess.run", return_value=MagicMock(returncode=0)) as mock_run:
+        with patch("comfy_cli.command.install.run_pip_install", return_value=MagicMock(returncode=0)) as mock_install:
             install.pip_install_comfyui_dependencies(
                 repo_dir,
                 gpu=GPU_OPTION.NVIDIA,
@@ -208,14 +207,14 @@ class TestAutoDetectIntegration:
                 cuda_tag="cu130",
             )
 
-        cmd = _get_torch_install_cmd(mock_run.call_args_list)
+        cmd = _get_torch_install_args(mock_install.call_args_list)
         assert "https://download.pytorch.org/whl/cu130" in cmd
 
     def test_auto_detect_failure_falls_back(self, tmp_path):
         repo_dir = str(tmp_path)
         (tmp_path / "requirements.txt").write_text("some-package\n")
 
-        with patch("comfy_cli.command.install.subprocess.run", return_value=MagicMock(returncode=0)) as mock_run:
+        with patch("comfy_cli.command.install.run_pip_install", return_value=MagicMock(returncode=0)) as mock_install:
             install.pip_install_comfyui_dependencies(
                 repo_dir,
                 gpu=GPU_OPTION.NVIDIA,
@@ -227,14 +226,14 @@ class TestAutoDetectIntegration:
                 cuda_tag=None,
             )
 
-        cmd = _get_torch_install_cmd(mock_run.call_args_list)
+        cmd = _get_torch_install_args(mock_install.call_args_list)
         assert "https://download.pytorch.org/whl/cu126" in cmd
 
     def test_explicit_cuda_version_used_when_no_tag(self, tmp_path):
         repo_dir = str(tmp_path)
         (tmp_path / "requirements.txt").write_text("some-package\n")
 
-        with patch("comfy_cli.command.install.subprocess.run", return_value=MagicMock(returncode=0)) as mock_run:
+        with patch("comfy_cli.command.install.run_pip_install", return_value=MagicMock(returncode=0)) as mock_install:
             install.pip_install_comfyui_dependencies(
                 repo_dir,
                 gpu=GPU_OPTION.NVIDIA,
@@ -246,14 +245,14 @@ class TestAutoDetectIntegration:
                 cuda_tag=None,
             )
 
-        cmd = _get_torch_install_cmd(mock_run.call_args_list)
+        cmd = _get_torch_install_args(mock_install.call_args_list)
         assert "https://download.pytorch.org/whl/cu118" in cmd
 
     def test_cuda_tag_takes_precedence_over_enum(self, tmp_path):
         repo_dir = str(tmp_path)
         (tmp_path / "requirements.txt").write_text("some-package\n")
 
-        with patch("comfy_cli.command.install.subprocess.run", return_value=MagicMock(returncode=0)) as mock_run:
+        with patch("comfy_cli.command.install.run_pip_install", return_value=MagicMock(returncode=0)) as mock_install:
             install.pip_install_comfyui_dependencies(
                 repo_dir,
                 gpu=GPU_OPTION.NVIDIA,
@@ -265,16 +264,16 @@ class TestAutoDetectIntegration:
                 cuda_tag="cu130",
             )
 
-        cmd = _get_torch_install_cmd(mock_run.call_args_list)
+        cmd = _get_torch_install_args(mock_install.call_args_list)
         assert "https://download.pytorch.org/whl/cu130" in cmd
 
 
-def _get_torch_install_cmd(calls):
-    """Find the subprocess.run call that installs torch packages."""
+def _get_torch_install_args(calls):
+    """Find the installer call that installs torch packages."""
     for c in calls:
-        cmd = c[0][0]
-        if "torch" in cmd and "requirements.txt" not in cmd:
-            return cmd
+        args = c.kwargs["args"]
+        if "torch" in args and "requirements.txt" not in args:
+            return args
     return None
 
 
@@ -293,7 +292,7 @@ class TestTorchInstallCommands:
         repo_dir = str(tmp_path)
         (tmp_path / "requirements.txt").write_text("some-package\n")
 
-        with patch("comfy_cli.command.install.subprocess.run", return_value=MagicMock(returncode=0)) as mock_run:
+        with patch("comfy_cli.command.install.run_pip_install", return_value=MagicMock(returncode=0)) as mock_install:
             install.pip_install_comfyui_dependencies(
                 repo_dir,
                 gpu=GPU_OPTION.AMD,
@@ -305,7 +304,7 @@ class TestTorchInstallCommands:
                 rocm_version=rocm_version,
             )
 
-        cmd = _get_torch_install_cmd(mock_run.call_args_list)
+        cmd = _get_torch_install_args(mock_install.call_args_list)
         assert "--index-url" in cmd
         assert "--extra-index-url" not in cmd
         assert expected_url in cmd
@@ -324,7 +323,7 @@ class TestTorchInstallCommands:
         repo_dir = str(tmp_path)
         (tmp_path / "requirements.txt").write_text("some-package\n")
 
-        with patch("comfy_cli.command.install.subprocess.run", return_value=MagicMock(returncode=0)) as mock_run:
+        with patch("comfy_cli.command.install.run_pip_install", return_value=MagicMock(returncode=0)) as mock_install:
             install.pip_install_comfyui_dependencies(
                 repo_dir,
                 gpu=GPU_OPTION.NVIDIA,
@@ -335,7 +334,7 @@ class TestTorchInstallCommands:
                 python="/usr/bin/python",
             )
 
-        cmd = _get_torch_install_cmd(mock_run.call_args_list)
+        cmd = _get_torch_install_args(mock_install.call_args_list)
         assert "--index-url" in cmd
         assert "--extra-index-url" not in cmd
         assert expected_url in cmd
@@ -344,7 +343,7 @@ class TestTorchInstallCommands:
         repo_dir = str(tmp_path)
         (tmp_path / "requirements.txt").write_text("some-package\n")
 
-        with patch("comfy_cli.command.install.subprocess.run", return_value=MagicMock(returncode=0)) as mock_run:
+        with patch("comfy_cli.command.install.run_pip_install", return_value=MagicMock(returncode=0)) as mock_install:
             install.pip_install_comfyui_dependencies(
                 repo_dir,
                 gpu=GPU_OPTION.NVIDIA,
@@ -355,6 +354,6 @@ class TestTorchInstallCommands:
                 python="/usr/bin/python",
             )
 
-        cmd = _get_torch_install_cmd(mock_run.call_args_list)
+        cmd = _get_torch_install_args(mock_install.call_args_list)
         assert "--index-url" in cmd
         assert "https://download.pytorch.org/whl/cu126" in cmd

@@ -33,30 +33,30 @@ def test_validate_version_empty():
 
 class TestPipInstallManager:
     @patch("comfy_cli.command.custom_nodes.cm_cli_util.find_cm_cli")
-    @patch("comfy_cli.command.install.subprocess.run")
+    @patch("comfy_cli.command.install.run_pip_install")
     @patch("os.path.exists", return_value=True)
-    def test_success(self, mock_exists, mock_run, mock_find):
-        mock_run.return_value = MagicMock(returncode=0)
+    def test_success(self, mock_exists, mock_install, mock_find):
+        mock_install.return_value = MagicMock(returncode=0)
         result = pip_install_manager("/fake/repo")
         assert result is True
-        mock_run.assert_called_once()
+        mock_install.assert_called_once()
 
     @patch("os.path.exists", return_value=False)
     def test_missing_requirements_file(self, mock_exists):
         result = pip_install_manager("/fake/repo")
         assert result is False
 
-    @patch("comfy_cli.command.install.subprocess.run")
+    @patch("comfy_cli.command.install.run_pip_install")
     @patch("os.path.exists", return_value=True)
-    def test_pip_failure(self, mock_exists, mock_run):
-        mock_run.return_value = MagicMock(returncode=1, stderr="some error")
+    def test_pip_failure(self, mock_exists, mock_install):
+        mock_install.return_value = MagicMock(returncode=1, stderr="some error")
         result = pip_install_manager("/fake/repo")
         assert result is False
 
-    @patch("comfy_cli.command.install.subprocess.run")
+    @patch("comfy_cli.command.install.run_pip_install")
     @patch("os.path.exists", return_value=True)
-    def test_pip_failure_no_stderr(self, mock_exists, mock_run):
-        mock_run.return_value = MagicMock(returncode=1, stderr="")
+    def test_pip_failure_no_stderr(self, mock_exists, mock_install):
+        mock_install.return_value = MagicMock(returncode=1, stderr="")
         result = pip_install_manager("/fake/repo")
         assert result is False
 
