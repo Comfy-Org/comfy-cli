@@ -46,7 +46,7 @@ class Port:
     type: str
     required: bool = False
     is_link: bool = False
-    enum_values: list[str] = field(default_factory=list)
+    enum_values: list[Any] = field(default_factory=list)  # preserves the option's real type (int combos stay int)
     options: PortOptions = field(default_factory=PortOptions)
 
     @property
@@ -94,18 +94,23 @@ class Port:
             return []
         warnings: list[dict] = []
         if self.type == "COMBO" and self.enum_values:
-            # enum_values are stored as strings; the submitted value may be a
-            # string or a number (int-valued combos). Compare on the stringified
-            # form so `8` matches the option "8", and `8.0` matches "8" too.
-            candidates = {value, str(value)}
+            # Membership compares on the stringified form BOTH ways, so a value
+            # matches its option regardless of int/str (`8` ↔ "8", `8.0` ↔ "8").
+            # This keeps validate lenient (never false-warns on a real value)
+            # while the displayed schema keeps the option's true type. The
+            # warning carries the FULL valid list (typed) so a rejection tells
+            # the agent exactly what to pick — no truncation, no guessing.
+            candidates = {str(value)}
             if isinstance(value, float) and value.is_integer():
                 candidates.add(str(int(value)))
-            if not (candidates & set(self.enum_values)):
+            enum_str = {str(e) for e in self.enum_values}
+            if not (candidates & enum_str):
                 warnings.append(
                     {
                         "code": "unknown_enum_value",
                         "field": self.name,
                         "message": f"{value!r} not in {len(self.enum_values)} known options for {self.name}",
+                        "valid_options": list(self.enum_values),
                     }
                 )
         if self.type in ("INT", "FLOAT", "NUMBER") and isinstance(value, int | float):
@@ -235,7 +240,7 @@ def _control_after_generate_set(val: Any) -> bool:
     return True
 
 
-def _parse_input_spec(spec: Any) -> tuple[str, bool, list[str], PortOptions]:
+def _parse_input_spec(spec: Any) -> tuple[str, bool, list[Any], PortOptions]:
     """Returns (type_id, is_enum, enum_values, options)."""
     if isinstance(spec, str):
         return spec, False, [], PortOptions()
@@ -256,13 +261,15 @@ def _parse_input_spec(spec: Any) -> tuple[str, bool, list[str], PortOptions]:
         # where the choices array is the precision check.
         options = opts_raw.get("options")
         if isinstance(options, list) and options and all(_is_scalar_choice(v) for v in options):
-            values = [v if isinstance(v, str) else str(v) for v in options]
-            return first, True, values, port_opts
+            # Keep each option's real type: an int-valued combo (Sora-2/LTXV
+            # `duration`) must stay [4, 8, 12], not ["4","8","12"], so `nodes
+            # show` is truthful and agents pass the type the cloud accepts.
+            return first, True, list(options), port_opts
         return first, False, [], port_opts
 
     if isinstance(first, list):
-        values = [str(v) if not isinstance(v, str) else v for v in first]
-        return "COMBO", True, values, port_opts
+        # Same: preserve the option types for the classic list-form combo.
+        return "COMBO", True, list(first), port_opts
 
     return "UNKNOWN", False, [], port_opts
 
@@ -692,6 +699,11 @@ class Graph:
         all_names = list(self._nodes.keys())
 
         for node_id, node_data in workflow.items():
+            # `_meta` is the compose/run provenance block (schema/blueprint/items),
+            # stripped before submit — not a node and not a mistake. `comfy compose`
+            # adds it itself, so warning here is self-inflicted noise.
+            if node_id == "_meta":
+                continue
             if not isinstance(node_data, dict):
                 warnings.append(
                     {
@@ -850,16 +862,23 @@ class Graph:
                 # Catalog checks
                 for w in port.validate_catalog(value):
                     if w["code"] == "unknown_enum_value":
-                        top = port.enum_values[:5]
+                        top = port.enum_values[:8]
                         errors.append(
                             {
                                 "node_id": node_id,
                                 "field": input_name,
                                 "code": "unknown_enum_value",
                                 "message": w["message"],
-                                "hint": f"valid options include: {', '.join(top)}"
-                                + (f" (and {len(port.enum_values) - 5} more)" if len(port.enum_values) > 5 else ""),
+                                "hint": f"valid options include: {', '.join(str(v) for v in top)}"
+                                + (
+                                    f" (and {len(port.enum_values) - 8} more — see valid_options)"
+                                    if len(port.enum_values) > 8
+                                    else ""
+                                ),
                                 "suggestions": port.enum_values[:20],
+                                # full, typed list — never truncated, so the agent
+                                # can pick a real value instead of guessing.
+                                "valid_options": list(port.enum_values),
                             }
                         )
                     else:

@@ -67,6 +67,20 @@ For the full error code list and resolution steps, run `comfy --json discover`.
 When any *job* fails (an `execution_error`-family envelope), invoke the
 `comfy-debug` skill before improvising — it maps every failure code to a fix.
 
+## Presenting your work — show, don't tell
+
+This is **visual, iterative** work, not code — the user steers by *seeing* the
+result, so the image is the message, never a path or a sentence about it. The
+moment a generation lands, **`Read` it into chat** (for a clip, run `comfy
+preview clip.mp4` → a contact-sheet PNG you `Read`, plus duration/fps/audio).
+Lead with the
+visual, then show the *source* that made it (the blueprint/prompt) — never the
+compiled JSON. Recommend with taste; iterate in fast show→react loops rather
+than long upfront questionnaires. You can see frames but **cannot hear audio** —
+for music/SFX say "give it a listen" and defer to the user's ear. The full
+playbook is the **`comfy-relay`** skill — load it whenever you generate, review,
+or iterate on media.
+
 ## Routing the request — survey first, then choose
 
 Don't commit to the first approach that fits. The ecosystem spans gallery
@@ -111,8 +125,9 @@ mechanism by complexity and reuse — not as a quality ranking:
 1. **Template** — `comfy templates ls --type <image|video|audio>`
    If a curated workflow matches the shape, fetch it. For one-off smoke tests,
    slot-edit and run it directly. For anything that may become a longer piece,
-   multiple variations, or a reusable pattern, wrap the useful template region
-   as a fragment and drive it from a blueprint.
+   multiple variations, or a reusable pattern, **project it into source** with
+   `comfy workflow decompose` (below) and drive it from a blueprint — don't
+   hand-edit the fetched JSON.
 
 2. **Fragment + blueprint** — this is the **default construction path** once
    the workflow is more than a throwaway. Use it even for simple workflows if
@@ -146,13 +161,34 @@ mechanism by complexity and reuse — not as a quality ranking:
    comfy nodes path IMAGE VIDEO                  # what CAN connect these types
    ```
 
-   **c. Distill into a local fragment** — author `./fragments/<name>.json`
-   capturing the wiring you derived: 1-15 standard API-format nodes wrapped
-   with a `_fragment` header declaring typed inputs, outputs, and params
-   (caller-supplied values marked `"PLACEHOLDER"`). Make EVERY asset/model
-   name a required param with no default, so the next composition
-   re-discovers instead of inheriting. Load the `comfy-fragments` skill for
-   the format, then check your work:
+   **c. Distill into a local fragment.**
+
+   **If a working workflow already exists — a template you fetched, a
+   slot-edited file, anything that runs — DECOMPOSE it. Do not re-author the
+   fragment by hand.**
+   ```bash
+   comfy workflow decompose ref.json --name <name>   # → ./fragments/<name>.json
+   ```
+   `decompose` strips loaders → typed **inputs** (bound to the consumer),
+   strips the terminal save → a typed **output**, and surfaces every scalar
+   widget as a **named param** with its current default — all derived from the
+   graph, nothing hardcoded. The buried prompt that used to need
+   `jq '…widgets_values[0]'` becomes a named param you set in the blueprint.
+   (Frontend/subgraph templates are flattened first, so this needs a running or
+   cloud server, or `--input object_info.json`.)
+
+   Why decompose instead of hand-authoring: the projection **inherits the exact
+   working values** — correct widget *types* (the `4` int vs `"4"` string a
+   model's enum actually accepts), real enum choices, wiring that already ran.
+   Re-typing a fragment from a node schema re-introduces those as transcription
+   bugs you only discover when the cloud rejects the job. Start from what works.
+
+   Only author `./fragments/<name>.json` by hand when there is **no** working
+   graph to project from (you're building a shape that doesn't exist yet): 1-15
+   API-format nodes wrapped with a `_fragment` header declaring typed inputs,
+   outputs, and params (caller-supplied values marked `"PLACEHOLDER"`). Make
+   EVERY asset/model name a required param with no default. Load the
+   `comfy-fragments` skill for the format, then check your work:
    ```bash
    comfy --json workflow fragment validate <name>
    ```
@@ -211,6 +247,37 @@ mechanism by complexity and reuse — not as a quality ranking:
 **Hard rule: never build raw workflow JSON with >30 nodes. Use fragments and a
 blueprint.** Even for smaller workflows, prefer fragments if any part could be
 extended, repeated, or reused.
+
+## The compile model — edit source, never the artifact (REQUIRED)
+
+The folders are **source**; the workflow JSON is a **build artifact**.
+`fragments/` + `blueprints/` are what you edit; `compose` is the compiler;
+`blueprints/<name>.compiled.json` is the artifact `run` executes.
+(`templates fetch` pulls a vendored dependency *into* source; `decompose`
+turns any workflow into a fragment; `compose` builds it back.)
+
+This is a hard contract, not a style preference:
+
+- **NEVER hand-edit a fetched template or a compiled/exported workflow JSON.**
+  Do not open it in an editor, and do not run `jq`/`sed`/`python` to change a
+  value inside a node's `inputs`/`widgets_values`, and do not append/rewire
+  nodes by hand.
+- **The moment you need to change anything inside a fetched/compiled workflow,
+  STOP and `comfy workflow decompose <file>` it.** Then set the value as a
+  named param in a blueprint and `compose`. The decomposed fragment is
+  self-documenting — its `_fragment.description`/`source` say where it came
+  from, and `comfy workflow fragment show <name>` lists every param with its
+  `binds` + default, so you edit by name, never by node id.
+- **Only exception** — a *throwaway* run of a template you will not reuse:
+  `comfy workflow slots` → `set-slot`/`vary` to tweak top-level values, then
+  `run`. The instant the work will be extended, reused, varied, or chained — or
+  the value lives inside a subgraph `slots` can't address — decompose instead.
+
+**Red flag — STOP:** you typed `jq`/`sed`/`Edit` against a workflow's
+`widgets_values` or `inputs`, or you're hunting for a node by numeric id
+(`select(.id==128)`). That means the source representation failed. `decompose`
+it and set a named param. (This rule exists because that exact jq-on-`id==128`
+hand-edit is the anti-pattern `decompose` was built to kill.)
 
 ---
 
@@ -913,7 +980,21 @@ N-item batches and writes one numbered file per batch. The envelope then
 reports `out: null` plus `written[]` (all paths) — script against
 `data.written`, not `data.out`.
 
-Stage handoff (download → promote into assets/ → push → `$asset`):
+**On cloud, prefer ONE graph over a stage handoff.** If a generated image
+feeds the next step (e.g. keyframe → image-to-video), wire the producer's
+**IMAGE output straight into the next node's image input in the same
+workflow.** The image stays an in-graph tensor on the server — **no download,
+no re-upload, no files.** A cross-job handoff instead does cloud → local →
+cloud and **re-transmits the full file bytes** (`comfy upload` always re-sends
+the body; the cloud has no exists-by-hash skip), so it's pure waste when the
+graph could have expressed the edge.
+
+Split into separate jobs (and pay the handoff) only when you genuinely need to
+**review the intermediate before spending** on the next stage — e.g. QC a
+keyframe before burning a 5-minute video run. That trade is often worth it;
+just don't split out of habit.
+
+Stage handoff, when you do need it (download → promote into assets/ → push → `$asset`):
 
 ```bash
 # `jobs watch` exits 0 only on completion — use && to chain safely:
@@ -927,7 +1008,8 @@ comfy --json assets push
 
 Outside a project, the legacy handoff still works: `comfy --json upload
 <file> --where cloud`, take `data.uploads[0].cloud_name`, paste it into
-the next workflow's LoadImage input — but prefer the project flow.
+the next workflow's LoadImage input — but it re-sends the bytes; prefer one
+graph, or the project flow.
 
 Pipeline failure recovery: re-submit only the failed workflow. Use
 `comfy --json jobs status <id>` to identify which failed.

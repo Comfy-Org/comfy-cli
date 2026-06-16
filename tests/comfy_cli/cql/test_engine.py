@@ -397,9 +397,9 @@ class TestValidateWorkflow:
         assert result["errors"] == []
 
     def test_non_node_key_warns(self, graph: Graph):
-        """Non-node keys like _meta should produce a warning, not an error."""
+        """An unrecognized non-node key should produce a warning, not an error."""
         wf = {
-            "_meta": {"title": "My Workflow"},
+            "notanode": {"title": "My Workflow"},
             "1": {
                 "class_type": "CheckpointLoaderSimple",
                 "inputs": {"ckpt_name": "sd_xl_base.safetensors"},
@@ -409,8 +409,22 @@ class TestValidateWorkflow:
         assert result["valid"] is True
         non_node = [w for w in result["warnings"] if w["code"] == "non_node_key"]
         assert len(non_node) == 1
-        assert non_node[0]["node_id"] == "_meta"
-        assert non_node[0]["field"] == "_meta"
+        assert non_node[0]["node_id"] == "notanode"
+        assert non_node[0]["field"] == "notanode"
+
+    def test_meta_provenance_key_is_not_warned(self, graph: Graph):
+        """`_meta` is the compose/run provenance block (stripped before submit),
+        not a stray key — validating composed output must not nag about it."""
+        wf = {
+            "_meta": {"schema": "compose/1", "blueprint": "blueprints/x.yaml"},
+            "1": {
+                "class_type": "CheckpointLoaderSimple",
+                "inputs": {"ckpt_name": "sd_xl_base.safetensors"},
+            },
+        }
+        result = graph.validate_workflow(wf)
+        assert result["valid"] is True
+        assert [w for w in result["warnings"] if w["node_id"] == "_meta"] == []
 
     def test_non_dict_node_value_warns(self, graph: Graph):
         """A string value for a key should warn, not crash."""
@@ -616,6 +630,41 @@ class TestValidateWorkflow:
         result = graph.validate_workflow(wf)
         errs = [e for e in result["errors"] if e["code"] == "unknown_enum_value"]
         assert any(e["field"] == "resolution" for e in errs)
+
+    def test_int_combo_preserves_int_type(self, graph: Graph):
+        """object_info int-valued combos must keep their int type so `nodes show`
+        tells the truth and agents pass 8 (not "8") — the cloud rejects the
+        string form (the Sora-2 `duration` bug)."""
+        m = graph._nodes["LtxvApiTextToVideo"]
+        duration = next(p for p in m.inputs if p.name == "duration")
+        assert duration.enum_values == [6, 8, 10, 12]
+        assert all(isinstance(v, int) for v in duration.enum_values)
+
+    def test_enum_error_carries_full_valid_options(self, graph: Graph):
+        """A rejection must surface the FULL valid list (typed), not a truncated
+        preview — so an agent can pick a real value instead of guessing."""
+        wf = {
+            "1": {
+                "class_type": "LtxvApiTextToVideo",
+                "inputs": {"prompt": "x", "duration": 7, "fps": 25, "resolution": "1920x1080"},
+            },
+        }
+        result = graph.validate_workflow(wf)
+        err = next(e for e in result["errors"] if e["field"] == "duration")
+        assert err["valid_options"] == [6, 8, 10, 12]
+
+    def test_int_combo_accepts_string_form_leniently(self, graph: Graph):
+        """Local validate stays lenient on type (string "8" still matches int 8)
+        so it never false-warns; truthfulness comes from the displayed schema,
+        not from stricter local validation."""
+        wf = {
+            "1": {
+                "class_type": "LtxvApiTextToVideo",
+                "inputs": {"prompt": "x", "duration": "8", "fps": 25, "resolution": "1920x1080"},
+            },
+        }
+        result = graph.validate_workflow(wf)
+        assert result["valid"] is True
 
     def test_wildcard_type_compatible(self, graph: Graph):
         """'*' type on either side should not trigger a mismatch."""

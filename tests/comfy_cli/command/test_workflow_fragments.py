@@ -643,6 +643,40 @@ class TestComposeCmd:
         assert envelope["ok"] is False
         assert envelope["error"]["code"] == "blueprint_not_found"
 
+
+class TestFragmentizeCmd:
+    _RESTYLE_WF = {
+        "1": {"class_type": "LoadImage", "inputs": {"image": "base.png"}, "_meta": {"title": "Base"}},
+        "2": {
+            "class_type": "FluxKontextProImageNode",
+            "inputs": {"prompt": "as an oil painting", "input_image": ["1", 0], "seed": 7},
+            "_meta": {"title": "Kontext"},
+        },
+        "3": {"class_type": "SaveImage", "inputs": {"images": ["2", 0], "filename_prefix": "out"}},
+    }
+
+    def test_projects_api_workflow_to_valid_fragment_file(self, tmp_path: Path, capsys):
+        wf = tmp_path / "restyle.json"
+        wf.write_text(json.dumps(self._RESTYLE_WF))
+        lib = tmp_path / "fragments"
+
+        envelope = _run(["decompose", str(wf), "--name", "restyle", "--lib", str(lib)], capsys)
+
+        assert envelope["ok"] is True, envelope
+        data = envelope["data"]
+        assert data["name"] == "restyle"
+        assert data["ports"] == {"inputs": 1, "outputs": 1, "params": 2}  # prompt + seed
+
+        # The written file is a real, loadable fragment.
+        frag = load_fragment(lib / "restyle.json")
+        assert any(p.binds == "2.prompt" for p in frag.params.values())
+        assert "1" not in frag.nodes and "3" not in frag.nodes  # boundaries stripped
+
+    def test_missing_workflow_file_errors(self, tmp_path: Path, capsys):
+        envelope = _run(["decompose", str(tmp_path / "nope.json")], capsys)
+        assert envelope["ok"] is False
+        assert envelope["error"]["code"] == "workflow_not_found"
+
     def test_compose_invalid_yaml(self, tmp_path: Path, capsys):
         blueprint = tmp_path / "bad.yaml"
         blueprint.write_text("pipeline: [ this is not balanced")

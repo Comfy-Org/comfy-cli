@@ -20,7 +20,9 @@ from comfy_cli.fragments import (
     FragmentError,
     RefResolutionError,
     compose_blueprints,
+    decompose_workflow,
     load_fragment,
+    parse_fragment,
     resolve_fragment_name,
 )
 from comfy_cli.output import get_renderer, rprint
@@ -213,6 +215,135 @@ def _journal_compose(blueprint: Path, written: list[str]) -> None:
             project_module.journal(p, cmd="compose", blueprint=str(blueprint), written=list(written))
     except Exception:  # noqa: BLE001 — best-effort by contract
         pass
+
+
+@tracking.track_command("workflow")
+def decompose_cmd(
+    workflow: Annotated[Path, typer.Argument(help="Workflow JSON to project — API format, or frontend (UI) format.")],
+    name: Annotated[
+        str | None,
+        typer.Option("--name", show_default=False, help="Fragment name. Defaults to the workflow file stem."),
+    ] = None,
+    out: Annotated[
+        Path | None,
+        typer.Option("--out", "-o", show_default=False, help="Output path. Defaults to <lib>/<name>.json"),
+    ] = None,
+    lib: Annotated[
+        str | None,
+        typer.Option("--lib", show_default=False, help="Fragment library directory. Defaults to ./fragments"),
+    ] = None,
+    input_path: Annotated[
+        str | None,
+        typer.Option(
+            "--input", show_default=False, help="Offline object_info.json (needed to convert frontend format)."
+        ),
+    ] = None,
+    host: Annotated[str | None, typer.Option("--host", show_default=False, help="Comfy server host.")] = None,
+    port: Annotated[int | None, typer.Option("--port", show_default=False, help="Comfy server port.")] = None,
+):
+    """Project a workflow into a reusable fragment (the inverse of `compose`).
+
+    Loaders become typed inputs, the terminal save's producer an output, and
+    every scalar widget a named param — so a blueprint overrides values by name
+    instead of editing the compiled graph by hand. Frontend-format workflows are
+    flattened to API format first (subgraphs expanded), which needs object_info
+    from a running/cloud server or `--input <object_info.json>`.
+    """
+    renderer = get_renderer()
+    if not workflow.is_file():
+        renderer.error(code="workflow_not_found", message=f"Workflow file not found: {workflow}", hint="check the path")
+        raise typer.Exit(code=1)
+    try:
+        data = json.loads(workflow.read_text(encoding="utf-8"))
+    except OSError as e:
+        renderer.error(code="workflow_not_found", message=f"Unable to read workflow file: {e}")
+        raise typer.Exit(code=1) from e
+    except json.JSONDecodeError as e:
+        renderer.error(code="workflow_invalid_json", message=f"Workflow file is not valid JSON: {e}")
+        raise typer.Exit(code=1) from e
+
+    from comfy_cli.workflow_to_api import WorkflowConversionError, convert_ui_to_api, is_api_format
+
+    # Frontend (UI) format needs object_info to flatten subgraphs + name widgets.
+    if not is_api_format(data):
+        object_info = _load_object_info(renderer, input_path=input_path, host=host, port=port)
+        try:
+            api_workflow = convert_ui_to_api(data, object_info)
+        except WorkflowConversionError as e:
+            renderer.error(
+                code="workflow_conversion_failed",
+                message=f"Could not convert frontend workflow to API format: {e}",
+                hint="re-export from ComfyUI, or pass a matching --input object_info.json",
+            )
+            raise typer.Exit(code=1) from e
+    else:
+        api_workflow = data
+
+    frag_name = name or _slug_name(workflow.stem)
+    frag_json = decompose_workflow(api_workflow, name=frag_name, source=str(workflow))
+    try:
+        frag = parse_fragment(frag_json, source_path=str(workflow))
+    except FragmentError as e:  # pragma: no cover — projection always emits valid fragments
+        renderer.error(code="fragment_invalid", message=str(e), hint=e.hint or "", details={"path": str(workflow)})
+        raise typer.Exit(code=1) from e
+
+    target = out or (_default_lib_dir(lib) / f"{frag_name}.json")
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(json.dumps(frag_json, indent=2), encoding="utf-8")
+    except OSError as e:
+        renderer.error(code="decompose_io_error", message=f"Failed writing fragment: {e}")
+        raise typer.Exit(code=1) from e
+
+    payload = {
+        "workflow": str(workflow),
+        "out": str(target),
+        "name": frag.name,
+        "node_count": len(frag.nodes),
+        "ports": {"inputs": len(frag.inputs), "outputs": len(frag.outputs), "params": len(frag.params)},
+        "inputs": sorted(frag.inputs.keys()),
+        "outputs": sorted(frag.outputs.keys()),
+        "params": sorted(frag.params.keys()),
+    }
+    if renderer.is_pretty():
+        rprint(f"[green]✓[/green] fragment [bold]{frag.name}[/bold] → {target}")
+        rprint(f"  nodes   : {len(frag.nodes)}")
+        rprint(f"  inputs  : {', '.join(sorted(frag.inputs)) or '—'}")
+        rprint(f"  outputs : {', '.join(sorted(frag.outputs)) or '—'}")
+        rprint(f"  params  : {len(frag.params)}")
+    renderer.emit(payload, command="workflow decompose")
+
+
+def _slug_name(text: str) -> str:
+    """Filesystem stem → a safe bare fragment name."""
+    import re
+
+    s = re.sub(r"[^A-Za-z0-9]+", "_", text).strip("_").lower()
+    return s or "fragment"
+
+
+def _load_object_info(renderer, *, input_path: str | None, host: str | None, port: int | None) -> dict:
+    """Fetch raw object_info for frontend→API conversion (offline dump or live server)."""
+    try:
+        if input_path is not None:
+            p = Path(input_path).expanduser()
+            return json.loads(p.read_text(encoding="utf-8"))
+        from comfy_cli import where as where_module
+        from comfy_cli.config_manager import ConfigManager
+        from comfy_cli.cql.loader import resilient_load_object_info
+
+        decision = where_module.resolve(
+            flag=None, config_value=ConfigManager().get(where_module.CONFIG_KEY_WHERE_DEFAULT)
+        )
+        mode = "cloud" if decision.target is where_module.WhereTarget.CLOUD else "local"
+        return resilient_load_object_info(mode=mode, host=host or "127.0.0.1", port=port or 8188)
+    except (OSError, json.JSONDecodeError) as e:
+        renderer.error(
+            code="object_info_unavailable",
+            message=f"Could not load object_info: {e}",
+            hint="pass --input <object_info.json>, sign into cloud, or start the server with `comfy launch`",
+        )
+        raise typer.Exit(code=1) from e
 
 
 @fragment_app.command("ls", help="List fragments in a library directory.")

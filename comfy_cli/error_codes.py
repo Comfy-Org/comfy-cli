@@ -291,6 +291,7 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ErrorCode(
         "oauth_cancelled",
         "OAuth flow was cancelled by the user.",
+        "re-run `comfy cloud login` to retry sign-in",
     ),
     ErrorCode(
         "oauth_timeout",
@@ -306,10 +307,12 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ErrorCode(
         "watcher_timeout",
         "Background watcher gave up after max runtime without a terminal status.",
+        "the job may still be running — check `comfy jobs status <id>`, or re-watch with a longer `--timeout`",
     ),
     ErrorCode(
         "watcher_poll_error",
         "Background watcher encountered a transient error polling the server.",
+        "transient — the job is likely still running; re-run `comfy jobs watch <id>`",
     ),
     ErrorCode(
         "unknown_status_stall",
@@ -331,10 +334,12 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ErrorCode(
         "missing_argument",
         "Required argument(s) not provided.",
+        "run the command with `--help` to see its required arguments",
     ),
     ErrorCode(
         "json_incompatible",
         "Requested feature is not available in JSON output mode.",
+        "drop `--json` (or pass `--no-json`) for this command",
     ),
     # --- skills --------------------------------------------------------------
     ErrorCode(
@@ -397,6 +402,38 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "Reading the blueprint or writing the composed workflow failed with an OSError "
         "(permissions, missing parent dir, disk full, unreadable encoding).",
         "check the path is readable/writable and the disk has space",
+    ),
+    ErrorCode(
+        "workflow_conversion_failed",
+        "`comfy workflow decompose` could not flatten a frontend-format workflow to "
+        "API format (malformed graph, or object_info that doesn't match the nodes).",
+        "re-export from ComfyUI, or pass a matching --input object_info.json",
+    ),
+    ErrorCode(
+        "decompose_io_error",
+        "Writing the projected fragment file failed with an OSError (permissions, missing parent dir, disk full).",
+        "check the --out/--lib path is writable and the disk has space",
+    ),
+    # --- preview -------------------------------------------------------------
+    ErrorCode(
+        "preview_input_not_found",
+        "The file passed to `comfy preview` doesn't exist or isn't readable.",
+        "check the path",
+    ),
+    ErrorCode(
+        "ffmpeg_unavailable",
+        "`comfy preview` needs ffmpeg + ffprobe on PATH and they weren't found.",
+        "install ffmpeg (e.g. `brew install ffmpeg` / `apt install ffmpeg`)",
+    ),
+    ErrorCode(
+        "preview_unsupported_media",
+        "The file has no image/video/audio stream to preview.",
+        "pass an image, video, or audio file",
+    ),
+    ErrorCode(
+        "preview_failed",
+        "ffprobe/ffmpeg failed to probe the file or render the preview image.",
+        "check the file isn't corrupt; try a different --grid/--width",
     ),
     # --- CQL / object_info ---------------------------------------------------
     ErrorCode(

@@ -26,6 +26,7 @@ from comfy_cli.command import (
 from comfy_cli.command import (
     nodes as nodes_command,
 )
+from comfy_cli.command import preview as preview_command
 from comfy_cli.command import (
     project as project_command,
 )
@@ -1528,6 +1529,10 @@ app.add_typer(custom_nodes.app, name="node", help="Manage custom nodes.")
 app.add_typer(nodes_command.app, name="nodes", help="Introspect ComfyUI node classes (inputs, outputs, categories).")
 app.add_typer(templates_command.app, name="templates", help="Browse the Comfy workflow-template gallery.")
 app.add_typer(workflow_command.app, name="workflow", help="Slot-based editing of frontend-format ComfyUI workflows.")
+app.command(
+    "preview",
+    help="Render a previewable PNG from a media file (image → thumb, video → contact sheet, audio → waveform).",
+)(preview_command.preview_cmd)
 app.add_typer(custom_nodes.manager_app, name="manager", help="Manage ComfyUI-Manager.")
 
 app.add_typer(pr_command.app, name="pr-cache", help="Manage PR cache.")

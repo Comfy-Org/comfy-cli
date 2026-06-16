@@ -1316,11 +1316,10 @@ class TestPopComposeMeta:
         assert pop_compose_meta(wf) is None
         assert wf["1"]["_meta"] == {"title": "K"}
 
-    def test_preflight_sees_no_meta_warning_after_strip(self):
-        """With `_meta` stripped, CQL validation emits no `_meta` warning.
-
-        Control: WITHOUT the strip the validator warns about the key, which
-        proves this test would catch a regression."""
+    def test_meta_is_clean_in_preflight_and_stripped_for_submit(self):
+        """`_meta` (compose provenance) is recognized by validation — it never
+        warns, stripped or not — and `pop_compose_meta` still removes it before
+        the submit POST (so the server never sees the provenance block)."""
         from comfy_cli.command.run.loader import pop_compose_meta
         from comfy_cli.cql.engine import Graph
 
@@ -1331,10 +1330,13 @@ class TestPopComposeMeta:
             return [w for w in validation.get("warnings", []) if "_meta" in str(w)]
 
         wf = {"_meta": {"schema": "compose/1"}, "1": {"class_type": "KSampler", "inputs": {}}}
-        # Control: unstripped workflow DOES warn about the `_meta` key.
-        assert meta_warnings(graph.validate_workflow(dict(wf)))
+        # Recognized provenance: preflight is clean even WITH `_meta` present
+        # (the composer adds it; warning on it would be self-inflicted noise).
+        assert not meta_warnings(graph.validate_workflow(dict(wf)))
 
+        # And it's still stripped for the submit path, leaving preflight clean.
         pop_compose_meta(wf)
+        assert "_meta" not in wf
         assert not meta_warnings(graph.validate_workflow(wf))
 
 

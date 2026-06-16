@@ -744,4 +744,8 @@ app.command(
     "compose",
     help="Compose a YAML blueprint of fragments into a single API-format workflow.",
 )(_wfrag.compose_cmd)
+app.command(
+    "decompose",
+    help="Project a workflow (template or API JSON) into a reusable fragment — the inverse of compose.",
+)(_wfrag.decompose_cmd)
 app.add_typer(_wfrag.fragment_app, name="fragment")

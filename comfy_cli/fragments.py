@@ -330,6 +330,154 @@ def resolve_fragment_name(name: str, lib_dir: Path) -> Path:
 
 
 # ---------------------------------------------------------------------------
+# Projection: API workflow -> fragment source (the inverse of compose)
+# ---------------------------------------------------------------------------
+
+
+# Reverse of PATH_LOADERS so a projected loader node maps back to the port type
+# and widget key it materializes — single source of truth, never re-listed.
+_LOADER_BY_CLASS = {cls: (modality, key) for modality, (cls, key) in PATH_LOADERS.items()}
+
+# Terminal save nodes and the input key carrying the value they save. Mirrors
+# the save nodes :meth:`Pipeline.add_save` emits, so projecting a composed graph
+# recovers the same output ports. ``{class: (modality, input_key)}``.
+_SAVE_BY_CLASS = {
+    "SaveImage": ("IMAGE", "images"),
+    "SaveVideo": ("VIDEO", "video"),
+}
+
+
+def _slug(text: str) -> str:
+    """Lowercase snake_case token safe for a fragment port name."""
+    s = re.sub(r"[^A-Za-z0-9]+", "_", str(text)).strip("_").lower()
+    return s or "x"
+
+
+def _renumber_numeric(workflow: dict) -> dict:
+    """Return a copy whose node ids are all numeric strings, references rewired.
+
+    Fragments require numeric ids (the composer does ``int(old) + offset``), but
+    flattening a subgraph yields composite ids like ``"139:99"``. When every id
+    is already numeric this is a no-op (so projecting an API workflow keeps its
+    ids stable); otherwise nodes are renumbered 1..N and every ``[id, port]``
+    input reference is rewritten to match.
+    """
+    ids = [nid for nid, n in workflow.items() if isinstance(n, dict) and "class_type" in n]
+    if all(str(nid).isdigit() for nid in ids):
+        return workflow
+    remap = {nid: str(i) for i, nid in enumerate(ids, start=1)}
+    out: dict = {}
+    for nid in ids:
+        node = copy.deepcopy(workflow[nid])
+        for in_name, value in list(node.get("inputs", {}).items()):
+            if isinstance(value, list) and len(value) == 2 and str(value[0]) in remap:
+                node["inputs"][in_name] = [remap[str(value[0])], value[1]]
+        out[remap[nid]] = node
+    return out
+
+
+def _scalar_param_type(value: Any) -> str | None:
+    """Map a widget value to a fragment param type, or None if it's not a scalar
+    widget (a connection ``[node_id, port]`` is wiring, never a param)."""
+    if isinstance(value, bool):  # bool is a subclass of int — check it first
+        return "BOOLEAN"
+    if isinstance(value, int):
+        return "INT"
+    if isinstance(value, float):
+        return "FLOAT"
+    if isinstance(value, str):
+        return "STRING"
+    return None
+
+
+def decompose_workflow(workflow: dict, *, name: str, source: str | None = None) -> dict:
+    """Project a flat API-format workflow into a fragment JSON dict.
+
+    The inverse of :func:`compose_blueprint`. Boundary nodes are surfaced as
+    typed ports the way a hand-written fragment shapes them:
+
+    * each **loader** (LoadImage/Audio/Video) is *stripped*, and the consumer
+      input it fed becomes a typed fragment **input** — compose re-injects a
+      loader, so keeping the original would double-load;
+    * each **save** (SaveImage/SaveVideo) is *stripped*, and the producer it
+      saved becomes a typed fragment **output**, leaving a composable
+      non-terminal building block;
+    * every remaining **scalar widget** becomes a named, typed **param**
+      defaulting to its current value, so a blueprint overrides it by name
+      instead of editing the compiled graph by hand.
+
+    Names are derived from each node's ``_meta.title`` (or class), never from
+    hardcoded ids. ``source`` (the origin path/name) is recorded in the header
+    so the fragment is self-documenting — it says where it came from and how to
+    edit it. The result round-trips through :func:`parse_fragment`.
+    """
+    origin = source or "a workflow"
+    description = (
+        f"Decomposed from {origin}. Edit values as named params in a blueprint and "
+        f"rebuild with `comfy workflow compose` — do not hand-edit the compiled workflow."
+    )
+    workflow = _renumber_numeric(workflow)
+    nodes = {nid: node for nid, node in workflow.items() if isinstance(node, dict) and "class_type" in node}
+    loaders = {nid for nid, n in nodes.items() if n["class_type"] in _LOADER_BY_CLASS}
+    saves = {nid for nid, n in nodes.items() if n["class_type"] in _SAVE_BY_CLASS}
+    interior = {nid: n for nid, n in nodes.items() if nid not in loaders and nid not in saves}
+
+    inputs: dict[str, dict] = {}
+    outputs: dict[str, dict] = {}
+    params: dict[str, dict] = {}
+    used_ports: set[str] = set()  # input + param names share one namespace
+    used_outs: set[str] = set()
+
+    def _unique(base: str, seen: set[str]) -> str:
+        nm = base
+        i = 2
+        while nm in seen:
+            nm = f"{base}_{i}"
+            i += 1
+        seen.add(nm)
+        return nm
+
+    def _title(node: dict) -> str:
+        return node.get("_meta", {}).get("title") or node["class_type"]
+
+    # Inputs: every edge from a stripped loader into an interior node's input.
+    # Binding the consumer (not the loader) is what lets compose inject a fresh
+    # loader for a file path — or wire a cross-step ref in its place.
+    for cid, node in interior.items():
+        for in_name, value in node.get("inputs", {}).items():
+            if isinstance(value, list) and len(value) == 2 and str(value[0]) in loaders:
+                modality = _LOADER_BY_CLASS[nodes[str(value[0])]["class_type"]][0]
+                pname = _unique(f"{_slug(_title(node))}_{_slug(in_name)}", used_ports)
+                inputs[pname] = {"type": modality, "binds": f"{cid}.{in_name}"}
+
+    # Outputs: each stripped save's producer, typed by the save's modality.
+    for sid in saves:
+        modality, save_key = _SAVE_BY_CLASS[nodes[sid]["class_type"]]
+        ref = nodes[sid].get("inputs", {}).get(save_key)
+        if isinstance(ref, list) and len(ref) == 2 and str(ref[0]) in interior:
+            oname = _unique(_slug(modality), used_outs)
+            outputs[oname] = {"type": modality, "from": str(ref[0]), "port": int(ref[1])}
+
+    # Params: every scalar widget on an interior node. Connection edges (lists)
+    # and loader-fed inputs are not scalars, so they fall out naturally.
+    for nid, node in interior.items():
+        for in_name, value in node.get("inputs", {}).items():
+            ptype = _scalar_param_type(value)
+            if ptype is None:
+                continue
+            pname = _unique(f"{_slug(_title(node))}_{_slug(in_name)}", used_ports)
+            params[pname] = {"type": ptype, "binds": f"{nid}.{in_name}", "default": value}
+
+    header: dict = {"name": name, "description": description, "terminal": False}
+    if source is not None:
+        header["source"] = source
+    header.update({"inputs": inputs, "outputs": outputs, "params": params})
+    frag: dict = {"_fragment": header}
+    frag.update(interior)
+    return frag
+
+
+# ---------------------------------------------------------------------------
 # Pipeline composer
 # ---------------------------------------------------------------------------
 

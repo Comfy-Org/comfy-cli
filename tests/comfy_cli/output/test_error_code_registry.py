@@ -164,6 +164,28 @@ def test_every_raised_code_is_registered(raised_codes):
     )
 
 
+def test_every_error_code_is_a_navigation_signal():
+    """An error message must point toward correctness — every registered code
+    carries a navigation `hint` (the valid set, the close match, the next
+    command). The only exception is a genuinely terminal, user-initiated state
+    where there is no "next step" to navigate to.
+
+    If this fails: add a `hint` to the new code saying what to do next.
+    """
+    # `cancelled` = the user pressed Ctrl-C — nothing to navigate toward.
+    TERMINAL_NO_NAVIGATION = {"cancelled"}
+    missing = [
+        ec.code
+        for ec in error_codes.REGISTRY
+        if ec.code not in TERMINAL_NO_NAVIGATION and not (ec.hint and ec.hint.strip())
+    ]
+    assert not missing, (
+        f"error codes with no navigation hint: {missing}\n"
+        "Every error is a signal toward correctness — add a `hint` telling the agent what to do next "
+        "(the valid options, the close match, or the exact command to run)."
+    )
+
+
 def test_every_registered_code_is_raised(raised_codes):
     """If this fails: a code in the registry is no longer raised anywhere.
 

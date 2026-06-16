@@ -141,7 +141,15 @@ def _spinner() -> Progress:
 
 def _emit_result(result: poll.PollResult, *, request_id: str, download: str | None, as_json: bool) -> None:
     if as_json:
-        output.print_json(result.raw)
+        # Honor --download in JSON mode too. Previously this returned before
+        # saving, so `--json --download` printed the URL but wrote no file,
+        # forcing callers to curl the URL by hand. Save first, then surface the
+        # local path alongside the raw response.
+        if download and result.status == "succeeded" and result.image_urls:
+            saved = output.save_urls(result.image_urls, download, request_id)
+            output.print_json({"result": result.raw, "saved": [str(p) for p in saved]})
+        else:
+            output.print_json(result.raw)
         return
     if result.status != "succeeded":
         rprint(f"[bold red]Job {result.status}: {result.error or 'unknown error'}[/bold red]")
@@ -415,10 +423,26 @@ def _arg_value(args: list[str], *names: str) -> str | None:
 
 def _list_models(extra_args: list[str]) -> None:
     """`comfy generate list` — show available models with their short aliases."""
-    partner = _arg_value(extra_args, "--partner", "-p")
-    category = _arg_value(extra_args, "--category", "--style", "-c")
-    query = _arg_value(extra_args, "--query", "-q")
+    clean, meta = _separate_meta_flags(extra_args)
+    as_json = bool(meta.get("json", False))
+    partner = _arg_value(clean, "--partner", "-p")
+    category = _arg_value(clean, "--category", "--style", "-c")
+    query = _arg_value(clean, "--query", "-q")
     eps = spec.list_endpoints(partner=partner, category=category, query=query)
+    if as_json:
+        models = [
+            {
+                "alias": spec.preferred_alias(e.id) or e.id,
+                "id": e.id,
+                "partner": e.partner,
+                "category": e.category,
+                "mode": "async" if e.polling else "sync",
+                "summary": e.summary,
+            }
+            for e in eps
+        ]
+        output.print_json({"models": models, "count": len(models)})
+        return
     if not eps:
         rprint("[yellow]No models match those filters.[/yellow]")
         raise typer.Exit(code=0)
@@ -438,14 +462,42 @@ def _list_models(extra_args: list[str]) -> None:
 
 def _schema(extra_args: list[str]) -> None:
     """`comfy generate schema <model>` — show params for a model (fal-style)."""
-    if not extra_args or extra_args[0].startswith("-"):
+    clean, meta = _separate_meta_flags(extra_args)
+    as_json = bool(meta.get("json", False))
+    if not clean or clean[0].startswith("-"):
+        if as_json:
+            output.print_json({"error": "Usage: comfy generate schema <model>"})
+            raise typer.Exit(code=1)
         rprint("[bold red]Usage: comfy generate schema <model>[/bold red]")
         raise typer.Exit(code=1)
     try:
-        ep = spec.get_endpoint(extra_args[0])
+        ep = spec.get_endpoint(clean[0])
     except spec.SpecError as e:
+        if as_json:
+            output.print_json({"error": str(e)})
+            raise typer.Exit(code=1)
         rprint(f"[bold red]{e}[/bold red]")
         raise typer.Exit(code=1)
+    if as_json:
+        flags = schema.flags_for(ep)
+        output.print_json(
+            {
+                "model": spec.preferred_alias(ep.id) or ep.id,
+                "id": ep.id,
+                "params": [
+                    {
+                        "name": f.name,
+                        "kind": f.kind,
+                        "required": f.required,
+                        "default": f.default,
+                        "enum": f.enum,
+                        "description": f.description,
+                    }
+                    for f in flags
+                ],
+            }
+        )
+        return
     _show_schema_help(ep)
 
 

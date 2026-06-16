@@ -118,6 +118,47 @@ def test_envelope_shape_on_error():
     assert r.exit_code == 1
 
 
+def test_error_hint_falls_back_to_registry():
+    """An error emitted without an explicit hint inherits its code's REGISTERED
+    navigation hint — so every error points toward correctness, never a dead end."""
+    from comfy_cli import error_codes
+
+    stream = io.StringIO()
+    r = _resolve()
+    r.mode = OutputMode.JSON
+    r.machine_stream = stream
+    r.command = "run"
+    r.error("server_not_running", "no server")  # NO hint passed
+    env = json.loads(stream.getvalue().strip())
+    registered = error_codes.get("server_not_running").hint
+    assert registered  # the code documents navigation
+    assert env["error"]["hint"] == registered
+
+
+def test_empty_string_hint_also_falls_back_to_registry():
+    """Call sites commonly pass `hint=e.hint or ""`; a blank hint must still
+    inherit the registered navigation, not emit a dead-end empty hint."""
+    from comfy_cli import error_codes
+
+    stream = io.StringIO()
+    r = _resolve()
+    r.mode = OutputMode.JSON
+    r.machine_stream = stream
+    r.error("server_not_running", "no server", hint="")  # empty, not None
+    env = json.loads(stream.getvalue().strip())
+    assert env["error"]["hint"] == error_codes.get("server_not_running").hint
+
+
+def test_explicit_hint_overrides_registry():
+    stream = io.StringIO()
+    r = _resolve()
+    r.mode = OutputMode.JSON
+    r.machine_stream = stream
+    r.error("server_not_running", "no server", hint="custom next step")
+    env = json.loads(stream.getvalue().strip())
+    assert env["error"]["hint"] == "custom next step"
+
+
 def test_error_exit_code_is_observable_after_call():
     """main() reads renderer.exit_code as a backstop so call sites that
     forgot to also `raise typer.Exit(1)` still produce a non-zero process

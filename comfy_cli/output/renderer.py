@@ -257,8 +257,20 @@ class Renderer:
         """Emit a structured error. In pretty mode, prints red message + yellow
         hint. In JSON mode, emits an envelope with ``ok=false`` and the error
         block; in NDJSON mode also emits the envelope as the final line.
+
+        An error message is a navigation signal toward correctness. When the
+        call site doesn't supply a usable ``hint`` — ``None`` OR an empty/blank
+        string (call sites often pass ``e.hint or ""``) — fall back to the
+        code's REGISTERED hint so every error tells the agent what to do next.
+        No dead ends.
         """
         self._exit_code = exit_code
+        if not (hint and hint.strip()):
+            from comfy_cli import error_codes
+
+            registered = error_codes.get(code)
+            if registered is not None and registered.hint:
+                hint = registered.hint
         if self.is_pretty():
             # Lazy import to keep panel deps optional.
             from comfy_cli.output.panels import error_panel

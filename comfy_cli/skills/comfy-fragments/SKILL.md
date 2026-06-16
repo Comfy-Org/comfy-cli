@@ -238,6 +238,9 @@ comfy workflow compose blueprints/my_pipeline.yaml   # → blueprints/my_pipelin
 # Specify a custom fragments directory (default: ./fragments) or output path
 comfy workflow compose blueprints/my_pipeline.yaml --lib ./my_fragments -o pipeline.json
 
+# Project a workflow INTO a fragment — the inverse of compose
+comfy workflow decompose ref.json --name restyle   # → ./fragments/restyle.json
+
 # List fragments in a library
 comfy --json workflow fragment ls [--lib DIR]
 
@@ -253,6 +256,56 @@ comfy run --workflow blueprints/my_pipeline.compiled.json --wait
 
 `--lib` defaults to `./fragments` relative to cwd. Default output is
 `<blueprint>.compiled.json`, next to the blueprint.
+
+### `decompose` — turn an existing workflow into source
+
+`compose` builds fragments → a workflow; `decompose` is the **inverse**:
+it projects a workflow JSON (a fetched template, or any API/frontend graph)
+back into a fragment so you edit *source*, never the compiled artifact. From
+the graph alone (nothing hardcoded) it:
+
+- **strips each loader** (`LoadImage`/`LoadAudio`/`LoadVideo`) and exposes the
+  consumer input it fed as a typed **input** — so compose can re-inject a loader
+  for a path, or wire a `$alias.output` ref in its place (keeping the original
+  loader would double-load);
+- **strips the terminal save** and exposes its producer as a typed **output**,
+  leaving a composable, non-terminal building block;
+- surfaces every remaining **scalar widget** as a **named param** defaulting to
+  its current value — the buried prompt that needed `jq '…widgets_values[0]'`
+  becomes `params: {…_prompt: "…"}` you set in the blueprint.
+
+```bash
+comfy workflow decompose workflows/restyle.json --name restyle   # API format: no server needed
+comfy workflow decompose template.json --name lulz --input object_info.json   # frontend/subgraph: needs schema
+```
+
+Frontend-format (UI) and subgraph templates are flattened to API format first,
+which needs `object_info` — from a running/cloud server, or an offline
+`--input object_info.json` dump. Already-API workflows need neither. The result
+always round-trips through `fragment validate`.
+
+**Use it — don't hand-edit.** When you fetch a template or have a workflow whose
+values you need to change, `decompose` it and edit named params in a blueprint.
+**Never** `jq`/`sed`/edit a workflow's `widgets_values`/`inputs` or hunt nodes by
+id (`select(.id==128)`) — that's the anti-pattern decompose exists to kill. The
+only exception is a throwaway run you won't reuse: `slots`/`set-slot`/`vary` then
+`run`.
+
+### Self-documenting by construction
+
+Both sides of the compile carry their own provenance, so a future agent (or you,
+later) can edit safely without re-deriving intent:
+
+- **A decomposed fragment** records `_fragment.source` (where it came from) and a
+  `_fragment.description` that says how to edit it ("…edit params in a blueprint
+  and rebuild with `comfy workflow compose` — do not hand-edit"). `comfy workflow
+  fragment show <name>` prints the description plus every param's `binds` +
+  default — so each value documents which node/field it controls.
+- **A compiled workflow** embeds `_meta` (`schema: compose/1`) naming the
+  `blueprint` that produced it and, for `foreach`, an `item_map` of which nodes
+  belong to which item. `comfy run` strips `_meta` before submit. So the artifact
+  always points back at its source; to change it, edit that blueprint and
+  recompile — never the compiled JSON.
 
 Compose embeds `_meta` (`schema: compose/1`) provenance in the compiled
 JSON — the blueprint path and, for `foreach`, which nodes belong to which
