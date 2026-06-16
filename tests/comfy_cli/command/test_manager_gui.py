@@ -533,6 +533,9 @@ class TestMigrateLegacy:
         assert legacy_manager.exists()
 
 
+# `install` now bootstraps pip (no-op if present) before the pip steps; these
+# flow tests use a fake python, so stub it out. Its dispatch is covered in tests/uv.
+@patch("comfy_cli.command.install.ensure_pip", new=lambda *a, **kw: None)
 class TestInstallSkipManager:
     """Tests for --skip-manager flag setting config to disable."""
 
@@ -589,6 +592,7 @@ class TestInstallSkipManager:
         mock_pip_manager.assert_not_called()
 
 
+@patch("comfy_cli.command.install.ensure_pip", new=lambda *a, **kw: None)
 class TestInstallManagerFailure:
     """Tests for pip_install_manager failure handling."""
 

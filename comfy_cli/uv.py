@@ -1,4 +1,5 @@
 import re
+import shutil
 import subprocess
 import sys
 from importlib import metadata
@@ -33,6 +34,43 @@ def _check_call(cmd: list[str], cwd: PathLike | None = None):
                 "See https://github.com/astral-sh/uv/issues/12036 for details."
             )
         raise
+
+
+def _interpreter_has_pip(python: str) -> bool:
+    """True iff ``<python> -m pip`` is usable. A uv-managed venv often has none."""
+    try:
+        return subprocess.run([python, "-m", "pip", "--version"], capture_output=True).returncode == 0
+    except OSError:
+        return False
+
+
+def pip_bootstrap_cmd(python: str, *, has_pip: bool, uv_path: str | None) -> list[str] | None:
+    """The single command that makes ``<python> -m pip`` usable, or ``None`` if it
+    already is. Pure (no I/O), so the dispatch is unit-tested:
+
+    - pip present         → ``None`` (no-op)
+    - no pip, uv present  → ``uv pip install --python <python> pip``
+    - neither             → ``python -m ensurepip --upgrade``
+
+    This is a *bootstrap*, not a replacement: callers keep their existing
+    ``python -m pip install …`` lines unchanged (same flags, same returncode
+    handling), so the installer behaviour is untouched when pip already exists.
+    """
+    if has_pip:
+        return None
+    if uv_path:
+        return [uv_path, "pip", "install", "--python", python, "pip"]
+    return [python, "-m", "ensurepip", "--upgrade"]
+
+
+def ensure_pip(python: str, *, cwd: PathLike | None = None) -> None:
+    """Make ``<python> -m pip`` usable before a pip install. Idempotent and a
+    no-op when pip is already present — so it's safe to call unconditionally in
+    front of any existing pip step. Fixes the ``comfy update``/``install`` crash
+    on a uv-managed venv (``No module named pip``). Raises if it can't bootstrap."""
+    cmd = pip_bootstrap_cmd(python, has_pip=_interpreter_has_pip(python), uv_path=shutil.which("uv"))
+    if cmd is not None:
+        _check_call(cmd, cwd=cwd)
 
 
 _req_name_re: re.Pattern[str] = re.compile(r"require\s([\w-]+)")

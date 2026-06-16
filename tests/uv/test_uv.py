@@ -7,7 +7,7 @@ import pytest
 
 from comfy_cli import ui
 from comfy_cli.constants import GPU_OPTION
-from comfy_cli.uv import DependencyCompiler, _check_call, parse_req_file
+from comfy_cli.uv import DependencyCompiler, _check_call, parse_req_file, pip_bootstrap_cmd
 
 hereDir = Path(__file__).parent.resolve()
 mockComfyDir = hereDir / "mock_comfy"
@@ -426,3 +426,30 @@ def test_parse_req_file_handles_crlf_line_endings(tmp_path):
     rf = tmp_path / "requirements.txt"
     rf.write_bytes(b"foo>=1.0  # note\r\nbar>=2.0\r\n")
     assert parse_req_file(rf) == ["foo>=1.0", "bar>=2.0"]
+
+
+# pip bootstrap dispatch — `comfy update`/`install` must not assume the resolved
+# interpreter ships pip (a uv-managed venv often doesn't). `ensure_pip` runs the
+# command `pip_bootstrap_cmd` returns, then existing `python -m pip` calls work
+# unchanged. The bootstrap is a NO-OP when pip is already present.
+_PY = "/ws/.venv/bin/python"
+
+
+def test_pip_bootstrap_is_noop_when_pip_present():
+    assert pip_bootstrap_cmd(_PY, has_pip=True, uv_path="/usr/bin/uv") is None
+
+
+def test_pip_bootstrap_uses_uv_when_no_pip():
+    # the reported case: uv-managed venv, no pip → install pip via uv into it
+    assert pip_bootstrap_cmd(_PY, has_pip=False, uv_path="/usr/bin/uv") == [
+        "/usr/bin/uv",
+        "pip",
+        "install",
+        "--python",
+        _PY,
+        "pip",
+    ]
+
+
+def test_pip_bootstrap_falls_back_to_ensurepip():
+    assert pip_bootstrap_cmd(_PY, has_pip=False, uv_path=None) == [_PY, "-m", "ensurepip", "--upgrade"]

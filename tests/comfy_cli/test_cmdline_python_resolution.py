@@ -9,6 +9,7 @@ class TestUpdateComfy:
             patch("comfy_cli.cmdline.resolve_workspace_python", return_value="/resolved/python") as mock_resolve,
             patch.object(cmdline.workspace_manager, "workspace_path", str(tmp_path)),
             patch("comfy_cli.cmdline.os.chdir"),
+            patch("comfy_cli.cmdline.ensure_pip"),  # the pip-bootstrap step is exercised in tests/uv
             patch("comfy_cli.cmdline.subprocess.run") as mock_run,
             patch("comfy_cli.cmdline.custom_nodes.command.update_node_id_cache"),
         ):
@@ -31,6 +32,7 @@ class TestUpdateComfy:
             patch("comfy_cli.cmdline.resolve_workspace_python", return_value="/resolved/python"),
             patch.object(cmdline.workspace_manager, "workspace_path", str(tmp_path)),
             patch("comfy_cli.cmdline.os.chdir"),
+            patch("comfy_cli.cmdline.ensure_pip"),
             patch("comfy_cli.cmdline.subprocess.run"),
             patch(
                 "comfy_cli.cmdline.custom_nodes.command.update_node_id_cache",

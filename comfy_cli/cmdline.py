@@ -53,7 +53,7 @@ from comfy_cli.output import Renderer, get_renderer, rprint, set_renderer
 from comfy_cli.resolve_python import resolve_workspace_python
 from comfy_cli.skills import command as skill_command
 from comfy_cli.standalone import StandalonePython
-from comfy_cli.uv import DependencyCompiler
+from comfy_cli.uv import DependencyCompiler, ensure_pip
 from comfy_cli.workspace_manager import WorkspaceManager, check_comfy_repo
 
 logging.setup_logging()
@@ -602,6 +602,9 @@ def update(
         os.chdir(comfy_path)
         subprocess.run(["git", "pull"], check=True)
         python = resolve_workspace_python(comfy_path)
+        # A uv-managed venv may have no pip — bootstrap it first so the install
+        # below doesn't crash with `No module named pip` (no-op if pip exists).
+        ensure_pip(python, cwd=comfy_path)
         subprocess.run(
             [python, "-m", "pip", "install", "-r", "requirements.txt"],
             check=True,
