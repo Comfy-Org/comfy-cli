@@ -673,6 +673,45 @@ def take_last_fatal_refresh_reason() -> str | None:
     return reason
 
 
+# Refresh tokens that already came back fatal (reuse-detection / invalid_grant)
+# in THIS process. The server revokes the whole family on such a failure, so the
+# token is dead until a fresh ``cloud login`` — re-POSTing it only trips
+# reuse-detection again. A polling/watch loop (``allow_clear=False``, so the
+# session is deliberately kept on disk) would otherwise re-spend the spent token
+# on every iteration and storm the token endpoint (one revoked family →
+# thousands of rejected refreshes). We latch dead tokens here and refuse to
+# replay them. Process-wide and lock-guarded because concurrent poll threads
+# share it; keyed by token *value* so a re-login (new token) is never blocked;
+# cleared on any successful refresh — the family is alive again.
+_dead_refresh_tokens: set[str] = set()
+_dead_refresh_lock = threading.Lock()
+
+
+def _mark_refresh_token_dead(token: str | None) -> None:
+    if not token:
+        return
+    with _dead_refresh_lock:
+        _dead_refresh_tokens.add(token)
+
+
+def _is_refresh_token_dead(token: str | None) -> bool:
+    if not token:
+        return False
+    with _dead_refresh_lock:
+        return token in _dead_refresh_tokens
+
+
+def _clear_dead_refresh_tokens() -> None:
+    """Forget every latched dead token. Called on a successful refresh or a
+    fresh login — the family is alive again, so nothing is dead."""
+    with _dead_refresh_lock:
+        _dead_refresh_tokens.clear()
+
+
+# Test hook: reset the process-wide latch between tests.
+_reset_dead_refresh_tokens = _clear_dead_refresh_tokens
+
+
 def ensure_fresh_session(*, leeway_s: int = 60, force: bool = False, allow_clear: bool = True):
     """Return the stored cloud session, refreshing it first when the access
     token is expired (or within ``leeway_s`` of expiring) and a refresh token
@@ -722,6 +761,13 @@ def ensure_fresh_session(*, leeway_s: int = 60, force: bool = False, allow_clear
         # the proactive ``resolve_target`` leg cheap on the common case.
         return session
 
+    # The family this token belongs to already failed fatally (reuse-detection /
+    # invalid_grant) earlier in this process — it is dead until a fresh login.
+    # Short-circuit before taking the lock or hitting the network so a tight
+    # poll/watch loop can't re-spend the spent token and storm reuse-detection.
+    if _is_refresh_token_dead(session.refresh_token):
+        return None
+
     # A refresh is indicated. Serialize the whole decide→refresh→persist across
     # processes so concurrent callers coalesce into a single network refresh
     # and a rotated refresh token is never replayed by a second waiter.
@@ -770,6 +816,11 @@ def _locked_refresh(auth_store, *, observed_refresh_token: str, leeway_s: int, f
         # rotation (e.g. same token, fresh enough now). Nothing to do.
         return session
 
+    # Re-check under the lock: the token may have been latched dead by another
+    # thread while we waited. Never re-send a token known to be spent.
+    if _is_refresh_token_dead(session.refresh_token):
+        return None
+
     from comfy_cli.cloud import CLIENT_ID, get_resource_url
 
     try:
@@ -798,6 +849,9 @@ def _locked_refresh(auth_store, *, observed_refresh_token: str, leeway_s: int, f
             # off mid-run. We still return ``None`` so the watcher knows the
             # refresh did not produce a usable token.
             _record_fatal_refresh(e)
+            # Latch the dead token so a polling/watch loop (allow_clear=False,
+            # session kept on disk) never re-POSTs it and storms reuse-detection.
+            _mark_refresh_token_dead(session.refresh_token)
             if allow_clear:
                 auth_store.clear_cloud_session()
             return None
@@ -818,6 +872,7 @@ def _locked_refresh(auth_store, *, observed_refresh_token: str, leeway_s: int, f
     # fresh access token and degrades to a clean re-login when it expires,
     # rather than tripping reuse-detection mid-use.
     _last_fatal.reason = None  # success — drop any reason from an earlier attempt
+    _clear_dead_refresh_tokens()  # the family is alive again
     return auth_store.save_cloud_session(
         base_url=session.base_url,
         resource=session.resource,

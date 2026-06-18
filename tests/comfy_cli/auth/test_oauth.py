@@ -20,6 +20,17 @@ import pytest
 from comfy_cli.auth import store as auth_store
 from comfy_cli.cloud import oauth
 
+
+@pytest.fixture(autouse=True)
+def _reset_oauth_dead_token_latch():
+    """The dead-refresh-token latch is process-wide by design (a revoked family
+    stays dead for the life of the process). Reset it around every test so one
+    test's revoked token can't short-circuit another test's refresh."""
+    oauth._reset_dead_refresh_tokens()
+    yield
+    oauth._reset_dead_refresh_tokens()
+
+
 # ---------------------------------------------------------------------------
 # PKCE
 # ---------------------------------------------------------------------------
@@ -532,6 +543,67 @@ class TestEnsureFreshSession:
     def test_none_when_no_session(self, monkeypatch):
         monkeypatch.setattr(auth_store, "get_cloud_session", lambda: None)
         assert oauth.ensure_fresh_session() is None
+
+    def test_fatal_refresh_latches_dead_token_no_retry(self, monkeypatch):
+        """A revoked family (reuse / invalid_grant) must be re-POSTed at most
+        once: subsequent polls must NOT hit the token endpoint again, or a
+        watch/poll loop storms reuse-detection. Mirrors the background watcher,
+        which passes allow_clear=False and keeps the session on disk."""
+        calls = []
+
+        def boom(**kw):
+            calls.append(1)
+            raise oauth.OAuthRefreshError(
+                "reuse",
+                hint="re-login",
+                details={"body": '{"error":"invalid_grant","error_description":"refresh token reuse detected"}'},
+            )
+
+        monkeypatch.setattr(auth_store, "get_cloud_session", lambda: self._expired())
+        monkeypatch.setattr(oauth, "refresh_tokens", boom)
+
+        for _ in range(5):
+            oauth.ensure_fresh_session(allow_clear=False)
+
+        assert calls == [1], f"dead refresh token re-POSTed {len(calls)}x; must latch after the first fatal"
+
+    def test_dead_token_latch_keys_by_value_not_global(self, monkeypatch):
+        """The latch must key on the token *value* so a different (live) token —
+        e.g. after a fresh login — is never blocked by a previously-dead one."""
+        oauth._mark_refresh_token_dead("RT-old")
+
+        saved: dict = {}
+        fresh = auth_store.CloudSession(
+            base_url="https://c",
+            resource="https://c/api",
+            client_id="cid",
+            scope="s",
+            access_token="NEW",
+            refresh_token="RT-new2",
+            token_type="Bearer",
+            expires_at=int(time.time()) + 3600,
+            saved_at="2026-01-01T00:00:01+00:00",
+        )
+        called = []
+
+        def _refresh(**kw):
+            called.append(1)
+            return oauth.TokenSet(
+                access_token="NEW",
+                refresh_token="RT-new2",
+                token_type="Bearer",
+                expires_in=3600,
+                expires_at=int(time.time()) + 3600,
+                scope="s",
+            )
+
+        monkeypatch.setattr(auth_store, "get_cloud_session", lambda: self._expired(refresh="RT-new"))
+        monkeypatch.setattr(auth_store, "save_cloud_session", lambda **kw: saved.update(kw) or fresh)
+        monkeypatch.setattr(oauth, "refresh_tokens", _refresh)
+
+        result = oauth.ensure_fresh_session(allow_clear=False)
+        assert called == [1], "a live token must still refresh even when a different token is latched dead"
+        assert result.access_token == "NEW"
 
     def _valid(self) -> auth_store.CloudSession:
         return auth_store.CloudSession(
