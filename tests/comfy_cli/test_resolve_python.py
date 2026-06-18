@@ -15,8 +15,8 @@ from comfy_cli.resolve_python import (
 
 
 def _clean_env(**overrides):
-    """Return a patch.dict that clears VIRTUAL_ENV and CONDA_PREFIX, then applies overrides."""
-    removals = {k: overrides.pop(k, None) for k in ("VIRTUAL_ENV", "CONDA_PREFIX")}
+    """Return a patch.dict that clears Python environment selectors, then applies overrides."""
+    removals = {k: overrides.pop(k, None) for k in ("VIRTUAL_ENV", "CONDA_PREFIX", "UV_RUN_RECURSION_DEPTH")}
     env = {k: v for k, v in overrides.items()}
     env.update({k: v for k, v in removals.items() if v is not None})
     keys_to_remove = [k for k, v in removals.items() if v is None and k in os.environ]
@@ -96,6 +96,42 @@ class TestResolveWorkspacePython:
         with _clean_env(VIRTUAL_ENV=str(venv_dir)):
             result = resolve_workspace_python(str(workspace))
         assert result == str(python)
+
+    def test_uv_run_virtual_env_outside_workspace_uses_workspace_venv(self, tmp_path):
+        source_root = tmp_path / "comfy-cli"
+        cli_venv = source_root / ".venv"
+        _make_fake_python(cli_venv)
+        workspace = tmp_path / "workspace"
+        workspace_python = _make_fake_python(workspace / ".venv")
+
+        with (
+            _clean_env(VIRTUAL_ENV=str(cli_venv), UV_RUN_RECURSION_DEPTH="1"),
+            patch("comfy_cli.resolve_python._source_checkout_root", return_value=str(source_root)),
+        ):
+            result = resolve_workspace_python(str(workspace))
+        assert result == str(workspace_python)
+
+    def test_uv_run_active_virtual_env_outside_source_still_takes_precedence(self, tmp_path):
+        source_root = tmp_path / "comfy-cli"
+        active_venv = tmp_path / "active-env"
+        active_python = _make_fake_python(active_venv)
+        workspace = tmp_path / "workspace"
+        _make_fake_python(workspace / ".venv")
+
+        with (
+            _clean_env(VIRTUAL_ENV=str(active_venv), UV_RUN_RECURSION_DEPTH="1"),
+            patch("comfy_cli.resolve_python._source_checkout_root", return_value=str(source_root)),
+        ):
+            result = resolve_workspace_python(str(workspace))
+        assert result == str(active_python)
+
+    def test_uv_run_virtual_env_inside_workspace_still_takes_precedence(self, tmp_path):
+        workspace = tmp_path / "workspace"
+        workspace_python = _make_fake_python(workspace / ".venv")
+
+        with _clean_env(VIRTUAL_ENV=str(workspace / ".venv"), UV_RUN_RECURSION_DEPTH="1"):
+            result = resolve_workspace_python(str(workspace))
+        assert result == str(workspace_python)
 
     def test_virtual_env_takes_precedence_over_conda(self, tmp_path):
         venv_dir = tmp_path / "user_venv"
@@ -225,6 +261,25 @@ class TestEnsureWorkspacePython:
             result = ensure_workspace_python(str(workspace))
         assert result == str(python)
         assert not (workspace / ".venv").exists()
+
+    def test_uv_run_virtual_env_outside_workspace_creates_workspace_venv(self, tmp_path):
+        source_root = tmp_path / "comfy-cli"
+        cli_venv = source_root / ".venv"
+        _make_fake_python(cli_venv)
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+
+        with (
+            _clean_env(VIRTUAL_ENV=str(cli_venv), UV_RUN_RECURSION_DEPTH="1"),
+            patch("comfy_cli.resolve_python._source_checkout_root", return_value=str(source_root)),
+            patch("comfy_cli.resolve_python.create_workspace_venv", return_value="/created/python") as mock_create,
+            patch("comfy_cli.resolve_python.sys.prefix", "/tmp/uv-run/comfy-cli"),
+            patch("comfy_cli.resolve_python.sys.base_prefix", "/usr"),
+        ):
+            result = ensure_workspace_python(str(workspace))
+
+        assert result == "/created/python"
+        mock_create.assert_called_once_with(str(workspace))
 
     def test_with_conda_does_not_create_venv(self, tmp_path):
         conda_dir = tmp_path / "conda"

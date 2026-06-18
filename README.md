@@ -79,6 +79,8 @@ When you run `comfy install`, comfy-cli picks a Python environment for ComfyUI
 dependencies using the following precedence:
 
 1. An **active virtualenv or conda** environment (`VIRTUAL_ENV` / `CONDA_PREFIX`) is used as-is.
+   When a comfy-cli source checkout is launched through `uv run`, its project virtualenv is ignored if it is
+   outside the selected ComfyUI workspace.
 2. An **existing `.venv` or `venv`** directory inside the workspace is reused.
 3. Otherwise the choice depends on how comfy-cli was installed:
    - **`pip install comfy-cli`** (global / system Python): dependencies go
