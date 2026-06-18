@@ -79,6 +79,8 @@ When you run `comfy install`, comfy-cli picks a Python environment for ComfyUI
 dependencies using the following precedence:
 
 1. An **active virtualenv or conda** environment (`VIRTUAL_ENV` / `CONDA_PREFIX`) is used as-is.
+   When a comfy-cli source checkout is launched through `uv run`, its project virtualenv is ignored if it is
+   outside the selected ComfyUI workspace.
 2. An **existing `.venv` or `venv`** directory inside the workspace is reused.
 3. Otherwise the choice depends on how comfy-cli was installed:
    - **`pip install comfy-cli`** (global / system Python): dependencies go
@@ -86,6 +88,50 @@ dependencies using the following precedence:
    - **`pipx install comfy-cli`** or **`uv tool install comfy-cli`** (isolated
      tool environment): a `.venv` is created inside the ComfyUI workspace.
      Use `comfy launch` to start ComfyUI with the correct Python.
+
+ComfyUI and ComfyUI-Manager dependency installs use uv's pip-compatible installer
+when uv is available, targeting the selected environment explicitly. This keeps
+the default `comfy install` and `comfy update` paths aligned with comfy-cli's uv
+support:
+
+- uv-created workspace virtual environments do not need pip installed inside
+  them, avoiding `No module named pip` failures when the environment is otherwise
+  valid.
+- Warm-cache restores and updates can reuse uv's resolver/cache/linking behavior,
+  so repeated installs often complete much faster.
+- Users do not need to switch to a separate manual restore flow just to keep a
+  ComfyUI workspace uv-managed.
+
+The difference is most visible when comparing the documented flow with a
+uv-managed workspace:
+
+| Step | Existing documented flow | uv-managed workspace flow |
+| --- | --- | --- |
+| Install comfy-cli | `pip install comfy-cli` | `uv tool install comfy-cli` or `uv run comfy ...` |
+| Install ComfyUI | `comfy install` | `uv run comfy install --restore` from an existing ComfyUI workspace, or `uv run comfy --workspace <path> install` |
+| Update ComfyUI | `comfy update` | `comfy update` from a workspace whose `.venv` was created by uv |
+| Dependency install behavior | Historically called `<workspace-python> -m pip install ...` | Uses `<comfy-cli-python> -m uv pip install --python <workspace-python> ...` |
+| Failure this avoids | A valid workspace environment can still fail with `No module named pip` if pip was not seeded into `.venv` | uv targets the workspace interpreter directly, so pip does not need to be importable inside the workspace |
+| Practical result | Users may need to manually repair the environment before install/update can continue | Install, restore, Manager setup, and repeated updates can stay uv-managed and reuse uv's cache |
+
+For a fresh machine or another SSH host, the uv-managed flow does not require
+downloading the comfy-cli repository first:
+
+| Goal | pip-first instructions | uv-first instructions |
+| --- | --- | --- |
+| Install the CLI tool | `pip install comfy-cli` | `uv tool install comfy-cli` |
+| Check the CLI | `comfy --help` | `comfy --help` |
+| Install ComfyUI into a specific path | `comfy --workspace <path> install` | `comfy --workspace <path> install` |
+| Restore an existing checkout | `comfy --workspace <path> install --restore` | `comfy --workspace <path> install --restore` |
+| Update an existing checkout | `comfy --workspace <path> update` | `comfy --workspace <path> update` |
+| Dependency installer used by comfy-cli | The selected workspace Python may need `pip` importable | comfy-cli uses uv's installer and passes `--python <workspace-python>` |
+
+In both flows, users run the same `comfy` commands after installing the CLI.
+The uv-backed installer changes the internal dependency restore step so fresh
+machines and uv-managed workspaces do not depend on pip being present inside the
+ComfyUI workspace environment.
+
+If uv is unavailable, comfy-cli falls back to `python -m pip`.
 
 ### Specifying execution path
 

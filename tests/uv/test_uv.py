@@ -1,5 +1,6 @@
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 from unittest.mock import patch
 
@@ -7,7 +8,7 @@ import pytest
 
 from comfy_cli import ui
 from comfy_cli.constants import GPU_OPTION
-from comfy_cli.uv import DependencyCompiler, _check_call, parse_req_file
+from comfy_cli.uv import DependencyCompiler, _check_call, parse_req_file, pip_install_command
 
 hereDir = Path(__file__).parent.resolve()
 mockComfyDir = hereDir / "mock_comfy"
@@ -118,6 +119,51 @@ def test_compile_passes_torch_backend():
     cmd = mock_run.call_args[0][0]
     idx = cmd.index("--torch-backend")
     assert cmd[idx + 1] == "cu126"
+
+
+def test_pip_install_command_prefers_uv_with_target_python():
+    with patch("comfy_cli.uv.find_spec", return_value=object()):
+        cmd = pip_install_command("/workspace/.venv/bin/python", ["-r", "requirements.txt"])
+
+    assert cmd == [
+        sys.executable,
+        "-m",
+        "uv",
+        "pip",
+        "install",
+        "--python",
+        "/workspace/.venv/bin/python",
+        "-r",
+        "requirements.txt",
+    ]
+
+
+def test_pip_install_command_falls_back_to_pip_when_uv_missing():
+    with patch("comfy_cli.uv.find_spec", return_value=None):
+        cmd = pip_install_command("/workspace/.venv/bin/python", ["-r", "requirements.txt"])
+
+    assert cmd == ["/workspace/.venv/bin/python", "-m", "pip", "install", "-r", "requirements.txt"]
+
+
+def test_pip_install_command_matches_pip_multi_index_behavior():
+    with patch("comfy_cli.uv.find_spec", return_value=object()):
+        cmd = pip_install_command(
+            "/workspace/.venv/bin/python",
+            ["torch", "--extra-index-url", "https://download.pytorch.org/whl/cpu"],
+        )
+
+    assert cmd[-2:] == ["--index-strategy", "unsafe-best-match"]
+
+
+def test_install_build_deps_uses_uv_installer_without_requiring_pip_in_target():
+    with patch("comfy_cli.uv.run_pip_install") as mock_install:
+        DependencyCompiler.Install_Build_Deps(executable="/workspace/.venv/bin/python")
+
+    mock_install.assert_called_once_with(
+        executable="/workspace/.venv/bin/python",
+        args=["--upgrade", "pip", "uv"],
+        check=True,
+    )
 
 
 def test_compile_omits_torch_backend_when_none():

@@ -21,11 +21,37 @@ def _is_externally_managed() -> bool:
     return bool(stdlib) and os.path.isfile(os.path.join(stdlib, "EXTERNALLY-MANAGED"))
 
 
+def _is_path_inside(path: str, parent: str) -> bool:
+    path = os.path.realpath(path)
+    parent = os.path.realpath(parent)
+    try:
+        return os.path.commonpath([path, parent]) == parent
+    except ValueError:
+        return False
+
+
+def _source_checkout_root() -> str | None:
+    root = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+    if os.path.isfile(os.path.join(root, "pyproject.toml")):
+        return root
+    return None
+
+
+def _ignore_uv_run_virtual_env(virtual_env: str, workspace_path: str | None) -> bool:
+    if not workspace_path or not os.environ.get("UV_RUN_RECURSION_DEPTH"):
+        return False
+    source_root = _source_checkout_root()
+    if source_root is None or not _is_path_inside(virtual_env, source_root):
+        return False
+    return not _is_path_inside(virtual_env, workspace_path)
+
+
 def resolve_workspace_python(workspace_path: str | None = None) -> str:
     if virtual_env := os.environ.get("VIRTUAL_ENV"):
-        python = _get_python_binary(virtual_env)
-        if os.path.isfile(python):
-            return python
+        if not _ignore_uv_run_virtual_env(virtual_env, workspace_path):
+            python = _get_python_binary(virtual_env)
+            if os.path.isfile(python):
+                return python
 
     if conda_prefix := os.environ.get("CONDA_PREFIX"):
         python = _get_python_binary(conda_prefix)
@@ -54,7 +80,8 @@ def create_workspace_venv(workspace_path: str) -> str:
 
 
 def ensure_workspace_python(workspace_path: str) -> str:
-    if os.environ.get("VIRTUAL_ENV") or os.environ.get("CONDA_PREFIX"):
+    virtual_env = os.environ.get("VIRTUAL_ENV")
+    if (virtual_env and not _ignore_uv_run_virtual_env(virtual_env, workspace_path)) or os.environ.get("CONDA_PREFIX"):
         return resolve_workspace_python(workspace_path)
 
     for venv_name in (".venv", "venv"):

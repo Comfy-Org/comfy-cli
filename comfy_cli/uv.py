@@ -2,6 +2,7 @@ import re
 import subprocess
 import sys
 from importlib import metadata
+from importlib.util import find_spec
 from pathlib import Path
 from textwrap import dedent
 from typing import Any, cast
@@ -13,6 +14,38 @@ from comfy_cli.typing import PathLike
 
 def _run(cmd: list[str], cwd: PathLike, check: bool = True) -> subprocess.CompletedProcess[Any]:
     return subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, check=check)
+
+
+def pip_install_command(executable: PathLike, args: list[str]) -> list[str]:
+    """Build an installer command for a Python environment.
+
+    Prefer uv from the comfy-cli runtime and target the workspace interpreter
+    explicitly. This avoids requiring pip to be installed inside uv-created
+    workspace virtual environments.
+    """
+    if find_spec("uv") is not None:
+        cmd = [sys.executable, "-m", "uv", "pip", "install", "--python", str(executable), *args]
+        if "--extra-index-url" in args and "--index-strategy" not in args:
+            cmd.extend(["--index-strategy", "unsafe-best-match"])
+        return cmd
+    return [str(executable), "-m", "pip", "install", *args]
+
+
+def run_pip_install(
+    executable: PathLike,
+    args: list[str],
+    cwd: PathLike | None = None,
+    check: bool = False,
+    capture_output: bool = False,
+    text: bool = False,
+) -> subprocess.CompletedProcess[Any]:
+    return subprocess.run(
+        pip_install_command(executable, args),
+        cwd=cwd,
+        check=check,
+        capture_output=capture_output,
+        text=text,
+    )
 
 
 def _check_call(cmd: list[str], cwd: PathLike | None = None):
@@ -126,9 +159,8 @@ class DependencyCompiler:
 
     @staticmethod
     def Install_Build_Deps(executable: PathLike = sys.executable):
-        """Use pip to install bare minimum requirements for uv to do its thing"""
-        cmd = [str(executable), "-m", "pip", "install", "--upgrade", "pip", "uv"]
-        _check_call(cmd=cmd)
+        """Install uv into the target environment before running uv as a module there."""
+        run_pip_install(executable=executable, args=["--upgrade", "pip", "uv"], check=True)
 
     @staticmethod
     def Compile(
