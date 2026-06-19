@@ -1121,3 +1121,81 @@ def test_watch_already_cancelled_job_exits_130(monkeypatch):
     runner = CliRunner()
     result = runner.invoke(jobs_mod.app, ["watch", "pidX", "--where", "local"])
     assert result.exit_code == 130, (result.exit_code, result.output)
+
+
+# ---------------------------------------------------------------------------
+# `jobs wait` — block until N prompt_ids are all terminal (multi-job wait)
+# ---------------------------------------------------------------------------
+
+
+def test_wait_loop_settles_all_jobs():
+    """_wait_loop polls each id until terminal; returns snapshots + empty pending."""
+    import time as _t
+
+    from comfy_cli.output import get_renderer
+
+    bcalls = {"n": 0}
+
+    def fake_fetch(pid):
+        if pid == "a":
+            return {"prompt_id": "a", "status": "completed", "outputs": ["u"]}
+        bcalls["n"] += 1
+        if bcalls["n"] < 2:
+            return {"prompt_id": "b", "status": "running"}
+        return {"prompt_id": "b", "status": "error", "error_message": "boom"}
+
+    snaps, pending = jobs_mod._wait_loop(
+        ["a", "b"], fake_fetch, poll_interval=0.0, deadline=_t.time() + 5, renderer=get_renderer()
+    )
+    assert pending == []
+    assert snaps["a"]["status"] == "completed"
+    assert snaps["b"]["status"] == "error"
+
+
+def test_wait_loop_times_out_on_stuck_job():
+    import time as _t
+
+    from comfy_cli.output import get_renderer
+
+    snaps, pending = jobs_mod._wait_loop(
+        ["stuck"],
+        lambda pid: {"prompt_id": pid, "status": "running"},
+        poll_interval=0.0,
+        deadline=_t.time() + 0.05,
+        renderer=get_renderer(),
+    )
+    assert pending == ["stuck"]
+    assert "stuck" not in snaps
+
+
+def test_wait_cmd_all_completed_exit_zero(monkeypatch):
+    from typer.testing import CliRunner
+
+    monkeypatch.setattr(
+        jobs_mod,
+        "_wait_fetch_snapshot",
+        lambda pid, **kw: {"prompt_id": pid, "status": "completed", "outputs": []},
+    )
+    monkeypatch.setattr(jobs_mod, "_server_or_error", lambda h, p, **kw: True)
+    r = CliRunner().invoke(jobs_mod.app, ["wait", "a", "b", "--where", "local", "--poll-interval", "0"])
+    assert r.exit_code == 0, r.output
+
+
+def test_wait_cmd_any_error_exits_one(monkeypatch):
+    from typer.testing import CliRunner
+
+    def fetch(pid, **kw):
+        status = "error" if pid == "b" else "completed"
+        return {"prompt_id": pid, "status": status, "error_message": "boom"}
+
+    monkeypatch.setattr(jobs_mod, "_wait_fetch_snapshot", fetch)
+    monkeypatch.setattr(jobs_mod, "_server_or_error", lambda h, p, **kw: True)
+    r = CliRunner().invoke(jobs_mod.app, ["wait", "a", "b", "--where", "local", "--poll-interval", "0"])
+    assert r.exit_code == 1, r.output
+
+
+def test_wait_cmd_no_ids_errors():
+    from typer.testing import CliRunner
+
+    r = CliRunner().invoke(jobs_mod.app, ["wait", "--where", "local"])
+    assert r.exit_code != 0

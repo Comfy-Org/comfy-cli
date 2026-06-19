@@ -758,6 +758,220 @@ def _render_status_pretty(snap: dict, *, host: str, port: int) -> None:
 
 
 # ---------------------------------------------------------------------------
+# `jobs wait` — block until N prompt_ids are all terminal (multi-job wait)
+# ---------------------------------------------------------------------------
+
+
+def _wait_fetch_snapshot(
+    prompt_id: str, *, cloud: bool, host: str | None, port: int | None, server_up: bool
+) -> dict | None:
+    """Best-effort single-job status snapshot for the wait loop.
+
+    cloud -> /api/job status; local -> live /history when the server is up,
+    else fall back to the on-disk state file the async watcher maintains.
+    """
+    if cloud:
+        return _cloud_status_snapshot(prompt_id)
+    if server_up and host is not None and port is not None:
+        snap = _snapshot(host, port, prompt_id)
+        if snap is not None:
+            return snap
+    from comfy_cli import jobs_state
+
+    try:
+        st = jobs_state.read(prompt_id)
+    except ValueError:
+        st = None
+    if st is None:
+        return None
+    err_msg = st.error.get("message") if isinstance(st.error, dict) else None
+    return {
+        "prompt_id": prompt_id,
+        "status": st.status,
+        "outputs": list(st.outputs or []),
+        "error_message": err_msg,
+    }
+
+
+def _wait_loop(prompt_ids, fetch, *, poll_interval: float, deadline: float, renderer):
+    """Poll ``fetch(pid)`` for each id until all are terminal or the deadline
+    passes. Emits a ``settled`` NDJSON event as each job finishes. Returns
+    ``(snapshots, still_pending)``.
+    """
+    from comfy_cli import cancellation, jobs_state
+
+    pending = list(prompt_ids)
+    snapshots: dict[str, dict] = {}
+    total = len(pending)
+    cancel_token = cancellation.get_token()
+    while pending:
+        still: list[str] = []
+        for pid in pending:
+            snap = fetch(pid)
+            status = (snap or {}).get("status")
+            if status in jobs_state.TERMINAL_STATUSES:
+                snapshots[pid] = snap if isinstance(snap, dict) else {"prompt_id": pid, "status": status}
+                renderer.event("settled", prompt_id=pid, status=status, settled=len(snapshots), total=total)
+            else:
+                still.append(pid)
+        pending = still
+        if not pending:
+            break
+        if time.time() >= deadline or (cancel_token is not None and cancel_token.is_set()):
+            break
+        time.sleep(max(0.0, min(poll_interval, deadline - time.time())))
+    return snapshots, pending
+
+
+def _gather_waitable_ids(cloud: bool) -> list[str]:
+    """Every non-terminal locally-tracked prompt_id whose ``where`` matches routing."""
+    from comfy_cli import jobs_state
+
+    want = "cloud" if cloud else "local"
+    out: list[str] = []
+    try:
+        paths = sorted(jobs_state.state_dir().glob("*.json"))
+    except OSError:
+        return out
+    for path in paths:
+        st = jobs_state.read(path.stem)
+        if st is None or st.where != want or st.is_terminal:
+            continue
+        out.append(st.prompt_id)
+    return out
+
+
+def _render_wait_pretty(summary: dict) -> None:
+    from rich.table import Table
+    from rich.text import Text
+
+    badge = {
+        "completed": ("✓", "bold green"),
+        "error": ("✗", "bold red"),
+        "cancelled": ("⊘", "bold yellow"),
+        "timed_out": ("⏱", "bold yellow"),
+    }
+    tbl = Table(
+        title=f"waited on {summary['total']} job(s) — {summary['elapsed_seconds']}s",
+        border_style="cyan",
+        show_header=True,
+    )
+    tbl.add_column("prompt_id", style="dim", no_wrap=True)
+    tbl.add_column("status")
+    for r in summary["jobs"]:
+        glyph, style = badge.get(r["status"], ("•", "white"))
+        tbl.add_row(r["prompt_id"], Text(f"{glyph} {r['status']}", style=style))
+    get_renderer().console().print(tbl)
+
+
+@app.command("wait", help="Block until ALL given prompt_ids reach a terminal state; emit a summary.")
+@tracking.track_command("jobs")
+def wait_cmd(
+    prompt_ids: Annotated[
+        list[str] | None,
+        typer.Argument(help="prompt_ids to wait on (omit and use --all to wait on every tracked job)."),
+    ] = None,
+    host: Annotated[str | None, typer.Option()] = None,
+    port: Annotated[int | None, typer.Option()] = None,
+    where: Annotated[str | None, typer.Option("--where", help="'local' (default) or 'cloud'.")] = None,
+    poll_interval: Annotated[
+        float,
+        typer.Option("--poll-interval", help="Seconds between status polls (these are long jobs; don't hammer)."),
+    ] = 5.0,
+    timeout: Annotated[float, typer.Option("--timeout", help="Give up after this many seconds total.")] = 1800.0,
+    wait_all: Annotated[bool, typer.Option("--all", help="Wait on all locally-tracked non-terminal jobs.")] = False,
+):
+    renderer = get_renderer()
+    cloud = _is_cloud(where)
+
+    ids = list(prompt_ids or [])
+    if wait_all:
+        ids.extend(_gather_waitable_ids(cloud))
+    ids = list(dict.fromkeys(ids))  # de-dup, preserve order
+    if not ids:
+        renderer.error(
+            code="no_prompt_ids",
+            message="no prompt_ids to wait on",
+            hint="pass one or more prompt_ids, or --all to wait on every tracked job",
+        )
+        raise typer.Exit(code=2)
+
+    h: str | None = None
+    p: int | None = None
+    server_up = False
+    if cloud:
+        _cloud_preflight_or_exit()
+    else:
+        h, p = _resolve_host_port(host, port)
+        server_up = _server_or_error(h, p, raise_on_missing=False)
+
+    start = time.time()
+    deadline = start + timeout
+
+    def fetch(pid: str) -> dict | None:
+        return _wait_fetch_snapshot(pid, cloud=cloud, host=h, port=p, server_up=server_up)
+
+    if renderer.is_pretty():
+        renderer.console().print(
+            f"[bold]Waiting on {len(ids)} job(s)[/bold] [dim](poll {poll_interval}s, timeout {timeout:.0f}s)[/dim]"
+        )
+
+    snapshots, pending = _wait_loop(ids, fetch, poll_interval=poll_interval, deadline=deadline, renderer=renderer)
+
+    jobs_list: list[dict] = []
+    for pid in ids:
+        if pid in pending:
+            jobs_list.append({"prompt_id": pid, "status": "timed_out", "ok": False})
+            continue
+        snap = snapshots.get(pid) or {"prompt_id": pid, "status": "unknown"}
+        status = str(snap.get("status") or "unknown")
+        row: dict = {"prompt_id": pid, "status": status, "ok": status == "completed"}
+        if snap.get("outputs"):
+            row["outputs"] = snap["outputs"]
+        if snap.get("error_message"):
+            row["error_message"] = snap["error_message"]
+        jobs_list.append(row)
+
+    completed = sum(1 for r in jobs_list if r["status"] == "completed")
+    failed = sum(1 for r in jobs_list if r["status"] == "error")
+    cancelled = sum(1 for r in jobs_list if r["status"] == "cancelled")
+    timed_out = sum(1 for r in jobs_list if r["status"] == "timed_out")
+    summary = {
+        "total": len(ids),
+        "completed": completed,
+        "failed": failed,
+        "cancelled": cancelled,
+        "timed_out": timed_out,
+        "elapsed_seconds": round(time.time() - start, 2),
+        "jobs": jobs_list,
+    }
+    where_label = "cloud" if cloud else "local"
+
+    if renderer.is_pretty():
+        _render_wait_pretty(summary)
+
+    if failed == 0 and cancelled == 0 and timed_out == 0:
+        renderer.emit(summary, command="jobs wait", where=where_label)
+        return
+
+    if failed:
+        code, exit_code = "execution_error", 1
+    elif cancelled:
+        code, exit_code = "cancelled", 130
+    else:
+        code, exit_code = "wait_timeout", 1
+    renderer.error(
+        code=code,
+        message=f"{completed}/{len(ids)} completed — {failed} failed, {cancelled} cancelled, {timed_out} timed out",
+        hint=("raise --timeout if jobs are merely slow" if timed_out else None),
+        details=summary,
+        exit_code=exit_code,
+        command="jobs wait",
+    )
+    raise typer.Exit(code=exit_code)
+
+
+# ---------------------------------------------------------------------------
 # `jobs cancel` — stop a running or pending prompt, locally or on cloud
 # ---------------------------------------------------------------------------
 
