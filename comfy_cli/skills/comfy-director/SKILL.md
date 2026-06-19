@@ -58,7 +58,9 @@ Pick per shot, in rough order of strength:
 | Strategy | Use for |
 |---|---|
 | Character/location reference image carried into each shot's i2v graph | protagonist identity |
+| Same identity, new framings via reference-image edit (one hero → N angles) | recognizable face across cuts |
 | Keyframe of shot N seeds shot N+1 (image-referenced restyle or end-frame) | contiguous action |
+| Talking head fed the EXACT audio that plays (KlingAvatar), cut between angles of the *same* lip-synced head — never B-roll over the VO | dialogue that must feel real |
 | Repeated wardrobe/light/lens lines verbatim in every prompt | cheap baseline glue |
 
 If a shot can't hold continuity, **rewrite the screenplay** so it doesn't
@@ -70,6 +72,22 @@ need that shot — don't ship the break.
   will not follow a dynamic arc (it inverts exactly where you need the peak).
 - Place VO by math: stem duration vs beat window, before mixing.
 - Duck score under VO; loudness-normalize the final mix (~-14 LUFS).
+- **Dialogue must lip-sync by construction.** Drive the mouth from the exact
+  audio that plays (KlingAvatar `sound_file`) and cut between *angles of the same
+  lip-synced head* — B-roll over a continuous VO reads as a montage, and
+  i2v-invented mouths drift. "No lip-sync / doesn't feel real" is the classic
+  rejection. (Generate audio in-graph — cloud `LoadAudio` can't see uploads; see
+  `comfy` audio gotchas.)
+- **Lock voice & casting by EAR before the expensive renders.** Voice/accent is
+  subjective and unreadable from a waveform — render a few cheap candidate TTS
+  takes of one line, have the user pick, THEN bake the winner into the costly,
+  `transient_auth`-prone avatar/lip-sync shots. Re-rendering all of them on a
+  rejected voice is the avoidable burn. Same logic for the protagonist's look:
+  approve the hero still before generating every shot from it.
+- **Verify the mix by measurement, not faith.** You can't hear the render —
+  `ffmpeg volumedetect` each section: a "dead air" ending or a buried line shows
+  up as a window near -91 dB. Confirm every beat is present at level before
+  declaring it done.
 
 ## Production ops
 
@@ -107,3 +125,6 @@ need that shot — don't ship the break.
 | Client's mentioned technique as the concept | "I said it to spark ideas" |
 | No continuity plan | Protagonist changes face every cut |
 | One 40s music gen | Arc inverts at the climax |
+| B-roll over a continuous VO | "Feels like a montage / audio doesn't match" |
+| Baked the voice into N shots before the user heard it | Re-render everything when they reject it |
+| Butt-joined talking-head clips | Voice drifts out of sync (avatar pads video past audio) |

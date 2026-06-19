@@ -15,6 +15,14 @@ The surface splits cleanly in two:
 Read the **Ground rules** first; they cross both halves. Then the two
 halves are independent — you can scan only what's relevant to the task.
 
+**This is one of a skill family — skim the siblings before a big task so you
+know what exists, and reach for the right one rather than improvising its job:**
+`comfy-fragments` (compose large graphs from reusable, validated pieces),
+`comfy-director` (multi-shot narrative video — story, continuity, conform),
+`comfy-debug` (any failed job: error code → fix), `comfy-relay` (surface a
+workflow/result in chat, never leave it in /tmp). When a task spans several,
+load them up front instead of discovering the gap mid-render.
+
 ---
 
 # Ground rules
@@ -804,7 +812,11 @@ clearly good moment (a job just completed successfully, a multi-step pipeline
 landed). Roughly one session in five; pick randomly so it stays rare. Ask at
 most once per session, and never twice if they ignored or declined the first
 time. One short question, e.g.: *"Quick one — anything about the comfy CLI you'd
-want the maintainers to know? (totally optional)"*
+want the maintainers to know? (totally optional)"* It's especially worth a nudge
+after a session with real **friction** — a papercut you hit repeatedly, a
+workaround you had to invent, a missing flag (a multi-job wait, a cost readout).
+That's the highest-signal feedback; surface it in the user's words rather than
+let it evaporate.
 
 **What to send.** Only what the user actually says, relayed close to verbatim.
 Never invent, embellish, or send your own assessment. If they say nothing or
@@ -860,6 +872,13 @@ Hard-won lessons per domain. Not a tutorial — a reference card.
 - Provider clips come back off-spec (e.g. 5.042s @ 1924x1076) — ffprobe and
   normalize (crop/trim) every clip before concat/conform
 - Audio sync: match durations — short audio = silent ending, long audio = truncated ending
+- **Talking heads (KlingAvatarNode):** lip-sync is by construction — it animates
+  the mouth FROM the `sound_file` you pass, so feed it the EXACT audio that plays
+  under the shot (it carries non-speech like laughter fine, too). BUT it pads the
+  **video** past the **audio** (trailing still frames), so clip video-duration >
+  speech. Concatenating such clips raw drifts the voice progressively out of sync
+  — trim each clip to its own audio length (+ a small freeze-held breath beat)
+  before concat; never butt-join the raw clips.
 - Survey first: `comfy nodes ls --produces VIDEO --exclude-deprecated`, `comfy nodes ls --category "partner/video*"`, `comfy templates ls --type video` — compare OSS, partner-API, and gallery before choosing
 
 ## Audio
@@ -869,6 +888,19 @@ Hard-won lessons per domain. Not a tutorial — a reference card.
 - Output format is FLAC, not MP3
 - For instrumental: set lyrics to empty string `""`
 - Wire both positive AND negative to same TextEncode output when cfg=1.0
+- **Cloud can't load uploaded audio.** `LoadAudio` AND `VHS_LoadAudioUpload`
+  enums are blind to uploads (only ever list `bedroom.mp4`), even though
+  `LoadImage` sees uploaded images. Don't upload→LoadAudio — it wall-fails with
+  no signpost. Generate audio **in-graph** (a TTS / music node) and wire it by
+  connection into the consumer (e.g. KlingAvatar `sound_file`).
+- **Emotional TTS:** `eleven_multilingual_v2` is a flat reader. For real emotion
+  use `eleven_v3` + inline performance tags in the text (`[whispers]`,
+  `[voice breaking]`, `[long pause]`) + lower `stability` (~0.30) for swing.
+  `model.style` caps at **0.2** (>0.2 fails validation).
+- **Accents the preset voices don't cover** (Irish, Italian, …): coaxing a preset
+  with an accent tag is unreliable — `FB_Qwen3TTSVoiceDesign` (an `instruct`
+  voice description + fixed `seed`) builds a genuine one. Reuse the SAME
+  `instruct`+`seed` across all of a character's lines to keep the voice consistent.
 - Survey first: `comfy nodes ls --produces AUDIO`, `comfy nodes ls --category "partner/audio*"`, `comfy templates ls --type audio` — compare before choosing
 
 ## Editing (upscale, inpaint, style transfer)
@@ -974,6 +1006,32 @@ scheduling the engine already does and gives you N jobs to babysit instead
 of one. (For a pure prompt/seed sweep over the *same* graph, `comfy
 workflow vary` is the right tool; see the `comfy-fragments` skill for the
 full blueprint syntax.)
+
+**The exception — when fan-out across separate jobs IS right.** A multi-shot
+film built on **partner-API video/avatar nodes** (KlingAvatar, Kling i2v, Sora,
+…) is the case the one-graph rule doesn't fit: each shot must fail, retry
+(`transient_auth`), and QC **independently** — one mega-graph sinks every shot
+on a single mid-run auth blip — and the final edit (cuts, ducking, loudnorm) is
+**ffmpeg**, which can't live in a Comfy graph. There you DO submit N independent
+jobs. The loop is: **submit N → wait on all at once → download → conform**:
+
+```bash
+# submit each shot, collect prompt_ids
+for wf in workflows/s*.json; do
+  comfy --json run --workflow "$wf" | jq -r .data.prompt_id
+done > ids.txt
+# block on the whole batch with one call (NOT a hand-rolled poll loop):
+comfy --json jobs wait $(cat ids.txt)   # summary envelope; exit≠0 if any failed
+#   --all waits on every tracked non-terminal job; --timeout bounds it;
+#   a `settled` NDJSON event fires per job as it finishes (--json-stream)
+xargs -a ids.txt -n1 comfy --json download   # then conform with ffmpeg (in shell)
+```
+
+The ffmpeg conform stage legitimately stays in shell — `comfy` defines what the
+graph does, not the limit of what you do with its outputs. This is the
+*deliberate* per-shot fan-out the `foreach` advice rules out for **in-engine**
+work; it is not the accidental `PIDS=()` babysitting loop (`jobs wait` replaces
+that). Keep the per-shot `job_ids.txt` / `LOG.md` discipline from `comfy-director`.
 
 With `chunk: N` in a `foreach` blueprint, compose splits items into
 N-item batches and writes one numbered file per batch. The envelope then
