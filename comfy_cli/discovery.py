@@ -35,6 +35,7 @@ COMMAND_SCHEMAS: dict[str, str] = {
     "comfy jobs ls": "jobs",
     "comfy jobs status": "jobs",
     "comfy jobs watch": "jobs",
+    "comfy jobs wait": "jobs_wait",
     # help / validation
     "comfy help": "help",
     "comfy validate": "workflow",

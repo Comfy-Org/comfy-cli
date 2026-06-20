@@ -320,6 +320,16 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "check `comfy jobs status <id> --where cloud`; report the status so it can be mapped",
     ),
     ErrorCode(
+        "no_prompt_ids",
+        "`jobs wait` was given no prompt_ids to wait on.",
+        "pass one or more prompt_ids, or `--all` to wait on every locally-tracked job",
+    ),
+    ErrorCode(
+        "wait_timeout",
+        "`jobs wait` gave up before every job reached a terminal state.",
+        "the jobs may still be running — raise `--timeout`, or check `comfy jobs status <id>`",
+    ),
+    ErrorCode(
         "execution_error",
         "ComfyUI reported an execution error for the workflow.",
         "inspect the error details or re-run with `--wait --verbose`",

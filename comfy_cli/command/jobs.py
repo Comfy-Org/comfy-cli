@@ -954,21 +954,25 @@ def wait_cmd(
         renderer.emit(summary, command="jobs wait", where=where_label)
         return
 
+    # Literal codes (not a variable) so the error-code registry ratchet can
+    # AST-scan them. execution_error/cancelled are already registered; wait_timeout
+    # is registered alongside no_prompt_ids in comfy_cli/error_codes.py.
+    msg = f"{completed}/{len(ids)} completed — {failed} failed, {cancelled} cancelled, {timed_out} timed out"
     if failed:
-        code, exit_code = "execution_error", 1
-    elif cancelled:
-        code, exit_code = "cancelled", 130
-    else:
-        code, exit_code = "wait_timeout", 1
+        renderer.error(code="execution_error", message=msg, details=summary, exit_code=1, command="jobs wait")
+        raise typer.Exit(code=1)
+    if cancelled:
+        renderer.error(code="cancelled", message=msg, details=summary, exit_code=130, command="jobs wait")
+        raise typer.Exit(code=130)
     renderer.error(
-        code=code,
-        message=f"{completed}/{len(ids)} completed — {failed} failed, {cancelled} cancelled, {timed_out} timed out",
-        hint=("raise --timeout if jobs are merely slow" if timed_out else None),
+        code="wait_timeout",
+        message=msg,
+        hint="the jobs may still be running — raise `--timeout`, or check `comfy jobs status <id>`",
         details=summary,
-        exit_code=exit_code,
+        exit_code=1,
         command="jobs wait",
     )
-    raise typer.Exit(code=exit_code)
+    raise typer.Exit(code=1)
 
 
 # ---------------------------------------------------------------------------

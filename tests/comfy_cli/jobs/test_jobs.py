@@ -1199,3 +1199,27 @@ def test_wait_cmd_no_ids_errors():
 
     r = CliRunner().invoke(jobs_mod.app, ["wait", "--where", "local"])
     assert r.exit_code != 0
+
+
+def test_wait_summary_validates_against_jobs_wait_schema():
+    """The `jobs wait` summary payload must validate against its declared schema."""
+    import json as _json
+    from pathlib import Path
+
+    import jsonschema
+
+    schema_path = Path(jobs_mod.__file__).resolve().parents[1] / "schemas" / "jobs_wait.json"
+    schema = _json.loads(schema_path.read_text())
+    summary = {
+        "total": 2,
+        "completed": 1,
+        "failed": 1,
+        "cancelled": 0,
+        "timed_out": 0,
+        "elapsed_seconds": 1.5,
+        "jobs": [
+            {"prompt_id": "a", "status": "completed", "ok": True, "outputs": ["u"]},
+            {"prompt_id": "b", "status": "error", "ok": False, "error_message": "boom"},
+        ],
+    }
+    jsonschema.Draft202012Validator(schema).validate(summary)
