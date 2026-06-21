@@ -304,16 +304,27 @@ def entry(
     _maybe_nudge_setup(ctx, renderer)
 
     if ctx.invoked_subcommand is None:
-        if renderer.is_json():
+        # The welcome screen is human-facing: agents read `discover` / `--help-json`,
+        # and a JSON welcome envelope helps no one. Emit JSON only when machine
+        # output was actually *requested* — explicit `--json`/`--json-stream`,
+        # `COMFY_OUTPUT` env, or a real detected agent — NOT merely because stdout
+        # isn't a TTY. A human who pipes `comfy` (caller kind "pipe") still wants
+        # the banner, so the non-TTY auto-JSON rule is overridden here only.
+        _env_json = (os.environ.get("COMFY_OUTPUT") or "").strip().lower() in {"json", "ndjson"}
+        _real_agent = renderer.caller.agentic and renderer.caller.kind != "pipe"
+        _machine_welcome = bool(json_output) or bool(json_stream) or _env_json or _real_agent
+        if _machine_welcome:
             renderer.emit(
                 {
                     "welcome": "Comfy CLI",
                     "homepage": "https://github.com/Comfy-Org/comfy-cli",
-                    "hint": "run `comfy --help-json` for the full surface or `comfy --help` for human help.",
+                    "hint": "run `comfy setup` to get started, `comfy --help-json` for the full surface, or `comfy --help` for human help.",
                 },
                 command="welcome",
             )
         else:
+            from rich.console import Console
+
             from comfy_cli.credentials import get_session as _get_session
             from comfy_cli.output.branding import intro_banner
             from comfy_cli.update import latest_upgrade_version
@@ -326,7 +337,10 @@ def entry(
 
                 _base_url = _get_base_url()
             _update_hint = latest_upgrade_version(cli_version, ConfigManager().get_config_path())
-            renderer.console().print(
+            # Render to stdout regardless of the resolved mode: a non-TTY human
+            # pipe resolves to JSON, but we're deliberately showing the human banner.
+            _console = renderer.console() if renderer.is_pretty() else Console(file=sys.stdout)
+            _console.print(
                 intro_banner(
                     version=ConfigManager().get_cli_version(),
                     signed_in=_signed_in,

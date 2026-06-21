@@ -158,3 +158,61 @@ def test_no_json_forces_pretty():
     # And it must not be valid JSON.
     with pytest.raises(json.JSONDecodeError):
         json.loads(result.stdout)
+
+
+def _bare_comfy(extra_args=None, drop_agent_markers=True):
+    proc_env = os.environ.copy()
+    proc_env.setdefault("NO_COLOR", "1")
+    if drop_agent_markers:
+        for k in ("CLAUDECODE", "AI_AGENT", "COMFY_USER_AGENT", "COMFY_OUTPUT"):
+            proc_env.pop(k, None)
+    return subprocess.run(
+        [sys.executable, "-m", "comfy_cli", *(extra_args or [])],
+        capture_output=True,
+        text=True,
+        env=proc_env,
+        check=False,
+    )
+
+
+def test_bare_comfy_pipe_shows_human_banner_not_json():
+    """A human piping bare `comfy` (non-TTY, no agent markers) gets the human
+    welcome banner — not a useless JSON welcome envelope. Auto-JSON-on-non-TTY is
+    for real commands/agents, not the welcome screen."""
+    result = _bare_comfy()
+    assert "comfy setup" in result.stdout, result.stdout[:300]
+    # The banner is not a JSON envelope.
+    try:
+        json.loads(result.stdout)
+        parsed = True
+    except json.JSONDecodeError:
+        parsed = False
+    assert not parsed, f"expected the pretty banner, got JSON: {result.stdout[:200]}"
+
+
+def test_bare_comfy_explicit_json_still_emits_welcome_envelope():
+    """`--json` (explicit) keeps the machine welcome envelope."""
+    result = _bare_comfy(["--json"])
+    doc = json.loads([ln for ln in result.stdout.splitlines() if ln.strip()][-1])
+    assert doc["command"] == "welcome"
+    assert doc["ok"] is True
+
+
+def test_bare_comfy_real_agent_keeps_json_welcome():
+    """A real detected agent (CLAUDECODE) still gets the machine welcome envelope —
+    only the non-TTY *pipe* case is overridden to the human banner, so the agent
+    contract (JSON on stdout) is preserved."""
+    proc_env = os.environ.copy()
+    for k in ("AI_AGENT", "COMFY_USER_AGENT", "COMFY_OUTPUT"):
+        proc_env.pop(k, None)
+    proc_env["CLAUDECODE"] = "1"
+    result = subprocess.run(
+        [sys.executable, "-m", "comfy_cli"],
+        capture_output=True,
+        text=True,
+        env=proc_env,
+        check=False,
+    )
+    doc = json.loads([ln for ln in result.stdout.splitlines() if ln.strip()][-1])
+    assert doc["command"] == "welcome"
+    assert doc["ok"] is True
