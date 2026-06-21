@@ -355,6 +355,7 @@ def intro_banner(
     qs = Table.grid(padding=(0, 3), expand=False)
     qs.add_column(style="bold white", no_wrap=True)
     qs.add_column(style="dim", overflow="fold")
+    qs.add_row("comfy setup", "get started — pick local/cloud, sign in, install skills")
     qs.add_row("comfy install", "install ComfyUI")
     qs.add_row("comfy launch", "start the local server")
     qs.add_row("comfy cloud login", "sign in to Comfy Cloud")
@@ -374,7 +375,7 @@ def intro_banner(
             ("– not signed in", "dim"),
             ("   ", ""),
             ("→ ", f"bold {BRAND_ACCENT}"),
-            ("comfy cloud login", "yellow"),
+            ("comfy setup", "yellow"),
         )
 
     rows = [

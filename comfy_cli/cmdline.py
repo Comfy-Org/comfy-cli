@@ -128,6 +128,30 @@ def help(ctx: typer.Context):
     ctx.exit(0)
 
 
+def _maybe_nudge_setup(ctx: typer.Context, renderer) -> None:
+    """First-run only: nudge a brand-new, unconfigured user toward `comfy setup`.
+
+    Heavily gated so it never touches the machine contract or repeats: skips the
+    bare/`setup` invocations, anything but interactive pretty output, signed-in
+    users, and installs already nudged. Prints one line to stderr, then marks the
+    install. Onboarding must never break a command — failures are swallowed.
+    """
+    sub = ctx.invoked_subcommand
+    if sub in (None, "setup") or not renderer.is_pretty() or not sys.stderr.isatty():
+        return
+    try:
+        from comfy_cli.credentials import get_session
+        from comfy_cli.onboarding import NUDGE_TEXT, mark_setup_nudged, should_nudge_setup
+
+        session = get_session(refresh=False)
+        signed_in = session is not None and not session.is_expired()
+        if should_nudge_setup(signed_in=signed_in):
+            print(NUDGE_TEXT, file=sys.stderr)
+            mark_setup_nudged()
+    except Exception:  # noqa: BLE001 — a nudge must never break the actual command
+        pass
+
+
 @app.callback(invoke_without_command=True)
 def entry(
     ctx: typer.Context,
@@ -276,6 +300,8 @@ def entry(
     # so the user is asked exactly once, in the right place — not pre-empted here.
     if ctx.invoked_subcommand != "setup":
         tracking.prompt_tracking_consent(skip_prompt, default_value=enable_telemetry)
+
+    _maybe_nudge_setup(ctx, renderer)
 
     if ctx.invoked_subcommand is None:
         if renderer.is_json():

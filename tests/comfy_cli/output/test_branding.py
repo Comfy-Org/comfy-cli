@@ -198,6 +198,20 @@ def test_intro_banner_signed_out_includes_wordmark_and_login_hint():
     assert "comfy CLI v0.0.0" in out or "comfy-cli v0.0.0" in out
 
 
+def test_intro_banner_signed_out_leads_with_setup():
+    """A first-time / unconfigured user must be pointed at the one-step wizard."""
+    out = _render(
+        intro_banner(
+            version="0.0.0",
+            signed_in=False,
+            base_url="https://testcloud.comfy.org",
+        )
+    )
+    assert "comfy setup" in out  # the get-started entry point is surfaced
+    # the not-signed-in nudge leads to the wizard, not just raw login
+    assert "not signed in" in out
+
+
 def test_intro_banner_signed_in_shows_check_and_host():
     out = _render(
         intro_banner(
