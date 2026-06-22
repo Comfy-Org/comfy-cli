@@ -21,7 +21,7 @@ Optional:
 Usage:
     POSTHOG_PERSONAL_API_KEY=phx_... POSTHOG_PROJECT_ID=12345 \
     POSTHOG_QUERY_HOST=https://us.posthog.com \
-    python scripts/verify_tracking_live.py
+    python tests/e2e/verify_tracking_live.py
 """
 
 from __future__ import annotations
