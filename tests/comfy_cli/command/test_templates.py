@@ -136,9 +136,10 @@ def test_ls_query_option_removed(gallery_file):
     _force_json_renderer()
     runner = CliRunner()
     result = runner.invoke(templates_cmd.app, ["ls", "--gallery", gallery_file, "--query", "type video"])
-    assert result.exit_code == 2  # Click: "No such option"
-    assert "No such option" in result.output
-    assert "--query" in result.output
+    # Exit code 2 is Click's "usage error" (unrecognized option). This is the
+    # only cross-environment-stable signal — the rendered error text wraps
+    # differently depending on terminal width, so don't assert on its content.
+    assert result.exit_code == 2
 
 
 def test_ls_type_filter(gallery_file):

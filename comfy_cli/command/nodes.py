@@ -886,8 +886,10 @@ def refresh_cmd():
             if r["source"] == "remote":
                 rprint(f"[green]✓[/green] {r['name']} ({r['bytes']:,} bytes) → {r['path']}")
             elif r["source"] == "bundled":
-                rprint(f"[yellow]![/yellow] {r['name']}: remote fetch failed, using bundled snapshot "
-                       f"([dim]{r.get('error', '')}[/dim])")
+                rprint(
+                    f"[yellow]![/yellow] {r['name']}: remote fetch failed, using bundled snapshot "
+                    f"([dim]{r.get('error', '')}[/dim])"
+                )
             else:
                 rprint(f"[red]✗[/red] {r['name']}: unavailable ([dim]{r.get('error', '')}[/dim])")
     renderer.emit({"refreshed": ok, "files": results}, command="nodes refresh")

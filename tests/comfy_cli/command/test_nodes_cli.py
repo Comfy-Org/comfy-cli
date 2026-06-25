@@ -217,7 +217,12 @@ class TestNodesRefresh:
 
         fake = [
             {"name": "supported_nodes.yaml", "source": "remote", "bytes": 100, "path": "/c/supported_nodes.yaml"},
-            {"name": "cloud_disable_config.yaml", "source": "remote", "bytes": 50, "path": "/c/cloud_disable_config.yaml"},
+            {
+                "name": "cloud_disable_config.yaml",
+                "source": "remote",
+                "bytes": 50,
+                "path": "/c/cloud_disable_config.yaml",
+            },
         ]
         monkeypatch.setattr(annotations_source, "refresh_annotations", lambda: fake)
         env = _run(["refresh"], capsys)
