@@ -333,10 +333,14 @@ def fetch_cmd(
         "output_type": match["output_type"],
         "out": target_repr,
         "bytes": len(body),
-        # `nodes` count is the only field the agent needs to confirm the
-        # workflow loaded; the full JSON ride-along bloats every envelope.
         "node_count": len(wf) if isinstance(wf, dict) else None,
     }
+    # When there's no file destination, ride the full workflow along in the
+    # envelope so a JSON consumer can actually retrieve it (pretty mode already
+    # wrote it to stdout above). With --out the workflow is on disk, so we keep
+    # the envelope lean and omit it.
+    if out is None:
+        payload["workflow"] = wf
     if renderer.is_pretty() and out:
         rprint(f"[green]✓[/green] wrote {len(body):,} bytes ({payload['node_count']} nodes) to {target_repr}")
     renderer.emit(payload, command="templates fetch")

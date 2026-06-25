@@ -244,6 +244,23 @@ def test_fetch_with_out_writes_to_file(gallery_file, tmp_path: Path, monkeypatch
     assert env["data"]["node_count"] == 1
     assert out_path.exists()
     assert out_path.read_bytes() == workflow_body
+    # With --out the workflow is on disk; keep the envelope lean (no ride-along).
+    assert "workflow" not in env["data"]
+
+
+def test_fetch_json_mode_no_out_rides_workflow_in_envelope(gallery_file, monkeypatch):
+    """In JSON mode without --out, the full workflow must be retrievable from
+    the envelope under data.workflow (otherwise there's no way to get it)."""
+    _force_json_renderer()
+    wf = {"1": {"class_type": "KSampler", "inputs": {}}}
+    _stub_template_workflow_fetch(monkeypatch, json.dumps(wf).encode())
+
+    runner = CliRunner()
+    result = runner.invoke(templates_cmd.app, ["fetch", "--gallery", gallery_file, "image_flux2"])
+    assert result.exit_code == 0, result.output
+    env = _envelope(result.output)
+    assert env["data"]["out"] == "stdout"
+    assert env["data"]["workflow"] == wf
 
 
 def test_fetch_unknown_template_surfaces_template_not_found(gallery_file, monkeypatch, capsys):
