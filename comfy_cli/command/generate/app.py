@@ -507,6 +507,21 @@ def _refresh() -> None:
         with httpx.Client(timeout=30.0, follow_redirects=True) as cli:
             r = cli.get(url, headers={"Comfy-Env": "comfy-cli", "User-Agent": "comfy-cli/api"})
             r.raise_for_status()
+    except httpx.HTTPStatusError as e:
+        # The partner-proxy OpenAPI spec is not published at a public URL, so a
+        # 404 here is expected, not a transient failure. Explain that the model
+        # catalog ships bundled with the CLI and updates via `pip install -U`,
+        # rather than dumping a raw HTTP error.
+        if e.response.status_code == 404:
+            rprint(
+                "[bold yellow]The partner model catalog is not available for live refresh.[/bold yellow]\n"
+                f"[dim]No public catalog is published at {url}.[/dim]\n"
+                f"The CLI uses its bundled catalog at [dim]{spec.active_spec_path()}[/dim].\n"
+                "To get newer models, update the CLI: [bold]pip install -U comfy-cli[/bold]."
+            )
+            raise typer.Exit(code=0)
+        rprint(f"[bold red]Failed to fetch {url}: {e}[/bold red]")
+        raise typer.Exit(code=1)
     except httpx.HTTPError as e:
         rprint(f"[bold red]Failed to fetch {url}: {e}[/bold red]")
         raise typer.Exit(code=1)

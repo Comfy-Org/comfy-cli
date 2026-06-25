@@ -864,16 +864,30 @@ def categories_cmd(
 
 @app.command(
     "refresh",
-    help="object_info is fetched live from the server on each command — nothing to refresh.",
+    help="Re-fetch node annotation data (pack/labels/cloud_disabled) from Comfy-Org/comfy-complete.",
 )
 @tracking.track_command("nodes")
-def refresh_cmd(
-    where: Annotated[
-        str | None,
-        typer.Option("--where", show_default=False, help="Override the resolved routing mode."),
-    ] = None,
-):
-    """Explain that object_info is fetched live and exit."""
+def refresh_cmd():
+    """Force-refresh the node annotation cache from the public comfy-complete repo.
+
+    ``object_info`` itself is fetched live from the server on every command, so
+    there is nothing to refresh there. The *annotations* (which custom-node pack
+    a node belongs to, its behavioral labels, and whether it's disabled on
+    cloud) come from Comfy-Org/comfy-complete and are cached locally with a TTL;
+    this command pulls the latest copy immediately.
+    """
     renderer = get_renderer()
-    rprint("[dim]object_info is fetched live from the server on each command — nothing to refresh.[/dim]")
-    renderer.emit({"refreshed": False, "reason": "live_fetch"}, command="nodes refresh")
+    from comfy_cli.cql import annotations_source
+
+    results = annotations_source.refresh_annotations()
+    ok = all(r["source"] == "remote" for r in results)
+    if renderer.is_pretty():
+        for r in results:
+            if r["source"] == "remote":
+                rprint(f"[green]✓[/green] {r['name']} ({r['bytes']:,} bytes) → {r['path']}")
+            elif r["source"] == "bundled":
+                rprint(f"[yellow]![/yellow] {r['name']}: remote fetch failed, using bundled snapshot "
+                       f"([dim]{r.get('error', '')}[/dim])")
+            else:
+                rprint(f"[red]✗[/red] {r['name']}: unavailable ([dim]{r.get('error', '')}[/dim])")
+    renderer.emit({"refreshed": ok, "files": results}, command="nodes refresh")

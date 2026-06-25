@@ -26,10 +26,6 @@ HELP_EXAMPLES: dict[str, list[str]] = {
         "comfy --json discover",
         "comfy --json discover --schemas-only",
     ],
-    "comfy query": [
-        "comfy --json query --query 'from nodes select name'",
-        "comfy query --input object_info.json --query 'from nodes where category=\"loaders\"'",
-    ],
     "comfy auth": ["comfy auth list", "comfy auth set civitai --key ..."],
     "comfy auth set": ["comfy auth set comfy-cloud --key sk-…"],
     "comfy auth list": ["comfy auth list", "comfy --json auth list"],

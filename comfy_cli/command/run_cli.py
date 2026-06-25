@@ -429,26 +429,15 @@ def _build_steps(state: _DemoState) -> list[Step]:
             ],
         ),
         Step(
-            title="query — CQL against the live node graph",
+            title="nodes — introspect the live node graph (CQL engine, flag-based)",
             invocations=[
                 Invocation(
-                    argv=[
-                        *comfy,
-                        "query",
-                        "-q",
-                        "from nodes where name in ('EmptyImage','ImageInvert','SaveImage') select name, category",
-                    ],
-                    label="comfy query",
+                    argv=[*comfy, "nodes", "search", "SaveImage"],
+                    label="comfy nodes search SaveImage",
                 ),
                 Invocation(
-                    argv=[
-                        *comfy,
-                        "--json",
-                        "query",
-                        "-q",
-                        "from nodes where name in ('EmptyImage','ImageInvert','SaveImage') select name, category",
-                    ],
-                    label="comfy --json query",
+                    argv=[*comfy, "--json", "nodes", "ls", "--produces", "IMAGE", "--limit", "5"],
+                    label="comfy --json nodes ls --produces IMAGE --limit 5",
                 ),
             ],
         ),

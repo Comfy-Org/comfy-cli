@@ -149,7 +149,6 @@ class Morphism:
     pack: str = ""
     labels: list[str] = field(default_factory=list)
     cloud_disabled: bool = False
-    needs_gpu: bool = True  # default True per Go
 
     def output_types(self) -> list[str]:
         seen: set[str] = set()
@@ -403,17 +402,6 @@ def parse_disable_config(data: bytes) -> set[str]:
     return labels
 
 
-def parse_no_gpu_nodes(data: bytes) -> set[str]:
-    """Parse no_gpu_nodes.json → set of CPU-only node IDs."""
-    try:
-        cfg = json.loads(data)
-    except Exception:
-        return set()
-    if not isinstance(cfg, dict) or cfg.get("schema_version") != 1:
-        return set()
-    return set(cfg.get("no_gpu_nodes") or [])
-
-
 # ---------------------------------------------------------------------------
 # Graph — mirrors nodegraph/graph.go
 # ---------------------------------------------------------------------------
@@ -461,19 +449,15 @@ class Graph:
         self,
         supported_nodes_yaml: bytes | None = None,
         cloud_disable_yaml: bytes | None = None,
-        no_gpu_json: bytes | None = None,
     ) -> None:
         node_pack: dict[str, str] = {}
         node_labels: dict[str, list[str]] = {}
         disable_labels: set[str] = set()
-        no_gpu: set[str] = set()
 
         if supported_nodes_yaml:
             node_pack, node_labels = parse_supported_nodes(supported_nodes_yaml)
         if cloud_disable_yaml:
             disable_labels = parse_disable_config(cloud_disable_yaml)
-        if no_gpu_json:
-            no_gpu = parse_no_gpu_nodes(no_gpu_json)
 
         for nid, m in self._nodes.items():
             if nid in node_pack:
@@ -481,7 +465,6 @@ class Graph:
             if nid in node_labels:
                 m.labels = node_labels[nid]
             m.cloud_disabled = any(label in disable_labels for label in m.labels)
-            m.needs_gpu = nid not in no_gpu
         self._annotated = True
 
     # -- Lookup --
@@ -944,7 +927,6 @@ class Graph:
         port: int = 8188,
         supported_nodes_yaml: bytes | None = None,
         cloud_disable_yaml: bytes | None = None,
-        no_gpu_json: bytes | None = None,
     ) -> Graph:
         """Unified entry point: resolve object_info, build graph, annotate.
 
@@ -966,17 +948,21 @@ class Graph:
             raw = _load_from_target(mode=mode, host=host, port=port)
 
         g = cls.from_object_info(raw)
-        if supported_nodes_yaml or cloud_disable_yaml or no_gpu_json:
-            g.annotate(supported_nodes_yaml, cloud_disable_yaml, no_gpu_json)
+        if supported_nodes_yaml or cloud_disable_yaml:
+            g.annotate(supported_nodes_yaml, cloud_disable_yaml)
         else:
             g._try_default_annotations()
         return g
 
     def _try_default_annotations(self) -> None:
-        """Load bundled annotation files from ``comfy_cli.cql.data``.
+        """Load node annotation data from Comfy-Org/comfy-complete.
 
-        These ship as package data (40 KB total) from Comfy-Org/comfy-complete.
-        They enrich every node with:
+        Resolves via :mod:`comfy_cli.cql.annotations_source`, which prefers a
+        TTL-fresh local cache, falls back to a live fetch from the public repo,
+        and finally to the package-bundled snapshot — so the data stays fresh
+        without a ``pip install -U`` while remaining fully offline-safe.
+
+        The annotations enrich every node with:
           - pack membership (which custom-node pack it belongs to)
           - behavioral labels (ReadsArbitraryFile, NetworkAccess, etc.)
           - cloud_disabled (whether this node is disabled on cloud)
@@ -987,15 +973,13 @@ class Graph:
         and cloud_disabled=False (safe default).
         """
         try:
-            from importlib import resources
+            from comfy_cli.cql import annotations_source
 
-            data_pkg = resources.files("comfy_cli.cql.data")
-            sup = (data_pkg / "supported_nodes.yaml").read_bytes()
-            dis = (data_pkg / "cloud_disable_config.yaml").read_bytes()
-            nogpu = (data_pkg / "no_gpu_nodes.json").read_bytes()
-            self.annotate(sup, dis, nogpu)
+            sup, dis = annotations_source.load_annotation_bytes()
+            if sup or dis:
+                self.annotate(sup, dis)
         except Exception:
-            pass  # missing package data is non-fatal
+            pass  # missing data / network is non-fatal
 
     # -- Serialization helpers for CLI compat --
 
@@ -1013,7 +997,6 @@ class Graph:
             "pack": m.pack,
             "labels": m.labels,
             "cloud_disabled": m.cloud_disabled,
-            "needs_gpu": m.needs_gpu,
             "inputs": [
                 {
                     "name": p.name,

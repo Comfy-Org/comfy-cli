@@ -459,11 +459,6 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "re-run once the server/session is reachable to get a fresh schema",
     ),
     ErrorCode(
-        "cql_query_invalid",
-        "Grammar query failed to parse or evaluate.",
-        "check the grammar; `comfy nodes ls --help` has examples",
-    ),
-    ErrorCode(
         "node_not_found",
         "Requested node class isn't in the loaded environment.",
         "see `details.close_matches` or run `comfy nodes search`",

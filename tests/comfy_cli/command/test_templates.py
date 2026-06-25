@@ -15,6 +15,7 @@ from typer.testing import CliRunner
 
 from comfy_cli.caller import Caller
 from comfy_cli.command import templates as templates_cmd
+from comfy_cli.cql import gallery as gallery_engine
 from comfy_cli.output.renderer import (
     OutputMode,
     Renderer,
@@ -126,6 +127,20 @@ def test_ls_default_returns_all_three(gallery_file):
     assert env["data"]["matched"] == 3
 
 
+def test_ls_query_option_removed(gallery_file):
+    """The dead `--query` CQL stub was removed; templates browse via flags only.
+
+    Regression guard: there is no CQL query-language in the CLI, so `--query`
+    must not be a recognized option.
+    """
+    _force_json_renderer()
+    runner = CliRunner()
+    result = runner.invoke(templates_cmd.app, ["ls", "--gallery", gallery_file, "--query", "type video"])
+    assert result.exit_code == 2  # Click: "No such option"
+    assert "No such option" in result.output
+    assert "--query" in result.output
+
+
 def test_ls_type_filter(gallery_file):
     _force_json_renderer()
     runner = CliRunner()
@@ -196,7 +211,7 @@ def _stub_template_workflow_fetch(monkeypatch, body_or_exc):
             raise body_or_exc
         return body_or_exc
 
-    monkeypatch.setattr(templates_cmd, "_fetch_template_workflow", _impl)
+    monkeypatch.setattr(gallery_engine, "fetch_template_workflow", _impl)
 
 
 def test_fetch_writes_to_stdout_in_pretty_mode(gallery_file, monkeypatch, capsys):
@@ -240,7 +255,7 @@ def test_fetch_unknown_template_surfaces_template_not_found(gallery_file, monkey
         sentinel_called["fired"] = True
         raise AssertionError("fetch was called for an unknown template")
 
-    monkeypatch.setattr(templates_cmd, "_fetch_template_workflow", _should_not_fire)
+    monkeypatch.setattr(gallery_engine, "fetch_template_workflow", _should_not_fire)
 
     runner = CliRunner()
     result = runner.invoke(templates_cmd.app, ["fetch", "--gallery", gallery_file, "no_such_template"])

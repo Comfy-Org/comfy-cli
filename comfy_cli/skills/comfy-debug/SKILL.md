@@ -90,9 +90,6 @@ comfy --json-stream jobs watch <prompt_id>   # re-attach
 ```
 The local server keeps the job; the CLI just lost its tail.
 
-### `cql_query_invalid`
-`cql_query_invalid` — raised when a legacy `--query` string is passed to `comfy templates ls`. There is no query grammar; use flag-based filtering instead: `--type image|video|audio`, `--tag <t>`, `--model <m>` (templates) and `--produces/--accepts/--category/--pack` (`comfy nodes ls`).
-
 ### `cql_no_graph`
 The CLI needs an `object_info.json` to query against. Two options:
 ```

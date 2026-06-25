@@ -204,3 +204,33 @@ class TestQueryFlagRemoved:
         runner = CliRunner()
         result = runner.invoke(nodes_cmd.app, ["ls", "--query", "produces IMAGE"])
         assert result.exit_code != 0
+
+
+# ---------------------------------------------------------------------------
+# nodes refresh — re-fetch annotation data from comfy-complete
+# ---------------------------------------------------------------------------
+
+
+class TestNodesRefresh:
+    def test_refresh_reports_remote_success(self, monkeypatch, capsys):
+        from comfy_cli.cql import annotations_source
+
+        fake = [
+            {"name": "supported_nodes.yaml", "source": "remote", "bytes": 100, "path": "/c/supported_nodes.yaml"},
+            {"name": "cloud_disable_config.yaml", "source": "remote", "bytes": 50, "path": "/c/cloud_disable_config.yaml"},
+        ]
+        monkeypatch.setattr(annotations_source, "refresh_annotations", lambda: fake)
+        env = _run(["refresh"], capsys)
+        assert env["data"]["refreshed"] is True
+        assert env["data"]["files"] == fake
+
+    def test_refresh_reports_bundled_fallback(self, monkeypatch, capsys):
+        from comfy_cli.cql import annotations_source
+
+        fake = [
+            {"name": "supported_nodes.yaml", "source": "bundled", "bytes": 100, "path": None, "error": "offline"},
+            {"name": "cloud_disable_config.yaml", "source": "bundled", "bytes": 50, "path": None, "error": "offline"},
+        ]
+        monkeypatch.setattr(annotations_source, "refresh_annotations", lambda: fake)
+        env = _run(["refresh"], capsys)
+        assert env["data"]["refreshed"] is False

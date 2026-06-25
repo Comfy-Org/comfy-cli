@@ -72,7 +72,7 @@ include = [ "comfy_cli*" ]
 "comfy_cli.skills" = [ "*/SKILL.md" ]
 "comfy_cli.schemas" = [ "*.json", "*.md" ]
 
-"comfy_cli.cql.data" = [ "*.yaml", "*.json" ]
+"comfy_cli.cql.data" = [ "*.yaml" ]
 "comfy_cli.command.generate" = [ "spec/openapi.yml" ]
 
 [tool.ruff]
