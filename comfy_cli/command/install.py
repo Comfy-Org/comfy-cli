@@ -51,7 +51,7 @@ def pip_install_comfyui_dependencies(
     skip_torch_or_directml: bool,
     skip_requirement: bool,
     python: str = sys.executable,
-    rocm_version: constants.ROCmVersion = constants.ROCmVersion.v6_3,
+    rocm_version: constants.ROCmVersion = constants.ROCmVersion.v7_2,
     cuda_tag: str | None = None,
 ):
     os.chdir(repo_dir)
@@ -153,7 +153,7 @@ def execute(
     gpu: constants.GPU_OPTION | None = None,
     cuda_version: constants.CUDAVersion | None = None,
     cuda_tag: str | None = None,
-    rocm_version: constants.ROCmVersion = constants.ROCmVersion.v6_3,
+    rocm_version: constants.ROCmVersion = constants.ROCmVersion.v7_2,
     plat: constants.OS = None,
     skip_torch_or_directml: bool = False,
     skip_requirement: bool = False,

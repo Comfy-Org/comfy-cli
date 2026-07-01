@@ -450,7 +450,7 @@ def install(
         ),
     ] = None,
     cuda_version: Annotated[CUDAVersion | None, typer.Option(show_default=False)] = None,
-    rocm_version: Annotated[ROCmVersion, typer.Option(show_default=True)] = ROCmVersion.v6_3,
+    rocm_version: Annotated[ROCmVersion, typer.Option(show_default=True)] = ROCmVersion.v7_2,
     amd: Annotated[
         bool | None,
         typer.Option(
