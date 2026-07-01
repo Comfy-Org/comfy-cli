@@ -1370,14 +1370,9 @@ def _is_cloud(where: str | None) -> bool:
     for ``jobs ls/status/watch``.
     """
     from comfy_cli import where as where_module
-    from comfy_cli.config_manager import ConfigManager
 
     try:
-        config_value = ConfigManager().get(where_module.CONFIG_KEY_WHERE_DEFAULT)
-    except Exception:  # noqa: BLE001 — never let a bad config break routing
-        config_value = None
-    try:
-        decision = where_module.resolve(flag=where, config_value=config_value)
+        decision = where_module.resolve_default(flag=where)
     except ValueError:
         # Invalid value — fall back to local; the validating command
         # (cmdline.py top-level option) will surface ``where_invalid``.
