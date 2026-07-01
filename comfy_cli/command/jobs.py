@@ -38,13 +38,12 @@ from comfy_cli.config_manager import ConfigManager
 
 def _get_backend_from_env():
     """Resolve host/port from environment variables as requested.
-    - COMFY_BACKEND=host:port (combined, colon-separated)
-    - COMFY_HOST_PORT=host:port (combined, colon-separated)
+    - COMFY_BACKEND=host:port or COMFY_HOST_PORT=host:port (combined, colon-separated)
     - COMFY_HOST and COMFY_PORT (separate)
     CLI flags take precedence; this is a fallback.
     """
     import os
-    be = os.environ.get("COMFY_BACKEND")
+    be = os.environ.get("COMFY_BACKEND") or os.environ.get("COMFY_HOST_PORT")
     if be:
         b = be.replace("http://", "").replace("https://", "").strip("/")
         if ":" in b:
@@ -54,15 +53,6 @@ def _get_backend_from_env():
             except ValueError:
                 return h, None
         return b, None
-    hp = os.environ.get("COMFY_HOST_PORT")
-    if hp:
-        if ":" in hp:
-            h, p = hp.rsplit(":", 1)
-            try:
-                return h, int(p)
-            except ValueError:
-                return h, None
-        return hp, None
     h = os.environ.get("COMFY_HOST")
     p = os.environ.get("COMFY_PORT")
     if h or p:
