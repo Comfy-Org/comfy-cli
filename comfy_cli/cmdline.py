@@ -44,6 +44,33 @@ from comfy_cli.command.launch import launch as launch_command
 from comfy_cli.command.models import models as models_command
 from comfy_cli.command.models import search as models_search_command
 from comfy_cli.config_manager import ConfigManager
+
+def _get_backend_from_env():
+    """Resolve host/port from environment variables as requested.
+    - COMFY_BACKEND=host:port (combined, colon-separated)
+    - COMFY_HOST and COMFY_PORT (separate)
+    CLI flags take precedence; this is a fallback.
+    """
+    import os
+    be = os.environ.get("COMFY_BACKEND")
+    if be:
+        b = be.replace("http://", "").replace("https://", "").strip("/")
+        if ":" in b:
+            h, p = b.rsplit(":", 1)
+            try:
+                return h, int(p)
+            except ValueError:
+                return h, None
+        return b, None
+    h = os.environ.get("COMFY_HOST")
+    p = os.environ.get("COMFY_PORT")
+    if h or p:
+        try:
+            return h, int(p) if p else None
+        except ValueError:
+            return h, None
+    return None, None
+
 from comfy_cli.constants import GPU_OPTION, CUDAVersion, ROCmVersion
 from comfy_cli.cuda_detect import DEFAULT_CUDA_TAG, detect_cuda_driver_version, resolve_cuda_wheel
 from comfy_cli.discovery import build_discovery
@@ -825,6 +852,13 @@ def run(
             if not port:
                 port = bg_port
 
+        # env var support (COMFY_BACKEND or COMFY_HOST/COMFY_PORT)
+        env_h, env_p = _get_backend_from_env()
+        if not host and env_h:
+            host = env_h
+        if not port and env_p is not None:
+            port = env_p
+
         if not host:
             host = "127.0.0.1"
         if not port:
@@ -875,11 +909,11 @@ def validate(
     ] = None,
     host: Annotated[
         str | None,
-        typer.Option(show_default=False, help="ComfyUI host (default 127.0.0.1)."),
+        typer.Option(show_default=False, help="ComfyUI host (default 127.0.0.1).", envvar="COMFY_HOST"),
     ] = None,
     port: Annotated[
         int | None,
-        typer.Option(show_default=False, help="ComfyUI port (default 8188)."),
+        typer.Option(show_default=False, help="ComfyUI port (default 8188).", envvar="COMFY_PORT"),
     ] = None,
     input_path: Annotated[
         str | None,
