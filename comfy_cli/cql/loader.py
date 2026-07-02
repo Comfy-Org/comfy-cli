@@ -30,6 +30,7 @@ from typing import Any
 
 from comfy_cli.cql._net import is_loopback_host
 from comfy_cli.cql.errors import CQLRuntimeError
+from comfy_cli.http import NoRedirectHandler
 
 # Cap raw bytes read from disk or the network. Real `object_info` dumps are a
 # few MB; anything past 256 MiB is almost certainly a wrong path or a hostile
@@ -37,17 +38,7 @@ from comfy_cli.cql.errors import CQLRuntimeError
 MAX_INPUT_BYTES = 256 * 1024 * 1024
 
 
-class _NoRedirect(urllib.request.HTTPRedirectHandler):
-    """Refuse redirects — a 302 from /object_info to elsewhere is suspicious
-    and would expose us to a different server than the user asked to query."""
-
-    def http_error_301(self, req, fp, code, msg, headers):
-        raise urllib.error.HTTPError(req.full_url, code, "redirect refused", headers, fp)
-
-    http_error_302 = http_error_303 = http_error_307 = http_error_308 = http_error_301
-
-
-_LOADER_OPENER = urllib.request.build_opener(_NoRedirect())
+_LOADER_OPENER = urllib.request.build_opener(NoRedirectHandler())
 
 
 def load_graph(

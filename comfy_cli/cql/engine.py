@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from comfy_cli.cql._net import is_loopback_host
+from comfy_cli.http import NoRedirectHandler
 
 # ---------------------------------------------------------------------------
 # Types — mirrors nodegraph/types.go
@@ -1048,16 +1049,7 @@ _logger = logging.getLogger(__name__)
 _MAX_OBJECT_INFO_BYTES = 64 * 1024 * 1024
 
 
-class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
-    """Refuse redirects — a 302 from /object_info is suspicious."""
-
-    def http_error_301(self, req, fp, code, msg, headers):
-        raise urllib.error.HTTPError(req.full_url, code, "redirect refused", headers, fp)
-
-    http_error_302 = http_error_303 = http_error_307 = http_error_308 = http_error_301
-
-
-_opener = urllib.request.build_opener(_NoRedirectHandler())
+_opener = urllib.request.build_opener(NoRedirectHandler())
 
 
 class LoadError(Exception):
