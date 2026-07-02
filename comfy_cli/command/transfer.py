@@ -142,13 +142,27 @@ def _local_source_path(url: str) -> Path | None:
     (``_assert_download_url``) still governs it — this branch is purely
     additive and never weakens that guard for real URLs.
     """
+    # UNC / network paths (\\host\share, //host/share) are "absolute" on
+    # Windows but resolve over SMB — treat them as remote so is_file() can't be
+    # coaxed into an outbound NTLM-leaking connection. Reject up front for both
+    # the bare-path and file:// forms.
+    if url.startswith(("//", "\\\\")):
+        return None
     parsed = urllib.parse.urlsplit(url)
     if parsed.scheme == "file":
         # file://host/path with a real host is NOT a local file — leave it to
-        # the SSRF guard rather than reading an attacker-chosen path.
-        if parsed.netloc and parsed.netloc.lower() not in ("localhost", "127.0.0.1"):
+        # the SSRF guard rather than reading an attacker-chosen path. Use
+        # `hostname` (not `netloc`) so the port/IPv6 brackets in
+        # `file://localhost:8080/…` or `file://[::1]/…` don't defeat the check.
+        host = (parsed.hostname or "").lower()
+        if host and host not in ("localhost", "127.0.0.1", "::1"):
             return None
-        return Path(urllib.request.url2pathname(parsed.path))
+        source = Path(urllib.request.url2pathname(parsed.path))
+        # url2pathname can still yield a UNC path on Windows (\\host\share);
+        # reject those too.
+        if str(source).startswith(("//", "\\\\")):
+            return None
+        return source
     # A bare absolute filesystem path (POSIX `/…`, Windows `C:\…`). Network
     # URLs are never absolute paths, so they fall through to the SSRF guard.
     if Path(url).is_absolute():
@@ -487,10 +501,17 @@ def execute_download(
     annotations = _annotate_output_urls(output_urls, state)
     item_counters: dict[str, int] = {}
 
+    # Copy-from-disk is only valid for an actual LOCAL job. `output_urls` can
+    # arrive from untrusted metadata (a piped stdin envelope's `data.outputs`,
+    # or a cloud/remote API `record`), so a bare path / file:// URL there must
+    # NOT bypass the SSRF guard — gate the local branch on the job's own
+    # `where == "local"` marker from the state file, never on URL shape alone.
+    is_local_job = state is not None and getattr(state, "where", None) == "local"
+
     for idx, url in enumerate(output_urls):
         # A LOCAL run emits a bare on-disk path / file:// URL for an output
         # that already exists — copy it instead of HTTP-fetching it.
-        local_source = _local_source_path(url)
+        local_source = _local_source_path(url) if is_local_job else None
         # Derive the extension from the source. A bare path has no
         # `?filename=` query param, so read the real suffix off the on-disk
         # file rather than mislabeling everything `.png`; real URLs carry the
@@ -537,7 +558,48 @@ def execute_download(
                     details={"url": url, "path": str(local_source), "index": idx},
                 )
                 raise typer.Exit(code=1)
-            shutil.copyfile(local_source, local_path)
+            # Mirror the HTTP branch's 10 GB safety cap so a pathological source
+            # (e.g. an unbounded pseudo-file that still reports as regular) can't
+            # exhaust the disk. stat() follows the symlinked source, matching
+            # what copyfile actually reads.
+            max_download = 10 * 1024 * 1024 * 1024  # 10 GB safety cap
+            try:
+                source_size = local_source.stat().st_size
+            except OSError as e:
+                renderer.error(
+                    code="download_failed",
+                    message=f"Failed to stat local output {idx}: {e}",
+                    hint="ensure the output file is readable",
+                    details={"url": url, "path": str(local_source), "index": idx},
+                )
+                raise typer.Exit(code=1)
+            if source_size > max_download:
+                renderer.error(
+                    code="download_failed",
+                    message=f"Local output {idx} exceeds {max_download} byte safety limit",
+                    hint="the source file is too large to copy",
+                    details={"url": url, "path": str(local_source), "size": source_size, "index": idx},
+                )
+                raise typer.Exit(code=1)
+            # Wrap the copy like the HTTP branch's failure handling: an OSError
+            # (permission denied, full/read-only dest) or SameFileError (source
+            # already equals the collision-safe dest) must surface as a
+            # structured envelope, not an unhandled traceback that breaks
+            # machine-mode/NDJSON consumers.
+            try:
+                shutil.copyfile(local_source, local_path)
+            except shutil.SameFileError:
+                # Source and dest are the same file — nothing to copy; the file
+                # is already at the destination path.
+                pass
+            except OSError as e:
+                renderer.error(
+                    code="download_failed",
+                    message=f"Failed to copy local output {idx}: {e}",
+                    hint="check filesystem permissions and free space in the out-dir",
+                    details={"url": url, "path": str(local_source), "index": idx},
+                )
+                raise typer.Exit(code=1)
         else:
             try:
                 _assert_download_url(url)

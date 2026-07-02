@@ -526,6 +526,67 @@ class TestSSRFGuardIntact:
         assert envelope["error"]["code"] == "download_failed"
         assert "non-HTTP URL" in envelope["error"]["message"]
 
+    def test_bare_path_from_non_local_job_is_not_copied(self, fake_target, tmp_path, capsys):
+        # The copy-from-disk branch is gated on `where == "local"`. A cloud/
+        # remote job whose (untrusted) metadata sneaks in a bare absolute path
+        # must NOT be copied off disk — it falls through to the SSRF guard,
+        # which rejects it as a non-HTTP URL. Guards against exfiltration via a
+        # tampered piped envelope or a malicious API record.
+        secret = tmp_path / "secret.txt"
+        secret.write_bytes(b"top-secret")
+        state = jobs_state.JobState(
+            prompt_id=PROMPT_ID,
+            client_id=None,
+            workflow="/abs/composed.json",
+            where="cloud",
+            base_url="https://cloud.example.com",
+            status="completed",
+            outputs=[str(secret)],
+            record=None,
+            item_map=None,
+        )
+        assert jobs_state.write(state) is not None
+        set_renderer(Renderer(mode=OutputMode.JSON, command="download"))
+        import typer
+
+        out = tmp_path / "out"
+        with patch("comfy_cli.command.transfer.resolve_target", return_value=fake_target):
+            with pytest.raises(typer.Exit) as excinfo:
+                transfer.execute_download(PROMPT_ID, out_dir=str(out))
+        assert excinfo.value.exit_code == 1
+        envelope = json.loads([ln for ln in capsys.readouterr().out.splitlines() if ln.strip()][-1])
+        assert envelope["error"]["code"] == "download_failed"
+        assert "non-HTTP URL" in envelope["error"]["message"]
+        # The secret was never copied out.
+        assert not any(out.glob("*")) if out.exists() else True
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "//attacker.com/share/x.png",  # POSIX-style UNC
+            "\\\\attacker.com\\share\\x.png",  # Windows UNC
+        ],
+    )
+    def test_unc_paths_are_not_local(self, url):
+        # UNC/network paths are "absolute" but resolve over SMB (NTLM leak);
+        # they must not be treated as local files.
+        assert transfer._local_source_path(url) is None
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "file:///abs/path.png",  # no host
+            "file://localhost/abs/path.png",  # bare loopback host
+            "file://localhost:8080/abs/path.png",  # loopback host + port (port ignored)
+            "file://[::1]/abs/path.png",  # IPv6 loopback
+        ],
+    )
+    def test_loopback_file_uris_are_local(self, url):
+        # The tightened `hostname`-based check accepts genuine loopback file://
+        # URIs — a port or IPv6 brackets on a loopback host don't defeat it
+        # (that was the whole point of switching off `netloc`).
+        assert transfer._local_source_path(url) == Path("/abs/path.png")
+
 
 # ---------------------------------------------------------------------------
 # _default_out_dir — project/1 root wins over the legacy config key
