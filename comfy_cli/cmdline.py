@@ -812,23 +812,14 @@ def run(
             )
             return
 
+        from comfy_cli.host_port import parse_host_port_arg, resolve_host_port
+
         if host:
-            s = host.split(":")
-            host = s[0]
-            if not port and len(s) == 2:
-                port = int(s[1])
+            host, parsed_port = parse_host_port_arg(host)
+            if not port and parsed_port is not None:
+                port = parsed_port
 
-        if config.background:
-            bg_host, bg_port = config.background[0], config.background[1]
-            if not host:
-                host = bg_host
-            if not port:
-                port = bg_port
-
-        if not host:
-            host = "127.0.0.1"
-        if not port:
-            port = 8188
+        host, port = resolve_host_port(host, port)
 
         run_inner.execute(
             workflow,
