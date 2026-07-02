@@ -428,6 +428,16 @@ def vary_cmd(
 # The userdata subdirectory the ComfyUI frontend stores saved workflows in.
 _WORKFLOWS_DIR = "workflows"
 
+# Cap on a single ``/userdata`` response we buffer into memory. We read one byte
+# past the cap so we can *detect* truncation and fail loudly, rather than
+# silently writing a partial workflow and reporting success.
+_USERDATA_MAX_BYTES = 64 * 1024 * 1024
+
+
+class _ResponseTooLarge(Exception):
+    """A ``/userdata`` response exceeded ``_USERDATA_MAX_BYTES`` — refuse to truncate."""
+
+
 # Map the cloud ``--sort`` fields onto local FileInfo keys (client-side sort;
 # ComfyUI's /userdata listing has no server-side sort/limit/filter).
 _LOCAL_SORT_KEYS = {"create_time": "created", "update_time": "modified", "name": "path"}
@@ -440,12 +450,24 @@ def _resolve_where_target(where: str | None):
     return resolve_target(where=where)
 
 
+def _strip_terminal_controls(text: str) -> str:
+    """Drop C0/C1 control chars (keeping tab / newline / carriage return) so
+    untrusted workflow content printed to a TTY can't emit ANSI/OSC escape
+    sequences that spoof output or manipulate the terminal."""
+    return "".join(ch for ch in text if ch in "\t\n\r" or (0x20 <= ord(ch) < 0x7F) or ord(ch) >= 0xA0)
+
+
 def _reject_unsafe_workflow_key(renderer, key: str) -> str:
     """Validate a local workflow id/name as a safe relative path under ``workflows/``.
 
     Subdirectories are allowed (``sub/flux.json``), but traversal
     (``..``), absolute paths, home refs, and backslashes are rejected so a
     hostile id can't escape the userdata dir. Returns the cleaned key.
+
+    Components are checked after stripping trailing dots and spaces, because a
+    Windows ComfyUI server strips those from filenames — so ``.. `` or ``...``
+    would collapse to ``..`` and escape ``workflows/`` if we only matched the
+    literal ``..``.
     """
     cleaned = key.strip()
     parts = cleaned.split("/")
@@ -454,8 +476,8 @@ def _reject_unsafe_workflow_key(renderer, key: str) -> str:
         or cleaned.startswith("/")
         or cleaned.startswith("~")
         or "\\" in cleaned
-        or ".." in parts
-        or "" in parts  # empty component: leading/trailing/double slash
+        # Catches "" (leading/trailing/double slash), ".", "..", "...", ".. ", etc.
+        or any(p.rstrip(" .") in ("", "..") for p in parts)
     ):
         renderer.error(
             code="invalid_argument",
@@ -485,14 +507,33 @@ def _userdata_request(
 
     req = _authed_request(url, target, method=method, data=data, content_type=content_type)
     with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return resp.status, resp.read(64 * 1024 * 1024)  # 64 MiB cap
+        status = resp.status
+        # Read one byte past the cap so we can tell a full body from a truncated one.
+        raw = resp.read(_USERDATA_MAX_BYTES + 1)
+    if len(raw) > _USERDATA_MAX_BYTES:
+        raise _ResponseTooLarge()
+    return status, raw
 
 
 def _handle_local_http_error(renderer, e, *, operation: str, workflow_id: str | None = None) -> typer.Exit:
-    """Map local ``/userdata`` failures to envelope codes. Returns an Exit to ``raise from``."""
+    """Map local ``/userdata`` failures to envelope codes. Returns an Exit to ``raise from``.
+
+    A *reachable* server that answers with an HTTP error or an unparseable body
+    gets a distinct code (``server_error`` / ``client_error`` / ``invalid_response``)
+    so the user isn't wrongly told to `comfy launch` — that hint is reserved for a
+    genuinely unreachable server (URLError / OSError).
+    """
     import urllib.error
 
-    if isinstance(e, urllib.error.HTTPError) and e.code == 404:
+    if isinstance(e, _ResponseTooLarge):
+        renderer.error(
+            code="workflow_too_large",
+            message=f"local ComfyUI /userdata response during {operation} exceeded the "
+            f"{_USERDATA_MAX_BYTES // (1024 * 1024)} MiB cap",
+            hint="the saved workflow is unexpectedly large; inspect it directly on the server",
+            details={"operation": operation, "limit_bytes": _USERDATA_MAX_BYTES},
+        )
+    elif isinstance(e, urllib.error.HTTPError) and e.code == 404:
         renderer.error(
             code="workflow_not_found",
             message=f"no saved workflow with id {workflow_id!r}"
@@ -501,12 +542,26 @@ def _handle_local_http_error(renderer, e, *, operation: str, workflow_id: str | 
             hint="list available workflows via `comfy --json --where local workflow list`",
             details={"workflow_id": workflow_id, "operation": operation},
         )
+    elif isinstance(e, urllib.error.HTTPError) and 500 <= e.code < 600:
+        renderer.error(
+            code="server_error",
+            message=f"HTTP {e.code} during {operation} against local ComfyUI /userdata",
+            hint="check the ComfyUI server logs",
+            details={"status": e.code, "operation": operation},
+        )
     elif isinstance(e, urllib.error.HTTPError):
         renderer.error(
-            code="server_not_running",
+            code="client_error",
             message=f"HTTP {e.code} during {operation} against local ComfyUI /userdata",
-            hint="run `comfy launch` to start a local server",
+            hint="the server rejected the request; check the workflow id and the server version",
             details={"status": e.code, "operation": operation},
+        )
+    elif isinstance(e, json.JSONDecodeError):
+        renderer.error(
+            code="invalid_response",
+            message=f"local ComfyUI returned an unparseable body during {operation}",
+            hint="check that the host:port really is a ComfyUI server",
+            details={"operation": operation},
         )
     else:
         renderer.error(
@@ -625,7 +680,7 @@ def _local_list(renderer, target, *, name: str | None, limit: int, sort: str, or
             rows = []  # the workflows/ dir doesn't exist yet → no saved workflows
         else:
             raise _handle_local_http_error(renderer, e, operation="list") from e
-    except (urllib.error.URLError, OSError, json.JSONDecodeError) as e:
+    except (urllib.error.URLError, OSError, json.JSONDecodeError, _ResponseTooLarge) as e:
         raise _handle_local_http_error(renderer, e, operation="list") from e
 
     rows = [r for r in rows if isinstance(r, dict) and isinstance(r.get("path"), str)]
@@ -672,12 +727,14 @@ def _local_get(renderer, target, workflow_id: str, out: str | None) -> None:
     url = _userdata_file_url(target, key)
     try:
         _, raw = _userdata_request(url, target)
-    except (urllib.error.HTTPError, urllib.error.URLError, OSError) as e:
+    except (urllib.error.HTTPError, urllib.error.URLError, OSError, _ResponseTooLarge) as e:
         raise _handle_local_http_error(renderer, e, operation="get", workflow_id=workflow_id) from e
 
     try:
+        # ``json.loads`` decodes bytes itself and raises ``UnicodeDecodeError`` (not a
+        # ``JSONDecodeError``) on non-UTF-8 input, so catch both.
         data = json.loads(raw)
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, UnicodeDecodeError):
         data = None
     if _is_frontend_format(data):
         node_count = len(data["nodes"])
@@ -686,25 +743,48 @@ def _local_get(renderer, target, workflow_id: str, out: str | None) -> None:
     else:
         node_count = None
 
+    # A valid-UTF-8-but-not-JSON body (e.g. an HTML proxy/error page returned 200) or
+    # non-UTF-8 bytes still get written verbatim; warn so a corrupt fetch isn't silent.
+    warnings: list[dict[str, str]] = []
+    if data is None:
+        warnings.append(
+            {
+                "code": "workflow_content_not_json",
+                "message": "fetched content is not parseable JSON; wrote the raw bytes unchanged",
+            }
+        )
+
     if out:
         out_path = Path(out).expanduser()
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        out_path.write_bytes(raw)
+        try:
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            out_path.write_bytes(raw)
+        except OSError as e:
+            renderer.error(
+                code="workflow_write_error",
+                message=f"could not write workflow to {out_path}: {e}",
+                hint="check the --out path is writable and the disk has space",
+            )
+            raise typer.Exit(code=1) from e
         target_repr = str(out_path)
     else:
         if renderer.is_pretty():
             import sys
 
-            sys.stdout.write(raw.decode("utf-8", "replace"))
+            # Strip control chars so untrusted content can't emit ANSI/OSC escapes
+            # that spoof or manipulate the terminal.
+            sys.stdout.write(_strip_terminal_controls(raw.decode("utf-8", "replace")))
             sys.stdout.write("\n")
         target_repr = "stdout"
 
-    payload = {
+    payload: dict[str, Any] = {
         "workflow_id": key,
         "out": target_repr,
         "bytes": len(raw),
         "node_count": node_count,
     }
+    if warnings:
+        payload["warnings"] = warnings
     if renderer.is_pretty() and out:
         rprint(f"[green]✓[/green] wrote {len(raw):,} bytes to {target_repr}")
     renderer.emit(payload, command="workflow get", where="local")
@@ -723,6 +803,14 @@ def _local_save(renderer, target, workflow_file: str, name: str, description: st
         raise typer.Exit(code=1)
     try:
         text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as e:
+        renderer.error(
+            code="workflow_read_error",
+            message=f"could not read {path}: {e}",
+            hint="check file permissions and encoding",
+        )
+        raise typer.Exit(code=1) from e
+    try:
         workflow_json = json.loads(text)
     except json.JSONDecodeError as e:
         renderer.error(
@@ -739,14 +827,14 @@ def _local_save(renderer, target, workflow_file: str, name: str, description: st
         )
         raise typer.Exit(code=1)
 
-    key = name if name.endswith(".json") else f"{name}.json"
+    key = name if name.lower().endswith(".json") else f"{name}.json"
     key = _reject_unsafe_workflow_key(renderer, key)
     url = _userdata_file_url(target, key, query={"overwrite": "true", "full_info": "true"})
     try:
         _, raw = _userdata_request(
             url, target, method="POST", data=text.encode("utf-8"), content_type="application/json"
         )
-    except (urllib.error.HTTPError, urllib.error.URLError, OSError) as e:
+    except (urllib.error.HTTPError, urllib.error.URLError, OSError, _ResponseTooLarge) as e:
         raise _handle_local_http_error(renderer, e, operation="save", workflow_id=key) from e
 
     info = None
@@ -786,7 +874,7 @@ def _local_delete(renderer, target, workflow_id: str) -> None:
     url = _userdata_file_url(target, key)
     try:
         _userdata_request(url, target, method="DELETE")
-    except (urllib.error.HTTPError, urllib.error.URLError, OSError) as e:
+    except (urllib.error.HTTPError, urllib.error.URLError, OSError, _ResponseTooLarge) as e:
         raise _handle_local_http_error(renderer, e, operation="delete", workflow_id=workflow_id) from e
 
     payload = {"workflow_id": key, "deleted": True}
@@ -817,11 +905,30 @@ def list_cmd(
     import urllib.parse
 
     renderer = get_renderer()
+
+    # Validate the free-form sort/order options up front (both routes) so a typo like
+    # `--order ASC` errors loudly instead of silently sorting the wrong way.
+    order_norm = order.lower()
+    if order_norm not in ("asc", "desc"):
+        renderer.error(
+            code="invalid_argument",
+            message=f"--order must be 'asc' or 'desc', got {order!r}",
+            hint="pass `--order asc` or `--order desc`",
+        )
+        raise typer.Exit(code=1)
+    if sort not in _LOCAL_SORT_KEYS:
+        renderer.error(
+            code="invalid_argument",
+            message=f"--sort must be one of {', '.join(_LOCAL_SORT_KEYS)}, got {sort!r}",
+            hint="pass `--sort create_time|update_time|name`",
+        )
+        raise typer.Exit(code=1)
+
     target = _resolve_where_target(where)
     if not target.is_cloud:
-        return _local_list(renderer, target, name=name, limit=limit, sort=sort, order=order)
+        return _local_list(renderer, target, name=name, limit=limit, sort=sort, order=order_norm)
 
-    params: dict[str, Any] = {"limit": min(max(limit, 1), 100), "sort": sort, "order": order}
+    params: dict[str, Any] = {"limit": min(max(limit, 1), 100), "sort": sort, "order": order_norm}
     if name:
         params["name"] = name
     url = target.url("workflows") + "?" + urllib.parse.urlencode(params)

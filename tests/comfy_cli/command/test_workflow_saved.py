@@ -224,6 +224,36 @@ class TestLocalList:
         assert env["ok"] is False
         assert env["error"]["code"] == "server_not_running"
 
+    def test_reachable_server_error_is_not_server_not_running(self, local_target, monkeypatch, capsys):
+        # A reachable server that 500s must not be mislabeled "run comfy launch".
+        _patch_urlopen(monkeypatch, {"/userdata": _http_error(500)})
+        env = _run(["list", "--where", "local"], capsys)
+        assert env["ok"] is False
+        assert env["error"]["code"] == "server_error"
+
+    def test_unparseable_body_surfaces_invalid_response(self, local_target, monkeypatch, capsys):
+        _patch_urlopen(monkeypatch, {"/userdata": (b"<html>not json</html>", 200)})
+        env = _run(["list", "--where", "local"], capsys)
+        assert env["ok"] is False
+        assert env["error"]["code"] == "invalid_response"
+
+    def test_invalid_order_rejected(self, local_target, monkeypatch, capsys):
+        _patch_urlopen(monkeypatch, {})  # must fail before any HTTP
+        env = _run(["list", "--where", "local", "--order", "sideways"], capsys)
+        assert env["ok"] is False
+        assert env["error"]["code"] == "invalid_argument"
+
+    def test_order_normalized_case_insensitively(self, local_target, monkeypatch, capsys):
+        _patch_urlopen(monkeypatch, {"/userdata": _USERDATA_LIST_RESPONSE})
+        env = _run(["list", "--where", "local", "--order", "ASC"], capsys)
+        assert env["ok"] is True
+
+    def test_invalid_sort_rejected(self, local_target, monkeypatch, capsys):
+        _patch_urlopen(monkeypatch, {})
+        env = _run(["list", "--where", "local", "--sort", "bogus"], capsys)
+        assert env["ok"] is False
+        assert env["error"]["code"] == "invalid_argument"
+
 
 class TestLocalGet:
     def test_writes_content_to_file(self, local_target, tmp_path, monkeypatch, capsys):
@@ -252,6 +282,54 @@ class TestLocalGet:
         env = _run(["get", "../../etc/passwd", "--where", "local"], capsys)
         assert env["ok"] is False
         assert env["error"]["code"] == "invalid_argument"
+
+    def test_rejects_windows_trailing_dot_traversal(self, local_target, monkeypatch, capsys):
+        # A Windows server strips trailing dots/spaces, so "sub/.. /x" collapses to
+        # "sub/../x" and escapes workflows/ — reject it before any HTTP.
+        _patch_urlopen(monkeypatch, {})
+        env = _run(["get", "sub/.. /secret", "--where", "local"], capsys)
+        assert env["ok"] is False
+        assert env["error"]["code"] == "invalid_argument"
+
+    def test_non_json_body_warns_and_writes_raw(self, local_target, tmp_path, monkeypatch, capsys):
+        # A 200 with a non-JSON body (e.g. an HTML error page) still gets written,
+        # but a warning surfaces so the corrupt fetch isn't silent.
+        _patch_urlopen(monkeypatch, {"/userdata/": (b"<html>nope</html>", 200)})
+        out = tmp_path / "got.json"
+        env = _run(["get", "flux.json", "--out", str(out), "--where", "local"], capsys)
+        assert env["ok"] is True
+        assert env["data"]["node_count"] is None
+        assert any(w["code"] == "workflow_content_not_json" for w in env["data"].get("warnings", []))
+        assert out.read_bytes() == b"<html>nope</html>"
+
+    def test_non_utf8_body_does_not_crash(self, local_target, tmp_path, monkeypatch, capsys):
+        # json.loads on non-UTF-8 bytes raises UnicodeDecodeError, not JSONDecodeError.
+        _patch_urlopen(monkeypatch, {"/userdata/": (b"\xff\xfe\x00bad", 200)})
+        out = tmp_path / "got.json"
+        env = _run(["get", "flux.json", "--out", str(out), "--where", "local"], capsys)
+        assert env["ok"] is True
+        assert any(w["code"] == "workflow_content_not_json" for w in env["data"].get("warnings", []))
+        assert out.read_bytes() == b"\xff\xfe\x00bad"
+
+    def test_write_error_surfaces_envelope(self, local_target, tmp_path, monkeypatch, capsys):
+        _patch_urlopen(monkeypatch, {"/userdata/": _LOCAL_WORKFLOW})
+
+        def _boom(self, data):
+            raise OSError("disk full")
+
+        monkeypatch.setattr("pathlib.Path.write_bytes", _boom)
+        env = _run(["get", "flux.json", "--out", str(tmp_path / "o.json"), "--where", "local"], capsys)
+        assert env["ok"] is False
+        assert env["error"]["code"] == "workflow_write_error"
+
+    def test_response_over_cap_refuses_to_truncate(self, local_target, tmp_path, monkeypatch, capsys):
+        # Shrink the cap so the mocked body exceeds it; the CLI must fail loudly
+        # rather than silently writing a truncated file.
+        monkeypatch.setattr(workflow_cmd, "_USERDATA_MAX_BYTES", 4)
+        _patch_urlopen(monkeypatch, {"/userdata/": (b'{"nodes": []}', 200)})
+        env = _run(["get", "flux.json", "--out", str(tmp_path / "o.json"), "--where", "local"], capsys)
+        assert env["ok"] is False
+        assert env["error"]["code"] == "workflow_too_large"
 
 
 class TestLocalSave:
@@ -284,6 +362,24 @@ class TestLocalSave:
         env = _run(["save", str(wf), "--name", "x", "--where", "local"], capsys)
         assert env["ok"] is False
         assert env["error"]["code"] == "workflow_invalid_json"
+
+    def test_non_utf8_file_surfaces_read_error(self, local_target, tmp_path, monkeypatch, capsys):
+        wf = tmp_path / "bin.json"
+        wf.write_bytes(b"\xff\xfe\x00")  # not valid UTF-8 → UnicodeDecodeError on read
+        _patch_urlopen(monkeypatch, {})
+        env = _run(["save", str(wf), "--name", "x", "--where", "local"], capsys)
+        assert env["ok"] is False
+        assert env["error"]["code"] == "workflow_read_error"
+
+    def test_json_ext_appended_case_insensitively(self, local_target, tmp_path, monkeypatch, capsys):
+        # `--name flux.JSON` already ends in .json (case-insensitive) → don't double the ext.
+        wf = tmp_path / "src.json"
+        wf.write_text(json.dumps(_LOCAL_WORKFLOW))
+        calls = _patch_urlopen(monkeypatch, {"/userdata/": {"path": "flux.JSON"}})
+        env = _run(["save", str(wf), "--name", "flux.JSON", "--where", "local"], capsys)
+        assert env["ok"] is True
+        assert "workflows%2Fflux.JSON" in calls[0]["url"]
+        assert "flux.JSON.json" not in calls[0]["url"]
 
     def test_missing_file(self, local_target, tmp_path, monkeypatch, capsys):
         _patch_urlopen(monkeypatch, {})

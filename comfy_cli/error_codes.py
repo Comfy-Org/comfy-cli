@@ -68,6 +68,25 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "Workflow file exists but isn't readable as UTF-8 text (OSError / UnicodeDecodeError).",
         "check file permissions and encoding",
     ),
+    ErrorCode(
+        "workflow_write_error",
+        "`workflow get --out` could not write the fetched workflow to disk (OSError: permissions, "
+        "missing parent dir, full disk, invalid path).",
+        "check the --out path is writable and the disk has space",
+    ),
+    ErrorCode(
+        "workflow_too_large",
+        "A local ComfyUI `/userdata` response exceeded the in-memory read cap, so the CLI refused to "
+        "truncate it into a corrupt/partial file. `details.limit_bytes` carries the cap.",
+        "the saved workflow is unexpectedly large; inspect it directly on the server",
+    ),
+    ErrorCode(
+        "workflow_content_not_json",
+        "`workflow get` fetched content that isn't parseable JSON (non-UTF-8 bytes or a non-JSON body such "
+        "as an HTML error page); the raw bytes were still written. Surfaced in `data.warnings[]`, not as an "
+        "error envelope, so the command still succeeds.",
+        "verify the id points at a real saved workflow, not a stray file, on the local server",
+    ),
     # --- local server / WebSocket --------------------------------------------
     ErrorCode(
         "server_not_running",
