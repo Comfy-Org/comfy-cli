@@ -407,29 +407,127 @@ def vary_cmd(
 
 
 # ---------------------------------------------------------------------------
-# Cloud-saved workflows — list, get, save, delete via /api/workflows
+# Saved workflows — list, get, save, delete.
 # ---------------------------------------------------------------------------
 #
-# These four subcommands are cloud-only. ComfyUI's local server has no
-# /api/workflows surface; users on local manage workflows as JSON files
-# on disk via the slot-editing commands above. With ``--where local`` or
-# no cloud session configured, we surface ``workflow_saved_local_unsupported``
-# with a hint pointing at the local file-based flow.
+# These four subcommands route through ``--where``:
+#
+#   cloud  → Comfy Cloud's ``/api/workflows`` store (UUID-keyed, versioned).
+#   local  → the running ComfyUI's ``/userdata`` file store, under the same
+#            ``workflows/`` dir the ComfyUI frontend uses. A workflow's id on
+#            the local path is its path *relative to* ``workflows/`` (e.g.
+#            ``flux.json`` or ``sub/dir/flux.json``) — that same string is what
+#            ``get``/``delete`` take and what ``save`` returns.
+#
+# The two paths share the ``--json`` envelope shape as far as feasible; the
+# per-verb docstrings + PR note the deltas (local has no versioning, no
+# server-side description, and reports raw file ``size``/``modified``/``created``
+# epoch-ms timestamps instead of cloud's ISO ``created_at``/``updated_at``).
 
 
-def _cloud_target_or_local_error(where: str | None, renderer):
-    """Resolve a cloud Target or emit ``workflow_saved_local_unsupported``."""
+# The userdata subdirectory the ComfyUI frontend stores saved workflows in.
+_WORKFLOWS_DIR = "workflows"
+
+# Map the cloud ``--sort`` fields onto local FileInfo keys (client-side sort;
+# ComfyUI's /userdata listing has no server-side sort/limit/filter).
+_LOCAL_SORT_KEYS = {"create_time": "created", "update_time": "modified", "name": "path"}
+
+
+def _resolve_where_target(where: str | None):
+    """Resolve the routing Target for a saved-workflow verb (cloud or local)."""
     from comfy_cli.target import resolve_target
 
-    target = resolve_target(where=where)
-    if not target.is_cloud:
+    return resolve_target(where=where)
+
+
+def _reject_unsafe_workflow_key(renderer, key: str) -> str:
+    """Validate a local workflow id/name as a safe relative path under ``workflows/``.
+
+    Subdirectories are allowed (``sub/flux.json``), but traversal
+    (``..``), absolute paths, home refs, and backslashes are rejected so a
+    hostile id can't escape the userdata dir. Returns the cleaned key.
+    """
+    cleaned = key.strip()
+    parts = cleaned.split("/")
+    if (
+        not cleaned
+        or cleaned.startswith("/")
+        or cleaned.startswith("~")
+        or "\\" in cleaned
+        or ".." in parts
+        or "" in parts  # empty component: leading/trailing/double slash
+    ):
         renderer.error(
-            code="workflow_saved_local_unsupported",
-            message="Saved-workflow management requires Comfy Cloud; local ComfyUI has no /api/workflows surface.",
-            hint="for local workflows, manage JSON files on disk via `comfy workflow slots/set-slot/vary`",
+            code="invalid_argument",
+            message=f"workflow id {key!r} is not a valid path under the local workflows/ dir",
+            hint="use a relative name like `flux.json` or `sub/flux.json` (no `..`, no leading `/`)",
         )
         raise typer.Exit(code=1)
-    return target
+    return cleaned
+
+
+def _userdata_request(
+    url: str,
+    target,
+    *,
+    method: str = "GET",
+    data: bytes | None = None,
+    content_type: str | None = None,
+    timeout: float = 30.0,
+) -> tuple[int, bytes]:
+    """Authed HTTP call to a ComfyUI ``/userdata`` endpoint returning (status, raw_bytes).
+
+    Raises urllib errors verbatim so callers can map them to envelope codes.
+    Local ComfyUI needs no auth; ``_authed_request`` is a no-op on the headers
+    when the Target carries no credential.
+    """
+    import urllib.request
+
+    req = _authed_request(url, target, method=method, data=data, content_type=content_type)
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return resp.status, resp.read(64 * 1024 * 1024)  # 64 MiB cap
+
+
+def _handle_local_http_error(renderer, e, *, operation: str, workflow_id: str | None = None) -> typer.Exit:
+    """Map local ``/userdata`` failures to envelope codes. Returns an Exit to ``raise from``."""
+    import urllib.error
+
+    if isinstance(e, urllib.error.HTTPError) and e.code == 404:
+        renderer.error(
+            code="workflow_not_found",
+            message=f"no saved workflow with id {workflow_id!r}"
+            if workflow_id
+            else f"workflow not found ({operation})",
+            hint="list available workflows via `comfy --json --where local workflow list`",
+            details={"workflow_id": workflow_id, "operation": operation},
+        )
+    elif isinstance(e, urllib.error.HTTPError):
+        renderer.error(
+            code="server_not_running",
+            message=f"HTTP {e.code} during {operation} against local ComfyUI /userdata",
+            hint="run `comfy launch` to start a local server",
+            details={"status": e.code, "operation": operation},
+        )
+    else:
+        renderer.error(
+            code="server_not_running",
+            message=f"could not reach local ComfyUI during {operation}: {e}",
+            hint="run `comfy launch` to start a local server",
+        )
+    return typer.Exit(code=1)
+
+
+def _userdata_file_url(target, key: str, query: dict | None = None) -> str:
+    """Build the ``/userdata/<encoded workflows/key>`` URL. The whole relative
+    path is percent-encoded into a single segment (``/`` → ``%2F``), exactly as
+    the ComfyUI frontend does, so subdir keys survive aiohttp's ``{file}`` route."""
+    import urllib.parse
+
+    encoded = urllib.parse.quote(f"{_WORKFLOWS_DIR}/{key}", safe="")
+    url = target.url("userdata", encoded)
+    if query:
+        url += "?" + urllib.parse.urlencode(query)
+    return url
 
 
 def _authed_request(
@@ -508,7 +606,196 @@ def _handle_cloud_http_error(renderer, e, *, operation: str, workflow_id: str | 
     return typer.Exit(code=1)
 
 
-@app.command("list", help="List your saved workflows on Comfy Cloud.")
+# ---------------------------------------------------------------------------
+# Local ``/userdata`` implementations of the four saved-workflow verbs.
+# ---------------------------------------------------------------------------
+
+
+def _local_list(renderer, target, *, name: str | None, limit: int, sort: str, order: str) -> None:
+    import urllib.error
+    import urllib.parse
+
+    params = {"dir": _WORKFLOWS_DIR, "recurse": "true", "split": "false", "full_info": "true"}
+    url = target.url("userdata") + "?" + urllib.parse.urlencode(params)
+    try:
+        _, raw = _userdata_request(url, target)
+        rows = json.loads(raw) if raw else []
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            rows = []  # the workflows/ dir doesn't exist yet → no saved workflows
+        else:
+            raise _handle_local_http_error(renderer, e, operation="list") from e
+    except (urllib.error.URLError, OSError, json.JSONDecodeError) as e:
+        raise _handle_local_http_error(renderer, e, operation="list") from e
+
+    rows = [r for r in rows if isinstance(r, dict) and isinstance(r.get("path"), str)]
+    if name:
+        needle = name.lower()
+        rows = [r for r in rows if needle in r["path"].lower()]
+
+    sort_key = _LOCAL_SORT_KEYS.get(sort, "created")
+    reverse = order != "asc"
+    if sort_key == "path":
+        rows.sort(key=lambda r: r["path"].lower(), reverse=reverse)
+    else:
+        rows.sort(key=lambda r: r.get(sort_key) or 0, reverse=reverse)
+    rows = rows[: min(max(limit, 1), 100)]
+
+    workflows = [
+        {
+            "id": r["path"],
+            "name": r["path"],
+            "size": r.get("size"),
+            "modified": r.get("modified"),
+            "created": r.get("created"),
+        }
+        for r in rows
+    ]
+    payload = {"count": len(workflows), "workflows": workflows}
+    if renderer.is_pretty():
+        from rich.table import Table
+
+        tbl = Table(show_header=True, header_style="bold")
+        tbl.add_column("id")
+        tbl.add_column("size", justify="right", style="dim")
+        for r in workflows[:50]:
+            tbl.add_row(r["id"], str(r["size"]) if r["size"] is not None else "")
+        renderer.console().print(tbl)
+        rprint(f"[dim]{len(workflows)} workflow(s) (local)[/dim]")
+    renderer.emit(payload, command="workflow list", where="local")
+
+
+def _local_get(renderer, target, workflow_id: str, out: str | None) -> None:
+    import urllib.error
+
+    key = _reject_unsafe_workflow_key(renderer, workflow_id)
+    url = _userdata_file_url(target, key)
+    try:
+        _, raw = _userdata_request(url, target)
+    except (urllib.error.HTTPError, urllib.error.URLError, OSError) as e:
+        raise _handle_local_http_error(renderer, e, operation="get", workflow_id=workflow_id) from e
+
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        data = None
+    if _is_frontend_format(data):
+        node_count = len(data["nodes"])
+    elif isinstance(data, dict):
+        node_count = len(data)
+    else:
+        node_count = None
+
+    if out:
+        out_path = Path(out).expanduser()
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_bytes(raw)
+        target_repr = str(out_path)
+    else:
+        if renderer.is_pretty():
+            import sys
+
+            sys.stdout.write(raw.decode("utf-8", "replace"))
+            sys.stdout.write("\n")
+        target_repr = "stdout"
+
+    payload = {
+        "workflow_id": key,
+        "out": target_repr,
+        "bytes": len(raw),
+        "node_count": node_count,
+    }
+    if renderer.is_pretty() and out:
+        rprint(f"[green]✓[/green] wrote {len(raw):,} bytes to {target_repr}")
+    renderer.emit(payload, command="workflow get", where="local")
+
+
+def _local_save(renderer, target, workflow_file: str, name: str, description: str | None) -> None:
+    import urllib.error
+
+    path = Path(workflow_file).expanduser()
+    if not path.is_file():
+        renderer.error(
+            code="workflow_not_found",
+            message=f"local workflow file not found: {path}",
+            hint="check the path",
+        )
+        raise typer.Exit(code=1)
+    try:
+        text = path.read_text(encoding="utf-8")
+        workflow_json = json.loads(text)
+    except json.JSONDecodeError as e:
+        renderer.error(
+            code="workflow_invalid_json",
+            message=f"{path} is not valid JSON: {e}",
+            hint="re-export the workflow from ComfyUI",
+        )
+        raise typer.Exit(code=1) from e
+    if not isinstance(workflow_json, dict):
+        renderer.error(
+            code="workflow_not_api_format",
+            message="workflow_json must be a JSON object",
+            hint="use ComfyUI's `File > Save` to export",
+        )
+        raise typer.Exit(code=1)
+
+    key = name if name.endswith(".json") else f"{name}.json"
+    key = _reject_unsafe_workflow_key(renderer, key)
+    url = _userdata_file_url(target, key, query={"overwrite": "true", "full_info": "true"})
+    try:
+        _, raw = _userdata_request(
+            url, target, method="POST", data=text.encode("utf-8"), content_type="application/json"
+        )
+    except (urllib.error.HTTPError, urllib.error.URLError, OSError) as e:
+        raise _handle_local_http_error(renderer, e, operation="save", workflow_id=key) from e
+
+    info = None
+    try:
+        info = json.loads(raw)
+    except json.JSONDecodeError:
+        pass
+    # ComfyUI returns FileInfo.path as "workflows/<key>"; strip the prefix back
+    # to the id the other verbs use. Fall back to the key we sent.
+    stored_id = key
+    if isinstance(info, dict) and isinstance(info.get("path"), str):
+        stored = info["path"]
+        prefix = f"{_WORKFLOWS_DIR}/"
+        stored_id = stored[len(prefix) :] if stored.startswith(prefix) else stored
+
+    payload: dict[str, Any] = {
+        "workflow_id": stored_id,
+        "name": stored_id,
+        "source": str(path),
+        "size": info.get("size") if isinstance(info, dict) else None,
+        "modified": info.get("modified") if isinstance(info, dict) else None,
+    }
+    if description:
+        # Local file-backed userdata has no metadata store for a description.
+        payload["warnings"] = [
+            {"code": "description_ignored", "message": "--description is ignored on the local path (no metadata store)"}
+        ]
+    if renderer.is_pretty():
+        rprint(f"[green]✓[/green] saved [dim]{stored_id}[/dim]")
+    renderer.emit(payload, command="workflow save", where="local", changed=True)
+
+
+def _local_delete(renderer, target, workflow_id: str) -> None:
+    import urllib.error
+
+    key = _reject_unsafe_workflow_key(renderer, workflow_id)
+    url = _userdata_file_url(target, key)
+    try:
+        _userdata_request(url, target, method="DELETE")
+    except (urllib.error.HTTPError, urllib.error.URLError, OSError) as e:
+        raise _handle_local_http_error(renderer, e, operation="delete", workflow_id=workflow_id) from e
+
+    payload = {"workflow_id": key, "deleted": True}
+    if renderer.is_pretty():
+        rprint(f"[green]✓[/green] deleted [dim]{key}[/dim]")
+    renderer.emit(payload, command="workflow delete", where="local", changed=True)
+
+
+@app.command("list", help="List saved workflows (cloud store, or local ComfyUI /userdata with --where local).")
 @tracking.track_command("workflow")
 def list_cmd(
     name: Annotated[
@@ -530,7 +817,9 @@ def list_cmd(
     import urllib.parse
 
     renderer = get_renderer()
-    target = _cloud_target_or_local_error(where, renderer)
+    target = _resolve_where_target(where)
+    if not target.is_cloud:
+        return _local_list(renderer, target, name=name, limit=limit, sort=sort, order=order)
 
     params: dict[str, Any] = {"limit": min(max(limit, 1), 100), "sort": sort, "order": order}
     if name:
@@ -579,10 +868,16 @@ def list_cmd(
     renderer.emit(payload, command="workflow list", where="cloud")
 
 
-@app.command("get", help="Fetch a saved workflow's content from Comfy Cloud (writes JSON to --out or stdout).")
+@app.command(
+    "get",
+    help="Fetch a saved workflow's content (cloud, or local with --where local); writes JSON to --out or stdout.",
+)
 @tracking.track_command("workflow")
 def get_cmd(
-    workflow_id: Annotated[str, typer.Argument(help="The workflow UUID.")],
+    workflow_id: Annotated[
+        str,
+        typer.Argument(help="Workflow id: cloud UUID, or local path under workflows/ (e.g. flux.json)."),
+    ],
     out: Annotated[
         str | None,
         typer.Option("--out", "-o", show_default=False, help="Write JSON to this file instead of stdout."),
@@ -592,7 +887,9 @@ def get_cmd(
     import urllib.error
 
     renderer = get_renderer()
-    target = _cloud_target_or_local_error(where, renderer)
+    target = _resolve_where_target(where)
+    if not target.is_cloud:
+        return _local_get(renderer, target, workflow_id, out)
 
     import urllib.parse as _up
 
@@ -640,21 +937,31 @@ def get_cmd(
     renderer.emit(payload, command="workflow get", where="cloud")
 
 
-@app.command("save", help="Save a local workflow JSON to Comfy Cloud as a new saved workflow.")
+@app.command(
+    "save",
+    help="Save a workflow JSON to the saved-workflow store (cloud, or local ComfyUI /userdata with --where local).",
+)
 @tracking.track_command("workflow")
 def save_cmd(
     workflow_file: Annotated[str, typer.Argument(help="Path to a workflow JSON file.")],
-    name: Annotated[str, typer.Option("--name", help="Display name for the workflow.")],
+    name: Annotated[
+        str,
+        typer.Option(
+            "--name", help="Cloud: display name. Local: filename under workflows/ ('.json' appended if absent)."
+        ),
+    ],
     description: Annotated[
         str | None,
-        typer.Option("--description", show_default=False, help="Optional description."),
+        typer.Option("--description", show_default=False, help="Optional description (cloud only; ignored on local)."),
     ] = None,
     where: Annotated[str | None, typer.Option("--where", show_default=False)] = None,
 ):
     import urllib.error
 
     renderer = get_renderer()
-    target = _cloud_target_or_local_error(where, renderer)
+    target = _resolve_where_target(where)
+    if not target.is_cloud:
+        return _local_save(renderer, target, workflow_file, name, description)
 
     path = Path(workflow_file).expanduser()
     if not path.is_file():
@@ -702,16 +1009,21 @@ def save_cmd(
     renderer.emit(payload, command="workflow save", where="cloud", changed=True)
 
 
-@app.command("delete", help="Delete a saved workflow from Comfy Cloud.")
+@app.command("delete", help="Delete a saved workflow (cloud, or local ComfyUI /userdata with --where local).")
 @tracking.track_command("workflow")
 def delete_cmd(
-    workflow_id: Annotated[str, typer.Argument(help="The workflow UUID to delete.")],
+    workflow_id: Annotated[
+        str,
+        typer.Argument(help="Workflow id to delete: cloud UUID, or local path under workflows/ (e.g. flux.json)."),
+    ],
     where: Annotated[str | None, typer.Option("--where", show_default=False)] = None,
 ):
     import urllib.error
 
     renderer = get_renderer()
-    target = _cloud_target_or_local_error(where, renderer)
+    target = _resolve_where_target(where)
+    if not target.is_cloud:
+        return _local_delete(renderer, target, workflow_id)
 
     import urllib.parse as _up
 

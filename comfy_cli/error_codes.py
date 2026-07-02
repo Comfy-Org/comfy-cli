@@ -236,11 +236,6 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "`comfy jobs cancel` could not reach the local server to cancel the prompt.",
         "check the server is still running on the host/port",
     ),
-    ErrorCode(
-        "workflow_saved_local_unsupported",
-        "`comfy workflow {list,get,save,delete}` requires Comfy Cloud — local ComfyUI has no /api/workflows.",
-        "for local workflows, manage JSON files on disk via `workflow slots`/`set-slot`/`vary`",
-    ),
     # --- auth (provider keys + cloud session intertwined) --------------------
     ErrorCode(
         "auth_invalid_key",
@@ -457,6 +452,13 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "`details.source` has the host key; `details.reason` has the fetch error. "
         "Surfaced in `data.warnings[]` (not as an error envelope) so the command still succeeds.",
         "re-run once the server/session is reachable to get a fresh schema",
+    ),
+    ErrorCode(
+        "description_ignored",
+        "`comfy workflow save --where local --description` was given a description, but the local "
+        "file-backed `/userdata` store has nowhere to keep it. Surfaced in `data.warnings[]` "
+        "(not as an error envelope) so the save still succeeds.",
+        "descriptions are a Comfy Cloud feature; drop `--description` on the local path",
     ),
     ErrorCode(
         "cql_query_invalid",
