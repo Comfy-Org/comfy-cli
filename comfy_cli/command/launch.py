@@ -225,8 +225,7 @@ def background_launch(extra, frontend_pr=None):
 
     cmd.extend(extra)
 
-    loop = asyncio.get_event_loop()
-    log = loop.run_until_complete(launch_and_monitor(cmd, listen, port))
+    log = asyncio.run(launch_and_monitor(cmd, listen, port))
 
     if log is not None:
         print(
