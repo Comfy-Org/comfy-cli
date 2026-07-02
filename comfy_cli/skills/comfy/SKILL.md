@@ -256,7 +256,12 @@ mechanism by complexity and reuse — not as a quality ranking:
 blueprint.** Even for smaller workflows, prefer fragments if any part could be
 extended, repeated, or reused.
 
-## The compile model — edit source, never the artifact (REQUIRED)
+## The compile model — edit source, never the artifact (fragments; legacy)
+
+> **Legacy.** Fragments/blueprints/`compose` produce **API format**, which can't live
+> on the canvas or merge (CRDT). For reuse/composition prefer **recipes** (`apply
+> --param` + `capture`, above). This section remains for the existing project/blueprint
+> convention and headless batch compiles; new authoring should use recipes.
 
 The folders are **source**; the workflow JSON is a **build artifact**.
 `fragments/` + `blueprints/` are what you edit; `compose` is the compiler;
@@ -342,6 +347,33 @@ JSON
 comfy --json workflow apply wf.json --ops ops.json $CAT   # or --ops - to read stdin
 # → data.ops[] (all minted ids), data.aliases{ckpt,ks}. Atomic: nothing writes if any spec fails.
 ```
+
+**Reusable recipes (the reuse path — prefer this over fragments/compose).** A recipe
+is an ops file with a `params` header and `${param}` holes:
+
+```jsonc
+{ "recipe":"t2i",
+  "params": { "positive": {"type":"string"},          // required (no default)
+              "steps":    {"type":"int", "default":20} },  // type: string|int|float|bool
+  "ops": [ …, {"op":"set_widget","node":"ks","widget":"steps","value":"${steps}"} ] }
+```
+
+`apply --param k=v` fills the holes — **typed and strict**: a value exactly `${x}`
+takes the param's real value; a missing required param, an unknown param, or a bad
+type all error (never a silent blank).
+
+```bash
+# capture a working graph into a recipe, PARAMETERIZING the fields you'll vary:
+comfy --json workflow capture wf.json --name t2i --param 6.text=positive --param 3.seed=seed -o t2i.recipe.json $CAT
+comfy --json workflow apply fresh.json --ops t2i.recipe.json --param positive="a fox" --param seed=42 $CAT
+```
+
+`capture --param <node_id>.<widget>=<name>` lifts that widget to a `${name}` hole
+(current value becomes its default) — use it for the fields you want to vary, since
+plain `capture` omits widgets left at their default. Recipes are UI-format op-batches
+— mergeable and canvas-native. `compose`/`decompose` (the fragment/blueprint path)
+are **legacy**: they emit API format and can't co-edit; use recipes for anything
+you'll reuse or edit on the canvas.
 
 **Run it and get the image back.** Inside a project, outputs land in `outputs/`.
 Outside one (a bare `wf.json`), submit and pipe the result into `download`:
