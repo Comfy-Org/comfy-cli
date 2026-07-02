@@ -374,6 +374,12 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "A slot override failed validation (bad shape, unknown address, etc.).",
         "see `details` — addresses follow `<instance_id>.<input_name>`",
     ),
+    ErrorCode(
+        "workflow_edit_invalid",
+        "A structured edit (add-node/connect/set-widget/delete-node) failed: "
+        "unknown class_type, missing node, bad slot/widget name, or malformed address.",
+        "run `comfy workflow slots <file>` for widget addresses or `comfy nodes types` for class_types",
+    ),
     # --- workflow fragments / compose ---------------------------------------
     ErrorCode(
         "fragment_invalid",

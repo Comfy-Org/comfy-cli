@@ -38,6 +38,10 @@ class PortOptions:
     multiline: bool = False
     control_after_generate: bool = False
     force_input: bool = False
+    # For COMFY_DYNAMICCOMBO_V3: the raw options list ({key, inputs} dicts) so the
+    # engine can expand key-dependent sub-widgets (e.g. model → model.resolution),
+    # matching the converter. None for ordinary inputs.
+    dynamic_options: list | None = None
 
 
 @dataclass
@@ -265,6 +269,13 @@ def _parse_input_spec(spec: Any) -> tuple[str, bool, list[Any], PortOptions]:
             # `duration`) must stay [4, 8, 12], not ["4","8","12"], so `nodes
             # show` is truthful and agents pass the type the cloud accepts.
             return first, True, list(options), port_opts
+        # Dynamic combo (COMFY_DYNAMICCOMBO_V3): options are {key, inputs} dicts.
+        # It IS a widget (the frontend renders a selector + key-dependent
+        # sub-widgets); the selector's choices are the keys. Capture the tree so
+        # widget_order can expand the sub-widgets — matching the API converter.
+        if isinstance(options, list) and options and all(isinstance(v, dict) and "key" in v for v in options):
+            port_opts.dynamic_options = options
+            return first, True, [v["key"] for v in options], port_opts
         return first, False, [], port_opts
 
     if isinstance(first, list):
@@ -272,6 +283,34 @@ def _parse_input_spec(spec: Any) -> tuple[str, bool, list[Any], PortOptions]:
         return "COMBO", True, list(first), port_opts
 
     return "UNKNOWN", False, [], port_opts
+
+
+def _dynamic_sub_widget_names(base: str, options: list) -> list[str]:
+    """Sub-widget names a dynamic combo expands to, from the first (default) key —
+    e.g. ``model`` → ``["model.resolution"]``. Static mirror of the converter's
+    value-driven ``_dynamic_combo_sub_inputs`` (uses the first key, not a selection)."""
+    return [name for name, _ in _dynamic_sub_widget_defaults(base, options).items()]
+
+
+def _dynamic_sub_widget_defaults(base: str, options: list) -> dict[str, Any]:
+    """``{f"{base}.{sub}": default}`` for the first key's sub-inputs."""
+    if not options or not isinstance(options[0], dict):
+        return {}
+    sub_def = options[0].get("inputs")
+    if not isinstance(sub_def, dict):
+        return {}
+    out: dict[str, Any] = {}
+    for section in ("required", "optional"):
+        section_def = sub_def.get(section) or {}
+        if not isinstance(section_def, dict):
+            continue
+        for sub_name, spec in section_def.items():
+            _t, _e, enum_values, opts = _parse_input_spec(spec)
+            default = opts.default
+            if default is None and enum_values:
+                default = enum_values[0]
+            out[f"{base}.{sub_name}"] = default
+    return out
 
 
 def _is_scalar_choice(v: Any) -> bool:
@@ -686,9 +725,35 @@ class Graph:
             if p.is_link:
                 continue
             order.append(p.name)
+            if p.options.dynamic_options:
+                order.extend(_dynamic_sub_widget_names(p.name, p.options.dynamic_options))
             if p.options.control_after_generate:
                 order.append("control_after_generate")
         return order
+
+    def widget_defaults(self, class_name: str) -> dict[str, Any]:
+        """Default value per widget-order name — including dynamic-combo selectors
+        (first key), their sub-widgets, and control_after_generate. Used by
+        ``add-node`` so a fresh node is runtime-valid, aligned with the converter."""
+        m = self._nodes.get(class_name)
+        if m is None:
+            return {}
+        out: dict[str, Any] = {}
+        for p in m.inputs:
+            if p.is_link:
+                continue
+            if p.options.dynamic_options:
+                out[p.name] = p.enum_values[0] if p.enum_values else None  # selected key
+                out.update(_dynamic_sub_widget_defaults(p.name, p.options.dynamic_options))
+            elif p.options.default is not None:
+                out[p.name] = p.options.default
+            elif p.enum_values:
+                out[p.name] = p.enum_values[0]
+            else:
+                out[p.name] = None
+            if p.options.control_after_generate:
+                out["control_after_generate"] = "fixed"
+        return out
 
     # -- Validation --
 

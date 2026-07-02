@@ -72,7 +72,7 @@ def _load_workflow_or_fail(renderer, path: str) -> tuple[Path, dict[str, Any]]:
     return p, data
 
 
-def _get_graph(input_path: str | None, host: str | None, port: int | None, on_stale=None):
+def _get_graph(input_path: str | None, host: str | None, port: int | None, on_stale=None, where: str | None = None):
     """Build a Graph from the resolved object_info source.
 
     The live (non-``--input``) fetch goes through ``resilient_load_object_info``,
@@ -95,7 +95,7 @@ def _get_graph(input_path: str | None, host: str | None, port: int | None, on_st
         from comfy_cli.config_manager import ConfigManager
 
         decision = where_module.resolve(
-            flag=None,
+            flag=where,
             config_value=ConfigManager().get(where_module.CONFIG_KEY_WHERE_DEFAULT),
         )
         mode = "cloud" if decision.target is where_module.WhereTarget.CLOUD else "local"
@@ -749,3 +749,18 @@ app.command(
     help="Project a workflow (template or API JSON) into a reusable fragment — the inverse of compose.",
 )(_wfrag.decompose_cmd)
 app.add_typer(_wfrag.fragment_app, name="fragment")
+
+# ---------------------------------------------------------------------------
+# Structured, CRDT-ready edit primitives (add-node / connect / set-widget /
+# delete). Implemented in workflow_edit.py; mounted here so the surface stays
+# under `comfy workflow`. Each emits a replayable op in `data.op`.
+# ---------------------------------------------------------------------------
+
+from comfy_cli.command import workflow_edit as _wedit  # noqa: E402
+
+app.command("add-node", help="Add a node to the graph; emits an add_node op.")(_wedit.add_node_cmd)
+app.command("connect", help="Wire an output slot to an input slot; emits a connect op.")(_wedit.connect_cmd)
+app.command("set-widget", help="Set a widget by name (`<id>.<widget>`); emits a set_widget op.")(_wedit.set_widget_cmd)
+app.command("delete-node", help="Delete a node and its links; emits a delete_node op.")(_wedit.delete_cmd)
+app.command("ls-nodes", help="List nodes (id/type/title) in a workflow file.")(_wedit.ls_nodes_cmd)
+app.command("apply", help="Apply a batch of edits (JSON specs) in one pass; supports node aliases.")(_wedit.apply_cmd)
