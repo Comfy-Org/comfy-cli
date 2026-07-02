@@ -17,7 +17,6 @@ halves are independent — you can scan only what's relevant to the task.
 
 **This is one of a skill family — skim the siblings before a big task so you
 know what exists, and reach for the right one rather than improvising its job:**
-`comfy-fragments` (compose large graphs from reusable, validated pieces),
 `comfy-director` (multi-shot narrative video — story, continuity, conform),
 `comfy-debug` (any failed job: error code → fix), `comfy-relay` (surface a
 workflow/result in chat, never leave it in /tmp). When a task spans several,
@@ -191,15 +190,12 @@ mechanism by complexity and reuse — not as a quality ranking:
    Re-typing a fragment from a node schema re-introduces those as transcription
    bugs you only discover when the cloud rejects the job. Start from what works.
 
-   Only author `./fragments/<name>.json` by hand when there is **no** working
-   graph to project from (you're building a shape that doesn't exist yet): 1-15
-   API-format nodes wrapped with a `_fragment` header declaring typed inputs,
-   outputs, and params (caller-supplied values marked `"PLACEHOLDER"`). Make
-   EVERY asset/model name a required param with no default. Load the
-   `comfy-fragments` skill for the format, then check your work:
-   ```bash
-   comfy --json workflow fragment validate <name>
-   ```
+   When there is **no** working graph to project from (you're building a shape
+   that doesn't exist yet), author a **recipe** instead (see the recipe section
+   above): build it once with the structured-edit primitives, `capture` it, and
+   lift the asset/model/prompt fields to `${param}`. Recipes are UI-format,
+   mergeable, and reusable — prefer them over the legacy fragment/blueprint
+   authoring described below.
 
    **d. Compose + run** — a YAML blueprint in `blueprints/<name>.yaml`
    wires your fragments together; cross-step refs use `$alias.output_name`,
@@ -1126,8 +1122,8 @@ names files `<item>_<nnn>.<ext>`. Read outputs by item, never by array
 order. Avoid the old `PIDS=()` shell-loop pattern — it duplicates
 scheduling the engine already does and gives you N jobs to babysit instead
 of one. (For a pure prompt/seed sweep over the *same* graph, `comfy
-workflow vary` is the right tool; see the `comfy-fragments` skill for the
-full blueprint syntax.)
+workflow vary` is the right tool; for reusable parameterized generation use a
+recipe with `workflow foreach`.)
 
 **The exception — when fan-out across separate jobs IS right.** A multi-shot
 film built on **partner-API video/avatar nodes** (KlingAvatar, Kling i2v, Sora,

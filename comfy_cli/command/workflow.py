@@ -732,23 +732,26 @@ def delete_cmd(
 
 
 # ---------------------------------------------------------------------------
-# compose / fragment — fragment-based workflow composition
+# compose / fragment — LEGACY fragment/blueprint authoring (API-format).
 # ---------------------------------------------------------------------------
-# Implemented in workflow_fragments.py; mounted here so the surface stays
-# under `comfy workflow`. compose is a single command; fragment is a sub-typer
-# of inspectors (ls/show/validate).
+# Superseded by the recipe path (apply/capture/foreach), which is UI-format and
+# CRDT-mergeable. Kept in code for backward compatibility + the $asset/$var
+# reference system, but HIDDEN from `--help` so agents aren't steered here — the
+# recipe path is the surfaced reuse story. (Still runnable if invoked explicitly.)
 
 from comfy_cli.command import workflow_fragments as _wfrag  # noqa: E402
 
 app.command(
     "compose",
-    help="Compose a YAML blueprint of fragments into a single API-format workflow.",
+    hidden=True,
+    help="[legacy] Compose a YAML blueprint of fragments into an API-format workflow. Prefer recipes (apply).",
 )(_wfrag.compose_cmd)
 app.command(
     "decompose",
-    help="Project a workflow (template or API JSON) into a reusable fragment — the inverse of compose.",
+    hidden=True,
+    help="[legacy] Project a workflow into a fragment. Prefer `capture` (→ a UI-format recipe).",
 )(_wfrag.decompose_cmd)
-app.add_typer(_wfrag.fragment_app, name="fragment")
+app.add_typer(_wfrag.fragment_app, name="fragment", hidden=True)
 
 # ---------------------------------------------------------------------------
 # Structured, CRDT-ready edit primitives (add-node / connect / set-widget /
