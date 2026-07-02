@@ -32,15 +32,22 @@ You can't play a clip in chat. Surface it visually instead — **one command doe
 it:**
 
 ```bash
-comfy --json preview clip.mp4          # → clip.preview.png (a contact sheet) + duration/fps/has_audio
+comfy --json preview clip.mp4          # → clip.preview.png (a contact sheet)
 # then Read clip.preview.png
 ```
 
 `comfy preview` handles all three modalities: **video → contact sheet** (a grid
 across the whole timeline, best for judging pacing/arc), **image → thumbnail**,
-**audio → waveform** (so you can *see* the dynamics you can't hear). It also
-reports the facts frames can't show — **duration, fps, and whether there's
-audio** — in the envelope.
+**audio → waveform** (so you can *see* the dynamics you can't hear). The
+contact-sheet/thumbnail PNG **always renders** — the CLI ships a bundled ffmpeg,
+so no system install is needed.
+
+It also *tries* to report the facts frames can't show — **duration, fps, has_audio** —
+but those come from `ffprobe`, which is **not** bundled: without a system `ffprobe`
+on PATH those envelope fields are `null` (and the contact sheet spans only the
+first second, since it can't read the duration). Install system ffmpeg
+(`brew install ffmpeg` / `apt install ffmpeg`) when you need accurate timeline
+sampling or the metadata; the PNG itself works without it.
 
 Prefer it over hand-rolling ffmpeg. (If you need a custom grid: `--grid 6x4`;
 custom width: `--width 720`.) For a key-moments read instead of a grid, extract
