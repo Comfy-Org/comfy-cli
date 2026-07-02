@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import copy
 import random
+import re
 import uuid
 from typing import Any
 
@@ -176,6 +177,188 @@ def delete_node(
     removed = [ln[0] for ln in workflow.get("links") or [] if ln[1] == node_id or ln[3] == node_id]
     op = _new_op("delete_node", actor, base_version, node_id=node_id, removed_links=removed)
     return apply_op(workflow, op, graph), op
+
+
+# ---------------------------------------------------------------------------
+# recipes — a parameterized op-batch. A recipe is `{params?, ops:[...]}`; a bare
+# list is a param-less batch. `${name}` placeholders in op values are filled from
+# `--param`. Validation is strict: a required param with no value, an unknown
+# param, or a `${name}` the recipe didn't declare all fail — never a silent blank.
+# ---------------------------------------------------------------------------
+
+_PARAM_REF = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+
+
+class RecipeError(ValueError):
+    """A recipe or its parameters are malformed."""
+
+
+def parse_recipe(doc: Any) -> tuple[list, dict]:
+    """Split a recipe document into (ops, params_decl). Accepts a bare op list."""
+    if isinstance(doc, list):
+        return doc, {}
+    if isinstance(doc, dict) and isinstance(doc.get("ops"), list):
+        return doc["ops"], (doc.get("params") or {})
+    raise RecipeError("recipe must be a JSON array of ops, or an object with an `ops` array")
+
+
+def resolve_params(params_decl: dict, provided: dict[str, str]) -> dict[str, Any]:
+    """Type-coerce provided values against the declared params. Errors on an
+    unknown param, or a declared param with neither a value nor a default."""
+    unknown = sorted(set(provided) - set(params_decl))
+    if unknown:
+        raise RecipeError(f"unknown --param {unknown}; recipe declares {sorted(params_decl)}")
+    out: dict[str, Any] = {}
+    for name, decl in params_decl.items():
+        decl = decl if isinstance(decl, dict) else {}
+        if name in provided:
+            out[name] = _coerce_param(provided[name], decl.get("type", "string"), name)
+        elif "default" in decl:
+            out[name] = decl["default"]
+        else:
+            raise RecipeError(f"missing required --param {name!r}")
+    return out
+
+
+def _coerce_param(raw: str, type_name: str, name: str) -> Any:
+    if type_name == "int":
+        try:
+            return int(raw)
+        except ValueError as e:
+            raise RecipeError(f"--param {name}: expected int, got {raw!r}") from e
+    if type_name in ("float", "number"):
+        try:
+            return float(raw)
+        except ValueError as e:
+            raise RecipeError(f"--param {name}: expected number, got {raw!r}") from e
+    if type_name in ("bool", "boolean"):
+        low = raw.strip().lower()
+        if low in ("true", "1", "yes"):
+            return True
+        if low in ("false", "0", "no"):
+            return False
+        raise RecipeError(f"--param {name}: expected bool, got {raw!r}")
+    return raw  # string (the default)
+
+
+def substitute_params(ops: list, params: dict[str, Any]) -> list:
+    """Replace `${name}` in op values. A value that is exactly `${name}` takes the
+    param's real (typed) value; embedded refs interpolate as text. An undeclared
+    `${name}` is an error, not a blank."""
+
+    def sub(value: Any) -> Any:
+        if isinstance(value, str):
+            whole = _PARAM_REF.fullmatch(value)
+            if whole:
+                return _param(whole.group(1), params)
+            return _PARAM_REF.sub(lambda m: str(_param(m.group(1), params)), value)
+        if isinstance(value, list):
+            return [sub(v) for v in value]
+        if isinstance(value, dict):
+            return {k: sub(v) for k, v in value.items()}
+        return value
+
+    return [sub(op) for op in ops]
+
+
+def _param(name: str, params: dict[str, Any]) -> Any:
+    if name not in params:
+        raise RecipeError(f"recipe references undeclared param ${{{name}}}")
+    return params[name]
+
+
+def capture_recipe(workflow: dict, graph, name: str = "captured", lift: dict | None = None) -> dict:
+    """Project a UI-format graph into a recipe — the op-batch that rebuilds it
+    (add_node + non-default set_widget + connect). The inverse of `apply`:
+    `apply(empty, capture(wf))` reproduces `wf`. Top-level nodes only.
+
+    `lift` maps `(node_id, widget_name) -> param_name`: those widgets become
+    `${param_name}` holes (with a `params` header entry defaulting to the current
+    value) even if the value equals the node default — so the fields you want to
+    vary are actually parameterizable. No auto-parameterization otherwise."""
+    if (workflow.get("definitions") or {}).get("subgraphs"):
+        raise RecipeError("capture does not support subgraphs yet — edit/flatten top-level nodes first")
+    lift = lift or {}
+    nodes = [n for n in (workflow.get("nodes") or []) if isinstance(n, dict) and "id" in n]
+    by_id = {n["id"]: n for n in nodes}
+
+    # Validate lift targets up front — no silently-ignored typos.
+    for (node_id, widget), _pname in lift.items():
+        node = by_id.get(node_id)
+        if node is None:
+            raise RecipeError(f"--param target node {node_id!r} not in workflow")
+        if widget not in graph.widget_order(node.get("type", "")):
+            raise RecipeError(f"--param target {node_id}.{widget!r}: not a widget on {node.get('type')}")
+
+    alias_by_id: dict[Any, str] = {}
+    counts: dict[str, int] = {}
+    for n in nodes:
+        slug = re.sub(r"[^a-z0-9]+", "_", str(n.get("type", "node")).lower()).strip("_") or "node"
+        counts[slug] = counts.get(slug, 0) + 1
+        alias_by_id[n["id"]] = slug if counts[slug] == 1 else f"{slug}_{counts[slug]}"
+
+    ops: list[dict] = []
+    params_header: dict[str, Any] = {}
+    for n in nodes:
+        alias = alias_by_id[n["id"]]
+        class_type = n.get("type")
+        add: dict[str, Any] = {"op": "add_node", "class_type": class_type, "as": alias}
+        if n.get("pos"):
+            add["at"] = n["pos"]
+        ops.append(add)
+        order = graph.widget_order(class_type)
+        defaults = graph.widget_defaults(class_type)
+        widgets = n.get("widgets_values") or []
+        for i, wname in enumerate(order):
+            if i >= len(widgets):
+                break
+            pname = lift.get((n["id"], wname))
+            if pname is not None:
+                # Explicitly lifted → a ${param} hole, current value as its default.
+                ops.append({"op": "set_widget", "node": alias, "widget": wname, "value": f"${{{pname}}}"})
+                params_header[pname] = {"type": _widget_param_type(graph, class_type, wname), "default": widgets[i]}
+            elif widgets[i] != defaults.get(wname):
+                # Only widgets that differ from the fresh-node default — add_node fills the rest.
+                ops.append({"op": "set_widget", "node": alias, "widget": wname, "value": widgets[i]})
+
+    node_by_id = {n["id"]: n for n in nodes}
+    for ln in workflow.get("links") or []:
+        if not (isinstance(ln, list) and len(ln) >= 5):
+            continue
+        _lid, from_id, from_slot, to_id, to_slot = ln[0], ln[1], ln[2], ln[3], ln[4]
+        if from_id not in alias_by_id or to_id not in alias_by_id:
+            continue
+        out_name = _slot_name(node_by_id[from_id].get("outputs"), from_slot)
+        in_name = _slot_name(node_by_id[to_id].get("inputs"), to_slot)
+        ops.append(
+            {"op": "connect", "from": f"{alias_by_id[from_id]}.{out_name}", "to": f"{alias_by_id[to_id]}.{in_name}"}
+        )
+
+    return {"recipe": name, "params": params_header, "ops": ops}
+
+
+def _widget_param_type(graph, class_type: str, widget: str) -> str:
+    """Recipe param type for a widget, from its schema port type."""
+    m = graph.node(class_type)
+    port = next((p for p in (m.inputs if m else []) if p.name == widget), None)
+    t = (port.type if port else "").upper()
+    if t == "INT":
+        return "int"
+    if t in ("FLOAT", "NUMBER"):
+        return "float"
+    if t == "BOOLEAN":
+        return "bool"
+    return "string"
+
+
+def _slot_name(slots: Any, idx: Any) -> Any:
+    """A link's slot addressed by name where the node declares one, else by index
+    (both are valid connect targets)."""
+    if isinstance(slots, list) and isinstance(idx, int) and 0 <= idx < len(slots):
+        nm = slots[idx].get("name") if isinstance(slots[idx], dict) else None
+        if nm:
+            return nm
+    return idx
 
 
 # ---------------------------------------------------------------------------

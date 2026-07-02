@@ -266,6 +266,81 @@ def ls_nodes_cmd(
 
 
 # ---------------------------------------------------------------------------
+# capture — project a graph into a reusable recipe (the decompose analog)
+# ---------------------------------------------------------------------------
+
+
+@tracking.track_command("workflow")
+def capture_cmd(
+    file: Annotated[str, typer.Argument(help="Frontend-format workflow JSON to capture.")],
+    name: Annotated[str | None, typer.Option("--name", show_default=False, help="Recipe name.")] = None,
+    param: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--param",
+            show_default=False,
+            help="Lift a widget to a recipe param: `<node_id>.<widget>=<param_name>` (repeatable).",
+        ),
+    ] = None,
+    out: Annotated[
+        str | None,
+        typer.Option("--out", "-o", show_default=False, help="Write the recipe JSON here (else stdout)."),
+    ] = None,
+    input_path: Annotated[str | None, typer.Option("--input", show_default=False)] = None,
+    host: Annotated[str | None, typer.Option(show_default=False)] = None,
+    port: Annotated[int | None, typer.Option(show_default=False)] = None,
+    where: Annotated[str | None, typer.Option("--where", show_default=False, help="Catalog target: local | cloud.")] = None,
+):
+    """Project a workflow into a reusable recipe — the op-batch that rebuilds it.
+    `apply` that recipe onto an empty graph to reproduce the workflow; edit a value
+    to a `${param}` to make it parameterized."""
+    from pathlib import Path
+
+    renderer = get_renderer()
+    renderer.command = "workflow capture"
+    p, workflow = _load_workflow_or_fail(renderer, file)
+    graph = _graph_or_exit(input_path, host, port, renderer, where)
+    lift: dict[tuple[Any, str], str] = {}
+    for spec in param or []:
+        if "=" not in spec or "." not in spec.split("=", 1)[0]:
+            renderer.error(
+                code="workflow_edit_invalid",
+                message=f"--param must be `<node_id>.<widget>=<param_name>`, got {spec!r}",
+            )
+            raise typer.Exit(code=1)
+        target, _, pname = spec.partition("=")
+        node_str, _, widget = target.partition(".")  # node id has no dot; widget may (model.resolution)
+        node_id: Any = int(node_str) if node_str.lstrip("-").isdigit() else node_str
+        lift[(node_id, widget)] = pname.strip()
+    try:
+        recipe = workflow_ops.capture_recipe(workflow, graph, name=name or p.stem, lift=lift)
+    except workflow_ops.RecipeError as e:
+        renderer.error(code="workflow_edit_invalid", message=str(e))
+        raise typer.Exit(code=1) from e
+
+    serialized = json.dumps(recipe, indent=2)
+    wrote: str | None = None
+    if out:
+        out_path = Path(out).expanduser()
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        _atomic_write_text(out_path, serialized)
+        wrote = str(out_path)
+    elif renderer.is_pretty():
+        import sys
+
+        sys.stdout.write(serialized + "\n")
+    payload = {
+        "recipe": recipe["recipe"],
+        "op_count": len(recipe["ops"]),
+        "out": wrote or "stdout",
+        "recipe_doc": recipe,
+    }
+    if renderer.is_pretty() and wrote:
+        rprint(f"[bold green]✓[/bold green] captured {len(recipe['ops'])} ops → [dim]{wrote}[/dim]")
+    renderer.emit(payload, command="workflow capture")
+
+
+# ---------------------------------------------------------------------------
 # apply — batch: one object_info load, many edits, aliases for just-made nodes
 # ---------------------------------------------------------------------------
 
@@ -291,8 +366,12 @@ def apply_cmd(
     file: Annotated[str, typer.Argument(help="Frontend-format workflow JSON.")],
     ops_file: Annotated[
         str,
-        typer.Option("--ops", help="JSON array of edit specs, or '-' to read from stdin."),
+        typer.Option("--ops", help="Recipe file (JSON array of ops, or {params, ops}), or '-' for stdin."),
     ],
+    param: Annotated[
+        list[str] | None,
+        typer.Option("--param", show_default=False, help="Recipe param as key=value; repeatable."),
+    ] = None,
     actor: Annotated[str, typer.Option("--actor", help="Op author id (for CRDT stamping).")] = "cli",
     base_version: Annotated[int, typer.Option("--base-version", help="Draft version this batch is based on.")] = 0,
     stdout: Annotated[bool, typer.Option("--stdout/--in-place", show_default=False)] = False,
@@ -322,13 +401,27 @@ def apply_cmd(
             renderer.error(code="workflow_edit_invalid", message=f"cannot read --ops file: {e}")
             raise typer.Exit(code=1) from e
     try:
-        specs = json.loads(raw)
+        doc = json.loads(raw)
     except json.JSONDecodeError as e:
         renderer.error(code="workflow_edit_invalid", message=f"--ops is not valid JSON: {e}")
         raise typer.Exit(code=1) from e
-    if not isinstance(specs, list):
-        renderer.error(code="workflow_edit_invalid", message="--ops must be a JSON array of edit specs")
-        raise typer.Exit(code=1)
+
+    # A recipe is `{params?, ops}` (or a bare op list); `${param}` holes are filled
+    # from --param with strict validation (no silent blanks).
+    provided: dict[str, str] = {}
+    for kv in param or []:
+        if "=" not in kv:
+            renderer.error(code="workflow_edit_invalid", message=f"--param must be key=value, got {kv!r}")
+            raise typer.Exit(code=1)
+        k, _, v = kv.partition("=")
+        provided[k.strip()] = v
+    try:
+        specs, params_decl = workflow_ops.parse_recipe(doc)
+        params = workflow_ops.resolve_params(params_decl, provided)
+        specs = workflow_ops.substitute_params(specs, params)
+    except workflow_ops.RecipeError as e:
+        renderer.error(code="workflow_edit_invalid", message=str(e))
+        raise typer.Exit(code=1) from e
 
     aliases: dict[str, Any] = {}
     ops: list[dict] = []

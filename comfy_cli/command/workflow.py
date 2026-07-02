@@ -763,4 +763,5 @@ app.command("connect", help="Wire an output slot to an input slot; emits a conne
 app.command("set-widget", help="Set a widget by name (`<id>.<widget>`); emits a set_widget op.")(_wedit.set_widget_cmd)
 app.command("delete-node", help="Delete a node and its links; emits a delete_node op.")(_wedit.delete_cmd)
 app.command("ls-nodes", help="List nodes (id/type/title) in a workflow file.")(_wedit.ls_nodes_cmd)
-app.command("apply", help="Apply a batch of edits (JSON specs) in one pass; supports node aliases.")(_wedit.apply_cmd)
+app.command("apply", help="Apply a recipe / batch of edits in one pass; supports node aliases + --param.")(_wedit.apply_cmd)
+app.command("capture", help="Project a workflow into a reusable recipe (the op-batch that rebuilds it).")(_wedit.capture_cmd)

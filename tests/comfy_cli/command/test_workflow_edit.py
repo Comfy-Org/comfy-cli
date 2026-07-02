@@ -594,6 +594,148 @@ class TestDynamicCombo:
 
 
 # ---------------------------------------------------------------------------
+# recipes — parameterized op-batches (apply --param)
+# ---------------------------------------------------------------------------
+
+
+class TestRecipes:
+    def _recipe(self):
+        return {
+            "recipe": "t2i",
+            "params": {"positive": {"type": "string"}, "steps": {"type": "int", "default": 20}},
+            "ops": [
+                {"op": "add_node", "class_type": "KSampler", "as": "ks"},
+                {"op": "set_widget", "node": "ks", "widget": "steps", "value": "${steps}"},
+                {"op": "add_node", "class_type": "CLIPTextEncode", "as": "pos"},
+                {"op": "set_widget", "node": "pos", "widget": "text", "value": "a ${positive} scene"},
+            ],
+        }
+
+    def _empty(self, tmp_path):
+        return _write(tmp_path, {"nodes": [], "links": [], "last_node_id": 0, "last_link_id": 0})
+
+    def test_param_substitution_is_typed(self, patched_graph, tmp_path, capsys):
+        path = self._empty(tmp_path)
+        rp = tmp_path / "r.json"
+        rp.write_text(json.dumps(self._recipe()), encoding="utf-8")
+        env = _run(["apply", str(path), "--ops", str(rp), "--param", "positive=quiet forest", "--param", "steps=35"], capsys)
+        assert env["ok"] is True, env
+        wf = json.loads(path.read_text())
+        g = _graph()
+        ks = next(n for n in wf["nodes"] if n["type"] == "KSampler")
+        pos = next(n for n in wf["nodes"] if n["type"] == "CLIPTextEncode")
+        assert ks["widgets_values"][g.widget_order("KSampler").index("steps")] == 35  # int, not "35"
+        assert pos["widgets_values"][g.widget_order("CLIPTextEncode").index("text")] == "a quiet forest scene"
+
+    def test_default_used_when_param_omitted(self, patched_graph, tmp_path, capsys):
+        path = self._empty(tmp_path)
+        rp = tmp_path / "r.json"
+        rp.write_text(json.dumps(self._recipe()), encoding="utf-8")
+        env = _run(["apply", str(path), "--ops", str(rp), "--param", "positive=x"], capsys)
+        assert env["ok"] is True
+        wf = json.loads(path.read_text())
+        g = _graph()
+        ks = next(n for n in wf["nodes"] if n["type"] == "KSampler")
+        assert ks["widgets_values"][g.widget_order("KSampler").index("steps")] == 20  # declared default
+
+    def test_missing_required_param_errors(self, patched_graph, tmp_path, capsys):
+        path = self._empty(tmp_path)
+        rp = tmp_path / "r.json"
+        rp.write_text(json.dumps(self._recipe()), encoding="utf-8")
+        env = _run(["apply", str(path), "--ops", str(rp)], capsys)  # positive omitted, no default
+        assert env["ok"] is False
+        assert env["error"]["code"] == "workflow_edit_invalid"
+        assert "positive" in env["error"]["message"]
+
+    def test_unknown_param_errors(self, patched_graph, tmp_path, capsys):
+        path = self._empty(tmp_path)
+        rp = tmp_path / "r.json"
+        rp.write_text(json.dumps(self._recipe()), encoding="utf-8")
+        env = _run(["apply", str(path), "--ops", str(rp), "--param", "positive=x", "--param", "nope=1"], capsys)
+        assert env["ok"] is False
+        assert "nope" in env["error"]["message"]
+
+    def test_bad_type_errors(self, patched_graph, tmp_path, capsys):
+        path = self._empty(tmp_path)
+        rp = tmp_path / "r.json"
+        rp.write_text(json.dumps(self._recipe()), encoding="utf-8")
+        env = _run(["apply", str(path), "--ops", str(rp), "--param", "positive=x", "--param", "steps=notanint"], capsys)
+        assert env["ok"] is False
+        assert "int" in env["error"]["message"]
+
+
+# ---------------------------------------------------------------------------
+# capture — project a graph into a recipe; round-trips through apply
+# ---------------------------------------------------------------------------
+
+
+class TestCapture:
+    def test_capture_roundtrips_through_apply(self, patched_graph, tmp_path, capsys):
+        src = _write(tmp_path, _base_workflow())
+        cap = _run(["capture", str(src), "--name", "base"], capsys)
+        assert cap["ok"] is True, cap
+        recipe = cap["data"]["recipe_doc"]
+        # a non-default widget (KSampler seed=42) is captured; defaults are not
+        assert any(o["op"] == "set_widget" and o["widget"] == "seed" and o["value"] == 42 for o in recipe["ops"])
+        assert not any(o.get("widget") == "steps" for o in recipe["ops"])  # steps=20 is the default
+
+        empty = _write(tmp_path, {"nodes": [], "links": [], "last_node_id": 0, "last_link_id": 0}, "empty.json")
+        rp = tmp_path / "r.json"
+        rp.write_text(json.dumps(recipe), encoding="utf-8")
+        applied = _run(["apply", str(empty), "--ops", str(rp)], capsys)
+        assert applied["ok"] is True, applied
+
+        rebuilt = json.loads(empty.read_text())
+        orig = _base_workflow()
+        assert sorted(n["type"] for n in rebuilt["nodes"]) == sorted(n["type"] for n in orig["nodes"])
+        assert len(rebuilt["links"]) == len(orig["links"])
+        g = _graph()
+        ks = next(n for n in rebuilt["nodes"] if n["type"] == "KSampler")
+        assert ks["widgets_values"][g.widget_order("KSampler").index("seed")] == 42  # preserved
+
+        from comfy_cli.workflow_to_api import convert_ui_to_api
+
+        api = convert_ui_to_api(rebuilt, _object_info())
+        ks_api = next(v for v in api.values() if v["class_type"] == "KSampler")
+        assert isinstance(ks_api["inputs"].get("latent_image"), list)  # wiring preserved
+
+    def test_capture_lifts_widget_to_param_even_at_default(self, patched_graph, tmp_path, capsys):
+        """`--param` promotes a widget to a ${param} hole even when its value is the
+        node default (the footgun: capture would otherwise drop it)."""
+        # EmptyLatentImage.width=512 IS the default → normally not captured.
+        src = _write(tmp_path, _base_workflow())
+        lat_id = next(n["id"] for n in _base_workflow()["nodes"] if n["type"] == "EmptyLatentImage")
+        cap = _run(["capture", str(src), "--param", f"{lat_id}.width=w"], capsys)
+        assert cap["ok"] is True, cap
+        recipe = cap["data"]["recipe_doc"]
+        assert "w" in recipe["params"] and recipe["params"]["w"]["type"] == "int"
+        assert any(o["op"] == "set_widget" and o.get("value") == "${w}" for o in recipe["ops"])
+        # and it applies with an override
+        empty = _write(tmp_path, {"nodes": [], "links": [], "last_node_id": 0, "last_link_id": 0}, "e.json")
+        rp = tmp_path / "r.json"
+        rp.write_text(json.dumps(recipe), encoding="utf-8")
+        env = _run(["apply", str(empty), "--ops", str(rp), "--param", "w=768"], capsys)
+        assert env["ok"] is True, env
+        g = _graph()
+        lat = next(n for n in json.loads(empty.read_text())["nodes"] if n["type"] == "EmptyLatentImage")
+        assert lat["widgets_values"][g.widget_order("EmptyLatentImage").index("width")] == 768
+
+    def test_capture_param_rejects_unknown_target(self, patched_graph, tmp_path, capsys):
+        src = _write(tmp_path, _base_workflow())
+        env = _run(["capture", str(src), "--param", "3.nope=x"], capsys)
+        assert env["ok"] is False
+        assert env["error"]["code"] == "workflow_edit_invalid"
+
+    def test_capture_rejects_subgraphs(self, patched_graph, tmp_path, capsys):
+        wf = _base_workflow()
+        wf["definitions"] = {"subgraphs": [{"id": "sg", "name": "x", "nodes": []}]}
+        path = _write(tmp_path, wf)
+        env = _run(["capture", str(path)], capsys)
+        assert env["ok"] is False
+        assert "subgraph" in env["error"]["message"].lower()
+
+
+# ---------------------------------------------------------------------------
 # op-model correctness — direct against workflow_ops (P1..P7)
 # ---------------------------------------------------------------------------
 
