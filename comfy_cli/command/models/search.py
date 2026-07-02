@@ -29,7 +29,7 @@ import re
 import urllib.error
 import urllib.parse
 import urllib.request
-from typing import Annotated, Any
+from typing import Annotated, Any, NoReturn
 
 import typer
 
@@ -124,6 +124,25 @@ def _http_get_json(url: str, target, timeout: float = 30.0) -> Any:
         return json.loads(body)
 
 
+def _emit_http_error(e: urllib.error.HTTPError, *, renderer, target, message: str, hint: str) -> NoReturn:
+    """Emit a renderer error for an ``HTTPError`` and exit with code 1.
+
+    Shared by the ``list-folders`` and ``search`` handlers, whose HTTPError
+    branches are identical: the error ``code`` is cloud/local-routed, and the
+    response body is truncated to 1 KiB and decoded (lossily) into ``details``
+    for debugging. Only ``message`` and ``hint`` differ per caller. The
+    single-hint ``show`` handler and the 404-special-casing ``list-folder``
+    handler deliberately do NOT use this — their shapes differ.
+    """
+    renderer.error(
+        code="cloud_http_error" if target.is_cloud else "server_not_running",
+        message=message,
+        hint=hint,
+        details={"status": e.code, "body": (e.read() or b"")[:1000].decode("utf-8", "replace")},
+    )
+    raise typer.Exit(code=1) from e
+
+
 # ---------------------------------------------------------------------------
 # list-folders / list-folder — runtime introspection
 # ---------------------------------------------------------------------------
@@ -149,15 +168,15 @@ def list_folders_cmd(
     try:
         data = _http_get_json(url, target)
     except urllib.error.HTTPError as e:
-        renderer.error(
-            code="cloud_http_error" if target.is_cloud else "server_not_running",
+        _emit_http_error(
+            e,
+            renderer=renderer,
+            target=target,
             message=f"HTTP {e.code} from {url}",
             hint="run `comfy auth whoami` to verify auth"
             if target.is_cloud
             else "run `comfy launch` to start a local server",
-            details={"status": e.code, "body": (e.read() or b"")[:1000].decode("utf-8", "replace")},
         )
-        raise typer.Exit(code=1) from e
     except (urllib.error.URLError, OSError, json.JSONDecodeError) as e:
         renderer.error(
             code="server_not_running" if not target.is_cloud else "cloud_http_error",
@@ -459,13 +478,13 @@ def search_cmd(
         else:
             rows, total = _local_search(target, text=text, type_=type_, limit=limit)
     except urllib.error.HTTPError as e:
-        renderer.error(
-            code="cloud_http_error" if target.is_cloud else "server_not_running",
+        _emit_http_error(
+            e,
+            renderer=renderer,
+            target=target,
             message=f"HTTP {e.code} during models search",
             hint="check auth (`comfy auth whoami`) or network",
-            details={"status": e.code, "body": (e.read() or b"")[:1000].decode("utf-8", "replace")},
         )
-        raise typer.Exit(code=1) from e
     except (urllib.error.URLError, OSError, json.JSONDecodeError) as e:
         renderer.error(
             code="cloud_http_error" if target.is_cloud else "server_not_running",
