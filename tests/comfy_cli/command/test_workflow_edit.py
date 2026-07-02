@@ -665,6 +665,74 @@ class TestRecipes:
 
 
 # ---------------------------------------------------------------------------
+# foreach — bulk-instantiate a recipe over N param-sets
+# ---------------------------------------------------------------------------
+
+
+class TestForeach:
+    def _recipe(self, tmp_path):
+        rp = tmp_path / "r.json"
+        rp.write_text(
+            json.dumps(
+                {
+                    "recipe": "t2i",
+                    "params": {"positive": {"type": "string"}, "steps": {"type": "int", "default": 20}},
+                    "ops": [
+                        {"op": "add_node", "class_type": "KSampler", "as": "ks"},
+                        {"op": "set_widget", "node": "ks", "widget": "steps", "value": "${steps}"},
+                        {"op": "add_node", "class_type": "CLIPTextEncode", "as": "pos"},
+                        {"op": "set_widget", "node": "pos", "widget": "text", "value": "${positive}"},
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        return rp
+
+    def test_foreach_materializes_one_workflow_per_param_set(self, patched_graph, tmp_path, capsys):
+        rp = self._recipe(tmp_path)
+        params = tmp_path / "sets.jsonl"
+        params.write_text('{"positive":"a cat","steps":10}\n{"positive":"a dog","steps":30}\n', encoding="utf-8")
+        out = tmp_path / "out"
+        env = _run(["foreach", str(rp), "--params", str(params), "--out-dir", str(out)], capsys)
+        assert env["ok"] is True, env
+        assert env["data"]["count"] == 2
+        files = sorted(out.glob("*.json"))
+        assert len(files) == 2
+        g = _graph()
+        seen = []
+        for f in files:
+            wf = json.loads(f.read_text())
+            pos = next(n for n in wf["nodes"] if n["type"] == "CLIPTextEncode")
+            ks = next(n for n in wf["nodes"] if n["type"] == "KSampler")
+            seen.append(
+                (
+                    pos["widgets_values"][g.widget_order("CLIPTextEncode").index("text")],
+                    ks["widgets_values"][g.widget_order("KSampler").index("steps")],
+                )
+            )
+        assert seen == [("a cat", 10), ("a dog", 30)]  # each param-set → its own workflow
+
+    def test_foreach_accepts_json_array(self, patched_graph, tmp_path, capsys):
+        rp = self._recipe(tmp_path)
+        params = tmp_path / "sets.json"
+        params.write_text(json.dumps([{"positive": "x"}, {"positive": "y"}, {"positive": "z"}]), encoding="utf-8")
+        out = tmp_path / "out"
+        env = _run(["foreach", str(rp), "--params", str(params), "--out-dir", str(out)], capsys)
+        assert env["ok"] is True
+        assert env["data"]["count"] == 3  # steps uses the default
+
+    def test_foreach_bad_param_set_fails(self, patched_graph, tmp_path, capsys):
+        rp = self._recipe(tmp_path)
+        params = tmp_path / "sets.jsonl"
+        params.write_text('{"steps":10}\n', encoding="utf-8")  # missing required positive
+        out = tmp_path / "out"
+        env = _run(["foreach", str(rp), "--params", str(params), "--out-dir", str(out)], capsys)
+        assert env["ok"] is False
+        assert "positive" in env["error"]["message"]
+
+
+# ---------------------------------------------------------------------------
 # capture — project a graph into a recipe; round-trips through apply
 # ---------------------------------------------------------------------------
 

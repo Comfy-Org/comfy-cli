@@ -345,22 +345,6 @@ def capture_cmd(
 # ---------------------------------------------------------------------------
 
 
-def _resolve_ref(ref: Any, aliases: dict[str, Any]) -> Any:
-    """Map an alias to its minted id; pass ints/unknown strings through."""
-    if isinstance(ref, str):
-        if ref in aliases:
-            return aliases[ref]
-        if ref.lstrip("-").isdigit():
-            return int(ref)
-    return ref
-
-
-def _split_ref_slot(spec_val: str, aliases: dict[str, Any]) -> tuple[Any, Any]:
-    """Split `<node_or_alias>.<slot>` and resolve the node part."""
-    node_part, _, slot = str(spec_val).partition(".")
-    return _resolve_ref(node_part, aliases), slot
-
-
 @tracking.track_command("workflow")
 def apply_cmd(
     file: Annotated[str, typer.Argument(help="Frontend-format workflow JSON.")],
@@ -423,42 +407,10 @@ def apply_cmd(
         renderer.error(code="workflow_edit_invalid", message=str(e))
         raise typer.Exit(code=1) from e
 
-    aliases: dict[str, Any] = {}
-    ops: list[dict] = []
     try:
-        for i, spec in enumerate(specs):
-            if not isinstance(spec, dict) or "op" not in spec:
-                raise ValueError(f"spec #{i} must be an object with an 'op' field")
-            kind = spec["op"]
-            if kind == "add_node":
-                workflow, op = workflow_ops.add_node(
-                    workflow, graph, spec["class_type"], pos=spec.get("at"), actor=actor, base_version=base_version
-                )
-                if spec.get("as"):
-                    aliases[spec["as"]] = op["node_id"]
-            elif kind == "connect":
-                fn, fs = _split_ref_slot(spec["from"], aliases)
-                tn, ts = _split_ref_slot(spec["to"], aliases)
-                workflow, op = workflow_ops.connect(
-                    workflow, graph, fn, fs, tn, ts, actor=actor, base_version=base_version
-                )
-            elif kind == "set_widget":
-                workflow, op = workflow_ops.set_widget(
-                    workflow,
-                    graph,
-                    _resolve_ref(spec["node"], aliases),
-                    spec["widget"],
-                    spec["value"],
-                    actor=actor,
-                    base_version=base_version,
-                )
-            elif kind == "delete_node":
-                workflow, op = workflow_ops.delete_node(
-                    workflow, graph, _resolve_ref(spec["node"], aliases), actor=actor, base_version=base_version
-                )
-            else:
-                raise ValueError(f"spec #{i}: unknown op {kind!r}")
-            ops.append(op)
+        workflow, ops, aliases = workflow_ops.apply_specs(
+            workflow, graph, specs, actor=actor, base_version=base_version
+        )
     except (ValueError, KeyError) as e:
         # Atomic batch: nothing is written if any spec fails.
         renderer.error(code="workflow_edit_invalid", message=f"batch failed: {e}")
@@ -486,3 +438,106 @@ def apply_cmd(
     if renderer.is_pretty():
         rprint(f"[bold green]✓[/bold green] applied {len(ops)} edit(s) → [dim]{p}[/dim]")
     renderer.emit(payload, command="workflow apply", changed=True)
+
+
+# ---------------------------------------------------------------------------
+# foreach — instantiate a recipe over N param-sets → N ready-to-run workflows
+# ---------------------------------------------------------------------------
+
+
+def _load_param_sets(raw: str, renderer) -> list[dict]:
+    """Param-sets are a JSON array of objects, a single object, or JSONL."""
+    raw = raw.strip()
+    try:
+        doc = json.loads(raw)
+        return doc if isinstance(doc, list) else [doc]
+    except json.JSONDecodeError:
+        pass
+    sets: list[dict] = []
+    for ln in raw.splitlines():
+        ln = ln.strip()
+        if not ln:
+            continue
+        try:
+            sets.append(json.loads(ln))
+        except json.JSONDecodeError as e:
+            renderer.error(code="workflow_edit_invalid", message=f"--params line is not JSON: {e}")
+            raise typer.Exit(code=1) from e
+    return sets
+
+
+@tracking.track_command("workflow")
+def foreach_cmd(
+    recipe_file: Annotated[str, typer.Argument(help="Recipe file: {params, ops}.")],
+    params_file: Annotated[
+        str,
+        typer.Option("--params", help="Param-sets: a JSON array of objects, one object, or JSONL; '-' for stdin."),
+    ],
+    out_dir: Annotated[str, typer.Option("--out-dir", help="Directory to write the N materialized workflows.")],
+    actor: Annotated[str, typer.Option("--actor")] = "cli",
+    base_version: Annotated[int, typer.Option("--base-version")] = 0,
+    input_path: Annotated[str | None, typer.Option("--input", show_default=False)] = None,
+    host: Annotated[str | None, typer.Option(show_default=False)] = None,
+    port: Annotated[int | None, typer.Option(show_default=False)] = None,
+    where: Annotated[str | None, typer.Option("--where", show_default=False, help="Catalog target: local | cloud.")] = None,
+):
+    """Instantiate a recipe over N param-sets → N ready-to-run workflows (bulk).
+    Run them with `comfy run --workflow <each> --where cloud`."""
+    import sys
+    from pathlib import Path
+
+    renderer = get_renderer()
+    renderer.command = "workflow foreach"
+    graph = _graph_or_exit(input_path, host, port, renderer, where)
+    try:
+        doc = json.loads(Path(recipe_file).expanduser().read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as e:
+        renderer.error(code="workflow_edit_invalid", message=f"cannot read recipe: {e}")
+        raise typer.Exit(code=1) from e
+    raw = sys.stdin.read() if params_file == "-" else _read_text_or_exit(renderer, params_file)
+    param_sets = _load_param_sets(raw, renderer)
+    if not param_sets:
+        renderer.error(code="workflow_edit_invalid", message="--params yielded no param-sets")
+        raise typer.Exit(code=1)
+
+    try:
+        specs_template, params_decl = workflow_ops.parse_recipe(doc)
+    except workflow_ops.RecipeError as e:
+        renderer.error(code="workflow_edit_invalid", message=str(e))
+        raise typer.Exit(code=1) from e
+
+    name = (doc.get("recipe") if isinstance(doc, dict) else None) or Path(recipe_file).expanduser().stem
+    out = Path(out_dir).expanduser()
+    out.mkdir(parents=True, exist_ok=True)
+    written: list[str] = []
+    try:
+        for i, pset in enumerate(param_sets):
+            if not isinstance(pset, dict):
+                raise workflow_ops.RecipeError(f"param-set #{i} must be a JSON object")
+            params = workflow_ops.resolve_params(params_decl, {k: str(v) for k, v in pset.items()})
+            specs = workflow_ops.substitute_params(specs_template, params)
+            wf: dict = {"nodes": [], "links": [], "last_node_id": 0, "last_link_id": 0}
+            wf, _ops, _aliases = workflow_ops.apply_specs(wf, graph, specs, actor=actor, base_version=base_version)
+            workflow_ops.strip_internal(wf)
+            target = out / f"{name}_{i:03d}.json"
+            _atomic_write_text(target, json.dumps(wf, indent=2))
+            written.append(str(target))
+    except (workflow_ops.RecipeError, ValueError, KeyError) as e:
+        renderer.error(code="workflow_edit_invalid", message=f"foreach failed: {e}")
+        raise typer.Exit(code=1) from e
+
+    payload = {"recipe": name, "count": len(written), "out_dir": str(out), "written": written}
+    if renderer.is_pretty():
+        rprint(f"[bold green]✓[/bold green] materialized {len(written)} workflow(s) → [dim]{out}[/dim]")
+        rprint("[dim]run each: comfy run --workflow <file> --where cloud[/dim]")
+    renderer.emit(payload, command="workflow foreach", changed=bool(written))
+
+
+def _read_text_or_exit(renderer, path: str) -> str:
+    from pathlib import Path
+
+    try:
+        return Path(path).expanduser().read_text(encoding="utf-8")
+    except OSError as e:
+        renderer.error(code="workflow_edit_invalid", message=f"cannot read --params file: {e}")
+        raise typer.Exit(code=1) from e

@@ -765,3 +765,4 @@ app.command("delete-node", help="Delete a node and its links; emits a delete_nod
 app.command("ls-nodes", help="List nodes (id/type/title) in a workflow file.")(_wedit.ls_nodes_cmd)
 app.command("apply", help="Apply a recipe / batch of edits in one pass; supports node aliases + --param.")(_wedit.apply_cmd)
 app.command("capture", help="Project a workflow into a reusable recipe (the op-batch that rebuilds it).")(_wedit.capture_cmd)
+app.command("foreach", help="Instantiate a recipe over N param-sets → N workflows (bulk generation).")(_wedit.foreach_cmd)

@@ -362,6 +362,59 @@ def _slot_name(slots: Any, idx: Any) -> Any:
 
 
 # ---------------------------------------------------------------------------
+# apply_specs — run a batch of edit specs (add_node/connect/set_widget/delete_node)
+# with `as` aliases so later specs reference just-minted nodes. Shared by the
+# `apply` and `foreach` commands. Raises on a malformed spec so the caller can keep
+# the batch atomic (write nothing on failure).
+# ---------------------------------------------------------------------------
+
+
+def resolve_ref(ref: Any, aliases: dict[str, Any]) -> Any:
+    """Map an alias to its minted id; pass ints/unknown strings through."""
+    if isinstance(ref, str):
+        if ref in aliases:
+            return aliases[ref]
+        if ref.lstrip("-").isdigit():
+            return int(ref)
+    return ref
+
+
+def _split_ref_slot(spec_val: str, aliases: dict[str, Any]) -> tuple[Any, Any]:
+    """Split `<node_or_alias>.<slot>` and resolve the node part."""
+    node_part, _, slot = str(spec_val).partition(".")
+    return resolve_ref(node_part, aliases), slot
+
+
+def apply_specs(workflow: dict, graph, specs: list, *, actor: str = "cli", base_version: int = 0) -> tuple[dict, list, dict]:
+    """Apply edit specs to ``workflow`` in order. Returns (workflow, ops, aliases)."""
+    aliases: dict[str, Any] = {}
+    ops: list[dict] = []
+    for i, spec in enumerate(specs):
+        if not isinstance(spec, dict) or "op" not in spec:
+            raise ValueError(f"spec #{i} must be an object with an 'op' field")
+        kind = spec["op"]
+        if kind == "add_node":
+            workflow, op = add_node(workflow, graph, spec["class_type"], pos=spec.get("at"), actor=actor, base_version=base_version)
+            if spec.get("as"):
+                aliases[spec["as"]] = op["node_id"]
+        elif kind == "connect":
+            fn, fs = _split_ref_slot(spec["from"], aliases)
+            tn, ts = _split_ref_slot(spec["to"], aliases)
+            workflow, op = connect(workflow, graph, fn, fs, tn, ts, actor=actor, base_version=base_version)
+        elif kind == "set_widget":
+            workflow, op = set_widget(
+                workflow, graph, resolve_ref(spec["node"], aliases), spec["widget"], spec["value"],
+                actor=actor, base_version=base_version,
+            )
+        elif kind == "delete_node":
+            workflow, op = delete_node(workflow, graph, resolve_ref(spec["node"], aliases), actor=actor, base_version=base_version)
+        else:
+            raise ValueError(f"spec #{i}: unknown op {kind!r}")
+        ops.append(op)
+    return workflow, ops, aliases
+
+
+# ---------------------------------------------------------------------------
 # apply — the deterministic, idempotent replay used by every consumer
 # ---------------------------------------------------------------------------
 
