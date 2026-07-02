@@ -52,6 +52,10 @@ dependencies = [
   "uv>=0.11.15",
 
   "websocket-client",
+  # Bundled static ffmpeg so `comfy preview` renders video/audio previews on
+  # machines without a system ffmpeg (the CLI-as-agent path). ffprobe metadata
+  # still needs system ffprobe; preview degrades to extension-based classification.
+  "imageio-ffmpeg",
 ]
 
 optional-dependencies.dev = [ "jsonschema", "pre-commit", "pytest", "pytest-cov", "ruff" ]

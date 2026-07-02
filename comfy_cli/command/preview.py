@@ -110,15 +110,41 @@ def build_preview_cmd(
     return base + ["-frames:v", "1", "-vf", f"scale='min({width},iw)':-1", out_path]
 
 
-def _ffprobe(path: Path) -> dict:
+def _ffprobe(path: Path, ffprobe_bin: str = "ffprobe") -> dict:
     proc = subprocess.run(
-        ["ffprobe", "-v", "error", "-print_format", "json", "-show_streams", "-show_format", str(path)],
+        [ffprobe_bin, "-v", "error", "-print_format", "json", "-show_streams", "-show_format", str(path)],
         capture_output=True,
         text=True,
     )
     if proc.returncode != 0:
         raise RuntimeError(proc.stderr.strip() or "ffprobe failed")
     return json.loads(proc.stdout or "{}")
+
+
+def _resolve_ffmpeg() -> str | None:
+    """System ``ffmpeg``, else the static binary bundled with imageio-ffmpeg
+    (if installed). Lets `comfy preview` render on a box with no system ffmpeg."""
+    found = shutil.which("ffmpeg")
+    if found:
+        return found
+    try:
+        import imageio_ffmpeg
+
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:
+        return None
+
+
+_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tiff"}
+_AUDIO_EXTS = {".mp3", ".wav", ".flac", ".ogg", ".m4a", ".aac", ".opus"}
+
+
+def _classify_by_ext(path: Path) -> dict:
+    """Fallback classification when ffprobe is unavailable (e.g. only the
+    imageio-ffmpeg static ffmpeg is present): pick kind from the extension."""
+    ext = path.suffix.lower()
+    kind = "image" if ext in _IMAGE_EXTS else "audio" if ext in _AUDIO_EXTS else "video"
+    return {"kind": kind, "width": None, "height": None, "fps": None, "duration": None, "has_audio": None}
 
 
 @tracking.track_command("preview")
@@ -137,19 +163,26 @@ def preview_cmd(
     if not file.is_file():
         renderer.error(code="preview_input_not_found", message=f"File not found: {file}", hint="check the path")
         raise typer.Exit(code=1)
-    if not (shutil.which("ffmpeg") and shutil.which("ffprobe")):
+    ffmpeg_bin = _resolve_ffmpeg()
+    if not ffmpeg_bin:
         renderer.error(
             code="ffmpeg_unavailable",
-            message="ffmpeg/ffprobe not found on PATH — `comfy preview` needs them.",
-            hint="install ffmpeg (e.g. `brew install ffmpeg` / `apt install ffmpeg`)",
+            message="ffmpeg not found — `comfy preview` needs it to render.",
+            hint="install ffmpeg (`brew install ffmpeg` / `apt install ffmpeg`) or `pip install imageio-ffmpeg`",
         )
         raise typer.Exit(code=1)
 
-    try:
-        info = classify_streams(_ffprobe(file))
-    except (RuntimeError, json.JSONDecodeError) as e:
-        renderer.error(code="preview_failed", message=f"Could not probe {file}: {e}")
-        raise typer.Exit(code=1) from e
+    ffprobe_bin = shutil.which("ffprobe")
+    if ffprobe_bin:
+        try:
+            info = classify_streams(_ffprobe(file, ffprobe_bin))
+        except (RuntimeError, json.JSONDecodeError) as e:
+            renderer.error(code="preview_failed", message=f"Could not probe {file}: {e}")
+            raise typer.Exit(code=1) from e
+    else:
+        # ffmpeg present (likely the imageio-ffmpeg static build) but no ffprobe:
+        # classify by extension and let ffmpeg render the preview anyway.
+        info = _classify_by_ext(file)
     if info["kind"] == "unknown":
         renderer.error(
             code="preview_unsupported_media",
@@ -168,6 +201,7 @@ def preview_cmd(
     cmd = build_preview_cmd(
         info["kind"], str(file), str(out_path), grid=(cols, rows), width=width, duration=info["duration"]
     )
+    cmd[0] = ffmpeg_bin  # use the resolved binary (system or imageio-ffmpeg's static build)
     proc = subprocess.run(cmd, capture_output=True, text=True)
     if proc.returncode != 0 or not out_path.is_file():
         renderer.error(
