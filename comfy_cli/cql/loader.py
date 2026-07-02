@@ -19,7 +19,6 @@ and are short-circuited when no host is provided.
 from __future__ import annotations
 
 import hashlib
-import ipaddress
 import json
 import os
 import sys
@@ -29,6 +28,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
+from comfy_cli.cql._net import is_loopback_host
 from comfy_cli.cql.errors import CQLRuntimeError
 
 # Cap raw bytes read from disk or the network. Real `object_info` dumps are a
@@ -96,13 +96,7 @@ def _load_from_server(host: str, port: int, *, timeout: float) -> dict[str, Any]
     # own path; this loader is local-only by design.)
     parsed = urllib.parse.urlsplit(url)
     hostname = (parsed.hostname or "").strip().lower()
-    is_loopback = hostname == "localhost"
-    if not is_loopback:
-        try:
-            is_loopback = ipaddress.ip_address(hostname).is_loopback
-        except ValueError:
-            is_loopback = False
-    if not is_loopback:
+    if not is_loopback_host(hostname):
         raise CQLRuntimeError(
             f"refusing non-loopback CQL server target: {host}",
             details={"hint": "pass --input <path> for remote object_info dumps"},
