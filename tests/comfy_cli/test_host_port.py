@@ -53,6 +53,25 @@ def test_parse_host_port_arg_unterminated_bracket_raises():
         parse_host_port_arg("[::1")
 
 
+@pytest.mark.parametrize("value", ["[::1]8188", "[::1]junk"])
+def test_parse_host_port_arg_trailing_text_after_bracket_raises(value):
+    # A missing/garbled ':' after ']' must error, not silently drop the port.
+    with pytest.raises(typer.BadParameter):
+        parse_host_port_arg(value)
+
+
+@pytest.mark.parametrize("value", ["host:0", "host:-1", "host:99999", "[::1]:0", "[::1]:70000"])
+def test_parse_host_port_arg_out_of_range_port_raises(value):
+    with pytest.raises(typer.BadParameter):
+        parse_host_port_arg(value)
+
+
+@pytest.mark.parametrize("value", [":8188", "[]:8188"])
+def test_parse_host_port_arg_empty_host_raises(value):
+    with pytest.raises(typer.BadParameter):
+        parse_host_port_arg(value)
+
+
 # ---------------------------------------------------------------------------
 # validate_host
 # ---------------------------------------------------------------------------
@@ -65,6 +84,12 @@ def test_validate_host_allows_safe(host):
 
 @pytest.mark.parametrize("host", ["evil.com/@x", "a/b", "h@ost", "h?ost", "h#ost"])
 def test_validate_host_rejects_url_special_chars(host):
+    with pytest.raises(typer.BadParameter):
+        validate_host(host)
+
+
+@pytest.mark.parametrize("host", ["host\r\nX", "ho st", "host\t", "host\x00"])
+def test_validate_host_rejects_whitespace_and_control_chars(host):
     with pytest.raises(typer.BadParameter):
         validate_host(host)
 
