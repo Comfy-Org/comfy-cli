@@ -23,6 +23,7 @@ import ipaddress
 import json
 import os
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -281,9 +282,12 @@ def _from_api_workflow(data: dict[str, Any]) -> dict[str, Any]:
 # raw object_info path didn't leverage it, and there was no offline fallback.
 #
 # ``resilient_load_object_info`` wraps the engine's network fetch with:
-#   1. auto-cache of every successful fetch (per host),
-#   2. one refresh-and-retry on failure, and
-#   3. a stale-cache fallback (with a clear stderr warning) when the retry
+#   1. a cache-first TTL gate: a cache entry younger than the TTL (default
+#      10 minutes, ``COMFY_OBJECT_INFO_TTL`` seconds to override, ``0`` to
+#      always fetch) is served without any network call,
+#   2. auto-cache of every successful fetch (per host),
+#   3. one refresh-and-retry on failure, and
+#   4. a stale-cache fallback (with a clear stderr warning) when the retry
 #      still fails — only raising the original error when no cache exists.
 #
 # An explicit ``--input <object_info.json>`` always wins and is never cached.
@@ -355,6 +359,51 @@ def read_object_info_cache(host_key: str) -> dict[str, Any] | None:
     return data if isinstance(data, dict) else None
 
 
+# Cache-first TTL policy. A cache entry younger than this is served without a
+# network call; the entry's age is its file mtime (``write_object_info_cache``
+# writes via tmp + ``os.replace``, so mtime == fetch time).
+DEFAULT_OBJECT_INFO_TTL_SECONDS = 600.0
+OBJECT_INFO_TTL_ENV = "COMFY_OBJECT_INFO_TTL"
+
+
+def object_info_cache_ttl() -> float:
+    """TTL (seconds) for the cache-first object_info gate.
+
+    Reads ``COMFY_OBJECT_INFO_TTL``; unset/blank/unparseable values fall back
+    to the 10-minute default. ``0`` (or any value <= 0) disables the
+    cache-first gate entirely — every call fetches live, restoring the
+    pre-TTL behavior (the stale-cache *failure* fallback still applies).
+    """
+    raw = os.environ.get(OBJECT_INFO_TTL_ENV)
+    if raw is None or not raw.strip():
+        return DEFAULT_OBJECT_INFO_TTL_SECONDS
+    try:
+        ttl = float(raw)
+    except ValueError:
+        return DEFAULT_OBJECT_INFO_TTL_SECONDS
+    return max(ttl, 0.0)
+
+
+def read_fresh_object_info_cache(host_key: str, ttl: float) -> dict[str, Any] | None:
+    """Return the cached dump for ``host_key`` iff it is younger than ``ttl``.
+
+    Freshness is judged by the cache file's mtime. Returns ``None`` when the
+    TTL gate is disabled (``ttl <= 0``), the file is missing/unreadable, the
+    entry has expired, or the mtime is in the future (clock skew — treat as
+    expired rather than trusting a timestamp we can't reason about).
+    """
+    if ttl <= 0:
+        return None
+    path = object_info_cache_path(host_key)
+    try:
+        age = time.time() - path.stat().st_mtime
+    except OSError:
+        return None
+    if age < 0 or age >= ttl:
+        return None
+    return read_object_info_cache(host_key)
+
+
 def _resolve_host_key(mode: str, host: str, port: int) -> str:
     """Resolve the cache key (the target base URL) without doing any I/O.
 
@@ -380,18 +429,24 @@ def resilient_load_object_info(
     _warn=None,
     on_stale=None,
 ) -> dict[str, Any]:
-    """Fetch ``object_info`` with cache + refresh-retry + stale fallback.
+    """Fetch ``object_info`` cache-first, with refresh-retry + stale fallback.
 
     Resolution order:
 
     1. ``input_path`` — explicit offline dump always wins; never cached.
-    2. Live fetch via the engine. On success, write the per-host cache.
-    3. On failure: attempt ``ensure_fresh_session`` and retry the fetch ONCE.
+    2. Cache-first TTL gate: a per-host cache entry younger than the TTL
+       (default 10 minutes; ``COMFY_OBJECT_INFO_TTL`` seconds to override,
+       ``0`` to always fetch live) is returned with NO network call.
+    3. Live fetch via the engine. On success, write the per-host cache.
+    4. On failure: attempt ``ensure_fresh_session`` and retry the fetch ONCE.
        On success, write the cache.
-    4. Still failing: fall back to the cached dump (if any) with a clear
-       stderr WARNING that it may be stale.
-    5. No cache: re-raise the original ``LoadError`` (callers map it to the
+    5. Still failing: fall back to the cached dump (if any, regardless of
+       age) with a clear stderr WARNING that it may be stale.
+    6. No cache: re-raise the original ``LoadError`` (callers map it to the
        ``cql_no_graph`` envelope with their existing hint).
+
+    The cache key is the resolved target base URL, so local vs cloud — and
+    distinct base URLs — never share an entry.
 
     ``_warn`` is an injectable sink for the stale-cache warning (defaults to
     stderr); tests pass their own to assert on it.
@@ -404,6 +459,10 @@ def resilient_load_object_info(
         return _load_from_file(input_path)
 
     host_key = _resolve_host_key(mode, host, port)
+
+    fresh = read_fresh_object_info_cache(host_key, object_info_cache_ttl())
+    if fresh is not None:
+        return fresh
 
     try:
         data = _load_from_target(mode=mode, host=host, port=port)
