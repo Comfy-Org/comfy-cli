@@ -115,6 +115,7 @@
       },
       "widgets_values": [
         123456789,
+        "fixed",
         20,
         7.0,
         "euler",

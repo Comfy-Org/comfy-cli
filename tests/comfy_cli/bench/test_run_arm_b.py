@@ -188,6 +188,49 @@ def test_dispatch_unknown_tool_is_error(dispatcher):
     assert is_error and "unknown tool" in result["error"]
 
 
+def test_dispatch_vary_over_cap_is_error(dispatcher):
+    # An unbounded model-supplied list length is capped so a runaway call fails loudly.
+    result, is_error = dispatcher.dispatch("vary", {"slots": {"3.seed": list(range(arm_b.MAX_VARIANTS + 1))}})
+    assert is_error and "capped" in result["error"]
+
+
+def test_dispatch_vary_calls_do_not_overwrite(dispatcher):
+    # Two vary calls in one task must not clobber each other's variant files.
+    r1, e1 = dispatcher.dispatch("vary", {"slots": {"3.seed": [1, 2]}})
+    r2, e2 = dispatcher.dispatch("vary", {"slots": {"3.seed": [3, 4]}})
+    assert not e1 and not e2
+    assert set(r1["written"]).isdisjoint(r2["written"])
+    # Both calls' files coexist on disk (namespaced per call).
+    written = set(r1["written"]) | set(r2["written"])
+    assert len(list((dispatcher.variant_dir).rglob("*.json"))) == len(written) == 4
+
+
+def test_dispatch_catch_all_error_is_generic(dispatcher, monkeypatch):
+    # An unexpected exception must not leak its raw message (possibly a local path) to the model.
+    def boom(*_a, **_k):
+        raise RuntimeError("/secret/local/path leaked")
+
+    monkeypatch.setattr(dispatcher, "_slots", boom)
+    result, is_error = dispatcher.dispatch("slots", {})
+    assert is_error and "secret" not in result["error"] and "internal error" in result["error"]
+
+
+def test_edit_session_seed_ksampler_slots_align():
+    # Regression: the KSampler widgets_values must include control_after_generate so slots
+    # map positionally (steps=20, cfg=7.0), not off-by-one.
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as td:
+        wf = Path(td) / "wf.json"
+        wf.write_text((FIXTURES / "edit_session_seed.json").read_text(encoding="utf-8"), encoding="utf-8")
+        disp = arm_b.ToolDispatcher(OBJECT_INFO, wf, Path(td) / "v")
+        slots, _ = disp.dispatch("slots", {})
+        by_addr = {s["address"]: s["current_value"] for s in slots["slots"]}
+        assert by_addr["3.steps"] == 20
+        assert by_addr["3.cfg"] == 7.0
+        assert by_addr["3.sampler_name"] == "euler"
+
+
 # --------------------------------------------------------------------------- #
 # driver loop with the stub client
 # --------------------------------------------------------------------------- #
@@ -280,3 +323,56 @@ def test_tasks_json_prompts_are_present_and_nonempty():
     for t in tasks:
         for p in t["prompts"]:
             assert isinstance(p, str) and p.strip()
+
+
+# --------------------------------------------------------------------------- #
+# input validation + fail-fast guards
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize("bad", ["../evil", "a/b", "a\\b", "..", ".", "", None, 5])
+def test_validate_task_id_rejects_unsafe(bad):
+    with pytest.raises(ValueError):
+        arm_b._validate_task_id(bad)
+
+
+def test_validate_task_id_accepts_normal():
+    assert arm_b._validate_task_id("t4") == "t4"
+
+
+def test_seed_for_task_unknown_seed_fails_fast():
+    with pytest.raises(ValueError):
+        arm_b._seed_for_task({"id": "tx", "seedWorkflow": "bogus-seed"}, FIXTURES)
+    # None seed (t1/t3 build-from-scratch) still resolves to the txt2img template.
+    assert arm_b._seed_for_task({"id": "t1", "seedWorkflow": None}, FIXTURES).name == "txt2img_seed.json"
+
+
+def test_run_unknown_model_fails_fast(tmp_path):
+    with pytest.raises(ValueError):
+        arm_b.run(
+            dry_run=True,
+            out_path=tmp_path / "out.ndjson",
+            object_info_path=OBJECT_INFO,
+            tasks_path=arm_b.TASKS_PATH,
+            model="gpt-4o",
+            work_dir=tmp_path / "work",
+        )
+
+
+def test_truncated_turn_marks_outcome_and_stops(tmp_path):
+    # A turn cut short (non-terminal stop reason) is stamped "truncated" and the task's
+    # remaining turns are skipped so the shared transcript never goes invalid.
+    plan = {("t4", 1): [([arm_b._text("cut off mid-thought")], "max_tokens", arm_b._usage(100, 20, 0, 0))]}
+    driver = arm_b._StubDriver(arm_b.StubClient(plan), model=arm_b.DEFAULT_MODEL)
+    task = {"id": "t4", "title": "edit session", "seedWorkflow": "edit-session-seed", "prompts": ["a", "b", "c"]}
+    rows: list[dict] = []
+    arm_b.run_task_stub(
+        task,
+        driver=driver,
+        fixtures_dir=FIXTURES,
+        object_info_path=OBJECT_INFO,
+        work_dir=tmp_path,
+        on_row=rows.append,
+    )
+    assert len(rows) == 1  # turns 2 and 3 skipped
+    assert rows[0]["outcome"] == "truncated" and rows[0]["note"]

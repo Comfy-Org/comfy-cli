@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import shutil
 import sys
 import time
@@ -46,6 +47,8 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Pricing — mirror of comfy-inapp-agent/agent-server/usage.mjs PRICING so the two
@@ -65,6 +68,10 @@ CACHE_READ_MULT = 0.1
 CACHE_WRITE_MULT = 1.25
 
 DEFAULT_MODEL = "claude-opus-4-8"
+
+# Upper bound on variants a single `vary` tool call may produce — guards against an
+# unbounded model-supplied list length exhausting memory/disk.
+MAX_VARIANTS = 64
 
 # Token fields the runner captures from the Anthropic ``usage`` block, emitted
 # verbatim so report.mjs can recompute cost from them.
@@ -219,6 +226,7 @@ class ToolDispatcher:
         self.graph = Graph.load(input_path=str(object_info_path))
         self.workflow_path = Path(workflow_path)
         self.variant_dir = Path(variant_dir)
+        self._vary_calls = 0  # namespaces each vary invocation's output files
 
     def _load_workflow(self) -> dict[str, Any]:
         return json.loads(self.workflow_path.read_text(encoding="utf-8"))
@@ -235,8 +243,12 @@ class ToolDispatcher:
             if handler is None:
                 return {"error": f"unknown tool {name!r}"}, True
             return handler(tool_input or {})
-        except Exception as e:  # dispatch must be total — surface the error to the model
-            return {"error": f"{type(e).__name__}: {e}"}, True
+        except Exception:  # dispatch must be total — never raise into the loop
+            # Log full detail locally, but return only a generic message: the result
+            # is sent to the external Anthropic API on a live run and the raw exception
+            # string can embed absolute filesystem paths / other local state.
+            logger.exception("tool %r raised while dispatching", name)
+            return {"error": f"internal error while running tool {name!r}"}, True
 
     # -- read tools --
 
@@ -288,18 +300,30 @@ class ToolDispatcher:
         if len(set(lengths.values())) != 1:
             return {"error": f"all `slots` lists must be the same length; got {lengths}."}, True
         n = next(iter(lengths.values()))
+        if n < 1:
+            return {"error": "vary requires at least one value per slot."}, True
+        if n > MAX_VARIANTS:
+            # A model-supplied list length is unbounded; deep-copying the workflow n
+            # times would exhaust memory/disk/inodes. Cap it so a runaway tool call fails
+            # loudly instead of hanging.
+            return {"error": f"vary is capped at {MAX_VARIANTS} variants per call; requested {n}."}, True
         variations = [{a: v[i] for a, v in by_addr.items()} for i in range(n)]
         wf = self._load_workflow()
         try:
             workflows, warnings = self.graph.expand_variations(wf, variations)
         except ValueError as e:
             return {"error": str(e)}, True
-        self.variant_dir.mkdir(parents=True, exist_ok=True)
+        # Namespace each vary call's files so a second call in the same task can't
+        # silently overwrite the first call's variants (both would restart at _000).
+        call_idx = self._vary_calls
+        self._vary_calls += 1
+        out_dir = self.variant_dir / f"call_{call_idx:03d}"
+        out_dir.mkdir(parents=True, exist_ok=True)
         written = []
         for i, w in enumerate(workflows):
-            target = self.variant_dir / f"{self.workflow_path.stem}_{i:03d}.json"
+            target = out_dir / f"{self.workflow_path.stem}_{i:03d}.json"
             target.write_text(json.dumps(w, indent=2), encoding="utf-8")
-            written.append(target.name)
+            written.append(f"{out_dir.name}/{target.name}")
         return {"count": len(workflows), "written": written, "warnings": warnings}, False
 
 
@@ -328,6 +352,9 @@ class TurnTelemetry:
     tool_input_bytes: list[int] = field(default_factory=list)
     tool_output_bytes: list[int] = field(default_factory=list)
     duration_ms: float = 0.0
+    # Turn completion status: "ok" when the model ended cleanly, "truncated" when the
+    # turn was cut short (non-terminal stop reason or MAX_API_CALLS_PER_TURN exhaustion).
+    stop_status: str = "ok"
 
     def add_usage(self, usage: dict[str, int]) -> None:
         for f in TOKEN_FIELDS:
@@ -434,6 +461,7 @@ class Driver:
             messages = []
         tel = TurnTelemetry()
         messages.append({"role": "user", "content": prompt})
+        completed = False
         for _ in range(MAX_API_CALLS_PER_TURN):
             t0 = time.perf_counter()
             resp = self._create(messages)
@@ -446,24 +474,45 @@ class Driver:
             content = _battr(resp, "content") or []
             messages.append({"role": "assistant", "content": content})
             tool_uses = [b for b in content if _battr(b, "type") == "tool_use"]
-            if _battr(resp, "stop_reason") != "tool_use" or not tool_uses:
-                break
+            stop_reason = _battr(resp, "stop_reason")
 
-            tool_results = []
-            for tu in tool_uses:
-                tu_input = _battr(tu, "input") or {}
-                result, is_error = dispatcher.dispatch(_battr(tu, "name"), tu_input)
-                result_json = json.dumps(result)
-                tel.add_tool(len(json.dumps(tu_input)), len(result_json))
-                tool_results.append(
-                    {
-                        "type": "tool_result",
-                        "tool_use_id": _battr(tu, "id"),
-                        "content": result_json,
-                        "is_error": is_error,
-                    }
-                )
-            messages.append({"role": "user", "content": tool_results})
+            # Always answer every tool_use the model emitted — even when it also signalled
+            # a terminal stop_reason. Leaving a tool_use unanswered makes the transcript
+            # invalid, and since a task's turns (t4) share one `messages` list, the next
+            # turn's create() would 400 on the dangling tool_use.
+            if tool_uses:
+                tool_results = []
+                for tu in tool_uses:
+                    tu_input = _battr(tu, "input") or {}
+                    result, is_error = dispatcher.dispatch(_battr(tu, "name"), tu_input)
+                    result_json = json.dumps(result, ensure_ascii=False)
+                    # Measure true UTF-8 payload bytes (not escaped-ASCII lengths) so the
+                    # byte comparison against arm A isn't skewed by unicode-heavy payloads.
+                    tel.add_tool(
+                        len(json.dumps(tu_input, ensure_ascii=False).encode("utf-8")),
+                        len(result_json.encode("utf-8")),
+                    )
+                    tool_results.append(
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": _battr(tu, "id"),
+                            "content": result_json,
+                            "is_error": is_error,
+                        }
+                    )
+                messages.append({"role": "user", "content": tool_results})
+
+            if stop_reason != "tool_use" or not tool_uses:
+                # The model stopped. "end_turn"/"stop_sequence" are clean completions;
+                # anything else (e.g. "max_tokens") means the turn was cut short.
+                completed = True
+                if stop_reason not in ("end_turn", "stop_sequence", "tool_use"):
+                    tel.stop_status = "truncated"
+                break
+        if not completed:
+            # Exhausted MAX_API_CALLS_PER_TURN still mid-tool-loop: the transcript ends on a
+            # dangling tool_result (user) turn, so the task must not continue onto it.
+            tel.stop_status = "truncated"
         return tel
 
 
@@ -477,7 +526,16 @@ def _seed_for_task(task: dict[str, Any], fixtures_dir: Path) -> Path:
     """
     name = task.get("seedWorkflow")
     mapping = {"txt2img-seed": "txt2img_seed.json", "edit-session-seed": "edit_session_seed.json"}
-    return fixtures_dir / mapping.get(name, "txt2img_seed.json")
+    if name is None:
+        # t1/t3 build from scratch; arm B seeds from the txt2img template and micro-edits it.
+        return fixtures_dir / "txt2img_seed.json"
+    if name not in mapping:
+        # An unrecognized non-null seed id (typo / new upstream id) must fail loudly rather
+        # than silently run against the wrong seed graph.
+        raise ValueError(
+            f"unknown seedWorkflow {name!r} for task {task.get('id')!r}; expected one of {sorted(mapping)}"
+        )
+    return fixtures_dir / mapping[name]
 
 
 # t3 is the documented ceiling: arm B's slots/set-slot/vary can only EDIT an existing
@@ -495,6 +553,22 @@ def _task_outcome(task_id: str) -> tuple[str, str | None]:
     if task_id == "t3":
         return "ceiling", _T3_CEILING_NOTE
     return "ok", None
+
+
+def _resolve_outcome(task_id: str, tel: TurnTelemetry) -> tuple[str, str | None]:
+    """Combine the per-task stamp with the turn's actual completion status.
+
+    A truncated turn (non-terminal stop reason or MAX_API_CALLS_PER_TURN exhaustion)
+    must NOT be emitted as a successful row — that would corrupt the arm-A/arm-B
+    comparison this runner exists to produce.
+    """
+    if tel.stop_status == "truncated":
+        return (
+            "truncated",
+            "turn cut short (non-terminal stop reason or MAX_API_CALLS_PER_TURN exhausted); "
+            "remaining turns skipped to keep the shared transcript valid",
+        )
+    return _task_outcome(task_id)
 
 
 def run_task(
@@ -519,8 +593,10 @@ def run_task(
     messages: list[dict[str, Any]] = []
     for i, prompt in enumerate(task["prompts"], start=1):
         tel = driver.run_turn(dispatcher, prompt, messages)
-        outcome, note = _task_outcome(task["id"])
+        outcome, note = _resolve_outcome(task["id"], tel)
         on_row(build_row(task=task, turn=i, model=driver.model, tel=tel, outcome=outcome, note=note))
+        if tel.stop_status == "truncated":
+            break  # shared transcript is now invalid; don't run further turns on it
 
 
 # ---------------------------------------------------------------------------
@@ -759,8 +835,10 @@ def run_task_stub(
     messages: list[dict[str, Any]] = []
     for i, prompt in enumerate(task["prompts"], start=1):
         tel = driver.run_turn_for(dispatcher, task["id"], i, prompt, messages)
-        outcome, note = _task_outcome(task["id"])
+        outcome, note = _resolve_outcome(task["id"], tel)
         on_row(build_row(task=task, turn=i, model=driver.model, tel=tel, outcome=outcome, note=note))
+        if tel.stop_status == "truncated":
+            break  # shared transcript is now invalid; don't run further turns on it
 
 
 # ---------------------------------------------------------------------------
@@ -797,11 +875,25 @@ DEFAULT_OBJECT_INFO = FIXTURES_DIR / "object_info.json"
 DEFAULT_OUT = _HERE / "out" / "arm-b.ndjson"
 
 
+def _validate_task_id(task_id: Any) -> str:
+    """Reject task ids unsafe to interpolate into a filesystem path.
+
+    ``task['id']`` flows straight into scratch-file/variant-dir names; a crafted id with
+    a path separator or ``..`` would let a malicious ``--tasks`` file escape ``work_dir``.
+    """
+    if not isinstance(task_id, str) or not task_id:
+        raise ValueError(f"task id must be a non-empty string, got {task_id!r}")
+    if task_id in (".", "..") or "/" in task_id or "\\" in task_id or "\x00" in task_id:
+        raise ValueError(f"task id {task_id!r} may not contain path separators or '..'")
+    return task_id
+
+
 def load_tasks(path: str | Path = TASKS_PATH) -> list[dict[str, Any]]:
     data = json.loads(Path(path).read_text(encoding="utf-8"))
     tasks = data["tasks"]
     # Normalize: every task has a `prompts` list (matching child 1's taskPrompts()).
     for t in tasks:
+        _validate_task_id(t.get("id"))
         if "prompts" not in t or not isinstance(t["prompts"], list):
             t["prompts"] = [t["prompt"]] if t.get("prompt") else []
     return tasks
@@ -823,6 +915,11 @@ def run(
     only: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Run the whole matrix, write NDJSON to ``out_path``, and return the rows."""
+    if resolve_pricing(model) is None:
+        # Fail fast: an unknown model would price every turn at $0 (estimate_cost_usd → None
+        # → 0.0), making the run look free and silently skewing the dollar comparison.
+        known = ", ".join(entry[0] for entry in PRICING)
+        raise ValueError(f"model {model!r} has no pricing entry; add one to PRICING (known prefixes: {known}).")
     tasks = load_tasks(tasks_path)
     if only:
         tasks = [t for t in tasks if t["id"] in set(only)]
