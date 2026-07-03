@@ -27,8 +27,6 @@ from comfy_cli.command.workflow import (
 )
 from comfy_cli.output import get_renderer, rprint
 
-_SUBGRAPH_SEP = "/"
-
 
 def _split_addr(addr: str, renderer) -> tuple[Any, str]:
     """Split ``<node_id>.<name>`` → (node_id, name). node_id is int when numeric."""
@@ -141,15 +139,11 @@ def set_widget_cmd(
     p, workflow = _load_workflow_or_fail(renderer, file)
     graph = _graph_or_exit(input_path, host, port, renderer, where)
     node_id, widget = _split_addr(addr, renderer)
-    if isinstance(node_id, str) and _SUBGRAPH_SEP in node_id:
-        # Interior-of-subgraph edits aren't part of the top-level op/CRDT model
-        # (subgraph authoring is deferred by design). Route to the proven path.
-        renderer.error(
-            code="workflow_edit_invalid",
-            message=f"nested subgraph address {node_id!r} is not supported by set-widget",
-            hint=f"use `comfy workflow set-slot <file> '{addr}=<value>'` for values inside a subgraph",
-        )
-        raise typer.Exit(code=1)
+    # Subgraph addresses — a promoted input on a subgraph instance (flat
+    # ``57.text``, exactly what `slots` advertises) or an interior node (nested
+    # ``57/27.text``) — are resolved inside ``workflow_ops.set_widget`` against
+    # the same CQL resolver `slots` uses, and emit a replayable op that writes
+    # back into the subgraph definition.
     try:
         workflow, op = workflow_ops.set_widget(
             workflow, graph, node_id, widget, _parse_value(value), actor=actor, base_version=base_version

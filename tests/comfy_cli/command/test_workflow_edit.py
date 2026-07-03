@@ -20,6 +20,7 @@ from typing import Any
 import pytest
 from typer.testing import CliRunner
 
+from comfy_cli import workflow_ops
 from comfy_cli.caller import Caller
 from comfy_cli.command import workflow as workflow_cmd
 from comfy_cli.command import workflow_edit
@@ -341,6 +342,167 @@ class TestSetWidget:
 
 
 # ---------------------------------------------------------------------------
+# set-widget on SUBGRAPH-based templates (the modern gallery templates)
+#
+# Modern ComfyUI templates wrap their real nodes inside a subgraph *instance*
+# (a top-level node whose `type` is a subgraph UUID). `slots` advertises the
+# instance's promoted inputs as flat `<instance>.<input>` addresses (e.g.
+# `57.text`). set-widget MUST accept the SAME address slots emits — descending
+# into the subgraph definition and writing the interior node's widget — plus the
+# nested `<instance>/<inner>.<input>` form the skill documents.
+# ---------------------------------------------------------------------------
+
+
+_SG_UUID = "f2fdebf6-dfaf-43b6-9eb2-7f70613cfdc1"
+
+
+def _subgraph_workflow() -> dict:
+    """A minimal curated subgraph template (derived from a fetched gallery
+    template): a top-level subgraph instance `57` whose promoted `text`/`seed`/
+    `steps` route through `proxyWidgets` to interior CLIPTextEncode `27` and
+    KSampler `3`, plus a plain top-level node `9` so we can prove top-level edits
+    still work alongside subgraph edits."""
+    return {
+        "last_node_id": 60,
+        "last_link_id": 0,
+        "nodes": [
+            {
+                "id": 57,
+                "type": _SG_UUID,
+                "pos": [0, 0],
+                "inputs": [],
+                "outputs": [],
+                "properties": {"proxyWidgets": [["27", "text"], ["3", "seed"], ["3", "steps"]]},
+            },
+            {
+                "id": 9,
+                "type": "EmptyLatentImage",
+                "pos": [10, 10],
+                "inputs": [],
+                "outputs": [{"name": "LATENT", "type": "LATENT", "links": []}],
+                "widgets_values": [512, 512, 1],
+            },
+        ],
+        "links": [],
+        "definitions": {
+            "subgraphs": [
+                {
+                    "id": _SG_UUID,
+                    "name": "Text to Image",
+                    "inputs": [
+                        {"name": "text", "type": "STRING"},
+                        {"name": "seed", "type": "INT"},
+                        {"name": "steps", "type": "INT"},
+                    ],
+                    "nodes": [
+                        {"id": 27, "type": "CLIPTextEncode", "widgets_values": ["old prompt"]},
+                        {"id": 3, "type": "KSampler", "widgets_values": [42, "fixed", 20, 8.0, "euler", "normal", 1.0]},
+                    ],
+                }
+            ]
+        },
+    }
+
+
+def _interior(wf: dict, inner_id) -> dict:
+    sg = wf["definitions"]["subgraphs"][0]
+    return next(n for n in sg["nodes"] if str(n["id"]) == str(inner_id))
+
+
+class TestSetWidgetSubgraph:
+    def test_flat_promoted_address_writes_interior_node(self, patched_graph, tmp_path, capsys):
+        """`57.text` — the exact address `slots` advertises — writes CLIPTextEncode 27."""
+        path = _write(tmp_path, _subgraph_workflow())
+        env = _run(["set-widget", str(path), "57.text", "a cat on a bicycle"], capsys)
+        assert env["ok"] is True, env
+        op = env["data"]["op"]
+        assert op["op"] == "set_widget"
+        assert op["node_id"] == 57
+        assert op["value"] == "a cat on a bicycle"
+        assert op["old"] == "old prompt"
+        # op is self-describing + replayable: resolved interior path + widget.
+        assert op["path"] == ["57", "27"]
+        assert op["inner_widget"] == "text"
+        # CRDT stamping preserved.
+        assert isinstance(op["op_id"], str) and op["op_id"]
+        assert op["stamp"] == [0, "cli"]
+        # value landed on the interior node, in the definition (persists on disk).
+        wf = json.loads(path.read_text())
+        assert _interior(wf, 27)["widgets_values"][0] == "a cat on a bicycle"
+
+    def test_flat_promoted_int_input_writes_ksampler(self, patched_graph, tmp_path, capsys):
+        path = _write(tmp_path, _subgraph_workflow())
+        env = _run(["set-widget", str(path), "57.seed", "12345"], capsys)
+        assert env["ok"] is True, env
+        assert env["data"]["op"]["path"] == ["57", "3"]
+        wf = json.loads(path.read_text())
+        assert _interior(wf, 3)["widgets_values"][0] == 12345  # seed is index 0
+
+    def test_nested_interior_address_writes_interior_node(self, patched_graph, tmp_path, capsys):
+        """`57/27.text` (the nested form the skill documents) hits the same widget."""
+        path = _write(tmp_path, _subgraph_workflow())
+        env = _run(["set-widget", str(path), "57/27.text", "a nested cat"], capsys)
+        assert env["ok"] is True, env
+        op = env["data"]["op"]
+        assert op["node_id"] == "57/27"
+        assert op["path"] == ["57", "27"]
+        assert op["inner_widget"] == "text"
+        wf = json.loads(path.read_text())
+        assert _interior(wf, 27)["widgets_values"][0] == "a nested cat"
+
+    def test_flat_and_nested_share_a_conflict_target(self):
+        """Flat `57.text` and nested `57/27.text` land on the same interior
+        widget, so their ops must resolve to the SAME CRDT write target (they
+        converge — one does not silently clobber the other undetected)."""
+        wf = _subgraph_workflow()
+        _, flat = workflow_ops.set_widget(copy.deepcopy(wf), _graph(), 57, "text", "A")
+        _, nested = workflow_ops.set_widget(copy.deepcopy(wf), _graph(), "57/27", "text", "B")
+        assert workflow_ops._write_target(flat) == workflow_ops._write_target(nested)
+        assert workflow_ops.detect_conflict(flat, nested) is True  # different values, same target
+
+    def test_slots_and_set_widget_agree(self, patched_graph, monkeypatch, tmp_path, capsys):
+        """The self-consistency the bug broke: every flat address `slots` emits
+        for the subgraph instance is accepted by set-widget."""
+        # slots resolves its graph via workflow.py's _get_graph; set-widget via
+        # workflow_edit.py's. patched_graph covers the latter; patch the former too.
+        monkeypatch.setattr(workflow_cmd, "_get_graph", lambda *a, **kw: _graph())
+        path = _write(tmp_path, _subgraph_workflow())
+        slots_env = _run(["slots", str(path)], capsys)
+        addrs = [s["address"] for s in slots_env["data"]["slots"] if str(s["address"]).startswith("57.")]
+        assert addrs, slots_env  # the instance's promoted inputs are advertised flat
+        for addr in ("57.text", "57.seed", "57.steps"):
+            assert addr in addrs
+            env = _run(["set-widget", str(path), addr, "3" if addr != "57.text" else "x"], capsys)
+            assert env["ok"] is True, (addr, env)
+
+    def test_unknown_promoted_input_errors_cleanly(self, patched_graph, tmp_path, capsys):
+        path = _write(tmp_path, _subgraph_workflow())
+        env = _run(["set-widget", str(path), "57.nope", "1"], capsys)
+        assert env["ok"] is False
+        assert env["error"]["code"] == "workflow_edit_invalid"
+        assert "not found on subgraph node 57" in env["error"]["message"]
+
+    def test_type_mismatch_on_promoted_int_rejected(self, patched_graph, tmp_path, capsys):
+        path = _write(tmp_path, _subgraph_workflow())
+        env = _run(["set-widget", str(path), "57.seed", '"notanumber"'], capsys)
+        assert env["ok"] is False
+        # unchanged on disk (edit rejected before write).
+        wf = json.loads(path.read_text())
+        assert _interior(wf, 3)["widgets_values"][0] == 42
+
+    def test_top_level_edit_still_works_with_subgraphs_present(self, patched_graph, tmp_path, capsys):
+        """A plain top-level node in a workflow that also contains subgraphs is
+        still edited directly (no regression)."""
+        path = _write(tmp_path, _subgraph_workflow())
+        env = _run(["set-widget", str(path), "9.width", "768"], capsys)
+        assert env["ok"] is True, env
+        assert "path" not in env["data"]["op"]  # direct top-level op, not a subgraph op
+        wf = json.loads(path.read_text())
+        node9 = next(n for n in wf["nodes"] if n["id"] == 9)
+        assert node9["widgets_values"][0] == 768
+
+
+# ---------------------------------------------------------------------------
 # connect
 # ---------------------------------------------------------------------------
 
@@ -451,11 +613,13 @@ class TestDelete:
         assert latent["link"] is None
 
 
-    def test_nested_subgraph_address_routed_to_set_slot(self, patched_graph, tmp_path, capsys):
+    def test_nested_subgraph_address_missing_interior_node_errors(self, patched_graph, tmp_path, capsys):
+        # A nested address into a graph with no such subgraph/interior node fails
+        # cleanly (the top-level workflow here has no subgraph instance 10).
         path = _write(tmp_path, _base_workflow())
         env = _run(["set-widget", str(path), "10/9.prompt", "x"], capsys)
         assert env["ok"] is False
-        assert "set-slot" in (env["error"]["hint"] or "")
+        assert env["error"]["code"] == "workflow_edit_invalid"
 
 
 # ---------------------------------------------------------------------------

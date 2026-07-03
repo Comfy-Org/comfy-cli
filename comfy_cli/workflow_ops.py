@@ -104,6 +104,39 @@ def set_widget(
     actor: str = "cli",
     base_version: int = 0,
 ) -> tuple[dict, dict]:
+    # Subgraph-aware: a subgraph instance's *promoted* input (flat ``57.text`` —
+    # exactly what ``comfy workflow slots`` advertises) or an interior node
+    # (nested ``57/27.text``) resolves INTO the subgraph definition. Both forms
+    # reuse the CQL engine's slot resolver so set-widget and slots agree. The op
+    # carries the resolved interior ``path`` + ``inner_widget`` so apply/replay is
+    # deterministic and writes back into the definition (the change persists).
+    sub = _subgraph_write_target(workflow, node_id, widget)
+    if sub is not None:
+        segments, inner_widget = sub
+        target = _navigate_subgraph_path(workflow, segments)  # read-only: current value + schema
+        inner_type = target.get("type", "")
+        order = graph.widget_order(inner_type)
+        old = None
+        if inner_widget in order:
+            i = order.index(inner_widget)
+            cur = target.get("widgets_values") or []
+            old = cur[i] if i < len(cur) else None
+        warnings = _validate_widget(graph, inner_type, inner_widget, value)  # raises on shape mismatch
+        op = _new_op(
+            "set_widget",
+            actor,
+            base_version,
+            node_id=node_id,
+            widget=widget,
+            value=value,
+            old=old,
+            path=[str(s) for s in segments],
+            inner_widget=inner_widget,
+        )
+        if warnings:
+            op["warnings"] = warnings
+        return apply_op(workflow, op, graph), op
+
     node = _require(workflow, node_id)
     class_type = node.get("type", "")
     idx = _widget_index(graph, class_type, widget)  # raises on unknown widget name
@@ -122,6 +155,83 @@ def set_widget(
     if warnings:
         op["warnings"] = warnings
     return apply_op(workflow, op, graph), op
+
+
+def _subgraph_write_target(workflow: dict, node_id: Any, widget: str) -> tuple[list[str], str] | None:
+    """Resolve a subgraph promoted/interior widget address to ``(node_path, inner_widget)``.
+
+    Returns ``None`` when ``node_id`` is an ordinary top-level node (the caller
+    uses the direct widget path). Two address forms resolve here — the SAME ones
+    ``comfy workflow slots`` advertises for a subgraph instance:
+
+      * FLAT promoted input (``57.text``): ``node_id`` is a subgraph *instance*
+        and ``widget`` names one of its promoted proxy inputs; we follow the
+        instance's ``proxyWidgets`` to the interior node that backs it.
+      * NESTED interior (``57/27.text``): ``node_id`` already carries the
+        ``<instance>/<inner>`` path; its segments pass straight through.
+
+    Raises ``ValueError`` (with a slots-consistent hint) when the node is a
+    subgraph instance but ``widget`` is not one of its promoted inputs.
+    """
+    from comfy_cli.cql import engine as _engine
+
+    node_str = str(node_id)
+    # Nested interior form: the interior path is explicit.
+    if _engine._SUBGRAPH_PATH_SEP in node_str:
+        return node_str.split(_engine._SUBGRAPH_PATH_SEP), widget
+
+    defs_by_id = _engine._subgraph_defs_by_id(workflow)
+    if not defs_by_id:
+        return None
+    instance = _find(workflow, node_id)
+    if instance is None:
+        return None  # let the direct path raise the canonical "node not found"
+    if defs_by_id.get(instance.get("type", "")) is None:
+        return None  # ordinary top-level node
+    # Subgraph instance: map the promoted input name → interior node via proxyWidgets.
+    proxy = (instance.get("properties") or {}).get("proxyWidgets") or []
+    proxied: list[str] = []
+    for entry in proxy:
+        if not (isinstance(entry, list) and len(entry) >= 2):
+            continue
+        name = entry[1] if isinstance(entry[1], str) else str(entry[1])
+        proxied.append(name)
+        if name == widget:
+            return [node_str, str(entry[0])], widget
+    raise ValueError(
+        f"promoted input {widget!r} not found on subgraph node {node_id}; "
+        f"available: {', '.join(proxied) if proxied else '(none)'} "
+        f"(or address an interior widget directly, e.g. {node_str}/<innerId>.<input>)"
+    )
+
+
+def _navigate_subgraph_path(workflow: dict, segments: list[str]) -> dict:
+    """Read-only walk of a ``/``-separated node path into subgraph definitions.
+
+    Unlike the engine's apply-time resolver this does NOT fork shared definitions
+    (a read must not mutate); the forking happens at apply time. Raises
+    ``ValueError`` describing the first hop that couldn't be found.
+    """
+    from comfy_cli.cql import engine as _engine
+
+    defs_by_id = _engine._subgraph_defs_by_id(workflow)
+    node = next(
+        (n for n in workflow.get("nodes") or [] if isinstance(n, dict) and str(n.get("id", "")) == str(segments[0])),
+        None,
+    )
+    if node is None:
+        raise ValueError(f"node {segments[0]} not found in workflow")
+    for seg in segments[1:]:
+        sg = defs_by_id.get(node.get("type", ""))
+        if sg is None:
+            raise ValueError(f"node {node.get('id')} is not a subgraph; cannot descend to {seg!r}")
+        node = next(
+            (n for n in (sg.get("nodes") or []) if isinstance(n, dict) and str(n.get("id", "")) == str(seg)),
+            None,
+        )
+        if node is None:
+            raise ValueError(f"interior node {seg} not found in subgraph {sg.get('id')}")
+    return node
 
 
 def connect(
@@ -449,6 +559,18 @@ def _apply_add_node(workflow: dict, op: dict) -> None:
 
 
 def _apply_set_widget(workflow: dict, op: dict, graph) -> None:
+    path = op.get("path")
+    if path:
+        # Subgraph interior write. Descend the resolved node path (forking any
+        # shared definition en route so a sibling instance can't alias this
+        # write) and set the interior widget — the reference resolver the
+        # ``slots``/``set-slot`` surface uses, so the two agree by construction.
+        from comfy_cli.cql import engine as _engine
+
+        defs_by_id = _engine._subgraph_defs_by_id(workflow)
+        target = _engine._resolve_node_path(workflow, [str(s) for s in path], defs_by_id)
+        _engine._write_widget(target, op["inner_widget"], op["value"], graph, extend=False)
+        return
     node = _require(workflow, op["node_id"])
     idx = _widget_index(graph, node.get("type", ""), op["widget"])
     widgets = node.setdefault("widgets_values", [])
@@ -530,6 +652,11 @@ def _apply_delete_node(workflow: dict, op: dict) -> None:
 def _write_target(op: dict) -> tuple:
     kind = op["op"]
     if kind == "set_widget":
+        # Subgraph writes target the resolved interior path so the flat promoted
+        # form (``57.text``) and the nested form (``57/27.text``) that land on the
+        # same interior widget share one write target (converge, not clobber).
+        if op.get("path"):
+            return ("widget", tuple(str(s) for s in op["path"]), op["inner_widget"])
         return ("widget", op["node_id"], op["widget"])
     if kind in ("add_node", "delete_node"):
         return ("node", op["node_id"])
