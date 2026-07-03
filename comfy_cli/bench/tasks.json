@@ -1,0 +1,39 @@
+{
+  "_comment": "Vendored byte-identical from comfy-inapp-agent/agent-server/bench/tasks.mjs (child 1, BE-2308). Prompt strings MUST stay in sync across both repos; see comfy_cli/bench/README.md.",
+  "tasks": [
+    {
+      "id": "t1",
+      "title": "Build a small template workflow (~7–15 nodes) from scratch",
+      "seedWorkflow": null,
+      "prompts": [
+        "Build a standard SDXL text-to-image workflow on a new canvas tab: a checkpoint loader, positive and negative CLIP text-encode prompts, an empty latent image, a KSampler, a VAE decode, and a save-image node, all wired together. Use the positive prompt \"a golden retriever puppy playing in autumn leaves, cinematic lighting\". Set the KSampler to 25 steps, cfg 7, the euler sampler and the normal scheduler. Build it in one batched send_graph_mutation into a new tab so I can revert in one click."
+      ]
+    },
+    {
+      "id": "t2",
+      "title": "Micro-edit one parameter in a seed workflow",
+      "seedWorkflow": "txt2img-seed",
+      "prompts": [
+        "The workflow on my canvas has a positive prompt that says the cat is on a windowsill. Change ONLY the positive prompt text to \"a photo of a cat sleeping in a sunbeam on a wooden floor\". Leave every other node and parameter exactly as it is."
+      ]
+    },
+    {
+      "id": "t3",
+      "title": "Build / extend a large workflow (~150 nodes)",
+      "seedWorkflow": null,
+      "prompts": [
+        "I want a large, elaborate SDXL pipeline built on a new canvas tab — aim for roughly 150 nodes total. Include: a base checkpoint pass (loader, positive/negative prompts, empty latent, KSampler, VAE decode), a refiner pass, a two-stage latent upscale with a second and third KSampler, four separate LoRA loaders chained on the model and clip, a ControlNet branch (ControlNet loader + apply + a LoadImage + preprocessor), several CLIPTextEncode variations combined with ConditioningCombine and ConditioningConcat nodes, multiple VAEDecode/VAEEncode round-trips, a face-detailer style crop-and-resample sub-graph, an image-composite branch, and a batch of SaveImage/PreviewImage nodes for each stage. Add plenty of Reroute nodes to keep the wiring tidy. Build it incrementally with add_node / set_node_widget and send_graph_mutation until the graph is large and complete."
+      ]
+    },
+    {
+      "id": "t4",
+      "title": "Three successive edits + re-reads in one session",
+      "seedWorkflow": "edit-session-seed",
+      "prompts": [
+        "The workflow on my canvas is a landscape generator with a LoRA. First edit: change the KSampler to 40 steps and switch the sampler to dpmpp_2m_sde. Then read back the graph and confirm the sampler settings.",
+        "Second edit: change the positive prompt to \"a dense bioluminescent alien jungle at night, volumetric fog, highly detailed\" and set the LoRA model strength to 1.0. Read the graph back and confirm both changes landed.",
+        "Third edit: add a second SaveImage node with the filename prefix \"jungle_alt\" wired from the same VAE decode output, then read the whole graph back one more time and give me a short summary of the final workflow."
+      ]
+    }
+  ]
+}

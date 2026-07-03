@@ -1,0 +1,4 @@
+# Generated benchmark output — do not commit run artifacts.
+*.ndjson
+*_variants/
+!.gitkeep

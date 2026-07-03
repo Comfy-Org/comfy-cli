@@ -54,6 +54,9 @@ dependencies = [
   "websocket-client",
 ]
 
+# `bench` — the BE-2302 arm-B micro-edit benchmark runner (comfy_cli/bench). Only a
+# live run needs the Anthropic SDK; the offline `--dry-run` + unit tests are stub-only.
+optional-dependencies.bench = [ "anthropic>=0.40" ]
 optional-dependencies.dev = [ "jsonschema", "pre-commit", "pytest", "pytest-cov", "ruff" ]
 optional-dependencies.preview = [ "term-image>=0.7,<0.8" ]
 urls.Repository = "https://github.com/Comfy-Org/comfy-cli.git"
@@ -74,6 +77,8 @@ include = [ "comfy_cli*" ]
 
 "comfy_cli.cql.data" = [ "*.yaml", "*.json" ]
 "comfy_cli.command.generate" = [ "spec/openapi.yml" ]
+# Bench task matrix + offline object_info / seed-workflow fixtures.
+"comfy_cli.bench" = [ "tasks.json", "fixtures/*.json" ]
 
 [tool.ruff]
 target-version = "py310"
