@@ -965,6 +965,33 @@ class Graph:
                         }
                     )
 
+            # Required inputs must be PRESENT, not just well-typed when given.
+            # The server rejects a node whose required input is absent
+            # ("Required input is missing"), so a validate pass that only
+            # inspects the inputs the workflow happens to contain is a false
+            # green. Autogrow ports are covered by the slot check above.
+            provided = set((node_data.get("inputs") or {}).keys())
+            for port in m.inputs:
+                if not port.required or port.is_autogrow or port.name in provided:
+                    continue
+                hint = f"set {port.name!r} to a {port.type} value"
+                if port.options.default is not None:
+                    hint += f" (default: {port.options.default!r})"
+                elif port.enum_values:
+                    hint += f" (e.g. {port.enum_values[0]!r})"
+                errors.append(
+                    {
+                        "node_id": node_id,
+                        "field": port.name,
+                        "code": "missing_required_input",
+                        "message": (
+                            f"required input {port.name!r} of {class_type} is missing — "
+                            f"the server will reject this node"
+                        ),
+                        "hint": hint,
+                    }
+                )
+
         return {
             "valid": len(errors) == 0,
             "errors": errors,

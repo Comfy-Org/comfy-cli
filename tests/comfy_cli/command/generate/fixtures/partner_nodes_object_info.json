@@ -1,0 +1,674 @@
+{
+ "ByteDanceImageToVideoNode": {
+  "api_node": true,
+  "category": "partner/video/ByteDance",
+  "deprecated": false,
+  "description": "Generate video using ByteDance models via api based on image and prompt",
+  "dev_only": false,
+  "display_name": "ByteDance Image to Video",
+  "essentials_category": null,
+  "experimental": false,
+  "has_intermediate_output": false,
+  "input": {
+   "hidden": {
+    "api_key_comfy_org": [
+     "API_KEY_COMFY_ORG"
+    ],
+    "auth_token_comfy_org": [
+     "AUTH_TOKEN_COMFY_ORG"
+    ],
+    "comfy_usage_source": [
+     "COMFY_USAGE_SOURCE"
+    ],
+    "unique_id": [
+     "UNIQUE_ID"
+    ]
+   },
+   "optional": {
+    "camera_fixed": [
+     "BOOLEAN",
+     {
+      "advanced": true,
+      "default": false,
+      "tooltip": "Specifies whether to fix the camera. The platform appends an instruction to fix the camera to your prompt, but does not guarantee the actual effect."
+     }
+    ],
+    "generate_audio": [
+     "BOOLEAN",
+     {
+      "advanced": true,
+      "default": false,
+      "tooltip": "This parameter is ignored for any model except seedance-1-5-pro."
+     }
+    ],
+    "seed": [
+     "INT",
+     {
+      "control_after_generate": true,
+      "default": 0,
+      "display": "number",
+      "max": 2147483647,
+      "min": 0,
+      "step": 1,
+      "tooltip": "Seed to use for generation."
+     }
+    ],
+    "watermark": [
+     "BOOLEAN",
+     {
+      "advanced": true,
+      "default": false,
+      "tooltip": "Whether to add an \"AI generated\" watermark to the video."
+     }
+    ]
+   },
+   "required": {
+    "aspect_ratio": [
+     "COMBO",
+     {
+      "multiselect": false,
+      "options": [
+       "adaptive",
+       "16:9",
+       "4:3",
+       "1:1",
+       "3:4",
+       "9:16",
+       "21:9"
+      ],
+      "tooltip": "The aspect ratio of the output video."
+     }
+    ],
+    "duration": [
+     "INT",
+     {
+      "default": 5,
+      "display": "slider",
+      "max": 12,
+      "min": 3,
+      "step": 1,
+      "tooltip": "The duration of the output video in seconds."
+     }
+    ],
+    "image": [
+     "IMAGE",
+     {
+      "tooltip": "First frame to be used for the video."
+     }
+    ],
+    "model": [
+     "COMBO",
+     {
+      "default": "seedance-1-0-pro-fast-251015",
+      "multiselect": false,
+      "options": [
+       "seedance-1-5-pro-251215",
+       "seedance-1-0-pro-250528",
+       "seedance-1-0-lite-i2v-250428",
+       "seedance-1-0-pro-fast-251015"
+      ]
+     }
+    ],
+    "prompt": [
+     "STRING",
+     {
+      "multiline": true,
+      "tooltip": "The text prompt used to generate the video."
+     }
+    ],
+    "resolution": [
+     "COMBO",
+     {
+      "multiselect": false,
+      "options": [
+       "480p",
+       "720p",
+       "1080p"
+      ],
+      "tooltip": "The resolution of the output video."
+     }
+    ]
+   }
+  },
+  "input_order": {
+   "hidden": [
+    "auth_token_comfy_org",
+    "api_key_comfy_org",
+    "unique_id",
+    "comfy_usage_source"
+   ],
+   "optional": [
+    "seed",
+    "camera_fixed",
+    "watermark",
+    "generate_audio"
+   ],
+   "required": [
+    "model",
+    "prompt",
+    "image",
+    "resolution",
+    "aspect_ratio",
+    "duration"
+   ]
+  },
+  "is_input_list": false,
+  "name": "ByteDanceImageToVideoNode",
+  "output": [
+   "VIDEO"
+  ],
+  "output_is_list": [
+   false
+  ],
+  "output_matchtypes": null,
+  "output_name": [
+   "VIDEO"
+  ],
+  "output_node": false,
+  "output_tooltips": [
+   null
+  ],
+  "price_badge": {
+   "depends_on": {
+    "input_groups": [],
+    "inputs": [],
+    "widgets": [
+     {
+      "name": "model",
+      "type": "COMBO"
+     },
+     {
+      "name": "duration",
+      "type": "INT"
+     },
+     {
+      "name": "resolution",
+      "type": "COMBO"
+     },
+     {
+      "name": "generate_audio",
+      "type": "BOOLEAN"
+     }
+    ]
+   },
+   "engine": "jsonata",
+   "expr": "\n    (\n      $priceByModel := {\n        \"seedance-1-5-pro\": {\n          \"480p\":[0.12,0.12],\n          \"720p\":[0.26,0.26],\n          \"1080p\":[0.58,0.59]\n        },\n        \"seedance-1-0-pro\": {\n          \"480p\":[0.23,0.24],\n          \"720p\":[0.51,0.56],\n          \"1080p\":[1.18,1.22]\n        },\n        \"seedance-1-0-pro-fast\": {\n          \"480p\":[0.09,0.1],\n          \"720p\":[0.21,0.23],\n          \"1080p\":[0.47,0.49]\n        },\n        \"seedance-1-0-lite\": {\n          \"480p\":[0.17,0.18],\n          \"720p\":[0.37,0.41],\n          \"1080p\":[0.85,0.88]\n        }\n      };\n      $model := widgets.model;\n      $modelKey :=\n        $contains($model, \"seedance-1-5-pro\")      ? \"seedance-1-5-pro\" :\n        $contains($model, \"seedance-1-0-pro-fast\") ? \"seedance-1-0-pro-fast\" :\n        $contains($model, \"seedance-1-0-pro\")      ? \"seedance-1-0-pro\" :\n        \"seedance-1-0-lite\";\n      $resolution := widgets.resolution;\n      $resKey :=\n        $contains($resolution, \"1080\") ? \"1080p\" :\n        $contains($resolution, \"720\")  ? \"720p\" :\n        \"480p\";\n      $modelPrices := $lookup($priceByModel, $modelKey);\n      $baseRange := $lookup($modelPrices, $resKey);\n      $min10s := $baseRange[0];\n      $max10s := $baseRange[1];\n      $scale := widgets.duration / 10;\n      $audioMultiplier := ($modelKey = \"seedance-1-5-pro\" and widgets.generate_audio) ? 2 : 1;\n      $minCost := $min10s * $scale * $audioMultiplier;\n      $maxCost := $max10s * $scale * $audioMultiplier;\n      ($minCost = $maxCost)\n        ? {\"type\":\"usd\",\"usd\": $minCost, \"format\": { \"approximate\": true }}\n        : {\"type\":\"range_usd\",\"min_usd\": $minCost, \"max_usd\": $maxCost, \"format\": { \"approximate\": true }}\n    )\n    "
+  },
+  "python_module": "comfy_api_nodes.nodes_bytedance",
+  "search_aliases": null
+ },
+ "Flux2ProImageNode": {
+  "api_node": true,
+  "category": "partner/image/BFL",
+  "deprecated": true,
+  "description": "Generates images synchronously based on prompt and resolution.",
+  "dev_only": false,
+  "display_name": "Flux.2 [pro] Image",
+  "essentials_category": null,
+  "experimental": false,
+  "has_intermediate_output": false,
+  "input": {
+   "hidden": {
+    "api_key_comfy_org": [
+     "API_KEY_COMFY_ORG"
+    ],
+    "auth_token_comfy_org": [
+     "AUTH_TOKEN_COMFY_ORG"
+    ],
+    "comfy_usage_source": [
+     "COMFY_USAGE_SOURCE"
+    ],
+    "unique_id": [
+     "UNIQUE_ID"
+    ]
+   },
+   "optional": {
+    "images": [
+     "IMAGE",
+     {
+      "tooltip": "Up to 9 images to be used as references."
+     }
+    ]
+   },
+   "required": {
+    "height": [
+     "INT",
+     {
+      "default": 768,
+      "max": 2048,
+      "min": 256,
+      "step": 32
+     }
+    ],
+    "prompt": [
+     "STRING",
+     {
+      "default": "",
+      "multiline": true,
+      "tooltip": "Prompt for the image generation or edit"
+     }
+    ],
+    "prompt_upsampling": [
+     "BOOLEAN",
+     {
+      "advanced": true,
+      "default": true,
+      "tooltip": "Whether to perform upsampling on the prompt. If active, automatically modifies the prompt for more creative generation."
+     }
+    ],
+    "seed": [
+     "INT",
+     {
+      "control_after_generate": true,
+      "default": 0,
+      "max": 18446744073709551615,
+      "min": 0,
+      "tooltip": "The random seed used for creating the noise."
+     }
+    ],
+    "width": [
+     "INT",
+     {
+      "default": 1024,
+      "max": 2048,
+      "min": 256,
+      "step": 32
+     }
+    ]
+   }
+  },
+  "input_order": {
+   "hidden": [
+    "auth_token_comfy_org",
+    "api_key_comfy_org",
+    "unique_id",
+    "comfy_usage_source"
+   ],
+   "optional": [
+    "images"
+   ],
+   "required": [
+    "prompt",
+    "width",
+    "height",
+    "seed",
+    "prompt_upsampling"
+   ]
+  },
+  "is_input_list": false,
+  "name": "Flux2ProImageNode",
+  "output": [
+   "IMAGE"
+  ],
+  "output_is_list": [
+   false
+  ],
+  "output_matchtypes": null,
+  "output_name": [
+   "IMAGE"
+  ],
+  "output_node": false,
+  "output_tooltips": [
+   null
+  ],
+  "price_badge": {
+   "depends_on": {
+    "input_groups": [],
+    "inputs": [
+     "images"
+    ],
+    "widgets": [
+     {
+      "name": "width",
+      "type": "INT"
+     },
+     {
+      "name": "height",
+      "type": "INT"
+     }
+    ]
+   },
+   "engine": "jsonata",
+   "expr": "\n    (\n      $MP := 1024 * 1024;\n      $outMP := $max([1, $floor(((widgets.width * widgets.height) + $MP - 1) / $MP)]);\n      $outputCost := 0.03 + 0.015 * ($outMP - 1);\n      inputs.images.connected\n        ? {\n            \"type\":\"range_usd\",\n            \"min_usd\": $outputCost + 0.015,\n            \"max_usd\": $outputCost + 0.12,\n            \"format\": { \"approximate\": true }\n          }\n        : {\"type\":\"usd\",\"usd\": $outputCost}\n    )\n    "
+  },
+  "python_module": "comfy_api_nodes.nodes_bfl",
+  "search_aliases": null
+ },
+ "GeminiImageNode": {
+  "api_node": true,
+  "category": "partner/image/Gemini",
+  "deprecated": false,
+  "description": "Edit images synchronously via Google API.",
+  "dev_only": false,
+  "display_name": "Nano Banana (Google Gemini Image)",
+  "essentials_category": null,
+  "experimental": false,
+  "has_intermediate_output": false,
+  "input": {
+   "hidden": {
+    "api_key_comfy_org": [
+     "API_KEY_COMFY_ORG"
+    ],
+    "auth_token_comfy_org": [
+     "AUTH_TOKEN_COMFY_ORG"
+    ],
+    "comfy_usage_source": [
+     "COMFY_USAGE_SOURCE"
+    ],
+    "unique_id": [
+     "UNIQUE_ID"
+    ]
+   },
+   "optional": {
+    "aspect_ratio": [
+     "COMBO",
+     {
+      "default": "auto",
+      "multiselect": false,
+      "options": [
+       "auto",
+       "1:1",
+       "2:3",
+       "3:2",
+       "3:4",
+       "4:3",
+       "4:5",
+       "5:4",
+       "9:16",
+       "16:9",
+       "21:9"
+      ],
+      "tooltip": "Defaults to matching the output image size to that of your input image, or otherwise generates 1:1 squares."
+     }
+    ],
+    "files": [
+     "GEMINI_INPUT_FILES",
+     {
+      "tooltip": "Optional file(s) to use as context for the model. Accepts inputs from the Gemini Generate Content Input Files node."
+     }
+    ],
+    "images": [
+     "IMAGE",
+     {
+      "tooltip": "Optional image(s) to use as context for the model. To include multiple images, you can use the Batch Images node."
+     }
+    ],
+    "response_modalities": [
+     "COMBO",
+     {
+      "advanced": true,
+      "multiselect": false,
+      "options": [
+       "IMAGE+TEXT",
+       "IMAGE"
+      ],
+      "tooltip": "Choose 'IMAGE' for image-only output, or 'IMAGE+TEXT' to return both the generated image and a text response."
+     }
+    ],
+    "system_prompt": [
+     "STRING",
+     {
+      "advanced": true,
+      "default": "You are an expert image-generation engine. You must ALWAYS produce an image.\nInterpret all user input\u2014regardless of format, intent, or abstraction\u2014as literal visual directives for image composition.\nIf a prompt is conversational or lacks specific visual details, you must creatively invent a concrete visual scenario that depicts the concept.\nPrioritize generating the visual representation above any text, formatting, or conversational requests.",
+      "multiline": true,
+      "tooltip": "Foundational instructions that dictate an AI's behavior."
+     }
+    ]
+   },
+   "required": {
+    "model": [
+     "COMBO",
+     {
+      "multiselect": false,
+      "options": [
+       "gemini-2.5-flash-image"
+      ],
+      "tooltip": "The Gemini model to use for generating responses."
+     }
+    ],
+    "prompt": [
+     "STRING",
+     {
+      "default": "",
+      "multiline": true,
+      "tooltip": "Text prompt for generation"
+     }
+    ],
+    "seed": [
+     "INT",
+     {
+      "control_after_generate": true,
+      "default": 42,
+      "max": 18446744073709551615,
+      "min": 0,
+      "tooltip": "When seed is fixed to a specific value, the model makes a best effort to provide the same response for repeated requests. Deterministic output isn't guaranteed. Also, changing the model or parameter settings, such as the temperature, can cause variations in the response even when you use the same seed value. By default, a random seed value is used."
+     }
+    ]
+   }
+  },
+  "input_order": {
+   "hidden": [
+    "auth_token_comfy_org",
+    "api_key_comfy_org",
+    "unique_id",
+    "comfy_usage_source"
+   ],
+   "optional": [
+    "images",
+    "files",
+    "aspect_ratio",
+    "response_modalities",
+    "system_prompt"
+   ],
+   "required": [
+    "prompt",
+    "model",
+    "seed"
+   ]
+  },
+  "is_input_list": false,
+  "name": "GeminiImageNode",
+  "output": [
+   "IMAGE",
+   "STRING"
+  ],
+  "output_is_list": [
+   false,
+   false
+  ],
+  "output_matchtypes": null,
+  "output_name": [
+   "IMAGE",
+   "STRING"
+  ],
+  "output_node": false,
+  "output_tooltips": [
+   null,
+   null
+  ],
+  "price_badge": {
+   "depends_on": {
+    "input_groups": [],
+    "inputs": [],
+    "widgets": []
+   },
+   "engine": "jsonata",
+   "expr": "{\"type\":\"usd\",\"usd\":0.039,\"format\":{\"suffix\":\"/Image (1K)\",\"approximate\":true}}"
+  },
+  "python_module": "comfy_api_nodes.nodes_gemini",
+  "search_aliases": null
+ },
+ "KlingImage2VideoNode": {
+  "api_node": true,
+  "category": "partner/video/Kling",
+  "deprecated": false,
+  "description": "",
+  "dev_only": false,
+  "display_name": "Kling Image(First Frame) to Video",
+  "essentials_category": null,
+  "experimental": false,
+  "has_intermediate_output": false,
+  "input": {
+   "hidden": {
+    "api_key_comfy_org": [
+     "API_KEY_COMFY_ORG"
+    ],
+    "auth_token_comfy_org": [
+     "AUTH_TOKEN_COMFY_ORG"
+    ],
+    "comfy_usage_source": [
+     "COMFY_USAGE_SOURCE"
+    ],
+    "unique_id": [
+     "UNIQUE_ID"
+    ]
+   },
+   "required": {
+    "aspect_ratio": [
+     "COMBO",
+     {
+      "default": "16:9",
+      "multiselect": false,
+      "options": [
+       "16:9",
+       "9:16",
+       "1:1"
+      ]
+     }
+    ],
+    "cfg_scale": [
+     "FLOAT",
+     {
+      "default": 0.8,
+      "max": 1.0,
+      "min": 0.0
+     }
+    ],
+    "duration": [
+     "COMBO",
+     {
+      "default": "5",
+      "multiselect": false,
+      "options": [
+       "5",
+       "10"
+      ]
+     }
+    ],
+    "mode": [
+     "COMBO",
+     {
+      "default": "std",
+      "multiselect": false,
+      "options": [
+       "std",
+       "pro"
+      ]
+     }
+    ],
+    "model_name": [
+     "COMBO",
+     {
+      "default": "kling-v2-master",
+      "multiselect": false,
+      "options": [
+       "kling-v1",
+       "kling-v1-5",
+       "kling-v1-6",
+       "kling-v2-master",
+       "kling-v2-1",
+       "kling-v2-1-master",
+       "kling-v2-5-turbo"
+      ]
+     }
+    ],
+    "negative_prompt": [
+     "STRING",
+     {
+      "multiline": true,
+      "tooltip": "Negative text prompt"
+     }
+    ],
+    "prompt": [
+     "STRING",
+     {
+      "multiline": true,
+      "tooltip": "Positive text prompt"
+     }
+    ],
+    "start_frame": [
+     "IMAGE",
+     {
+      "tooltip": "The reference image used to generate the video."
+     }
+    ]
+   }
+  },
+  "input_order": {
+   "hidden": [
+    "auth_token_comfy_org",
+    "api_key_comfy_org",
+    "unique_id",
+    "comfy_usage_source"
+   ],
+   "required": [
+    "start_frame",
+    "prompt",
+    "negative_prompt",
+    "model_name",
+    "cfg_scale",
+    "mode",
+    "aspect_ratio",
+    "duration"
+   ]
+  },
+  "is_input_list": false,
+  "name": "KlingImage2VideoNode",
+  "output": [
+   "VIDEO",
+   "STRING",
+   "STRING"
+  ],
+  "output_is_list": [
+   false,
+   false,
+   false
+  ],
+  "output_matchtypes": null,
+  "output_name": [
+   "VIDEO",
+   "video_id",
+   "duration"
+  ],
+  "output_node": false,
+  "output_tooltips": [
+   null,
+   null,
+   null
+  ],
+  "price_badge": {
+   "depends_on": {
+    "input_groups": [],
+    "inputs": [],
+    "widgets": [
+     {
+      "name": "mode",
+      "type": "COMBO"
+     },
+     {
+      "name": "model_name",
+      "type": "COMBO"
+     },
+     {
+      "name": "duration",
+      "type": "COMBO"
+     }
+    ]
+   },
+   "engine": "jsonata",
+   "expr": "\n                (\n                  $mode := widgets.mode;\n                  $model := widgets.model_name;\n                  $dur := widgets.duration;\n                  $contains($model,\"v2-5-turbo\")\n                    ? ($contains($dur,\"10\") ? {\"type\":\"usd\",\"usd\":0.7} : {\"type\":\"usd\",\"usd\":0.35})\n                    : ($contains($model,\"v2-1-master\") or $contains($model,\"v2-master\"))\n                      ? ($contains($dur,\"10\") ? {\"type\":\"usd\",\"usd\":2.8} : {\"type\":\"usd\",\"usd\":1.4})\n                      : ($contains($model,\"v2-1\") or $contains($model,\"v1-6\") or $contains($model,\"v1-5\"))\n                        ? (\n                            $contains($mode,\"pro\")\n                              ? ($contains($dur,\"10\") ? {\"type\":\"usd\",\"usd\":0.98} : {\"type\":\"usd\",\"usd\":0.49})\n                              : ($contains($dur,\"10\") ? {\"type\":\"usd\",\"usd\":0.56} : {\"type\":\"usd\",\"usd\":0.28})\n                          )\n                        : $contains($model,\"v1\")\n                          ? (\n                              $contains($mode,\"pro\")\n                                ? ($contains($dur,\"10\") ? {\"type\":\"usd\",\"usd\":0.98} : {\"type\":\"usd\",\"usd\":0.49})\n                                : ($contains($dur,\"10\") ? {\"type\":\"usd\",\"usd\":0.28} : {\"type\":\"usd\",\"usd\":0.14})\n                            )\n                          : {\"type\":\"usd\",\"usd\":0.14}\n                )\n                "
+  },
+  "python_module": "comfy_api_nodes.nodes_kling",
+  "search_aliases": null
+ }
+}
