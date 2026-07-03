@@ -5,7 +5,6 @@ import sys
 import webbrowser
 from typing import Annotated
 
-import questionary
 import typer
 from rich.console import Console
 
@@ -1460,6 +1459,10 @@ def feedback(
             else str(usability_satisfaction_score),
         },
     )
+    # Imported lazily: questionary pulls in prompt_toolkit (~50ms) and is only
+    # needed on this interactive feedback path.
+    import questionary
+
     if (
         sent
         and questionary.confirm("Do you want to provide additional feature-specific feedback on our GitHub page?").ask()

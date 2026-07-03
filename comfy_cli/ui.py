@@ -1,14 +1,21 @@
-from enum import Enum
-from typing import Any, TypeVar
+from __future__ import annotations
 
-import questionary
+from enum import Enum
+from typing import TYPE_CHECKING, Any, TypeVar
+
 import typer
-from questionary import Choice
 from rich.console import Console
 from rich.progress import Progress
 from rich.table import Table
 
 from comfy_cli.workspace_manager import WorkspaceManager
+
+# questionary pulls in prompt_toolkit (~50ms of import time), so it is
+# imported lazily inside each prompting function rather than at module import.
+if TYPE_CHECKING:
+    from questionary import Choice
+
+    ChoiceType = str | Choice | dict[str, Any]
 
 console = Console()
 workspace_manager = WorkspaceManager()
@@ -35,9 +42,6 @@ def show_progress(iterable, total, description="Downloading..."):
             progress.update(task, advance=len(chunk))
 
 
-ChoiceType = str | Choice | dict[str, Any]
-
-
 def prompt_autocomplete(
     question: str, choices: list[ChoiceType], default: ChoiceType = "", force_prompting: bool = False
 ) -> ChoiceType | None:
@@ -55,6 +59,8 @@ def prompt_autocomplete(
     """
     if workspace_manager.skip_prompting and not force_prompting:
         return None
+    import questionary
+
     return questionary.autocomplete(question, choices=choices, default=default).ask()
 
 
@@ -75,6 +81,8 @@ def prompt_select(
     """
     if workspace_manager.skip_prompting and not force_prompting:
         return None
+    import questionary
+
     return questionary.select(question, choices=choices, default=default).ask()
 
 
@@ -95,6 +103,8 @@ def prompt_select_enum(question: str, choices: list[E], force_prompting: bool = 
     """
     if workspace_manager.skip_prompting and not force_prompting:
         return None
+
+    import questionary
 
     choice_map = {choice.value: choice for choice in choices}
     display_choices = list(choice_map.keys())
@@ -120,6 +130,8 @@ def prompt_input(question: str, default: str = "", force_prompting: bool = False
     """
     if workspace_manager.skip_prompting and not force_prompting:
         return default
+    import questionary
+
     return questionary.text(question, default=default).ask()
 
 
@@ -134,6 +146,8 @@ def prompt_multi_select(prompt: str, choices: list[str]) -> list[str]:
     Returns:
         List[str]: A list of the selected items.
     """
+    import questionary
+
     selections = questionary.checkbox(prompt, choices=choices).ask()  # returns list of selected items
     return selections if selections else []
 
