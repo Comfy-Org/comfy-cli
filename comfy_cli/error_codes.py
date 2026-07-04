@@ -340,6 +340,13 @@ REGISTRY: tuple[ErrorCode, ...] = (
         '("Unauthorized: Please login first to use this node"). Transient — not a local credential problem.',
         "resubmit the same workflow — it succeeds on retry; `comfy cloud login` will not help",
     ),
+    # --- background server logs ----------------------------------------------
+    ErrorCode(
+        "no_log_file",
+        "`comfy logs` found no captured ComfyUI log — the server was never launched "
+        "via `comfy launch --background`, or it was launched externally.",
+        "start ComfyUI with `comfy launch` so its output is captured",
+    ),
     # --- general argument / mode errors --------------------------------------
     ErrorCode(
         "missing_argument",

@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://comfy.org/schemas/logs.json",
+  "title": "comfy logs --json data payload",
+  "description": "Tail of the background ComfyUI log captured by `comfy launch --background`.",
+  "type": "object",
+  "required": ["lines", "path", "truncated"],
+  "additionalProperties": true,
+  "properties": {
+    "lines": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "The last N log lines (newline-terminated except possibly the final one)."
+    },
+    "path": {
+      "type": "string",
+      "description": "Absolute path of the logfile that was read."
+    },
+    "truncated": {
+      "type": "boolean",
+      "description": "True when the line/byte cap dropped lines the caller would otherwise have received."
+    }
+  }
+}

@@ -41,6 +41,7 @@ from comfy_cli.command import (
 )
 from comfy_cli.command.install import validate_version
 from comfy_cli.command.launch import launch as launch_command
+from comfy_cli.command.launch import logs as logs_command
 from comfy_cli.command.models import models as models_command
 from comfy_cli.command.models import search as models_search_command
 from comfy_cli.config_manager import ConfigManager
@@ -1110,6 +1111,21 @@ def launch(
     ] = None,
 ):
     launch_command(background, extra, frontend_pr)
+
+
+@app.command(help="Show the captured background ComfyUI log (from `comfy launch --background`).")
+@tracking.track_command()
+def logs(
+    tail: Annotated[
+        int,
+        typer.Option("--tail", help="Number of trailing log lines to show (capped for JSON payloads)."),
+    ] = 200,
+    where: Annotated[
+        str | None,
+        typer.Option("--where", show_default=False, help="Routing target. Only 'local' is supported."),
+    ] = None,
+):
+    logs_command(tail=tail, where=where)
 
 
 @app.command("setup", help="Interactive setup wizard — routing, auth, and agent skills in one step.")

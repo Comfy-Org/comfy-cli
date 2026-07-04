@@ -97,6 +97,8 @@ COMMAND_SCHEMAS: dict[str, str] = {
     # config
     "comfy set-default": "set_default",
     "comfy version": "version",
+    # background server logs
+    "comfy logs": "logs",
 }
 
 

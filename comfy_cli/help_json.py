@@ -47,6 +47,7 @@ HELP_EXAMPLES: dict[str, list[str]] = {
         "comfy --json-stream run --workflow path/to/workflow_api.json",
     ],
     "comfy stop": ["comfy stop"],
+    "comfy logs": ["comfy logs", "comfy --json logs --tail 50"],
     "comfy set-default": ["comfy set-default /path/to/ComfyUI"],
     "comfy update": ["comfy update", "comfy update all"],
     "comfy standalone": ["comfy standalone"],
