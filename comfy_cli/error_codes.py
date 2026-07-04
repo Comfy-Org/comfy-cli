@@ -347,6 +347,12 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "via `comfy launch --background`, or it was launched externally.",
         "start ComfyUI with `comfy launch` so its output is captured",
     ),
+    ErrorCode(
+        "log_read_failed",
+        "`comfy logs` located the logfile but could not read it — it was removed or its "
+        "permissions changed between the existence check and the read (TOCTOU window).",
+        "check the file still exists and is readable, then retry",
+    ),
     # --- general argument / mode errors --------------------------------------
     ErrorCode(
         "missing_argument",

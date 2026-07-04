@@ -109,6 +109,19 @@ def test_read_log_tail_handles_final_line_without_newline(tmp_path):
     assert lines == ["b\n", "last-no-newline"]
 
 
+def test_read_log_tail_single_huge_line_kept_byte_truncated(tmp_path):
+    # A single newline-less line larger than the byte cap must not drop all
+    # output; keep a byte-truncated tail of it instead.
+    p = tmp_path / "log.txt"
+    p.write_text("z" * 5000)
+
+    lines, truncated = launch.read_log_tail(str(p), 10, max_bytes=500)
+
+    assert truncated is True
+    assert len(lines) == 1
+    assert lines[0] == "z" * 500
+
+
 # --------------------------------------------------------------------------- #
 # `comfy logs` verb
 # --------------------------------------------------------------------------- #
@@ -185,6 +198,40 @@ def test_logs_where_local_is_accepted(monkeypatch, tmp_path, capsys):
     assert env["data"]["lines"] == ["hello\n"]
 
 
+def test_logs_read_error_emits_clean_error(monkeypatch, tmp_path, capsys):
+    _force_json_renderer()
+    log = tmp_path / "comfyui_8188.log"
+    log.write_text("hello\n")
+    monkeypatch.setattr(launch, "resolve_background_log_path", lambda: str(log))
+
+    def boom(*args, **kwargs):
+        raise OSError("permission denied")
+
+    monkeypatch.setattr(launch, "read_log_tail", boom)
+
+    with pytest.raises(typer.Exit):
+        launch.logs(tail=50)
+
+    env = _envelope(capsys)
+    assert env["ok"] is False
+    assert env["error"]["code"] == "log_read_failed"
+
+
+def test_logs_pretty_honors_large_tail_past_line_cap(monkeypatch, tmp_path, capsys):
+    # Pretty output goes to a human terminal, so --tail beyond the JSON line cap
+    # must not be silently truncated.
+    log = tmp_path / "comfyui_8188.log"
+    n = launch.LOGS_MAX_LINES + 50
+    log.write_text("".join(f"line {i}\n" for i in range(n)))
+    monkeypatch.setattr(launch, "resolve_background_log_path", lambda: str(log))
+
+    launch.logs(tail=n)
+
+    out = capsys.readouterr().out
+    assert "line 0\n" in out  # earliest line present → nothing was capped away
+    assert f"line {n - 1}\n" in out
+
+
 def test_logs_pretty_writes_raw_lines(monkeypatch, tmp_path, capsys):
     # Default renderer is pretty; log text with '[...]' must not be reinterpreted.
     log = tmp_path / "comfyui_8188.log"
@@ -243,6 +290,8 @@ def test_launch_and_monitor_redirects_to_logfile_and_records_path(
 
     assert cfg.config["DEFAULT"][constants.CONFIG_KEY_BACKGROUND_LOG] == log_path
     assert "8188" in cfg.config["DEFAULT"][constants.CONFIG_KEY_BACKGROUND]
-    cfg.write_config.assert_called_once()
+    # Written twice: the log path is recorded up front (so a crash log is
+    # findable even if startup fails) and again with the background info on success.
+    assert cfg.write_config.call_count == 2
     # The logfile the child wrote is on disk with both lines.
     assert "To see the GUI go to:" in (tmp_path / "user" / "comfyui_8188.log").read_text()

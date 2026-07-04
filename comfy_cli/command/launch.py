@@ -211,6 +211,15 @@ def background_launch(extra, frontend_pr=None):
     else:
         extra = []
 
+    # Validate --port as an integer. It flows into the log path
+    # (``comfyui_<port>.log``); a non-integer value like ``../../etc/x`` would
+    # otherwise escape the workspace when the logfile is created.
+    try:
+        port = int(port)
+    except (TypeError, ValueError):
+        print(f"[bold red]Invalid --port value {port!r}; expected an integer.[/bold red]\n")
+        raise typer.Exit(code=1)
+
     if check_comfy_server_running(port):
         print(f"[bold red]The {port} port is already in use. A new ComfyUI server cannot be launched.\n[bold red]\n")
         raise typer.Exit(code=1)
@@ -257,6 +266,20 @@ def background_log_path(port, workspace: str | None = None) -> str:
     return os.path.join(workspace, "user", f"comfyui_{port}.log")
 
 
+def _open_log_for_write(log_path: str):
+    """Open ``log_path`` for a truncating write, refusing to follow a symlink.
+
+    On a shared host an attacker with write access to ``<workspace>/user`` could
+    pre-place ``comfyui_<port>.log`` as a symlink so ``open(..., "w")`` clobbers
+    the link target. ``O_NOFOLLOW`` makes the open fail (``ELOOP``) instead. The
+    flag is absent on some platforms (older Windows); there ``getattr`` yields 0
+    and we fall back to a plain truncating open.
+    """
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(log_path, flags, 0o644)
+    return os.fdopen(fd, "w", encoding="utf-8")
+
+
 async def launch_and_monitor(cmd, listen, port):
     """
     Monitor the process during the background launch.
@@ -282,12 +305,27 @@ async def launch_and_monitor(cmd, listen, port):
     env["PYTHONUNBUFFERED"] = "1"
 
     log_path = background_log_path(port)
-    os.makedirs(os.path.dirname(log_path), exist_ok=True)
 
     # Truncate-on-launch: each background launch starts a fresh log. The child
     # inherits its own dup of this fd, so writes continue after we (the monitor)
-    # close our handle and after we os._exit on success.
-    logfh = open(log_path, "w", encoding="utf-8")
+    # close our handle and after we os._exit on success. Failing to create the
+    # log (read-only/permission-restricted workspace) is reported cleanly rather
+    # than aborting launch with a raw traceback.
+    try:
+        os.makedirs(os.path.dirname(log_path), exist_ok=True)
+        logfh = _open_log_for_write(log_path)
+    except OSError as e:
+        print(f"[bold red]Could not open background log file {log_path}: {e}[/bold red]\n")
+        os._exit(1)
+
+    # Record the log path up front so `comfy logs` can surface a crash log even
+    # when startup fails before the success marker below (where the running
+    # background info is recorded). A fresh ConfigManager re-reads this on the
+    # success path.
+    cfg = ConfigManager()
+    cfg.config["DEFAULT"][constants.CONFIG_KEY_BACKGROUND_LOG] = log_path
+    cfg.write_config()
+
     try:
         if sys.platform == "win32":
             process = subprocess.Popen(
@@ -318,6 +356,8 @@ async def launch_and_monitor(cmd, listen, port):
             print(
                 f"[bold yellow]ComfyUI is successfully launched in the background.[/bold yellow]\nTo see the GUI go to: http://{listen}:{port}"
             )
+            # CONFIG_KEY_BACKGROUND_LOG was already recorded before launch; here
+            # we add the running background info now that startup succeeded.
             cfg = ConfigManager()
             cfg.config["DEFAULT"][constants.CONFIG_KEY_BACKGROUND] = f"{(listen, port, process.pid)}"
             cfg.config["DEFAULT"][constants.CONFIG_KEY_BACKGROUND_LOG] = log_path
@@ -389,8 +429,15 @@ def read_log_tail(
     truncated = n > max_lines and total > max_lines
 
     size = sum(len(line.encode("utf-8")) for line in lines)
-    while lines and size > max_bytes:
+    while len(lines) > 1 and size > max_bytes:
         size -= len(lines.pop(0).encode("utf-8"))
+        truncated = True
+
+    # If the sole remaining line is itself larger than the byte cap, keep a
+    # byte-truncated tail of it rather than dropping all output for a non-empty
+    # logfile (e.g. a single huge newline-less line).
+    if lines and size > max_bytes:
+        lines[-1] = lines[-1].encode("utf-8")[-max_bytes:].decode("utf-8", errors="replace")
         truncated = True
 
     return lines, truncated
@@ -417,15 +464,32 @@ def resolve_background_log_path() -> str | None:
 
 def logs(tail: int = 200, where: str | None = None):
     """Print the tail of the background ComfyUI log captured by `comfy launch`."""
+    from comfy_cli import where as where_mod
     from comfy_cli.output import get_renderer
 
     renderer = get_renderer()
 
-    if where is not None and where.strip().lower() != "local":
+    # Honor the same routing precedence as the rest of the CLI (flag, COMFY_WHERE,
+    # project comfy.yaml, persisted where_default) instead of only the --where flag,
+    # so `comfy logs` errors when routing is *explicitly* pointed at cloud. The
+    # cloud-credentials auto-detect (source="auto") is deliberately NOT treated as
+    # an explicit choice: `comfy logs` is a local-only command, so simply having
+    # cloud creds configured shouldn't force a --where local on every invocation.
+    try:
+        resolution = where_mod.resolve_default(flag=where)
+    except ValueError as e:
         renderer.error(
             code="where_invalid",
-            message="`comfy logs` reads a local logfile; only `--where local` is supported.",
-            hint="drop --where, or pass --where local",
+            message=str(e),
+            hint="pass --where local, or set routing to local",
+            command="logs",
+        )
+        raise typer.Exit(code=1)
+    if resolution.target is not where_mod.WhereTarget.LOCAL and resolution.source != "auto":
+        renderer.error(
+            code="where_invalid",
+            message="`comfy logs` reads a local logfile; only `local` routing is supported.",
+            hint="pass --where local, or set routing to local",
             command="logs",
         )
         raise typer.Exit(code=1)
@@ -440,7 +504,26 @@ def logs(tail: int = 200, where: str | None = None):
         )
         raise typer.Exit(code=1)
 
-    lines, truncated = read_log_tail(log_path, tail)
+    # Pretty output goes to a human terminal: honor the requested --tail. The
+    # line/byte caps exist to keep JSON payloads bounded, so apply them only in
+    # machine mode (matching the --tail help text).
+    if renderer.is_pretty():
+        read_kwargs = {"max_lines": max(tail, LOGS_MAX_LINES), "max_bytes": sys.maxsize}
+    else:
+        read_kwargs = {}
+
+    try:
+        lines, truncated = read_log_tail(log_path, tail, **read_kwargs)
+    except OSError as e:
+        # The isfile() check above is best-effort; the file can vanish or become
+        # unreadable in the TOCTOU window. Emit a clean error, not a raw traceback.
+        renderer.error(
+            code="log_read_failed",
+            message=f"Could not read log file {log_path}: {e}",
+            hint="check the file still exists and is readable",
+            command="logs",
+        )
+        raise typer.Exit(code=1)
 
     if renderer.is_pretty():
         # Write raw so ComfyUI log text (which can contain '[...]') isn't
