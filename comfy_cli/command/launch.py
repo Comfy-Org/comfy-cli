@@ -273,10 +273,12 @@ def _open_log_for_write(log_path: str):
     pre-place ``comfyui_<port>.log`` as a symlink so ``open(..., "w")`` clobbers
     the link target. ``O_NOFOLLOW`` makes the open fail (``ELOOP``) instead. The
     flag is absent on some platforms (older Windows); there ``getattr`` yields 0
-    and we fall back to a plain truncating open.
+    and we fall back to a plain truncating open. The file is created owner-only
+    (``0o600``) — consistent with the shared-host threat model above, the log
+    isn't meant to be world-readable.
     """
     flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
-    fd = os.open(log_path, flags, 0o644)
+    fd = os.open(log_path, flags, 0o600)
     return os.fdopen(fd, "w", encoding="utf-8")
 
 
