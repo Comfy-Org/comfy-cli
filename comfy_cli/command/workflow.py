@@ -17,6 +17,7 @@ Slot addresses follow CQL's format: ``<instance_id>.<input_name>``. Run
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -84,6 +85,15 @@ def _get_graph(input_path: str | None, host: str | None, port: int | None, on_st
     ``on_stale(host_key, error_str)``.
     """
     from comfy_cli.cql.engine import Graph, LoadError
+
+    # Default offline catalog: when no explicit ``--input`` is given, honor the
+    # ``COMFY_OBJECT_INFO_FILE`` env var. This lets a host (e.g. a server-side
+    # agent) point every CQL command at a pre-warmed object_info dump by setting
+    # one env var, instead of threading ``--input <path>`` through each call — no
+    # per-command network fetch, no cloud credential needed for schema. An
+    # explicit ``--input`` still wins.
+    if input_path is None:
+        input_path = os.environ.get("COMFY_OBJECT_INFO_FILE") or None
 
     renderer = get_renderer()
     try:
