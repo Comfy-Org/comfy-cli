@@ -458,6 +458,16 @@ def resilient_load_object_info(
         # already pinning a known-good file.
         return _load_from_file(input_path)
 
+    # Offline default catalog: COMFY_OBJECT_INFO_FILE is honored exactly like an
+    # explicit --input dump, so EVERY object_info consumer routed through this
+    # loader — workflow edits, `nodes show`/`find`, `validate`, fragments —
+    # resolves the node schema from a pre-warmed / baked file with no network
+    # fetch and no cloud credential. A host (e.g. a server-side agent) sets it
+    # once instead of threading --input through each command.
+    env_dump = os.environ.get("COMFY_OBJECT_INFO_FILE")
+    if env_dump:
+        return _load_from_file(env_dump)
+
     host_key = _resolve_host_key(mode, host, port)
 
     fresh = read_fresh_object_info_cache(host_key, object_info_cache_ttl())
