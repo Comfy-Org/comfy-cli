@@ -14,6 +14,7 @@ import urllib.error
 from pathlib import Path
 
 import pytest
+import typer
 
 from comfy_cli.command import transfer
 from comfy_cli.target import Target
@@ -145,3 +146,36 @@ class TestUploadMachineModeStdoutPurity:
         assert parsed[-1]["data"]["uploads"][0]["cloud_name"] == "ab12.png"
         assert "uploaded" not in captured.out
         assert "uploaded" not in captured.err
+
+
+class TestUploadConnectionError:
+    """A connection-level failure (``URLError``/``TimeoutError``) on upload must
+    surface as a structured ``upload_failed`` envelope, not an unhandled
+    traceback that breaks ``--json``/NDJSON consumers (BE-2454)."""
+
+    @pytest.fixture(autouse=True)
+    def reset_renderer(self):
+        from comfy_cli.output.renderer import reset_renderer_for_testing
+
+        reset_renderer_for_testing()
+        yield
+        reset_renderer_for_testing()
+
+    def test_urlerror_emits_upload_failed_envelope(self, asset, monkeypatch, capsys):
+        from comfy_cli.output import Renderer, set_renderer
+        from comfy_cli.output.renderer import OutputMode
+
+        err = urllib.error.URLError(ConnectionRefusedError(111, "Connection refused"))
+        monkeypatch.setattr(transfer, "_TRANSFER_OPENER", _FakeOpener(error=err))
+        monkeypatch.setattr(transfer, "resolve_target", lambda where=None: _local_target())
+        set_renderer(Renderer(mode=OutputMode.JSON, command="upload"))
+
+        with pytest.raises(typer.Exit) as excinfo:
+            transfer.execute_upload([str(asset)], where="local")
+
+        assert excinfo.value.exit_code == 1
+        env = json.loads([ln for ln in capsys.readouterr().out.splitlines() if ln.strip()][-1])
+        assert env["ok"] is False
+        assert env["error"]["code"] == "upload_failed"
+        assert "Connection refused" in env["error"]["message"]
+        assert "Connection refused" in env["error"]["details"]["reason"]
