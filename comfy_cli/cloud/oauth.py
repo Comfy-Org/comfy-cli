@@ -52,6 +52,7 @@ from comfy_cli.cloud import (
     CLIENT_NAME,
     get_base_url,
 )
+from comfy_cli.http import NoRedirectHandler
 
 # ---------------------------------------------------------------------------
 # Error types — caller maps these to renderer.error(code=...) codes.
@@ -881,16 +882,7 @@ def _assert_https_or_loopback(url: str) -> None:
     raise _HTTPFail(0, f"refusing plaintext HTTP for OAuth endpoint: {url}")
 
 
-# Refuse redirects: an evil 302 from the token endpoint to attacker.example
-# would replay the verifier + code at the redirect target.
-class _NoRedirect(urllib.request.HTTPRedirectHandler):
-    def http_error_301(self, req, fp, code, msg, headers):
-        raise HTTPError(req.full_url, code, "redirect refused", headers, fp)
-
-    http_error_302 = http_error_303 = http_error_307 = http_error_308 = http_error_301
-
-
-_OAUTH_OPENER = urllib.request.build_opener(_NoRedirect())
+_OAUTH_OPENER = urllib.request.build_opener(NoRedirectHandler())
 
 
 def _send_and_parse(req: urllib.request.Request) -> dict:

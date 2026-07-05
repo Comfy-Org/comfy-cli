@@ -1222,3 +1222,15 @@ def test_slot_address_with_dotted_input_name(graph, monkeypatch):
     # Must NOT raise "interior node images not found"; value lands on node 9's dotted widget.
     engine._apply_one_slot(wf, "10/9.images.image0", "X", graph)
     assert wf["definitions"]["subgraphs"][0]["nodes"][0]["widgets_values"][0] == "X"
+
+
+# ===========================================================================
+# SSRF loopback guard on the local object_info fetch
+# ===========================================================================
+
+
+def test_load_from_target_refuses_non_loopback_local_host():
+    from comfy_cli.cql.engine import LoadError, _load_from_target
+
+    with pytest.raises(LoadError, match="non-loopback"):
+        _load_from_target(mode="local", host="example.com", port=8188)

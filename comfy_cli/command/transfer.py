@@ -24,6 +24,7 @@ import typer
 
 from comfy_cli import jobs_state
 from comfy_cli.comfy_client import Client, Unauthenticated, extract_output_entries
+from comfy_cli.http import NoRedirectHandler
 from comfy_cli.output import get_renderer
 from comfy_cli.output import rprint as pprint
 from comfy_cli.target import resolve_target
@@ -74,14 +75,6 @@ def _auth_headers(target: Any) -> dict[str, str]:
     return headers
 
 
-# Refuse redirects on upload — a 30x from an authenticated POST is suspicious.
-class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
-    def http_error_301(self, req, fp, code, msg, headers):
-        raise urllib.error.HTTPError(req.full_url, code, "redirect refused (auth leak prevention)", headers, fp)
-
-    http_error_302 = http_error_303 = http_error_307 = http_error_308 = http_error_301
-
-
 # Stripped on every download redirect so auth never crosses origins.
 _AUTH_HEADERS_TO_STRIP = frozenset({"authorization", "x-api-key", "x-comfy-api-key", "cookie"})
 _MAX_REDIRECTS = 5
@@ -109,7 +102,7 @@ class _DownloadRedirectHandler(urllib.request.HTTPRedirectHandler):
         return new_req
 
 
-_TRANSFER_OPENER = urllib.request.build_opener(_NoRedirectHandler())
+_TRANSFER_OPENER = urllib.request.build_opener(NoRedirectHandler("redirect refused (auth leak prevention)"))
 _DOWNLOAD_OPENER = urllib.request.build_opener(_DownloadRedirectHandler())
 
 

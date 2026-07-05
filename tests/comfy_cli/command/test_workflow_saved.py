@@ -1,8 +1,10 @@
-"""Tests for `comfy workflow list/get/save/delete` — cloud-saved workflows.
+"""Tests for `comfy workflow list/get/save/delete` — saved workflows.
 
-These commands wrap the `/api/workflows` surface documented at
-docs.comfy.org/api-reference/cloud/workflow. All HTTP is mocked; the
-live round-trip is verified manually.
+The cloud path wraps the `/api/workflows` surface documented at
+docs.comfy.org/api-reference/cloud/workflow. The local path (`--where local`)
+wraps the running ComfyUI's `/userdata` file store under `workflows/`, mirroring
+the ComfyUI frontend's layout. All HTTP is mocked; the live round-trip is
+verified manually.
 """
 
 from __future__ import annotations
@@ -163,33 +165,257 @@ _WORKFLOW_CONTENT_RESPONSE = {
 }
 
 
+# A frontend-format workflow (nodes[] list) — what the local /userdata store holds.
+_LOCAL_WORKFLOW = {
+    "last_node_id": 2,
+    "nodes": [
+        {"id": 1, "type": "KSampler"},
+        {"id": 2, "type": "VAEDecode"},
+    ],
+    "links": [],
+}
+
+# ComfyUI's /userdata?dir=workflows&full_info=true response: FileInfo dicts with
+# `path` relative to the workflows/ dir.
+_USERDATA_LIST_RESPONSE = [
+    {"path": "flux.json", "size": 120, "modified": 1700000002000, "created": 1700000000000},
+    {"path": "sub/wan.json", "size": 340, "modified": 1700000001000, "created": 1700000001000},
+]
+
+
+def _http_error(code: int):
+    return urllib.error.HTTPError("http://127.0.0.1:8188/userdata/x", code, "err", {}, io.BytesIO(b""))
+
+
 # ---------------------------------------------------------------------------
-# Local route — all four subcommands must reject with workflow_saved_local_unsupported
+# Local route — /userdata-backed CRUD
 # ---------------------------------------------------------------------------
 
 
-class TestLocalIsRejectedCleanly:
-    def test_list_local_unsupported(self, local_target, capsys):
+class TestLocalList:
+    def test_lists_userdata_workflows(self, local_target, monkeypatch, capsys):
+        calls = _patch_urlopen(monkeypatch, {"/userdata": _USERDATA_LIST_RESPONSE})
+        env = _run(["list", "--where", "local"], capsys)
+        assert env["ok"] is True
+        assert env["data"]["count"] == 2
+        # id == name == the path relative to workflows/ (what get/delete take).
+        ids = {r["id"] for r in env["data"]["workflows"]}
+        assert ids == {"flux.json", "sub/wan.json"}
+        # Requests the recursive full-info listing of the workflows/ dir.
+        assert "dir=workflows" in calls[0]["url"]
+        assert "full_info=true" in calls[0]["url"]
+
+    def test_name_filter_and_limit(self, local_target, monkeypatch, capsys):
+        _patch_urlopen(monkeypatch, {"/userdata": _USERDATA_LIST_RESPONSE})
+        env = _run(["list", "--where", "local", "--name", "wan", "--limit", "10"], capsys)
+        assert env["data"]["count"] == 1
+        assert env["data"]["workflows"][0]["id"] == "sub/wan.json"
+
+    def test_missing_workflows_dir_is_empty_not_error(self, local_target, monkeypatch, capsys):
+        # ComfyUI 404s when the workflows/ dir doesn't exist yet — that's "none saved".
+        _patch_urlopen(monkeypatch, {"/userdata": _http_error(404)})
+        env = _run(["list", "--where", "local"], capsys)
+        assert env["ok"] is True
+        assert env["data"]["count"] == 0
+
+    def test_server_not_running_envelope(self, local_target, monkeypatch, capsys):
+        _patch_urlopen(monkeypatch, {"/userdata": urllib.error.URLError("Connection refused")})
         env = _run(["list", "--where", "local"], capsys)
         assert env["ok"] is False
-        assert env["error"]["code"] == "workflow_saved_local_unsupported"
+        assert env["error"]["code"] == "server_not_running"
 
-    def test_get_local_unsupported(self, local_target, capsys):
-        env = _run(["get", "any-id", "--where", "local"], capsys)
+    def test_reachable_server_error_is_not_server_not_running(self, local_target, monkeypatch, capsys):
+        # A reachable server that 500s must not be mislabeled "run comfy launch".
+        _patch_urlopen(monkeypatch, {"/userdata": _http_error(500)})
+        env = _run(["list", "--where", "local"], capsys)
         assert env["ok"] is False
-        assert env["error"]["code"] == "workflow_saved_local_unsupported"
+        assert env["error"]["code"] == "server_error"
 
-    def test_delete_local_unsupported(self, local_target, capsys):
-        env = _run(["delete", "any-id", "--where", "local"], capsys)
+    def test_unparseable_body_surfaces_invalid_response(self, local_target, monkeypatch, capsys):
+        _patch_urlopen(monkeypatch, {"/userdata": (b"<html>not json</html>", 200)})
+        env = _run(["list", "--where", "local"], capsys)
         assert env["ok"] is False
-        assert env["error"]["code"] == "workflow_saved_local_unsupported"
+        assert env["error"]["code"] == "invalid_response"
 
-    def test_save_local_unsupported(self, local_target, tmp_path, capsys):
-        wf = tmp_path / "wf.json"
-        wf.write_text(json.dumps({"1": {"class_type": "X"}}))
-        env = _run(["save", str(wf), "--name", "test", "--where", "local"], capsys)
+    def test_invalid_order_rejected(self, local_target, monkeypatch, capsys):
+        _patch_urlopen(monkeypatch, {})  # must fail before any HTTP
+        env = _run(["list", "--where", "local", "--order", "sideways"], capsys)
         assert env["ok"] is False
-        assert env["error"]["code"] == "workflow_saved_local_unsupported"
+        assert env["error"]["code"] == "invalid_argument"
+
+    def test_order_normalized_case_insensitively(self, local_target, monkeypatch, capsys):
+        _patch_urlopen(monkeypatch, {"/userdata": _USERDATA_LIST_RESPONSE})
+        env = _run(["list", "--where", "local", "--order", "ASC"], capsys)
+        assert env["ok"] is True
+
+    def test_invalid_sort_rejected(self, local_target, monkeypatch, capsys):
+        _patch_urlopen(monkeypatch, {})
+        env = _run(["list", "--where", "local", "--sort", "bogus"], capsys)
+        assert env["ok"] is False
+        assert env["error"]["code"] == "invalid_argument"
+
+
+class TestLocalGet:
+    def test_writes_content_to_file(self, local_target, tmp_path, monkeypatch, capsys):
+        _patch_urlopen(monkeypatch, {"/userdata/": _LOCAL_WORKFLOW})
+        out = tmp_path / "got.json"
+        env = _run(["get", "flux.json", "--out", str(out), "--where", "local"], capsys)
+        assert env["ok"] is True
+        assert env["data"]["workflow_id"] == "flux.json"
+        assert env["data"]["node_count"] == 2  # frontend format → len(nodes)
+        assert json.loads(out.read_text()) == _LOCAL_WORKFLOW
+
+    def test_encodes_subdir_key_as_single_segment(self, local_target, tmp_path, monkeypatch, capsys):
+        calls = _patch_urlopen(monkeypatch, {"/userdata/": _LOCAL_WORKFLOW})
+        _run(["get", "sub/wan.json", "--out", str(tmp_path / "o.json"), "--where", "local"], capsys)
+        # workflows/sub/wan.json is percent-encoded whole (slashes → %2F).
+        assert "workflows%2Fsub%2Fwan.json" in calls[0]["url"]
+
+    def test_404_surfaces_workflow_not_found(self, local_target, monkeypatch, capsys):
+        _patch_urlopen(monkeypatch, {"/userdata/": _http_error(404)})
+        env = _run(["get", "ghost.json", "--where", "local"], capsys)
+        assert env["ok"] is False
+        assert env["error"]["code"] == "workflow_not_found"
+
+    def test_rejects_path_traversal(self, local_target, monkeypatch, capsys):
+        _patch_urlopen(monkeypatch, {})  # must fail before any HTTP
+        env = _run(["get", "../../etc/passwd", "--where", "local"], capsys)
+        assert env["ok"] is False
+        assert env["error"]["code"] == "invalid_argument"
+
+    def test_rejects_windows_trailing_dot_traversal(self, local_target, monkeypatch, capsys):
+        # A Windows server strips trailing dots/spaces, so "sub/.. /x" collapses to
+        # "sub/../x" and escapes workflows/ — reject it before any HTTP.
+        _patch_urlopen(monkeypatch, {})
+        env = _run(["get", "sub/.. /secret", "--where", "local"], capsys)
+        assert env["ok"] is False
+        assert env["error"]["code"] == "invalid_argument"
+
+    def test_non_json_body_warns_and_writes_raw(self, local_target, tmp_path, monkeypatch, capsys):
+        # A 200 with a non-JSON body (e.g. an HTML error page) still gets written,
+        # but a warning surfaces so the corrupt fetch isn't silent.
+        _patch_urlopen(monkeypatch, {"/userdata/": (b"<html>nope</html>", 200)})
+        out = tmp_path / "got.json"
+        env = _run(["get", "flux.json", "--out", str(out), "--where", "local"], capsys)
+        assert env["ok"] is True
+        assert env["data"]["node_count"] is None
+        assert any(w["code"] == "workflow_content_not_json" for w in env["data"].get("warnings", []))
+        assert out.read_bytes() == b"<html>nope</html>"
+
+    def test_non_utf8_body_does_not_crash(self, local_target, tmp_path, monkeypatch, capsys):
+        # json.loads on non-UTF-8 bytes raises UnicodeDecodeError, not JSONDecodeError.
+        _patch_urlopen(monkeypatch, {"/userdata/": (b"\xff\xfe\x00bad", 200)})
+        out = tmp_path / "got.json"
+        env = _run(["get", "flux.json", "--out", str(out), "--where", "local"], capsys)
+        assert env["ok"] is True
+        assert any(w["code"] == "workflow_content_not_json" for w in env["data"].get("warnings", []))
+        assert out.read_bytes() == b"\xff\xfe\x00bad"
+
+    def test_write_error_surfaces_envelope(self, local_target, tmp_path, monkeypatch, capsys):
+        _patch_urlopen(monkeypatch, {"/userdata/": _LOCAL_WORKFLOW})
+
+        def _boom(self, data):
+            raise OSError("disk full")
+
+        monkeypatch.setattr("pathlib.Path.write_bytes", _boom)
+        env = _run(["get", "flux.json", "--out", str(tmp_path / "o.json"), "--where", "local"], capsys)
+        assert env["ok"] is False
+        assert env["error"]["code"] == "workflow_write_error"
+
+    def test_response_over_cap_refuses_to_truncate(self, local_target, tmp_path, monkeypatch, capsys):
+        # Shrink the cap so the mocked body exceeds it; the CLI must fail loudly
+        # rather than silently writing a truncated file.
+        monkeypatch.setattr(workflow_cmd, "_USERDATA_MAX_BYTES", 4)
+        _patch_urlopen(monkeypatch, {"/userdata/": (b'{"nodes": []}', 200)})
+        env = _run(["get", "flux.json", "--out", str(tmp_path / "o.json"), "--where", "local"], capsys)
+        assert env["ok"] is False
+        assert env["error"]["code"] == "workflow_too_large"
+
+
+class TestLocalSave:
+    def test_posts_file_bytes_and_appends_json_ext(self, local_target, tmp_path, monkeypatch, capsys):
+        wf = tmp_path / "src.json"
+        wf.write_text(json.dumps(_LOCAL_WORKFLOW))
+        stored = {"path": "flux.json", "size": 120, "modified": 1700000002000, "created": 1700000000000}
+        calls = _patch_urlopen(monkeypatch, {"/userdata/": stored})
+        env = _run(["save", str(wf), "--name", "flux", "--where", "local"], capsys)
+        assert env["ok"] is True
+        assert env["data"]["workflow_id"] == "flux.json"
+        assert calls[0]["method"] == "POST"
+        # '.json' appended to the bare --name; encoded into the userdata path.
+        assert "workflows%2Fflux.json" in calls[0]["url"]
+        assert "overwrite=true" in calls[0]["url"]
+        assert json.loads(calls[0]["body"]) == _LOCAL_WORKFLOW
+
+    def test_description_ignored_with_warning(self, local_target, tmp_path, monkeypatch, capsys):
+        wf = tmp_path / "src.json"
+        wf.write_text(json.dumps(_LOCAL_WORKFLOW))
+        _patch_urlopen(monkeypatch, {"/userdata/": {"path": "flux.json"}})
+        env = _run(["save", str(wf), "--name", "flux.json", "--description", "hi", "--where", "local"], capsys)
+        assert env["ok"] is True
+        assert any(w["code"] == "description_ignored" for w in env["data"].get("warnings", []))
+
+    def test_invalid_json_file(self, local_target, tmp_path, monkeypatch, capsys):
+        wf = tmp_path / "bad.json"
+        wf.write_text("not json")
+        _patch_urlopen(monkeypatch, {})
+        env = _run(["save", str(wf), "--name", "x", "--where", "local"], capsys)
+        assert env["ok"] is False
+        assert env["error"]["code"] == "workflow_invalid_json"
+
+    def test_non_utf8_file_surfaces_read_error(self, local_target, tmp_path, monkeypatch, capsys):
+        wf = tmp_path / "bin.json"
+        wf.write_bytes(b"\xff\xfe\x00")  # not valid UTF-8 → UnicodeDecodeError on read
+        _patch_urlopen(monkeypatch, {})
+        env = _run(["save", str(wf), "--name", "x", "--where", "local"], capsys)
+        assert env["ok"] is False
+        assert env["error"]["code"] == "workflow_read_error"
+
+    def test_json_ext_appended_case_insensitively(self, local_target, tmp_path, monkeypatch, capsys):
+        # `--name flux.JSON` already ends in .json (case-insensitive) → don't double the ext.
+        wf = tmp_path / "src.json"
+        wf.write_text(json.dumps(_LOCAL_WORKFLOW))
+        calls = _patch_urlopen(monkeypatch, {"/userdata/": {"path": "flux.JSON"}})
+        env = _run(["save", str(wf), "--name", "flux.JSON", "--where", "local"], capsys)
+        assert env["ok"] is True
+        assert "workflows%2Fflux.JSON" in calls[0]["url"]
+        assert "flux.JSON.json" not in calls[0]["url"]
+
+    def test_missing_file(self, local_target, tmp_path, monkeypatch, capsys):
+        _patch_urlopen(monkeypatch, {})
+        env = _run(["save", str(tmp_path / "nope.json"), "--name", "x", "--where", "local"], capsys)
+        assert env["ok"] is False
+        assert env["error"]["code"] == "workflow_not_found"
+
+    def test_server_not_running_envelope(self, local_target, tmp_path, monkeypatch, capsys):
+        wf = tmp_path / "src.json"
+        wf.write_text(json.dumps(_LOCAL_WORKFLOW))
+        _patch_urlopen(monkeypatch, {"/userdata/": urllib.error.URLError("refused")})
+        env = _run(["save", str(wf), "--name", "flux", "--where", "local"], capsys)
+        assert env["ok"] is False
+        assert env["error"]["code"] == "server_not_running"
+
+
+class TestLocalDelete:
+    def test_sends_delete(self, local_target, monkeypatch, capsys):
+        calls = _patch_urlopen(monkeypatch, {"/userdata/": (b"", 204)})
+        env = _run(["delete", "flux.json", "--where", "local"], capsys)
+        assert env["ok"] is True
+        assert env["data"]["deleted"] is True
+        assert calls[0]["method"] == "DELETE"
+        assert "workflows%2Fflux.json" in calls[0]["url"]
+
+    def test_404_surfaces_workflow_not_found(self, local_target, monkeypatch, capsys):
+        _patch_urlopen(monkeypatch, {"/userdata/": _http_error(404)})
+        env = _run(["delete", "ghost.json", "--where", "local"], capsys)
+        assert env["ok"] is False
+        assert env["error"]["code"] == "workflow_not_found"
+
+    def test_rejects_absolute_path(self, local_target, monkeypatch, capsys):
+        _patch_urlopen(monkeypatch, {})
+        env = _run(["delete", "/etc/passwd", "--where", "local"], capsys)
+        assert env["ok"] is False
+        assert env["error"]["code"] == "invalid_argument"
 
 
 # ---------------------------------------------------------------------------

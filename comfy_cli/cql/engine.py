@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import copy
 import difflib
-import ipaddress
 import json
 import logging
 import urllib.error
@@ -21,6 +20,9 @@ import uuid as _uuid
 from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Any
+
+from comfy_cli.cql._net import is_loopback_host
+from comfy_cli.http import NoRedirectHandler
 
 # ---------------------------------------------------------------------------
 # Types — mirrors nodegraph/types.go
@@ -1044,20 +1046,10 @@ class Graph:
 
 _logger = logging.getLogger(__name__)
 
-_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1", "[::1]"})
 _MAX_OBJECT_INFO_BYTES = 64 * 1024 * 1024
 
 
-class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
-    """Refuse redirects — a 302 from /object_info is suspicious."""
-
-    def http_error_301(self, req, fp, code, msg, headers):
-        raise urllib.error.HTTPError(req.full_url, code, "redirect refused", headers, fp)
-
-    http_error_302 = http_error_303 = http_error_307 = http_error_308 = http_error_301
-
-
-_opener = urllib.request.build_opener(_NoRedirectHandler())
+_opener = urllib.request.build_opener(NoRedirectHandler())
 
 
 class LoadError(Exception):
@@ -1102,14 +1094,7 @@ def _load_from_target(*, mode: str = "local", host: str = "127.0.0.1", port: int
     # Loopback guard for local targets
     if not target.is_cloud:
         parsed_host = urllib.parse.urlsplit(url).hostname or ""
-        host_l = parsed_host.lower()
-        is_loopback = host_l in _LOOPBACK_HOSTS
-        if not is_loopback:
-            try:
-                is_loopback = ipaddress.ip_address(host_l).is_loopback
-            except ValueError:
-                is_loopback = False
-        if not is_loopback:
+        if not is_loopback_host(parsed_host):
             raise LoadError(
                 f"Refusing to fetch object_info from non-loopback host {parsed_host!r} "
                 f"in local mode (potential SSRF). Use --where cloud for remote targets."

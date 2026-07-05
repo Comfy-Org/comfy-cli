@@ -89,6 +89,7 @@ class CUDAVersion(str, Enum):
 
 
 class ROCmVersion(str, Enum):
+    v7_2 = "7.2"
     v7_1 = "7.1"
     v7_0 = "7.0"
     v6_3 = "6.3"

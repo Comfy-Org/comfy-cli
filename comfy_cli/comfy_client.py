@@ -23,6 +23,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+from comfy_cli.http import NoRedirectHandler
 from comfy_cli.target import Target
 
 _LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1", "[::1]"}
@@ -94,22 +95,7 @@ class Unauthenticated(Exception):
     """Target needs auth but no valid session is present."""
 
 
-class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
-    """Refuse to follow redirects.
-
-    Following redirects with `Authorization: Bearer …` in flight risks
-    replaying the token at the redirect target. ComfyUI gateways don't issue
-    redirects under normal operation; if we ever see one it's almost certainly
-    a misconfiguration or attack. Surface as a clear HTTPError instead.
-    """
-
-    def http_error_301(self, req, fp, code, msg, headers):
-        raise urllib.error.HTTPError(req.full_url, code, "redirect refused", headers, fp)
-
-    http_error_302 = http_error_303 = http_error_307 = http_error_308 = http_error_301
-
-
-_OPENER = urllib.request.build_opener(_NoRedirectHandler())
+_OPENER = urllib.request.build_opener(NoRedirectHandler())
 
 
 def _assert_safe_url(url: str) -> None:

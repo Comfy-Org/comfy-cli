@@ -44,8 +44,6 @@ from comfy_cli.command.launch import launch as launch_command
 from comfy_cli.command.models import models as models_command
 from comfy_cli.command.models import search as models_search_command
 from comfy_cli.config_manager import ConfigManager
-from comfy_cli.env_backend import get_backend_from_env as _get_backend_from_env
-
 from comfy_cli.constants import GPU_OPTION, CUDAVersion, ROCmVersion
 from comfy_cli.cuda_detect import DEFAULT_CUDA_TAG, detect_cuda_driver_version, resolve_cuda_wheel
 from comfy_cli.discovery import build_discovery
@@ -452,7 +450,7 @@ def install(
         ),
     ] = None,
     cuda_version: Annotated[CUDAVersion | None, typer.Option(show_default=False)] = None,
-    rocm_version: Annotated[ROCmVersion, typer.Option(show_default=True)] = ROCmVersion.v6_3,
+    rocm_version: Annotated[ROCmVersion, typer.Option(show_default=True)] = ROCmVersion.v7_2,
     amd: Annotated[
         bool | None,
         typer.Option(
@@ -814,30 +812,14 @@ def run(
             )
             return
 
+        from comfy_cli.host_port import parse_host_port_arg, resolve_host_port
+
         if host:
-            s = host.split(":")
-            host = s[0]
-            if not port and len(s) == 2:
-                port = int(s[1])
+            host, parsed_port = parse_host_port_arg(host)
+            if not port and parsed_port is not None:
+                port = parsed_port
 
-        if config.background:
-            bg_host, bg_port = config.background[0], config.background[1]
-            if not host:
-                host = bg_host
-            if not port:
-                port = bg_port
-
-        # env var support (COMFY_BACKEND or COMFY_HOST/COMFY_PORT)
-        env_h, env_p = _get_backend_from_env()
-        if not host and env_h:
-            host = env_h
-        if not port and env_p is not None:
-            port = env_p
-
-        if not host:
-            host = "127.0.0.1"
-        if not port:
-            port = 8188
+        host, port = resolve_host_port(host, port)
 
         run_inner.execute(
             workflow,
@@ -930,7 +912,8 @@ def validate(
             pass
 
     # env var fallback (same resolution as `comfy run`)
-    env_h, env_p = _get_backend_from_env()
+    from comfy_cli.env_backend import get_backend_from_env
+    env_h, env_p = get_backend_from_env()
     if not host and env_h:
         host = env_h
     if not port and env_p is not None:
