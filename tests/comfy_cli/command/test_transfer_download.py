@@ -391,14 +391,19 @@ class TestDownloadIntegrity:
     structured envelope and leave neither the final file nor a `.part` partial
     behind; completed downloads land atomically."""
 
-    def _failing_download(self, fake_target, tmp_path, capsys, resp) -> dict:
+    def _failing_download(self, fake_target, tmp_path, capsys, resp=None, raises=None) -> dict:
         import typer
+
+        def _open(req, **kw):
+            if raises is not None:
+                raise raises
+            return resp
 
         set_renderer(Renderer(mode=OutputMode.JSON, command="download"))
         _write_state(fake_target)
         with (
             patch("comfy_cli.command.transfer.resolve_target", return_value=fake_target),
-            patch.object(transfer._DOWNLOAD_OPENER, "open", side_effect=lambda req: resp),
+            patch.object(transfer._DOWNLOAD_OPENER, "open", side_effect=_open),
         ):
             with pytest.raises(typer.Exit) as excinfo:
                 transfer.execute_download(PROMPT_ID, out_dir=str(tmp_path / "out"))
@@ -474,6 +479,36 @@ class TestDownloadIntegrity:
         umask = os.umask(0)
         os.umask(umask)
         assert (Path(paths[0]).stat().st_mode & 0o777) == 0o666 & ~umask
+
+    def test_connection_failure_emits_envelope_not_traceback(self, fake_target, tmp_path, capsys):
+        import urllib.error
+
+        err = self._failing_download(
+            fake_target, tmp_path, capsys, raises=urllib.error.URLError("[Errno 111] Connection refused")
+        )
+        assert err["code"] == "download_failed"
+        assert "refused" in err["details"]["reason"]
+        assert list((tmp_path / "out").iterdir()) == []
+
+    def test_midstream_reset_emits_envelope_and_cleans_temp(self, fake_target, tmp_path, capsys):
+        class _ResettingResp(_FakeResp):
+            def read(self, n: int) -> bytes:
+                chunk = super().read(n)
+                if not chunk:
+                    raise ConnectionResetError("Connection reset by peer")
+                return chunk
+
+        err = self._failing_download(fake_target, tmp_path, capsys, _ResettingResp(b"x" * 100, content_length=None))
+        assert err["code"] == "download_failed"
+        assert "reset" in err["details"]["reason"]
+        assert list((tmp_path / "out").iterdir()) == []
+
+    def test_rename_failure_emits_envelope_and_cleans_temp(self, fake_target, tmp_path, capsys):
+        with patch("pathlib.Path.replace", side_effect=OSError("Permission denied")):
+            err = self._failing_download(fake_target, tmp_path, capsys, _FakeResp())
+        assert err["code"] == "download_failed"
+        assert "Permission denied" in err["details"]["reason"]
+        assert list((tmp_path / "out").iterdir()) == []
 
 
 class TestLocalOutputCopy:

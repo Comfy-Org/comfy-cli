@@ -694,6 +694,20 @@ def execute_download(
                     details={"status": e.code, "url": url, "index": idx},
                 )
                 raise typer.Exit(code=1)
+            except OSError as e:
+                # Everything that isn't an HTTP status lands here: URLError
+                # (refused/DNS/TLS — a subclass of OSError), a socket timeout
+                # or reset mid-read, and filesystem errors from the temp-file
+                # create/write/rename. Emit the envelope instead of a
+                # traceback so machine-mode consumers keep their contract.
+                reason = getattr(e, "reason", None) or e
+                renderer.error(
+                    code="download_failed",
+                    message=f"Failed to download output {idx}: {reason}",
+                    hint="check that the server is reachable and the out-dir is writable",
+                    details={"url": url, "index": idx, "reason": str(reason)},
+                )
+                raise typer.Exit(code=1)
             finally:
                 # Cleared after the success rename; on every failure path this
                 # removes the partial download.
