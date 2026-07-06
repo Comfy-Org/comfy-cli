@@ -123,10 +123,17 @@ def workspace():
     #
     # Wrap the network-bound install in a bounded retry so a single transient blip
     # is absorbed rather than nuking the whole matrix; a sustained CDN outage still
-    # fails fast with the true cause.
+    # fails fast with the true cause. Each attempt starts from a clean `ws`: a
+    # failed install can partially mutate the workspace (e.g. ComfyUI already
+    # cloned), and without a reset a later attempt could short-circuit to success
+    # and mask a *deterministic* install regression. The retry is only meant to
+    # absorb transient failures, so we wipe the workspace between attempts to keep
+    # each one a true from-scratch install.
     install_cmd = f"comfy --skip-prompt --workspace {ws} install {url_flag} {install_flags}"
     attempts = 3
     for attempt in range(1, attempts + 1):
+        if os.path.isdir(ws):
+            shutil.rmtree(ws, ignore_errors=True)
         proc = exec(install_cmd)
         if proc.returncode == 0:
             break
