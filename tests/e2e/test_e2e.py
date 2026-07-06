@@ -1,5 +1,6 @@
 import os
 import subprocess
+import time
 from datetime import datetime
 from textwrap import dedent
 
@@ -47,14 +48,35 @@ def workspace():
     install_flags = os.getenv("TEST_E2E_COMFY_INSTALL_FLAGS", "--cpu")
     comfy_url = os.getenv("TEST_E2E_COMFY_URL", "")
     url_flag = f"--url {comfy_url}" if comfy_url else ""
-    proc = exec(
-        f"""
-            comfy --skip-prompt --workspace {ws} install {url_flag} {install_flags}
-            comfy --skip-prompt set-default {ws}
-            comfy --skip-prompt --no-enable-telemetry env
-        """
-    )
-    assert proc.returncode == 0
+    # Run `comfy install` as its OWN command (not chained via a shell string) so
+    # its exit code is actually checked. When several commands are joined in one
+    # `shell=True` string, `/bin/sh -c` returns only the LAST command's status, so
+    # a failed install (e.g. `sys.exit(1)` on a PyTorch wheel-CDN TLS handshake
+    # failure) used to be masked by a later `comfy env` succeeding — the fixture
+    # limped on to `node update-cache` and reported a misleading
+    # "ComfyUI-Manager not found" instead of the real network error.
+    #
+    # Wrap the network-bound install in a bounded retry (mirrors the node-install
+    # retry below) so a single transient blip is absorbed rather than nuking the
+    # whole matrix; a sustained CDN outage still fails fast with the true cause.
+    install_cmd = f"comfy --skip-prompt --workspace {ws} install {url_flag} {install_flags}"
+    attempts = 3
+    for attempt in range(1, attempts + 1):
+        proc = exec(install_cmd)
+        if proc.returncode == 0:
+            break
+        print(f"[workspace] comfy install attempt {attempt}/{attempts} failed (rc={proc.returncode})")
+        if attempt < attempts:
+            backoff = 5 * attempt
+            print(f"[workspace] retrying comfy install after {backoff}s backoff")
+            time.sleep(backoff)
+    assert proc.returncode == 0, f"comfy install failed after {attempts} attempts:\n{proc.stdout}\n{proc.stderr}"
+
+    proc = exec(f"comfy --skip-prompt set-default {ws}")
+    assert proc.returncode == 0, f"set-default failed:\n{proc.stdout}\n{proc.stderr}"
+
+    proc = exec("comfy --skip-prompt --no-enable-telemetry env")
+    assert proc.returncode == 0, f"env failed:\n{proc.stdout}\n{proc.stderr}"
 
     # Populate Manager cache before any node operations (blocking fetch).
     proc = exec(f"comfy --workspace {ws} node update-cache")
