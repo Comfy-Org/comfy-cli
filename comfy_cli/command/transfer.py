@@ -668,6 +668,27 @@ def execute_download(
                             if not chunk:
                                 break
                             total += len(chunk)
+                            if expected is not None and total > expected:
+                                # http.client clips plain Content-Length bodies,
+                                # but ignores Content-Length when the response
+                                # is chunked — that pairing could stream far
+                                # past the declared size before the post-loop
+                                # check fires.
+                                renderer.error(
+                                    code="download_failed",
+                                    message=(
+                                        f"Download of output {idx} exceeds its declared "
+                                        f"Content-Length of {expected} bytes"
+                                    ),
+                                    hint="the server sent more data than it declared",
+                                    details={
+                                        "url": url,
+                                        "index": idx,
+                                        "declared_bytes": expected,
+                                        "received_bytes": total,
+                                    },
+                                )
+                                raise typer.Exit(code=1)
                             if total > _MAX_DOWNLOAD_BYTES:
                                 renderer.error(
                                     code="download_failed",

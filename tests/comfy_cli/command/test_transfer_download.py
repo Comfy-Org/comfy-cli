@@ -429,6 +429,13 @@ class TestDownloadIntegrity:
         assert resp.reads == 0
         assert list((tmp_path / "out").iterdir()) == []
 
+    def test_body_exceeding_declared_length_aborts(self, fake_target, tmp_path, capsys):
+        err = self._failing_download(fake_target, tmp_path, capsys, _FakeResp(b"x" * 400, content_length=100))
+        assert err["code"] == "download_failed"
+        assert err["details"]["declared_bytes"] == 100
+        assert err["details"]["received_bytes"] == 400
+        assert list((tmp_path / "out").iterdir()) == []
+
     def test_lengthless_body_over_cap_errors_with_envelope(self, fake_target, tmp_path, capsys, monkeypatch):
         monkeypatch.setattr(transfer, "_MAX_DOWNLOAD_BYTES", 100)
         err = self._failing_download(fake_target, tmp_path, capsys, _FakeResp(b"x" * 200, content_length=None))
