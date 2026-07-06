@@ -486,6 +486,7 @@ def execute_cloud(
     timeout: int = 600,
     notify: bool = False,
     print_prompt: bool = False,
+    workflow_id: str | None = None,
 ):
     """Run a workflow against Comfy Cloud via the stored OAuth session.
 
@@ -603,9 +604,9 @@ def execute_cloud(
     try:
         if not wait and renderer.is_pretty():
             with renderer.console().status("[cyan]Submitting to Comfy Cloud…", spinner="dots"):
-                submit = client.submit_prompt(parsed_workflow, client_id)
+                submit = client.submit_prompt(parsed_workflow, client_id, workflow_id=workflow_id)
         else:
-            submit = client.submit_prompt(parsed_workflow, client_id)
+            submit = client.submit_prompt(parsed_workflow, client_id, workflow_id=workflow_id)
     except Unauthenticated as e:
         renderer.error(code="cloud_unauthorized", message=str(e), hint="run: comfy cloud login")
         raise typer.Exit(code=1) from e

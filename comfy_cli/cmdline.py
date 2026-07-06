@@ -760,6 +760,14 @@ def run(
             ),
         ),
     ] = False,
+    workflow_id: Annotated[
+        str | None,
+        typer.Option(
+            "--workflow-id",
+            show_default=False,
+            help="Cloud workflow entity id to associate this run with (enables draft auto-save on run).",
+        ),
+    ] = None,
 ):
     # Snapshot kwargs before the body mutates api_key/host/port — analytics should record what user actually supplied.
     _track_props = tracking.filter_command_kwargs(dict(locals()))
@@ -808,6 +816,7 @@ def run(
                 timeout=timeout,
                 notify=effective_notify,
                 print_prompt=print_prompt,
+                workflow_id=workflow_id,
             )
             return
 
