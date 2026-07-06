@@ -11,9 +11,11 @@ from __future__ import annotations
 
 import json
 import mimetypes
+import os
 import re
 import shutil
 import sys
+import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -133,6 +135,23 @@ def _declared_content_length(resp: Any) -> int | None:
     except (TypeError, ValueError):
         return None
     return value if value >= 0 else None
+
+
+def _part_tempfile(dst: Path) -> tuple[int, Path]:
+    """Exclusively create a random ``<name>.<rand>.part`` sibling of ``dst``.
+
+    mkstemp's O_EXCL + random name defeat a symlink planted in the out-dir
+    (a plain ``open("wb")`` would follow it) and keep concurrent downloads
+    off each other's temp files; its restrictive 0600 mode is then widened
+    to the process umask so the renamed result keeps ``open("wb")``-equivalent
+    permissions.
+    """
+    fd, name = tempfile.mkstemp(dir=str(dst.parent), prefix=dst.name + ".", suffix=".part")
+    if hasattr(os, "fchmod"):
+        umask = os.umask(0)
+        os.umask(umask)
+        os.fchmod(fd, 0o666 & ~umask)
+    return fd, Path(name)
 
 
 def _local_source_path(url: str) -> Path | None:
@@ -620,15 +639,11 @@ def execute_download(
             for hdr, val in auth_hdrs.items():
                 req.add_header(hdr, val)
 
-            # Stream into a sibling ".part" file and rename it into place only
-            # once the body is complete and verified, so `local_path` never
-            # holds a partial file no matter how the transfer dies. Drop any
-            # stale .part first — open("wb") would follow a planted symlink.
-            part_path = local_path.with_name(local_path.name + ".part")
-            try:
-                part_path.unlink(missing_ok=True)
-            except OSError:
-                pass
+            # Stream into an exclusively-created temp file and rename it into
+            # place only once the body is complete and verified, so
+            # `local_path` never holds a partial file no matter how the
+            # transfer dies.
+            part_path: Path | None = None
             try:
                 with _DOWNLOAD_OPENER.open(req) as resp:
                     expected = _declared_content_length(resp)
@@ -640,8 +655,9 @@ def execute_download(
                             details={"url": url, "index": idx, "declared_bytes": expected},
                         )
                         raise typer.Exit(code=1)
+                    part_fd, part_path = _part_tempfile(local_path)
                     total = 0
-                    with open(part_path, "wb") as fp:
+                    with os.fdopen(part_fd, "wb") as fp:
                         while True:
                             chunk = resp.read(65536)
                             if not chunk:
@@ -669,6 +685,7 @@ def execute_download(
                     )
                     raise typer.Exit(code=1)
                 part_path.replace(local_path)
+                part_path = None
             except urllib.error.HTTPError as e:
                 renderer.error(
                     code="download_failed",
@@ -678,12 +695,13 @@ def execute_download(
                 )
                 raise typer.Exit(code=1)
             finally:
-                # No-op after the success rename; on every failure path this
+                # Cleared after the success rename; on every failure path this
                 # removes the partial download.
-                try:
-                    part_path.unlink(missing_ok=True)
-                except OSError:
-                    pass
+                if part_path is not None:
+                    try:
+                        part_path.unlink(missing_ok=True)
+                    except OSError:
+                        pass
 
         file_size = local_path.stat().st_size
         entry: dict[str, Any] = {

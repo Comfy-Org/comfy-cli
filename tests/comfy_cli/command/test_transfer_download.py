@@ -10,6 +10,8 @@ keys are omitted.
 from __future__ import annotations
 
 import json
+import os
+import sys
 from pathlib import Path
 from unittest.mock import patch
 
@@ -445,6 +447,33 @@ class TestDownloadIntegrity:
         paths, _ = _run_download(fake_target, tmp_path, capsys)
         assert paths
         assert list((tmp_path / "out").glob("*.part")) == []
+
+    def test_preexisting_part_sibling_survives_success(self, fake_target, tmp_path, capsys):
+        out = tmp_path / "out"
+        out.mkdir(parents=True)
+        bystander = out / f"{SHORT_ID}_000.png.part"
+        bystander.write_bytes(b"user data, not ours")
+        _write_state(fake_target)
+        paths, _ = _run_download(fake_target, tmp_path, capsys)
+        assert len(paths) == 4
+        assert bystander.read_bytes() == b"user data, not ours"
+
+    def test_preexisting_part_sibling_survives_failure(self, fake_target, tmp_path, capsys):
+        out = tmp_path / "out"
+        out.mkdir(parents=True)
+        bystander = out / f"{SHORT_ID}_000.png.part"
+        bystander.write_bytes(b"user data, not ours")
+        err = self._failing_download(fake_target, tmp_path, capsys, _FakeResp(b"x" * 40, content_length=100))
+        assert err["code"] == "download_failed"
+        assert bystander.read_bytes() == b"user data, not ours"
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX permission bits")
+    def test_downloaded_file_keeps_umask_permissions(self, fake_target, tmp_path, capsys):
+        _write_state(fake_target)
+        paths, _ = _run_download(fake_target, tmp_path, capsys)
+        umask = os.umask(0)
+        os.umask(umask)
+        assert (Path(paths[0]).stat().st_mode & 0o777) == 0o666 & ~umask
 
 
 class TestLocalOutputCopy:
