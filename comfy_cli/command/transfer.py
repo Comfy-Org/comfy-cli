@@ -421,12 +421,14 @@ def execute_upload(
                 details={"status": status, "filename": filename},
             )
             raise typer.Exit(code=1)
-        except (urllib.error.URLError, TimeoutError, ConnectionError) as e:
-            # A connection-level failure (refused / DNS / timeout / TLS at
-            # connect, or a reset / read-timeout mid-transfer) raises URLError,
-            # a bare TimeoutError, or a bare ConnectionError — never HTTPError.
-            # Surface it as a structured envelope instead of letting an
-            # unhandled traceback break machine/NDJSON consumers.
+        except (urllib.error.URLError, TimeoutError, ConnectionError, http.client.HTTPException) as e:
+            # A connection- or transfer-level failure — not HTTPError. A
+            # refused/DNS/timeout/TLS failure at connect raises URLError; a read
+            # timeout raises a bare TimeoutError; a reset raises ConnectionError;
+            # a truncated (e.g. chunked) response body raises
+            # http.client.IncompleteRead (an HTTPException). Surface it as a
+            # structured envelope instead of an unhandled traceback that breaks
+            # machine/NDJSON consumers.
             reason = getattr(e, "reason", None) or e
             renderer.error(
                 code="upload_failed",

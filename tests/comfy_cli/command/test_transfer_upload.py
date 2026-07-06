@@ -8,6 +8,7 @@ endpoint is the only ingestion path.
 
 from __future__ import annotations
 
+import http.client
 import io
 import json
 import urllib.error
@@ -179,3 +180,20 @@ class TestUploadConnectionError:
         assert env["error"]["code"] == "upload_failed"
         assert "Connection refused" in env["error"]["message"]
         assert "Connection refused" in env["error"]["details"]["reason"]
+
+    def test_incomplete_read_emits_upload_failed_envelope(self, asset, monkeypatch, capsys):
+        from comfy_cli.output import Renderer, set_renderer
+        from comfy_cli.output.renderer import OutputMode
+
+        # A truncated response body raises http.client.IncompleteRead — an
+        # HTTPException, not a URLError.
+        monkeypatch.setattr(transfer, "_TRANSFER_OPENER", _FakeOpener(error=http.client.IncompleteRead(b"x", 100)))
+        monkeypatch.setattr(transfer, "resolve_target", lambda where=None: _local_target())
+        set_renderer(Renderer(mode=OutputMode.JSON, command="upload"))
+
+        with pytest.raises(typer.Exit) as excinfo:
+            transfer.execute_upload([str(asset)], where="local")
+
+        assert excinfo.value.exit_code == 1
+        env = json.loads([ln for ln in capsys.readouterr().out.splitlines() if ln.strip()][-1])
+        assert env["error"]["code"] == "upload_failed"
