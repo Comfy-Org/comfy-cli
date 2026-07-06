@@ -603,6 +603,37 @@ class TestLocalOutputCopy:
         assert Path(paths[0]).suffix == ".mp4"
         assert Path(paths[0]).read_bytes() == b"fake-mp4"
 
+    def test_copy_cap_enforced_during_read(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(transfer, "_MAX_DOWNLOAD_BYTES", 100)
+        src = tmp_path / "big.bin"
+        src.write_bytes(b"x" * 300)
+        dst = tmp_path / "out" / "big.bin"
+        dst.parent.mkdir()
+        with pytest.raises(ValueError, match="safety limit"):
+            transfer._copy_local_output_capped(src, dst)
+        assert list(dst.parent.iterdir()) == []
+
+    def test_copy_cap_breach_surfaces_as_envelope(self, fake_target, tmp_path, capsys, monkeypatch):
+        import typer
+
+        src = tmp_path / "output" / "grew.png"
+        src.parent.mkdir()
+        src.write_bytes(b"\x89PNG-local")
+        self._write_local_state([str(src)])
+
+        def _cap_breach(src_, dst_):
+            raise ValueError("local output exceeds 100 byte safety limit")
+
+        monkeypatch.setattr(transfer, "_copy_local_output_capped", _cap_breach)
+        set_renderer(Renderer(mode=OutputMode.JSON, command="download"))
+        with patch("comfy_cli.command.transfer.resolve_target", return_value=fake_target):
+            with pytest.raises(typer.Exit) as excinfo:
+                transfer.execute_download(PROMPT_ID, out_dir=str(tmp_path / "out"))
+        assert excinfo.value.exit_code == 1
+        envelope = json.loads([ln for ln in capsys.readouterr().out.splitlines() if ln.strip()][-1])
+        assert envelope["error"]["code"] == "download_failed"
+        assert "safety limit" in envelope["error"]["message"]
+
     def test_missing_local_source_errors_cleanly(self, fake_target, tmp_path, capsys):
         self._write_local_state([str(tmp_path / "output" / "gone.png")])
         set_renderer(Renderer(mode=OutputMode.JSON, command="download"))

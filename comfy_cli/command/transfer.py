@@ -13,7 +13,6 @@ import json
 import mimetypes
 import os
 import re
-import shutil
 import sys
 import tempfile
 import urllib.error
@@ -157,6 +156,36 @@ def _part_tempfile(dst: Path) -> tuple[int, Path]:
         os.umask(umask)
         os.fchmod(fd, 0o666 & ~umask)
     return fd, Path(name)
+
+
+def _copy_local_output_capped(src: Path, dst: Path) -> None:
+    """Copy ``src`` to ``dst`` via an exclusive sibling temp file.
+
+    The caller's pre-copy ``stat()`` cap check can be defeated by a source
+    that grows mid-copy or a pseudo-file that under-reports ``st_size`` —
+    enforce ``_MAX_DOWNLOAD_BYTES`` on the bytes actually read, and rename
+    into place so ``dst`` never holds a partial copy.
+    """
+    part_fd, part_path = _part_tempfile(dst)
+    try:
+        total = 0
+        with open(src, "rb") as sf, os.fdopen(part_fd, "wb") as df:
+            while True:
+                chunk = sf.read(65536)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > _MAX_DOWNLOAD_BYTES:
+                    raise ValueError(f"local output exceeds {_MAX_DOWNLOAD_BYTES} byte safety limit")
+                df.write(chunk)
+        part_path.replace(dst)
+        part_path = None
+    finally:
+        if part_path is not None:
+            try:
+                part_path.unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 def _local_source_path(url: str) -> Path | None:
@@ -610,17 +639,12 @@ def execute_download(
                 )
                 raise typer.Exit(code=1)
             # Wrap the copy like the HTTP branch's failure handling: an OSError
-            # (permission denied, full/read-only dest) or SameFileError (source
-            # already equals the collision-safe dest) must surface as a
-            # structured envelope, not an unhandled traceback that breaks
-            # machine-mode/NDJSON consumers.
+            # (permission denied, full/read-only dest) or the mid-copy size cap
+            # must surface as a structured envelope, not an unhandled traceback
+            # that breaks machine-mode/NDJSON consumers.
             try:
-                shutil.copyfile(local_source, local_path)
-            except shutil.SameFileError:
-                # Source and dest are the same file — nothing to copy; the file
-                # is already at the destination path.
-                pass
-            except OSError as e:
+                _copy_local_output_capped(local_source, local_path)
+            except (OSError, ValueError) as e:
                 renderer.error(
                     code="download_failed",
                     message=f"Failed to copy local output {idx}: {e}",
