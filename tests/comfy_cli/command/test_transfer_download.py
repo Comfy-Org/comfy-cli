@@ -13,7 +13,7 @@ import json
 import os
 import sys
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -117,7 +117,7 @@ def _run_download(fake_target, tmp_path, capsys) -> tuple[list[str], dict]:
     set_renderer(Renderer(mode=OutputMode.NDJSON, command="download"))
     with (
         patch("comfy_cli.command.transfer.resolve_target", return_value=fake_target),
-        patch.object(transfer._DOWNLOAD_OPENER, "open", side_effect=lambda req: _FakeResp()),
+        patch.object(transfer._DOWNLOAD_OPENER, "open", side_effect=lambda req, timeout=None: _FakeResp()),
     ):
         paths = transfer.execute_download(PROMPT_ID, out_dir=str(tmp_path / "out"))
     lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]
@@ -341,7 +341,7 @@ class TestMachineModeStdoutPurity:
     def _download(self, fake_target, tmp_path):
         with (
             patch("comfy_cli.command.transfer.resolve_target", return_value=fake_target),
-            patch.object(transfer._DOWNLOAD_OPENER, "open", side_effect=lambda req: _FakeResp()),
+            patch.object(transfer._DOWNLOAD_OPENER, "open", side_effect=lambda req, timeout=None: _FakeResp()),
         ):
             transfer.execute_download(PROMPT_ID, out_dir=str(tmp_path / "out"))
 
@@ -441,7 +441,9 @@ class TestDownloadIntegrity:
         _write_state(fake_target)
         with (
             patch("comfy_cli.command.transfer.resolve_target", return_value=fake_target),
-            patch.object(transfer._DOWNLOAD_OPENER, "open", side_effect=lambda req: _FakeResp(content_length=None)),
+            patch.object(
+                transfer._DOWNLOAD_OPENER, "open", side_effect=lambda req, timeout=None: _FakeResp(content_length=None)
+            ),
         ):
             paths = transfer.execute_download(PROMPT_ID, out_dir=str(tmp_path / "out"))
         assert len(paths) == 4
@@ -509,6 +511,17 @@ class TestDownloadIntegrity:
         assert err["code"] == "download_failed"
         assert "Permission denied" in err["details"]["reason"]
         assert list((tmp_path / "out").iterdir()) == []
+
+    def test_download_passes_socket_timeout(self, fake_target, tmp_path, capsys):
+        set_renderer(Renderer(mode=OutputMode.NDJSON, command="download"))
+        _write_state(fake_target)
+        opener = MagicMock(side_effect=lambda req, timeout=None: _FakeResp())
+        with (
+            patch("comfy_cli.command.transfer.resolve_target", return_value=fake_target),
+            patch.object(transfer._DOWNLOAD_OPENER, "open", opener),
+        ):
+            transfer.execute_download(PROMPT_ID, out_dir=str(tmp_path / "out"))
+        assert opener.call_args.kwargs["timeout"] == transfer._DOWNLOAD_TIMEOUT_S
 
 
 class TestLocalOutputCopy:

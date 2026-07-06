@@ -111,6 +111,11 @@ _DOWNLOAD_OPENER = urllib.request.build_opener(_DownloadRedirectHandler())
 # Per-output safety cap, shared by the HTTP download stream and local-output copies.
 _MAX_DOWNLOAD_BYTES = 10 * 1024 * 1024 * 1024  # 10 GB
 
+# Per-socket-op (connect / each read) timeout for output downloads: a stalled
+# transfer aborts instead of hanging forever, while a steadily-flowing body of
+# any size is unaffected.
+_DOWNLOAD_TIMEOUT_S = 30
+
 
 def _sanitize_multipart_filename(name: str) -> str:
     """Escape a filename for use in Content-Disposition per RFC 7578.
@@ -645,7 +650,7 @@ def execute_download(
             # transfer dies.
             part_path: Path | None = None
             try:
-                with _DOWNLOAD_OPENER.open(req) as resp:
+                with _DOWNLOAD_OPENER.open(req, timeout=_DOWNLOAD_TIMEOUT_S) as resp:
                     expected = _declared_content_length(resp)
                     if expected is not None and expected > _MAX_DOWNLOAD_BYTES:
                         renderer.error(
