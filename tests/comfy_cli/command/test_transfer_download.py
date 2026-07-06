@@ -89,12 +89,18 @@ def _write_state(target: Target, *, record=None, item_map=None) -> list[str]:
 
 
 class _FakeResp:
-    """Context-manager response yielding one chunk then EOF."""
+    """Context-manager response yielding one chunk then EOF. Declares a
+    matching Content-Length by default; pass an int to lie, None to omit."""
 
-    def __init__(self, data: bytes = b"\x89PNG-fake"):
+    def __init__(self, data: bytes = b"\x89PNG-fake", *, content_length="auto"):
         self._chunks = [data]
+        self.reads = 0
+        if content_length == "auto":
+            content_length = len(data)
+        self.headers = {} if content_length is None else {"Content-Length": str(content_length)}
 
     def read(self, n: int) -> bytes:
+        self.reads += 1
         return self._chunks.pop(0) if self._chunks else b""
 
     def __enter__(self):
@@ -376,6 +382,69 @@ class TestMachineModeStdoutPurity:
                 json.loads(ln)
         assert "downloaded" not in captured.out
         assert "downloaded" not in captured.err
+
+
+class TestDownloadIntegrity:
+    """A transfer that dies mid-body or oversteps the size cap must fail with a
+    structured envelope and leave neither the final file nor a `.part` partial
+    behind; completed downloads land atomically."""
+
+    def _failing_download(self, fake_target, tmp_path, capsys, resp) -> dict:
+        import typer
+
+        set_renderer(Renderer(mode=OutputMode.JSON, command="download"))
+        _write_state(fake_target)
+        with (
+            patch("comfy_cli.command.transfer.resolve_target", return_value=fake_target),
+            patch.object(transfer._DOWNLOAD_OPENER, "open", side_effect=lambda req: resp),
+        ):
+            with pytest.raises(typer.Exit) as excinfo:
+                transfer.execute_download(PROMPT_ID, out_dir=str(tmp_path / "out"))
+        assert excinfo.value.exit_code == 1
+        lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]
+        envelope = json.loads(lines[-1])
+        assert envelope["ok"] is False
+        return envelope["error"]
+
+    def test_truncated_body_errors_and_leaves_nothing(self, fake_target, tmp_path, capsys):
+        err = self._failing_download(fake_target, tmp_path, capsys, _FakeResp(b"x" * 400, content_length=1000))
+        assert err["code"] == "download_failed"
+        assert err["details"]["expected_bytes"] == 1000
+        assert err["details"]["received_bytes"] == 400
+        assert list((tmp_path / "out").iterdir()) == []
+
+    def test_declared_size_over_cap_refused_before_body_read(self, fake_target, tmp_path, capsys, monkeypatch):
+        monkeypatch.setattr(transfer, "_MAX_DOWNLOAD_BYTES", 100)
+        resp = _FakeResp(b"x" * 40, content_length=500)
+        err = self._failing_download(fake_target, tmp_path, capsys, resp)
+        assert err["code"] == "download_failed"
+        assert err["details"]["declared_bytes"] == 500
+        assert resp.reads == 0
+        assert list((tmp_path / "out").iterdir()) == []
+
+    def test_lengthless_body_over_cap_errors_with_envelope(self, fake_target, tmp_path, capsys, monkeypatch):
+        monkeypatch.setattr(transfer, "_MAX_DOWNLOAD_BYTES", 100)
+        err = self._failing_download(fake_target, tmp_path, capsys, _FakeResp(b"x" * 200, content_length=None))
+        assert err["code"] == "download_failed"
+        assert err["details"]["received_bytes"] == 200
+        assert list((tmp_path / "out").iterdir()) == []
+
+    def test_lengthless_body_downloads_without_verification(self, fake_target, tmp_path, capsys):
+        set_renderer(Renderer(mode=OutputMode.NDJSON, command="download"))
+        _write_state(fake_target)
+        with (
+            patch("comfy_cli.command.transfer.resolve_target", return_value=fake_target),
+            patch.object(transfer._DOWNLOAD_OPENER, "open", side_effect=lambda req: _FakeResp(content_length=None)),
+        ):
+            paths = transfer.execute_download(PROMPT_ID, out_dir=str(tmp_path / "out"))
+        assert len(paths) == 4
+        assert all(Path(p).read_bytes() == b"\x89PNG-fake" for p in paths)
+
+    def test_completed_download_leaves_no_part_file(self, fake_target, tmp_path, capsys):
+        _write_state(fake_target)
+        paths, _ = _run_download(fake_target, tmp_path, capsys)
+        assert paths
+        assert list((tmp_path / "out").glob("*.part")) == []
 
 
 class TestLocalOutputCopy:

@@ -106,6 +106,9 @@ class _DownloadRedirectHandler(urllib.request.HTTPRedirectHandler):
 _TRANSFER_OPENER = urllib.request.build_opener(NoRedirectHandler("redirect refused (auth leak prevention)"))
 _DOWNLOAD_OPENER = urllib.request.build_opener(_DownloadRedirectHandler())
 
+# Per-output safety cap, shared by the HTTP download stream and local-output copies.
+_MAX_DOWNLOAD_BYTES = 10 * 1024 * 1024 * 1024  # 10 GB
+
 
 def _sanitize_multipart_filename(name: str) -> str:
     """Escape a filename for use in Content-Disposition per RFC 7578.
@@ -121,6 +124,15 @@ def _assert_download_url(url: str) -> None:
     parsed = urllib.parse.urlsplit(url)
     if parsed.scheme not in ("http", "https"):
         raise ValueError(f"refusing to download from non-HTTP URL: {url}")
+
+
+def _declared_content_length(resp: Any) -> int | None:
+    """Parse the response's Content-Length header; None when absent or invalid."""
+    try:
+        value = int(resp.headers.get("Content-Length"))
+    except (TypeError, ValueError):
+        return None
+    return value if value >= 0 else None
 
 
 def _local_source_path(url: str) -> Path | None:
@@ -551,11 +563,10 @@ def execute_download(
                     details={"url": url, "path": str(local_source), "index": idx},
                 )
                 raise typer.Exit(code=1)
-            # Mirror the HTTP branch's 10 GB safety cap so a pathological source
+            # Mirror the HTTP branch's safety cap so a pathological source
             # (e.g. an unbounded pseudo-file that still reports as regular) can't
             # exhaust the disk. stat() follows the symlinked source, matching
             # what copyfile actually reads.
-            max_download = 10 * 1024 * 1024 * 1024  # 10 GB safety cap
             try:
                 source_size = local_source.stat().st_size
             except OSError as e:
@@ -566,10 +577,10 @@ def execute_download(
                     details={"url": url, "path": str(local_source), "index": idx},
                 )
                 raise typer.Exit(code=1)
-            if source_size > max_download:
+            if source_size > _MAX_DOWNLOAD_BYTES:
                 renderer.error(
                     code="download_failed",
-                    message=f"Local output {idx} exceeds {max_download} byte safety limit",
+                    message=f"Local output {idx} exceeds {_MAX_DOWNLOAD_BYTES} byte safety limit",
                     hint="the source file is too large to copy",
                     details={"url": url, "path": str(local_source), "size": source_size, "index": idx},
                 )
@@ -609,19 +620,55 @@ def execute_download(
             for hdr, val in auth_hdrs.items():
                 req.add_header(hdr, val)
 
-            max_download = 10 * 1024 * 1024 * 1024  # 10 GB safety cap
+            # Stream into a sibling ".part" file and rename it into place only
+            # once the body is complete and verified, so `local_path` never
+            # holds a partial file no matter how the transfer dies. Drop any
+            # stale .part first — open("wb") would follow a planted symlink.
+            part_path = local_path.with_name(local_path.name + ".part")
+            try:
+                part_path.unlink(missing_ok=True)
+            except OSError:
+                pass
             try:
                 with _DOWNLOAD_OPENER.open(req) as resp:
+                    expected = _declared_content_length(resp)
+                    if expected is not None and expected > _MAX_DOWNLOAD_BYTES:
+                        renderer.error(
+                            code="download_failed",
+                            message=f"Output {idx} declares {expected} bytes, over the {_MAX_DOWNLOAD_BYTES} byte safety limit",
+                            hint="the output is too large to download",
+                            details={"url": url, "index": idx, "declared_bytes": expected},
+                        )
+                        raise typer.Exit(code=1)
                     total = 0
-                    with open(local_path, "wb") as fp:
+                    with open(part_path, "wb") as fp:
                         while True:
                             chunk = resp.read(65536)
                             if not chunk:
                                 break
                             total += len(chunk)
-                            if total > max_download:
-                                raise ValueError(f"download exceeds {max_download} byte safety limit")
+                            if total > _MAX_DOWNLOAD_BYTES:
+                                renderer.error(
+                                    code="download_failed",
+                                    message=f"Download of output {idx} exceeds {_MAX_DOWNLOAD_BYTES} byte safety limit",
+                                    hint="the output is too large to download",
+                                    details={"url": url, "index": idx, "received_bytes": total},
+                                )
+                                raise typer.Exit(code=1)
                             fp.write(chunk)
+                # http.client returns EOF instead of raising IncompleteRead when
+                # a Content-Length body is cut short and read in chunks, so a
+                # dropped connection otherwise looks like a completed download —
+                # verify the byte count explicitly.
+                if expected is not None and total != expected:
+                    renderer.error(
+                        code="download_failed",
+                        message=f"Download of output {idx} truncated: received {total} of {expected} bytes",
+                        hint="the connection dropped mid-transfer; retry the download",
+                        details={"url": url, "index": idx, "expected_bytes": expected, "received_bytes": total},
+                    )
+                    raise typer.Exit(code=1)
+                part_path.replace(local_path)
             except urllib.error.HTTPError as e:
                 renderer.error(
                     code="download_failed",
@@ -630,6 +677,13 @@ def execute_download(
                     details={"status": e.code, "url": url, "index": idx},
                 )
                 raise typer.Exit(code=1)
+            finally:
+                # No-op after the success rename; on every failure path this
+                # removes the partial download.
+                try:
+                    part_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
 
         file_size = local_path.stat().st_size
         entry: dict[str, Any] = {
