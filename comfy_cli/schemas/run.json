@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://comfy.org/schemas/run.json",
+  "title": "comfy run --json data payload",
+  "type": "object",
+  "required": ["workflow", "status"],
+  "additionalProperties": true,
+  "properties": {
+    "workflow": {"type": "string", "description": "Absolute path to the workflow file."},
+    "status": {"type": "string", "enum": ["queued", "completed", "cancelled"]},
+    "prompt_id": {"type": ["string", "null"]},
+    "client_id": {"type": ["string", "null"]},
+    "outputs": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "URLs or local paths to produced artifacts."
+    },
+    "outputs_by_node": {
+      "type": "object",
+      "description": "Cloud --wait only: the same artifact URLs grouped by the node id that produced them.",
+      "additionalProperties": {"type": "array", "items": {"type": "string"}}
+    },
+    "outputs_by_item": {
+      "type": "object",
+      "description": "Cloud --wait only: artifact URLs grouped by blueprint foreach item (via the compose item_map). Empty object when no item_map exists.",
+      "additionalProperties": {"type": "array", "items": {"type": "string"}}
+    },
+    "warnings": {
+      "type": "array",
+      "description": "Non-fatal diagnostics about the run (e.g. partial_execution when the cloud pruned an output branch). Empty when none.",
+      "items": {
+        "type": "object",
+        "required": ["code", "message"],
+        "additionalProperties": true,
+        "properties": {
+          "code": {"type": "string"},
+          "message": {"type": "string"}
+        }
+      }
+    },
+    "elapsed_seconds": {"type": ["number", "null"]},
+    "host": {"type": "string"},
+    "port": {"type": "integer"}
+  }
+}

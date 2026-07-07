@@ -164,7 +164,7 @@ def _coerce(flag: FlagDef, raw: str) -> Any:
     raise SchemaError(f"--{flag.name}: unknown kind {flag.kind!r}")  # unreachable
 
 
-def parse_args(flags: list[FlagDef], argv: list[str]) -> dict[str, Any]:
+def parse_args(flags: list[FlagDef], argv: list[str], *, require_all: bool = True) -> dict[str, Any]:
     """Parse ``argv`` against the given flag list. Returns {name: typed_value}.
 
     Recognized forms:
@@ -172,6 +172,10 @@ def parse_args(flags: list[FlagDef], argv: list[str]) -> dict[str, Any]:
       --name=value
       --name           (only for boolean flags; means True)
       --no-name        (only for boolean flags; means False)
+
+    ``require_all=False`` skips the required-argument check — used by
+    ``--emit-workflow``, where the partner node supplies its own defaults so the
+    user need only override what they care about.
     """
     by_name = {f.name: f for f in flags}
     # Also accept dash-separated aliases so `--no-X` matching can't collide with
@@ -216,7 +220,7 @@ def parse_args(flags: list[FlagDef], argv: list[str]) -> dict[str, Any]:
             i += 1
         values[flag.name] = _coerce(flag, raw)
 
-    missing = [f.name for f in flags if f.required and f.name not in values]
+    missing = [f.name for f in flags if f.required and f.name not in values] if require_all else []
     if missing:
         joined = ", ".join(f"--{m}" for m in missing)
         raise SchemaError(f"Missing required argument(s): {joined}")
@@ -256,7 +260,8 @@ def help_text(endpoint: Endpoint, flags: list[FlagDef]) -> str:
     lines.append("  --async            Submit and return job id without waiting.")
     lines.append("  --json             Emit raw JSON response instead of pretty output.")
     lines.append("  --timeout <sec>    Override sync-poll timeout (default 300).")
-    lines.append("  --api-key <key>    Override COMFY_API_KEY env var.")
+    lines.append("  --api-key <key>    Per-call override. Auth: --api-key > login session > COMFY_API_KEY env.")
+    lines.append("  --emit-workflow <path>  Write a runnable partner-node workflow instead of calling the proxy.")
     return "\n".join(line for line in lines if line is not None)
 
 

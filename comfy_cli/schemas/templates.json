@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "comfy templates *",
+  "description": "Output shape for template gallery commands (ls, show, fetch). All subcommands share this schema; each field is optional because the payload varies per subcommand.",
+  "type": "object",
+  "properties": {
+    "total_in_gallery": { "type": "integer", "description": "Total templates in the gallery before filtering (ls)." },
+    "matched": { "type": "integer", "description": "Templates matching the active filters before the --limit cap (ls)." },
+    "shown": { "type": "integer", "description": "Number of rows in the response after capping (ls)." },
+    "filters": {
+      "type": "object",
+      "description": "Active filter parameters (ls).",
+      "properties": {
+        "type": { "type": ["string", "null"] },
+        "category": { "type": ["string", "null"] },
+        "tag": { "type": ["string", "null"] },
+        "model": { "type": ["string", "null"] },
+        "provider": { "type": ["string", "null"] },
+        "name": { "type": ["string", "null"] }
+      }
+    },
+    "rows": {
+      "type": "array",
+      "description": "Template rows (ls).",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": { "type": "string" },
+          "title": { "type": "string" },
+          "output_type": { "type": "string" },
+          "category_title": { "type": "string" },
+          "tags": { "type": "array", "items": { "type": "string" } },
+          "models": { "type": "array", "items": { "type": "string" } },
+          "providers": { "type": "array", "items": { "type": "string" } },
+          "description": { "type": "string" }
+        }
+      }
+    },
+    "template": {
+      "type": "object",
+      "description": "Full template record (show).",
+      "properties": {
+        "name": { "type": "string" },
+        "title": { "type": "string" },
+        "output_type": { "type": "string" },
+        "category_title": { "type": "string" },
+        "group_category": { "type": "string" },
+        "tags": { "type": "array", "items": { "type": "string" } },
+        "models": { "type": "array", "items": { "type": "string" } },
+        "providers": { "type": "array", "items": { "type": "string" } },
+        "description": { "type": "string" },
+        "date": { "type": "string" },
+        "open_source": { "type": "boolean" },
+        "usage": { "type": "integer" },
+        "media_subtype": { "type": "string" },
+        "io": { "type": "object" }
+      }
+    },
+    "name": { "type": "string", "description": "Template name (fetch)." },
+    "title": { "type": "string", "description": "Template display title (fetch)." },
+    "output_type": { "type": "string", "description": "Output kind: image, video, audio, 3d (fetch)." },
+    "out": { "type": "string", "description": "Destination: file path or 'stdout' (fetch)." },
+    "bytes": { "type": "integer", "description": "Size of the fetched workflow JSON in bytes (fetch)." },
+    "node_count": {
+      "oneOf": [
+        { "type": "integer" },
+        { "type": "null" }
+      ],
+      "description": "Number of nodes in the fetched workflow (fetch)."
+    }
+  }
+}

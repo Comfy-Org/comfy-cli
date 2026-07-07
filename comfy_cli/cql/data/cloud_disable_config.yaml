@@ -1,0 +1,15 @@
+# Cloud node filtering - which labels cause nodes to be disabled on cloud.
+# Consumed by filter_object_info_nodes.py via resolve_disabled_nodes.py.
+# Adding a new label to supported_nodes.yaml does NOT automatically disable
+# those nodes on cloud — you must explicitly add the label here.
+disable_nodes:
+  or:
+    - DisabledOnCloud: true
+    - ReadsArbitraryFile: true
+    - WritesToDisk: true
+    - CreatesLargeOutputs: true
+    - NetworkAccess: true
+    - Stateful: true
+    - HasCustomEndpoints: true
+    - RequiresExternalAPI: true
+    - PathParsing: true

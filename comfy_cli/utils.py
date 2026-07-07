@@ -8,15 +8,20 @@ import shutil
 import subprocess
 import tarfile
 from pathlib import Path
+from typing import BinaryIO, cast
 
 import psutil
 import requests
 import typer
-from rich import print, progress
+from rich import progress
 from rich.live import Live
 from rich.table import Table
 
 from comfy_cli.constants import DEFAULT_COMFY_WORKSPACE, OS, PROC
+
+# Use the output shim so prints go to stderr (not stdout) in JSON mode,
+# preserving the one-envelope-on-stdout contract.
+from comfy_cli.output import rprint as print  # noqa: A001 - intentional shadowing
 from comfy_cli.typing import PathLike
 
 
@@ -126,7 +131,7 @@ def download_url(
             fsize = int(response.headers.get("Content-Length", 0))
             desc = f"downloading {fname}..." + ("(Unknown total file size)" if fsize == 0 else "")
 
-            with progress.wrap_file(response.raw, total=fsize, description=desc) as response_raw:
+            with progress.wrap_file(cast(BinaryIO, response.raw), total=fsize, description=desc) as response_raw:
                 shutil.copyfileobj(response_raw, f)
         else:
             shutil.copyfileobj(response.raw, f)
@@ -144,6 +149,8 @@ def extract_tarball(
 
     with tarfile.open(inPath) as tar:
         info = tar.next()
+        if info is None:
+            raise ValueError(f"tarball is empty: {inPath}")
         old_name = info.name.split("/")[0]
     # path to top-level of extraction result
     extractPath = inPath.with_name(old_name)
@@ -152,39 +159,40 @@ def extract_tarball(
     shutil.rmtree(extractPath, ignore_errors=True)
     shutil.rmtree(outPath, ignore_errors=True)
 
-    if show_progress:
-        fileSize = inPath.stat().st_size
+    if not show_progress:
+        with tarfile.open(inPath) as tar:
+            tar.extractall(filter=None)
+        shutil.move(extractPath, outPath)
+        return
 
-        barProg = progress.Progress()
-        barTask = barProg.add_task("[cyan]extracting tarball...", total=fileSize)
-        pathProg = progress.Progress(progress.TextColumn("{task.description}"))
-        pathTask = pathProg.add_task("")
+    fileSize = inPath.stat().st_size
 
-        progress_table = Table.grid()
-        progress_table.add_row(barProg)
-        progress_table.add_row(pathProg)
+    barProg = progress.Progress()
+    barTask = barProg.add_task("[cyan]extracting tarball...", total=fileSize)
+    pathProg = progress.Progress(progress.TextColumn("{task.description}"))
+    pathTask = pathProg.add_task("")
 
-        _size = 0
+    progress_table = Table.grid()
+    progress_table.add_row(barProg)
+    progress_table.add_row(pathProg)
 
-        def _filter(tinfo: tarfile.TarInfo, _path: PathLike):
-            nonlocal _size
-            pathProg.update(pathTask, description=tinfo.path)
-            barProg.advance(barTask, _size)
-            _size = tinfo.size
+    _size = 0
 
-            # TODO: ideally we'd use data_filter here, but it's busted: https://github.com/python/cpython/issues/107845
-            # return tarfile.data_filter(tinfo, _path)
-            return tinfo
-    else:
-        _filter = None
+    def _filter(tinfo: tarfile.TarInfo, _path: PathLike):
+        nonlocal _size
+        pathProg.update(pathTask, description=tinfo.path)
+        barProg.advance(barTask, _size)
+        _size = tinfo.size
+
+        # TODO: ideally we'd use data_filter here, but it's busted: https://github.com/python/cpython/issues/107845
+        # return tarfile.data_filter(tinfo, _path)
+        return tinfo
 
     with Live(progress_table, refresh_per_second=10):
         with tarfile.open(inPath) as tar:
             tar.extractall(filter=_filter)
-
-        if show_progress:
-            barProg.advance(barTask, _size)
-            pathProg.update(pathTask, description="")
+        barProg.advance(barTask, _size)
+        pathProg.update(pathTask, description="")
 
     shutil.move(extractPath, outPath)
 
@@ -202,35 +210,36 @@ def create_tarball(
     # clean the archive target path
     outPath.unlink(missing_ok=True)
 
-    if show_progress:
-        fileSize = sum(f.stat().st_size for f in inPath.glob("**/*"))
+    if not show_progress:
+        with tarfile.open(outPath, "w:gz") as tar:
+            # don't include parent paths in archive
+            tar.add(inPath.relative_to(cwd), filter=None)
+        return
 
-        barProg = progress.Progress()
-        barTask = barProg.add_task("[cyan]creating tarball...", total=fileSize)
-        pathProg = progress.Progress(progress.TextColumn("{task.description}"))
-        pathTask = pathProg.add_task("")
+    fileSize = sum(f.stat().st_size for f in inPath.glob("**/*"))
 
-        progress_table = Table.grid()
-        progress_table.add_row(barProg)
-        progress_table.add_row(pathProg)
+    barProg = progress.Progress()
+    barTask = barProg.add_task("[cyan]creating tarball...", total=fileSize)
+    pathProg = progress.Progress(progress.TextColumn("{task.description}"))
+    pathTask = pathProg.add_task("")
 
-        _size = 0
+    progress_table = Table.grid()
+    progress_table.add_row(barProg)
+    progress_table.add_row(pathProg)
 
-        def _filter(tinfo: tarfile.TarInfo):
-            nonlocal _size
-            pathProg.update(pathTask, description=tinfo.path)
-            barProg.advance(barTask, _size)
-            _size = Path(tinfo.path).stat().st_size
+    _size = 0
 
-            return tinfo
-    else:
-        _filter = None
+    def _filter(tinfo: tarfile.TarInfo):
+        nonlocal _size
+        pathProg.update(pathTask, description=tinfo.path)
+        barProg.advance(barTask, _size)
+        _size = Path(tinfo.path).stat().st_size
+
+        return tinfo
 
     with Live(progress_table, refresh_per_second=10):
         with tarfile.open(outPath, "w:gz") as tar:
             # don't include parent paths in archive
             tar.add(inPath.relative_to(cwd), filter=_filter)
-
-        if show_progress:
-            barProg.advance(barTask, _size)
-            pathProg.update(pathTask, description="")
+        barProg.advance(barTask, _size)
+        pathProg.update(pathTask, description="")

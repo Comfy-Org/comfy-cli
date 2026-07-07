@@ -68,7 +68,7 @@ class Endpoint:
 
 # Short, creative-facing aliases mapping to the curated openapi paths below.
 # Aliases are what end users actually type: `comfy generate flux-pro --prompt …`.
-# The full openapi path remains accepted as a power-user escape hatch.
+# The full openapi path remains accepted as an escape hatch.
 _ALIASES: dict[str, str] = {
     # Flux / BFL
     "flux-pro": "bfl/flux-pro-1.1/generate",

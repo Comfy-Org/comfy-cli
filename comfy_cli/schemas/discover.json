@@ -1,0 +1,86 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://comfy.org/schemas/discover.json",
+  "title": "comfy discover --json data payload",
+  "description": "Self-describing surface for agents: full command tree, the schema each command emits, and capabilities the CLI exposes.",
+  "type": "object",
+  "required": ["prog", "version", "commands", "schemas", "capabilities"],
+  "additionalProperties": true,
+  "properties": {
+    "prog": {"type": "string"},
+    "version": {"type": "string"},
+    "output_contract": {
+      "type": "object",
+      "description": "Versioned machine-output contract: negotiate envelope/event shape on these, not on the CLI version.",
+      "properties": {
+        "envelope": {"type": "string"},
+        "event": {"type": "string"}
+      }
+    },
+    "commands": {
+      "type": "object",
+      "description": "Same shape as `comfy --help-json`'s `commands`."
+    },
+    "schemas": {
+      "type": "object",
+      "additionalProperties": false,
+      "patternProperties": {
+        "^[a-z][a-z0-9_]*$": {
+          "type": "object",
+          "required": ["name", "title", "schema"],
+          "properties": {
+            "name": {"type": "string", "description": "Schema filename, e.g. 'env.json'."},
+            "title": {"type": "string"},
+            "schema": {"type": "object", "description": "Inline JSON Schema document."}
+          }
+        }
+      }
+    },
+    "command_schemas": {
+      "type": "object",
+      "description": "Map of fully-qualified command path -> schema name (without .json).",
+      "additionalProperties": {"type": "string"}
+    },
+    "error_codes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["code", "meaning"],
+        "properties": {
+          "code": {"type": "string"},
+          "meaning": {"type": "string"},
+          "phase": {"type": "string"},
+          "hint": {"type": ["string", "null"]}
+        }
+      }
+    },
+    "capabilities": {
+      "type": "object",
+      "description": "Feature flags an agent can branch on.",
+      "additionalProperties": true,
+      "properties": {
+        "json_envelope": {"type": "boolean"},
+        "json_stream": {"type": "boolean"},
+        "cancellation": {"type": "boolean"},
+        "cql": {"type": "boolean"},
+        "where_routing": {"type": "boolean"},
+        "where_targets": {"type": "array", "items": {"type": "string"}},
+        "cloud_oauth": {"type": "boolean"},
+        "auth_providers": {
+          "description": "Either a flat list (legacy) or {oauth: [...], api_key: [...]}.",
+          "oneOf": [
+            {"type": "array", "items": {"type": "string"}},
+            {
+              "type": "object",
+              "properties": {
+                "oauth": {"type": "array", "items": {"type": "string"}},
+                "api_key": {"type": "array", "items": {"type": "string"}}
+              },
+              "additionalProperties": false
+            }
+          ]
+        }
+      }
+    }
+  }
+}

@@ -78,7 +78,9 @@ class TestRunApiKeyResolution:
 
     def test_envvar_is_picked_up(self, runner, mock_run_execute, tmp_path):
         wf = _write_workflow(tmp_path)
-        result = runner.invoke(app, ["run", "--workflow", wf], env={"COMFY_API_KEY": "env-key-xyz"})
+        result = runner.invoke(
+            app, ["run", "--workflow", wf], env={"COMFY_API_KEY": "env-key-xyz", "COMFY_WHERE": "local"}
+        )
         assert result.exit_code == 0, result.output
         assert mock_run_execute.call_args.kwargs["api_key"] == "env-key-xyz"
 
@@ -87,7 +89,7 @@ class TestRunApiKeyResolution:
         result = runner.invoke(
             app,
             ["run", "--workflow", wf, "--api-key", "flag-key-abc"],
-            env={"COMFY_API_KEY": "env-key-xyz"},
+            env={"COMFY_API_KEY": "env-key-xyz", "COMFY_WHERE": "local"},
         )
         assert result.exit_code == 0, result.output
         assert mock_run_execute.call_args.kwargs["api_key"] == "flag-key-abc"
@@ -95,18 +97,20 @@ class TestRunApiKeyResolution:
     def test_absent_resolves_to_none(self, runner, mock_run_execute, tmp_path):
         wf = _write_workflow(tmp_path)
         # Explicit empty env to neutralize any host-level COMFY_API_KEY leak.
-        result = runner.invoke(app, ["run", "--workflow", wf], env={"COMFY_API_KEY": ""})
+        result = runner.invoke(app, ["run", "--workflow", wf], env={"COMFY_API_KEY": "", "COMFY_WHERE": "local"})
         assert result.exit_code == 0, result.output
         assert mock_run_execute.call_args.kwargs["api_key"] is None
 
     def test_envvar_trailing_whitespace_is_stripped(self, runner, mock_run_execute, tmp_path):
         wf = _write_workflow(tmp_path)
-        result = runner.invoke(app, ["run", "--workflow", wf], env={"COMFY_API_KEY": "  sk-abc\n"})
+        result = runner.invoke(
+            app, ["run", "--workflow", wf], env={"COMFY_API_KEY": "  sk-abc\n", "COMFY_WHERE": "local"}
+        )
         assert result.exit_code == 0, result.output
         assert mock_run_execute.call_args.kwargs["api_key"] == "sk-abc"
 
     def test_whitespace_only_collapses_to_none(self, runner, mock_run_execute, tmp_path):
         wf = _write_workflow(tmp_path)
-        result = runner.invoke(app, ["run", "--workflow", wf], env={"COMFY_API_KEY": "   \n\t"})
+        result = runner.invoke(app, ["run", "--workflow", wf], env={"COMFY_API_KEY": "   \n\t", "COMFY_WHERE": "local"})
         assert result.exit_code == 0, result.output
         assert mock_run_execute.call_args.kwargs["api_key"] is None

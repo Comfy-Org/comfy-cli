@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://comfy.org/schemas/preview.json",
+  "title": "comfy preview --json data payload",
+  "type": "object",
+  "required": ["input", "kind", "preview"],
+  "additionalProperties": true,
+  "properties": {
+    "input": {"type": "string"},
+    "kind": {"type": "string", "enum": ["image", "video", "audio"]},
+    "preview": {"type": "string", "description": "Path to the rendered preview PNG; open/Read it."},
+    "width": {"type": ["integer", "null"]},
+    "height": {"type": ["integer", "null"]},
+    "duration": {"type": ["number", "null"]},
+    "fps": {"type": ["number", "null"]},
+    "has_audio": {"type": ["boolean", "null"]},
+    "hint": {"type": ["string", "null"]}
+  }
+}

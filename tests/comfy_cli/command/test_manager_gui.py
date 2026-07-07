@@ -198,11 +198,8 @@ class TestLaunchManagerFlagInjection:
     @patch("comfy_cli.command.launch.launch_comfyui")
     @patch("comfy_cli.command.launch._get_manager_flags", return_value=["--enable-manager"])
     @patch("comfy_cli.command.launch.workspace_manager")
-    @patch("comfy_cli.command.launch.check_for_updates")
     @patch("os.chdir")
-    def test_launch_injects_enable_manager(
-        self, mock_chdir, mock_updates, mock_ws, mock_get_flags, mock_launch_comfyui
-    ):
+    def test_launch_injects_enable_manager(self, mock_chdir, mock_ws, mock_get_flags, mock_launch_comfyui):
         mock_ws.workspace_path = "/fake/workspace"
         mock_ws.workspace_type = "default"
         mock_ws.config_manager.config = {"DEFAULT": {}}
@@ -219,11 +216,8 @@ class TestLaunchManagerFlagInjection:
     @patch("comfy_cli.command.launch.launch_comfyui")
     @patch("comfy_cli.command.launch._get_manager_flags", return_value=[])
     @patch("comfy_cli.command.launch.workspace_manager")
-    @patch("comfy_cli.command.launch.check_for_updates")
     @patch("os.chdir")
-    def test_launch_no_inject_when_disabled(
-        self, mock_chdir, mock_updates, mock_ws, mock_get_flags, mock_launch_comfyui
-    ):
+    def test_launch_no_inject_when_disabled(self, mock_chdir, mock_ws, mock_get_flags, mock_launch_comfyui):
         mock_ws.workspace_path = "/fake/workspace"
         mock_ws.workspace_type = "default"
         mock_ws.config_manager.config = {"DEFAULT": {}}
@@ -239,11 +233,8 @@ class TestLaunchManagerFlagInjection:
     @patch("comfy_cli.command.launch.launch_comfyui")
     @patch("comfy_cli.command.launch._get_manager_flags", return_value=["--enable-manager"])
     @patch("comfy_cli.command.launch.workspace_manager")
-    @patch("comfy_cli.command.launch.check_for_updates")
     @patch("os.chdir")
-    def test_launch_injects_when_extra_is_none(
-        self, mock_chdir, mock_updates, mock_ws, mock_get_flags, mock_launch_comfyui
-    ):
+    def test_launch_injects_when_extra_is_none(self, mock_chdir, mock_ws, mock_get_flags, mock_launch_comfyui):
         mock_ws.workspace_path = "/fake/workspace"
         mock_ws.workspace_type = "not_default"
         mock_ws.config_manager.config = {"DEFAULT": {}}
@@ -259,11 +250,8 @@ class TestLaunchManagerFlagInjection:
     @patch("comfy_cli.command.launch.launch_comfyui")
     @patch("comfy_cli.command.launch._get_manager_flags", return_value=["--enable-manager", "--disable-manager-ui"])
     @patch("comfy_cli.command.launch.workspace_manager")
-    @patch("comfy_cli.command.launch.check_for_updates")
     @patch("os.chdir")
-    def test_launch_injects_disable_gui_flags(
-        self, mock_chdir, mock_updates, mock_ws, mock_get_flags, mock_launch_comfyui
-    ):
+    def test_launch_injects_disable_gui_flags(self, mock_chdir, mock_ws, mock_get_flags, mock_launch_comfyui):
         mock_ws.workspace_path = "/fake/workspace"
         mock_ws.workspace_type = "not_default"
         mock_ws.config_manager.config = {"DEFAULT": {}}
@@ -282,11 +270,8 @@ class TestLaunchManagerFlagInjection:
         "comfy_cli.command.launch._get_manager_flags", return_value=["--enable-manager", "--enable-manager-legacy-ui"]
     )
     @patch("comfy_cli.command.launch.workspace_manager")
-    @patch("comfy_cli.command.launch.check_for_updates")
     @patch("os.chdir")
-    def test_launch_injects_legacy_gui_flags(
-        self, mock_chdir, mock_updates, mock_ws, mock_get_flags, mock_launch_comfyui
-    ):
+    def test_launch_injects_legacy_gui_flags(self, mock_chdir, mock_ws, mock_get_flags, mock_launch_comfyui):
         mock_ws.workspace_path = "/fake/workspace"
         mock_ws.workspace_type = "not_default"
         mock_ws.config_manager.config = {"DEFAULT": {}}
@@ -548,6 +533,9 @@ class TestMigrateLegacy:
         assert legacy_manager.exists()
 
 
+# `install` now bootstraps pip (no-op if present) before the pip steps; these
+# flow tests use a fake python, so stub it out. Its dispatch is covered in tests/uv.
+@patch("comfy_cli.command.install.ensure_pip", new=lambda *a, **kw: None)
 class TestInstallSkipManager:
     """Tests for --skip-manager flag setting config to disable."""
 
@@ -604,6 +592,7 @@ class TestInstallSkipManager:
         mock_pip_manager.assert_not_called()
 
 
+@patch("comfy_cli.command.install.ensure_pip", new=lambda *a, **kw: None)
 class TestInstallManagerFailure:
     """Tests for pip_install_manager failure handling."""
 
@@ -1065,7 +1054,15 @@ class TestFindCmCli:
 
     def test_find_cm_cli_module_found(self):
         """When cm_cli module exists, should return True."""
-        with patch("importlib.util.find_spec") as mock_find_spec:
+        from comfy_cli.command.custom_nodes import cm_cli_util as _cm_cli_util
+
+        # Pin workspace_path to None so we exercise the find_spec fallback rather
+        # than the workspace-Python subprocess branch (which would skip find_spec
+        # whenever the developer has a workspace configured).
+        with (
+            patch("importlib.util.find_spec") as mock_find_spec,
+            patch.object(_cm_cli_util.workspace_manager, "workspace_path", None),
+        ):
             mock_find_spec.return_value = MagicMock()  # Non-None means module exists
             # Clear cache before test
             from comfy_cli.command.custom_nodes.cm_cli_util import find_cm_cli
@@ -1097,7 +1094,12 @@ class TestFindCmCli:
 
     def test_find_cm_cli_cache_behavior(self):
         """find_cm_cli should cache results and not call find_spec repeatedly."""
-        with patch("importlib.util.find_spec") as mock_find_spec:
+        from comfy_cli.command.custom_nodes import cm_cli_util as _cm_cli_util
+
+        with (
+            patch("importlib.util.find_spec") as mock_find_spec,
+            patch.object(_cm_cli_util.workspace_manager, "workspace_path", None),
+        ):
             mock_find_spec.return_value = MagicMock()
             from comfy_cli.command.custom_nodes.cm_cli_util import find_cm_cli
 

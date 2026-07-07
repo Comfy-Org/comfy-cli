@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://comfy.org/schemas/assets.json",
+  "title": "comfy assets push --json data payload",
+  "description": "Result of `comfy assets push`: files uploaded to the resolved target via the server's /upload/image API and recorded in .comfy/assets.lock.json. `cloud_name` is the server-returned name on the push target (kept under that key for both local and cloud).",
+  "type": "object",
+  "required": ["pushed", "skipped", "lock", "where"],
+  "additionalProperties": true,
+  "properties": {
+    "pushed": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "sha256", "cloud_name", "size"],
+        "additionalProperties": true,
+        "properties": {
+          "name": {"type": "string", "description": "Path relative to assets/ (posix) — the `$asset.<name>` key."},
+          "sha256": {"type": "string"},
+          "cloud_name": {"type": "string", "description": "Server-returned filename on the push target."},
+          "size": {"type": "integer"}
+        }
+      }
+    },
+    "current": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "Asset names verified already-current on this target (lock hit, not re-uploaded). pushed ∪ current = everything now on the server, so scripts can assert their files landed without treating a truthful pushed:[] as failure."
+    },
+    "skipped": {"type": "integer", "description": "Files whose lock entry already matched (same sha256 and same target)."},
+    "lock": {"type": "string", "description": "Absolute path of .comfy/assets.lock.json."},
+    "where": {"type": "string", "enum": ["local", "cloud"], "description": "Resolved push target."}
+  }
+}

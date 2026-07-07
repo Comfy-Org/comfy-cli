@@ -46,7 +46,6 @@ class TestLaunchResolvesWorkspacePython:
             patch.object(launch.workspace_manager, "workspace_type", launch.WorkspaceType.DEFAULT),
             patch.object(launch.workspace_manager, "config_manager", MagicMock()),
             patch.object(launch.workspace_manager, "set_recent_workspace"),
-            patch("comfy_cli.command.launch.check_for_updates"),
             patch("comfy_cli.command.launch.os.chdir"),
             patch("comfy_cli.command.launch.launch_comfyui") as mock_launch_comfyui,
         ):

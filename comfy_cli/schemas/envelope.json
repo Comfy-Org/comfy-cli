@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://comfy.org/schemas/envelope.json",
+  "title": "comfy-cli output envelope",
+  "description": "Every --json command returns one of these on stdout. Streaming commands emit it as the last NDJSON line.",
+  "type": "object",
+  "required": ["ok", "command", "version", "where", "data", "error"],
+  "additionalProperties": true,
+  "properties": {
+    "schema": {
+      "const": "envelope/1",
+      "description": "Envelope contract version. Additive optional fields do not bump it; renamed/removed/retyped fields or changed exit semantics do."
+    },
+    "type": {
+      "const": "envelope",
+      "description": "Line discriminator: in NDJSON streams the final line is the envelope, every other line is an event."
+    },
+    "ok": {
+      "type": "boolean",
+      "description": "True iff the command succeeded. Mirrors a 0 exit code."
+    },
+    "command": {
+      "type": "string",
+      "description": "Fully-qualified command path (e.g. 'env', 'model download')."
+    },
+    "version": {
+      "type": "string",
+      "description": "comfy-cli version that produced this output."
+    },
+    "where": {
+      "type": ["string", "null"],
+      "enum": ["local", "cloud", null],
+      "description": "Backend that handled the command. Null for commands that don't route."
+    },
+    "data": {
+      "description": "Command-specific payload. Schema lives in comfy_cli/schemas/<command>.json."
+    },
+    "error": {
+      "oneOf": [
+        {"type": "null"},
+        {"$ref": "error.json"}
+      ]
+    },
+    "changed": {
+      "type": "boolean",
+      "description": "Optional: present on mutating commands; true iff state changed."
+    }
+  }
+}

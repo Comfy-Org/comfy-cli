@@ -33,11 +33,12 @@ classifiers = [
 dependencies = [
   "charset-normalizer>=3",
   "cookiecutter",
-  "gitpython",
+  "gitpython>=3.1.50",
   "httpx",
   "mixpanel",
   "packaging",
   "pathspec",
+  "posthog>=6,<8",
   "psutil",
   "pyyaml",
   "questionary",
@@ -48,11 +49,13 @@ dependencies = [
   "tomlkit",
   "typer>=0.12.5",
   "typing-extensions>=4.7",
-  "uv>=0.6.9",
+  "uv>=0.11.15",
+
   "websocket-client",
 ]
 
-optional-dependencies.dev = [ "pre-commit", "pytest", "pytest-cov", "ruff" ]
+optional-dependencies.dev = [ "jsonschema", "pre-commit", "pytest", "pytest-cov", "ruff" ]
+optional-dependencies.preview = [ "term-image>=0.7,<0.8" ]
 urls.Repository = "https://github.com/Comfy-Org/comfy-cli.git"
 scripts.comfy = "comfy_cli.__main__:main"
 scripts.comfy-cli = "comfy_cli.__main__:main"
@@ -63,6 +66,13 @@ where = [ "." ]
 include = [ "comfy_cli*" ]
 
 [tool.setuptools.package-data]
+# Bundled skills: subdirs of comfy_cli.skills named after each skill (kept in
+# sync with BUNDLED_SKILLS). Hyphenated dirs aren't importable packages, so
+# they're plain data dirs matched by glob from the parent package.
+"comfy_cli.skills" = [ "*/SKILL.md" ]
+"comfy_cli.schemas" = [ "*.json", "*.md" ]
+
+"comfy_cli.cql.data" = [ "*.yaml", "*.json" ]
 "comfy_cli.command.generate" = [ "spec/openapi.yml" ]
 
 [tool.ruff]

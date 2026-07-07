@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://comfy.org/schemas/project.json",
+  "title": "comfy project --json data payload",
+  "description": "Result of a `project init|status` invocation. `init` carries root/created; `status` is the queryable project state: defaults, blueprints, assets joined against the push lock, the run journal tail, and layout warnings.",
+  "type": "object",
+  "required": ["root"],
+  "additionalProperties": true,
+  "properties": {
+    "action": {"type": "string", "enum": ["init", "status"]},
+    "where_default": {
+      "type": "string",
+      "enum": ["local", "cloud"],
+      "description": "Backend default written into comfy.yaml by `project init` (--where flag, else auto-detected from configured credentials)."
+    },
+    "root": {"type": "string", "description": "Absolute path of the project root (the dir holding comfy.yaml)."},
+    "created": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "Paths created by `project init`, relative to root."
+    },
+    "schema": {"type": "string", "description": "The marker schema, e.g. 'project/1'."},
+    "defaults": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "where": {"type": "string", "enum": ["local", "cloud"]}
+      }
+    },
+    "blueprints": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "Names of *.yaml files under blueprints/."
+    },
+    "assets": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "sha256", "size", "pushed", "stale"],
+        "additionalProperties": true,
+        "properties": {
+          "name": {"type": "string", "description": "Path relative to assets/ (posix)."},
+          "sha256": {"type": "string"},
+          "size": {"type": "integer"},
+          "pushed": {"type": "boolean", "description": "Present in .comfy/assets.lock.json."},
+          "stale": {"type": "boolean", "description": "Pushed, but the on-disk sha256 no longer matches the lock."}
+        }
+      }
+    },
+    "recent_runs": {
+      "type": "array",
+      "items": {"type": "object"},
+      "description": "Tail of .comfy/runs.jsonl, newest last."
+    },
+    "warnings": {
+      "type": "array",
+      "items": {"type": "string"}
+    }
+  }
+}

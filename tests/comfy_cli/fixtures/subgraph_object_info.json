@@ -1,0 +1,799 @@
+{
+  "BatchImagesNode": {
+    "input": {
+      "required": {
+        "images": [
+          "COMFY_AUTOGROW_V3",
+          {
+            "template": {
+              "input": {
+                "required": {
+                  "image": [
+                    "IMAGE",
+                    {}
+                  ]
+                }
+              },
+              "prefix": "image",
+              "min": 1,
+              "max": 50
+            }
+          }
+        ]
+      }
+    },
+    "input_order": {
+      "required": [
+        "images"
+      ]
+    },
+    "is_input_list": false,
+    "output": [
+      "IMAGE"
+    ],
+    "output_is_list": [
+      false
+    ],
+    "output_name": [
+      "IMAGE"
+    ],
+    "output_tooltips": [
+      null
+    ],
+    "output_matchtypes": null,
+    "name": "BatchImagesNode",
+    "display_name": "Batch Images",
+    "description": "",
+    "python_module": "comfy_extras.nodes_post_processing",
+    "category": "image/batch",
+    "output_node": false,
+    "deprecated": false,
+    "experimental": false,
+    "dev_only": false,
+    "api_node": false,
+    "price_badge": null,
+    "search_aliases": [
+      "batch",
+      "image batch",
+      "batch images",
+      "combine images",
+      "merge images",
+      "stack images"
+    ],
+    "essentials_category": "Image Tools",
+    "has_intermediate_output": false
+  },
+  "GeminiImage2Node": {
+    "input": {
+      "required": {
+        "prompt": [
+          "STRING",
+          {
+            "tooltip": "Text prompt describing the image to generate or the edits to apply. Include any constraints, styles, or details the model should follow.",
+            "default": "",
+            "multiline": true
+          }
+        ],
+        "model": [
+          "COMBO",
+          {
+            "multiselect": false,
+            "options": [
+              "gemini-3-pro-image-preview",
+              "Nano Banana 2 (Gemini 3.1 Flash Image)"
+            ]
+          }
+        ],
+        "seed": [
+          "INT",
+          {
+            "tooltip": "When the seed is fixed to a specific value, the model makes a best effort to provide the same response for repeated requests. Deterministic output isn't guaranteed. Also, changing the model or parameter settings, such as the temperature, can cause variations in the response even when you use the same seed value. By default, a random seed value is used.",
+            "default": 42,
+            "min": 0,
+            "max": 18446744073709551615,
+            "control_after_generate": true
+          }
+        ],
+        "aspect_ratio": [
+          "COMBO",
+          {
+            "tooltip": "If set to 'auto', matches your input image's aspect ratio; if no image is provided, a 16:9 square is usually generated.",
+            "default": "auto",
+            "multiselect": false,
+            "options": [
+              "auto",
+              "1:1",
+              "2:3",
+              "3:2",
+              "3:4",
+              "4:3",
+              "4:5",
+              "5:4",
+              "9:16",
+              "16:9",
+              "21:9"
+            ]
+          }
+        ],
+        "resolution": [
+          "COMBO",
+          {
+            "tooltip": "Target output resolution. For 2K/4K the native Gemini upscaler is used.",
+            "multiselect": false,
+            "options": [
+              "1K",
+              "2K",
+              "4K"
+            ]
+          }
+        ],
+        "response_modalities": [
+          "COMBO",
+          {
+            "tooltip": "Choose 'IMAGE' for image-only output, or 'IMAGE+TEXT' to return both the generated image and a text response.",
+            "advanced": true,
+            "multiselect": false,
+            "options": [
+              "IMAGE+TEXT",
+              "IMAGE"
+            ]
+          }
+        ]
+      },
+      "optional": {
+        "images": [
+          "IMAGE",
+          {
+            "tooltip": "Optional reference image(s). To include multiple images, use the Batch Images node (up to 14)."
+          }
+        ],
+        "files": [
+          "GEMINI_INPUT_FILES",
+          {
+            "tooltip": "Optional file(s) to use as context for the model. Accepts inputs from the Gemini Generate Content Input Files node."
+          }
+        ],
+        "system_prompt": [
+          "STRING",
+          {
+            "tooltip": "Foundational instructions that dictate an AI's behavior.",
+            "advanced": true,
+            "default": "You are an expert image-generation engine. You must ALWAYS produce an image.\nInterpret all user input\u2014regardless of format, intent, or abstraction\u2014as literal visual directives for image composition.\nIf a prompt is conversational or lacks specific visual details, you must creatively invent a concrete visual scenario that depicts the concept.\nPrioritize generating the visual representation above any text, formatting, or conversational requests.",
+            "multiline": true
+          }
+        ]
+      },
+      "hidden": {
+        "auth_token_comfy_org": [
+          "AUTH_TOKEN_COMFY_ORG"
+        ],
+        "api_key_comfy_org": [
+          "API_KEY_COMFY_ORG"
+        ],
+        "unique_id": [
+          "UNIQUE_ID"
+        ]
+      }
+    },
+    "input_order": {
+      "required": [
+        "prompt",
+        "model",
+        "seed",
+        "aspect_ratio",
+        "resolution",
+        "response_modalities"
+      ],
+      "optional": [
+        "images",
+        "files",
+        "system_prompt"
+      ],
+      "hidden": [
+        "auth_token_comfy_org",
+        "api_key_comfy_org",
+        "unique_id"
+      ]
+    },
+    "is_input_list": false,
+    "output": [
+      "IMAGE",
+      "STRING"
+    ],
+    "output_is_list": [
+      false,
+      false
+    ],
+    "output_name": [
+      "IMAGE",
+      "STRING"
+    ],
+    "output_tooltips": [
+      null,
+      null
+    ],
+    "output_matchtypes": null,
+    "name": "GeminiImage2Node",
+    "display_name": "Nano Banana Pro (Google Gemini Image)",
+    "description": "Generate or edit images synchronously via Google Vertex API.",
+    "python_module": "comfy_api_nodes.nodes_gemini",
+    "category": "partner/image/Gemini",
+    "output_node": false,
+    "deprecated": false,
+    "experimental": false,
+    "dev_only": false,
+    "api_node": true,
+    "price_badge": {
+      "engine": "jsonata",
+      "depends_on": {
+        "widgets": [
+          {
+            "name": "model",
+            "type": "COMBO"
+          },
+          {
+            "name": "resolution",
+            "type": "COMBO"
+          }
+        ],
+        "inputs": [],
+        "input_groups": []
+      },
+      "expr": "\n    (\n      $m := widgets.model;\n      $r := widgets.resolution;\n      $isFlash := $contains($m, \"nano banana 2\");\n      $flashPrices := {\"1k\": 0.0696, \"2k\": 0.1014, \"4k\": 0.154};\n      $proPrices := {\"1k\": 0.134, \"2k\": 0.134, \"4k\": 0.24};\n      $prices := $isFlash ? $flashPrices : $proPrices;\n      {\"type\":\"usd\",\"usd\": $lookup($prices, $r), \"format\":{\"suffix\":\"/Image\",\"approximate\":true}}\n    )\n    "
+    },
+    "search_aliases": null,
+    "essentials_category": null,
+    "has_intermediate_output": false
+  },
+  "PreviewAny": {
+    "input": {
+      "required": {
+        "source": [
+          "*",
+          {}
+        ]
+      }
+    },
+    "input_order": {
+      "required": [
+        "source"
+      ]
+    },
+    "is_input_list": false,
+    "output": [
+      "STRING"
+    ],
+    "output_is_list": [
+      false
+    ],
+    "output_name": [
+      "STRING"
+    ],
+    "name": "PreviewAny",
+    "display_name": "Preview as Text",
+    "description": "",
+    "python_module": "comfy_extras.nodes_preview_any",
+    "category": "utilities",
+    "output_node": true,
+    "has_intermediate_output": false,
+    "search_aliases": [
+      "show output",
+      "inspect",
+      "debug",
+      "print value",
+      "show text"
+    ]
+  },
+  "PreviewImage": {
+    "input": {
+      "required": {
+        "images": [
+          "IMAGE"
+        ]
+      },
+      "hidden": {
+        "prompt": "PROMPT",
+        "extra_pnginfo": "EXTRA_PNGINFO"
+      }
+    },
+    "input_order": {
+      "required": [
+        "images"
+      ],
+      "hidden": [
+        "prompt",
+        "extra_pnginfo"
+      ]
+    },
+    "is_input_list": false,
+    "output": [],
+    "output_is_list": [],
+    "output_name": [],
+    "name": "PreviewImage",
+    "display_name": "Preview Image",
+    "description": "Saves the input images to your ComfyUI output directory.",
+    "python_module": "nodes",
+    "category": "image",
+    "output_node": true,
+    "has_intermediate_output": false,
+    "search_aliases": [
+      "preview",
+      "preview image",
+      "show image",
+      "view image",
+      "display image",
+      "image viewer"
+    ],
+    "essentials_category": "Basics"
+  },
+  "PrimitiveInt": {
+    "input": {
+      "required": {
+        "value": [
+          "INT",
+          {
+            "min": -9223372036854775807,
+            "max": 9223372036854775807,
+            "control_after_generate": "fixed"
+          }
+        ]
+      }
+    },
+    "input_order": {
+      "required": [
+        "value"
+      ]
+    },
+    "is_input_list": false,
+    "output": [
+      "INT"
+    ],
+    "output_is_list": [
+      false
+    ],
+    "output_name": [
+      "INT"
+    ],
+    "output_tooltips": [
+      null
+    ],
+    "output_matchtypes": null,
+    "name": "PrimitiveInt",
+    "display_name": "Int",
+    "description": "",
+    "python_module": "comfy_extras.nodes_primitive",
+    "category": "utilities/primitive",
+    "output_node": false,
+    "deprecated": false,
+    "experimental": false,
+    "dev_only": false,
+    "api_node": false,
+    "price_badge": null,
+    "search_aliases": null,
+    "essentials_category": null,
+    "has_intermediate_output": false
+  },
+  "PrimitiveStringMultiline": {
+    "input": {
+      "required": {
+        "value": [
+          "STRING",
+          {
+            "multiline": true
+          }
+        ]
+      }
+    },
+    "input_order": {
+      "required": [
+        "value"
+      ]
+    },
+    "is_input_list": false,
+    "output": [
+      "STRING"
+    ],
+    "output_is_list": [
+      false
+    ],
+    "output_name": [
+      "STRING"
+    ],
+    "output_tooltips": [
+      null
+    ],
+    "output_matchtypes": null,
+    "name": "PrimitiveStringMultiline",
+    "display_name": "Text String (Multiline)",
+    "description": "",
+    "python_module": "comfy_extras.nodes_primitive",
+    "category": "utilities/primitive",
+    "output_node": false,
+    "deprecated": false,
+    "experimental": false,
+    "dev_only": false,
+    "api_node": false,
+    "price_badge": null,
+    "search_aliases": [
+      "text",
+      "string",
+      "text multiline",
+      "string multiline",
+      "text box",
+      "prompt"
+    ],
+    "essentials_category": "Basics",
+    "has_intermediate_output": false
+  },
+  "RegexExtract": {
+    "input": {
+      "required": {
+        "string": [
+          "STRING",
+          {
+            "multiline": true
+          }
+        ],
+        "regex_pattern": [
+          "STRING",
+          {
+            "multiline": true
+          }
+        ],
+        "mode": [
+          "COMBO",
+          {
+            "multiselect": false,
+            "options": [
+              "First Match",
+              "All Matches",
+              "First Group",
+              "All Groups"
+            ]
+          }
+        ],
+        "case_insensitive": [
+          "BOOLEAN",
+          {
+            "advanced": true,
+            "default": true
+          }
+        ],
+        "multiline": [
+          "BOOLEAN",
+          {
+            "advanced": true,
+            "default": false
+          }
+        ],
+        "dotall": [
+          "BOOLEAN",
+          {
+            "advanced": true,
+            "default": false
+          }
+        ],
+        "group_index": [
+          "INT",
+          {
+            "advanced": true,
+            "default": 1,
+            "min": 0,
+            "max": 100
+          }
+        ]
+      }
+    },
+    "input_order": {
+      "required": [
+        "string",
+        "regex_pattern",
+        "mode",
+        "case_insensitive",
+        "multiline",
+        "dotall",
+        "group_index"
+      ]
+    },
+    "is_input_list": false,
+    "output": [
+      "STRING"
+    ],
+    "output_is_list": [
+      false
+    ],
+    "output_name": [
+      "STRING"
+    ],
+    "output_tooltips": [
+      null
+    ],
+    "output_matchtypes": null,
+    "name": "RegexExtract",
+    "display_name": "Extract Text",
+    "description": "",
+    "python_module": "comfy_extras.nodes_string",
+    "category": "text",
+    "output_node": false,
+    "deprecated": false,
+    "experimental": false,
+    "dev_only": false,
+    "api_node": false,
+    "price_badge": null,
+    "search_aliases": [
+      "regex extract",
+      "regex",
+      "pattern extract",
+      "text parser",
+      "parse text"
+    ],
+    "essentials_category": null,
+    "has_intermediate_output": false
+  },
+  "RegexReplace": {
+    "input": {
+      "required": {
+        "string": [
+          "STRING",
+          {
+            "multiline": true
+          }
+        ],
+        "regex_pattern": [
+          "STRING",
+          {
+            "multiline": true
+          }
+        ],
+        "replace": [
+          "STRING",
+          {
+            "multiline": true
+          }
+        ]
+      },
+      "optional": {
+        "case_insensitive": [
+          "BOOLEAN",
+          {
+            "advanced": true,
+            "default": true
+          }
+        ],
+        "multiline": [
+          "BOOLEAN",
+          {
+            "advanced": true,
+            "default": false
+          }
+        ],
+        "dotall": [
+          "BOOLEAN",
+          {
+            "tooltip": "When enabled, the dot (.) character will match any character including newline characters. When disabled, dots won't match newlines.",
+            "advanced": true,
+            "default": false
+          }
+        ],
+        "count": [
+          "INT",
+          {
+            "tooltip": "Maximum number of replacements to make. Set to 0 to replace all occurrences (default). Set to 1 to replace only the first match, 2 for the first two matches, etc.",
+            "advanced": true,
+            "default": 0,
+            "min": 0,
+            "max": 100
+          }
+        ]
+      }
+    },
+    "input_order": {
+      "required": [
+        "string",
+        "regex_pattern",
+        "replace"
+      ],
+      "optional": [
+        "case_insensitive",
+        "multiline",
+        "dotall",
+        "count"
+      ]
+    },
+    "is_input_list": false,
+    "output": [
+      "STRING"
+    ],
+    "output_is_list": [
+      false
+    ],
+    "output_name": [
+      "STRING"
+    ],
+    "output_tooltips": [
+      null
+    ],
+    "output_matchtypes": null,
+    "name": "RegexReplace",
+    "display_name": "Replace Text (Regex)",
+    "description": "Find and replace text using regex patterns.",
+    "python_module": "comfy_extras.nodes_string",
+    "category": "text",
+    "output_node": false,
+    "deprecated": false,
+    "experimental": false,
+    "dev_only": false,
+    "api_node": false,
+    "price_badge": null,
+    "search_aliases": [
+      "regex replace",
+      "regex",
+      "pattern replace",
+      "substitution"
+    ],
+    "essentials_category": null,
+    "has_intermediate_output": false
+  },
+  "SimpleMath+": {
+    "input": {
+      "optional": {
+        "a": [
+          "INT,FLOAT",
+          {
+            "default": 0.0,
+            "step": 0.1
+          }
+        ],
+        "b": [
+          "INT,FLOAT",
+          {
+            "default": 0.0,
+            "step": 0.1
+          }
+        ]
+      },
+      "required": {
+        "value": [
+          "STRING",
+          {
+            "multiline": false,
+            "default": ""
+          }
+        ]
+      }
+    },
+    "input_order": {
+      "optional": [
+        "a",
+        "b"
+      ],
+      "required": [
+        "value"
+      ]
+    },
+    "is_input_list": false,
+    "output": [
+      "INT",
+      "FLOAT"
+    ],
+    "output_is_list": [
+      false,
+      false
+    ],
+    "output_name": [
+      "INT",
+      "FLOAT"
+    ],
+    "name": "SimpleMath+",
+    "display_name": "\ud83d\udd27 Simple Math",
+    "description": "",
+    "python_module": "custom_nodes.comfyui_essentials",
+    "category": "essentials/utilities",
+    "output_node": false,
+    "has_intermediate_output": false,
+    "search_aliases": []
+  },
+  "SomethingToString": {
+    "input": {
+      "required": {
+        "input": [
+          "*"
+        ]
+      },
+      "optional": {
+        "prefix": [
+          "STRING",
+          {
+            "default": ""
+          }
+        ],
+        "suffix": [
+          "STRING",
+          {
+            "default": ""
+          }
+        ]
+      }
+    },
+    "input_order": {
+      "required": [
+        "input"
+      ],
+      "optional": [
+        "prefix",
+        "suffix"
+      ]
+    },
+    "is_input_list": false,
+    "output": [
+      "STRING"
+    ],
+    "output_is_list": [
+      false
+    ],
+    "output_name": [
+      "STRING"
+    ],
+    "name": "SomethingToString",
+    "display_name": "Something To String",
+    "description": "\nConverts any type to a string.\n",
+    "python_module": "custom_nodes.ComfyUI-KJNodes",
+    "category": "KJNodes/text",
+    "output_node": false,
+    "has_intermediate_output": false,
+    "search_aliases": []
+  },
+  "SaveImage": {
+    "input": {
+      "required": {
+        "images": [
+          "IMAGE",
+          {
+            "tooltip": "The images to save."
+          }
+        ],
+        "filename_prefix": [
+          "STRING",
+          {
+            "default": "ComfyUI",
+            "tooltip": "The prefix for the file to save. This may include formatting information such as %date:yyyy-MM-dd% or %Empty Latent Image.width% to include values from nodes."
+          }
+        ]
+      },
+      "hidden": {
+        "prompt": "PROMPT",
+        "extra_pnginfo": "EXTRA_PNGINFO"
+      }
+    },
+    "input_order": {
+      "required": [
+        "images",
+        "filename_prefix"
+      ],
+      "hidden": [
+        "prompt",
+        "extra_pnginfo"
+      ]
+    },
+    "is_input_list": false,
+    "output": [],
+    "output_is_list": [],
+    "output_name": [],
+    "name": "SaveImage",
+    "display_name": "Save Image",
+    "description": "Saves the input images to your ComfyUI output directory.",
+    "python_module": "nodes",
+    "category": "image",
+    "output_node": true,
+    "has_intermediate_output": false,
+    "search_aliases": [
+      "save",
+      "save image",
+      "export image",
+      "output image",
+      "write image",
+      "download"
+    ],
+    "essentials_category": "Basics"
+  }
+}

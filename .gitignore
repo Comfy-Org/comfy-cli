@@ -1,6 +1,21 @@
 __pycache__/
 *.py[cod]
 
+# Local agent / editor configs
+.claude/settings.local.json
+
+# Generated artifacts — comfy CLI convention dirs
+/workflows/
+/outputs/
+/output/
+/inputs/
+/variants/
+/stories
+
+# Local projects (creative work, demos, experiments)
+/projects/
+conda.listing.txt
+
 #COMMON CONFIGs
 .DS_Store
 .src_port
@@ -61,3 +76,4 @@ requirements.compiled
 override.txt
 .coverage
 coverage.xml
+

@@ -26,6 +26,18 @@ workflows, and call hosted partner image models, all from your terminal.
 - 🎬 Run workflows against a local ComfyUI server, including auto-conversion of UI-format JSON
 - 🧪 Test ComfyUI and frontend pull requests with one flag
 - 💻 Cross-platform: Windows, macOS, Linux
+- ☁️  Route any workflow to **Comfy Cloud** with `--where cloud` (no GPU required)
+- 🤖 Agent-friendly: every command emits structured `--json` envelopes
+- 📚 Bundled skills teach Claude / Cursor to drive comfy natively
+
+## Quick Start
+
+```bash
+pip install comfy-cli
+comfy setup
+```
+
+`comfy setup` walks you through everything — local or cloud routing, authentication, and agent skill installation — in one interactive wizard. Pass `-y` for non-interactive (CI/scripted) installs.
 
 ## Installation
 

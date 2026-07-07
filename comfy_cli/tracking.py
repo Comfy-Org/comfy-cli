@@ -1,24 +1,86 @@
+from __future__ import annotations
+
+import atexit
 import functools
+import json
 import logging as logginglib
+import os
 import sys
 import uuid
+from typing import Any, Protocol
 
 import typer
 from mixpanel import Mixpanel
+from posthog import Posthog
 
 from comfy_cli import constants, logging, ui
 from comfy_cli.config_manager import ConfigManager
 from comfy_cli.workspace_manager import WorkspaceManager
 
-# Ignore logs from urllib3 that Mixpanel uses.
+# Ignore logs from urllib3 that Mixpanel/PostHog use.
 logginglib.getLogger("urllib3").setLevel(logginglib.ERROR)
 
 MIXPANEL_TOKEN = "93aeab8962b622d431ac19800ccc9f67"
-mp = Mixpanel(MIXPANEL_TOKEN) if MIXPANEL_TOKEN else None
 
-# Kwargs whose values must never reach tracking system.
-# The key is kept (with a redacted marker) so we can still see whether the option was supplied.
-SENSITIVE_TRACKING_KEYS = frozenset({"api_key"})
+# phc_* are public client-side write keys designed for embedding — safe to commit, same as MIXPANEL_TOKEN above.
+# Override with $POSTHOG_API_KEY.
+POSTHOG_TOKEN = os.environ.get(
+    "POSTHOG_API_KEY",
+    "phc_iKfK86id4xVYws9LybMje0h44eGtfwFgRPIBehmy8rO",
+)
+POSTHOG_HOST = "https://t.comfy.org"
+
+# Only these events get the tracing_id --> workflow_run_id alias on PostHog.
+EXECUTION_EVENTS = frozenset({"execution_start", "execution_success", "execution_error"})
+
+# Namespace applied to event names on PostHog only, matching the
+# app:/hub:/registry: surface-prefix convention in the shared project. Mixpanel
+# keeps the bare legacy names (see ``mixpanel_name`` in track_event) so its
+# historical streams stay continuous.
+POSTHOG_EVENT_PREFIX = "cli:"
+
+# Sanitize command kwargs before sending them as telemetry: _is_sensitive()
+# masks credential-bearing names, _is_trackable() drops ctx/private/unserializable
+# values, and _scrub_value() strips query strings off URL values.
+
+_SENSITIVE_SUFFIXES = ("_token", "_api_key", "_secret", "_password")
+# `token` is the publish PAT; `changelog` is bulky free text with no analytics
+# value beyond its presence. `key` is the bare `--key` option carrying the Comfy
+# Cloud API key (e.g. `cloud set-key`, auth store). Sensitive values become
+# "<redacted>" (the key is kept so we can still tell the option was supplied).
+_SENSITIVE_EXACT = frozenset({"api_key", "key", "token", "password", "secret", "changelog"})
+
+
+def _is_sensitive(name: str) -> bool:
+    """True if *name* looks like a credential. Case-insensitive; matches the
+    snake_case suffixes only (Typer kwargs are always snake_case)."""
+    lower = name.lower()
+    return lower in _SENSITIVE_EXACT or lower.endswith(_SENSITIVE_SUFFIXES)
+
+
+def _is_trackable(name: str, value: object) -> bool:
+    """True if the (name, value) kwarg is safe to send. Drops ctx/context,
+    underscore-prefixed names, and values json can't serialize -- posthog-python
+    coerces unserializable values and ships them (e.g. a Click Context) rather
+    than raising the way Mixpanel does, so we must reject them ourselves."""
+    if name in ("ctx", "context"):
+        return False
+    if name.startswith("_"):
+        return False
+    try:
+        json.dumps(value)
+    except (TypeError, ValueError, OverflowError, RecursionError):
+        return False
+    return True
+
+
+def _scrub_value(value: object) -> object:
+    """Strip the query string and fragment from URL values; CivitAI download
+    links carry the token as ?token=. Only top-level http(s) strings are touched."""
+    if isinstance(value, str) and value.startswith(("http://", "https://")):
+        return value.partition("?")[0].partition("#")[0]
+    return value
+
 
 # Generate a unique tracing ID per command.
 config_manager = ConfigManager()
@@ -37,23 +99,137 @@ workspace_manager = WorkspaceManager()
 # stable agent identity in analytics.
 _session_only_tracking = False
 
+
+def _telemetry_disabled_by_env() -> bool:
+    """Return True if telemetry is suppressed via environment variable.
+
+    Honors the cross-tool ``DO_NOT_TRACK`` convention
+    (https://consoledonottrack.com/) and the project-specific
+    ``COMFY_NO_TELEMETRY``. Per the spec, any value other than empty or
+    ``"0"`` opts out.
+    """
+    for name in ("DO_NOT_TRACK", "COMFY_NO_TELEMETRY"):
+        val = os.environ.get(name, "")
+        if val and val != "0":
+            return True
+    return False
+
+
+def _consent_enabled() -> bool:
+    """Whether passive telemetry may be sent right now: no env opt-out AND the
+    user has consented (persisted flag) or a session-only opt-in is active.
+
+    This is the full gate. Agent-authored data (e.g. session reviews) rides it,
+    so opting out of tracking by any means means nothing is sent."""
+    if _telemetry_disabled_by_env():
+        return False
+    return bool(config_manager.get_bool(constants.CONFIG_KEY_ENABLE_TRACKING)) or _session_only_tracking
+
+
+class TelemetryProvider(Protocol):
+    enabled: bool
+
+    def track(self, event_name: str, distinct_id: str | None, properties: dict[str, Any]) -> None: ...
+
+    def flush(self) -> None: ...
+
+
+class MixpanelProvider:
+    def __init__(self, token: str):
+        self.client = Mixpanel(token) if token else None
+        self.enabled = self.client is not None
+
+    def track(self, event_name: str, distinct_id: str | None, properties: dict[str, Any]) -> None:
+        if self.client is None or distinct_id is None:
+            return
+        self.client.track(distinct_id=distinct_id, event_name=event_name, properties=properties)
+
+    def flush(self) -> None:
+        # mixpanel-python ships per-call over sync HTTP; nothing to drain.
+        return
+
+
+class PostHogProvider:
+    _STANDARD_PROPERTIES = {
+        "environment": "cli",
+        "surface": "cli",
+        "source": "cli",
+        "trigger_source": "cli",
+    }
+
+    def __init__(self, token: str, host: str):
+        self.client: Posthog | None = None
+        self.enabled = False
+        if not token:
+            return
+        # disable_geoip=False lets PostHog enrich events with IP-derived location.
+        self.client = Posthog(project_api_key=token, host=host, disable_geoip=False)
+        self.enabled = True
+
+    def track(self, event_name: str, distinct_id: str | None, properties: dict[str, Any]) -> None:
+        if not self.enabled or self.client is None or distinct_id is None:
+            return
+        merged = {**self._STANDARD_PROPERTIES, **properties}
+        # Membership check uses the canonical (unprefixed) name; the prefix is
+        # cosmetic to the PostHog taxonomy and applied only at capture time.
+        if event_name in EXECUTION_EVENTS and "tracing_id" in merged:
+            merged.setdefault("workflow_run_id", merged["tracing_id"])
+        self.client.capture(event=f"{POSTHOG_EVENT_PREFIX}{event_name}", distinct_id=distinct_id, properties=merged)
+
+    def flush(self) -> None:
+        if self.client is None:
+            return
+        # posthog-python ships asynchronously; without flush, short-lived CLI invocations silently drop in-flight events
+        self.client.flush()
+
+
+PROVIDERS: list[TelemetryProvider] = [
+    MixpanelProvider(MIXPANEL_TOKEN),
+    PostHogProvider(POSTHOG_TOKEN, POSTHOG_HOST),
+]
+
 app = typer.Typer()
 
 
 @app.command()
 def enable():
     init_tracking(True)
-    typer.echo(f"Tracking is now {'enabled'}.")
-    init_tracking(True)
+    typer.echo("Tracking is now enabled.")
 
 
 @app.command()
 def disable():
     init_tracking(False)
-    typer.echo(f"Tracking is now {'disabled'}.")
+    typer.echo("Tracking is now disabled.")
 
 
-def track_event(event_name: str, properties: any = None):
+def _dispatch(
+    event_name: str, properties: dict[str, Any], *, distinct_id: str | None, mixpanel_name: str | None = None
+):
+    """Fan an event out to every provider. Enriches with cli_version/tracing_id.
+
+    This is the shared send path; callers above own the gating (consent for
+    passive telemetry, env-only for feedback).
+    """
+    properties = {**properties, "cli_version": cli_version, "tracing_id": tracing_id}
+    for provider in PROVIDERS:
+        provider_event_name = (
+            mixpanel_name if (mixpanel_name is not None and isinstance(provider, MixpanelProvider)) else event_name
+        )
+        try:
+            provider.track(provider_event_name, distinct_id=distinct_id, properties=dict(properties))
+        except Exception as e:
+            logging.warning(f"Failed to track event via {type(provider).__name__}: {e}")
+
+
+def track_event(event_name: str, properties: Any = None, *, mixpanel_name: str | None = None):
+    """Fire ``event_name`` to every enabled telemetry provider.
+
+    ``mixpanel_name``, if supplied, overrides the event name on the Mixpanel pipe only — used to keep
+    legacy Mixpanel event names while PostHog receives the canonical name.
+    """
+    if _telemetry_disabled_by_env():
+        return
     if properties is None:
         properties = {}
     logging.debug(f"tracking event called with event_name: {event_name} and properties: {properties}")
@@ -61,15 +237,88 @@ def track_event(event_name: str, properties: any = None):
     if not enable_tracking and not _session_only_tracking:
         return
 
-    try:
-        properties["cli_version"] = cli_version
-        properties["tracing_id"] = tracing_id
-        mp.track(distinct_id=user_id, event_name=event_name, properties=properties)
-    except Exception as e:
-        logging.warning(f"Failed to track event: {e}")  # Log the error but do not raise
+    _dispatch(event_name, properties, distinct_id=user_id, mixpanel_name=mixpanel_name)
 
 
-def track_command(sub_command: str = None):
+def _ensure_user_id(*, persist: bool = True) -> str:
+    """Return a distinct_id. Persists a generated anonymous id only when
+    ``persist`` is True (consent on). For an opted-out, user-initiated action
+    we still attach an ephemeral id but never write durable identity to disk.
+    """
+    global user_id
+    if user_id:
+        return user_id
+    existing = config_manager.get(constants.CONFIG_KEY_USER_ID)
+    if existing:
+        user_id = existing
+        return user_id
+    new_id = str(uuid.uuid4())
+    if persist:
+        user_id = new_id
+        try:
+            config_manager.set(constants.CONFIG_KEY_USER_ID, new_id)
+        except OSError:
+            pass
+    return new_id
+
+
+def submit_feedback(message: str = "", *, scores: dict[str, str | None] | None = None) -> bool:
+    """Send user feedback to telemetry (PostHog + Mixpanel) as ``feedback_submitted``.
+
+    Unlike passive command telemetry, feedback is an explicit, user-initiated
+    action — so it is NOT gated on the consent flag. Only the hard env opt-out
+    (``DO_NOT_TRACK`` / ``COMFY_NO_TELEMETRY``) suppresses it. Returns False
+    without sending when opted out or when there's nothing to send, so the
+    caller can tell the user rather than silently drop their words. Fail-fast:
+    no on-disk queue, no retry — best-effort delivery.
+    """
+    if _telemetry_disabled_by_env():
+        return False
+    properties: dict[str, Any] = {}
+    if message:
+        properties["message"] = message
+    if scores:
+        properties.update({k: v for k, v in scores.items() if v is not None})
+    if not properties:
+        return False
+    consented = config_manager.get_bool(constants.CONFIG_KEY_ENABLE_TRACKING)
+    _dispatch("feedback_submitted", properties, distinct_id=_ensure_user_id(persist=bool(consented)))
+    return True
+
+
+def submit_agent_review(summary: str = "", *, properties: dict[str, Any] | None = None) -> bool:
+    """Send an agent-authored summary of how the session went as ``agent_review_submitted``.
+
+    Distinct from :func:`submit_feedback`: this is the agent's assessment, not
+    the user's words, so it is treated like passive telemetry — fully
+    consent-gated. If the user opted out by ANY means (env opt-out, or no
+    consent), nothing is sent and this returns False. No queue, no retry.
+    """
+    if not _consent_enabled():
+        return False
+    payload: dict[str, Any] = {}
+    if summary:
+        payload["summary"] = summary
+    if properties:
+        payload.update({k: v for k, v in properties.items() if v is not None})
+    if not payload:
+        return False
+    _dispatch("agent_review_submitted", payload, distinct_id=user_id)
+    return True
+
+
+def filter_command_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
+    """Drop untrackable kwargs (see ``_is_trackable``), redact sensitive values
+    (see ``_is_sensitive``), and strip credentials embedded in URL values
+    (see ``_scrub_value``)."""
+    return {
+        k: ("<redacted>" if v is not None else None) if _is_sensitive(k) else _scrub_value(v)
+        for k, v in kwargs.items()
+        if _is_trackable(k, v)
+    }
+
+
+def track_command(sub_command: str | None = None):
     """
     A decorator factory that logs the command function name and selected arguments when it's called.
     """
@@ -78,15 +327,7 @@ def track_command(sub_command: str = None):
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
             command_name = f"{sub_command}:{func.__name__}" if sub_command is not None else func.__name__
-
-            # Copy kwargs to avoid mutating original dictionary
-            # Remove context and ctx from the dictionary as they are not needed for tracking and not serializable.
-            filtered_kwargs = {
-                k: ("<redacted>" if v is not None else None) if k in SENSITIVE_TRACKING_KEYS else v
-                for k, v in kwargs.items()
-                if k != "ctx" and k != "context"
-            }
-
+            filtered_kwargs = filter_command_kwargs(kwargs)
             logging.debug(f"Tracking command: {command_name} with arguments: {filtered_kwargs}")
             track_event(command_name, properties=filtered_kwargs)
 
@@ -100,6 +341,13 @@ def track_command(sub_command: str = None):
 def prompt_tracking_consent(skip_prompt: bool = False, default_value: bool = False):
     global _session_only_tracking, user_id
 
+    # Env-var opt-out short-circuits everything below: no prompt, no
+    # auto-enable in non-TTY, no user_id persistence. Per-process only —
+    # the on-disk consent flag is left untouched so a later run without
+    # the env var still gets the normal prompt path.
+    if _telemetry_disabled_by_env():
+        return
+
     if _session_only_tracking:
         return
 
@@ -111,21 +359,14 @@ def prompt_tracking_consent(skip_prompt: bool = False, default_value: bool = Fal
         init_tracking(default_value)
         return
 
-    # When stdin or stdout is not a TTY (subprocess pipe, redirect, CI),
-    # blocking on the consent prompt would either hang the caller forever
-    # or corrupt their output stream. Enable tracking for this process and
-    # persist a stable anonymous user_id so repeat agentic usage from the
-    # same machine attributes to one identity. The consent flag itself
-    # stays unset so a later interactive run can still ask the human; if
-    # they consent, init_tracking will reuse this user_id.
+    # Non-interactive sessions (pipes, CI, agents) default to no tracking
+    # until the user explicitly consents via an interactive terminal.
+    # Persist a stable anonymous user_id so a later interactive consent
+    # prompt can reuse it, but do NOT auto-enable telemetry — that would
+    # violate the DO_NOT_TRACK convention spirit for OSS tooling.
     if not sys.stdin.isatty() or not sys.stdout.isatty():
-        _session_only_tracking = True
         if user_id is None:
             user_id = str(uuid.uuid4())
-            # Best-effort persistence — a read-only config dir (fresh CI,
-            # restricted sandbox) must not crash the caller. If the write
-            # fails we keep the in-memory user_id so this process still
-            # tracks normally; the next run on a writable host will retry.
             try:
                 config_manager.set(constants.CONFIG_KEY_USER_ID, user_id)
             except OSError:
@@ -161,3 +402,14 @@ def init_tracking(enable_tracking: bool):
         logging.debug("Tracking install event.")
         config_manager.set(constants.CONFIG_KEY_INSTALL_EVENT_TRIGGERED, "True")
         track_event("install")
+
+
+def _flush_all_providers() -> None:
+    for provider in PROVIDERS:
+        try:
+            provider.flush()
+        except Exception as e:  # noqa: BLE001
+            logging.warning(f"Failed to flush telemetry provider {type(provider).__name__}: {e}")
+
+
+atexit.register(_flush_all_providers)

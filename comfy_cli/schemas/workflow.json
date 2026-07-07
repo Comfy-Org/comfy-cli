@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "comfy workflow *",
+  "description": "Output shape for workflow editing commands (slots, set-slot, vary).",
+  "type": "object",
+  "properties": {
+    "workflow": { "type": "string" },
+    "count": { "type": "integer" },
+    "slots": { "type": "array" },
+    "applied": { "type": "array" },
+    "warnings": { "type": "array" },
+    "wrote": { "type": "string" },
+    "variations_summary": { "type": "array" },
+    "item_map": {
+      "type": "object",
+      "description": "compose: foreach item -> provenance map. Mirrors the `_meta.items` block embedded in each written workflow (`_meta.schema == \"compose/1\"`).",
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "nodes": { "type": "array", "items": { "type": "string" }, "description": "node ids this item's branch produced (numerically sorted, includes the save node)" },
+          "save_node": { "type": ["string", "null"], "description": "auto-appended save node id, null when the branch is terminal" },
+          "prefix": { "type": "string", "description": "per-item output filename prefix (<output_prefix>/<item key>)" }
+        }
+      }
+    }
+  }
+}

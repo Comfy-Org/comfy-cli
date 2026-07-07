@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://comfy.org/schemas/run_event.json",
+  "title": "comfy run --json-stream NDJSON event",
+  "description": "One JSON object per line. The final line is an envelope (run.json schema in .data).",
+  "type": "object",
+  "required": ["type"],
+  "additionalProperties": true,
+  "properties": {
+    "schema": {
+      "const": "event/1",
+      "description": "Event contract version. Additive optional fields do not bump it; renamed/removed/retyped fields do."
+    },
+    "type": {
+      "type": "string",
+      "enum": [
+        "queued",
+        "executing",
+        "execution_cached",
+        "progress",
+        "executed",
+        "execution_error",
+        "output",
+        "cancelled"
+      ]
+    },
+    "node": {"type": ["string", "null"]},
+    "title": {"type": ["string", "null"]},
+    "class_type": {"type": ["string", "null"]},
+    "completed": {"type": ["integer", "null"]},
+    "total": {"type": ["integer", "null"]},
+    "prompt_id": {"type": ["string", "null"]},
+    "url": {"type": ["string", "null"]}
+  }
+}

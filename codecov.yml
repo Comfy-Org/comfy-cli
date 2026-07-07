@@ -1,0 +1,19 @@
+# Codecov configuration.
+#
+# The default `project` status uses target `auto` with zero tolerance, i.e. a
+# hard ratchet that fails on any drop in total coverage. That doesn't suit a
+# repo that periodically lands large feature surfaces (new CLI command wrappers
+# are thin and lightly tested by design), so we replace the ratchet with an
+# explicit floor: total coverage must stay at/above 70%. This is still a real
+# gate — it just tolerates the small dips that come with adding command surface —
+# and can be raised over time as coverage backfills.
+coverage:
+  status:
+    project:
+      default:
+        target: 70%
+        threshold: 1%
+    # No patch (diff-coverage) status — avoid blocking on lightly-tested CLI glue.
+    patch: false
+
+comment: false

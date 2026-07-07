@@ -51,6 +51,7 @@ class TestExecute:
 
         with (
             patch("comfy_cli.command.install.ensure_workspace_python", return_value="/resolved/python") as mock_ensure,
+            patch("comfy_cli.command.install.ensure_pip"),  # pip-bootstrap step; exercised in tests/uv
             patch("comfy_cli.command.install.clone_comfyui"),
             patch("comfy_cli.command.install.check_comfy_repo", return_value=(True, None)),
             patch("comfy_cli.command.install.pip_install_comfyui_dependencies") as mock_pip_deps,
@@ -282,6 +283,7 @@ class TestTorchInstallCommands:
     @pytest.mark.parametrize(
         "rocm_version,expected_url",
         [
+            (constants.ROCmVersion.v7_2, "https://download.pytorch.org/whl/rocm7.2"),
             (constants.ROCmVersion.v7_1, "https://download.pytorch.org/whl/rocm7.1"),
             (constants.ROCmVersion.v7_0, "https://download.pytorch.org/whl/rocm7.0"),
             (constants.ROCmVersion.v6_3, "https://download.pytorch.org/whl/rocm6.3"),

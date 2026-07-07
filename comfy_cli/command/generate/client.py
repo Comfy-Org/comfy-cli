@@ -9,7 +9,6 @@ A thin wrapper around httpx that:
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from typing import Any
 
@@ -27,17 +26,34 @@ class ApiError(RuntimeError):
 
 
 def resolve_api_key(explicit: str | None = None) -> str:
-    """Order: explicit flag → COMFY_API_KEY env var. Raise if neither set."""
-    key = explicit.strip() if isinstance(explicit, str) and explicit.strip() else os.environ.get("COMFY_API_KEY", "")
-    key = key.strip()
-    if not key:
-        raise ApiError(
-            401,
-            "",
-            "No API key. Pass --api-key or set COMFY_API_KEY in your environment. "
-            "Generate one at https://platform.comfy.org/api-keys.",
-        )
-    return key
+    """Resolve a credential for the partner-API proxy.
+
+    OAuth-first: when a live OAuth session is present it is preferred over
+    ambient API keys (``COMFY_API_KEY`` env / stored key), because OAuth is
+    the CLI's primary auth path and API keys are on a deprecation path. The
+    only thing that outranks the session is an explicit ``--api-key`` flag —
+    a deliberate per-call override. Resolution order (shared chain in
+    ``comfy_cli.credentials``, ``purpose="partner"``):
+    explicit flag → live OAuth session (refreshed if near expiry) →
+    ``COMFY_API_KEY`` env → stored key. Raise if none resolve.
+
+    The proxy validates a non-``comfyui-`` bearer token as a Firebase JWT
+    (see ``_auth_headers``), so the same session that powers
+    ``comfy run --where cloud`` authenticates partner-API calls too — no
+    separate API key required.
+    """
+    from comfy_cli.credentials import resolve_cloud_credential
+
+    cred = resolve_cloud_credential(purpose="partner", explicit=explicit, refresh=True)
+    if cred is not None:
+        return cred.value
+
+    raise ApiError(
+        401,
+        "",
+        "Not signed in. Run `comfy cloud login`, or pass --api-key / set "
+        "COMFY_API_KEY (get one at https://platform.comfy.org/api-keys).",
+    )
 
 
 def _split_payload(
@@ -85,7 +101,7 @@ def _auth_headers(api_key: str, extra: dict[str, str] | None = None) -> dict[str
     #   - "comfyui-..." API keys → X-API-Key (validated by sha256 lookup)
     #   - Firebase ID tokens     → Authorization: Bearer (validated as a JWT)
     # See comfy-api server/middleware/authentication/comfy_firebase_auth.go.
-    headers = {"User-Agent": "comfy-cli/api", "Comfy-Env": "comfy-cli"}
+    headers = {"User-Agent": "comfy-cli/api", "Comfy-Env": "comfy-cli", "Comfy-Usage-Source": "comfy-cli"}
     if api_key.startswith("comfyui-"):
         headers["X-API-Key"] = api_key
     else:

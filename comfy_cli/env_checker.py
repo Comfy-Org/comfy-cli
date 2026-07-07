@@ -117,3 +117,26 @@ class EnvChecker:
             data.append(("Comfy Server Running", "[bold red]No[/bold red]"))
 
         return data
+
+    def fill_data(self) -> dict:
+        """Structured snapshot of the environment, used by ``comfy env --json``.
+
+        Distinct from ``fill_print_table`` (which returns Rich-formatted tuples
+        for display): this returns a JSON-serializable dict that validates
+        against ``schemas/env.json``.
+        """
+        cm = ConfigManager()
+        server_running = check_comfy_server_running()
+        return {
+            "python": {
+                "version": f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
+                "executable": sys.executable,
+                "virtualenv": self.virtualenv_path,
+                "conda_env": self.conda_env,
+            },
+            "config": cm.get_data(),
+            "server": {
+                "running": server_running,
+                "url": "http://localhost:8188" if server_running else None,
+            },
+        }

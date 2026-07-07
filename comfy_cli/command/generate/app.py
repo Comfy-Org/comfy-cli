@@ -25,7 +25,8 @@ from rich import print as rprint
 from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
 
 from comfy_cli import tracking, ui
-from comfy_cli.command.generate import adapters, client, output, poll, schema, spec, upload
+from comfy_cli.command.generate import adapters, client, emit, output, poll, schema, spec, upload
+from comfy_cli.output.renderer import get_renderer
 
 _HELP = "Generate images via ComfyUI partner nodes (Flux, Ideogram, DALL·E, Recraft, Stability, …)."
 
@@ -43,7 +44,6 @@ def register_with(parent: typer.Typer) -> None:
     subcommand name and error."""
 
     @parent.command(name="generate", help=_HELP, context_settings=_CONTEXT_SETTINGS)
-    @tracking.track_command()
     def _generate_entry(
         ctx: typer.Context,
         target: Annotated[
@@ -57,22 +57,34 @@ def register_with(parent: typer.Typer) -> None:
         if target is None or target in {"-h", "--help"}:
             _print_top_help()
             raise typer.Exit(code=0)
+        extra = list(ctx.args)
         if target == "list":
-            return _list_models(list(ctx.args))
+            tracking.track_event("generate:list")
+            return _list_models(extra)
         if target == "schema":
-            return _schema(list(ctx.args))
+            model_arg = extra[0] if extra and not extra[0].startswith("-") else None
+            tracking.track_event("generate:schema", {"model": model_arg})
+            return _schema(extra)
         if target == "refresh":
+            tracking.track_event("generate:refresh")
             return _refresh()
         if target == "upload":
-            return _upload(list(ctx.args))
+            tracking.track_event("generate:upload")
+            return _upload(extra)
         if target == "resume":
-            return _resume(list(ctx.args))
-        _generate(target, list(ctx.args))
+            resume_model = extra[0] if extra and not extra[0].startswith("-") else None
+            resume_job_id = extra[1] if len(extra) >= 2 and not extra[1].startswith("-") else None
+            tracking.track_event(
+                "generate:resume",
+                {"model": resume_model, "job_id": resume_job_id},
+            )
+            return _resume(extra)
+        _generate(target, extra)
 
 
 def _separate_meta_flags(extra_args: list[str]) -> tuple[list[str], dict[str, str | bool]]:
     """Pull run-level flags out of the user's argv tail."""
-    meta_names = {"download", "async", "json", "timeout", "api-key"}
+    meta_names = {"download", "async", "json", "timeout", "api-key", "emit-workflow", "output-prefix"}
     meta: dict[str, str | bool] = {}
     remaining: list[str] = []
     i = 0
@@ -129,7 +141,15 @@ def _spinner() -> Progress:
 
 def _emit_result(result: poll.PollResult, *, request_id: str, download: str | None, as_json: bool) -> None:
     if as_json:
-        output.print_json(result.raw)
+        # Honor --download in JSON mode too. Previously this returned before
+        # saving, so `--json --download` printed the URL but wrote no file,
+        # forcing callers to curl the URL by hand. Save first, then surface the
+        # local path alongside the raw response.
+        if download and result.status == "succeeded" and result.image_urls:
+            saved = output.save_urls(result.image_urls, download, request_id)
+            output.print_json({"result": result.raw, "saved": [str(p) for p in saved]})
+        else:
+            output.print_json(result.raw)
         return
     if result.status != "succeeded":
         rprint(f"[bold red]Job {result.status}: {result.error or 'unknown error'}[/bold red]")
@@ -146,130 +166,249 @@ def _emit_result(result: poll.PollResult, *, request_id: str, download: str | No
 
 
 def _generate(model: str, extra_args: list[str]) -> None:
-    try:
-        ep = spec.get_endpoint(model)
-    except spec.SpecError as e:
-        rprint(f"[bold red]{e}[/bold red]")
-        raise typer.Exit(code=1)
+    # --help short-circuits before tracking — it's a help-display action, not an execution attempt.
+    # If the model is unknown, fall through so the tracking path records the schema error.
+    asks_help = any(a in {"--help", "-h"} for a in extra_args)
+    if asks_help:
+        try:
+            help_ep = spec.get_endpoint(model)
+        except spec.SpecError:
+            help_ep = None
+        if help_ep is not None:
+            _show_schema_help(help_ep)
+            raise typer.Exit(code=0)
 
-    if any(a in {"--help", "-h"} for a in extra_args):
-        _show_schema_help(ep)
-        raise typer.Exit(code=0)
+    # generate:start fires at entry so every invocation has a paired start/end lifecycle.
+    # Props are filled in progressively as model_alias / partner / async / has_download become known.
+    gen_props: dict[str, object | None] = {
+        "model": model,
+        "model_alias": None,
+        "async": None,
+        "has_download": None,
+        "partner": None,
+    }
+    tracking.track_event("generate:start", gen_props)
 
-    try:
-        remaining, meta = _separate_meta_flags(extra_args)
-    except schema.SchemaError as e:
-        rprint(f"[bold red]{e}[/bold red]")
-        raise typer.Exit(code=1)
-
-    flags = schema.flags_for(ep)
-    try:
-        values = schema.parse_args(flags, remaining)
-    except schema.SchemaError as e:
-        rprint(f"[bold red]{e}[/bold red]")
-        name = spec.preferred_alias(ep.id) or ep.id
-        rprint(f"[dim]Run `comfy generate schema {name}` for the full parameter list.[/dim]")
-        raise typer.Exit(code=1)
-
-    try:
-        api_key = client.resolve_api_key(meta.get("api-key") if isinstance(meta.get("api-key"), str) else None)
-    except client.ApiError as e:
-        rprint(f"[bold red]{e}[/bold red]")
-        raise typer.Exit(code=1)
-
-    timeout_raw = meta.get("timeout", "300")
-    try:
-        timeout = float(timeout_raw) if isinstance(timeout_raw, str) else 300.0
-    except ValueError:
-        rprint(f"[bold red]--timeout: expected number, got {timeout_raw!r}[/bold red]")
-        raise typer.Exit(code=1)
-
-    do_async = bool(meta.get("async", False))
-    download = meta.get("download") if isinstance(meta.get("download"), str) else None
-    as_json = bool(meta.get("json", False))
+    def _track_error(error_kind: str, exc: BaseException) -> None:
+        tracking.track_event(
+            "generate:error",
+            {**gen_props, "error_type": type(exc).__name__, "error_kind": error_kind},
+        )
 
     try:
-        _apply_upload_transforms(values, flags, ep, api_key)
-    except (client.ApiError, httpx.HTTPError) as e:
-        rprint(f"[bold red]Upload failed: {e}[/bold red]")
-        raise typer.Exit(code=1)
+        try:
+            ep = spec.get_endpoint(model)
+        except spec.SpecError as e:
+            rprint(f"[bold red]{e}[/bold red]")
+            _track_error("schema", e)
+            raise typer.Exit(code=1)
 
-    request_id = str(uuid.uuid4())[:8]
-    try:
-        resp = client.send_request(ep, values, flags, api_key, timeout=timeout)
-    except httpx.HTTPError as e:
-        rprint(f"[bold red]Network error contacting {spec.base_url()}: {e}[/bold red]")
-        raise typer.Exit(code=1) from e
+        gen_props["model_alias"] = spec.preferred_alias(ep.id)
+        gen_props["partner"] = getattr(ep, "partner", None)
 
-    try:
-        client.raise_for_status(resp)
-    except client.ApiError as e:
-        rprint(f"[bold red]API error {e.status}[/bold red]\n{e.body}")
-        raise typer.Exit(code=1) from e
+        try:
+            remaining, meta = _separate_meta_flags(extra_args)
+        except schema.SchemaError as e:
+            rprint(f"[bold red]{e}[/bold red]")
+            _track_error("schema", e)
+            raise typer.Exit(code=1)
 
-    if resp.headers.get("content-type", "").startswith("image/"):
-        if download:
-            saved = output.save_binary_response(resp, download, request_id)
-            output.print_saved([saved])
-        else:
-            rprint("[yellow]Binary image response; nothing saved. Pass --download <path> to write it to disk.[/yellow]")
-        return
+        do_async = bool(meta.get("async", False))
+        download = meta.get("download") if isinstance(meta.get("download"), str) else None
+        as_json = bool(meta.get("json", False))
+        gen_props["async"] = do_async
+        gen_props["has_download"] = bool(download)
 
-    try:
-        body = resp.json()
-    except ValueError:
-        rprint("[bold red]Unexpected non-JSON response.[/bold red]")
-        rprint(resp.text[:500])
-        raise typer.Exit(code=1)
+        emit_path = meta.get("emit-workflow") if isinstance(meta.get("emit-workflow"), str) else None
+        flags = schema.flags_for(ep)
+        try:
+            # In emit mode the partner node carries its own defaults, so don't
+            # force every proxy-required flag — let the user override only what
+            # they want.
+            values = schema.parse_args(flags, remaining, require_all=not emit_path)
+        except schema.SchemaError as e:
+            rprint(f"[bold red]{e}[/bold red]")
+            name = gen_props["model_alias"] or ep.id
+            rprint(f"[dim]Run `comfy generate schema {name}` for the full parameter list.[/dim]")
+            _track_error("schema", e)
+            raise typer.Exit(code=1)
 
-    if ep.polling:
-        job_id = poll.extract_job_id(ep.polling, body) or request_id
-        name = spec.preferred_alias(ep.id) or ep.id
-        if do_async:
+        if emit_path:
+            # Emit a runnable workflow that drives the partner *node* and return
+            # — no proxy call, no API key required. The artifact is the result.
+            name = gen_props["model_alias"] or ep.id
+            prefix = meta.get("output-prefix") if isinstance(meta.get("output-prefix"), str) else "generate"
+            renderer = get_renderer()
+            try:
+                workflow = emit.write_workflow(name, values, Path(emit_path).expanduser(), output_prefix=prefix)
+            except (emit.EmitError, OSError) as e:
+                _track_error("emit", e)
+                hint = (
+                    "check destination path permissions and parent directory"
+                    if isinstance(e, OSError)
+                    else "check the model name and that all required inputs are provided"
+                )
+                renderer.error(
+                    code="emit_workflow_failed",
+                    message=str(e),
+                    hint=hint,
+                )
+                raise typer.Exit(code=1) from e
+            tracking.track_event("generate:emit", {**gen_props, "node_count": len(workflow)})
+            if renderer.is_pretty():
+                rprint(f"[bold green]Wrote workflow:[/bold green] {emit_path}")
+                rprint(f"  run it: comfy run --workflow {emit_path}")
+            renderer.emit(
+                {"out": str(Path(emit_path).expanduser()), "model": name, "nodes": len(workflow)},
+                command="generate emit-workflow",
+            )
+            return
+
+        try:
+            api_key = client.resolve_api_key(meta.get("api-key") if isinstance(meta.get("api-key"), str) else None)
+        except client.ApiError as e:
+            rprint(f"[bold red]{e}[/bold red]")
+            _track_error("api", e)
+            raise typer.Exit(code=1)
+
+        timeout_raw = meta.get("timeout", "300")
+        try:
+            timeout = float(timeout_raw) if isinstance(timeout_raw, str) else 300.0
+        except ValueError as e:
+            rprint(f"[bold red]--timeout: expected number, got {timeout_raw!r}[/bold red]")
+            _track_error("schema", e)
+            raise typer.Exit(code=1)
+
+        try:
+            _apply_upload_transforms(values, flags, ep, api_key)
+        except (client.ApiError, httpx.HTTPError) as e:
+            rprint(f"[bold red]Upload failed: {e}[/bold red]")
+            _track_error("upload", e)
+            raise typer.Exit(code=1)
+
+        request_id = str(uuid.uuid4())[:8]
+        try:
+            resp = client.send_request(ep, values, flags, api_key, timeout=timeout)
+        except httpx.HTTPError as e:
+            rprint(f"[bold red]Network error contacting {spec.base_url()}: {e}[/bold red]")
+            _track_error("network", e)
+            raise typer.Exit(code=1) from e
+
+        try:
+            client.raise_for_status(resp)
+        except client.ApiError as e:
+            rprint(f"[bold red]API error {e.status}[/bold red]\n{e.body}")
+            _track_error("api", e)
+            raise typer.Exit(code=1) from e
+
+        if resp.headers.get("content-type", "").startswith("image/"):
+            if download:
+                saved = output.save_binary_response(resp, download, request_id)
+                output.print_saved([saved])
+            else:
+                rprint(
+                    "[yellow]Binary image response; nothing saved. Pass --download <path> to write it to disk.[/yellow]"
+                )
+            tracking.track_event("generate:success", gen_props)
+            return
+
+        try:
+            body = resp.json()
+        except ValueError as e:
+            rprint("[bold red]Unexpected non-JSON response.[/bold red]")
+            rprint(resp.text[:500])
+            _track_error("non_json_response", e)
+            raise typer.Exit(code=1)
+
+        if ep.polling:
+            job_id = poll.extract_job_id(ep.polling, body) or request_id
+            name = gen_props["model_alias"] or ep.id
+            if do_async:
+                if as_json:
+                    output.print_json(body)
+                else:
+                    rprint(f"[bold green]Submitted:[/bold green] {name}")
+                    rprint(f"  job id: {job_id}")
+                    rprint(f"  resume: comfy generate resume {name} {job_id}")
+                # Submitted, not succeeded — the workflow runs on the partner side and completion is
+                # observed server-side via partner_node:api_call_*. No generate:success pair here.
+                tracking.track_event(
+                    "generate:submitted",
+                    {
+                        "model": model,
+                        "model_alias": gen_props["model_alias"],
+                        "job_id": job_id,
+                        "partner": gen_props["partner"],
+                    },
+                )
+                return
+
+            poller = poll.get_poller(ep.polling)
+            with _spinner() as prog:
+                task = prog.add_task(f"Generating with {name} (job {job_id})", total=None)
+
+                def _on_progress(p: float) -> None:
+                    prog.update(task, description=f"Generating ({p * 100:.0f}%)")
+
+                try:
+                    result = poller(
+                        body,
+                        api_key=api_key,
+                        timeout=timeout,
+                        on_progress=_on_progress,
+                        create_path=ep.path,
+                    )
+                except (client.ApiError, httpx.HTTPError) as e:
+                    _track_error("network" if isinstance(e, httpx.HTTPError) else "api", e)
+                    raise typer.Exit(code=1) from e
+            try:
+                _emit_result(result, request_id=job_id, download=download, as_json=as_json)
+                tracking.track_event("generate:success", gen_props)
+            except typer.Exit as e:
+                if (e.exit_code or 0) == 0:
+                    tracking.track_event("generate:success", gen_props)
+                else:
+                    _track_error("api", e)
+                raise
+            return
+
+        adapter = adapters.get(ep.id)
+        if adapter is not None and adapter.decode_sync is not None:
+            body = resp.json()
             if as_json:
                 output.print_json(body)
+                tracking.track_event("generate:success", gen_props)
+                return
+            if not download:
+                rprint("[yellow]Image data returned inline. Pass --download <path> to save.[/yellow]")
+                tracking.track_event("generate:success", gen_props)
+                return
+            saved = adapter.decode_sync(body, download, request_id)
+            if saved:
+                output.print_saved(saved)
             else:
-                rprint(f"[bold green]Submitted:[/bold green] {name}")
-                rprint(f"  job id: {job_id}")
-                rprint(f"  resume: comfy generate resume {name} {job_id}")
+                rprint("[yellow]No image data found in response.[/yellow]")
+                output.print_json(body)
+            tracking.track_event("generate:success", gen_props)
             return
 
-        poller = poll.get_poller(ep.polling)
-        with _spinner() as prog:
-            task = prog.add_task(f"Generating with {name} (job {job_id})", total=None)
-
-            def _on_progress(p: float) -> None:
-                prog.update(task, description=f"Generating ({p * 100:.0f}%)")
-
-            result = poller(
-                body,
-                api_key=api_key,
-                timeout=timeout,
-                on_progress=_on_progress,
-                create_path=ep.path,
-            )
-        _emit_result(result, request_id=job_id, download=download, as_json=as_json)
-        return
-
-    adapter = adapters.get(ep.id)
-    if adapter is not None and adapter.decode_sync is not None:
-        body = resp.json()
-        if as_json:
-            output.print_json(body)
-            return
-        if not download:
-            rprint("[yellow]Image data returned inline. Pass --download <path> to save.[/yellow]")
-            return
-        saved = adapter.decode_sync(body, download, request_id)
-        if saved:
-            output.print_saved(saved)
-        else:
-            rprint("[yellow]No image data found in response.[/yellow]")
-            output.print_json(body)
-        return
-
-    result = poll.sync_result_from_response(resp)
-    _emit_result(result, request_id=request_id, download=download, as_json=as_json)
+        try:
+            result = poll.sync_result_from_response(resp)
+            _emit_result(result, request_id=request_id, download=download, as_json=as_json)
+            tracking.track_event("generate:success", gen_props)
+        except typer.Exit as e:
+            if (e.exit_code or 0) == 0:
+                tracking.track_event("generate:success", gen_props)
+            else:
+                _track_error("api", e)
+            raise
+    except typer.Exit:
+        # Inline raise sites already emitted their lifecycle event.
+        raise
+    except Exception as e:
+        # Safety net so an unexpected exception still pairs generate:start with a terminal generate:error.
+        _track_error("unknown", e)
+        raise
 
 
 def _arg_value(args: list[str], *names: str) -> str | None:
@@ -284,10 +423,26 @@ def _arg_value(args: list[str], *names: str) -> str | None:
 
 def _list_models(extra_args: list[str]) -> None:
     """`comfy generate list` — show available models with their short aliases."""
-    partner = _arg_value(extra_args, "--partner", "-p")
-    category = _arg_value(extra_args, "--category", "--style", "-c")
-    query = _arg_value(extra_args, "--query", "-q")
+    clean, meta = _separate_meta_flags(extra_args)
+    as_json = bool(meta.get("json", False))
+    partner = _arg_value(clean, "--partner", "-p")
+    category = _arg_value(clean, "--category", "--style", "-c")
+    query = _arg_value(clean, "--query", "-q")
     eps = spec.list_endpoints(partner=partner, category=category, query=query)
+    if as_json:
+        models = [
+            {
+                "alias": spec.preferred_alias(e.id) or e.id,
+                "id": e.id,
+                "partner": e.partner,
+                "category": e.category,
+                "mode": "async" if e.polling else "sync",
+                "summary": e.summary,
+            }
+            for e in eps
+        ]
+        output.print_json({"models": models, "count": len(models)})
+        return
     if not eps:
         rprint("[yellow]No models match those filters.[/yellow]")
         raise typer.Exit(code=0)
@@ -307,14 +462,42 @@ def _list_models(extra_args: list[str]) -> None:
 
 def _schema(extra_args: list[str]) -> None:
     """`comfy generate schema <model>` — show params for a model (fal-style)."""
-    if not extra_args or extra_args[0].startswith("-"):
+    clean, meta = _separate_meta_flags(extra_args)
+    as_json = bool(meta.get("json", False))
+    if not clean or clean[0].startswith("-"):
+        if as_json:
+            output.print_json({"error": "Usage: comfy generate schema <model>"})
+            raise typer.Exit(code=1)
         rprint("[bold red]Usage: comfy generate schema <model>[/bold red]")
         raise typer.Exit(code=1)
     try:
-        ep = spec.get_endpoint(extra_args[0])
+        ep = spec.get_endpoint(clean[0])
     except spec.SpecError as e:
+        if as_json:
+            output.print_json({"error": str(e)})
+            raise typer.Exit(code=1)
         rprint(f"[bold red]{e}[/bold red]")
         raise typer.Exit(code=1)
+    if as_json:
+        flags = schema.flags_for(ep)
+        output.print_json(
+            {
+                "model": spec.preferred_alias(ep.id) or ep.id,
+                "id": ep.id,
+                "params": [
+                    {
+                        "name": f.name,
+                        "kind": f.kind,
+                        "required": f.required,
+                        "default": f.default,
+                        "enum": f.enum,
+                        "description": f.description,
+                    }
+                    for f in flags
+                ],
+            }
+        )
+        return
     _show_schema_help(ep)
 
 
@@ -410,7 +593,7 @@ def _apply_upload_transforms(values: dict, flags: list[schema.FlagDef], endpoint
 
 
 def _resume(extra_args: list[str]) -> None:
-    if len(extra_args) < 2:
+    if len(extra_args) < 2 or extra_args[0].startswith("-") or extra_args[1].startswith("-"):
         rprint("[bold red]Usage: comfy generate resume <model> <job_id> [--download PATH] [--json][/bold red]")
         raise typer.Exit(code=1)
     model, job_id = extra_args[0], extra_args[1]
@@ -473,6 +656,10 @@ def _print_top_help() -> None:
         '  comfy generate ideogram-edit --image cat.png --mask m.png --prompt "add sunglasses" --rendering_speed TURBO'
     )
     rprint('  comfy generate dalle --prompt "a watercolor whale" --download whale.png')
+    rprint(
+        '  comfy generate flux-pro --prompt "a fox" --emit-workflow flux.json   '
+        "[dim]# write a runnable workflow instead of calling the proxy[/dim]"
+    )
     rprint("")
     rprint("[bold]Actions:[/bold]")
     rprint("  comfy generate list                    Browse available models")
@@ -481,4 +668,6 @@ def _print_top_help() -> None:
     rprint("  comfy generate upload <file-or-url>    Host a local file or remote URL and print its signed URL")
     rprint("  comfy generate resume <model> <job>    Resume an async job")
     rprint("")
-    rprint("[dim]Auth: set COMFY_API_KEY or pass --api-key. Get one at https://platform.comfy.org.[/dim]")
+    rprint(
+        "[dim]Auth: run `comfy cloud login` (session outranks env var), set COMFY_API_KEY, or pass --api-key. Get one at https://platform.comfy.org.[/dim]"
+    )

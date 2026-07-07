@@ -8,10 +8,13 @@ from pathlib import Path
 import git
 import typer
 import yaml
-from rich import print
 
 from comfy_cli import constants, logging, utils
 from comfy_cli.config_manager import ConfigManager
+
+# Route prints through the output shim so they land on stderr in JSON mode
+# rather than corrupting the envelope on stdout.
+from comfy_cli.output import rprint as print  # noqa: A001 - intentional shadowing
 from comfy_cli.utils import singleton
 
 
@@ -367,3 +370,16 @@ class WorkspaceManager:
             ("Manager", manager_status),
             ("UV Compile Default", uv_compile_status),
         ]
+
+    def fill_data(self) -> dict:
+        """Structured workspace info for ``comfy env --json``."""
+        from comfy_cli.command.custom_nodes.cm_cli_util import resolve_manager_gui_mode
+
+        config_manager = ConfigManager()
+        uv_compile_value = config_manager.get(constants.CONFIG_KEY_UV_COMPILE_DEFAULT)
+        return {
+            "path": str(self.workspace_path) if self.workspace_path else None,
+            "type": self.workspace_type.value if self.workspace_type is not None else None,
+            "manager_mode": resolve_manager_gui_mode(not_installed_value="not-installed"),
+            "uv_compile_default": (str(uv_compile_value).lower() == "true" if uv_compile_value is not None else False),
+        }

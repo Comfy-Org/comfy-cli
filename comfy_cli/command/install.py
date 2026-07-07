@@ -10,7 +10,6 @@ import git
 import requests
 import semver
 import typer
-from rich import print as rprint
 from rich.console import Console
 from rich.panel import Panel
 from rich.prompt import Confirm
@@ -21,8 +20,9 @@ from comfy_cli.command.github.pr_info import PRInfo
 from comfy_cli.constants import GPU_OPTION
 from comfy_cli.cuda_detect import DEFAULT_CUDA_TAG
 from comfy_cli.git_utils import checkout_pr, git_checkout_tag
+from comfy_cli.output import rprint
 from comfy_cli.resolve_python import ensure_workspace_python
-from comfy_cli.uv import DependencyCompiler
+from comfy_cli.uv import DependencyCompiler, ensure_pip
 from comfy_cli.workspace_manager import WorkspaceManager, check_comfy_repo
 
 workspace_manager = WorkspaceManager()
@@ -45,13 +45,13 @@ def _pip_install_torch(python: str, index_args: list[str]) -> subprocess.Complet
 
 def pip_install_comfyui_dependencies(
     repo_dir,
-    gpu: GPU_OPTION,
+    gpu: GPU_OPTION | None,
     plat: constants.OS,
     cuda_version: constants.CUDAVersion | None,
     skip_torch_or_directml: bool,
     skip_requirement: bool,
     python: str = sys.executable,
-    rocm_version: constants.ROCmVersion = constants.ROCmVersion.v6_3,
+    rocm_version: constants.ROCmVersion = constants.ROCmVersion.v7_2,
     cuda_tag: str | None = None,
 ):
     os.chdir(repo_dir)
@@ -150,10 +150,10 @@ def execute(
     skip_manager: bool,
     version: str,
     commit: str | None = None,
-    gpu: constants.GPU_OPTION = None,
+    gpu: constants.GPU_OPTION | None = None,
     cuda_version: constants.CUDAVersion | None = None,
     cuda_tag: str | None = None,
-    rocm_version: constants.ROCmVersion = constants.ROCmVersion.v6_3,
+    rocm_version: constants.ROCmVersion = constants.ROCmVersion.v7_2,
     plat: constants.OS = None,
     skip_torch_or_directml: bool = False,
     skip_requirement: bool = False,
@@ -223,6 +223,9 @@ def execute(
     rprint(f"Using Python: [bold]{python}[/bold]")
 
     if not fast_deps:
+        # The pip path needs pip; a uv-managed workspace venv may not ship it.
+        # Bootstrap it first (no-op if present) so the installs below don't crash.
+        ensure_pip(python)
         pip_install_comfyui_dependencies(
             repo_dir,
             gpu,
@@ -280,8 +283,11 @@ def execute(
         )
         depComp.compile_deps()
         depComp.install_deps()
-        # Install manager separately (not included in DependencyCompiler)
+        # Install manager separately (not included in DependencyCompiler).
+        # fast_deps leaves a uv-managed venv that may have no pip, but the
+        # manager install uses pip — bootstrap it first (no-op if present).
         if not skip_manager:
+            ensure_pip(python)
             if not pip_install_manager(repo_dir, python=python):
                 from comfy_cli.config_manager import ConfigManager
 

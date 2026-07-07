@@ -66,6 +66,29 @@ def test_list_partner_filter(runner):
     assert "ideogram" not in r.stdout
 
 
+def test_list_json_emits_parseable_models(runner):
+    import json
+
+    r = runner.invoke(cli_app, ["generate", "list", "--json"])
+    assert r.exit_code == 0
+    payload = json.loads(r.stdout)  # must be pure JSON, no Rich table
+    assert payload["count"] == len(payload["models"]) >= 1
+    fields = {"alias", "id", "partner", "category", "mode", "summary"}
+    assert fields <= set(payload["models"][0])
+    assert any("flux-pro" in (m["alias"] or "") for m in payload["models"])
+
+
+def test_schema_json_emits_parseable_params(runner):
+    import json
+
+    r = runner.invoke(cli_app, ["generate", "schema", "flux-pro", "--json"])
+    assert r.exit_code == 0
+    payload = json.loads(r.stdout)
+    assert payload["model"]
+    assert isinstance(payload["params"], list) and payload["params"]
+    assert {"name", "kind", "required"} <= set(payload["params"][0])
+
+
 def test_list_partner_eq_form(runner):
     r = runner.invoke(cli_app, ["generate", "list", "--partner=bfl"])
     assert r.exit_code == 0
@@ -133,12 +156,14 @@ def test_per_model_help(runner):
 
 def test_generate_missing_api_key(runner, monkeypatch):
     monkeypatch.delenv("COMFY_API_KEY", raising=False)
+    # No OAuth session in the isolated test config, so this is the "no credential
+    # at all" path. OAuth-over-env precedence is intended; this asserts the new message.
     r = runner.invoke(
         cli_app,
         ["generate", "flux-pro", "--prompt", "x", "--width", "1", "--height", "1"],
     )
     assert r.exit_code == 1
-    assert "No API key" in r.stdout
+    assert "Not signed in" in r.stdout
 
 
 def test_generate_bad_int_suggests_schema(runner, api_key):

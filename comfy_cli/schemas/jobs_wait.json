@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://comfy.org/schemas/jobs_wait.json",
+  "title": "comfy jobs wait --json data payload",
+  "description": "Summary of a multi-job wait: aggregate counts plus the terminal state of each prompt_id waited on.",
+  "type": "object",
+  "required": ["total", "completed", "failed", "cancelled", "timed_out", "elapsed_seconds", "jobs"],
+  "additionalProperties": true,
+  "properties": {
+    "total": {"type": "integer"},
+    "completed": {"type": "integer"},
+    "failed": {"type": "integer"},
+    "cancelled": {"type": "integer"},
+    "timed_out": {"type": "integer"},
+    "elapsed_seconds": {"type": "number"},
+    "jobs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["prompt_id", "status", "ok"],
+        "additionalProperties": true,
+        "properties": {
+          "prompt_id": {"type": "string"},
+          "status": {
+            "type": "string",
+            "enum": ["completed", "error", "cancelled", "timed_out", "unknown"]
+          },
+          "ok": {"type": "boolean"},
+          "outputs": {"type": "array", "items": {"type": "string"}},
+          "error_message": {"type": "string"}
+        }
+      }
+    }
+  }
+}

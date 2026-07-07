@@ -7,13 +7,13 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 import requests
 import typer
-from rich import print
 from rich.markup import escape
 
 from comfy_cli import constants, tracking, ui
 from comfy_cli.config_manager import ConfigManager
 from comfy_cli.constants import DEFAULT_COMFY_MODEL_PATH
 from comfy_cli.file_utils import DownloadException, check_unauthorized, download_file
+from comfy_cli.output import rprint as print  # context-aware: stderr in JSON mode
 from comfy_cli.workspace_manager import WorkspaceManager
 
 app = typer.Typer()

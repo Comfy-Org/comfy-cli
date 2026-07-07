@@ -1,0 +1,90 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "comfy models *",
+  "description": "Output shape for model discovery commands (search, show, list-folders, list-folder). All subcommands share this schema; each field is optional because the payload varies per subcommand.",
+  "type": "object",
+  "properties": {
+    "mode": { "type": "string", "description": "Routing mode: 'cloud' or 'local'." },
+    "url": { "type": "string", "description": "The backend URL that was queried (list-folders, list-folder)." },
+    "filters": {
+      "type": "object",
+      "description": "Active filter parameters (search only).",
+      "properties": {
+        "text": { "type": ["string", "null"] },
+        "type": { "type": ["string", "null"] },
+        "include_public": { "type": ["boolean", "null"] }
+      }
+    },
+    "total": { "type": "integer", "description": "Total items before capping (list-folder, search)." },
+    "shown": { "type": "integer", "description": "Number of items in the response after capping." },
+    "count": { "type": "integer", "description": "Count of folders (list-folders)." },
+    "folder": { "type": "string", "description": "Folder name that was listed (list-folder)." },
+    "rows": {
+      "type": "array",
+      "description": "Enriched model rows (search).",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": { "type": "string" },
+          "display_name": { "type": "string" },
+          "type": { "type": "string" },
+          "tags": { "type": "array", "items": { "type": "string" } },
+          "base_model": { "type": ["string", "null"] },
+          "trained_words": {
+            "oneOf": [
+              { "type": "array", "items": { "type": "string" } },
+              { "type": "null" }
+            ]
+          },
+          "source_url": { "type": ["string", "null"] },
+          "preview_url": { "type": ["string", "null"] },
+          "size": { "type": ["integer", "null"] },
+          "is_public": { "type": "boolean" },
+          "id": { "type": ["string", "null"] }
+        }
+      }
+    },
+    "folders": {
+      "type": "array",
+      "description": "Available model folders (list-folders).",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": { "type": "string" },
+          "subfolders": { "type": "array", "items": { "type": "string" } }
+        }
+      }
+    },
+    "files": {
+      "type": "array",
+      "description": "Files within a single folder (list-folder).",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": { "type": "string" },
+          "pathIndex": { "type": "integer" }
+        }
+      }
+    },
+    "row": {
+      "type": "object",
+      "description": "Projected model row for the exact match (show).",
+      "properties": {
+        "name": { "type": "string" },
+        "display_name": { "type": "string" },
+        "type": { "type": "string" },
+        "tags": { "type": "array", "items": { "type": "string" } },
+        "base_model": { "type": ["string", "null"] },
+        "source_url": { "type": ["string", "null"] },
+        "preview_url": { "type": ["string", "null"] },
+        "size": { "type": ["integer", "null"] },
+        "is_public": { "type": "boolean" },
+        "id": { "type": ["string", "null"] }
+      }
+    },
+    "asset": {
+      "type": "object",
+      "description": "Full verbatim Asset object from the server (show)."
+    }
+  }
+}
