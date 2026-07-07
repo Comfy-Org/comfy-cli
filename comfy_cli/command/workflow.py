@@ -24,6 +24,15 @@ from typing import Annotated, Any
 import typer
 
 from comfy_cli import tracking
+from comfy_cli.command.cloud_http import (
+    cloud_target_or_local_error as _cloud_target_or_local_error,
+)
+from comfy_cli.command.cloud_http import (
+    handle_cloud_http_error as _handle_cloud_http_error,
+)
+from comfy_cli.command.cloud_http import (
+    http_request as _http_request,
+)
 from comfy_cli.output import get_renderer, rprint
 
 app = typer.Typer(no_args_is_help=True, help="Slot-based editing of frontend-format ComfyUI workflows.")
@@ -420,97 +429,6 @@ def vary_cmd(
 # on disk via the slot-editing commands above. With ``--where local`` or
 # no cloud session configured, we surface ``workflow_saved_local_unsupported``
 # with a hint pointing at the local file-based flow.
-
-
-def _cloud_target_or_local_error(where: str | None, renderer):
-    """Resolve a cloud Target or emit ``workflow_saved_local_unsupported``."""
-    from comfy_cli.target import resolve_target
-
-    target = resolve_target(where=where)
-    if not target.is_cloud:
-        renderer.error(
-            code="workflow_saved_local_unsupported",
-            message="Saved-workflow management requires Comfy Cloud; local ComfyUI has no /api/workflows surface.",
-            hint="for local workflows, manage JSON files on disk via `comfy workflow slots/set-slot/vary`",
-        )
-        raise typer.Exit(code=1)
-    return target
-
-
-def _authed_request(
-    url: str, target, *, method: str = "GET", data: bytes | None = None, content_type: str | None = None
-):
-    """Build an authenticated urllib Request. The return type is annotated
-    loosely to keep urllib out of the module's top-level imports."""
-    import urllib.request
-
-    req = urllib.request.Request(url, data=data, method=method)
-    if target.api_key:
-        req.add_header("X-API-Key", target.api_key)
-    elif target.auth_token:
-        req.add_header("Authorization", f"Bearer {target.auth_token}")
-    if content_type:
-        req.add_header("Content-Type", content_type)
-    return req
-
-
-def _http_request(
-    url: str, target, *, method: str = "GET", body: dict | None = None, timeout: float = 30.0
-) -> tuple[int, dict | None]:
-    """Authed HTTP call returning (status, parsed_json_or_none). Raises
-    urllib errors verbatim so callers can surface the right error code."""
-    import urllib.request
-
-    data = json.dumps(body).encode("utf-8") if body is not None else None
-    ct = "application/json" if data is not None else None
-    req = _authed_request(url, target, method=method, data=data, content_type=ct)
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        status = resp.status
-        raw = resp.read(64 * 1024 * 1024)  # 64 MiB cap
-    if not raw:
-        return status, None
-    try:
-        return status, json.loads(raw)
-    except json.JSONDecodeError:
-        return status, None
-
-
-def _handle_cloud_http_error(renderer, e, *, operation: str, workflow_id: str | None = None) -> typer.Exit:
-    """Map HTTP failures to envelope codes. Returns an Exit to ``raise from``."""
-    import urllib.error
-
-    if isinstance(e, urllib.error.HTTPError):
-        body = (e.read() or b"")[:1000].decode("utf-8", "replace")
-        if e.code == 404:
-            renderer.error(
-                code="workflow_not_found",
-                message=f"no saved workflow with id {workflow_id!r}"
-                if workflow_id
-                else f"workflow not found ({operation})",
-                hint="list available workflows via `comfy --json workflow list`",
-                details={"workflow_id": workflow_id, "operation": operation},
-            )
-        elif e.code in (401, 403):
-            renderer.error(
-                code="cloud_unauthorized",
-                message=f"HTTP {e.code} during {operation}",
-                hint="re-run `comfy cloud login`",
-                details={"status": e.code},
-            )
-        else:
-            renderer.error(
-                code="cloud_http_error",
-                message=f"HTTP {e.code} during {operation}",
-                hint="check `details.body` for the server's message",
-                details={"status": e.code, "body": body, "operation": operation},
-            )
-    else:
-        renderer.error(
-            code="cloud_http_error",
-            message=f"{operation} failed: {e}",
-            hint="check network / `comfy auth whoami`",
-        )
-    return typer.Exit(code=1)
 
 
 @app.command("list", help="List your saved workflows on Comfy Cloud.")
