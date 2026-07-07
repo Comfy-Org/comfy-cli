@@ -619,6 +619,7 @@ class TestPartFileHelper:
     def _open_fd_count(self):
         return len(os.listdir("/proc/self/fd"))
 
+    @pytest.mark.skipif(not hasattr(os, "fchmod"), reason="os.fchmod is POSIX-only")
     def test_fchmod_failure_closes_fd_and_removes_temp(self, tmp_path, monkeypatch):
         monkeypatch.setattr(os, "fchmod", lambda *a: (_ for _ in ()).throw(OSError("ENOTSUP")))
         with pytest.raises(OSError, match="ENOTSUP"):
