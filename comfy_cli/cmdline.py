@@ -768,10 +768,26 @@ def run(
             help="Cloud workflow entity id to associate this run with (enables draft auto-save on run).",
         ),
     ] = None,
+    no_watch: Annotated[
+        bool,
+        typer.Option(
+            "--no-watch",
+            show_default=False,
+            help=(
+                "Suppress the detached background watcher subprocess for non-blocking "
+                "runs (equivalent to setting COMFY_NO_WATCH=1). Agentic callers with "
+                "their own job-wait loop don't need a second process polling in the "
+                "background; it just holds onto credentials after the parent exits."
+            ),
+        ),
+    ] = False,
 ):
     # Snapshot kwargs before the body mutates api_key/host/port — analytics should record what user actually supplied.
     _track_props = tracking.filter_command_kwargs(dict(locals()))
     tracking.track_event("execution_start", _track_props, mixpanel_name="run")
+
+    if no_watch:
+        os.environ["COMFY_NO_WATCH"] = "1"
 
     try:
         if api_key:
