@@ -287,6 +287,28 @@ it can identify which node packs have incompatible dependencies and why.
 
   `comfy node install comfyui-impact-pack --no-uv-compile`
 
+If `--uv-compile` is enabled by default, commands such as `comfy node update all`
+will also batch-resolve custom node dependencies. To update nodes without that
+batch dependency pass, override the default:
+
+  `comfy node update all --no-uv-compile`
+
+To force reinstall the ComfyUI and ComfyUI-Manager Python requirements in a
+uv-managed workspace, target the workspace interpreter explicitly:
+
+```bash
+uv pip install --python <ComfyUI>/.venv/bin/python --reinstall \
+  -r <ComfyUI>/requirements.txt \
+  -r <ComfyUI>/manager_requirements.txt
+```
+
+If Manager's post-update fixer fails with
+`unexpected argument '--force'` while running `uv pip install`, the update has
+already completed but Manager attempted to call an older uv flag while restoring
+PyTorch packages. Reinstalling the workspace requirements with the command above
+repairs the environment. You can also rerun the node update with
+`--no-uv-compile` to skip the Manager batch dependency pass for that command.
+
 #### --fast-deps vs --uv-compile
 
 Both flags use `uv` for faster dependency resolution, but they work differently:
