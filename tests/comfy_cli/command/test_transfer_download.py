@@ -91,11 +91,18 @@ def _write_state(target: Target, *, record=None, item_map=None) -> list[str]:
 
 
 class _FakeResp:
-    """Context-manager response yielding one chunk then EOF. Declares a
-    matching Content-Length by default; pass an int to lie, None to omit."""
+    """Context-manager stand-in for http.client.HTTPResponse. ``read(n)``
+    honours ``n`` and advances through the body like the real object, so the
+    streaming loop and its running byte total are faithfully exercised.
+    Declares a matching Content-Length by default; pass an int to lie, None to
+    omit. ``chunk_size`` caps each read below ``n`` to force multi-read
+    streaming (and to model a chunked body that over-delivers past a small
+    declared Content-Length, which a real clipped Content-Length body cannot)."""
 
-    def __init__(self, data: bytes = b"\x89PNG-fake", *, content_length="auto"):
-        self._chunks = [data]
+    def __init__(self, data: bytes = b"\x89PNG-fake", *, content_length="auto", chunk_size=None):
+        self._buf = data
+        self._pos = 0
+        self._chunk_size = chunk_size
         self.reads = 0
         if content_length == "auto":
             content_length = len(data)
@@ -103,7 +110,10 @@ class _FakeResp:
 
     def read(self, n: int) -> bytes:
         self.reads += 1
-        return self._chunks.pop(0) if self._chunks else b""
+        take = n if self._chunk_size is None else min(n, self._chunk_size)
+        chunk = self._buf[self._pos : self._pos + take]
+        self._pos += len(chunk)
+        return chunk
 
     def __enter__(self):
         return self
@@ -432,18 +442,43 @@ class TestDownloadIntegrity:
         assert list((tmp_path / "out").iterdir()) == []
 
     def test_body_exceeding_declared_length_aborts(self, fake_target, tmp_path, capsys):
-        err = self._failing_download(fake_target, tmp_path, capsys, _FakeResp(b"x" * 400, content_length=100))
+        # Chunked over-delivery is the real trigger: a body streamed in small
+        # chunks past a declared Content-Length of 100 (a plain Content-Length
+        # body would be clipped and never over-deliver). The abort must fire
+        # mid-stream, not only after the loop ends.
+        resp = _FakeResp(b"x" * 400, content_length=100, chunk_size=32)
+        err = self._failing_download(fake_target, tmp_path, capsys, resp)
         assert err["code"] == "download_failed"
         assert err["details"]["declared_bytes"] == 100
-        assert err["details"]["received_bytes"] == 400
+        assert err["details"]["received_bytes"] > 100
+        assert resp.reads > 1  # streamed across multiple reads before aborting
         assert list((tmp_path / "out").iterdir()) == []
 
     def test_lengthless_body_over_cap_errors_with_envelope(self, fake_target, tmp_path, capsys, monkeypatch):
         monkeypatch.setattr(transfer, "_MAX_DOWNLOAD_BYTES", 100)
-        err = self._failing_download(fake_target, tmp_path, capsys, _FakeResp(b"x" * 200, content_length=None))
+        resp = _FakeResp(b"x" * 400, content_length=None, chunk_size=32)
+        err = self._failing_download(fake_target, tmp_path, capsys, resp)
         assert err["code"] == "download_failed"
-        assert err["details"]["received_bytes"] == 200
+        assert err["details"]["received_bytes"] > 100
+        assert resp.reads > 1  # cap tripped while accumulating, not on one read
         assert list((tmp_path / "out").iterdir()) == []
+
+    def test_multichunk_body_reassembled_correctly(self, fake_target, tmp_path, capsys):
+        # A large body delivered across many reads must land byte-exact, so the
+        # running total and the temp-file writes stay in step with the stream.
+        body = bytes(range(256)) * 40  # 10240 bytes
+        set_renderer(Renderer(mode=OutputMode.NDJSON, command="download"))
+        _write_state(fake_target)
+        with (
+            patch("comfy_cli.command.transfer.resolve_target", return_value=fake_target),
+            patch.object(
+                transfer._DOWNLOAD_OPENER,
+                "open",
+                side_effect=lambda req, timeout=None: _FakeResp(body, chunk_size=100),
+            ),
+        ):
+            paths = transfer.execute_download(PROMPT_ID, out_dir=str(tmp_path / "out"))
+        assert all(Path(p).read_bytes() == body for p in paths)
 
     def test_lengthless_body_downloads_without_verification(self, fake_target, tmp_path, capsys):
         set_renderer(Renderer(mode=OutputMode.NDJSON, command="download"))
