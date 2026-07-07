@@ -738,7 +738,7 @@ def _wait_fetch_snapshot(
 ) -> dict | None:
     """Best-effort single-job status snapshot for the wait loop.
 
-    cloud -> /api/job status; local -> live /history when the server is up,
+    cloud -> /api/jobs/<id>; local -> live /history when the server is up,
     else fall back to the on-disk state file the async watcher maintains.
     """
     if cloud:
@@ -1431,7 +1431,7 @@ def _cloud_ls(*, limit: int) -> None:
 
 
 def _cloud_status_snapshot(prompt_id: str) -> dict | None:
-    """Compose a cloud snapshot from /api/job/<id>/status + /api/history_v2/<id>."""
+    """Compose a cloud snapshot from /api/jobs/<id> + /api/history_v2/<id>."""
     from comfy_cli import jobs_state
     from comfy_cli.comfy_client import _group_outputs
 

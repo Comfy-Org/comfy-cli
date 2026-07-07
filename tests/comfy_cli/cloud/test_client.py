@@ -304,11 +304,11 @@ class TestListJobs:
 
 
 class TestGetJobStatus:
-    def test_cloud_uses_job_status_endpoint(self):
+    def test_cloud_uses_jobs_detail_endpoint(self):
         with patch.object(comfy_client._OPENER, "open", return_value=_mock_response({"status": "success"})) as urlopen:
             comfy_client.Client(CLOUD).get_job_status("pid-1")
         req = urlopen.call_args.args[0]
-        assert req.full_url == "https://cloud.example.com/api/job/pid-1/status"
+        assert req.full_url == "https://cloud.example.com/api/jobs/pid-1"
 
     def test_404_returns_none(self):
         with patch.object(comfy_client._OPENER, "open", side_effect=_http_error(404)):

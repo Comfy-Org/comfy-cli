@@ -404,9 +404,15 @@ class Client:
         raise NotImplementedError("local list_jobs uses /queue + /history merge — call jobs._gather_jobs")
 
     def get_job_status(self, prompt_id: str, *, timeout: float | None = None) -> dict | None:
-        """Cloud-only: GET {prefix}/job/<id>/status."""
+        """Cloud-only: GET {prefix}/jobs/<id>.
+
+        Hits the canonical plural jobs-detail endpoint (``JobDetailResponse``,
+        a superset of the deprecated ``/api/job/<id>/status``). Mirrors
+        ``list_jobs`` by routing through ``self.target.jobs_path`` so cloud vs
+        local prefixing stays correct.
+        """
         try:
-            return self._request("GET", ("job", prompt_id, "status"), timeout=timeout)
+            return self._request("GET", (self.target.jobs_path, prompt_id), timeout=timeout)
         except HTTPError as e:
             if e.status == 404:
                 return None

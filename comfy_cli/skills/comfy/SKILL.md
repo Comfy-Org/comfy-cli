@@ -929,7 +929,7 @@ Hard-won lessons per domain. Not a tutorial — a reference card.
 - CLI auto-injects API keys for partner nodes — never extract manually
 - Session tokens are short-lived (~1h); CLI auto-refreshes on 401
 - HTTP 401 with XML body = CDN catch-all, not ComfyUI — endpoints are under `/api/*`
-- Cloud uses HTTP polling (no WebSocket); `jobs watch` polls `/api/job/<id>/status`
+- Cloud uses HTTP polling (no WebSocket); `jobs watch` polls `/api/jobs/<id>`
 
 ---
 
