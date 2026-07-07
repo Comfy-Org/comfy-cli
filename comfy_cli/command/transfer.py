@@ -115,6 +115,16 @@ _MAX_DOWNLOAD_BYTES = 10 * 1024 * 1024 * 1024  # 10 GB
 # any size is unaffected.
 _DOWNLOAD_TIMEOUT_S = 30
 
+# Stream/copy chunk size. 1 MiB keeps syscall volume low on multi-GB outputs
+# while still bounding memory and letting the size cap trip promptly.
+_DOWNLOAD_CHUNK = 1024 * 1024
+
+# The process umask, captured once at import. os has no getter, so reading it
+# means the classic set-and-restore dance; doing it here (single-threaded under
+# the import lock) avoids a per-download window where the process umask is 0.
+_UMASK = os.umask(0)
+os.umask(_UMASK)
+
 
 def _sanitize_multipart_filename(name: str) -> str:
     """Escape a filename for use in Content-Disposition per RFC 7578.
@@ -141,21 +151,27 @@ def _declared_content_length(resp: Any) -> int | None:
     return value if value >= 0 else None
 
 
-def _part_tempfile(dst: Path) -> tuple[int, Path]:
-    """Exclusively create a random ``<name>.<rand>.part`` sibling of ``dst``.
+def _open_part_file(dst: Path) -> tuple[Any, Path]:
+    """Exclusively create a random ``<name>.<rand>.part`` sibling of ``dst``,
+    returning it open for binary writing plus its path.
 
     mkstemp's O_EXCL + random name defeat a symlink planted in the out-dir
     (a plain ``open("wb")`` would follow it) and keep concurrent downloads
-    off each other's temp files; its restrictive 0600 mode is then widened
-    to the process umask so the renamed result keeps ``open("wb")``-equivalent
-    permissions.
+    off each other's temp files; its restrictive 0600 mode is widened to the
+    process umask so the renamed result keeps ``open("wb")``-equivalent
+    permissions. Returning an already-open file keeps the raw descriptor from
+    ever crossing back to a caller, and any failure here closes the fd and
+    removes the temp file so it can't leak a descriptor or orphan a ``.part``.
     """
     fd, name = tempfile.mkstemp(dir=str(dst.parent), prefix=dst.name + ".", suffix=".part")
-    if hasattr(os, "fchmod"):
-        umask = os.umask(0)
-        os.umask(umask)
-        os.fchmod(fd, 0o666 & ~umask)
-    return fd, Path(name)
+    try:
+        if hasattr(os, "fchmod"):
+            os.fchmod(fd, 0o666 & ~_UMASK)
+        return os.fdopen(fd, "wb"), Path(name)
+    except OSError:
+        os.close(fd)
+        Path(name).unlink(missing_ok=True)
+        raise
 
 
 def _copy_local_output_capped(src: Path, dst: Path) -> None:
@@ -166,12 +182,15 @@ def _copy_local_output_capped(src: Path, dst: Path) -> None:
     enforce ``_MAX_DOWNLOAD_BYTES`` on the bytes actually read, and rename
     into place so ``dst`` never holds a partial copy.
     """
-    part_fd, part_path = _part_tempfile(dst)
+    part_file, part_path = _open_part_file(dst)
     try:
         total = 0
-        with open(src, "rb") as sf, os.fdopen(part_fd, "wb") as df:
+        # part_file is entered first so that if open(src) raises (a source
+        # unlinked between the caller's stat() and here), its already-entered
+        # context still closes the temp fd — the descriptor never leaks.
+        with part_file as df, open(src, "rb") as sf:
             while True:
-                chunk = sf.read(65536)
+                chunk = sf.read(_DOWNLOAD_CHUNK)
                 if not chunk:
                     break
                 total += len(chunk)
@@ -684,11 +703,11 @@ def execute_download(
                             details={"url": url, "index": idx, "declared_bytes": expected},
                         )
                         raise typer.Exit(code=1)
-                    part_fd, part_path = _part_tempfile(local_path)
+                    part_file, part_path = _open_part_file(local_path)
                     total = 0
-                    with os.fdopen(part_fd, "wb") as fp:
+                    with part_file as fp:
                         while True:
-                            chunk = resp.read(65536)
+                            chunk = resp.read(_DOWNLOAD_CHUNK)
                             if not chunk:
                                 break
                             total += len(chunk)

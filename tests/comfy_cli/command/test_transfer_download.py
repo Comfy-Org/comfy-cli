@@ -531,6 +531,33 @@ class TestDownloadIntegrity:
         assert opener.call_args.kwargs["timeout"] == transfer._DOWNLOAD_TIMEOUT_S
 
 
+class TestPartFileHelper:
+    """`_open_part_file` owns the raw fd end-to-end: any failure closes it and
+    removes the temp file, and a copy whose source vanishes must not leak the
+    descriptor either (the fd is wrapped before the source is opened)."""
+
+    def _open_fd_count(self):
+        return len(os.listdir("/proc/self/fd"))
+
+    def test_fchmod_failure_closes_fd_and_removes_temp(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(os, "fchmod", lambda *a: (_ for _ in ()).throw(OSError("ENOTSUP")))
+        with pytest.raises(OSError, match="ENOTSUP"):
+            transfer._open_part_file(tmp_path / "out.png")
+        assert list(tmp_path.glob("*.part")) == []
+
+    @pytest.mark.skipif(not sys.platform.startswith("linux"), reason="/proc/self/fd fd accounting")
+    def test_missing_source_copy_leaks_no_fd_and_no_temp(self, tmp_path):
+        dst = tmp_path / "dst.bin"
+        missing = tmp_path / "gone.bin"
+        before = self._open_fd_count()
+        for _ in range(5):
+            with pytest.raises(FileNotFoundError):
+                transfer._copy_local_output_capped(missing, dst)
+        assert self._open_fd_count() == before
+        assert list(tmp_path.glob("*.part")) == []
+        assert not dst.exists()
+
+
 class TestLocalOutputCopy:
     """A `comfy run --where local --wait` job records bare on-disk output
     paths (execution.format_image_path returns an absolute path for loopback
