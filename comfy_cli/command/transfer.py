@@ -144,10 +144,22 @@ def _assert_download_url(url: str) -> None:
 
 
 def _declared_content_length(resp: Any) -> int | None:
-    """Parse the response's Content-Length header; None when absent or invalid."""
+    """Parse the response's Content-Length header; None when absent or invalid.
+
+    A misconfigured proxy can fold duplicate headers into a single
+    ``"123, 123"`` value; accept it only when every part agrees (so the
+    verified length is unambiguous), otherwise treat the header as absent
+    rather than letting ``int()`` raise and silently skip verification.
+    """
+    raw = resp.headers.get("Content-Length")
+    if raw is None:
+        return None
+    parts = {p.strip() for p in str(raw).split(",")}
+    if len(parts) != 1:
+        return None
     try:
-        value = int(resp.headers.get("Content-Length"))
-    except (TypeError, ValueError):
+        value = int(parts.pop())
+    except ValueError:
         return None
     return value if value >= 0 else None
 
@@ -751,7 +763,7 @@ def execute_download(
                         code="download_failed",
                         message=f"Download of output {idx} truncated: received {total} of {expected} bytes",
                         hint="the connection dropped mid-transfer; retry the download",
-                        details={"url": url, "index": idx, "expected_bytes": expected, "received_bytes": total},
+                        details={"url": url, "index": idx, "declared_bytes": expected, "received_bytes": total},
                     )
                     raise typer.Exit(code=1)
                 part_path.replace(local_path)
@@ -774,11 +786,15 @@ def execute_download(
                 # gives. Emit the envelope instead of a traceback so
                 # machine-mode consumers keep their contract.
                 reason = getattr(e, "reason", None) or e
+                # A bare TimeoutError()/IncompleteRead can stringify to "",
+                # which would emit a reason-less envelope — fall back to the
+                # exception's type name so the cause is always diagnosable.
+                reason_text = str(reason) or type(e).__name__
                 renderer.error(
                     code="download_failed",
-                    message=f"Failed to download output {idx}: {reason}",
+                    message=f"Failed to download output {idx}: {reason_text}",
                     hint="check that the server is reachable and the out-dir is writable",
-                    details={"url": url, "index": idx, "reason": str(reason)},
+                    details={"url": url, "index": idx, "reason": reason_text},
                 )
                 raise typer.Exit(code=1)
             finally:

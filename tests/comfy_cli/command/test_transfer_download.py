@@ -416,7 +416,9 @@ class TestDownloadIntegrity:
     def test_truncated_body_errors_and_leaves_nothing(self, fake_target, tmp_path, capsys):
         err = self._failing_download(fake_target, tmp_path, capsys, _FakeResp(b"x" * 400, content_length=1000))
         assert err["code"] == "download_failed"
-        assert err["details"]["expected_bytes"] == 1000
+        # Every size failure reports the server-declared length under the same
+        # key so a machine consumer never has to guess which spelling is present.
+        assert err["details"]["declared_bytes"] == 1000
         assert err["details"]["received_bytes"] == 400
         assert list((tmp_path / "out").iterdir()) == []
 
@@ -546,6 +548,32 @@ class TestDownloadIntegrity:
         ):
             transfer.execute_download(PROMPT_ID, out_dir=str(tmp_path / "out"))
         assert opener.call_args.kwargs["timeout"] == transfer._DOWNLOAD_TIMEOUT_S
+
+
+class TestDeclaredContentLength:
+    """Content-Length parsing must never raise (a ValueError would silently
+    disable size verification): unparseable or ambiguous headers degrade to
+    None, a folded duplicate that agrees is accepted."""
+
+    class _Resp:
+        def __init__(self, value):
+            self.headers = {} if value is None else {"Content-Length": value}
+
+    @pytest.mark.parametrize(
+        "value,expected",
+        [
+            ("1000", 1000),
+            ("0", 0),
+            (None, None),
+            ("1000, 1000", 1000),  # folded duplicate that agrees
+            ("1000, 2000", None),  # folded duplicate that disagrees → ambiguous
+            ("not-a-number", None),
+            ("-5", None),
+            ("", None),
+        ],
+    )
+    def test_parses_or_degrades_to_none(self, value, expected):
+        assert transfer._declared_content_length(self._Resp(value)) == expected
 
 
 class TestPartFileHelper:
