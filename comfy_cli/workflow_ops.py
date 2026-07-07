@@ -2,9 +2,11 @@
 
 This is the op-model the agent (and a human via the CLI) uses to mutate a
 workflow. Every primitive returns ``(workflow, op)`` where ``op`` is a
-self-describing, replayable, conflict-free operation. The same op stream feeds
-both a single-writer file edit (locally) and a CRDT/merge consumer (cloud) — the
-CLI never merges; it only emits ops that *can* merge.
+self-describing, replayable operation. The same op stream feeds both a
+single-writer file edit (locally) and a merge consumer (cloud) — the CLI never
+merges; it emits ops that *converge under replay* and, for the residual cases a
+leaderless writer cannot decide alone, flags a conflict rather than silently
+diverging.
 
 Design (settled by the identity spike):
 
@@ -16,13 +18,41 @@ Design (settled by the identity spike):
 * **Widgets are name-addressed, never index-addressed.** ``set_widget`` carries
   the widget *name*; ``apply_op`` resolves name → ``widgets_values`` index against
   the live schema at apply time, so an op survives widget-layout drift.
-* **Ops are idempotent** (deduped by ``op_id``) and carry a causal ``stamp``
-  ``[base_version, actor]`` for deterministic last-writer-wins tie-breaking.
+
+Convergence guarantees ``apply_op`` upholds, so any replay order reaches the same
+``canonical`` graph (proved by the P8..P11 order-independence tests):
+
+* **Idempotent** — an op whose ``op_id`` was already applied is a no-op.
+* **Total** — a write (``set_widget``/``connect``) to a node that was
+  concurrently deleted is a no-op: delete wins. Apply never raises on a
+  since-removed target, so a merge consumer can replay a delete and an edge/edit
+  in either order.
+* **Last-writer-wins on widgets** — two concurrent writes to the same widget
+  converge on the value with the higher causal ``stamp`` ``[base_version, actor]``
+  (``op_id`` breaks exact ties into a total order), independent of apply order.
+  The winning stamp per target is tracked in ``_widget_stamps`` (apply-only
+  bookkeeping, stripped before serialization).
+* **Deterministic structure** — forking a shared subgraph definition mints an id
+  derived from ``(definition, instance)`` (not a random UUID), so two replicas
+  replaying the same ops produce byte-identical graphs.
+* **Non-clobbering autogrow** — a ``COMFY_AUTOGROW_V3`` connect never overwrites a
+  slot already wired to another link; it grows a fresh slot keyed by ``grow_id``
+  (the link id). Two concurrent autogrow connects both survive and ``canonical``
+  compares grown slots by ``grow_id``, not by list position.
+
+The one thing a leaderless writer genuinely *cannot* converge is a *sequence
+decision*: the human-visible ordering/numbering of concurrently-grown autogrow
+slots (a batch's element order) and of concurrent interior writes to the same
+shared subgraph definition. Those are surfaced by :func:`detect_conflict` for the
+merge consumer / ask-to-merge to resolve — the ops still never lose data, and
+``canonical`` treats the order as immaterial, so the semantic graph converges even
+while the display order does not.
 """
 
 from __future__ import annotations
 
 import copy
+import json
 import random
 import re
 import uuid
@@ -61,6 +91,52 @@ def _require(workflow: dict, node_id: Any) -> dict:
     if n is None:
         raise ValueError(f"node {node_id} not found in workflow")
     return n
+
+
+def _find_by_str(workflow: dict, node_id: Any) -> dict | None:
+    """Locate a node comparing ids as strings — subgraph op paths carry string
+    ids while top-level node ids are ints."""
+    s = str(node_id)
+    for n in workflow.get("nodes") or []:
+        if isinstance(n, dict) and str(n.get("id", "")) == s:
+            return n
+    return None
+
+
+def _stamp_key(op: dict) -> list:
+    """A total causal order for last-writer-wins: higher ``base_version`` wins,
+    ties broken by ``actor`` then the unique ``op_id`` (so no two distinct ops
+    ever compare equal)."""
+    stamp = op.get("stamp") or [op.get("base_version", 0), op.get("actor", "")]
+    return [stamp[0], stamp[1], op["op_id"]]
+
+
+def _lww_gate(workflow: dict, op: dict) -> bool:
+    """True iff this ``set_widget`` should apply under last-writer-wins. A write
+    to a target already claimed by a higher-or-equal stamp is dropped, making the
+    surviving value independent of apply order."""
+    prior = workflow.get("_widget_stamps", {}).get(json.dumps(_write_target(op), default=str))
+    return prior is None or _stamp_key(op) > list(prior)
+
+
+def _lww_commit(workflow: dict, op: dict) -> None:
+    """Record this op's stamp as the winner for its target."""
+    workflow.setdefault("_widget_stamps", {})[json.dumps(_write_target(op), default=str)] = _stamp_key(op)
+
+
+def _next_autogrow_name(ins: list, requested: str) -> str:
+    """A free autogrow slot name. Prefer the op's requested name; if a concurrent
+    connect already took it, grow the next sequential ``{base}.{elem}{N}`` so no
+    slot is ever clobbered (the server convention stays sequential)."""
+    taken = {i.get("name") for i in ins}
+    if requested not in taken:
+        return requested
+    base, _, stem = requested.partition(".")
+    elem = stem.rstrip("0123456789") or "slot"
+    n = 0
+    while f"{base}.{elem}{n}" in taken:
+        n += 1
+    return f"{base}.{elem}{n}"
 
 
 # ---------------------------------------------------------------------------
@@ -559,35 +635,57 @@ def _apply_add_node(workflow: dict, op: dict) -> None:
 
 
 def _apply_set_widget(workflow: dict, op: dict, graph) -> None:
+    # Last-writer-wins: a lower-stamped concurrent write to this target is
+    # dropped, so the surviving value is the same in any apply order.
+    if not _lww_gate(workflow, op):
+        return
     path = op.get("path")
     if path:
-        # Subgraph interior write. Descend the resolved node path (forking any
+        # Subgraph interior write. A concurrently-deleted instance => no-op
+        # (delete wins). Otherwise descend the resolved node path (forking any
         # shared definition en route so a sibling instance can't alias this
         # write) and set the interior widget — the reference resolver the
         # ``slots``/``set-slot`` surface uses, so the two agree by construction.
+        if _find_by_str(workflow, path[0]) is None:
+            return
         from comfy_cli.cql import engine as _engine
 
         defs_by_id = _engine._subgraph_defs_by_id(workflow)
         target = _engine._resolve_node_path(workflow, [str(s) for s in path], defs_by_id)
         _engine._write_widget(target, op["inner_widget"], op["value"], graph, extend=False)
+        _lww_commit(workflow, op)
         return
-    node = _require(workflow, op["node_id"])
+    node = _find(workflow, op["node_id"])
+    if node is None:
+        return  # target concurrently deleted => no-op (delete wins).
     idx = _widget_index(graph, node.get("type", ""), op["widget"])
     widgets = node.setdefault("widgets_values", [])
     if idx >= len(widgets):
         widgets.extend([None] * (idx + 1 - len(widgets)))
     widgets[idx] = op["value"]
+    _lww_commit(workflow, op)
 
 
 def _apply_connect(workflow: dict, op: dict) -> None:
-    dst = _require(workflow, op["to_node"])
+    # Totality: either endpoint concurrently deleted => no-op (delete wins), so a
+    # merge consumer can replay a connect and a delete in either order without a
+    # crash or a dangling link. Resolve both before mutating anything.
+    dst = _find(workflow, op["to_node"])
+    src = _find(workflow, op["from_node"])
+    if dst is None or src is None:
+        return
     grow = op.get("grow")
     if grow is not None:
-        # Autogrow: append the concrete slot (idempotent by name) and wire it.
+        # Autogrow: grow a concrete slot and wire it. Keyed by ``grow_id`` (the
+        # link id) so replay is idempotent AND non-clobbering — a concurrent
+        # autogrow that minted the same requested name gets its own fresh slot
+        # instead of overwriting this one, so neither connection is lost. The
+        # slot's convergence identity is ``grow_id``; its display name stays
+        # sequential per the server's ``images.imageN`` convention.
         ins = dst.setdefault("inputs", [])
-        to_idx = next((k for k, i in enumerate(ins) if i.get("name") == grow["name"]), None)
+        to_idx = next((k for k, i in enumerate(ins) if i.get("grow_id") == op["link_id"]), None)
         if to_idx is None:
-            entry = {"name": grow["name"], "type": grow["type"], "link": None}
+            entry = {"name": _next_autogrow_name(ins, grow["name"]), "type": grow["type"], "link": None, "grow_id": op["link_id"]}
             if grow.get("widget"):
                 # Mark as a converted widget (ComfyUI's widget→input); value stays
                 # in widgets_values for positional alignment, converter uses the link.
@@ -606,7 +704,6 @@ def _apply_connect(workflow: dict, op: dict) -> None:
     if not any(ln[0] == op["link_id"] for ln in links):
         links.append(link)
     dst["inputs"][to_idx]["link"] = op["link_id"]
-    src = _require(workflow, op["from_node"])
     out_links = src["outputs"][op["from_slot"]].setdefault("links", [])
     if op["link_id"] not in out_links:
         out_links.append(op["link_id"])
@@ -661,13 +758,22 @@ def _write_target(op: dict) -> tuple:
     if kind in ("add_node", "delete_node"):
         return ("node", op["node_id"])
     if kind == "connect":
+        grow = op.get("grow")
+        if grow is not None:
+            # Two autogrow connects onto the same base share a target (their
+            # relative order in the batch is the sequence decision the merge
+            # consumer must make); distinct bases don't collide.
+            return ("input", op["to_node"], "grow", str(grow["name"]).split(".", 1)[0])
         return ("input", op["to_node"], op["to_slot"])
     return (kind,)
 
 
 def detect_conflict(a: dict, b: dict) -> bool:
     """True iff two ops write the same target incompatibly — the signal V0's
-    ask-to-merge raises instead of silently clobbering."""
+    ask-to-merge raises instead of silently clobbering. Two autogrow connects to
+    the same base conflict here (their batch order is undecidable leaderlessly)
+    even though :func:`apply_op` keeps both connections and ``canonical`` treats
+    their order as immaterial."""
     if _write_target(a) != _write_target(b):
         return False
     if a["op"] == "set_widget" and b["op"] == "set_widget":
@@ -675,22 +781,72 @@ def detect_conflict(a: dict, b: dict) -> bool:
     return True
 
 
+def _slot_identity(inp: dict) -> tuple:
+    """A position-independent identity for an input slot: an autogrown slot is
+    keyed by its ``grow_id`` (stable across apply order), a fixed slot by name."""
+    if isinstance(inp, dict) and inp.get("grow_id") is not None:
+        return ("grow", inp["grow_id"])
+    return ("name", inp.get("name") if isinstance(inp, dict) else None)
+
+
 def canonical(workflow: dict) -> dict:
-    """A comparison-stable view: strip apply bookkeeping, order nodes/links by
-    id. Two graphs that converged are ``canonical``-equal regardless of the
-    order ops were applied in."""
+    """A comparison-stable view: strip apply bookkeeping and normalize every
+    order-dependent-but-semantically-immaterial detail away. Two graphs that
+    converged are ``canonical``-equal regardless of the order ops were applied in.
+
+    Normalizations: nodes ordered by id; links ordered by id AND their target
+    slot resolved from a raw list index to a position-independent identity (so a
+    concurrently-grown slot landing at a different index still matches);
+    autogrown input slots ordered by ``grow_id`` with their order-dependent
+    display name folded out; subgraph definitions ordered by id.
+    """
     w = copy.deepcopy(workflow)
     w.pop("_applied_ops", None)
-    if isinstance(w.get("nodes"), list):
-        w["nodes"] = sorted(w["nodes"], key=lambda n: n.get("id"))
-    if isinstance(w.get("links"), list):
-        w["links"] = sorted(w["links"], key=lambda ln: ln[0])
+    w.pop("_widget_stamps", None)
+    nodes = w.get("nodes")
+    # Capture each node's original index -> slot identity BEFORE reordering
+    # inputs, so links (which reference the raw index) can be rewritten.
+    slot_identity: dict[Any, dict[int, tuple]] = {}
+    if isinstance(nodes, list):
+        for n in nodes:
+            if not isinstance(n, dict):
+                continue
+            slot_identity[n.get("id")] = {i: _slot_identity(inp) for i, inp in enumerate(n.get("inputs") or [])}
+        # Reorder each node's grown slots deterministically (by grow_id) and drop
+        # their display name, which is order-dependent (image0 vs image1).
+        for n in nodes:
+            if not isinstance(n, dict) or not isinstance(n.get("inputs"), list):
+                continue
+            fixed = [i for i in n["inputs"] if not (isinstance(i, dict) and i.get("grow_id") is not None)]
+            grown = sorted(
+                (i for i in n["inputs"] if isinstance(i, dict) and i.get("grow_id") is not None),
+                key=lambda i: i["grow_id"],
+            )
+            for i in grown:
+                i["name"] = "\x00grow"
+            n["inputs"] = fixed + grown
+        w["nodes"] = sorted(nodes, key=lambda n: n.get("id"))
+    links = w.get("links")
+    if isinstance(links, list):
+        canon = []
+        for ln in links:
+            ln = list(ln)
+            if len(ln) >= 5:
+                ident = slot_identity.get(ln[3], {}).get(ln[4])
+                if ident is not None:
+                    ln[4] = ident
+            canon.append(ln)
+        w["links"] = sorted(canon, key=lambda ln: ln[0])
+    defs = (w.get("definitions") or {}).get("subgraphs")
+    if isinstance(defs, list):
+        w["definitions"]["subgraphs"] = sorted(defs, key=lambda sg: str(sg.get("id", "")))
     return w
 
 
 def strip_internal(workflow: dict) -> dict:
     """Remove apply-only bookkeeping before serializing to disk."""
     workflow.pop("_applied_ops", None)
+    workflow.pop("_widget_stamps", None)
     return workflow
 
 

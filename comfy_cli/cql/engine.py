@@ -11,12 +11,12 @@ from __future__ import annotations
 
 import copy
 import difflib
+import hashlib as _hashlib
 import json
 import logging
 import urllib.error
 import urllib.parse
 import urllib.request
-import uuid as _uuid
 from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Any
@@ -1542,16 +1542,29 @@ def _isolate_shared_subgraph(workflow: dict, instance: dict, defs_by_id: dict[st
     """If ``instance``'s subgraph definition is shared with another instance,
     deep-copy it under a fresh id and repoint ``instance`` so an interior write
     can't alias sibling instances. No-op when the instance already owns its def.
+
+    The fork id is DERIVED DETERMINISTICALLY from ``(definition id, instance id)``
+    — never a random UUID — so two replicas replaying the same op produce
+    byte-identical graphs (a convergence requirement of the op model in
+    :mod:`comfy_cli.workflow_ops`).
     """
     def_id = str(instance.get("type", ""))
     sg = defs_by_id.get(def_id)
     if sg is None or _count_instances(workflow, def_id) <= 1:
         return
     new_sg = copy.deepcopy(sg)
-    new_id = str(_uuid.uuid4())
+    new_id = _deterministic_fork_id(def_id, instance.get("id"))
     new_sg["id"] = new_id
     workflow.setdefault("definitions", {}).setdefault("subgraphs", []).append(new_sg)
     instance["type"] = new_id
+
+
+def _deterministic_fork_id(def_id: str, instance_id: Any) -> str:
+    """A stable id for the isolated copy of ``def_id`` owned by ``instance_id``.
+    Deterministic across processes (``hashlib``, not the salted builtin ``hash``)
+    so replaying the same op anywhere yields the same id."""
+    seed = f"{def_id}\x00{instance_id}".encode()
+    return "sg-" + _hashlib.sha1(seed).hexdigest()[:32]
 
 
 def _apply_one_slot(workflow: dict, addr: str, value: Any, graph: Graph) -> list[dict]:

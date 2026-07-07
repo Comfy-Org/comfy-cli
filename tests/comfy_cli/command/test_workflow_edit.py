@@ -223,6 +223,55 @@ def _base_workflow() -> dict:
     }
 
 
+def _autogrow_workflow() -> dict:
+    """A BatchImagesNode (autogrow `images` input) plus two IMAGE sources, so
+    two connects can race onto the same autogrow base."""
+    return {
+        "last_node_id": 21,
+        "last_link_id": 0,
+        "nodes": [
+            {
+                "id": 10,
+                "type": "BatchImagesNode",
+                "pos": [200, 0],
+                "inputs": [{"name": "images", "type": "COMFY_AUTOGROW_V3", "link": None}],
+                "outputs": [{"name": "IMAGE", "type": "IMAGE", "links": []}],
+                "widgets_values": [],
+            },
+            {
+                "id": 20,
+                "type": "VAEDecode",
+                "pos": [0, 0],
+                "inputs": [{"name": "samples", "type": "LATENT", "link": None}, {"name": "vae", "type": "VAE", "link": None}],
+                "outputs": [{"name": "IMAGE", "type": "IMAGE", "links": []}],
+                "widgets_values": [],
+            },
+            {
+                "id": 21,
+                "type": "VAEDecode",
+                "pos": [0, 100],
+                "inputs": [{"name": "samples", "type": "LATENT", "link": None}, {"name": "vae", "type": "VAE", "link": None}],
+                "outputs": [{"name": "IMAGE", "type": "IMAGE", "links": []}],
+                "widgets_values": [],
+            },
+        ],
+        "links": [],
+    }
+
+
+def _two_instance_subgraph_workflow() -> dict:
+    """Two top-level instances (57, 58) of ONE shared subgraph definition, so an
+    interior write must fork the shared def before mutating it."""
+    wf = _subgraph_workflow()
+    inst57 = next(n for n in wf["nodes"] if n["id"] == 57)
+    inst58 = copy.deepcopy(inst57)
+    inst58["id"] = 58
+    inst58["pos"] = [400, 0]
+    wf["nodes"].append(inst58)
+    wf["last_node_id"] = 58
+    return wf
+
+
 def _write(tmp_path: Path, data: dict, name: str = "wf.json") -> Path:
     p = tmp_path / name
     p.write_text(json.dumps(data, indent=2), encoding="utf-8")
@@ -729,8 +778,6 @@ class TestDynamicCombo:
     def test_add_node_fills_dynamiccombo_defaults(self, patched_graph, tmp_path, capsys):
         path = _write(tmp_path, {"nodes": [], "links": [], "last_node_id": 0, "last_link_id": 0})
         nid = _run(["add-node", str(path), "KlingFLFTest"], capsys)["data"]["op"]["node_id"]
-        from comfy_cli.command import workflow_edit  # graph for widget order
-
         g = _graph()
         node = next(n for n in json.loads(path.read_text())["nodes"] if n["id"] == nid)
         order = g.widget_order("KlingFLFTest")
@@ -1051,3 +1098,99 @@ class TestOpModel:
         assert isinstance(api, dict)
         # the added VAEDecode survives conversion with an int-keyed id
         assert str(vae_id) in api
+
+    # -- convergence properties (P8..P11): a merge consumer replays ops in any
+    #    order; apply must be TOTAL (never crash) and ORDER-INDEPENDENT (both
+    #    orders reach the same canonical graph). One property per convergence
+    #    bug the deep review flagged.
+
+    def test_p8_totality_delete_wins_over_concurrent_edit(self):
+        """A write to a concurrently-deleted node is a no-op (delete wins),
+        never a crash. {delete(3), set_widget(3)} converges in either order."""
+        ops = self._ops()
+        g = _graph()
+        base = _base_workflow()
+        _, op_del = ops.delete_node(copy.deepcopy(base), g, 3, actor="human")
+        _, op_set = ops.set_widget(copy.deepcopy(base), g, 3, "steps", 99, actor="agent")
+        # neither order may raise; both must converge to "node 3 gone".
+        del_then_set = ops.apply_op(ops.apply_op(copy.deepcopy(base), op_del, g), op_set, g)
+        set_then_del = ops.apply_op(ops.apply_op(copy.deepcopy(base), op_set, g), op_del, g)
+        assert ops.canonical(del_then_set) == ops.canonical(set_then_del)
+        assert all(n["id"] != 3 for n in del_then_set["nodes"])
+
+    def test_p8_totality_connect_to_deleted_node_is_noop(self):
+        """A connect whose endpoint was concurrently deleted no-ops without
+        crashing or leaving a dangling link."""
+        ops = self._ops()
+        g = _graph()
+        base = _base_workflow()
+        # wire EmptyLatentImage(7).LATENT -> KSampler(3).latent_image, then race a
+        # delete of the source node 7.
+        _, op_conn = ops.connect(copy.deepcopy(base), g, 7, "LATENT", 3, "latent_image", actor="agent")
+        _, op_del = ops.delete_node(copy.deepcopy(base), g, 7, actor="human")
+        out = ops.apply_op(ops.apply_op(copy.deepcopy(base), op_del, g), op_conn, g)
+        assert all(n["id"] != 7 for n in out["nodes"])
+        # no link may reference the deleted node 7 (as source or target).
+        assert all(ln[1] != 7 and ln[3] != 7 for ln in out.get("links") or [])
+
+    def test_p9_autogrow_connects_are_commutative(self):
+        """Two concurrent autogrow connects to the same base must both survive
+        (no clobber) and converge regardless of apply order."""
+        ops = self._ops()
+        g = _graph()
+        base = _autogrow_workflow()
+        _, op1 = ops.connect(copy.deepcopy(base), g, 20, "IMAGE", 10, "images", actor="a")
+        _, op2 = ops.connect(copy.deepcopy(base), g, 21, "IMAGE", 10, "images", actor="b")
+        ab = ops.apply_op(ops.apply_op(copy.deepcopy(base), op1, g), op2, g)
+        ba = ops.apply_op(ops.apply_op(copy.deepcopy(base), op2, g), op1, g)
+        # both source links survive in either order (no silent connection loss).
+        for out in (ab, ba):
+            link_srcs = {ln[1] for ln in out.get("links") or []}
+            assert {20, 21} <= link_srcs, out.get("links")
+        # ...and the two orders converge.
+        assert ops.canonical(ab) == ops.canonical(ba)
+
+    def test_p9_autogrow_grow_id_survives_api_conversion(self):
+        """The ``grow_id`` bookkeeping (persisted on grown slots as their
+        convergence identity) must not break API conversion — both wired sources
+        reach the flat API prompt."""
+        ops = self._ops()
+        from comfy_cli.workflow_to_api import convert_ui_to_api
+
+        g = _graph()
+        base = _autogrow_workflow()
+        _, op1 = ops.connect(copy.deepcopy(base), g, 20, "IMAGE", 10, "images", actor="a")
+        _, op2 = ops.connect(copy.deepcopy(base), g, 21, "IMAGE", 10, "images", actor="b")
+        wf = ops.apply_op(ops.apply_op(copy.deepcopy(base), op1, g), op2, g)
+        assert any(i.get("grow_id") for i in next(n for n in wf["nodes"] if n["id"] == 10)["inputs"])
+        api = convert_ui_to_api(wf, _object_info())
+        wired = list(api["10"]["inputs"].values())
+        assert ["20", 0] in wired and ["21", 0] in wired, wired
+
+    def test_p10_subgraph_fork_is_deterministic(self):
+        """Forking a shared subgraph definition must mint a deterministic id, so
+        two replicas replaying the same ops reach byte-identical graphs."""
+        ops = self._ops()
+        g = _graph()
+        base = _two_instance_subgraph_workflow()
+        _, op_a = ops.set_widget(copy.deepcopy(base), g, "57/27", "text", "A", actor="a")
+        _, op_b = ops.set_widget(copy.deepcopy(base), g, "58/27", "text", "B", actor="b")
+        replica1 = ops.apply_op(ops.apply_op(copy.deepcopy(base), op_a, g), op_b, g)
+        replica2 = ops.apply_op(ops.apply_op(copy.deepcopy(base), op_a, g), op_b, g)
+        # deterministic fork ids => two independent replays are identical.
+        assert ops.canonical(replica1) == ops.canonical(replica2)
+
+    def test_p11_concurrent_widget_writes_resolve_by_stamp(self):
+        """Two concurrent writes to the same widget converge on the higher-stamp
+        value regardless of apply order (last-writer-wins by causal stamp)."""
+        ops = self._ops()
+        g = _graph()
+        base = _base_workflow()
+        _, lo = ops.set_widget(copy.deepcopy(base), g, 3, "steps", 10, actor="human", base_version=5)
+        _, hi = ops.set_widget(copy.deepcopy(base), g, 3, "steps", 20, actor="agent", base_version=7)
+        lo_hi = ops.apply_op(ops.apply_op(copy.deepcopy(base), lo, g), hi, g)
+        hi_lo = ops.apply_op(ops.apply_op(copy.deepcopy(base), hi, g), lo, g)
+        assert ops.canonical(lo_hi) == ops.canonical(hi_lo)
+        order = g.widget_order("KSampler")
+        ks = next(n for n in lo_hi["nodes"] if n["id"] == 3)
+        assert ks["widgets_values"][order.index("steps")] == 20  # higher base_version wins
