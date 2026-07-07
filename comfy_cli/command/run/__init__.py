@@ -508,12 +508,15 @@ def execute_cloud(
         # exporter and `comfy templates fetch`) have to be lowered to the API
         # shape before submit. We do it client-side using the cloud snapshot
         # of object_info — the cloud server has no /workflow/convert endpoint.
-        from comfy_cli.cql.engine import _load_from_target
+        # Routed through resilient_load_object_info so COMFY_OBJECT_INFO_FILE
+        # (a pre-warmed/baked catalog, e.g. from an agent host) is honored
+        # before falling back to a live multi-MB /object_info fetch.
+        from comfy_cli.cql.loader import resilient_load_object_info
 
         if renderer.is_pretty():
             pprint("[yellow]Detected UI-format workflow, converting to API format…[/yellow]")
         try:
-            object_info = _load_from_target(mode="cloud")
+            object_info = resilient_load_object_info(mode="cloud")
         except Exception as e:  # noqa: BLE001
             renderer.error(
                 code="cql_no_graph",
@@ -573,10 +576,12 @@ def execute_cloud(
 
     # Pre-submit validation via pure-Python CQL engine.
     # Cloud path uses cached/bundled object_info (no live server needed).
+    # resilient_load_object_info honors COMFY_OBJECT_INFO_FILE first (the
+    # baked/offline catalog an agent host provides) before a live fetch.
     try:
-        from comfy_cli.cql.engine import _load_from_target
+        from comfy_cli.cql.loader import resilient_load_object_info
 
-        cloud_object_info = _load_from_target(mode="cloud")
+        cloud_object_info = resilient_load_object_info(mode="cloud")
     except Exception:  # noqa: BLE001
         cloud_object_info = {}
 
