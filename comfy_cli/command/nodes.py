@@ -40,17 +40,10 @@ def _resolved_where(where: str | None) -> str:
 
     # Mirror comfy_cli.target.resolve_target()'s defensive fallback: a corrupt
     # config must not take the whole `comfy nodes *` surface down with a
-    # traceback before the structured renderer ever runs.
-    config_value: str | None = None
+    # traceback before the structured renderer ever runs (resolve_default reads
+    # the persisted where_default defensively for the same reason).
     try:
-        from comfy_cli.config_manager import ConfigManager
-
-        config_value = ConfigManager().get(where_module.CONFIG_KEY_WHERE_DEFAULT)
-    except Exception:  # noqa: BLE001 — never break routing on a bad config
-        config_value = None
-
-    try:
-        decision = where_module.resolve(flag=where, config_value=config_value)
+        decision = where_module.resolve_default(flag=where)
     except ValueError:
         # An invalid persisted where_default shouldn't be fatal; fall back to
         # the flag (if valid) or auto-detect with the bad config value dropped.

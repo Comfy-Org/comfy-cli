@@ -34,15 +34,11 @@ import typer
 from websocket import WebSocket, WebSocketException, WebSocketTimeoutException
 
 from comfy_cli import cancellation, execution_errors, tracking
-from comfy_cli.config_manager import ConfigManager
 from comfy_cli.env_checker import check_comfy_server_running
+from comfy_cli.host_port import resolve_host_port as _resolve_host_port
 from comfy_cli.output import get_renderer
 
 app = typer.Typer(no_args_is_help=True, help="List, inspect, and live-watch ComfyUI prompts.")
-
-
-DEFAULT_HOST = "127.0.0.1"
-DEFAULT_PORT = 8188
 
 
 def _is_pid_alive(pid: int) -> bool:
@@ -59,34 +55,9 @@ def _is_pid_alive(pid: int) -> bool:
         return True
 
 
-# ---------------------------------------------------------------------------
-# Host/port resolution (reuse the same precedence as `comfy run`)
-# ---------------------------------------------------------------------------
-
-
-_UNSAFE_HOST_CHARS = frozenset("/@?#")
-
-
-def _validate_host(host: str) -> str:
-    """Reject host values that could cause URL injection."""
-    if any(c in host for c in _UNSAFE_HOST_CHARS):
-        raise typer.BadParameter(f"invalid host: {host!r} (contains URL-special characters)")
-    return host
-
-
-def _resolve_host_port(host: str | None, port: int | None) -> tuple[str, int]:
-    cfg = ConfigManager()
-    bg = cfg.background
-    if not host and bg is not None:
-        host = bg[0]
-    if not port and bg is not None:
-        port = bg[1]
-    h = _validate_host(host or DEFAULT_HOST)
-    # Bracket IPv6 literals so callers building "http://{host}:{port}" /
-    # "ws://{host}:{port}" produce valid URLs (e.g. "::1" -> "[::1]").
-    if ":" in h and not h.startswith("["):
-        h = f"[{h}]"
-    return (h, int(port or DEFAULT_PORT))
+# Host/port resolution (`resolve_host_port`) is shared with `comfy run` via
+# `comfy_cli.host_port`; imported above as `_resolve_host_port` to preserve the
+# call sites in this module unchanged.
 
 
 def _server_or_error(host: str, port: int, *, raise_on_missing: bool = True) -> bool:
@@ -767,7 +738,7 @@ def _wait_fetch_snapshot(
 ) -> dict | None:
     """Best-effort single-job status snapshot for the wait loop.
 
-    cloud -> /api/job status; local -> live /history when the server is up,
+    cloud -> /api/jobs/<id>; local -> live /history when the server is up,
     else fall back to the on-disk state file the async watcher maintains.
     """
     if cloud:
@@ -1370,14 +1341,9 @@ def _is_cloud(where: str | None) -> bool:
     for ``jobs ls/status/watch``.
     """
     from comfy_cli import where as where_module
-    from comfy_cli.config_manager import ConfigManager
 
     try:
-        config_value = ConfigManager().get(where_module.CONFIG_KEY_WHERE_DEFAULT)
-    except Exception:  # noqa: BLE001 — never let a bad config break routing
-        config_value = None
-    try:
-        decision = where_module.resolve(flag=where, config_value=config_value)
+        decision = where_module.resolve_default(flag=where)
     except ValueError:
         # Invalid value — fall back to local; the validating command
         # (cmdline.py top-level option) will surface ``where_invalid``.
@@ -1465,7 +1431,7 @@ def _cloud_ls(*, limit: int) -> None:
 
 
 def _cloud_status_snapshot(prompt_id: str) -> dict | None:
-    """Compose a cloud snapshot from /api/job/<id>/status + /api/history_v2/<id>."""
+    """Compose a cloud snapshot from /api/jobs/<id> + /api/history_v2/<id>."""
     from comfy_cli import jobs_state
     from comfy_cli.comfy_client import _group_outputs
 

@@ -283,6 +283,7 @@ class TestTorchInstallCommands:
     @pytest.mark.parametrize(
         "rocm_version,expected_url",
         [
+            (constants.ROCmVersion.v7_2, "https://download.pytorch.org/whl/rocm7.2"),
             (constants.ROCmVersion.v7_1, "https://download.pytorch.org/whl/rocm7.1"),
             (constants.ROCmVersion.v7_0, "https://download.pytorch.org/whl/rocm7.0"),
             (constants.ROCmVersion.v6_3, "https://download.pytorch.org/whl/rocm6.3"),

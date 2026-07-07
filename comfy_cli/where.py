@@ -77,6 +77,30 @@ def resolve(
     return WhereResolution(target=WhereTarget.LOCAL, source="default")
 
 
+def resolve_default(
+    flag: str | None = None,
+    *,
+    env: Mapping[str, str] | None = None,
+    project_value: str | None = _UNSET,
+) -> WhereResolution:
+    """``resolve()`` with the persisted ``where_default`` config read for you.
+
+    Convenience for the common call site that just wants routing resolved
+    against the config file: it looks up ``CONFIG_KEY_WHERE_DEFAULT`` internally
+    (defensively — a broken config never breaks routing, it just drops to the
+    next precedence source) and forwards everything to :func:`resolve`. Callers
+    keep their own error handling for the ``ValueError`` a bad ``flag``/env/
+    project/config value raises, and their own shaping of the result.
+    """
+    from comfy_cli.config_manager import ConfigManager
+
+    try:
+        config_value = ConfigManager().get(CONFIG_KEY_WHERE_DEFAULT)
+    except Exception:  # noqa: BLE001 — never let a bad config break routing
+        config_value = None
+    return resolve(flag=flag, env=env, config_value=config_value, project_value=project_value)
+
+
 def _project_where_default() -> str | None:
     """``defaults.where`` from the project/1 ``comfy.yaml`` governing cwd, if
     any. Discovery itself never raises (see :mod:`comfy_cli.project`); a

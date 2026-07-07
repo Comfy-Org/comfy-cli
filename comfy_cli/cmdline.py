@@ -40,6 +40,7 @@ from comfy_cli.command import (
 )
 from comfy_cli.command.install import validate_version
 from comfy_cli.command.launch import launch as launch_command
+from comfy_cli.command.launch import logs as logs_command
 from comfy_cli.command.models import models as models_command
 from comfy_cli.command.models import search as models_search_command
 from comfy_cli.config_manager import ConfigManager
@@ -449,7 +450,7 @@ def install(
         ),
     ] = None,
     cuda_version: Annotated[CUDAVersion | None, typer.Option(show_default=False)] = None,
-    rocm_version: Annotated[ROCmVersion, typer.Option(show_default=True)] = ROCmVersion.v6_3,
+    rocm_version: Annotated[ROCmVersion, typer.Option(show_default=True)] = ROCmVersion.v7_2,
     amd: Annotated[
         bool | None,
         typer.Option(
@@ -836,23 +837,14 @@ def run(
             )
             return
 
+        from comfy_cli.host_port import parse_host_port_arg, resolve_host_port
+
         if host:
-            s = host.split(":")
-            host = s[0]
-            if not port and len(s) == 2:
-                port = int(s[1])
+            host, parsed_port = parse_host_port_arg(host)
+            if not port and parsed_port is not None:
+                port = parsed_port
 
-        if config.background:
-            bg_host, bg_port = config.background[0], config.background[1]
-            if not host:
-                host = bg_host
-            if not port:
-                port = bg_port
-
-        if not host:
-            host = "127.0.0.1"
-        if not port:
-            port = 8188
+        host, port = resolve_host_port(host, port)
 
         run_inner.execute(
             workflow,
@@ -1134,6 +1126,21 @@ def launch(
     ] = None,
 ):
     launch_command(background, extra, frontend_pr)
+
+
+@app.command(help="Show the captured background ComfyUI log (from `comfy launch --background`).")
+@tracking.track_command()
+def logs(
+    tail: Annotated[
+        int,
+        typer.Option("--tail", help="Number of trailing log lines to show (capped for JSON payloads)."),
+    ] = 200,
+    where: Annotated[
+        str | None,
+        typer.Option("--where", show_default=False, help="Routing target. Only 'local' is supported."),
+    ] = None,
+):
+    logs_command(tail=tail, where=where)
 
 
 @app.command("setup", help="Interactive setup wizard — routing, auth, and agent skills in one step.")

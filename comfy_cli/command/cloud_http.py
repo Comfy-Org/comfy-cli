@@ -15,15 +15,15 @@ import typer
 
 
 def cloud_target_or_local_error(where: str | None, renderer):
-    """Resolve a cloud Target or emit ``workflow_saved_local_unsupported``."""
+    """Resolve a cloud Target, or emit ``cloud_only_command`` for a non-cloud target."""
     from comfy_cli.target import resolve_target
 
     target = resolve_target(where=where)
     if not target.is_cloud:
         renderer.error(
-            code="workflow_saved_local_unsupported",
-            message="Saved-workflow management requires Comfy Cloud; local ComfyUI has no /api/workflows surface.",
-            hint="for local workflows, manage JSON files on disk via `comfy workflow slots/set-slot/vary`",
+            code="cloud_only_command",
+            message="This command requires Comfy Cloud; there is no local equivalent.",
+            hint="sign in with `comfy cloud login` and re-run with `--where cloud`",
         )
         raise typer.Exit(code=1)
     return target

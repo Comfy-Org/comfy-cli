@@ -378,6 +378,216 @@ class TestMachineModeStdoutPurity:
         assert "downloaded" not in captured.err
 
 
+class TestLocalOutputCopy:
+    """A `comfy run --where local --wait` job records bare on-disk output
+    paths (execution.format_image_path returns an absolute path for loopback
+    hosts), not `/view` URLs. `comfy download` must copy those files into
+    --out-dir instead of tripping the anti-SSRF guard, which rejects any
+    non-http(s) URL — while STILL rejecting real non-http URLs on the fetch
+    path so the SSRF protection stays intact (issue #480)."""
+
+    def _write_local_state(self, outputs: list[str]) -> None:
+        state = jobs_state.JobState(
+            prompt_id=PROMPT_ID,
+            client_id=None,
+            workflow="/abs/composed.json",
+            where="local",
+            base_url="http://127.0.0.1:8188",
+            status="completed",
+            outputs=outputs,
+            record=None,
+            item_map=None,
+        )
+        assert jobs_state.write(state) is not None
+
+    def _run(self, tmp_path, capsys, fake_target) -> tuple[list[str], dict]:
+        set_renderer(Renderer(mode=OutputMode.NDJSON, command="download"))
+        with patch("comfy_cli.command.transfer.resolve_target", return_value=fake_target):
+            paths = transfer.execute_download(PROMPT_ID, out_dir=str(tmp_path / "out"))
+        lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]
+        return paths, json.loads(lines[-1])["data"]
+
+    def test_bare_path_output_is_copied_into_out_dir(self, fake_target, tmp_path, capsys):
+        src_dir = tmp_path / "output"
+        src_dir.mkdir()
+        src = src_dir / "ComfyUI_00001_.png"
+        src.write_bytes(b"\x89PNG-local-bytes")
+        self._write_local_state([str(src)])
+
+        paths, data = self._run(tmp_path, capsys, fake_target)
+
+        assert len(paths) == 1
+        copied = Path(paths[0])
+        assert copied.is_file()
+        assert copied.parent == (tmp_path / "out")
+        # The bytes are the on-disk source, copied verbatim.
+        assert copied.read_bytes() == b"\x89PNG-local-bytes"
+        # Source is left untouched (a copy, not a move).
+        assert src.read_bytes() == b"\x89PNG-local-bytes"
+        assert data["files"][0]["path"] == str(copied.resolve())
+        assert data["files"][0]["size"] == len(b"\x89PNG-local-bytes")
+
+    def test_copied_output_keeps_real_extension_not_png(self, fake_target, tmp_path, capsys):
+        # A bare path carries no `?filename=` param; the extension must come
+        # from the source file, not the hardcoded `.png` default.
+        src = tmp_path / "output" / "clip_out.webp"
+        src.parent.mkdir()
+        src.write_bytes(b"RIFFfake-webp")
+        self._write_local_state([str(src)])
+
+        paths, _ = self._run(tmp_path, capsys, fake_target)
+
+        assert Path(paths[0]).suffix == ".webp"
+
+    def test_file_uri_output_is_copied(self, fake_target, tmp_path, capsys):
+        src = tmp_path / "output" / "vid.mp4"
+        src.parent.mkdir()
+        src.write_bytes(b"fake-mp4")
+        self._write_local_state([src.as_uri()])  # file:///…/vid.mp4
+
+        paths, _ = self._run(tmp_path, capsys, fake_target)
+
+        assert Path(paths[0]).suffix == ".mp4"
+        assert Path(paths[0]).read_bytes() == b"fake-mp4"
+
+    def test_missing_local_source_errors_cleanly(self, fake_target, tmp_path, capsys):
+        self._write_local_state([str(tmp_path / "output" / "gone.png")])
+        set_renderer(Renderer(mode=OutputMode.JSON, command="download"))
+        import typer
+
+        with patch("comfy_cli.command.transfer.resolve_target", return_value=fake_target):
+            with pytest.raises(typer.Exit) as excinfo:
+                transfer.execute_download(PROMPT_ID, out_dir=str(tmp_path / "out"))
+        assert excinfo.value.exit_code == 1
+        lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]
+        envelope = json.loads(lines[-1])
+        assert envelope["ok"] is False
+        assert envelope["error"]["code"] == "download_failed"
+        assert "not found on disk" in envelope["error"]["message"]
+
+
+class TestSSRFGuardIntact:
+    """The local-copy branch is additive: `_assert_download_url` must still
+    reject any non-http(s) URL that isn't a bare local path, and the download
+    loop must surface that rejection (SSRF protection stays intact)."""
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "ftp://evil.example.com/etc/passwd",
+            "file://evil.example.com/etc/passwd",  # file:// with a REMOTE host
+            "gopher://internal:70/x",
+            "data:text/plain,hi",
+        ],
+    )
+    def test_assert_download_url_rejects_non_http(self, url):
+        with pytest.raises(ValueError, match="non-HTTP URL"):
+            transfer._assert_download_url(url)
+
+    @pytest.mark.parametrize(
+        "url",
+        ["http://x/view?filename=a.png", "https://x/view?filename=a.png"],
+    )
+    def test_assert_download_url_allows_http(self, url):
+        transfer._assert_download_url(url)  # does not raise
+
+    def test_remote_host_file_uri_is_not_treated_as_local(self):
+        # A file:// URL pointing at a non-local host must NOT be copied — it
+        # falls through to the SSRF guard, which rejects it.
+        assert transfer._local_source_path("file://evil.example.com/etc/passwd") is None
+        assert transfer._local_source_path("ftp://evil.example.com/x") is None
+        assert transfer._local_source_path("http://x/view?filename=a.png") is None
+
+    def test_non_http_output_still_rejected_by_download_loop(self, fake_target, tmp_path, capsys):
+        # A non-http, non-local URL flowing through the download loop must
+        # error via the guard rather than being fetched.
+        state = jobs_state.JobState(
+            prompt_id=PROMPT_ID,
+            client_id=None,
+            workflow="/abs/composed.json",
+            where="cloud",
+            base_url="https://cloud.example.com",
+            status="completed",
+            outputs=["ftp://evil.example.com/etc/passwd"],
+            record=None,
+            item_map=None,
+        )
+        assert jobs_state.write(state) is not None
+        set_renderer(Renderer(mode=OutputMode.JSON, command="download"))
+        import typer
+
+        with patch("comfy_cli.command.transfer.resolve_target", return_value=fake_target):
+            with pytest.raises(typer.Exit) as excinfo:
+                transfer.execute_download(PROMPT_ID, out_dir=str(tmp_path / "out"))
+        assert excinfo.value.exit_code == 1
+        lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]
+        envelope = json.loads(lines[-1])
+        assert envelope["ok"] is False
+        assert envelope["error"]["code"] == "download_failed"
+        assert "non-HTTP URL" in envelope["error"]["message"]
+
+    def test_bare_path_from_non_local_job_is_not_copied(self, fake_target, tmp_path, capsys):
+        # The copy-from-disk branch is gated on `where == "local"`. A cloud/
+        # remote job whose (untrusted) metadata sneaks in a bare absolute path
+        # must NOT be copied off disk — it falls through to the SSRF guard,
+        # which rejects it as a non-HTTP URL. Guards against exfiltration via a
+        # tampered piped envelope or a malicious API record.
+        secret = tmp_path / "secret.txt"
+        secret.write_bytes(b"top-secret")
+        state = jobs_state.JobState(
+            prompt_id=PROMPT_ID,
+            client_id=None,
+            workflow="/abs/composed.json",
+            where="cloud",
+            base_url="https://cloud.example.com",
+            status="completed",
+            outputs=[str(secret)],
+            record=None,
+            item_map=None,
+        )
+        assert jobs_state.write(state) is not None
+        set_renderer(Renderer(mode=OutputMode.JSON, command="download"))
+        import typer
+
+        out = tmp_path / "out"
+        with patch("comfy_cli.command.transfer.resolve_target", return_value=fake_target):
+            with pytest.raises(typer.Exit) as excinfo:
+                transfer.execute_download(PROMPT_ID, out_dir=str(out))
+        assert excinfo.value.exit_code == 1
+        envelope = json.loads([ln for ln in capsys.readouterr().out.splitlines() if ln.strip()][-1])
+        assert envelope["error"]["code"] == "download_failed"
+        assert "non-HTTP URL" in envelope["error"]["message"]
+        # The secret was never copied out.
+        assert not any(out.glob("*")) if out.exists() else True
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "//attacker.com/share/x.png",  # POSIX-style UNC
+            "\\\\attacker.com\\share\\x.png",  # Windows UNC
+        ],
+    )
+    def test_unc_paths_are_not_local(self, url):
+        # UNC/network paths are "absolute" but resolve over SMB (NTLM leak);
+        # they must not be treated as local files.
+        assert transfer._local_source_path(url) is None
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "file:///abs/path.png",  # no host
+            "file://localhost/abs/path.png",  # bare loopback host
+            "file://localhost:8080/abs/path.png",  # loopback host + port (port ignored)
+            "file://[::1]/abs/path.png",  # IPv6 loopback
+        ],
+    )
+    def test_loopback_file_uris_are_local(self, url):
+        # The tightened `hostname`-based check accepts genuine loopback file://
+        # URIs — a port or IPv6 brackets on a loopback host don't defeat it
+        # (that was the whole point of switching off `netloc`).
+        assert transfer._local_source_path(url) == Path("/abs/path.png")
+
+
 # ---------------------------------------------------------------------------
 # _default_out_dir — project/1 root wins over the legacy config key
 # ---------------------------------------------------------------------------

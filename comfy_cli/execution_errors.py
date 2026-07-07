@@ -1,6 +1,6 @@
 """Parse and classify ComfyUI execution failures into envelope-ready fields.
 
-The cloud's ``/api/job/<id>/status`` carries a failed job's cause as
+The cloud's ``/api/jobs/<id>`` detail response carries a failed job's cause as
 ``error_message`` — a JSON-encoded string holding ``exception_message``,
 ``exception_type``, ``node_id``, ``node_type`` and a full Python traceback.
 Embedding that string verbatim in an error envelope buries the one line a

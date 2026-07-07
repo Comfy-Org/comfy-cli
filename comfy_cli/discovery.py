@@ -103,9 +103,13 @@ COMMAND_SCHEMAS: dict[str, str] = {
     "comfy project init": "project",
     "comfy project status": "project",
     "comfy assets push": "assets",
+    "comfy assets library ls": "assets_library",
+    "comfy assets library ensure": "assets_library",
     # config
     "comfy set-default": "set_default",
     "comfy version": "version",
+    # background server logs
+    "comfy logs": "logs",
 }
 
 

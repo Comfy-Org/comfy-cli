@@ -23,6 +23,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+from comfy_cli.http import NoRedirectHandler
 from comfy_cli.target import Target
 
 _LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1", "[::1]"}
@@ -94,22 +95,7 @@ class Unauthenticated(Exception):
     """Target needs auth but no valid session is present."""
 
 
-class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
-    """Refuse to follow redirects.
-
-    Following redirects with `Authorization: Bearer …` in flight risks
-    replaying the token at the redirect target. ComfyUI gateways don't issue
-    redirects under normal operation; if we ever see one it's almost certainly
-    a misconfiguration or attack. Surface as a clear HTTPError instead.
-    """
-
-    def http_error_301(self, req, fp, code, msg, headers):
-        raise urllib.error.HTTPError(req.full_url, code, "redirect refused", headers, fp)
-
-    http_error_302 = http_error_303 = http_error_307 = http_error_308 = http_error_301
-
-
-_OPENER = urllib.request.build_opener(_NoRedirectHandler())
+_OPENER = urllib.request.build_opener(NoRedirectHandler())
 
 
 def _assert_safe_url(url: str) -> None:
@@ -427,9 +413,29 @@ class Client:
         raise NotImplementedError("local list_jobs uses /queue + /history merge — call jobs._gather_jobs")
 
     def get_job_status(self, prompt_id: str, *, timeout: float | None = None) -> dict | None:
-        """Cloud-only: GET {prefix}/job/<id>/status."""
+        """Cloud-only: GET {prefix}/jobs/<id>.
+
+        Hits the canonical plural jobs-detail endpoint (``JobDetailResponse``,
+        a superset of the deprecated ``/api/job/<id>/status``). Mirrors
+        ``list_jobs`` by routing through ``self.target.jobs_path`` so cloud vs
+        local prefixing stays correct.
+        """
+        # Guard like ``list_jobs``: a local target has no ``jobs_path``, and
+        # ``Target.url`` would drop the ``None`` segment and silently issue
+        # ``GET {base}/<id>`` instead of failing loudly.
+        if not self.target.jobs_path:
+            raise NotImplementedError("get_job_status requires a cloud target with a jobs endpoint")
+        # Validate + encode the id so it stays a single terminal path segment.
+        # An empty id would collapse to the plural LIST endpoint (200 with a
+        # ``{"jobs": [...]}`` payload); an id with ``/``, ``?``, ``#`` or ``..``
+        # would inject extra segments / query params (``Target.url`` only
+        # ``strip('/')``s each part, it does not percent-encode).
+        prompt_id = (prompt_id or "").strip()
+        if not prompt_id:
+            raise ValueError("prompt_id must be a non-empty string")
+        encoded_id = urllib.parse.quote(prompt_id, safe="")
         try:
-            return self._request("GET", ("job", prompt_id, "status"), timeout=timeout)
+            return self._request("GET", (self.target.jobs_path, encoded_id), timeout=timeout)
         except HTTPError as e:
             if e.status == 404:
                 return None

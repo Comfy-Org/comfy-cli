@@ -41,6 +41,7 @@ CONFIG_KEY_ENABLE_TRACKING = "enable_tracking"
 CONFIG_KEY_USER_ID = "user_id"
 CONFIG_KEY_INSTALL_EVENT_TRIGGERED = "install_event_triggered"
 CONFIG_KEY_BACKGROUND = "background"
+CONFIG_KEY_BACKGROUND_LOG = "background_log"  # workspace logfile path for the background server
 CONFIG_KEY_MANAGER_GUI_ENABLED = "manager_gui_enabled"  # Legacy, kept for backward compatibility
 CONFIG_KEY_MANAGER_GUI_MODE = "manager_gui_mode"  # Valid: "disable", "enable-gui", "disable-gui", "enable-legacy-gui"
 CONFIG_KEY_UV_COMPILE_DEFAULT = "uv_compile_default"
@@ -89,6 +90,7 @@ class CUDAVersion(str, Enum):
 
 
 class ROCmVersion(str, Enum):
+    v7_2 = "7.2"
     v7_1 = "7.1"
     v7_0 = "7.0"
     v6_3 = "6.3"

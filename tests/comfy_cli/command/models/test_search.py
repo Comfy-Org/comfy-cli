@@ -219,6 +219,26 @@ class TestListFolders:
         # The string-list shape normalizes to [{name, subfolders=[]}].
         assert env["data"]["folders"][0] == {"name": "checkpoints", "subfolders": []}
 
+    def test_cloud_http_error_decodes_body(self, cloud_target, monkeypatch, capsys):
+        # Shared `_emit_http_error` path: cloud code + truncated/decoded body in details.
+        err = urllib.error.HTTPError("https://x", 502, "Bad Gateway", {}, io.BytesIO(b'{"error": "upstream"}'))
+        _patch_urlopen(monkeypatch, {"/api/experiment/models": err})
+        env = _run(["list-folders", "--where", "cloud"], capsys)
+        assert env["ok"] is False
+        assert env["error"]["code"] == "cloud_http_error"
+        assert env["error"]["details"]["status"] == 502
+        assert env["error"]["details"]["body"] == '{"error": "upstream"}'
+
+    def test_local_http_error_uses_server_not_running(self, local_target, monkeypatch, capsys):
+        # Same shared path, local branch: code flips to server_not_running.
+        err = urllib.error.HTTPError("http://x", 500, "Server Error", {}, io.BytesIO(b"boom"))
+        _patch_urlopen(monkeypatch, {"127.0.0.1:8188/models": err})
+        env = _run(["list-folders", "--where", "local"], capsys)
+        assert env["ok"] is False
+        assert env["error"]["code"] == "server_not_running"
+        assert env["error"]["details"]["status"] == 500
+        assert env["error"]["details"]["body"] == "boom"
+
 
 # ---------------------------------------------------------------------------
 # list-folder
@@ -315,6 +335,16 @@ class TestSearch:
         env = _run(["search", "--text", "flux", "--where", "local"], capsys)
         names = [r["name"] for r in env["data"]["rows"]]
         assert names == ["flux1-dev.safetensors"]
+
+    def test_cloud_http_error_decodes_body(self, cloud_target, monkeypatch, capsys):
+        # Shared `_emit_http_error` path via the search handler.
+        err = urllib.error.HTTPError("https://x", 400, "Bad Request", {}, io.BytesIO(b'{"detail": "bad tag"}'))
+        _patch_urlopen(monkeypatch, {"/api/assets": err})
+        env = _run(["search", "--text", "flux", "--where", "cloud"], capsys)
+        assert env["ok"] is False
+        assert env["error"]["code"] == "cloud_http_error"
+        assert env["error"]["details"]["status"] == 400
+        assert env["error"]["details"]["body"] == '{"detail": "bad tag"}'
 
 
 # ---------------------------------------------------------------------------

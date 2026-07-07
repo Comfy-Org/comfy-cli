@@ -68,6 +68,25 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "Workflow file exists but isn't readable as UTF-8 text (OSError / UnicodeDecodeError).",
         "check file permissions and encoding",
     ),
+    ErrorCode(
+        "workflow_write_error",
+        "`workflow get --out` could not write the fetched workflow to disk (OSError: permissions, "
+        "missing parent dir, full disk, invalid path).",
+        "check the --out path is writable and the disk has space",
+    ),
+    ErrorCode(
+        "workflow_too_large",
+        "A local ComfyUI `/userdata` response exceeded the in-memory read cap, so the CLI refused to "
+        "truncate it into a corrupt/partial file. `details.limit_bytes` carries the cap.",
+        "the saved workflow is unexpectedly large; inspect it directly on the server",
+    ),
+    ErrorCode(
+        "workflow_content_not_json",
+        "`workflow get` fetched content that isn't parseable JSON (non-UTF-8 bytes or a non-JSON body such "
+        "as an HTML error page); the raw bytes were still written. Surfaced in `data.warnings[]`, not as an "
+        "error envelope, so the command still succeeds.",
+        "verify the id points at a real saved workflow, not a stray file, on the local server",
+    ),
     # --- local server / WebSocket --------------------------------------------
     ErrorCode(
         "server_not_running",
@@ -222,6 +241,11 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "for local filename listing use `comfy models list-folder <folder>`",
     ),
     ErrorCode(
+        "cloud_only_command",
+        "The command requires Comfy Cloud (e.g. `comfy assets library`); there is no local equivalent.",
+        "sign in with `comfy cloud login` and re-run with `--where cloud`",
+    ),
+    ErrorCode(
         "template_fetch_failed",
         "Fetching the per-template workflow JSON from `Comfy-Org/workflow_templates` failed.",
         "check network; if 404, the gallery and templates dir are out of sync — report upstream",
@@ -235,11 +259,6 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "cancel_failed",
         "`comfy jobs cancel` could not reach the local server to cancel the prompt.",
         "check the server is still running on the host/port",
-    ),
-    ErrorCode(
-        "workflow_saved_local_unsupported",
-        "`comfy workflow {list,get,save,delete}` requires Comfy Cloud — local ComfyUI has no /api/workflows.",
-        "for local workflows, manage JSON files on disk via `workflow slots`/`set-slot`/`vary`",
     ),
     # --- auth (provider keys + cloud session intertwined) --------------------
     ErrorCode(
@@ -339,6 +358,19 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "An API node's server-side session token expired mid-execution "
         '("Unauthorized: Please login first to use this node"). Transient — not a local credential problem.',
         "resubmit the same workflow — it succeeds on retry; `comfy cloud login` will not help",
+    ),
+    # --- background server logs ----------------------------------------------
+    ErrorCode(
+        "no_log_file",
+        "`comfy logs` found no captured ComfyUI log — the server was never launched "
+        "via `comfy launch --background`, or it was launched externally.",
+        "start ComfyUI with `comfy launch` so its output is captured",
+    ),
+    ErrorCode(
+        "log_read_failed",
+        "`comfy logs` located the logfile but could not read it — it was removed or its "
+        "permissions changed between the existence check and the read (TOCTOU window).",
+        "check the file still exists and is readable, then retry",
     ),
     # --- general argument / mode errors --------------------------------------
     ErrorCode(
@@ -463,6 +495,13 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "`details.source` has the host key; `details.reason` has the fetch error. "
         "Surfaced in `data.warnings[]` (not as an error envelope) so the command still succeeds.",
         "re-run once the server/session is reachable to get a fresh schema",
+    ),
+    ErrorCode(
+        "description_ignored",
+        "`comfy workflow save --where local --description` was given a description, but the local "
+        "file-backed `/userdata` store has nowhere to keep it. Surfaced in `data.warnings[]` "
+        "(not as an error envelope) so the save still succeeds.",
+        "descriptions are a Comfy Cloud feature; drop `--description` on the local path",
     ),
     ErrorCode(
         "cql_query_invalid",

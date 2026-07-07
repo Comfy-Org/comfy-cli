@@ -45,6 +45,61 @@ def test_resolve_invalid_raises():
 
 
 # ---------------------------------------------------------------------------
+# resolve_default: reads the persisted where_default config key for the caller
+# ---------------------------------------------------------------------------
+
+
+class _FakeConfigManager:
+    """Stand-in for ConfigManager whose ``get`` behaviour is programmable."""
+
+    _value: str | None = None
+    _raise: bool = False
+
+    def get(self, key):
+        assert key == where_module.CONFIG_KEY_WHERE_DEFAULT
+        if self._raise:
+            raise RuntimeError("corrupt config")
+        return self._value
+
+
+@pytest.fixture
+def fake_config(monkeypatch):
+    import comfy_cli.config_manager as cm
+
+    monkeypatch.setattr(cm, "ConfigManager", _FakeConfigManager)
+    return _FakeConfigManager
+
+
+def test_resolve_default_uses_config_value(fake_config, monkeypatch):
+    monkeypatch.setattr(fake_config, "_value", "cloud")
+    r = where_module.resolve_default(env={}, project_value=None)
+    assert r.target is where_module.WhereTarget.CLOUD
+    assert r.source == "config"
+
+
+def test_resolve_default_flag_beats_config(fake_config, monkeypatch):
+    monkeypatch.setattr(fake_config, "_value", "cloud")
+    r = where_module.resolve_default(flag="local", env={}, project_value=None)
+    assert r.target is where_module.WhereTarget.LOCAL
+    assert r.source == "flag"
+
+
+def test_resolve_default_broken_config_falls_through(fake_config, monkeypatch):
+    """A config read that raises never breaks routing — it drops to None."""
+    monkeypatch.setattr(fake_config, "_raise", True)
+    r = where_module.resolve_default(env={}, project_value=None)
+    assert r.target is where_module.WhereTarget.LOCAL
+    assert r.source == "default"
+
+
+def test_resolve_default_forwards_project_value(fake_config, monkeypatch):
+    monkeypatch.setattr(fake_config, "_value", "local")
+    r = where_module.resolve_default(env={}, project_value="cloud")
+    assert r.target is where_module.WhereTarget.CLOUD
+    assert r.source == "project"
+
+
+# ---------------------------------------------------------------------------
 # project/1 precedence: flag → env → project → config → auto
 # ---------------------------------------------------------------------------
 

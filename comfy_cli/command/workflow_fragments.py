@@ -329,12 +329,9 @@ def _load_object_info(renderer, *, input_path: str | None, host: str | None, por
             p = Path(input_path).expanduser()
             return json.loads(p.read_text(encoding="utf-8"))
         from comfy_cli import where as where_module
-        from comfy_cli.config_manager import ConfigManager
         from comfy_cli.cql.loader import resilient_load_object_info
 
-        decision = where_module.resolve(
-            flag=None, config_value=ConfigManager().get(where_module.CONFIG_KEY_WHERE_DEFAULT)
-        )
+        decision = where_module.resolve_default()
         mode = "cloud" if decision.target is where_module.WhereTarget.CLOUD else "local"
         return resilient_load_object_info(mode=mode, host=host or "127.0.0.1", port=port or 8188)
     except (OSError, json.JSONDecodeError) as e:
