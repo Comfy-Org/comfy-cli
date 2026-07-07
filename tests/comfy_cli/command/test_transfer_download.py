@@ -512,6 +512,23 @@ class TestDownloadIntegrity:
         assert "reset" in err["details"]["reason"]
         assert list((tmp_path / "out").iterdir()) == []
 
+    def test_chunked_truncation_incompleteread_emits_envelope(self, fake_target, tmp_path, capsys):
+        # A truncated chunked body raises http.client.IncompleteRead — an
+        # HTTPException, NOT an OSError — which used to escape both except arms
+        # as a raw traceback and break the machine-mode envelope contract.
+        import http.client
+
+        class _IncompleteResp(_FakeResp):
+            def read(self, n: int) -> bytes:
+                chunk = super().read(n)
+                if not chunk:
+                    raise http.client.IncompleteRead(b"", 500)
+                return chunk
+
+        err = self._failing_download(fake_target, tmp_path, capsys, _IncompleteResp(b"y" * 100, content_length=None))
+        assert err["code"] == "download_failed"
+        assert list((tmp_path / "out").iterdir()) == []
+
     def test_rename_failure_emits_envelope_and_cleans_temp(self, fake_target, tmp_path, capsys):
         with patch("pathlib.Path.replace", side_effect=OSError("Permission denied")):
             err = self._failing_download(fake_target, tmp_path, capsys, _FakeResp())

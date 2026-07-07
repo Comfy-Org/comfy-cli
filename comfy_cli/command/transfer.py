@@ -9,6 +9,7 @@ and output URLs from stdin, avoiding manual extraction.
 
 from __future__ import annotations
 
+import http.client
 import json
 import mimetypes
 import os
@@ -763,12 +764,15 @@ def execute_download(
                     details={"status": e.code, "url": url, "index": idx},
                 )
                 raise typer.Exit(code=1)
-            except OSError as e:
+            except (OSError, http.client.HTTPException) as e:
                 # Everything that isn't an HTTP status lands here: URLError
                 # (refused/DNS/TLS — a subclass of OSError), a socket timeout
-                # or reset mid-read, and filesystem errors from the temp-file
-                # create/write/rename. Emit the envelope instead of a
-                # traceback so machine-mode consumers keep their contract.
+                # or reset mid-read, filesystem errors from the temp-file
+                # create/write/rename, and a truncated *chunked* body — which
+                # raises http.client.IncompleteRead (an HTTPException, not an
+                # OSError) rather than the silent EOF a Content-Length body
+                # gives. Emit the envelope instead of a traceback so
+                # machine-mode consumers keep their contract.
                 reason = getattr(e, "reason", None) or e
                 renderer.error(
                     code="download_failed",
