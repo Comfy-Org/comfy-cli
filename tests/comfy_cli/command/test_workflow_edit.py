@@ -259,6 +259,85 @@ def _autogrow_workflow() -> dict:
     }
 
 
+def _convergence_base() -> dict:
+    """A graph rich enough to exercise every op kind concurrently: two widget
+    nodes (KSampler 3, EmptyLatentImage 7), an autogrow sink (BatchImagesNode 10),
+    and two IMAGE sources (20, 21)."""
+    wf = _base_workflow()
+    wf["nodes"].append(
+        {
+            "id": 10,
+            "type": "BatchImagesNode",
+            "pos": [300, 0],
+            "inputs": [{"name": "images", "type": "COMFY_AUTOGROW_V3", "link": None}],
+            "outputs": [{"name": "IMAGE", "type": "IMAGE", "links": []}],
+            "widgets_values": [],
+        }
+    )
+    for nid, y in ((20, 0), (21, 120)):
+        wf["nodes"].append(
+            {
+                "id": nid,
+                "type": "VAEDecode",
+                "pos": [150, y],
+                "inputs": [{"name": "samples", "type": "LATENT", "link": None}, {"name": "vae", "type": "VAE", "link": None}],
+                "outputs": [{"name": "IMAGE", "type": "IMAGE", "links": []}],
+                "widgets_values": [],
+            }
+        )
+    wf["last_node_id"] = 21
+    return wf
+
+
+# Each spec mints one well-formed op against a fresh _convergence_base(); all are
+# causally independent (they reference only base nodes), so any subset is a valid
+# concurrent batch off the same base_version.
+_CONVERGENCE_OP_SPECS = [
+    "set_steps",
+    "set_cfg",
+    "set_width",
+    "set_steps2",  # a second write to steps => LWW race with set_steps
+    "del_ksampler",
+    "del_latent",
+    "connect_latent",
+    "connect_latent2",  # a second link into the same concrete slot => a conflict
+    "autogrow_20",
+    "autogrow_21",  # a second autogrow onto the same base
+    "add_vae",
+]
+
+
+def _make_convergence_op(spec: str, rng, g) -> dict:
+    b = _convergence_base()
+    a = rng.choice("abc")
+    v = rng.randint(0, 3)
+    if spec == "set_steps":
+        _, op = workflow_ops.set_widget(b, g, 3, "steps", rng.randint(1, 40), actor=a, base_version=v)
+    elif spec == "set_cfg":
+        _, op = workflow_ops.set_widget(b, g, 3, "cfg", float(rng.randint(1, 15)), actor=a, base_version=v)
+    elif spec == "set_width":
+        _, op = workflow_ops.set_widget(b, g, 7, "width", rng.choice([256, 512, 768, 1024]), actor=a, base_version=v)
+    elif spec == "set_steps2":
+        _, op = workflow_ops.set_widget(b, g, 3, "steps", rng.randint(41, 80), actor=a, base_version=v)
+    elif spec == "del_ksampler":
+        _, op = workflow_ops.delete_node(b, g, 3, actor=a)
+    elif spec == "del_latent":
+        _, op = workflow_ops.delete_node(b, g, 7, actor=a)
+    elif spec == "connect_latent":
+        _, op = workflow_ops.connect(b, g, 7, "LATENT", 3, "latent_image", actor=a, base_version=v)
+    elif spec == "connect_latent2":
+        _, op = workflow_ops.connect(b, g, 7, "LATENT", 3, "latent_image", actor=a, base_version=v)
+    elif spec == "autogrow_20":
+        _, op = workflow_ops.connect(b, g, 20, "IMAGE", 10, "images", actor=a, base_version=v)
+    elif spec == "autogrow_21":
+        _, op = workflow_ops.connect(b, g, 21, "IMAGE", 10, "images", actor=a, base_version=v)
+    elif spec == "add_vae":
+        _, op = workflow_ops.add_node(b, g, "VAEDecode", actor=a)
+    else:  # pragma: no cover - guard against a typo in the spec list
+        raise AssertionError(f"unknown convergence op spec {spec!r}")
+    return op
+
+
 def _two_instance_subgraph_workflow() -> dict:
     """Two top-level instances (57, 58) of ONE shared subgraph definition, so an
     interior write must fork the shared def before mutating it."""
@@ -1194,3 +1273,115 @@ class TestOpModel:
         order = g.widget_order("KSampler")
         ks = next(n for n in lo_hi["nodes"] if n["id"] == 3)
         assert ks["widgets_values"][order.index("steps")] == 20  # higher base_version wins
+
+    # -- sufficiency (P12..P13): P8..P11 prove specific bugs are fixed; these
+    #    prove the op model's CONTRACT holds across randomized inputs — every op
+    #    pair either converges or is flagged (never silently diverges), and
+    #    canonical() is a sound equality oracle (folds only immaterial detail).
+
+    def test_p12_every_op_pair_converges_or_is_flagged(self):
+        """The load-bearing invariant: any two concurrent ops EITHER converge
+        under replay OR are reported by ``detect_conflict``. A silent divergence
+        (order matters, but nothing flagged it) is the failure this rules out.
+        Proved over randomized pairs with a fixed seed (reproducible)."""
+        import itertools
+        import random
+
+        ops = self._ops()
+        g = _graph()
+        rng = random.Random(20260707)
+        checked = 0
+        for _ in range(400):
+            specs = rng.sample(_CONVERGENCE_OP_SPECS, k=rng.randint(2, 4))
+            pool = [_make_convergence_op(s, rng, g) for s in specs]
+            for a, b in itertools.combinations(pool, 2):
+                base = _convergence_base()
+                ab = ops.apply_op(ops.apply_op(copy.deepcopy(base), a, g), b, g)
+                ba = ops.apply_op(ops.apply_op(copy.deepcopy(base), b, g), a, g)
+                if ops.canonical(ab) != ops.canonical(ba):
+                    assert ops.detect_conflict(a, b), (
+                        "SILENT DIVERGENCE",
+                        (a["op"], a.get("widget") or a.get("to_node")),
+                        (b["op"], b.get("widget") or b.get("to_node")),
+                    )
+                checked += 1
+        assert checked > 1000  # the harness genuinely exercised many pairs
+
+    def test_p12b_conflict_free_sets_fully_converge(self):
+        """Higher-order: a set of pairwise-non-conflicting ops converges across
+        ALL apply orders (not just pairs) — catches 3-way interactions."""
+        import itertools
+        import random
+
+        ops = self._ops()
+        g = _graph()
+        rng = random.Random(4242)
+        trials = 0
+        for _ in range(300):
+            specs = rng.sample(_CONVERGENCE_OP_SPECS, k=rng.randint(2, 4))
+            pool = [_make_convergence_op(s, rng, g) for s in specs]
+            free: list[dict] = []
+            for op in pool:  # greedily keep a maximal conflict-free subset
+                if all(not ops.detect_conflict(op, kept) for kept in free):
+                    free.append(op)
+            if len(free) < 2:
+                continue
+            perms = list(itertools.permutations(free))
+            if len(perms) > 24:
+                perms = rng.sample(perms, 24)
+            cans = []
+            for perm in perms:
+                wf = _convergence_base()
+                for op in perm:
+                    wf = ops.apply_op(wf, op, g)
+                cans.append(ops.canonical(wf))
+            for c in cans[1:]:
+                assert c == cans[0], "conflict-free set diverged across apply orders"
+            trials += 1
+        assert trials > 50
+
+    def test_p13_canonical_is_a_sound_equality_oracle(self):
+        """``canonical`` must fold away ONLY immaterial detail (apply
+        bookkeeping, node/link/def ordering, a grown slot's display name) and
+        must PRESERVE every material difference — otherwise a real divergence
+        could hide behind a false ``canonical`` match."""
+        ops = self._ops()
+        g = _graph()
+        base = _convergence_base()
+        c0 = ops.canonical(base)
+        assert c0 == ops.canonical(copy.deepcopy(base))  # stable / reflexive
+
+        # Immaterial differences must NOT change canonical.
+        immaterial = copy.deepcopy(base)
+        immaterial["nodes"] = list(reversed(immaterial["nodes"]))
+        immaterial["links"] = list(reversed(immaterial["links"]))
+        immaterial["_applied_ops"] = ["deadbeef"]
+        immaterial["_widget_stamps"] = {"('widget', 3, 'steps')": [9, "z", "op"]}
+        assert ops.canonical(immaterial) == c0
+
+        # Material differences MUST change canonical.
+        widget = copy.deepcopy(base)
+        next(n for n in widget["nodes"] if n["id"] == 3)["widgets_values"][2] = 999
+        assert ops.canonical(widget) != c0  # a changed widget value
+        removed_node = copy.deepcopy(base)
+        removed_node["nodes"] = [n for n in removed_node["nodes"] if n["id"] != 7]
+        assert ops.canonical(removed_node) != c0  # a removed node
+        removed_link = copy.deepcopy(base)
+        removed_link["links"] = []
+        assert ops.canonical(removed_link) != c0  # a removed link
+
+        # Autogrow: the grown slot's DISPLAY NAME is immaterial (order-dependent),
+        # but WHICH SOURCE it wires is material. Prove canonical draws that line.
+        _, o20 = ops.connect(_convergence_base(), g, 20, "IMAGE", 10, "images", actor="a")
+        _, o21 = ops.connect(_convergence_base(), g, 21, "IMAGE", 10, "images", actor="b")
+        grown = ops.apply_op(ops.apply_op(_convergence_base(), o20, g), o21, g)
+        renamed = copy.deepcopy(grown)
+        for inp in next(n for n in renamed["nodes"] if n["id"] == 10)["inputs"]:
+            if inp.get("grow_id") is not None:
+                inp["name"] = f"images.renamed{inp['grow_id']}"  # cosmetic only
+        assert ops.canonical(renamed) == ops.canonical(grown)  # name is immaterial
+        rewired = copy.deepcopy(grown)
+        for ln in rewired["links"]:
+            if ln[1] == 21:
+                ln[1] = 20  # a grown slot now sourced from a different node
+        assert ops.canonical(rewired) != ops.canonical(grown)  # source is material
