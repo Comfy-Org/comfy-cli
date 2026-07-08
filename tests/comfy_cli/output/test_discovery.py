@@ -80,6 +80,19 @@ def test_discover_annotates_commands_with_schema():
     assert cmds["discover"]["output_schema"] == "discover.json"
 
 
+def test_discover_lists_run_prompt_and_set_options():
+    # BE-2535: `comfy run --prompt`/`--set` must be visible on the agent
+    # surface. The options are auto-introspected into the commands tree.
+    envelope = _run_cli(["--json", "discover"])
+    run_params = envelope["data"]["commands"]["run"]["params"]
+    flags = {flag for p in run_params for flag in (p.get("flags") or [])}
+    assert "--prompt" in flags
+    assert "--set" in flags
+    # --workflow is now optional (omit it to use the bundled default).
+    workflow_param = next(p for p in run_params if "--workflow" in (p.get("flags") or []))
+    assert workflow_param["required"] is False
+
+
 def test_discover_includes_error_codes_from_markdown():
     envelope = _run_cli(["--json", "discover"])
     codes = {row["code"] for row in envelope["data"]["error_codes"]}

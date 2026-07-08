@@ -104,6 +104,7 @@ def execute(
     notify: bool = False,
     api_key: str | None = None,
     print_prompt: bool = False,
+    preloaded: tuple[dict, str, bool] | None = None,
 ):
     # `0.0.0.0` is a wildcard bind, not a connect address. macOS / Windows
     # clients can't reach it; on Linux it happens to resolve to a loopback.
@@ -120,11 +121,17 @@ def execute(
 
     renderer = get_renderer()
 
-    try:
-        raw_workflow, workflow_name, is_ui = _load_workflow_file(workflow)
-    except WorkflowLoadError as e:
-        renderer.error(code=e.code, message=str(e), hint=e.hint)
-        raise typer.Exit(code=1) from e
+    # `preloaded` short-circuits file loading: an in-memory API-format graph
+    # (e.g. the `comfy run --prompt` injected default) is handed straight in as
+    # (workflow_dict, display_name, is_ui). Everything downstream is unchanged.
+    if preloaded is not None:
+        raw_workflow, workflow_name, is_ui = preloaded
+    else:
+        try:
+            raw_workflow, workflow_name, is_ui = _load_workflow_file(workflow)
+        except WorkflowLoadError as e:
+            renderer.error(code=e.code, message=str(e), hint=e.hint)
+            raise typer.Exit(code=1) from e
 
     if not print_prompt and not check_comfy_server_running(port, host, timeout=timeout):
         renderer.error(
@@ -486,21 +493,28 @@ def execute_cloud(
     timeout: int = 600,
     notify: bool = False,
     print_prompt: bool = False,
+    preloaded: tuple[dict, str, bool] | None = None,
 ):
     """Run a workflow against Comfy Cloud via the stored OAuth session.
 
     Uses the unified :class:`comfy_cli.comfy_client.Client` — same surface as
     local, just a different :class:`comfy_cli.target.Target`.
+
+    ``preloaded`` short-circuits file loading with an in-memory API-format graph
+    (the ``comfy run --prompt`` injected default), mirroring :func:`execute`.
     """
     from comfy_cli.comfy_client import Client, HTTPError, Unauthenticated, _group_outputs
     from comfy_cli.target import resolve_target
 
     renderer = get_renderer()
-    try:
-        raw_workflow, workflow_name, is_ui = _load_workflow_file(workflow)
-    except WorkflowLoadError as e:
-        renderer.error(code=e.code, message=str(e), hint=e.hint)
-        raise typer.Exit(code=1) from e
+    if preloaded is not None:
+        raw_workflow, workflow_name, is_ui = preloaded
+    else:
+        try:
+            raw_workflow, workflow_name, is_ui = _load_workflow_file(workflow)
+        except WorkflowLoadError as e:
+            renderer.error(code=e.code, message=str(e), hint=e.hint)
+            raise typer.Exit(code=1) from e
 
     if is_ui:
         # Frontend-format workflows (the `nodes`+`links` shape from the canvas

@@ -660,15 +660,40 @@ def update(
 @app.command(help="Run an API workflow. Submits and returns immediately by default; pass --wait to block.")
 def run(
     workflow: Annotated[
-        str,
+        str | None,
         typer.Option(
             help=(
                 "Path to the workflow JSON file. Both ComfyUI API format and "
                 "exported UI format are accepted; UI workflows are converted "
-                "to API format client-side."
+                "to API format client-side. Optional: omit it and pass --prompt "
+                "to run the bundled default text2img workflow."
             )
         ),
-    ],
+    ] = None,
+    prompt: Annotated[
+        str | None,
+        typer.Option(
+            "--prompt",
+            show_default=False,
+            help=(
+                "Positive text prompt for the bundled default text2img workflow "
+                "(used when --workflow is omitted). Cannot be combined with --workflow."
+            ),
+        ),
+    ] = None,
+    set_overrides: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--set",
+            show_default=False,
+            help=(
+                "Override a field in the bundled default workflow, repeatable. "
+                "Form: alias=VALUE (checkpoint/negative/seed/steps/cfg/width/height/…) "
+                "or NODE_ID.field=VALUE (e.g. 4.ckpt_name=model.safetensors). "
+                "Cannot be combined with --workflow."
+            ),
+        ),
+    ] = None,
     wait: Annotated[
         bool,
         typer.Option(
@@ -792,6 +817,36 @@ def run(
         # ask for). The user can override either way with --notify/--no-notify.
         effective_notify = notify if notify is not None else (renderer.is_pretty() and not wait)
 
+        # --prompt/--set build an in-memory API-format graph from the bundled
+        # default text2img workflow (no --workflow file). The aliases resolve
+        # against OUR pinned node ids, so mixing them with a user --workflow —
+        # whose node ids are arbitrary — is rejected rather than silently
+        # misapplied. `preloaded` is handed straight to run's execute path.
+        preloaded: tuple[dict, str, bool] | None = None
+        if prompt is not None or set_overrides:
+            if workflow is not None:
+                renderer.error(
+                    code="prompt_rejected",
+                    message="--prompt/--set apply to the bundled default workflow and cannot be combined with --workflow",
+                    hint="drop --workflow to use the bundled default, or edit the workflow file directly",
+                )
+                raise typer.Exit(code=1)
+            from comfy_cli.cql.default_workflow import PromptInjectionError, build_default_workflow
+
+            try:
+                injected = build_default_workflow(prompt=prompt, overrides=set_overrides)
+            except PromptInjectionError as e:
+                renderer.error(code=e.code, message=str(e), hint=e.hint)
+                raise typer.Exit(code=1) from e
+            preloaded = (injected, "default_text2img", False)
+        elif workflow is None:
+            renderer.error(
+                code="prompt_rejected",
+                message="run requires --workflow, or --prompt (with optional --set) to use the bundled default workflow",
+                hint="e.g. comfy run --prompt 'a red fox in snow' --wait",
+            )
+            raise typer.Exit(code=1)
+
         if decision.target is where_module.WhereTarget.CLOUD:
             err = where_module.cloud_preflight()
             if err is not None:
@@ -810,6 +865,7 @@ def run(
                 timeout=timeout,
                 notify=effective_notify,
                 print_prompt=print_prompt,
+                preloaded=preloaded,
             )
             return
 
@@ -832,6 +888,7 @@ def run(
             notify=effective_notify,
             api_key=api_key,
             print_prompt=print_prompt,
+            preloaded=preloaded,
         )
     except typer.Exit as e:
         if (e.exit_code or 0) == 0:
