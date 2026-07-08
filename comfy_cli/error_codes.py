@@ -155,6 +155,12 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "add at least one node to the workflow",
     ),
     ErrorCode(
+        "default_workflow_unavailable",
+        "`comfy run --prompt`/`--set` could not load the bundled default text2img graph "
+        "(missing or corrupt package data). A packaging fault, not user input.",
+        "reinstall comfy-cli",
+    ),
+    ErrorCode(
         "conversion_error",
         "UI-format workflow could not be converted to API format.",
         "export your workflow from ComfyUI via 'File > Export (API)' and retry",

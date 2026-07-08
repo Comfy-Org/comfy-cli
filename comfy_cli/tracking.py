@@ -46,9 +46,12 @@ POSTHOG_EVENT_PREFIX = "cli:"
 _SENSITIVE_SUFFIXES = ("_token", "_api_key", "_secret", "_password")
 # `token` is the publish PAT; `changelog` is bulky free text with no analytics
 # value beyond its presence. `key` is the bare `--key` option carrying the Comfy
-# Cloud API key (e.g. `cloud set-key`, auth store). Sensitive values become
-# "<redacted>" (the key is kept so we can still tell the option was supplied).
-_SENSITIVE_EXACT = frozenset({"api_key", "key", "token", "password", "secret", "changelog"})
+# Cloud API key (e.g. `cloud set-key`, auth store). `prompt` (the `comfy run
+# --prompt` positive prompt) and `set_overrides` (the `--set` field=value list)
+# are verbatim user content — like `changelog`, we keep the presence but never
+# ship the text. Sensitive values become "<redacted>" (the key is kept so we can
+# still tell the option was supplied).
+_SENSITIVE_EXACT = frozenset({"api_key", "key", "token", "password", "secret", "changelog", "prompt", "set_overrides"})
 
 
 def _is_sensitive(name: str) -> bool:

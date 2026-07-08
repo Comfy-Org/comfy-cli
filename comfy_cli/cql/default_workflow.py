@@ -15,6 +15,7 @@ exactly the fragility this pinned graph removes.
 from __future__ import annotations
 
 import json
+import math
 from importlib import resources
 
 # -- Pinned node ids (must match data/default_text2img.json) --
@@ -70,9 +71,21 @@ def load_default_workflow() -> dict:
     Uses the same ``importlib.resources`` package-data loader as
     ``engine._try_default_annotations``; ``data/*.json`` is already declared as
     package data in ``pyproject.toml``.
+
+    A missing or corrupt bundle is a packaging fault, not user input, but it
+    must still exit through the controlled envelope (no stack trace escapes):
+    surface it as ``default_workflow_unavailable`` so ``build_default_workflow``'s
+    caller catches it like any other ``PromptInjectionError``.
     """
-    data = resources.files("comfy_cli.cql.data").joinpath("default_text2img.json").read_bytes()
-    return json.loads(data)
+    try:
+        data = resources.files("comfy_cli.cql.data").joinpath("default_text2img.json").read_bytes()
+        return json.loads(data)
+    except (OSError, ModuleNotFoundError, ValueError) as e:
+        raise PromptInjectionError(
+            f"the bundled default text2img workflow could not be loaded: {e}",
+            code="default_workflow_unavailable",
+            hint="this is a comfy-cli packaging error; try reinstalling comfy-cli",
+        ) from e
 
 
 def _coerce(value: str, existing):
@@ -82,7 +95,16 @@ def _coerce(value: str, existing):
     ``seed=42`` becomes int ``42``, ``cfg=7.5`` becomes float, and a text field
     stays a string). For a brand-new field with no existing scalar, fall back to
     a JSON-scalar parse (``42`` → int) and finally the raw string.
+
+    A list-valued ``existing`` is a graph connection edge (e.g. ``["6", 0]``),
+    not a settable input — overwriting it with a scalar corrupts the topology,
+    so those targets are rejected outright.
     """
+    if isinstance(existing, list):
+        raise PromptInjectionError(
+            f"this field holds a graph connection, not a settable value; refusing to overwrite it with {value!r}",
+            hint="--set only overrides scalar inputs (seed, cfg, text, ckpt_name, …), not wired node connections",
+        )
     if isinstance(existing, bool):
         low = value.strip().lower()
         if low in ("true", "1", "yes"):
@@ -97,9 +119,14 @@ def _coerce(value: str, existing):
             raise PromptInjectionError(f"expected an integer for this field, got {value!r}") from e
     if isinstance(existing, float):
         try:
-            return float(value)
+            result = float(value)
         except ValueError as e:
             raise PromptInjectionError(f"expected a number for this field, got {value!r}") from e
+        # `float("nan"/"inf")` parses, but json.dumps emits non-standard
+        # NaN/Infinity tokens that strict server-side parsers reject.
+        if not math.isfinite(result):
+            raise PromptInjectionError(f"expected a finite number for this field, got {value!r}")
+        return result
     if isinstance(existing, str):
         return value
     # New field (existing is None): best-effort JSON scalar, else raw string.
@@ -107,8 +134,12 @@ def _coerce(value: str, existing):
         parsed = json.loads(value)
     except (ValueError, TypeError):
         return value
-    if isinstance(parsed, (int, float, str, bool)):
+    if isinstance(parsed, bool) or isinstance(parsed, str):
         return parsed
+    if isinstance(parsed, (int, float)):
+        # json.loads accepts NaN/Infinity — fall back to the raw string rather
+        # than inject a non-finite scalar that won't round-trip through JSON.
+        return parsed if math.isfinite(parsed) else value
     return value
 
 
@@ -140,6 +171,19 @@ def _resolve_address(address: str, workflow: dict) -> tuple[str, str]:
         raise PromptInjectionError(
             f"--set address {address!r} targets node {node_id!r}, which is not in the default workflow",
             hint="node ids in the bundled graph: " + ", ".join(sorted(workflow)),
+        )
+    # A raw ``NODE_ID.field`` typo (e.g. ``4.ckpt_naem``) would otherwise write a
+    # junk key while the real input silently keeps its default. Every alias maps
+    # to a real input too, so validating the resolved field against the node's
+    # actual inputs guards both forms. (The bundled API graph carries every
+    # settable input explicitly, so "not present" == "not a real input".)
+    inputs = node.get("inputs")
+    if not isinstance(inputs, dict) or field not in inputs:
+        known = ", ".join(sorted(inputs)) if isinstance(inputs, dict) else "(none)"
+        raise PromptInjectionError(
+            f"--set address {address!r} targets field {field!r}, which node {node_id!r} "
+            f"({node.get('class_type')}) has no such input",
+            hint=f"inputs on this node: {known}",
         )
     return node_id, field
 

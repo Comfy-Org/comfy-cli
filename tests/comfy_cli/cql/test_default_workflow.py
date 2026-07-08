@@ -139,3 +139,46 @@ class TestErrors:
     def test_empty_field_in_raw_form(self):
         with pytest.raises(PromptInjectionError):
             build_default_workflow(overrides=["4.=x"])
+
+    def test_unknown_raw_field_is_rejected(self):
+        # A typo in the raw form must fail fast rather than silently write a junk
+        # key while the real input keeps its default.
+        with pytest.raises(PromptInjectionError) as e:
+            build_default_workflow(overrides=["4.ckpt_naem=x"])
+        assert e.value.code == "prompt_rejected"
+
+    def test_connection_edge_target_is_rejected(self):
+        # `3.positive` holds a wired connection (["6", 0]); overwriting it with a
+        # scalar would corrupt the graph topology.
+        with pytest.raises(PromptInjectionError):
+            build_default_workflow(overrides=["3.positive=cat"])
+
+    def test_rewire_attempt_is_rejected(self):
+        with pytest.raises(PromptInjectionError):
+            build_default_workflow(overrides=['9.images=["8", 0]'])
+
+    @pytest.mark.parametrize("bad", ["cfg=nan", "cfg=inf", "cfg=-inf", "cfg=Infinity"])
+    def test_non_finite_float_is_rejected(self, bad):
+        with pytest.raises(PromptInjectionError):
+            build_default_workflow(overrides=[bad])
+
+
+class TestBundleUnavailable:
+    def test_missing_bundle_surfaces_controlled_error(self, monkeypatch):
+        import comfy_cli.cql.default_workflow as mod
+
+        def boom(*_a, **_k):
+            raise FileNotFoundError("no such resource")
+
+        monkeypatch.setattr(mod.resources, "files", boom)
+        with pytest.raises(PromptInjectionError) as e:
+            build_default_workflow(prompt="fox")
+        assert e.value.code == "default_workflow_unavailable"
+
+    def test_corrupt_bundle_surfaces_controlled_error(self, monkeypatch):
+        import comfy_cli.cql.default_workflow as mod
+
+        monkeypatch.setattr(mod.json, "loads", lambda *_a, **_k: (_ for _ in ()).throw(ValueError("bad json")))
+        with pytest.raises(PromptInjectionError) as e:
+            load_default_workflow()
+        assert e.value.code == "default_workflow_unavailable"
