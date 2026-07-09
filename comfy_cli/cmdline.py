@@ -912,6 +912,14 @@ def validate(
         except Exception:
             pass
 
+    # env var fallback (same resolution as `comfy run`)
+    from comfy_cli.env_backend import get_backend_from_env
+    env_h, env_p = get_backend_from_env()
+    if not host and env_h:
+        host = env_h
+    if not port and env_p is not None:
+        port = env_p
+
     try:
         graph = Graph.load(mode=mode, input_path=input_path, host=host or "127.0.0.1", port=port or 8188)
     except LoadError as e:

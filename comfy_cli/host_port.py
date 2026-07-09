@@ -81,9 +81,26 @@ def _to_port(s: str, original: str) -> int:
 
 
 def resolve_host_port(host: str | None, port: int | None) -> tuple[str, int]:
-    """Fill host/port from ``config.background`` then defaults; validate and
-    bracket IPv6 literals so callers building ``'http://{host}:{port}'`` get a
-    well-formed URL (e.g. ``'::1'`` -> ``'[::1]'``)."""
+    """Fill host/port from environment variables, then ``config.background``,
+    then defaults; validate and bracket IPv6 literals so callers building
+    ``'http://{host}:{port}'`` get a well-formed URL (e.g. ``'::1'`` ->
+    ``'[::1]'``).
+
+    Resolution order (highest to lowest):
+    1. Explicit ``host`` / ``port`` arguments (from CLI flags).
+    2. Environment variables: ``COMFY_BACKEND``, ``COMFY_HOST_PORT``,
+       ``COMFY_HOST`` / ``COMFY_PORT``.
+    3. Persisted ``config.background`` server.
+    4. Built-in defaults (``127.0.0.1:8188``).
+    """
+    from comfy_cli.env_backend import get_backend_from_env
+
+    env_h, env_p = get_backend_from_env()
+    if not host and env_h:
+        host = env_h
+    if not port and env_p is not None:
+        port = env_p
+
     cfg = ConfigManager()
     bg = cfg.background
     if not host and bg is not None:
