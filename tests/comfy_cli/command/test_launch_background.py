@@ -61,6 +61,24 @@ def test_background_launch_surfaces_error_log(mock_config_manager, mock_check_ru
     mock_exit.assert_called_once_with(1)
 
 
+@patch("comfy_cli.command.launch.launch_and_monitor", new_callable=AsyncMock)
+@patch("comfy_cli.command.launch.check_comfy_server_running", return_value=False)
+@patch("comfy_cli.command.launch.ConfigManager")
+def test_background_launch_rejects_non_integer_port(mock_config_manager, mock_check_running, mock_monitor):
+    """A non-integer --port is rejected before it can be interpolated into the
+    log path (`comfyui_<port>.log`), where a value like `../../x` would escape
+    the workspace."""
+    import typer
+
+    mock_config_manager.return_value.background = None
+
+    with pytest.raises(typer.Exit):
+        launch.background_launch(extra=["--port", "../../etc/pwn"])
+
+    # Never reached the launch path.
+    mock_monitor.assert_not_awaited()
+
+
 @patch("comfy_cli.command.launch.utils.is_running", return_value=True)
 @patch("comfy_cli.command.launch.ConfigManager")
 def test_background_launch_refuses_when_already_running(mock_config_manager, mock_is_running):

@@ -159,3 +159,12 @@ class TestRemoveBackground:
         config_mgr.remove_background()
         assert config_mgr.background is None
         assert constants.CONFIG_KEY_BACKGROUND not in config_mgr.config["DEFAULT"]
+
+    def test_clears_background_log_path(self, config_mgr):
+        # The recorded logfile path must be dropped too, so `comfy logs` stops
+        # surfacing a stopped/dead server's stale log.
+        config_mgr.config["DEFAULT"][constants.CONFIG_KEY_BACKGROUND] = "('h', 1, 2)"
+        config_mgr.config["DEFAULT"][constants.CONFIG_KEY_BACKGROUND_LOG] = "/ws/user/comfyui_8188.log"
+        config_mgr.background = ("h", 1, 2)
+        config_mgr.remove_background()
+        assert constants.CONFIG_KEY_BACKGROUND_LOG not in config_mgr.config["DEFAULT"]

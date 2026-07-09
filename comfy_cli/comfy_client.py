@@ -404,9 +404,29 @@ class Client:
         raise NotImplementedError("local list_jobs uses /queue + /history merge — call jobs._gather_jobs")
 
     def get_job_status(self, prompt_id: str, *, timeout: float | None = None) -> dict | None:
-        """Cloud-only: GET {prefix}/job/<id>/status."""
+        """Cloud-only: GET {prefix}/jobs/<id>.
+
+        Hits the canonical plural jobs-detail endpoint (``JobDetailResponse``,
+        a superset of the deprecated ``/api/job/<id>/status``). Mirrors
+        ``list_jobs`` by routing through ``self.target.jobs_path`` so cloud vs
+        local prefixing stays correct.
+        """
+        # Guard like ``list_jobs``: a local target has no ``jobs_path``, and
+        # ``Target.url`` would drop the ``None`` segment and silently issue
+        # ``GET {base}/<id>`` instead of failing loudly.
+        if not self.target.jobs_path:
+            raise NotImplementedError("get_job_status requires a cloud target with a jobs endpoint")
+        # Validate + encode the id so it stays a single terminal path segment.
+        # An empty id would collapse to the plural LIST endpoint (200 with a
+        # ``{"jobs": [...]}`` payload); an id with ``/``, ``?``, ``#`` or ``..``
+        # would inject extra segments / query params (``Target.url`` only
+        # ``strip('/')``s each part, it does not percent-encode).
+        prompt_id = (prompt_id or "").strip()
+        if not prompt_id:
+            raise ValueError("prompt_id must be a non-empty string")
+        encoded_id = urllib.parse.quote(prompt_id, safe="")
         try:
-            return self._request("GET", ("job", prompt_id, "status"), timeout=timeout)
+            return self._request("GET", (self.target.jobs_path, encoded_id), timeout=timeout)
         except HTTPError as e:
             if e.status == 404:
                 return None

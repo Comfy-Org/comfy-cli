@@ -178,6 +178,10 @@ class ConfigManager:
 
     def remove_background(self):
         del self.config["DEFAULT"][constants.CONFIG_KEY_BACKGROUND]
+        # Also drop the recorded logfile path so `comfy logs` doesn't keep
+        # surfacing the previous run's stale log after the server is stopped or
+        # its pid is cleaned up.
+        self.config["DEFAULT"].pop(constants.CONFIG_KEY_BACKGROUND_LOG, None)
         self.write_config()
         self.background = None
 

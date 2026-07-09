@@ -304,15 +304,38 @@ class TestListJobs:
 
 
 class TestGetJobStatus:
-    def test_cloud_uses_job_status_endpoint(self):
+    def test_cloud_uses_jobs_detail_endpoint(self):
         with patch.object(comfy_client._OPENER, "open", return_value=_mock_response({"status": "success"})) as urlopen:
             comfy_client.Client(CLOUD).get_job_status("pid-1")
         req = urlopen.call_args.args[0]
-        assert req.full_url == "https://cloud.example.com/api/job/pid-1/status"
+        assert req.full_url == "https://cloud.example.com/api/jobs/pid-1"
 
     def test_404_returns_none(self):
         with patch.object(comfy_client._OPENER, "open", side_effect=_http_error(404)):
             assert comfy_client.Client(CLOUD).get_job_status("pid") is None
+
+    def test_local_raises_not_implemented(self):
+        # A local target has no jobs_path — must fail loudly, not fall back to
+        # GET {base}/<id> (mirrors list_jobs).
+        with pytest.raises(NotImplementedError):
+            comfy_client.Client(LOCAL).get_job_status("pid")
+
+    @pytest.mark.parametrize("bad_id", ["", "   "])
+    def test_empty_id_rejected(self, bad_id):
+        # An empty id would collapse to the plural LIST endpoint and misclassify
+        # the job — reject before issuing any request.
+        with patch.object(comfy_client._OPENER, "open") as urlopen:
+            with pytest.raises(ValueError):
+                comfy_client.Client(CLOUD).get_job_status(bad_id)
+        urlopen.assert_not_called()
+
+    def test_id_is_percent_encoded(self):
+        # A raw id with path/query metacharacters must not escape the
+        # /api/jobs/<id> segment.
+        with patch.object(comfy_client._OPENER, "open", return_value=_mock_response({"status": "success"})) as urlopen:
+            comfy_client.Client(CLOUD).get_job_status("../admin?x=1")
+        req = urlopen.call_args.args[0]
+        assert req.full_url == "https://cloud.example.com/api/jobs/..%2Fadmin%3Fx%3D1"
 
 
 class TestWaitForCompletion:

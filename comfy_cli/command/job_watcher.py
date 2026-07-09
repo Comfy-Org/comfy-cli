@@ -214,7 +214,7 @@ def _poll_cloud_once(state: jobs_state.JobState, *, client: Any = None) -> bool:
     state.status = _CLOUD_STATUS_MAP.get(raw, raw)
 
     if state.status == "completed":
-        # Cloud's /api/job/<id>/status sometimes includes outputs directly;
+        # Cloud's /api/jobs/<id> detail response sometimes includes outputs directly;
         # if not, fetch from history. Match the snapshot logic in jobs.py.
         outputs = record.get("outputs")
         if isinstance(outputs, list) and outputs:
