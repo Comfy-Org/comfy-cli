@@ -49,10 +49,3 @@ def status_glyph(status: str | None) -> str:
     canonical = _canonical(status)
     glyph, style = STATUS_STYLE.get(canonical, DEFAULT_STYLE)
     return f"[{style}]{glyph} {canonical or 'unknown'}[/{style}]"
-
-
-def glyph_only(status: str | None) -> str:
-    """Return just the colored glyph, no label — handy for tight tables."""
-    canonical = _canonical(status)
-    glyph, style = STATUS_STYLE.get(canonical, DEFAULT_STYLE)
-    return f"[{style}]{glyph}[/{style}]"

@@ -78,17 +78,6 @@ def branded_panel(
     )
 
 
-def cli_footer(*, version: str, where: str | None = None) -> Text:
-    """Right-aligned, dim subtitle used as the pretty-mode brand signature.
-
-    Every pretty rendering that *isn't* already a Panel should print this
-    after its primary output so the human always knows which tool / version /
-    routing target produced what they're looking at.
-    """
-    suffix = f"  ·  {where}" if where else ""
-    return Text(f"comfy CLI v{version}{suffix}", style="dim", justify="right")
-
-
 # ---------------------------------------------------------------------------
 # Wordmark — handcrafted 5-row block art, kept narrow enough for an 80-col tty
 # ---------------------------------------------------------------------------

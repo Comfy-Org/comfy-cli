@@ -317,13 +317,6 @@ class Renderer:
         self.event(type, **fields)
         return True
 
-    def flush_throttled(self, token: str, type: str, **fields: Any) -> None:
-        """Force-emit one final event for a throttle token (e.g., on completion)."""
-        if not self.is_stream():
-            return
-        self._throttle[token] = time.monotonic()
-        self.event(type, **fields)
-
     # ----- internals -----
 
     def _envelope(

@@ -1,9 +1,7 @@
-import concurrent.futures
 import os
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from pathlib import Path
 
 import git
 import typer
@@ -121,31 +119,6 @@ def check_comfy_repo(path) -> tuple[bool, str | None]:
 
 
 # Generate and update this following method using chatGPT
-# def load_yaml(file_path: str) -> ComfyLockYAMLStruct:
-#     with open(file_path, "r", encoding="utf-8") as file:
-#         data = yaml.safe_load(file)
-#         basics = Basics(
-#             name=data.get("basics", {}).get("name"),
-#             updated_at=(
-#                 datetime.fromisoformat(data.get("basics", {}).get("updated_at"))
-#                 if data.get("basics", {}).get("updated_at")
-#                 else None
-#             ),
-#         )
-#         models = [
-#             Model(
-#                 name=m.get("model"),
-#                 url=m.get("url"),
-#                 paths=[ModelPath(path=p.get("path")) for p in m.get("paths", [])],
-#                 hash=m.get("hash"),
-#                 type=m.get("type"),
-#             )
-#             for m in data.get("models", [])
-#         ]
-#         custom_nodes = []
-
-
-# Generate and update this following method using chatGPT
 def save_yaml(file_path: str, metadata: ComfyLockYAMLStruct):
     data = {
         "basics": {
@@ -166,12 +139,6 @@ def save_yaml(file_path: str, metadata: ComfyLockYAMLStruct):
     }
     with open(file_path, "w", encoding="utf-8") as file:
         yaml.safe_dump(data, file, default_flow_style=False, allow_unicode=True)
-
-
-# Function to check if the file is config.json
-def check_file_is_model(path):
-    if path.name.endswith(constants.SUPPORTED_PT_EXTENSIONS):
-        return str(path)
 
 
 class WorkspaceType(Enum):
@@ -316,19 +283,6 @@ class WorkspaceManager:
             for file in files:
                 if file.endswith(constants.SUPPORTED_PT_EXTENSIONS):
                     model_files.append(os.path.join(root, file))
-        return model_files
-
-    def scan_dir_concur(self):
-        base_path = Path(".")
-        model_files = []
-
-        # Use ThreadPoolExecutor to manage concurrency
-        with concurrent.futures.ThreadPoolExecutor() as executor:
-            futures = [executor.submit(check_file_is_model, p) for p in base_path.rglob("*")]
-            for future in concurrent.futures.as_completed(futures):
-                if future.result():
-                    model_files.append(future.result())
-
         return model_files
 
     def load_metadata(self):
