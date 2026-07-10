@@ -7,6 +7,7 @@ import platform
 import shutil
 import subprocess
 import tarfile
+from contextlib import contextmanager
 from pathlib import Path
 from typing import BinaryIO, cast
 
@@ -139,6 +140,29 @@ def download_url(
     return fpath
 
 
+@contextmanager
+def _tarball_progress(description: str, total: int):
+    """Yield the shared two-row Live progress scaffold used by
+    extract_tarball/create_tarball.
+
+    Builds a byte-progress bar plus a current-path line inside a single
+    ``Live`` display and yields the wired-up
+    ``(barProg, barTask, pathProg, pathTask)`` so each caller can supply its
+    own ``filter`` body and label.
+    """
+    barProg = progress.Progress()
+    barTask = barProg.add_task(f"[cyan]{description}", total=total)
+    pathProg = progress.Progress(progress.TextColumn("{task.description}"))
+    pathTask = pathProg.add_task("")
+
+    progress_table = Table.grid()
+    progress_table.add_row(barProg)
+    progress_table.add_row(pathProg)
+
+    with Live(progress_table, refresh_per_second=10):
+        yield barProg, barTask, pathProg, pathTask
+
+
 def extract_tarball(
     inPath: PathLike,
     outPath: PathLike | None = None,
@@ -167,28 +191,20 @@ def extract_tarball(
 
     fileSize = inPath.stat().st_size
 
-    barProg = progress.Progress()
-    barTask = barProg.add_task("[cyan]extracting tarball...", total=fileSize)
-    pathProg = progress.Progress(progress.TextColumn("{task.description}"))
-    pathTask = pathProg.add_task("")
-
-    progress_table = Table.grid()
-    progress_table.add_row(barProg)
-    progress_table.add_row(pathProg)
-
     _size = 0
 
-    def _filter(tinfo: tarfile.TarInfo, _path: PathLike):
-        nonlocal _size
-        pathProg.update(pathTask, description=tinfo.path)
-        barProg.advance(barTask, _size)
-        _size = tinfo.size
+    with _tarball_progress("extracting tarball...", fileSize) as (barProg, barTask, pathProg, pathTask):
 
-        # TODO: ideally we'd use data_filter here, but it's busted: https://github.com/python/cpython/issues/107845
-        # return tarfile.data_filter(tinfo, _path)
-        return tinfo
+        def _filter(tinfo: tarfile.TarInfo, _path: PathLike):
+            nonlocal _size
+            pathProg.update(pathTask, description=tinfo.path)
+            barProg.advance(barTask, _size)
+            _size = tinfo.size
 
-    with Live(progress_table, refresh_per_second=10):
+            # TODO: ideally we'd use data_filter here, but it's busted: https://github.com/python/cpython/issues/107845
+            # return tarfile.data_filter(tinfo, _path)
+            return tinfo
+
         with tarfile.open(inPath) as tar:
             tar.extractall(filter=_filter)
         barProg.advance(barTask, _size)
@@ -218,26 +234,18 @@ def create_tarball(
 
     fileSize = sum(f.stat().st_size for f in inPath.glob("**/*"))
 
-    barProg = progress.Progress()
-    barTask = barProg.add_task("[cyan]creating tarball...", total=fileSize)
-    pathProg = progress.Progress(progress.TextColumn("{task.description}"))
-    pathTask = pathProg.add_task("")
-
-    progress_table = Table.grid()
-    progress_table.add_row(barProg)
-    progress_table.add_row(pathProg)
-
     _size = 0
 
-    def _filter(tinfo: tarfile.TarInfo):
-        nonlocal _size
-        pathProg.update(pathTask, description=tinfo.path)
-        barProg.advance(barTask, _size)
-        _size = Path(tinfo.path).stat().st_size
+    with _tarball_progress("creating tarball...", fileSize) as (barProg, barTask, pathProg, pathTask):
 
-        return tinfo
+        def _filter(tinfo: tarfile.TarInfo):
+            nonlocal _size
+            pathProg.update(pathTask, description=tinfo.path)
+            barProg.advance(barTask, _size)
+            _size = Path(tinfo.path).stat().st_size
 
-    with Live(progress_table, refresh_per_second=10):
+            return tinfo
+
         with tarfile.open(outPath, "w:gz") as tar:
             # don't include parent paths in archive
             tar.add(inPath.relative_to(cwd), filter=_filter)
