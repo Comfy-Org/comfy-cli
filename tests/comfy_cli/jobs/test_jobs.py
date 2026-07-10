@@ -482,7 +482,7 @@ def test_jobs_cancel_cloud_posts_to_jobs_cancel_endpoint(monkeypatch: pytest.Mon
     )
     monkeypatch.setattr("comfy_cli.target.resolve_target", lambda **kw: fake_target)
     monkeypatch.setattr(jobs_mod, "_is_cloud", lambda w: True)
-    monkeypatch.setattr(jobs_mod, "_cloud_preflight_or_exit", lambda: None)
+    monkeypatch.setattr(jobs_mod, "cloud_preflight_or_exit", lambda: None)
 
     calls = _capture_urlopen(
         monkeypatch,
@@ -520,7 +520,7 @@ def test_jobs_cancel_cloud_404_surfaces_prompt_not_found(monkeypatch: pytest.Mon
     )
     monkeypatch.setattr("comfy_cli.target.resolve_target", lambda **kw: fake_target)
     monkeypatch.setattr(jobs_mod, "_is_cloud", lambda w: True)
-    monkeypatch.setattr(jobs_mod, "_cloud_preflight_or_exit", lambda: None)
+    monkeypatch.setattr(jobs_mod, "cloud_preflight_or_exit", lambda: None)
 
     err = urllib.error.HTTPError("https://x/cancel", 404, "Not Found", {}, io.BytesIO(b'{"error":"no such job"}'))
     _capture_urlopen(monkeypatch, {"/api/jobs/missing/cancel": err})
@@ -848,7 +848,7 @@ def test_jobs_status_cloud_envelope_carries_grouped_outputs(monkeypatch, capsys)
     from comfy_cli.output import Renderer, set_renderer
     from comfy_cli.output.renderer import OutputMode
 
-    monkeypatch.setattr(jobs_mod, "_cloud_preflight_or_exit", lambda: None)
+    monkeypatch.setattr(jobs_mod, "cloud_preflight_or_exit", lambda: None)
     monkeypatch.setattr(jobs_mod, "_cloud_client", lambda: _CompletedCloudClient())
     state = jobs_state.new(prompt_id="pid-env", client_id="c", workflow="w", where="cloud")
     state.item_map = {"s1": {"nodes": ["9", "12"], "save_node": "12", "prefix": "outputs/s1"}}
@@ -873,7 +873,7 @@ def test_jobs_watch_cloud_terminal_envelope_carries_grouped_outputs(monkeypatch,
     from comfy_cli.output import Renderer, set_renderer
     from comfy_cli.output.renderer import OutputMode
 
-    monkeypatch.setattr(jobs_mod, "_cloud_preflight_or_exit", lambda: None)
+    monkeypatch.setattr(jobs_mod, "cloud_preflight_or_exit", lambda: None)
     monkeypatch.setattr(jobs_mod, "_cloud_client", lambda: _CompletedCloudClient())
     state = jobs_state.new(prompt_id="pid-watch", client_id="c", workflow="w", where="cloud")
     state.item_map = {"s1": {"nodes": ["9"], "save_node": "9", "prefix": "outputs/s1"}}

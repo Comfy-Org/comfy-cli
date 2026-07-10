@@ -190,3 +190,23 @@ def cloud_preflight() -> CloudError | None:
             },
         )
     return None
+
+
+def cloud_preflight_or_exit() -> None:
+    """Run :func:`cloud_preflight`; emit a clean error envelope and exit if the
+    cloud path can't proceed (not signed in / expired session).
+
+    The shared "emit-and-exit" wrapper for every command that routes to cloud —
+    keeps the envelope shape identical across ``jobs``, ``run``, ``upload``, and
+    ``download`` instead of re-inlining the same block at each call site.
+    """
+    import typer
+
+    from comfy_cli.output import get_renderer
+
+    err = cloud_preflight()
+    if err is None:
+        return
+    renderer = get_renderer()
+    renderer.error(code=err.code, message=err.message, hint=err.hint, details=err.details)
+    raise typer.Exit(code=1)

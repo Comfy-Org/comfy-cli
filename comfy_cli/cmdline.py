@@ -793,15 +793,7 @@ def run(
         effective_notify = notify if notify is not None else (renderer.is_pretty() and not wait)
 
         if decision.target is where_module.WhereTarget.CLOUD:
-            err = where_module.cloud_preflight()
-            if err is not None:
-                renderer.error(
-                    code=err.code,
-                    message=err.message,
-                    hint=err.hint,
-                    details=err.details,
-                )
-                raise typer.Exit(code=1)
+            where_module.cloud_preflight_or_exit()
             # Cloud path uses HTTPS + Bearer auth; host/port aren't applicable.
             run_inner.execute_cloud(
                 workflow,
@@ -978,10 +970,7 @@ def upload(
 
     effective_where = "cloud" if decision.target is where_module.WhereTarget.CLOUD else "local"
     if effective_where == "cloud":
-        err = where_module.cloud_preflight()
-        if err is not None:
-            renderer.error(code=err.code, message=err.message, hint=err.hint, details=err.details)
-            raise typer.Exit(code=1)
+        where_module.cloud_preflight_or_exit()
 
     transfer_inner.execute_upload(files, where=effective_where, overwrite=overwrite)
 
@@ -1020,10 +1009,7 @@ def download(
 
     effective_where = "cloud" if decision.target is where_module.WhereTarget.CLOUD else "local"
     if effective_where == "cloud":
-        err = where_module.cloud_preflight()
-        if err is not None:
-            renderer.error(code=err.code, message=err.message, hint=err.hint, details=err.details)
-            raise typer.Exit(code=1)
+        where_module.cloud_preflight_or_exit()
 
     transfer_inner.execute_download(prompt_id, out_dir=out_dir, where=effective_where, url_only=url_only)
 

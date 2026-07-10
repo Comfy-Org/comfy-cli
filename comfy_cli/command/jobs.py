@@ -37,6 +37,7 @@ from comfy_cli import cancellation, execution_errors, tracking
 from comfy_cli.env_checker import check_comfy_server_running
 from comfy_cli.host_port import resolve_host_port as _resolve_host_port
 from comfy_cli.output import get_renderer
+from comfy_cli.where import cloud_preflight_or_exit
 
 app = typer.Typer(no_args_is_help=True, help="List, inspect, and live-watch ComfyUI prompts.")
 
@@ -411,7 +412,7 @@ def ls_cmd(
     if not local_only:
         if _is_cloud(where):
             try:
-                _cloud_preflight_or_exit()
+                cloud_preflight_or_exit()
                 client = _cloud_client()
                 server_rows = [_cloud_job_to_row(j) for j in client.list_jobs(limit=limit)]
             except typer.Exit:
@@ -871,7 +872,7 @@ def wait_cmd(
     p: int | None = None
     server_up = False
     if cloud:
-        _cloud_preflight_or_exit()
+        cloud_preflight_or_exit()
     else:
         h, p = _resolve_host_port(host, port)
         server_up = _server_or_error(h, p, raise_on_missing=False)
@@ -1053,7 +1054,7 @@ def _local_cancel(prompt_id: str, host: str, port: int) -> None:
 
 def _cloud_cancel(prompt_id: str) -> None:
     """Cancel a cloud job via ``POST /api/jobs/<id>/cancel`` — idempotent."""
-    _cloud_preflight_or_exit()
+    cloud_preflight_or_exit()
     renderer = get_renderer()
 
     from comfy_cli.target import resolve_target
@@ -1351,18 +1352,6 @@ def _is_cloud(where: str | None) -> bool:
     return decision.target is where_module.WhereTarget.CLOUD
 
 
-def _cloud_preflight_or_exit() -> None:
-    """Surface a clean envelope if the user isn't signed in / is expired."""
-    from comfy_cli.where import cloud_preflight
-
-    err = cloud_preflight()
-    if err is None:
-        return
-    renderer = get_renderer()
-    renderer.error(code=err.code, message=err.message, hint=err.hint, details=err.details)
-    raise typer.Exit(code=1)
-
-
 def _cloud_job_to_row(j: dict) -> JobRow:
     """Map a /api/jobs entry to our JobRow shape."""
     status_map = {"completed": "completed", "success": "completed", "failed": "error", "error": "error"}
@@ -1403,7 +1392,7 @@ def _cloud_client():
 def _cloud_ls(*, limit: int) -> None:
     from comfy_cli.comfy_client import HTTPError
 
-    _cloud_preflight_or_exit()
+    cloud_preflight_or_exit()
     renderer = get_renderer()
     client = _cloud_client()
     try:
@@ -1478,7 +1467,7 @@ def _cloud_status_snapshot(prompt_id: str) -> dict | None:
 
 
 def _cloud_status(prompt_id: str) -> None:
-    _cloud_preflight_or_exit()
+    cloud_preflight_or_exit()
     renderer = get_renderer()
     snap = _cloud_status_snapshot(prompt_id)
     if snap is None:
@@ -1513,7 +1502,7 @@ def _cloud_status(prompt_id: str) -> None:
 
 def _cloud_watch(prompt_id: str, *, poll_interval: float, max_wait: float) -> None:
     """Poll cloud's job status, emit NDJSON events on each transition."""
-    _cloud_preflight_or_exit()
+    cloud_preflight_or_exit()
     renderer = get_renderer()
     base_url = _cloud_client().target.base_url
 

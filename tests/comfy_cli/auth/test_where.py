@@ -242,3 +242,35 @@ def test_cloud_preflight_refreshes_expired_session(isolated_secrets, monkeypatch
     assert where_module.cloud_preflight() is None
     # The refreshed token was persisted, so subsequent commands use it.
     assert auth_store.get_cloud_session().access_token == "fresh-access-token"
+
+
+def test_cloud_preflight_or_exit_passes_when_configured(isolated_secrets):
+    """The emit-and-exit wrapper returns quietly when preflight clears."""
+    auth_store.save_cloud_session(
+        base_url="https://testcloud.comfy.org",
+        resource="https://testcloud.comfy.org/mcp",
+        client_id="mcp-dyn-test-id",
+        scope="mcp:tools:read mcp:tools:call",
+        access_token="fake-access-token",
+        refresh_token="fake-refresh-token",
+        token_type="Bearer",
+        expires_at=9999999999,
+    )
+    assert where_module.cloud_preflight_or_exit() is None
+
+
+def test_cloud_preflight_or_exit_emits_and_exits_when_not_configured(isolated_secrets, monkeypatch):
+    """No session → the wrapper emits the error envelope and raises Exit(1)."""
+    import typer
+
+    captured = {}
+
+    class _Renderer:
+        def error(self, **kw):
+            captured.update(kw)
+
+    monkeypatch.setattr("comfy_cli.output.get_renderer", lambda: _Renderer())
+    with pytest.raises(typer.Exit) as excinfo:
+        where_module.cloud_preflight_or_exit()
+    assert excinfo.value.exit_code == 1
+    assert captured["code"] == "cloud_not_configured"
