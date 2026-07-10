@@ -159,17 +159,13 @@ def execute(
     skip_requirement: bool = False,
     fast_deps: bool = False,
     pr: str | None = None,
-    *args,
-    **kwargs,
 ):
+    """Install ComfyUI from a given URL."""
     # Install ComfyUI from a given PR reference.
     if pr:
         url = handle_pr_checkout(pr, comfy_path)
         version = "nightly"
 
-    """
-    Install ComfyUI from a given URL.
-    """
     if not workspace_manager.skip_prompting:
         res = ui.prompt_confirm_action(f"Install from {url} to {comfy_path}?", True)
 

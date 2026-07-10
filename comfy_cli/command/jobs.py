@@ -1389,36 +1389,6 @@ def _cloud_client():
         raise typer.Exit(code=1) from e
 
 
-def _cloud_ls(*, limit: int) -> None:
-    from comfy_cli.comfy_client import HTTPError
-
-    cloud_preflight_or_exit()
-    renderer = get_renderer()
-    client = _cloud_client()
-    try:
-        jobs = client.list_jobs(limit=limit)
-    except HTTPError as e:
-        renderer.error(
-            code="cloud_http_error",
-            message=f"Cloud /api/jobs failed (HTTP {e.status}): {e.message}",
-            details={"status": e.status, "body": e.body[:1000]},
-        )
-        raise typer.Exit(code=1)
-
-    rows = [_cloud_job_to_row(j) for j in jobs[:limit]]
-    if renderer.is_pretty():
-        _render_jobs_pretty(rows, host=client.target.base_url, port=0)
-    renderer.emit(
-        {
-            "base_url": client.target.base_url,
-            "count": len(rows),
-            "jobs": [_row_to_dict(r) for r in rows],
-        },
-        command="jobs ls",
-        where="cloud",
-    )
-
-
 def _cloud_status_snapshot(prompt_id: str) -> dict | None:
     """Compose a cloud snapshot from /api/jobs/<id> + /api/history_v2/<id>."""
     from comfy_cli import jobs_state

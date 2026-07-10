@@ -122,7 +122,6 @@ class TestExecute:
 
             install.execute(
                 url="https://github.com/test/test.git",
-                manager_url="https://github.com/test/manager.git",
                 comfy_path=repo_dir,
                 restore=False,
                 skip_manager=True,
