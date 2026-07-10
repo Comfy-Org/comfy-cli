@@ -861,46 +861,12 @@ class Graph:
                         }
                     )
                     continue
-                # Catalog checks
-                for w in port.validate_catalog(value):
-                    if w["code"] == "unknown_enum_value":
-                        top = port.enum_values[:8]
-                        errors.append(
-                            {
-                                "node_id": node_id,
-                                "field": input_name,
-                                "code": "unknown_enum_value",
-                                "message": w["message"],
-                                "hint": f"valid options include: {', '.join(str(v) for v in top)}"
-                                + (
-                                    f" (and {len(port.enum_values) - 8} more — see valid_options)"
-                                    if len(port.enum_values) > 8
-                                    else ""
-                                ),
-                                "suggestions": port.enum_values[:20],
-                                # full, typed list — never truncated, so the agent
-                                # can pick a real value instead of guessing.
-                                "valid_options": list(port.enum_values),
-                            }
-                        )
-                    else:
-                        w["field"] = f"{node_id}.{class_type}.{w['field']}"
-                        warnings.append(w)
+                # Catalog checks (enum membership, etc.)
+                cat_errors, cat_warnings = _validate_catalog_value(node_id, class_type, input_name, port, value)
+                errors.extend(cat_errors)
+                warnings.extend(cat_warnings)
 
-            for base, port in autogrow_ports.items():
-                if port.required and base not in autogrow_seen and base not in (node_data.get("inputs") or {}):
-                    errors.append(
-                        {
-                            "node_id": node_id,
-                            "field": base,
-                            "code": "autogrow_no_slots",
-                            "message": (
-                                f"required autogrow input {base!r} has no connected slots — "
-                                f"the server will reject this node"
-                            ),
-                            "hint": f"wire one key per connection: {port.autogrow_slot_example()}",
-                        }
-                    )
+            errors.extend(_check_autogrow_required(node_id, autogrow_ports, autogrow_seen, node_data))
 
         return {
             "valid": len(errors) == 0,
@@ -1038,6 +1004,78 @@ class Graph:
             ],
             "outputs": [{"name": p.name, "type": p.type} for p in m.outputs],
         }
+
+
+# ---------------------------------------------------------------------------
+# Validation helpers
+# ---------------------------------------------------------------------------
+#
+# Context-independent checks factored out of Graph.validate_workflow so the
+# driver loop reads as the connection/class_type walk it is. Each returns the
+# error/warning dicts for the caller to append — no shared state is threaded.
+
+
+def _validate_catalog_value(
+    node_id: str, class_type: str, input_name: str, port: Port, value: Any
+) -> tuple[list[dict], list[dict]]:
+    """Enum-membership and other catalog checks for one scalar input value.
+
+    Returns (errors, warnings): an unknown enum value is a hard error carrying
+    the valid options; every other catalog finding is a namespaced warning.
+    """
+    errors: list[dict] = []
+    warnings: list[dict] = []
+    for w in port.validate_catalog(value):
+        if w["code"] == "unknown_enum_value":
+            top = port.enum_values[:8]
+            errors.append(
+                {
+                    "node_id": node_id,
+                    "field": input_name,
+                    "code": "unknown_enum_value",
+                    "message": w["message"],
+                    "hint": f"valid options include: {', '.join(str(v) for v in top)}"
+                    + (
+                        f" (and {len(port.enum_values) - 8} more — see valid_options)"
+                        if len(port.enum_values) > 8
+                        else ""
+                    ),
+                    "suggestions": port.enum_values[:20],
+                    # full, typed list — never truncated, so the agent
+                    # can pick a real value instead of guessing.
+                    "valid_options": list(port.enum_values),
+                }
+            )
+        else:
+            w["field"] = f"{node_id}.{class_type}.{w['field']}"
+            warnings.append(w)
+    return errors, warnings
+
+
+def _check_autogrow_required(
+    node_id: str, autogrow_ports: dict[str, Port], autogrow_seen: set[str], node_data: dict
+) -> list[dict]:
+    """Required autogrow inputs that received no connected slots.
+
+    The server would reject such a node, so surface it here instead of as a
+    cryptic downstream reject.
+    """
+    inputs = node_data.get("inputs") or {}
+    errors: list[dict] = []
+    for base, port in autogrow_ports.items():
+        if port.required and base not in autogrow_seen and base not in inputs:
+            errors.append(
+                {
+                    "node_id": node_id,
+                    "field": base,
+                    "code": "autogrow_no_slots",
+                    "message": (
+                        f"required autogrow input {base!r} has no connected slots — the server will reject this node"
+                    ),
+                    "hint": f"wire one key per connection: {port.autogrow_slot_example()}",
+                }
+            )
+    return errors
 
 
 # ---------------------------------------------------------------------------
