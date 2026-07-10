@@ -1223,3 +1223,95 @@ def test_wait_summary_validates_against_jobs_wait_schema():
         ],
     }
     jsonschema.Draft202012Validator(schema).validate(summary)
+
+
+# ---------------------------------------------------------------------------
+# `jobs watch` local WS dispatch — per-type handlers over _WatchState
+# ---------------------------------------------------------------------------
+
+
+class _RecordingRenderer:
+    """Minimal non-pretty renderer that records emitted events."""
+
+    def __init__(self):
+        self.events: list[tuple] = []
+        self.throttled: list[tuple] = []
+
+    def is_pretty(self):
+        return False
+
+    def event(self, name, **kwargs):
+        self.events.append((name, kwargs))
+
+    def throttled_event(self, key, name, **kwargs):
+        self.throttled.append((key, name, kwargs))
+
+
+def _watch_state(**kw):
+    r = _RecordingRenderer()
+    st = jobs_mod._WatchState(renderer=r, prompt_id="pid", host="127.0.0.1", port=8188, **kw)
+    return st, r
+
+
+def test_watch_handlers_registry_covers_the_protocol_types():
+    """The dispatch table maps exactly the WS event types watch handles."""
+    assert set(jobs_mod._WATCH_HANDLERS) == {
+        "executing",
+        "execution_cached",
+        "progress",
+        "executed",
+        "execution_error",
+    }
+    assert jobs_mod._WATCH_HANDLERS.get("unknown_type") is None
+
+
+def test_watch_executing_null_node_is_terminal_completed():
+    st, r = _watch_state()
+    jobs_mod._watch_executing(st, {"node": None, "prompt_id": "pid"})
+    assert st.terminal is True
+    assert st.end_reason == "completed"
+    assert r.events == []  # terminal sentinel emits nothing
+
+
+def test_watch_executing_node_emits_event_and_is_not_terminal():
+    st, r = _watch_state()
+    jobs_mod._watch_executing(st, {"node": "5", "prompt_id": "pid"})
+    assert st.terminal is False
+    assert r.events == [("executing", {"node": "5", "prompt_id": "pid"})]
+
+
+def test_watch_execution_cached_accumulates_completed_nodes():
+    st, r = _watch_state()
+    jobs_mod._watch_execution_cached(st, {"nodes": [1, 2]})
+    assert st.completed_nodes == {"1", "2"}
+    assert r.events == [("execution_cached", {"nodes": ["1", "2"], "prompt_id": "pid"})]
+
+
+def test_watch_progress_uses_throttled_event():
+    st, r = _watch_state()
+    jobs_mod._watch_progress(st, {"node": "3", "value": 2, "max": 10})
+    assert r.throttled == [
+        ("progress:3", "progress", {"max_hz": 10, "node": "3", "completed": 2, "total": 10, "prompt_id": "pid"})
+    ]
+
+
+def test_watch_executed_collects_output_urls_with_host_port():
+    st, r = _watch_state()
+    data = {
+        "node": "9",
+        "output": {"images": [{"filename": "out.png", "subfolder": "", "type": "output"}]},
+    }
+    jobs_mod._watch_executed(st, data)
+    assert st.completed_nodes == {"9"}
+    assert st.outputs == ["http://127.0.0.1:8188/view?filename=out.png&subfolder=&type=output"]
+    assert ("output", {"url": st.outputs[0], "prompt_id": "pid"}) in r.events
+    assert ("executed", {"node": "9", "prompt_id": "pid"}) in r.events
+
+
+def test_watch_execution_error_is_terminal_and_carries_details():
+    st, _ = _watch_state()
+    data = {"node_id": "5", "exception_message": "boom"}
+    jobs_mod._watch_execution_error(st, data)
+    assert st.terminal is True
+    assert st.end_reason == "error"
+    assert st.end_details == data
