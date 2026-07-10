@@ -1385,3 +1385,44 @@ class TestOpModel:
             if ln[1] == 21:
                 ln[1] = 20  # a grown slot now sourced from a different node
         assert ops.canonical(rewired) != ops.canonical(grown)  # source is material
+
+
+class TestOpResolutionSuggestions:
+    """The edit ops enrich a *not-found* error with the real id/address, so an
+    agent that rebuilt an identifier from memory (hitting a wrong node, a real
+    sibling, or a nonexistent id) self-corrects in one step instead of looping.
+    Covers the whole edit surface: set_widget, connect, delete_node."""
+
+    def test_set_widget_wrong_node_suggests_the_widgets_real_address(self):
+        # 'steps' lives on KSampler (3), not EmptyLatentImage (7).
+        g, wf = _graph(), _base_workflow()
+        with pytest.raises(ValueError, match=r"Did you mean:.*3\.steps \(KSampler\)"):
+            workflow_ops.set_widget(wf, g, 7, "steps", 20)
+
+    def test_set_widget_missing_node_suggests_the_widgets_real_address(self):
+        # Node 999 doesn't exist (mirrors a wrong id/separator); 'steps' is on 3.
+        g, wf = _graph(), _base_workflow()
+        with pytest.raises(ValueError, match=r"Did you mean:.*3\.steps \(KSampler\)"):
+            workflow_ops.set_widget(wf, g, 999, "steps", 20)
+
+    def test_set_widget_unknown_widget_no_false_suggestion(self):
+        g, wf = _graph(), _base_workflow()
+        with pytest.raises(ValueError) as ei:
+            workflow_ops.set_widget(wf, g, 3, "no_such_widget", 1)
+        assert "Did you mean" not in str(ei.value)
+
+    def test_set_widget_shape_error_is_not_enriched(self):
+        g, wf = _graph(), _base_workflow()
+        with pytest.raises(ValueError) as ei:
+            workflow_ops.set_widget(wf, g, 3, "steps", "not_an_int")
+        assert "Did you mean" not in str(ei.value)
+
+    def test_connect_missing_node_lists_available_nodes(self):
+        g, wf = _graph(), _base_workflow()
+        with pytest.raises(ValueError, match=r"Nodes in this workflow:.*KSampler"):
+            workflow_ops.connect(wf, g, 999, "LATENT", 3, "latent_image")
+
+    def test_delete_missing_node_lists_available_nodes(self):
+        g, wf = _graph(), _base_workflow()
+        with pytest.raises(ValueError, match=r"Nodes in this workflow:.*KSampler"):
+            workflow_ops.delete_node(wf, g, 999)

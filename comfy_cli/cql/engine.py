@@ -1567,7 +1567,60 @@ def _deterministic_fork_id(def_id: str, instance_id: Any) -> str:
     return "sg-" + _hashlib.sha1(seed).hexdigest()[:32]
 
 
+def _suggest_slots_for_input(workflow: dict, input_name: str, graph: Graph, *, limit: int = 6) -> list[str]:
+    """Real slot addresses whose widget name matches ``input_name``.
+
+    Turns an unresolvable address into an actionable correction: an agent that
+    named the right widget but the wrong node or separator (e.g.
+    ``285/288.vae_name`` or ``285:288.vae_name`` when the VAELoader is ``285/29``)
+    is pointed at the address that actually carries ``vae_name``. Best-effort —
+    any extraction failure yields no suggestions rather than masking the error.
+    """
+    if not input_name:
+        return []
+    try:
+        slots = _extract_frontend_slots(workflow, graph)
+    except Exception:
+        return []
+    out: list[str] = []
+    for s in slots:
+        if s.get("name") == input_name:
+            addr = s.get("address") or ""
+            node_type = s.get("node_type") or ""
+            out.append(f"{addr} ({node_type})" if node_type else addr)
+            if len(out) >= limit:
+                break
+    return out
+
+
 def _apply_one_slot(workflow: dict, addr: str, value: Any, graph: Graph) -> list[dict]:
+    """Apply one slot override, enriching *not-found* errors with real address
+    suggestions so a mistargeted edit self-corrects in one step.
+
+    An LLM that reconstructs an interior address from memory (rather than copying
+    it from ``slots``) tends to hit a real *sibling* node — e.g. writing
+    ``285/288.vae_name`` (a CLIPLoader) when the VAELoader is ``285/29``. The
+    intended widget name is almost always right, so on a not-found failure we
+    scan the workflow for the address that actually carries that widget and name
+    it in the error. Shape/enum errors (the target resolved fine) pass through
+    unchanged.
+    """
+    try:
+        return _apply_one_slot_impl(workflow, addr, value, graph)
+    except ValueError as e:
+        if "not found" not in str(e):
+            raise
+        input_name = addr.split(".", 1)[1] if "." in addr else ""
+        suggestions = _suggest_slots_for_input(workflow, input_name, graph)
+        if not suggestions:
+            raise
+        raise ValueError(
+            f"{e}. Did you mean: {'; '.join(suggestions)}? "
+            "Copy the address verbatim from `comfy workflow slots` — never rebuild it."
+        ) from e
+
+
+def _apply_one_slot_impl(workflow: dict, addr: str, value: Any, graph: Graph) -> list[dict]:
     """Apply a single slot override. Returns warnings. Raises ValueError on hard errors.
 
     Address forms (see ``_extract_frontend_slots`` / ``_SUBGRAPH_PATH_SEP``):

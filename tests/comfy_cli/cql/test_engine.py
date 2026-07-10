@@ -909,6 +909,39 @@ class TestDirectModeSlots:
         assert "above_max" in codes
 
 
+class TestSlotSuggestionOnNotFound:
+    """A not-found address is enriched with the real address that carries the
+    intended widget, so an agent that targeted the wrong node/separator (the
+    common LLM failure of rebuilding an address from memory) self-corrects in
+    one step instead of looping."""
+
+    def test_wrong_node_right_widget_suggests_correct_address(self, graph: Graph):
+        # 'text' lives on the CLIPTextEncode (node 6), not EmptyLatentImage (7).
+        wf = _direct_workflow()
+        with pytest.raises(ValueError, match=r"Did you mean:.*6\.text \(CLIPTextEncode\)"):
+            _apply_one_slot(wf, "7.text", "x", graph)
+
+    def test_missing_node_right_widget_suggests_correct_address(self, graph: Graph):
+        # Node 999 doesn't exist (mirrors a wrong id/separator); 'seed' is on KSampler 3.
+        wf = _direct_workflow()
+        with pytest.raises(ValueError, match=r"Did you mean:.*3\.seed \(KSampler\)"):
+            _apply_one_slot(wf, "999.seed", 1, graph)
+
+    def test_unknown_widget_name_gets_no_false_suggestion(self, graph: Graph):
+        # No node carries 'nonexistent' → original error, no "Did you mean".
+        wf = _direct_workflow()
+        with pytest.raises(ValueError) as ei:
+            _apply_one_slot(wf, "3.nonexistent", 1, graph)
+        assert "Did you mean" not in str(ei.value)
+
+    def test_shape_error_is_not_enriched(self, graph: Graph):
+        # The widget resolved fine; a shape rejection must pass through untouched.
+        wf = _direct_workflow()
+        with pytest.raises(ValueError) as ei:
+            _apply_one_slot(wf, "3.seed", "not_an_int", graph)
+        assert "Did you mean" not in str(ei.value)
+
+
 # ===========================================================================
 # TestTemplateModeSlots
 # ===========================================================================

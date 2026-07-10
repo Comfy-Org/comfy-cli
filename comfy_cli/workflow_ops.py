@@ -93,6 +93,51 @@ def _require(workflow: dict, node_id: Any) -> dict:
     return n
 
 
+def _available_nodes_hint(workflow: dict, *, limit: int = 12) -> str:
+    """Compact ``id (type)`` list of nodes that DO exist — to correct a
+    mistargeted node id."""
+    out: list[str] = []
+    for n in workflow.get("nodes") or []:
+        if isinstance(n, dict) and n.get("id") is not None:
+            out.append(f"{n.get('id')} ({n.get('type', '?')})")
+            if len(out) >= limit:
+                out.append("…")
+                break
+    return ", ".join(out)
+
+
+def _enrich_resolution_error(e: ValueError, workflow: dict, graph, *, widget: Any = None) -> ValueError:
+    """Turn a *not-found* edit error into an actionable one.
+
+    An LLM editing a graph tends to rebuild an identifier from memory instead of
+    copying it from ``comfy workflow slots`` — and a wrong id often lands on a
+    real *sibling* (e.g. ``285/288.vae_name`` hits a CLIPLoader when the VAELoader
+    is ``285/29``), so the edit fails or, worse, silently mis-targets. When the
+    widget name is known we scan the workflow for the address that actually
+    carries it; otherwise we list the node ids that exist. Shape/enum/type
+    errors (the target resolved fine) pass through unchanged.
+    """
+    msg = str(e)
+    if "not found" not in msg:
+        return e
+    if widget:
+        from comfy_cli.cql.engine import _suggest_slots_for_input
+
+        addrs = _suggest_slots_for_input(workflow, str(widget), graph)
+        if addrs:
+            return ValueError(
+                f"{msg}. Did you mean: {'; '.join(addrs)}? "
+                "Copy the address verbatim from `comfy workflow slots` — never rebuild it."
+            )
+    nodes_hint = _available_nodes_hint(workflow)
+    if nodes_hint:
+        return ValueError(
+            f"{msg}. Nodes in this workflow: {nodes_hint}. "
+            "Use an id from `comfy workflow slots` / `ls-nodes` — never rebuild it."
+        )
+    return e
+
+
 def _find_by_str(workflow: dict, node_id: Any) -> dict | None:
     """Locate a node comparing ids as strings — subgraph op paths carry string
     ids while top-level node ids are ints."""
@@ -171,6 +216,25 @@ def add_node(
 
 
 def set_widget(
+    workflow: dict,
+    graph,
+    node_id: Any,
+    widget: str,
+    value: Any,
+    *,
+    actor: str = "cli",
+    base_version: int = 0,
+) -> tuple[dict, dict]:
+    """Set a widget, enriching a not-found node/widget error with the real
+    address that carries ``widget`` so a mistargeted edit self-corrects in one
+    step (see :func:`_enrich_resolution_error`)."""
+    try:
+        return _set_widget_impl(workflow, graph, node_id, widget, value, actor=actor, base_version=base_version)
+    except ValueError as e:
+        raise _enrich_resolution_error(e, workflow, graph, widget=widget) from e
+
+
+def _set_widget_impl(
     workflow: dict,
     graph,
     node_id: Any,
@@ -321,6 +385,27 @@ def connect(
     actor: str = "cli",
     base_version: int = 0,
 ) -> tuple[dict, dict]:
+    """Wire two nodes, enriching a not-found endpoint error with the list of
+    node ids that exist (see :func:`_enrich_resolution_error`)."""
+    try:
+        return _connect_impl(
+            workflow, graph, from_node, from_slot, to_node, to_slot, actor=actor, base_version=base_version
+        )
+    except ValueError as e:
+        raise _enrich_resolution_error(e, workflow, graph) from e
+
+
+def _connect_impl(
+    workflow: dict,
+    graph,
+    from_node: Any,
+    from_slot: Any,
+    to_node: Any,
+    to_slot: Any,
+    *,
+    actor: str = "cli",
+    base_version: int = 0,
+) -> tuple[dict, dict]:
     src = _require(workflow, from_node)
     dst = _require(workflow, to_node)
     out_idx, link_type = _resolve_output_slot(src, graph, from_slot)
@@ -352,6 +437,22 @@ def connect(
 
 
 def delete_node(
+    workflow: dict,
+    graph,
+    node_id: Any,
+    *,
+    actor: str = "cli",
+    base_version: int = 0,
+) -> tuple[dict, dict]:
+    """Delete a node, enriching a not-found error with the list of node ids that
+    exist (see :func:`_enrich_resolution_error`)."""
+    try:
+        return _delete_node_impl(workflow, graph, node_id, actor=actor, base_version=base_version)
+    except ValueError as e:
+        raise _enrich_resolution_error(e, workflow, graph) from e
+
+
+def _delete_node_impl(
     workflow: dict,
     graph,
     node_id: Any,
