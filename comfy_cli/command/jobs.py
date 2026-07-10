@@ -1153,7 +1153,10 @@ def _watch_executing(state: _WatchState, data: dict[str, Any]) -> None:
         return
     renderer = state.renderer
     if renderer.is_pretty():
-        renderer.console().print(f"[dim]→[/dim] executing node [bold]{node}[/bold]")
+        # ``node`` is server-controlled; escape so it can't inject Rich markup.
+        from rich.markup import escape
+
+        renderer.console().print(f"[dim]→[/dim] executing node [bold]{escape(str(node))}[/bold]")
     renderer.event("executing", node=str(node), prompt_id=state.prompt_id)
 
 
@@ -1332,7 +1335,11 @@ def watch_cmd(
             if data.get("prompt_id") != prompt_id:
                 continue
             saw_any_event = True
-            handler = _WATCH_HANDLERS.get(msg.get("type"))
+            # ``type`` is server-controlled: a JSON array/object is unhashable
+            # and would make dict.get() raise TypeError, so only dispatch on a
+            # str key (unknown types fall through to be ignored, as before).
+            mtype = msg.get("type")
+            handler = _WATCH_HANDLERS.get(mtype) if isinstance(mtype, str) else None
             if handler is not None:
                 handler(state, data)
                 if state.terminal:

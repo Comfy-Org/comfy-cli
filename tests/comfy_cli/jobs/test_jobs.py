@@ -1315,3 +1315,36 @@ def test_watch_execution_error_is_terminal_and_carries_details():
     assert st.terminal is True
     assert st.end_reason == "error"
     assert st.end_details == data
+
+
+class _PrettyRecordingRenderer(_RecordingRenderer):
+    """Pretty renderer that records what would be printed to the console."""
+
+    def __init__(self):
+        super().__init__()
+        self.printed: list[str] = []
+
+    def is_pretty(self):
+        return True
+
+    def console(self):
+        outer = self
+
+        class _C:
+            def print(self, msg):
+                outer.printed.append(msg)
+
+        return _C()
+
+
+def test_watch_executing_escapes_server_controlled_node_markup():
+    """A server-controlled node id can't inject Rich markup into pretty output."""
+    r = _PrettyRecordingRenderer()
+    st = jobs_mod._WatchState(renderer=r, prompt_id="pid", host="127.0.0.1", port=8188)
+    jobs_mod._watch_executing(st, {"node": "[red]evil[/red]", "prompt_id": "pid"})
+    assert len(r.printed) == 1
+    # The injected markup must be escaped, not left as a live tag.
+    assert "[bold][red]" not in r.printed[0]
+    assert r"\[red]evil\[/red]" in r.printed[0]
+    # The event stream still carries the raw node id.
+    assert ("executing", {"node": "[red]evil[/red]", "prompt_id": "pid"}) in r.events
