@@ -1426,3 +1426,27 @@ class TestOpResolutionSuggestions:
         g, wf = _graph(), _base_workflow()
         with pytest.raises(ValueError, match=r"Nodes in this workflow:.*KSampler"):
             workflow_ops.delete_node(wf, g, 999)
+
+
+class TestSetWidgetModelNormalization:
+    """set_widget auto-corrects a mangled COMBO/model value to the real option so
+    the model actually loads even when the agent rebuilds the name from memory
+    (e.g. adds a directory prefix) — the reliable fix for 'model not found'."""
+
+    def test_prefixed_combo_value_is_normalized_in_the_op(self):
+        g, wf = _graph(), _base_workflow()
+        _, op = workflow_ops.set_widget(wf, g, 3, "sampler_name", "samplers/euler")
+        assert op["value"] == "euler"  # the real option, prefix stripped
+        assert any(w.get("code") == "normalized_value" for w in op.get("warnings", []))
+
+    def test_exact_value_is_untouched_and_unwarned(self):
+        g, wf = _graph(), _base_workflow()
+        _, op = workflow_ops.set_widget(wf, g, 3, "sampler_name", "euler")
+        assert op["value"] == "euler"
+        assert not any(w.get("code") == "normalized_value" for w in op.get("warnings", []))
+
+    def test_unknown_value_is_left_for_validate_to_flag(self):
+        g, wf = _graph(), _base_workflow()
+        _, op = workflow_ops.set_widget(wf, g, 3, "sampler_name", "totally_made_up")
+        assert op["value"] == "totally_made_up"  # not silently changed
+        assert any(w.get("code") == "unknown_enum_value" for w in op.get("warnings", []))

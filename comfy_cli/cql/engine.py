@@ -69,6 +69,52 @@ class Port:
         stem = self.name[:-1] if self.name.endswith("s") else self.name
         return f"{self.name}.{stem}0, {self.name}.{stem}1, …"
 
+    def canonical_combo(self, value: Any) -> Any | None:
+        """Map a *mangled* COMBO value to the real option it clearly means, or
+        None if it can't be resolved unambiguously.
+
+        A model name is one of these enum options, but an LLM tends to rebuild it
+        from memory — adding a directory prefix (``checkpoints/foo.safetensors``
+        when the option is bare ``foo.safetensors``), dropping a subfolder, or
+        drifting case. The filename is almost always right, so we match by
+        basename (case-insensitive) and, only when EXACTLY ONE option matches,
+        return it. Ambiguous or unmatched values return None so the caller still
+        surfaces ``unknown_enum_value``. Exact values return None (nothing to do).
+        """
+        if self.type != "COMBO" or not self.enum_values:
+            return None
+        opts = [str(e) for e in self.enum_values]
+        s = str(value)
+        if s in opts:
+            return None
+        base = s.rsplit("/", 1)[-1].lower()
+        matches = [o for o in opts if o.rsplit("/", 1)[-1].lower() == base]
+        if len(matches) == 1:
+            return matches[0]
+        ci = [o for o in opts if o.lower() == s.lower()]
+        if len(ci) == 1:
+            return ci[0]
+        return None
+
+    def suggest_combo(self, value: Any, *, limit: int = 5) -> list[str]:
+        """Closest real options to a rejected COMBO value, for a ``did_you_mean``
+        hint — so an unavailable model points at the nearest available one the
+        agent can substitute or offer, instead of a dead value."""
+        if self.type != "COMBO" or not self.enum_values:
+            return []
+        import difflib
+
+        opts = [str(e) for e in self.enum_values]
+        base = str(value).rsplit("/", 1)[-1]
+        bases = [o.rsplit("/", 1)[-1] for o in opts]
+        out: list[str] = []
+        for g in difflib.get_close_matches(base, bases, n=limit, cutoff=0.5):
+            for o in opts:
+                if o.rsplit("/", 1)[-1] == g and o not in out:
+                    out.append(o)
+                    break
+        return out[:limit]
+
     def validate_shape(self, value: Any) -> str | None:
         """Hard-reject on JSON-shape mismatch. Returns error message or None."""
         if self.type == "INT":
@@ -111,14 +157,17 @@ class Port:
                 candidates.add(str(int(value)))
             enum_str = {str(e) for e in self.enum_values}
             if not (candidates & enum_str):
-                warnings.append(
-                    {
-                        "code": "unknown_enum_value",
-                        "field": self.name,
-                        "message": f"{value!r} not in {len(self.enum_values)} known options for {self.name}",
-                        "valid_options": list(self.enum_values),
-                    }
-                )
+                warning = {
+                    "code": "unknown_enum_value",
+                    "field": self.name,
+                    "message": f"{value!r} not in {len(self.enum_values)} known options for {self.name}",
+                    "valid_options": list(self.enum_values),
+                }
+                suggestions = self.suggest_combo(value)
+                if suggestions:
+                    warning["did_you_mean"] = suggestions
+                    warning["message"] += f" — closest: {', '.join(suggestions)}"
+                warnings.append(warning)
         if self.type in ("INT", "FLOAT", "NUMBER") and isinstance(value, int | float):
             if self.options.min is not None and value < self.options.min:
                 warnings.append(

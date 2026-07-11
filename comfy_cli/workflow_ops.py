@@ -234,6 +234,32 @@ def set_widget(
         raise _enrich_resolution_error(e, workflow, graph, widget=widget) from e
 
 
+def _normalize_combo(graph, class_type: str, widget: str, value: Any) -> tuple[Any, dict | None]:
+    """Rewrite a mangled model/COMBO value to the real option it means so the
+    model actually loads (e.g. ``checkpoints/wai-illustrious-sdxl.safetensors`` →
+    ``wai-illustrious-sdxl.safetensors``). Returns ``(value, note)`` — ``note`` is
+    an informational warning when a rewrite happened, else ``None``. Only an
+    UNAMBIGUOUS match is rewritten; anything else is left untouched so validate's
+    ``unknown_enum_value`` (with ``did_you_mean``) still fires.
+    """
+    m = graph.node(class_type)
+    if m is None:
+        return value, None
+    port = next((p for p in m.inputs if p.name == widget), None)
+    if port is None:
+        return value, None
+    canon = port.canonical_combo(value)
+    if canon is None or canon == value:
+        return value, None
+    return canon, {
+        "code": "normalized_value",
+        "field": widget,
+        "message": f"{value!r} is not an exact option; using the matching model {canon!r}",
+        "from": str(value),
+        "to": canon,
+    }
+
+
 def _set_widget_impl(
     workflow: dict,
     graph,
@@ -255,6 +281,7 @@ def _set_widget_impl(
         segments, inner_widget = sub
         target = _navigate_subgraph_path(workflow, segments)  # read-only: current value + schema
         inner_type = target.get("type", "")
+        value, norm_note = _normalize_combo(graph, inner_type, inner_widget, value)
         order = graph.widget_order(inner_type)
         old = None
         if inner_widget in order:
@@ -262,6 +289,8 @@ def _set_widget_impl(
             cur = target.get("widgets_values") or []
             old = cur[i] if i < len(cur) else None
         warnings = _validate_widget(graph, inner_type, inner_widget, value)  # raises on shape mismatch
+        if norm_note:
+            warnings = [norm_note, *warnings]
         op = _new_op(
             "set_widget",
             actor,
@@ -280,9 +309,12 @@ def _set_widget_impl(
     node = _require(workflow, node_id)
     class_type = node.get("type", "")
     idx = _widget_index(graph, class_type, widget)  # raises on unknown widget name
+    value, norm_note = _normalize_combo(graph, class_type, widget, value)
     widgets = node.get("widgets_values") or []
     old = widgets[idx] if idx < len(widgets) else None
     warnings = _validate_widget(graph, class_type, widget, value)  # raises on shape mismatch
+    if norm_note:
+        warnings = [norm_note, *warnings]
     op = _new_op(
         "set_widget",
         actor,

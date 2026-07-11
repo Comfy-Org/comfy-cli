@@ -1296,3 +1296,54 @@ def test_load_from_target_refuses_non_loopback_local_host():
 
     with pytest.raises(LoadError, match="non-loopback"):
         _load_from_target(mode="local", host="example.com", port=8188)
+
+
+class TestComboNormalizationAndSuggestions:
+    """Port.canonical_combo rewrites a mangled model value (dir prefix / dropped
+    subfolder / case drift) to the real option when unambiguous; suggest_combo +
+    validate_catalog.did_you_mean point a rejected value at the nearest options."""
+
+    def _port(self):
+        from comfy_cli.cql.engine import Port
+        return Port(
+            name="ckpt_name",
+            type="COMBO",
+            enum_values=["sd_xl_base.safetensors", "v1-5-pruned.safetensors", "sub/model_x.safetensors"],
+        )
+
+    def test_canonical_strips_added_directory_prefix(self):
+        p = self._port()
+        assert p.canonical_combo("checkpoints/sd_xl_base.safetensors") == "sd_xl_base.safetensors"
+
+    def test_canonical_matches_dropped_subfolder_by_basename(self):
+        p = self._port()
+        assert p.canonical_combo("model_x.safetensors") == "sub/model_x.safetensors"
+
+    def test_canonical_case_insensitive(self):
+        p = self._port()
+        assert p.canonical_combo("SD_XL_BASE.SAFETENSORS") == "sd_xl_base.safetensors"
+
+    def test_canonical_exact_value_returns_none(self):
+        p = self._port()
+        assert p.canonical_combo("sd_xl_base.safetensors") is None
+
+    def test_canonical_unknown_returns_none(self):
+        p = self._port()
+        assert p.canonical_combo("realisticVisionV60B1.safetensors") is None
+
+    def test_canonical_ambiguous_basename_returns_none(self):
+        from comfy_cli.cql.engine import Port
+        p = Port(name="ckpt_name", type="COMBO", enum_values=["a/dup.safetensors", "b/dup.safetensors"])
+        assert p.canonical_combo("dup.safetensors") is None  # two matches → don't guess
+
+    def test_suggest_returns_close_options(self):
+        p = self._port()
+        got = p.suggest_combo("sd_xl_bas.safetensors")
+        assert "sd_xl_base.safetensors" in got
+
+    def test_validate_catalog_adds_did_you_mean(self):
+        p = self._port()
+        w = p.validate_catalog("v1-5-prund.safetensors")  # typo
+        assert w and w[0]["code"] == "unknown_enum_value"
+        assert "did_you_mean" in w[0]
+        assert "v1-5-pruned.safetensors" in w[0]["did_you_mean"]
