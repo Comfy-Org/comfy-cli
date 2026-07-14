@@ -39,6 +39,21 @@ comfy setup
 
 `comfy setup` walks you through everything — local or cloud routing, authentication, and agent skill installation — in one interactive wizard. Pass `-y` for non-interactive (CI/scripted) installs.
 
+## Run a workflow in the cloud
+
+No local GPU? Route any API-format workflow to [Comfy Cloud](https://www.comfy.org/) with `--where cloud`:
+
+```bash
+comfy cloud login                                        # sign in via your browser (OAuth)
+comfy run --workflow ./workflow.json --where cloud       # submits, prints a prompt_id, returns immediately
+comfy jobs wait <prompt_id> --where cloud                # block until the job finishes (or: jobs status for a one-shot check)
+comfy download <prompt_id> --where cloud -o ./outputs    # save the results locally
+```
+
+`comfy run` submits asynchronously and prints the `prompt_id` you feed to `jobs`/`download`; add `--wait` to block inline instead. Check your sign-in anytime with `comfy cloud whoami`. Export the workflow JSON from ComfyUI via **File → Export (API)** (UI-format JSON is auto-converted). Set cloud as your default target so you can drop the flag: `comfy set-default --where cloud`.
+
+**Credits:** cloud generation (`comfy run --where cloud`, `comfy generate`) consumes Comfy Cloud credits and needs an active subscription. Discovery and inspection commands — `comfy cloud whoami`, `comfy jobs status/ls`, `comfy templates ls`, `comfy generate list` — don't.
+
 ## Installation
 
 1. (Recommended) Activate a virtual environment ([venv](https://docs.python.org/3/library/venv.html) or [conda](https://conda.io/projects/conda/en/latest/user-guide/getting-started.html)).
