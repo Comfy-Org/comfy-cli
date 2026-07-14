@@ -1094,7 +1094,7 @@ def _cloud_cancel(prompt_id: str) -> None:
         renderer.error(
             code="cloud_http_error",
             message=f"cancel failed: {e}",
-            hint="check network / `comfy auth whoami`",
+            hint="check network / `comfy cloud whoami`",
         )
         raise typer.Exit(code=1) from e
 
