@@ -608,7 +608,7 @@ def install(
     rprint(f"ComfyUI is installed at: {comfy_path}")
 
 
-@app.command(help="Update ComfyUI Environment [all|comfy|cli]")
+@app.command(help="Update ComfyUI Environment [all|comfy|cli]. To update custom nodes, use `comfy node update`.")
 @tracking.track_command()
 def update(
     target: str = typer.Argument(
@@ -1558,7 +1558,10 @@ def dependency():
     depComp.install_deps()
 
 
-@app.command(help="Download a standalone Python interpreter and dependencies based on an existing comfyui workspace")
+@app.command(
+    help="Download a standalone Python interpreter and dependencies based on an existing comfyui workspace. "
+    "This bundles an interpreter; it does not update ComfyUI or custom nodes."
+)
 @tracking.track_command()
 def standalone(
     cli_spec: Annotated[
@@ -1626,7 +1629,11 @@ app.command(
     "preview",
     help="Render a previewable PNG from a media file (image → thumb, video → contact sheet, audio → waveform).",
 )(preview_command.preview_cmd)
-app.add_typer(custom_nodes.manager_app, name="manager", help="Manage ComfyUI-Manager.")
+app.add_typer(
+    custom_nodes.manager_app,
+    name="manager",
+    help="Enable/disable and configure ComfyUI-Manager (lifecycle, not updates).",
+)
 
 app.add_typer(pr_command.app, name="pr-cache", help="Manage PR cache.")
 
