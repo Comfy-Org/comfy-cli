@@ -8,6 +8,7 @@ alias prints a single yellow deprecation warning to stderr while the canonical
 
 from __future__ import annotations
 
+import inspect
 import json
 
 import pytest
@@ -160,13 +161,20 @@ def _force_json_renderer():
 _CLOUD_FOLDERS = [{"name": "checkpoints", "folders": ["checkpoints"]}]
 
 
+def _stderr_split_runner() -> CliRunner:
+    # Keep the envelope (stdout) and the deprecation warning (stderr) separable so
+    # the JSON contract can assert stdout stays envelope-only. click <8.2 needs the
+    # explicit mix_stderr=False; click >=8.2 dropped the kwarg and always splits.
+    if "mix_stderr" in inspect.signature(CliRunner.__init__).parameters:
+        return CliRunner(mix_stderr=False)
+    return CliRunner()
+
+
 class TestEndToEnd:
     def _invoke(self, monkeypatch, noun):
         _force_json_renderer()
         _patch_urlopen(monkeypatch, _CLOUD_FOLDERS)
-        # mix_stderr=False so the envelope (stdout) and the deprecation warning
-        # (stderr) stay separable — the JSON contract keeps stdout envelope-only.
-        return CliRunner(mix_stderr=False).invoke(
+        return _stderr_split_runner().invoke(
             app, ["--json", noun, "list-folders", "--where", "cloud"], standalone_mode=False
         )
 
