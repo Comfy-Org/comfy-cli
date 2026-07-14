@@ -78,6 +78,14 @@ COMMAND_SCHEMAS: dict[str, str] = {
     "comfy skill show": "skill",
     "comfy skill status": "skill",
     # model discovery (all asset types: checkpoints, loras, controlnets, vae, ...)
+    # Canonical spelling under the `model` noun.
+    "comfy model search": "models",
+    "comfy model show": "models",
+    "comfy model list-folders": "models",
+    "comfy model list-folder": "models",
+    # `comfy models` is the hidden, deprecated plural alias; the discovery
+    # envelopes still carry the `models …` form in `command`, so both spellings
+    # register (mirrors the `skill`/`skills` alias above).
     "comfy models search": "models",
     "comfy models show": "models",
     "comfy models list-folders": "models",

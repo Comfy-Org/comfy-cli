@@ -47,6 +47,7 @@ from comfy_cli.command.models import search as models_search_command
 from comfy_cli.config_manager import ConfigManager
 from comfy_cli.constants import GPU_OPTION, CUDAVersion, ROCmVersion
 from comfy_cli.cuda_detect import DEFAULT_CUDA_TAG, detect_cuda_driver_version, resolve_cuda_wheel
+from comfy_cli.deprecation import add_deprecated_alias
 from comfy_cli.discovery import build_discovery
 from comfy_cli.env_checker import EnvChecker
 from comfy_cli.help_json import build_help_json
@@ -1612,12 +1613,20 @@ def standalone(
 
 
 generate_command.register_with(app)
-app.add_typer(models_command.app, name="model", help="Manage models.")
+# The `model` noun owns BOTH the local-filesystem ops (download/remove/list) and
+# the backend/cloud discovery leaves (list-folders/list-folder/search/show). The
+# discovery leaves are implemented on `models_search_command.app`; surface them
+# under `model` by borrowing their command registrations (same CommandInfo
+# objects — no logic duplication).
+models_command.app.registered_commands.extend(models_search_command.app.registered_commands)
 app.add_typer(
-    models_search_command.app,
-    name="models",
-    help="Discover models — folders, files, and the cloud asset catalog.",
+    models_command.app,
+    name="model",
+    help="Manage models — local files on disk plus backend/cloud discovery.",
 )
+# `models` (plural) is now a hidden, deprecated alias for the discovery leaves.
+# Every old `comfy models …` invocation still works but prints a warning.
+add_deprecated_alias(app, models_search_command.app, old_name="models", new_name="model")
 app.add_typer(custom_nodes.app, name="node", help="Manage custom nodes.")
 app.add_typer(nodes_command.app, name="nodes", help="Introspect ComfyUI node classes (inputs, outputs, categories).")
 app.add_typer(templates_command.app, name="templates", help="Browse the Comfy workflow-template gallery.")
