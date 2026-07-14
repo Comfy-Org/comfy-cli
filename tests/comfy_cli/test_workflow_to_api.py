@@ -1254,6 +1254,20 @@ class TestImplicitSeedCompanion:
             "output_node": True,
             "display_name": "RegularInt",
         },
+        # A seed-substring INT (unflagged, no real companion) immediately followed
+        # by a COMBO that legitimately lists a control keyword among its options.
+        "SeedThenCombo": {
+            "input": {
+                "required": {
+                    "variation_seed": ["INT", {"default": 0}],
+                    "mode": [["fixed", "auto", "manual"], {}],
+                    "strength": ["FLOAT", {"default": 1.0}],
+                }
+            },
+            "input_order": {"required": ["variation_seed", "mode", "strength"]},
+            "output_node": True,
+            "display_name": "SeedThenCombo",
+        },
     }
 
     def test_seed_named_input_strips_implicit_companion(self):
@@ -1331,6 +1345,28 @@ class TestImplicitSeedCompanion:
         result = convert_ui_to_api(workflow, self.OI)
         assert result["1"]["inputs"]["value"] == 99
         assert result["1"]["inputs"]["label"] == "randomize"
+
+    def test_seed_does_not_steal_next_combos_control_keyword_value(self):
+        # `variation_seed` is a seed-substring INT with NO real companion; the
+        # NEXT widget is a COMBO whose legitimate saved value is "fixed" (one of
+        # its own options). The converter must keep "fixed" as the combo's value
+        # rather than consuming it as a phantom control_after_generate marker
+        # (which would drop it and shift `strength` into the wrong slot).
+        workflow = {
+            "nodes": [
+                {
+                    "id": 1,
+                    "type": "SeedThenCombo",
+                    "inputs": [],
+                    "outputs": [],
+                    "widgets_values": [7, "fixed", 0.5],
+                    "mode": 0,
+                }
+            ],
+            "links": [],
+        }
+        result = convert_ui_to_api(workflow, self.OI)
+        assert result["1"]["inputs"] == {"variation_seed": 7, "mode": "fixed", "strength": 0.5}
 
 
 class TestNodeNameForSAndRAlias:

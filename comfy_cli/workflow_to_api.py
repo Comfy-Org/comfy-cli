@@ -1188,47 +1188,72 @@ def _filter_control_values(
     out = []
     vidx = 0
     input_def = _schema_input_def(schema)
+    # Flatten to the ordered widget inputs so the seed companion check can peek at
+    # the NEXT widget input (a legitimate COMBO value that equals a control
+    # keyword must not be mistaken for a control_after_generate marker).
+    widget_inputs: list[tuple[str, Any]] = []
     for section in ("required", "optional"):
         section_def = input_def.get(section) or {}
         if not isinstance(section_def, dict):
             continue
         for input_name, input_spec in section_def.items():
-            if vidx >= len(widget_values):
-                break
-            is_widget, is_dynamic = _is_widget_input(input_spec)
-            if not is_widget:
-                continue
-            if is_dynamic:
-                # A V3 dynamic combo (``COMFY_*COMBO*``) occupies its selector
-                # slot plus a variable number of sub-input slots chosen by the
-                # selected option. Copy the whole span through untouched and
-                # advance ``vidx`` in lockstep with ``_get_widget_name_order``
-                # (which expands the same sub-inputs). Otherwise the walk
-                # treats the combo as a single slot, reaches a later seed input
-                # too early, checks the wrong slot for its control_after_generate
-                # marker, and leaves the marker in place — shifting every widget
-                # after the seed by one (e.g. GeminiNanoBanana2V2 / Nano Banana 2,
-                # whose dynamic ``model`` precedes the seed and whose
-                # ``response_modalities`` sits right after it, so the stray
-                # ``"fixed"`` lands on ``response_modalities``).
-                subs = _dynamic_combo_sub_inputs(input_name, input_spec, widget_values, vidx)
-                span = min(1 + len(subs), len(widget_values) - vidx)
-                out.extend(widget_values[vidx : vidx + span])
-                vidx += span
-                continue
-            out.append(widget_values[vidx])
+            if _is_widget_input(input_spec)[0]:
+                widget_inputs.append((input_name, input_spec))
+    for i, (input_name, input_spec) in enumerate(widget_inputs):
+        if vidx >= len(widget_values):
+            break
+        _is_widget, is_dynamic = _is_widget_input(input_spec)
+        if is_dynamic:
+            # A V3 dynamic combo (``COMFY_*COMBO*``) occupies its selector
+            # slot plus a variable number of sub-input slots chosen by the
+            # selected option. Copy the whole span through untouched and
+            # advance ``vidx`` in lockstep with ``_get_widget_name_order``
+            # (which expands the same sub-inputs). Otherwise the walk
+            # treats the combo as a single slot, reaches a later seed input
+            # too early, checks the wrong slot for its control_after_generate
+            # marker, and leaves the marker in place — shifting every widget
+            # after the seed by one (e.g. GeminiNanoBanana2V2 / Nano Banana 2,
+            # whose dynamic ``model`` precedes the seed and whose
+            # ``response_modalities`` sits right after it, so the stray
+            # ``"fixed"`` lands on ``response_modalities``).
+            subs = _dynamic_combo_sub_inputs(input_name, input_spec, widget_values, vidx)
+            span = min(1 + len(subs), len(widget_values) - vidx)
+            out.extend(widget_values[vidx : vidx + span])
+            vidx += span
+            continue
+        out.append(widget_values[vidx])
+        vidx += 1
+        next_input_spec = widget_inputs[i + 1][1] if i + 1 < len(widget_inputs) else None
+        if vidx < len(widget_values) and _has_control_after_generate_companion(
+            input_name, input_spec, widget_values[vidx], next_input_spec
+        ):
             vidx += 1
-            if vidx < len(widget_values) and _has_control_after_generate_companion(
-                input_name, input_spec, widget_values[vidx]
-            ):
-                vidx += 1
     while vidx < len(widget_values):
         out.append(widget_values[vidx])
         vidx += 1
     return out
 
 
-def _has_control_after_generate_companion(input_name: str, input_spec: Any, next_value: Any) -> bool:
+def _combo_lists_option(input_spec: Any, value: Any) -> bool:
+    """True if ``input_spec`` is a COMBO that declares ``value`` as one of its options.
+
+    Covers both the classic list-form combo (``[["a", "b", ...]]`` — the type IS
+    the option list) and the dict-form combo (``["COMBO", {"options": [...]}]``)."""
+    if not isinstance(input_spec, (list, tuple)) or not input_spec:
+        return False
+    type_field = input_spec[0]
+    if isinstance(type_field, list):
+        return value in type_field
+    if len(input_spec) >= 2 and isinstance(input_spec[1], dict):
+        opts = input_spec[1].get("options")
+        if isinstance(opts, list):
+            return value in opts
+    return False
+
+
+def _has_control_after_generate_companion(
+    input_name: str, input_spec: Any, next_value: Any, next_input_spec: Any = None
+) -> bool:
     """True if ``next_value`` should be consumed as a control_after_generate marker.
 
     Two ways the frontend adds the companion widget:
@@ -1254,6 +1279,12 @@ def _has_control_after_generate_companion(input_name: str, input_spec: Any, next
     ``seed`` substring guard preserves the schema-aware path's protection
     against a legitimate non-seed INT (e.g. ``steps``) that merely happens to
     precede a COMBO/STRING widget whose value equals a control keyword.
+
+    ``next_input_spec`` is the schema of the *next* widget input (when known). On
+    the implicit seed path we refuse to consume ``next_value`` when that next
+    widget is a COMBO that legitimately lists ``next_value`` as an option — there
+    the value is the combo's own saved selection, not a phantom companion, so
+    consuming it would drop a real widget value and shift every later widget.
     """
     if not (isinstance(next_value, str) and next_value in _CONTROL_AFTER_GENERATE_VALUES):
         return False
@@ -1261,7 +1292,11 @@ def _has_control_after_generate_companion(input_name: str, input_spec: Any, next
     if options.get("control_after_generate"):
         return True
     input_type = input_spec[0] if input_spec else None
-    return input_type == "INT" and "seed" in input_name.lower()
+    if not (input_type == "INT" and "seed" in input_name.lower()):
+        return False
+    # Implicit seed path: don't steal a value that the next COMBO widget declares
+    # as one of its own options.
+    return not _combo_lists_option(next_input_spec, next_value)
 
 
 def _collect_widget_inputs(

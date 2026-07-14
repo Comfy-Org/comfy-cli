@@ -137,13 +137,26 @@ def _resolve_ffmpeg() -> str | None:
 
 _IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tiff"}
 _AUDIO_EXTS = {".mp3", ".wav", ".flac", ".ogg", ".m4a", ".aac", ".opus"}
+_VIDEO_EXTS = {".mp4", ".mov", ".webm", ".mkv", ".avi", ".m4v", ".flv", ".wmv", ".mpg", ".mpeg", ".ts", ".mts", ".3gp"}
 
 
 def _classify_by_ext(path: Path) -> dict:
     """Fallback classification when ffprobe is unavailable (e.g. only the
-    imageio-ffmpeg static ffmpeg is present): pick kind from the extension."""
+    imageio-ffmpeg static ffmpeg is present): pick kind from the extension.
+
+    An unrecognized extension is ``"unknown"`` (not blindly ``"video"``) so a
+    non-media file still yields the clean ``preview_unsupported_media`` envelope
+    instead of being handed to ffmpeg and failing with a raw ffmpeg error — the
+    same outcome the ffprobe path produces for a file with no media stream."""
     ext = path.suffix.lower()
-    kind = "image" if ext in _IMAGE_EXTS else "audio" if ext in _AUDIO_EXTS else "video"
+    if ext in _IMAGE_EXTS:
+        kind = "image"
+    elif ext in _AUDIO_EXTS:
+        kind = "audio"
+    elif ext in _VIDEO_EXTS:
+        kind = "video"
+    else:
+        kind = "unknown"
     return {"kind": kind, "width": None, "height": None, "fps": None, "duration": None, "has_audio": None}
 
 

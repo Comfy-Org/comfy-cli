@@ -336,18 +336,33 @@ def _parse_input_spec(spec: Any) -> tuple[str, bool, list[Any], PortOptions]:
     return "UNKNOWN", False, [], port_opts
 
 
-def _dynamic_sub_widget_names(base: str, options: list) -> list[str]:
-    """Sub-widget names a dynamic combo expands to, from the first (default) key —
-    e.g. ``model`` → ``["model.resolution"]``. Static mirror of the converter's
-    value-driven ``_dynamic_combo_sub_inputs`` (uses the first key, not a selection)."""
-    return [name for name, _ in _dynamic_sub_widget_defaults(base, options).items()]
+_FIRST_KEY = object()  # sentinel: expand the first/default dynamic-combo key
 
 
-def _dynamic_sub_widget_defaults(base: str, options: list) -> dict[str, Any]:
-    """``{f"{base}.{sub}": default}`` for the first key's sub-inputs."""
-    if not options or not isinstance(options[0], dict):
+def _dynamic_sub_widget_names(base: str, options: list, selected: Any = _FIRST_KEY) -> list[str]:
+    """Sub-widget names a dynamic combo expands to for the ``selected`` key
+    (default: the first/default key) — e.g. ``model`` → ``["model.resolution"]``.
+    Static mirror of the converter's value-driven ``_dynamic_combo_sub_inputs``."""
+    return [name for name, _ in _dynamic_sub_widget_defaults(base, options, selected).items()]
+
+
+def _dynamic_sub_widget_defaults(base: str, options: list, selected: Any = _FIRST_KEY) -> dict[str, Any]:
+    """``{f"{base}.{sub}": default}`` for the ``selected`` key's sub-inputs.
+
+    Defaults to the first key (fresh nodes select it). Passing the node's actual
+    selected key — as ``widget_order_for_node`` does — keeps the widget order
+    aligned to ``widgets_values`` when a node picks an option whose sub-widget
+    count differs from the default. An unknown key expands to nothing, matching
+    the converter's ``_dynamic_combo_sub_inputs``."""
+    if not options:
         return {}
-    sub_def = options[0].get("inputs")
+    if selected is _FIRST_KEY:
+        option = options[0] if isinstance(options[0], dict) else None
+    else:
+        option = next((o for o in options if isinstance(o, dict) and o.get("key") == selected), None)
+    if option is None:
+        return {}
+    sub_def = option.get("inputs")
     if not isinstance(sub_def, dict):
         return {}
     out: dict[str, Any] = {}
@@ -780,6 +795,44 @@ class Graph:
                 order.extend(_dynamic_sub_widget_names(p.name, p.options.dynamic_options))
             if p.options.control_after_generate:
                 order.append("control_after_generate")
+        return order
+
+    def widget_order_for_node(self, class_name: str, widgets_values: Any = None) -> list[str]:
+        """Widget order aligned to a SPECIFIC node's ``widgets_values``.
+
+        Identical to :meth:`widget_order`, except a dynamic combo expands the
+        sub-widgets of its *currently selected* key (read from ``widgets_values``)
+        rather than the schema's first key. The two agree for a fresh node (which
+        defaults to the first key) but diverge once a node selects an option whose
+        sub-widget count differs — and there the static first-key order mis-indexes
+        every widget after the combo, so e.g. ``set-widget <id>.seed`` would write
+        into ``model.resolution``. Falls back to the static order when
+        ``widgets_values`` is empty (a fresh/unselected node selects the first key).
+        """
+        base = self.widget_order(class_name)
+        m = self._nodes.get(class_name)
+        values = list(widgets_values) if widgets_values else []
+        # The static order is already exact unless this node BOTH has a dynamic
+        # combo AND carries a selection to read. Delegating otherwise keeps the
+        # single source of truth (and any override) for the common case.
+        if m is None or not base or not values or not any(p.options.dynamic_options for p in m.inputs if not p.is_link):
+            return base
+        order: list[str] = []
+        vidx = 0
+        for p in m.inputs:
+            if p.is_link:
+                continue
+            order.append(p.name)
+            selector_idx = vidx
+            vidx += 1
+            if p.options.dynamic_options:
+                selected = values[selector_idx] if selector_idx < len(values) else _FIRST_KEY
+                subs = _dynamic_sub_widget_names(p.name, p.options.dynamic_options, selected)
+                order.extend(subs)
+                vidx += len(subs)
+            if p.options.control_after_generate:
+                order.append("control_after_generate")
+                vidx += 1
         return order
 
     def widget_defaults(self, class_name: str) -> dict[str, Any]:
@@ -1380,8 +1433,8 @@ def _node_widget_slots(node: dict, prefix: str, graph: Graph) -> list[dict]:
     m = graph.node(node_type)
     if m is None:
         return []
-    order = graph.widget_order(node_type)
     widgets = node.get("widgets_values") or []
+    order = graph.widget_order_for_node(node_type, widgets)
     slots: list[dict] = []
     for port in m.inputs:
         if port.is_link:
@@ -1530,12 +1583,12 @@ def _resolve_proxy_value(instance: dict, subgraph: dict, input_name: str, graph:
             if not isinstance(inode, dict) or str(inode.get("id", "")) != interior_id:
                 continue
             interior_class = inode.get("type", "")
-            order = graph.widget_order(interior_class)
+            widgets = inode.get("widgets_values") or []
+            order = graph.widget_order_for_node(interior_class, widgets)
             try:
                 idx = order.index(name)
             except ValueError:
                 return _UNRESOLVED
-            widgets = inode.get("widgets_values") or []
             return widgets[idx] if idx < len(widgets) else _UNRESOLVED
         break
     return _UNRESOLVED
@@ -1552,7 +1605,7 @@ def _write_widget(node: dict, input_name: str, value: Any, graph: Graph, *, exte
     m = graph.node(node_type)
     if m is None:
         raise ValueError(f"unknown node type {node_type!r} for node {node.get('id')}")
-    order = graph.widget_order(node_type)
+    order = graph.widget_order_for_node(node_type, node.get("widgets_values"))
     try:
         widget_idx = order.index(input_name)
     except ValueError:

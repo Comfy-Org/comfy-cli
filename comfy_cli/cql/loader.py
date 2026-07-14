@@ -455,9 +455,18 @@ def resilient_load_object_info(
 
     host_key = _resolve_host_key(mode, host, port)
 
-    fresh = read_fresh_object_info_cache(host_key, object_info_cache_ttl())
-    if fresh is not None:
-        return fresh
+    # Cache-first TTL is CLOUD-only. The cloud catalog is stable and its remote
+    # /object_info fetch is slow (multi-MB over the network), so a fresh cache hit
+    # is a real win. Local is the opposite: the localhost fetch is cheap, and a
+    # user installs custom nodes into their OWN server — serving a cached local
+    # catalog would hide a just-added node for the whole TTL. So local always
+    # fetches live. (The stale-cache *failure* fallback below still applies to
+    # both: a cache is still written on a successful local fetch so a later
+    # unreachable-server call can fall back to it.)
+    if mode == "cloud":
+        fresh = read_fresh_object_info_cache(host_key, object_info_cache_ttl())
+        if fresh is not None:
+            return fresh
 
     try:
         data = _load_from_target(mode=mode, host=host, port=port)

@@ -145,7 +145,10 @@ def _object_info() -> dict[str, Any]:
                                     "key": "kling-v3",
                                     "inputs": {
                                         "required": {
-                                            "resolution": ["COMBO", {"default": "1080p", "options": ["4k", "1080p", "720p"]}]
+                                            "resolution": [
+                                                "COMBO",
+                                                {"default": "1080p", "options": ["4k", "1080p", "720p"]},
+                                            ]
                                         }
                                     },
                                 }
@@ -242,7 +245,10 @@ def _autogrow_workflow() -> dict:
                 "id": 20,
                 "type": "VAEDecode",
                 "pos": [0, 0],
-                "inputs": [{"name": "samples", "type": "LATENT", "link": None}, {"name": "vae", "type": "VAE", "link": None}],
+                "inputs": [
+                    {"name": "samples", "type": "LATENT", "link": None},
+                    {"name": "vae", "type": "VAE", "link": None},
+                ],
                 "outputs": [{"name": "IMAGE", "type": "IMAGE", "links": []}],
                 "widgets_values": [],
             },
@@ -250,7 +256,10 @@ def _autogrow_workflow() -> dict:
                 "id": 21,
                 "type": "VAEDecode",
                 "pos": [0, 100],
-                "inputs": [{"name": "samples", "type": "LATENT", "link": None}, {"name": "vae", "type": "VAE", "link": None}],
+                "inputs": [
+                    {"name": "samples", "type": "LATENT", "link": None},
+                    {"name": "vae", "type": "VAE", "link": None},
+                ],
                 "outputs": [{"name": "IMAGE", "type": "IMAGE", "links": []}],
                 "widgets_values": [],
             },
@@ -280,7 +289,10 @@ def _convergence_base() -> dict:
                 "id": nid,
                 "type": "VAEDecode",
                 "pos": [150, y],
-                "inputs": [{"name": "samples", "type": "LATENT", "link": None}, {"name": "vae", "type": "VAE", "link": None}],
+                "inputs": [
+                    {"name": "samples", "type": "LATENT", "link": None},
+                    {"name": "vae", "type": "VAE", "link": None},
+                ],
                 "outputs": [{"name": "IMAGE", "type": "IMAGE", "links": []}],
                 "widgets_values": [],
             }
@@ -740,7 +752,6 @@ class TestDelete:
         latent = next(i for i in ks["inputs"] if i["name"] == "latent_image")
         assert latent["link"] is None
 
-
     def test_nested_subgraph_address_missing_interior_node_errors(self, patched_graph, tmp_path, capsys):
         # A nested address into a graph with no such subgraph/interior node fails
         # cleanly (the top-level workflow here has no subgraph instance 10).
@@ -908,7 +919,9 @@ class TestRecipes:
         path = self._empty(tmp_path)
         rp = tmp_path / "r.json"
         rp.write_text(json.dumps(self._recipe()), encoding="utf-8")
-        env = _run(["apply", str(path), "--ops", str(rp), "--param", "positive=quiet forest", "--param", "steps=35"], capsys)
+        env = _run(
+            ["apply", str(path), "--ops", str(rp), "--param", "positive=quiet forest", "--param", "steps=35"], capsys
+        )
         assert env["ok"] is True, env
         wf = json.loads(path.read_text())
         g = _graph()
@@ -1450,3 +1463,17 @@ class TestSetWidgetModelNormalization:
         _, op = workflow_ops.set_widget(wf, g, 3, "sampler_name", "totally_made_up")
         assert op["value"] == "totally_made_up"  # not silently changed
         assert any(w.get("code") == "unknown_enum_value" for w in op.get("warnings", []))
+
+
+class TestWhereInvalid:
+    """A bad --where surfaces the agent-first error envelope, not a raw traceback.
+
+    Regression: _get_graph only caught LoadError, so resolve_default's ValueError
+    on an invalid --where escaped uncaught out of every edit command.
+    """
+
+    def test_set_widget_bad_where_emits_envelope(self, tmp_path, capsys):
+        path = _write(tmp_path, _base_workflow())
+        env = _run(["set-widget", str(path), "3.seed", "5", "--where", "clowd"], capsys)
+        assert env["ok"] is False
+        assert env["error"]["code"] == "where_invalid"

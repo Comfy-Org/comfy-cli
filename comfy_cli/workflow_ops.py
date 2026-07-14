@@ -282,11 +282,11 @@ def _set_widget_impl(
         target = _navigate_subgraph_path(workflow, segments)  # read-only: current value + schema
         inner_type = target.get("type", "")
         value, norm_note = _normalize_combo(graph, inner_type, inner_widget, value)
-        order = graph.widget_order(inner_type)
+        cur = target.get("widgets_values") or []
+        order = graph.widget_order_for_node(inner_type, cur)
         old = None
         if inner_widget in order:
             i = order.index(inner_widget)
-            cur = target.get("widgets_values") or []
             old = cur[i] if i < len(cur) else None
         warnings = _validate_widget(graph, inner_type, inner_widget, value)  # raises on shape mismatch
         if norm_note:
@@ -308,9 +308,9 @@ def _set_widget_impl(
 
     node = _require(workflow, node_id)
     class_type = node.get("type", "")
-    idx = _widget_index(graph, class_type, widget)  # raises on unknown widget name
-    value, norm_note = _normalize_combo(graph, class_type, widget, value)
     widgets = node.get("widgets_values") or []
+    idx = _widget_index(graph, class_type, widget, widgets)  # raises on unknown widget name
+    value, norm_note = _normalize_combo(graph, class_type, widget, value)
     old = widgets[idx] if idx < len(widgets) else None
     warnings = _validate_widget(graph, class_type, widget, value)  # raises on shape mismatch
     if norm_note:
@@ -625,9 +625,9 @@ def capture_recipe(workflow: dict, graph, name: str = "captured", lift: dict | N
         if n.get("pos"):
             add["at"] = n["pos"]
         ops.append(add)
-        order = graph.widget_order(class_type)
-        defaults = graph.widget_defaults(class_type)
         widgets = n.get("widgets_values") or []
+        order = graph.widget_order_for_node(class_type, widgets)
+        defaults = graph.widget_defaults(class_type)
         for i, wname in enumerate(order):
             if i >= len(widgets):
                 break
@@ -704,7 +704,9 @@ def _split_ref_slot(spec_val: str, aliases: dict[str, Any]) -> tuple[Any, Any]:
     return resolve_ref(node_part, aliases), slot
 
 
-def apply_specs(workflow: dict, graph, specs: list, *, actor: str = "cli", base_version: int = 0) -> tuple[dict, list, dict]:
+def apply_specs(
+    workflow: dict, graph, specs: list, *, actor: str = "cli", base_version: int = 0
+) -> tuple[dict, list, dict]:
     """Apply edit specs to ``workflow`` in order. Returns (workflow, ops, aliases)."""
     aliases: dict[str, Any] = {}
     ops: list[dict] = []
@@ -713,7 +715,9 @@ def apply_specs(workflow: dict, graph, specs: list, *, actor: str = "cli", base_
             raise ValueError(f"spec #{i} must be an object with an 'op' field")
         kind = spec["op"]
         if kind == "add_node":
-            workflow, op = add_node(workflow, graph, spec["class_type"], pos=spec.get("at"), actor=actor, base_version=base_version)
+            workflow, op = add_node(
+                workflow, graph, spec["class_type"], pos=spec.get("at"), actor=actor, base_version=base_version
+            )
             if spec.get("as"):
                 aliases[spec["as"]] = op["node_id"]
         elif kind == "connect":
@@ -722,11 +726,18 @@ def apply_specs(workflow: dict, graph, specs: list, *, actor: str = "cli", base_
             workflow, op = connect(workflow, graph, fn, fs, tn, ts, actor=actor, base_version=base_version)
         elif kind == "set_widget":
             workflow, op = set_widget(
-                workflow, graph, resolve_ref(spec["node"], aliases), spec["widget"], spec["value"],
-                actor=actor, base_version=base_version,
+                workflow,
+                graph,
+                resolve_ref(spec["node"], aliases),
+                spec["widget"],
+                spec["value"],
+                actor=actor,
+                base_version=base_version,
             )
         elif kind == "delete_node":
-            workflow, op = delete_node(workflow, graph, resolve_ref(spec["node"], aliases), actor=actor, base_version=base_version)
+            workflow, op = delete_node(
+                workflow, graph, resolve_ref(spec["node"], aliases), actor=actor, base_version=base_version
+            )
         else:
             raise ValueError(f"spec #{i}: unknown op {kind!r}")
         ops.append(op)
@@ -791,8 +802,8 @@ def _apply_set_widget(workflow: dict, op: dict, graph) -> None:
     node = _find(workflow, op["node_id"])
     if node is None:
         return  # target concurrently deleted => no-op (delete wins).
-    idx = _widget_index(graph, node.get("type", ""), op["widget"])
     widgets = node.setdefault("widgets_values", [])
+    idx = _widget_index(graph, node.get("type", ""), op["widget"], widgets)
     if idx >= len(widgets):
         widgets.extend([None] * (idx + 1 - len(widgets)))
     widgets[idx] = op["value"]
@@ -818,7 +829,12 @@ def _apply_connect(workflow: dict, op: dict) -> None:
         ins = dst.setdefault("inputs", [])
         to_idx = next((k for k, i in enumerate(ins) if i.get("grow_id") == op["link_id"]), None)
         if to_idx is None:
-            entry = {"name": _next_autogrow_name(ins, grow["name"]), "type": grow["type"], "link": None, "grow_id": op["link_id"]}
+            entry = {
+                "name": _next_autogrow_name(ins, grow["name"]),
+                "type": grow["type"],
+                "link": None,
+                "grow_id": op["link_id"],
+            }
             if grow.get("widget"):
                 # Mark as a converted widget (ComfyUI's widget→input); value stays
                 # in widgets_values for positional alignment, converter uses the link.
@@ -858,11 +874,7 @@ def _apply_delete_node(workflow: dict, op: dict) -> None:
     node_id = op["node_id"]
     workflow["nodes"] = [n for n in workflow.get("nodes") or [] if n.get("id") != node_id]
     removed = set(op.get("removed_links") or [])
-    kept = [
-        ln
-        for ln in workflow.get("links") or []
-        if ln[0] not in removed and ln[1] != node_id and ln[3] != node_id
-    ]
+    kept = [ln for ln in workflow.get("links") or [] if ln[0] not in removed and ln[1] != node_id and ln[3] != node_id]
     workflow["links"] = kept
     kept_ids = {ln[0] for ln in kept}
     # Scrub dangling references so no input/output points at a gone link.
@@ -1010,8 +1022,11 @@ def _build_node(node_id: int, class_type: str, m, graph, pos: list | None) -> di
     }
 
 
-def _widget_index(graph, class_type: str, widget: str) -> int:
-    order = graph.widget_order(class_type)
+def _widget_index(graph, class_type: str, widget: str, widgets_values=None) -> int:
+    # Node-aware: expand a dynamic combo's sub-widgets by this node's actual
+    # selected key (from ``widgets_values``), not the schema's first key, so the
+    # index stays aligned to ``widgets_values`` for the node's real selection.
+    order = graph.widget_order_for_node(class_type, widgets_values)
     if widget not in order:
         avail = [w for w in order if w != "control_after_generate"]
         raise ValueError(
@@ -1091,7 +1106,9 @@ def _resolve_input_target(node: dict, graph, slot: Any, elem_type: str | None) -
     # Dotted autogrow key (images.image0) or a base that has no concrete slot yet.
     if isinstance(slot, str):
         base = slot.split(".", 1)[0]
-        ag = next((i for i in ins if i.get("name") == base and str(i.get("type", "")).startswith("COMFY_AUTOGROW")), None)
+        ag = next(
+            (i for i in ins if i.get("name") == base and str(i.get("type", "")).startswith("COMFY_AUTOGROW")), None
+        )
         if ag is not None:
             requested = slot if "." in slot else None
             return None, _plan_autogrow(ins, base, elem_type, requested=requested)

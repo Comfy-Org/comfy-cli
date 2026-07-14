@@ -173,6 +173,30 @@ def test_fresh_entry_for_other_target_does_not_hit(monkeypatch):
     assert loader.read_object_info_cache(LOCAL_KEY) == LIVE
 
 
+def test_local_never_serves_fresh_cache(monkeypatch):
+    """Cache-first TTL is cloud-only: a fresh LOCAL entry is NOT served, so a
+    node just installed into the user's own server is visible immediately. The
+    live fetch still runs (and rewrites the cache for the failure fallback)."""
+    import comfy_cli.cql.engine as engine
+
+    _pin_host_key(monkeypatch, LOCAL_KEY)
+    loader.write_object_info_cache(LOCAL_KEY, CACHED)  # fresh local entry
+
+    calls = {"n": 0}
+
+    def _live(**kw):
+        calls["n"] += 1
+        return LIVE
+
+    monkeypatch.setattr(engine, "_load_from_target", _live)
+
+    result = loader.resilient_load_object_info(mode="local", host="127.0.0.1", port=8188)
+
+    assert result == LIVE  # live, not the fresh cache
+    assert calls["n"] == 1
+    assert loader.read_object_info_cache(LOCAL_KEY) == LIVE  # cache rewritten for failure fallback
+
+
 # ---------------------------------------------------------------------------
 # expired entry + fetch failure → stale fallback still works
 # ---------------------------------------------------------------------------

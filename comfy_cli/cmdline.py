@@ -989,8 +989,16 @@ def validate(
         except Exception:
             pass
 
+    # Resolve object_info ONCE through the shared loader so validate honors the
+    # same catalog every other command does — an explicit --input dump, the
+    # COMFY_OBJECT_INFO_FILE offline catalog, or the cache-first live fetch — and
+    # so the graph we validate against is built from the SAME catalog used to
+    # lower a canvas workflow below (previously the graph came from Graph.load,
+    # which ignored COMFY_OBJECT_INFO_FILE, while lowering honored it).
     try:
-        graph = Graph.load(mode=mode, input_path=input_path, host=host or "127.0.0.1", port=port or 8188)
+        object_info = resilient_load_object_info(
+            mode=mode, input_path=input_path, host=host or "127.0.0.1", port=port or 8188
+        )
     except LoadError as e:
         renderer.error(
             code="cql_no_graph",
@@ -999,6 +1007,8 @@ def validate(
             details=e.details,
         )
         raise typer.Exit(code=1) from e
+    graph = Graph.from_object_info(object_info)
+    graph._try_default_annotations()
 
     # `validate_workflow` only inspects the API/prompt shape
     # ({id: {class_type, inputs}}) — it iterates node inputs and checks wiring,
@@ -1010,18 +1020,6 @@ def validate(
     # (and the SAME object_info resolution) the `run` path uses, so validate
     # inspects exactly what the server would execute.
     if not is_api_format(wf_data):
-        try:
-            object_info = resilient_load_object_info(
-                mode=mode, input_path=input_path, host=host or "127.0.0.1", port=port or 8188
-            )
-        except LoadError as e:
-            renderer.error(
-                code="cql_no_graph",
-                message=str(e),
-                hint=e.details.get("hint", "pass --input <object_info.json>, or start the server"),
-                details=e.details,
-            )
-            raise typer.Exit(code=1) from e
         try:
             wf_data = convert_ui_to_api(wf_data, object_info)
         except WorkflowConversionError as e:

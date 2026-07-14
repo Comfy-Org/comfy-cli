@@ -297,6 +297,85 @@ class TestWidgetOrder:
         assert order == []
 
 
+class TestWidgetOrderForNode:
+    """graph.widget_order_for_node — dynamic combos expand by the node's ACTUAL
+    selected key, not the schema's first key (regression for set-widget writing
+    into the wrong slot when the selection expands to a different sub-widget count)."""
+
+    @staticmethod
+    def _dyn_graph() -> Graph:
+        # `model` is a dynamic combo: key "a" → 1 sub-widget, key "b" → 2. `seed`
+        # follows it, so its slot index depends on which key is selected.
+        return Graph.from_object_info(
+            {
+                "DynNode": {
+                    "input": {
+                        "required": {
+                            "model": [
+                                "COMFY_DYNAMICCOMBO_V3",
+                                {
+                                    "options": [
+                                        {
+                                            "key": "a",
+                                            "inputs": {
+                                                "required": {"res": ["COMBO", {"options": ["x", "y"], "default": "x"}]}
+                                            },
+                                        },
+                                        {
+                                            "key": "b",
+                                            "inputs": {
+                                                "required": {
+                                                    "res": ["COMBO", {"options": ["x", "y"], "default": "x"}],
+                                                    "quality": ["COMBO", {"options": ["lo", "hi"], "default": "lo"}],
+                                                }
+                                            },
+                                        },
+                                    ]
+                                },
+                            ],
+                            "seed": ["INT", {"default": 0}],
+                        }
+                    },
+                    "input_order": {"required": ["model", "seed"]},
+                    "output": ["IMAGE"],
+                    "output_name": ["IMAGE"],
+                    "category": "test",
+                    "display_name": "Dyn",
+                    "python_module": "nodes",
+                }
+            }
+        )
+
+    def test_static_order_uses_first_key(self):
+        g = self._dyn_graph()
+        assert g.widget_order("DynNode") == ["model", "model.res", "seed"]
+
+    def test_node_order_expands_selected_key(self):
+        g = self._dyn_graph()
+        # Selecting "b" adds model.quality, pushing seed to index 3.
+        order = g.widget_order_for_node("DynNode", ["b", "x", "hi", 12345])
+        assert order == ["model", "model.res", "model.quality", "seed"]
+        assert order.index("seed") == 3
+
+    def test_node_order_first_key_matches_static(self):
+        g = self._dyn_graph()
+        assert g.widget_order_for_node("DynNode", ["a", "x", 999]) == ["model", "model.res", "seed"]
+
+    def test_empty_widgets_falls_back_to_static(self):
+        g = self._dyn_graph()
+        assert g.widget_order_for_node("DynNode", []) == g.widget_order("DynNode")
+
+    def test_set_widget_writes_seed_to_selected_slot(self):
+        """End-to-end: set-widget on a "b"-selected node must land seed at index 3,
+        not overwrite model.quality at index 2."""
+        from comfy_cli import workflow_ops
+
+        g = self._dyn_graph()
+        wf = {"nodes": [{"id": 3, "type": "DynNode", "widgets_values": ["b", "x", "hi", 111]}]}
+        workflow_ops.set_widget(wf, g, 3, "seed", 424242, actor="cli", base_version=0)
+        assert wf["nodes"][0]["widgets_values"] == ["b", "x", "hi", 424242]
+
+
 # ===========================================================================
 # TestTraversal
 # ===========================================================================
@@ -1305,6 +1384,7 @@ class TestComboNormalizationAndSuggestions:
 
     def _port(self):
         from comfy_cli.cql.engine import Port
+
         return Port(
             name="ckpt_name",
             type="COMBO",
@@ -1333,6 +1413,7 @@ class TestComboNormalizationAndSuggestions:
 
     def test_canonical_ambiguous_basename_returns_none(self):
         from comfy_cli.cql.engine import Port
+
         p = Port(name="ckpt_name", type="COMBO", enum_values=["a/dup.safetensors", "b/dup.safetensors"])
         assert p.canonical_combo("dup.safetensors") is None  # two matches → don't guess
 

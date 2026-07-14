@@ -95,7 +95,13 @@ def _get_graph(input_path: str | None, host: str | None, port: int | None, on_st
 
         # Honor an explicit --where (threaded from the agent edit commands) via
         # the convenience wrapper, which folds in the config/project precedence.
-        decision = where_module.resolve_default(where)
+        # A bad --where value raises ValueError — surface it as the agent-first
+        # error envelope, not a raw traceback out of every edit command.
+        try:
+            decision = where_module.resolve_default(where)
+        except ValueError as e:
+            renderer.error(code="where_invalid", message=str(e), hint="use --where local or --where cloud")
+            raise typer.Exit(code=1) from e
         mode = "cloud" if decision.target is where_module.WhereTarget.CLOUD else "local"
         from comfy_cli.cql.loader import resilient_load_object_info
 
@@ -1181,6 +1187,12 @@ app.command("connect", help="Wire an output slot to an input slot; emits a conne
 app.command("set-widget", help="Set a widget by name (`<id>.<widget>`); emits a set_widget op.")(_wedit.set_widget_cmd)
 app.command("delete-node", help="Delete a node and its links; emits a delete_node op.")(_wedit.delete_cmd)
 app.command("ls-nodes", help="List nodes (id/type/title) in a workflow file.")(_wedit.ls_nodes_cmd)
-app.command("apply", help="Apply a recipe / batch of edits in one pass; supports node aliases + --param.")(_wedit.apply_cmd)
-app.command("capture", help="Project a workflow into a reusable recipe (the op-batch that rebuilds it).")(_wedit.capture_cmd)
-app.command("foreach", help="Instantiate a recipe over N param-sets → N workflows (bulk generation).")(_wedit.foreach_cmd)
+app.command("apply", help="Apply a recipe / batch of edits in one pass; supports node aliases + --param.")(
+    _wedit.apply_cmd
+)
+app.command("capture", help="Project a workflow into a reusable recipe (the op-batch that rebuilds it).")(
+    _wedit.capture_cmd
+)
+app.command("foreach", help="Instantiate a recipe over N param-sets → N workflows (bulk generation).")(
+    _wedit.foreach_cmd
+)
