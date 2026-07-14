@@ -237,6 +237,28 @@ class TestResolveDefaultCheckpoint:
         assert res.no_checkpoint is False
         assert res.note is None
 
+    def test_non_dict_object_info_fails_open(self):
+        # A hostile/misbehaving server returning non-object JSON (e.g. `[]`)
+        # must fail open, not crash with AttributeError.
+        wf = build_default_workflow(prompt="fox")
+        out, res = resolve_default_checkpoint(wf, [])
+        assert out[CHECKPOINT_LOADER_ID]["inputs"]["ckpt_name"] == DEFAULT_CHECKPOINT_NAME
+        assert res.no_checkpoint is False
+        assert res.note is None
+
+    def test_pinned_matched_by_basename_in_subfolder(self):
+        # ComfyUI enumerates by path relative to the models dir; the pinned bare
+        # filename living in a subfolder should match (and be rewritten to the
+        # full path) rather than triggering an arbitrary substitution.
+        wf = build_default_workflow(prompt="fox")
+        subfoldered = f"SD1.5/{DEFAULT_CHECKPOINT_NAME}"
+        oi = _object_info_with_checkpoints(["other.safetensors", subfoldered])
+        out, res = resolve_default_checkpoint(wf, oi)
+        assert out[CHECKPOINT_LOADER_ID]["inputs"]["ckpt_name"] == subfoldered
+        assert res.note is None
+        assert res.substituted_to is None
+        assert res.no_checkpoint is False
+
     def test_object_info_without_checkpoint_node_fails_open(self):
         # object_info present but no CheckpointLoaderSimple → can't tell → fail open.
         wf = build_default_workflow(prompt="fox")

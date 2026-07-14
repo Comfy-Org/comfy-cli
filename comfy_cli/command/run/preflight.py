@@ -123,8 +123,11 @@ def _resolve_default_checkpoint_or_exit(renderer, workflow: dict, object_info: d
       (fail open — preflight + the server decide);
     - pinned absent but the target has ≥1 checkpoint → substitute the first
       available one and emit a ``checkpoint_substituted`` note;
-    - target positively has zero checkpoints → hard ``no_checkpoint_available``
-      error (exit 1) instead of a cryptic server-side reject.
+    - target positively has zero checkpoints → for ``where="local"`` a hard
+      ``no_checkpoint_available`` error (exit 1) instead of a cryptic
+      server-side reject; for ``where="cloud"`` a no-op (fail open), since Comfy
+      Cloud provisions its models per-job and the cached enum can't prove the
+      run would fail.
 
     ``where`` is ``"local"`` or ``"cloud"`` and drives the target label + hint.
     """
@@ -133,18 +136,21 @@ def _resolve_default_checkpoint_or_exit(renderer, workflow: dict, object_info: d
     target_label = "the local server" if where == "local" else "Comfy Cloud"
     _, res = resolve_default_checkpoint(workflow, object_info, target=target_label)
 
+    # Comfy Cloud provisions its models per-job at runtime, so an empty
+    # checkpoint enum in the cached/bundled cloud object_info does NOT mean the
+    # run would fail — hard-erroring there would wrongly block valid default
+    # cloud submits. Only the local path (where the enum reflects what's
+    # actually installed) treats a positively-empty enum as a hard stop.
+    if res.no_checkpoint and where == "cloud":
+        return
+
     if res.no_checkpoint:
-        if where == "local":
-            hint = (
-                "download a checkpoint, e.g. `comfy model download --url "
-                "https://huggingface.co/Comfy-Org/stable-diffusion-v1-5-archive/resolve/main/"
-                "v1-5-pruned-emaonly-fp16.safetensors`, then re-run — or `--set checkpoint=<name>`"
-            )
-        else:
-            hint = (
-                "run a published gallery template (Comfy Cloud provisions its models), or "
-                "`--set checkpoint=<name>` once a checkpoint is available on the target"
-            )
+        # Only reachable for the local path (cloud returned above).
+        hint = (
+            "download a checkpoint, e.g. `comfy model download --url "
+            "https://huggingface.co/Comfy-Org/stable-diffusion-v1-5-archive/resolve/main/"
+            "v1-5-pruned-emaonly-fp16.safetensors`, then re-run — or `--set checkpoint=<name>`"
+        )
         renderer.error(
             code="no_checkpoint_available",
             message=(
@@ -159,7 +165,11 @@ def _resolve_default_checkpoint_or_exit(renderer, workflow: dict, object_info: d
         # Event fires in NDJSON/stream mode only; the pretty line covers humans.
         renderer.event("checkpoint_substituted", message=res.note, checkpoint=res.substituted_to, where=where)
         if renderer.is_pretty():
-            pprint(f"[yellow]⚠ {res.note}[/yellow]")
+            from rich.markup import escape
+
+            # res.note embeds a target-provided checkpoint name; escape it so a
+            # name containing Rich tags can't inject terminal markup.
+            pprint(f"[yellow]⚠ {escape(res.note)}[/yellow]")
 
 
 def _fetch_object_info(host: str, port: int) -> dict:

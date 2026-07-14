@@ -276,6 +276,11 @@ def _checkpoint_enum(object_info: dict) -> list | None:
     option list is element 0. ``None`` (not an empty list) means "can't tell"
     so the caller can distinguish a positively-empty enum from an absent one.
     """
+    if not isinstance(object_info, dict):
+        # A non-object /object_info payload (e.g. a hostile or misbehaving
+        # server returning ``[]``) means "can't tell" — fail open, mirroring
+        # Graph.from_object_info's isinstance guard rather than crashing.
+        return None
     node = object_info.get("CheckpointLoaderSimple")
     if not isinstance(node, dict):
         return None
@@ -326,6 +331,17 @@ def resolve_default_checkpoint(
     pinned = inputs.get("ckpt_name")
     if pinned in enum:
         return workflow, CheckpointResolution()
+
+    # ComfyUI enumerates checkpoints by their path relative to the models dir,
+    # so a pinned bare filename won't exact-match the same file living in a
+    # subfolder (e.g. ``SD1.5/v1-5-…safetensors``). Prefer a basename match to
+    # the *intended* checkpoint before falling back to an arbitrary substitute.
+    if isinstance(pinned, str):
+        pinned_base = pinned.rsplit("/", 1)[-1]
+        for entry in enum:
+            if isinstance(entry, str) and entry.rsplit("/", 1)[-1] == pinned_base:
+                inputs["ckpt_name"] = entry
+                return workflow, CheckpointResolution()
 
     replacement = enum[0]
     inputs["ckpt_name"] = replacement

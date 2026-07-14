@@ -213,3 +213,29 @@ class TestRuntimeCheckpointResolutionLocal:
         MockExec, _ = self._run_local(preloaded, oi)
         submitted = MockExec.call_args.args[0]
         assert submitted[CHECKPOINT_LOADER_ID]["inputs"]["ckpt_name"] == "userpick.safetensors"
+
+
+class TestCheckpointResolutionEmptyEnumByTarget:
+    """`_resolve_default_checkpoint_or_exit` hard-errors on an empty enum only
+    for the local target; Comfy Cloud provisions models per-job so it fails
+    open (BE-2994)."""
+
+    def test_local_empty_enum_hard_errors(self):
+        from comfy_cli.command.run.preflight import _resolve_default_checkpoint_or_exit
+        from comfy_cli.output import get_renderer
+
+        wf = build_default_workflow(prompt="fox")
+        oi = _object_info_with_checkpoints([])
+        with pytest.raises(typer.Exit) as e:
+            _resolve_default_checkpoint_or_exit(get_renderer(), wf, oi, where="local")
+        assert e.value.exit_code == 1
+
+    def test_cloud_empty_enum_fails_open(self):
+        from comfy_cli.command.run.preflight import _resolve_default_checkpoint_or_exit
+        from comfy_cli.output import get_renderer
+
+        wf = build_default_workflow(prompt="fox")
+        oi = _object_info_with_checkpoints([])
+        # No raise: the submit is allowed to proceed with the pinned default.
+        _resolve_default_checkpoint_or_exit(get_renderer(), wf, oi, where="cloud")
+        assert wf[CHECKPOINT_LOADER_ID]["inputs"]["ckpt_name"] == DEFAULT_CHECKPOINT_NAME

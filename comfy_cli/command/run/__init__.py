@@ -196,11 +196,30 @@ def execute(
         # foreach item map to stash on the job state at submit time.
         compose_meta = pop_compose_meta(workflow)
 
+    # Partner-API node preflight (below) and runtime checkpoint resolution both
+    # need the server's object_info. `--print-prompt` is a documented
+    # no-server-hit dry-run, so skip the fetch + resolution there and print the
+    # graph as-is; the real submit flow resolves BEFORE the prompt_preview event
+    # so the streamed audit trail advertises the graph we actually submit.
+    object_info: dict = {}
+    if not print_prompt:
+        object_info = _fetch_object_info(host, port)
+
+        # Runtime checkpoint resolution for the bundled `--prompt` default: swap
+        # the pinned checkpoint for one the local server actually has (or
+        # hard-error if it has none). Guarded to the bundled default graph and
+        # skipped when the user pinned the checkpoint explicitly (honor it; let
+        # preflight reject it).
+        if preloaded is not None and workflow_name == "default_text2img" and not checkpoint_user_set:
+            _resolve_default_checkpoint_or_exit(renderer, workflow, object_info, where="local")
+
     # Stream mode: emit the workflow graph so agents have a complete audit
     # trail of what the CLI is about to submit (no-op otherwise).
     renderer.event("prompt_preview", prompt=workflow)
 
-    # --print-prompt: emit/print the workflow and exit without submitting.
+    # --print-prompt: emit/print the workflow and exit without submitting. No
+    # server hit (documented) — the graph is shown as-is, before any
+    # server-dependent checkpoint resolution.
     if print_prompt:
         if renderer.is_pretty():
             print(json.dumps(workflow, indent=2, ensure_ascii=False))
@@ -211,20 +230,6 @@ def execute(
                 where="local",
             )
         return
-
-    # Partner-API node preflight. Reject up-front when the workflow
-    # depends on a partner node (Veo/Kling/BFL/Gemini/…) and we have no
-    # credential to inject. If we DO have a credential, plumb it into
-    # extra_data so the partner node finds it server-side — same shape
-    # the cloud submit path uses.
-    object_info = _fetch_object_info(host, port)
-
-    # Runtime checkpoint resolution for the bundled `--prompt` default: swap the
-    # pinned checkpoint for one the local server actually has (or hard-error if
-    # it has none). Guarded to the bundled default graph and skipped when the
-    # user pinned the checkpoint explicitly (honor it; let preflight reject it).
-    if preloaded is not None and workflow_name == "default_text2img" and not checkpoint_user_set:
-        _resolve_default_checkpoint_or_exit(renderer, workflow, object_info, where="local")
 
     partner_nodes = _detect_partner_nodes(workflow, object_info)
     extra_data: dict | None = None
@@ -583,6 +588,23 @@ def execute_cloud(
     # its foreach item map to stash on the job state at submit time.
     compose_meta = pop_compose_meta(parsed_workflow)
 
+    # Cloud path uses cached/bundled object_info (no live server needed). Load
+    # it up front so checkpoint resolution can run BEFORE the preview/print
+    # below — the audit trail must advertise the graph we actually submit.
+    try:
+        from comfy_cli.cql.engine import _load_from_target
+
+        cloud_object_info = _load_from_target(mode="cloud")
+    except Exception:  # noqa: BLE001
+        cloud_object_info = {}
+
+    # Runtime checkpoint resolution for the bundled `--prompt` default (mirrors
+    # the local path): swap the pinned checkpoint for one Comfy Cloud actually
+    # has. Guarded to the bundled default and skipped when the user pinned the
+    # checkpoint explicitly. Cloud fails open on an empty enum (per-job models).
+    if preloaded is not None and workflow_name == "default_text2img" and not checkpoint_user_set:
+        _resolve_default_checkpoint_or_exit(renderer, parsed_workflow, cloud_object_info, where="cloud")
+
     if print_prompt:
         # Documented dry-run: show the API-format graph that WOULD be sent and
         # exit WITHOUT POSTing. Mirrors local execute()'s print_prompt branch.
@@ -598,21 +620,6 @@ def execute_cloud(
         raise typer.Exit(code=0)
 
     # Pre-submit validation via pure-Python CQL engine.
-    # Cloud path uses cached/bundled object_info (no live server needed).
-    try:
-        from comfy_cli.cql.engine import _load_from_target
-
-        cloud_object_info = _load_from_target(mode="cloud")
-    except Exception:  # noqa: BLE001
-        cloud_object_info = {}
-
-    # Runtime checkpoint resolution for the bundled `--prompt` default (mirrors
-    # the local path): swap the pinned checkpoint for one Comfy Cloud actually
-    # has, or hard-error if it enumerates none. Guarded to the bundled default
-    # and skipped when the user pinned the checkpoint explicitly.
-    if preloaded is not None and workflow_name == "default_text2img" and not checkpoint_user_set:
-        _resolve_default_checkpoint_or_exit(renderer, parsed_workflow, cloud_object_info, where="cloud")
-
     _preflight_validate(renderer, parsed_workflow, cloud_object_info, target_label="cloud")
 
     target = resolve_target(where="cloud")
