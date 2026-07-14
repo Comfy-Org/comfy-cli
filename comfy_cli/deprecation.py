@@ -17,6 +17,8 @@ consolidations reuse :func:`add_deprecated_alias`.
 
 from __future__ import annotations
 
+import functools
+
 import typer
 
 # Use the output shim so the warning lands on stderr (not stdout) in JSON mode,
@@ -55,19 +57,43 @@ def add_deprecated_alias(
     alias is a fresh Typer that borrows the registered commands — so the canonical
     mount of the same commands stays warning-free.
 
+    Both leaf commands *and* nested sub-groups (``add_typer``) are carried over,
+    and if ``source_app`` declares its own group callback the alias composes it
+    with the deprecation warning rather than dropping it — so the helper stays
+    correct as the sibling noun consolidations reuse it against richer command
+    trees.
+
     Returns the alias app (useful for tests).
     """
     alias = typer.Typer(
         no_args_is_help=True,
         help=deprecated_help(new_name, source_app.info.help),
     )
-    # Borrow the exact command registrations — same CommandInfo objects, so the
-    # alias and the canonical surface stay in lockstep with zero duplication.
+    # Borrow the exact command + sub-group registrations — same CommandInfo /
+    # TyperInfo objects, so the alias and the canonical surface stay in lockstep
+    # with zero duplication.
     alias.registered_commands.extend(source_app.registered_commands)
+    alias.registered_groups.extend(source_app.registered_groups)
 
-    @alias.callback()
-    def _emit_deprecation_warning() -> None:
-        warn_deprecated(old_name, new_name)
+    # The alias always needs a group callback to emit the deprecation warning.
+    # If the source app declared one of its own (with its own options / setup),
+    # compose the two — warn first, then delegate — preserving the source's
+    # callback signature so its CLI options still resolve on the alias.
+    source_cb_info = source_app.registered_callback
+    source_cb = getattr(source_cb_info, "callback", None) if source_cb_info else None
+
+    if source_cb is None:
+
+        @alias.callback()
+        def _emit_deprecation_warning() -> None:
+            warn_deprecated(old_name, new_name)
+    else:
+
+        @alias.callback()
+        @functools.wraps(source_cb)
+        def _emit_deprecation_warning(*args, **kwargs):
+            warn_deprecated(old_name, new_name)
+            return source_cb(*args, **kwargs)
 
     parent.add_typer(alias, name=old_name, hidden=True)
     return alias

@@ -103,6 +103,55 @@ class TestHelper:
         combined = result.output + capsys.readouterr().err
         assert "deprecated" not in combined.lower()
 
+    def test_alias_carries_nested_sub_groups(self):
+        # A source app with a nested sub-group (add_typer) must have that group
+        # carried onto the alias too — not silently dropped — and the warning
+        # still fires for leaves reached through the nested group.
+        source = typer.Typer(help="Root.")
+        sub = typer.Typer()
+
+        @sub.command("leaf")
+        def leaf():
+            typer.echo("leaf-ran")
+
+        source.add_typer(sub, name="sub")
+
+        parent = typer.Typer()
+        parent.add_typer(source, name="thing")
+        add_deprecated_alias(parent, source, old_name="things", new_name="thing")
+
+        result = CliRunner().invoke(parent, ["things", "sub", "leaf"])
+        assert result.exit_code == 0, result.output
+        assert "leaf-ran" in result.output
+        assert "deprecated" in result.output.lower()
+
+    def test_alias_composes_source_callback(self, capsys):
+        # A source app that declares its own group callback (with an option) must
+        # have both the deprecation warning AND its own callback run, with the
+        # callback's option preserved on the alias.
+        seen: list[bool] = []
+        source = typer.Typer()
+
+        @source.callback()
+        def _cb(flag: bool = typer.Option(False, "--flag")):
+            seen.append(flag)
+
+        @source.command("go")
+        def go():
+            typer.echo("ran")
+
+        parent = typer.Typer()
+        parent.add_typer(source, name="thing")
+        add_deprecated_alias(parent, source, old_name="things", new_name="thing")
+
+        result = CliRunner().invoke(parent, ["things", "--flag", "go"])
+        assert result.exit_code == 0, result.output
+        assert "ran" in result.output
+        combined = result.output + capsys.readouterr().err
+        assert "deprecated" in combined.lower()
+        # The source callback ran, and its --flag option resolved on the alias.
+        assert seen == [True], seen
+
 
 # ---------------------------------------------------------------------------
 # End-to-end through the real root app: `comfy models list-folders` warns,
