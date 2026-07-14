@@ -517,7 +517,7 @@ def _build_steps(state: _DemoState) -> list[Step]:
         ),
         Step(
             title="auth whoami — Comfy Cloud sign-in state",
-            desc="Same commands work against Comfy Cloud via --where cloud (after `comfy auth login`).",
+            desc="Same commands work against Comfy Cloud via --where cloud (after `comfy cloud login`).",
             invocations=[
                 Invocation(argv=[*comfy, "auth", "whoami"], label="comfy auth whoami", optional=True),
                 Invocation(

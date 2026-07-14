@@ -599,7 +599,7 @@ def execute_cloud(
     try:
         client = Client(target, timeout=float(timeout))
     except Unauthenticated as e:
-        renderer.error(code="cloud_unauthorized", message=str(e), hint="run: comfy auth login")
+        renderer.error(code="cloud_unauthorized", message=str(e), hint="run: comfy cloud login")
         raise typer.Exit(code=1) from e
 
     client_id = str(uuid.uuid4())
