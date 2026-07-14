@@ -902,7 +902,9 @@ def run(
 
 
 @app.command(
-    help="Validate an API-format workflow without submitting. Checks class_types, input shapes, enum values, and edge wiring."
+    hidden=True,
+    help="[DEPRECATED — use 'comfy workflow validate'] Validate an API-format workflow without submitting. "
+    "Checks class_types, input shapes, enum values, and edge wiring.",
 )
 @tracking.track_command()
 def validate(
@@ -927,81 +929,14 @@ def validate(
         typer.Option("--input", show_default=False, help="Path to a saved object_info JSON (offline mode)."),
     ] = None,
 ):
-    from pathlib import Path
+    # Deprecated alias for `comfy workflow validate` (its canonical home). Kept
+    # functional for backward compatibility; warns and delegates to the shared
+    # implementation. The warning routes to stderr in JSON modes, so structured
+    # output stays clean.
+    from comfy_cli.command.workflow import validate_api_workflow
 
-    from comfy_cli.cql.engine import Graph, LoadError
-
-    renderer = get_renderer()
-
-    # Load workflow
-    wf_path = Path(workflow).expanduser()
-    if not wf_path.is_file():
-        renderer.error(code="workflow_not_found", message=f"Workflow file not found: {workflow}", hint="check the path")
-        raise typer.Exit(code=1)
-    try:
-        wf_data = json.loads(wf_path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as e:
-        renderer.error(code="workflow_invalid_json", message=f"Invalid JSON: {e}", hint="re-export from ComfyUI")
-        raise typer.Exit(code=1) from e
-    if not isinstance(wf_data, dict):
-        renderer.error(
-            code="workflow_not_api_format", message="Workflow must be a JSON object", hint="use File > Export (API)"
-        )
-        raise typer.Exit(code=1)
-
-    # Load graph
-    mode = "local"
-    if where:
-        mode = where
-    else:
-        config = ConfigManager()
-        try:
-            decision = where_module.resolve(flag=None, config_value=config.get(where_module.CONFIG_KEY_WHERE_DEFAULT))
-            mode = decision.target.value
-        except Exception:
-            pass
-
-    try:
-        graph = Graph.load(mode=mode, input_path=input_path, host=host or "127.0.0.1", port=port or 8188)
-    except LoadError as e:
-        renderer.error(
-            code="cql_no_graph",
-            message=str(e),
-            hint=e.details.get("hint", "pass --input <object_info.json>, or start the server"),
-            details=e.details,
-        )
-        raise typer.Exit(code=1) from e
-
-    result = graph.validate_workflow(wf_data)
-
-    payload = {
-        "workflow": str(wf_path),
-        "valid": result["valid"],
-        "error_count": len(result["errors"]),
-        "warning_count": len(result["warnings"]),
-        "errors": result["errors"],
-        "warnings": result["warnings"],
-    }
-
-    if renderer.is_pretty():
-        if result["valid"]:
-            rprint(f"[bold green]✓[/bold green] workflow is valid ({len(wf_data)} nodes)")
-            for w in result["warnings"]:
-                rprint(f"  [yellow]⚠[/yellow] {w.get('message', '')}")
-        else:
-            rprint(f"[bold red]✗[/bold red] {len(result['errors'])} error(s)")
-            for e in result["errors"]:
-                msg = e.get("message", "")
-                suggestions = e.get("suggestions", [])
-                if suggestions:
-                    msg += f" (did you mean: {', '.join(suggestions[:3])}?)"
-                rprint(f"  [red]•[/red] node {e.get('node_id', '?')}: {msg}")
-            for w in result["warnings"]:
-                rprint(f"  [yellow]⚠[/yellow] {w.get('message', '')}")
-    renderer.emit(payload, command="validate", ok=result["valid"])
-
-    if not result["valid"]:
-        raise typer.Exit(code=1)
+    get_renderer().warn("`comfy validate` is deprecated — use `comfy workflow validate` instead.")
+    validate_api_workflow(workflow, where=where, host=host, port=port, input_path=input_path, command="validate")
 
 
 @app.command(help="Upload files to the ComfyUI server's input directory.")
