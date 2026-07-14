@@ -118,10 +118,37 @@ class TestStopJson:
         assert env["data"] == {"host": "127.0.0.1", "port": 8188, "stopped": True}
         assert fake.removed is True
 
-    def test_kill_failure_still_emits_envelope_stopped_false(self, monkeypatch, capsys):
+    def test_kill_failure_still_running_is_structured_error(self, monkeypatch, capsys):
+        # kill_all failed AND the server is still running: a genuine failure.
+        # Must report ok=false / exit 1 and KEEP the record so it can be
+        # targeted again (no orphaning).
         fake = _FakeConfig(("127.0.0.1", 8188, 4242))
         monkeypatch.setattr(cmdline, "ConfigManager", lambda: fake)
         monkeypatch.setattr(cmdline.utils, "kill_all", lambda pid: False)
+        monkeypatch.setattr(cmdline.utils, "is_running", lambda pid: True)
+        _force_renderer(OutputMode.JSON)
+
+        with pytest.raises(typer.Exit) as ei:
+            cmdline.stop()
+        assert ei.value.exit_code == 1
+
+        env = _last_envelope(capsys)
+        _validator_for("envelope.json").validate(env)
+        assert env["ok"] is False
+        assert env["command"] == "stop"
+        assert env["error"]["code"] == "stop_failed"
+        assert env["error"]["details"]["pid"] == 4242
+        # The record is preserved so a later stop/logs can still target it.
+        assert fake.removed is False
+
+    def test_already_gone_is_success_changed_false(self, monkeypatch, capsys):
+        # kill_all returned False because the process was already gone: a
+        # successful "nothing left to stop". Clear the stale record, report
+        # success with stopped=false / changed=false.
+        fake = _FakeConfig(("127.0.0.1", 8188, 4242))
+        monkeypatch.setattr(cmdline, "ConfigManager", lambda: fake)
+        monkeypatch.setattr(cmdline.utils, "kill_all", lambda pid: False)
+        monkeypatch.setattr(cmdline.utils, "is_running", lambda pid: False)
         _force_renderer(OutputMode.JSON)
 
         cmdline.stop()
@@ -131,7 +158,6 @@ class TestStopJson:
         assert env["ok"] is True
         assert env["data"]["stopped"] is False
         assert env["changed"] is False
-        # The stale background entry is cleared regardless of the kill outcome.
         assert fake.removed is True
 
     def test_no_background_is_structured_error(self, monkeypatch, capsys):
@@ -278,6 +304,21 @@ class TestLaunchBackgroundJson:
         assert env["ok"] is False
         assert env["error"]["code"] == "invalid_port"
         assert env["error"]["details"]["port"] == "notaport"
+
+    @pytest.mark.parametrize("bad_port", ["0", "70000", "-1"])
+    def test_out_of_range_port_is_structured_error(self, monkeypatch, capsys, bad_port):
+        fake_cfg = type("C", (), {"background": None})()
+        monkeypatch.setattr(launch_mod, "ConfigManager", lambda: fake_cfg)
+        _force_renderer(OutputMode.JSON)
+
+        with pytest.raises(typer.Exit):
+            launch_mod.background_launch(extra=["--port", bad_port])
+
+        env = _last_envelope(capsys)
+        _validator_for("envelope.json").validate(env)
+        assert env["ok"] is False
+        assert env["error"]["code"] == "invalid_port"
+        assert env["error"]["details"]["port"] == int(bad_port)
 
 
 # --------------------------------------------------------------------------

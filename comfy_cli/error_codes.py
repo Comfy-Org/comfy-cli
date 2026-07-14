@@ -590,6 +590,13 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "start one with `comfy launch --background` first",
     ),
     ErrorCode(
+        "stop_failed",
+        "`comfy stop` tried to kill the background ComfyUI but it is still running (e.g. a "
+        "permission or transient error). The PID record is kept so it can be targeted again. "
+        "`details` carries the host/port/pid.",
+        "check permissions and retry `comfy stop`, or kill the pid in `details` manually",
+    ),
+    ErrorCode(
         "workspace_not_found",
         "`comfy launch` could not resolve a ComfyUI workspace to launch.",
         "run `comfy install`, or pass `--workspace <path>`",

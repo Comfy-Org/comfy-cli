@@ -1130,16 +1130,33 @@ def stop():
     host, port, pid = bg_info
     is_killed = utils.kill_all(pid)
 
-    if not is_killed:
-        rprint("[bold red]Failed to stop ComfyUI in the background.[/bold red]\n")
-    else:
-        rprint(f"[bold yellow]Background ComfyUI is stopped.[/bold yellow] ({host}:{port})")
+    # kill_all returns False both when the process is already gone and when the
+    # kill genuinely fails. Only a server that is *still running* afterward is a
+    # real failure: keep its PID record so a later `comfy stop`/`comfy logs` can
+    # still target it, and report non-zero. An already-dead process is a
+    # successful "nothing left to stop" — clear the stale record and succeed.
+    if not is_killed and utils.is_running(pid):
+        if renderer.is_json():
+            renderer.error(
+                code="stop_failed",
+                message="Failed to stop ComfyUI in the background; it is still running.",
+                command="stop",
+                details={"host": host, "port": port, "pid": pid},
+            )
+        else:
+            rprint("[bold red]Failed to stop ComfyUI in the background.[/bold red]\n")
+        raise typer.Exit(code=1)
 
     config.remove_background()
 
+    if not renderer.is_json():
+        rprint(f"[bold yellow]Background ComfyUI is stopped.[/bold yellow] ({host}:{port})")
+
     # In JSON mode, emit the envelope so programmatic callers can tell a
     # successful stop from a malformed/absent response (pretty mode already
-    # printed the human line above; emit() is a no-op there).
+    # printed the human line above; emit() is a no-op there). ``stopped`` is
+    # True only when we actively killed the process; an already-gone server is
+    # a success with ``changed=False``.
     renderer.emit(
         {"host": host, "port": port, "stopped": is_killed},
         command="stop",

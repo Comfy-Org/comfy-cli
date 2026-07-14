@@ -17,7 +17,7 @@
     },
     "stopped": {
       "type": "boolean",
-      "description": "True when the background process was killed. The recorded background entry is cleared regardless."
+      "description": "True when this call actively killed the background process. False when the server was already gone (still a success, with `changed=false`). The recorded background entry is cleared in both cases. If the kill fails while the server is still running, `comfy stop` instead emits an `ok=false` envelope with the `stop_failed` error and keeps the record."
     }
   }
 }

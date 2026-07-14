@@ -245,6 +245,20 @@ def background_launch(extra, frontend_pr=None):
             print(f"[bold red]Invalid --port value {port!r}; expected an integer.[/bold red]\n")
         raise typer.Exit(code=1)
 
+    if not (1 <= port <= 65535):
+        # Out-of-range ports parse fine but never bind; surface the clear
+        # invalid_port signal here rather than a generic launch failure later.
+        if renderer.is_json():
+            renderer.error(
+                code="invalid_port",
+                message=f"Invalid --port value {port}; expected an integer in the range 1-65535.",
+                command="launch",
+                details={"port": port},
+            )
+        else:
+            print(f"[bold red]Invalid --port value {port}; expected an integer in the range 1-65535.[/bold red]\n")
+        raise typer.Exit(code=1)
+
     if check_comfy_server_running(port):
         if renderer.is_json():
             renderer.error(
@@ -411,12 +425,18 @@ async def launch_and_monitor(cmd, listen, port):
             # stdout. No-op in pretty mode — the human line above already ran.
             # Emit before os._exit(0): _write_json_line flushes, and os._exit
             # skips interpreter cleanup so a buffered write would be lost.
-            get_renderer().emit(
-                {"host": listen, "port": port, "pid": process.pid, "background": True},
-                command="launch",
-                where="local",
-                changed=True,
-            )
+            # Guard the write so a stdout failure (e.g. BrokenPipeError if the
+            # caller closed the read end) still reaches the clean os._exit(0)
+            # below instead of unwinding the monitor with a traceback.
+            try:
+                get_renderer().emit(
+                    {"host": listen, "port": port, "pid": process.pid, "background": True},
+                    command="launch",
+                    where="local",
+                    changed=True,
+                )
+            except Exception:
+                pass
 
             # NOTE: os.exit(0) doesn't work.
             os._exit(0)
