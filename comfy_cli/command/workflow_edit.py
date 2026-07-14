@@ -93,7 +93,9 @@ def add_node_cmd(
     input_path: Annotated[str | None, typer.Option("--input", show_default=False)] = None,
     host: Annotated[str | None, typer.Option(show_default=False)] = None,
     port: Annotated[int | None, typer.Option(show_default=False)] = None,
-    where: Annotated[str | None, typer.Option("--where", show_default=False, help="Catalog target: local | cloud.")] = None,
+    where: Annotated[
+        str | None, typer.Option("--where", show_default=False, help="Catalog target: local | cloud.")
+    ] = None,
 ):
     renderer = get_renderer()
     renderer.command = "workflow add-node"
@@ -132,7 +134,9 @@ def set_widget_cmd(
     input_path: Annotated[str | None, typer.Option("--input", show_default=False)] = None,
     host: Annotated[str | None, typer.Option(show_default=False)] = None,
     port: Annotated[int | None, typer.Option(show_default=False)] = None,
-    where: Annotated[str | None, typer.Option("--where", show_default=False, help="Catalog target: local | cloud.")] = None,
+    where: Annotated[
+        str | None, typer.Option("--where", show_default=False, help="Catalog target: local | cloud.")
+    ] = None,
 ):
     renderer = get_renderer()
     renderer.command = "workflow set-widget"
@@ -174,7 +178,9 @@ def connect_cmd(
     input_path: Annotated[str | None, typer.Option("--input", show_default=False)] = None,
     host: Annotated[str | None, typer.Option(show_default=False)] = None,
     port: Annotated[int | None, typer.Option(show_default=False)] = None,
-    where: Annotated[str | None, typer.Option("--where", show_default=False, help="Catalog target: local | cloud.")] = None,
+    where: Annotated[
+        str | None, typer.Option("--where", show_default=False, help="Catalog target: local | cloud.")
+    ] = None,
 ):
     renderer = get_renderer()
     renderer.command = "workflow connect"
@@ -207,7 +213,9 @@ def delete_cmd(
     input_path: Annotated[str | None, typer.Option("--input", show_default=False)] = None,
     host: Annotated[str | None, typer.Option(show_default=False)] = None,
     port: Annotated[int | None, typer.Option(show_default=False)] = None,
-    where: Annotated[str | None, typer.Option("--where", show_default=False, help="Catalog target: local | cloud.")] = None,
+    where: Annotated[
+        str | None, typer.Option("--where", show_default=False, help="Catalog target: local | cloud.")
+    ] = None,
 ):
     renderer = get_renderer()
     renderer.command = "workflow delete-node"
@@ -283,7 +291,9 @@ def capture_cmd(
     input_path: Annotated[str | None, typer.Option("--input", show_default=False)] = None,
     host: Annotated[str | None, typer.Option(show_default=False)] = None,
     port: Annotated[int | None, typer.Option(show_default=False)] = None,
-    where: Annotated[str | None, typer.Option("--where", show_default=False, help="Catalog target: local | cloud.")] = None,
+    where: Annotated[
+        str | None, typer.Option("--where", show_default=False, help="Catalog target: local | cloud.")
+    ] = None,
 ):
     """Project a workflow into a reusable recipe — the op-batch that rebuilds it.
     `apply` that recipe onto an empty graph to reproduce the workflow; edit a value
@@ -356,7 +366,9 @@ def apply_cmd(
     input_path: Annotated[str | None, typer.Option("--input", show_default=False)] = None,
     host: Annotated[str | None, typer.Option(show_default=False)] = None,
     port: Annotated[int | None, typer.Option(show_default=False)] = None,
-    where: Annotated[str | None, typer.Option("--where", show_default=False, help="Catalog target: local | cloud.")] = None,
+    where: Annotated[
+        str | None, typer.Option("--where", show_default=False, help="Catalog target: local | cloud.")
+    ] = None,
 ):
     """Apply a batch of edits in one pass — the catalog loads once, and an
     `add_node` spec may set `"as": "<alias>"` so later specs reference the
@@ -473,7 +485,9 @@ def foreach_cmd(
     input_path: Annotated[str | None, typer.Option("--input", show_default=False)] = None,
     host: Annotated[str | None, typer.Option(show_default=False)] = None,
     port: Annotated[int | None, typer.Option(show_default=False)] = None,
-    where: Annotated[str | None, typer.Option("--where", show_default=False, help="Catalog target: local | cloud.")] = None,
+    where: Annotated[
+        str | None, typer.Option("--where", show_default=False, help="Catalog target: local | cloud.")
+    ] = None,
 ):
     """Instantiate a recipe over N param-sets → N ready-to-run workflows (bulk).
     Run them with `comfy run --workflow <each> --where cloud`."""

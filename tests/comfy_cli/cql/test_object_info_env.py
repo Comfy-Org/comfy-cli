@@ -22,8 +22,11 @@ def test_resilient_load_honors_object_info_file_env(monkeypatch, tmp_path):
     monkeypatch.setattr(engine, "_load_from_file", fake_load)
     # The network path must NOT run when the env dump is set.
     monkeypatch.setattr(
-        engine, "_load_from_target",
-        lambda **_: (_ for _ in ()).throw(AssertionError("network fetch should not run with COMFY_OBJECT_INFO_FILE set")),
+        engine,
+        "_load_from_target",
+        lambda **_: (_ for _ in ()).throw(
+            AssertionError("network fetch should not run with COMFY_OBJECT_INFO_FILE set")
+        ),
     )
     monkeypatch.setenv("COMFY_OBJECT_INFO_FILE", str(dump))
 

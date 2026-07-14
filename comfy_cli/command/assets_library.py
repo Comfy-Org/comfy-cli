@@ -33,7 +33,9 @@ def ls_cmd(
     ] = None,
     tags: Annotated[
         str | None,
-        typer.Option("--tags", show_default=False, help="Comma-separated tags; assets must have ALL of them (e.g. input,output)."),
+        typer.Option(
+            "--tags", show_default=False, help="Comma-separated tags; assets must have ALL of them (e.g. input,output)."
+        ),
     ] = None,
     limit: Annotated[int, typer.Option("--limit", help="Cap rows returned (max 500).")] = 20,
     where: Annotated[str | None, typer.Option("--where", show_default=False)] = None,
@@ -47,7 +49,7 @@ def ls_cmd(
     params: list[tuple[str, Any]] = [("limit", min(max(limit, 1), 500))]
     if name:
         params.append(("name_contains", name))
-    for t in (tags.split(",") if tags else []):
+    for t in tags.split(",") if tags else []:
         t = t.strip()
         if t:
             params.append(("include_tags", t))

@@ -121,7 +121,9 @@ def test_build_txt2img_against_live_cloud_catalog():
     assert api[str(ids["ckpt"])]["inputs"]["ckpt_name"] is not None
 
 
-@pytest.mark.skipif(not os.environ.get("COMFY_CLOUD_E2E_RUN"), reason="submit spends credits: set COMFY_CLOUD_E2E_RUN=1")
+@pytest.mark.skipif(
+    not os.environ.get("COMFY_CLOUD_E2E_RUN"), reason="submit spends credits: set COMFY_CLOUD_E2E_RUN=1"
+)
 def test_submit_built_graph_to_cloud(tmp_path):
     """RED→GREEN (credit-gated): a primitive-built graph submits to cloud and
     returns a prompt_id. Runs the real `comfy run --where cloud`."""

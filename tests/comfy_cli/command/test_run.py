@@ -1059,7 +1059,9 @@ class TestExecuteCloudAutoConvert:
         submitted_args, _ = mock_client.submit_prompt.call_args
         assert submitted_args[0] == self.CONVERTED
 
-    def test_ui_workflow_conversion_honors_object_info_file_env(self, ui_workflow_file, fake_target, tmp_path, monkeypatch):
+    def test_ui_workflow_conversion_honors_object_info_file_env(
+        self, ui_workflow_file, fake_target, tmp_path, monkeypatch
+    ):
         """Both cloud object_info loads on this path (UI→API conversion, then
         preflight-validate) are routed through resilient_load_object_info, so
         COMFY_OBJECT_INFO_FILE — a pre-warmed/baked catalog an agent host
