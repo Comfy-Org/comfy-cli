@@ -502,7 +502,10 @@ def _schema(extra_args: list[str]) -> None:
 
 
 def _refresh() -> None:
-    url = spec.base_url() + "/openapi.yml"
+    # comfy-api serves the OpenAPI spec at `/openapi` (JSON, valid YAML). The old
+    # `/openapi.yml` path 404s. `write_cache()` stores the body verbatim and
+    # `load_raw_spec()` parses it with yaml.load, so JSON is loaded fine.
+    url = spec.base_url() + "/openapi"
     try:
         with httpx.Client(timeout=30.0, follow_redirects=True) as cli:
             r = cli.get(url, headers={"Comfy-Env": "comfy-cli", "User-Agent": "comfy-cli/api"})

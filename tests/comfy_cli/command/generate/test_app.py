@@ -421,6 +421,44 @@ def test_refresh_writes_cache(runner, monkeypatch, tmp_path):
     assert captured["headers"].get("Comfy-Env") == "comfy-cli"
 
 
+def test_refresh_fetches_openapi_path(runner, monkeypatch, tmp_path):
+    """Regression (BE-2982): comfy-api serves the spec at `<base_url>/openapi`
+    (JSON), not `/openapi.yml` (which 404s). Assert `_refresh()` hits `/openapi`."""
+    captured = {}
+
+    class FakeClient:
+        def __init__(self, *a, **kw):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            pass
+
+        def get(self, url, headers=None):
+            captured["url"] = url
+            # A JSON body, as comfy-api actually serves — must parse as YAML.
+            return httpx.Response(
+                200,
+                text='{"openapi": "3.0.2", "paths": {}}',
+                request=httpx.Request("GET", url),
+            )
+
+    monkeypatch.setattr(gen_app.httpx, "Client", FakeClient)
+    monkeypatch.setattr("comfy_cli.command.generate.spec._USER_CACHE", tmp_path / "openapi-cache.yml")
+
+    # Resolve the expected base_url BEFORE refresh writes the cache: reading it
+    # afterwards would repopulate the lru-cached spec from the freshly-written
+    # (minimal) tmp cache and leak that into later tests.
+    expected = gen_app.spec.base_url() + "/openapi"
+
+    r = runner.invoke(cli_app, ["generate", "refresh"])
+    assert r.exit_code == 0, r.stdout
+    assert captured["url"] == expected
+    assert not captured["url"].endswith("/openapi.yml")
+
+
 def test_refresh_network_failure(runner, monkeypatch):
     class FakeClient:
         def __init__(self, *a, **kw):
