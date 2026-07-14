@@ -848,25 +848,3 @@ def categories_cmd(
             renderer.console().print(tbl)
             rprint(f"[dim]{len(flat)} categories[/dim]")
     renderer.emit(payload, command="nodes categories")
-
-
-# ---------------------------------------------------------------------------
-# refresh — object_info is fetched live; nothing to cache
-# ---------------------------------------------------------------------------
-
-
-@app.command(
-    "refresh",
-    help="object_info is fetched live from the server on each command — nothing to refresh.",
-)
-@tracking.track_command("nodes")
-def refresh_cmd(
-    where: Annotated[
-        str | None,
-        typer.Option("--where", show_default=False, help="Override the resolved routing mode."),
-    ] = None,
-):
-    """Explain that object_info is fetched live and exit."""
-    renderer = get_renderer()
-    rprint("[dim]object_info is fetched live from the server on each command — nothing to refresh.[/dim]")
-    renderer.emit({"refreshed": False, "reason": "live_fetch"}, command="nodes refresh")

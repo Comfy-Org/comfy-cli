@@ -1435,12 +1435,6 @@ def env():
     renderer.emit(data, command="env")
 
 
-@app.command(hidden=True)
-@tracking.track_command()
-def models():
-    rprint("\n[bold red] No such command, did you mean 'comfy model' instead?[/bold red]\n")
-
-
 _FEEDBACK_DISABLED_NOTICE = (
     "[yellow]Feedback not sent — telemetry is opted out via DO_NOT_TRACK / COMFY_NO_TELEMETRY.[/yellow]\n"
     "Unset that to send, or open an issue: https://github.com/Comfy-Org/comfy-cli/issues/new/choose"
@@ -1544,9 +1538,9 @@ def agent_review(
     )
 
 
-@app.command(hidden=True)
 @app.command(
-    help="Given an existing installation of comfy core and any custom nodes, installs any needed python dependencies"
+    hidden=True,
+    help="Given an existing installation of comfy core and any custom nodes, installs any needed python dependencies",
 )
 @tracking.track_command()
 def dependency():
