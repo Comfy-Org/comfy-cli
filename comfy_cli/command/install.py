@@ -6,8 +6,6 @@ import sys
 from typing import TypedDict
 from urllib.parse import urlparse
 
-import git
-import requests
 import semver
 import typer
 from rich.console import Console
@@ -192,6 +190,10 @@ def execute(
             sys.exit(1)
 
     elif not check_comfy_repo(repo_dir)[0]:
+        # Imported lazily: GitPython costs ~90ms to import and is only needed
+        # on this error-reporting path.
+        import git
+
         # Get actual remote URL for better error message
         try:
             repo = git.Repo(repo_dir)
@@ -602,6 +604,10 @@ def get_latest_release(repo_owner: str, repo_name: str) -> GithubRelease | None:
     if github_token := os.getenv("GITHUB_TOKEN"):
         headers["Authorization"] = f"Bearer {github_token}"
 
+    # Imported lazily: requests costs ~30ms to import and this module is on
+    # the import path of every CLI invocation.
+    import requests
+
     try:
         response = requests.get(url, headers=headers, timeout=5)
 
@@ -679,6 +685,8 @@ def fetch_pr_info(repo_owner: str, repo_name: str, pr_number: int) -> PRInfo:
     if github_token := os.getenv("GITHUB_TOKEN"):
         headers["Authorization"] = f"Bearer {github_token}"
 
+    import requests  # deferred; see fetch_github_release_data
+
     try:
         response = requests.get(url, headers=headers, timeout=10)
 
@@ -713,6 +721,8 @@ def find_pr_by_branch(repo_owner: str, repo_name: str, username: str, branch: st
     headers = {}
     if github_token := os.getenv("GITHUB_TOKEN"):
         headers["Authorization"] = f"Bearer {github_token}"
+
+    import requests  # deferred; see fetch_github_release_data
 
     try:
         response = requests.get(url, headers=headers, params=params, timeout=10)

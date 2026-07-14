@@ -53,6 +53,15 @@ COMMAND_SCHEMAS: dict[str, str] = {
     "comfy workflow slots": "workflow",
     "comfy workflow set-slot": "workflow",
     "comfy workflow vary": "workflow",
+    # structured edit primitives + recipes (CRDT op-based authoring)
+    "comfy workflow add-node": "workflow",
+    "comfy workflow connect": "workflow",
+    "comfy workflow set-widget": "workflow",
+    "comfy workflow delete-node": "workflow",
+    "comfy workflow ls-nodes": "workflow",
+    "comfy workflow apply": "workflow",
+    "comfy workflow capture": "workflow",
+    "comfy workflow foreach": "workflow",
     # workflow cloud CRUD + fragment composition
     "comfy workflow list": "workflow",
     "comfy workflow get": "workflow",
@@ -94,6 +103,8 @@ COMMAND_SCHEMAS: dict[str, str] = {
     "comfy project init": "project",
     "comfy project status": "project",
     "comfy assets push": "assets",
+    "comfy assets library ls": "assets_library",
+    "comfy assets library ensure": "assets_library",
     # config
     "comfy set-default": "set_default",
     "comfy version": "version",

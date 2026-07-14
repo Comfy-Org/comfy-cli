@@ -493,6 +493,7 @@ def execute_cloud(
     timeout: int = 600,
     notify: bool = False,
     print_prompt: bool = False,
+    workflow_id: str | None = None,
     preloaded: tuple[dict, str, bool] | None = None,
 ):
     """Run a workflow against Comfy Cloud via the stored OAuth session.
@@ -521,12 +522,15 @@ def execute_cloud(
         # exporter and `comfy templates fetch`) have to be lowered to the API
         # shape before submit. We do it client-side using the cloud snapshot
         # of object_info — the cloud server has no /workflow/convert endpoint.
-        from comfy_cli.cql.engine import _load_from_target
+        # Routed through resilient_load_object_info so COMFY_OBJECT_INFO_FILE
+        # (a pre-warmed/baked catalog, e.g. from an agent host) is honored
+        # before falling back to a live multi-MB /object_info fetch.
+        from comfy_cli.cql.loader import resilient_load_object_info
 
         if renderer.is_pretty():
             pprint("[yellow]Detected UI-format workflow, converting to API format…[/yellow]")
         try:
-            object_info = _load_from_target(mode="cloud")
+            object_info = resilient_load_object_info(mode="cloud")
         except Exception as e:  # noqa: BLE001
             renderer.error(
                 code="cql_no_graph",
@@ -586,10 +590,12 @@ def execute_cloud(
 
     # Pre-submit validation via pure-Python CQL engine.
     # Cloud path uses cached/bundled object_info (no live server needed).
+    # resilient_load_object_info honors COMFY_OBJECT_INFO_FILE first (the
+    # baked/offline catalog an agent host provides) before a live fetch.
     try:
-        from comfy_cli.cql.engine import _load_from_target
+        from comfy_cli.cql.loader import resilient_load_object_info
 
-        cloud_object_info = _load_from_target(mode="cloud")
+        cloud_object_info = resilient_load_object_info(mode="cloud")
     except Exception:  # noqa: BLE001
         cloud_object_info = {}
 
@@ -617,9 +623,9 @@ def execute_cloud(
     try:
         if not wait and renderer.is_pretty():
             with renderer.console().status("[cyan]Submitting to Comfy Cloud…", spinner="dots"):
-                submit = client.submit_prompt(parsed_workflow, client_id)
+                submit = client.submit_prompt(parsed_workflow, client_id, workflow_id=workflow_id)
         else:
-            submit = client.submit_prompt(parsed_workflow, client_id)
+            submit = client.submit_prompt(parsed_workflow, client_id, workflow_id=workflow_id)
     except Unauthenticated as e:
         renderer.error(code="cloud_unauthorized", message=str(e), hint="run: comfy cloud login")
         raise typer.Exit(code=1) from e

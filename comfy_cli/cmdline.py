@@ -5,7 +5,6 @@ import sys
 import webbrowser
 from typing import Annotated
 
-import questionary
 import typer
 from rich.console import Console
 
@@ -787,10 +786,34 @@ def run(
             ),
         ),
     ] = False,
+    workflow_id: Annotated[
+        str | None,
+        typer.Option(
+            "--workflow-id",
+            show_default=False,
+            help="Cloud workflow entity id to associate this run with (enables draft auto-save on run).",
+        ),
+    ] = None,
+    no_watch: Annotated[
+        bool,
+        typer.Option(
+            "--no-watch",
+            show_default=False,
+            help=(
+                "Suppress the detached background watcher subprocess for non-blocking "
+                "runs (equivalent to setting COMFY_NO_WATCH=1). Agentic callers with "
+                "their own job-wait loop don't need a second process polling in the "
+                "background; it just holds onto credentials after the parent exits."
+            ),
+        ),
+    ] = False,
 ):
     # Snapshot kwargs before the body mutates api_key/host/port — analytics should record what user actually supplied.
     _track_props = tracking.filter_command_kwargs(dict(locals()))
     tracking.track_event("execution_start", _track_props, mixpanel_name="run")
+
+    if no_watch:
+        os.environ["COMFY_NO_WATCH"] = "1"
 
     try:
         if api_key:
@@ -857,6 +880,7 @@ def run(
                 timeout=timeout,
                 notify=effective_notify,
                 print_prompt=print_prompt,
+                workflow_id=workflow_id,
                 preloaded=preloaded,
             )
             return
@@ -902,13 +926,15 @@ def run(
 
 
 @app.command(
-    help="Validate an API-format workflow without submitting. Checks class_types, input shapes, enum values, and edge wiring."
+    help="Validate a workflow without submitting. Accepts API-format or a frontend/canvas "
+    "graph (auto-converted to API first). Checks class_types, required inputs, input shapes, "
+    "enum values, and edge wiring."
 )
 @tracking.track_command()
 def validate(
     workflow: Annotated[
         str,
-        typer.Option(help="Path to the API-format workflow JSON file."),
+        typer.Option(help="Path to the workflow JSON file (API format or a frontend/canvas graph)."),
     ],
     where: Annotated[
         str | None,
@@ -930,6 +956,8 @@ def validate(
     from pathlib import Path
 
     from comfy_cli.cql.engine import Graph, LoadError
+    from comfy_cli.cql.loader import resilient_load_object_info
+    from comfy_cli.workflow_to_api import WorkflowConversionError, convert_ui_to_api, is_api_format
 
     renderer = get_renderer()
 
@@ -971,6 +999,38 @@ def validate(
             details=e.details,
         )
         raise typer.Exit(code=1) from e
+
+    # `validate_workflow` only inspects the API/prompt shape
+    # ({id: {class_type, inputs}}) — it iterates node inputs and checks wiring,
+    # required inputs, enums, and shapes. A frontend/canvas graph
+    # ({nodes: [...], links: [...]}) never gets its nodes examined: every
+    # top-level key is treated as a non-node and the result comes back
+    # valid:true even when the wiring is structurally broken. So a canvas
+    # workflow MUST be lowered to API format FIRST, using the SAME converter
+    # (and the SAME object_info resolution) the `run` path uses, so validate
+    # inspects exactly what the server would execute.
+    if not is_api_format(wf_data):
+        try:
+            object_info = resilient_load_object_info(
+                mode=mode, input_path=input_path, host=host or "127.0.0.1", port=port or 8188
+            )
+        except LoadError as e:
+            renderer.error(
+                code="cql_no_graph",
+                message=str(e),
+                hint=e.details.get("hint", "pass --input <object_info.json>, or start the server"),
+                details=e.details,
+            )
+            raise typer.Exit(code=1) from e
+        try:
+            wf_data = convert_ui_to_api(wf_data, object_info)
+        except WorkflowConversionError as e:
+            renderer.error(
+                code="conversion_error",
+                message=str(e),
+                hint="check that every node's required inputs are connected",
+            )
+            raise typer.Exit(code=1) from e
 
     result = graph.validate_workflow(wf_data)
 
@@ -1510,6 +1570,10 @@ def feedback(
             else str(usability_satisfaction_score),
         },
     )
+    # Imported lazily: questionary pulls in prompt_toolkit (~50ms) and is only
+    # needed on this interactive feedback path.
+    import questionary
+
     if (
         sent
         and questionary.confirm("Do you want to provide additional feature-specific feedback on our GitHub page?").ask()

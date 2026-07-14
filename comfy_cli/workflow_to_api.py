@@ -1065,8 +1065,19 @@ def _dynamic_combo_sub_inputs(
         names: list[str] = []
         for section in ("required", "optional"):
             section_def = sub_def.get(section) or {}
-            if isinstance(section_def, dict):
-                names.extend(f"{input_name}.{sub_name}" for sub_name in section_def.keys())
+            if not isinstance(section_def, dict):
+                continue
+            for sub_name, sub_spec in section_def.items():
+                # Only widget sub-inputs occupy a slot in ``widgets_values``.
+                # Connection-only sub-inputs (IMAGE, autogrow templates,
+                # ``forceInput`` widgets, ...) are wired via links and carry no
+                # saved value, so counting them here over-reports the combo's
+                # span and shifts every widget after it — including a seed's
+                # control_after_generate marker that then survives into the
+                # next input (e.g. GeminiNanoBanana2V2's ``response_modalities``).
+                is_widget, _is_dynamic = _is_widget_input(sub_spec)
+                if is_widget:
+                    names.append(f"{input_name}.{sub_name}")
         return names
     return []
 
@@ -1184,8 +1195,26 @@ def _filter_control_values(
         for input_name, input_spec in section_def.items():
             if vidx >= len(widget_values):
                 break
-            is_widget, _is_dynamic = _is_widget_input(input_spec)
+            is_widget, is_dynamic = _is_widget_input(input_spec)
             if not is_widget:
+                continue
+            if is_dynamic:
+                # A V3 dynamic combo (``COMFY_*COMBO*``) occupies its selector
+                # slot plus a variable number of sub-input slots chosen by the
+                # selected option. Copy the whole span through untouched and
+                # advance ``vidx`` in lockstep with ``_get_widget_name_order``
+                # (which expands the same sub-inputs). Otherwise the walk
+                # treats the combo as a single slot, reaches a later seed input
+                # too early, checks the wrong slot for its control_after_generate
+                # marker, and leaves the marker in place — shifting every widget
+                # after the seed by one (e.g. GeminiNanoBanana2V2 / Nano Banana 2,
+                # whose dynamic ``model`` precedes the seed and whose
+                # ``response_modalities`` sits right after it, so the stray
+                # ``"fixed"`` lands on ``response_modalities``).
+                subs = _dynamic_combo_sub_inputs(input_name, input_spec, widget_values, vidx)
+                span = min(1 + len(subs), len(widget_values) - vidx)
+                out.extend(widget_values[vidx : vidx + span])
+                vidx += span
                 continue
             out.append(widget_values[vidx])
             vidx += 1
@@ -1205,21 +1234,34 @@ def _has_control_after_generate_companion(input_name: str, input_spec: Any, next
     Two ways the frontend adds the companion widget:
 
     * Explicit: the input spec sets ``control_after_generate: True``.
-    * Implicit: the input is named ``seed`` or ``noise_seed`` and is INT-typed.
-      The frontend's ``useIntWidget`` composable adds the companion in that case
-      regardless of the schema flag.
+    * Implicit: a seed-like INT widget. The frontend's ``useIntWidget``
+      composable appends the companion after seed-like INT inputs even when
+      the schema omits the flag.
 
-    For the implicit path we peek at the next value: older workflows saved
-    before the companion existed don't have the marker string, so we must
-    verify the slot really is a control keyword before consuming it.
+    The implicit path is *value-gated and node-agnostic*: we only consume the
+    next slot when it is literally one of the control keywords
+    (``"fixed"``/``"increment"``/``"decrement"``/``"randomize"``). That string
+    is only ever present when the frontend really did append the companion, so
+    it is a reliable signal regardless of schema flags or the exact input name.
+
+    We still require the input to be a seed-like INT (name contains ``seed``,
+    case-insensitive) rather than *any* INT. Partner/API nodes name the widget
+    every which way -- ``seed``/``noise_seed`` (Bria/Kling/Vidu/Wan2),
+    ``image_seed``/``model_seed``/``texture_seed`` (Tripo), ``Seed`` (Rodin3D),
+    ``rand_seed``, ``noise_seed_sde``, ``variation_seed`` -- and several ship
+    the input *unflagged*, so the old exact ``seed``/``noise_seed`` match let
+    their companion survive and shifted every later widget by one. Keeping the
+    ``seed`` substring guard preserves the schema-aware path's protection
+    against a legitimate non-seed INT (e.g. ``steps``) that merely happens to
+    precede a COMBO/STRING widget whose value equals a control keyword.
     """
+    if not (isinstance(next_value, str) and next_value in _CONTROL_AFTER_GENERATE_VALUES):
+        return False
     options = input_spec[1] if len(input_spec) >= 2 and isinstance(input_spec[1], dict) else {}
     if options.get("control_after_generate"):
-        return isinstance(next_value, str) and next_value in _CONTROL_AFTER_GENERATE_VALUES
+        return True
     input_type = input_spec[0] if input_spec else None
-    if input_type == "INT" and input_name in ("seed", "noise_seed"):
-        return isinstance(next_value, str) and next_value in _CONTROL_AFTER_GENERATE_VALUES
-    return False
+    return input_type == "INT" and "seed" in input_name.lower()
 
 
 def _collect_widget_inputs(

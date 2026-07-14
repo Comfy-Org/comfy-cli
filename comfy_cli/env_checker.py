@@ -5,7 +5,6 @@ Module for checking various env and state conditions.
 import os
 import sys
 
-import requests
 from rich.console import Console
 
 from comfy_cli.config_manager import ConfigManager
@@ -42,6 +41,10 @@ def check_comfy_server_running(port=8188, host="localhost", timeout: float = 5.0
     Returns:
         bool: True if the Comfy server is running, False otherwise.
     """
+    # Imported lazily: requests costs ~30ms to import and is only needed when
+    # actually probing the server, not for every CLI invocation.
+    import requests
+
     try:
         response = requests.get(f"http://{host}:{port}/history", timeout=timeout)
         return response.status_code == 200

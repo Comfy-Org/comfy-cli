@@ -167,8 +167,11 @@ def _object_info() -> dict[str, Any]:
                     "fps": [[25, 50], {"default": 25}],
                     "resolution": ["COMBO", {"options": ["1920x1080", "2560x1440"], "default": "1920x1080"}],
                 },
+                "optional": {
+                    "seed": ["INT", {"default": 0, "min": 0, "max": 2**31 - 1}],
+                },
             },
-            "input_order": {"required": ["prompt", "duration", "fps", "resolution"]},
+            "input_order": {"required": ["prompt", "duration", "fps", "resolution"], "optional": ["seed"]},
             "output": ["VIDEO"],
             "output_name": ["VIDEO"],
             "category": "partner/video/LTXV",
@@ -490,7 +493,9 @@ class TestValidateWorkflow:
         assert "euler" in errs[0]["suggestions"]
 
     def test_valid_edges_pass(self, graph: Graph):
-        """Well-wired edges don't produce errors."""
+        """Well-wired edges don't produce edge errors. (The KSampler is
+        deliberately partial — its missing required inputs surface as
+        missing_required_input, which is a separate check.)"""
         wf = {
             "1": {
                 "class_type": "CheckpointLoaderSimple",
@@ -507,6 +512,35 @@ class TestValidateWorkflow:
                     "scheduler": "normal",
                     "denoise": 1.0,
                 },
+            },
+        }
+        result = graph.validate_workflow(wf)
+        edge_codes = {"dangling_edge", "output_index_out_of_range", "edge_type_mismatch"}
+        assert [e for e in result["errors"] if e["code"] in edge_codes] == []
+        assert all(e["code"] == "missing_required_input" for e in result["errors"])
+
+    def test_missing_required_input_is_error(self, graph: Graph):
+        """A required input that is simply ABSENT must fail validate — the
+        server rejects it ("Required input is missing"), so a clean pass here
+        is a false green. Regression: emitted partner-node workflows omitted
+        inputs entirely and still validated."""
+        wf = self._valid_workflow()
+        del wf["2"]["inputs"]["steps"]  # widget input
+        del wf["2"]["inputs"]["model"]  # link input
+        result = graph.validate_workflow(wf)
+        assert result["valid"] is False
+        errs = {e["field"]: e for e in result["errors"] if e["code"] == "missing_required_input"}
+        assert set(errs) == {"steps", "model"}
+        assert errs["steps"]["node_id"] == "2"
+        # The hint should surface the schema default when there is one.
+        assert "20" in errs["steps"]["hint"]
+
+    def test_missing_optional_input_is_not_error(self, graph: Graph):
+        """Optional inputs may be omitted freely (LtxvApiTextToVideo.seed)."""
+        wf = {
+            "1": {
+                "class_type": "LtxvApiTextToVideo",
+                "inputs": {"prompt": "a boat", "duration": 8, "fps": 25, "resolution": "1920x1080"},
             },
         }
         result = graph.validate_workflow(wf)
@@ -552,17 +586,9 @@ class TestValidateWorkflow:
 
         This is advisory (warning, not error) — ComfyUI allows cross-type
         wiring via reroutes and converters; the server is the authority."""
-        wf = {
-            "1": {
-                "class_type": "CheckpointLoaderSimple",
-                "inputs": {"ckpt_name": "sd_xl_base.safetensors"},
-            },
-            "2": {
-                "class_type": "KSampler",
-                # Output index 1 is CLIP, but model input expects MODEL
-                "inputs": {"model": ["1", 1]},
-            },
-        }
+        wf = self._valid_workflow()
+        # Output index 1 is CLIP, but the model input expects MODEL.
+        wf["2"]["inputs"]["model"] = ["1", 1]
         result = graph.validate_workflow(wf)
         # edge_type_mismatch is a warning, not a hard error
         assert result["valid"] is True
@@ -760,8 +786,11 @@ class TestAutogrowInputs:
             },
         }
         result = graph.validate_workflow(wf)
-        assert result["valid"] is True, result["errors"]
         # The dotted slots must not trip type-mismatch or unknown-input noise.
+        # (The bare VAEDecode loaders legitimately miss their own required
+        # links — scope the check to the autogrow node.)
+        errs_autogrow = [e for e in result["errors"] if e["node_id"] == "20"]
+        assert errs_autogrow == [], errs_autogrow
         assert result["warnings"] == []
 
     def test_bare_link_wiring_errors_with_slot_hint(self, graph: Graph):
@@ -878,6 +907,39 @@ class TestDirectModeSlots:
         warnings = _apply_one_slot(wf, "3.steps", 99999, graph)
         codes = [w["code"] for w in warnings]
         assert "above_max" in codes
+
+
+class TestSlotSuggestionOnNotFound:
+    """A not-found address is enriched with the real address that carries the
+    intended widget, so an agent that targeted the wrong node/separator (the
+    common LLM failure of rebuilding an address from memory) self-corrects in
+    one step instead of looping."""
+
+    def test_wrong_node_right_widget_suggests_correct_address(self, graph: Graph):
+        # 'text' lives on the CLIPTextEncode (node 6), not EmptyLatentImage (7).
+        wf = _direct_workflow()
+        with pytest.raises(ValueError, match=r"Did you mean:.*6\.text \(CLIPTextEncode\)"):
+            _apply_one_slot(wf, "7.text", "x", graph)
+
+    def test_missing_node_right_widget_suggests_correct_address(self, graph: Graph):
+        # Node 999 doesn't exist (mirrors a wrong id/separator); 'seed' is on KSampler 3.
+        wf = _direct_workflow()
+        with pytest.raises(ValueError, match=r"Did you mean:.*3\.seed \(KSampler\)"):
+            _apply_one_slot(wf, "999.seed", 1, graph)
+
+    def test_unknown_widget_name_gets_no_false_suggestion(self, graph: Graph):
+        # No node carries 'nonexistent' → original error, no "Did you mean".
+        wf = _direct_workflow()
+        with pytest.raises(ValueError) as ei:
+            _apply_one_slot(wf, "3.nonexistent", 1, graph)
+        assert "Did you mean" not in str(ei.value)
+
+    def test_shape_error_is_not_enriched(self, graph: Graph):
+        # The widget resolved fine; a shape rejection must pass through untouched.
+        wf = _direct_workflow()
+        with pytest.raises(ValueError) as ei:
+            _apply_one_slot(wf, "3.seed", "not_an_int", graph)
+        assert "Did you mean" not in str(ei.value)
 
 
 # ===========================================================================
@@ -1234,3 +1296,54 @@ def test_load_from_target_refuses_non_loopback_local_host():
 
     with pytest.raises(LoadError, match="non-loopback"):
         _load_from_target(mode="local", host="example.com", port=8188)
+
+
+class TestComboNormalizationAndSuggestions:
+    """Port.canonical_combo rewrites a mangled model value (dir prefix / dropped
+    subfolder / case drift) to the real option when unambiguous; suggest_combo +
+    validate_catalog.did_you_mean point a rejected value at the nearest options."""
+
+    def _port(self):
+        from comfy_cli.cql.engine import Port
+        return Port(
+            name="ckpt_name",
+            type="COMBO",
+            enum_values=["sd_xl_base.safetensors", "v1-5-pruned.safetensors", "sub/model_x.safetensors"],
+        )
+
+    def test_canonical_strips_added_directory_prefix(self):
+        p = self._port()
+        assert p.canonical_combo("checkpoints/sd_xl_base.safetensors") == "sd_xl_base.safetensors"
+
+    def test_canonical_matches_dropped_subfolder_by_basename(self):
+        p = self._port()
+        assert p.canonical_combo("model_x.safetensors") == "sub/model_x.safetensors"
+
+    def test_canonical_case_insensitive(self):
+        p = self._port()
+        assert p.canonical_combo("SD_XL_BASE.SAFETENSORS") == "sd_xl_base.safetensors"
+
+    def test_canonical_exact_value_returns_none(self):
+        p = self._port()
+        assert p.canonical_combo("sd_xl_base.safetensors") is None
+
+    def test_canonical_unknown_returns_none(self):
+        p = self._port()
+        assert p.canonical_combo("realisticVisionV60B1.safetensors") is None
+
+    def test_canonical_ambiguous_basename_returns_none(self):
+        from comfy_cli.cql.engine import Port
+        p = Port(name="ckpt_name", type="COMBO", enum_values=["a/dup.safetensors", "b/dup.safetensors"])
+        assert p.canonical_combo("dup.safetensors") is None  # two matches → don't guess
+
+    def test_suggest_returns_close_options(self):
+        p = self._port()
+        got = p.suggest_combo("sd_xl_bas.safetensors")
+        assert "sd_xl_base.safetensors" in got
+
+    def test_validate_catalog_adds_did_you_mean(self):
+        p = self._port()
+        w = p.validate_catalog("v1-5-prund.safetensors")  # typo
+        assert w and w[0]["code"] == "unknown_enum_value"
+        assert "did_you_mean" in w[0]
+        assert "v1-5-pruned.safetensors" in w[0]["did_you_mean"]

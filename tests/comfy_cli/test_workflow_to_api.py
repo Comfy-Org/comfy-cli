@@ -1957,6 +1957,206 @@ class TestDynamicComboAfterControlMarker:
         assert inputs["shape.side"] == 10.0
 
 
+class TestSeedControlMarkerOffByOne:
+    """Regression for the partner-node seed + ``control_after_generate``
+    off-by-one that made ``validate`` (which lowers the graph via
+    ``convert_ui_to_api``) read a downstream widget as the stray control
+    token — most visibly a Gemini / Nano Banana node whose
+    ``response_modalities`` was read as ``"fixed"``.
+
+    Two independent gaps produced the same symptom:
+
+    1. A seed-like INT input whose name isn't literally ``seed``/``noise_seed``
+       and whose schema omits the ``control_after_generate`` flag (Rodin3D's
+       ``Seed``, Tripo's ``image_seed``/``model_seed``/``texture_seed``,
+       ``rand_seed``, ``noise_seed_sde``, ``variation_seed``, ...). The old
+       exact-name implicit heuristic missed these, so the ``"fixed"`` marker
+       survived and shifted every later widget by one.
+
+    2. A dynamic combo (``COMFY_DYNAMICCOMBO_V3``) positioned *before* the seed
+       (GeminiNanoBanana2V2 / "Nano Banana 2") whose option carries a
+       connection-only (non-widget) sub-input. The span walk over-counted the
+       combo, reached the seed at the wrong index, and left the marker in
+       place — landing ``"fixed"`` on the ``response_modalities`` widget that
+       immediately follows the seed.
+    """
+
+    def test_non_canonical_seed_name_strips_control_marker(self):
+        # Seed-like INT named ``image_seed`` (Tripo style), unflagged, followed
+        # by a control marker and then a downstream COMBO. Before the fix the
+        # marker survived and ``response_modalities`` read "fixed".
+        object_info = {
+            "PartnerImageNode": {
+                "input": {
+                    "required": {
+                        "prompt": ["STRING", {"multiline": True}],
+                        "image_seed": ["INT", {"default": 42}],  # no control_after_generate flag
+                        "response_modalities": [["IMAGE", "IMAGE+TEXT"], {}],
+                    }
+                },
+                "input_order": {"required": ["prompt", "image_seed", "response_modalities"]},
+                "output_node": True,
+                "display_name": "Partner Image",
+            }
+        }
+        workflow = {
+            "nodes": [
+                {
+                    "id": 1,
+                    "type": "PartnerImageNode",
+                    "inputs": [],
+                    "outputs": [],
+                    "widgets_values": ["a cat", 12345, "fixed", "IMAGE"],
+                    "mode": 0,
+                }
+            ],
+            "links": [],
+        }
+        result = convert_ui_to_api(workflow, object_info)
+        inputs = result["1"]["inputs"]
+        assert inputs["image_seed"] == 12345
+        assert inputs["response_modalities"] == "IMAGE"  # not "fixed"
+        assert "fixed" not in inputs.values()
+
+    def test_nano_banana_pro_flagged_seed_still_strips(self):
+        # GeminiImage2Node / "Nano Banana Pro" shape: plain COMBO model, seed
+        # carries control_after_generate. This already worked; pin it.
+        object_info = {
+            "GeminiImage2Node": {
+                "input": {
+                    "required": {
+                        "prompt": ["STRING", {"multiline": True}],
+                        "model": [["gemini-2.5-flash-image"], {}],
+                        "seed": ["INT", {"default": 42, "control_after_generate": True}],
+                        "aspect_ratio": [["auto", "1:1"], {}],
+                        "resolution": [["1K", "2K"], {}],
+                        "response_modalities": [["IMAGE", "IMAGE+TEXT"], {}],
+                    }
+                },
+                "input_order": {
+                    "required": ["prompt", "model", "seed", "aspect_ratio", "resolution", "response_modalities"]
+                },
+                "output_node": True,
+                "display_name": "Nano Banana Pro (Google Gemini Image)",
+            }
+        }
+        workflow = {
+            "nodes": [
+                {
+                    "id": 1,
+                    "type": "GeminiImage2Node",
+                    "inputs": [],
+                    "outputs": [],
+                    "widgets_values": ["a cat", "gemini-2.5-flash-image", 999, "fixed", "auto", "1K", "IMAGE"],
+                    "mode": 0,
+                }
+            ],
+            "links": [],
+        }
+        result = convert_ui_to_api(workflow, object_info)
+        inputs = result["1"]["inputs"]
+        assert inputs["seed"] == 999
+        assert inputs["response_modalities"] == "IMAGE"
+        assert "fixed" not in inputs.values()
+
+    def test_dynamic_combo_before_seed_with_nonwidget_subinput(self):
+        # GeminiNanoBanana2V2 / "Nano Banana 2" shape: dynamic ``model`` combo
+        # precedes the seed and its option has a connection-only sub-input
+        # (``images`` -> IMAGE) that carries no widget value. ``response_modalities``
+        # sits right after the seed, so before the fix the stray control marker
+        # landed on it. The non-widget sub-input must not consume a value slot.
+        object_info = {
+            "GeminiNanoBanana2V2": {
+                "input": {
+                    "required": {
+                        "prompt": ["STRING", {"multiline": True}],
+                        "model": [
+                            "COMFY_DYNAMICCOMBO_V3",
+                            {
+                                "options": [
+                                    {
+                                        "key": "nb2",
+                                        "inputs": {
+                                            "required": {
+                                                "aspect_ratio": [["auto", "16:9"], {}],
+                                                "resolution": [["1K", "2K"], {}],
+                                                "thinking_level": [["MINIMAL", "HIGH"], {}],
+                                                "images": ["IMAGE", {}],  # connection-only, no widget value
+                                            }
+                                        },
+                                    }
+                                ]
+                            },
+                        ],
+                        "seed": ["INT", {"default": 42, "control_after_generate": True}],
+                        "response_modalities": [["IMAGE", "IMAGE+TEXT"], {}],
+                    }
+                },
+                "input_order": {"required": ["prompt", "model", "seed", "response_modalities"]},
+                "output_node": True,
+                "display_name": "Nano Banana 2",
+            }
+        }
+        workflow = {
+            "nodes": [
+                {
+                    "id": 1,
+                    "type": "GeminiNanoBanana2V2",
+                    "inputs": [],
+                    "outputs": [],
+                    # prompt, model_key, aspect_ratio, resolution, thinking_level,
+                    # seed, control_marker, response_modalities
+                    "widgets_values": ["a cat", "nb2", "auto", "1K", "HIGH", 999, "fixed", "IMAGE"],
+                    "mode": 0,
+                }
+            ],
+            "links": [],
+        }
+        result = convert_ui_to_api(workflow, object_info)
+        inputs = result["1"]["inputs"]
+        assert inputs["seed"] == 999
+        assert inputs["response_modalities"] == "IMAGE"  # not "fixed"
+        assert inputs["model"] == "nb2"
+        assert inputs["model.aspect_ratio"] == "auto"
+        assert inputs["model.resolution"] == "1K"
+        assert inputs["model.thinking_level"] == "HIGH"
+        assert "fixed" not in inputs.values()
+
+    def test_non_seed_int_before_control_keyword_not_stripped(self):
+        # Safety net: a non-seed INT (``steps``) followed by a COMBO whose value
+        # is literally "fixed" must NOT be treated as a control companion.
+        object_info = {
+            "PlainNode": {
+                "input": {
+                    "required": {
+                        "steps": ["INT", {"default": 20}],
+                        "mode": [["fixed", "auto"], {}],
+                    }
+                },
+                "input_order": {"required": ["steps", "mode"]},
+                "output_node": True,
+                "display_name": "Plain",
+            }
+        }
+        workflow = {
+            "nodes": [
+                {
+                    "id": 1,
+                    "type": "PlainNode",
+                    "inputs": [],
+                    "outputs": [],
+                    "widgets_values": [20, "fixed"],
+                    "mode": 0,
+                }
+            ],
+            "links": [],
+        }
+        result = convert_ui_to_api(workflow, object_info)
+        inputs = result["1"]["inputs"]
+        assert inputs["steps"] == 20
+        assert inputs["mode"] == "fixed"  # preserved, not eaten as a control marker
+
+
 class TestDynamicPrompts:
     """Port of frontend's processDynamicPrompt behavior (formatUtil.ts).
 

@@ -10,10 +10,8 @@ import uuid
 from typing import Any, Protocol
 
 import typer
-from mixpanel import Mixpanel
-from posthog import Posthog
 
-from comfy_cli import constants, logging, ui
+from comfy_cli import constants, logging
 from comfy_cli.config_manager import ConfigManager
 from comfy_cli.workspace_manager import WorkspaceManager
 
@@ -139,7 +137,15 @@ class TelemetryProvider(Protocol):
 
 class MixpanelProvider:
     def __init__(self, token: str):
-        self.client = Mixpanel(token) if token else None
+        if token:
+            # Imported lazily: mixpanel (and its urllib3 dependency) is only
+            # needed once an event is actually sent, and importing it at
+            # module import slows down every CLI invocation.
+            from mixpanel import Mixpanel
+
+            self.client = Mixpanel(token)
+        else:
+            self.client = None
         self.enabled = self.client is not None
 
     def track(self, event_name: str, distinct_id: str | None, properties: dict[str, Any]) -> None:
@@ -165,8 +171,16 @@ class PostHogProvider:
         self.enabled = False
         if not token:
             return
+        # Imported lazily (see MixpanelProvider) — posthog costs ~100ms to import.
+        from posthog import Posthog
+
         # disable_geoip=False lets PostHog enrich events with IP-derived location.
-        self.client = Posthog(project_api_key=token, host=host, disable_geoip=False)
+        # flush_interval is passed explicitly because the client's atexit join
+        # waits out the full interval even on an empty queue; the library
+        # default varies by version (0.5s in 7.18, 5.0s in 7.21) and would add
+        # that much dead time to every CLI exit. 0.2s bounds the exit cost while
+        # the explicit flush() in _flush_all_providers still drains real events.
+        self.client = Posthog(project_api_key=token, host=host, disable_geoip=False, flush_interval=0.2)
         self.enabled = True
 
     def track(self, event_name: str, distinct_id: str | None, properties: dict[str, Any]) -> None:
@@ -186,10 +200,24 @@ class PostHogProvider:
         self.client.flush()
 
 
-PROVIDERS: list[TelemetryProvider] = [
-    MixpanelProvider(MIXPANEL_TOKEN),
-    PostHogProvider(POSTHOG_TOKEN, POSTHOG_HOST),
-]
+# Providers are constructed lazily on the first event dispatch, NOT at module
+# import. Building them eagerly costs ~100ms of import time and starts
+# PostHog's consumer thread, whose atexit join stalls every CLI exit — even
+# for fully opted-out invocations that never send anything. ``None`` means
+# "not constructed yet"; tests may patch in a ready-made list.
+PROVIDERS: list[TelemetryProvider] | None = None
+
+
+def _get_providers() -> list[TelemetryProvider]:
+    """Return the telemetry providers, constructing them on first use."""
+    global PROVIDERS
+    if PROVIDERS is None:
+        PROVIDERS = [
+            MixpanelProvider(MIXPANEL_TOKEN),
+            PostHogProvider(POSTHOG_TOKEN, POSTHOG_HOST),
+        ]
+    return PROVIDERS
+
 
 app = typer.Typer()
 
@@ -215,7 +243,7 @@ def _dispatch(
     passive telemetry, env-only for feedback).
     """
     properties = {**properties, "cli_version": cli_version, "tracing_id": tracing_id}
-    for provider in PROVIDERS:
+    for provider in _get_providers():
         provider_event_name = (
             mixpanel_name if (mixpanel_name is not None and isinstance(provider, MixpanelProvider)) else event_name
         )
@@ -376,6 +404,10 @@ def prompt_tracking_consent(skip_prompt: bool = False, default_value: bool = Fal
                 pass
         return
 
+    # Imported lazily: ui pulls in questionary/prompt_toolkit (~50ms) and is
+    # only needed on this interactive consent path.
+    from comfy_cli import ui
+
     enable_tracking = ui.prompt_confirm_action("Do you agree to enable tracking to improve the application?", False)
     init_tracking(enable_tracking)
 
@@ -408,6 +440,10 @@ def init_tracking(enable_tracking: bool):
 
 
 def _flush_all_providers() -> None:
+    # Never construct providers here: if none were built, no event was ever
+    # dispatched this process, so there is nothing to flush.
+    if PROVIDERS is None:
+        return
     for provider in PROVIDERS:
         try:
             provider.flush()

@@ -3,7 +3,6 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 
-import git
 import typer
 import yaml
 
@@ -86,6 +85,10 @@ def check_comfy_repo(path) -> tuple[bool, str | None]:
     """
     if not os.path.exists(path):
         return False, None
+    # Imported lazily: GitPython costs ~90ms to import and is only needed on
+    # this detection path, not for every CLI invocation.
+    import git
+
     try:
         repo = git.Repo(path, search_parent_directories=True)
         path_is_comfy_repo = any(remote.url in constants.COMFY_ORIGIN_URL_CHOICES for remote in repo.remotes)
