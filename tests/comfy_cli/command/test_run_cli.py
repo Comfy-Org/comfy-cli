@@ -41,7 +41,7 @@ class TestStepBuilders:
             "jobs status",
             "jobs watch",
             "fleet",
-            "auth",
+            "whoami",
         ]:
             assert needle in titles, f"missing coverage for: {needle}"
 

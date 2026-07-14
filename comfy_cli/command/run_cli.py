@@ -516,13 +516,13 @@ def _build_steps(state: _DemoState) -> list[Step]:
             custom=_fleet_step,
         ),
         Step(
-            title="auth whoami — Comfy Cloud sign-in state",
+            title="cloud whoami — Comfy Cloud sign-in state",
             desc="Same commands work against Comfy Cloud via --where cloud (after `comfy cloud login`).",
             invocations=[
-                Invocation(argv=[*comfy, "auth", "whoami"], label="comfy auth whoami", optional=True),
+                Invocation(argv=[*comfy, "cloud", "whoami"], label="comfy cloud whoami", optional=True),
                 Invocation(
-                    argv=[*comfy, "--json", "auth", "whoami"],
-                    label="comfy --json auth whoami",
+                    argv=[*comfy, "--json", "cloud", "whoami"],
+                    label="comfy --json cloud whoami",
                     optional=True,
                 ),
             ],
@@ -563,7 +563,7 @@ def execute(*, pause_seconds: float, no_cleanup: bool, show_agent: bool) -> int:
     pprint(
         "[bold]Capabilities shown:[/bold] env · which · discover · query · "
         "run (sync/verbose/json/async) · jobs (ls/status/watch) · "
-        f"parallel fleet ×{FLEET_SIZE} · auth whoami."
+        f"parallel fleet ×{FLEET_SIZE} · cloud whoami."
     )
 
     paths_to_clean = [wf_path, *state.fleet_workflow_paths]
