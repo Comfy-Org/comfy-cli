@@ -1702,9 +1702,11 @@ def _isolate_shared_subgraph(workflow: dict, instance: dict, defs_by_id: dict[st
 def _deterministic_fork_id(def_id: str, instance_id: Any) -> str:
     """A stable id for the isolated copy of ``def_id`` owned by ``instance_id``.
     Deterministic across processes (``hashlib``, not the salted builtin ``hash``)
-    so replaying the same op anywhere yields the same id."""
+    so replaying the same op anywhere yields the same id. SHA-256 (not SHA-1) —
+    this isn't a security boundary, but there's no reason to reach for a broken
+    hash, and it keeps the scanners quiet."""
     seed = f"{def_id}\x00{instance_id}".encode()
-    return "sg-" + _hashlib.sha1(seed).hexdigest()[:32]
+    return "sg-" + _hashlib.sha256(seed).hexdigest()[:32]
 
 
 def _suggest_slots_for_input(workflow: dict, input_name: str, graph: Graph, *, limit: int = 6) -> list[str]:
