@@ -583,6 +583,41 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "`comfy feedback` was run in JSON/non-interactive mode without an inline message.",
         'comfy feedback "your feedback here"',
     ),
+    # --- launch / stop lifecycle ---------------------------------------------
+    ErrorCode(
+        "no_background",
+        "`comfy stop` found no ComfyUI running in the background (nothing to stop).",
+        "start one with `comfy launch --background` first",
+    ),
+    ErrorCode(
+        "workspace_not_found",
+        "`comfy launch` could not resolve a ComfyUI workspace to launch.",
+        "run `comfy install`, or pass `--workspace <path>`",
+    ),
+    ErrorCode(
+        "background_already_running",
+        "`comfy launch --background` refused because a ComfyUI is already running in the background "
+        "(only one background service is allowed).",
+        "stop it first with `comfy stop`",
+    ),
+    ErrorCode(
+        "invalid_port",
+        "`comfy launch --background` was given a `--port` that isn't an integer. `details.port` carries "
+        "the offending value.",
+        "pass an integer port, e.g. `--port 8188`",
+    ),
+    ErrorCode(
+        "port_in_use",
+        "`comfy launch --background` found the requested port already in use, so a new ComfyUI server "
+        "could not be started. `details.port` carries the port.",
+        "stop whatever holds the port, or launch on a different `--port`",
+    ),
+    ErrorCode(
+        "launch_failed",
+        "`comfy launch --background` started ComfyUI but never saw the success marker before the process "
+        "exited — startup failed. The captured log is available via `comfy logs`.",
+        "inspect `comfy logs` for the startup error, fix it, and retry",
+    ),
 )
 
 

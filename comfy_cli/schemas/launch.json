@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://comfy.org/schemas/launch.json",
+  "title": "comfy launch --json data payload",
+  "description": "Emitted by `comfy launch --background` once ComfyUI has started successfully in the background. Foreground `comfy launch` blocks on the server and does not emit this envelope.",
+  "type": "object",
+  "required": ["host", "port", "pid", "background"],
+  "additionalProperties": true,
+  "properties": {
+    "host": {
+      "type": "string",
+      "description": "Host the background server bound to (e.g. `127.0.0.1`)."
+    },
+    "port": {
+      "type": "integer",
+      "description": "Port the background server is listening on."
+    },
+    "pid": {
+      "type": "integer",
+      "description": "Process id of the launched background ComfyUI. Pass to `comfy stop` semantics via the recorded background entry."
+    },
+    "background": {
+      "type": "boolean",
+      "description": "Always true — this payload is only emitted for `--background` launches."
+    }
+  }
+}

@@ -17,6 +17,7 @@ from comfy_cli import constants, utils
 from comfy_cli.command.custom_nodes.cm_cli_util import find_cm_cli, resolve_manager_gui_mode
 from comfy_cli.config_manager import ConfigManager
 from comfy_cli.env_checker import check_comfy_server_running
+from comfy_cli.output import get_renderer
 from comfy_cli.output import rprint as print  # context-aware print: stderr in JSON mode
 from comfy_cli.resolve_python import resolve_workspace_python
 from comfy_cli.workspace_manager import WorkspaceManager, WorkspaceType
@@ -155,10 +156,18 @@ def launch(
     resolved_workspace = workspace_manager.workspace_path
 
     if not resolved_workspace:
-        print(
-            "\nComfyUI is not available.\nTo install ComfyUI, you can run:\n\n\tcomfy install\n\n",
-            file=sys.stderr,
-        )
+        renderer = get_renderer()
+        if renderer.is_json():
+            renderer.error(
+                code="workspace_not_found",
+                message="ComfyUI is not available.",
+                command="launch",
+            )
+        else:
+            print(
+                "\nComfyUI is not available.\nTo install ComfyUI, you can run:\n\n\tcomfy install\n\n",
+                file=sys.stderr,
+            )
         raise typer.Exit(code=1)
 
     if (extra is None or len(extra) == 0) and workspace_manager.workspace_type == WorkspaceType.DEFAULT:
@@ -189,11 +198,19 @@ def launch(
 
 
 def background_launch(extra, frontend_pr=None):
+    renderer = get_renderer()
     config_background = ConfigManager().background
     if config_background is not None and utils.is_running(config_background[2]):
-        print(
-            "[bold red]ComfyUI is already running in background.\nYou cannot start more than one background service.[/bold red]\n"
-        )
+        if renderer.is_json():
+            renderer.error(
+                code="background_already_running",
+                message="ComfyUI is already running in background. You cannot start more than one background service.",
+                command="launch",
+            )
+        else:
+            print(
+                "[bold red]ComfyUI is already running in background.\nYou cannot start more than one background service.[/bold red]\n"
+            )
         raise typer.Exit(code=1)
 
     port = 8188
@@ -217,11 +234,29 @@ def background_launch(extra, frontend_pr=None):
     try:
         port = int(port)
     except (TypeError, ValueError):
-        print(f"[bold red]Invalid --port value {port!r}; expected an integer.[/bold red]\n")
+        if renderer.is_json():
+            renderer.error(
+                code="invalid_port",
+                message=f"Invalid --port value {port!r}; expected an integer.",
+                command="launch",
+                details={"port": port},
+            )
+        else:
+            print(f"[bold red]Invalid --port value {port!r}; expected an integer.[/bold red]\n")
         raise typer.Exit(code=1)
 
     if check_comfy_server_running(port):
-        print(f"[bold red]The {port} port is already in use. A new ComfyUI server cannot be launched.\n[bold red]\n")
+        if renderer.is_json():
+            renderer.error(
+                code="port_in_use",
+                message=f"The {port} port is already in use. A new ComfyUI server cannot be launched.",
+                command="launch",
+                details={"port": port},
+            )
+        else:
+            print(
+                f"[bold red]The {port} port is already in use. A new ComfyUI server cannot be launched.\n[bold red]\n"
+            )
         raise typer.Exit(code=1)
 
     cmd = [
@@ -248,6 +283,12 @@ def background_launch(extra, frontend_pr=None):
         )
 
     print("\n[bold red]Execution error: failed to launch ComfyUI[/bold red]\n")
+    if renderer.is_json():
+        renderer.error(
+            code="launch_failed",
+            message="Failed to launch ComfyUI in the background.",
+            command="launch",
+        )
     # NOTE: os.exit(0) doesn't work
     os._exit(1)
 
@@ -364,6 +405,18 @@ async def launch_and_monitor(cmd, listen, port):
             cfg.config["DEFAULT"][constants.CONFIG_KEY_BACKGROUND] = f"{(listen, port, process.pid)}"
             cfg.config["DEFAULT"][constants.CONFIG_KEY_BACKGROUND_LOG] = log_path
             cfg.write_config()
+
+            # In JSON mode, emit the success envelope so programmatic callers
+            # (the local MCP, CI) can parse a real result instead of an empty
+            # stdout. No-op in pretty mode — the human line above already ran.
+            # Emit before os._exit(0): _write_json_line flushes, and os._exit
+            # skips interpreter cleanup so a buffered write would be lost.
+            get_renderer().emit(
+                {"host": listen, "port": port, "pid": process.pid, "background": True},
+                command="launch",
+                where="local",
+                changed=True,
+            )
 
             # NOTE: os.exit(0) doesn't work.
             os._exit(0)

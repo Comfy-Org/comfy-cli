@@ -1112,22 +1112,40 @@ def validate_comfyui(_env_checker):
 @app.command(help="Stop background ComfyUI")
 @tracking.track_command()
 def stop():
-    if constants.CONFIG_KEY_BACKGROUND not in ConfigManager().config["DEFAULT"]:
-        rprint("[bold red]No ComfyUI is running in the background.[/bold red]\n")
+    renderer = get_renderer()
+    config = ConfigManager()
+
+    bg_info = config.background if constants.CONFIG_KEY_BACKGROUND in config.config["DEFAULT"] else None
+    if not bg_info:
+        if renderer.is_json():
+            renderer.error(
+                code="no_background",
+                message="No ComfyUI is running in the background.",
+                command="stop",
+            )
+        else:
+            rprint("[bold red]No ComfyUI is running in the background.[/bold red]\n")
         raise typer.Exit(code=1)
 
-    bg_info = ConfigManager().background
-    if not bg_info:
-        rprint("[bold red]No ComfyUI is running in the background.[/bold red]\n")
-        raise typer.Exit(code=1)
-    is_killed = utils.kill_all(bg_info[2])
+    host, port, pid = bg_info
+    is_killed = utils.kill_all(pid)
 
     if not is_killed:
         rprint("[bold red]Failed to stop ComfyUI in the background.[/bold red]\n")
     else:
-        rprint(f"[bold yellow]Background ComfyUI is stopped.[/bold yellow] ({bg_info[0]}:{bg_info[1]})")
+        rprint(f"[bold yellow]Background ComfyUI is stopped.[/bold yellow] ({host}:{port})")
 
-    ConfigManager().remove_background()
+    config.remove_background()
+
+    # In JSON mode, emit the envelope so programmatic callers can tell a
+    # successful stop from a malformed/absent response (pretty mode already
+    # printed the human line above; emit() is a no-op there).
+    renderer.emit(
+        {"host": host, "port": port, "stopped": is_killed},
+        command="stop",
+        where="local",
+        changed=is_killed,
+    )
 
 
 @app.command(help="Launch ComfyUI: ?[--background] ?[-- <extra args ...>]")

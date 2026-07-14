@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://comfy.org/schemas/stop.json",
+  "title": "comfy stop --json data payload",
+  "description": "Result of stopping the background ComfyUI started by `comfy launch --background`.",
+  "type": "object",
+  "required": ["host", "port", "stopped"],
+  "additionalProperties": true,
+  "properties": {
+    "host": {
+      "type": "string",
+      "description": "Host the background server was bound to (e.g. `127.0.0.1`)."
+    },
+    "port": {
+      "type": "integer",
+      "description": "Port the background server was listening on."
+    },
+    "stopped": {
+      "type": "boolean",
+      "description": "True when the background process was killed. The recorded background entry is cleared regardless."
+    }
+  }
+}
