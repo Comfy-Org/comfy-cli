@@ -714,32 +714,44 @@ def apply_specs(
         if not isinstance(spec, dict) or "op" not in spec:
             raise ValueError(f"spec #{i} must be an object with an 'op' field")
         kind = spec["op"]
-        if kind == "add_node":
-            workflow, op = add_node(
-                workflow, graph, spec["class_type"], pos=spec.get("at"), actor=actor, base_version=base_version
-            )
-            if spec.get("as"):
-                aliases[spec["as"]] = op["node_id"]
-        elif kind == "connect":
-            fn, fs = _split_ref_slot(spec["from"], aliases)
-            tn, ts = _split_ref_slot(spec["to"], aliases)
-            workflow, op = connect(workflow, graph, fn, fs, tn, ts, actor=actor, base_version=base_version)
-        elif kind == "set_widget":
-            workflow, op = set_widget(
-                workflow,
-                graph,
-                resolve_ref(spec["node"], aliases),
-                spec["widget"],
-                spec["value"],
-                actor=actor,
-                base_version=base_version,
-            )
-        elif kind == "delete_node":
-            workflow, op = delete_node(
-                workflow, graph, resolve_ref(spec["node"], aliases), actor=actor, base_version=base_version
-            )
-        else:
-            raise ValueError(f"spec #{i}: unknown op {kind!r}")
+        # A missing required field surfaces as a bare KeyError (just the key name);
+        # wrap it so the batch/recipe caller learns WHICH spec and op are malformed.
+        try:
+            if kind == "add_node":
+                workflow, op = add_node(
+                    workflow, graph, spec["class_type"], pos=spec.get("at"), actor=actor, base_version=base_version
+                )
+                alias = spec.get("as")
+                if alias:
+                    # A duplicate alias would silently clobber the earlier node, so a
+                    # later `${alias}` reference resolves to the wrong node. Recipes
+                    # are generated/templated, so an accidental repeat is plausible —
+                    # fail loudly instead.
+                    if alias in aliases:
+                        raise ValueError(f"spec #{i}: alias {alias!r} is already defined by an earlier spec")
+                    aliases[alias] = op["node_id"]
+            elif kind == "connect":
+                fn, fs = _split_ref_slot(spec["from"], aliases)
+                tn, ts = _split_ref_slot(spec["to"], aliases)
+                workflow, op = connect(workflow, graph, fn, fs, tn, ts, actor=actor, base_version=base_version)
+            elif kind == "set_widget":
+                workflow, op = set_widget(
+                    workflow,
+                    graph,
+                    resolve_ref(spec["node"], aliases),
+                    spec["widget"],
+                    spec["value"],
+                    actor=actor,
+                    base_version=base_version,
+                )
+            elif kind == "delete_node":
+                workflow, op = delete_node(
+                    workflow, graph, resolve_ref(spec["node"], aliases), actor=actor, base_version=base_version
+                )
+            else:
+                raise ValueError(f"spec #{i}: unknown op {kind!r}")
+        except KeyError as e:
+            raise ValueError(f"spec #{i} ({kind}) is missing required field {e}") from e
         ops.append(op)
     return workflow, ops, aliases
 

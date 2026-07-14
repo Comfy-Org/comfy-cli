@@ -27,6 +27,18 @@ from comfy_cli.command.workflow import (
 )
 from comfy_cli.output import get_renderer, rprint
 
+# Shared option aliases — the edit commands (add-node/set-widget/connect/
+# delete-node/capture/apply/foreach) all take the same catalog + CRDT-stamping
+# options. Declaring each once here means a help string or default can't drift
+# between the 7 near-identical signatures.
+ActorOpt = Annotated[str, typer.Option("--actor", help="Op author id (for CRDT stamping).")]
+BaseVersionOpt = Annotated[int, typer.Option("--base-version", help="Draft version this edit is based on.")]
+StdoutOpt = Annotated[bool, typer.Option("--stdout/--in-place", show_default=False)]
+InputOpt = Annotated[str | None, typer.Option("--input", show_default=False)]
+HostOpt = Annotated[str | None, typer.Option(show_default=False)]
+PortOpt = Annotated[int | None, typer.Option(show_default=False)]
+WhereOpt = Annotated[str | None, typer.Option("--where", show_default=False, help="Catalog target: local | cloud.")]
+
 
 def _split_addr(addr: str, renderer) -> tuple[Any, str]:
     """Split ``<node_id>.<name>`` → (node_id, name). node_id is int when numeric."""
@@ -87,15 +99,13 @@ def add_node_cmd(
         str | None,
         typer.Option("--at", show_default=False, help="Canvas position 'x,y' for the new node."),
     ] = None,
-    actor: Annotated[str, typer.Option("--actor", help="Op author id (for CRDT stamping).")] = "cli",
-    base_version: Annotated[int, typer.Option("--base-version", help="Draft version this edit is based on.")] = 0,
-    stdout: Annotated[bool, typer.Option("--stdout/--in-place", show_default=False)] = False,
-    input_path: Annotated[str | None, typer.Option("--input", show_default=False)] = None,
-    host: Annotated[str | None, typer.Option(show_default=False)] = None,
-    port: Annotated[int | None, typer.Option(show_default=False)] = None,
-    where: Annotated[
-        str | None, typer.Option("--where", show_default=False, help="Catalog target: local | cloud.")
-    ] = None,
+    actor: ActorOpt = "cli",
+    base_version: BaseVersionOpt = 0,
+    stdout: StdoutOpt = False,
+    input_path: InputOpt = None,
+    host: HostOpt = None,
+    port: PortOpt = None,
+    where: WhereOpt = None,
 ):
     renderer = get_renderer()
     renderer.command = "workflow add-node"
@@ -128,15 +138,13 @@ def set_widget_cmd(
     file: Annotated[str, typer.Argument(help="Frontend-format workflow JSON.")],
     addr: Annotated[str, typer.Argument(help="Widget address `<node_id>.<widget_name>`.")],
     value: Annotated[str, typer.Argument(help="New value (parsed as JSON, else literal string).")],
-    actor: Annotated[str, typer.Option("--actor", help="Op author id (for CRDT stamping).")] = "cli",
-    base_version: Annotated[int, typer.Option("--base-version", help="Draft version this edit is based on.")] = 0,
-    stdout: Annotated[bool, typer.Option("--stdout/--in-place", show_default=False)] = False,
-    input_path: Annotated[str | None, typer.Option("--input", show_default=False)] = None,
-    host: Annotated[str | None, typer.Option(show_default=False)] = None,
-    port: Annotated[int | None, typer.Option(show_default=False)] = None,
-    where: Annotated[
-        str | None, typer.Option("--where", show_default=False, help="Catalog target: local | cloud.")
-    ] = None,
+    actor: ActorOpt = "cli",
+    base_version: BaseVersionOpt = 0,
+    stdout: StdoutOpt = False,
+    input_path: InputOpt = None,
+    host: HostOpt = None,
+    port: PortOpt = None,
+    where: WhereOpt = None,
 ):
     renderer = get_renderer()
     renderer.command = "workflow set-widget"
@@ -172,15 +180,13 @@ def connect_cmd(
     file: Annotated[str, typer.Argument(help="Frontend-format workflow JSON.")],
     source: Annotated[str, typer.Argument(help="Source `<node_id>.<output_slot>` (slot name or index).")],
     target: Annotated[str, typer.Argument(help="Target `<node_id>.<input_slot>` (slot name or index).")],
-    actor: Annotated[str, typer.Option("--actor", help="Op author id (for CRDT stamping).")] = "cli",
-    base_version: Annotated[int, typer.Option("--base-version", help="Draft version this edit is based on.")] = 0,
-    stdout: Annotated[bool, typer.Option("--stdout/--in-place", show_default=False)] = False,
-    input_path: Annotated[str | None, typer.Option("--input", show_default=False)] = None,
-    host: Annotated[str | None, typer.Option(show_default=False)] = None,
-    port: Annotated[int | None, typer.Option(show_default=False)] = None,
-    where: Annotated[
-        str | None, typer.Option("--where", show_default=False, help="Catalog target: local | cloud.")
-    ] = None,
+    actor: ActorOpt = "cli",
+    base_version: BaseVersionOpt = 0,
+    stdout: StdoutOpt = False,
+    input_path: InputOpt = None,
+    host: HostOpt = None,
+    port: PortOpt = None,
+    where: WhereOpt = None,
 ):
     renderer = get_renderer()
     renderer.command = "workflow connect"
@@ -207,15 +213,13 @@ def connect_cmd(
 def delete_cmd(
     file: Annotated[str, typer.Argument(help="Frontend-format workflow JSON.")],
     node: Annotated[str, typer.Argument(help="Node id to delete.")],
-    actor: Annotated[str, typer.Option("--actor", help="Op author id (for CRDT stamping).")] = "cli",
-    base_version: Annotated[int, typer.Option("--base-version", help="Draft version this edit is based on.")] = 0,
-    stdout: Annotated[bool, typer.Option("--stdout/--in-place", show_default=False)] = False,
-    input_path: Annotated[str | None, typer.Option("--input", show_default=False)] = None,
-    host: Annotated[str | None, typer.Option(show_default=False)] = None,
-    port: Annotated[int | None, typer.Option(show_default=False)] = None,
-    where: Annotated[
-        str | None, typer.Option("--where", show_default=False, help="Catalog target: local | cloud.")
-    ] = None,
+    actor: ActorOpt = "cli",
+    base_version: BaseVersionOpt = 0,
+    stdout: StdoutOpt = False,
+    input_path: InputOpt = None,
+    host: HostOpt = None,
+    port: PortOpt = None,
+    where: WhereOpt = None,
 ):
     renderer = get_renderer()
     renderer.command = "workflow delete-node"
@@ -288,12 +292,10 @@ def capture_cmd(
         str | None,
         typer.Option("--out", "-o", show_default=False, help="Write the recipe JSON here (else stdout)."),
     ] = None,
-    input_path: Annotated[str | None, typer.Option("--input", show_default=False)] = None,
-    host: Annotated[str | None, typer.Option(show_default=False)] = None,
-    port: Annotated[int | None, typer.Option(show_default=False)] = None,
-    where: Annotated[
-        str | None, typer.Option("--where", show_default=False, help="Catalog target: local | cloud.")
-    ] = None,
+    input_path: InputOpt = None,
+    host: HostOpt = None,
+    port: PortOpt = None,
+    where: WhereOpt = None,
 ):
     """Project a workflow into a reusable recipe — the op-batch that rebuilds it.
     `apply` that recipe onto an empty graph to reproduce the workflow; edit a value
@@ -360,15 +362,13 @@ def apply_cmd(
         list[str] | None,
         typer.Option("--param", show_default=False, help="Recipe param as key=value; repeatable."),
     ] = None,
-    actor: Annotated[str, typer.Option("--actor", help="Op author id (for CRDT stamping).")] = "cli",
-    base_version: Annotated[int, typer.Option("--base-version", help="Draft version this batch is based on.")] = 0,
-    stdout: Annotated[bool, typer.Option("--stdout/--in-place", show_default=False)] = False,
-    input_path: Annotated[str | None, typer.Option("--input", show_default=False)] = None,
-    host: Annotated[str | None, typer.Option(show_default=False)] = None,
-    port: Annotated[int | None, typer.Option(show_default=False)] = None,
-    where: Annotated[
-        str | None, typer.Option("--where", show_default=False, help="Catalog target: local | cloud.")
-    ] = None,
+    actor: ActorOpt = "cli",
+    base_version: BaseVersionOpt = 0,
+    stdout: StdoutOpt = False,
+    input_path: InputOpt = None,
+    host: HostOpt = None,
+    port: PortOpt = None,
+    where: WhereOpt = None,
 ):
     """Apply a batch of edits in one pass — the catalog loads once, and an
     `add_node` spec may set `"as": "<alias>"` so later specs reference the
@@ -480,14 +480,12 @@ def foreach_cmd(
         typer.Option("--params", help="Param-sets: a JSON array of objects, one object, or JSONL; '-' for stdin."),
     ],
     out_dir: Annotated[str, typer.Option("--out-dir", help="Directory to write the N materialized workflows.")],
-    actor: Annotated[str, typer.Option("--actor")] = "cli",
-    base_version: Annotated[int, typer.Option("--base-version")] = 0,
-    input_path: Annotated[str | None, typer.Option("--input", show_default=False)] = None,
-    host: Annotated[str | None, typer.Option(show_default=False)] = None,
-    port: Annotated[int | None, typer.Option(show_default=False)] = None,
-    where: Annotated[
-        str | None, typer.Option("--where", show_default=False, help="Catalog target: local | cloud.")
-    ] = None,
+    actor: ActorOpt = "cli",
+    base_version: BaseVersionOpt = 0,
+    input_path: InputOpt = None,
+    host: HostOpt = None,
+    port: PortOpt = None,
+    where: WhereOpt = None,
 ):
     """Instantiate a recipe over N param-sets → N ready-to-run workflows (bulk).
     Run them with `comfy run --workflow <each> --where cloud`."""
@@ -531,7 +529,20 @@ def foreach_cmd(
             _atomic_write_text(target, json.dumps(wf, indent=2))
             written.append(str(target))
     except (workflow_ops.RecipeError, ValueError, KeyError) as e:
-        renderer.error(code="workflow_edit_invalid", message=f"foreach failed: {e}")
+        # foreach writes one file per param-set as it goes, so a mid-batch failure
+        # leaves the earlier files on disk. Surface them (in the hint AND machine-
+        # readable details) so the caller isn't blind to the partial output.
+        renderer.error(
+            code="workflow_edit_invalid",
+            message=f"foreach failed: {e}",
+            hint=(
+                f"{len(written)} workflow(s) were written to {out} before the failure — "
+                "delete them or fix the failing param-set and re-run"
+            )
+            if written
+            else None,
+            details={"written": written} if written else None,
+        )
         raise typer.Exit(code=1) from e
 
     payload = {"recipe": name, "count": len(written), "out_dir": str(out), "written": written}

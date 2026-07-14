@@ -858,6 +858,32 @@ class TestApplyBatch:
         assert env["error"]["code"] == "workflow_edit_invalid"
         assert path.read_text() == before, "failed batch must not write a partial graph"
 
+    def test_duplicate_alias_is_rejected(self, patched_graph, tmp_path, capsys):
+        """A repeated `as` name would silently clobber the earlier node — reject it."""
+        path = self._empty(tmp_path)
+        before = path.read_text()
+        specs = [
+            {"op": "add_node", "class_type": "KSampler", "as": "ks"},
+            {"op": "add_node", "class_type": "KSampler", "as": "ks"},  # duplicate alias
+        ]
+        ops_path = tmp_path / "ops.json"
+        ops_path.write_text(json.dumps(specs), encoding="utf-8")
+        env = _run(["apply", str(path), "--ops", str(ops_path)], capsys)
+        assert env["ok"] is False
+        assert env["error"]["code"] == "workflow_edit_invalid"
+        assert "ks" in env["error"]["message"] and "already defined" in env["error"]["message"]
+        assert path.read_text() == before
+
+    def test_missing_field_names_the_spec(self, patched_graph, tmp_path, capsys):
+        """A bare KeyError becomes an actionable `spec #i (...) is missing ...`."""
+        path = self._empty(tmp_path)
+        specs = [{"op": "add_node", "class_type": "KSampler", "as": "ks"}, {"op": "set_widget", "node": "ks"}]
+        ops_path = tmp_path / "ops.json"
+        ops_path.write_text(json.dumps(specs), encoding="utf-8")
+        env = _run(["apply", str(path), "--ops", str(ops_path)], capsys)
+        assert env["ok"] is False
+        assert "spec #1" in env["error"]["message"] and "missing required field" in env["error"]["message"]
+
 
 # ---------------------------------------------------------------------------
 # dynamic combo (COMFY_DYNAMICCOMBO_V3) — set_widget on model + model.resolution
@@ -1033,6 +1059,21 @@ class TestForeach:
         env = _run(["foreach", str(rp), "--params", str(params), "--out-dir", str(out)], capsys)
         assert env["ok"] is False
         assert "positive" in env["error"]["message"]
+
+    def test_foreach_surfaces_partial_writes_on_mid_batch_failure(self, patched_graph, tmp_path, capsys):
+        """foreach writes per param-set; a mid-batch failure leaves earlier files
+        on disk, so the error must surface them (not leave the caller blind)."""
+        rp = self._recipe(tmp_path)
+        params = tmp_path / "sets.jsonl"
+        # #0 valid → written; #1 missing required `positive` → fails.
+        params.write_text('{"positive":"a cat"}\n{"steps":10}\n', encoding="utf-8")
+        out = tmp_path / "out"
+        env = _run(["foreach", str(rp), "--params", str(params), "--out-dir", str(out)], capsys)
+        assert env["ok"] is False
+        written = env["error"]["details"]["written"]
+        assert len(written) == 1 and written[0].endswith("_000.json")
+        assert list(out.glob("*.json"))  # the partial file really is on disk
+        assert "before the failure" in env["error"]["hint"]
 
 
 # ---------------------------------------------------------------------------

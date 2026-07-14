@@ -396,8 +396,10 @@ comfy --json download --out-dir ./out < run.json                      # pull the
   in place.
 - **`delete-node` ≠ `delete`:** `delete-node` removes a *node from the graph file*;
   `comfy workflow delete` deletes a *saved workflow from Comfy Cloud*. Do not confuse them.
-- These operate on **top-level** nodes of frontend-format graphs. For values
-  *inside a subgraph*, use `set-slot`'s nested address (`10/9.prompt`) or decompose.
+- `add-node`/`connect`/`delete-node` operate on **top-level** nodes only.
+  `set-widget` additionally resolves values **inside a subgraph** directly — use
+  the flat promoted address `slots` advertises (e.g. `57.text`) or the nested
+  form (`57/27.text`); no decompose needed.
 
 ---
 

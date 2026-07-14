@@ -835,6 +835,11 @@ def run(
             renderer.error(code="where_invalid", message=str(e), hint="use --where local or --where cloud")
             raise typer.Exit(code=1)
 
+        # Record the RESOLVED routing target so submission analytics can tell a
+        # cloud run from a local one even when --where was defaulted (the raw
+        # `where` kwarg is None then). Rides on the execution_success/_error events.
+        _track_props["target"] = "cloud" if decision.target is where_module.WhereTarget.CLOUD else "local"
+
         # Default for --notify: on when a human is at the terminal, off for
         # agents (they shouldn't get surprise side-channel processes they didn't
         # ask for). The user can override either way with --notify/--no-notify.
@@ -873,6 +878,10 @@ def run(
         if decision.target is where_module.WhereTarget.CLOUD:
             where_module.cloud_preflight_or_exit()
             # Cloud path uses HTTPS + Bearer auth; host/port aren't applicable.
+            # NOTE: do NOT `return` here — falling through to the try's `else`
+            # is what fires `execution_success`. An early return skipped it, so
+            # successful cloud submissions emitted `execution_start` but never
+            # `execution_success` (local runs were unaffected).
             run_inner.execute_cloud(
                 workflow,
                 wait=wait,
@@ -883,29 +892,28 @@ def run(
                 workflow_id=workflow_id,
                 preloaded=preloaded,
             )
-            return
+        else:
+            from comfy_cli.host_port import parse_host_port_arg, resolve_host_port
 
-        from comfy_cli.host_port import parse_host_port_arg, resolve_host_port
+            if host:
+                host, parsed_port = parse_host_port_arg(host)
+                if not port and parsed_port is not None:
+                    port = parsed_port
 
-        if host:
-            host, parsed_port = parse_host_port_arg(host)
-            if not port and parsed_port is not None:
-                port = parsed_port
+            host, port = resolve_host_port(host, port)
 
-        host, port = resolve_host_port(host, port)
-
-        run_inner.execute(
-            workflow,
-            host,
-            port,
-            wait=wait,
-            verbose=verbose,
-            timeout=timeout,
-            notify=effective_notify,
-            api_key=api_key,
-            print_prompt=print_prompt,
-            preloaded=preloaded,
-        )
+            run_inner.execute(
+                workflow,
+                host,
+                port,
+                wait=wait,
+                verbose=verbose,
+                timeout=timeout,
+                notify=effective_notify,
+                api_key=api_key,
+                print_prompt=print_prompt,
+                preloaded=preloaded,
+            )
     except typer.Exit as e:
         if (e.exit_code or 0) == 0:
             tracking.track_event("execution_success", _track_props)
