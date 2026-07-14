@@ -502,9 +502,12 @@ def _schema(extra_args: list[str]) -> None:
 
 
 def _refresh() -> None:
-    # comfy-api serves the OpenAPI spec at `/openapi` (JSON, valid YAML). The old
-    # `/openapi.yml` path 404s. `write_cache()` stores the body verbatim and
-    # `load_raw_spec()` parses it with yaml.load, so JSON is loaded fine.
+    # comfy-api serves the OpenAPI spec at `/openapi` (JSON, which the spec loader
+    # parses fine as YAML). The old `/openapi.yml` path 404s. Because we follow
+    # redirects and cache the body verbatim for 7 days, validate that the response
+    # actually parses to an OpenAPI mapping before persisting it — otherwise a
+    # non-spec 200 (HTML interstitial, redirect landing page, JSON array/scalar)
+    # would poison the cache and break every `generate` subcommand for a week.
     url = spec.base_url() + "/openapi"
     try:
         with httpx.Client(timeout=30.0, follow_redirects=True) as cli:
@@ -512,6 +515,11 @@ def _refresh() -> None:
             r.raise_for_status()
     except httpx.HTTPError as e:
         rprint(f"[bold red]Failed to fetch {url}: {e}[/bold red]")
+        raise typer.Exit(code=1)
+    try:
+        spec.validate_spec_text(r.text)
+    except spec.SpecError as e:
+        rprint(f"[bold red]Refusing to cache spec from {url}: {e}[/bold red]")
         raise typer.Exit(code=1)
     path = spec.write_cache(r.text)
     rprint(f"[bold green]Refreshed model catalog at {path}[/bold green]")

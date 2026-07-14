@@ -459,6 +459,39 @@ def test_refresh_fetches_openapi_path(runner, monkeypatch, tmp_path):
     assert not captured["url"].endswith("/openapi.yml")
 
 
+def test_refresh_rejects_non_spec_body(runner, monkeypatch, tmp_path):
+    """Regression (BE-2982): `/openapi` is followed through redirects and cached
+    for 7 days, so a non-spec 200 (HTML interstitial, redirect landing page, JSON
+    array/scalar) must be refused rather than poison the cache for a week."""
+    cache = tmp_path / "openapi-cache.yml"
+
+    class FakeClient:
+        def __init__(self, *a, **kw):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            pass
+
+        def get(self, url, headers=None):
+            # An HTML interstitial that parses (as YAML) to a plain string, not a mapping.
+            return httpx.Response(
+                200,
+                text="<html><body>Just a moment...</body></html>",
+                request=httpx.Request("GET", url),
+            )
+
+    monkeypatch.setattr(gen_app.httpx, "Client", FakeClient)
+    monkeypatch.setattr("comfy_cli.command.generate.spec._USER_CACHE", cache)
+
+    r = runner.invoke(cli_app, ["generate", "refresh"])
+    assert r.exit_code == 1, r.stdout
+    assert "Refusing to cache" in r.stdout
+    assert not cache.exists()  # nothing was persisted
+
+
 def test_refresh_network_failure(runner, monkeypatch):
     class FakeClient:
         def __init__(self, *a, **kw):

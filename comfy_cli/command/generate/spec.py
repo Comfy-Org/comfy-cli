@@ -41,6 +41,17 @@ _YamlLoader.add_implicit_resolver(
     _re.compile(r"^(?:true|True|TRUE|false|False|FALSE)$"),
     list("tTfF"),
 )
+# PyYAML's YAML 1.1 float resolver only recognizes scientific notation when a
+# decimal point is present (e.g. ``1.0e6``). The remote spec is served as JSON,
+# and ``json.dumps`` emits exponent literals WITHOUT a point for very large/small
+# floats (e.g. ``1e+16``, ``1e-07``); without this those numeric defaults/bounds
+# would silently parse as strings and leak that way into flag schemas. Add a
+# resolver for the point-less exponent form so JSON floats round-trip correctly.
+_YamlLoader.add_implicit_resolver(
+    "tag:yaml.org,2002:float",
+    _re.compile(r"^[-+]?[0-9][0-9_]*[eE][-+]?[0-9]+$"),
+    list("-+0123456789"),
+)
 
 PROXY_PREFIX = "/proxy/"
 DEFAULT_BASE_URL = "https://api.comfy.org"
@@ -410,6 +421,28 @@ def _unknown_endpoint_message(endpoint_id: str) -> str:
         msg += "\nDid you mean: " + ", ".join(close) + "?"
     msg += "\nRun `comfy generate list` to see available models."
     return msg
+
+
+def validate_spec_text(yaml_text: str) -> dict[str, Any]:
+    """Parse `yaml_text` and confirm it looks like an OpenAPI document.
+
+    `_refresh()` fetches a live URL (following redirects), so a non-spec 200 —
+    an HTML error/interstitial, a redirect landing page, or a JSON array/scalar —
+    is entirely possible. Such a body must NOT be cached: `_select_spec_path()`
+    would keep serving it for the full `CACHE_TTL_SECONDS` (7 days) with no
+    fallback to the bundled spec, and `base_url()`/`_registry()` would then call
+    `.get()` on a non-mapping and crash every `generate` subcommand for a week.
+    Raises `SpecError` if the body is not a mapping shaped like an OpenAPI spec.
+    """
+    try:
+        parsed = yaml.load(yaml_text, Loader=_YamlLoader)
+    except yaml.YAMLError as e:
+        raise SpecError(f"response did not parse as YAML/JSON: {e}") from e
+    if not isinstance(parsed, dict):
+        raise SpecError(f"expected an OpenAPI mapping, got {type(parsed).__name__}")
+    if "openapi" not in parsed and "paths" not in parsed:
+        raise SpecError("response is not an OpenAPI document (missing both 'openapi' and 'paths')")
+    return parsed
 
 
 def write_cache(yaml_text: str) -> Path:
