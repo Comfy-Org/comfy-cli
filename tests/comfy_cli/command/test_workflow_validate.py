@@ -84,7 +84,16 @@ def _run(app, args: list[str], capsys):
     captured = capsys.readouterr()
     combined = (captured.out or "") + (captured.err or "")
     if not combined.strip():
+        # CliRunner intercepted the streams itself. Include BOTH stdout and
+        # stderr: in JSON mode the deprecation warning is routed to stderr by
+        # design (so structured stdout stays clean), and newer click (>=8.2)
+        # captures stderr separately from stdout instead of mixing it in.
         combined = result.stdout or ""
+        try:
+            combined += result.stderr or ""
+        except ValueError:
+            # Older click mixes stderr into stdout; nothing separate to add.
+            pass
     envelope = None
     for line in reversed(combined.strip().splitlines()):
         line = line.strip()
@@ -153,3 +162,55 @@ def test_alias_matches_canonical_validation_payload(tmp_path, capsys):
 
     for key in ("valid", "error_count", "warning_count", "errors", "warnings"):
         assert canonical["data"][key] == alias["data"][key]
+
+
+def test_invalid_where_emits_structured_error(tmp_path, capsys):
+    """A bad --where value fails fast with an envelope, not a raw traceback."""
+    wf = _write(tmp_path, "wf.json", _valid_workflow())
+
+    code, env, _ = _run(workflow_cmd.app, ["validate", "--workflow", wf, "--where", "clod"], capsys)
+
+    assert code == 1
+    assert env is not None
+    assert env["ok"] is False
+    assert env["error"]["code"] == "where_invalid"
+
+
+def test_non_utf8_workflow_emits_structured_error(tmp_path, capsys):
+    """A non-UTF-8 workflow file reports an envelope instead of crashing."""
+    oi = _write(tmp_path, "oi.json", _object_info())
+    bad = tmp_path / "bad.json"
+    bad.write_bytes(b"\xff\xfe\x00not-utf8")
+
+    code, env, _ = _run(workflow_cmd.app, ["validate", "--workflow", str(bad), "--input", oi], capsys)
+
+    assert code == 1
+    assert env is not None
+    assert env["ok"] is False
+    assert env["error"]["code"] == "workflow_read_error"
+
+
+def test_pretty_output_escapes_workflow_markup(tmp_path, capsys):
+    """Workflow-supplied node ids must not inject Rich markup into pretty output."""
+    from comfy_cli.caller import Caller
+
+    oi = _write(tmp_path, "oi.json", _object_info())
+    # An unknown class_type under a node id carrying Rich markup -> an error whose
+    # pretty rendering echoes the (escaped) node id.
+    wf = _write(tmp_path, "wf.json", {"[green]spoof[/green]": {"class_type": "NoSuchNode", "inputs": {}}})
+
+    reset_renderer_for_testing()
+    r = Renderer.resolve(
+        is_stdout_tty=True,
+        env={},
+        caller=Caller(kind="user", agentic=False, source_env=None),
+    )
+    r.mode = OutputMode.PRETTY
+    set_renderer(r)
+
+    result = CliRunner().invoke(workflow_cmd.app, ["validate", "--workflow", wf, "--input", oi])
+    out = result.stdout or ""
+
+    assert result.exit_code == 1
+    # The literal markup survives verbatim (escaped) rather than being interpreted.
+    assert "[green]spoof[/green]" in out

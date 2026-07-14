@@ -1187,6 +1187,16 @@ def validate_api_workflow(
     except json.JSONDecodeError as e:
         renderer.error(code="workflow_invalid_json", message=f"Invalid JSON: {e}", hint="re-export from ComfyUI")
         raise typer.Exit(code=1) from e
+    except (OSError, UnicodeDecodeError) as e:
+        # e.g. a non-UTF-8 file, permission denied, or a TOCTOU race if the file
+        # vanished after the is_file() check above. Report structurally instead
+        # of crashing with a raw traceback.
+        renderer.error(
+            code="workflow_read_error",
+            message=f"Unable to read workflow file: {e}",
+            hint="check file permissions and encoding",
+        )
+        raise typer.Exit(code=1) from e
     if not isinstance(wf_data, dict):
         renderer.error(
             code="workflow_not_api_format", message="Workflow must be a JSON object", hint="use File > Export (API)"
@@ -1196,6 +1206,19 @@ def validate_api_workflow(
     # Load graph
     mode = "local"
     if where:
+        # Validate the routing target up front. Otherwise a typo (e.g. `clod`)
+        # is forwarded verbatim to Graph.load, whose target resolution raises a
+        # bare ValueError that would escape as an uncaught traceback (the online
+        # path only — Graph.load short-circuits to --input when supplied).
+        try:
+            where_module._parse(where)
+        except ValueError as e:
+            renderer.error(
+                code="where_invalid",
+                message=str(e),
+                hint="use `--where local` or `--where cloud`",
+            )
+            raise typer.Exit(code=1) from e
         mode = where
     else:
         config = ConfigManager()
@@ -1228,20 +1251,25 @@ def validate_api_workflow(
     }
 
     if renderer.is_pretty():
+        # Workflow-supplied strings (node ids, messages, enum/input values echoed
+        # in messages) flow into rprint, which parses Rich markup. Escape them so a
+        # crafted file can't inject markup to spoof/hide output (e.g. fake a green ✓).
+        from rich.markup import escape
+
         if result["valid"]:
             rprint(f"[bold green]✓[/bold green] workflow is valid ({len(wf_data)} nodes)")
             for w in result["warnings"]:
-                rprint(f"  [yellow]⚠[/yellow] {w.get('message', '')}")
+                rprint(f"  [yellow]⚠[/yellow] {escape(str(w.get('message', '')))}")
         else:
             rprint(f"[bold red]✗[/bold red] {len(result['errors'])} error(s)")
             for e in result["errors"]:
-                msg = e.get("message", "")
+                msg = str(e.get("message", ""))
                 suggestions = e.get("suggestions", [])
                 if suggestions:
-                    msg += f" (did you mean: {', '.join(suggestions[:3])}?)"
-                rprint(f"  [red]•[/red] node {e.get('node_id', '?')}: {msg}")
+                    msg += f" (did you mean: {', '.join(str(s) for s in suggestions[:3])}?)"
+                rprint(f"  [red]•[/red] node {escape(str(e.get('node_id', '?')))}: {escape(msg)}")
             for w in result["warnings"]:
-                rprint(f"  [yellow]⚠[/yellow] {w.get('message', '')}")
+                rprint(f"  [yellow]⚠[/yellow] {escape(str(w.get('message', '')))}")
     renderer.emit(payload, command=command, ok=result["valid"])
 
     if not result["valid"]:
