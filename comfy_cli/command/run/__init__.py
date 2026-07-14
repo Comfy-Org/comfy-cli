@@ -531,7 +531,7 @@ def execute_cloud(
             renderer.error(
                 code="cql_no_graph",
                 message=f"could not load cloud object_info for conversion: {e}",
-                hint="run `comfy nodes refresh --where cloud` to populate the cache",
+                hint="object_info is fetched live — check your cloud sign-in and connection then retry, or run against a local server",
             )
             raise typer.Exit(code=1) from e
         try:
