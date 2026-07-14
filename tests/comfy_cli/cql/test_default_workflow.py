@@ -10,11 +10,14 @@ import pytest
 
 from comfy_cli.cql.default_workflow import (
     CHECKPOINT_LOADER_ID,
+    DEFAULT_CHECKPOINT_NAME,
     NEGATIVE_PROMPT_ID,
     POSITIVE_PROMPT_ID,
     PromptInjectionError,
     build_default_workflow,
     load_default_workflow,
+    overrides_set_checkpoint,
+    resolve_default_checkpoint,
 )
 
 
@@ -64,7 +67,12 @@ class TestPromptInjection:
     def test_no_prompt_no_overrides_is_default_graph(self):
         wf = build_default_workflow()
         assert wf[POSITIVE_PROMPT_ID]["inputs"]["text"] == ""
-        assert wf[CHECKPOINT_LOADER_ID]["inputs"]["ckpt_name"] == "v1-5-pruned-emaonly.ckpt"
+        assert wf[CHECKPOINT_LOADER_ID]["inputs"]["ckpt_name"] == DEFAULT_CHECKPOINT_NAME
+
+    def test_default_checkpoint_constant_matches_bundle(self):
+        # The runtime-resolution constant must stay in sync with the JSON pin.
+        assert DEFAULT_CHECKPOINT_NAME == "v1-5-pruned-emaonly-fp16.safetensors"
+        assert load_default_workflow()[CHECKPOINT_LOADER_ID]["inputs"]["ckpt_name"] == DEFAULT_CHECKPOINT_NAME
 
 
 class TestSetOverrides:
@@ -182,3 +190,91 @@ class TestBundleUnavailable:
         with pytest.raises(PromptInjectionError) as e:
             load_default_workflow()
         assert e.value.code == "default_workflow_unavailable"
+
+
+def _object_info_with_checkpoints(names: list[str]) -> dict:
+    """Minimal object_info enumerating a CheckpointLoaderSimple ckpt_name enum,
+    in the raw ``[[<names>], {opts}]`` server shape."""
+    return {"CheckpointLoaderSimple": {"input": {"required": {"ckpt_name": [list(names), {}]}}}}
+
+
+class TestResolveDefaultCheckpoint:
+    """Runtime checkpoint resolution (pure, offline) for the bundled default."""
+
+    def test_pinned_present_no_change(self):
+        wf = build_default_workflow(prompt="fox")
+        oi = _object_info_with_checkpoints(["other.safetensors", DEFAULT_CHECKPOINT_NAME])
+        out, res = resolve_default_checkpoint(wf, oi, target="the local server")
+        assert out[CHECKPOINT_LOADER_ID]["inputs"]["ckpt_name"] == DEFAULT_CHECKPOINT_NAME
+        assert res.note is None
+        assert res.substituted_to is None
+        assert res.no_checkpoint is False
+
+    def test_pinned_absent_substitutes_first_available(self):
+        wf = build_default_workflow(prompt="fox")
+        oi = _object_info_with_checkpoints(["dreamshaper.safetensors", "sd_xl.safetensors"])
+        out, res = resolve_default_checkpoint(wf, oi, target="the local server")
+        assert out[CHECKPOINT_LOADER_ID]["inputs"]["ckpt_name"] == "dreamshaper.safetensors"
+        assert res.substituted_to == "dreamshaper.safetensors"
+        assert res.no_checkpoint is False
+        assert "not found on the local server" in res.note
+        assert "dreamshaper.safetensors" in res.note
+        assert "--set checkpoint=" in res.note
+
+    def test_empty_enum_flags_no_checkpoint(self):
+        wf = build_default_workflow(prompt="fox")
+        oi = _object_info_with_checkpoints([])
+        out, res = resolve_default_checkpoint(wf, oi)
+        # Unchanged; the caller emits the actionable error.
+        assert out[CHECKPOINT_LOADER_ID]["inputs"]["ckpt_name"] == DEFAULT_CHECKPOINT_NAME
+        assert res.no_checkpoint is True
+        assert res.note is None
+
+    def test_empty_object_info_fails_open(self):
+        wf = build_default_workflow(prompt="fox")
+        out, res = resolve_default_checkpoint(wf, {})
+        assert out[CHECKPOINT_LOADER_ID]["inputs"]["ckpt_name"] == DEFAULT_CHECKPOINT_NAME
+        assert res.no_checkpoint is False
+        assert res.note is None
+
+    def test_object_info_without_checkpoint_node_fails_open(self):
+        # object_info present but no CheckpointLoaderSimple → can't tell → fail open.
+        wf = build_default_workflow(prompt="fox")
+        out, res = resolve_default_checkpoint(wf, {"KSampler": {"input": {"required": {}}}})
+        assert res.no_checkpoint is False
+        assert res.note is None
+
+    def test_missing_checkpoint_node_in_graph_is_noop(self):
+        # A caller misuse (non-default graph) must not crash.
+        _, res = resolve_default_checkpoint(
+            {"9": {"class_type": "SaveImage", "inputs": {}}}, _object_info_with_checkpoints(["a.safetensors"])
+        )
+        assert res.no_checkpoint is False
+        assert res.note is None
+
+
+class TestOverridesSetCheckpoint:
+    def test_alias_detected(self):
+        wf = build_default_workflow()
+        assert overrides_set_checkpoint(["checkpoint=x.safetensors"], wf) is True
+
+    def test_ckpt_alias_detected(self):
+        wf = build_default_workflow()
+        assert overrides_set_checkpoint(["ckpt=x.safetensors"], wf) is True
+
+    def test_raw_form_detected(self):
+        wf = build_default_workflow()
+        assert overrides_set_checkpoint(["4.ckpt_name=x.safetensors"], wf) is True
+
+    def test_non_checkpoint_override_not_detected(self):
+        wf = build_default_workflow()
+        assert overrides_set_checkpoint(["seed=42", "cfg=7.5"], wf) is False
+
+    def test_none_and_empty(self):
+        wf = build_default_workflow()
+        assert overrides_set_checkpoint(None, wf) is False
+        assert overrides_set_checkpoint([], wf) is False
+
+    def test_malformed_entry_ignored(self):
+        wf = build_default_workflow()
+        assert overrides_set_checkpoint(["bogus", "seed=42"], wf) is False

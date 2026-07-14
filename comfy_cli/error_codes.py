@@ -161,6 +161,16 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "reinstall comfy-cli",
     ),
     ErrorCode(
+        "no_checkpoint_available",
+        "`comfy run --prompt`/`--set` (bundled default text2img) needs a checkpoint, but the "
+        "target positively enumerated ZERO installed checkpoints. Only raised when object_info "
+        "was fetched and its checkpoint list is empty — never when object_info couldn't be fetched "
+        "(that path fails open and submits).",
+        "install a checkpoint (local: `comfy model download --url <checkpoint-url>`; cloud: run a "
+        "published gallery template, which provisions models), then re-run — or `--set "
+        "checkpoint=<name>` once one is available",
+    ),
+    ErrorCode(
         "conversion_error",
         "UI-format workflow could not be converted to API format.",
         "export your workflow from ComfyUI via 'File > Export (API)' and retry",

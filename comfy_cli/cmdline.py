@@ -822,7 +822,7 @@ def run(
         # against OUR pinned node ids, so mixing them with a user --workflow —
         # whose node ids are arbitrary — is rejected rather than silently
         # misapplied. `preloaded` is handed straight to run's execute path.
-        preloaded: tuple[dict, str, bool] | None = None
+        preloaded: tuple[dict, str, bool, bool] | None = None
         if prompt is not None or set_overrides:
             if workflow is not None:
                 renderer.error(
@@ -831,14 +831,21 @@ def run(
                     hint="drop --workflow to use the bundled default, or edit the workflow file directly",
                 )
                 raise typer.Exit(code=1)
-            from comfy_cli.cql.default_workflow import PromptInjectionError, build_default_workflow
+            from comfy_cli.cql.default_workflow import (
+                PromptInjectionError,
+                build_default_workflow,
+                overrides_set_checkpoint,
+            )
 
             try:
                 injected = build_default_workflow(prompt=prompt, overrides=set_overrides)
             except PromptInjectionError as e:
                 renderer.error(code=e.code, message=str(e), hint=e.hint)
                 raise typer.Exit(code=1) from e
-            preloaded = (injected, "default_text2img", False)
+            # If the user pinned the checkpoint (--set checkpoint=… / 4.ckpt_name=…),
+            # honor it verbatim: runtime resolution is skipped downstream.
+            checkpoint_user_set = overrides_set_checkpoint(set_overrides, injected)
+            preloaded = (injected, "default_text2img", False, checkpoint_user_set)
         elif workflow is None:
             renderer.error(
                 code="prompt_rejected",

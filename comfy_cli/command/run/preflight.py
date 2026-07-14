@@ -111,6 +111,57 @@ def _preflight_validate(renderer, workflow: dict, object_info: dict, *, target_l
             pprint(f"[yellow]⚠ {w.get('field', '?')}: {w.get('message', '')}[/yellow]")
 
 
+def _resolve_default_checkpoint_or_exit(renderer, workflow: dict, object_info: dict, *, where: str) -> None:
+    """Runtime-resolve the bundled default's pinned checkpoint against the
+    target, in place, then report the outcome through the renderer.
+
+    Call ONLY for the bundled default graph (``workflow_name ==
+    "default_text2img"``) when the user did NOT explicitly ``--set`` the
+    checkpoint. Three outcomes:
+
+    - pinned present / can't tell (object_info empty or not enumerated) → no-op
+      (fail open — preflight + the server decide);
+    - pinned absent but the target has ≥1 checkpoint → substitute the first
+      available one and emit a ``checkpoint_substituted`` note;
+    - target positively has zero checkpoints → hard ``no_checkpoint_available``
+      error (exit 1) instead of a cryptic server-side reject.
+
+    ``where`` is ``"local"`` or ``"cloud"`` and drives the target label + hint.
+    """
+    from comfy_cli.cql.default_workflow import resolve_default_checkpoint
+
+    target_label = "the local server" if where == "local" else "Comfy Cloud"
+    _, res = resolve_default_checkpoint(workflow, object_info, target=target_label)
+
+    if res.no_checkpoint:
+        if where == "local":
+            hint = (
+                "download a checkpoint, e.g. `comfy model download --url "
+                "https://huggingface.co/Comfy-Org/stable-diffusion-v1-5-archive/resolve/main/"
+                "v1-5-pruned-emaonly-fp16.safetensors`, then re-run — or `--set checkpoint=<name>`"
+            )
+        else:
+            hint = (
+                "run a published gallery template (Comfy Cloud provisions its models), or "
+                "`--set checkpoint=<name>` once a checkpoint is available on the target"
+            )
+        renderer.error(
+            code="no_checkpoint_available",
+            message=(
+                f"the bundled default text2img workflow needs a checkpoint, but {target_label} has none installed"
+            ),
+            hint=hint,
+            details={"where": where},
+        )
+        raise typer.Exit(code=1)
+
+    if res.note:
+        # Event fires in NDJSON/stream mode only; the pretty line covers humans.
+        renderer.event("checkpoint_substituted", message=res.note, checkpoint=res.substituted_to, where=where)
+        if renderer.is_pretty():
+            pprint(f"[yellow]⚠ {res.note}[/yellow]")
+
+
 def _fetch_object_info(host: str, port: int) -> dict:
     """Fetch object_info for partner-node detection + validation. Fail open."""
     try:

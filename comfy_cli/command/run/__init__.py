@@ -38,6 +38,7 @@ from comfy_cli.command.run.preflight import PARTNER_NODE_CATEGORY_PREFIXES as PA
 from comfy_cli.command.run.preflight import _detect_partner_nodes as _detect_partner_nodes
 from comfy_cli.command.run.preflight import _fetch_object_info as _fetch_object_info
 from comfy_cli.command.run.preflight import _preflight_validate as _preflight_validate
+from comfy_cli.command.run.preflight import _resolve_default_checkpoint_or_exit as _resolve_default_checkpoint_or_exit
 from comfy_cli.command.run.preflight import fetch_object_info as fetch_object_info
 from comfy_cli.command.run.watcher import _spawn_watcher as _spawn_watcher
 from comfy_cli.command.run.watcher import _tail_state_file as _tail_state_file
@@ -104,7 +105,7 @@ def execute(
     notify: bool = False,
     api_key: str | None = None,
     print_prompt: bool = False,
-    preloaded: tuple[dict, str, bool] | None = None,
+    preloaded: tuple[dict, str, bool, bool] | None = None,
 ):
     # `0.0.0.0` is a wildcard bind, not a connect address. macOS / Windows
     # clients can't reach it; on Linux it happens to resolve to a loopback.
@@ -123,10 +124,13 @@ def execute(
 
     # `preloaded` short-circuits file loading: an in-memory API-format graph
     # (e.g. the `comfy run --prompt` injected default) is handed straight in as
-    # (workflow_dict, display_name, is_ui). Everything downstream is unchanged.
+    # (workflow_dict, display_name, is_ui, checkpoint_user_set). Everything
+    # downstream is unchanged; `checkpoint_user_set` gates runtime checkpoint
+    # resolution for the bundled default (skip it when the user pinned one).
     if preloaded is not None:
-        raw_workflow, workflow_name, is_ui = preloaded
+        raw_workflow, workflow_name, is_ui, checkpoint_user_set = preloaded
     else:
+        checkpoint_user_set = False
         try:
             raw_workflow, workflow_name, is_ui = _load_workflow_file(workflow)
         except WorkflowLoadError as e:
@@ -214,6 +218,14 @@ def execute(
     # extra_data so the partner node finds it server-side — same shape
     # the cloud submit path uses.
     object_info = _fetch_object_info(host, port)
+
+    # Runtime checkpoint resolution for the bundled `--prompt` default: swap the
+    # pinned checkpoint for one the local server actually has (or hard-error if
+    # it has none). Guarded to the bundled default graph and skipped when the
+    # user pinned the checkpoint explicitly (honor it; let preflight reject it).
+    if preloaded is not None and workflow_name == "default_text2img" and not checkpoint_user_set:
+        _resolve_default_checkpoint_or_exit(renderer, workflow, object_info, where="local")
+
     partner_nodes = _detect_partner_nodes(workflow, object_info)
     extra_data: dict | None = None
     if api_key:
@@ -493,7 +505,7 @@ def execute_cloud(
     timeout: int = 600,
     notify: bool = False,
     print_prompt: bool = False,
-    preloaded: tuple[dict, str, bool] | None = None,
+    preloaded: tuple[dict, str, bool, bool] | None = None,
 ):
     """Run a workflow against Comfy Cloud via the stored OAuth session.
 
@@ -508,8 +520,9 @@ def execute_cloud(
 
     renderer = get_renderer()
     if preloaded is not None:
-        raw_workflow, workflow_name, is_ui = preloaded
+        raw_workflow, workflow_name, is_ui, checkpoint_user_set = preloaded
     else:
+        checkpoint_user_set = False
         try:
             raw_workflow, workflow_name, is_ui = _load_workflow_file(workflow)
         except WorkflowLoadError as e:
@@ -592,6 +605,13 @@ def execute_cloud(
         cloud_object_info = _load_from_target(mode="cloud")
     except Exception:  # noqa: BLE001
         cloud_object_info = {}
+
+    # Runtime checkpoint resolution for the bundled `--prompt` default (mirrors
+    # the local path): swap the pinned checkpoint for one Comfy Cloud actually
+    # has, or hard-error if it enumerates none. Guarded to the bundled default
+    # and skipped when the user pinned the checkpoint explicitly.
+    if preloaded is not None and workflow_name == "default_text2img" and not checkpoint_user_set:
+        _resolve_default_checkpoint_or_exit(renderer, parsed_workflow, cloud_object_info, where="cloud")
 
     _preflight_validate(renderer, parsed_workflow, cloud_object_info, target_label="cloud")
 
