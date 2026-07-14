@@ -418,6 +418,12 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "unknown class_type, missing node, bad slot/widget name, or malformed address.",
         "run `comfy workflow slots <file>` for widget addresses or `comfy nodes types` for class_types",
     ),
+    ErrorCode(
+        "normalized_value",
+        "Warning (not fatal): a set-widget value wasn't an exact COMBO option, so "
+        "the nearest matching option was used. Surfaced in the op's `warnings`.",
+        "see the warning's `from`/`to`; pass an exact option to avoid the fuzzy match",
+    ),
     # --- workflow fragments / compose ---------------------------------------
     ErrorCode(
         "fragment_invalid",
