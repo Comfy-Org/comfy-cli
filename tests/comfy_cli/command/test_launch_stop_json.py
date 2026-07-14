@@ -21,6 +21,7 @@ from pathlib import Path
 import jsonschema
 import pytest
 import typer
+from referencing import Registry, Resource
 
 from comfy_cli import cmdline
 from comfy_cli.caller import Caller
@@ -45,20 +46,32 @@ def _force_renderer(mode: OutputMode) -> Renderer:
 def _last_envelope(capsys) -> dict:
     out = capsys.readouterr().out.strip()
     assert out, "expected an envelope on stdout"
-    return json.loads(out.splitlines()[-1])
+    lines = out.splitlines()
+    # JSON mode reserves stdout for exactly one envelope line; all human text
+    # (rprint/print) must be routed to stderr. More than one stdout line means
+    # a pretty-mode print leaked into the machine channel — fail loudly here
+    # instead of silently grabbing the last line.
+    assert len(lines) == 1, f"JSON mode must emit exactly one stdout line, got {len(lines)}: {lines!r}"
+    return json.loads(lines[0])
+
+
+def _schema_registry() -> Registry:
+    """Registry of every shipped schema, resolvable by both its canonical
+    ``$id`` and its filename (envelope.json's ``$ref: "error.json"`` is a
+    filename-relative reference)."""
+    registry: Registry = Registry()
+    for path in SCHEMAS_DIR.glob("*.json"):
+        s = json.loads(path.read_text())
+        resource = Resource.from_contents(s)
+        registry = registry.with_resource(uri=path.name, resource=resource)
+        if s.get("$id"):
+            registry = registry.with_resource(uri=s["$id"], resource=resource)
+    return registry
 
 
 def _validator_for(name: str) -> jsonschema.Validator:
     schema = json.loads((SCHEMAS_DIR / name).read_text())
-    store: dict = {}
-    for path in SCHEMAS_DIR.glob("*.json"):
-        s = json.loads(path.read_text())
-        if s.get("$id"):
-            store[s["$id"]] = s
-        store[path.name] = s
-    base = SCHEMAS_DIR.absolute().as_uri() + "/"
-    resolver = jsonschema.RefResolver(base_uri=base, referrer=schema, store=store)
-    return jsonschema.Draft202012Validator(schema, resolver=resolver)
+    return jsonschema.Draft202012Validator(schema, registry=_schema_registry())
 
 
 def _validate(envelope: dict, data_schema: str) -> None:
