@@ -1618,7 +1618,14 @@ generate_command.register_with(app)
 # discovery leaves are implemented on `models_search_command.app`; surface them
 # under `model` by borrowing their command registrations (same CommandInfo
 # objects — no logic duplication).
+# Mirror the deprecated alias: carry BOTH the discovery leaves and any nested
+# discovery sub-groups so `comfy model …` and the `comfy models …` alias stay in
+# lockstep as the discovery tree grows (both are empty of sub-groups today). A
+# group callback is deliberately NOT carried over here: on the alias it scopes to
+# discovery-only leaves, but `model` also owns the local ops (download/remove/list),
+# so mounting discovery's group setup on the whole noun would leak it onto those.
 models_command.app.registered_commands.extend(models_search_command.app.registered_commands)
+models_command.app.registered_groups.extend(models_search_command.app.registered_groups)
 app.add_typer(
     models_command.app,
     name="model",

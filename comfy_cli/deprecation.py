@@ -5,11 +5,12 @@ users to the new one. Three things happen to an alias:
 
   (a) it is hidden from ``--help`` (so the surface advertises only the new name);
   (b) its group help is prefixed with a ``[DEPRECATED — use <new>]`` banner; and
-  (c) invoking any leaf under it prints a single ``[yellow]`` warning line to
-      stderr.
+  (c) invoking any leaf under it prints a single ``[yellow]`` warning line via
+      :func:`rprint` — stdout in pretty mode, stderr in JSON/NDJSON mode.
 
 The warning is never silenced — discoverability of the rename is the whole
-point, and stderr keeps it out of the one-envelope-on-stdout contract.
+point — and in JSON mode it lands on stderr, keeping it out of the
+one-envelope-on-stdout contract.
 
 Introduced for the ``models`` → ``model`` merge (BE-2999); the sibling noun
 consolidations reuse :func:`add_deprecated_alias`.
@@ -18,6 +19,7 @@ consolidations reuse :func:`add_deprecated_alias`.
 from __future__ import annotations
 
 import functools
+import typing
 
 import typer
 
@@ -38,7 +40,7 @@ def deprecated_help(new_name: str, original_help: str | None = None) -> str:
 
 
 def warn_deprecated(old_name: str, new_name: str) -> None:
-    """Emit the one-line yellow deprecation warning to stderr."""
+    """Emit the one-line yellow deprecation warning (stderr in JSON mode)."""
     rprint(f"[yellow]'comfy {old_name} …' is deprecated; use 'comfy {new_name} …'[/yellow]")
 
 
@@ -94,6 +96,22 @@ def add_deprecated_alias(
         def _emit_deprecation_warning(*args, **kwargs):
             warn_deprecated(old_name, new_name)
             return source_cb(*args, **kwargs)
+
+        # ``functools.wraps`` copied ``source_cb``'s *string* annotations (source
+        # modules use ``from __future__ import annotations``) but the wrapper's
+        # ``__globals__`` still point at this module. Typer resolves a callback's
+        # hints with ``get_type_hints``, so any source-local type would be looked
+        # up in ``deprecation.py`` and raise ``NameError`` at CLI startup.
+        # Pre-resolve the hints against ``source_cb``'s own globals and store the
+        # concrete types (``include_extras`` keeps typer.Option/Argument metadata).
+        try:
+            _emit_deprecation_warning.__annotations__ = typing.get_type_hints(source_cb, include_extras=True)
+        except Exception:
+            # Unresolvable source hints are a problem with the source callback
+            # itself (it would fail canonically too), not with this alias — leave
+            # the copied annotations untouched so behaviour matches the canonical
+            # mount rather than masking the error here.
+            pass
 
     parent.add_typer(alias, name=old_name, hidden=True)
     return alias
