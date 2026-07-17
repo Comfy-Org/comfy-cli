@@ -624,13 +624,15 @@ def _http_request(
     if not raw:
         return status, None
     try:
-        return status, json.loads(raw)
+        return status, json.loads(raw.decode("utf-8"))
     except (json.JSONDecodeError, UnicodeDecodeError) as e:
         # A non-empty body that won't decode as JSON is a *malformed* response, not
         # "no data": returning ``None`` here would let callers report an empty list
         # or a null id as success. Raise instead so it surfaces as a loud, mapped
-        # error. (``json.loads`` decodes bytes itself and raises ``UnicodeDecodeError``
-        # — not a ``JSONDecodeError`` — on non-UTF-8 input, so catch both.)
+        # error. Decode as UTF-8 *explicitly* first: handed raw bytes, ``json.loads``
+        # auto-detects UTF-16/32 (RFC 4627) and would silently accept a non-UTF-8 body
+        # the contract treats as malformed. Non-UTF-8 bytes -> ``UnicodeDecodeError``;
+        # valid-UTF-8 non-JSON text -> ``JSONDecodeError``; catch both.
         raise _ResponseUnparseable() from e
 
 

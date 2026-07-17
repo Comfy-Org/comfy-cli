@@ -537,13 +537,19 @@ class TestDelete:
 # unparseable 200 body — must surface a loud error, not empty/success (BE-3334)
 # ---------------------------------------------------------------------------
 
-# A non-empty 200 body the client can't decode as JSON: a valid-UTF-8 non-JSON page
-# (e.g. an HTML proxy/error page returned 200) and a non-UTF-8 byte string. The
-# latter makes ``json.loads`` raise ``UnicodeDecodeError`` (not ``JSONDecodeError``),
-# so both must be caught. Neither may be reported as "no data" (empty list / null id).
+# A non-empty 200 body the client can't decode as JSON. Three shapes, all malformed:
+#   - a valid-UTF-8 non-JSON page (e.g. an HTML proxy/error page returned 200);
+#   - a non-UTF-8 byte string that isn't valid UTF-8 at all;
+#   - valid JSON encoded as UTF-16, which the *contract* treats as malformed. ``json.loads``
+#     auto-detects UTF-16/32 byte input (RFC 4627), so handed raw bytes it would silently
+#     accept this; decoding as UTF-8 first is what surfaces it. This param locks that in.
+# Decoding UTF-8 first raises ``UnicodeDecodeError`` on the two non-UTF-8 cases and
+# ``JSONDecodeError`` on the HTML one, so both must be caught. Neither may be reported
+# as "no data" (empty list / null id).
 _UNPARSEABLE_BODIES = [
     pytest.param(b"<html>502 Bad Gateway</html>", id="non-json"),
     pytest.param(b"\xff\xfe\x00bad", id="non-utf8"),
+    pytest.param(json.dumps({"data": [], "id": "x"}).encode("utf-16"), id="utf16-json"),
 ]
 
 
@@ -555,6 +561,7 @@ class TestUnparseableResponse:
         # Must NOT masquerade as a successful, genuinely-empty list.
         assert env["ok"] is False
         assert env["error"]["code"] == "workflow_unparseable"
+        assert env["error"]["details"]["operation"] == "list"
 
     @pytest.mark.parametrize("raw", _UNPARSEABLE_BODIES)
     def test_save_surfaces_error_not_null_id(self, cloud_target, tmp_path, monkeypatch, capsys, raw):
@@ -565,3 +572,22 @@ class TestUnparseableResponse:
         # Must NOT claim success with a null workflow_id.
         assert env["ok"] is False
         assert env["error"]["code"] == "workflow_unparseable"
+        assert env["error"]["details"]["operation"] == "save"
+
+    @pytest.mark.parametrize("raw", _UNPARSEABLE_BODIES)
+    def test_get_surfaces_error_not_missing_content(self, cloud_target, monkeypatch, capsys, raw):
+        _patch_urlopen(monkeypatch, {"/api/workflows/wf-uuid/content": (raw, 200)})
+        env = _run(["get", "wf-uuid", "--where", "cloud"], capsys)
+        # Must NOT be reported as missing/invalid content — it's a malformed transport body.
+        assert env["ok"] is False
+        assert env["error"]["code"] == "workflow_unparseable"
+        assert env["error"]["details"]["operation"] == "get"
+
+    @pytest.mark.parametrize("raw", _UNPARSEABLE_BODIES)
+    def test_delete_surfaces_error_not_success(self, cloud_target, monkeypatch, capsys, raw):
+        _patch_urlopen(monkeypatch, {"/api/workflows/wf-uuid": (raw, 200)})
+        env = _run(["delete", "wf-uuid", "--where", "cloud"], capsys)
+        # Must NOT claim a successful delete off an unparseable body.
+        assert env["ok"] is False
+        assert env["error"]["code"] == "workflow_unparseable"
+        assert env["error"]["details"]["operation"] == "delete"
