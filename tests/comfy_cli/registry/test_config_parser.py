@@ -1125,3 +1125,22 @@ def test_classifiers_hint_is_valid_toml_once_uncommented(tmp_path, monkeypatch):
             uncommented.append(line.removeprefix("# ").removeprefix("#"))
     data = tomlkit.parse("[project]\n" + "\n".join(uncommented))
     assert "Operating System :: OS Independent" in data["project"]["classifiers"]
+
+
+def test_generated_pyproject_has_no_trailing_whitespace(tmp_path, monkeypatch):
+    """Blank hint separators must render as a bare "#", not "# " — user repos commonly
+    run a trailing-whitespace pre-commit hook over the file we generate."""
+    monkeypatch.chdir(tmp_path)
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "remote", "add", "origin", "https://github.com/user/ComfyUI-MyNode.git"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+    initialize_project_config()
+    content = (tmp_path / "pyproject.toml").read_text()
+
+    assert [line for line in content.splitlines() if line != line.rstrip()] == []
+    # The separators must still be comments, so the block stays one uncommentable unit.
+    assert "#\n#     # OR for OS-specific nodes" in content

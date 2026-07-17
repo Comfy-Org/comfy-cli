@@ -7,6 +7,7 @@ from urllib.parse import urlparse, urlunparse
 import tomlkit
 import tomlkit.exceptions
 import typer
+from tomlkit.items import Comment, Trivia
 
 from comfy_cli import ui
 from comfy_cli.registry.types import (
@@ -72,7 +73,10 @@ classifiers = [
 def _append_hint(table: tomlkit.items.Table, hint: str) -> None:
     """Append a hint block to `table` as one comment item per line."""
     for line in hint.split("\n"):
-        table.add(tomlkit.comment(line))
+        # Blank separators are emitted as a bare "#" so the block stays one contiguous
+        # comment. tomlkit.comment("") would render "# " and leave trailing whitespace
+        # in the file we hand the user.
+        table.add(tomlkit.comment(line) if line.strip() else Comment(Trivia(comment_ws="", comment="#")))
 
 
 def create_comfynode_config():
