@@ -11,7 +11,7 @@ import requests
 from pathspec import PathSpec
 
 from comfy_cli import constants, ui
-from comfy_cli.http import DOWNLOAD_TIMEOUT
+from comfy_cli.http import DEFAULT_HTTP_TIMEOUT, DOWNLOAD_TIMEOUT
 
 
 class DownloadException(Exception):
@@ -59,8 +59,10 @@ def check_unauthorized(url: str, headers: dict | None = None) -> bool:
         bool: True if the response status code is 401, False otherwise.
     """
     try:
-        response = requests.get(url, headers=headers, allow_redirects=True, stream=True, timeout=DOWNLOAD_TIMEOUT)
-        return response.status_code == 401
+        with requests.get(
+            url, headers=headers, allow_redirects=True, stream=True, timeout=DEFAULT_HTTP_TIMEOUT
+        ) as response:
+            return response.status_code == 401
     except requests.RequestException:
         # If there's an error making the request, we can't determine if it's unauthorized
         return False
