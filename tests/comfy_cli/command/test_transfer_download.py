@@ -923,3 +923,106 @@ class TestDefaultOutDir:
 
         monkeypatch.setattr(config_manager, "ConfigManager", _FakeCM)
         assert transfer._default_out_dir() == "./outputs"
+
+
+class TestDownloadExtensionSanitized:
+    """The download extension can be derived from an untrusted `?filename=`
+    query param (a compromised/malicious server). Unlike the `item` token, it
+    was never sanitized, so control/ANSI bytes reached the on-disk name and
+    the echoed path — a terminal-injection vector in human mode. `_sanitize_ext`
+    whitelists it to a safe charset while preserving the no-traversal guarantee
+    (BE-3326)."""
+
+    # A real ESC control byte, exactly as a hostile server could return it.
+    _ATTACK_NAME = "out.png\x1b[31mHACK"
+
+    @staticmethod
+    def _has_control_bytes(s: str) -> bool:
+        return any(ord(c) < 0x20 or ord(c) == 0x7F for c in s)
+
+    def _write_cloud_state(self, target: Target, outputs: list[str]) -> None:
+        state = jobs_state.JobState(
+            prompt_id=PROMPT_ID,
+            client_id=None,
+            workflow="/abs/composed.json",
+            where="cloud",
+            base_url=target.base_url,
+            status="completed",
+            outputs=outputs,
+            record=None,
+            item_map=None,
+        )
+        assert jobs_state.write(state) is not None
+
+    def _run(self, fake_target, tmp_path, capsys) -> tuple[list[str], dict]:
+        set_renderer(Renderer(mode=OutputMode.NDJSON, command="download"))
+        with (
+            patch("comfy_cli.command.transfer.resolve_target", return_value=fake_target),
+            patch.object(transfer._DOWNLOAD_OPENER, "open", side_effect=lambda req, timeout=None: _FakeResp()),
+        ):
+            paths = transfer.execute_download(PROMPT_ID, out_dir=str(tmp_path / "out"))
+        lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]
+        return paths, json.loads(lines[-1])["data"]
+
+    def test_query_param_control_bytes_stripped_from_ext(self, fake_target, tmp_path, capsys):
+        # A hostile server names the output with a control-byte-laden extension.
+        url = f"https://cloud.example.com/api/view?filename={self._ATTACK_NAME}&subfolder=&type=output"
+        self._write_cloud_state(fake_target, [url])
+
+        paths, data = self._run(fake_target, tmp_path, capsys)
+
+        assert len(paths) == 1
+        name = Path(paths[0]).name
+        echoed = data["files"][0]["path"]
+        # No control/ANSI bytes survive into the on-disk name or the echoed path.
+        assert not self._has_control_bytes(name), repr(name)
+        assert not self._has_control_bytes(echoed), repr(echoed)
+        # The extension stays a clean `.png`-family suffix (leading dot + safe chars).
+        assert name.startswith(f"{SHORT_ID}_000.png"), name
+        assert Path(paths[0]).is_file()
+
+    def test_query_param_no_directory_traversal(self, fake_target, tmp_path, capsys):
+        # `Path(...).suffix` already drops directory components; confirm a
+        # traversal-shaped filename never escapes the out-dir and degrades to
+        # the `.png` default (no dotted suffix to keep).
+        out_dir = tmp_path / "out"
+        url = "https://cloud.example.com/api/view?filename=../../../etc/passwd&subfolder=&type=output"
+        self._write_cloud_state(fake_target, [url])
+
+        paths, _ = self._run(fake_target, tmp_path, capsys)
+
+        assert len(paths) == 1
+        written = Path(paths[0])
+        assert written.name == f"{SHORT_ID}_000.png"
+        # Nothing was written outside the requested out-dir.
+        assert written.resolve().parent == out_dir.resolve()
+
+    def test_local_source_control_bytes_stripped_from_ext(self, fake_target, tmp_path, capsys):
+        # The local-copy branch derives `ext` from the on-disk source name and
+        # must be sanitized too (BE-3326 applies to both branches).
+        src_dir = tmp_path / "output"
+        src_dir.mkdir()
+        src = src_dir / self._ATTACK_NAME
+        src.write_bytes(b"\x89PNG-local")
+        state = jobs_state.JobState(
+            prompt_id=PROMPT_ID,
+            client_id=None,
+            workflow="/abs/composed.json",
+            where="local",
+            base_url="http://127.0.0.1:8188",
+            status="completed",
+            outputs=[str(src)],
+            record=None,
+            item_map=None,
+        )
+        assert jobs_state.write(state) is not None
+
+        set_renderer(Renderer(mode=OutputMode.NDJSON, command="download"))
+        with patch("comfy_cli.command.transfer.resolve_target", return_value=fake_target):
+            paths = transfer.execute_download(PROMPT_ID, out_dir=str(tmp_path / "out"))
+
+        assert len(paths) == 1
+        name = Path(paths[0]).name
+        assert not self._has_control_bytes(name), repr(name)
+        assert name.startswith(f"{SHORT_ID}_000.png"), name
+        assert Path(paths[0]).is_file()

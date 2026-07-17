@@ -265,6 +265,20 @@ def _sanitize_item_name(item: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]", "_", item) or "item"
 
 
+def _sanitize_ext(ext: str) -> str:
+    """A filesystem/terminal-safe download extension.
+
+    The extension can be derived from an untrusted ``?filename=`` query param
+    (a compromised/malicious server), so ``Path(remote_name).suffix`` can carry
+    control/ANSI bytes — e.g. ``out.png\\x1b[31mHACK`` yields ``.png\\x1b[31mHACK``
+    — which would otherwise land in the on-disk name and inject into the
+    terminal when the path is echoed in human mode. Whitelist to a known-safe
+    extension charset, dropping everything else; the caller keeps its ``.png``
+    fallback for a now-empty result. Directory traversal is already impossible
+    because ``Path(...).suffix`` drops path components before we get here."""
+    return re.sub(r"[^A-Za-z0-9._-]", "", ext)
+
+
 def _collision_safe_path(path: Path) -> Path:
     """Never overwrite an existing download: ``name.ext`` → ``name.1.ext``,
     ``name.2.ext``, … (deterministic, first free slot).
@@ -623,12 +637,12 @@ def execute_download(
         # file rather than mislabeling everything `.png`; real URLs carry the
         # name in the query param.
         if local_source is not None:
-            ext = local_source.suffix or ".png"
+            ext = _sanitize_ext(local_source.suffix) or ".png"
         else:
             parsed = urllib.parse.urlparse(url)
             qs = urllib.parse.parse_qs(parsed.query)
             remote_name = qs.get("filename", ["output.png"])[0]
-            ext = Path(remote_name).suffix or ".png"
+            ext = _sanitize_ext(Path(remote_name).suffix) or ".png"
         node_id, item = annotations[idx]
         if item is not None:
             safe_item = _sanitize_item_name(item)
