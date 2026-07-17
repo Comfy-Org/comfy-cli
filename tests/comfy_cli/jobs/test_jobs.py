@@ -181,6 +181,63 @@ class TestLocalSnapshotGroupedOutputs:
         assert snap["outputs_by_item"] == {}
 
 
+class TestLocalSnapshotTextOutputs:
+    """`_snapshot` surfaces text/STRING node outputs under an always-present
+    additive `text_outputs` key: grouped-by-node full strings on the history
+    branch, `{}` when there's no text or the job is still queued/running."""
+
+    def _patch_history(self, monkeypatch, prompt_id, body):
+        def fake_get(url, timeout=10.0):
+            if url.endswith("/queue"):
+                return {"queue_running": [], "queue_pending": []}
+            if url.endswith(f"/history/{prompt_id}"):
+                return {prompt_id: body}
+            raise AssertionError(url)
+
+        monkeypatch.setattr(jobs_mod, "_http_get_json", fake_get)
+
+    def test_history_snapshot_groups_text_by_node(self, monkeypatch):
+        body = {
+            "status": {"completed": True, "messages": []},
+            "outputs": {
+                "7": {"text": ["a detailed image description that stays untruncated"]},
+                "9": {"images": [{"filename": "a.png", "subfolder": "", "type": "output"}]},
+            },
+        }
+        self._patch_history(monkeypatch, "txt-1", body)
+
+        snap = jobs_mod._snapshot("h", 8188, "txt-1")
+        assert snap is not None
+        assert snap["status"] == "completed"
+        # Full, untruncated strings grouped by producing node.
+        assert snap["text_outputs"] == {"7": ["a detailed image description that stays untruncated"]}
+        # Existing media keys are byte-identical to before — additive only.
+        assert snap["outputs"] == ["http://h:8188/view?filename=a.png&subfolder=&type=output"]
+
+    def test_history_snapshot_without_text_emits_empty(self, monkeypatch):
+        body = {
+            "status": {"completed": True, "messages": []},
+            "outputs": {"9": {"images": [{"filename": "a.png", "subfolder": "", "type": "output"}]}},
+        }
+        self._patch_history(monkeypatch, "txt-none", body)
+
+        snap = jobs_mod._snapshot("h", 8188, "txt-none")
+        assert snap is not None
+        assert snap["text_outputs"] == {}
+
+    def test_queue_snapshot_emits_empty_text_outputs(self, monkeypatch):
+        def fake_get(url, timeout=10.0):
+            if url.endswith("/queue"):
+                return {"queue_running": [[0, "txt-live", {"a": {}}, {}, {}]], "queue_pending": []}
+            raise AssertionError(url)
+
+        monkeypatch.setattr(jobs_mod, "_http_get_json", fake_get)
+        snap = jobs_mod._snapshot("h", 8188, "txt-live")
+        assert snap is not None
+        assert snap["status"] == "running"
+        assert snap["text_outputs"] == {}
+
+
 def test_safe_queue_entry_handles_short_rows():
     assert jobs_mod._safe_queue_entry([0, "id", {"node": {}}]) == ("id", {"node": {}})
     assert jobs_mod._safe_queue_entry([])[0] == "?"
@@ -1007,6 +1064,28 @@ def test_watcher_known_inflight_status_never_stalls(monkeypatch):
 
     assert state.status == "completed"
     assert state.error is None
+
+
+def test_render_status_pretty_previews_text_truncated(monkeypatch, capsys):
+    """Pretty render shows a bounded per-entry text preview (first line, ~120
+    chars); the full untruncated string is reserved for the `--json` path."""
+    from comfy_cli.output import Renderer, set_renderer
+    from comfy_cli.output.renderer import OutputMode
+
+    set_renderer(Renderer(mode=OutputMode.PRETTY))
+    tail = "TAILMARKER" + "X" * 400
+    snap = {
+        "prompt_id": "p",
+        "status": "completed",
+        "outputs": [],
+        # First line is long enough to truncate; a second line must be dropped.
+        "text_outputs": {"7": [f"HEADMARKER {'Y' * 130}\ndropped second line {tail}"]},
+    }
+    jobs_mod._render_status_pretty(snap, host="h", port=8188)
+    out = capsys.readouterr().out
+    assert "HEADMARKER" in out  # first line previewed
+    assert "…" in out  # truncated past ~120 chars
+    assert tail not in out  # second line never rendered
 
 
 def test_emit_terminal_verdicts():

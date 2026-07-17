@@ -635,6 +635,7 @@ def _snapshot(host: str, port: int, prompt_id: str) -> dict | None:
                     "outputs": [],
                     "outputs_by_node": {},
                     "outputs_by_item": {},
+                    "text_outputs": {},
                     "host": host,
                     "port": port,
                 }
@@ -663,7 +664,7 @@ def _snapshot(host: str, port: int, prompt_id: str) -> dict | None:
     # their producing-node association — same flatten the cloud snapshot
     # uses, so the grouped keys match the cloud envelope shape exactly.
     from comfy_cli import jobs_state
-    from comfy_cli.comfy_client import _group_outputs, extract_output_entries
+    from comfy_cli.comfy_client import _group_outputs, extract_output_entries, extract_text_outputs
 
     node_outputs: list[dict] = []
     for entry in extract_output_entries(body):
@@ -686,6 +687,11 @@ def _snapshot(host: str, port: int, prompt_id: str) -> dict | None:
         "outputs": output_urls,
         "outputs_by_node": outputs_by_node,
         "outputs_by_item": outputs_by_item,
+        # Text/STRING node outputs (image descriptions, ShowText, …) live under
+        # outputs[node]["text"] as bare strings, which the URL flatten drops.
+        # Additive key: full untruncated strings for `--json`; the pretty
+        # renderer previews them. Empty {} when the run emitted no text.
+        "text_outputs": extract_text_outputs(body),
         "error": error_detail,
         "host": host,
         "port": port,
@@ -715,6 +721,18 @@ def _render_status_pretty(snap: dict, *, host: str, port: int) -> None:
     tbl.add_row("status", badge)
     if snap.get("outputs"):
         tbl.add_row("outputs", "\n".join(snap["outputs"]))
+    if snap.get("text_outputs"):
+        # Bounded preview only — first line, ~120 chars per entry. The full
+        # untruncated text ships on the `--json` path (renderer.emit).
+        preview_lines = []
+        for node_id, texts in snap["text_outputs"].items():
+            for text in texts:
+                first = str(text).splitlines()[0] if str(text).strip() else ""
+                if len(first) > 120:
+                    first = first[:117] + "…"
+                preview_lines.append(f"[{node_id}] {first}")
+        if preview_lines:
+            tbl.add_row("text", "\n".join(preview_lines))
     if snap.get("error"):
         tbl.add_row("error", str(snap["error"])[:600])
 

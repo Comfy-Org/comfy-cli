@@ -18,7 +18,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from comfy_cli import comfy_client, jobs_state
-from comfy_cli.comfy_client import extract_output_entries
+from comfy_cli.comfy_client import extract_output_entries, extract_text_outputs
 from comfy_cli.command import transfer
 from comfy_cli.output import Renderer, set_renderer
 from comfy_cli.output.renderer import OutputMode, reset_renderer_for_testing
@@ -230,6 +230,52 @@ class TestExtractOutputEntries:
         assert [o["filename"] for o in outputs] == [e["filename"] for e in entries]
         # URLs are the view_url of each entry — same triple, same encoding.
         assert outputs[0]["url"] == "https://cloud.example.com/api/view?filename=ComfyUI_a.png&subfolder=&type=output"
+
+
+class TestExtractTextOutputs:
+    """Text/STRING node outputs (GeminiNode descriptions, ShowText, …) live as
+    bare-string lists under ``outputs[node]["text"]`` — a shape the media-key
+    flatten drops. This pure helper groups them by node id."""
+
+    def test_groups_text_by_node(self):
+        record = {
+            "outputs": {
+                "7": {"text": ["a cat sitting on a mat", "second string"]},
+                "9": {"images": [{"filename": "x.png", "type": "output"}]},
+                "11": {"text": ["only line"]},
+            }
+        }
+        assert extract_text_outputs(record) == {
+            "7": ["a cat sitting on a mat", "second string"],
+            "11": ["only line"],
+        }
+
+    def test_no_text_yields_empty(self):
+        # A completed run with only media outputs -> {} (never raises).
+        record = {"outputs": {"9": {"images": [{"filename": "x.png", "type": "output"}]}}}
+        assert extract_text_outputs(record) == {}
+        assert extract_text_outputs({}) == {}
+        assert extract_text_outputs({"outputs": {}}) == {}
+
+    def test_non_list_text_is_skipped(self):
+        # Some nodes stash a bare string under "text"; only lists are kept.
+        assert extract_text_outputs({"outputs": {"7": {"text": "not a list"}}}) == {}
+        assert extract_text_outputs({"outputs": {"7": {"text": None}}}) == {}
+
+    def test_mixed_type_items_keep_only_strings(self):
+        record = {"outputs": {"7": {"text": ["keep", 42, None, {"nested": 1}, "also keep"]}}}
+        assert extract_text_outputs(record) == {"7": ["keep", "also keep"]}
+        # A list with no string items drops the node entirely.
+        assert extract_text_outputs({"outputs": {"7": {"text": [1, 2, 3]}}}) == {}
+
+    def test_non_dict_outputs_and_nodes_tolerated(self):
+        assert extract_text_outputs({"outputs": "garbage"}) == {}
+        assert extract_text_outputs({"outputs": None}) == {}
+        assert extract_text_outputs({"outputs": {"7": "garbage", "9": {"text": ["ok"]}}}) == {"9": ["ok"]}
+
+    def test_node_ids_coerced_to_str(self):
+        # /history keys can arrive as ints in some serializations.
+        assert extract_text_outputs({"outputs": {7: {"text": ["x"]}}}) == {"7": ["x"]}
 
 
 class TestCollisionSafeNaming:
