@@ -363,7 +363,14 @@ def _capture_urlopen(monkeypatch: pytest.MonkeyPatch, routes: dict):
                 return _Resp(payload if isinstance(payload, bytes) else json.dumps(payload).encode())
         raise AssertionError(f"unexpected URL: {url}")
 
+    # Local queue/interrupt paths still use plain ``urllib.request.urlopen``;
+    # the cloud cancel path now opens through the shared no-redirect opener in
+    # ``comfy_cli.http``. Both receive a ``Request`` object, so route the same
+    # fake through both.
+    import comfy_cli.http as http_mod
+
     monkeypatch.setattr("urllib.request.urlopen", _fake)
+    monkeypatch.setattr(http_mod._AUTHED_OPENER, "open", _fake)
     return calls
 
 
