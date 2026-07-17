@@ -438,6 +438,12 @@ class _ResponseTooLarge(Exception):
     """A ``/userdata`` response exceeded ``_USERDATA_MAX_BYTES`` — refuse to truncate."""
 
 
+class _ResponseUnparseable(Exception):
+    """A non-empty 200 body could not be decoded as JSON — surface it as a loud
+    error instead of a misleading empty/success result (an empty body is still a
+    legitimate ``None`` and is *not* this)."""
+
+
 # Map the cloud ``--sort`` fields onto local FileInfo keys (client-side sort;
 # ComfyUI's /userdata listing has no server-side sort/limit/filter).
 _LOCAL_SORT_KEYS = {"create_time": "created", "update_time": "modified", "name": "path"}
@@ -619,15 +625,27 @@ def _http_request(
         return status, None
     try:
         return status, json.loads(raw)
-    except json.JSONDecodeError:
-        return status, None
+    except (json.JSONDecodeError, UnicodeDecodeError) as e:
+        # A non-empty body that won't decode as JSON is a *malformed* response, not
+        # "no data": returning ``None`` here would let callers report an empty list
+        # or a null id as success. Raise instead so it surfaces as a loud, mapped
+        # error. (``json.loads`` decodes bytes itself and raises ``UnicodeDecodeError``
+        # — not a ``JSONDecodeError`` — on non-UTF-8 input, so catch both.)
+        raise _ResponseUnparseable() from e
 
 
 def _handle_cloud_http_error(renderer, e, *, operation: str, workflow_id: str | None = None) -> typer.Exit:
     """Map HTTP failures to envelope codes. Returns an Exit to ``raise from``."""
     import urllib.error
 
-    if isinstance(e, urllib.error.HTTPError):
+    if isinstance(e, _ResponseUnparseable):
+        renderer.error(
+            code="workflow_unparseable",
+            message=f"cloud returned a non-empty but unparseable (non-JSON) response during {operation}",
+            hint="the server sent a malformed body; retry, and report it if it persists",
+            details={"operation": operation, "workflow_id": workflow_id},
+        )
+    elif isinstance(e, urllib.error.HTTPError):
         body = (e.read() or b"")[:1000].decode("utf-8", "replace")
         if e.code == 404:
             renderer.error(
@@ -935,7 +953,7 @@ def list_cmd(
 
     try:
         _, body = _http_request(url, target)
-    except (urllib.error.HTTPError, urllib.error.URLError, OSError) as e:
+    except (urllib.error.HTTPError, urllib.error.URLError, OSError, _ResponseUnparseable) as e:
         raise _handle_cloud_http_error(renderer, e, operation="list") from e
 
     rows = (body or {}).get("data") or []
@@ -1006,7 +1024,7 @@ def get_cmd(
     url = target.url("workflows", _up.quote(workflow_id, safe=""), "content")
     try:
         _, body = _http_request(url, target)
-    except (urllib.error.HTTPError, urllib.error.URLError, OSError) as e:
+    except (urllib.error.HTTPError, urllib.error.URLError, OSError, _ResponseUnparseable) as e:
         raise _handle_cloud_http_error(renderer, e, operation="get", workflow_id=workflow_id) from e
 
     if not isinstance(body, dict) or "workflow_json" not in body:
@@ -1101,7 +1119,7 @@ def save_cmd(
     url = target.url("workflows")
     try:
         _, resp = _http_request(url, target, method="POST", body=body)
-    except (urllib.error.HTTPError, urllib.error.URLError, OSError) as e:
+    except (urllib.error.HTTPError, urllib.error.URLError, OSError, _ResponseUnparseable) as e:
         raise _handle_cloud_http_error(renderer, e, operation="save") from e
 
     workflow_id = (resp or {}).get("id") if isinstance(resp, dict) else None
@@ -1137,7 +1155,7 @@ def delete_cmd(
     url = target.url("workflows", _up.quote(workflow_id, safe=""))
     try:
         _, _body = _http_request(url, target, method="DELETE")
-    except (urllib.error.HTTPError, urllib.error.URLError, OSError) as e:
+    except (urllib.error.HTTPError, urllib.error.URLError, OSError, _ResponseUnparseable) as e:
         raise _handle_cloud_http_error(renderer, e, operation="delete", workflow_id=workflow_id) from e
 
     payload = {"workflow_id": workflow_id, "deleted": True}

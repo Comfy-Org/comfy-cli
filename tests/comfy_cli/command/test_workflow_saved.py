@@ -531,3 +531,37 @@ class TestDelete:
         env = _run(["delete", "ghost", "--where", "cloud"], capsys)
         assert env["ok"] is False
         assert env["error"]["code"] == "workflow_not_found"
+
+
+# ---------------------------------------------------------------------------
+# unparseable 200 body — must surface a loud error, not empty/success (BE-3334)
+# ---------------------------------------------------------------------------
+
+# A non-empty 200 body the client can't decode as JSON: a valid-UTF-8 non-JSON page
+# (e.g. an HTML proxy/error page returned 200) and a non-UTF-8 byte string. The
+# latter makes ``json.loads`` raise ``UnicodeDecodeError`` (not ``JSONDecodeError``),
+# so both must be caught. Neither may be reported as "no data" (empty list / null id).
+_UNPARSEABLE_BODIES = [
+    pytest.param(b"<html>502 Bad Gateway</html>", id="non-json"),
+    pytest.param(b"\xff\xfe\x00bad", id="non-utf8"),
+]
+
+
+class TestUnparseableResponse:
+    @pytest.mark.parametrize("raw", _UNPARSEABLE_BODIES)
+    def test_list_surfaces_error_not_empty(self, cloud_target, monkeypatch, capsys, raw):
+        _patch_urlopen(monkeypatch, {"/api/workflows": (raw, 200)})
+        env = _run(["list", "--where", "cloud"], capsys)
+        # Must NOT masquerade as a successful, genuinely-empty list.
+        assert env["ok"] is False
+        assert env["error"]["code"] == "workflow_unparseable"
+
+    @pytest.mark.parametrize("raw", _UNPARSEABLE_BODIES)
+    def test_save_surfaces_error_not_null_id(self, cloud_target, tmp_path, monkeypatch, capsys, raw):
+        wf_path = tmp_path / "wf.json"
+        wf_path.write_text(json.dumps({"1": {"class_type": "KSampler", "inputs": {}}}))
+        _patch_urlopen(monkeypatch, {"/api/workflows": (raw, 200)})
+        env = _run(["save", str(wf_path), "--name", "x", "--where", "cloud"], capsys)
+        # Must NOT claim success with a null workflow_id.
+        assert env["ok"] is False
+        assert env["error"]["code"] == "workflow_unparseable"

@@ -81,6 +81,14 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "the saved workflow is unexpectedly large; inspect it directly on the server",
     ),
     ErrorCode(
+        "workflow_unparseable",
+        "A cloud `/api/workflows` call returned a non-empty 200 body that couldn't be decoded as JSON "
+        "(non-UTF-8 bytes or a non-JSON body such as an HTML proxy/error page). Distinct from an empty "
+        "body (legitimately no data): the malformed body is surfaced as a hard error rather than a "
+        "misleading empty list / null id. `details.operation` carries the verb.",
+        "the server sent a malformed body; retry, and report it if it persists",
+    ),
+    ErrorCode(
         "workflow_content_not_json",
         "`workflow get` fetched content that isn't parseable JSON (non-UTF-8 bytes or a non-JSON body such "
         "as an HTML error page); the raw bytes were still written. Surfaced in `data.warnings[]`, not as an "
