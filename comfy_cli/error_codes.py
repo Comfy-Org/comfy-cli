@@ -146,8 +146,9 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "Workflow uses a partner-API node (category `partner/*` — Veo, Kling, BFL, Gemini, etc.) "
         "but no `api_key_comfy_org` credential is available. Local submit would succeed at /prompt "
         "and then fail opaquely at execute time with `Unauthorized: Please login first`.",
-        "re-submit with `--where cloud` (the CLI auto-injects the credential there), or run "
-        "`comfy auth set comfy-cloud-api-key --key …` so the local submit path can inject it too",
+        "run: comfy cloud login (or set COMFY_API_KEY in the environment, or persist a key with "
+        "`comfy cloud set-key --key …` so the local submit path can inject it too; cloud runs "
+        "auto-inject via --where cloud)",
     ),
     ErrorCode(
         "workflow_empty",

@@ -19,7 +19,7 @@ Two *purposes* exist and their credentials are NOT interchangeable:
   matching the historical ``comfy generate`` chain.
 
 Both purposes fall back to the same stored key (provider
-``comfy-cloud-api-key``, persisted via the hidden ``comfy cloud set-key``).
+``comfy-cloud-api-key``, persisted via ``comfy cloud set-key``).
 
 This module is also the only sanctioned *read* gateway to the OAuth session
 (:func:`get_session`) and the ambient API key (:func:`find_api_key`) — a
@@ -37,7 +37,7 @@ if TYPE_CHECKING:
     from comfy_cli.auth.store import CloudSession
 
 # Provider name under which a Comfy Cloud API key is persisted in the auth
-# store. Hidden / testing-only path; the canonical sign-in is OAuth.
+# store. Testing-only path; the canonical sign-in is OAuth.
 # (Re-exported by ``comfy_cli.target`` for back-compat.)
 CLOUD_API_KEY_PROVIDER = "comfy-cloud-api-key"
 

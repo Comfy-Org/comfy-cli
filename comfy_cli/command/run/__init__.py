@@ -229,8 +229,9 @@ def execute(
                 code="partner_node_requires_credential",
                 message=msg,
                 hint=(
-                    "re-submit with `--where cloud` (the CLI auto-injects the key there), "
-                    "or store the key locally with `comfy auth set comfy-cloud-api-key --key …`"
+                    "run: comfy cloud login   (or set COMFY_API_KEY in the environment, "
+                    "or persist a key with `comfy cloud set-key --key …`; "
+                    "cloud runs auto-inject via --where cloud)"
                 ),
                 details={
                     "partner_nodes": partner_nodes,

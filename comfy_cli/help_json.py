@@ -31,7 +31,7 @@ HELP_EXAMPLES: dict[str, list[str]] = {
         "comfy query --input object_info.json --query 'from nodes where category=\"loaders\"'",
     ],
     "comfy auth": ["comfy auth list", "comfy auth set civitai --key ..."],
-    "comfy auth set": ["comfy auth set comfy-cloud --key sk-…"],
+    "comfy auth set": ["comfy auth set civitai --key sk-…"],
     "comfy auth list": ["comfy auth list", "comfy --json auth list"],
     "comfy auth remove": ["comfy auth remove civitai"],
     "comfy install": [
