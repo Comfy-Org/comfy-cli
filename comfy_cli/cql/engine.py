@@ -438,7 +438,12 @@ class Graph:
     @property
     def object_info(self) -> dict[str, Any]:
         """The raw ``/object_info`` dict this graph was built from (``{}`` if
-        the graph was constructed without one)."""
+        the graph was constructed without one).
+
+        Read-only: this is the graph's live internal schema state, returned by
+        reference to avoid copying a large payload. Callers (e.g. the validate
+        command handing it to ``convert_ui_to_api``) must not mutate it.
+        """
         return self._raw
 
     @classmethod
