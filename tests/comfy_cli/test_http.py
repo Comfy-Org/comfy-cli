@@ -4,7 +4,21 @@ import urllib.request
 
 import pytest
 
-from comfy_cli.http import NoRedirectHandler
+from comfy_cli.http import DEFAULT_HTTP_TIMEOUT, DOWNLOAD_TIMEOUT, NoRedirectHandler
+
+
+def test_default_http_timeout_is_a_positive_scalar():
+    assert isinstance(DEFAULT_HTTP_TIMEOUT, (int, float))
+    assert DEFAULT_HTTP_TIMEOUT > 0
+
+
+def test_download_timeout_is_a_connect_read_tuple():
+    # A (connect, read) tuple so connect failures fail fast while a legitimately
+    # long transfer is not capped (requests applies read timeout per socket read).
+    assert isinstance(DOWNLOAD_TIMEOUT, tuple)
+    assert len(DOWNLOAD_TIMEOUT) == 2
+    connect, read = DOWNLOAD_TIMEOUT
+    assert connect > 0 and read > 0
 
 
 def _call(handler, method_name, code=302):

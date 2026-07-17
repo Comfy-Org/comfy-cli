@@ -19,6 +19,7 @@ from rich.live import Live
 from rich.table import Table
 
 from comfy_cli.constants import DEFAULT_COMFY_WORKSPACE, OS, PROC
+from comfy_cli.http import DOWNLOAD_TIMEOUT
 
 # Use the output shim so prints go to stderr (not stdout) in JSON mode,
 # preserving the one-envelope-on-stdout contract.
@@ -121,7 +122,7 @@ def download_url(
     cwd = Path(cwd).expanduser().resolve()
     fpath = cwd / fname
 
-    response = requests.get(url, stream=True, allow_redirects=allow_redirects)
+    response = requests.get(url, stream=True, allow_redirects=allow_redirects, timeout=DOWNLOAD_TIMEOUT)
     if response.status_code != 200:
         response.raise_for_status()  # Will only raise for 4xx codes, so...
         raise RuntimeError(f"Request to {url} returned status code {response.status_code}")

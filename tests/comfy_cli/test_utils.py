@@ -1,6 +1,7 @@
 import io
 from unittest.mock import MagicMock, patch
 
+from comfy_cli.http import DOWNLOAD_TIMEOUT
 from comfy_cli.utils import create_tarball, download_url, extract_tarball
 
 
@@ -30,6 +31,19 @@ class TestDownloadUrl:
         result = download_url("http://example.com/f.bin", "f.bin", cwd=tmp_path, show_progress=False)
         assert result == tmp_path / "f.bin"
         assert (tmp_path / "f.bin").read_bytes() == content
+
+    @patch("comfy_cli.utils.requests.get")
+    def test_passes_download_timeout(self, mock_get, tmp_path):
+        """A streaming download must set a (connect, read) timeout so a stalled peer can't hang."""
+        content = b"x"
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.headers = {"Content-Length": str(len(content))}
+        mock_response.raw = _FakeRaw(content)
+        mock_get.return_value = mock_response
+
+        download_url("http://example.com/f.bin", "f.bin", cwd=tmp_path, show_progress=False)
+        assert mock_get.call_args.kwargs["timeout"] == DOWNLOAD_TIMEOUT
 
 
 class TestTarballRoundTrip:

@@ -4,6 +4,8 @@ import os
 
 import requests
 
+from comfy_cli.http import DEFAULT_HTTP_TIMEOUT
+
 # Reduced global imports from comfy_cli.registry
 from comfy_cli.registry.types import (
     License,
@@ -79,7 +81,7 @@ class RegistryAPI:
         headers = {"Content-Type": "application/json"}
         body = request_body
 
-        response = requests.post(url, headers=headers, data=json.dumps(body))
+        response = requests.post(url, headers=headers, data=json.dumps(body), timeout=DEFAULT_HTTP_TIMEOUT)
 
         if response.status_code == 201:
             data = response.json()
@@ -98,7 +100,7 @@ class RegistryAPI:
           list: A list of Node instances.
         """
         url = f"{self.base_url}/nodes"
-        response = requests.get(url)
+        response = requests.get(url, timeout=DEFAULT_HTTP_TIMEOUT)
         if response.status_code == 200:
             raw_nodes = response.json()["nodes"]
             return [map_node_to_node_class(node) for node in raw_nodes]
@@ -121,7 +123,7 @@ class RegistryAPI:
         else:
             url = f"{self.base_url}/nodes/{node_id}/install?version={version}"
 
-        response = requests.get(url)
+        response = requests.get(url, timeout=DEFAULT_HTTP_TIMEOUT)
         if response.status_code == 200:
             # Convert the API response to a NodeVersion object
             logging.debug(f"RegistryAPI install_node response: {response.json()}")

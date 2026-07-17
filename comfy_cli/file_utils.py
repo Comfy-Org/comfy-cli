@@ -11,6 +11,7 @@ import requests
 from pathspec import PathSpec
 
 from comfy_cli import constants, ui
+from comfy_cli.http import DOWNLOAD_TIMEOUT
 
 
 class DownloadException(Exception):
@@ -58,7 +59,7 @@ def check_unauthorized(url: str, headers: dict | None = None) -> bool:
         bool: True if the response status code is 401, False otherwise.
     """
     try:
-        response = requests.get(url, headers=headers, allow_redirects=True, stream=True)
+        response = requests.get(url, headers=headers, allow_redirects=True, stream=True, timeout=DOWNLOAD_TIMEOUT)
         return response.status_code == 401
     except requests.RequestException:
         # If there's an error making the request, we can't determine if it's unauthorized
@@ -464,7 +465,7 @@ def zip_files(zip_filename, includes=None):
 def upload_file_to_signed_url(signed_url: str, file_path: str):
     with open(file_path, "rb") as f:
         headers = {"Content-Type": "application/zip"}
-        response = requests.put(signed_url, data=f, headers=headers)
+        response = requests.put(signed_url, data=f, headers=headers, timeout=DOWNLOAD_TIMEOUT)
 
         if response.status_code == 200:
             print("Upload successful.")

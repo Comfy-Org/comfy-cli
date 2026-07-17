@@ -17,6 +17,7 @@ from comfy_cli.file_utils import (
     guess_status_code_reason,
     upload_file_to_signed_url,
 )
+from comfy_cli.http import DOWNLOAD_TIMEOUT
 
 
 def test_guess_status_code_reason_401_with_json():
@@ -54,6 +55,17 @@ def test_check_unauthorized_true(mock_get):
     mock_get.return_value = mock_response
 
     assert check_unauthorized("http://example.com") is True
+
+
+@patch("requests.get")
+def test_check_unauthorized_passes_timeout(mock_get):
+    """The unauthorized probe must set a timeout so a stalled peer can't hang the CLI."""
+    mock_response = Mock()
+    mock_response.status_code = 200
+    mock_get.return_value = mock_response
+
+    check_unauthorized("http://example.com")
+    assert mock_get.call_args.kwargs["timeout"] == DOWNLOAD_TIMEOUT
 
 
 @patch("requests.get")
@@ -134,6 +146,7 @@ def test_upload_file_success(mock_put, tmp_path):
     upload_file_to_signed_url("http://example.com", str(test_file))
 
     mock_put.assert_called_once()
+    assert mock_put.call_args.kwargs["timeout"] == DOWNLOAD_TIMEOUT
 
 
 @patch("requests.put")
