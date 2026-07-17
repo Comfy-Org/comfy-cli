@@ -265,6 +265,9 @@ def _sanitize_item_name(item: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]", "_", item) or "item"
 
 
+_MAX_EXT_LEN = 20  # generous — real extensions are short; caps an untrusted suffix
+
+
 def _sanitize_ext(ext: str) -> str:
     """A filesystem/terminal-safe download extension.
 
@@ -273,10 +276,21 @@ def _sanitize_ext(ext: str) -> str:
     control/ANSI bytes — e.g. ``out.png\\x1b[31mHACK`` yields ``.png\\x1b[31mHACK``
     — which would otherwise land in the on-disk name and inject into the
     terminal when the path is echoed in human mode. Whitelist to a known-safe
-    extension charset, dropping everything else; the caller keeps its ``.png``
-    fallback for a now-empty result. Directory traversal is already impossible
-    because ``Path(...).suffix`` drops path components before we get here."""
-    return re.sub(r"[^A-Za-z0-9._-]", "", ext)
+    extension charset, dropping everything else, and cap the length so a
+    ``?filename=out.<thousands of safe chars>`` suffix can't push ``local_name``
+    past NAME_MAX and raise ``OSError(ENAMETOOLONG)`` outside the NDJSON error
+    contract. Directory traversal is already impossible because ``Path(...).suffix``
+    drops path components before we get here.
+
+    A suffix that survives to only dots/dashes/underscores (e.g. ``.💥``,
+    ``.日本語``, ``.<ESC>``) carries no real extension — return ``""`` so the
+    caller's ``or ".png"`` fallback applies instead of writing a name with a
+    bare trailing dot (``<id>_000.``), which is invalid/silently normalized on
+    Windows and desyncs the reported path from the on-disk name."""
+    cleaned = re.sub(r"[^A-Za-z0-9._-]", "", ext)[:_MAX_EXT_LEN]
+    if not any(c.isalnum() for c in cleaned):
+        return ""
+    return cleaned
 
 
 def _collision_safe_path(path: Path) -> Path:

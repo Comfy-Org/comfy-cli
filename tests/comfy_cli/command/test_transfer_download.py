@@ -977,8 +977,11 @@ class TestDownloadExtensionSanitized:
         # No control/ANSI bytes survive into the on-disk name or the echoed path.
         assert not self._has_control_bytes(name), repr(name)
         assert not self._has_control_bytes(echoed), repr(echoed)
-        # The extension stays a clean `.png`-family suffix (leading dot + safe chars).
-        assert name.startswith(f"{SHORT_ID}_000.png"), name
+        # Exact name: control/ANSI bytes are gone (`\x1b`, `[` stripped) while the
+        # benign alphanumeric payload remnant survives the whitelist. Asserting the
+        # full name (not just a `.png` prefix) catches any regression that leaks
+        # control bytes after `.png`.
+        assert name == f"{SHORT_ID}_000.png31mHACK", name
         assert Path(paths[0]).is_file()
 
     def test_query_param_no_directory_traversal(self, fake_target, tmp_path, capsys):
@@ -1024,5 +1027,37 @@ class TestDownloadExtensionSanitized:
         assert len(paths) == 1
         name = Path(paths[0]).name
         assert not self._has_control_bytes(name), repr(name)
-        assert name.startswith(f"{SHORT_ID}_000.png"), name
+        # Exact name (see query-param twin above): control bytes stripped, benign
+        # payload remnant kept — asserting the full name catches control-byte leaks.
+        assert name == f"{SHORT_ID}_000.png31mHACK", name
         assert Path(paths[0]).is_file()
+
+    @pytest.mark.parametrize(
+        "suffix",
+        [
+            ".💥",  # emoji-only
+            ".日本語",  # unicode-only
+            ".\x1b",  # lone control byte
+            ".",  # already just a dot
+            "..",  # multiple dots
+            ".-_",  # dots/dashes/underscores, no alnum
+            "",  # empty
+        ],
+    )
+    def test_sanitize_ext_collapses_extensionless_suffix_to_empty(self, suffix):
+        # A suffix with no surviving alphanumeric char carries no real extension:
+        # it must return "" so the caller's `or ".png"` fallback applies rather than
+        # a truthy bare-dot result that bypasses the fallback and writes `<id>_000.`.
+        assert transfer._sanitize_ext(suffix) == ""
+
+    def test_sanitize_ext_keeps_real_extension(self):
+        assert transfer._sanitize_ext(".png") == ".png"
+        assert transfer._sanitize_ext(".7z") == ".7z"
+        assert transfer._sanitize_ext(".tar.gz") == ".tar.gz"
+
+    def test_sanitize_ext_caps_length(self):
+        # A hostile `?filename=out.<thousands of safe chars>` must not yield an
+        # over-long extension that pushes local_name past NAME_MAX.
+        result = transfer._sanitize_ext("." + "a" * 5000)
+        assert len(result) <= transfer._MAX_EXT_LEN
+        assert not self._has_control_bytes(result)
