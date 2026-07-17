@@ -160,7 +160,7 @@ class TestStreamShape:
     def test_every_line_carries_schema_and_type(self, workflow_file, capsys):
         with (
             patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),
-            patch("comfy_cli.command.run.request.urlopen") as mock_open,
+            patch("comfy_cli.http._PLAIN_OPENER.open") as mock_open,
             patch("comfy_cli.command.run.WebSocket") as MockWs,
         ):
             mock_open.return_value.read.return_value = json.dumps({"prompt_id": "p"}).encode()
@@ -281,7 +281,7 @@ class TestSuccessfulRun:
     def test_no_wait_emits_prompt_preview_then_queued(self, workflow_file, capsys):
         with (
             patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),
-            patch("comfy_cli.command.run.request.urlopen") as mock_open,
+            patch("comfy_cli.http._PLAIN_OPENER.open") as mock_open,
             patch("comfy_cli.command.run._spawn_watcher", return_value=True),
         ):
             mock_open.return_value.read.return_value = json.dumps({"prompt_id": "p123"}).encode()
@@ -303,7 +303,7 @@ class TestSuccessfulRun:
         """Mocked WS flow → queued + executing/executed/output events + ok envelope."""
         with (
             patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),
-            patch("comfy_cli.command.run.request.urlopen") as mock_open,
+            patch("comfy_cli.http._PLAIN_OPENER.open") as mock_open,
             patch("comfy_cli.command.run.WebSocket") as MockWs,
         ):
             mock_open.return_value.read.return_value = json.dumps({"prompt_id": "p"}).encode()
@@ -342,7 +342,7 @@ class TestQueueHttpErrors:
     def _setup_and_run(self, workflow_file, http_response, capsys, status=None, body=b""):
         with (
             patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),
-            patch("comfy_cli.command.run.request.urlopen") as mock_open,
+            patch("comfy_cli.http._PLAIN_OPENER.open") as mock_open,
             patch("comfy_cli.command.run.WebSocket"),
         ):
             if status is None:
@@ -407,7 +407,7 @@ class TestQueueHttpErrors:
     def test_url_error_routes_to_connection_error(self, workflow_file, capsys):
         with (
             patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),
-            patch("comfy_cli.command.run.request.urlopen") as mock_open,
+            patch("comfy_cli.http._PLAIN_OPENER.open") as mock_open,
             patch("comfy_cli.command.run.WebSocket"),
         ):
             mock_open.side_effect = urllib.error.URLError("refused")
@@ -418,7 +418,7 @@ class TestQueueHttpErrors:
         """200 + non-empty node_errors → `queued` with validation_warnings populated."""
         with (
             patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),
-            patch("comfy_cli.command.run.request.urlopen") as mock_open,
+            patch("comfy_cli.http._PLAIN_OPENER.open") as mock_open,
             patch("comfy_cli.command.run.WebSocket") as MockWs,
         ):
             body = json.dumps(
@@ -447,7 +447,7 @@ class TestQueuedEventShape:
         """`nodes` lists one entry per workflow node with node_id, class_type, title."""
         with (
             patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),
-            patch("comfy_cli.command.run.request.urlopen") as mock_open,
+            patch("comfy_cli.http._PLAIN_OPENER.open") as mock_open,
             patch("comfy_cli.command.run._spawn_watcher", return_value=True),
         ):
             mock_open.return_value.read.return_value = json.dumps({"prompt_id": "p"}).encode()
@@ -467,7 +467,7 @@ class TestWebSocketEvents:
     def _run_with_ws_messages(self, workflow_file, recv_side_effect, capsys):
         with (
             patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),
-            patch("comfy_cli.command.run.request.urlopen") as mock_open,
+            patch("comfy_cli.http._PLAIN_OPENER.open") as mock_open,
             patch("comfy_cli.command.run.WebSocket") as MockWs,
         ):
             mock_open.return_value.read.return_value = json.dumps({"prompt_id": "p"}).encode()
@@ -865,7 +865,7 @@ class TestPromptPreviewAlwaysEmitted:
     def test_api_input_emits_prompt_preview_before_queued(self, workflow_file, capsys):
         with (
             patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),
-            patch("comfy_cli.command.run.request.urlopen") as mock_open,
+            patch("comfy_cli.http._PLAIN_OPENER.open") as mock_open,
             patch("comfy_cli.command.run.WebSocket") as MockWs,
         ):
             mock_open.return_value.read.return_value = json.dumps({"prompt_id": "p"}).encode()
@@ -885,7 +885,7 @@ class TestPromptPreviewAlwaysEmitted:
         with (
             patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),
             patch("comfy_cli.command.run.fetch_object_info", return_value=OBJECT_INFO),
-            patch("comfy_cli.command.run.request.urlopen") as mock_post,
+            patch("comfy_cli.http._PLAIN_OPENER.open") as mock_post,
             patch("comfy_cli.command.run.WebSocket") as MockWs,
         ):
             mock_post.return_value.read.return_value = json.dumps({"prompt_id": "p"}).encode()
@@ -907,7 +907,7 @@ class TestPromptPreviewAlwaysEmitted:
         # POST envelope's runtime fields (client_id, extra_data with api_key).
         with (
             patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),
-            patch("comfy_cli.command.run.request.urlopen") as mock_open,
+            patch("comfy_cli.http._PLAIN_OPENER.open") as mock_open,
             patch("comfy_cli.command.run.WebSocket") as MockWs,
         ):
             mock_open.return_value.read.return_value = json.dumps({"prompt_id": "p"}).encode()
@@ -934,7 +934,7 @@ class TestPrintPrompt:
         with (
             patch("comfy_cli.command.run.check_comfy_server_running") as mock_check,
             patch("comfy_cli.command.run.fetch_object_info") as mock_fetch,
-            patch("comfy_cli.command.run.request.urlopen") as mock_post,
+            patch("comfy_cli.http._PLAIN_OPENER.open") as mock_post,
         ):
             lines, exit_code = _run_execute_capture(workflow_file, capsys, print_prompt=True)
         assert mock_check.call_count == 0
@@ -953,7 +953,7 @@ class TestPrintPrompt:
         with (
             patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),
             patch("comfy_cli.command.run.fetch_object_info", return_value=OBJECT_INFO),
-            patch("comfy_cli.command.run.request.urlopen") as mock_post,
+            patch("comfy_cli.http._PLAIN_OPENER.open") as mock_post,
         ):
             lines, exit_code = _run_execute_capture(ui_workflow_file, capsys, print_prompt=True)
         assert mock_post.call_count == 0
@@ -969,7 +969,7 @@ class TestPrintPrompt:
         # --print-prompt skips the pre-flight server probe, but UI conversion
         # still needs /object_info, so an unreachable host surfaces here.
         with (
-            patch("comfy_cli.command.run.request.urlopen", side_effect=urllib.error.URLError("Connection refused")),
+            patch("comfy_cli.http._PLAIN_OPENER.open", side_effect=urllib.error.URLError("Connection refused")),
         ):
             lines, exit_code = _run_execute_capture(ui_workflow_file, capsys, print_prompt=True)
         assert exit_code == 1
@@ -1025,7 +1025,7 @@ class TestConvertedAndConversionErrors:
         with (
             patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),
             patch("comfy_cli.command.run.fetch_object_info", return_value=OBJECT_INFO),
-            patch("comfy_cli.command.run.request.urlopen") as mock_open,
+            patch("comfy_cli.http._PLAIN_OPENER.open") as mock_open,
             patch("comfy_cli.command.run.WebSocket") as MockWs,
         ):
             mock_open.return_value.read.return_value = json.dumps({"prompt_id": "p"}).encode()
@@ -1099,7 +1099,7 @@ class TestObjectInfoFailures:
     def test_object_info_unavailable_on_http_error(self, ui_workflow_file, capsys):
         with (
             patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),
-            patch("comfy_cli.command.run.request.urlopen") as mock_open,
+            patch("comfy_cli.http._PLAIN_OPENER.open") as mock_open,
         ):
             # _make_http_error builds a /prompt URL by default — build the
             # /object_info HTTPError inline so the test exercises that path.
@@ -1121,7 +1121,7 @@ class TestObjectInfoFailures:
         """URLError on /object_info → connection_error (NOT object_info_unavailable)."""
         with (
             patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),
-            patch("comfy_cli.command.run.request.urlopen") as mock_open,
+            patch("comfy_cli.http._PLAIN_OPENER.open") as mock_open,
         ):
             mock_open.side_effect = urllib.error.URLError("connection refused")
             lines, exit_code = _run_execute_capture(ui_workflow_file, capsys)
@@ -1135,7 +1135,7 @@ class TestNodeCachedIntegration:
     def test_execution_cached_event_shape(self, workflow_file, capsys):
         with (
             patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),
-            patch("comfy_cli.command.run.request.urlopen") as mock_open,
+            patch("comfy_cli.http._PLAIN_OPENER.open") as mock_open,
             patch("comfy_cli.command.run.WebSocket") as MockWs,
         ):
             mock_open.return_value.read.return_value = json.dumps({"prompt_id": "p"}).encode()
@@ -1249,7 +1249,7 @@ class TestVerboseNoOpInJsonMode:
     def test_verbose_does_not_corrupt_json_stream(self, workflow_file, capsys):
         with (
             patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),
-            patch("comfy_cli.command.run.request.urlopen") as mock_open,
+            patch("comfy_cli.http._PLAIN_OPENER.open") as mock_open,
             patch("comfy_cli.command.run.WebSocket") as MockWs,
         ):
             mock_open.return_value.read.return_value = json.dumps({"prompt_id": "p"}).encode()
@@ -1323,7 +1323,7 @@ class TestErrorPathCoverage:
         try:
             with (
                 patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),
-                patch("comfy_cli.command.run.request.urlopen", side_effect=TimeoutError("timed out")),
+                patch("comfy_cli.http._PLAIN_OPENER.open", side_effect=TimeoutError("timed out")),
             ):
                 lines, exit_code = _run_execute_capture(path, capsys)
             assert _envelope(lines)["error"]["code"] == "connection_error"
@@ -1355,7 +1355,7 @@ class TestErrorPathCoverage:
             mock_resp.__exit__ = MagicMock(return_value=False)
             with (
                 patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),
-                patch("comfy_cli.command.run.request.urlopen", return_value=mock_resp),
+                patch("comfy_cli.http._PLAIN_OPENER.open", return_value=mock_resp),
             ):
                 lines, exit_code = _run_execute_capture(path, capsys)
             env = _envelope(lines)
@@ -1368,7 +1368,7 @@ class TestErrorPathCoverage:
         """queue()'s urlopen TimeoutError → connection_error."""
         with (
             patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),
-            patch("comfy_cli.command.run.request.urlopen", side_effect=TimeoutError("post timed out")),
+            patch("comfy_cli.http._PLAIN_OPENER.open", side_effect=TimeoutError("post timed out")),
             patch("comfy_cli.command.run.WebSocket"),
         ):
             lines, exit_code = _run_execute_capture(workflow_file, capsys)
@@ -1378,7 +1378,7 @@ class TestErrorPathCoverage:
         """queue()'s urlopen OSError → connection_error."""
         with (
             patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),
-            patch("comfy_cli.command.run.request.urlopen", side_effect=OSError("network unreachable")),
+            patch("comfy_cli.http._PLAIN_OPENER.open", side_effect=OSError("network unreachable")),
             patch("comfy_cli.command.run.WebSocket"),
         ):
             lines, exit_code = _run_execute_capture(workflow_file, capsys)
@@ -1467,7 +1467,7 @@ class TestErrorPathCoverage:
         are still included so consumers see the complete 'what ran' picture."""
         with (
             patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),
-            patch("comfy_cli.command.run.request.urlopen") as mock_open,
+            patch("comfy_cli.http._PLAIN_OPENER.open") as mock_open,
             patch("comfy_cli.command.run.WebSocket") as MockWs,
         ):
             mock_open.return_value.read.return_value = json.dumps({"prompt_id": "p"}).encode()
@@ -1506,7 +1506,7 @@ class TestTimeoutAppliesToConnectAndPost:
     def test_queue_passes_timeout_to_urlopen(self, workflow_file, capsys):
         with (
             patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),
-            patch("comfy_cli.command.run.request.urlopen") as mock_open,
+            patch("comfy_cli.http._PLAIN_OPENER.open") as mock_open,
             patch("comfy_cli.command.run.WebSocket") as MockWs,
         ):
             mock_open.return_value.read.return_value = json.dumps({"prompt_id": "p"}).encode()
@@ -1561,7 +1561,7 @@ class TestTimeoutAppliesToConnectAndPost:
     def test_connect_passes_timeout_to_ws_connect(self, workflow_file, capsys):
         with (
             patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),
-            patch("comfy_cli.command.run.request.urlopen") as mock_open,
+            patch("comfy_cli.http._PLAIN_OPENER.open") as mock_open,
             patch("comfy_cli.command.run.WebSocket") as MockWs,
         ):
             mock_open.return_value.read.return_value = json.dumps({"prompt_id": "p"}).encode()
@@ -1598,7 +1598,7 @@ class TestNoWaitQueueErrorRegression:
     def test_no_wait_with_400_emits_prompt_rejected(self, workflow_file, capsys):
         with (
             patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),
-            patch("comfy_cli.command.run.request.urlopen") as mock_open,
+            patch("comfy_cli.http._PLAIN_OPENER.open") as mock_open,
         ):
             body = json.dumps(
                 {

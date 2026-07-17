@@ -116,7 +116,7 @@ class TestFetchObjectInfo:
     def test_returns_parsed_json_on_success(self):
         payload = {"KSampler": {"input": {}, "output_node": False}}
         with patch(
-            "comfy_cli.command.run.request.urlopen",
+            "comfy_cli.http._PLAIN_OPENER.open",
             return_value=_ok_response(json.dumps(payload).encode()),
         ) as mock_open:
             result = fetch_object_info("127.0.0.1", 8188, timeout=30)
@@ -125,7 +125,7 @@ class TestFetchObjectInfo:
 
     def test_http_error_exits_cleanly(self):
         with patch(
-            "comfy_cli.command.run.request.urlopen",
+            "comfy_cli.http._PLAIN_OPENER.open",
             side_effect=_make_http_error(500, b"server exploded"),
         ):
             with pytest.raises(typer.Exit) as exc_info:
@@ -134,7 +134,7 @@ class TestFetchObjectInfo:
 
     def test_network_error_exits_cleanly(self):
         with patch(
-            "comfy_cli.command.run.request.urlopen",
+            "comfy_cli.http._PLAIN_OPENER.open",
             side_effect=urllib.error.URLError("Connection refused"),
         ):
             with pytest.raises(typer.Exit) as exc_info:
@@ -142,14 +142,14 @@ class TestFetchObjectInfo:
             assert exc_info.value.exit_code == 1
 
     def test_timeout_exits_cleanly(self):
-        with patch("comfy_cli.command.run.request.urlopen", side_effect=TimeoutError("timed out")):
+        with patch("comfy_cli.http._PLAIN_OPENER.open", side_effect=TimeoutError("timed out")):
             with pytest.raises(typer.Exit) as exc_info:
                 fetch_object_info("127.0.0.1", 8188, timeout=5)
             assert exc_info.value.exit_code == 1
 
     def test_invalid_json_exits_cleanly(self):
         with patch(
-            "comfy_cli.command.run.request.urlopen",
+            "comfy_cli.http._PLAIN_OPENER.open",
             return_value=_ok_response(b"<html>not json</html>"),
         ):
             with pytest.raises(typer.Exit) as exc_info:
@@ -176,7 +176,7 @@ class TestWorkflowExecutionAuth:
 
     def test_queue_embeds_api_key_in_extra_data(self, workflow):
         ex = self._make_exec(workflow, api_key="sk-secret")
-        with patch("comfy_cli.command.run.request.urlopen") as mock_open:
+        with patch("comfy_cli.http._PLAIN_OPENER.open") as mock_open:
             mock_open.return_value.read.return_value = json.dumps({"prompt_id": "abc"}).encode()
             ex.queue()
         req = mock_open.call_args[0][0]
@@ -185,7 +185,7 @@ class TestWorkflowExecutionAuth:
 
     def test_queue_does_not_send_x_api_key_header(self, workflow):
         ex = self._make_exec(workflow, api_key="sk-secret")
-        with patch("comfy_cli.command.run.request.urlopen") as mock_open:
+        with patch("comfy_cli.http._PLAIN_OPENER.open") as mock_open:
             mock_open.return_value.read.return_value = json.dumps({"prompt_id": "abc"}).encode()
             ex.queue()
         req = mock_open.call_args[0][0]
@@ -193,7 +193,7 @@ class TestWorkflowExecutionAuth:
 
     def test_queue_omits_api_key_when_not_set(self, workflow):
         ex = self._make_exec(workflow)
-        with patch("comfy_cli.command.run.request.urlopen") as mock_open:
+        with patch("comfy_cli.http._PLAIN_OPENER.open") as mock_open:
             mock_open.return_value.read.return_value = json.dumps({"prompt_id": "abc"}).encode()
             ex.queue()
         req = mock_open.call_args[0][0]
@@ -206,7 +206,7 @@ class TestWorkflowExecutionAuth:
 
     def test_queue_sends_usage_source_header(self, workflow):
         ex = self._make_exec(workflow)
-        with patch("comfy_cli.command.run.request.urlopen") as mock_open:
+        with patch("comfy_cli.http._PLAIN_OPENER.open") as mock_open:
             mock_open.return_value.read.return_value = json.dumps({"prompt_id": "abc"}).encode()
             ex.queue()
         req = mock_open.call_args[0][0]

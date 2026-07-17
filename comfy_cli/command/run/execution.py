@@ -38,6 +38,7 @@ from rich.table import Column, Table
 
 from comfy_cli import execution_errors
 from comfy_cli.command.run.loader import _MAX_BODY_PREVIEW, _node_errors_to_list
+from comfy_cli.http import plain_urlopen
 from comfy_cli.output import get_renderer
 from comfy_cli.output import rprint as pprint
 from comfy_cli.workspace_manager import WorkspaceManager
@@ -167,7 +168,7 @@ class WorkflowExecution:
         req = request.Request(f"http://{self.host}:{self.port}/prompt", json.dumps(data).encode("utf-8"))
         req.add_header("Comfy-Usage-Source", "comfy-cli")
         try:
-            resp = request.urlopen(req, timeout=self.timeout)
+            resp = plain_urlopen(req, timeout=self.timeout)
             raw_body = resp.read()
         except urllib.error.HTTPError as e:
             body_bytes = e.read()
