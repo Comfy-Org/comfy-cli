@@ -134,3 +134,21 @@ def test_migrated_caller_propagates_refused_redirect():
         with pytest.raises(urllib.error.HTTPError) as exc_info:
             _http_get_json("https://x/api/assets", _target(api_key="k"))
     assert exc_info.value.code == 302
+
+
+@pytest.mark.parametrize("url", ["file:///etc/passwd", "ftp://example.com/x", "data:text/plain,hi"])
+def test_authed_opener_refuses_non_http_schemes(url, tmp_path):
+    """The credential-carrying opener is pinned to http(s). ``build_opener``
+    would install File/FTP/Data handlers, so a caller steered into a local-file
+    or ftp URL could exfiltrate or read unintended content; those schemes must
+    fall through to UnknownHandler instead."""
+    with pytest.raises(urllib.error.URLError) as exc_info:
+        authed_urlopen(url, _target(api_key="k"))
+    assert "unknown url type" in str(exc_info.value.reason)
+
+
+def test_authed_opener_handler_set():
+    """Only http(s)-relevant handlers are installed — no File/FTP/Data."""
+    names = {type(h).__name__ for h in http_mod._AUTHED_OPENER.handlers}
+    assert {"HTTPHandler", "HTTPSHandler", "NoRedirectHandler"} <= names
+    assert not names & {"FileHandler", "FTPHandler", "DataHandler"}

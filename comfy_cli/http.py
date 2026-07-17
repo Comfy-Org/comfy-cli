@@ -26,7 +26,31 @@ class NoRedirectHandler(urllib.request.HTTPRedirectHandler):
     http_error_302 = http_error_303 = http_error_307 = http_error_308 = http_error_301
 
 
-_AUTHED_OPENER = urllib.request.build_opener(NoRedirectHandler())
+def _build_authed_opener() -> urllib.request.OpenerDirector:
+    """Build the credential-carrying opener with http/https handlers only.
+
+    ``build_opener()`` would also install ``FileHandler``/``FTPHandler``. Every
+    call site builds its URL from a trusted ``target.base_url``, so that isn't
+    reachable today, but this is the opener that attaches credentials — pinning
+    it to http(s) means a future caller can't be steered into a ``file://`` or
+    ``ftp://`` fetch. Unknown schemes fall to ``UnknownHandler``, which raises
+    ``URLError("unknown url type")``.
+    """
+    opener = urllib.request.OpenerDirector()
+    for handler in (
+        urllib.request.ProxyHandler(),
+        urllib.request.HTTPHandler(),
+        urllib.request.HTTPSHandler(),
+        urllib.request.HTTPDefaultErrorHandler(),
+        urllib.request.HTTPErrorProcessor(),
+        NoRedirectHandler(),
+        urllib.request.UnknownHandler(),
+    ):
+        opener.add_handler(handler)
+    return opener
+
+
+_AUTHED_OPENER = _build_authed_opener()
 
 
 def build_authed_request(
