@@ -7,11 +7,18 @@ This module provides CLI commands for managing the PR cache, including:
 """
 
 import typer
+
+# NOT migrated to `comfy_cli.output.rprint` on purpose. `pr list` renders its
+# result through the module-level `console` below (plain Rich -> stdout) and emits
+# no renderer envelope. Routing only these calls through the shim would split one
+# command's output across two streams in JSON mode -- table on stdout, "no cached
+# PR builds found" / cache settings on stderr. Migrate `console` and these calls
+# together, once `pr` emits envelopes via the renderer.
+from rich import print as rprint
 from rich.console import Console
 from rich.table import Table
 
 from comfy_cli import tracking
-from comfy_cli.output import rprint
 from comfy_cli.pr_cache import PRCache
 
 app = typer.Typer(help="Manage PR cache")

@@ -21,11 +21,19 @@ from typing import Annotated
 
 import httpx
 import typer
+
+# NOT migrated to `comfy_cli.output.rprint` on purpose. `generate` carries its own
+# `--json` flag (see `_emit_result` / `output.print_json`) and never emits a
+# renderer envelope on its submit/sync/resume paths. Routing these calls through
+# the shim would send the command's *primary result* (job ids, image URLs) to
+# stderr whenever stdout isn't a TTY, leaving stdout empty -- so `comfy generate
+# ... > out.txt` would write an empty file. Migrate only once `generate` emits
+# envelopes via the renderer.
+from rich import print as rprint
 from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
 
 from comfy_cli import tracking, ui
 from comfy_cli.command.generate import adapters, client, emit, output, poll, schema, spec, upload
-from comfy_cli.output import rprint
 from comfy_cli.output.renderer import get_renderer
 
 _HELP = "Generate images via ComfyUI partner nodes (Flux, Ideogram, DALL·E, Recraft, Stability, …)."
