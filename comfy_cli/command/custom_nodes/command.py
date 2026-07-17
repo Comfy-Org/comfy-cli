@@ -1219,11 +1219,6 @@ def registry_install(
     try:
         # Call the API to install the node
         node_version = registry_api.install_node(node_id, version)
-        if not node_version.download_url:
-            logging.error("Download URL not provided from the registry.")
-            ui.display_error_message(f"Failed to download the custom node {node_id}.")
-            return
-
     except RegistryAPIError as e:
         logging.error(f"Encountered an error while installing the node. error: {str(e)}")
         get_renderer().error(
@@ -1234,8 +1229,23 @@ def registry_install(
         raise typer.Exit(code=1) from e
     except Exception as e:
         logging.error(f"Encountered an error while installing the node. error: {str(e)}")
-        ui.display_error_message(f"Failed to download the custom node {node_id}.")
-        return
+        get_renderer().error(
+            code="node_install_failed",
+            message=f"Failed to download the custom node {node_id}.",
+            details={"node_id": node_id},
+        )
+        raise typer.Exit(code=1) from e
+
+    # Checked outside the try: typer.Exit subclasses Exception, so raising it
+    # above would be swallowed by the broad handler and emit a second envelope.
+    if not node_version.download_url:
+        logging.error("Download URL not provided from the registry.")
+        get_renderer().error(
+            code="node_install_failed",
+            message=f"Failed to download the custom node {node_id}.",
+            details={"node_id": node_id},
+        )
+        raise typer.Exit(code=1)
 
     # Download the node archive
     custom_nodes_path = pathlib.Path(workspace_manager.workspace_path) / "custom_nodes"
