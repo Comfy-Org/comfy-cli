@@ -14,6 +14,23 @@ from comfy_cli.registry.types import (
 )
 
 
+class RegistryAPIError(Exception):
+    """Raised when a Registry API call fails.
+
+    Carries the HTTP ``status`` and response ``body`` when the failure came
+    from a non-2xx response, so the command boundary can surface a
+    machine-readable ``renderer.error(code=..., details={status, body})``
+    instead of a bare traceback. Client-side validation failures (missing
+    publisher id / project name) carry no status/body.
+    """
+
+    def __init__(self, message: str, *, status: int | None = None, body: str | None = None):
+        super().__init__(message)
+        self.message = message
+        self.status = status
+        self.body = body
+
+
 class RegistryAPI:
     def __init__(self):
         self.base_url = self.determine_base_url()
@@ -44,10 +61,10 @@ class RegistryAPI:
         """
         # Local import to prevent circular dependency
         if not node_config.tool_comfy.publisher_id:
-            raise Exception("Publisher ID is required in pyproject.toml to publish a node version")
+            raise RegistryAPIError("Publisher ID is required in pyproject.toml to publish a node version")
 
         if not node_config.project.name:
-            raise Exception("Project name is required in pyproject.toml to publish a node version")
+            raise RegistryAPIError("Project name is required in pyproject.toml to publish a node version")
         license_json = serialize_license(node_config.project.license)
         request_body = {
             "personal_access_token": token,
@@ -88,7 +105,11 @@ class RegistryAPI:
                 signedUrl=data["signedUrl"],
             )
         else:
-            raise Exception(f"Failed to publish node version: {response.status_code} {response.text}")
+            raise RegistryAPIError(
+                f"Failed to publish node version: {response.status_code} {response.text}",
+                status=response.status_code,
+                body=response.text,
+            )
 
     def list_all_nodes(self):
         """
@@ -103,7 +124,11 @@ class RegistryAPI:
             raw_nodes = response.json()["nodes"]
             return [map_node_to_node_class(node) for node in raw_nodes]
         else:
-            raise Exception(f"Failed to retrieve nodes: {response.status_code} - {response.text}")
+            raise RegistryAPIError(
+                f"Failed to retrieve nodes: {response.status_code} - {response.text}",
+                status=response.status_code,
+                body=response.text,
+            )
 
     def install_node(self, node_id, version=None):
         """
@@ -129,7 +154,11 @@ class RegistryAPI:
             logging.debug(f"RegistryAPI install_node response: {response.json()}")
             return map_node_version(response.json())
         else:
-            raise Exception(f"Failed to install node: {response.status_code} - {response.text}")
+            raise RegistryAPIError(
+                f"Failed to install node: {response.status_code} - {response.text}",
+                status=response.status_code,
+                body=response.text,
+            )
 
     def get_node(self, node_id):
         """

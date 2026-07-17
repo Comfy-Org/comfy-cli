@@ -6,6 +6,7 @@ from typer.testing import CliRunner
 
 from comfy_cli.command.custom_nodes.command import app
 from comfy_cli.file_utils import DownloadException
+from comfy_cli.registry import RegistryAPIError
 
 runner = CliRunner()
 
@@ -383,3 +384,29 @@ class TestRegistryInstallDownloadError:
 
         assert "Traceback" not in result.output
         assert "DownloadException" not in result.output
+
+
+class TestRegistryInstallApiError:
+    """A RegistryAPIError from install_node must surface a machine-readable
+    renderer.error(code="node_install_failed", details={status, body}) and
+    exit non-zero — not a bare traceback and not a silent exit 0."""
+
+    def test_api_error_surfaced_with_code_and_exit_1(self, tmp_path):
+        with (
+            patch("comfy_cli.command.custom_nodes.command.registry_api") as mock_api,
+            patch("comfy_cli.command.custom_nodes.command.workspace_manager") as mock_ws,
+            patch("comfy_cli.command.custom_nodes.command.get_renderer") as mock_get_renderer,
+        ):
+            mock_ws.workspace_path = str(tmp_path)
+            mock_api.install_node.side_effect = RegistryAPIError(
+                "Failed to install node: 404 - Not Found", status=404, body="Not Found"
+            )
+
+            result = runner.invoke(app, ["registry-install", "test-node"])
+
+        assert result.exit_code == 1
+        assert "Traceback" not in result.output
+        mock_get_renderer.return_value.error.assert_called_once()
+        _, kwargs = mock_get_renderer.return_value.error.call_args
+        assert kwargs["code"] == "node_install_failed"
+        assert kwargs["details"] == {"node_id": "test-node", "status": 404, "body": "Not Found"}

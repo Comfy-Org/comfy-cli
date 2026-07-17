@@ -23,9 +23,11 @@ from comfy_cli.file_utils import (
     upload_file_to_signed_url,
     zip_files,
 )
+from comfy_cli.output import get_renderer
 from comfy_cli.output import rprint as print  # context-aware: stderr in JSON mode
 from comfy_cli.registry import (
     RegistryAPI,
+    RegistryAPIError,
     extract_node_configuration,
     initialize_project_config,
 )
@@ -1119,6 +1121,13 @@ def publish(
         # Upload the zip file to the signed URL
         typer.echo("Uploading zip file...")
         upload_file_to_signed_url(signed_url, zip_filename)
+    except RegistryAPIError as e:
+        get_renderer().error(
+            code="node_publish_failed",
+            message=str(e),
+            details={"status": e.status, "body": e.body},
+        )
+        raise typer.Exit(code=1) from e
     except Exception as e:
         ui.display_error_message({str(e)})
         raise typer.Exit(code=1)
@@ -1215,6 +1224,14 @@ def registry_install(
             ui.display_error_message(f"Failed to download the custom node {node_id}.")
             return
 
+    except RegistryAPIError as e:
+        logging.error(f"Encountered an error while installing the node. error: {str(e)}")
+        get_renderer().error(
+            code="node_install_failed",
+            message=f"Failed to download the custom node {node_id}.",
+            details={"node_id": node_id, "status": e.status, "body": e.body},
+        )
+        raise typer.Exit(code=1) from e
     except Exception as e:
         logging.error(f"Encountered an error while installing the node. error: {str(e)}")
         ui.display_error_message(f"Failed to download the custom node {node_id}.")

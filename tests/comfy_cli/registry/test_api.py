@@ -5,7 +5,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from comfy_cli.registry import PyProjectConfig
-from comfy_cli.registry.api import RegistryAPI
+from comfy_cli.registry.api import RegistryAPI, RegistryAPIError
 from comfy_cli.registry.types import ComfyConfig, License, ProjectConfig, URLs
 
 
@@ -69,9 +69,20 @@ class TestRegistryAPI(unittest.TestCase):
         mock_response.text = "Bad Request"
         mock_post.return_value = mock_response
 
-        with self.assertRaises(Exception) as context:
+        with self.assertRaises(RegistryAPIError) as context:
             self.registry_api.publish_node_version(self.node_config, self.token)
         self.assertIn("Failed to publish node version", str(context.exception))
+        self.assertEqual(context.exception.status, 400)
+        self.assertEqual(context.exception.body, "Bad Request")
+
+    def test_publish_node_version_requires_publisher_id(self):
+        # Client-side validation failure: typed error, no HTTP status/body.
+        self.node_config.tool_comfy.publisher_id = ""
+        with self.assertRaises(RegistryAPIError) as context:
+            self.registry_api.publish_node_version(self.node_config, self.token)
+        self.assertIn("Publisher ID is required", str(context.exception))
+        self.assertIsNone(context.exception.status)
+        self.assertIsNone(context.exception.body)
 
     def _mock_publish_response(self, changelog=""):
         mock_response = MagicMock()
@@ -168,9 +179,11 @@ class TestRegistryAPI(unittest.TestCase):
         mock_response.text = "Internal Server Error"
         mock_get.return_value = mock_response
 
-        with self.assertRaises(Exception) as context:
+        with self.assertRaises(RegistryAPIError) as context:
             self.registry_api.list_all_nodes()
         self.assertIn("Failed to retrieve nodes", str(context.exception))
+        self.assertEqual(context.exception.status, 500)
+        self.assertEqual(context.exception.body, "Internal Server Error")
 
     @patch("requests.get")
     def test_install_node_success(self, mock_get):
@@ -197,9 +210,11 @@ class TestRegistryAPI(unittest.TestCase):
         mock_response.text = "Not Found"
         mock_get.return_value = mock_response
 
-        with self.assertRaises(Exception) as context:
+        with self.assertRaises(RegistryAPIError) as context:
             self.registry_api.install_node("node1")
         self.assertIn("Failed to install node", str(context.exception))
+        self.assertEqual(context.exception.status, 404)
+        self.assertEqual(context.exception.body, "Not Found")
 
     @patch("requests.get")
     def test_get_node_success(self, mock_get):
