@@ -995,7 +995,7 @@ def validate(
                 suggestions = e.get("suggestions", [])
                 if suggestions:
                     msg += f" (did you mean: {', '.join(suggestions[:3])}?)"
-                rprint(f"  [red]•[/red] node {e.get('node_id', '?')}: {msg}")
+                rprint(f"  [red]•[/red] node {e.get('node_id') or '?'}: {msg}")
             for w in result["warnings"]:
                 rprint(f"  [yellow]⚠[/yellow] {w.get('message', '')}")
     renderer.emit(payload, command="validate", ok=result["valid"])

@@ -700,9 +700,8 @@ class Graph:
         warnings: list[dict] = []
         all_names = list(self._nodes.keys())
         # No-outputs check: the server rejects any prompt with zero output nodes
-        # (execution.py:1155-1162, prompt_no_outputs). Track whether we saw any
-        # recognized node and whether any was an output node.
-        any_recognized = False
+        # (execution.py:1155-1162, prompt_no_outputs). Track whether any
+        # recognized node is an output node.
         has_output_node = False
 
         for node_id, node_data in workflow.items():
@@ -749,7 +748,6 @@ class Graph:
                 )
                 continue
 
-            any_recognized = True
             if m.is_output_node:
                 has_output_node = True
 
@@ -878,11 +876,21 @@ class Graph:
             errors.extend(_check_autogrow_required(node_id, autogrow_ports, autogrow_seen, node_data))
             errors.extend(_check_required_present(node_id, m, node_data))
 
-        # No-outputs check: a prompt with recognized nodes but zero output nodes
-        # is rejected server-side (execution.py:1155-1162, prompt_no_outputs).
-        if any_recognized and not has_output_node:
+        # No-outputs check: the server rejects any prompt with zero output
+        # nodes (execution.py:1155-1162, prompt_no_outputs) — including an
+        # empty/node-less prompt. Suppress it only when an unknown_class_type
+        # error is present: that node could be the real (custom) output node we
+        # just can't see, so the missing-output message would be misleading
+        # noise on top of the unknown-class error the user must resolve first.
+        has_unknown_class = any(e.get("code") == "unknown_class_type" for e in errors)
+        if not has_output_node and not has_unknown_class:
             errors.append(
                 {
+                    # workflow-level error: no owning node, hence None (keeps the
+                    # node_id/field keys every other error carries, for schema
+                    # consistency).
+                    "node_id": None,
+                    "field": None,
                     "code": "prompt_no_outputs",
                     "message": "workflow has no output nodes — the server will reject it (prompt_no_outputs)",
                     "hint": "add an output node such as SaveImage/PreviewImage",

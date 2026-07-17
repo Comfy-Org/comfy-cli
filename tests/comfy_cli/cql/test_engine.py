@@ -943,9 +943,38 @@ class TestValidateServerParity:
         assert len([e for e in result["errors"] if e["code"] == "prompt_no_outputs"]) == 1
 
     def test_all_unknown_nodes_no_false_no_outputs(self, graph_sd15: Graph):
-        """With zero *recognized* nodes there's nothing to submit, so we don't
-        pile a no-outputs error on top of the unknown-class errors."""
+        """An unknown node could itself be the (custom) output node — we can't
+        see it — so we don't pile a no-outputs error on top of the
+        unknown-class errors the user must resolve first."""
         result = graph_sd15.validate_workflow({"1": {"class_type": "TotallyMadeUp", "inputs": {}}})
+        assert [e for e in result["errors"] if e["code"] == "prompt_no_outputs"] == []
+
+    def test_empty_workflow_is_no_outputs(self, graph_sd15: Graph):
+        """An empty prompt has zero output nodes, which the server rejects
+        (prompt_no_outputs); a node-less prompt must not slip through as valid."""
+        result = graph_sd15.validate_workflow({})
+        no_out = [e for e in result["errors"] if e["code"] == "prompt_no_outputs"]
+        assert len(no_out) == 1
+        assert result["valid"] is False
+        # workflow-level error still carries the node_id/field schema keys.
+        assert no_out[0]["node_id"] is None
+        assert no_out[0]["field"] is None
+
+    def test_meta_only_workflow_is_no_outputs(self, graph_sd15: Graph):
+        """A prompt that is only a `_meta` block (no nodes) has no outputs."""
+        result = graph_sd15.validate_workflow({"_meta": {"schema": "x"}})
+        assert len([e for e in result["errors"] if e["code"] == "prompt_no_outputs"]) == 1
+
+    def test_unknown_output_node_no_double_no_outputs(self, graph_sd15: Graph):
+        """A recognized non-output node plus an unknown node (which could be the
+        real output) must not stack prompt_no_outputs on the unknown-class
+        error — the fix is installing the custom node, not adding an output."""
+        wf = {
+            "1": {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": "v1-5.safetensors"}},
+            "2": {"class_type": "MyCustomSaver", "inputs": {"images": ["1", 0]}},
+        }
+        result = graph_sd15.validate_workflow(wf)
+        assert any(e["code"] == "unknown_class_type" for e in result["errors"])
         assert [e for e in result["errors"] if e["code"] == "prompt_no_outputs"] == []
 
     def test_width_below_min_is_error(self, graph_sd15: Graph):
