@@ -36,6 +36,7 @@ from websocket import WebSocket, WebSocketException, WebSocketTimeoutException
 from comfy_cli import cancellation, execution_errors, tracking
 from comfy_cli.env_checker import check_comfy_server_running
 from comfy_cli.host_port import resolve_host_port as _resolve_host_port
+from comfy_cli.http import authed_urlopen
 from comfy_cli.output import get_renderer
 from comfy_cli.where import cloud_preflight_or_exit
 
@@ -1064,14 +1065,9 @@ def _cloud_cancel(prompt_id: str) -> None:
     # escape (e.g. ``../foo`` → ``%2E%2E%2Ffoo``). Cloud rejects bad UUIDs
     # upstream too; encoding here is defense in depth.
     url = target.url("jobs", urllib.parse.quote(prompt_id, safe=""), "cancel")
-    req = urllib.request.Request(url, data=b"", method="POST")
-    if target.api_key:
-        req.add_header("X-API-Key", target.api_key)
-    elif target.auth_token:
-        req.add_header("Authorization", f"Bearer {target.auth_token}")
 
     try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
+        with authed_urlopen(url, target, method="POST", data=b"", timeout=15) as resp:
             body = resp.read()
     except urllib.error.HTTPError as e:
         body_text = (e.read() or b"")[:1000].decode("utf-8", "replace")

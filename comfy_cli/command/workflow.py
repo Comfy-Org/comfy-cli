@@ -515,13 +515,12 @@ def _userdata_request(
     """Authed HTTP call to a ComfyUI ``/userdata`` endpoint returning (status, raw_bytes).
 
     Raises urllib errors verbatim so callers can map them to envelope codes.
-    Local ComfyUI needs no auth; ``_authed_request`` is a no-op on the headers
-    when the Target carries no credential.
+    Local ComfyUI needs no auth; ``authed_urlopen`` attaches no header when the
+    Target carries no credential.
     """
-    import urllib.request
+    from comfy_cli.http import authed_urlopen
 
-    req = _authed_request(url, target, method=method, data=data, content_type=content_type)
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
+    with authed_urlopen(url, target, method=method, data=data, content_type=content_type, timeout=timeout) as resp:
         status = resp.status
         # Read one byte past the cap so we can tell a full body from a truncated one.
         raw = resp.read(_USERDATA_MAX_BYTES + 1)
@@ -600,23 +599,6 @@ def _userdata_file_url(target, key: str, query: dict | None = None) -> str:
     return url
 
 
-def _authed_request(
-    url: str, target, *, method: str = "GET", data: bytes | None = None, content_type: str | None = None
-):
-    """Build an authenticated urllib Request. The return type is annotated
-    loosely to keep urllib out of the module's top-level imports."""
-    import urllib.request
-
-    req = urllib.request.Request(url, data=data, method=method)
-    if target.api_key:
-        req.add_header("X-API-Key", target.api_key)
-    elif target.auth_token:
-        req.add_header("Authorization", f"Bearer {target.auth_token}")
-    if content_type:
-        req.add_header("Content-Type", content_type)
-    return req
-
-
 def _http_request(
     url: str, target, *, method: str = "GET", body: dict | None = None, timeout: float = 30.0
 ) -> tuple[int, dict | None]:
@@ -624,12 +606,11 @@ def _http_request(
     urllib errors verbatim so callers can surface the right error code, and
     ``_ResponseTooLarge`` when the body exceeds ``_HTTP_MAX_BYTES`` — an
     oversize body must not masquerade as an unparseable one."""
-    import urllib.request
+    from comfy_cli.http import authed_urlopen
 
     data = json.dumps(body).encode("utf-8") if body is not None else None
     ct = "application/json" if data is not None else None
-    req = _authed_request(url, target, method=method, data=data, content_type=ct)
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
+    with authed_urlopen(url, target, method=method, data=data, content_type=ct, timeout=timeout) as resp:
         status = resp.status
         # Read one byte past the cap so we can tell a full body from a truncated one.
         raw = resp.read(_HTTP_MAX_BYTES + 1)
