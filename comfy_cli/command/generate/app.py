@@ -21,11 +21,11 @@ from typing import Annotated
 
 import httpx
 import typer
-from rich import print as rprint
 from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
 
 from comfy_cli import tracking, ui
 from comfy_cli.command.generate import adapters, client, emit, output, poll, schema, spec, upload
+from comfy_cli.output import rprint
 from comfy_cli.output.renderer import get_renderer
 
 _HELP = "Generate images via ComfyUI partner nodes (Flux, Ideogram, DALL·E, Recraft, Stability, …)."

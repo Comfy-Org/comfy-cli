@@ -7,11 +7,11 @@ This module provides CLI commands for managing the PR cache, including:
 """
 
 import typer
-from rich import print as rprint
 from rich.console import Console
 from rich.table import Table
 
 from comfy_cli import tracking
+from comfy_cli.output import rprint
 from comfy_cli.pr_cache import PRCache
 
 app = typer.Typer(help="Manage PR cache")

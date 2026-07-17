@@ -11,9 +11,9 @@ import mimetypes
 from pathlib import Path
 
 import httpx
-from rich import print as rprint
 
 from comfy_cli.command.generate import client
+from comfy_cli.output import rprint
 
 _EXT_FROM_MIME = {
     "image/png": "png",
