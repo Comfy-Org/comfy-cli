@@ -5,7 +5,12 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from comfy_cli.registry import PyProjectConfig
-from comfy_cli.registry.api import RegistryAPI, RegistryAPIError
+from comfy_cli.registry.api import (
+    MAX_ERROR_BODY_CHARS,
+    RegistryAPI,
+    RegistryAPIError,
+    sanitize_error_body,
+)
 from comfy_cli.registry.types import ComfyConfig, License, ProjectConfig, URLs
 
 
@@ -83,6 +88,22 @@ class TestRegistryAPI(unittest.TestCase):
         self.assertIn("Publisher ID is required", str(context.exception))
         self.assertIsNone(context.exception.status)
         self.assertIsNone(context.exception.body)
+
+    @patch("requests.post")
+    def test_publish_node_version_failure_redacts_token_echoed_by_registry(self, mock_post):
+        # The publish payload carries the PAT; a registry error that echoes the
+        # payload back must not leak it into the message or the error body.
+        mock_response = MagicMock()
+        mock_response.status_code = 400
+        mock_response.text = f'{{"error":"bad request","sent":{{"personal_access_token":"{self.token}"}}}}'
+        mock_post.return_value = mock_response
+
+        with self.assertRaises(RegistryAPIError) as context:
+            self.registry_api.publish_node_version(self.node_config, self.token)
+
+        self.assertNotIn(self.token, str(context.exception))
+        self.assertNotIn(self.token, context.exception.body)
+        self.assertIn("***REDACTED***", context.exception.body)
 
     def _mock_publish_response(self, changelog=""):
         mock_response = MagicMock()
@@ -248,3 +269,25 @@ class TestRegistryAPI(unittest.TestCase):
         with self.assertRaises(Exception) as context:
             self.registry_api.get_node("node1")
         self.assertIn("Failed to retrieve node", str(context.exception))
+
+
+class TestSanitizeErrorBody(unittest.TestCase):
+    def test_leaves_ordinary_body_untouched(self):
+        self.assertEqual(sanitize_error_body("Not Found"), "Not Found")
+
+    def test_redacts_secrets(self):
+        body = '{"personal_access_token":"s3cr3t"}'
+        self.assertEqual(sanitize_error_body(body, secrets=("s3cr3t",)), '{"personal_access_token":"***REDACTED***"}')
+
+    def test_ignores_empty_secrets(self):
+        # A falsy token must not turn every empty string into a redaction marker.
+        self.assertEqual(sanitize_error_body("plain", secrets=(None, "")), "plain")
+
+    def test_escapes_newlines_to_prevent_log_forgery(self):
+        forged = "error\nINFO: everything is fine\r\n"
+        self.assertEqual(sanitize_error_body(forged), "error\\nINFO: everything is fine\\r\\n")
+
+    def test_truncates_oversized_body(self):
+        result = sanitize_error_body("x" * (MAX_ERROR_BODY_CHARS + 500))
+        self.assertTrue(result.startswith("x" * MAX_ERROR_BODY_CHARS))
+        self.assertIn(f"truncated, {MAX_ERROR_BODY_CHARS + 500} chars total", result)

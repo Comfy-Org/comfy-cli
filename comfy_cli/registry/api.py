@@ -13,6 +13,29 @@ from comfy_cli.registry.types import (
     PyProjectConfig,
 )
 
+MAX_ERROR_BODY_CHARS = 2000
+
+
+def sanitize_error_body(text: str, *, secrets: tuple[str | None, ...] = ()) -> str:
+    """Make an untrusted registry response body safe to log and render.
+
+    The registry is upstream of us: its response body can echo back what we
+    sent (including the publish PAT), embed newlines that forge extra log
+    lines, or be arbitrarily large. Redact known secrets, flatten CR/LF to
+    escapes, and bound the length before the body reaches a log record or a
+    ``renderer.error`` envelope.
+    """
+    for secret in secrets:
+        if secret:
+            text = text.replace(secret, "***REDACTED***")
+
+    text = text.replace("\r", "\\r").replace("\n", "\\n")
+
+    if len(text) > MAX_ERROR_BODY_CHARS:
+        text = f"{text[:MAX_ERROR_BODY_CHARS]}... [truncated, {len(text)} chars total]"
+
+    return text
+
 
 class RegistryAPIError(Exception):
     """Raised when a Registry API call fails.
@@ -105,10 +128,13 @@ class RegistryAPI:
                 signedUrl=data["signedUrl"],
             )
         else:
+            # The publish request body carries the PAT, so a registry error that
+            # echoes the payload back would otherwise leak it into logs.
+            safe_body = sanitize_error_body(response.text, secrets=(token,))
             raise RegistryAPIError(
-                f"Failed to publish node version: {response.status_code} {response.text}",
+                f"Failed to publish node version: {response.status_code} {safe_body}",
                 status=response.status_code,
-                body=response.text,
+                body=safe_body,
             )
 
     def list_all_nodes(self):
@@ -124,10 +150,11 @@ class RegistryAPI:
             raw_nodes = response.json()["nodes"]
             return [map_node_to_node_class(node) for node in raw_nodes]
         else:
+            safe_body = sanitize_error_body(response.text)
             raise RegistryAPIError(
-                f"Failed to retrieve nodes: {response.status_code} - {response.text}",
+                f"Failed to retrieve nodes: {response.status_code} - {safe_body}",
                 status=response.status_code,
-                body=response.text,
+                body=safe_body,
             )
 
     def install_node(self, node_id, version=None):
@@ -154,10 +181,11 @@ class RegistryAPI:
             logging.debug(f"RegistryAPI install_node response: {response.json()}")
             return map_node_version(response.json())
         else:
+            safe_body = sanitize_error_body(response.text)
             raise RegistryAPIError(
-                f"Failed to install node: {response.status_code} - {response.text}",
+                f"Failed to install node: {response.status_code} - {safe_body}",
                 status=response.status_code,
-                body=response.text,
+                body=safe_body,
             )
 
     def get_node(self, node_id):

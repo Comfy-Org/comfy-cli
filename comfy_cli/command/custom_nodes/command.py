@@ -1129,7 +1129,7 @@ def publish(
         )
         raise typer.Exit(code=1) from e
     except Exception as e:
-        ui.display_error_message({str(e)})
+        ui.display_error_message(str(e))
         raise typer.Exit(code=1)
 
 
