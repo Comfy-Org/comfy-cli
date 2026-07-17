@@ -176,6 +176,25 @@ def test_invalid_where_emits_structured_error(tmp_path, capsys):
     assert env["error"]["code"] == "where_invalid"
 
 
+def test_invalid_where_default_falls_back_instead_of_failing(tmp_path, capsys, monkeypatch):
+    """A bad *configured* default (no explicit --where) never breaks the command.
+
+    Only an explicit bad flag is a user error worth failing on; a stale env or
+    config value drops to the local default, matching the pre-existing routing
+    behavior of the other commands.
+    """
+    oi = _write(tmp_path, "oi.json", _object_info())
+    wf = _write(tmp_path, "wf.json", _valid_workflow())
+    monkeypatch.setenv("COMFY_WHERE", "clod")
+
+    code, env, _ = _run(workflow_cmd.app, ["validate", "--workflow", wf, "--input", oi], capsys)
+
+    assert code == 0
+    assert env is not None
+    assert env["ok"] is True
+    assert env["data"]["valid"] is True
+
+
 def test_non_utf8_workflow_emits_structured_error(tmp_path, capsys):
     """A non-UTF-8 workflow file reports an envelope instead of crashing."""
     oi = _write(tmp_path, "oi.json", _object_info())

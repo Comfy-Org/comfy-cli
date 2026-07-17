@@ -1172,7 +1172,6 @@ def validate_api_workflow(
     its own path.
     """
     from comfy_cli import where as where_module
-    from comfy_cli.config_manager import ConfigManager
     from comfy_cli.cql.engine import Graph, LoadError
 
     renderer = get_renderer()
@@ -1203,30 +1202,25 @@ def validate_api_workflow(
         )
         raise typer.Exit(code=1)
 
-    # Load graph
+    # Load graph. Resolve routing up front so a typo (e.g. `clod`) fails here
+    # with an envelope: forwarded verbatim, it would surface as a bare
+    # ValueError from Graph.load's target resolution (online path only —
+    # Graph.load short-circuits to --input when supplied).
     mode = "local"
-    if where:
-        # Validate the routing target up front. Otherwise a typo (e.g. `clod`)
-        # is forwarded verbatim to Graph.load, whose target resolution raises a
-        # bare ValueError that would escape as an uncaught traceback (the online
-        # path only — Graph.load short-circuits to --input when supplied).
-        try:
-            where_module._parse(where)
-        except ValueError as e:
+    try:
+        mode = where_module.resolve_default(flag=where).target.value
+    except ValueError as e:
+        if where:
             renderer.error(
                 code="where_invalid",
                 message=str(e),
                 hint="use `--where local` or `--where cloud`",
             )
             raise typer.Exit(code=1) from e
-        mode = where
-    else:
-        config = ConfigManager()
-        try:
-            decision = where_module.resolve(flag=None, config_value=config.get(where_module.CONFIG_KEY_WHERE_DEFAULT))
-            mode = decision.target.value
-        except Exception:
-            pass
+        # A bad env/project/config value with no explicit flag never breaks the
+        # command — drop to the local default, as before.
+    except Exception:
+        pass
 
     try:
         graph = Graph.load(mode=mode, input_path=input_path, host=host or "127.0.0.1", port=port or 8188)
