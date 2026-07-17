@@ -26,15 +26,23 @@ class NoRedirectHandler(urllib.request.HTTPRedirectHandler):
     http_error_302 = http_error_303 = http_error_307 = http_error_308 = http_error_301
 
 
-def _build_authed_opener() -> urllib.request.OpenerDirector:
-    """Build the credential-carrying opener with http/https handlers only.
+def build_http_only_opener(*handlers: urllib.request.BaseHandler) -> urllib.request.OpenerDirector:
+    """Build an opener that speaks http(s) and nothing else.
 
-    ``build_opener()`` would also install ``FileHandler``/``FTPHandler``. Every
-    call site builds its URL from a trusted ``target.base_url``, so that isn't
-    reachable today, but this is the opener that attaches credentials — pinning
-    it to http(s) means a future caller can't be steered into a ``file://`` or
-    ``ftp://`` fetch. Unknown schemes fall to ``UnknownHandler``, which raises
+    ``build_opener()`` would also install ``FileHandler``/``FTPHandler``/
+    ``DataHandler``. Our call sites build their URLs from a trusted
+    ``target.base_url``, so that isn't reachable today, but these openers
+    attach credentials — pinning them to http(s) means a future caller can't
+    be steered into a ``file://``, ``ftp://`` or ``data:`` fetch. Unknown
+    schemes fall to ``UnknownHandler``, which raises
     ``URLError("unknown url type")``.
+
+    ``handlers`` are the caller's own additions (e.g. a redirect policy);
+    everything else mirrors ``build_opener``'s defaults, including
+    ``ProxyHandler``, which only registers a scheme when the environment
+    configures a proxy for it. Note that no redirect handler is installed
+    unless the caller passes one, so a bare opener surfaces a 30x as an
+    ``HTTPError`` rather than following it.
     """
     opener = urllib.request.OpenerDirector()
     for handler in (
@@ -43,14 +51,14 @@ def _build_authed_opener() -> urllib.request.OpenerDirector:
         urllib.request.HTTPSHandler(),
         urllib.request.HTTPDefaultErrorHandler(),
         urllib.request.HTTPErrorProcessor(),
-        NoRedirectHandler(),
         urllib.request.UnknownHandler(),
+        *handlers,
     ):
         opener.add_handler(handler)
     return opener
 
 
-_AUTHED_OPENER = _build_authed_opener()
+_AUTHED_OPENER = build_http_only_opener(NoRedirectHandler())
 
 
 def build_authed_request(
