@@ -75,13 +75,50 @@ def test_build_http_only_opener_installs_caller_handlers():
     assert handler in opener.handlers
 
 
-def test_build_http_only_opener_matches_build_opener_proxy_support(monkeypatch):
-    """Proxy support is preserved: ProxyHandler registers exactly the schemes
-    build_opener's own ProxyHandler would for the same environment."""
+def _proxies(opener):
+    return next(h.proxies for h in opener.handlers if isinstance(h, urllib.request.ProxyHandler))
+
+
+def test_build_http_only_opener_keeps_http_proxy_support(monkeypatch):
+    """Proxy support is preserved for the schemes we actually speak."""
+    monkeypatch.setenv("HTTP_PROXY", "http://proxy.example:3128")
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy.example:8080")
+
+    proxies = _proxies(http.build_http_only_opener())
+    assert proxies == {"http": "http://proxy.example:3128", "https": "http://proxy.example:8080"}
+    # ...and for the schemes we speak, that is exactly what build_opener resolves.
+    stdlib = _proxies(urllib.request.build_opener())
+    assert proxies == {k: v for k, v in stdlib.items() if k in ("http", "https")}
+
+
+def test_build_http_only_opener_ignores_non_http_proxies(monkeypatch):
+    """A proxy for a non-http scheme must not smuggle that scheme back in.
+
+    ``ProxyHandler`` registers a ``<scheme>_open`` per proxy entry, so an
+    ``ftp_proxy`` would otherwise hand the opener an ``ftp_open`` that wins
+    dispatch over ``UnknownHandler``.
+    """
+    monkeypatch.setenv("FTP_PROXY", "http://proxy.example:3128")
     monkeypatch.setenv("HTTPS_PROXY", "http://proxy.example:3128")
 
-    def proxies(opener):
-        return next(h.proxies for h in opener.handlers if isinstance(h, urllib.request.ProxyHandler))
+    opener = http.build_http_only_opener()
+    assert "ftp" not in _proxies(opener)
+    assert "ftp" not in opener.handle_open
+    with pytest.raises(urllib.error.URLError) as exc_info:
+        opener.open("ftp://example.com/x")
+    assert "unknown url type" in str(exc_info.value.reason)
 
-    assert proxies(http.build_http_only_opener()) == proxies(urllib.request.build_opener())
-    assert "https" in proxies(http.build_http_only_opener())
+
+def test_build_http_only_opener_lets_caller_override_a_default():
+    """A caller-supplied handler replaces the default it subclasses, rather
+    than being appended behind it where it would never win dispatch."""
+
+    class PinnedHTTPSHandler(urllib.request.HTTPSHandler):
+        pass
+
+    handler = PinnedHTTPSHandler()
+    opener = http.build_http_only_opener(handler)
+
+    https_handlers = [h for h in opener.handlers if isinstance(h, urllib.request.HTTPSHandler)]
+    assert https_handlers == [handler]
+    assert opener.handle_open["https"] == [handler]

@@ -26,6 +26,22 @@ class NoRedirectHandler(urllib.request.HTTPRedirectHandler):
     http_error_302 = http_error_303 = http_error_307 = http_error_308 = http_error_301
 
 
+def _http_only_proxy_handler() -> urllib.request.ProxyHandler:
+    """A ProxyHandler that can only proxy http(s).
+
+    ``ProxyHandler()`` defaults to ``getproxies()`` and registers a
+    ``<scheme>_open`` method for *every* entry it finds, so an ``ftp_proxy`` in
+    the environment would give the opener an ``ftp_open`` — servicing
+    ``ftp://`` through the proxy and stepping straight past the
+    ``UnknownHandler`` that ``build_http_only_opener`` relies on. Filtering the
+    map to http(s) keeps real
+    proxy support (``proxy_bypass``/``no_proxy`` read the environment directly,
+    not this dict) while leaving non-http schemes with nowhere to go.
+    """
+    proxies = {scheme: url for scheme, url in urllib.request.getproxies().items() if scheme in ("http", "https")}
+    return urllib.request.ProxyHandler(proxies)
+
+
 def build_http_only_opener(*handlers: urllib.request.BaseHandler) -> urllib.request.OpenerDirector:
     """Build an opener that speaks http(s) and nothing else.
 
@@ -37,23 +53,29 @@ def build_http_only_opener(*handlers: urllib.request.BaseHandler) -> urllib.requ
     schemes fall to ``UnknownHandler``, which raises
     ``URLError("unknown url type")``.
 
-    ``handlers`` are the caller's own additions (e.g. a redirect policy);
-    everything else mirrors ``build_opener``'s defaults, including
-    ``ProxyHandler``, which only registers a scheme when the environment
-    configures a proxy for it. Note that no redirect handler is installed
-    unless the caller passes one, so a bare opener surfaces a 30x as an
-    ``HTTPError`` rather than following it.
+    ``handlers`` are the caller's own additions (e.g. a redirect policy). As in
+    ``build_opener``, a caller-supplied handler replaces the default it
+    subclasses rather than being appended behind it. Note that no redirect
+    handler is installed unless the caller passes one, so a bare opener
+    surfaces a 30x as an ``HTTPError`` rather than following it.
     """
+    defaults = [
+        (urllib.request.ProxyHandler, _http_only_proxy_handler),
+        (urllib.request.HTTPHandler, urllib.request.HTTPHandler),
+        (urllib.request.HTTPDefaultErrorHandler, urllib.request.HTTPDefaultErrorHandler),
+        (urllib.request.HTTPErrorProcessor, urllib.request.HTTPErrorProcessor),
+        (urllib.request.UnknownHandler, urllib.request.UnknownHandler),
+    ]
+    # urllib.request only defines HTTPSHandler on an SSL-capable build; naming it
+    # unconditionally would blow up at import time on one without.
+    if hasattr(urllib.request, "HTTPSHandler"):
+        defaults.append((urllib.request.HTTPSHandler, urllib.request.HTTPSHandler))
+
     opener = urllib.request.OpenerDirector()
-    for handler in (
-        urllib.request.ProxyHandler(),
-        urllib.request.HTTPHandler(),
-        urllib.request.HTTPSHandler(),
-        urllib.request.HTTPDefaultErrorHandler(),
-        urllib.request.HTTPErrorProcessor(),
-        urllib.request.UnknownHandler(),
-        *handlers,
-    ):
+    for klass, factory in defaults:
+        if not any(isinstance(handler, klass) for handler in handlers):
+            opener.add_handler(factory())
+    for handler in handlers:
         opener.add_handler(handler)
     return opener
 
