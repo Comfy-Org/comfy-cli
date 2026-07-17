@@ -608,7 +608,7 @@ def install(
     rprint(f"ComfyUI is installed at: {comfy_path}")
 
 
-@app.command(help="Update ComfyUI Environment [all|comfy|cli]. To update custom nodes, use `comfy node update`.")
+@app.command(help="Update ComfyUI Environment \\[all|comfy|cli]. To update custom nodes, use `comfy node update`.")
 @tracking.track_command()
 def update(
     target: str = typer.Argument(
