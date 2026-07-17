@@ -1103,12 +1103,6 @@ def run_cli(
     )
 
 
-def validate_comfyui(_env_checker):
-    if _env_checker.comfy_repo is None:
-        rprint("[bold red]If ComfyUI is not installed, this feature cannot be used.[/bold red]")
-        raise typer.Exit(code=1)
-
-
 @app.command(help="Stop background ComfyUI")
 @tracking.track_command()
 def stop():

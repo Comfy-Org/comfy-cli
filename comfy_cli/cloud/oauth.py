@@ -86,10 +86,6 @@ class OAuthRefreshError(OAuthError):
     code = "oauth_refresh_failed"
 
 
-class OAuthCancelled(OAuthError):
-    code = "oauth_cancelled"
-
-
 class OAuthTimeout(OAuthError):
     code = "oauth_timeout"
 

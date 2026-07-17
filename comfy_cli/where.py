@@ -24,8 +24,6 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
-from comfy_cli.cancellation import get_token  # noqa: F401  — re-exported indirectly
-
 
 class WhereTarget(str, Enum):
     LOCAL = "local"

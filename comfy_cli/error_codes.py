@@ -309,11 +309,6 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "run `comfy cloud login` to sign in again",
     ),
     ErrorCode(
-        "oauth_cancelled",
-        "OAuth flow was cancelled by the user.",
-        "re-run `comfy cloud login` to retry sign-in",
-    ),
-    ErrorCode(
         "oauth_timeout",
         "Timed out waiting for browser callback during OAuth login.",
         "re-run `comfy cloud login` and complete the sign-in in your browser",

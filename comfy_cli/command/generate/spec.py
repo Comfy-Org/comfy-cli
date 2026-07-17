@@ -420,7 +420,3 @@ def write_cache(yaml_text: str) -> Path:
     load_raw_spec.cache_clear()
     _registry.cache_clear()
     return _USER_CACHE
-
-
-def active_spec_path() -> Path:
-    return _select_spec_path()
