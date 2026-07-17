@@ -502,6 +502,19 @@ class TestHttpRequestCap:
         target = workflow_cmd._resolve_where_target("cloud")
         assert workflow_cmd._http_request(target.url("workflows"), target) == (200, None)
 
+    def test_non_utf8_body_returns_none_rather_than_raising(self, cloud_target, monkeypatch):
+        # UnicodeDecodeError is a ValueError but not a JSONDecodeError; if it is
+        # not caught it escapes _http_request and no call site handles it.
+        _patch_urlopen(monkeypatch, {"/api/workflows": (b"\xff\xfe\x00not json", 200)})
+        target = workflow_cmd._resolve_where_target("cloud")
+        assert workflow_cmd._http_request(target.url("workflows"), target) == (200, None)
+
+    def test_non_utf8_body_surfaces_envelope_not_traceback(self, cloud_target, monkeypatch, capsys):
+        # End-to-end: the undecodable body must reach the user as an envelope.
+        _patch_urlopen(monkeypatch, {"/api/workflows/wf-uuid/content": (b"\xff\xfe\x00not json", 200)})
+        env = _run(["get", "wf-uuid", "--where", "cloud"], capsys)
+        assert env["ok"] is False
+
     @pytest.mark.parametrize("verb", ["list", "get", "save", "delete"])
     def test_every_call_site_routes_oversize_to_envelope(self, verb, cloud_target, tmp_path, monkeypatch, capsys):
         # Each of the four _http_request call sites must catch _ResponseTooLarge;
@@ -521,6 +534,16 @@ class TestHttpRequestCap:
         assert env["ok"] is False
         assert env["error"]["code"] == "workflow_too_large"
         assert env["error"]["details"]["operation"] == verb
+        # The hint must speak to the operation that actually failed; a single
+        # hardcoded "saved workflow is too large" is wrong for list/save/delete.
+        assert env["error"]["hint"] == workflow_cmd._TOO_LARGE_HINTS[verb]
+
+    @pytest.mark.parametrize("verb", ["save", "delete"])
+    def test_mutating_verbs_do_not_claim_the_write_was_rejected(self, verb):
+        # save/delete have already sent their request by the time the response
+        # is read, so the server-side change may have landed. The hint must not
+        # imply otherwise, or users will wrongly retry a completed mutation.
+        assert "may still have been" in workflow_cmd._TOO_LARGE_HINTS[verb]
 
 
 # ---------------------------------------------------------------------------

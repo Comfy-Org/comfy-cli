@@ -442,6 +442,17 @@ class _ResponseTooLarge(Exception):
     """A response exceeded the surface's byte cap — refuse to truncate."""
 
 
+# Per-operation guidance for an oversize cloud response. ``save``/``delete``
+# have already sent their request by the time the response is read, so the
+# server-side write may well have landed — say so rather than implying it did not.
+_TOO_LARGE_HINTS = {
+    "list": "narrow the result set with `--limit` or `--name`",
+    "get": "the saved workflow is unexpectedly large; inspect it directly in the cloud UI",
+    "save": "the workflow may still have been saved; confirm with `comfy --json workflow list`",
+    "delete": "the workflow may still have been deleted; confirm with `comfy --json workflow list`",
+}
+
+
 # Map the cloud ``--sort`` fields onto local FileInfo keys (client-side sort;
 # ComfyUI's /userdata listing has no server-side sort/limit/filter).
 _LOCAL_SORT_KEYS = {"create_time": "created", "update_time": "modified", "name": "path"}
@@ -628,7 +639,9 @@ def _http_request(
         return status, None
     try:
         return status, json.loads(raw)
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        # UnicodeDecodeError is a ValueError but *not* a JSONDecodeError, so a
+        # body that isn't valid UTF-8 needs naming here or it escapes uncaught.
         return status, None
 
 
@@ -640,11 +653,13 @@ def _handle_cloud_http_error(renderer, e, *, operation: str, workflow_id: str | 
         renderer.error(
             code="workflow_too_large",
             message=f"cloud API response during {operation} exceeded the {_HTTP_MAX_BYTES // (1024 * 1024)} MiB cap",
-            hint="the saved workflow is unexpectedly large; inspect it directly in the cloud UI",
+            hint=_TOO_LARGE_HINTS.get(operation, "the cloud response was unexpectedly large"),
             details={"operation": operation, "workflow_id": workflow_id, "limit_bytes": _HTTP_MAX_BYTES},
         )
     elif isinstance(e, urllib.error.HTTPError):
-        body = (e.read() or b"")[:1000].decode("utf-8", "replace")
+        # Bound the read itself; slicing after an unbounded read would still
+        # have pulled an arbitrarily large error body into memory first.
+        body = (e.read(1000) or b"").decode("utf-8", "replace")
         if e.code == 404:
             renderer.error(
                 code="workflow_not_found",
