@@ -1046,7 +1046,9 @@ class TestExecuteCloudAutoConvert:
             patch("comfy_cli.command.run.convert_ui_to_api", return_value=self.CONVERTED) as mock_convert,
             patch(
                 "comfy_cli.cql.engine._load_from_target",
-                return_value={"KSampler": {}},  # any truthy dict suffices for the converter
+                # An output-node KSampler so preflight's no-outputs check passes
+                # (the converter is mocked and ignores object_info anyway).
+                return_value={"KSampler": {"output_node": True}},
             ),
             patch("comfy_cli.comfy_client.Client", return_value=mock_client),
             patch("comfy_cli.command.run._spawn_watcher"),
