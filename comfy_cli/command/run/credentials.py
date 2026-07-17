@@ -36,14 +36,29 @@ def _resolve_partner_credential() -> tuple[str, str] | None:
     ``partner_node_requires_credential`` on every local run. ``allow_clear=False``
     keeps this best-effort injector from ever destroying the shared login: a
     fatal refresh error does not clear the stored session, and a transient
-    refresh failure returns the stale session (which fails its own expiry check
-    and falls through to env/stored key) — so behavior on a network flake is
-    unchanged, and concurrent ``comfy run`` fan-outs are safe under the OAuth
-    refresh lock. Returns ``None`` when nothing usable is configured.
+    refresh failure returns the stale session — which, once it is past the
+    resolver's own 30s expiry leeway, falls through to env/stored key. (A token
+    inside the 30–60s window is still returned as live; it is refreshed when the
+    network allows and otherwise good for the imminent submit.) Concurrent
+    ``comfy run`` fan-outs are safe under the OAuth refresh lock.
+
+    Truly best-effort: the refresh path does network I/O plus a file-locked
+    persist, and ``ensure_fresh_session`` only swallows the transient/timeout
+    cases — an unexpected error (e.g. an ``OSError`` acquiring the lock or
+    saving the rotated token) would otherwise propagate and abort the run. We
+    catch it and fall through to a network-free read of env/stored keys, so this
+    injector never turns a refresh hiccup into a failed ``comfy run``. Returns
+    ``None`` when nothing usable is configured.
     """
     from comfy_cli.credentials import resolve_cloud_credential
 
-    cred = resolve_cloud_credential(purpose="cloud", refresh=True, allow_clear=False)
+    try:
+        cred = resolve_cloud_credential(purpose="cloud", refresh=True, allow_clear=False)
+    except Exception:  # noqa: BLE001 — best-effort: never abort the run on a refresh hiccup
+        # refresh=False reads the store as-is (no network, no lock): an expired
+        # session fails its own expiry check and the resolver returns env/stored
+        # key — exactly the pre-BE-3361 behavior on this path.
+        cred = resolve_cloud_credential(purpose="cloud", refresh=False, allow_clear=False)
     if cred is None:
         return None
     if cred.kind == "oauth":

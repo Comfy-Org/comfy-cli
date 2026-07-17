@@ -717,6 +717,24 @@ class TestResolvePartnerCredential:
         monkeypatch.setattr(oauth, "ensure_fresh_session", lambda **kw: stale)
         assert _resolve_partner_credential() is None
 
+    def test_refresh_path_error_falls_through_to_env_key(self, monkeypatch: pytest.MonkeyPatch):
+        """The refresh leg does network + file-locked persist; ``ensure_fresh_session``
+        only swallows transient/timeout cases, so an unexpected ``OSError`` (lock
+        acquire / token persist) would otherwise abort the run. This best-effort
+        injector must catch it and still return the env/stored key network-free."""
+        monkeypatch.setenv("COMFY_CLOUD_API_KEY", "env-key-fallback")
+        from comfy_cli.auth import store as auth_store
+        from comfy_cli.cloud import oauth
+
+        def _boom(**kw):
+            raise OSError("cannot acquire refresh lock")
+
+        monkeypatch.setattr(auth_store, "get", lambda _: None)
+        # refresh=True raises; the network-free fallback reads the store as-is.
+        monkeypatch.setattr(oauth, "ensure_fresh_session", _boom)
+        monkeypatch.setattr(auth_store, "get_cloud_session", lambda: None)
+        assert _resolve_partner_credential() == ("api_key_comfy_org", "env-key-fallback")
+
 
 class TestExecutePartnerNodePreflight:
     """Submitting a partner-API workflow to a local server with no

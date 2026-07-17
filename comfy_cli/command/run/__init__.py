@@ -218,9 +218,12 @@ def execute(
     extra_data: dict | None = None
     if api_key:
         extra_data = {"api_key_comfy_org": api_key}
-    if partner_nodes:
+    # Only resolve an injected credential when an explicit --api-key hasn't
+    # already satisfied the partner node: the resolver may perform a network
+    # OAuth refresh, so skipping it here keeps an explicit-key run network-free.
+    if partner_nodes and not extra_data:
         cred = _resolve_partner_credential()
-        if cred is None and not extra_data:
+        if cred is None:
             msg = (
                 "Workflow uses partner-API node(s) that need an `api_key_comfy_org` "
                 "credential the local server doesn't have: " + ", ".join(partner_nodes) + "."
@@ -239,8 +242,7 @@ def execute(
                 },
             )
             raise typer.Exit(code=1)
-        elif cred is not None and not extra_data:
-            extra_data = {cred[0]: cred[1]}
+        extra_data = {cred[0]: cred[1]}
 
     # Pre-submit validation via pure-Python CQL engine (checks class_types + input shapes).
     _preflight_validate(renderer, workflow, object_info, target_label="server")
