@@ -6,16 +6,18 @@ import json
 import logging as logginglib
 import os
 import sys
+import threading
 import uuid
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 import typer
-from mixpanel import Mixpanel
-from posthog import Posthog
 
 from comfy_cli import constants, logging, ui
 from comfy_cli.config_manager import ConfigManager
 from comfy_cli.workspace_manager import WorkspaceManager
+
+if TYPE_CHECKING:
+    from posthog import Posthog
 
 # Ignore logs from urllib3 that Mixpanel/PostHog use.
 logginglib.getLogger("urllib3").setLevel(logginglib.ERROR)
@@ -139,7 +141,12 @@ class TelemetryProvider(Protocol):
 
 class MixpanelProvider:
     def __init__(self, token: str):
-        self.client = Mixpanel(token) if token else None
+        self.client = None
+        if token:
+            # Imported here, not at module scope: see `_get_providers`.
+            from mixpanel import Mixpanel
+
+            self.client = Mixpanel(token)
         self.enabled = self.client is not None
 
     def track(self, event_name: str, distinct_id: str | None, properties: dict[str, Any]) -> None:
@@ -165,6 +172,9 @@ class PostHogProvider:
         self.enabled = False
         if not token:
             return
+        # Imported here, not at module scope: see `_get_providers`.
+        from posthog import Posthog
+
         # disable_geoip=False lets PostHog enrich events with IP-derived location.
         self.client = Posthog(project_api_key=token, host=host, disable_geoip=False)
         self.enabled = True
@@ -186,10 +196,34 @@ class PostHogProvider:
         self.client.flush()
 
 
-PROVIDERS: list[TelemetryProvider] = [
-    MixpanelProvider(MIXPANEL_TOKEN),
-    PostHogProvider(POSTHOG_TOKEN, POSTHOG_HOST),
-]
+# Built on the first send, not at import. `mixpanel` pulls in pydantic (and thus
+# the compiled pydantic_core extension) for its feature-flags module, and importing
+# it here meant every `comfy` process held that .pyd open for its whole lifetime.
+# On Windows a loaded DLL cannot be replaced, so `comfy install` — which shells out
+# to `uv pip install` against its own interpreter's environment — could not upgrade
+# pydantic_core and died with "Access is denied (os error 5)", leaving the package
+# half-removed and every later `comfy` invocation unable to import it.
+# Deferring the import means a run that never sends telemetry (no consent, or
+# DO_NOT_TRACK) never loads the extension at all. See tests/comfy_cli/test_tracking_lazy_import.py.
+PROVIDERS: list[TelemetryProvider] | None = None
+
+# Building at import used to be single-shot courtesy of the import lock; keep that
+# guarantee now that it happens on demand. Racing builds would strand a PostHog
+# client — and its unflushed queue — in the list that lost.
+_PROVIDERS_LOCK = threading.Lock()
+
+
+def _get_providers() -> list[TelemetryProvider]:
+    global PROVIDERS
+    if PROVIDERS is None:
+        with _PROVIDERS_LOCK:
+            if PROVIDERS is None:
+                PROVIDERS = [
+                    MixpanelProvider(MIXPANEL_TOKEN),
+                    PostHogProvider(POSTHOG_TOKEN, POSTHOG_HOST),
+                ]
+    return PROVIDERS
+
 
 app = typer.Typer()
 
@@ -215,7 +249,7 @@ def _dispatch(
     passive telemetry, env-only for feedback).
     """
     properties = {**properties, "cli_version": cli_version, "tracing_id": tracing_id}
-    for provider in PROVIDERS:
+    for provider in _get_providers():
         provider_event_name = (
             mixpanel_name if (mixpanel_name is not None and isinstance(provider, MixpanelProvider)) else event_name
         )
@@ -408,6 +442,11 @@ def init_tracking(enable_tracking: bool):
 
 
 def _flush_all_providers() -> None:
+    # Deliberately reads PROVIDERS rather than calling _get_providers(): a run that
+    # never sent anything has nothing to drain, and constructing providers from an
+    # atexit hook would import the SDKs we just went to the trouble of deferring.
+    if PROVIDERS is None:
+        return
     for provider in PROVIDERS:
         try:
             provider.flush()
