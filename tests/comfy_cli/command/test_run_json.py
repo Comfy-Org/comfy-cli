@@ -299,6 +299,83 @@ class TestSuccessfulRun:
         assert env["data"]["status"] == "queued"
         assert env["data"]["prompt_id"] == "p123"
 
+    def test_queued_envelope_field_set_local_golden(self, workflow_file, capsys):
+        """Golden field set of the local async ``queued`` envelope. The shared
+        ``_emit_queued`` helper (BE-3265) must never silently drop/add a key —
+        the envelope is a public agent-mode JSON contract, and local carries
+        ``host``/``port`` plus the local-only ``watcher_spawned``."""
+        with (
+            patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),
+            patch("comfy_cli.command.run.request.urlopen") as mock_open,
+            patch("comfy_cli.command.run._spawn_watcher", return_value=True),
+        ):
+            mock_open.return_value.read.return_value = json.dumps({"prompt_id": "pL"}).encode()
+            lines, exit_code = _run_execute_capture(workflow_file, capsys, wait=False)
+        assert exit_code == 0
+        data = _envelope(lines)["data"]
+        assert set(data) == {
+            "workflow",
+            "status",
+            "prompt_id",
+            "client_id",
+            "outputs",
+            "elapsed_seconds",
+            "host",
+            "port",
+            "state_file",
+            "watcher_spawned",
+        }
+        assert data["status"] == "queued"
+        assert data["host"] == "127.0.0.1"
+        assert data["port"] == 8188
+        assert data["watcher_spawned"] is True
+        assert data["outputs"] == []
+        assert data["elapsed_seconds"] is None
+
+    def test_queued_envelope_field_set_cloud_golden(self, workflow_file, capsys):
+        """Golden field set of the cloud non-wait ``queued`` envelope. Cloud
+        carries ``base_url`` (not ``host``/``port``) and — unlike local —
+        deliberately omits ``watcher_spawned`` (BE-3265: field membership is
+        owned per-target by the call site, not the shared helper)."""
+        from comfy_cli.comfy_client import SubmitResult
+        from comfy_cli.command.run import execute_cloud
+        from comfy_cli.target import Target
+
+        target = Target(
+            kind="cloud",
+            base_url="https://cloud.example.com",
+            path_prefix="/api",
+            history_path="history_v2",
+            jobs_path="jobs",
+            api_key="test-api-key",
+        )
+        mock_client = MagicMock()
+        mock_client.submit_prompt.return_value = SubmitResult(prompt_id="pC", number=1, node_errors={})
+        with (
+            patch("comfy_cli.target.resolve_target", return_value=target),
+            patch("comfy_cli.cql.engine._load_from_target", return_value={}),
+            patch("comfy_cli.comfy_client.Client", return_value=mock_client),
+            patch("comfy_cli.command.run._spawn_watcher", return_value=True),
+        ):
+            execute_cloud(workflow_file, wait=False, timeout=5)
+        out, _err = capsys.readouterr()
+        data = _envelope(_parse_lines(out))["data"]
+        assert set(data) == {
+            "workflow",
+            "status",
+            "prompt_id",
+            "client_id",
+            "outputs",
+            "elapsed_seconds",
+            "base_url",
+            "state_file",
+        }
+        assert data["status"] == "queued"
+        assert data["base_url"] == "https://cloud.example.com"
+        assert "watcher_spawned" not in data
+        assert data["outputs"] == []
+        assert data["elapsed_seconds"] is None
+
     def test_envelope_after_success(self, workflow_file, capsys):
         """Mocked WS flow → queued + executing/executed/output events + ok envelope."""
         with (
