@@ -78,6 +78,53 @@ def test_providers_are_built_on_first_dispatch():
     assert {"mixpanel", "posthog"} <= loaded
 
 
+def test_broken_sdk_import_degrades_instead_of_crashing_the_command():
+    """Deferring the import moves it onto the user's command path, so the failure it
+    used to hit at startup can now surface mid-run. A half-removed pydantic_core is
+    exactly the state this change exists to prevent, but a user can still land in it
+    from an earlier bad install — telemetry must go quiet, not take the command down.
+    """
+    _modules_after(
+        "import builtins\n"
+        "_real = builtins.__import__\n"
+        "def boom(name, *a, **k):\n"
+        "    if name in ('mixpanel', 'posthog'):\n"
+        "        raise ImportError(\"cannot import name '__version__' from 'pydantic_core'\")\n"
+        "    return _real(name, *a, **k)\n"
+        "builtins.__import__ = boom\n"
+        "import comfy_cli.tracking as t\n"
+        "t.MIXPANEL_TOKEN = 'tok'\n"
+        "t.POSTHOG_TOKEN = 'tok'\n"
+        # The send path must survive: _get_providers() is called in _dispatch's loop
+        # header, outside the per-provider try/except that only guards .track().
+        "t._dispatch('evt', {}, distinct_id='abc')\n"
+        "assert t._get_providers() == [], f'expected no providers, got {t._get_providers()!r}'\n"
+        # Cached, so a doomed import isn't retried on every later event.
+        "assert t.PROVIDERS == []\n"
+        "t._flush_all_providers()\n"
+    )
+
+
+def test_one_broken_sdk_does_not_silence_the_other():
+    """Providers are built independently: an unusable PostHog SDK must not throw away
+    a perfectly good Mixpanel provider (and vice versa)."""
+    _modules_after(
+        "import builtins\n"
+        "_real = builtins.__import__\n"
+        "def boom(name, *a, **k):\n"
+        "    if name == 'posthog':\n"
+        "        raise ImportError('posthog is broken')\n"
+        "    return _real(name, *a, **k)\n"
+        "builtins.__import__ = boom\n"
+        "import comfy_cli.tracking as t\n"
+        "t.MIXPANEL_TOKEN = 'tok'\n"
+        "t.POSTHOG_TOKEN = 'tok'\n"
+        "providers = t._get_providers()\n"
+        "names = [type(p).__name__ for p in providers]\n"
+        "assert names == ['MixpanelProvider'], f'lost the healthy provider: {names!r}'\n"
+    )
+
+
 def test_concurrent_first_send_builds_one_set_of_providers():
     """Module-level init was single-shot via the import lock; the lazy accessor
     has to keep that. A racing build would strand a PostHog client, and its

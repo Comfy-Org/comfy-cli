@@ -218,10 +218,23 @@ def _get_providers() -> list[TelemetryProvider]:
     if PROVIDERS is None:
         with _PROVIDERS_LOCK:
             if PROVIDERS is None:
-                PROVIDERS = [
-                    MixpanelProvider(MIXPANEL_TOKEN),
-                    PostHogProvider(POSTHOG_TOKEN, POSTHOG_HOST),
-                ]
+                # Construction runs the deferred SDK imports, so it can fail on exactly
+                # the broken dependency tree this deferral exists to avoid (a half-removed
+                # pydantic_core raises ImportError). Telemetry is best-effort: degrade to a
+                # no-op rather than take the user's command down with us. Each provider is
+                # built independently so one unusable SDK doesn't silence the other, and the
+                # result is cached either way — including [] — so a doomed import isn't
+                # retried on every later event.
+                built = []
+                for name, factory in (
+                    ("MixpanelProvider", lambda: MixpanelProvider(MIXPANEL_TOKEN)),
+                    ("PostHogProvider", lambda: PostHogProvider(POSTHOG_TOKEN, POSTHOG_HOST)),
+                ):
+                    try:
+                        built.append(factory())
+                    except Exception as e:  # noqa: BLE001
+                        logging.warning(f"Failed to initialize telemetry provider {name}, skipping it: {e}")
+                PROVIDERS = built
     return PROVIDERS
 
 
@@ -445,9 +458,15 @@ def _flush_all_providers() -> None:
     # Deliberately reads PROVIDERS rather than calling _get_providers(): a run that
     # never sent anything has nothing to drain, and constructing providers from an
     # atexit hook would import the SDKs we just went to the trouble of deferring.
-    if PROVIDERS is None:
+    # Taking the lock (without building) makes an in-flight build resolve first —
+    # otherwise we could read None mid-construction and exit without draining the
+    # racing thread's PostHog queue. Released before flushing so a slow network
+    # drain doesn't block a concurrent send.
+    with _PROVIDERS_LOCK:
+        providers = PROVIDERS
+    if providers is None:
         return
-    for provider in PROVIDERS:
+    for provider in providers:
         try:
             provider.flush()
         except Exception as e:  # noqa: BLE001
