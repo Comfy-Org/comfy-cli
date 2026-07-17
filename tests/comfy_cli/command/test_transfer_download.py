@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import urllib.parse
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -197,6 +198,80 @@ class TestItemNamedDownloads:
         download_files = schema["oneOf"][1]["properties"]["files"]["items"]["properties"]
         assert "node_id" in download_files
         assert "item" in download_files
+
+
+def _write_state_with_urls(fake_target, urls: list[str]) -> None:
+    """State file carrying arbitrary output URLs (no record/item_map), so a
+    test can drive the `?filename=` the server would have chosen."""
+    state = jobs_state.JobState(
+        prompt_id=PROMPT_ID,
+        client_id=None,
+        workflow="/abs/composed.json",
+        where="cloud",
+        base_url=fake_target.base_url,
+        status="completed",
+        outputs=list(urls),
+        record=None,
+        item_map=None,
+    )
+    assert jobs_state.write(state) is not None
+
+
+def _download_with_remote_name(fake_target, tmp_path, capsys, remote_name=None) -> Path:
+    """Download a single output whose `?filename=` is `remote_name` (omitted
+    from the query entirely when None); return the saved path."""
+    query = {"type": "output"}
+    if remote_name is not None:
+        query["filename"] = remote_name
+    url = f"{fake_target.base_url}/api/view?{urllib.parse.urlencode(query)}"
+    _write_state_with_urls(fake_target, [url])
+    paths, _ = _run_download(fake_target, tmp_path, capsys)
+    assert len(paths) == 1
+    return Path(paths[0])
+
+
+class TestDownloadExtensionSanitization:
+    """`?filename=` is server-controlled, so the extension derived from it is
+    sanitized before it reaches the on-disk name or the echoed path."""
+
+    def test_ordinary_extension_is_preserved(self, fake_target, tmp_path, capsys):
+        path = _download_with_remote_name(fake_target, tmp_path, capsys, "out.png")
+        assert path.name == f"{SHORT_ID}_000.png"
+
+    def test_long_real_extension_is_preserved(self, fake_target, tmp_path, capsys):
+        # The whitelist is a character class, not a `.png`-only list — a real
+        # long output extension must survive it.
+        path = _download_with_remote_name(fake_target, tmp_path, capsys, "out.safetensors")
+        assert path.name == f"{SHORT_ID}_000.safetensors"
+
+    def test_control_bytes_never_reach_the_filename(self, fake_target, tmp_path, capsys):
+        path = _download_with_remote_name(fake_target, tmp_path, capsys, "out.png\x1b[31mHACK")
+        assert path.name == f"{SHORT_ID}_000.png"
+        assert not any(ord(c) < 32 for c in path.name)
+        assert path.is_file()
+
+    @pytest.mark.parametrize(
+        "remote_name",
+        [
+            "out.",  # trailing dot → empty suffix
+            "out",  # no extension at all
+            None,  # no `filename` param → the "output.png" default
+            "out.p*ng",  # non-alphanumeric byte in the suffix
+            "out." + "a" * 17,  # absurdly long suffix
+        ],
+    )
+    def test_unusable_extension_falls_back_to_png(self, fake_target, tmp_path, capsys, remote_name):
+        path = _download_with_remote_name(fake_target, tmp_path, capsys, remote_name)
+        assert path.name == f"{SHORT_ID}_000.png"
+
+    def test_traversal_stays_impossible(self, fake_target, tmp_path, capsys):
+        # Regression guard: only the last component's suffix is ever read, so a
+        # traversal-shaped name cannot escape `dest` (it never could — this
+        # pins that the sanitizer did not introduce a way to).
+        path = _download_with_remote_name(fake_target, tmp_path, capsys, "x.../../../etc/passwd")
+        dest = (tmp_path / "out").resolve()
+        assert path.resolve().parent == dest
+        assert path.name == f"{SHORT_ID}_000.png"
 
 
 class TestExtractOutputEntries:

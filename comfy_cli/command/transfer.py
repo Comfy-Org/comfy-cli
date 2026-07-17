@@ -265,6 +265,20 @@ def _sanitize_item_name(item: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]", "_", item) or "item"
 
 
+def _sanitize_ext(ext: str) -> str:
+    """A filesystem-safe extension for a download filename.
+
+    An output server controls `?filename=`, so the suffix read off it can
+    carry control/ANSI bytes that would land in the on-disk name and in the
+    saved path echoed to the terminal. Accept only a conservative
+    alphanumeric extension; anything else falls back to the same `.png`
+    default the callers already use for a suffix-less name. The 16-char cap
+    is generous enough for real output extensions (`.safetensors`) while
+    still bounding the junk a hostile name can produce.
+    """
+    return ext if re.fullmatch(r"\.[A-Za-z0-9]{1,16}", ext) else ".png"
+
+
 def _collision_safe_path(path: Path) -> Path:
     """Never overwrite an existing download: ``name.ext`` → ``name.1.ext``,
     ``name.2.ext``, … (deterministic, first free slot).
@@ -621,14 +635,15 @@ def execute_download(
         # Derive the extension from the source. A bare path has no
         # `?filename=` query param, so read the real suffix off the on-disk
         # file rather than mislabeling everything `.png`; real URLs carry the
-        # name in the query param.
+        # name in the query param. The query param is server-controlled, so
+        # its suffix is sanitized before it reaches the on-disk name.
         if local_source is not None:
             ext = local_source.suffix or ".png"
         else:
             parsed = urllib.parse.urlparse(url)
             qs = urllib.parse.parse_qs(parsed.query)
             remote_name = qs.get("filename", ["output.png"])[0]
-            ext = Path(remote_name).suffix or ".png"
+            ext = _sanitize_ext(Path(remote_name).suffix)
         node_id, item = annotations[idx]
         if item is not None:
             safe_item = _sanitize_item_name(item)
