@@ -39,7 +39,14 @@ app = typer.Typer(
 # ---------------------------------------------------------------------------
 
 
-@app.command("login", help="Sign in to Comfy Cloud via your browser (OAuth + PKCE).")
+@app.command(
+    "login",
+    help=(
+        "Sign in to Comfy Cloud via your browser (OAuth + PKCE). Under --json/--json-stream "
+        "the authorize URL is emitted as a `login_url` event before the command blocks on the "
+        "browser callback, so an agent/MCP parent can open it; see docs/json-output.md."
+    ),
+)
 @tracking.track_command("cloud")
 def login_cmd(
     no_browser: Annotated[
@@ -65,14 +72,22 @@ def login_cmd(
         rprint(f"Signing in to [bold cyan]Comfy Cloud[/bold cyan] ([dim]{base_url}[/dim])")
 
     def _on_url(url: str) -> None:
-        if not renderer.is_pretty():
+        if renderer.is_pretty():
+            if no_browser:
+                rprint("\nOpen this URL in your browser to sign in:")
+                rprint(f"  [cyan]{url}[/cyan]\n")
+            else:
+                rprint("[dim]Opening browser… (if it doesn't appear, copy this URL)[/dim]")
+                rprint(f"[dim]  {url}[/dim]")
             return
-        if no_browser:
-            rprint("\nOpen this URL in your browser to sign in:")
-            rprint(f"  [cyan]{url}[/cyan]\n")
-        else:
-            rprint("[dim]Opening browser… (if it doesn't appear, copy this URL)[/dim]")
-            rprint(f"[dim]  {url}[/dim]")
+        # Machine mode: surface the authorize URL as a `login_url` event so an
+        # agent/MCP parent driving `comfy --json cloud login` can open (or hand
+        # off) the URL. run_login then blocks up to `timeout` seconds on the
+        # loopback callback, so upgrade to the NDJSON stream and flush the line
+        # now — the parent must see the URL *before* we block on the wait.
+        renderer.force_stream()
+        renderer.event("login_url", url=url, timeout_s=timeout)
+        renderer.machine_stream.flush()
 
     try:
         result = run_login(
