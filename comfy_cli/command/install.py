@@ -686,15 +686,26 @@ def parse_pr_reference(pr_ref: str) -> tuple[str, str, int | None]:
 
 
 def _pr_info_from_github(data: dict) -> PRInfo:
+    # GitHub returns head.repo/base.repo as null once the PR's source repo has been
+    # deleted; indexing into that would raise an opaque TypeError.
+    head_repo = data["head"].get("repo")
+    base_repo = data["base"].get("repo")
+    if head_repo is None or base_repo is None:
+        raise ValueError(f"PR #{data['number']} cannot be installed: its source repository has been deleted.")
+
+    # Absent (list endpoint) and null (mergeability still being computed) both mean
+    # "unknown"; keep the pre-existing optimistic default rather than showing ✗.
+    mergeable = data.get("mergeable")
+
     return PRInfo(
         number=data["number"],
-        head_repo_url=data["head"]["repo"]["clone_url"],
+        head_repo_url=head_repo["clone_url"],
         head_branch=data["head"]["ref"],
-        base_repo_url=data["base"]["repo"]["clone_url"],
+        base_repo_url=base_repo["clone_url"],
         base_branch=data["base"]["ref"],
         title=data["title"],
-        user=data["head"]["repo"]["owner"]["login"],
-        mergeable=data.get("mergeable", True),
+        user=head_repo["owner"]["login"],
+        mergeable=True if mergeable is None else mergeable,
     )
 
 

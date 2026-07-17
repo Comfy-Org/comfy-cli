@@ -189,6 +189,42 @@ class TestGitHubAPIIntegration:
             find_pr_by_branch("comfyanonymous", "ComfyUI", "testuser", "test-branch")
 
     @patch("requests.get")
+    def test_fetch_pr_info_deleted_fork(self, mock_get):
+        """A deleted source fork (head.repo = null) reports a clear reason, not a TypeError"""
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "number": 123,
+            "title": "Test PR",
+            "head": {"repo": None, "ref": "test-branch"},
+            "base": {"repo": {"clone_url": "https://github.com/comfyanonymous/ComfyUI.git"}, "ref": "master"},
+            "mergeable": True,
+        }
+        mock_get.return_value = mock_response
+
+        with pytest.raises(ValueError, match="source repository has been deleted"):
+            fetch_pr_info("comfyanonymous", "ComfyUI", 123)
+
+    @patch("requests.get")
+    def test_fetch_pr_info_mergeable_null(self, mock_get):
+        """A null 'mergeable' (still computing) is unknown, not un-mergeable"""
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "number": 123,
+            "title": "Test PR",
+            "head": {
+                "repo": {"clone_url": "https://github.com/testuser/ComfyUI.git", "owner": {"login": "testuser"}},
+                "ref": "test-branch",
+            },
+            "base": {"repo": {"clone_url": "https://github.com/comfyanonymous/ComfyUI.git"}, "ref": "master"},
+            "mergeable": None,
+        }
+        mock_get.return_value = mock_response
+
+        assert fetch_pr_info("comfyanonymous", "ComfyUI", 123).mergeable is True
+
+    @patch("requests.get")
     def test_github_get_rejects_non_github_urls(self, mock_get):
         """_github_get attaches GITHUB_TOKEN, so a non-api.github.com URL must not be requested"""
         with patch.dict("os.environ", {"GITHUB_TOKEN": "test-token"}):
