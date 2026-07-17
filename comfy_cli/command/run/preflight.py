@@ -24,6 +24,11 @@ from comfy_cli.output import rprint as pprint
 # the authoritative signal is the `api_node: true` flag.
 PARTNER_NODE_CATEGORY_PREFIXES = ("partner/",)
 
+# Cap on what we'll pull off the wire for /object_info, success or error. A
+# real schema dump is a few MiB at most; the bound is there so a wedged or
+# hostile server can't stream us out of memory.
+_MAX_OBJECT_INFO_BYTES = 64 * 1024 * 1024
+
 
 def fetch_object_info(host, port, timeout):
     """GET ``/object_info`` from the running ComfyUI server.
@@ -38,9 +43,9 @@ def fetch_object_info(host, port, timeout):
     url = f"http://{host}:{port}/object_info"
     try:
         with plain_urlopen(url, timeout=timeout) as resp:
-            body = resp.read(64 * 1024 * 1024)
+            body = resp.read(_MAX_OBJECT_INFO_BYTES)
     except urllib.error.HTTPError as e:
-        body_text = e.read().decode("utf-8", errors="replace").strip()
+        body_text = e.read(_MAX_OBJECT_INFO_BYTES).decode("utf-8", errors="replace").strip()
         renderer.error(
             code="object_info_unavailable",
             message=f"Failed to fetch /object_info (HTTP {e.code})",

@@ -103,6 +103,19 @@ def plain_urlopen(url, *, timeout: float = 30.0):
     return _PLAIN_OPENER.open(url, timeout=timeout)
 
 
+def no_redirect_urlopen(url, *, timeout: float = 30.0):
+    """Open a prepared credential-bearing ``Request`` without following redirects.
+
+    ``authed_urlopen`` covers the common case where the credential rides a
+    header we attach ourselves. This is the escape hatch for a request whose
+    credential the caller has already placed somewhere we can't build — the
+    ``/prompt`` submit carries ``api_key_comfy_org`` inside its JSON body — and
+    which therefore wants the same no-redirect policy without the header
+    mechanics.
+    """
+    return _AUTHED_OPENER.open(url, timeout=timeout)
+
+
 def build_authed_request(
     url: str,
     target,
