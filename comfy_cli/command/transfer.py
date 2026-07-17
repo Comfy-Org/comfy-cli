@@ -635,10 +635,13 @@ def execute_download(
         # Derive the extension from the source. A bare path has no
         # `?filename=` query param, so read the real suffix off the on-disk
         # file rather than mislabeling everything `.png`; real URLs carry the
-        # name in the query param. The query param is server-controlled, so
-        # its suffix is sanitized before it reaches the on-disk name.
+        # name in the query param. Neither side is trusted: the query param is
+        # server-controlled, and the local path is only *parsed* out of an
+        # `outputs` entry that itself arrives from untrusted metadata (see the
+        # `is_local_job` note above) — so both suffixes are sanitized before
+        # they reach the on-disk name.
         if local_source is not None:
-            ext = local_source.suffix or ".png"
+            ext = _sanitize_ext(local_source.suffix)
         else:
             parsed = urllib.parse.urlparse(url)
             qs = urllib.parse.parse_qs(parsed.query)

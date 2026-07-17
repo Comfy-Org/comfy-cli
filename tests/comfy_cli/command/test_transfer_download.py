@@ -775,6 +775,23 @@ class TestLocalOutputCopy:
 
         assert Path(paths[0]).suffix == ".webp"
 
+    def test_copied_output_extension_is_sanitized(self, fake_target, tmp_path, capsys):
+        # The output reference is a string from the job state's `outputs`,
+        # which arrives from untrusted metadata (a piped stdin envelope, or a
+        # cloud `record`) — `_local_source_path` only parses it, never proves
+        # the name came from a real local render. So a suffix carrying
+        # control/ANSI bytes must not reach the on-disk name or the echoed
+        # saved path, exactly as on the remote branch.
+        src = tmp_path / "output" / "evil.png\x1b[31mHACK"
+        src.parent.mkdir()
+        src.write_bytes(b"\x89PNG-local-bytes")
+        self._write_local_state([str(src)])
+
+        paths, _ = self._run(tmp_path, capsys, fake_target)
+
+        assert Path(paths[0]).suffix == ".png"
+        assert "\x1b" not in paths[0]
+
     def test_file_uri_output_is_copied(self, fake_target, tmp_path, capsys):
         src = tmp_path / "output" / "vid.mp4"
         src.parent.mkdir()
