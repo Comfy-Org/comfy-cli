@@ -34,9 +34,9 @@ def _http_only_proxy_handler() -> urllib.request.ProxyHandler:
     the environment would give the opener an ``ftp_open`` — servicing
     ``ftp://`` through the proxy and stepping straight past the
     ``UnknownHandler`` that ``build_http_only_opener`` relies on. Filtering the
-    map to http(s) keeps real
-    proxy support (``proxy_bypass``/``no_proxy`` read the environment directly,
-    not this dict) while leaving non-http schemes with nowhere to go.
+    map to http(s) keeps real proxy support (``proxy_bypass``/``no_proxy`` read
+    the environment directly, not this dict) while leaving non-http schemes
+    with nowhere to go.
     """
     proxies = {scheme: url for scheme, url in urllib.request.getproxies().items() if scheme in ("http", "https")}
     return urllib.request.ProxyHandler(proxies)
