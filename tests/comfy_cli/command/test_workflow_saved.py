@@ -537,19 +537,22 @@ class TestDelete:
 # unparseable 200 body — must surface a loud error, not empty/success (BE-3334)
 # ---------------------------------------------------------------------------
 
-# A non-empty 200 body the client can't decode as JSON. Three shapes, all malformed:
-#   - a valid-UTF-8 non-JSON page (e.g. an HTML proxy/error page returned 200);
-#   - a non-UTF-8 byte string that isn't valid UTF-8 at all;
+# A non-empty 200 body the client can't decode as JSON. Four shapes, all malformed:
+#   - a valid-UTF-8 non-JSON page (e.g. an HTML proxy/error page returned 200) -> JSONDecodeError;
+#   - a non-UTF-8 byte string that isn't valid UTF-8 at all -> UnicodeDecodeError;
 #   - valid JSON encoded as UTF-16, which the *contract* treats as malformed. ``json.loads``
 #     auto-detects UTF-16/32 byte input (RFC 4627), so handed raw bytes it would silently
-#     accept this; decoding as UTF-8 first is what surfaces it. This param locks that in.
-# Decoding UTF-8 first raises ``UnicodeDecodeError`` on the two non-UTF-8 cases and
-# ``JSONDecodeError`` on the HTML one, so both must be caught. Neither may be reported
-# as "no data" (empty list / null id).
+#     accept this; decoding as UTF-8 first surfaces it as UnicodeDecodeError. Locks that in.
+#   - a JSON integer past CPython's 4300-digit int/str conversion limit: ``json.loads`` raises
+#     a *bare* ``ValueError`` (not ``JSONDecodeError``), which the narrow catch would have let
+#     escape as a raw traceback. Locks in the broadened ``ValueError``-base catch.
+# ``JSONDecodeError`` and ``UnicodeDecodeError`` both subclass ``ValueError``; catching the base
+# maps all four. None may be reported as "no data" (empty list / null id).
 _UNPARSEABLE_BODIES = [
     pytest.param(b"<html>502 Bad Gateway</html>", id="non-json"),
     pytest.param(b"\xff\xfe\x00bad", id="non-utf8"),
     pytest.param(json.dumps({"data": [], "id": "x"}).encode("utf-16"), id="utf16-json"),
+    pytest.param(b"1" + b"0" * 4400, id="bigint-valueerror"),
 ]
 
 
@@ -591,3 +594,16 @@ class TestUnparseableResponse:
         assert env["ok"] is False
         assert env["error"]["code"] == "workflow_unparseable"
         assert env["error"]["details"]["operation"] == "delete"
+
+
+class TestListMalformedShape:
+    """A valid-JSON but wrongly-shaped 200 body reaches ``list`` (``get``/``save`` already
+    guard with ``isinstance``). It must map to an error, not raise a raw ``AttributeError``
+    and not coerce to a masquerading empty list."""
+
+    @pytest.mark.parametrize("raw", [pytest.param(b"[1, 2, 3]", id="array"), pytest.param(b"42", id="scalar")])
+    def test_list_non_dict_body_surfaces_error(self, cloud_target, monkeypatch, capsys, raw):
+        _patch_urlopen(monkeypatch, {"/api/workflows": (raw, 200)})
+        env = _run(["list", "--where", "cloud"], capsys)
+        assert env["ok"] is False
+        assert env["error"]["code"] == "cloud_http_error"

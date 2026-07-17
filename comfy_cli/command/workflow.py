@@ -625,14 +625,19 @@ def _http_request(
         return status, None
     try:
         return status, json.loads(raw.decode("utf-8"))
-    except (json.JSONDecodeError, UnicodeDecodeError) as e:
+    except (ValueError, RecursionError) as e:
         # A non-empty body that won't decode as JSON is a *malformed* response, not
         # "no data": returning ``None`` here would let callers report an empty list
         # or a null id as success. Raise instead so it surfaces as a loud, mapped
         # error. Decode as UTF-8 *explicitly* first: handed raw bytes, ``json.loads``
         # auto-detects UTF-16/32 (RFC 4627) and would silently accept a non-UTF-8 body
         # the contract treats as malformed. Non-UTF-8 bytes -> ``UnicodeDecodeError``;
-        # valid-UTF-8 non-JSON text -> ``JSONDecodeError``; catch both.
+        # valid-UTF-8 non-JSON text -> ``JSONDecodeError``; both subclass ``ValueError``.
+        # Catch the ``ValueError`` base to also map the parser's *other* rejections that
+        # aren't ``JSONDecodeError`` — e.g. a JSON integer past CPython's 4300-digit
+        # int/str limit raises a bare ``ValueError`` — plus ``RecursionError`` from
+        # pathologically nested input (the 64 MiB cap permits deep nesting). Otherwise
+        # those escape the mapping and crash the CLI with a raw traceback.
         raise _ResponseUnparseable() from e
 
 
@@ -648,7 +653,9 @@ def _handle_cloud_http_error(renderer, e, *, operation: str, workflow_id: str | 
             details={"operation": operation, "workflow_id": workflow_id},
         )
     elif isinstance(e, urllib.error.HTTPError):
-        body = (e.read() or b"")[:1000].decode("utf-8", "replace")
+        # Cap the read itself — ``[:1000]`` after a full ``read()`` would still pull an
+        # arbitrarily large (or malicious) error page into memory before slicing.
+        body = (e.read(1000) or b"").decode("utf-8", "replace")
         if e.code == 404:
             renderer.error(
                 code="workflow_not_found",
@@ -957,6 +964,19 @@ def list_cmd(
         _, body = _http_request(url, target)
     except (urllib.error.HTTPError, urllib.error.URLError, OSError, _ResponseUnparseable) as e:
         raise _handle_cloud_http_error(renderer, e, operation="list") from e
+
+    # A non-empty body decodes here only if it was valid JSON; guard the shape the
+    # way ``get``/``save`` do. An empty body is a legitimate ``None`` (→ no rows), but
+    # a valid-JSON *non-dict* 200 (an array like ``[1, 2, 3]`` or a scalar) is malformed:
+    # ``(body).get("data")`` would raise a raw ``AttributeError``, and coercing it to an
+    # empty list would masquerade the malformed shape as a genuinely-empty listing.
+    if body is not None and not isinstance(body, dict):
+        renderer.error(
+            code="cloud_http_error",
+            message="unexpected response shape from /api/workflows (expected a JSON object)",
+            details={"got_type": type(body).__name__},
+        )
+        raise typer.Exit(code=1)
 
     rows = (body or {}).get("data") or []
     payload = {
