@@ -618,13 +618,28 @@ class TestPartialExecutionDiff:
 
 class TestResolvePartnerCredential:
     """The credential the local submit can inject into ``extra_data`` so a
-    partner-API node finds it. Three sources, env > stored key > OAuth."""
+    partner-API node finds it. Precedence session > env > stored key.
 
-    def test_uses_env_var_first(self, monkeypatch: pytest.MonkeyPatch):
+    The OAuth session is refreshed when possible (``refresh=True``) but never
+    cleared from this best-effort path (``allow_clear=False``): access tokens
+    are short-lived, so a signed-in user's token routinely lapses between
+    commands — refreshing keeps local runs working, without ever logging the
+    user off the shared session. The refresh happens inside
+    ``oauth.ensure_fresh_session`` (mocked here); its allow_clear semantics are
+    exercised end-to-end in ``tests/comfy_cli/test_credentials.py``.
+    """
+
+    def _no_session(self, monkeypatch: pytest.MonkeyPatch):
+        from comfy_cli.cloud import oauth
+
+        monkeypatch.setattr(oauth, "ensure_fresh_session", lambda **kw: None)
+
+    def test_uses_env_var_when_no_session(self, monkeypatch: pytest.MonkeyPatch):
         monkeypatch.setenv("COMFY_CLOUD_API_KEY", "env-key-123")
         from comfy_cli.auth import store as auth_store
 
         monkeypatch.setattr(auth_store, "get", lambda _: None)
+        self._no_session(monkeypatch)
         assert _resolve_partner_credential() == ("api_key_comfy_org", "env-key-123")
 
     def test_falls_back_to_stored_provider_key(self, monkeypatch: pytest.MonkeyPatch):
@@ -639,37 +654,67 @@ class TestResolvePartnerCredential:
             "get",
             lambda name: record if name == CLOUD_API_KEY_PROVIDER else None,
         )
-        monkeypatch.setattr(auth_store, "get_cloud_session", lambda: None)
+        self._no_session(monkeypatch)
         assert _resolve_partner_credential() == ("api_key_comfy_org", "stored-key-456")
 
-    def test_falls_back_to_oauth_token(self, monkeypatch: pytest.MonkeyPatch):
+    def test_refreshes_and_uses_oauth_token(self, monkeypatch: pytest.MonkeyPatch):
+        """A signed-in user whose access token lapsed gets a REFRESHED token
+        here — the whole point of BE-3361 — rather than being skipped and
+        hitting ``partner_node_requires_credential``."""
         monkeypatch.delenv("COMFY_CLOUD_API_KEY", raising=False)
         from comfy_cli.auth import store as auth_store
+        from comfy_cli.cloud import oauth
 
-        session = MagicMock()
-        session.is_expired.return_value = False
-        session.access_token = "oauth-bearer-789"
+        # ensure_fresh_session refreshes the lapsed token and returns a fresh,
+        # non-expired session carrying the NEW access token.
+        refreshed = MagicMock()
+        refreshed.is_expired.return_value = False
+        refreshed.access_token = "refreshed-bearer-789"
+        refreshed.base_url = "https://cloud.comfy.org"
         monkeypatch.setattr(auth_store, "get", lambda _: None)
-        monkeypatch.setattr(auth_store, "get_cloud_session", lambda: session)
-        assert _resolve_partner_credential() == ("auth_token_comfy_org", "oauth-bearer-789")
+        monkeypatch.setattr(oauth, "ensure_fresh_session", lambda **kw: refreshed)
+        assert _resolve_partner_credential() == ("auth_token_comfy_org", "refreshed-bearer-789")
+
+    def test_passes_allow_clear_false_to_refresh(self, monkeypatch: pytest.MonkeyPatch):
+        """This best-effort injector must NEVER clear the shared session on a
+        fatal refresh: it refreshes with ``allow_clear=False``."""
+        monkeypatch.delenv("COMFY_CLOUD_API_KEY", raising=False)
+        from comfy_cli.auth import store as auth_store
+        from comfy_cli.cloud import oauth
+
+        seen: dict = {}
+
+        def _refresh(**kw):
+            seen.update(kw)
+            return None
+
+        monkeypatch.setattr(auth_store, "get", lambda _: None)
+        monkeypatch.setattr(oauth, "ensure_fresh_session", _refresh)
+        _resolve_partner_credential()
+        assert seen.get("allow_clear") is False
 
     def test_returns_none_when_nothing_configured(self, monkeypatch: pytest.MonkeyPatch):
         monkeypatch.delenv("COMFY_CLOUD_API_KEY", raising=False)
         from comfy_cli.auth import store as auth_store
 
         monkeypatch.setattr(auth_store, "get", lambda _: None)
-        monkeypatch.setattr(auth_store, "get_cloud_session", lambda: None)
+        self._no_session(monkeypatch)
         assert _resolve_partner_credential() is None
 
-    def test_treats_expired_session_as_no_creds(self, monkeypatch: pytest.MonkeyPatch):
+    def test_stale_session_from_transient_failure_falls_through(self, monkeypatch: pytest.MonkeyPatch):
+        """A transient refresh failure returns the STALE (expired) session; it
+        fails its own expiry check and the resolver falls through — unchanged
+        from the pre-BE-3361 behavior on a network flake."""
         monkeypatch.delenv("COMFY_CLOUD_API_KEY", raising=False)
         from comfy_cli.auth import store as auth_store
+        from comfy_cli.cloud import oauth
 
-        session = MagicMock()
-        session.is_expired.return_value = True
-        session.access_token = "stale"
+        stale = MagicMock()
+        stale.is_expired.return_value = True
+        stale.access_token = "stale"
+        stale.base_url = "https://cloud.comfy.org"
         monkeypatch.setattr(auth_store, "get", lambda _: None)
-        monkeypatch.setattr(auth_store, "get_cloud_session", lambda: session)
+        monkeypatch.setattr(oauth, "ensure_fresh_session", lambda **kw: stale)
         assert _resolve_partner_credential() is None
 
 
