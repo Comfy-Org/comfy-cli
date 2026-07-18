@@ -373,10 +373,20 @@ class TestRunResolvesBinaryPath:
         with patch.object(hardware.shutil, "which", side_effect=RuntimeError("boom")):
             assert hardware._run(["nvidia-smi"]) is None
 
+    def test_run_empty_cmd_returns_none(self):
+        """An empty command degrades to None instead of raising IndexError,
+        honoring the never-raise contract."""
+        with patch.object(hardware.subprocess, "check_output") as mock_run:
+            assert hardware._run([]) is None
+        mock_run.assert_not_called()
 
-class TestResolveBinaryWindowsCwdGuard:
-    """On Windows, a binary that ``shutil.which`` resolves inside the current
-    working directory is rejected — closing the CWD binary-planting hole."""
+
+class TestResolveBinaryCwdGuard:
+    """A binary that ``shutil.which`` resolves *directly inside* the current
+    working directory is rejected — closing the CWD binary-planting hole. The
+    guard fires on every platform (``$PATH`` can search the CWD on POSIX too via a
+    ``.``/empty entry) and rejects only the immediate directory so a legitimate
+    system binary in a subdirectory is never lost."""
 
     def test_windows_rejects_binary_planted_in_cwd(self, tmp_path):
         planted = tmp_path / "nvidia-smi.exe"
@@ -402,14 +412,45 @@ class TestResolveBinaryWindowsCwdGuard:
         ):
             assert hardware._resolve_binary("nvidia-smi") == str(legit)
 
-    def test_non_windows_does_not_apply_cwd_guard(self, tmp_path):
-        """POSIX ``shutil.which`` never searches the CWD, so the guard is
-        Windows-only; a resolved path is returned as-is."""
-        resolved = tmp_path / "sysctl"
-        resolved.write_text("")
+    def test_allows_system_binary_in_subdirectory_of_cwd(self, tmp_path):
+        """Running from an ancestor of the binary (e.g. ``C:\\Windows`` with the
+        real binary under ``System32``) must NOT reject it — only a binary
+        directly in the CWD is a plant."""
+        system_dir = tmp_path / "System32"
+        system_dir.mkdir()
+        legit = system_dir / "nvidia-smi.exe"
+        legit.write_text("")
+        with (
+            patch.object(hardware.platform, "system", return_value="Windows"),
+            # CWD is the ANCESTOR (tmp_path), binary lives one level deeper.
+            patch.object(hardware.os, "getcwd", return_value=str(tmp_path)),
+            patch.object(hardware.shutil, "which", return_value=str(legit)),
+        ):
+            assert hardware._resolve_binary("nvidia-smi") == str(legit)
+
+    def test_posix_also_rejects_binary_planted_in_cwd(self, tmp_path):
+        """A ``.``/empty entry in ``$PATH`` lets ``shutil.which`` return a CWD
+        match on POSIX too, so the guard applies there as well."""
+        planted = tmp_path / "nvidia-smi"
+        planted.write_text("")
         with (
             patch.object(hardware.platform, "system", return_value="Darwin"),
             patch.object(hardware.os, "getcwd", return_value=str(tmp_path)),
+            patch.object(hardware.shutil, "which", return_value=str(planted)),
+        ):
+            assert hardware._resolve_binary("nvidia-smi") is None
+
+    def test_posix_allows_system_binary_outside_cwd(self, tmp_path):
+        """A legitimate binary outside the CWD is returned as-is on POSIX."""
+        cwd = tmp_path / "project"
+        bin_dir = tmp_path / "usr_bin"
+        cwd.mkdir()
+        bin_dir.mkdir()
+        resolved = bin_dir / "sysctl"
+        resolved.write_text("")
+        with (
+            patch.object(hardware.platform, "system", return_value="Darwin"),
+            patch.object(hardware.os, "getcwd", return_value=str(cwd)),
             patch.object(hardware.shutil, "which", return_value=str(resolved)),
         ):
             assert hardware._resolve_binary("sysctl") == str(resolved)
