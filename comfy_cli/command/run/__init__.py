@@ -443,6 +443,10 @@ def execute(
     finally:
         if progress is not None:
             progress.stop()
+        # Best-effort close of the run WebSocket on every exit path. On the
+        # async (no --wait) path connect() never ran so ws is None and this is
+        # a no-op; it is idempotent with the SIGINT-token close wired above.
+        _safe_close(execution)
 
 
 def _journal_run(workflow: str, prompt_id, where: str) -> None:

@@ -413,6 +413,25 @@ class TestExecuteErrorHandling:
             mock_exec.connect.assert_called_once()
             mock_exec.queue.assert_called_once()
             mock_exec.watch_execution.assert_called_once()
+            # The run WebSocket must be closed on the success path (BE-3404) —
+            # the finally-block _safe_close, not left open until teardown.
+            mock_exec.ws.close.assert_called_once()
+
+    def test_websocket_closed_on_watch_failure(self, workflow_file):
+        # BE-3404: the finally-block close also fires when watch_execution
+        # raises, so a mid-run error doesn't linger the server-side session.
+        with (
+            patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),
+            patch("comfy_cli.command.run.ExecutionProgress"),
+            patch("comfy_cli.command.run.WorkflowExecution") as MockExec,
+        ):
+            mock_exec = MagicMock()
+            MockExec.return_value = mock_exec
+            mock_exec.watch_execution.side_effect = WebSocketTimeoutException("timed out")
+
+            with pytest.raises(typer.Exit):
+                execute(workflow_file, host="127.0.0.1", port=8188, wait=True, timeout=30)
+            mock_exec.ws.close.assert_called_once()
 
     def test_file_not_found_exits(self):
         with pytest.raises(typer.Exit) as exc_info:
