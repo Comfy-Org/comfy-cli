@@ -592,3 +592,102 @@ def test_check_custom_nodes_surfaced_verbatim(gallery_file, tmp_path, monkeypatc
     assert result.exit_code == 0, result.output
     env = _envelope(result.output)
     assert env["data"]["custom_nodes_required"] == ["ComfyUI-SEEDVR2"]
+
+
+# ---------------------------------------------------------------------------
+# Hardening — malformed gallery / workflow inputs must not crash
+# ---------------------------------------------------------------------------
+
+
+def test_cache_path_never_escapes_templates_dir(monkeypatch, tmp_path):
+    # A gallery entry name carrying path separators / traversal must be encoded so
+    # the cache file stays strictly under gallery/templates (path-traversal guard).
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    base = tmp_path / "comfy-cli" / "gallery" / "templates"
+    for evil in ["../../etc/passwd", "a/b/c", "..", "sub/dir/name"]:
+        p = templates_cmd._template_workflow_cache_path(evil).resolve()
+        assert base.resolve() in p.parents, f"{evil!r} escaped to {p}"
+
+
+def test_iter_workflow_nodes_tolerates_non_dict_definitions():
+    # A truthy non-dict `definitions` (valid JSON, e.g. a list) must not raise.
+    wf = {"nodes": [{"id": 1, "type": "A"}], "definitions": ["not", "a", "dict"]}
+    types = templates_cmd._collect_node_class_types(wf)
+    assert types == ["A"]
+
+
+def test_iter_workflow_nodes_tolerates_non_list_nodes():
+    # Truthy non-list `nodes` / subgraph `nodes` must not raise TypeError.
+    wf = {"nodes": "oops", "definitions": {"subgraphs": [{"nodes": 5}]}}
+    assert templates_cmd._collect_model_requirements(wf) == []
+    assert templates_cmd._collect_node_class_types(wf) == []
+
+
+def test_collect_models_skips_empty_name_requirement():
+    # A model ref with a directory but no name is unmatchable; keeping it would
+    # produce a phantom empty-name "missing" model.
+    wf = {"nodes": [{"id": 1, "type": "A", "properties": {"models": [{"name": "", "directory": "checkpoints"}]}}]}
+    assert templates_cmd._collect_model_requirements(wf) == []
+
+
+def test_as_str_list_coerces_scalar_and_junk():
+    assert templates_cmd._as_str_list(["a", "b"]) == ["a", "b"]
+    assert templates_cmd._as_str_list("solo") == ["solo"]  # NOT split into chars
+    assert templates_cmd._as_str_list(None) == []
+    assert templates_cmd._as_str_list(42) == []
+
+
+def test_check_present_when_required_name_carries_subfolder(gallery_file, tmp_path, monkeypatch):
+    # A model ref whose OWN name carries a subfolder (SDXL/model.safetensors) must
+    # still match a basename folder listing — both sides get normalized.
+    _force_json_renderer()
+    _no_local_server(monkeypatch)
+    wf = {
+        "nodes": [
+            {
+                "id": 1,
+                "type": "CheckpointLoaderSimple",
+                "properties": {"models": [{"name": "SDXL/model.safetensors", "directory": "checkpoints"}]},
+            }
+        ]
+    }
+    _stub_template_workflow_fetch(monkeypatch, json.dumps(wf).encode())
+    _stub_folder_listing(monkeypatch, {"checkpoints": ["model.safetensors"]})
+
+    result = _run_check(gallery_file, "image_z_image", tmp_path, monkeypatch)
+    assert result.exit_code == 0, result.output
+    env = _envelope(result.output)
+    assert env["data"]["verdict"] == "runnable"
+
+
+def test_check_api_source_stays_index_when_object_info_finds_nothing(gallery_file, tmp_path, monkeypatch):
+    # image_flux2 is API-by-index. A reachable object_info scan that finds no api_node
+    # must NOT overwrite the source to object_info (it wasn't the signal's origin).
+    from comfy_cli.cql import engine
+
+    _force_json_renderer()
+    graph = engine.Graph.from_object_info(
+        {"KSampler": {"input": {}, "output": [], "output_name": [], "api_node": False}}
+    )
+    _stub_object_info(monkeypatch, graph)
+    _stub_template_workflow_fetch(monkeypatch, json.dumps({"nodes": [{"id": 1, "type": "KSampler"}]}).encode())
+
+    result = _run_check(gallery_file, "image_flux2", tmp_path, monkeypatch)
+    assert result.exit_code == 0, result.output
+    env = _envelope(result.output)
+    assert env["data"]["verdict"] == "api-required"
+    assert env["data"]["api"]["source"] == "index"
+    assert env["data"]["api"]["api_nodes"] == []
+
+
+def test_check_invalid_utf8_workflow_surfaces_invalid_json(gallery_file, tmp_path, monkeypatch):
+    # Invalid UTF-8 in the cached/fetched body raises UnicodeDecodeError (not a
+    # subclass of JSONDecodeError) — it must be caught as a clean error, not crash.
+    _force_json_renderer()
+    _no_local_server(monkeypatch)
+    _stub_template_workflow_fetch(monkeypatch, b"\xff\xfe not valid utf-8")
+
+    result = _run_check(gallery_file, "image_z_image", tmp_path, monkeypatch)
+    assert result.exit_code != 0
+    env = _envelope(result.output)
+    assert env["error"]["code"] == "template_workflow_invalid_json"

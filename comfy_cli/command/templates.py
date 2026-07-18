@@ -76,6 +76,18 @@ def _load_gallery(
     return json.loads(cache.read_bytes())
 
 
+def _as_str_list(value: Any) -> list[str]:
+    """Coerce a gallery field to a list of strings, tolerating the scalar-or-junk
+    variance in real data. A bare string is treated as a single-element list (not
+    split into characters); a non-list/non-string scalar becomes an empty list.
+    """
+    if isinstance(value, str):
+        return [value] if value else []
+    if isinstance(value, list):
+        return [str(v) for v in value if v]
+    return []
+
+
 def _flatten_templates(categories: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Walk the nested (category → templates) shape and flatten to a list.
 
@@ -103,7 +115,7 @@ def _flatten_templates(categories: list[dict[str, Any]]) -> list[dict[str, Any]]
                     "group_category": cat.get("category") or "",
                     "tags": list(t.get("tags") or []),
                     "models": list(t.get("models") or []),
-                    "requires_custom_nodes": list(t.get("requiresCustomNodes") or []),
+                    "requires_custom_nodes": _as_str_list(t.get("requiresCustomNodes")),
                     "providers": _flatten_providers(t.get("logos") or []),
                     "date": t.get("date") or "",
                     "open_source": bool(t.get("openSource", False)),
@@ -488,7 +500,7 @@ def fetch_cmd(
     # node count in the envelope without re-reading.
     try:
         wf = json.loads(body)
-    except json.JSONDecodeError as e:
+    except (json.JSONDecodeError, UnicodeDecodeError) as e:
         renderer.error(
             code="template_workflow_invalid_json",
             message=f"upstream returned non-JSON for {name!r}: {e}",
@@ -534,9 +546,16 @@ def fetch_cmd(
 
 def _template_workflow_cache_path(name: str) -> Path:
     """Where a fetched per-template workflow JSON is cached. Same base-dir logic
-    as :func:`_cache_path`, one file per template under ``gallery/templates``."""
+    as :func:`_cache_path`, one file per template under ``gallery/templates``.
+
+    ``name`` comes from the (untrusted) gallery index, so it's URL-encoded the
+    same way :func:`_fetch_template_workflow` encodes it for the fetch URL —
+    ``quote(..., safe="")`` turns any ``/`` or ``..`` segment into ``%2F``/``..``
+    with no path separators, keeping the file strictly inside ``gallery/templates``.
+    """
     base = os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache")
-    return Path(base) / "comfy-cli" / "gallery" / "templates" / f"{name}.json"
+    safe_name = urllib.parse.quote(name, safe="")
+    return Path(base) / "comfy-cli" / "gallery" / "templates" / f"{safe_name}.json"
 
 
 def _iter_workflow_nodes(wf: dict[str, Any]):
@@ -549,14 +568,22 @@ def _iter_workflow_nodes(wf: dict[str, Any]):
     """
     if not isinstance(wf, dict):
         return
-    for node in wf.get("nodes") or []:
-        if isinstance(node, dict):
-            yield node
-    for sg in (wf.get("definitions") or {}).get("subgraphs") or []:
-        if isinstance(sg, dict):
-            for node in sg.get("nodes") or []:
-                if isinstance(node, dict):
-                    yield node
+    top = wf.get("nodes")
+    if isinstance(top, list):
+        for node in top:
+            if isinstance(node, dict):
+                yield node
+    definitions = wf.get("definitions")
+    subgraphs = definitions.get("subgraphs") if isinstance(definitions, dict) else None
+    if isinstance(subgraphs, list):
+        for sg in subgraphs:
+            if not isinstance(sg, dict):
+                continue
+            sg_nodes = sg.get("nodes")
+            if isinstance(sg_nodes, list):
+                for node in sg_nodes:
+                    if isinstance(node, dict):
+                        yield node
 
 
 def _collect_model_requirements(wf: dict[str, Any]) -> list[dict[str, str]]:
@@ -578,7 +605,10 @@ def _collect_model_requirements(wf: dict[str, Any]) -> list[dict[str, str]]:
                 continue
             name = str(m.get("name") or "")
             directory = str(m.get("directory") or "")
-            if not name and not directory:
+            if not name:
+                # A model ref with no filename isn't matchable against a folder
+                # listing — keeping it would always report a phantom empty-name
+                # "missing" model and wrongly flip the verdict to missing-models.
                 continue
             key = (directory, name)
             if key in seen:
@@ -738,15 +768,24 @@ def check_cmd(
                 details={"status": status} if status else None,
             )
             raise typer.Exit(code=1) from e
+        # Write atomically: a truncated file (interrupted write / full disk) would
+        # otherwise be trusted by the read path above on the next non-refresh run
+        # and fail `template_workflow_invalid_json` until the user passed --refresh.
         try:
             cache_path.parent.mkdir(parents=True, exist_ok=True)
-            cache_path.write_bytes(body)
+            tmp_path = cache_path.parent / f"{cache_path.name}.{os.getpid()}.tmp"
+            try:
+                tmp_path.write_bytes(body)
+                os.replace(tmp_path, cache_path)
+            except OSError:
+                tmp_path.unlink(missing_ok=True)
+                raise
         except OSError:
             pass  # a non-writable cache dir must not fail the check
 
     try:
         wf = json.loads(body)
-    except json.JSONDecodeError as e:
+    except (json.JSONDecodeError, UnicodeDecodeError) as e:
         renderer.error(
             code="template_workflow_invalid_json",
             message=f"template workflow for {name!r} is not valid JSON: {e}",
@@ -775,10 +814,13 @@ def check_cmd(
         from comfy_cli.cql.engine import Graph
 
         graph = Graph.load(mode="local")
-        found = [cls for cls in node_types if (m := graph.node(cls)) is not None and m.is_api_node]
-        api_nodes = found
-        api_source = "object_info"
-        api_dependent = api_dependent or bool(api_nodes)
+        api_nodes = [cls for cls in node_types if (m := graph.node(cls)) is not None and m.is_api_node]
+        # Only attribute the signal to object_info when it actually found API nodes;
+        # an empty scan must leave `source` reflecting the index heuristic, not claim
+        # object_info as the source of an api-required verdict it didn't produce.
+        if api_nodes:
+            api_source = "object_info"
+            api_dependent = True
     except Exception:
         # Server down / object_info unavailable → index heuristic alone decides.
         # Discard any partial object_info result so `source` and `api_nodes` agree.
@@ -820,7 +862,11 @@ def check_cmd(
 
         for req in required:
             listing = listings.get(req["directory"])
-            if listing and any(_basename(entry) == req["name"] for entry in listing):
+            # Normalize BOTH sides: a model ref may itself carry a subfolder
+            # (e.g. ``SDXL/model.safetensors``, as ComfyUI loader widgets emit),
+            # so compare basenames on the required side too.
+            req_base = _basename(req["name"])
+            if listing and any(_basename(entry) == req_base for entry in listing):
                 present.append(req["name"])
             else:
                 missing.append(dict(req))
@@ -848,13 +894,18 @@ def check_cmd(
     }
 
     if renderer.is_pretty():
+        # `name`, node-class names, model names/urls and warnings are all untrusted
+        # (they come from the gallery index / workflow JSON), so escape them before
+        # Rich interprets them — a stray `[foo]` would otherwise raise MarkupError.
+        from rich.markup import escape
+
         mark = "[bold green]✓[/bold green]" if verdict == "runnable" else "[bold red]✗[/bold red]"
-        rprint(f"{mark} {name} — [bold]{verdict}[/bold]")
+        rprint(f"{mark} {escape(name)} — [bold]{verdict}[/bold]")
         if api_dependent:
-            extra = f": {', '.join(api_nodes)}" if api_nodes else ""
+            extra = f": {escape(', '.join(api_nodes))}" if api_nodes else ""
             rprint(f"  [yellow]needs partner-API access[/yellow] (via {api_source}){extra}")
         if custom_nodes_required:
-            rprint(f"  custom nodes: {', '.join(custom_nodes_required)} [dim](not verified)[/dim]")
+            rprint(f"  custom nodes: {escape(', '.join(custom_nodes_required))} [dim](not verified)[/dim]")
         if missing:
             from rich.table import Table
 
@@ -863,10 +914,10 @@ def check_cmd(
             tbl.add_column("directory", style="dim")
             tbl.add_column("download url")
             for m in missing:
-                tbl.add_row(m["name"], m["directory"], m["url"] or "[dim](none)[/dim]")
+                tbl.add_row(escape(m["name"]), escape(m["directory"]), escape(m["url"]) or "[dim](none)[/dim]")
             renderer.console().print(tbl)
         elif required:
             rprint(f"  [dim]{len(present)}/{len(required)} model(s) present[/dim]")
         for w in warnings:
-            rprint(f"  [yellow]⚠[/yellow] {w}")
+            rprint(f"  [yellow]⚠[/yellow] {escape(w)}")
     renderer.emit(payload, command="templates check")
