@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
 import time
 import urllib.error
 import urllib.parse
@@ -41,6 +42,14 @@ GALLERY_URL = "https://raw.githubusercontent.com/Comfy-Org/workflow_templates/ma
 # cheaply. A network-down machine still lists from the stale cache (fetch failure
 # falls back), and ``comfy templates refresh`` remains the manual force-refresh.
 GALLERY_TTL_SECONDS = 24 * 60 * 60
+
+# Everything a gallery load can throw. ``_fetch_gallery`` raises ``RuntimeError``
+# on a non-200 status (which ``urlopen`` doesn't already turn into an
+# ``HTTPError``), the fetch itself raises ``URLError``/``OSError``, and decoding a
+# 200-with-garbage body raises ``JSONDecodeError`` — all of which must route
+# through the same stale-cache fallback / command-level error, never an uncaught
+# traceback.
+_GALLERY_LOAD_ERRORS = (urllib.error.URLError, OSError, RuntimeError, json.JSONDecodeError)
 
 
 # ---------------------------------------------------------------------------
@@ -93,17 +102,57 @@ def _load_gallery(
     ttl_auto_refresh = have_cache and not refresh
     try:
         data = _fetch_gallery()
-    except (urllib.error.URLError, OSError) as e:
+        # Validate BEFORE we touch the cache: a 200 with a non-JSON body
+        # (rate-limit HTML, captive portal, truncated response) must never
+        # clobber the last-known-good cache with garbage.
+        parsed = json.loads(data)
+    except _GALLERY_LOAD_ERRORS as e:
         if ttl_auto_refresh:
+            # The stale cache is our fallback — but a concurrent `refresh` may
+            # have removed it or left it corrupt mid-write. If reading it back
+            # also fails, surface the original fetch error, not the read error.
+            try:
+                stale = json.loads(cache.read_bytes())
+            except (OSError, json.JSONDecodeError):
+                raise e
             get_renderer().warn(
                 f"gallery refresh failed ({e}); using cached index (last updated {_cache_age_str(cache)} ago)",
                 hint="run `comfy templates refresh` once back online to update it",
             )
-            return json.loads(cache.read_bytes())
+            return stale
         raise
-    cache.parent.mkdir(parents=True, exist_ok=True)
-    cache.write_bytes(data)
-    return json.loads(data)
+    _persist_cache(cache, data)
+    return parsed
+
+
+def _persist_cache(cache: Path, data: bytes) -> None:
+    """Persist a freshly fetched index to the cache, atomically and best-effort.
+
+    * Atomic — write to a temp file in the same directory then ``os.replace``
+      it into place, so a concurrent ``templates`` reader never observes a
+      half-written index (which would parse-fail as ``gallery_load_failed``).
+    * Best-effort — a read-only cache dir (e.g. a gallery baked into a
+      container image) or a full disk must not break the command once we
+      already hold valid data, so a write failure is swallowed rather than
+      propagated.
+    """
+    try:
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=str(cache.parent), prefix=".index-", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "wb") as f:
+                f.write(data)
+            os.replace(tmp, cache)
+        except OSError:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+    except OSError:
+        # Couldn't persist (read-only dir, disk full, …). We still have valid
+        # data in hand, so proceed without caching rather than failing the run.
+        pass
 
 
 def _cache_is_stale(cache: Path) -> bool:
@@ -113,7 +162,10 @@ def _cache_is_stale(cache: Path) -> bool:
     except OSError:
         # Can't stat it → treat as stale so we attempt a refresh.
         return True
-    return age > GALLERY_TTL_SECONDS
+    # A future mtime (clock skew, or a restored/tampered file) yields a
+    # negative age; treat it as stale so the cache can't be pinned "fresh"
+    # indefinitely until wall-clock time catches up.
+    return age < 0 or age > GALLERY_TTL_SECONDS
 
 
 def _cache_age_str(cache: Path) -> str:
@@ -305,7 +357,7 @@ def ls_cmd(
 
     try:
         cats = _load_gallery(gallery_path, refresh=refresh)
-    except (urllib.error.URLError, OSError, json.JSONDecodeError) as e:
+    except _GALLERY_LOAD_ERRORS as e:
         renderer.error(
             code="gallery_load_failed",
             message=str(e),
@@ -402,7 +454,7 @@ def show_cmd(
     renderer = get_renderer()
     try:
         cats = _load_gallery(gallery_path, refresh=refresh)
-    except (urllib.error.URLError, OSError, json.JSONDecodeError) as e:
+    except _GALLERY_LOAD_ERRORS as e:
         renderer.error(code="gallery_load_failed", message=str(e))
         raise typer.Exit(code=1) from e
 
@@ -501,7 +553,7 @@ def fetch_cmd(
     # of letting the user hit a raw GitHub 404.
     try:
         cats = _load_gallery(gallery_path, refresh=refresh)
-    except (urllib.error.URLError, OSError, json.JSONDecodeError) as e:
+    except _GALLERY_LOAD_ERRORS as e:
         renderer.error(code="gallery_load_failed", message=str(e))
         raise typer.Exit(code=1) from e
 
