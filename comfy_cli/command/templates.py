@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -33,6 +34,13 @@ from comfy_cli.output import get_renderer, rprint
 app = typer.Typer(no_args_is_help=True, help="Browse the Comfy workflow-template gallery.")
 
 GALLERY_URL = "https://raw.githubusercontent.com/Comfy-Org/workflow_templates/main/templates/index.json"
+
+# How long a cached gallery index stays fresh before ``_load_gallery`` transparently
+# re-fetches it. 24h (not the spec's 7 days): the gallery updates weekly-ish and the
+# fetch is one small JSON file, so a tighter TTL keeps agents off a frozen catalog
+# cheaply. A network-down machine still lists from the stale cache (fetch failure
+# falls back), and ``comfy templates refresh`` remains the manual force-refresh.
+GALLERY_TTL_SECONDS = 24 * 60 * 60
 
 
 # ---------------------------------------------------------------------------
@@ -63,17 +71,63 @@ def _load_gallery(
 
     Returns the raw decoded JSON (a list of category dicts). The CLI does
     its own filtering on top.
+
+    A cache older than ``GALLERY_TTL_SECONDS`` is transparently re-fetched so
+    ``templates ls/show`` never serves a frozen catalog forever. If that refresh
+    fails (offline / GitHub down), we fall back to the stale cache with a
+    non-fatal renderer warning rather than erroring out.
     """
     if explicit_path:
         return json.loads(Path(explicit_path).read_bytes())
 
     cache = _cache_path()
-    if refresh or not cache.exists():
+    have_cache = cache.exists()
+
+    if not refresh and have_cache and not _cache_is_stale(cache):
+        return json.loads(cache.read_bytes())
+
+    # A TTL-expired cache is refreshed transparently, so a fetch failure here
+    # must NOT break `templates ls` — fall back to the stale cache with a
+    # non-fatal warning. An explicit `--refresh` (or a genuinely absent cache),
+    # by contrast, surfaces the fetch error so the user learns it failed.
+    ttl_auto_refresh = have_cache and not refresh
+    try:
         data = _fetch_gallery()
-        cache.parent.mkdir(parents=True, exist_ok=True)
-        cache.write_bytes(data)
-        return json.loads(data)
-    return json.loads(cache.read_bytes())
+    except (urllib.error.URLError, OSError) as e:
+        if ttl_auto_refresh:
+            get_renderer().warn(
+                f"gallery refresh failed ({e}); using cached index (last updated {_cache_age_str(cache)} ago)",
+                hint="run `comfy templates refresh` once back online to update it",
+            )
+            return json.loads(cache.read_bytes())
+        raise
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    cache.write_bytes(data)
+    return json.loads(data)
+
+
+def _cache_is_stale(cache: Path) -> bool:
+    """True when the cache file is older than ``GALLERY_TTL_SECONDS``."""
+    try:
+        age = time.time() - cache.stat().st_mtime
+    except OSError:
+        # Can't stat it → treat as stale so we attempt a refresh.
+        return True
+    return age > GALLERY_TTL_SECONDS
+
+
+def _cache_age_str(cache: Path) -> str:
+    """Human-friendly age of the cache file for the stale-fallback warning."""
+    try:
+        age = max(0.0, time.time() - cache.stat().st_mtime)
+    except OSError:
+        return "unknown time"
+    hours = age / 3600.0
+    if hours >= 24:
+        return f"{hours / 24:.1f}d"
+    if hours >= 1:
+        return f"{hours:.1f}h"
+    return f"{age / 60:.0f}m"
 
 
 def _flatten_templates(categories: list[dict[str, Any]]) -> list[dict[str, Any]]:
