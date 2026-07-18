@@ -65,6 +65,36 @@ class TestDetectHardwareMacOS:
         assert hw["gpu"] is None
         assert hw["ram_bytes"] == 17179869184
 
+    def test_apple_silicon_under_rosetta_unified_block(self):
+        """An x86_64 Python under Rosetta 2 reports machine == 'x86_64', but
+        sysctl.proc_translated == '1' reveals the underlying Apple Silicon, so
+        the unified-memory block is still reported (not gpu null)."""
+
+        def fake_run(cmd):
+            if cmd == ["sysctl", "-n", "sysctl.proc_translated"]:
+                return "1"
+            if cmd == ["sysctl", "-n", "machdep.cpu.brand_string"]:
+                return "Apple M4 Max"
+            return None
+
+        with (
+            patch.object(hardware.platform, "system", return_value="Darwin"),
+            patch.object(hardware.platform, "machine", return_value="x86_64"),
+            patch.object(hardware.platform, "release", return_value="25.4.0"),
+            patch.object(hardware, "_run", side_effect=fake_run),
+            patch.object(hardware, "_detect_ram_bytes", return_value=68719476736),
+        ):
+            hw = hardware.detect_hardware()
+
+        assert hw["arch"] == "x86_64"
+        assert hw["cpu"] == "Apple M4 Max"
+        assert hw["gpu"] == {
+            "vendor": "apple",
+            "model": "Apple M4 Max",
+            "vram_bytes": None,
+            "unified_memory": True,
+        }
+
 
 class TestDetectHardwareNvidiaSmi:
     def test_nvidia_smi_happy_path(self):
