@@ -9,6 +9,7 @@ import requests
 from rich.console import Console
 
 from comfy_cli.config_manager import ConfigManager
+from comfy_cli.hardware import detect_hardware
 from comfy_cli.utils import singleton
 
 console = Console()
@@ -30,6 +31,36 @@ def format_python_version(version_info):
     if version_info.major == 3 and version_info.minor > 8:
         return f"{version_info.major}.{version_info.minor}.{version_info.micro}"
     return f"[bold red]{version_info.major}.{version_info.minor}.{version_info.micro}[/bold red]"
+
+
+def _bytes_to_gb(value) -> str:
+    """Render a byte count as a whole-number GB string, or ``?`` if unknown."""
+    if not isinstance(value, (int | float)):
+        return "?"
+    return f"{round(value / (1024**3))} GB"
+
+
+def format_hardware_summary(hw: dict) -> str:
+    """One-line ``cpu / RAM GB / GPU model (VRAM GB or 'unified')`` summary.
+
+    Used by ``fill_print_table`` (pretty mode). Tolerates missing/None fields so
+    it never raises on a partial (failed-probe) hardware block.
+    """
+    cpu = hw.get("cpu") or "unknown CPU"
+    ram = _bytes_to_gb(hw.get("ram_bytes"))
+
+    gpu = hw.get("gpu")
+    if not gpu:
+        gpu_part = "no GPU"
+    else:
+        model = gpu.get("model") or gpu.get("vendor") or "unknown GPU"
+        if gpu.get("unified_memory"):
+            gpu_part = f"{model} (unified)"
+        elif gpu.get("vram_bytes") is not None:
+            gpu_part = f"{model} ({_bytes_to_gb(gpu.get('vram_bytes'))} VRAM)"
+        else:
+            gpu_part = model
+    return f"{cpu} / {ram} RAM / {gpu_part}"
 
 
 def check_comfy_server_running(port=8188, host="localhost", timeout: float = 5.0):
@@ -106,6 +137,8 @@ class EnvChecker:
         config_data = ConfigManager().get_env_data()
         data.extend(config_data)
 
+        data.append(("Hardware", format_hardware_summary(detect_hardware())))
+
         if check_comfy_server_running():
             data.append(
                 (
@@ -139,4 +172,5 @@ class EnvChecker:
                 "running": server_running,
                 "url": "http://localhost:8188" if server_running else None,
             },
+            "hardware": detect_hardware(),
         }
