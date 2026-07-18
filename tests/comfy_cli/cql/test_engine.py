@@ -704,12 +704,15 @@ class TestValidateWorkflow:
 
     def test_below_min_error(self, graph: Graph):
         """A value below the catalog min is a hard error (the server rejects it
-        with value_smaller_than_min) — was a warning before BE-3357."""
+        with value_smaller_than_min) — was a warning before BE-3357. Node "1" is
+        wired to a SaveImage output so it is server-reachable (BE-3406); an
+        unreachable node would be pruned and the range demoted to a warning."""
         wf = {
             "1": {
                 "class_type": "EmptyLatentImage",
                 "inputs": {"width": 0, "height": 512, "batch_size": 1},
             },
+            "2": {"class_type": "SaveImage", "inputs": {"images": ["1", 0], "filename_prefix": "out"}},
         }
         result = graph.validate_workflow(wf)
         assert result["valid"] is False
@@ -720,12 +723,14 @@ class TestValidateWorkflow:
         assert "below_min" not in [w["code"] for w in result["warnings"]]
 
     def test_above_max_error(self, graph: Graph):
-        """A value above the catalog max is a hard error (value_bigger_than_max)."""
+        """A value above the catalog max is a hard error (value_bigger_than_max).
+        Node "1" is wired to a SaveImage output so it is server-reachable."""
         wf = {
             "1": {
                 "class_type": "EmptyLatentImage",
                 "inputs": {"width": 999999, "height": 512, "batch_size": 1},
             },
+            "2": {"class_type": "SaveImage", "inputs": {"images": ["1", 0], "filename_prefix": "out"}},
         }
         result = graph.validate_workflow(wf)
         assert result["valid"] is False
@@ -782,8 +787,11 @@ class TestAutogrowInputs:
         assert "images.image0" in err["hint"]
 
     def test_required_autogrow_with_no_slots_errors(self, graph: Graph):
+        # BatchImagesNode "20" is wired to a SaveImage output so it is
+        # server-reachable (BE-3406) — an unreachable node would be pruned.
         wf = {
             "20": {"class_type": "BatchImagesNode", "inputs": {}},
+            "30": {"class_type": "SaveImage", "inputs": {"images": ["20", 0], "filename_prefix": "out"}},
         }
         result = graph.validate_workflow(wf)
         assert result["valid"] is False
@@ -995,6 +1003,79 @@ class TestValidateServerParity:
         result = graph_sd15.validate_workflow(wf)
         assert result["valid"] is True, result["errors"]
         assert [e for e in result["errors"] if e.get("node_id") == "_meta"] == []
+
+    # -- Output-reachability pruning (BE-3406): match the server, which only
+    # validates output nodes and their transitive input ancestors. --
+
+    def test_disconnected_node_missing_required_is_pruned(self, graph_sd15: Graph):
+        """Acceptance (a): a disconnected KSampler missing all its required
+        inputs, alongside a valid connected output chain, does not fail
+        validation — the server prunes it (never reachable from an output), so
+        we must not hard-reject the whole prompt on it."""
+        wf = self._sd15_full()
+        # A stray KSampler wired to nothing and referenced by nothing: not
+        # reachable from SaveImage, so the server never validates it.
+        wf["99"] = {"class_type": "KSampler", "inputs": {"seed": 1}}
+        result = graph_sd15.validate_workflow(wf)
+        assert result["valid"] is True, result["errors"]
+        assert [e for e in result["errors"] if e["node_id"] == "99"] == []
+
+    def test_reachable_node_missing_required_still_errors(self, graph_sd15: Graph):
+        """Acceptance (b): a node ON the output chain that is missing a required
+        input still hard-errors — reachability doesn't weaken real validation."""
+        wf = self._sd15_full()
+        del wf["3"]["inputs"]["seed"]  # KSampler feeds VAEDecode → SaveImage
+        result = graph_sd15.validate_workflow(wf)
+        assert result["valid"] is False
+        missing = [e for e in result["errors"] if e["code"] == "required_input_missing" and e["node_id"] == "3"]
+        assert {e["field"] for e in missing} == {"seed"}
+
+    def test_transitive_ancestor_missing_required_still_errors(self, graph_sd15: Graph):
+        """A *transitive* ancestor (CLIPTextEncode, two hops upstream of the
+        SaveImage output) is reachable and its missing required input errors —
+        proving the backward walk follows link edges, not just direct parents."""
+        wf = self._sd15_full()
+        del wf["6"]["inputs"]["text"]  # "6" → KSampler.positive → VAEDecode → SaveImage
+        result = graph_sd15.validate_workflow(wf)
+        assert result["valid"] is False
+        missing = [e for e in result["errors"] if e["code"] == "required_input_missing" and e["node_id"] == "6"]
+        assert {e["field"] for e in missing} == {"text"}
+
+    def test_output_node_missing_required_still_errors(self, graph_sd15: Graph):
+        """The output node itself seeds the reachable set, so a required input
+        missing on SaveImage still errors."""
+        wf = self._sd15_full()
+        del wf["9"]["inputs"]["filename_prefix"]
+        result = graph_sd15.validate_workflow(wf)
+        assert result["valid"] is False
+        assert any(
+            e["code"] == "required_input_missing" and e["node_id"] == "9" and e["field"] == "filename_prefix"
+            for e in result["errors"]
+        )
+
+    def test_disconnected_out_of_range_demoted_to_warning(self, graph_sd15: Graph):
+        """A below_min value on a disconnected node is a warning, not a hard
+        error — the server never range-checks a pruned node. The connected chain
+        stays valid."""
+        wf = self._sd15_full()
+        # A stray EmptyLatentImage (all required inputs present) with an
+        # out-of-range width, wired to nothing.
+        wf["99"] = {"class_type": "EmptyLatentImage", "inputs": {"width": 1, "height": 512, "batch_size": 1}}
+        result = graph_sd15.validate_workflow(wf)
+        assert result["valid"] is True, result["errors"]
+        assert [e for e in result["errors"] if e["node_id"] == "99"] == []
+        warned = [w for w in result["warnings"] if w.get("code") == "below_min" and w.get("node_id") == "99"]
+        assert len(warned) == 1
+
+    def test_reachable_out_of_range_still_errors(self, graph_sd15: Graph):
+        """The connected EmptyLatentImage feeding the output chain still
+        hard-errors on an out-of-range width (reachability preserves the #551
+        promotion where it matters)."""
+        wf = self._sd15_full()
+        wf["5"]["inputs"]["width"] = 1  # "5" → KSampler.latent_image → … → SaveImage
+        result = graph_sd15.validate_workflow(wf)
+        assert result["valid"] is False
+        assert [e for e in result["errors"] if e["code"] == "below_min" and e["node_id"] == "5"]
 
 
 # ===========================================================================
