@@ -1041,63 +1041,84 @@ def _is_widget_input(input_spec: Any) -> tuple[bool, bool]:
     return False, False
 
 
-def _dynamic_combo_sub_inputs(
-    input_name: str, input_spec: Any, widget_values: list[Any], current_idx: int
-) -> list[str]:
+def _dynamic_combo_selected_subs(input_name: str, input_spec: Any, selected: Any) -> list[tuple[str, Any]]:
+    """``(dotted_name, spec)`` pairs for the selected option's sub-inputs.
+
+    The dynamic combo's ``widgets_values`` selector value picks one option; that
+    option's ``inputs`` mirror an INPUT_TYPES dict. We return every sub-input's
+    *spec* (dotted with the parent name, e.g. ``model.size_preset``) and leave
+    the widget-vs-connection decision to the caller's ``_is_widget_input`` — the
+    same test applied to top-level inputs — so a connection-only sub-input (e.g.
+    a ``COMFY_AUTOGROW_V3`` image list) consumes no ``widgets_values`` slot.
+    Returns ``[]`` for an unknown selection or a malformed option block (the
+    latter would otherwise crash the per-node wrapper and drop the whole node).
+    """
     if not isinstance(input_spec, (list, tuple)) or len(input_spec) < 2:
         return []
     options_meta = input_spec[1] if isinstance(input_spec[1], dict) else {}
     options = options_meta.get("options") or []
-    if not options or current_idx >= len(widget_values):
-        return []
-    selected = widget_values[current_idx]
     for option in options:
         if not isinstance(option, dict) or option.get("key") != selected:
             continue
         sub_def = option.get("inputs")
-        # The option's ``inputs`` is supposed to mirror an INPUT_TYPES dict
-        # (``{"required": {...}, "optional": {...}}``). Treat anything else
-        # — typically a malformed third-party V3 node — as having no
-        # sub-inputs rather than letting AttributeError escape into the
-        # per-node wrapper and silently dropping the whole node.
         if not isinstance(sub_def, dict):
             return []
-        names: list[str] = []
+        subs: list[tuple[str, Any]] = []
         for section in ("required", "optional"):
             section_def = sub_def.get(section) or {}
             if isinstance(section_def, dict):
-                names.extend(f"{input_name}.{sub_name}" for sub_name in section_def.keys())
-        return names
+                for sub_name, sub_spec in section_def.items():
+                    subs.append((f"{input_name}.{sub_name}", sub_spec))
+        return subs
     return []
 
 
-def _get_widget_name_order(node_type: str, node: dict, object_info: dict, widget_values: list[Any]) -> list[str | None]:
-    """Build the widget-name list that maps positionally to ``widgets_values``."""
-    schema = _schema_for(node_type, node, object_info)
-    if schema:
-        input_def = _schema_input_def(schema)
-        names: list[str | None] = []
-        widget_idx = 0
-        for section in ("required", "optional"):
-            section_def = input_def.get(section) or {}
-            if not isinstance(section_def, dict):
-                continue
-            for input_name, input_spec in section_def.items():
-                is_widget, is_dynamic = _is_widget_input(input_spec)
-                if not is_widget:
-                    continue
-                names.append(input_name)
-                if is_dynamic and widget_values:
-                    subs = _dynamic_combo_sub_inputs(input_name, input_spec, widget_values, widget_idx)
-                    names.extend(subs)
-                    widget_idx += 1 + len(subs)
-                else:
-                    widget_idx += 1
-        if names:
-            return names
+def _schema_widget_pairs(schema: Any, widget_values: list[Any]) -> list[tuple[str, Any]]:
+    """Pair a schema's widget inputs with their ``widgets_values`` slots.
 
-    # Fallback: inspect the node's own input list. Some nodes mark widget-flagged inputs.
-    return _fallback_widget_names(node, widget_values)
+    One ordered walk that unifies name-order and control-marker filtering so the
+    two can never disagree. For each schema input in order:
+
+    * skip non-widget inputs (connections, ``forceInput`` demotions, wildcards)
+      — they own no slot;
+    * consume one slot for a widget input, emitting ``(name, value)``;
+    * for a V3 dynamic combo (``COMFY_*COMBO*``) the consumed value is the
+      selector — recurse into the selected option's *widget* sub-inputs, each
+      consuming a following slot (connection-only subs are skipped, nested
+      dynamic combos recurse), so ``model.size_preset``/``model.width`` land in
+      order and ``model.images`` never steals a slot;
+    * drop a trailing ``control_after_generate`` marker string when the
+      just-consumed input is control-flagged (explicit flag or an implicit INT
+      ``seed``/``noise_seed``) — sub-inputs are handled identically via recursion.
+
+    Returns ``[]`` when the schema declares no widget inputs, so the caller can
+    fall back to node-input inspection exactly as before.
+    """
+    input_def = _schema_input_def(schema)
+    pairs: list[tuple[str, Any]] = []
+    vidx = 0
+
+    def consume(name: str, spec: Any) -> None:
+        nonlocal vidx
+        is_widget, is_dynamic = _is_widget_input(spec)
+        if not is_widget or vidx >= len(widget_values):
+            return
+        value = widget_values[vidx]
+        pairs.append((name, value))
+        vidx += 1
+        if is_dynamic:
+            for sub_name, sub_spec in _dynamic_combo_selected_subs(name, spec, value):
+                consume(sub_name, sub_spec)
+        elif vidx < len(widget_values) and _has_control_after_generate_companion(name, spec, widget_values[vidx]):
+            vidx += 1
+
+    for section in ("required", "optional"):
+        section_def = input_def.get(section) or {}
+        if not isinstance(section_def, dict):
+            continue
+        for input_name, input_spec in section_def.items():
+            consume(input_name, input_spec)
+    return pairs
 
 
 def _fallback_widget_names(node: dict, widget_values: list[Any]) -> list[str | None]:
@@ -1252,13 +1273,26 @@ def _collect_widget_inputs(
         _absorb_dict_widget_values(widget_values, out, link_inputs)
         return out
 
+    # When a schema is available, a single walk pairs names with values while
+    # expanding V3 dynamic combos and dropping control markers together — the
+    # name order and the marker filtering can never disagree (which is what let
+    # a dynamic combo before a seed steal the seed's slot, e.g. Seedream's
+    # ``model`` before ``seed``). It also skips connection-only sub-inputs
+    # (e.g. ``COMFY_AUTOGROW_V3`` images) so they never consume a value slot.
+    schema = _schema_for(node_type, node, object_info)
+    pairs = _schema_widget_pairs(schema, widget_values) if schema else []
+    if pairs:
+        for name, value in pairs:
+            if not name or name in link_inputs:
+                continue
+            out[name] = emit(name, value)
+        return out
+
+    # No schema, or the schema declares no widget inputs: fall back to the
+    # positional control-marker heuristic + node-input name inspection, which
+    # matches the reference behavior for unknown node types.
     filtered = _filter_control_values(widget_values, node_type, node, object_info)
-    # ``widget_idx`` inside _get_widget_name_order is the position in the
-    # value list it receives, so it must see the *filtered* list — otherwise
-    # a V3 dynamic combo's selector is read from the wrong slot whenever a
-    # control_after_generate marker precedes it (e.g. on the Bria / Kling /
-    # Vidu / Wan2 API nodes that pair a seed with a dynamic combo).
-    names = _get_widget_name_order(node_type, node, object_info, filtered)
+    names = _fallback_widget_names(node, filtered)
     if not names:
         if filtered:
             logger.warning(

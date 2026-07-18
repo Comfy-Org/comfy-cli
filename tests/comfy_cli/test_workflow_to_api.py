@@ -903,7 +903,7 @@ class TestMalformedInputHardening:
     def test_v3_combo_option_with_non_dict_inputs_keeps_node(self):
         # A V3 dynamic combo option whose ``inputs`` field is malformed
         # (string / list / etc., not the expected INPUT_TYPES-shaped dict)
-        # used to crash _dynamic_combo_sub_inputs; the per-node wrapper
+        # used to crash _dynamic_combo_selected_subs; the per-node wrapper
         # caught the AttributeError but silently dropped the entire node.
         # Now we degrade to "no sub-inputs" and keep the rest of the node.
         object_info = {
@@ -1902,11 +1902,11 @@ class TestMutedBypassedSubgraph:
 
 
 class TestDynamicComboAfterControlMarker:
-    """Regression: _get_widget_name_order must walk the filtered widget list,
-    not the raw one. Without this, a V3 dynamic combo whose schema sits after
-    a control_after_generate widget reads its selector from the wrong slot
-    (the control marker), fails to identify the option, and silently drops
-    every sub-input value for it.
+    """Regression: the unified widget walk (_schema_widget_pairs) must consume
+    the control_after_generate marker inline so a V3 dynamic combo whose schema
+    sits after a seed still reads its selector from the right slot. Before the
+    unified pass the selector was read from the wrong slot (the control marker),
+    the option was never identified, and every sub-input value was dropped.
 
     Affects 38 stock API nodes that pair a seed with a dynamic combo:
     Bria*, ByteDance*, Grok*, Kling*, Meshy*, Recraft*, Reve*, Vidu*, Wan2*,
@@ -2199,3 +2199,85 @@ class TestSubgraphExpansion:
         assert "100:50" in result
         # Link from the external EmptyLatentImage was retargeted at the internal node.
         assert result["100:50"]["inputs"]["images"] == ["7", 0]
+
+
+class TestSeedreamDynamicCombo:
+    """Regression: a pristine ``COMFY_DYNAMICCOMBO_V3`` template must convert to
+    valid API JSON.
+
+    Two defects used to compound on the ByteDance Seedream node (whose ``model``
+    dynamic combo precedes a ``control_after_generate`` seed):
+
+    1. The connection-only ``images`` sub-input (``COMFY_AUTOGROW_V3``) was
+       treated as a widget, so it consumed a value slot and shifted every later
+       widget by one — the seed value landed in a phantom ``model.images`` key.
+    2. The control-marker filter walked the schema without dynamic expansion, so
+       the ``"randomize"`` marker after the (mis-aligned) seed survived and the
+       server rejected ``seed`` as a string.
+    """
+
+    @pytest.fixture
+    def seedream_object_info(self):
+        return json.loads((FIXTURES / "object_info_bytedance_seedream_v2.json").read_text())
+
+    def test_pristine_pro_t2i_template_converts(self, seedream_object_info):
+        ui = json.loads((FIXTURES / "seedream_5_0_pro_t2i_ui.json").read_text())
+        result = convert_ui_to_api(ui, seedream_object_info)
+        inputs = result["1"]["inputs"]
+
+        assert isinstance(inputs["prompt"], str) and inputs["prompt"]
+        assert inputs["model"] == "seedream 5.0 pro"
+        assert inputs["model.size_preset"] == "(1K) 1024x1024 (1:1)"
+        assert inputs["model.width"] == 2048
+        assert inputs["model.height"] == 2048
+        assert inputs["seed"] == 0
+        assert isinstance(inputs["seed"], int) and not isinstance(inputs["seed"], bool)
+        assert inputs["watermark"] is False
+        # Optional input not in widgets_values is filled from its schema default.
+        assert inputs["thinking"] is True
+
+        # The connection-only ``images`` sub-input must never become a widget,
+        # and the control marker must never leak into the value map.
+        assert "model.images" not in inputs
+        assert "randomize" not in inputs.values()
+
+    def test_batch_option_maps_max_images_and_fail_on_partial(self, seedream_object_info):
+        # The "seedream 5.0 lite" option carries the batch shape: max_images and
+        # fail_on_partial widgets around the connection-only images sub-input.
+        workflow = {
+            "nodes": [
+                {
+                    "id": 1,
+                    "type": "ByteDanceSeedreamNodeV2",
+                    "inputs": [],
+                    "outputs": [{"links": None}],
+                    "widgets_values": [
+                        "a prompt",
+                        "seedream 5.0 lite",
+                        "(1K) 1024x1024 (1:1)",
+                        2048,
+                        2048,
+                        2,
+                        False,
+                        7,
+                        "fixed",
+                        True,
+                    ],
+                    "mode": 0,
+                }
+            ],
+            "links": [],
+        }
+        inputs = convert_ui_to_api(workflow, seedream_object_info)["1"]["inputs"]
+
+        assert inputs["model"] == "seedream 5.0 lite"
+        assert inputs["model.size_preset"] == "(1K) 1024x1024 (1:1)"
+        assert inputs["model.width"] == 2048
+        assert inputs["model.height"] == 2048
+        assert inputs["model.max_images"] == 2
+        assert inputs["model.fail_on_partial"] is False
+        assert inputs["seed"] == 7
+        assert inputs["watermark"] is True
+
+        assert "model.images" not in inputs
+        assert "fixed" not in inputs.values()
