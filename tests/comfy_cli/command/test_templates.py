@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import time
 from pathlib import Path
 
@@ -23,6 +24,10 @@ from comfy_cli.output.renderer import (
     reset_renderer_for_testing,
     set_renderer,
 )
+
+# The genuine spawn helper, captured before the autouse stub replaces it, so the
+# spawn-seam tests can exercise the real (Popen-calling) implementation.
+_REAL_SPAWN_BACKGROUND_REFRESH = templates_cmd._spawn_background_refresh
 
 FIXTURE = [
     {
@@ -92,6 +97,23 @@ def reset_singleton():
     reset_renderer_for_testing()
     yield
     reset_renderer_for_testing()
+
+
+@pytest.fixture(autouse=True)
+def no_real_background_refresh(monkeypatch):
+    """Never spawn a real detached refresher during tests (stale-while-revalidate).
+
+    ``_spawn_background_refresh`` would otherwise fork ``python -m comfy_cli``
+    on every stale-cache serve. Replace it with a counter so tests can assert it
+    fired without paying a subprocess/network round-trip.
+    """
+    calls = {"count": 0}
+
+    def _record():
+        calls["count"] += 1
+
+    monkeypatch.setattr(templates_cmd, "_spawn_background_refresh", _record)
+    return calls
 
 
 def _force_json_renderer():
@@ -316,67 +338,47 @@ def test_fresh_cache_within_ttl_serves_cache_without_fetching(cache_file, monkey
     assert env["data"]["total_in_gallery"] == 3
 
 
-def test_expired_cache_refetches_and_rewrites(cache_file, monkeypatch):
+def test_expired_cache_serves_stale_immediately_and_spawns_background_refresh(
+    cache_file, monkeypatch, no_real_background_refresh
+):
     # Backdate the cache past the TTL so a refresh is due.
     _set_mtime(cache_file, templates_cmd.GALLERY_TTL_SECONDS + 3600)
 
-    # A single-category "refreshed" gallery, distinct from the 3-row fixture.
-    refreshed = [
-        {
-            "moduleName": "default",
-            "category": "GENERATION TYPE",
-            "title": "Image",
-            "type": "image",
-            "templates": [
-                {
-                    "name": "brand_new_template",
-                    "title": "Brand New",
-                    "description": "Freshly fetched.",
-                    "tags": [],
-                    "models": [],
-                    "logos": [],
-                }
-            ],
-        }
-    ]
-    fetched = {"count": 0}
-
-    def _fake_fetch(*args, **kwargs):
-        fetched["count"] += 1
-        return json.dumps(refreshed).encode()
-
-    monkeypatch.setattr(templates_cmd, "_fetch_gallery", _fake_fetch)
+    # Stale-while-revalidate (BE-3427): the foreground command must NOT block on
+    # a network fetch when a stale cache is present — it serves the stale copy
+    # immediately and revalidates in a detached background process.
+    monkeypatch.setattr(templates_cmd, "_fetch_gallery", _fetch_boom)
     _force_json_renderer()
 
     runner = CliRunner()
     result = runner.invoke(templates_cmd.app, ["ls"])
     assert result.exit_code == 0, result.output
-    assert fetched["count"] == 1
 
     env = _envelope(result.output)
-    names = [r["name"] for r in env["data"]["rows"]]
-    assert names == ["brand_new_template"]
-    # Cache was rewritten with the refreshed payload.
-    assert json.loads(cache_file.read_bytes()) == refreshed
+    # Served the stale 3-row fixture right away (no inline fetch — _fetch_boom
+    # would have raised if it were called).
+    assert env["data"]["total_in_gallery"] == 3
+    # A background refresh was kicked off for the next invocation.
+    assert no_real_background_refresh["count"] == 1
+    # The foreground command leaves the cache untouched (the bg process rewrites
+    # it), so a failed/slow revalidation can never clobber the last-good copy.
+    assert json.loads(cache_file.read_bytes()) == FIXTURE
 
 
-def test_expired_cache_fetch_failure_falls_back_to_stale(cache_file, monkeypatch, capsys):
+def test_refresh_cache_entrypoint_keeps_cache_on_fetch_failure(cache_file, monkeypatch):
+    # The detached background refresher (`templates _refresh-cache`) is spawned
+    # after the foreground served stale. If its fetch fails (offline), it must
+    # exit cleanly and leave the last-known-good cache untouched.
     import urllib.error
-
-    _set_mtime(cache_file, templates_cmd.GALLERY_TTL_SECONDS + 3600)
 
     def _boom(*args, **kwargs):
         raise urllib.error.URLError("network down")
 
     monkeypatch.setattr(templates_cmd, "_fetch_gallery", _boom)
-    _force_json_renderer()
 
     runner = CliRunner()
-    result = runner.invoke(templates_cmd.app, ["ls"])
-    # Offline machine still lists from the stale cache — exit 0, original rows.
+    result = runner.invoke(templates_cmd.app, ["_refresh-cache"])
     assert result.exit_code == 0, result.output
-    env = _envelope(result.output)
-    assert env["data"]["total_in_gallery"] == 3
     # The stale cache is untouched (not overwritten by a failed fetch).
     assert json.loads(cache_file.read_bytes()) == FIXTURE
 
@@ -421,24 +423,18 @@ def test_explicit_refresh_fetch_failure_is_fatal_not_stale_fallback(cache_file, 
     assert env["error"]["code"] == "gallery_load_failed"
 
 
-def test_expired_cache_garbage_200_keeps_stale_and_does_not_clobber(cache_file, monkeypatch):
+def test_refresh_cache_entrypoint_ignores_garbage_200(cache_file, monkeypatch):
     # A 200 with a non-JSON body (rate-limit HTML / captive portal) must NOT
-    # overwrite the last-known-good cache — we validate before persisting and
-    # fall back to the stale cache.
-    _set_mtime(cache_file, templates_cmd.GALLERY_TTL_SECONDS + 3600)
-
+    # overwrite the last-known-good cache — the background refresher validates
+    # before persisting and leaves the stale cache intact on garbage.
     def _garbage(*args, **kwargs):
         return b"<html>rate limited</html>"
 
     monkeypatch.setattr(templates_cmd, "_fetch_gallery", _garbage)
-    _force_json_renderer()
 
     runner = CliRunner()
-    result = runner.invoke(templates_cmd.app, ["ls"])
-    # Offline-equivalent: stale cache still serves, exit 0, original rows.
+    result = runner.invoke(templates_cmd.app, ["_refresh-cache"])
     assert result.exit_code == 0, result.output
-    env = _envelope(result.output)
-    assert env["data"]["total_in_gallery"] == 3
     # The good cache was left untouched, not clobbered with the HTML garbage.
     assert json.loads(cache_file.read_bytes()) == FIXTURE
 
@@ -461,23 +457,19 @@ def test_explicit_refresh_garbage_200_is_fatal(cache_file, monkeypatch):
     assert json.loads(cache_file.read_bytes()) == FIXTURE
 
 
-def test_non_200_status_falls_back_to_stale_not_uncaught(cache_file, monkeypatch):
-    # `_fetch_gallery` raises RuntimeError on a non-200 status; during a TTL
-    # auto-refresh that must route through the stale-cache fallback, never
-    # escape as an uncaught traceback.
-    _set_mtime(cache_file, templates_cmd.GALLERY_TTL_SECONDS + 3600)
-
+def test_refresh_cache_entrypoint_swallows_non_200(cache_file, monkeypatch):
+    # `_fetch_gallery` raises RuntimeError on a non-200 status; the background
+    # refresher must swallow it (never escape as an uncaught traceback) and keep
+    # the stale cache intact.
     def _non_200(*args, **kwargs):
         raise RuntimeError("gallery fetch failed: HTTP 429")
 
     monkeypatch.setattr(templates_cmd, "_fetch_gallery", _non_200)
-    _force_json_renderer()
 
     runner = CliRunner()
-    result = runner.invoke(templates_cmd.app, ["ls"])
+    result = runner.invoke(templates_cmd.app, ["_refresh-cache"])
     assert result.exit_code == 0, result.output
-    env = _envelope(result.output)
-    assert env["data"]["total_in_gallery"] == 3
+    assert json.loads(cache_file.read_bytes()) == FIXTURE
 
 
 def test_non_200_status_under_refresh_is_fatal_not_uncaught(cache_file, monkeypatch):
@@ -497,32 +489,29 @@ def test_non_200_status_under_refresh_is_fatal_not_uncaught(cache_file, monkeypa
     assert env["error"]["code"] == "gallery_load_failed"
 
 
-def test_future_mtime_clock_skew_is_treated_as_stale(cache_file, monkeypatch):
+def test_future_mtime_clock_skew_serves_stale_and_revalidates(cache_file, monkeypatch, no_real_background_refresh):
     # A future mtime (clock skew / restored file) yields a negative age; it must
-    # read as stale so the cache can't be pinned "fresh" forever.
+    # read as stale so the cache can't be pinned "fresh" forever. Under SWR that
+    # means: served immediately (no inline fetch) and revalidated in the
+    # background, rather than the future-dated cache being trusted.
     _set_mtime(cache_file, -2 * 3600)  # mtime 2h in the future
 
-    fetched = {"count": 0}
-
-    def _fake_fetch(*args, **kwargs):
-        fetched["count"] += 1
-        return json.dumps(FIXTURE).encode()
-
-    monkeypatch.setattr(templates_cmd, "_fetch_gallery", _fake_fetch)
+    monkeypatch.setattr(templates_cmd, "_fetch_gallery", _fetch_boom)
     _force_json_renderer()
 
     runner = CliRunner()
     result = runner.invoke(templates_cmd.app, ["ls"])
     assert result.exit_code == 0, result.output
-    # A refresh was attempted rather than the future-dated cache being trusted.
-    assert fetched["count"] == 1
+    env = _envelope(result.output)
+    assert env["data"]["total_in_gallery"] == 3
+    # A background refresh was kicked off rather than the future-dated cache
+    # being trusted forever.
+    assert no_real_background_refresh["count"] == 1
 
 
-def test_readonly_cache_dir_still_serves_fetched_data(cache_file, monkeypatch):
-    # If persisting the freshly fetched index fails (read-only dir / disk full),
-    # the command must still succeed on the in-hand data, not error out.
-    _set_mtime(cache_file, templates_cmd.GALLERY_TTL_SECONDS + 3600)
-
+def test_refresh_cache_entrypoint_still_persists_when_atomic_rename_used(cache_file, monkeypatch):
+    # The background refresher persists a freshly fetched index via the atomic
+    # `_persist_cache` path, rewriting the cache for the next invocation.
     refreshed = [
         {
             "moduleName": "default",
@@ -533,21 +522,86 @@ def test_readonly_cache_dir_still_serves_fetched_data(cache_file, monkeypatch):
         }
     ]
 
-    def _fake_fetch(*args, **kwargs):
-        return json.dumps(refreshed).encode()
+    monkeypatch.setattr(templates_cmd, "_fetch_gallery", lambda *a, **k: json.dumps(refreshed).encode())
+
+    runner = CliRunner()
+    result = runner.invoke(templates_cmd.app, ["_refresh-cache"])
+    assert result.exit_code == 0, result.output
+    # Cache was rewritten with the refreshed payload for the next `ls`/`show`.
+    assert json.loads(cache_file.read_bytes()) == refreshed
+
+
+def test_readonly_cache_dir_still_serves_fetched_data_on_refresh(cache_file, monkeypatch):
+    # `--refresh` fetches synchronously; if persisting the freshly fetched index
+    # fails (read-only dir / disk full), the command must still succeed on the
+    # in-hand data rather than error out.
+    refreshed = [
+        {
+            "moduleName": "default",
+            "category": "GENERATION TYPE",
+            "title": "Image",
+            "type": "image",
+            "templates": [{"name": "brand_new_template", "title": "Brand New", "tags": [], "models": [], "logos": []}],
+        }
+    ]
 
     def _boom_mkstemp(*args, **kwargs):
         raise OSError("read-only file system")
 
-    monkeypatch.setattr(templates_cmd, "_fetch_gallery", _fake_fetch)
+    monkeypatch.setattr(templates_cmd, "_fetch_gallery", lambda *a, **k: json.dumps(refreshed).encode())
     # Make the real _persist_cache's write fail (read-only dir / disk full);
     # it must swallow the error and let the command proceed on in-hand data.
     monkeypatch.setattr(templates_cmd.tempfile, "mkstemp", _boom_mkstemp)
     _force_json_renderer()
 
     runner = CliRunner()
-    result = runner.invoke(templates_cmd.app, ["ls"])
+    result = runner.invoke(templates_cmd.app, ["ls", "--refresh"])
     assert result.exit_code == 0, result.output
     env = _envelope(result.output)
     names = [r["name"] for r in env["data"]["rows"]]
     assert names == ["brand_new_template"]
+
+
+# ---------------------------------------------------------------------------
+# Stale-while-revalidate spawn seam (BE-3427): the foreground serves stale and
+# fires a *detached* background refresher; here we assert the spawn shape.
+# ---------------------------------------------------------------------------
+
+
+def test_spawn_background_refresh_is_fully_detached(monkeypatch):
+    # `_spawn_background_refresh` must launch a detached `comfy templates
+    # _refresh-cache` — new session, stdio → /dev/null — so it can outlive the
+    # parent without ever blocking it (offline: the parent must not wait on the
+    # 15s fetch timeout).
+    # Restore the real helper (the autouse fixture stubs it out for other tests).
+    monkeypatch.setattr(templates_cmd, "_spawn_background_refresh", _REAL_SPAWN_BACKGROUND_REFRESH)
+    captured = {}
+
+    def _fake_popen(argv, **kwargs):
+        captured["argv"] = argv
+        captured["kwargs"] = kwargs
+        return object()
+
+    monkeypatch.setattr(templates_cmd.subprocess, "Popen", _fake_popen)
+    templates_cmd._spawn_background_refresh()
+
+    assert captured["argv"][-2:] == ["templates", "_refresh-cache"]
+    assert captured["argv"][0] == sys.executable
+    assert captured["kwargs"]["start_new_session"] is True
+    assert captured["kwargs"]["stdout"] is templates_cmd.subprocess.DEVNULL
+    assert captured["kwargs"]["stderr"] is templates_cmd.subprocess.DEVNULL
+    assert captured["kwargs"]["stdin"] is templates_cmd.subprocess.DEVNULL
+
+
+def test_spawn_background_refresh_swallows_spawn_failure(monkeypatch):
+    # If the OS can't spawn the refresher (no fork, exec denied), the foreground
+    # command has already served stale — the failure must be swallowed, not
+    # raised.
+    monkeypatch.setattr(templates_cmd, "_spawn_background_refresh", _REAL_SPAWN_BACKGROUND_REFRESH)
+
+    def _boom_popen(*args, **kwargs):
+        raise OSError("cannot fork")
+
+    monkeypatch.setattr(templates_cmd.subprocess, "Popen", _boom_popen)
+    # Must not raise.
+    templates_cmd._spawn_background_refresh()

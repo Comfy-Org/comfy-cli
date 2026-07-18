@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
+import sys
 import tempfile
 import time
 import urllib.error
@@ -81,10 +83,12 @@ def _load_gallery(
     Returns the raw decoded JSON (a list of category dicts). The CLI does
     its own filtering on top.
 
-    A cache older than ``GALLERY_TTL_SECONDS`` is transparently re-fetched so
-    ``templates ls/show`` never serves a frozen catalog forever. If that refresh
-    fails (offline / GitHub down), we fall back to the stale cache with a
-    non-fatal renderer warning rather than erroring out.
+    A cache older than ``GALLERY_TTL_SECONDS`` is served immediately and
+    revalidated in the background (stale-while-revalidate, BE-3427): a stale
+    cache is returned right away and a detached subprocess re-fetches it for
+    the *next* invocation, so an offline/firewalled machine never blocks on the
+    15s fetch timeout on every call. An explicit ``--refresh`` (or a genuinely
+    absent/corrupt cache) still fetches synchronously and surfaces errors.
     """
     if explicit_path:
         return json.loads(Path(explicit_path).read_bytes())
@@ -95,10 +99,32 @@ def _load_gallery(
     if not refresh and have_cache and not _cache_is_stale(cache):
         return json.loads(cache.read_bytes())
 
-    # A TTL-expired cache is refreshed transparently, so a fetch failure here
-    # must NOT break `templates ls` — fall back to the stale cache with a
-    # non-fatal warning. An explicit `--refresh` (or a genuinely absent cache),
-    # by contrast, surfaces the fetch error so the user learns it failed.
+    # Stale-while-revalidate: a TTL-expired *but present* cache is served
+    # immediately, and a detached background process re-fetches it for the next
+    # invocation. This is what keeps an offline/firewalled machine from hanging
+    # on the full fetch timeout once per invocation past the TTL — the fetch
+    # never blocks the current call. `--refresh` is an explicit user request and
+    # deliberately stays synchronous (fetch + surface errors) below.
+    if not refresh and have_cache:
+        try:
+            stale = json.loads(cache.read_bytes())
+        except (OSError, json.JSONDecodeError):
+            # Cache is unreadable/corrupt — nothing safe to serve, so fall
+            # through to a synchronous fetch instead of the SWR fast path.
+            stale = None
+        if stale is not None:
+            _spawn_background_refresh()
+            get_renderer().warn(
+                f"gallery index is stale (last updated {_cache_age_str(cache)} ago); "
+                "serving the cached copy and refreshing in the background",
+                hint="run `comfy templates refresh` to update it now",
+            )
+            return stale
+
+    # No cache at all, an explicit `--refresh`, or an unreadable stale cache:
+    # fetch synchronously. On a TTL auto-refresh with a (corrupt) cache present
+    # a fetch failure still falls back to the stale cache; `--refresh` / no-cache
+    # surface the error so the user learns it failed.
     ttl_auto_refresh = have_cache and not refresh
     try:
         data = _fetch_gallery()
@@ -180,6 +206,35 @@ def _cache_age_str(cache: Path) -> str:
     if hours >= 1:
         return f"{hours:.1f}h"
     return f"{age / 60:.0f}m"
+
+
+def _spawn_background_refresh() -> None:
+    """Kick off a detached subprocess that re-fetches the gallery index.
+
+    Serve-stale-while-revalidate (BE-3427): the caller has already returned the
+    stale cache, so this revalidation must never block or delay process exit —
+    a firewalled machine would otherwise hang on the 15s fetch timeout on every
+    invocation past the TTL. We spawn a fully detached ``comfy templates
+    _refresh-cache`` (new session, stdio → /dev/null), exactly like the ``comfy
+    run`` async job watcher does: the child re-fetches and atomically rewrites
+    the cache for the *next* invocation, and its success or failure never
+    touches the current command.
+    """
+    argv = [sys.executable, "-m", "comfy_cli", "templates", "_refresh-cache"]
+    try:
+        subprocess.Popen(
+            argv,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+            start_new_session=True,
+            close_fds=True,
+        )
+    except OSError:
+        # Couldn't spawn the refresher (no fork available, exec denied, …). We
+        # already served the stale cache, so degrade silently rather than
+        # failing the foreground command.
+        pass
 
 
 def _flatten_templates(categories: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -504,6 +559,25 @@ def refresh_cmd():
     if renderer.is_pretty():
         rprint(f"[green]✓[/green] cached gallery to {cache} ({len(data)} bytes)")
     renderer.emit(payload, command="templates refresh")
+
+
+@app.command("_refresh-cache", hidden=True)
+def _refresh_cache_cmd():
+    """Hidden: the detached background gallery refresh (see
+    ``_spawn_background_refresh``).
+
+    Fetch + atomically persist only — no output, no telemetry, never a non-zero
+    exit. It is spawned by ``templates ls/show/fetch`` when they serve a stale
+    cache, so any failure (offline, rate-limit, garbage 200) must be swallowed:
+    the foreground command already succeeded on the stale copy, and a bad body
+    must not clobber the last-known-good cache.
+    """
+    try:
+        data = _fetch_gallery()
+        json.loads(data)  # validate before persisting — never cache garbage
+    except _GALLERY_LOAD_ERRORS:
+        return
+    _persist_cache(_cache_path(), data)
 
 
 # Where the per-template workflow JSONs live on GitHub. The gallery index lists
