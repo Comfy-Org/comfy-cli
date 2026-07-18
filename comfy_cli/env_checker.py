@@ -7,6 +7,7 @@ import sys
 
 import requests
 from rich.console import Console
+from rich.markup import escape
 
 from comfy_cli.config_manager import ConfigManager
 from comfy_cli.hardware import detect_hardware
@@ -46,14 +47,18 @@ def format_hardware_summary(hw: dict) -> str:
     Used by ``fill_print_table`` (pretty mode). Tolerates missing/None fields so
     it never raises on a partial (failed-probe) hardware block.
     """
-    cpu = hw.get("cpu") or "unknown CPU"
+    # cpu/model come from untrusted probe output (/proc/cpuinfo, nvidia-smi,
+    # rocm-smi, libcuda). This summary is rendered by fill_print_table via Rich
+    # (markup enabled), so escape those strings — a stray "[" (plausible on
+    # VMs/hypervisors) would otherwise raise MarkupError and crash `comfy env`.
+    cpu = escape(hw.get("cpu") or "unknown CPU")
     ram = _bytes_to_gb(hw.get("ram_bytes"))
 
     gpu = hw.get("gpu")
     if not gpu:
         gpu_part = "no GPU"
     else:
-        model = gpu.get("model") or gpu.get("vendor") or "unknown GPU"
+        model = escape(str(gpu.get("model") or gpu.get("vendor") or "unknown GPU"))
         if gpu.get("unified_memory"):
             gpu_part = f"{model} (unified)"
         elif gpu.get("vram_bytes") is not None:

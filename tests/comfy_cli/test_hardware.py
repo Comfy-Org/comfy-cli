@@ -184,7 +184,79 @@ class TestDetectHardwareNeverRaises:
         assert hw["gpu"] is None
 
 
+class TestDetectGpuAmd:
+    def test_amd_happy_path(self):
+        payload = json.dumps(
+            {"card0": {"Card SKU": "gfx90a", "GPU Name": "AMD Instinct MI210", "VRAM Total Memory (B)": "68702699520"}}
+        )
+        with patch.object(hardware, "_run", return_value=payload):
+            gpu = hardware._detect_gpu_amd()
+        assert gpu == {
+            "vendor": "amd",
+            "model": "AMD Instinct MI210",
+            "vram_bytes": 68702699520,
+            "unified_memory": False,
+        }
+
+    def test_amd_total_key_beats_used_key(self):
+        """The 'VRAM Total Used Memory' key also contains 'vram'+'total'; the probe
+        must report the total-capacity key, not usage."""
+        payload = json.dumps(
+            {
+                "card0": {
+                    "VRAM Total Used Memory (B)": "1073741824",
+                    "VRAM Total Memory (B)": "68702699520",
+                }
+            }
+        )
+        with patch.object(hardware, "_run", return_value=payload):
+            gpu = hardware._detect_gpu_amd()
+        assert gpu["vram_bytes"] == 68702699520
+
+    def test_amd_skips_non_card_metadata_block(self):
+        """A leading non-card metadata dict must not be mistaken for the GPU."""
+        payload = json.dumps(
+            {
+                "system": {"Driver version": "6.0.0"},
+                "card0": {"GPU Name": "AMD Radeon RX 7900 XTX", "VRAM Total Memory (B)": "25757220864"},
+            }
+        )
+        with patch.object(hardware, "_run", return_value=payload):
+            gpu = hardware._detect_gpu_amd()
+        assert gpu["model"] == "AMD Radeon RX 7900 XTX"
+        assert gpu["vram_bytes"] == 25757220864
+
+    def test_amd_all_none_reports_no_gpu(self):
+        """An error/metadata-only payload with nothing parseable must yield None,
+        not a phantom {vendor: amd, model: None, vram_bytes: None} block."""
+        payload = json.dumps({"card0": {"Something Unrelated": "x"}})
+        with patch.object(hardware, "_run", return_value=payload):
+            assert hardware._detect_gpu_amd() is None
+
+
 class TestFormatHardwareSummary:
+    def test_markup_in_model_is_escaped_not_crashing(self):
+        """CPU/GPU strings are untrusted; markup-like content (e.g. a close tag
+        '[/]') must be escaped so rendering through Rich can't raise MarkupError."""
+        import pytest
+        from rich.errors import MarkupError
+        from rich.text import Text
+
+        raw_model = "GPU [/] X"
+        # Sanity: the raw model really would crash Rich markup parsing.
+        with pytest.raises(MarkupError):
+            Text.from_markup(raw_model)
+
+        hw = {
+            "cpu": "Fake CPU",
+            "ram_bytes": 17179869184,
+            "gpu": {"vendor": "nvidia", "model": raw_model, "vram_bytes": 8 * 1024**3, "unified_memory": False},
+        }
+        summary = format_hardware_summary(hw)
+        assert "\\[/]" in summary
+        # Rendering with markup enabled (as cmdline.py does) must not raise.
+        Text.from_markup(summary)
+
     def test_unified_memory_summary(self):
         hw = {
             "cpu": "Apple M4 Max",
