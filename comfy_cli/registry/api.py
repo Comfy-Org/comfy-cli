@@ -121,7 +121,10 @@ class RegistryAPI:
         else:
             url = f"{self.base_url}/nodes/{node_id}/install?version={version}"
 
-        response = requests.get(url)
+        # A stalled/blackholed registry must not hang callers indefinitely (e.g.
+        # `comfy outdated`, which promises to degrade gracefully on network
+        # failure). A Timeout surfaces as a RequestException for callers to catch.
+        response = requests.get(url, timeout=30)
         if response.status_code == 200:
             # Convert the API response to a NodeVersion object
             logging.debug(f"RegistryAPI install_node response: {response.json()}")

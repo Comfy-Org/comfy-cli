@@ -77,7 +77,9 @@ def _load_cache() -> dict[str, Any]:
     path = _cache_path()
     try:
         data = json.loads(path.read_bytes())
-    except (OSError, json.JSONDecodeError):
+    except (OSError, ValueError):
+        # ValueError covers JSONDecodeError *and* the UnicodeDecodeError that a
+        # non-UTF-8 (corrupt) cache file raises — either way, start fresh.
         return {}
     return data if isinstance(data, dict) else {}
 
@@ -162,16 +164,51 @@ def _is_outdated(installed: str | None, latest: str | None) -> bool:
 # ---------------------------------------------------------------------------
 
 
+# Git runs with ``cwd`` inside a custom-node pack we do not control, so it honors
+# that pack's ``.git/config`` and ``origin`` URL. A pack shipped as an archive
+# with an embedded ``.git`` could otherwise turn a read-only version check into
+# arbitrary code execution. Hardening, applied to *every* git call, neutralizes
+# each knob a malicious repo config could use to run a program during a plain
+# read, while keeping the legitimate https/ssh transports working:
+#   * ``GIT_ALLOW_PROTOCOL`` drops ``ext::`` (runs a shell) and ``git://`` (whose
+#     ``core.gitProxy`` runs a program), leaving file/http/https/ssh.
+#   * command-line ``-c`` overrides (which beat repo-local config) clear the
+#     ``credential.helper`` and ``core.fsmonitor`` program hooks.
+#   * ``GIT_SSH_COMMAND=ssh`` (env beats ``core.sshCommand``) pins ssh to the
+#     default client, so a pack can't hijack it — yet ssh remotes still resolve.
+#   * ``GIT_TERMINAL_PROMPT=0`` keeps a credential-needing remote from blocking.
+_GIT_HARDENING: list[str] = [
+    "-c",
+    "credential.helper=",
+    "-c",
+    "core.fsmonitor=",
+    "-c",
+    "protocol.ext.allow=never",
+    "-c",
+    "protocol.git.allow=never",
+]
+_GIT_SAFE_ENV = {
+    "GIT_ALLOW_PROTOCOL": "file:http:https:ssh",
+    "GIT_SSH_COMMAND": "ssh",
+    "GIT_TERMINAL_PROMPT": "0",
+}
+
+
 def _git_output(args: list[str], cwd: str) -> str | None:
-    """Run ``git <args>`` in *cwd*, returning stripped stdout or ``None``."""
+    """Run ``git <args>`` in *cwd*, returning stripped stdout or ``None``.
+
+    Hardened against a malicious pack ``.git/config``/``origin`` — see
+    ``_GIT_HARDENING`` / ``_GIT_SAFE_ENV``.
+    """
     try:
         out = subprocess.run(
-            ["git", *args],
+            ["git", *_GIT_HARDENING, *args],
             cwd=cwd,
             capture_output=True,
             text=True,
             timeout=GIT_TIMEOUT_SECONDS,
             check=True,
+            env={**os.environ, **_GIT_SAFE_ENV},
         )
     except (subprocess.SubprocessError, OSError):
         return None
@@ -223,7 +260,11 @@ def _core_latest(cache: dict[str, Any], refresh: bool, warn: Callable[[str], Non
     from comfy_cli.command.install import get_latest_release
 
     try:
-        release = get_latest_release("comfyanonymous", "ComfyUI")
+        # get_latest_release prints its own error line to stdout via rich on a
+        # network failure; redirect that to stderr so it can't corrupt the
+        # single-line JSON envelope stdout contract (mirrors _read_pyproject).
+        with contextlib.redirect_stdout(sys.stderr):
+            release = get_latest_release("comfyanonymous", "ComfyUI")
     except Exception as e:  # noqa: BLE001 - never let a network hiccup abort the report
         warn(f"could not fetch latest ComfyUI release: {e}")
         return None
@@ -280,6 +321,43 @@ def _registry_latest(
     return latest
 
 
+def _git_pack_info(
+    pack_dir: Path,
+    cache: dict[str, Any],
+    refresh: bool,
+    warn: Callable[[str], None],
+) -> dict[str, Any]:
+    """Compare a git pack's local HEAD against its remote's HEAD."""
+    name = pack_dir.name
+    installed = _git_output(["rev-parse", "HEAD"], str(pack_dir))
+    latest = None
+    key = f"pack:git:{pack_dir}"
+    cached = _cache_get(cache, key) if not refresh else None
+    if cached is not None:
+        latest = cached
+    else:
+        remote = _git_output(["remote", "get-url", "origin"], str(pack_dir))
+        if remote:
+            # ``--`` stops a ``origin`` URL starting with ``-`` from being
+            # parsed as a git option (option-injection); transports are
+            # further restricted in ``_git_output``.
+            ls = _git_output(["ls-remote", "--", remote, "HEAD"], str(pack_dir))
+            if ls:
+                latest = ls.split()[0]
+                _cache_set(cache, key, latest)
+            else:
+                warn(f"could not reach git remote for pack '{name}'")
+        else:
+            warn(f"no origin remote for git pack '{name}'")
+    return {
+        "name": name,
+        "source": "git",
+        "installed": installed,
+        "latest": latest,
+        "outdated": _is_outdated(installed, latest),
+    }
+
+
 def _pack_info(
     pack_dir: Path,
     cache: dict[str, Any],
@@ -289,6 +367,7 @@ def _pack_info(
 ) -> dict[str, Any]:
     name = pack_dir.name
     pyproject = pack_dir / "pyproject.toml"
+    is_git = _is_git_checkout(str(pack_dir))
 
     # Registry pack: pyproject carries a node id + version → registry API.
     if pyproject.is_file():
@@ -297,6 +376,11 @@ def _pack_info(
             node_id = cfg.project.name
             installed = cfg.project.version
             latest = _registry_latest(node_id, cache, refresh, registry_api, warn)
+            # Many git-installed packs also ship a pyproject but aren't in the
+            # registry (latest unknown). Rather than report them as permanently
+            # "unknown", fall back to the git HEAD comparison when we can.
+            if latest is None and is_git:
+                return _git_pack_info(pack_dir, cache, refresh, warn)
             return {
                 "name": node_id,
                 "source": "registry",
@@ -306,29 +390,8 @@ def _pack_info(
             }
 
     # Git pack: compare local HEAD against the remote's HEAD.
-    if _is_git_checkout(str(pack_dir)):
-        installed = _git_output(["rev-parse", "HEAD"], str(pack_dir))
-        latest = None
-        key = f"pack:git:{pack_dir}"
-        cached = _cache_get(cache, key) if not refresh else None
-        if cached is not None:
-            latest = cached
-        else:
-            remote = _git_output(["remote", "get-url", "origin"], str(pack_dir))
-            if remote:
-                ls = _git_output(["ls-remote", remote, "HEAD"], str(pack_dir))
-                if ls:
-                    latest = ls.split()[0]
-                    _cache_set(cache, key, latest)
-                else:
-                    warn(f"could not reach git remote for pack '{name}'")
-        return {
-            "name": name,
-            "source": "git",
-            "installed": installed,
-            "latest": latest,
-            "outdated": _is_outdated(installed, latest),
-        }
+    if is_git:
+        return _git_pack_info(pack_dir, cache, refresh, warn)
 
     # Neither: report what we can, latest unknown.
     return {
@@ -390,11 +453,15 @@ def build_report(
 
 
 def _render_pretty(renderer, report: dict[str, Any]) -> None:
+    from rich.markup import escape
     from rich.table import Table
 
     def _fmt(installed: Any, latest: Any, outdated: bool) -> tuple[str, str]:
-        i = str(installed) if installed is not None else "[dim]?[/dim]"
-        latest_str = str(latest) if latest is not None else "[dim]unknown[/dim]"
+        # Pack names/versions come from the filesystem and pyproject; escape any
+        # ``[...]`` so a value like ``foo[/]`` can't raise a rich MarkupError and
+        # crash the pretty report.
+        i = escape(str(installed)) if installed is not None else "[dim]?[/dim]"
+        latest_str = escape(str(latest)) if latest is not None else "[dim]unknown[/dim]"
         if outdated:
             return f"[yellow]{i}[/yellow]", f"[bold green]{latest_str}[/bold green]"
         return i, latest_str
@@ -411,7 +478,7 @@ def _render_pretty(renderer, report: dict[str, Any]) -> None:
 
     for pack in report["packs"]:
         pi, pl = _fmt(pack["installed"], pack["latest"], pack["outdated"])
-        tbl.add_row(pack["name"], pi, pl, _status(pack["outdated"], pack["latest"]))
+        tbl.add_row(escape(pack["name"]), pi, pl, _status(pack["outdated"], pack["latest"]))
 
     renderer.console().print(tbl)
     n_outdated = int(core["outdated"]) + sum(1 for p in report["packs"] if p["outdated"])
@@ -431,9 +498,13 @@ def _status(outdated: bool, latest: Any) -> str:
 
 def execute(renderer, comfy_path: str | None, *, refresh: bool = False) -> None:
     """Entry point wired from ``comfy outdated`` in cmdline.py."""
+    from rich.markup import escape
+
     report, warnings = build_report(comfy_path, refresh=refresh)
     if renderer.is_pretty():
         _render_pretty(renderer, report)
     for w in warnings:
-        renderer.warn(w)
+        # Warnings embed pack names/error text; escape so a name like ``foo[/]``
+        # can't trip renderer.warn's markup pass.
+        renderer.warn(escape(w))
     renderer.emit(report, command="outdated")

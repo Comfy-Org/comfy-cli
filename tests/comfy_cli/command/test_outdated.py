@@ -107,8 +107,13 @@ def workspace(tmp_path) -> Path:
     (reg / "pyproject.toml").write_text('[project]\nname = "comfy-registry-pack"\nversion = "1.0.0"\n')
 
     # --- git pack: local HEAD behind its remote HEAD ---
+    # Pin the bare repo's default branch to ``main`` so its HEAD symref resolves
+    # to the branch the seed pushes below. Without this, a runner whose
+    # ``init.defaultBranch`` is ``master`` (the git default) leaves the bare
+    # repo's HEAD dangling, so ``git ls-remote <remote> HEAD`` returns nothing
+    # and the git-pack latest lookup silently fails.
     remote = tmp_path / "gitpack-remote.git"
-    _git(tmp_path, "init", "--bare", str(remote))
+    _git(tmp_path, "init", "--bare", "-b", "main", str(remote))
     seed = tmp_path / "gitpack-seed"
     _git(tmp_path, "clone", str(remote), str(seed))
     _commit(seed, "node.py", "v1\n", "pack v1")
@@ -288,6 +293,91 @@ def test_missing_workspace_warns_not_crashes(tmp_path):
     assert report["core"]["installed"] is None
     assert report["packs"] == []
     assert warnings
+
+
+def test_git_pack_with_pyproject_falls_back_to_git_when_unregistered(tmp_path, monkeypatch):
+    """A git-installed pack shipping a pyproject that the registry doesn't know
+    must fall back to the git HEAD comparison, not report unknown/not-outdated."""
+    ws = tmp_path / "ComfyUI"
+    (ws / "custom_nodes").mkdir(parents=True)
+    _git(ws, "init")
+    _commit(ws, "main.py", "# comfy\n", "initial")
+
+    # git pack whose local HEAD is behind its remote HEAD, but which also ships
+    # a pyproject (so the registry branch is entered first).
+    remote = tmp_path / "gp-remote.git"
+    _git(tmp_path, "init", "--bare", "-b", "main", str(remote))
+    seed = tmp_path / "gp-seed"
+    _git(tmp_path, "clone", str(remote), str(seed))
+    _commit(seed, "node.py", "v1\n", "pack v1")
+    _git(seed, "push", "origin", "HEAD:refs/heads/main")
+
+    pack = ws / "custom_nodes" / "hybrid-pack"
+    _git(tmp_path, "clone", str(remote), str(pack))
+    (pack / "pyproject.toml").write_text('[project]\nname = "hybrid-pack"\nversion = "1.0.0"\n')
+    _commit(seed, "node.py", "v2\n", "pack v2")
+    _git(seed, "push", "origin", "HEAD:refs/heads/main")
+
+    monkeypatch.setattr(
+        "comfy_cli.command.install.get_latest_release",
+        lambda *a, **k: {"tag": "v0.3.40"},
+    )
+    # Registry doesn't know this pack (404 → install_node raises) → latest None
+    # → must fall back to git.
+    report, _ = outdated_cmd.build_report(str(ws), registry_api=_FakeRegistry({}, raises=True))
+
+    pack_row = _packs_by_name(report)["hybrid-pack"]
+    assert pack_row["source"] == "git"
+    assert pack_row["installed"] != pack_row["latest"]
+    assert pack_row["outdated"] is True
+
+
+def test_git_pack_without_origin_warns(tmp_path, monkeypatch):
+    """A git pack with no ``origin`` remote surfaces an explicit warning."""
+    ws = tmp_path / "ComfyUI"
+    (ws / "custom_nodes").mkdir(parents=True)
+    _git(ws, "init")
+    _commit(ws, "main.py", "# comfy\n", "initial")
+
+    pack = ws / "custom_nodes" / "orphan-pack"
+    pack.mkdir()
+    _git(pack, "init")
+    _commit(pack, "node.py", "v1\n", "pack v1")  # no origin remote configured
+
+    monkeypatch.setattr(
+        "comfy_cli.command.install.get_latest_release",
+        lambda *a, **k: {"tag": "v0.3.40"},
+    )
+    report, warnings = outdated_cmd.build_report(str(ws), registry_api=_FakeRegistry({}))
+
+    assert _packs_by_name(report)["orphan-pack"]["latest"] is None
+    assert any("no origin remote" in w for w in warnings)
+
+
+def test_git_pack_rejects_option_injecting_remote(tmp_path, monkeypatch):
+    """A malicious ``origin`` URL (``ext::``/``-``-prefixed) must not execute:
+    the transport allowlist + ``--`` separator degrade it to latest: null."""
+    ws = tmp_path / "ComfyUI"
+    (ws / "custom_nodes").mkdir(parents=True)
+    _git(ws, "init")
+    _commit(ws, "main.py", "# comfy\n", "initial")
+
+    pack = ws / "custom_nodes" / "evil-pack"
+    pack.mkdir()
+    _git(pack, "init")
+    _commit(pack, "node.py", "v1\n", "pack v1")
+    canary = tmp_path / "pwned"
+    _git(pack, "remote", "add", "origin", f"ext::sh -c 'touch {canary}; true'")
+
+    monkeypatch.setattr(
+        "comfy_cli.command.install.get_latest_release",
+        lambda *a, **k: {"tag": "v0.3.40"},
+    )
+    report, warnings = outdated_cmd.build_report(str(ws), registry_api=_FakeRegistry({}))
+
+    assert not canary.exists(), "ext:: transport executed — RCE not blocked"
+    assert _packs_by_name(report)["evil-pack"]["latest"] is None
+    assert any("could not reach git remote" in w for w in warnings)
 
 
 def test_report_validates_against_shipped_schema(workspace, monkeypatch):
