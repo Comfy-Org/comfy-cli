@@ -489,6 +489,11 @@ class Graph:
     # -- Lookup --
 
     def node(self, name: str) -> Morphism | None:
+        # A malformed workflow can supply an unhashable class_type (list/dict);
+        # dict.get on an unhashable key raises TypeError, so screen it out here
+        # rather than crash the reachability walk / lookups (BE-3406 hardening).
+        if not isinstance(name, str):
+            return None
         return self._nodes.get(name)
 
     def all_nodes(self) -> list[Morphism]:
@@ -730,6 +735,11 @@ class Graph:
                 )
                 continue
             class_type = node_data.get("class_type", "")
+            # A non-string class_type (list/dict from malformed JSON) is unhashable
+            # and would crash the self._nodes.get(class_type) lookup below; treat it
+            # as absent so it flows to the structured non_node_key path instead.
+            if not isinstance(class_type, str):
+                class_type = ""
             if not class_type:
                 warnings.append(
                     {
@@ -767,7 +777,13 @@ class Graph:
             # case surfaces here instead of as a cryptic server reject.
             autogrow_ports = {p.name: p for p in m.inputs if p.is_autogrow}
             autogrow_seen: set[str] = set()
-            for input_name, value in (node_data.get("inputs") or {}).items():
+            node_inputs = node_data.get("inputs")
+            # A truthy non-dict `inputs` (e.g. a string/list from malformed JSON)
+            # sails through `or {}` and crashes `.items()`; treat it as empty so
+            # required-input checks flag the absence instead of raising.
+            if not isinstance(node_inputs, dict):
+                node_inputs = {}
+            for input_name, value in node_inputs.items():
                 if autogrow_ports and "." in input_name:
                     base = input_name.split(".", 1)[0]
                     if base in autogrow_ports:
@@ -810,7 +826,10 @@ class Graph:
                         continue
 
                     src_class = src_data["class_type"]
-                    src_m = self._nodes.get(src_class)
+                    # Route through the guarded lookup: a referenced node with an
+                    # unhashable class_type (malformed JSON) would otherwise crash
+                    # the dict.get here.
+                    src_m = self.node(src_class)
                     if src_m is None:
                         # Source class_type already flagged by the outer loop
                         continue
@@ -1091,7 +1110,12 @@ def _output_reachable_node_ids(workflow: dict[str, Any], graph: Graph) -> set[st
         node_data = workflow.get(stack.pop())
         if not isinstance(node_data, dict):
             continue
-        for value in (node_data.get("inputs") or {}).values():
+        node_inputs = node_data.get("inputs")
+        # Guard against a truthy non-dict `inputs` from malformed JSON, which
+        # would slip past `or {}` and raise AttributeError on `.values()`.
+        if not isinstance(node_inputs, dict):
+            continue
+        for value in node_inputs.values():
             if isinstance(value, list) and len(value) == 2:
                 src_id = str(value[0])
                 if src_id in workflow and src_id not in reachable:
@@ -1155,7 +1179,14 @@ def _validate_catalog_value(
             }
             # Only a hard reject on a node the server will run; on a pruned node
             # it stays advisory (matching pre-promotion behavior for that node).
-            (errors if range_is_error else warnings).append(entry)
+            if range_is_error:
+                errors.append(entry)
+            else:
+                # Demoted to an advisory warning: match the fully-qualified
+                # `field` schema every other warning uses (preflight renders
+                # w["field"]), rather than leaking the bare input_name.
+                entry["field"] = f"{node_id}.{class_type}.{input_name}"
+                warnings.append(entry)
         else:
             w["field"] = f"{node_id}.{class_type}.{w['field']}"
             warnings.append(w)

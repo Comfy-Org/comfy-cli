@@ -1077,6 +1077,47 @@ class TestValidateServerParity:
         assert result["valid"] is False
         assert [e for e in result["errors"] if e["code"] == "below_min" and e["node_id"] == "5"]
 
+    def test_demoted_range_warning_field_is_qualified(self, graph_sd15: Graph):
+        """A range violation demoted to a warning on a pruned node uses the same
+        fully-qualified `field` (`node.class.input`) as every other warning, so
+        consumers (e.g. preflight renders w["field"]) see one schema."""
+        wf = self._sd15_full()
+        wf["99"] = {"class_type": "EmptyLatentImage", "inputs": {"width": 1, "height": 512, "batch_size": 1}}
+        result = graph_sd15.validate_workflow(wf)
+        warned = [w for w in result["warnings"] if w.get("code") == "below_min" and w.get("node_id") == "99"]
+        assert len(warned) == 1
+        assert warned[0]["field"] == "99.EmptyLatentImage.width"
+
+
+class TestValidateMalformedInputs:
+    """Malformed workflow JSON must yield structured output, never an unhandled
+    traceback (BE-3406 hardening) — the validator's whole contract is to catch
+    bad prompts, so it may not crash on the shapes it's meant to reject."""
+
+    def test_non_dict_inputs_does_not_crash(self, graph: Graph):
+        """A truthy non-dict `inputs` (string/list from malformed JSON) slips
+        past `or {}` and would crash `.items()`/`.values()`; validation must
+        instead return a result. Node is wired to a SaveImage so it's reachable
+        (exercises both the per-input loop and the reachability walk)."""
+        wf = {
+            "1": {"class_type": "EmptyLatentImage", "inputs": "not-a-dict"},
+            "2": {"class_type": "SaveImage", "inputs": {"images": ["1", 0], "filename_prefix": "out"}},
+        }
+        result = graph.validate_workflow(wf)  # must not raise
+        assert isinstance(result["errors"], list)
+        assert isinstance(result["warnings"], list)
+
+    def test_unhashable_class_type_does_not_crash(self, graph: Graph):
+        """An unhashable class_type (list/dict) would raise TypeError in the
+        `self._nodes.get(class_type)` lookup and the reachability walk's
+        `graph.node(...)`; both are screened so validation returns a result."""
+        wf = {
+            "1": {"class_type": ["EmptyLatentImage"], "inputs": {"width": 512}},
+            "2": {"class_type": "SaveImage", "inputs": {"images": ["1", 0], "filename_prefix": "out"}},
+        }
+        result = graph.validate_workflow(wf)  # must not raise
+        assert isinstance(result["errors"], list)
+
 
 # ===========================================================================
 # TestDirectModeSlots
