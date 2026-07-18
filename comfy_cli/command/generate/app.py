@@ -501,16 +501,43 @@ def _schema(extra_args: list[str]) -> None:
     _show_schema_help(ep)
 
 
+def _fetch_spec(url: str) -> httpx.Response:
+    with httpx.Client(timeout=30.0, follow_redirects=True) as cli:
+        r = cli.get(url, headers={"Comfy-Env": "comfy-cli", "User-Agent": "comfy-cli/api"})
+        r.raise_for_status()
+        return r
+
+
 def _refresh() -> None:
-    url = spec.base_url() + "/openapi.yml"
+    base = spec.base_url()
+    # The live spec is served at ``/openapi`` (no extension, JSON body). Older /
+    # custom ``COMFY_API_BASE_URL`` deployments may still serve ``/openapi.yml``,
+    # so fall back to it on a 404 to keep those working.
+    primary, fallback = base + "/openapi", base + "/openapi.yml"
+    fetched_from = primary
     try:
-        with httpx.Client(timeout=30.0, follow_redirects=True) as cli:
-            r = cli.get(url, headers={"Comfy-Env": "comfy-cli", "User-Agent": "comfy-cli/api"})
-            r.raise_for_status()
+        try:
+            r = _fetch_spec(primary)
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code != 404:
+                raise
+            fetched_from = fallback
+            r = _fetch_spec(fallback)
     except httpx.HTTPError as e:
-        rprint(f"[bold red]Failed to fetch {url}: {e}[/bold red]")
+        rprint(f"[bold red]Failed to fetch {fetched_from}: {e}[/bold red]")
         raise typer.Exit(code=1)
-    path = spec.write_cache(r.text)
+
+    # Validate before caching so a 200-with-garbage response never poisons the
+    # ~/.comfy/openapi-cache.yml cache (used for CACHE_TTL_SECONDS by every
+    # subsequent `comfy generate`).
+    body = r.text
+    try:
+        spec.validate_spec_text(body)
+    except spec.SpecError as e:
+        rprint(f"[bold red]Refusing to cache spec from {fetched_from}: {e}[/bold red]")
+        raise typer.Exit(code=1)
+
+    path = spec.write_cache(body)
     rprint(f"[bold green]Refreshed model catalog at {path}[/bold green]")
 
 
