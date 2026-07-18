@@ -222,10 +222,36 @@ class TestProviderConstruction:
         Consumer uses request_timeout=None → an unbounded requests.post that
         hangs the CLI forever on a blackholed endpoint. The provider must build
         its Mixpanel client with an explicit 10s consumer timeout so this can't
-        silently regress to None."""
+        silently regress to None. retry_limit must also be 1: the Consumer
+        default is 4 with backoff, which would let a blackholed send run ~40s+
+        across retries even with a 10s per-attempt timeout — and this send is
+        synchronous on the main thread, not covered by the atexit deadline."""
         provider = MixpanelProvider("token-mp")
         assert provider.client is not None
-        assert provider.client._consumer._request_timeout == 10
+        consumer = provider.client._consumer
+        assert consumer._request_timeout == 10
+        # retry_limit is threaded into the session's urllib3 Retry.total.
+        adapter = consumer._session.get_adapter("https://api.mixpanel.com")
+        assert adapter.max_retries.total == 1
+
+    def test_posthog_unregisters_its_own_atexit_join(self):
+        """Regression guard for BE-3403: Posthog's constructor registers its own
+        ``atexit.register(self.join)``, which flushes synchronously on the main
+        thread at shutdown, unbounded by ``_flush_all_providers``' 5s daemon
+        deadline. Against a blackholed endpoint that join can block ~21s after
+        the terminal envelope. The provider must unregister it so the bounded
+        flush is the only shutdown drain path."""
+        import comfy_cli.tracking as tracking_mod
+
+        fake_client = MagicMock()
+        with (
+            patch.object(tracking_mod, "Posthog", return_value=fake_client),
+            patch.object(tracking_mod, "atexit") as fake_atexit,
+        ):
+            provider = PostHogProvider("phc_test", "https://t.comfy.org")
+
+        assert provider.enabled is True
+        fake_atexit.unregister.assert_called_once_with(fake_client.join)
 
     def test_posthog_track_skips_when_distinct_id_is_none(self, tracking_with_two_providers):
         tracking_mod, _, ph_provider = tracking_with_two_providers

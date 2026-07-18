@@ -7,6 +7,7 @@ import logging as logginglib
 import os
 import sys
 import threading
+import time
 import uuid
 from typing import Any, Protocol
 
@@ -144,8 +145,12 @@ class MixpanelProvider:
         # mixpanel-python's default Consumer uses request_timeout=None → an
         # unbounded, synchronous requests.post on the main thread, so a
         # blackholed telemetry endpoint (accepts TCP, never responds) hangs the
-        # CLI indefinitely (BE-3354/BE-3403). Bound every send to 10s.
-        self.client = Mixpanel(token, consumer=MixpanelConsumer(request_timeout=10)) if token else None
+        # CLI indefinitely (BE-3354/BE-3403). track() sends inline on the calling
+        # thread and flush() is a no-op, so this bound is the ONLY thing guarding
+        # the hot event path — it isn't covered by the atexit daemon deadline.
+        # retry_limit=1 (default is 4 with backoff) keeps a blackholed send to a
+        # single ~10s attempt instead of ~40s+ across retries.
+        self.client = Mixpanel(token, consumer=MixpanelConsumer(request_timeout=10, retry_limit=1)) if token else None
         self.enabled = self.client is not None
 
     def track(self, event_name: str, distinct_id: str | None, properties: dict[str, Any]) -> None:
@@ -177,6 +182,13 @@ class PostHogProvider:
         # can't linger on a blackholed endpoint after the terminal envelope is
         # already on stdout (BE-3354/BE-3403).
         self.client = Posthog(project_api_key=token, host=host, disable_geoip=False, max_retries=1, timeout=10)
+        # Posthog's constructor registers its own atexit.register(self.join),
+        # which runs self.join() synchronously on the main thread at shutdown —
+        # independently of _flush_all_providers and NOT bounded by its daemon
+        # deadline. Against a blackholed endpoint that join can still block ~21s
+        # after the terminal envelope is on stdout, defeating this change. Drop it
+        # so our bounded flush is the only shutdown drain path (BE-3403).
+        atexit.unregister(self.client.join)
         self.enabled = True
 
     def track(self, event_name: str, distinct_id: str | None, properties: dict[str, Any]) -> None:
@@ -424,16 +436,35 @@ def _flush_one(provider: TelemetryProvider) -> None:
         logging.warning(f"Failed to flush telemetry provider {type(provider).__name__}: {e}")
 
 
+_FLUSH_DEADLINE_SECONDS = 5.0
+
+
 def _flush_all_providers() -> None:
     # Telemetry is best-effort by contract: a blackholed endpoint (accepts TCP,
     # never responds) must never let this atexit hook wedge every consumer of the
     # CLI's stdout after the terminal envelope is already emitted (BE-3329/BE-3403).
-    # Run each provider's flush in a daemon thread with a hard join deadline;
-    # dropping in-flight events beats hanging the process.
+    # Start every provider's flush in a daemon thread, then join them all against
+    # a SINGLE shared deadline so total exit delay stays ~5s regardless of how
+    # many providers there are (a per-provider join would make it 5s × N).
+    # Dropping in-flight events beats hanging the process. t.start()/t.join() are
+    # wrapped defensively so nothing this hook does can raise and print a
+    # traceback to stderr after the terminal envelope.
+    deadline = time.monotonic() + _FLUSH_DEADLINE_SECONDS
+    threads: list[tuple[threading.Thread, TelemetryProvider]] = []
     for provider in PROVIDERS:
         t = threading.Thread(target=_flush_one, args=(provider,), daemon=True)
-        t.start()
-        t.join(timeout=5.0)
+        try:
+            t.start()
+        except RuntimeError as e:  # e.g. a thread-creation race during shutdown
+            logging.warning(f"could not start telemetry flush for {type(provider).__name__}: {e}")
+            continue
+        threads.append((t, provider))
+    for t, provider in threads:
+        try:
+            t.join(timeout=max(0.0, deadline - time.monotonic()))
+        except RuntimeError as e:  # pragma: no cover - defensive
+            logging.warning(f"telemetry flush join failed for {type(provider).__name__}: {e}")
+            continue
         if t.is_alive():
             logging.warning(f"telemetry flush timed out for {type(provider).__name__}; dropping in-flight events")
 
