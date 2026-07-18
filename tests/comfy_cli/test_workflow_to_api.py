@@ -1956,6 +1956,144 @@ class TestDynamicComboAfterControlMarker:
         # Without the fix the sub-input was silently dropped.
         assert inputs["shape.side"] == 10.0
 
+    def test_dynamic_combo_sub_seed_strips_implicit_control_marker(self):
+        # BE-3370 review: an INT ``seed``/``noise_seed`` *sub-input* of a
+        # dynamic combo relies on the frontend's implicit companion, but its
+        # dotted name (``model.seed``) never matched the leaf-name check, so the
+        # trailing control marker was kept as a real value and shifted every
+        # later sub-input by one slot.
+        object_info = {
+            "SeedInCombo": {
+                "input": {
+                    "required": {
+                        "model": [
+                            "COMFY_DYNAMICCOMBO_V3",
+                            {
+                                "options": [
+                                    {
+                                        "key": "fast",
+                                        "inputs": {
+                                            "required": {
+                                                # implicit companion: no control_after_generate flag
+                                                "seed": ["INT", {"default": 0}],
+                                                "steps": ["INT", {"default": 20}],
+                                            }
+                                        },
+                                    }
+                                ]
+                            },
+                        ]
+                    }
+                },
+                "input_order": {"required": ["model"]},
+                "output_node": True,
+                "display_name": "SIC",
+            }
+        }
+        workflow = {
+            "nodes": [
+                {
+                    "id": 1,
+                    "type": "SeedInCombo",
+                    "inputs": [],
+                    "outputs": [],
+                    # selector, seed, control_marker, steps
+                    "widgets_values": ["fast", 7, "randomize", 30],
+                    "mode": 0,
+                }
+            ],
+            "links": [],
+        }
+        result = convert_ui_to_api(workflow, object_info)
+        inputs = result["1"]["inputs"]
+        assert inputs["model"] == "fast"
+        assert inputs["model.seed"] == 7
+        # Without the fix "randomize" landed here and steps was dropped.
+        assert inputs["model.steps"] == 30
+
+    def test_unresolved_selector_warns(self, caplog):
+        import logging
+
+        # BE-3370 review: a selector value that matches no option key leaves the
+        # option's sub-input slots unconsumed, silently shifting later widgets.
+        # We can't recover the alignment, but the mismatch must not be silent.
+        object_info = {
+            "StaleCombo": {
+                "input": {
+                    "required": {
+                        "model": [
+                            "COMFY_DYNAMICCOMBO_V3",
+                            {"options": [{"key": "known", "inputs": {"required": {"x": ["FLOAT"]}}}]},
+                        ]
+                    }
+                },
+                "input_order": {"required": ["model"]},
+                "output_node": True,
+                "display_name": "SC",
+            }
+        }
+        workflow = {
+            "nodes": [
+                {
+                    "id": 1,
+                    "type": "StaleCombo",
+                    "inputs": [],
+                    "outputs": [],
+                    "widgets_values": ["renamed_server_side", 1.5],
+                    "mode": 0,
+                }
+            ],
+            "links": [],
+        }
+        with caplog.at_level(logging.WARNING):
+            result = convert_ui_to_api(workflow, object_info)
+        assert result["1"]["inputs"]["model"] == "renamed_server_side"
+        assert any("matched no option" in rec.message for rec in caplog.records)
+
+    def test_deeply_nested_dynamic_combos_do_not_recurse_forever(self, caplog):
+        # BE-3370 review: an unbounded chain of nested COMFY_*COMBO* sub-inputs
+        # must degrade to a warning, not an uncaught RecursionError that aborts
+        # the whole conversion. Build a self-referential option chain deeper
+        # than _MAX_DYNAMIC_COMBO_DEPTH.
+        import logging
+
+        from comfy_cli.workflow_to_api import _MAX_DYNAMIC_COMBO_DEPTH
+
+        depth = _MAX_DYNAMIC_COMBO_DEPTH + 5
+        # Innermost combo has a plain leaf; each outer level nests the next.
+        spec = ["COMFY_DYNAMICCOMBO_V3", {"options": [{"key": "go", "inputs": {"required": {"leaf": ["INT"]}}}]}]
+        for _ in range(depth):
+            spec = [
+                "COMFY_DYNAMICCOMBO_V3",
+                {"options": [{"key": "go", "inputs": {"required": {"next": spec}}}]},
+            ]
+        object_info = {
+            "DeepCombo": {
+                "input": {"required": {"root": spec}},
+                "input_order": {"required": ["root"]},
+                "output_node": True,
+                "display_name": "DC",
+            }
+        }
+        # Every level selects "go"; only the outermost needs a value to start.
+        workflow = {
+            "nodes": [
+                {
+                    "id": 1,
+                    "type": "DeepCombo",
+                    "inputs": [],
+                    "outputs": [],
+                    "widgets_values": ["go"] * (depth + 2),
+                    "mode": 0,
+                }
+            ],
+            "links": [],
+        }
+        with caplog.at_level(logging.WARNING):
+            result = convert_ui_to_api(workflow, object_info)  # must not raise
+        assert "1" in result
+        assert any("exceeded depth" in rec.message for rec in caplog.records)
+
 
 class TestDynamicPrompts:
     """Port of frontend's processDynamicPrompt behavior (formatUtil.ts).

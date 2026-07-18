@@ -55,6 +55,13 @@ _MAX_SUBGRAPH_ITERATIONS = 10
 # the widget-value list before mapping to input names.
 _CONTROL_AFTER_GENERATE_VALUES = frozenset({"fixed", "increment", "decrement", "randomize"})
 
+# A dynamic combo may nest another dynamic combo among its sub-inputs. Real
+# schemas nest at most a couple of levels; a deeper chain (e.g. a pathological
+# third-party ``/object_info`` entry) would otherwise recurse the widget walk
+# without bound. Cap it so a malformed schema degrades to a warning instead of a
+# ``RecursionError`` that aborts the whole conversion.
+_MAX_DYNAMIC_COMBO_DEPTH = 16
+
 
 class WorkflowConversionError(Exception):
     """Raised when a workflow can't be converted to API format."""
@@ -1073,6 +1080,15 @@ def _dynamic_combo_selected_subs(input_name: str, input_spec: Any, selected: Any
     return []
 
 
+def _dynamic_combo_option_keys(input_spec: Any) -> list[Any]:
+    """The ``key`` of every option a dynamic combo declares (order preserved)."""
+    if not isinstance(input_spec, (list, tuple)) or len(input_spec) < 2:
+        return []
+    options_meta = input_spec[1] if isinstance(input_spec[1], dict) else {}
+    options = options_meta.get("options") or []
+    return [option.get("key") for option in options if isinstance(option, dict)]
+
+
 def _schema_widget_pairs(schema: Any, widget_values: list[Any]) -> list[tuple[str, Any]]:
     """Pair a schema's widget inputs with their ``widgets_values`` slots.
 
@@ -1098,7 +1114,7 @@ def _schema_widget_pairs(schema: Any, widget_values: list[Any]) -> list[tuple[st
     pairs: list[tuple[str, Any]] = []
     vidx = 0
 
-    def consume(name: str, spec: Any) -> None:
+    def consume(name: str, spec: Any, depth: int = 0) -> None:
         nonlocal vidx
         is_widget, is_dynamic = _is_widget_input(spec)
         if not is_widget or vidx >= len(widget_values):
@@ -1107,8 +1123,29 @@ def _schema_widget_pairs(schema: Any, widget_values: list[Any]) -> list[tuple[st
         pairs.append((name, value))
         vidx += 1
         if is_dynamic:
-            for sub_name, sub_spec in _dynamic_combo_selected_subs(name, spec, value):
-                consume(sub_name, sub_spec)
+            subs = _dynamic_combo_selected_subs(name, spec, value)
+            if not subs and value not in _dynamic_combo_option_keys(spec):
+                # The saved selector no longer names any option in the current
+                # schema (model renamed/removed server-side, or object_info /
+                # workflow version skew). Its sub-input value slots go
+                # unconsumed, so every following widget reads a shifted slot.
+                # We can't recover the alignment, but warn so the corruption
+                # isn't silent.
+                logger.warning(
+                    "Dynamic-combo input %r selector %r matched no option in the current "
+                    "schema; following widget values may be misaligned",
+                    name,
+                    value,
+                )
+            elif depth >= _MAX_DYNAMIC_COMBO_DEPTH:
+                logger.warning(
+                    "Dynamic-combo nesting for input %r exceeded depth %d; stopping sub-input expansion",
+                    name,
+                    _MAX_DYNAMIC_COMBO_DEPTH,
+                )
+            else:
+                for sub_name, sub_spec in subs:
+                    consume(sub_name, sub_spec, depth + 1)
         elif vidx < len(widget_values) and _has_control_after_generate_companion(name, spec, widget_values[vidx]):
             vidx += 1
 
@@ -1238,7 +1275,11 @@ def _has_control_after_generate_companion(input_name: str, input_spec: Any, next
     if options.get("control_after_generate"):
         return isinstance(next_value, str) and next_value in _CONTROL_AFTER_GENERATE_VALUES
     input_type = input_spec[0] if input_spec else None
-    if input_type == "INT" and input_name in ("seed", "noise_seed"):
+    # ``input_name`` may be dotted for a dynamic-combo sub-input (e.g.
+    # ``model.seed``); the frontend's implicit companion keys off the leaf
+    # widget name, so match on the final segment.
+    leaf_name = input_name.rsplit(".", 1)[-1]
+    if input_type == "INT" and leaf_name in ("seed", "noise_seed"):
         return isinstance(next_value, str) and next_value in _CONTROL_AFTER_GENERATE_VALUES
     return False
 
