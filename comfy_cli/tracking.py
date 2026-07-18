@@ -6,10 +6,12 @@ import json
 import logging as logginglib
 import os
 import sys
+import threading
 import uuid
 from typing import Any, Protocol
 
 import typer
+from mixpanel import Consumer as MixpanelConsumer
 from mixpanel import Mixpanel
 from posthog import Posthog
 
@@ -139,7 +141,11 @@ class TelemetryProvider(Protocol):
 
 class MixpanelProvider:
     def __init__(self, token: str):
-        self.client = Mixpanel(token) if token else None
+        # mixpanel-python's default Consumer uses request_timeout=None → an
+        # unbounded, synchronous requests.post on the main thread, so a
+        # blackholed telemetry endpoint (accepts TCP, never responds) hangs the
+        # CLI indefinitely (BE-3354/BE-3403). Bound every send to 10s.
+        self.client = Mixpanel(token, consumer=MixpanelConsumer(request_timeout=10)) if token else None
         self.enabled = self.client is not None
 
     def track(self, event_name: str, distinct_id: str | None, properties: dict[str, Any]) -> None:
@@ -166,7 +172,11 @@ class PostHogProvider:
         if not token:
             return
         # disable_geoip=False lets PostHog enrich events with IP-derived location.
-        self.client = Posthog(project_api_key=token, host=host, disable_geoip=False)
+        # max_retries/timeout tighten the consumer drain budget from the posthog
+        # 7.x defaults (3 × 15s ≈ 50s worst case) to ~21s, so the atexit flush
+        # can't linger on a blackholed endpoint after the terminal envelope is
+        # already on stdout (BE-3354/BE-3403).
+        self.client = Posthog(project_api_key=token, host=host, disable_geoip=False, max_retries=1, timeout=10)
         self.enabled = True
 
     def track(self, event_name: str, distinct_id: str | None, properties: dict[str, Any]) -> None:
@@ -407,12 +417,25 @@ def init_tracking(enable_tracking: bool):
         track_event("install")
 
 
+def _flush_one(provider: TelemetryProvider) -> None:
+    try:
+        provider.flush()
+    except Exception as e:  # noqa: BLE001
+        logging.warning(f"Failed to flush telemetry provider {type(provider).__name__}: {e}")
+
+
 def _flush_all_providers() -> None:
+    # Telemetry is best-effort by contract: a blackholed endpoint (accepts TCP,
+    # never responds) must never let this atexit hook wedge every consumer of the
+    # CLI's stdout after the terminal envelope is already emitted (BE-3329/BE-3403).
+    # Run each provider's flush in a daemon thread with a hard join deadline;
+    # dropping in-flight events beats hanging the process.
     for provider in PROVIDERS:
-        try:
-            provider.flush()
-        except Exception as e:  # noqa: BLE001
-            logging.warning(f"Failed to flush telemetry provider {type(provider).__name__}: {e}")
+        t = threading.Thread(target=_flush_one, args=(provider,), daemon=True)
+        t.start()
+        t.join(timeout=5.0)
+        if t.is_alive():
+            logging.warning(f"telemetry flush timed out for {type(provider).__name__}; dropping in-flight events")
 
 
 atexit.register(_flush_all_providers)
