@@ -16,6 +16,7 @@ import ctypes
 import logging
 import os
 import platform
+import shutil
 import subprocess
 
 import psutil
@@ -27,14 +28,64 @@ logger = logging.getLogger(__name__)
 _SUBPROCESS_TIMEOUT = 5
 
 
+def _is_within_cwd(path: str) -> bool:
+    """Return ``True`` only if ``path`` provably resolves inside ``os.getcwd()``.
+
+    Used to reject a probe binary that resolves to the current working directory
+    (see :func:`_resolve_binary`). Ambiguity — a path on a different drive, or an
+    unresolvable one — is treated as *not* under the CWD so a legitimate system
+    binary is never rejected.
+    """
+    try:
+        cwd = os.path.realpath(os.getcwd())
+        resolved = os.path.realpath(path)
+        return os.path.commonpath([cwd, resolved]) == cwd
+    except (OSError, ValueError):
+        # Different drives (Windows) or an unresolvable path → not under the CWD.
+        return False
+
+
+def _resolve_binary(name: str) -> str | None:
+    """Resolve a probe binary to a trusted absolute path, or ``None`` to skip it.
+
+    :func:`shutil.which` performs a PATH lookup and returns ``None`` when the
+    binary is absent (so the probe simply degrades to ``None``). Passing the
+    resolved absolute path to :func:`subprocess.check_output` — rather than the
+    bare name — prevents Windows ``CreateProcess`` from searching the current
+    working directory, so running ``comfy env`` from an attacker-controlled
+    directory cannot execute a planted ``nvidia-smi.exe``.
+
+    ``shutil.which`` on Windows may itself resolve against the current directory,
+    so as defense-in-depth a resolved path inside the CWD tree is additionally
+    rejected. A legitimate system binary (e.g. ``nvidia-smi.exe`` under
+    ``System32``) is unaffected.
+    """
+    try:
+        path = shutil.which(name)
+        if path is None:
+            return None
+        if platform.system() == "Windows" and _is_within_cwd(path):
+            logger.debug("skipping hardware probe %r: resolved under CWD (%s)", name, path)
+            return None
+        return path
+    except Exception:
+        logger.debug("resolving hardware probe binary %r failed", name, exc_info=True)
+        return None
+
+
 def _run(cmd: list[str]) -> str | None:
     """Run ``cmd`` and return stripped stdout, or ``None`` on any failure.
 
-    Bounded by ``timeout=5`` so a hung binary can never block the probe.
+    ``cmd[0]`` is resolved to a trusted absolute path via :func:`_resolve_binary`
+    before execution (skipping the probe when absent or CWD-planted), and the run
+    is bounded by ``timeout=5`` so a hung binary can never block the probe.
     """
+    resolved = _resolve_binary(cmd[0])
+    if resolved is None:
+        return None
     try:
         output = subprocess.check_output(
-            cmd,
+            [resolved, *cmd[1:]],
             text=True,
             timeout=_SUBPROCESS_TIMEOUT,
             stderr=subprocess.DEVNULL,

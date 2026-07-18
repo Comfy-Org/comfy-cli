@@ -333,3 +333,83 @@ class TestFillDataHardware:
             "server": {"running": False},
         }
         jsonschema.Draft202012Validator(_env_schema()).validate(payload)
+
+
+class TestRunResolvesBinaryPath:
+    """``_run`` must resolve the binary to an absolute path (never invoke by bare
+    name) so Windows ``CreateProcess`` can't pick up a CWD-planted executable."""
+
+    def test_run_invokes_resolved_absolute_path(self):
+        captured = {}
+
+        def fake_check_output(cmd, **kwargs):
+            captured["cmd"] = cmd
+            return "ok\n"
+
+        with (
+            patch.object(hardware.shutil, "which", return_value="/usr/bin/sysctl"),
+            patch.object(hardware.subprocess, "check_output", side_effect=fake_check_output),
+        ):
+            result = hardware._run(["sysctl", "-n", "machdep.cpu.brand_string"])
+
+        assert result == "ok"
+        # First element is the resolved absolute path, not the bare name; the
+        # remaining arguments are preserved verbatim.
+        assert captured["cmd"] == ["/usr/bin/sysctl", "-n", "machdep.cpu.brand_string"]
+
+    def test_run_skips_when_binary_absent(self):
+        """A binary missing from PATH resolves to None → probe is skipped and the
+        subprocess is never spawned."""
+        with (
+            patch.object(hardware.shutil, "which", return_value=None),
+            patch.object(hardware.subprocess, "check_output") as mock_run,
+        ):
+            assert hardware._run(["nvidia-smi", "--query-gpu=name"]) is None
+        mock_run.assert_not_called()
+
+    def test_run_never_raises_on_resolve_failure(self):
+        """Even a broken PATH lookup degrades to None, honoring the never-raise
+        contract."""
+        with patch.object(hardware.shutil, "which", side_effect=RuntimeError("boom")):
+            assert hardware._run(["nvidia-smi"]) is None
+
+
+class TestResolveBinaryWindowsCwdGuard:
+    """On Windows, a binary that ``shutil.which`` resolves inside the current
+    working directory is rejected — closing the CWD binary-planting hole."""
+
+    def test_windows_rejects_binary_planted_in_cwd(self, tmp_path):
+        planted = tmp_path / "nvidia-smi.exe"
+        planted.write_text("")
+        with (
+            patch.object(hardware.platform, "system", return_value="Windows"),
+            patch.object(hardware.os, "getcwd", return_value=str(tmp_path)),
+            patch.object(hardware.shutil, "which", return_value=str(planted)),
+        ):
+            assert hardware._resolve_binary("nvidia-smi") is None
+
+    def test_windows_allows_system_binary_outside_cwd(self, tmp_path):
+        cwd = tmp_path / "attacker"
+        system_dir = tmp_path / "System32"
+        cwd.mkdir()
+        system_dir.mkdir()
+        legit = system_dir / "nvidia-smi.exe"
+        legit.write_text("")
+        with (
+            patch.object(hardware.platform, "system", return_value="Windows"),
+            patch.object(hardware.os, "getcwd", return_value=str(cwd)),
+            patch.object(hardware.shutil, "which", return_value=str(legit)),
+        ):
+            assert hardware._resolve_binary("nvidia-smi") == str(legit)
+
+    def test_non_windows_does_not_apply_cwd_guard(self, tmp_path):
+        """POSIX ``shutil.which`` never searches the CWD, so the guard is
+        Windows-only; a resolved path is returned as-is."""
+        resolved = tmp_path / "sysctl"
+        resolved.write_text("")
+        with (
+            patch.object(hardware.platform, "system", return_value="Darwin"),
+            patch.object(hardware.os, "getcwd", return_value=str(tmp_path)),
+            patch.object(hardware.shutil, "which", return_value=str(resolved)),
+        ):
+            assert hardware._resolve_binary("sysctl") == str(resolved)
