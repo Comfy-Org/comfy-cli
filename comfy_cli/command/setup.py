@@ -336,6 +336,12 @@ def _auth_browser(console) -> bool:
         if e.hint:
             pprint(f"  [dim]{e.hint}[/dim]")
         return False
+    except OSError:
+        # A broken output stream (run_login re-raises OSError from the URL
+        # callback rather than blocking the full timeout on a dead terminal).
+        # In this interactive wizard the session is already unusable — degrade
+        # to a failed sign-in instead of an unhandled traceback.
+        return False
 
     store.save_cloud_session(
         base_url=result.base_url,

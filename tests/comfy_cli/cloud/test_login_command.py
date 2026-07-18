@@ -118,11 +118,16 @@ def test_pretty_login_prints_url_without_event_line(monkeypatch, capsys):
     assert "event/1" not in out
 
 
-def test_json_login_timeout_renders_oauth_timeout_envelope(monkeypatch, capsys):
-    """An `OAuthTimeout` from `run_login` surfaces as a single `ok=false`
-    envelope carrying the `oauth_timeout` code — no `login_url` line required."""
+def test_json_login_timeout_still_emits_login_url_before_error_envelope(monkeypatch, capsys):
+    """On timeout, the real `run_login` has already fired `on_url_ready` (before
+    it blocks on the callback wait), so a `--json` timeout emits the `login_url`
+    line *then* the `oauth_timeout` error envelope — the feature's headline
+    guarantee (URL surfaced before the block) holds even when the block times
+    out. Emulate that ordering, not an impossible URL-less timeout."""
 
     def fake_run_login(**kwargs):
+        # Real run_login surfaces the URL, then the wait times out.
+        kwargs["on_url_ready"](_AUTHORIZE_URL)
         raise oauth.OAuthTimeout(
             "timed out waiting for browser callback after 300s",
             hint="re-run `comfy cloud login` and complete the sign-in in your browser",
@@ -137,10 +142,47 @@ def test_json_login_timeout_renders_oauth_timeout_envelope(monkeypatch, capsys):
 
     out = capsys.readouterr().out
     lines = _parse_lines(out)
-    assert len(lines) == 1
 
-    envelope = lines[0]
+    # The URL is surfaced first, then the error envelope closes the stream.
+    assert lines[0]["type"] == "login_url"
+    assert lines[0]["url"] == _AUTHORIZE_URL
+    envelope = lines[-1]
     assert envelope["type"] == "envelope"
     assert envelope["ok"] is False
     assert envelope["error"]["code"] == "oauth_timeout"
-    assert "login_url" not in out
+    types = [ln.get("type") for ln in lines]
+    assert types.index("login_url") < types.index("envelope")
+
+
+def test_json_login_fails_fast_when_login_url_write_breaks(monkeypatch, capsys):
+    """If the machine stream breaks while emitting `login_url` (a piped parent
+    hung up), `run_login` re-raises the `OSError` from the callback instead of
+    blocking the full timeout, and `login_cmd` fails fast with exit code 1
+    rather than a silent 300s hang."""
+
+    class _BrokenStream:
+        def write(self, _s):
+            raise BrokenPipeError("parent hung up")
+
+        def flush(self):
+            raise BrokenPipeError("parent hung up")
+
+    blocked = {"waited": False}
+
+    def real_ish_run_login(**kwargs):
+        # Mirror run_login's contract: fire the URL callback (which now writes to
+        # the broken stream) *before* the callback wait. A correct implementation
+        # never reaches the wait because the OSError propagates.
+        kwargs["on_url_ready"](_AUTHORIZE_URL)
+        blocked["waited"] = True  # only reached if the OSError was swallowed
+        raise oauth.OAuthTimeout("timed out", hint="")
+
+    monkeypatch.setattr(command, "run_login", real_ish_run_login)
+    renderer = Renderer(mode=OutputMode.JSON, command="cloud login", version="test")
+    renderer.machine_stream = _BrokenStream()
+    set_renderer(renderer)
+
+    with pytest.raises(typer.Exit) as exc:
+        command.login_cmd(no_browser=True, timeout=300)
+    assert exc.value.exit_code == 1
+    assert blocked["waited"] is False  # never blocked on the wait
