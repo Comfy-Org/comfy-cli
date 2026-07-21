@@ -59,6 +59,14 @@ comfy --json cloud whoami   # signed_in, auth_method, base_url
 If the user is signed in, commands auto-route to cloud — just run them
 without `--where`. Mention routing only when the user asks to switch.
 
+`COMFY_WHERE` picks the backend; `COMFY_LOCAL_URL` sets the **local
+address** for every command when it isn't `127.0.0.1:8188` (e.g. a ComfyUI
+started outside comfy-cli): `export COMFY_LOCAL_URL=http://127.0.0.1:8189`
+(accepts `http://host:port`, `host:port`, or `http://host`; port defaults to
+`8188`; IPv6 as `http://[::1]:8189`). Per-command precedence: `--host`/`--port`
+flag → `COMFY_LOCAL_URL` → a comfy-cli-launched background server →
+`127.0.0.1:8188`.
+
 ## Error codes — react, don't guess
 
 The most common error codes and what to do:

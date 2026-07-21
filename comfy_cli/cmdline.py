@@ -962,7 +962,7 @@ def validate(
             pass
 
     try:
-        graph = Graph.load(mode=mode, input_path=input_path, host=host or "127.0.0.1", port=port or 8188)
+        graph = Graph.load(mode=mode, input_path=input_path, host=host, port=port)
     except LoadError as e:
         renderer.error(
             code="cql_no_graph",
@@ -1327,13 +1327,10 @@ def which():
     if renderer.is_pretty():
         import sys as _sys
 
+        from comfy_cli.local_address import resolve_local_host_port
         from comfy_cli.output.panels import which_panel
 
-        cfg_bg = ConfigManager().background
-        if cfg_bg is not None:
-            host, port = cfg_bg[0], cfg_bg[1]
-        else:
-            host, port = "127.0.0.1", 8188
+        host, port = resolve_local_host_port(None, None, background=ConfigManager().background)
         try:
             server_running = env_checker.check_comfy_server_running(host=host, port=port, timeout=0.5)
         except Exception:  # noqa: BLE001

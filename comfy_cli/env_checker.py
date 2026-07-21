@@ -49,6 +49,25 @@ def check_comfy_server_running(port=8188, host="localhost", timeout: float = 5.0
         return False
 
 
+def _resolved_local_address() -> tuple[str, int]:
+    """The local ComfyUI ``(host, port)`` ``comfy env`` should probe + report.
+
+    Honors the same precedence as every other local command minus the
+    per-command flag (``comfy env`` takes none): ``COMFY_LOCAL_URL`` env >
+    ``config.background`` > ``127.0.0.1:8188``.
+    """
+    from comfy_cli.local_address import resolve_local_host_port
+
+    return resolve_local_host_port(None, None, background=ConfigManager().background)
+
+
+def _display_url(host: str, port: int) -> str:
+    """``http://host:port`` with IPv6 literals bracketed for a valid URL."""
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    return f"http://{host}:{port}"
+
+
 @singleton
 class EnvChecker:
     """
@@ -106,11 +125,12 @@ class EnvChecker:
         config_data = ConfigManager().get_env_data()
         data.extend(config_data)
 
-        if check_comfy_server_running():
+        host, port = _resolved_local_address()
+        if check_comfy_server_running(port=port, host=host):
             data.append(
                 (
                     "Comfy Server Running",
-                    "[bold green]Yes[/bold green]\nhttp://localhost:8188",
+                    f"[bold green]Yes[/bold green]\n{_display_url(host, port)}",
                 )
             )
         else:
@@ -126,7 +146,8 @@ class EnvChecker:
         against ``schemas/env.json``.
         """
         cm = ConfigManager()
-        server_running = check_comfy_server_running()
+        host, port = _resolved_local_address()
+        server_running = check_comfy_server_running(port=port, host=host)
         return {
             "python": {
                 "version": f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
@@ -137,6 +158,6 @@ class EnvChecker:
             "config": cm.get_data(),
             "server": {
                 "running": server_running,
-                "url": "http://localhost:8188" if server_running else None,
+                "url": _display_url(host, port) if server_running else None,
             },
         }

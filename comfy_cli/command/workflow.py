@@ -89,7 +89,7 @@ def _get_graph(input_path: str | None, host: str | None, port: int | None, on_st
     try:
         if input_path is not None:
             # Explicit offline dump — Graph.load reads + annotates it.
-            return Graph.load(input_path=input_path, host=host or "127.0.0.1", port=port or 8188)
+            return Graph.load(input_path=input_path, host=host, port=port)
         # Live fetch: resolve mode from global routing chain, then use resilient loader.
         from comfy_cli import where as where_module
 
@@ -99,8 +99,8 @@ def _get_graph(input_path: str | None, host: str | None, port: int | None, on_st
 
         raw = resilient_load_object_info(
             mode=mode,
-            host=host or "127.0.0.1",
-            port=port or 8188,
+            host=host,
+            port=port,
             on_stale=on_stale,
         )
         graph = Graph.from_object_info(raw)
