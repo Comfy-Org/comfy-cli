@@ -32,6 +32,19 @@ def format_python_version(version_info):
     return f"[bold red]{version_info.major}.{version_info.minor}.{version_info.micro}[/bold red]"
 
 
+def _bracket_host(host: str) -> str:
+    """Bracket a bare IPv6 literal (``::1`` -> ``[::1]``) for use in a URL.
+
+    Idempotent: an already-bracketed host (as returned by
+    ``host_port.resolve_host_port``) and hostnames / IPv4 (no ``:``) pass
+    through unchanged, so it's safe to apply at a shared choke point regardless
+    of whether the caller pre-bracketed.
+    """
+    if ":" in host and not host.startswith("["):
+        return f"[{host}]"
+    return host
+
+
 def check_comfy_server_running(port=8188, host="localhost", timeout: float = 5.0):
     """
     Checks if the Comfy server is running by making a GET request to the /history endpoint.
@@ -43,7 +56,7 @@ def check_comfy_server_running(port=8188, host="localhost", timeout: float = 5.0
         bool: True if the Comfy server is running, False otherwise.
     """
     try:
-        response = requests.get(f"http://{host}:{port}/history", timeout=timeout)
+        response = requests.get(f"http://{_bracket_host(host)}:{port}/history", timeout=timeout)
         return response.status_code == 200
     except requests.exceptions.RequestException:
         return False
@@ -63,9 +76,7 @@ def _resolved_local_address() -> tuple[str, int]:
 
 def _display_url(host: str, port: int) -> str:
     """``http://host:port`` with IPv6 literals bracketed for a valid URL."""
-    if ":" in host and not host.startswith("["):
-        host = f"[{host}]"
-    return f"http://{host}:{port}"
+    return f"http://{_bracket_host(host)}:{port}"
 
 
 @singleton

@@ -1327,6 +1327,7 @@ def which():
     if renderer.is_pretty():
         import sys as _sys
 
+        from comfy_cli.env_checker import _display_url
         from comfy_cli.local_address import resolve_local_host_port
         from comfy_cli.output.panels import which_panel
 
@@ -1342,7 +1343,7 @@ def which():
                 python_executable=_sys.executable,
                 python_version=f"{_sys.version_info.major}.{_sys.version_info.minor}.{_sys.version_info.micro}",
                 server_running=server_running,
-                server_url=f"http://{host}:{port}",
+                server_url=_display_url(host, port),
                 version=ConfigManager().get_cli_version(),
             )
         )

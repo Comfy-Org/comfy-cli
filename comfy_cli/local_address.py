@@ -12,7 +12,8 @@ Two entry points:
 
 - :func:`parse_local_url` — parse the env var's value (``http://host:port``,
   ``host:port``, or ``http://host``; scheme optional and only ``http``; IPv6
-  literals bracketed) into ``(host, port)``. Raises ``ValueError`` on garbage.
+  literals bracketed) into ``(host, port)`` where ``port`` is ``None`` when the
+  value omits one. Raises ``ValueError`` on garbage.
 - :func:`resolve_local_host_port` — the precedence resolver: explicit flag >
   ``COMFY_LOCAL_URL`` env > ``config.background`` > ``127.0.0.1:8188``, with
   host and port resolved independently.
@@ -24,6 +25,7 @@ rather than raised, so a typo in the env var can't hard-break every command.
 from __future__ import annotations
 
 import os
+import re
 import sys
 from collections.abc import Mapping
 
@@ -32,21 +34,29 @@ DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8188
 
 # URL-injection-unsafe host characters (mirrors ``comfy_cli.host_port``).
-_UNSAFE_HOST_CHARS = frozenset("/@?#")
+# Brackets are included so a stray ``[``/``]`` (e.g. ``a[xyz]`` from a
+# non-IPv6 authority) is rejected rather than flowing into a malformed URL or
+# being parsed as a Rich markup tag at a display site. A *well-formed* IPv6
+# literal never reaches here with brackets: ``_split_host_port`` strips them
+# before validating.
+_UNSAFE_HOST_CHARS = frozenset("/@?#[]")
 
 # Bad COMFY_LOCAL_URL values already warned about this process, so a resolver
 # invoked at several sites per command doesn't spam identical warnings.
 _warned: set[str] = set()
 
 
-def parse_local_url(value: str) -> tuple[str, int]:
+def parse_local_url(value: str) -> tuple[str, int | None]:
     """Parse a local ComfyUI address into ``(host, port)``.
 
-    Accepts ``http://host:port``, ``host:port``, or ``http://host`` (port
-    defaults to :data:`DEFAULT_PORT`). The scheme is optional and, when
-    present, must be ``http``. Bracketed IPv6 literals (``[::1]:8189``) are
-    supported and the brackets are stripped from the returned host. Raises
-    ``ValueError`` on any input that isn't a well-formed local address.
+    Accepts ``http://host:port``, ``host:port``, or ``http://host``. When the
+    value omits a port the returned port is ``None`` (not a defaulted 8188) so
+    the resolver can fall a host-only override through to a recorded background
+    port before the default — see :func:`resolve_local_host_port`. The scheme
+    is optional and, when present, must be ``http``. Bracketed IPv6 literals
+    (``[::1]:8189``) are supported and the brackets are stripped from the
+    returned host. Raises ``ValueError`` on any input that isn't a well-formed
+    local address.
     """
     v = value.strip()
     if not v:
@@ -69,8 +79,12 @@ def parse_local_url(value: str) -> tuple[str, int]:
     return _split_host_port(v)
 
 
-def _split_host_port(authority: str) -> tuple[str, int]:
-    """Split ``host[:port]`` (IPv6-aware) into a validated ``(host, port)``."""
+def _split_host_port(authority: str) -> tuple[str, int | None]:
+    """Split ``host[:port]`` (IPv6-aware) into a validated ``(host, port)``.
+
+    ``port`` is ``None`` when the authority carries no port, so the resolver
+    can distinguish "no port given" from an explicit value.
+    """
     if authority.startswith("["):
         end = authority.find("]")
         if end == -1:
@@ -82,15 +96,15 @@ def _split_host_port(authority: str) -> tuple[str, int]:
             # (e.g. ``[::1]8188``) is a typo we must not silently drop.
             if not rest.startswith(":"):
                 raise ValueError("unexpected text after ']'")
-            port = _to_port(rest[1:]) if rest[1:] else DEFAULT_PORT
+            port = _to_port(rest[1:]) if rest[1:] else None
         else:
-            port = DEFAULT_PORT
+            port = None
         return _validate_host(host), port
     if authority.count(":") == 1:  # host:port
         h, p = authority.split(":")
-        return _validate_host(h), (_to_port(p) if p else DEFAULT_PORT)
+        return _validate_host(h), (_to_port(p) if p else None)
     # zero colons -> hostname only; 2+ colons -> bare IPv6 literal (no port)
-    return _validate_host(authority), DEFAULT_PORT
+    return _validate_host(authority), None
 
 
 def _to_port(s: str) -> int:
@@ -131,8 +145,28 @@ def _env_local_host_port(env: Mapping[str, str] | None = None) -> tuple[str | No
     except ValueError as exc:
         if raw not in _warned:
             _warned.add(raw)
-            print(f"warning: ignoring invalid {ENV_LOCAL_URL}={raw!r}: {exc}", file=sys.stderr)
+            # Redact any ``user:pass@`` userinfo so credentials in a mistyped
+            # value aren't echoed to stderr / captured in CI logs. The value
+            # can also surface inside ``exc`` (e.g. an invalid-port token
+            # ``s3cret@host``), so redact the whole composed line, not just raw.
+            msg = f"warning: ignoring invalid {ENV_LOCAL_URL}={raw!r}: {exc}"
+            print(_redact_userinfo(msg), file=sys.stderr)
         return None, None
+
+
+# ``[scheme://]userinfo@`` — the userinfo (with an optional ``:password``) is
+# everything up to an ``@`` that isn't itself a delimiter/space.
+_USERINFO_RE = re.compile(r"([A-Za-z][A-Za-z0-9+.\-]*://)?[^\s/@'\"]+(?::[^\s/@'\"]*)?@")
+
+
+def _redact_userinfo(text: str) -> str:
+    """Mask any ``user:pass@`` userinfo in ``text`` so secrets aren't logged.
+
+    Deduplication still keys on the original raw value; only the *printed*
+    form is redacted. Applied to the whole warning line because the credential
+    can appear both in the echoed value and inside the parse error's message.
+    """
+    return _USERINFO_RE.sub(lambda m: f"{m.group(1) or ''}***@", text)
 
 
 def resolve_local_host_port(

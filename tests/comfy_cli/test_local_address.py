@@ -26,13 +26,13 @@ from comfy_cli.local_address import (
     [
         ("http://127.0.0.1:8189", ("127.0.0.1", 8189)),
         ("127.0.0.1:8189", ("127.0.0.1", 8189)),
-        ("http://localhost", ("localhost", 8188)),  # scheme, no port -> default
-        ("localhost", ("localhost", 8188)),  # bare host -> default port
+        ("http://localhost", ("localhost", None)),  # scheme, no port -> None (falls through)
+        ("localhost", ("localhost", None)),  # bare host -> no port
         ("http://example.test:9000/", ("example.test", 9000)),  # trailing path dropped
         ("[::1]:8189", ("::1", 8189)),  # bracketed IPv6 + port
         ("http://[::1]:8189", ("::1", 8189)),  # scheme + bracketed IPv6
-        ("[::1]", ("::1", 8188)),  # bracketed IPv6, no port
-        ("::1", ("::1", 8188)),  # bare IPv6 literal (2+ colons) -> no port
+        ("[::1]", ("::1", None)),  # bracketed IPv6, no port
+        ("::1", ("::1", None)),  # bare IPv6 literal (2+ colons) -> no port
         ("  http://127.0.0.1:8189  ", ("127.0.0.1", 8189)),  # whitespace stripped
         ("HTTP://127.0.0.1:8189", ("127.0.0.1", 8189)),  # scheme case-insensitive
     ],
@@ -56,6 +56,8 @@ def test_parse_local_url_valid(value, expected):
         "[::1:8189",  # unterminated bracket
         "[::1]x8189",  # junk after bracket
         "user@evil.com:8189",  # URL-special char (userinfo '@') in the authority
+        "a[xyz]",  # stray brackets in a non-IPv6 authority (markup-injection vector)
+        "a[xyz]:8189",  # same, with a port
     ],
 )
 def test_parse_local_url_invalid_raises(value):
@@ -101,6 +103,36 @@ def test_resolve_env_port_only_keeps_default_host():
     # the port falls through to the default (no port in the URL -> 8188).
     env = {ENV_LOCAL_URL: "http://envhost"}
     assert resolve_local_host_port(None, None, env=env) == ("envhost", DEFAULT_PORT)
+
+
+def test_resolve_host_only_env_falls_through_to_background_port():
+    # A host-only COMFY_LOCAL_URL must NOT shadow a recorded background port
+    # with a defaulted 8188: host comes from the env, port from background.
+    env = {ENV_LOCAL_URL: "http://envhost"}
+    assert resolve_local_host_port(None, None, background=("bghost", 9001, 4242), env=env) == ("envhost", 9001)
+
+
+def test_resolve_env_brackets_in_host_are_ignored_with_warning(capsys):
+    # A stray-bracket authority is malformed: ignored (not a live target), and
+    # never flows into a URL / Rich markup where it would corrupt output.
+    import comfy_cli.local_address as la
+
+    la._warned.clear()
+    env = {ENV_LOCAL_URL: "http://a[xyz]:8189"}
+    assert resolve_local_host_port(None, None, background=("bghost", 9001), env=env) == ("bghost", 9001)
+    assert ENV_LOCAL_URL in capsys.readouterr().err
+
+
+def test_resolve_invalid_env_warning_redacts_userinfo(capsys):
+    # Credentials in a mistyped value must not be echoed to stderr / CI logs.
+    import comfy_cli.local_address as la
+
+    la._warned.clear()
+    env = {ENV_LOCAL_URL: "http://user:s3cret@host/path"}  # '@' fails validation
+    resolve_local_host_port(None, None, env=env)
+    err = capsys.readouterr().err
+    assert "s3cret" not in err and "user" not in err
+    assert "***@host" in err
 
 
 def test_resolve_invalid_env_is_ignored_with_warning(capsys):
