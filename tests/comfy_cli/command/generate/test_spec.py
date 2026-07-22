@@ -130,6 +130,31 @@ def test_extract_enum_walks_items_and_variants():
     assert spec._extract_enum({"type": "array", "items": {"enum": ["x"]}}) == ["x"]
     assert spec._extract_enum({"anyOf": [{"type": "integer"}, {"enum": ["y"]}]}) == ["y"]
     assert spec._extract_enum({"oneOf": [{"items": {"enum": ["z"]}}]}) == ["z"]
-    # Non-string enums (and enum-less schemas) don't count.
-    assert spec._extract_enum({"enum": [1, 2]}) is None
+    # Numeric members coerce to their string form (unquoted YAML values);
+    # bools and enum-less schemas don't count.
+    assert spec._extract_enum({"enum": [1, 2.5]}) == ["1", "2.5"]
+    assert spec._extract_enum({"enum": [True, False]}) is None
     assert spec._extract_enum({"type": "string"}) is None
+
+
+def test_extract_enum_unions_anyof_and_intersects_allof():
+    # A spec that splits the model set across anyOf/oneOf branches surfaces
+    # every branch, deduped, not just the first.
+    assert spec._extract_enum({"anyOf": [{"enum": ["a", "b"]}, {"enum": ["b", "c"]}]}) == ["a", "b", "c"]
+    assert spec._extract_enum({"oneOf": [{"enum": ["x"]}, {"enum": ["y"]}]}) == ["x", "y"]
+    # allOf branches are constraints: only values valid in every branch count.
+    assert spec._extract_enum({"allOf": [{"enum": ["a", "b", "c"]}, {"enum": ["b", "c", "d"]}]}) == ["b", "c"]
+    # An empty allOf intersection means no usable enum.
+    assert spec._extract_enum({"allOf": [{"enum": ["a"]}, {"enum": ["b"]}]}) is None
+    # An enum-less allOf branch constrains nothing.
+    assert spec._extract_enum({"allOf": [{"type": "string"}, {"enum": ["k"]}]}) == ["k"]
+
+
+def test_find_property_descends_top_level_composition():
+    # A request body composed via top-level allOf/anyOf/oneOf still surfaces
+    # its model property instead of silently falling back to hardcoded lists.
+    composed = {"allOf": [{"type": "object"}, {"properties": {"model": {"enum": ["m1"]}}}]}
+    assert spec._find_property(composed, "model") == {"enum": ["m1"]}
+    nested = {"anyOf": [{"oneOf": [{"properties": {"model": {"enum": ["m2"]}}}]}]}
+    assert spec._find_property(nested, "model") == {"enum": ["m2"]}
+    assert spec._find_property({"allOf": [{"type": "object"}]}, "model") is None

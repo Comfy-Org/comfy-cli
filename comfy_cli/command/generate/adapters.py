@@ -27,6 +27,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 
@@ -307,4 +308,11 @@ def resolve_path(template: str, values: dict, adapter: Adapter) -> str:
                 break
     if not val:
         raise ApiError(0, "", f"Missing --{adapter.path_param}: required to fill in the URL path.")
-    return template.replace("{" + adapter.path_param + "}", str(val))
+    # The value may come from a spec-derived enum (refreshable cache), so pin it
+    # to a single path segment: percent-encode reserved characters ("/", "?",
+    # "#", …) and reject dot segments outright — a tampered spec must not be
+    # able to redirect the proxied request via path traversal.
+    val = str(val)
+    if val in (".", ".."):
+        raise ApiError(0, "", f"Invalid --{adapter.path_param} value: {val!r}.")
+    return template.replace("{" + adapter.path_param + "}", quote(val, safe=""))

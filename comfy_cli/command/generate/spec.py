@@ -402,10 +402,15 @@ def get_endpoint(endpoint_id: str) -> Endpoint:
 def _extract_enum(prop: dict[str, Any]) -> list[str] | None:
     """Pull a string enum out of a resolved property schema — directly, from
     ``items`` (array-typed fields), or from ``anyOf``/``oneOf``/``allOf``
-    variants. Returns None when no non-empty string enum is found."""
+    variants. ``anyOf``/``oneOf`` branches are unioned (a spec may split the
+    model set across variants) while ``allOf`` branches are intersected (every
+    constraint must hold). Numeric members are coerced to their string form so
+    an unquoted YAML value like ``3.5`` isn't silently dropped. Returns None
+    when no non-empty string enum is found."""
     enum = prop.get("enum")
     if isinstance(enum, list):
-        values = [v for v in enum if isinstance(v, str)]
+        values = [str(v) if isinstance(v, int | float) and not isinstance(v, bool) else v for v in enum]
+        values = [v for v in values if isinstance(v, str)]
         if values:
             return values
     items = prop.get("items")
@@ -413,15 +418,25 @@ def _extract_enum(prop: dict[str, Any]) -> list[str] | None:
         found = _extract_enum(items)
         if found:
             return found
-    for key in ("anyOf", "oneOf", "allOf"):
+    for key in ("anyOf", "oneOf"):
         variants = prop.get(key)
         if not isinstance(variants, list):
             continue
+        merged: list[str] = []
         for variant in variants:
             if isinstance(variant, dict):
                 found = _extract_enum(variant)
                 if found:
-                    return found
+                    merged.extend(v for v in found if v not in merged)
+        if merged:
+            return merged
+    all_of = prop.get("allOf")
+    if isinstance(all_of, list):
+        branch_enums = [e for v in all_of if isinstance(v, dict) if (e := _extract_enum(v))]
+        if branch_enums:
+            intersected = [v for v in branch_enums[0] if all(v in b for b in branch_enums[1:])]
+            if intersected:
+                return intersected
     return None
 
 
@@ -438,13 +453,32 @@ def model_enum(endpoint_id: str, field: str = "model") -> list[str] | None:
         endpoint = get_endpoint(endpoint_id)
     except SpecError:
         return None
-    props = (endpoint.request_schema or {}).get("properties")
-    if not isinstance(props, dict):
-        return None
-    prop = props.get(field)
-    if not isinstance(prop, dict):
+    prop = _find_property(endpoint.request_schema or {}, field)
+    if prop is None:
         return None
     return _extract_enum(prop)
+
+
+def _find_property(schema: dict[str, Any], field: str) -> dict[str, Any] | None:
+    """Locate ``field`` in ``schema['properties']``, descending into top-level
+    ``allOf``/``anyOf``/``oneOf`` composition when the schema carries no direct
+    match — a composed request body must not silently defeat the spec-derived
+    enum and fall back to the hardcoded list."""
+    props = schema.get("properties")
+    if isinstance(props, dict):
+        prop = props.get(field)
+        if isinstance(prop, dict):
+            return prop
+    for key in ("allOf", "anyOf", "oneOf"):
+        variants = schema.get(key)
+        if not isinstance(variants, list):
+            continue
+        for variant in variants:
+            if isinstance(variant, dict):
+                found = _find_property(variant, field)
+                if found is not None:
+                    return found
+    return None
 
 
 def _unknown_endpoint_message(endpoint_id: str) -> str:

@@ -128,6 +128,18 @@ def test_gemini_resolve_path_substitutes_model():
     assert url == "/proxy/vertexai/gemini/gemini-2.5-flash-image"
 
 
+def test_resolve_path_pins_value_to_one_segment():
+    """A path-param value can come from a refreshable spec cache — reserved
+    characters are percent-encoded and dot segments rejected, so a tampered
+    enum can't redirect the proxied request."""
+    ep = spec.get_endpoint("nano-banana")
+    adapter = adapters.get(ep.id)
+    url = adapters.resolve_path(ep.path, {"model": "../../admin?x=1#f"}, adapter)
+    assert url == "/proxy/vertexai/gemini/..%2F..%2Fadmin%3Fx%3D1%23f"
+    with pytest.raises(adapters.ApiError):
+        adapters.resolve_path(ep.path, {"model": ".."}, adapter)
+
+
 def test_gemini_send_request_hits_substituted_path(monkeypatch):
     captured = {}
 
