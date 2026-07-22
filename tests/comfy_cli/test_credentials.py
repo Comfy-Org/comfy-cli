@@ -255,6 +255,127 @@ class TestGetSession:
         assert cred is not None and cred.access_token == "forced"
 
 
+class TestResolveAllowClear:
+    """``resolve_cloud_credential(allow_clear=...)`` plumbs the flag through
+    ``get_session`` into ``ensure_fresh_session`` so a best-effort caller (the
+    local partner-node injector, BE-3361) can REFRESH a lapsed session without
+    ever CLEARING it on a fatal refresh error.
+
+    Exercised against the real secret store (tmp secrets file) so the whole
+    ``resolve_cloud_credential → get_session → ensure_fresh_session →
+    _locked_refresh`` stack — including the ``clear_cloud_session`` decision — is
+    covered end-to-end, not just the boundary.
+    """
+
+    @pytest.fixture
+    def persisted(self, tmp_path, monkeypatch: pytest.MonkeyPatch):
+        path = tmp_path / "secrets.json"
+        monkeypatch.setattr(auth_store, "secrets_path", lambda: path)
+        monkeypatch.delenv("COMFY_CLOUD_API_KEY", raising=False)
+        monkeypatch.delenv("COMFY_API_KEY", raising=False)
+        return path
+
+    def _persist_expired(self):
+        import time
+
+        auth_store.save_cloud_session(
+            base_url="https://cloud.comfy.org",
+            resource="https://cloud.comfy.org/api",
+            client_id="cid",
+            scope="s",
+            access_token="AT-stale",
+            refresh_token="RT0",
+            token_type="Bearer",
+            expires_at=int(time.time()) - 10,  # already lapsed
+        )
+
+    def test_allow_clear_forwarded_to_ensure_fresh_session(self, clean_env):
+        """The flag reaches the refresher (cheap boundary check)."""
+        seen: dict = {}
+
+        def _refresh(**kw):
+            seen.update(kw)
+            return None
+
+        clean_env.setattr(oauth, "ensure_fresh_session", _refresh)
+        resolve_cloud_credential(purpose="cloud", refresh=True, allow_clear=False)
+        assert seen.get("allow_clear") is False
+
+    def test_allow_clear_defaults_true(self, clean_env):
+        seen: dict = {}
+
+        def _refresh(**kw):
+            seen.update(kw)
+            return None
+
+        clean_env.setattr(oauth, "ensure_fresh_session", _refresh)
+        resolve_cloud_credential(purpose="cloud", refresh=True)
+        assert seen.get("allow_clear") is True
+
+    def test_expired_session_is_refreshed(self, persisted, monkeypatch: pytest.MonkeyPatch):
+        """Expired session + valid refresh token → a refresh happens and the
+        NEW access token is returned (the BE-3361 fix)."""
+        import time
+
+        self._persist_expired()
+
+        def _refreshed(**kw):
+            return oauth.TokenSet(
+                access_token="AT-fresh",
+                refresh_token="RT1",
+                token_type="Bearer",
+                expires_in=3600,
+                expires_at=int(time.time()) + 3600,
+                scope="s",
+            )
+
+        monkeypatch.setattr(oauth, "refresh_tokens", _refreshed)
+        cred = resolve_cloud_credential(purpose="cloud", refresh=True, allow_clear=False)
+        assert cred == Credential(kind="oauth", value="AT-fresh", source="session")
+
+    def test_fatal_refresh_allow_clear_false_preserves_session_and_falls_through(
+        self, persisted, monkeypatch: pytest.MonkeyPatch
+    ):
+        """A fatal refresh error with ``allow_clear=False`` must NOT clear the
+        stored session; the resolver falls through to the env/stored key."""
+        self._persist_expired()
+        monkeypatch.setenv("COMFY_CLOUD_API_KEY", "env-key")
+
+        def _boom(**kw):
+            raise oauth.OAuthRefreshError(
+                "refresh failed: HTTP 400",
+                details={"status": 400, "body": "invalid_grant: refresh token reuse detected"},
+            )
+
+        monkeypatch.setattr(oauth, "refresh_tokens", _boom)
+        cred = resolve_cloud_credential(purpose="cloud", refresh=True, allow_clear=False)
+        # fell through to the env key...
+        assert cred == Credential(kind="api_key", value="env-key", source="env:COMFY_CLOUD_API_KEY")
+        # ...and the shared login was NOT destroyed.
+        assert auth_store.get_cloud_session() is not None
+        assert auth_store.get_cloud_session().refresh_token == "RT0"
+
+    def test_transient_refresh_failure_returns_stale_and_falls_through(
+        self, persisted, monkeypatch: pytest.MonkeyPatch
+    ):
+        """A transient (network) refresh failure returns the stale session,
+        which fails its own expiry check → resolver falls through. Same as the
+        pre-BE-3361 behavior on a flake; the session is preserved."""
+        self._persist_expired()
+        monkeypatch.setenv("COMFY_CLOUD_API_KEY", "env-key")
+
+        def _flake(**kw):
+            raise oauth.OAuthRefreshError(
+                "refresh failed: <urlopen error>",
+                details={"status": 0, "body": ""},  # transient, non-fatal
+            )
+
+        monkeypatch.setattr(oauth, "refresh_tokens", _flake)
+        cred = resolve_cloud_credential(purpose="cloud", refresh=True, allow_clear=False)
+        assert cred == Credential(kind="api_key", value="env-key", source="env:COMFY_CLOUD_API_KEY")
+        assert auth_store.get_cloud_session() is not None  # stale session kept
+
+
 # ---------------------------------------------------------------------------
 # 2. no-direct-reads ratchet
 # ---------------------------------------------------------------------------

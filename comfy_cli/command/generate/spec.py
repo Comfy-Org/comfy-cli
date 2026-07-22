@@ -423,25 +423,23 @@ def _unknown_endpoint_message(endpoint_id: str) -> str:
     return msg
 
 
-def validate_spec_text(yaml_text: str) -> dict[str, Any]:
-    """Parse `yaml_text` and confirm it looks like an OpenAPI document.
+def validate_spec_text(text: str) -> dict[str, Any]:
+    """Parse a raw openapi spec body with the same loader ``load_raw_spec`` uses
+    and require a top-level ``paths`` mapping.
 
-    `_refresh()` fetches a live URL (following redirects), so a non-spec 200 —
-    an HTML error/interstitial, a redirect landing page, or a JSON array/scalar —
-    is entirely possible. Such a body must NOT be cached: `_select_spec_path()`
-    would keep serving it for the full `CACHE_TTL_SECONDS` (7 days) with no
-    fallback to the bundled spec, and `base_url()`/`_registry()` would then call
-    `.get()` on a non-mapping and crash every `generate` subcommand for a week.
-    Raises `SpecError` if the body is not a mapping shaped like an OpenAPI spec.
+    The body may be YAML or JSON — JSON is a subset of YAML 1.2, and
+    ``_YamlLoader`` only restricts bool resolution, so a JSON spec (as served at
+    ``api.comfy.org/openapi``) parses. Raises :class:`SpecError` if the body does
+    not parse or lacks ``paths``; callers use this to avoid caching a
+    200-with-garbage response, which would poison the on-disk cache for
+    ``CACHE_TTL_SECONDS``.
     """
     try:
-        parsed = yaml.load(yaml_text, Loader=_YamlLoader)
+        parsed = yaml.load(text, Loader=_YamlLoader)
     except yaml.YAMLError as e:
-        raise SpecError(f"response did not parse as YAML/JSON: {e}") from e
-    if not isinstance(parsed, dict):
-        raise SpecError(f"expected an OpenAPI mapping, got {type(parsed).__name__}")
-    if "openapi" not in parsed and "paths" not in parsed:
-        raise SpecError("response is not an OpenAPI document (missing both 'openapi' and 'paths')")
+        raise SpecError(f"spec did not parse: {e}") from e
+    if not isinstance(parsed, dict) or not isinstance(parsed.get("paths"), dict):
+        raise SpecError("spec has no top-level 'paths' mapping")
     return parsed
 
 
