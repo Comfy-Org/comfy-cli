@@ -5,6 +5,11 @@ on:
       - main
     paths:
       - comfy_cli/**
+      # The smoke test below pip-installs comfy-cli, so dependency changes must
+      # run it too — an unpinned transitive dep (mixpanel 5.x -> pydantic-core)
+      # is exactly what broke `comfy install` on Windows.
+      - pyproject.toml
+      - .github/workflows/test-windows.yml
 
 permissions:
   contents: read
