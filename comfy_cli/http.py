@@ -82,6 +82,39 @@ def build_http_only_opener(*handlers: urllib.request.BaseHandler) -> urllib.requ
 
 _AUTHED_OPENER = build_http_only_opener(NoRedirectHandler())
 
+# The uncredentialed fetches — the template gallery on raw.githubusercontent.com
+# and the REST calls against a local ``http://{host}:{port}`` ComfyUI server.
+# These reached for ``urllib.request.urlopen()``, i.e. the global default
+# opener, which also speaks ``file://``, ``ftp://`` and ``data:``. Nothing here
+# attaches a credential header, so unlike ``_AUTHED_OPENER`` there is no
+# redirect-replay exposure and ``HTTPRedirectHandler`` is installed explicitly
+# to keep the redirect-following those call sites have always had. What the
+# pinning buys is that a URL which stops being trusted — a gallery URL that
+# becomes configurable, say — still can't be steered into a local-file read.
+_PLAIN_OPENER = build_http_only_opener(urllib.request.HTTPRedirectHandler())
+
+
+def plain_urlopen(url, *, timeout: float = 30.0):
+    """Open an uncredentialed request via the http(s)-only shared opener.
+
+    ``url`` is a full URL or a prepared ``Request``. Redirects are followed, as
+    they were when these call sites used the global default opener.
+    """
+    return _PLAIN_OPENER.open(url, timeout=timeout)
+
+
+def no_redirect_urlopen(url, *, timeout: float = 30.0):
+    """Open a prepared credential-bearing ``Request`` without following redirects.
+
+    ``authed_urlopen`` covers the common case where the credential rides a
+    header we attach ourselves. This is the escape hatch for a request whose
+    credential the caller has already placed somewhere we can't build — the
+    ``/prompt`` submit carries ``api_key_comfy_org`` inside its JSON body — and
+    which therefore wants the same no-redirect policy without the header
+    mechanics.
+    """
+    return _AUTHED_OPENER.open(url, timeout=timeout)
+
 
 def build_authed_request(
     url: str,

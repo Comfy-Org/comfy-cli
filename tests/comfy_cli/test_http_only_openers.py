@@ -20,9 +20,10 @@ from comfy_cli.cql import engine, loader
 
 NON_HTTP_URLS = ["file:///etc/passwd", "ftp://example.com/x", "data:text/plain,hi"]
 
-# Every opener the CLI builds, including _DOWNLOAD_OPENER: it deliberately
-# follows redirects (its own handler strips auth headers and re-checks the
-# scheme), but it should be scheme-pinned like the rest.
+# Every opener the CLI builds, including the ones that deliberately follow
+# redirects (_DOWNLOAD_OPENER strips auth headers and re-checks the scheme in
+# its own handler; _PLAIN_OPENER carries nothing to leak). All of them should
+# be scheme-pinned regardless.
 OPENERS = [
     ("http._AUTHED_OPENER", http._AUTHED_OPENER),
     ("comfy_client._OPENER", comfy_client._OPENER),
@@ -31,8 +32,14 @@ OPENERS = [
     ("cloud.oauth._OAUTH_OPENER", oauth._OAUTH_OPENER),
     ("transfer._TRANSFER_OPENER", transfer._TRANSFER_OPENER),
     ("transfer._DOWNLOAD_OPENER", transfer._DOWNLOAD_OPENER),
+    ("http._PLAIN_OPENER", http._PLAIN_OPENER),
 ]
 OPENER_IDS = [name for name, _ in OPENERS]
+
+# _PLAIN_OPENER carries no credentials and must keep following redirects: its
+# call sites used urllib's global default opener before, which follows them.
+# Pinning the scheme must not silently turn it into a no-redirect opener.
+REDIRECT_FOLLOWING = ["http._PLAIN_OPENER"]
 
 
 @pytest.mark.parametrize("opener", [o for _, o in OPENERS], ids=OPENER_IDS)
@@ -52,10 +59,13 @@ def test_opener_handler_set(opener):
     assert not names & {"FileHandler", "FTPHandler", "DataHandler"}
 
 
+_NO_REDIRECT = [n for n, _ in OPENERS if n != "transfer._DOWNLOAD_OPENER" and n not in REDIRECT_FOLLOWING]
+
+
 @pytest.mark.parametrize(
     ("name", "opener"),
-    [(n, o) for n, o in OPENERS if n != "transfer._DOWNLOAD_OPENER"],
-    ids=[n for n, _ in OPENERS if n != "transfer._DOWNLOAD_OPENER"],
+    [(n, o) for n, o in OPENERS if n in _NO_REDIRECT],
+    ids=_NO_REDIRECT,
 )
 def test_credentialed_openers_refuse_redirects(name, opener):
     """Every opener that carries credentials keeps its NoRedirectHandler."""
@@ -67,6 +77,21 @@ def test_download_opener_still_follows_redirects():
     must not turn it into a no-redirect opener."""
     assert any(isinstance(h, transfer._DownloadRedirectHandler) for h in transfer._DOWNLOAD_OPENER.handlers)
     assert not any(isinstance(h, http.NoRedirectHandler) for h in transfer._DOWNLOAD_OPENER.handlers)
+
+
+@pytest.mark.parametrize(
+    ("name", "opener"),
+    [(n, o) for n, o in OPENERS if n in REDIRECT_FOLLOWING],
+    ids=REDIRECT_FOLLOWING,
+)
+def test_uncredentialed_openers_still_follow_redirects(name, opener):
+    """These sites used urllib's global default opener, which follows
+    redirects. They carry no credential, so there is nothing to replay at the
+    redirect target — pinning the scheme must not silently make a 30x start
+    raising HTTPError at call sites that transparently followed it before."""
+    redirect_handlers = [h for h in opener.handlers if isinstance(h, urllib.request.HTTPRedirectHandler)]
+    assert redirect_handlers, f"{name} lost its redirect handler"
+    assert not any(isinstance(h, http.NoRedirectHandler) for h in redirect_handlers)
 
 
 def test_build_http_only_opener_installs_caller_handlers():

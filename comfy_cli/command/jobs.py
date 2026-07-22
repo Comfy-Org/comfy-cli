@@ -36,7 +36,7 @@ from websocket import WebSocket, WebSocketException, WebSocketTimeoutException
 from comfy_cli import cancellation, execution_errors, tracking
 from comfy_cli.env_checker import check_comfy_server_running
 from comfy_cli.host_port import resolve_host_port as _resolve_host_port
-from comfy_cli.http import authed_urlopen
+from comfy_cli.http import authed_urlopen, plain_urlopen
 from comfy_cli.output import get_renderer
 from comfy_cli.where import cloud_preflight_or_exit
 
@@ -84,7 +84,7 @@ def _server_or_error(host: str, port: int, *, raise_on_missing: bool = True) -> 
 def _http_get_json(url: str, *, timeout: float = 10.0) -> Any:
     req = urllib.request.Request(url)
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with plain_urlopen(req, timeout=timeout) as resp:
             return json.loads(resp.read())
     except urllib.error.URLError as e:
         raise RuntimeError(f"failed to GET {url}: {e}") from e
@@ -992,7 +992,7 @@ def _local_cancel(prompt_id: str, host: str, port: int) -> None:
     )
     queue_ok = True
     try:
-        with urllib.request.urlopen(queue_req, timeout=10) as resp:
+        with plain_urlopen(queue_req, timeout=10) as resp:
             _ = resp.read()
     except (urllib.error.HTTPError, urllib.error.URLError, OSError):
         # Server refused the delete; common when the prompt isn't in queue.
@@ -1016,7 +1016,7 @@ def _local_cancel(prompt_id: str, host: str, port: int) -> None:
     if prompt_id in running_ids:
         interrupt_req = urllib.request.Request(f"{base}/interrupt", method="POST")
         try:
-            with urllib.request.urlopen(interrupt_req, timeout=10) as resp:
+            with plain_urlopen(interrupt_req, timeout=10) as resp:
                 _ = resp.read()
         except (urllib.error.HTTPError, urllib.error.URLError, OSError):
             interrupt_ok = False

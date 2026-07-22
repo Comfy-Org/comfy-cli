@@ -7,7 +7,7 @@ from unittest.mock import patch
 import pytest
 
 import comfy_cli.http as http_mod
-from comfy_cli.http import NoRedirectHandler, authed_urlopen, build_authed_request
+from comfy_cli.http import NoRedirectHandler, authed_urlopen, build_authed_request, no_redirect_urlopen
 
 
 def _target(*, api_key=None, auth_token=None):
@@ -134,6 +134,35 @@ def test_migrated_caller_propagates_refused_redirect():
         with pytest.raises(urllib.error.HTTPError) as exc_info:
             _http_get_json("https://x/api/assets", _target(api_key="k"))
     assert exc_info.value.code == 302
+
+
+# ---------------------------------------------------------------------------
+# no_redirect_urlopen
+# ---------------------------------------------------------------------------
+
+
+def test_no_redirect_urlopen_uses_no_redirect_opener():
+    """A prepared Request goes through _AUTHED_OPENER untouched — no header is
+    attached, since this helper's callers carry their credential themselves."""
+    sentinel = object()
+    req = urllib.request.Request("http://127.0.0.1:8188/prompt", data=b"{}", method="POST")
+    with patch.object(http_mod._AUTHED_OPENER, "open", return_value=sentinel) as opened:
+        result = no_redirect_urlopen(req, timeout=15)
+    assert result is sentinel
+    assert opened.call_args.args[0] is req
+    assert opened.call_args.kwargs["timeout"] == 15
+
+
+def test_no_redirect_urlopen_propagates_refused_redirect():
+    """The /prompt submit embeds a credential in its body, so a 30x must raise
+    rather than be followed — we don't lean on urllib dropping the body."""
+    err = urllib.error.HTTPError(
+        "http://127.0.0.1:8188/prompt", 307, "redirect refused", http.client.HTTPMessage(), None
+    )
+    with patch.object(http_mod._AUTHED_OPENER, "open", side_effect=err):
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            no_redirect_urlopen(urllib.request.Request("http://127.0.0.1:8188/prompt"))
+    assert exc_info.value.code == 307
 
 
 @pytest.mark.parametrize("url", ["file:///etc/passwd", "ftp://example.com/x", "data:text/plain,hi"])
