@@ -306,6 +306,131 @@ class TestWidgetOrder:
 
 
 # ===========================================================================
+# TestWidgetOrderDynamicCombo
+# ===========================================================================
+
+
+def _dynamic_combo_object_info() -> dict:
+    """A COMFY_DYNAMICCOMBO_V3 node with a nested dynamic combo among one
+    option's sub-inputs, plus connection-only subs that own no value slot."""
+    return {
+        "DynNode": {
+            "input": {
+                "required": {
+                    "prompt": ["STRING", {"default": ""}],
+                    "model": [
+                        "COMFY_DYNAMICCOMBO_V3",
+                        {
+                            "options": [
+                                {
+                                    "key": "alpha",
+                                    "inputs": {
+                                        "required": {
+                                            "size": ["COMBO", {"options": ["S", "M"]}],
+                                            "width": ["INT", {"default": 512}],
+                                            "images": ["COMFY_AUTOGROW_V3", {"min": 0}],
+                                        }
+                                    },
+                                },
+                                {
+                                    "key": "beta",
+                                    "inputs": {
+                                        "required": {
+                                            "mode": [
+                                                "COMFY_DYNAMICCOMBO_V3",
+                                                {
+                                                    "options": [
+                                                        {
+                                                            "key": "fast",
+                                                            "inputs": {"required": {"steps": ["INT", {"default": 4}]}},
+                                                        },
+                                                        {
+                                                            "key": "slow",
+                                                            "inputs": {
+                                                                "required": {
+                                                                    "steps": ["INT", {"default": 50}],
+                                                                    "refine": ["BOOLEAN", {"default": True}],
+                                                                }
+                                                            },
+                                                        },
+                                                    ]
+                                                },
+                                            ],
+                                        }
+                                    },
+                                },
+                            ]
+                        },
+                    ],
+                    "seed": ["INT", {"default": 0, "control_after_generate": True}],
+                },
+            },
+            "input_order": {"required": ["prompt", "model", "seed"]},
+            "output": ["IMAGE"],
+            "output_name": ["IMAGE"],
+            "category": "test",
+            "display_name": "DynNode",
+            "python_module": "nodes",
+        }
+    }
+
+
+class TestWidgetOrderDynamicCombo:
+    """Value-aware order expansion for COMFY_DYNAMICCOMBO_V3 ports."""
+
+    @pytest.fixture
+    def dyn_graph(self) -> Graph:
+        return Graph.from_object_info(_dynamic_combo_object_info())
+
+    def test_dynamic_combo_is_widget_not_link(self, dyn_graph: Graph):
+        m = dyn_graph.node("DynNode")
+        model = next(p for p in m.inputs if p.name == "model")
+        assert model.is_link is False
+        assert model.enum_values == ["alpha", "beta"]
+        assert len(model.dynamic_options) == 2
+
+    def test_value_independent_order_has_selector_only(self, dyn_graph: Graph):
+        assert dyn_graph.widget_order("DynNode") == ["prompt", "model", "seed", "control_after_generate"]
+
+    def test_value_aware_order_expands_selected_option(self, dyn_graph: Graph):
+        order = dyn_graph.widget_order_for_node("DynNode", ["p", "alpha", "S", 512, 0, "fixed"])
+        # connection-only sub (COMFY_AUTOGROW_V3 images) contributes no slot.
+        assert order == ["prompt", "model", "model.size", "model.width", "seed", "control_after_generate"]
+
+    def test_value_aware_order_recurses_nested_dynamic_combo(self, dyn_graph: Graph):
+        order = dyn_graph.widget_order_for_node("DynNode", ["p", "beta", "slow", 50, True, 0, "fixed"])
+        assert order == [
+            "prompt",
+            "model",
+            "model.mode",
+            "model.mode.steps",
+            "model.mode.refine",
+            "seed",
+            "control_after_generate",
+        ]
+
+    def test_unknown_selector_expands_nothing(self, dyn_graph: Graph):
+        order = dyn_graph.widget_order_for_node("DynNode", ["p", "gone", 0, "fixed"])
+        assert order == ["prompt", "model", "seed", "control_after_generate"]
+
+    def test_nested_selector_change_rebuilds_inner_roster(self, dyn_graph: Graph):
+        wf = {"nodes": [{"id": 1, "type": "DynNode", "widgets_values": ["p", "beta", "fast", 4, 7, "fixed"]}]}
+        out, warnings = dyn_graph.apply_slots(wf, {"1.model.mode": "slow"})
+        assert [w["code"] for w in warnings] == ["dynamic_combo_roster_rebuilt"]
+        # fast's [steps=4] roster is replaced by slow's defaults [steps=50, refine=True];
+        # the trailing seed + control marker stay aligned.
+        assert out["nodes"][0]["widgets_values"] == ["p", "beta", "slow", 50, True, 7, "fixed"]
+
+    def test_outer_selector_change_replaces_nested_span(self, dyn_graph: Graph):
+        wf = {"nodes": [{"id": 1, "type": "DynNode", "widgets_values": ["p", "beta", "slow", 50, True, 7, "fixed"]}]}
+        out, warnings = dyn_graph.apply_slots(wf, {"1.model": "alpha"})
+        assert [w["code"] for w in warnings] == ["dynamic_combo_roster_rebuilt"]
+        # the whole nested span (mode, mode.steps, mode.refine) is replaced by
+        # alpha's defaults (size first-enum, width default).
+        assert out["nodes"][0]["widgets_values"] == ["p", "alpha", "S", 512, 7, "fixed"]
+
+
+# ===========================================================================
 # TestTraversal
 # ===========================================================================
 
@@ -1385,12 +1510,12 @@ def test_slot_address_with_dotted_input_name(graph, monkeypatch):
         inputs = []  # no declared inputs -> _write_widget skips shape/catalog validation
 
     real_node = graph.node
-    real_order = graph.widget_order
+    real_order = graph.widget_order_for_node
     monkeypatch.setattr(graph, "node", lambda nt: _FakeMeta() if nt == "DottedWidgetNode" else real_node(nt))
     monkeypatch.setattr(
         graph,
-        "widget_order",
-        lambda nt: ["images.image0"] if nt == "DottedWidgetNode" else real_order(nt),
+        "widget_order_for_node",
+        lambda nt, wv: ["images.image0"] if nt == "DottedWidgetNode" else real_order(nt, wv),
     )
 
     wf = {
