@@ -251,7 +251,7 @@ requires-dist = [
     { name = "gitpython", specifier = ">=3.1.50" },
     { name = "httpx" },
     { name = "jsonschema", marker = "extra == 'dev'" },
-    { name = "mixpanel" },
+    { name = "mixpanel", specifier = "<5" },
     { name = "packaging" },
     { name = "pathspec" },
     { name = "posthog", specifier = ">=6,<8" },
