@@ -613,7 +613,7 @@ def install(
 def update(
     target: str = typer.Argument(
         "comfy",
-        help="[all|comfy|cli]",
+        help="\\[all|comfy|cli]",
         autocompletion=utils.create_choice_completer(["all", "comfy", "cli"]),
     ),
 ):
