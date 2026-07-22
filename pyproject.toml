@@ -35,7 +35,11 @@ dependencies = [
   "cookiecutter",
   "gitpython>=3.1.50",
   "httpx",
-  "mixpanel",
+  # mixpanel 5.x pulls in pydantic/pydantic-core; the compiled pydantic_core DLL
+  # gets loaded by `comfy install` and then cannot be replaced when ComfyUI's
+  # requirements resolve a different version on Windows (os error 5). 4.x has no
+  # pydantic dependency.
+  "mixpanel<5",
   "packaging",
   "pathspec",
   "posthog>=6,<8",
