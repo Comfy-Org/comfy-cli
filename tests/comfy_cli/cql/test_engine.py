@@ -1422,3 +1422,255 @@ def test_load_from_target_refuses_non_loopback_local_host():
 
     with pytest.raises(LoadError, match="non-loopback"):
         _load_from_target(mode="local", host="example.com", port=8188)
+
+
+# ===========================================================================
+# TestDynamicComboInputs — BE-3358: selection-key enum + dotted sub-inputs
+# ===========================================================================
+
+
+@pytest.fixture
+def graph_dynamic() -> Graph:
+    """Graph built from the synthetic BE-3349-shaped dynamic-combo fixture:
+    a COMFY_DYNAMICCOMBO_V3 `model` input with two options carrying different
+    required sub-inputs (INT with min/max, an enum), one of which nests a
+    second dynamic combo (`model.mode` → `model.mode.budget`)."""
+    import json
+    from pathlib import Path
+
+    fixture = Path(__file__).parent.parent / "fixtures" / "dynamic_combo_object_info.json"
+    return Graph.from_object_info(json.loads(fixture.read_text()))
+
+
+class TestDynamicComboInputs:
+    """COMFY_DYNAMICCOMBO_V3 inputs (ClaudeNode.model, …): the flat value must
+    be a known selection key, and the selected option's required sub-inputs
+    must be present as dotted keys — mirroring the server's
+    _expand_schema_for_dynamic + required_input_missing checks."""
+
+    def _node(self, inputs: dict) -> dict:
+        return {"1": {"class_type": "ClaudeNode", "inputs": inputs}}
+
+    def test_valid_selection_with_all_sub_keys(self, graph_dynamic: Graph):
+        wf = self._node(
+            {
+                "prompt": "hi",
+                "model": "Opus 4.6",
+                "model.max_tokens": 800,
+                "model.mode": "fast",
+            }
+        )
+        result = graph_dynamic.validate_workflow(wf)
+        assert result["valid"] is True, result["errors"]
+        assert result["warnings"] == []
+
+    def test_missing_required_sub_key_errors(self, graph_dynamic: Graph):
+        """BE-3349 repro 1: {"model": "Opus 4.6"} with no sub-keys."""
+        wf = self._node({"prompt": "hi", "model": "Opus 4.6"})
+        result = graph_dynamic.validate_workflow(wf)
+        assert result["valid"] is False
+        missing = [e for e in result["errors"] if e["code"] == "required_input_missing"]
+        assert {e["field"] for e in missing} == {"model.max_tokens", "model.mode"}
+
+    def test_invalid_selection_key_errors(self, graph_dynamic: Graph):
+        """BE-3349 repro 2: unknown selection is a hard unknown_enum_value
+        carrying the full valid_options list."""
+        wf = self._node({"prompt": "hi", "model": "NotARealModel", "model.bogus_key": 5})
+        result = graph_dynamic.validate_workflow(wf)
+        assert result["valid"] is False
+        err = next(e for e in result["errors"] if e["code"] == "unknown_enum_value")
+        assert err["field"] == "model"
+        assert err["valid_options"] == ["Opus 4.6", "Haiku 4.5"]
+        # Sub-keys of an unknown selection can't be judged — no pile-on warning.
+        assert "unknown_input" not in [w["code"] for w in result["warnings"]]
+
+    def test_garbage_dotted_key_warns(self, graph_dynamic: Graph):
+        wf = self._node(
+            {
+                "prompt": "hi",
+                "model": "Opus 4.6",
+                "model.max_tokens": 800,
+                "model.mode": "fast",
+                "model.bogus_key": 5,
+            }
+        )
+        result = graph_dynamic.validate_workflow(wf)
+        # Extra keys are ignored by the server → warning, not error.
+        assert result["valid"] is True, result["errors"]
+        warn = next(w for w in result["warnings"] if w["code"] == "unknown_input")
+        assert warn["field"] == "model.bogus_key"
+        assert "model.max_tokens" in warn["hint"]
+
+    def test_out_of_range_sub_value_errors(self, graph_dynamic: Graph):
+        wf = self._node(
+            {
+                "prompt": "hi",
+                "model": "Opus 4.6",
+                "model.max_tokens": 999999,
+                "model.mode": "fast",
+            }
+        )
+        result = graph_dynamic.validate_workflow(wf)
+        assert result["valid"] is False
+        err = next(e for e in result["errors"] if e["code"] == "above_max")
+        assert err["field"] == "model.max_tokens"
+
+    def test_sub_value_shape_mismatch_errors(self, graph_dynamic: Graph):
+        wf = self._node(
+            {
+                "prompt": "hi",
+                "model": "Opus 4.6",
+                "model.max_tokens": "lots",
+                "model.mode": "fast",
+            }
+        )
+        result = graph_dynamic.validate_workflow(wf)
+        assert result["valid"] is False
+        err = next(e for e in result["errors"] if e["code"] == "shape_mismatch")
+        assert err["field"] == "model.max_tokens"
+        assert "model.max_tokens" in err["message"]
+
+    def test_enum_sub_input_membership_checked(self, graph_dynamic: Graph):
+        """A COMBO sub-input of the selected option gets the same hard enum
+        check as a top-level combo."""
+        wf = self._node(
+            {
+                "prompt": "hi",
+                "model": "Haiku 4.5",
+                "model.max_tokens": 100,
+                "model.style": "florid",
+            }
+        )
+        result = graph_dynamic.validate_workflow(wf)
+        assert result["valid"] is False
+        err = next(e for e in result["errors"] if e["code"] == "unknown_enum_value")
+        assert err["field"] == "model.style"
+        assert err["valid_options"] == ["concise", "detailed"]
+
+    def test_required_dynamic_port_absent_errors(self, graph_dynamic: Graph):
+        wf = self._node({"prompt": "hi"})
+        result = graph_dynamic.validate_workflow(wf)
+        assert result["valid"] is False
+        err = next(e for e in result["errors"] if e["code"] == "required_input_missing")
+        assert err["field"] == "model"
+        assert "Opus 4.6" in err["hint"]
+
+    def test_nested_selection_missing_required_sub_key(self, graph_dynamic: Graph):
+        """Nested dynamic combo: mode=thinking requires model.mode.budget."""
+        wf = self._node(
+            {
+                "prompt": "hi",
+                "model": "Opus 4.6",
+                "model.max_tokens": 800,
+                "model.mode": "thinking",
+            }
+        )
+        result = graph_dynamic.validate_workflow(wf)
+        assert result["valid"] is False
+        missing = [e for e in result["errors"] if e["code"] == "required_input_missing"]
+        assert {e["field"] for e in missing} == {"model.mode.budget"}
+
+    def test_nested_selection_valid_with_budget(self, graph_dynamic: Graph):
+        wf = self._node(
+            {
+                "prompt": "hi",
+                "model": "Opus 4.6",
+                "model.max_tokens": 800,
+                "model.mode": "thinking",
+                "model.mode.budget": 2048,
+            }
+        )
+        result = graph_dynamic.validate_workflow(wf)
+        assert result["valid"] is True, result["errors"]
+        assert result["warnings"] == []
+
+    def test_nested_invalid_selection_errors_without_pile_on(self, graph_dynamic: Graph):
+        wf = self._node(
+            {
+                "prompt": "hi",
+                "model": "Opus 4.6",
+                "model.max_tokens": 800,
+                "model.mode": "warp",
+                "model.mode.budget": 2048,
+            }
+        )
+        result = graph_dynamic.validate_workflow(wf)
+        assert result["valid"] is False
+        err = next(e for e in result["errors"] if e["code"] == "unknown_enum_value")
+        assert err["field"] == "model.mode"
+        assert err["valid_options"] == ["fast", "thinking"]
+        # model.mode.budget sits under the unresolved selection — no warning.
+        assert result["warnings"] == []
+
+    def test_optional_sub_input_absent_is_fine_but_range_checked_when_present(self, graph_dynamic: Graph):
+        wf = self._node(
+            {
+                "prompt": "hi",
+                "model": "Opus 4.6",
+                "model.max_tokens": 800,
+                "model.mode": "fast",
+                "model.temperature": 3.5,
+            }
+        )
+        result = graph_dynamic.validate_workflow(wf)
+        assert result["valid"] is False
+        err = next(e for e in result["errors"] if e["code"] == "above_max")
+        assert err["field"] == "model.temperature"
+
+    def test_link_valued_selection_is_skipped(self, graph_dynamic: Graph):
+        """A 2-list selection value is a link — treated as a no-op (no crash,
+        no selection error), matching the pre-BE-3358 behavior."""
+        wf = {
+            "0": {
+                "class_type": "ClaudeNode",
+                "inputs": {"prompt": "src", "model": "Haiku 4.5", "model.max_tokens": 1, "model.style": "concise"},
+            },
+            "1": {"class_type": "ClaudeNode", "inputs": {"prompt": "hi", "model": ["0", 0]}},
+        }
+        result = graph_dynamic.validate_workflow(wf)
+        codes = [e["code"] for e in result["errors"]]
+        assert "unknown_enum_value" not in codes
+        assert "required_input_missing" not in codes
+
+    def test_malformed_options_are_skipped(self):
+        """Non-dict options and options missing key/inputs parse to nothing —
+        validation degrades to the old lenient behavior instead of crashing."""
+        info = {
+            "Foo": {
+                "input": {
+                    "required": {
+                        "shape": [
+                            "COMFY_DYNAMICCOMBO_V3",
+                            {
+                                "options": [
+                                    "not-a-dict",
+                                    {"key": 42, "inputs": {"required": {}}},
+                                    {"key": "no-inputs"},
+                                    {"key": "square", "inputs": "not-a-dict"},
+                                ]
+                            },
+                        ]
+                    }
+                },
+                "input_order": {"required": ["shape"]},
+                "output": [],
+                "output_name": [],
+                "output_node": True,
+                "display_name": "Foo",
+                "python_module": "nodes",
+            }
+        }
+        g = Graph.from_object_info(info)
+        port = g.node("Foo").inputs[0]
+        assert port.selection_keys == []
+        result = g.validate_workflow({"1": {"class_type": "Foo", "inputs": {"shape": "anything"}}})
+        assert result["valid"] is True, result["errors"]
+
+    def test_describe_exposes_selection_keys(self, graph_dynamic: Graph):
+        desc = graph_dynamic.morphism_to_dict(graph_dynamic.node("ClaudeNode"))
+        model = next(i for i in desc["inputs"] if i["name"] == "model")
+        assert model["selection_keys"] == ["Opus 4.6", "Haiku 4.5"]
+        # enum_values contract untouched: selection keys are not flat choices.
+        assert model["choices"] == []
+        prompt = next(i for i in desc["inputs"] if i["name"] == "prompt")
+        assert "selection_keys" not in prompt
