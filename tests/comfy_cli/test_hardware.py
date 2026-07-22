@@ -177,6 +177,10 @@ class TestDetectHardwareNeverRaises:
             patch.object(hardware.platform, "system", side_effect=RuntimeError),
             patch.object(hardware.platform, "machine", side_effect=RuntimeError),
             patch.object(hardware.platform, "release", side_effect=RuntimeError),
+            # Block the real GPU probes too: without these, a dev box with an
+            # actual GPU detects it and the `gpu is None` assert fails.
+            patch.object(hardware, "_run", side_effect=TimeoutError("boom")),
+            patch.object(hardware.cuda_detect, "_load_libcuda", side_effect=OSError),
         ):
             hw = hardware.detect_hardware()
         assert hw["os"] is None
