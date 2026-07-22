@@ -613,7 +613,7 @@ def install(
 def update(
     target: str = typer.Argument(
         "comfy",
-        help="[all|comfy|cli]",
+        help="\\[all|comfy|cli]",
         autocompletion=utils.create_choice_completer(["all", "comfy", "cli"]),
     ),
 ):
@@ -655,6 +655,19 @@ def update(
         custom_nodes.command.update_node_id_cache()
     except (FileNotFoundError, subprocess.CalledProcessError) as e:
         rprint(f"[yellow]Failed to update node id cache: {e}[/yellow]")
+
+
+@app.command(help="Report installed-vs-latest versions for ComfyUI core and custom node packs (read-only).")
+@tracking.track_command()
+def outdated(
+    refresh: Annotated[
+        bool,
+        typer.Option("--refresh", help="Bypass the 1h latest-version cache and re-query the network."),
+    ] = False,
+):
+    from comfy_cli.command import outdated as outdated_command
+
+    outdated_command.execute(get_renderer(), workspace_manager.workspace_path, refresh=refresh)
 
 
 @app.command(help="Run an API workflow. Submits and returns immediately by default; pass --wait to block.")
@@ -929,7 +942,9 @@ def validate(
 ):
     from pathlib import Path
 
+    from comfy_cli.command.run import is_ui_workflow
     from comfy_cli.cql.engine import Graph, LoadError
+    from comfy_cli.workflow_to_api import WorkflowConversionError, convert_ui_to_api
 
     renderer = get_renderer()
 
@@ -972,6 +987,43 @@ def validate(
         )
         raise typer.Exit(code=1) from e
 
+    # Detect a UI-export (frontend/canvas) workflow and lower it to API format
+    # before validating — exactly as `comfy run` does. Without this the wrapper
+    # keys (`nodes`, `links`, `groups`, `config`, …) each emit a `non_node_key`
+    # warning, zero nodes are checked, and the result is a vacuous `valid:true`.
+    # The converter reuses the object_info the graph was already built from
+    # (`graph.object_info`), so offline `--input` works and no second fetch happens.
+    converted_from_ui = False
+    if is_ui_workflow(wf_data):
+        if renderer.is_pretty():
+            rprint("[yellow]Detected UI-format workflow, converting to API format...[/yellow]")
+        try:
+            converted = convert_ui_to_api(wf_data, graph.object_info)
+        except WorkflowConversionError as e:
+            renderer.error(
+                code="workflow_not_api_format",
+                message=f"Workflow is a UI export that could not be converted to API format: {e}",
+                hint="use ComfyUI's 'File > Export (API)' to save as API format",
+            )
+            raise typer.Exit(code=1) from e
+        except Exception as e:  # noqa: BLE001 — never leak a raw traceback to the agent flow
+            renderer.error(
+                code="conversion_crash",
+                message=f"Workflow conversion crashed unexpectedly: {type(e).__name__}: {e}",
+                hint="report this at https://github.com/Comfy-Org/comfy-cli/issues",
+                details={"exception_type": type(e).__name__},
+            )
+            raise typer.Exit(code=1) from e
+        if not converted:
+            renderer.error(
+                code="workflow_not_api_format",
+                message="Workflow is a UI export that converted to no executable nodes",
+                hint="use ComfyUI's 'File > Export (API)' to save as API format",
+            )
+            raise typer.Exit(code=1)
+        wf_data = converted
+        converted_from_ui = True
+
     result = graph.validate_workflow(wf_data)
 
     payload = {
@@ -982,6 +1034,11 @@ def validate(
         "errors": result["errors"],
         "warnings": result["warnings"],
     }
+    if converted_from_ui:
+        # Signal that validation ran against the converted graph, not the file's
+        # literal bytes, and report how many nodes the conversion produced.
+        payload["converted_from_ui"] = True
+        payload["converted_node_count"] = len(wf_data)
 
     if renderer.is_pretty():
         if result["valid"]:
@@ -995,7 +1052,7 @@ def validate(
                 suggestions = e.get("suggestions", [])
                 if suggestions:
                     msg += f" (did you mean: {', '.join(suggestions[:3])}?)"
-                rprint(f"  [red]•[/red] node {e.get('node_id', '?')}: {msg}")
+                rprint(f"  [red]•[/red] node {e.get('node_id') or '?'}: {msg}")
             for w in result["warnings"]:
                 rprint(f"  [yellow]⚠[/yellow] {w.get('message', '')}")
     renderer.emit(payload, command="validate", ok=result["valid"])
