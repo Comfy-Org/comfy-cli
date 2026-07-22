@@ -1674,3 +1674,180 @@ class TestDynamicComboInputs:
         assert model["choices"] == []
         prompt = next(i for i in desc["inputs"] if i["name"] == "prompt")
         assert "selection_keys" not in prompt
+
+    # -- Cursor-review hardening (PR #573 panel findings) -------------------
+
+    def test_stale_link_valued_sub_key_no_hard_edge_error(self, graph_dynamic: Graph):
+        """A stale dynamic sub-key left over from a previous selection is
+        IGNORED by the server even when link-valued — the generic edge checks
+        must not hard-error (dangling_edge) on it; it only warns."""
+        wf = self._node(
+            {
+                "prompt": "hi",
+                "model": "Opus 4.6",
+                "model.max_tokens": 800,
+                "model.mode": "fast",
+                # stale key from a previous selection, pointing at a node that
+                # no longer exists
+                "model.old_image": ["99", 0],
+            }
+        )
+        result = graph_dynamic.validate_workflow(wf)
+        assert result["valid"] is True, result["errors"]
+        codes = [e["code"] for e in result["errors"]]
+        assert "dangling_edge" not in codes
+        warn = next(w for w in result["warnings"] if w["code"] == "unknown_input")
+        assert warn["field"] == "model.old_image"
+
+    def test_deep_stray_key_attributed_to_nested_level(self, graph_dynamic: Graph):
+        """A stray key under a RESOLVED nested combo is attributed to that
+        level (model.mode='fast'), not the top-level model selection."""
+        wf = self._node(
+            {
+                "prompt": "hi",
+                "model": "Opus 4.6",
+                "model.max_tokens": 800,
+                "model.mode": "fast",
+                "model.mode.bogus": 1,
+            }
+        )
+        result = graph_dynamic.validate_workflow(wf)
+        assert result["valid"] is True, result["errors"]
+        warn = next(w for w in result["warnings"] if w["code"] == "unknown_input")
+        assert warn["field"] == "model.mode.bogus"
+        assert "model.mode='fast'" in warn["message"]
+        assert "'fast' takes no sub-inputs" in warn["hint"]
+
+    def test_required_missing_hint_truncates_many_selection_keys(self):
+        """A dynamic combo with hundreds of options must not dump them all
+        into the required_input_missing hint — first 8, then a count."""
+        options = [{"key": f"ckpt-{i:03d}", "inputs": {"required": {}, "optional": {}}} for i in range(30)]
+        info = {
+            "Loader": {
+                "input": {"required": {"model": ["COMFY_DYNAMICCOMBO_V3", {"options": options}]}},
+                "input_order": {"required": ["model"]},
+                "output": [],
+                "output_name": [],
+                "output_node": True,
+                "display_name": "Loader",
+                "python_module": "nodes",
+            }
+        }
+        g = Graph.from_object_info(info)
+        result = g.validate_workflow({"1": {"class_type": "Loader", "inputs": {}}})
+        err = next(e for e in result["errors"] if e["code"] == "required_input_missing")
+        hint = err["hint"]
+        assert "ckpt-007" in hint
+        assert "ckpt-008" not in hint
+        assert "and 22 more" in hint
+
+    def test_deeply_nested_dynamic_options_degrade_without_recursion_error(self):
+        """A hostile object_info with pathologically nested dynamic combos
+        (deeper than _MAX_SUBGRAPH_DEPTH) parses leniently instead of
+        crashing from_object_info with a RecursionError."""
+        spec = ["COMFY_DYNAMICCOMBO_V3", {"options": [{"key": "leaf", "inputs": {"required": {}}}]}]
+        for _ in range(200):
+            spec = [
+                "COMFY_DYNAMICCOMBO_V3",
+                {"options": [{"key": "deeper", "inputs": {"required": {"next": spec}}}]},
+            ]
+        info = {
+            "Nest": {
+                "input": {"required": {"root": spec}},
+                "input_order": {"required": ["root"]},
+                "output": [],
+                "output_name": [],
+                "output_node": True,
+                "display_name": "Nest",
+                "python_module": "nodes",
+            }
+        }
+        g = Graph.from_object_info(info)  # must not raise
+        port = g.node("Nest").inputs[0]
+        assert port.selection_keys == ["deeper"]
+        result = g.validate_workflow({"1": {"class_type": "Nest", "inputs": {"root": "deeper"}}})
+        assert isinstance(result["valid"], bool)
+
+
+class TestDynamicComboAutogrowSub:
+    """Autogrow sub-inputs carried by a dynamic-combo option (e.g. an option
+    whose schema declares `images` as COMFY_AUTOGROW_V3): slot keys wire as
+    `model.images.image0`, … — mirroring the top-level autogrow path."""
+
+    INFO = {
+        "Src": {
+            "input": {"required": {}},
+            "input_order": {"required": []},
+            "output": ["IMAGE"],
+            "output_name": ["image"],
+            "display_name": "Src",
+            "python_module": "nodes",
+        },
+        "Batch": {
+            "input": {
+                "required": {
+                    "model": [
+                        "COMFY_DYNAMICCOMBO_V3",
+                        {
+                            "options": [
+                                {
+                                    "key": "multi",
+                                    "inputs": {"required": {"images": ["COMFY_AUTOGROW_V3", {}]}, "optional": {}},
+                                },
+                                {"key": "none", "inputs": {"required": {}, "optional": {}}},
+                            ]
+                        },
+                    ]
+                }
+            },
+            "input_order": {"required": ["model"]},
+            "output": [],
+            "output_name": [],
+            "output_node": True,
+            "display_name": "Batch",
+            "python_module": "nodes",
+        },
+    }
+
+    def _graph(self) -> Graph:
+        return Graph.from_object_info(self.INFO)
+
+    def test_wired_slot_keys_are_valid(self):
+        wf = {
+            "0": {"class_type": "Src", "inputs": {}},
+            "1": {
+                "class_type": "Batch",
+                "inputs": {"model": "multi", "model.images.image0": ["0", 0], "model.images.image1": ["0", 0]},
+            },
+        }
+        result = self._graph().validate_workflow(wf)
+        assert result["valid"] is True, result["errors"]
+        # Slot keys must NOT surface as unknown_input noise.
+        assert [w for w in result["warnings"] if w["code"] == "unknown_input"] == []
+
+    def test_required_autogrow_sub_with_no_slots_errors(self):
+        wf = {"1": {"class_type": "Batch", "inputs": {"model": "multi"}}}
+        result = self._graph().validate_workflow(wf)
+        assert result["valid"] is False
+        err = next(e for e in result["errors"] if e["code"] == "autogrow_no_slots")
+        assert err["field"] == "model.images"
+        assert "model.images.image0" in err["hint"]
+
+    def test_bare_wired_autogrow_sub_errors(self):
+        wf = {
+            "0": {"class_type": "Src", "inputs": {}},
+            "1": {"class_type": "Batch", "inputs": {"model": "multi", "model.images": ["0", 0]}},
+        }
+        result = self._graph().validate_workflow(wf)
+        assert result["valid"] is False
+        err = next(e for e in result["errors"] if e["code"] == "autogrow_bare_input")
+        assert err["field"] == "model.images"
+
+    def test_slot_edges_still_checked(self):
+        """Valid slot keys keep the generic edge checks — a slot pointing at a
+        missing node is still a dangling_edge error."""
+        wf = {"1": {"class_type": "Batch", "inputs": {"model": "multi", "model.images.image0": ["99", 0]}}}
+        result = self._graph().validate_workflow(wf)
+        assert result["valid"] is False
+        err = next(e for e in result["errors"] if e["code"] == "dangling_edge")
+        assert err["field"] == "model.images.image0"

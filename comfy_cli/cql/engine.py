@@ -311,7 +311,7 @@ def _ordered_names(raw: dict, order: list[str] | None) -> list[str]:
     return out
 
 
-def _parse_dynamic_options(spec: Any) -> tuple[list[str], dict[str, list[Port]]]:
+def _parse_dynamic_options(spec: Any, depth: int = 0) -> tuple[list[str], dict[str, list[Port]]]:
     """Parse a COMFY_DYNAMICCOMBO_* spec's option sub-schemas.
 
     The server serializes each option as ``{"key": <str>, "inputs":
@@ -322,7 +322,15 @@ def _parse_dynamic_options(spec: Any) -> tuple[list[str], dict[str, list[Port]]]
     naturally and its sub-ports carry their own ``dynamic_options``.
     Malformed options (non-dict, missing/non-string key, non-dict inputs)
     are skipped; duplicate keys keep the first occurrence.
+
+    ``depth`` bounds the mutual recursion with ``_parse_inputs``: a hostile or
+    buggy ``object_info`` payload with pathologically nested dynamic combos
+    must degrade to the lenient no-options behavior, not crash the CLI with a
+    ``RecursionError``. Same bound as subgraph expansion
+    (``_MAX_SUBGRAPH_DEPTH``).
     """
+    if depth >= _MAX_SUBGRAPH_DEPTH:
+        return [], {}
     opts_raw = spec[1] if isinstance(spec, list) and len(spec) > 1 and isinstance(spec[1], dict) else {}
     options = opts_raw.get("options")
     selection_keys: list[str] = []
@@ -338,14 +346,16 @@ def _parse_dynamic_options(spec: Any) -> tuple[list[str], dict[str, list[Port]]]
             continue
         req = inputs_block.get("required")
         opt_block = inputs_block.get("optional")
-        sub_ports = _parse_inputs(req if isinstance(req, dict) else {}, None, required=True)
-        sub_ports += _parse_inputs(opt_block if isinstance(opt_block, dict) else {}, None, required=False)
+        sub_ports = _parse_inputs(req if isinstance(req, dict) else {}, None, required=True, depth=depth + 1)
+        sub_ports += _parse_inputs(
+            opt_block if isinstance(opt_block, dict) else {}, None, required=False, depth=depth + 1
+        )
         selection_keys.append(key)
         dynamic_options[key] = sub_ports
     return selection_keys, dynamic_options
 
 
-def _parse_inputs(raw: dict, order: list[str] | None, required: bool) -> list[Port]:
+def _parse_inputs(raw: dict, order: list[str] | None, required: bool, depth: int = 0) -> list[Port]:
     ports: list[Port] = []
     for name in _ordered_names(raw, order):
         spec = raw[name]
@@ -353,7 +363,7 @@ def _parse_inputs(raw: dict, order: list[str] | None, required: bool) -> list[Po
         selection_keys: list[str] = []
         dynamic_options: dict[str, list[Port]] | None = None
         if type_id.startswith("COMFY_DYNAMICCOMBO"):
-            selection_keys, dynamic_options = _parse_dynamic_options(spec)
+            selection_keys, dynamic_options = _parse_dynamic_options(spec, depth)
         ports.append(
             Port(
                 name=name,
@@ -828,7 +838,24 @@ class Graph:
             # case surfaces here instead of as a cryptic server reject.
             autogrow_ports = {p.name: p for p in m.inputs if p.is_autogrow}
             autogrow_seen: set[str] = set()
+            # Dynamic combos are checked up front so the generic loop below can
+            # exempt STALE dynamic sub-keys (left over from a previous
+            # selection): the server ignores unknown sub-keys, so a hard edge
+            # check on one would false-error; the unknown_input warning from
+            # _check_dynamic_combo already covers it. Sub-keys under an
+            # unresolved selection keep the old generic checks.
+            dyn_port_names = {p.name for p in m.inputs if p.is_dynamic_combo}
+            dyn_errors, dyn_warnings, dyn_valid_keys, dyn_unresolved = _check_dynamic_combo(
+                node_id, class_type, m, node_data
+            )
             for input_name, value in (node_data.get("inputs") or {}).items():
+                if (
+                    "." in input_name
+                    and input_name.split(".", 1)[0] in dyn_port_names
+                    and input_name not in dyn_valid_keys
+                    and not any(input_name.startswith(prefix) for prefix in dyn_unresolved)
+                ):
+                    continue
                 if autogrow_ports and "." in input_name:
                     base = input_name.split(".", 1)[0]
                     if base in autogrow_ports:
@@ -945,7 +972,6 @@ class Graph:
 
             errors.extend(_check_autogrow_required(node_id, autogrow_ports, autogrow_seen, node_data))
             errors.extend(_check_required_present(node_id, m, node_data))
-            dyn_errors, dyn_warnings = _check_dynamic_combo(node_id, class_type, m, node_data)
             errors.extend(dyn_errors)
             warnings.extend(dyn_warnings)
 
@@ -1246,7 +1272,9 @@ def _check_autogrow_required(
     return errors
 
 
-def _check_dynamic_combo(node_id: str, class_type: str, m: Morphism, node_data: dict) -> tuple[list[dict], list[dict]]:
+def _check_dynamic_combo(
+    node_id: str, class_type: str, m: Morphism, node_data: dict
+) -> tuple[list[dict], list[dict], set[str], set[str]]:
     """COMFY_DYNAMICCOMBO_* inputs: selection-key membership + per-selection
     required sub-inputs.
 
@@ -1258,17 +1286,23 @@ def _check_dynamic_combo(node_id: str, class_type: str, m: Morphism, node_data: 
     sub-port of the selected option — a warning, not an error, because the
     server ignores extra keys. Dotted keys whose base is an autogrow port
     keep the existing autogrow path; bases here are disjoint by type.
+
+    Returns ``(errors, warnings, valid_keys, unresolved)`` — the caller uses
+    ``valid_keys``/``unresolved`` to exempt stale (server-ignored) dynamic
+    sub-keys from the generic edge checks, which would otherwise hard-error
+    on e.g. a dangling link left over from a previous selection.
     """
     dynamic_ports = {p.name: p for p in m.inputs if p.is_dynamic_combo}
     if not dynamic_ports:
-        return [], []
+        return [], [], set(), set()
     inputs = node_data.get("inputs") or {}
     errors: list[dict] = []
     warnings: list[dict] = []
     valid_keys: set[str] = set()
     unresolved: set[str] = set()
+    resolved: dict[str, Any] = {}
     for name, port in dynamic_ports.items():
-        v, u = _expand_dynamic_port(node_id, class_type, port, name, inputs, errors, warnings)
+        v, u = _expand_dynamic_port(node_id, class_type, port, name, inputs, errors, warnings, resolved)
         valid_keys |= v
         unresolved |= u
 
@@ -1283,20 +1317,26 @@ def _check_dynamic_combo(node_id: str, class_type: str, m: Morphism, node_data: 
             continue
         if key in valid_keys or any(key.startswith(prefix) for prefix in unresolved):
             continue
-        selection = inputs.get(base)
-        known = sorted(k for k in valid_keys if k.startswith(f"{base}."))
+        # Attribute the stray key to the DEEPEST resolved combo prefix, so a
+        # stray `model.mode.bogus` under a resolved `model.mode` names
+        # `model.mode`'s selection (and lists ITS sub-keys), not `model`'s.
+        anchor = max((n for n in resolved if key.startswith(f"{n}.")), key=len, default=base)
+        selection = resolved.get(anchor, inputs.get(anchor))
+        known = sorted(k for k in valid_keys if k.startswith(f"{anchor}."))
         warnings.append(
             {
                 "node_id": node_id,
                 "field": key,
                 "code": "unknown_input",
-                "message": (f"input {key!r} matches no sub-input of {base}={selection!r} — the server will ignore it"),
+                "message": (
+                    f"input {key!r} matches no sub-input of {anchor}={selection!r} — the server will ignore it"
+                ),
                 "hint": f"valid sub-keys for this selection: {', '.join(known)}"
                 if known
                 else f"selection {selection!r} takes no sub-inputs",
             }
         )
-    return errors, warnings
+    return errors, warnings, valid_keys, unresolved
 
 
 def _expand_dynamic_port(
@@ -1307,6 +1347,7 @@ def _expand_dynamic_port(
     inputs: dict,
     errors: list[dict],
     warnings: list[dict],
+    resolved: dict[str, Any],
 ) -> tuple[set[str], set[str]]:
     """Validate ONE dynamic-combo port and return ``(valid_keys, unresolved)``.
 
@@ -1314,10 +1355,17 @@ def _expand_dynamic_port(
     resolved nested selections) accepts; the caller warns on present dotted
     keys outside this set. ``unresolved`` — ``"<name>."`` prefixes whose
     sub-keys can't be judged, so the caller skips unknown-key warnings there.
+    ``resolved`` (mutated) — dotted port name → its valid selection, so the
+    caller can attribute stray keys to the deepest resolved level.
     """
     unresolved = {f"{full_name}."}
     if full_name not in inputs:
         if port.required:
+            # Truncate like the unknown_enum_value branch: a combo with
+            # hundreds of options (e.g. model checkpoints) must not produce
+            # an unreadable hint.
+            top = port.selection_keys[:8]
+            extra = len(port.selection_keys) - len(top)
             errors.append(
                 {
                     "node_id": node_id,
@@ -1328,7 +1376,7 @@ def _expand_dynamic_port(
                         f"the server will reject this node (required_input_missing)"
                     ),
                     "hint": f"add {full_name!r} to inputs"
-                    + (f" (one of: {', '.join(port.selection_keys)})" if port.selection_keys else ""),
+                    + (f" (one of: {', '.join(top)}" + (f", and {extra} more …" if extra else "") + ")" if top else ""),
                 }
             )
         return set(), unresolved
@@ -1364,21 +1412,62 @@ def _expand_dynamic_port(
 
     valid: set[str] = set()
     nested_unresolved: set[str] = set()
+    resolved[full_name] = value
     for sub in (port.dynamic_options or {}).get(value, []):
         sub_name = f"{full_name}.{sub.name}"
         valid.add(sub_name)
         if sub.is_dynamic_combo:
             # Nested dynamic combo: deeper dotted paths (model.mode.detail).
             nested_valid, nested_unres = _expand_dynamic_port(
-                node_id, class_type, sub, sub_name, inputs, errors, warnings
+                node_id, class_type, sub, sub_name, inputs, errors, warnings, resolved
             )
             valid |= nested_valid
             nested_unresolved |= nested_unres
             continue
+        if sub.is_autogrow:
+            # Autogrow sub-input (an option carrying e.g. `images`): wired as
+            # one slot key per connection (`model.images.image0`, …) —
+            # mirror the top-level autogrow path: slot keys are valid, a bare
+            # single connection is an error, and a required subtree with zero
+            # wired slots is an error.
+            slot_prefix = f"{sub_name}."
+            slots = {k for k in inputs if k.startswith(slot_prefix)}
+            valid |= slots
+            stem = sub.name[:-1] if sub.name.endswith("s") else sub.name
+            example = f"{slot_prefix}{stem}0, {slot_prefix}{stem}1, …"
+            bare = inputs.get(sub_name)
+            if isinstance(bare, list) and len(bare) == 2:
+                errors.append(
+                    {
+                        "node_id": node_id,
+                        "field": sub_name,
+                        "code": "autogrow_bare_input",
+                        "message": (
+                            f"input {sub_name!r} is an autogrow input ({sub.type}) and cannot be "
+                            f"wired as a single connection — the server expects one slot key per "
+                            f"connection"
+                        ),
+                        "hint": f"wire one key per connection: {example}",
+                    }
+                )
+            elif sub.required and not slots and sub_name not in inputs:
+                errors.append(
+                    {
+                        "node_id": node_id,
+                        "field": sub_name,
+                        "code": "autogrow_no_slots",
+                        "message": (
+                            f"required autogrow input {sub_name!r} has no connected slots — "
+                            f"the server will reject this node"
+                        ),
+                        "hint": f"wire one key per connection: {example}",
+                    }
+                )
+            continue
         if sub_name not in inputs:
-            # DynamicSlot is always optional server-side; autogrow presence has
-            # its own error shape — mirror _check_required_present's exclusions.
-            if sub.required and not sub.is_autogrow and not sub.type.startswith("COMFY_DYNAMICSLOT"):
+            # DynamicSlot is always optional server-side; autogrow presence is
+            # handled above — mirror _check_required_present's exclusions.
+            if sub.required and not sub.type.startswith("COMFY_DYNAMICSLOT"):
                 errors.append(
                     {
                         "node_id": node_id,

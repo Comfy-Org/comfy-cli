@@ -104,9 +104,13 @@ def test_ui_export_that_converts_to_nothing_is_rejected(runner, tmp_path):
 
 
 def test_api_format_unchanged(runner, tmp_path):
-    """An API-format file behaves exactly as before: validated directly, no
-    `converted_from_ui` key in the payload."""
-    api = {"1": {"class_type": "EmptyLatentImage", "inputs": {"width": 64, "height": 64, "batch_size": 1}}}
+    """An API-format file is validated directly — no UI conversion, no
+    `converted_from_ui` key in the payload. (Includes an output node: since
+    BE-3357 an output-less prompt is a hard `prompt_no_outputs` error.)"""
+    api = {
+        "1": {"class_type": "EmptyLatentImage", "inputs": {"width": 64, "height": 64, "batch_size": 1}},
+        "2": {"class_type": "SaveImage", "inputs": {"images": ["1", 0], "filename_prefix": "out"}},
+    }
     wf = _write(tmp_path, "api.json", api)
 
     result = _validate(runner, wf)
@@ -130,11 +134,14 @@ def test_non_dict_payload_unchanged(runner, tmp_path):
 
 def test_empty_dict_payload_unchanged(runner, tmp_path):
     """An empty dict is not UI format and is left to the existing validator
-    (no conversion, no `converted_from_ui` key)."""
+    (no conversion, no `converted_from_ui` key). Since BE-3357 the validator
+    correctly rejects it: a node-less prompt has no output nodes
+    (`prompt_no_outputs`), exactly as the server would."""
     wf = _write(tmp_path, "empty.json", {})
 
     result = _validate(runner, wf)
 
-    assert result.exit_code == 0
+    assert result.exit_code == 1
     data = _envelope(result)["data"]
     assert "converted_from_ui" not in data
+    assert [e["code"] for e in data["errors"]] == ["prompt_no_outputs"]
