@@ -121,9 +121,8 @@ class RegistryAPI:
         else:
             url = f"{self.base_url}/nodes/{node_id}/install?version={version}"
 
-        # A stalled/blackholed registry must not hang callers indefinitely (e.g.
-        # `comfy outdated`, which promises to degrade gracefully on network
-        # failure). A Timeout surfaces as a RequestException for callers to catch.
+        # A stalled/blackholed registry must not hang callers indefinitely.
+        # A Timeout surfaces as a RequestException for callers to catch.
         response = requests.get(url, timeout=30)
         if response.status_code == 200:
             # Convert the API response to a NodeVersion object
@@ -131,6 +130,29 @@ class RegistryAPI:
             return map_node_version(response.json())
         else:
             raise Exception(f"Failed to install node: {response.status_code} - {response.text}")
+
+    def get_node(self, node_id):
+        """
+        Retrieves a node's public metadata, read-only.
+
+        Unlike ``install_node`` (whose backend records an installation and fires
+        an analytics event on every call), this endpoint has no side effects, so
+        it's safe for pure version checks like ``comfy outdated``.
+
+        Args:
+          node_id (str): The unique identifier of the node.
+
+        Returns:
+          Node: Node data, including ``latest_version`` when the registry has one.
+        """
+        url = f"{self.base_url}/nodes/{node_id}"
+        # Same rationale as install_node: a stalled registry must not hang callers.
+        response = requests.get(url, timeout=30)
+        if response.status_code == 200:
+            logging.debug(f"RegistryAPI get_node response: {response.json()}")
+            return map_node_to_node_class(response.json())
+        else:
+            raise Exception(f"Failed to retrieve node: {response.status_code} - {response.text}")
 
 
 def map_node_version(api_node_version):

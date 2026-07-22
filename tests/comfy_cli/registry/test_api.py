@@ -200,3 +200,36 @@ class TestRegistryAPI(unittest.TestCase):
         with self.assertRaises(Exception) as context:
             self.registry_api.install_node("node1")
         self.assertIn("Failed to install node", str(context.exception))
+
+    @patch("requests.get")
+    def test_get_node_success(self, mock_get):
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "id": "node1",
+            "name": "Node One",
+            "description": "A node",
+            "latest_version": {
+                "id": "nv1",
+                "version": "1.2.3",
+            },
+        }
+        mock_get.return_value = mock_response
+
+        node = self.registry_api.get_node("node1")
+        self.assertEqual(node.id, "node1")
+        self.assertEqual(node.latest_version.version, "1.2.3")
+        # Read-only endpoint — must hit /nodes/{id}, never /nodes/{id}/install.
+        called_url = mock_get.call_args[0][0]
+        self.assertTrue(called_url.endswith("/nodes/node1"))
+
+    @patch("requests.get")
+    def test_get_node_failure(self, mock_get):
+        mock_response = MagicMock()
+        mock_response.status_code = 404
+        mock_response.text = "Not Found"
+        mock_get.return_value = mock_response
+
+        with self.assertRaises(Exception) as context:
+            self.registry_api.get_node("node1")
+        self.assertIn("Failed to retrieve node", str(context.exception))

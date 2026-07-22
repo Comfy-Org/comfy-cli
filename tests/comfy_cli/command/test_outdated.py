@@ -60,22 +60,27 @@ def _commit(cwd: Path, filename: str, content: str, message: str) -> None:
 
 
 class _FakeRegistry:
-    """Stand-in for RegistryAPI: install_node(id) -> object with .version."""
+    """Stand-in for RegistryAPI: get_node(id) -> object with .latest_version.version."""
 
     def __init__(self, versions: dict[str, str], raises: bool = False):
         self._versions = versions
         self._raises = raises
 
-    def install_node(self, node_id: str, version=None):
+    def get_node(self, node_id: str):
         if self._raises:
             raise RuntimeError("registry unreachable")
 
         class _NV:
             pass
 
+        class _Node:
+            pass
+
         nv = _NV()
         nv.version = self._versions.get(node_id, "0.0.0")
-        return nv
+        node = _Node()
+        node.latest_version = nv
+        return node
 
 
 @pytest.fixture(autouse=True)
@@ -322,7 +327,7 @@ def test_git_pack_with_pyproject_falls_back_to_git_when_unregistered(tmp_path, m
         "comfy_cli.command.install.get_latest_release",
         lambda *a, **k: {"tag": "v0.3.40"},
     )
-    # Registry doesn't know this pack (404 → install_node raises) → latest None
+    # Registry doesn't know this pack (404 → get_node raises) → latest None
     # → must fall back to git.
     report, _ = outdated_cmd.build_report(str(ws), registry_api=_FakeRegistry({}, raises=True))
 

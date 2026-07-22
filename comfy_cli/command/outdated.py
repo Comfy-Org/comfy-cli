@@ -311,11 +311,14 @@ def _registry_latest(
         if cached is not None:
             return cached
     try:
-        node_version = registry_api.install_node(node_id)
+        # get_node, not install_node: the install endpoint records an
+        # installation + analytics event server-side on every call, which a
+        # read-only report must not inflate.
+        node = registry_api.get_node(node_id)
     except Exception as e:  # noqa: BLE001 - registry unreachable → unknown, not fatal
         warn(f"could not fetch latest version for pack '{node_id}': {e}")
         return None
-    latest = getattr(node_version, "version", None)
+    latest = getattr(getattr(node, "latest_version", None), "version", None)
     if latest:
         _cache_set(cache, key, latest)
     return latest
@@ -417,7 +420,7 @@ def build_report(
 ) -> tuple[dict[str, Any], list[str]]:
     """Build the outdated report. Returns ``(report, warnings)``.
 
-    Pure enough to unit-test: inject ``registry_api`` (needs ``install_node``)
+    Pure enough to unit-test: inject ``registry_api`` (needs ``get_node``)
     and ``now``; all network paths degrade to ``latest: null`` + a warning.
     """
     warnings: list[str] = []
