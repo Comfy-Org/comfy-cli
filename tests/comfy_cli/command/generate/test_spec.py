@@ -104,3 +104,32 @@ def test_filter_by_partner_and_category():
 def test_proxy_prefix_accepted():
     ep = spec.get_endpoint("/proxy/bfl/flux-pro-1.1/generate")
     assert ep.id == "bfl/flux-pro-1.1/generate"
+
+
+# ── model_enum — spec-derived partner model lists ─────────────────────────
+
+
+def test_model_enum_from_vendored_spec():
+    models = spec.model_enum("byteplus/api/v3/contents/generations/tasks")
+    assert models, "expected the byteplus tasks request schema to carry a model enum"
+    assert all(m.startswith("seedance-") for m in models)
+
+
+def test_model_enum_returns_none_without_enum():
+    # Gemini's model variant is a path param, not a request-body property.
+    assert spec.model_enum("vertexai/gemini/{model}") is None
+    # Property exists but carries no enum.
+    assert spec.model_enum("openai/images/generations", field="prompt") is None
+    # Unknown endpoint / unknown field — no exception, just None.
+    assert spec.model_enum("nope/nope") is None
+    assert spec.model_enum("openai/images/generations", field="nope") is None
+
+
+def test_extract_enum_walks_items_and_variants():
+    assert spec._extract_enum({"enum": ["a", "b"]}) == ["a", "b"]
+    assert spec._extract_enum({"type": "array", "items": {"enum": ["x"]}}) == ["x"]
+    assert spec._extract_enum({"anyOf": [{"type": "integer"}, {"enum": ["y"]}]}) == ["y"]
+    assert spec._extract_enum({"oneOf": [{"items": {"enum": ["z"]}}]}) == ["z"]
+    # Non-string enums (and enum-less schemas) don't count.
+    assert spec._extract_enum({"enum": [1, 2]}) is None
+    assert spec._extract_enum({"type": "string"}) is None

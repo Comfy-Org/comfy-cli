@@ -399,6 +399,54 @@ def get_endpoint(endpoint_id: str) -> Endpoint:
     raise SpecError(_unknown_endpoint_message(endpoint_id))
 
 
+def _extract_enum(prop: dict[str, Any]) -> list[str] | None:
+    """Pull a string enum out of a resolved property schema — directly, from
+    ``items`` (array-typed fields), or from ``anyOf``/``oneOf``/``allOf``
+    variants. Returns None when no non-empty string enum is found."""
+    enum = prop.get("enum")
+    if isinstance(enum, list):
+        values = [v for v in enum if isinstance(v, str)]
+        if values:
+            return values
+    items = prop.get("items")
+    if isinstance(items, dict):
+        found = _extract_enum(items)
+        if found:
+            return found
+    for key in ("anyOf", "oneOf", "allOf"):
+        variants = prop.get(key)
+        if not isinstance(variants, list):
+            continue
+        for variant in variants:
+            if isinstance(variant, dict):
+                found = _extract_enum(variant)
+                if found:
+                    return found
+    return None
+
+
+def model_enum(endpoint_id: str, field: str = "model") -> list[str] | None:
+    """Return the model-variant enum the active spec carries for
+    ``endpoint_id``'s ``field`` request property, or None when the spec has no
+    enum there (callers fall back to their hardcoded lists).
+
+    The request schema is already ``$ref``-resolved by ``_resolve``, so a plain
+    property walk suffices. Reading from the active spec (user cache when
+    fresh, else the vendored copy) means a spec refresh surfaces new partner
+    models with zero code changes."""
+    try:
+        endpoint = get_endpoint(endpoint_id)
+    except SpecError:
+        return None
+    props = (endpoint.request_schema or {}).get("properties")
+    if not isinstance(props, dict):
+        return None
+    prop = props.get(field)
+    if not isinstance(prop, dict):
+        return None
+    return _extract_enum(prop)
+
+
 def _unknown_endpoint_message(endpoint_id: str) -> str:
     """Build a helpful error suggesting close matches."""
     import difflib
