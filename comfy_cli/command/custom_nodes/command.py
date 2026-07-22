@@ -515,7 +515,7 @@ def show(
     ] = None,
     mode: str = typer.Option(
         None,
-        help="[remote|local|cache]",
+        help="\\[remote|local|cache]",
         autocompletion=mode_completer,
     ),
 ):
@@ -540,7 +540,7 @@ def simple_show(
     ] = None,
     mode: str = typer.Option(
         None,
-        help="[remote|local|cache]",
+        help="\\[remote|local|cache]",
         autocompletion=mode_completer,
     ),
 ):
@@ -595,7 +595,7 @@ def install(
     ] = False,
     mode: str = typer.Option(
         None,
-        help="[remote|local|cache]",
+        help="\\[remote|local|cache]",
         autocompletion=mode_completer,
     ),
 ):
@@ -664,7 +664,7 @@ def reinstall(
     ] = None,
     mode: str = typer.Option(
         None,
-        help="[remote|local|cache]",
+        help="\\[remote|local|cache]",
         autocompletion=mode_completer,
     ),
 ):
@@ -709,7 +709,7 @@ def uninstall(
     ] = None,
     mode: str = typer.Option(
         None,
-        help="[remote|local|cache]",
+        help="\\[remote|local|cache]",
         autocompletion=mode_completer,
     ),
 ):
@@ -748,7 +748,7 @@ def update_node_id_cache():
 def update(
     nodes: list[str] = typer.Argument(
         ...,
-        help="[all|List of custom nodes to update]",
+        help="\\[all|List of custom nodes to update]",
         autocompletion=node_or_all_completer,
     ),
     channel: Annotated[
@@ -769,7 +769,7 @@ def update(
     ] = None,
     mode: str = typer.Option(
         None,
-        help="[remote|local|cache]",
+        help="\\[remote|local|cache]",
         autocompletion=mode_completer,
     ),
 ):
@@ -785,7 +785,7 @@ def update(
 def disable(
     nodes: list[str] = typer.Argument(
         ...,
-        help="[all|List of custom nodes to disable]",
+        help="\\[all|List of custom nodes to disable]",
         autocompletion=node_or_all_completer,
     ),
     channel: Annotated[
@@ -798,7 +798,7 @@ def disable(
     ] = None,
     mode: str = typer.Option(
         None,
-        help="[remote|local|cache]",
+        help="\\[remote|local|cache]",
         autocompletion=mode_completer,
     ),
 ):
@@ -812,7 +812,7 @@ def disable(
 def enable(
     nodes: list[str] = typer.Argument(
         ...,
-        help="[all|List of custom nodes to enable]",
+        help="\\[all|List of custom nodes to enable]",
         autocompletion=node_or_all_completer,
     ),
     channel: Annotated[
@@ -825,7 +825,7 @@ def enable(
     ] = None,
     mode: str = typer.Option(
         None,
-        help="[remote|local|cache]",
+        help="\\[remote|local|cache]",
         autocompletion=mode_completer,
     ),
 ):
@@ -839,7 +839,7 @@ def enable(
 def fix(
     nodes: list[str] = typer.Argument(
         ...,
-        help="[all|List of custom nodes to fix]",
+        help="\\[all|List of custom nodes to fix]",
         autocompletion=node_or_all_completer,
     ),
     channel: Annotated[
@@ -860,7 +860,7 @@ def fix(
     ] = None,
     mode: str = typer.Option(
         None,
-        help="[remote|local|cache]",
+        help="\\[remote|local|cache]",
         autocompletion=mode_completer,
     ),
 ):
@@ -901,7 +901,7 @@ def install_deps(
     ] = None,
     mode: str = typer.Option(
         None,
-        help="[remote|local|cache]",
+        help="\\[remote|local|cache]",
         autocompletion=mode_completer,
     ),
 ):
@@ -951,7 +951,7 @@ def deps_in_workflow(
     ] = None,
     mode: str = typer.Option(
         None,
-        help="[remote|local|cache]",
+        help="\\[remote|local|cache]",
         autocompletion=mode_completer,
     ),
 ):

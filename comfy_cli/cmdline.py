@@ -613,7 +613,7 @@ def install(
 def update(
     target: str = typer.Argument(
         "comfy",
-        help="[all|comfy|cli]",
+        help="\\[all|comfy|cli]",
         autocompletion=utils.create_choice_completer(["all", "comfy", "cli"]),
     ),
 ):
@@ -655,6 +655,19 @@ def update(
         custom_nodes.command.update_node_id_cache()
     except (FileNotFoundError, subprocess.CalledProcessError) as e:
         rprint(f"[yellow]Failed to update node id cache: {e}[/yellow]")
+
+
+@app.command(help="Report installed-vs-latest versions for ComfyUI core and custom node packs (read-only).")
+@tracking.track_command()
+def outdated(
+    refresh: Annotated[
+        bool,
+        typer.Option("--refresh", help="Bypass the 1h latest-version cache and re-query the network."),
+    ] = False,
+):
+    from comfy_cli.command import outdated as outdated_command
+
+    outdated_command.execute(get_renderer(), workspace_manager.workspace_path, refresh=refresh)
 
 
 @app.command(help="Run an API workflow. Submits and returns immediately by default; pass --wait to block.")
