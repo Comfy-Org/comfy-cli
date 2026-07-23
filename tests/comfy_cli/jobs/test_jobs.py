@@ -329,6 +329,21 @@ def test_orphaned_flag_visible_in_help():
 # ---------------------------------------------------------------------------
 
 
+class _Seq:
+    """Route payload that changes per call: element i answers the i-th matching
+    request, and the last element repeats. Lets a test model a queue whose
+    contents change between two GET /queue reads."""
+
+    def __init__(self, *payloads):
+        self._payloads = list(payloads)
+        self._i = 0
+
+    def next(self):
+        payload = self._payloads[min(self._i, len(self._payloads) - 1)]
+        self._i += 1
+        return payload
+
+
 def _capture_urlopen(monkeypatch: pytest.MonkeyPatch, routes: dict):
     """Capture calls to urlopen and return a list of (url, method, headers) per call."""
     calls: list[dict] = []
@@ -358,6 +373,8 @@ def _capture_urlopen(monkeypatch: pytest.MonkeyPatch, routes: dict):
             if " " in needle:
                 want_method, sub = needle.split(" ", 1)
             if sub in url and (want_method is None or want_method == method):
+                if isinstance(payload, _Seq):
+                    payload = payload.next()
                 if isinstance(payload, Exception):
                     raise payload
                 return _Resp(payload if isinstance(payload, bytes) else json.dumps(payload).encode())
@@ -599,6 +616,135 @@ def test_jobs_cancel_local_unreachable_history_is_not_prompt_not_found(monkeypat
     assert result.exit_code == 0, result.output
     assert env["ok"] is True
     assert env["data"]["found"] is False
+
+
+def test_jobs_cancel_local_empty_id_is_prompt_not_found(monkeypatch: pytest.MonkeyPatch):
+    """An empty/whitespace id must be rejected before any probe: quoting it into
+    the history probe would produce `GET /history/` — the list-ALL endpoint —
+    whose non-empty body would read as 'found' and wave a garbage id through."""
+    monkeypatch.setattr(jobs_mod, "_server_or_error", lambda h, p, **kw: True)
+    calls = _capture_urlopen(monkeypatch, {})  # any HTTP call at all is a failure
+
+    result, env = _cancel_local_json("   ")
+    assert result.exit_code == 1, result.output
+    assert env["error"]["code"] == "prompt_not_found"
+    assert calls == [], f"empty id must not touch the server: {calls}"
+
+
+def test_jobs_cancel_local_non_json_body_is_not_a_traceback(monkeypatch: pytest.MonkeyPatch):
+    """A 200 with a non-JSON body (proxy error page, captive portal) must be
+    treated like any other probe failure, not crash with a JSONDecodeError."""
+    monkeypatch.setattr(jobs_mod, "_server_or_error", lambda h, p, **kw: True)
+    _capture_urlopen(
+        monkeypatch,
+        {
+            "GET /queue": b"<html>gateway timeout</html>",
+            "POST /queue": b"{}",
+        },
+    )
+
+    result, env = _cancel_local_json("ghost-id")
+    assert result.exit_code == 0, result.output
+    assert env["ok"] is True and env["data"]["found"] is False
+
+
+def test_jobs_cancel_local_rereads_running_set_before_interrupt(monkeypatch: pytest.MonkeyPatch):
+    """A job that goes pending→running while the queue delete is in flight must
+    still be interrupted. Gating on the pre-delete snapshot would skip the
+    interrupt and report a successful cancel of a job that keeps running."""
+    monkeypatch.setattr(jobs_mod, "_server_or_error", lambda h, p, **kw: True)
+    calls = _capture_urlopen(
+        monkeypatch,
+        {
+            "GET /queue": _Seq(
+                # Before the delete: ours is pending, another job is running.
+                {"queue_running": [[0, "other", {}, {}, {}]], "queue_pending": [[1, "mine", {}, {}, {}]]},
+                # After the delete: 'other' finished and ours started.
+                {"queue_running": [[0, "mine", {}, {}, {}]], "queue_pending": []},
+            ),
+            "POST /queue": b"{}",
+            "/interrupt": b"{}",
+        },
+    )
+
+    result, env = _cancel_local_json("mine")
+    assert result.exit_code == 0, result.output
+    assert env["ok"] is True
+    assert any("/interrupt" in c["url"] for c in calls), f"must interrupt the now-running job: {calls}"
+
+
+def test_jobs_cancel_local_does_not_interrupt_a_job_that_took_over(monkeypatch: pytest.MonkeyPatch):
+    """The mirror case: our job finished during the delete round-trip and a
+    DIFFERENT job now holds the running slot. /interrupt takes no prompt_id, so
+    firing it off the stale snapshot would cancel that unrelated job."""
+    monkeypatch.setattr(jobs_mod, "_server_or_error", lambda h, p, **kw: True)
+    calls = _capture_urlopen(
+        monkeypatch,
+        {
+            "GET /queue": _Seq(
+                {"queue_running": [[0, "mine", {}, {}, {}]], "queue_pending": []},
+                {"queue_running": [[0, "other", {}, {}, {}]], "queue_pending": []},
+            ),
+            "POST /queue": b"{}",
+            "/interrupt": b"{}",
+        },
+    )
+
+    result, _env = _cancel_local_json("mine")
+    assert result.exit_code == 0, result.output
+    assert not any("/interrupt" in c["url"] for c in calls), f"must not kill an unrelated job: {calls}"
+
+
+def test_jobs_cancel_local_server_dying_mid_cancel_is_not_a_success(monkeypatch: pytest.MonkeyPatch):
+    """Reachability for the final gate must be judged AFTER the delete. If the
+    server dies between the existence probe and the delete, the delete fails and
+    the command must surface cancel_failed rather than report a clean cancel."""
+    import urllib.error
+
+    from comfy_cli import jobs_state
+
+    jobs_state.write(jobs_state.new(prompt_id="pid-dying", client_id="c", workflow="w", where="local"))
+
+    monkeypatch.setattr(jobs_mod, "_server_or_error", lambda h, p, **kw: True)
+    _capture_urlopen(
+        monkeypatch,
+        {
+            "GET /queue": _Seq(
+                {"queue_running": [], "queue_pending": []},
+                urllib.error.URLError("connection refused"),
+            ),
+            "POST /queue": urllib.error.URLError("connection refused"),
+        },
+    )
+
+    result, env = _cancel_local_json("pid-dying")
+    assert result.exit_code == 1, result.output
+    assert env["error"]["code"] == "cancel_failed"
+
+
+def test_jobs_cancel_local_keeps_terminal_status(monkeypatch: pytest.MonkeyPatch):
+    """Cancelling an already-completed job is an idempotent ok — it must NOT
+    rewrite the recorded outcome, or `jobs ls` reports a completed run as
+    cancelled."""
+    from comfy_cli import jobs_state
+
+    st = jobs_state.new(prompt_id="pid-done", client_id="c", workflow="w", where="local")
+    st.status = "completed"
+    jobs_state.write(st)
+
+    monkeypatch.setattr(jobs_mod, "_server_or_error", lambda h, p, **kw: True)
+    _capture_urlopen(
+        monkeypatch,
+        {
+            "GET /queue": {"queue_running": [], "queue_pending": []},
+            "POST /queue": b"{}",
+        },
+    )
+
+    result, env = _cancel_local_json("pid-done")
+    assert result.exit_code == 0, result.output
+    assert env["ok"] is True and env["data"]["found"] is True
+    assert jobs_state.read("pid-done").status == "completed"
 
 
 def test_jobs_cancel_cloud_posts_to_jobs_cancel_endpoint(monkeypatch: pytest.MonkeyPatch):

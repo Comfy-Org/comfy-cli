@@ -87,6 +87,11 @@ def _http_get_json(url: str, *, timeout: float = 10.0) -> Any:
             return json.loads(resp.read())
     except urllib.error.URLError as e:
         raise RuntimeError(f"failed to GET {url}: {e}") from e
+    except ValueError as e:
+        # json.JSONDecodeError is a ValueError — a non-JSON 200 (captive
+        # portal, proxy error page) must look like any other GET failure to
+        # callers, not crash them with an uncaught decode error.
+        raise RuntimeError(f"failed to parse JSON from {url}: {e}") from e
 
 
 # ---------------------------------------------------------------------------
@@ -989,28 +994,39 @@ def _local_cancel(prompt_id: str, host: str, port: int) -> None:
     base = f"http://{host}:{port}"
     from comfy_cli import jobs_state
 
+    # 0. An empty/whitespace id can never name a real prompt, and it would turn
+    #    the /history/<id> probe below into `GET /history/` — the list-ALL
+    #    endpoint, whose non-empty body would read as "found". Reject it up
+    #    front, before any probe or mutation.
+    if not prompt_id.strip():
+        renderer.error(
+            code="prompt_not_found",
+            message="prompt id must be a non-empty string",
+            hint="check `comfy jobs ls`",
+            details={"prompt_id": prompt_id, "host": host, "port": port},
+        )
+        raise typer.Exit(code=1)
+
     # 1. Existence probe, BEFORE mutating anything — the queue delete in step 2
-    #    would erase the only evidence that a pending prompt ever existed. This
-    #    single /queue fetch also feeds the interrupt gate in step 3, so the
-    #    check costs no extra round-trip.
+    #    would erase the only evidence that a pending prompt ever existed.
     try:
         queue = _http_get_json(f"{base}/queue")
-        queue_reachable = True
+        queue_reachable_pre = True
     except RuntimeError:
         queue = {}
-        queue_reachable = False
+        queue_reachable_pre = False
     if not isinstance(queue, dict):
         queue = {}
     running_ids = {str(_safe_queue_entry(entry)[0]) for entry in (queue.get("queue_running") or [])}
     pending_ids = {str(_safe_queue_entry(entry)[0]) for entry in (queue.get("queue_pending") or [])}
 
-    is_running = prompt_id in running_ids
-    existing = jobs_state.read(prompt_id)
     # A state file means WE submitted it, so it existed even if the server has
-    # since forgotten it (restart, history trimmed).
-    found = is_running or prompt_id in pending_ids or existing is not None
-    probes_reachable = queue_reachable
-    if not found and queue_reachable:
+    # since forgotten it (restart, history trimmed). Read for existence only —
+    # the status write at the end re-reads, so a concurrent `jobs watch` update
+    # in the meantime isn't clobbered.
+    found = prompt_id in running_ids or prompt_id in pending_ids or jobs_state.read(prompt_id) is not None
+    probes_reachable = queue_reachable_pre
+    if not found and queue_reachable_pre:
         # /history/<id> is `{}` for an unknown id, and a dict keyed by the id
         # for a known one (running, completed, errored, or cancelled). Quote the
         # id into the path so a hostile value can't escape the segment — same
@@ -1049,9 +1065,24 @@ def _local_cancel(prompt_id: str, host: str, port: int) -> None:
     # 3. Interrupt only if THIS prompt is the one currently executing.
     #    /interrupt takes NO prompt_id — it kills whatever is running — so
     #    blindly posting it after a pending-job delete would also abort an
-    #    unrelated running job ("cancel B" silently cancelling A). Gate on
-    #    /queue's queue_running list (read in step 1); the queue delete above
-    #    already covers pending jobs.
+    #    unrelated running job ("cancel B" silently cancelling A). Gate on a
+    #    FRESH read of /queue's queue_running: the step-1 snapshot predates the
+    #    delete round-trip, and in that window our prompt can go pending→running
+    #    (missing it = silent cancel failure) or a different prompt can take
+    #    over the running slot (interrupting it = cancelling A instead of B).
+    try:
+        queue_now = _http_get_json(f"{base}/queue")
+        queue_reachable = True
+        if not isinstance(queue_now, dict):
+            queue_now = {}
+        is_running = prompt_id in {str(_safe_queue_entry(entry)[0]) for entry in (queue_now.get("queue_running") or [])}
+    except RuntimeError:
+        # Can't confirm; fall back to the step-1 snapshot. The server is very
+        # likely down, in which case /interrupt fails harmlessly too — better
+        # a best-effort interrupt than a silently skipped cancel.
+        queue_reachable = False
+        is_running = prompt_id in running_ids
+
     interrupt_ok = True
     if is_running:
         interrupt_req = urllib.request.Request(f"{base}/interrupt", method="POST")
@@ -1080,7 +1111,14 @@ def _local_cancel(prompt_id: str, host: str, port: int) -> None:
         "interrupt_ok": interrupt_ok,
     }
 
-    if existing is not None:
+    # Re-read right before the write: the step-1 read predates three network
+    # round-trips, and a concurrent `jobs watch` may have recorded newer
+    # status/outputs in the meantime (the per-file lock stops torn writes, not
+    # stale overwrites). Already-terminal jobs keep their recorded outcome —
+    # cancelling a finished job is an idempotent ok, not a re-labelling of a
+    # 'completed' run as 'cancelled'.
+    existing = jobs_state.read(prompt_id)
+    if existing is not None and not existing.is_terminal:
         existing.status = "cancelled"
         jobs_state.write(existing)
 
