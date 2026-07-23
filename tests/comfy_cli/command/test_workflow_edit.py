@@ -683,6 +683,40 @@ class TestConnect:
         assert {i["name"] for i in grown} == {"images.image0", "images.image1"}
         assert all(i["link"] is not None and i["type"] == "IMAGE" for i in grown)
 
+    def test_autogrow_rejects_malformed_slot_targets(self, patched_graph, tmp_path, capsys):
+        """A dotted autogrow target that is not the next sequential slot — an index gap
+        (images.image2), a doubled prefix (images.images.image0), a stray element
+        (images.foo), or a trailing dot — is rejected with the fix, not silently grown
+        into a key the server cannot map. Regression: prod connects mis-addressed
+        autogrow slots and the CLI grew bogus inputs that failed only at submit time."""
+        path = _write(tmp_path, {"nodes": [], "links": [], "last_node_id": 0, "last_link_id": 0})
+        src = _run(["add-node", str(path), "VAEDecode"], capsys)["data"]["op"]["node_id"]
+        batch = _run(["add-node", str(path), "BatchImagesNode"], capsys)["data"]["op"]["node_id"]
+
+        for bad in ("images.image2", "images.images.image0", "images.foo", "images."):
+            env = _run(["connect", str(path), f"{src}.IMAGE", f"{batch}.{bad}"], capsys)
+            assert env["ok"] is False, (bad, env)
+            assert env["error"]["code"] == "workflow_edit_invalid", (bad, env)
+            # Actionable: names the base and the exact next free key to use instead.
+            assert "images.image0" in env["error"]["message"], (bad, env)
+            # And the bogus target is never minted onto the node.
+            bn = next(n for n in json.loads(path.read_text())["nodes"] if n["id"] == batch)
+            assert not any(i["name"] == bad for i in bn["inputs"]), (bad, bn["inputs"])
+
+    def test_autogrow_accepts_the_exact_next_slot_key(self, patched_graph, tmp_path, capsys):
+        """The bare base auto-appends, and the EXACT next sequential key is also accepted,
+        so an agent addressing images.image0 then images.image1 still wires cleanly."""
+        path = _write(tmp_path, {"nodes": [], "links": [], "last_node_id": 0, "last_link_id": 0})
+        a = _run(["add-node", str(path), "VAEDecode"], capsys)["data"]["op"]["node_id"]
+        b = _run(["add-node", str(path), "VAEDecode"], capsys)["data"]["op"]["node_id"]
+        batch = _run(["add-node", str(path), "BatchImagesNode"], capsys)["data"]["op"]["node_id"]
+        e1 = _run(["connect", str(path), f"{a}.IMAGE", f"{batch}.images.image0"], capsys)  # exact next
+        assert e1["ok"] is True, e1
+        assert e1["data"]["op"]["grow"]["name"] == "images.image0"
+        e2 = _run(["connect", str(path), f"{b}.IMAGE", f"{batch}.images.image1"], capsys)  # exact next
+        assert e2["ok"] is True, e2
+        assert e2["data"]["op"]["grow"]["name"] == "images.image1"
+
     def test_connect_converts_widget_to_input(self, patched_graph, tmp_path, capsys):
         """connect onto a widget-backed input (KSampler.cfg) converts it to a link;
         widgets_values stays intact and the converter uses the link (fps-style wiring)."""

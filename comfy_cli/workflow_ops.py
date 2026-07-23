@@ -1122,8 +1122,20 @@ def _resolve_input_target(node: dict, graph, slot: Any, elem_type: str | None) -
             (i for i in ins if i.get("name") == base and str(i.get("type", "")).startswith("COMFY_AUTOGROW")), None
         )
         if ag is not None:
-            requested = slot if "." in slot else None
-            return None, _plan_autogrow(ins, base, elem_type, requested=requested)
+            grow = _plan_autogrow(ins, base, elem_type)  # canonical next sequential slot
+            # Addressing the bare base auto-appends. A dotted key is accepted ONLY if
+            # it names that exact next slot; an index gap (images.image4), a doubled
+            # prefix (images.images.image0), or a stray element (images.foo) would mint
+            # a key the server can't map — reject it with the fix instead of growing it.
+            if "." in slot and slot != grow["name"]:
+                grown = [i.get("name") for i in ins if str(i.get("name", "")).startswith(base + ".")]
+                raise ValueError(
+                    f"input {slot!r} is not a valid autogrow slot on node {node.get('id')}; "
+                    f"autogrow input {base!r} appends one sequential slot per connection "
+                    f"(existing: {grown}) — connect to the base {base!r} to auto-append, "
+                    f"or use the next free key {grow['name']!r}"
+                )
+            return None, grow
     # Widget-backed input: convert the widget to a linked input.
     if graph is not None and isinstance(slot, str) and slot in graph.widget_order(node.get("type", "")):
         return None, {"name": slot, "type": elem_type or "*", "widget": slot}
@@ -1131,11 +1143,11 @@ def _resolve_input_target(node: dict, graph, slot: Any, elem_type: str | None) -
     raise ValueError(f"input {slot!r} not found on node {node.get('id')}; inputs: {names}")
 
 
-def _plan_autogrow(ins: list, base: str, elem_type: str | None, requested: str | None = None) -> dict:
+def _plan_autogrow(ins: list, base: str, elem_type: str | None) -> dict:
+    """The canonical next autogrow slot for ``base`` — one sequential
+    ``{base}.{elem}{N}`` per existing slot, minted with the source ``elem_type``.
+    Callers validate any explicitly requested key against this name before growing."""
     existing = [i for i in ins if str(i.get("name", "")).startswith(base + ".")]
-    if requested and not any(i.get("name") == requested for i in ins):
-        name = requested
-    else:
-        elem = base[:-1] if base.endswith("s") else base
-        name = f"{base}.{elem}{len(existing)}"
+    elem = base[:-1] if base.endswith("s") else base
+    name = f"{base}.{elem}{len(existing)}"
     return {"name": name, "type": elem_type or "*"}
