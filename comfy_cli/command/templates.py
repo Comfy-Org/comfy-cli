@@ -751,7 +751,6 @@ def run_template_cmd(
     import tempfile
 
     from comfy_cli.command import run as run_module
-    from comfy_cli.config_manager import ConfigManager
     from comfy_cli.env_checker import check_comfy_server_running
 
     renderer = get_renderer()
@@ -819,20 +818,17 @@ def run_template_cmd(
         )
         raise typer.Exit(code=1) from e
 
-    # -- Resolve host/port exactly like `comfy run`'s local branch.
-    config = ConfigManager()
+    # -- Resolve host/port through the shared resolver, exactly like `comfy
+    # run`'s local branch (cmdline.py). This validates the host (rejecting
+    # URL-injection characters), brackets IPv6 literals, and honors
+    # config.background — behavior the old hand-rolled block lacked.
+    from comfy_cli.host_port import parse_host_port_arg, resolve_host_port
+
     if host:
-        s = host.split(":")
-        host = s[0]
-        if not port and len(s) == 2:
-            port = int(s[1])
-    if config.background:
-        host = host or config.background[0]
-        port = port or config.background[1]
-    host = host or "127.0.0.1"
-    if host == "0.0.0.0":  # wildcard bind, not a connect address
-        host = "127.0.0.1"
-    port = port or 8188
+        host, parsed_port = parse_host_port_arg(host)
+        if not port and parsed_port is not None:
+            port = parsed_port
+    host, port = resolve_host_port(host, port)
 
     if not check_comfy_server_running(port, host, timeout=timeout):
         renderer.error(

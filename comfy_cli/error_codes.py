@@ -151,11 +151,14 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ),
     ErrorCode(
         "spend_consent_required",
-        "`comfy run-template` resolved a template that uses partner-API (paid) nodes — running it "
-        "would spend Comfy credits — and no consent was given (`--allow-spend` absent, or the "
-        "interactive confirmation was declined). Nothing was submitted; no credits were spent. "
-        "`details.partner_nodes` / `details.gallery_signals` carry the evidence.",
-        "re-run with `--allow-spend` to consent to the credit spend",
+        "A credit-spending command hit its spend gate with no consent, so it failed closed — "
+        "nothing was submitted and no credits were spent. `comfy run-template` raises this when a "
+        "template uses partner-API (paid) nodes and `--allow-spend` is absent or the interactive "
+        "confirmation was declined (`details.partner_nodes` / `details.gallery_signals` carry the "
+        "evidence); `comfy generate` raises it when a credit-spending call runs non-interactively "
+        "(`--json` / no TTY) with no consent.",
+        "consent to the spend and re-run — `comfy run-template --allow-spend`, or "
+        "`comfy generate --yes` (persist with `comfy generate consent always`)",
     ),
     ErrorCode(
         "workflow_empty",
