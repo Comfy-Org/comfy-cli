@@ -422,6 +422,21 @@ def ls_cmd(
     # the server query and the state-file scope key off this single decision.
     target_where = "cloud" if _is_cloud(where) else "local"
 
+    # --orphaned only makes sense for state files (the server doesn't know
+    # whether a watcher crashed), so skip the server query in that mode.
+    if orphaned:
+        local_only = True
+
+    # State-file rows are scoped to the resolved target, so a `--where local`
+    # listing can't surface cloud jobs from an earlier run; `--all` restores
+    # the union view. `--orphaned` stays unfiltered — watcher cleanup is
+    # where-agnostic. `server_rows` are never filtered: they are already
+    # scoped by which backend we queried.
+    #
+    # Both decisions are made *before* the --watch branch so the live table
+    # applies exactly the same filters as the one-shot listing.
+    state_where = None if (all_wheres or orphaned) else target_where
+
     if watch:
         if not renderer.is_pretty():
             renderer.error(
@@ -436,21 +451,11 @@ def ls_cmd(
             limit=limit,
             where=where,
             local_only=local_only,
-            state_where=None if all_wheres else target_where,
+            state_where=state_where,
+            orphaned_only=orphaned,
         )
         return
 
-    # --orphaned only makes sense for state files (the server doesn't know
-    # whether a watcher crashed), so skip the server query in that mode.
-    if orphaned:
-        local_only = True
-
-    # State-file rows are scoped to the resolved target, so a `--where local`
-    # listing can't surface cloud jobs from an earlier run; `--all` restores
-    # the union view. `--orphaned` stays unfiltered — watcher cleanup is
-    # where-agnostic. `server_rows` are never filtered: they are already
-    # scoped by which backend we queried.
-    state_where = None if (all_wheres or orphaned) else target_where
     state_rows = _gather_local_state_files(limit=limit, orphaned_only=orphaned, where=state_where)
 
     server_rows: list[JobRow] = []
@@ -492,12 +497,13 @@ def ls_cmd(
     )
 
 
-def _watch_ls(*, host, port, limit, where, local_only, state_where=None):
+def _watch_ls(*, host, port, limit, where, local_only, state_where=None, orphaned_only=False):
     """Rich Live refresh of the jobs table every 2s until Ctrl-C.
 
     ``state_where`` scopes the state-file rows exactly as the one-shot path
-    does (``None`` = the unfiltered union view, i.e. ``--all``), so the live
-    table shows the same jobs as ``jobs ls``.
+    does (``None`` = the unfiltered union view, i.e. ``--all``), and
+    ``orphaned_only`` mirrors ``--orphaned``, so the live table shows the same
+    jobs as ``jobs ls``.
     """
     import time
 
@@ -511,7 +517,7 @@ def _watch_ls(*, host, port, limit, where, local_only, state_where=None):
     h, p = _resolve_host_port(host, port)
 
     def build_table() -> Table:
-        state_rows = _gather_local_state_files(limit=limit, where=state_where)
+        state_rows = _gather_local_state_files(limit=limit, where=state_where, orphaned_only=orphaned_only)
         server_rows: list[JobRow] = []
         if not local_only:
             try:

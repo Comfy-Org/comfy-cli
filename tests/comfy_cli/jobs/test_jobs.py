@@ -473,6 +473,71 @@ def test_ls_orphaned_stays_unfiltered(capsys, monkeypatch):
     assert _ls_ids(data) == {"orphan-local", "orphan-cloud"}
 
 
+def _watch_kwargs(monkeypatch, **kwargs) -> dict:
+    """Run ``jobs ls --watch`` under a pretty renderer with ``_watch_ls``
+    stubbed, and return the kwargs the live path would have been driven with."""
+    from comfy_cli.output.renderer import OutputMode, Renderer, set_renderer
+
+    set_renderer(Renderer(mode=OutputMode.PRETTY, command="jobs ls"))
+    seen: dict = {}
+    monkeypatch.setattr(jobs_mod, "_watch_ls", lambda **kw: seen.update(kw))
+    jobs_mod.ls_cmd(host="127.0.0.1", port=65431, watch=True, **kwargs)
+    return seen
+
+
+def test_ls_watch_mirrors_one_shot_scope(monkeypatch):
+    """``--watch`` must apply the *same* state-file filters as the one-shot
+    listing: the resolved target by default, the union under ``--all``."""
+    monkeypatch.delenv("COMFY_WHERE", raising=False)
+
+    assert _watch_kwargs(monkeypatch)["state_where"] == "local"
+    assert _watch_kwargs(monkeypatch, all_wheres=True)["state_where"] is None
+
+    monkeypatch.setattr(jobs_mod, "_is_cloud", lambda w: True)
+    assert _watch_kwargs(monkeypatch, where="cloud")["state_where"] == "cloud"
+
+
+def test_ls_watch_threads_orphaned(monkeypatch):
+    """``jobs ls --watch --orphaned`` must restrict to crashed-watcher rows,
+    keep the union scope, and skip the server query — exactly like one-shot.
+    The `if orphaned` handling used to sit *below* the --watch early return."""
+    monkeypatch.delenv("COMFY_WHERE", raising=False)
+
+    seen = _watch_kwargs(monkeypatch, orphaned=True)
+    assert seen["orphaned_only"] is True
+    assert seen["state_where"] is None, "--orphaned is where-agnostic in watch too"
+    assert seen["local_only"] is True, "the server can't know a watcher crashed"
+
+
+def test_watch_build_table_applies_orphaned_and_scope(monkeypatch):
+    """The stubbed kwargs above are only useful if ``_watch_ls`` actually
+    forwards them to the gatherer."""
+    from comfy_cli.output.renderer import OutputMode, Renderer, set_renderer
+
+    class _Stop(Exception):
+        pass
+
+    set_renderer(Renderer(mode=OutputMode.PRETTY, command="jobs ls"))
+    seen: dict = {}
+    monkeypatch.setattr(jobs_mod, "_gather_local_state_files", lambda **kw: seen.update(kw) or [])
+    # Bail out of the first table build rather than looping forever. `_Stop` is
+    # not KeyboardInterrupt on purpose — `_watch_ls` swallows that one.
+    monkeypatch.setattr(jobs_mod, "_merge_jobs", lambda *_a, **_k: (_ for _ in ()).throw(_Stop()))
+
+    with pytest.raises(_Stop):
+        jobs_mod._watch_ls(
+            host="127.0.0.1",
+            port=65431,
+            limit=100,
+            where="local",
+            local_only=True,
+            state_where=None,
+            orphaned_only=True,
+        )
+    assert seen["orphaned_only"] is True
+    assert seen["where"] is None
+
+
 # ---------------------------------------------------------------------------
 # --where routing — top-level flag must be honored, not just per-command
 # ---------------------------------------------------------------------------
