@@ -433,7 +433,10 @@ def test_jobs_cancel_local_pending_job_does_not_interrupt(monkeypatch: pytest.Mo
         monkeypatch,
         {
             # prompt-pending is queued; a *different* prompt is running.
-            "GET /queue": {"queue_running": [[0, "prompt-running", {}, {}, {}]], "queue_pending": []},
+            "GET /queue": {
+                "queue_running": [[0, "prompt-running", {}, {}, {}]],
+                "queue_pending": [[1, "prompt-pending", {}, {}, {}]],
+            },
             "POST /queue": b"{}",
             "/interrupt": b"{}",
         },
@@ -464,6 +467,138 @@ def test_jobs_cancel_local_both_fail_returns_error(monkeypatch: pytest.MonkeyPat
     runner = CliRunner()
     result = runner.invoke(jobs_mod.app, ["cancel", "prompt-abc", "--where", "local"])
     assert result.exit_code == 1, result.output
+
+
+# ---------------------------------------------------------------------------
+# `jobs cancel` local — existence probe (prompt_not_found for ids nowhere)
+# ---------------------------------------------------------------------------
+
+
+def _cancel_local_json(prompt_id: str):
+    """Run ``comfy --json jobs cancel <id> --where local`` in-process and
+    return (result, envelope) — the envelope being the last stdout line."""
+    from typer.testing import CliRunner
+
+    from comfy_cli.cmdline import app
+
+    result = CliRunner().invoke(app, ["--json", "jobs", "cancel", prompt_id, "--where", "local"])
+    lines = [ln for ln in result.stdout.splitlines() if ln.strip()]
+    assert lines, f"no stdout envelope: {result.output!r}"
+    return result, json.loads(lines[-1])
+
+
+def test_jobs_cancel_local_unknown_id_emits_prompt_not_found(monkeypatch: pytest.MonkeyPatch):
+    """An id the server and the state store have never seen is an error, not a
+    silent idempotent ok — otherwise a typo'd id is indistinguishable from a
+    real cancel (`POST /queue {"delete": [id]}` 200s for unknown ids)."""
+    monkeypatch.setattr(jobs_mod, "_server_or_error", lambda h, p, **kw: True)
+    calls = _capture_urlopen(
+        monkeypatch,
+        {
+            "GET /queue": {"queue_running": [], "queue_pending": []},
+            # ComfyUI returns {} from /history/<id> for an unknown id.
+            "GET /history/": {},
+            "POST /queue": b"{}",
+            "/interrupt": b"{}",
+        },
+    )
+
+    result, env = _cancel_local_json("not-a-real-id")
+    assert result.exit_code == 1, result.output
+    assert env["ok"] is False
+    assert env["error"]["code"] == "prompt_not_found"
+    assert env["error"]["details"]["prompt_id"] == "not-a-real-id"
+
+    # The probe must run BEFORE any mutation — nothing was deleted or
+    # interrupted on the way to deciding the id doesn't exist.
+    assert not any(c["method"] == "POST" for c in calls), calls
+
+
+def test_jobs_cancel_local_known_only_in_history_is_idempotent_ok(monkeypatch: pytest.MonkeyPatch):
+    """A completed (terminal) prompt is still a KNOWN prompt — the documented
+    idempotent contract keeps returning ok for it."""
+    monkeypatch.setattr(jobs_mod, "_server_or_error", lambda h, p, **kw: True)
+    calls = _capture_urlopen(
+        monkeypatch,
+        {
+            "GET /queue": {"queue_running": [], "queue_pending": []},
+            "GET /history/abc-1": {"abc-1": _HISTORY_FIXTURE["abc-1"]},
+            "POST /queue": b"{}",
+            "/interrupt": b"{}",
+        },
+    )
+
+    result, env = _cancel_local_json("abc-1")
+    assert result.exit_code == 0, result.output
+    assert env["ok"] is True
+    assert env["data"]["found"] is True
+    # Terminal, not running → no /interrupt (that would kill an unrelated job).
+    assert not any("/interrupt" in c["url"] for c in calls), calls
+
+
+def test_jobs_cancel_local_known_only_in_state_file_is_ok(monkeypatch: pytest.MonkeyPatch):
+    """A state file means WE submitted the prompt, so it existed — even if the
+    server has since forgotten it (restart, trimmed history). No history probe
+    is needed; the routes below would AssertionError if one were made."""
+    from comfy_cli import jobs_state
+
+    jobs_state.write(jobs_state.new(prompt_id="pid-local", client_id="c", workflow="w", where="local"))
+
+    monkeypatch.setattr(jobs_mod, "_server_or_error", lambda h, p, **kw: True)
+    calls = _capture_urlopen(
+        monkeypatch,
+        {
+            "GET /queue": {"queue_running": [], "queue_pending": []},
+            "POST /queue": b"{}",
+        },
+    )
+
+    result, env = _cancel_local_json("pid-local")
+    assert result.exit_code == 0, result.output
+    assert env["ok"] is True and env["data"]["found"] is True
+    assert not any("/history" in c["url"] for c in calls), calls
+
+
+def test_jobs_cancel_local_unreachable_queue_is_not_prompt_not_found(monkeypatch: pytest.MonkeyPatch):
+    """Absence of evidence isn't evidence of absence: when the existence probe
+    can't reach the server, keep the old idempotent behavior rather than
+    claiming the id doesn't exist."""
+    import urllib.error
+
+    monkeypatch.setattr(jobs_mod, "_server_or_error", lambda h, p, **kw: True)
+    _capture_urlopen(
+        monkeypatch,
+        {
+            "GET /queue": urllib.error.URLError("connection refused"),
+            "POST /queue": b"{}",
+        },
+    )
+
+    result, env = _cancel_local_json("ghost-id")
+    assert result.exit_code == 0, result.output
+    assert env["ok"] is True
+    assert env["data"]["found"] is False
+
+
+def test_jobs_cancel_local_unreachable_history_is_not_prompt_not_found(monkeypatch: pytest.MonkeyPatch):
+    """Same guard one probe further in: /queue answered but /history failed, so
+    existence is unproven — don't report prompt_not_found."""
+    import urllib.error
+
+    monkeypatch.setattr(jobs_mod, "_server_or_error", lambda h, p, **kw: True)
+    _capture_urlopen(
+        monkeypatch,
+        {
+            "GET /queue": {"queue_running": [], "queue_pending": []},
+            "GET /history/": urllib.error.URLError("connection reset"),
+            "POST /queue": b"{}",
+        },
+    )
+
+    result, env = _cancel_local_json("ghost-id")
+    assert result.exit_code == 0, result.output
+    assert env["ok"] is True
+    assert env["data"]["found"] is False
 
 
 def test_jobs_cancel_cloud_posts_to_jobs_cancel_endpoint(monkeypatch: pytest.MonkeyPatch):

@@ -954,7 +954,7 @@ def wait_cmd(
 
 @app.command(
     "cancel",
-    help="Cancel a job. Idempotent — calling on an already-terminal prompt returns ok.",
+    help="Cancel a job. Idempotent for known jobs; unknown ids error with prompt_not_found.",
 )
 @tracking.track_command("jobs")
 def cancel_cmd(
@@ -978,13 +978,61 @@ def _local_cancel(prompt_id: str, host: str, port: int) -> None:
     interrupting any in-flight execution. ComfyUI splits these into two
     endpoints; we hit both so the call works regardless of phase.
 
-    Returns 200 (ok) regardless of whether the prompt was actually
-    queued/running — mirrors cloud's idempotent behavior.
+    Idempotent for prompts we can prove exist — running, pending, in the
+    server's history, or in the local state store — including already-terminal
+    ones, which return ok. An id that is nowhere is a `prompt_not_found` error
+    (exit 1), matching what the cloud path does with a 404: ``POST /queue
+    {"delete": [id]}`` 200s for unknown ids, so without the probe below a
+    typo'd id is indistinguishable from a real cancel.
     """
     renderer = get_renderer()
     base = f"http://{host}:{port}"
+    from comfy_cli import jobs_state
 
-    # 1. Remove from the pending queue (no-op if not pending).
+    # 1. Existence probe, BEFORE mutating anything — the queue delete in step 2
+    #    would erase the only evidence that a pending prompt ever existed. This
+    #    single /queue fetch also feeds the interrupt gate in step 3, so the
+    #    check costs no extra round-trip.
+    try:
+        queue = _http_get_json(f"{base}/queue")
+        queue_reachable = True
+    except RuntimeError:
+        queue = {}
+        queue_reachable = False
+    if not isinstance(queue, dict):
+        queue = {}
+    running_ids = {str(_safe_queue_entry(entry)[0]) for entry in (queue.get("queue_running") or [])}
+    pending_ids = {str(_safe_queue_entry(entry)[0]) for entry in (queue.get("queue_pending") or [])}
+
+    is_running = prompt_id in running_ids
+    existing = jobs_state.read(prompt_id)
+    # A state file means WE submitted it, so it existed even if the server has
+    # since forgotten it (restart, history trimmed).
+    found = is_running or prompt_id in pending_ids or existing is not None
+    probes_reachable = queue_reachable
+    if not found and queue_reachable:
+        # /history/<id> is `{}` for an unknown id, and a dict keyed by the id
+        # for a known one (running, completed, errored, or cancelled). Quote the
+        # id into the path so a hostile value can't escape the segment — same
+        # defense in depth as the cloud path.
+        try:
+            history = _http_get_json(f"{base}/history/{urllib.parse.quote(prompt_id, safe='')}")
+            found = isinstance(history, dict) and bool(history)
+        except RuntimeError:
+            # Unreachable is not "absent" — absence of evidence isn't evidence
+            # of absence, so fall through to the idempotent path instead.
+            probes_reachable = False
+
+    if not found and probes_reachable:
+        renderer.error(
+            code="prompt_not_found",
+            message=f"no local job with id {prompt_id!r}",
+            hint="check `comfy jobs ls`",
+            details={"prompt_id": prompt_id, "host": host, "port": port},
+        )
+        raise typer.Exit(code=1)
+
+    # 2. Remove from the pending queue (no-op if not pending).
     queue_body = json.dumps({"delete": [prompt_id]}).encode("utf-8")
     queue_req = urllib.request.Request(
         f"{base}/queue", data=queue_body, method="POST", headers={"Content-Type": "application/json"}
@@ -998,21 +1046,14 @@ def _local_cancel(prompt_id: str, host: str, port: int) -> None:
         # Don't fail the whole command — try the interrupt next.
         queue_ok = False
 
-    # 2. Interrupt only if THIS prompt is the one currently executing.
+    # 3. Interrupt only if THIS prompt is the one currently executing.
     #    /interrupt takes NO prompt_id — it kills whatever is running — so
     #    blindly posting it after a pending-job delete would also abort an
     #    unrelated running job ("cancel B" silently cancelling A). Gate on
-    #    /queue's queue_running list; the queue delete above already covers
-    #    pending jobs.
+    #    /queue's queue_running list (read in step 1); the queue delete above
+    #    already covers pending jobs.
     interrupt_ok = True
-    try:
-        queue = _http_get_json(f"{base}/queue")
-        queue_reachable = True
-    except RuntimeError:
-        queue = {}
-        queue_reachable = False
-    running_ids = {str(_safe_queue_entry(entry)[0]) for entry in (queue.get("queue_running") or [])}
-    if prompt_id in running_ids:
+    if is_running:
         interrupt_req = urllib.request.Request(f"{base}/interrupt", method="POST")
         try:
             with urllib.request.urlopen(interrupt_req, timeout=10) as resp:
@@ -1034,12 +1075,11 @@ def _local_cancel(prompt_id: str, host: str, port: int) -> None:
         "where": "local",
         "host": host,
         "port": port,
+        "found": found,
         "queue_delete_ok": queue_ok,
         "interrupt_ok": interrupt_ok,
     }
-    from comfy_cli import jobs_state
 
-    existing = jobs_state.read(prompt_id)
     if existing is not None:
         existing.status = "cancelled"
         jobs_state.write(existing)
