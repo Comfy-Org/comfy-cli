@@ -7,12 +7,12 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 import requests
 import typer
-from rich.markup import escape
 
 from comfy_cli import constants, tracking, ui
 from comfy_cli.config_manager import ConfigManager
 from comfy_cli.constants import DEFAULT_COMFY_MODEL_PATH
 from comfy_cli.file_utils import DownloadException, check_unauthorized, download_file
+from comfy_cli.output import get_renderer
 from comfy_cli.output import rprint as print  # context-aware: stderr in JSON mode
 from comfy_cli.workspace_manager import WorkspaceManager
 
@@ -51,6 +51,68 @@ def _format_elapsed(seconds: float) -> str:
 
 def potentially_strip_param_url(path_name: str) -> str:
     return path_name.split("?")[0]
+
+
+def _download_failure(
+    *,
+    code: str,
+    message: str,
+    hint: str | None = None,
+    details: dict | None = None,
+) -> typer.Exit:
+    """Emit an ``envelope/1`` error for a `model download` failure and return the
+    ``typer.Exit`` the caller should raise.
+
+    Every failure path in :func:`download` funnels through here so a `--json`
+    consumer always gets a machine-readable ``error.code`` and a non-zero exit —
+    never a bare exit that an envelope-synthesizing wrapper would read as a
+    success for a download that never happened.
+
+    In pretty mode ``renderer.error`` renders the red error panel, so call sites
+    do not print the message themselves. Rich builds the panel body from
+    ``rich.text.Text``, which is literal, so a message containing markup
+    metacharacters (``[/]``) neither crashes nor gets swallowed — no ``escape()``
+    needed.
+
+    ``code`` is keyword-only on purpose: the registry test
+    (``tests/comfy_cli/output/test_error_code_registry.py``) AST-scans for
+    ``code="..."`` keywords, so a positional call site would silently drop out of
+    the both-ways registry enforcement.
+    """
+    get_renderer().error(
+        code=code,
+        message=message,
+        hint=hint,
+        details=details,
+        command="model download",
+    )
+    return typer.Exit(code=1)
+
+
+def _resolve_civitai_source(fetch, url: str):
+    """Run a CivitAI metadata lookup, converting any failure into an error envelope.
+
+    The lookups raise on HTTP/parse errors and ``request_civitai_model_version_api``
+    returns ``None`` when the version carries no primary file; both used to escape
+    as an unhandled traceback with no envelope.
+    """
+    try:
+        resolved = fetch()
+    except Exception as e:
+        raise _download_failure(
+            code="download_failed",
+            message=f"Could not resolve a downloadable file from the CivitAI URL: {e}",
+            hint="check the model/version exists and is public; a private model needs --set-civitai-api-token",
+            details={"url": url, "stage": "resolve"},
+        ) from None
+    if resolved is None:
+        raise _download_failure(
+            code="download_failed",
+            message="The CivitAI model version has no primary file to download.",
+            hint="pick a version that has a primary file, or pass its direct download URL",
+            details={"url": url, "stage": "resolve"},
+        )
+    return resolved
 
 
 def check_huggingface_url(url: str) -> tuple[bool, str | None, str | None, str | None, str | None]:
@@ -270,7 +332,9 @@ def download(
             headers["Authorization"] = f"Bearer {civitai_api_token}"
 
     if is_civitai_model_url:
-        local_filename, url, model_type, basemodel = request_civitai_model_api(model_id, version_id, headers)
+        local_filename, url, model_type, basemodel = _resolve_civitai_source(
+            lambda: request_civitai_model_api(model_id, version_id, headers), url
+        )
 
         model_path = model_path_map.get(model_type)
 
@@ -280,7 +344,9 @@ def download(
 
             relative_path = os.path.join(DEFAULT_COMFY_MODEL_PATH, model_path, basemodel)
     elif is_civitai_api_url:
-        local_filename, url, model_type, basemodel = request_civitai_model_version_api(version_id, headers)
+        local_filename, url, model_type, basemodel = _resolve_civitai_source(
+            lambda: request_civitai_model_version_api(version_id, headers), url
+        )
 
         model_path = model_path_map.get(model_type)
 
@@ -299,7 +365,10 @@ def download(
             basemodel = ui.prompt_input("Enter base model (e.g. SD1.5, SDXL, ...)", default="")
             relative_path = os.path.join(DEFAULT_COMFY_MODEL_PATH, model_path, basemodel)
     else:
-        print("Model source is unknown")
+        # Neither CivitAI nor Hugging Face — a plain file URL, which IS a supported
+        # source: the download proceeds via download_file() below. This is a note,
+        # not a failure, so it must not short-circuit.
+        print(f"Model source is unknown; treating {url} as a direct file URL")
 
     if filename is None:
         if local_filename is None:
@@ -312,25 +381,41 @@ def download(
     if relative_path is None:
         relative_path = DEFAULT_COMFY_MODEL_PATH
 
-    if local_filename is None:
-        raise typer.Exit(code=1)
-    if local_filename == "":
-        raise DownloadException("Filename cannot be empty")
+    # None (prompt cancelled / no TTY) and "" (prompting skipped for an agentic
+    # caller, which returns the empty default) are the same failure: nothing to
+    # save the file as. Both used to end without an envelope — a bare exit 1 and
+    # an unhandled DownloadException traceback respectively.
+    if not local_filename:
+        raise _download_failure(
+            code="missing_argument",
+            message="Could not determine a filename to save the model as.",
+            hint="pass `--filename <name>`",
+            details={"url": url},
+        )
 
     local_filepath = get_workspace() / relative_path / local_filename
 
     if local_filepath.exists():
-        print(f"[bold red]File already exists: {local_filepath}[/bold red]")
-        return
+        raise _download_failure(
+            code="model_file_exists",
+            message=f"File already exists: {local_filepath}",
+            hint="pass `--filename` to save under a different name, or remove the existing file",
+            details={"path": str(local_filepath)},
+        )
 
     start_time = time.monotonic()
 
     if is_huggingface_url and check_unauthorized(url, headers):
         if hf_api_token is None:
-            print(
-                f"Unauthorized access to Hugging Face model. Please set the Hugging Face API token using `comfy model download --set-hf-api-token` or via the `{constants.HF_API_TOKEN_ENV_KEY}` environment variable"
+            raise _download_failure(
+                code="hf_unauthorized",
+                message="Unauthorized access to the Hugging Face model, and no Hugging Face API token is configured.",
+                hint=(
+                    "set the token via `comfy model download --set-hf-api-token <token>` or the "
+                    f"`{constants.HF_API_TOKEN_ENV_KEY}` environment variable"
+                ),
+                details={"url": url, "repo_id": repo_id},
             )
-            return
         else:
             try:
                 import huggingface_hub
@@ -340,30 +425,57 @@ def download(
 
                 from comfy_cli.resolve_python import resolve_workspace_python
 
-                python = resolve_workspace_python(str(get_workspace()))
-                subprocess.check_call([python, "-m", "pip", "install", "huggingface_hub"])
-                import huggingface_hub
+                try:
+                    python = resolve_workspace_python(str(get_workspace()))
+                    subprocess.check_call([python, "-m", "pip", "install", "huggingface_hub"])
+                    import huggingface_hub
+                except Exception as e:
+                    raise _download_failure(
+                        code="download_failed",
+                        message=f"`huggingface_hub` is required for Hugging Face downloads and could not be installed: {e}",
+                        hint="install it manually (`pip install huggingface_hub`) and retry",
+                        details={"url": url},
+                    ) from None
 
             print(f"Downloading model {model_id} from Hugging Face...")
-            output_path = huggingface_hub.hf_hub_download(
-                repo_id=repo_id,
-                filename=hf_filename,
-                subfolder=hf_folder_name,
-                revision=hf_branch_name,
-                token=hf_api_token,
-                local_dir=get_workspace() / relative_path,
-                cache_dir=get_workspace() / relative_path,
-            )
+            try:
+                output_path = huggingface_hub.hf_hub_download(
+                    repo_id=repo_id,
+                    filename=hf_filename,
+                    subfolder=hf_folder_name,
+                    revision=hf_branch_name,
+                    token=hf_api_token,
+                    local_dir=get_workspace() / relative_path,
+                    cache_dir=get_workspace() / relative_path,
+                )
+            except Exception as e:
+                raise _download_failure(
+                    code="download_failed",
+                    message=f"Hugging Face download failed: {e}",
+                    hint="check the repo/revision exists and the token has access to it",
+                    details={"url": url, "repo_id": repo_id},
+                ) from None
             print(f"Model downloaded successfully to: {output_path}")
     else:
         print(f"Start downloading URL: {url} into {local_filepath}")
         try:
             download_file(url, local_filepath, headers, downloader=resolved_downloader)
         except DownloadException as e:
-            # escape() so a dynamic error message containing "[/]" or similar
-            # rich-markup syntax doesn't trigger MarkupError or get mis-rendered.
-            print(f"[bold red]{escape(str(e))}[/bold red]")
-            raise typer.Exit(code=1) from None
+            raise _download_failure(
+                code="download_failed",
+                message=str(e),
+                details={"url": url, "path": str(local_filepath)},
+            ) from None
+        except OSError as e:
+            # download_file() converts network failures to DownloadException, but a
+            # local filesystem failure (unwritable dir, disk full) still escapes as
+            # OSError — which would end the command with a traceback and no envelope.
+            raise _download_failure(
+                code="download_failed",
+                message=f"Could not write the downloaded file to {local_filepath}: {e}",
+                hint="check the destination directory exists, is writable, and has free space",
+                details={"url": url, "path": str(local_filepath)},
+            ) from None
 
     elapsed = time.monotonic() - start_time
     print(f"Done in {_format_elapsed(elapsed)}")

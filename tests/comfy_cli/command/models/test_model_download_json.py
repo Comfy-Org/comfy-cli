@@ -1,0 +1,344 @@
+"""`comfy --json model download` failure paths must emit `envelope/1` errors.
+
+The invariant under test: **every** failure of `model download` exits non-zero
+AND puts exactly one `envelope/1` object with `ok: false` on stdout. Two of these
+paths used to exit 0 with no envelope (file-exists, HF-unauthorized), which the
+local MCP's `plain_ok` synthesizer turned into a synthesized *success* for a
+download that never happened.
+
+The success path is deliberately unchanged (prints + exit 0, no envelope) — that
+same synthesizer depends on exit-0-no-envelope meaning success.
+"""
+
+from __future__ import annotations
+
+import io
+import json
+from typing import Any
+from unittest.mock import Mock, patch
+
+import pytest
+import typer.testing
+
+from comfy_cli import constants
+from comfy_cli.command.models.models import app
+from comfy_cli.file_utils import DownloadException
+from comfy_cli.output.renderer import (
+    OutputMode,
+    Renderer,
+    reset_renderer_for_testing,
+    set_renderer,
+)
+
+runner = typer.testing.CliRunner()
+
+# The renderer's machine stream (stdout in real runs) is pinned to this buffer so
+# the "exactly one envelope on stdout, nothing else" assertion holds regardless of
+# whether the installed Click version mixes stderr into CliRunner's captured
+# output. Human log lines go to `_HUMAN` (stderr in real runs) and must never
+# appear in `_MACHINE`.
+_MACHINE = io.StringIO()
+_HUMAN = io.StringIO()
+
+
+@pytest.fixture(autouse=True)
+def json_renderer():
+    """Install a JSON-mode renderer with pinned streams, and tear it down.
+
+    The renderer is a process-wide singleton, so the teardown matters: without it
+    the pretty-mode expectations of the neighbouring `test_models.py` would break
+    depending on test ordering.
+    """
+    global _MACHINE, _HUMAN
+    reset_renderer_for_testing()
+    _MACHINE = io.StringIO()
+    _HUMAN = io.StringIO()
+    r = Renderer()
+    r.mode = OutputMode.JSON
+    r.machine_stream = _MACHINE
+    r.pretty_stream = _HUMAN
+    set_renderer(r)
+    yield r
+    reset_renderer_for_testing()
+
+
+def _stdout() -> str:
+    return _MACHINE.getvalue()
+
+
+def _envelope() -> dict[str, Any]:
+    """Parse the single envelope the command is allowed to put on stdout."""
+    output = _stdout()
+    objects = []
+    for line in output.strip().splitlines():
+        if not line.strip():
+            continue
+        try:
+            objects.append(json.loads(line))
+        except json.JSONDecodeError:
+            pytest.fail(f"non-JSON line on stdout in --json mode: {line!r}\nfull stdout:\n{output}")
+    assert len(objects) == 1, f"expected exactly one envelope on stdout, got {len(objects)}:\n{output}"
+    return objects[0]
+
+
+def _assert_error_envelope(result, code: str) -> dict[str, Any]:
+    assert result.exit_code == 1, f"expected exit 1, got {result.exit_code}\n{result.output}"
+    env = _envelope()
+    assert env["schema"] == "envelope/1"
+    assert env["ok"] is False
+    assert env["error"]["code"] == code
+    assert env["error"]["hint"], "every error must carry a navigation hint"
+    return env
+
+
+def _invoke(args: list[str], **patches):
+    """Run `model download` with the network/prompt surface stubbed out.
+
+    Defaults: not a CivitAI URL, not a Hugging Face URL, no config values. Each
+    test overrides only the piece it exercises.
+    """
+    cfg = patches.pop("config_manager", None)
+    if cfg is None:
+        cfg = Mock()
+        cfg.get_or_override.return_value = None
+        cfg.get.return_value = None
+
+    with (
+        patch("comfy_cli.command.models.models.check_civitai_url", return_value=(False, False, None, None)),
+        patch("comfy_cli.command.models.models.check_huggingface_url", return_value=(False, None, None, None, None)),
+        patch("comfy_cli.command.models.models.config_manager", cfg),
+        patch("comfy_cli.tracking.track_command", lambda _cmd: lambda fn: fn),
+    ):
+        stack = []
+        try:
+            for target, kwargs in patches.items():
+                p = patch(f"comfy_cli.command.models.models.{target}", **kwargs)
+                stack.append(p)
+                p.start()
+            return runner.invoke(app, ["download", *args])
+        finally:
+            for p in reversed(stack):
+                p.stop()
+
+
+# --------------------------------------------------------------------------- #
+# transfer failure — the headline acceptance case
+# --------------------------------------------------------------------------- #
+
+
+def test_download_exception_emits_download_failed(tmp_path):
+    result = _invoke(
+        ["--url", "https://example.com/missing.safetensors", "--filename", "x.safetensors"],
+        get_workspace={"return_value": tmp_path},
+        download_file={"side_effect": DownloadException("404 Not Found")},
+    )
+
+    env = _assert_error_envelope(result, "download_failed")
+    assert "404 Not Found" in env["error"]["message"]
+    assert env["error"]["details"]["url"] == "https://example.com/missing.safetensors"
+
+
+def test_local_write_failure_emits_download_failed(tmp_path):
+    """`download_file` converts *network* failures to DownloadException, but a local
+    filesystem failure still surfaces as OSError — which used to end the command
+    with a traceback and no envelope."""
+    result = _invoke(
+        ["--url", "https://example.com/m.bin", "--filename", "x.bin"],
+        get_workspace={"return_value": tmp_path},
+        download_file={"side_effect": PermissionError(13, "Permission denied")},
+    )
+
+    env = _assert_error_envelope(result, "download_failed")
+    assert "Permission denied" in env["error"]["message"]
+
+
+def test_download_exception_message_with_markup_survives(tmp_path):
+    """A server message containing rich-markup metacharacters must reach the
+    envelope verbatim — the JSON path never runs it through Rich markup."""
+    result = _invoke(
+        ["--url", "https://example.com/m.bin", "--filename", "x.bin"],
+        get_workspace={"return_value": tmp_path},
+        download_file={"side_effect": DownloadException("server said [/] at /path/[id]/resource")},
+    )
+
+    env = _assert_error_envelope(result, "download_failed")
+    assert env["error"]["message"] == "server said [/] at /path/[id]/resource"
+
+
+# --------------------------------------------------------------------------- #
+# file already exists — used to exit 0 with no envelope
+# --------------------------------------------------------------------------- #
+
+
+def test_file_exists_emits_error_and_exits_nonzero(tmp_path):
+    target = tmp_path / "models" / "checkpoints" / "x.safetensors"
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"already here")
+
+    result = _invoke(
+        [
+            "--url",
+            "https://example.com/x.safetensors",
+            "--relative-path",
+            "models/checkpoints",
+            "--filename",
+            "x.safetensors",
+        ],
+        get_workspace={"return_value": tmp_path},
+        download_file={},
+    )
+
+    env = _assert_error_envelope(result, "model_file_exists")
+    assert env["error"]["details"]["path"] == str(target)
+
+
+def test_file_exists_does_not_download(tmp_path):
+    target = tmp_path / "x.bin"
+    target.write_bytes(b"already here")
+
+    with patch("comfy_cli.command.models.models.download_file") as mock_dl:
+        result = _invoke(
+            ["--url", "https://example.com/x.bin", "--relative-path", ".", "--filename", "x.bin"],
+            get_workspace={"return_value": tmp_path},
+        )
+
+    assert result.exit_code == 1
+    assert not mock_dl.called
+
+
+# --------------------------------------------------------------------------- #
+# Hugging Face unauthorized with no token — used to exit 0 with no envelope
+# --------------------------------------------------------------------------- #
+
+
+def test_hf_unauthorized_without_token_emits_error(tmp_path):
+    cfg = Mock()
+    cfg.get_or_override.return_value = None  # no CivitAI token, no HF token
+    cfg.get.return_value = None
+
+    with (
+        patch("comfy_cli.command.models.models.check_civitai_url", return_value=(False, False, None, None)),
+        patch(
+            "comfy_cli.command.models.models.check_huggingface_url",
+            return_value=(True, "org/repo", "m.safetensors", None, "main"),
+        ),
+        patch("comfy_cli.command.models.models.check_unauthorized", return_value=True),
+        patch("comfy_cli.command.models.models.get_workspace", return_value=tmp_path),
+        patch("comfy_cli.command.models.models.download_file") as mock_dl,
+        patch("comfy_cli.command.models.models.config_manager", cfg),
+        patch("comfy_cli.tracking.track_command", lambda _cmd: lambda fn: fn),
+    ):
+        result = runner.invoke(
+            app,
+            [
+                "download",
+                "--url",
+                "https://huggingface.co/org/repo/resolve/main/m.safetensors",
+                "--relative-path",
+                "models/checkpoints",
+                "--filename",
+                "m.safetensors",
+            ],
+        )
+
+    env = _assert_error_envelope(result, "hf_unauthorized")
+    assert constants.HF_API_TOKEN_ENV_KEY in env["error"]["hint"]
+    assert env["error"]["details"]["repo_id"] == "org/repo"
+    assert not mock_dl.called
+
+
+# --------------------------------------------------------------------------- #
+# no resolvable filename — used to be a bare `typer.Exit(1)` / a raw traceback
+# --------------------------------------------------------------------------- #
+
+
+def test_unprompted_empty_filename_emits_missing_argument(tmp_path):
+    """`ui.prompt_input` returns its (empty) default when prompting is skipped —
+    e.g. for an agentic caller. That used to raise an unhandled
+    DownloadException("Filename cannot be empty") and print a traceback."""
+    result = _invoke(
+        ["--url", "https://example.com/"],
+        get_workspace={"return_value": tmp_path},
+        download_file={},
+        ui={"new": Mock(**{"prompt_input.return_value": ""})},
+    )
+
+    _assert_error_envelope(result, "missing_argument")
+
+
+def test_cancelled_filename_prompt_emits_missing_argument(tmp_path):
+    """`questionary` returns None when the prompt is cancelled / gets EOF. That
+    used to be a bare `typer.Exit(1)` with no message and no envelope."""
+    result = _invoke(
+        ["--url", "https://example.com/"],
+        get_workspace={"return_value": tmp_path},
+        download_file={},
+        ui={"new": Mock(**{"prompt_input.return_value": None})},
+    )
+
+    _assert_error_envelope(result, "missing_argument")
+
+
+# --------------------------------------------------------------------------- #
+# CivitAI metadata resolution — used to escape as an unhandled traceback
+# --------------------------------------------------------------------------- #
+
+
+def test_civitai_lookup_failure_emits_download_failed(tmp_path):
+    with (
+        patch("comfy_cli.command.models.models.check_civitai_url", return_value=(True, False, 4242, None)),
+        patch("comfy_cli.command.models.models.check_huggingface_url", return_value=(False, None, None, None, None)),
+        patch(
+            "comfy_cli.command.models.models.request_civitai_model_api",
+            side_effect=RuntimeError("404 Client Error"),
+        ),
+        patch("comfy_cli.command.models.models.get_workspace", return_value=tmp_path),
+        patch("comfy_cli.command.models.models.config_manager", Mock(**{"get_or_override.return_value": None})),
+        patch("comfy_cli.tracking.track_command", lambda _cmd: lambda fn: fn),
+    ):
+        result = runner.invoke(
+            app,
+            ["download", "--url", "https://civitai.com/models/4242", "--filename", "x.safetensors"],
+        )
+
+    env = _assert_error_envelope(result, "download_failed")
+    assert env["error"]["details"]["stage"] == "resolve"
+
+
+def test_civitai_version_without_primary_file_emits_download_failed(tmp_path):
+    with (
+        patch("comfy_cli.command.models.models.check_civitai_url", return_value=(False, True, None, 777)),
+        patch("comfy_cli.command.models.models.check_huggingface_url", return_value=(False, None, None, None, None)),
+        patch("comfy_cli.command.models.models.request_civitai_model_version_api", return_value=None),
+        patch("comfy_cli.command.models.models.get_workspace", return_value=tmp_path),
+        patch("comfy_cli.command.models.models.config_manager", Mock(**{"get_or_override.return_value": None})),
+        patch("comfy_cli.tracking.track_command", lambda _cmd: lambda fn: fn),
+    ):
+        result = runner.invoke(
+            app,
+            ["download", "--url", "https://civitai.com/api/download/models/777", "--filename", "x.safetensors"],
+        )
+
+    env = _assert_error_envelope(result, "download_failed")
+    assert env["error"]["details"]["stage"] == "resolve"
+
+
+# --------------------------------------------------------------------------- #
+# the success path is unchanged: no envelope, exit 0
+# --------------------------------------------------------------------------- #
+
+
+def test_direct_url_success_still_emits_no_envelope(tmp_path):
+    """A plain (non-CivitAI, non-Hugging-Face) file URL is a SUPPORTED source —
+    it must still download, and must still leave stdout empty on success so the
+    MCP's exit-0-no-envelope success synthesizer keeps working."""
+    with patch("comfy_cli.command.models.models.download_file") as mock_dl:
+        result = _invoke(
+            ["--url", "https://example.com/model.bin", "--relative-path", ".", "--filename", "model.bin"],
+            get_workspace={"return_value": tmp_path},
+        )
+
+    assert result.exit_code == 0, result.output
+    assert mock_dl.called, "a direct file URL must still be downloaded"
+    assert _stdout().strip() == "", f"success path must keep stdout clean, got: {_stdout()!r}"
+    assert "Done in" in _HUMAN.getvalue(), "the human-facing log still goes to stderr"
