@@ -646,6 +646,15 @@ comfy generate resume <model> <job_id> --download outputs/x.mp4
 
 Mechanical contracts that bite agents — encode them, don't rediscover:
 
+- **Spend gate — generation spends the user's Comfy credits and requires
+  consent.** Interactive TTY runs confirm before spending; `--json` / non-TTY
+  runs **fail closed** with error code `spend_consent_required` (exit 1,
+  nothing spent) unless consent is supplied. Pass `--yes` only when the human
+  has actually approved the spend — do not reflexively add it to make the
+  error go away. A human can persist always-proceed with
+  `comfy generate consent always` (revert: `consent ask`; inspect:
+  `consent show`). `list` / `schema` / `refresh` / `upload` / `resume` /
+  `--emit-workflow` spend nothing and are not gated.
 - **Machine-readable output:** `generate <model> --json` prints the raw API
   response as JSON; `generate upload <file> --json` emits structured
   `{url, expires_at, …}`; `generate <model> --emit-workflow out.json` goes

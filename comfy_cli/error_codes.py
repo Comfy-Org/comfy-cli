@@ -577,6 +577,12 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "`generate --emit-workflow` could not build the partner-node workflow.",
         "check the model name and that all required inputs are provided",
     ),
+    ErrorCode(
+        "spend_consent_required",
+        "A credit-spending `comfy generate` call ran non-interactively (--json / no TTY) "
+        "with no consent — the spend gate fails closed and nothing was spent.",
+        "re-run with --yes, or persist consent with `comfy generate consent always`",
+    ),
     # --- feedback ------------------------------------------------------------
     ErrorCode(
         "feedback_message_required",
