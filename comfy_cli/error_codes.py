@@ -150,17 +150,6 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "`comfy auth set comfy-cloud-api-key --key …` so the local submit path can inject it too",
     ),
     ErrorCode(
-        "spend_consent_required",
-        "A credit-spending command hit its spend gate with no consent, so it failed closed — "
-        "nothing was submitted and no credits were spent. `comfy run-template` raises this when a "
-        "template uses partner-API (paid) nodes and `--allow-spend` is absent or the interactive "
-        "confirmation was declined (`details.partner_nodes` / `details.gallery_signals` carry the "
-        "evidence); `comfy generate` raises it when a credit-spending call runs non-interactively "
-        "(`--json` / no TTY) with no consent.",
-        "consent to the spend and re-run — `comfy run-template --allow-spend`, or "
-        "`comfy generate --yes` (persist with `comfy generate consent always`)",
-    ),
-    ErrorCode(
         "workflow_empty",
         "Workflow JSON is an empty object (no nodes).",
         "add at least one node to the workflow",
@@ -590,9 +579,14 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ),
     ErrorCode(
         "spend_consent_required",
-        "A credit-spending `comfy generate` call ran non-interactively (--json / no TTY) "
-        "with no consent — the spend gate fails closed and nothing was spent.",
-        "re-run with --yes, or persist consent with `comfy generate consent always`",
+        "A credit-spending command hit its spend gate with no consent, so it failed closed — "
+        "nothing was submitted and no credits were spent. `comfy run-template` raises this when a "
+        "template uses partner-API (paid) nodes and `--allow-spend` is absent or the interactive "
+        "confirmation was declined (`details.partner_nodes` / `details.gallery_signals` carry the "
+        "evidence); `comfy generate` raises it when a credit-spending call runs non-interactively "
+        "(`--json` / no TTY) with no consent.",
+        "consent to the spend and re-run — `comfy run-template --allow-spend`, or "
+        "`comfy generate --yes` (persist with `comfy generate consent always`)",
     ),
     # --- feedback ------------------------------------------------------------
     ErrorCode(
