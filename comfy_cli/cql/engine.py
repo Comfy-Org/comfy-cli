@@ -953,8 +953,8 @@ class Graph:
         *,
         mode: str = "local",
         input_path: str | None = None,
-        host: str = "127.0.0.1",
-        port: int = 8188,
+        host: str | None = None,
+        port: int | None = None,
         supported_nodes_yaml: bytes | None = None,
         cloud_disable_yaml: bytes | None = None,
         no_gpu_json: bytes | None = None,
@@ -1220,7 +1220,7 @@ def _load_from_file(path: str) -> dict[str, Any]:
         raise LoadError(f"invalid JSON in {p}: {e}", details={"path": str(p)}) from e
 
 
-def _load_from_target(*, mode: str = "local", host: str = "127.0.0.1", port: int = 8188) -> dict[str, Any]:
+def _load_from_target(*, mode: str = "local", host: str | None = None, port: int | None = None) -> dict[str, Any]:
     """Fetch /object_info from the resolved target — local or cloud.
 
     Both paths are the same HTTP fetch; only the base URL, path prefix,
