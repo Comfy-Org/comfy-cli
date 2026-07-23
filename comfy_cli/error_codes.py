@@ -228,8 +228,12 @@ REGISTRY: tuple[ErrorCode, ...] = (
     # --- models / templates introspection ------------------------------------
     ErrorCode(
         "invalid_argument",
-        "An argument intended for a URL path failed safe-path validation.",
-        "use only alphanumerics, `_`, `-`, or `.` in path-segment arguments",
+        "An argument intended for a URL path or for a filesystem path component failed "
+        "safe-path validation — e.g. a `comfy model download` filename (from `--filename` or "
+        "from the CivitAI API response) that carries a path separator, a drive letter or `..` "
+        "and would write outside the workspace.",
+        "use only alphanumerics, `_`, `-`, or `.` in path-segment arguments; choose the "
+        "destination directory with `--relative-path`",
     ),
     ErrorCode(
         "folder_not_found",

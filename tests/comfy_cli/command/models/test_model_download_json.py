@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import io
 import json
+import sys
 from typing import Any
 from unittest.mock import Mock, patch
 
@@ -96,6 +97,11 @@ def _invoke(args: list[str], **patches):
 
     Defaults: not a CivitAI URL, not a Hugging Face URL, no config values. Each
     test overrides only the piece it exercises.
+
+    Note: there is deliberately no ``patch("comfy_cli.tracking.track_command")``
+    here. ``download`` is decorated at import time, so patching the factory
+    afterwards never rebinds the wrapper — the mock would be pure decoration. The
+    real wrapper runs and no-ops because telemetry consent is off under pytest.
     """
     cfg = patches.pop("config_manager", None)
     if cfg is None:
@@ -107,7 +113,6 @@ def _invoke(args: list[str], **patches):
         patch("comfy_cli.command.models.models.check_civitai_url", return_value=(False, False, None, None)),
         patch("comfy_cli.command.models.models.check_huggingface_url", return_value=(False, None, None, None, None)),
         patch("comfy_cli.command.models.models.config_manager", cfg),
-        patch("comfy_cli.tracking.track_command", lambda _cmd: lambda fn: fn),
     ):
         stack = []
         try:
@@ -226,7 +231,6 @@ def test_hf_unauthorized_without_token_emits_error(tmp_path):
         patch("comfy_cli.command.models.models.get_workspace", return_value=tmp_path),
         patch("comfy_cli.command.models.models.download_file") as mock_dl,
         patch("comfy_cli.command.models.models.config_manager", cfg),
-        patch("comfy_cli.tracking.track_command", lambda _cmd: lambda fn: fn),
     ):
         result = runner.invoke(
             app,
@@ -294,7 +298,6 @@ def test_civitai_lookup_failure_emits_download_failed(tmp_path):
         ),
         patch("comfy_cli.command.models.models.get_workspace", return_value=tmp_path),
         patch("comfy_cli.command.models.models.config_manager", Mock(**{"get_or_override.return_value": None})),
-        patch("comfy_cli.tracking.track_command", lambda _cmd: lambda fn: fn),
     ):
         result = runner.invoke(
             app,
@@ -312,7 +315,6 @@ def test_civitai_version_without_primary_file_emits_download_failed(tmp_path):
         patch("comfy_cli.command.models.models.request_civitai_model_version_api", return_value=None),
         patch("comfy_cli.command.models.models.get_workspace", return_value=tmp_path),
         patch("comfy_cli.command.models.models.config_manager", Mock(**{"get_or_override.return_value": None})),
-        patch("comfy_cli.tracking.track_command", lambda _cmd: lambda fn: fn),
     ):
         result = runner.invoke(
             app,
@@ -342,3 +344,175 @@ def test_direct_url_success_still_emits_no_envelope(tmp_path):
     assert mock_dl.called, "a direct file URL must still be downloaded"
     assert _stdout().strip() == "", f"success path must keep stdout clean, got: {_stdout()!r}"
     assert "Done in" in _HUMAN.getvalue(), "the human-facing log still goes to stderr"
+
+
+# --------------------------------------------------------------------------- #
+# the URL is never echoed back with its credentials attached
+# --------------------------------------------------------------------------- #
+
+
+def test_error_details_url_is_scrubbed_of_token(tmp_path):
+    """CivitAI download links carry the API token as `?token=`. `tracking._scrub_value`
+    strips it before telemetry; an error envelope is a louder channel than telemetry
+    (agent/MCP wrappers log stdout verbatim), so it must be stripped there too."""
+    result = _invoke(
+        ["--url", "https://example.com/m.bin?token=SUPERSECRET#frag", "--filename", "x.bin"],
+        get_workspace={"return_value": tmp_path},
+        download_file={"side_effect": DownloadException("boom")},
+    )
+
+    env = _assert_error_envelope(result, "download_failed")
+    assert env["error"]["details"]["url"] == "https://example.com/m.bin"
+    assert "SUPERSECRET" not in json.dumps(env)
+    assert "SUPERSECRET" not in _HUMAN.getvalue(), "the human log leaks the token too"
+
+
+def test_userinfo_is_stripped_from_details_url(tmp_path):
+    result = _invoke(
+        ["--url", "https://user:pw@example.com/m.bin", "--filename", "x.bin"],
+        get_workspace={"return_value": tmp_path},
+        download_file={"side_effect": DownloadException("boom")},
+    )
+
+    env = _assert_error_envelope(result, "download_failed")
+    assert env["error"]["details"]["url"] == "https://example.com/m.bin"
+
+
+# --------------------------------------------------------------------------- #
+# a filename must not escape the workspace
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize("bad", ["../../.bashrc", "..", "sub/dir.bin", "C:evil.bin", "a\\b.bin"])
+def test_traversing_filename_is_rejected_before_any_download(tmp_path, bad):
+    """`--filename` — and, in a non-interactive run, the CivitAI-supplied `file["name"]`
+    that becomes its default — is joined into the destination with no sanitisation by
+    `pathlib`, so `..` or an absolute value writes outside the workspace."""
+    with patch("comfy_cli.command.models.models.download_file") as mock_dl:
+        result = _invoke(
+            ["--url", "https://example.com/m.bin", "--relative-path", ".", "--filename", bad],
+            get_workspace={"return_value": tmp_path},
+        )
+
+    env = _assert_error_envelope(result, "invalid_argument")
+    assert "--relative-path" in env["error"]["hint"], "the hint must point at the supported way to pick a directory"
+    assert not mock_dl.called
+
+
+def test_plain_filename_is_still_accepted(tmp_path):
+    """The traversal guard must not deny the ordinary case."""
+    with patch("comfy_cli.command.models.models.download_file") as mock_dl:
+        result = _invoke(
+            ["--url", "https://example.com/m.bin", "--relative-path", "models/checkpoints", "--filename", "v1.5.bin"],
+            get_workspace={"return_value": tmp_path},
+        )
+
+    assert result.exit_code == 0, result.output
+    assert mock_dl.called
+
+
+def test_traversing_civitai_basemodel_is_rejected(tmp_path):
+    """`version["baseModel"]` is remote input joined straight into the destination path."""
+    with (
+        patch("comfy_cli.command.models.models.check_civitai_url", return_value=(False, True, None, 777)),
+        patch("comfy_cli.command.models.models.check_huggingface_url", return_value=(False, None, None, None, None)),
+        patch(
+            "comfy_cli.command.models.models.request_civitai_model_version_api",
+            return_value=("m.safetensors", "https://civitai.com/x", "checkpoint", "../../../.."),
+        ),
+        patch("comfy_cli.command.models.models.get_workspace", return_value=tmp_path),
+        patch("comfy_cli.command.models.models.download_file") as mock_dl,
+        patch("comfy_cli.command.models.models.config_manager", Mock(**{"get_or_override.return_value": None})),
+    ):
+        result = runner.invoke(app, ["download", "--url", "https://civitai.com/api/download/models/777"])
+
+    _assert_error_envelope(result, "invalid_argument")
+    assert not mock_dl.called
+
+
+# --------------------------------------------------------------------------- #
+# rich markup in dynamic values must not become the crash it was meant to catch
+# --------------------------------------------------------------------------- #
+
+
+def test_markup_hostile_url_does_not_crash_the_log_line(tmp_path):
+    """`print` here is Rich's markup-parsing print. A URL holding `[/]` (or an IPv6
+    literal) raised MarkupError out of the *logging*, ending the command with a
+    traceback and no envelope — the exact failure this command promises not to have."""
+    with patch("comfy_cli.command.models.models.download_file") as mock_dl:
+        result = _invoke(
+            ["--url", "http://[::1]/a/[/]/m.bin", "--relative-path", ".", "--filename", "m.bin"],
+            get_workspace={"return_value": tmp_path},
+        )
+
+    assert result.exit_code == 0, result.output
+    assert mock_dl.called
+
+
+# --------------------------------------------------------------------------- #
+# nothing escapes without an envelope, including what we didn't name
+# --------------------------------------------------------------------------- #
+
+
+def test_unexpected_downloader_exception_still_emits_envelope(tmp_path):
+    """The downloader can raise something neither `DownloadException` nor `OSError` —
+    a malformed `Content-Length` used to surface as ValueError out of `int()`. The
+    `--json` contract is an envelope on *every* failure, so there's a backstop."""
+    result = _invoke(
+        ["--url", "https://example.com/m.bin", "--filename", "x.bin"],
+        get_workspace={"return_value": tmp_path},
+        download_file={"side_effect": ValueError("invalid literal for int()")},
+    )
+
+    env = _assert_error_envelope(result, "download_failed")
+    assert "ValueError" in env["error"]["message"]
+
+
+# --------------------------------------------------------------------------- #
+# --filename is honoured on the gated Hugging Face path too
+# --------------------------------------------------------------------------- #
+
+
+def test_hf_download_honours_explicit_filename(tmp_path):
+    """`hf_hub_download` names the file after the repo path, so `--filename` was
+    silently ignored on the *authenticated* HF branch only. That made the
+    `local_filepath.exists()` guard inspect a path this branch never writes, and made
+    the `model_file_exists` hint ("pass `--filename`") impossible to act on."""
+    hf_written = tmp_path / "models" / "checkpoints" / "repo-name.safetensors"
+    hf_written.parent.mkdir(parents=True)
+    hf_written.write_bytes(b"weights")
+
+    fake_hub = Mock()
+    fake_hub.hf_hub_download.return_value = str(hf_written)
+
+    cfg = Mock()
+    cfg.get_or_override.return_value = "hf_token"
+    cfg.get.return_value = None
+
+    with (
+        patch.dict(sys.modules, {"huggingface_hub": fake_hub}),
+        patch("comfy_cli.command.models.models.check_civitai_url", return_value=(False, False, None, None)),
+        patch(
+            "comfy_cli.command.models.models.check_huggingface_url",
+            return_value=(True, "org/repo", "repo-name.safetensors", None, "main"),
+        ),
+        patch("comfy_cli.command.models.models.check_unauthorized", return_value=True),
+        patch("comfy_cli.command.models.models.get_workspace", return_value=tmp_path),
+        patch("comfy_cli.command.models.models.config_manager", cfg),
+    ):
+        result = runner.invoke(
+            app,
+            [
+                "download",
+                "--url",
+                "https://huggingface.co/org/repo/resolve/main/repo-name.safetensors",
+                "--relative-path",
+                "models/checkpoints",
+                "--filename",
+                "mine.safetensors",
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    assert (tmp_path / "models" / "checkpoints" / "mine.safetensors").read_bytes() == b"weights"
+    assert not hf_written.exists()

@@ -1,12 +1,15 @@
 import contextlib
+import ntpath
 import os
 import pathlib
+import shutil
 import time
 from typing import Annotated
-from urllib.parse import parse_qs, unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlparse, urlsplit, urlunsplit
 
 import requests
 import typer
+from rich.markup import escape
 
 from comfy_cli import constants, tracking, ui
 from comfy_cli.config_manager import ConfigManager
@@ -89,6 +92,56 @@ def _download_failure(
     return typer.Exit(code=1)
 
 
+def _scrub_url(url: str) -> str:
+    """Drop the query string, fragment and userinfo from *url*.
+
+    CivitAI download links carry the API token as ``?token=`` — ``tracking._scrub_value``
+    already strips it before telemetry, and an error envelope is a *louder* channel
+    than telemetry (agent/MCP wrappers capture and log stdout verbatim), so the same
+    scrubbing applies to anything we put in ``error.details`` or a log line.
+    """
+    if not isinstance(url, str):
+        return url
+    try:
+        parts = urlsplit(url)
+    except ValueError:  # malformed authority (e.g. an unbracketed IPv6 literal)
+        return url.partition("?")[0].partition("#")[0]
+    if not parts.scheme:
+        return url.partition("?")[0].partition("#")[0]
+    return urlunsplit((parts.scheme, parts.netloc.rpartition("@")[2], parts.path, "", ""))
+
+
+def _reject_unsafe_component(value: str | None, *, label: str, url: str) -> None:
+    """Fail the download if *value* is anything but a single, inert path component.
+
+    ``local_filename`` and ``basemodel`` are joined into the destination path, and
+    both can come straight off the CivitAI API response (``file["name"]``,
+    ``version["baseModel"]``) — which is remote input, accepted without a prompt in
+    non-interactive runs. ``pathlib``/``os.path.join`` do not sanitize ``..`` or an
+    absolute component, so an unvalidated value writes outside the workspace.
+
+    Subdirectories are still reachable — via ``--relative-path``, which is the
+    option that exists for choosing the destination directory — so this rejects a
+    traversal without removing the capability.
+    """
+    if not value:
+        return
+    unsafe = (
+        value in (".", "..")
+        or os.path.isabs(value)
+        or bool(ntpath.splitdrive(value)[0])
+        or "/" in value
+        or "\\" in value
+    )
+    if unsafe:
+        raise _download_failure(
+            code="invalid_argument",
+            message=f"Unsafe {label}: {value!r} is not a plain name (it contains a path separator, a drive, or '..').",
+            hint="use `--relative-path <dir>` to choose the destination directory and `--filename <name>` for a plain name",
+            details={"url": _scrub_url(url), label: value},
+        )
+
+
 def _resolve_civitai_source(fetch, url: str):
     """Run a CivitAI metadata lookup, converting any failure into an error envelope.
 
@@ -103,14 +156,14 @@ def _resolve_civitai_source(fetch, url: str):
             code="download_failed",
             message=f"Could not resolve a downloadable file from the CivitAI URL: {e}",
             hint="check the model/version exists and is public; a private model needs --set-civitai-api-token",
-            details={"url": url, "stage": "resolve"},
+            details={"url": _scrub_url(url), "stage": "resolve"},
         ) from None
     if resolved is None:
         raise _download_failure(
             code="download_failed",
             message="The CivitAI model version has no primary file to download.",
             hint="pick a version that has a primary file, or pass its direct download URL",
-            details={"url": url, "stage": "resolve"},
+            details={"url": _scrub_url(url), "stage": "resolve"},
         )
     return resolved
 
@@ -335,6 +388,7 @@ def download(
         local_filename, url, model_type, basemodel = _resolve_civitai_source(
             lambda: request_civitai_model_api(model_id, version_id, headers), url
         )
+        _reject_unsafe_component(basemodel, label="basemodel", url=url)
 
         model_path = model_path_map.get(model_type)
 
@@ -347,6 +401,7 @@ def download(
         local_filename, url, model_type, basemodel = _resolve_civitai_source(
             lambda: request_civitai_model_version_api(version_id, headers), url
         )
+        _reject_unsafe_component(basemodel, label="basemodel", url=url)
 
         model_path = model_path_map.get(model_type)
 
@@ -368,7 +423,11 @@ def download(
         # Neither CivitAI nor Hugging Face — a plain file URL, which IS a supported
         # source: the download proceeds via download_file() below. This is a note,
         # not a failure, so it must not short-circuit.
-        print(f"Model source is unknown; treating {url} as a direct file URL")
+        # escape() the URL: `print` is Rich's markup-parsing print, and a URL holding
+        # markup metacharacters (`[/]`, or an IPv6 literal like `http://[::1]/x`)
+        # would otherwise raise MarkupError — an uncaught crash with no envelope,
+        # the exact failure mode this command is being hardened against.
+        print(f"Model source is unknown; treating {escape(_scrub_url(url))} as a direct file URL")
 
     if filename is None:
         if local_filename is None:
@@ -390,8 +449,10 @@ def download(
             code="missing_argument",
             message="Could not determine a filename to save the model as.",
             hint="pass `--filename <name>`",
-            details={"url": url},
+            details={"url": _scrub_url(url)},
         )
+
+    _reject_unsafe_component(local_filename, label="filename", url=url)
 
     local_filepath = get_workspace() / relative_path / local_filename
 
@@ -414,7 +475,7 @@ def download(
                     "set the token via `comfy model download --set-hf-api-token <token>` or the "
                     f"`{constants.HF_API_TOKEN_ENV_KEY}` environment variable"
                 ),
-                details={"url": url, "repo_id": repo_id},
+                details={"url": _scrub_url(url), "repo_id": repo_id},
             )
         else:
             try:
@@ -426,6 +487,12 @@ def download(
                 from comfy_cli.resolve_python import resolve_workspace_python
 
                 try:
+                    # NB: this installs into the *workspace* interpreter (pinned by
+                    # tests/comfy_cli/test_models_python_resolution.py), which is not
+                    # necessarily the one running this process — so the import below
+                    # can still fail for e.g. a pipx-installed CLI. That predates this
+                    # change and is tracked separately; what's new here is that the
+                    # failure now ends in an envelope instead of a traceback.
                     python = resolve_workspace_python(str(get_workspace()))
                     subprocess.check_call([python, "-m", "pip", "install", "huggingface_hub"])
                     import huggingface_hub
@@ -434,10 +501,10 @@ def download(
                         code="download_failed",
                         message=f"`huggingface_hub` is required for Hugging Face downloads and could not be installed: {e}",
                         hint="install it manually (`pip install huggingface_hub`) and retry",
-                        details={"url": url},
+                        details={"url": _scrub_url(url)},
                     ) from None
 
-            print(f"Downloading model {model_id} from Hugging Face...")
+            print(f"Downloading model {escape(str(model_id))} from Hugging Face...")
             try:
                 output_path = huggingface_hub.hf_hub_download(
                     repo_id=repo_id,
@@ -453,18 +520,39 @@ def download(
                     code="download_failed",
                     message=f"Hugging Face download failed: {e}",
                     hint="check the repo/revision exists and the token has access to it",
-                    details={"url": url, "repo_id": repo_id},
+                    details={"url": _scrub_url(url), "repo_id": repo_id},
                 ) from None
-            print(f"Model downloaded successfully to: {output_path}")
+
+            # `hf_hub_download` names the file after the *repo* path (`hf_filename`),
+            # so an explicit `--filename` was silently ignored on this branch only —
+            # the public-HF path below goes through download_file(local_filepath) and
+            # honours it. That split made the `local_filepath.exists()` guard above
+            # check a path this branch never writes, and made its `model_file_exists`
+            # hint ("pass `--filename`") impossible to act on. Move the result to the
+            # requested name so both are true on every path.
+            if filename is not None and pathlib.Path(output_path) != local_filepath:
+                try:
+                    local_filepath.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.move(str(output_path), str(local_filepath))
+                    output_path = str(local_filepath)
+                except OSError as e:
+                    raise _download_failure(
+                        code="download_failed",
+                        message=f"Downloaded the model but could not save it as {local_filepath}: {e}",
+                        hint="check the destination directory is writable, or omit `--filename`",
+                        details={"url": _scrub_url(url), "path": str(local_filepath)},
+                    ) from None
+
+            print(f"Model downloaded successfully to: {escape(str(output_path))}")
     else:
-        print(f"Start downloading URL: {url} into {local_filepath}")
+        print(f"Start downloading URL: {escape(_scrub_url(url))} into {escape(str(local_filepath))}")
         try:
             download_file(url, local_filepath, headers, downloader=resolved_downloader)
         except DownloadException as e:
             raise _download_failure(
                 code="download_failed",
                 message=str(e),
-                details={"url": url, "path": str(local_filepath)},
+                details={"url": _scrub_url(url), "path": str(local_filepath)},
             ) from None
         except OSError as e:
             # download_file() converts network failures to DownloadException, but a
@@ -474,7 +562,19 @@ def download(
                 code="download_failed",
                 message=f"Could not write the downloaded file to {local_filepath}: {e}",
                 hint="check the destination directory exists, is writable, and has free space",
-                details={"url": url, "path": str(local_filepath)},
+                details={"url": _scrub_url(url), "path": str(local_filepath)},
+            ) from None
+        except Exception as e:
+            # Backstop for the invariant this command promises: a `--json` caller must
+            # never get a bare traceback with no envelope. The downloader can still
+            # raise something neither branch above names — e.g. a malformed
+            # `Content-Length` from a broken proxy used to surface as ValueError out of
+            # `int(...)` (now guarded in file_utils, but the class of failure remains).
+            raise _download_failure(
+                code="download_failed",
+                message=f"Download failed unexpectedly ({type(e).__name__}): {e}",
+                hint="retry; if it persists, re-run without `--json` for the full traceback",
+                details={"url": _scrub_url(url), "path": str(local_filepath)},
             ) from None
 
     elapsed = time.monotonic() - start_time
