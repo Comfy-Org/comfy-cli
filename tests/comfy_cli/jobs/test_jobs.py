@@ -13,6 +13,7 @@ import sys
 from pathlib import Path
 
 import pytest
+import typer
 
 from comfy_cli.command import jobs as jobs_mod
 
@@ -317,6 +318,159 @@ def test_orphaned_flag_visible_in_help():
     """The flag must be documented on `jobs ls` so agents can
     discover it without reading source."""
     assert "--orphaned" in _command_flags("jobs", "ls")
+
+
+def test_all_flag_visible_in_help():
+    """``--all`` is the escape hatch back to the union view — agents must be
+    able to discover it from `comfy --help-json`."""
+    assert "--all" in _command_flags("jobs", "ls")
+
+
+# ---------------------------------------------------------------------------
+# `jobs ls` state-file rows are scoped to the resolved --where target
+# ---------------------------------------------------------------------------
+
+
+def _seed_three_targets() -> Path:
+    """Seed the (already isolated) state dir with one local, one cloud and
+    one legacy (``where`` present but null) job. Returns the dir."""
+    from comfy_cli import jobs_state
+
+    state_dir = jobs_state.state_dir()
+    _write_state(state_dir, "job-local", where="local", status="completed")
+    _write_state(state_dir, "job-cloud", where="cloud", status="completed")
+    # Legacy files predate the cloud target. ``jobs_state.read`` requires the
+    # key to be present (it's a non-defaulted dataclass field), so the
+    # reachable legacy shape is a null/empty value, not an absent one — those
+    # must read as "local".
+    _write_state(state_dir, "job-legacy", where=None, status="completed")
+    return state_dir
+
+
+def test_gather_local_state_files_filters_by_where():
+    """The ``where`` kwarg scopes state-file rows; ``None`` keeps the union."""
+    _seed_three_targets()
+
+    local_ids = {r.prompt_id for r in jobs_mod._gather_local_state_files(limit=100, where="local")}
+    assert local_ids == {"job-local", "job-legacy"}, f"missing/empty where must count as local; got {local_ids}"
+
+    cloud_ids = {r.prompt_id for r in jobs_mod._gather_local_state_files(limit=100, where="cloud")}
+    assert cloud_ids == {"job-cloud"}
+
+    union_ids = {r.prompt_id for r in jobs_mod._gather_local_state_files(limit=100)}
+    assert union_ids == {"job-local", "job-cloud", "job-legacy"}
+
+
+def test_gather_local_state_files_drops_file_with_no_where_key():
+    """Belt-and-braces on the legacy shape: a state file that omits ``where``
+    entirely never reaches the filter — ``jobs_state.read`` already rejects it
+    as truncated — so it can't leak into a scoped *or* an --all listing."""
+    from comfy_cli import jobs_state
+
+    state_dir = jobs_state.state_dir()
+    (state_dir / "job-nowhere.json").write_text(
+        json.dumps(
+            {
+                "prompt_id": "job-nowhere",
+                "client_id": "c",
+                "workflow": "/tmp/x.json",
+                "status": "completed",
+            }
+        )
+    )
+    assert jobs_state.read("job-nowhere") is None
+    assert jobs_mod._gather_local_state_files(limit=100) == []
+
+
+def _ls_payload(capsys, **kwargs) -> dict:
+    """Run ``jobs ls`` in-process under a JSON renderer, return its data dict."""
+    from comfy_cli.caller import Caller
+    from comfy_cli.output.renderer import OutputMode, Renderer, set_renderer
+
+    r = Renderer.resolve(
+        is_stdout_tty=False,
+        env={},
+        caller=Caller(kind="user", agentic=False, source_env=None),
+        json_flag=True,
+    )
+    r.mode = OutputMode.JSON
+    set_renderer(r)
+    # 65431 is a port nothing listens on — the server query degrades to the
+    # state-file view, which is exactly the leak this scoping guards.
+    kwargs.setdefault("host", "127.0.0.1")
+    kwargs.setdefault("port", 65431)
+    jobs_mod.ls_cmd(**kwargs)
+    env = _last_json(capsys.readouterr().out)
+    assert env["ok"] is True
+    return env["data"]
+
+
+def _ls_ids(payload: dict) -> set[str]:
+    return {j["prompt_id"] for j in payload["jobs"]}
+
+
+def test_ls_default_scopes_state_rows_to_local(capsys, monkeypatch):
+    """Acceptance: with a cloud job on disk, a local `jobs ls` has no cloud rows."""
+    _seed_three_targets()
+    monkeypatch.delenv("COMFY_WHERE", raising=False)
+
+    data = _ls_payload(capsys, limit=100)
+    assert data["where"] == "local"
+    assert data["scope"] == "local"
+    assert _ls_ids(data) == {"job-local", "job-legacy"}
+    # Acceptance: no cloud rows at all — and the legacy row reports the target
+    # it was scoped under rather than a bare null.
+    assert {j["where"] for j in data["jobs"]} == {"local"}
+
+
+def test_ls_where_cloud_scopes_state_rows_to_cloud(capsys, monkeypatch):
+    """Acceptance: `jobs ls --where cloud` shows no local state rows."""
+    _seed_three_targets()
+    monkeypatch.setattr(jobs_mod, "_is_cloud", lambda w: True)
+
+    def _preflight_fails():
+        raise typer.Exit(code=1)
+
+    # Cloud unreachable/unauthed: the command falls through to the state-file
+    # view, which must still be cloud-scoped.
+    monkeypatch.setattr(jobs_mod, "cloud_preflight_or_exit", _preflight_fails)
+
+    data = _ls_payload(capsys, limit=100, where="cloud")
+    assert data["where"] == "cloud"
+    assert data["scope"] == "cloud"
+    assert _ls_ids(data) == {"job-cloud"}
+
+
+def test_ls_all_restores_the_union_view(capsys, monkeypatch):
+    """Acceptance: ``--all`` brings every target's state rows back."""
+    _seed_three_targets()
+    monkeypatch.delenv("COMFY_WHERE", raising=False)
+
+    data = _ls_payload(capsys, limit=100, all_wheres=True)
+    assert data["where"] == "local", "--all widens the state-file scope, not the server query"
+    assert data["scope"] == "all"
+    assert _ls_ids(data) == {"job-local", "job-cloud", "job-legacy"}
+
+
+def test_ls_orphaned_stays_unfiltered(capsys, monkeypatch):
+    """``--orphaned`` keeps the union view — watcher cleanup is where-agnostic,
+    so a crashed cloud watcher is still reapable from a default (local) ls."""
+    from comfy_cli import jobs_state
+
+    state_dir = jobs_state.state_dir()
+    crashed = {
+        "code": "watcher_crashed",
+        "message": "Background watcher (pid 99999) is no longer running.",
+        "hint": "re-submit the workflow",
+    }
+    _write_state(state_dir, "orphan-local", where="local", status="error", error=crashed)
+    _write_state(state_dir, "orphan-cloud", where="cloud", status="error", error=crashed)
+    _write_state(state_dir, "healthy-cloud", where="cloud", status="completed")
+    monkeypatch.delenv("COMFY_WHERE", raising=False)
+
+    data = _ls_payload(capsys, limit=100, orphaned=True)
+    assert data["scope"] == "all"
+    assert _ls_ids(data) == {"orphan-local", "orphan-cloud"}
 
 
 # ---------------------------------------------------------------------------

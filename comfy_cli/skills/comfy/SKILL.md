@@ -714,9 +714,16 @@ bad wiring — before burning cloud compute.
 
 ```bash
 comfy --json jobs ls                # merged: local state files + server queue
+comfy --json jobs ls --all          # ...every target, not just the resolved --where
 comfy --json jobs status <prompt_id>
 comfy --json jobs watch <prompt_id> # blocks until terminal; emits NDJSON with --json-stream
 ```
+
+`jobs ls` is scoped to the resolved `--where` target: a `--where local`
+listing shows local state-file rows only, a `--where cloud` listing cloud
+ones. The payload's `scope` field says which view you got (`local` /
+`cloud` / `all`); pass `--all` for the union of everything this CLI
+submitted.
 
 Terminal envelopes (`run --wait`, `jobs status`, `jobs watch`) carry the
 flat `outputs` list plus grouped views of the same artifacts:
