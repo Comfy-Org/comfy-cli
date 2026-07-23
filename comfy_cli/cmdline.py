@@ -1678,6 +1678,13 @@ app.add_typer(
 app.add_typer(custom_nodes.app, name="node", help="Manage custom nodes.")
 app.add_typer(nodes_command.app, name="nodes", help="Introspect ComfyUI node classes (inputs, outputs, categories).")
 app.add_typer(templates_command.app, name="templates", help="Browse the Comfy workflow-template gallery.")
+app.command(
+    "run-template",
+    help=(
+        "Fetch a gallery template, fill its parameterized inputs (--param KEY=VALUE), "
+        "and run it to completion on local ComfyUI. Paid partner-API templates require --allow-spend."
+    ),
+)(templates_command.run_template_cmd)
 app.add_typer(workflow_command.app, name="workflow", help="Slot-based editing of frontend-format ComfyUI workflows.")
 app.command(
     "preview",

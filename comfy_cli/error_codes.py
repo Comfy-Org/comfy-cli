@@ -150,6 +150,14 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "`comfy auth set comfy-cloud-api-key --key …` so the local submit path can inject it too",
     ),
     ErrorCode(
+        "spend_consent_required",
+        "`comfy run-template` resolved a template that uses partner-API (paid) nodes — running it "
+        "would spend Comfy credits — and no consent was given (`--allow-spend` absent, or the "
+        "interactive confirmation was declined). Nothing was submitted; no credits were spent. "
+        "`details.partner_nodes` / `details.gallery_signals` carry the evidence.",
+        "re-run with `--allow-spend` to consent to the credit spend",
+    ),
+    ErrorCode(
         "workflow_empty",
         "Workflow JSON is an empty object (no nodes).",
         "add at least one node to the workflow",
