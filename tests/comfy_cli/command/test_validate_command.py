@@ -105,8 +105,35 @@ def test_ui_export_that_converts_to_nothing_is_rejected(runner, tmp_path):
 
 def test_api_format_unchanged(runner, tmp_path):
     """An API-format file behaves exactly as before: validated directly, no
-    `converted_from_ui` key in the payload."""
-    api = {"1": {"class_type": "EmptyLatentImage", "inputs": {"width": 64, "height": 64, "batch_size": 1}}}
+    `converted_from_ui` key in the payload. The fixture is a complete sd15
+    txt2img graph — it carries a SaveImage output node, as any real API-format
+    export does, so it clears the server-parity no-outputs check (BE-3357)."""
+    api = {
+        "4": {
+            "class_type": "CheckpointLoaderSimple",
+            "inputs": {"ckpt_name": "v1-5-pruned-emaonly-fp16.safetensors"},
+        },
+        "6": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["4", 1], "text": "a cat"}},
+        "7": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["4", 1], "text": "blurry"}},
+        "5": {"class_type": "EmptyLatentImage", "inputs": {"width": 512, "height": 512, "batch_size": 1}},
+        "3": {
+            "class_type": "KSampler",
+            "inputs": {
+                "model": ["4", 0],
+                "positive": ["6", 0],
+                "negative": ["7", 0],
+                "latent_image": ["5", 0],
+                "seed": 42,
+                "steps": 20,
+                "cfg": 8.0,
+                "sampler_name": "euler",
+                "scheduler": "simple",
+                "denoise": 1.0,
+            },
+        },
+        "8": {"class_type": "VAEDecode", "inputs": {"samples": ["3", 0], "vae": ["4", 2]}},
+        "9": {"class_type": "SaveImage", "inputs": {"images": ["8", 0], "filename_prefix": "ComfyUI"}},
+    }
     wf = _write(tmp_path, "api.json", api)
 
     result = _validate(runner, wf)
@@ -128,13 +155,17 @@ def test_non_dict_payload_unchanged(runner, tmp_path):
     assert _envelope(result)["error"]["code"] == "workflow_not_api_format"
 
 
-def test_empty_dict_payload_unchanged(runner, tmp_path):
+def test_empty_dict_payload_not_converted_and_rejected(runner, tmp_path):
     """An empty dict is not UI format and is left to the existing validator
-    (no conversion, no `converted_from_ui` key)."""
+    (no conversion, no `converted_from_ui` key) — which now rejects it: the
+    server refuses any prompt with zero output nodes, including a node-less
+    one, so validate mirrors that as `prompt_no_outputs` (BE-3357)."""
     wf = _write(tmp_path, "empty.json", {})
 
     result = _validate(runner, wf)
 
-    assert result.exit_code == 0
+    assert result.exit_code == 1
     data = _envelope(result)["data"]
     assert "converted_from_ui" not in data
+    assert data["valid"] is False
+    assert any(e["code"] == "prompt_no_outputs" for e in data["errors"])
