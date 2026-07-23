@@ -237,7 +237,8 @@ def set_slot_cmd(
         typer.Option(
             "--stdout/--in-place",
             show_default=False,
-            help="Print the result to stdout instead of writing back to <file>.",
+            help="Return the result instead of writing back to <file>: `data.workflow_json` in the "
+            "envelope under --json, or the raw workflow on stdout in human mode (--no-json).",
         ),
     ] = False,
     input_path: Annotated[str | None, typer.Option("--input", show_default=False)] = None,
@@ -268,21 +269,30 @@ def set_slot_cmd(
 
     serialized = json.dumps(new_workflow, indent=2)
 
-    if stdout:
+    # `--stdout` in human mode is a pipe target: print the raw workflow so
+    # `comfy workflow set-slot ... --stdout > new.json` keeps working. In JSON
+    # mode stdout is reserved for the envelope (see docs/json-output.md), so
+    # there the modified workflow rides in `data.workflow_json` instead — a
+    # bare workflow object is not an `envelope/1` and machine callers reject it.
+    if stdout and renderer.is_pretty():
         import sys
 
         sys.stdout.write(serialized)
         sys.stdout.write("\n")
         return
 
-    _atomic_write_text(p, serialized)
+    if not stdout:
+        _atomic_write_text(p, serialized)
 
-    payload = {
+    payload: dict[str, Any] = {
         "workflow": str(p),
         "applied": list(overrides_dict.keys()),
         "warnings": warnings,
-        "wrote": str(p),
+        "wrote": None if stdout else str(p),
     }
+    if stdout:
+        payload["out"] = "stdout"
+        payload["workflow_json"] = new_workflow
     if _stale:
         payload["stale"] = True
         payload["warnings"] = list(warnings) + [
@@ -294,7 +304,7 @@ def set_slot_cmd(
             rprint(f"  [dim]·[/dim] {addr}")
         for w in warnings:
             rprint(f"  [yellow]warning:[/yellow] {w}")
-    renderer.emit(payload, command="workflow set-slot", changed=True)
+    renderer.emit(payload, command="workflow set-slot", changed=not stdout)
 
 
 # ---------------------------------------------------------------------------
@@ -302,7 +312,10 @@ def set_slot_cmd(
 # ---------------------------------------------------------------------------
 
 
-@app.command("vary", help="Produce N workflow variants from a per-slot value list. Emits NDJSON.")
+@app.command(
+    "vary",
+    help="Produce N workflow variants from a per-slot value list. Emits NDJSON (or `data.variants` under --json).",
+)
 @tracking.track_command("workflow")
 def vary_cmd(
     file: Annotated[str, typer.Argument(help="Frontend-format workflow JSON.")],
@@ -321,7 +334,9 @@ def vary_cmd(
         typer.Option(
             "--out-dir",
             show_default=False,
-            help="If set, write each variation to <out-dir>/<stem>_<N>.json. Otherwise emit NDJSON to stdout.",
+            help="If set, write each variation to <out-dir>/<stem>_<N>.json. Otherwise return the "
+            "variants: `data.variants` in the envelope under --json, or NDJSON on stdout in "
+            "human mode (--no-json).",
         ),
     ] = None,
 ):
@@ -367,6 +382,10 @@ def vary_cmd(
         raise typer.Exit(code=1) from e
 
     written: list[str] = []
+    # Same envelope contract as set-slot --stdout: raw NDJSON on stdout is the
+    # human/pipe form; in JSON mode stdout belongs to the envelope, so the
+    # variants ride in `data.variants` instead.
+    variants: list[dict[str, Any]] | None = None
     if out_dir:
         out = Path(out_dir).expanduser()
         out.mkdir(parents=True, exist_ok=True)
@@ -374,20 +393,23 @@ def vary_cmd(
             target = out / f"{p.stem}_{i:03d}.json"
             _atomic_write_text(target, json.dumps(wf, indent=2))
             written.append(str(target))
-    else:
+    elif renderer.is_pretty():
         import sys
 
         for wf in workflows:
             sys.stdout.write(json.dumps(wf))
             sys.stdout.write("\n")
         sys.stdout.flush()
+    else:
+        variants = list(workflows)
 
-    payload = {
+    payload: dict[str, Any] = {
         "workflow": str(p),
         "count": len(workflows),
         "warnings": warnings,
         "out_dir": str(Path(out_dir).expanduser()) if out_dir else None,
         "written": written,
+        "variants": variants,
     }
     if _stale:
         payload["stale"] = True
