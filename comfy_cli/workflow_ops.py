@@ -487,6 +487,15 @@ def _connect_impl(
     return apply_op(workflow, op, graph), op
 
 
+def clear(workflow: dict, *, actor: str = "cli", base_version: int = 0) -> tuple[dict, dict]:
+    """Remove every node, link, and group in one op. last_node_id/last_link_id
+    are preserved so ids minted after a clear stay monotonic (id reuse would
+    let a merge resurrect a deleted node's identity)."""
+    removed = [n.get("id") for n in workflow.get("nodes") or [] if isinstance(n, dict)]
+    op = _new_op("clear", actor, base_version, removed_nodes=removed)
+    return apply_op(workflow, op, None), op
+
+
 def delete_node(
     workflow: dict,
     graph,
@@ -796,6 +805,8 @@ def apply_op(workflow: dict, op: dict, graph) -> dict:
         _apply_connect(workflow, op)
     elif kind == "delete_node":
         _apply_delete_node(workflow, op)
+    elif kind == "clear":
+        _apply_clear(workflow, op)
     else:
         raise ValueError(f"unknown op {kind!r}")
     applied.append(op["op_id"])
@@ -916,6 +927,13 @@ def _apply_delete_node(workflow: dict, op: dict) -> None:
                 inp["link"] = None
         for out in n.get("outputs") or []:
             out["links"] = [lid for lid in (out.get("links") or []) if lid in kept_ids]
+
+
+def _apply_clear(workflow: dict, op: dict) -> None:
+    workflow["nodes"] = []
+    workflow["links"] = []
+    if "groups" in workflow:
+        workflow["groups"] = []
 
 
 # ---------------------------------------------------------------------------

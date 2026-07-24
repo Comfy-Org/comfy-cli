@@ -896,6 +896,45 @@ class TestDelete:
 
 
 # ---------------------------------------------------------------------------
+# clear
+# ---------------------------------------------------------------------------
+
+
+class TestClear:
+    def test_clear_empties_graph_but_preserves_id_counters(self):
+        g = _graph()
+        wf = {"nodes": [], "links": [], "last_node_id": 0, "last_link_id": 0}
+        wf, _ = workflow_ops.add_node(wf, g, "KSampler")
+        wf, _ = workflow_ops.add_node(wf, g, "KSampler")
+        wf["groups"] = [{"title": "g"}]
+        last_node = wf["last_node_id"]
+        wf, op = workflow_ops.clear(wf)
+        assert wf["nodes"] == [] and wf["links"] == [] and wf["groups"] == []
+        assert wf["last_node_id"] == last_node  # ids stay monotonic across a clear
+        assert op["op"] == "clear"
+
+    def test_clear_op_replays_idempotently(self):
+        g = _graph()
+        wf = {"nodes": [], "links": [], "last_node_id": 0, "last_link_id": 0}
+        wf, _ = workflow_ops.add_node(wf, g, "KSampler")
+        cleared, op = workflow_ops.clear(copy.deepcopy(wf))
+        replay = workflow_ops.apply_op(copy.deepcopy(wf), op, g)
+        replay = workflow_ops.apply_op(replay, op, g)  # second apply is a no-op
+        assert replay["nodes"] == cleared["nodes"] == []
+
+    def test_clear_cmd_empties_workflow_and_emits_op(self, patched_graph, tmp_path, capsys):
+        wf = _base_workflow()
+        wf["groups"] = [{"title": "g"}]
+        path = _write(tmp_path, wf)
+        env = _run(["clear", str(path)], capsys)
+        assert env["ok"] is True, env
+        op = env["data"]["op"]
+        assert op["op"] == "clear"
+        on_disk = json.loads(path.read_text())
+        assert on_disk["nodes"] == [] and on_disk["links"] == [] and on_disk["groups"] == []
+
+
+# ---------------------------------------------------------------------------
 # invariant: the edit surface operates on UI (frontend) format ONLY
 # (API format is a throwaway produced only at `run`)
 # ---------------------------------------------------------------------------

@@ -239,6 +239,26 @@ def delete_cmd(
 
 
 # ---------------------------------------------------------------------------
+# clear
+# ---------------------------------------------------------------------------
+
+
+@tracking.track_command("workflow")
+def clear_cmd(
+    file: Annotated[str, typer.Argument(help="Frontend-format workflow JSON.")],
+    actor: ActorOpt = "cli",
+    base_version: BaseVersionOpt = 0,
+    stdout: StdoutOpt = False,
+    where: WhereOpt = None,  # accepted for caller uniformity; clear needs no catalog
+):
+    renderer = get_renderer()
+    renderer.command = "workflow clear"
+    p, workflow = _load_workflow_or_fail(renderer, file)
+    workflow, op = workflow_ops.clear(workflow, actor=actor, base_version=base_version)
+    _finish(renderer, p, workflow, op, base_version, stdout, "workflow clear")
+
+
+# ---------------------------------------------------------------------------
 # ls-nodes — recover node ids/types (so an agent can address minted nodes)
 # ---------------------------------------------------------------------------
 

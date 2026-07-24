@@ -1186,6 +1186,7 @@ app.command("add-node", help="Add a node to the graph; emits an add_node op.")(_
 app.command("connect", help="Wire an output slot to an input slot; emits a connect op.")(_wedit.connect_cmd)
 app.command("set-widget", help="Set a widget by name (`<id>.<widget>`); emits a set_widget op.")(_wedit.set_widget_cmd)
 app.command("delete-node", help="Delete a node and its links; emits a delete_node op.")(_wedit.delete_cmd)
+app.command("clear", help="Remove every node, link, and group; emits one clear op.")(_wedit.clear_cmd)
 app.command("ls-nodes", help="List nodes (id/type/title) in a workflow file.")(_wedit.ls_nodes_cmd)
 app.command("apply", help="Apply a recipe / batch of edits in one pass; supports node aliases + --param.")(
     _wedit.apply_cmd
