@@ -226,6 +226,13 @@ comfy node [show|simple-show] [installed|enabled|not-installed|disabled|all|snap
 
   `comfy node install comfyui-impact-pack`
 
+  > **Note:** the argument is the node's **Comfy Registry ID**, which is
+  > lowercase (e.g. `comfyui-impact-pack`), not the GitHub repository name
+  > (`ComfyUI-Impact-Pack`). Passing the repo-name casing fails to resolve with
+  > an error like `Node 'ComfyUI-Impact-Pack@unknown' not found`. Find a node's
+  > ID on its [Comfy Registry](https://registry.comfy.org) page or via
+  > `comfy node show all`.
+
 - Managing snapshot:
 
   `comfy node save-snapshot`
@@ -241,6 +248,39 @@ comfy node [show|simple-show] [installed|enabled|not-installed|disabled|all|snap
 - Generate deps:
 
   `comfy node deps-in-workflow --workflow=<workflow .json/.png file> --output=<output deps .json file>`
+
+#### `install` vs `registry-install`
+
+comfy-cli offers two ways to install a custom node, backed by different
+mechanisms:
+
+- **`comfy node install <id>...`** delegates to
+  [ComfyUI-Manager](https://github.com/Comfy-Org/ComfyUI-Manager)'s `cm-cli`.
+  It accepts one or more node IDs, resolves them through the Manager's channel
+  database (`--channel`, `--mode`), and installs dependencies via the Manager
+  (so it also supports `--fast-deps`, `--no-deps`, and `--uv-compile`). This is
+  the recommended command for day-to-day node management, and it requires
+  ComfyUI-Manager to be present in the workspace.
+
+  `comfy node install comfyui-impact-pack`
+
+- **`comfy node registry-install <id> [version]`** talks directly to the
+  [Comfy Registry](https://registry.comfy.org) API. It downloads the published
+  archive for a single node (optionally pinned to a specific `version`),
+  extracts it into `custom_nodes/`, and runs the node's own install script. It
+  does **not** go through ComfyUI-Manager, so it does not require the Manager to
+  be installed — this is the command the Registry's own install instructions
+  use.
+
+  `comfy node registry-install comfyui-impact-pack`
+
+  `comfy node registry-install comfyui-impact-pack 1.0.0`  # install a specific version
+
+  Because `registry-install` bypasses the Manager's dependency machinery and
+  simply runs the node's bundled install script, it only accepts
+  `--force-download` — it does **not** accept `--fast-deps`, `--no-deps`, or
+  `--uv-compile`. If you want fast/unified dependency resolution, use
+  `comfy node install` instead.
 
 #### Unified Dependency Resolution (--uv-compile)
 
@@ -268,6 +308,26 @@ it can identify which node packs have incompatible dependencies and why.
 - Use `--no-uv-compile` to override the default for a single command:
 
   `comfy node install comfyui-impact-pack --no-uv-compile`
+
+#### --fast-deps
+
+`--fast-deps` swaps comfy-cli's dependency installation from `pip` to comfy-cli's
+built-in `uv`-based resolver (`DependencyCompiler`), which is significantly
+faster and only requires `uv` (no ComfyUI-Manager). On a dependency version
+conflict it prompts you interactively to pick a version.
+
+- Accepted by: `comfy install`, `comfy node install`, and
+  `comfy node reinstall`.
+
+  `comfy install --fast-deps`
+
+  `comfy node install comfyui-impact-pack --fast-deps`
+
+- **Not** accepted by `comfy node registry-install`: that command installs a
+  node directly from the Comfy Registry by running the node's own bundled
+  install script, so it never touches comfy-cli's dependency resolver (see
+  [`install` vs `registry-install`](#install-vs-registry-install) above).
+- Mutually exclusive with `--no-deps` and `--uv-compile`.
 
 #### --fast-deps vs --uv-compile
 
