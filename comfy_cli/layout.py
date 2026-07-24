@@ -67,3 +67,93 @@ def cascade_pos(workflow: dict, size: list[float]) -> list[float]:
             break
         y += ROW_GAP
     return [x, y]
+
+
+def assign_positions(workflow: dict, graph, specs: list) -> list:
+    """Fill `at` on every add_node spec that lacks one, using the batch's own
+    connects for dataflow layering. Returns spec copies; non-add specs and
+    explicit `at` values pass through untouched. Pure: same inputs → same output."""
+    out = [dict(s) if isinstance(s, dict) else s for s in specs]
+    adds: dict[str, dict] = {}
+    order: list[str] = []
+    for i, spec in enumerate(out):
+        if not (isinstance(spec, dict) and spec.get("op") == "add_node"):
+            continue
+        m = graph.node(spec.get("class_type") or "")
+        if m is not None:
+            size = estimate_size(
+                len([p for p in m.inputs if p.is_link]),
+                len(m.outputs),
+                len(graph.widget_order(spec["class_type"])),
+            )
+        else:
+            size = list(DEFAULT_SIZE)  # unknown type: apply_specs will error later
+        key = spec.get("as") or f"__new{i}"
+        adds[key] = {"i": i, "size": size, "depth": 0, "pinned": spec.get("at")}
+        order.append(key)
+    if not adds:
+        return out
+
+    existing = {n.get("id"): n for n in workflow.get("nodes") or [] if isinstance(n, dict)}
+    edges: list[tuple[str, str]] = []
+    anchors: list[dict] = []
+
+    def endpoint(ref):
+        node_part = str(ref).partition(".")[0].strip()
+        if node_part in adds:
+            return ("new", node_part)
+        nid = int(node_part) if node_part.lstrip("-").isdigit() else node_part
+        if nid in existing:
+            return ("old", nid)
+        return (None, None)
+
+    for spec in out:
+        if not (isinstance(spec, dict) and spec.get("op") == "connect"):
+            continue
+        skind, s = endpoint(spec.get("from", ""))
+        tkind, t = endpoint(spec.get("to", ""))
+        if skind == "old":
+            anchors.append(existing[s])
+        if tkind == "old" and skind == "new":
+            anchors.append(existing[t])
+        if tkind == "new":
+            if skind == "new":
+                edges.append((s, t))
+            elif skind == "old":
+                adds[t]["depth"] = max(adds[t]["depth"], 1)
+
+    # Longest-path layering over new→new edges. Aliases are defined before use
+    # in a valid batch, so spec-order passes converge; run twice for safety.
+    for _ in range(2):
+        for s, t in edges:
+            adds[t]["depth"] = max(adds[t]["depth"], adds[s]["depth"] + 1)
+
+    if anchors:
+        arects = [_rect(a) for a in anchors]
+        base_x = max(r[0] + r[2] for r in arects) + COL_GAP
+        base_y = min(r[1] for r in arects)
+    else:
+        box = _bbox(list(existing.values()))
+        base_x, base_y = (box[2] + COL_GAP, box[1]) if box else ORIGIN
+
+    col_y: dict[int, float] = {}
+    movable = [k for k in order if adds[k]["pinned"] is None]
+    for k in movable:
+        a = adds[k]
+        x = base_x + a["depth"] * (NODE_W + COL_GAP)
+        y = col_y.get(a["depth"], base_y)
+        col_y[a["depth"]] = y + a["size"][1] + ROW_GAP
+        a["pos"] = [x, y]
+
+    def collides() -> bool:
+        return any(_overlaps((*adds[k]["pos"], *adds[k]["size"]), _rect(n)) for k in movable for n in existing.values())
+
+    for _ in range(_GUARD):
+        if not movable or not collides():
+            break
+        for k in movable:  # shift the whole new block, never existing nodes
+            adds[k]["pos"][1] += ROW_GAP
+
+    for k in movable:
+        out[adds[k]["i"]]["at"] = adds[k]["pos"]
+    return out

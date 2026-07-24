@@ -727,6 +727,7 @@ def apply_specs(
     workflow: dict, graph, specs: list, *, actor: str = "cli", base_version: int = 0
 ) -> tuple[dict, list, dict]:
     """Apply edit specs to ``workflow`` in order. Returns (workflow, ops, aliases)."""
+    specs = layout.assign_positions(workflow, graph, specs)
     aliases: dict[str, Any] = {}
     ops: list[dict] = []
     for i, spec in enumerate(specs):

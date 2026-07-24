@@ -1018,6 +1018,20 @@ class TestApplyBatch:
         assert env["ok"] is False
         assert "spec #1" in env["error"]["message"] and "missing required field" in env["error"]["message"]
 
+    def test_apply_specs_batch_has_no_stacked_nodes(self):
+        """apply_specs must layout-assign positions for a batch of add_nodes
+        that don't specify `at`, so they don't all land stacked at the origin."""
+        wf: dict = {"nodes": [], "links": [], "last_node_id": 0, "last_link_id": 0}
+        specs = [
+            {"op": "add_node", "class_type": "KSampler", "as": "a"},
+            {"op": "add_node", "class_type": "KSampler", "as": "b"},
+            {"op": "add_node", "class_type": "KSampler", "as": "c"},
+        ]
+        wf, ops, _ = workflow_ops.apply_specs(wf, _graph(), specs)
+        positions = [tuple(n["pos"]) for n in wf["nodes"]]
+        assert len(set(positions)) == len(positions)
+        assert (0, 0) not in positions
+
 
 # ---------------------------------------------------------------------------
 # dynamic combo (COMFY_DYNAMICCOMBO_V3) — set_widget on model + model.resolution
