@@ -179,7 +179,7 @@ class TestGitHubAPIIntegration:
 
     @patch("requests.get")
     def test_find_pr_by_branch_rate_limit(self, mock_get):
-        """A rate-limited 403 surfaces as GitHubRateLimitError, not a silent "no PR found\""""
+        """A rate-limited 403 surfaces as GitHubRateLimitError, not a silent "no PR found\" """
         mock_response = Mock()
         mock_response.status_code = 403
         mock_response.headers = {"x-ratelimit-remaining": "0", "x-ratelimit-reset": "1777415867"}
@@ -257,6 +257,9 @@ class TestGitOperations:
         assert "remote" in calls[1][0][0]
         assert "fetch" in calls[2][0][0]
         assert "checkout" in calls[3][0][0]
+        # ``--`` separates options from the fork-controlled branch refspec (argument-injection guard).
+        fetch_argv = calls[2][0][0]
+        assert fetch_argv[-2:] == ["--", "load-3d-nodes"]
         # Every git command runs against repo_path via cwd= (no process chdir).
         assert all(call.kwargs.get("cwd") == "/repo/path" for call in calls)
 
@@ -283,6 +286,9 @@ class TestGitOperations:
 
         assert result is True
         assert mock_subprocess.call_count == 2
+        # ``--`` separates options from the branch refspec (argument-injection guard).
+        fetch_argv = mock_subprocess.call_args_list[0][0][0]
+        assert fetch_argv[-2:] == ["--", "feature-branch"]
         assert all(call.kwargs.get("cwd") == "/repo/path" for call in mock_subprocess.call_args_list)
 
     @patch("subprocess.run")

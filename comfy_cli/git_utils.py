@@ -123,7 +123,9 @@ def checkout_pr(repo_path: str, pr_info: PRInfo) -> bool:
                 )
 
             subprocess.run(
-                ["git", "fetch", remote_name, pr_info.head_branch],
+                # ``--`` guards against a fork-controlled branch name beginning with ``-`` being
+                # parsed as a git option (argument injection); ``comfy install --pr`` runs against forks.
+                ["git", "fetch", remote_name, "--", pr_info.head_branch],
                 cwd=repo_path,
                 check=True,
                 capture_output=True,
@@ -144,7 +146,8 @@ def checkout_pr(repo_path: str, pr_info: PRInfo) -> bool:
 
         else:
             subprocess.run(
-                ["git", "fetch", "origin", pr_info.head_branch],
+                # ``--`` guards against a branch name beginning with ``-`` being parsed as a git option.
+                ["git", "fetch", "origin", "--", pr_info.head_branch],
                 cwd=repo_path,
                 check=True,
                 capture_output=True,
