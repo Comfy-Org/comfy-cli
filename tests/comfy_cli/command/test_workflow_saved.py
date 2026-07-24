@@ -502,12 +502,15 @@ class TestHttpRequestCap:
         target = workflow_cmd._resolve_where_target("cloud")
         assert workflow_cmd._http_request(target.url("workflows"), target) == (200, None)
 
-    def test_non_utf8_body_returns_none_rather_than_raising(self, cloud_target, monkeypatch):
-        # UnicodeDecodeError is a ValueError but not a JSONDecodeError; if it is
-        # not caught it escapes _http_request and no call site handles it.
+    def test_non_utf8_body_raises_unparseable(self, cloud_target, monkeypatch):
+        # UnicodeDecodeError is a ValueError but not a JSONDecodeError. A non-empty
+        # body that won't decode must not masquerade as "no data" (200, None); it is
+        # malformed and must raise _ResponseUnparseable so a call site maps it to a
+        # loud envelope rather than reporting empty success.
         _patch_urlopen(monkeypatch, {"/api/workflows": (b"\xff\xfe\x00not json", 200)})
         target = workflow_cmd._resolve_where_target("cloud")
-        assert workflow_cmd._http_request(target.url("workflows"), target) == (200, None)
+        with pytest.raises(workflow_cmd._ResponseUnparseable):
+            workflow_cmd._http_request(target.url("workflows"), target)
 
     def test_non_utf8_body_surfaces_envelope_not_traceback(self, cloud_target, monkeypatch, capsys):
         # End-to-end: the undecodable body must reach the user as an envelope.
@@ -686,3 +689,26 @@ class TestListMalformedShape:
         env = _run(["list", "--where", "cloud"], capsys)
         assert env["ok"] is False
         assert env["error"]["code"] == "cloud_http_error"
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            pytest.param(b'{"data": 42}', id="scalar"),
+            pytest.param(b'{"data": "oops"}', id="string"),
+            pytest.param(b'{"data": {"a": 1}}', id="object"),
+        ],
+    )
+    def test_list_non_list_data_surfaces_error(self, cloud_target, monkeypatch, capsys, raw):
+        # A dict body with a non-list ``data`` must not raise a raw TypeError (scalar)
+        # nor iterate silently into a masquerading empty listing (str/dict).
+        _patch_urlopen(monkeypatch, {"/api/workflows": (raw, 200)})
+        env = _run(["list", "--where", "cloud"], capsys)
+        assert env["ok"] is False
+        assert env["error"]["code"] == "cloud_http_error"
+
+    def test_list_missing_data_is_empty(self, cloud_target, monkeypatch, capsys):
+        # A dict body with no ``data`` key is a legitimately-empty listing, not an error.
+        _patch_urlopen(monkeypatch, {"/api/workflows": (b"{}", 200)})
+        env = _run(["list", "--where", "cloud"], capsys)
+        assert env["ok"] is True
+        assert env["data"]["count"] == 0

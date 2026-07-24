@@ -1011,7 +1011,20 @@ def list_cmd(
         )
         raise typer.Exit(code=1)
 
-    rows = (body or {}).get("data") or []
+    # A missing/empty ``data`` is a legitimately-empty listing, but a present non-list
+    # ``data`` is malformed the same way a non-dict body is: a scalar (``{"data": 42}``)
+    # would raise a raw ``TypeError`` in the comprehension below, and a str/dict would
+    # iterate silently and masquerade as an empty listing. Reject it with the same envelope.
+    rows = (body or {}).get("data")
+    if rows is None:
+        rows = []
+    elif not isinstance(rows, list):
+        renderer.error(
+            code="cloud_http_error",
+            message="unexpected response shape from /api/workflows (data must be a JSON array)",
+            details={"got_type": type(rows).__name__},
+        )
+        raise typer.Exit(code=1)
     payload = {
         "count": len(rows),
         "workflows": [
