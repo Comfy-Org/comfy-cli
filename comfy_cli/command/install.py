@@ -410,6 +410,30 @@ def handle_github_rate_limit(response):
         raise GitHubRateLimitError(message)
 
 
+def _github_get(url: str, *, params: dict | None = None, timeout: int) -> dict | list:
+    """GET a GitHub REST API URL with optional GITHUB_TOKEN auth.
+
+    SECURITY: must only ever be called with https://api.github.com/ URLs —
+    it attaches the user's GITHUB_TOKEN as a Bearer header. Keep module-private.
+    Raises GitHubRateLimitError on 403/429 rate limits, requests.HTTPError on
+    other non-2xx, requests.RequestException on network errors.
+    """
+    if not url.startswith("https://api.github.com/"):
+        raise ValueError(f"_github_get only accepts api.github.com URLs, got: {url}")
+
+    headers = {}
+    if github_token := os.getenv("GITHUB_TOKEN"):
+        headers["Authorization"] = f"Bearer {github_token}"
+
+    response = requests.get(url, headers=headers, params=params, timeout=timeout)
+
+    if response.status_code in (403, 429):
+        handle_github_rate_limit(response)
+
+    response.raise_for_status()
+    return response.json()
+
+
 class GithubRelease(TypedDict):
     """
     A dictionary representing a GitHub release.
@@ -598,19 +622,8 @@ def get_latest_release(repo_owner: str, repo_name: str) -> GithubRelease | None:
     """
     url = f"https://api.github.com/repos/{repo_owner}/{repo_name}/releases/latest"
 
-    headers = {}
-    if github_token := os.getenv("GITHUB_TOKEN"):
-        headers["Authorization"] = f"Bearer {github_token}"
-
     try:
-        response = requests.get(url, headers=headers, timeout=5)
-
-        if response.status_code in (403, 429):
-            handle_github_rate_limit(response)
-
-        response.raise_for_status()
-
-        data = response.json()
+        data = _github_get(url, timeout=5)
 
         # Forks may use non-semver tags (e.g. "release-2026-04"); the caller
         # only needs the raw tag string for git checkout, so let `version`
@@ -672,35 +685,36 @@ def parse_pr_reference(pr_ref: str) -> tuple[str, str, int | None]:
     return _parse_pr_reference(pr_ref, "comfyanonymous", "ComfyUI")
 
 
+def _pr_info_from_github(data: dict) -> PRInfo:
+    # GitHub returns head.repo/base.repo as null once the PR's source repo has been
+    # deleted; indexing into that would raise an opaque TypeError.
+    head_repo = data["head"].get("repo")
+    base_repo = data["base"].get("repo")
+    if head_repo is None or base_repo is None:
+        raise ValueError(f"PR #{data['number']} cannot be installed: its source repository has been deleted.")
+
+    # Absent (list endpoint) and null (mergeability still being computed) both mean
+    # "unknown"; keep the pre-existing optimistic default rather than showing ✗.
+    mergeable = data.get("mergeable")
+
+    return PRInfo(
+        number=data["number"],
+        head_repo_url=head_repo["clone_url"],
+        head_branch=data["head"]["ref"],
+        base_repo_url=base_repo["clone_url"],
+        base_branch=data["base"]["ref"],
+        title=data["title"],
+        user=head_repo["owner"]["login"],
+        mergeable=True if mergeable is None else mergeable,
+    )
+
+
 def fetch_pr_info(repo_owner: str, repo_name: str, pr_number: int) -> PRInfo:
     url = f"https://api.github.com/repos/{repo_owner}/{repo_name}/pulls/{pr_number}"
 
-    headers = {}
-    if github_token := os.getenv("GITHUB_TOKEN"):
-        headers["Authorization"] = f"Bearer {github_token}"
-
     try:
-        response = requests.get(url, headers=headers, timeout=10)
-
-        if response is None:
-            raise Exception(f"Failed to fetch PR #{pr_number}: No response from GitHub API")
-
-        if response.status_code in (403, 429):
-            handle_github_rate_limit(response)
-
-        response.raise_for_status()
-        data = response.json()
-
-        return PRInfo(
-            number=data["number"],
-            head_repo_url=data["head"]["repo"]["clone_url"],
-            head_branch=data["head"]["ref"],
-            base_repo_url=data["base"]["repo"]["clone_url"],
-            base_branch=data["base"]["ref"],
-            title=data["title"],
-            user=data["head"]["repo"]["owner"]["login"],
-            mergeable=data.get("mergeable", True),
-        )
+        data = _github_get(url, timeout=10)
+        return _pr_info_from_github(data)
 
     except requests.RequestException as e:
         raise Exception(f"Failed to fetch PR #{pr_number}: {e}")
@@ -710,27 +724,11 @@ def find_pr_by_branch(repo_owner: str, repo_name: str, username: str, branch: st
     url = f"https://api.github.com/repos/{repo_owner}/{repo_name}/pulls"
     params = {"head": f"{username}:{branch}", "state": "open"}
 
-    headers = {}
-    if github_token := os.getenv("GITHUB_TOKEN"):
-        headers["Authorization"] = f"Bearer {github_token}"
-
     try:
-        response = requests.get(url, headers=headers, params=params, timeout=10)
-        response.raise_for_status()
-        data = response.json()
+        data = _github_get(url, params=params, timeout=10)
 
         if data:
-            pr_data = data[0]
-            return PRInfo(
-                number=pr_data["number"],
-                head_repo_url=pr_data["head"]["repo"]["clone_url"],
-                head_branch=pr_data["head"]["ref"],
-                base_repo_url=pr_data["base"]["repo"]["clone_url"],
-                base_branch=pr_data["base"]["ref"],
-                title=pr_data["title"],
-                user=pr_data["head"]["repo"]["owner"]["login"],
-                mergeable=pr_data.get("mergeable", True),
-            )
+            return _pr_info_from_github(data[0])
 
         return None
 

@@ -977,7 +977,7 @@ def validate(
             pass
 
     try:
-        graph = Graph.load(mode=mode, input_path=input_path, host=host or "127.0.0.1", port=port or 8188)
+        graph = Graph.load(mode=mode, input_path=input_path, host=host, port=port)
     except LoadError as e:
         renderer.error(
             code="cql_no_graph",
@@ -1384,13 +1384,11 @@ def which():
     if renderer.is_pretty():
         import sys as _sys
 
+        from comfy_cli.env_checker import _display_url
+        from comfy_cli.local_address import resolve_local_host_port
         from comfy_cli.output.panels import which_panel
 
-        cfg_bg = ConfigManager().background
-        if cfg_bg is not None:
-            host, port = cfg_bg[0], cfg_bg[1]
-        else:
-            host, port = "127.0.0.1", 8188
+        host, port = resolve_local_host_port(None, None, background=ConfigManager().background)
         try:
             server_running = env_checker.check_comfy_server_running(host=host, port=port, timeout=0.5)
         except Exception:  # noqa: BLE001
@@ -1402,7 +1400,7 @@ def which():
                 python_executable=_sys.executable,
                 python_version=f"{_sys.version_info.major}.{_sys.version_info.minor}.{_sys.version_info.micro}",
                 server_running=server_running,
-                server_url=f"http://{host}:{port}",
+                server_url=_display_url(host, port),
                 version=ConfigManager().get_cli_version(),
             )
         )
@@ -1678,6 +1676,13 @@ app.add_typer(
 app.add_typer(custom_nodes.app, name="node", help="Manage custom nodes.")
 app.add_typer(nodes_command.app, name="nodes", help="Introspect ComfyUI node classes (inputs, outputs, categories).")
 app.add_typer(templates_command.app, name="templates", help="Browse the Comfy workflow-template gallery.")
+app.command(
+    "run-template",
+    help=(
+        "Fetch a gallery template, fill its parameterized inputs (--param KEY=VALUE), "
+        "and run it to completion on local ComfyUI. Paid partner-API templates require --allow-spend."
+    ),
+)(templates_command.run_template_cmd)
 app.add_typer(workflow_command.app, name="workflow", help="Slot-based editing of frontend-format ComfyUI workflows.")
 app.command(
     "preview",

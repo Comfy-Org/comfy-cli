@@ -245,7 +245,10 @@ class TestProviderConstruction:
 
         fake_client = MagicMock()
         with (
-            patch.object(tracking_mod, "Posthog", return_value=fake_client),
+            # PostHogProvider imports `Posthog` lazily inside __init__ (see
+            # `_get_providers`), so there's no module-level attribute to patch —
+            # patch the source it's imported from instead.
+            patch("posthog.Posthog", return_value=fake_client),
             patch.object(tracking_mod, "atexit") as fake_atexit,
         ):
             provider = PostHogProvider("phc_test", "https://t.comfy.org")

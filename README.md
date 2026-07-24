@@ -152,8 +152,24 @@ Comfy provides commands that allow you to easily run the installed ComfyUI.
   `comfy --workspace=~/comfy launch --background -- --listen 10.0.0.10 --port 8000`
 
   - Instances launched with `--background` are displayed in the "Background ComfyUI" section of `comfy env`, providing management functionalities for a single background instance only.
-  - Since "Comfy Server Running" in `comfy env` only shows the default port 8188, it doesn't display ComfyUI running on a different port.
   - Background-running ComfyUI can be stopped with `comfy stop`.
+
+- To point **every** command (not just one) at a ComfyUI on a non-default
+  address — e.g. a server you started _outside_ comfy-cli on `:8189` — export
+  the `COMFY_LOCAL_URL` environment variable:
+
+  `export COMFY_LOCAL_URL=http://127.0.0.1:8189`
+
+  - Accepts `http://host:port`, `host:port`, or `http://host` (the port
+    defaults to `8188`; the scheme is optional and, if present, must be
+    `http`). IPv6 literals are bracketed: `COMFY_LOCAL_URL=http://[::1]:8189`.
+  - Honored by `comfy env`, `comfy run`, `comfy jobs`, `comfy upload`/`download`,
+    `comfy nodes`, and every other local-targeting command, so `comfy env`'s
+    "Comfy Server Running" line now probes and reports the resolved address.
+  - Precedence (per command): a per-command `--host`/`--port` flag wins, then
+    `COMFY_LOCAL_URL`, then a comfy-cli-launched background server, then the
+    `127.0.0.1:8188` default. A malformed value is ignored with a one-line
+    stderr warning rather than breaking the command.
 
 - to run ComfyUI with a specific pull request:
 

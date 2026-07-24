@@ -11,6 +11,7 @@ from comfy_cli.command import install as install_module
 from comfy_cli.command.install import (
     GitHubRateLimitError,
     PRInfo,
+    _github_get,
     _parse_github_owner_repo,
     _resolve_latest_tag_from_local,
     checkout_stable_comfyui,
@@ -175,6 +176,62 @@ class TestGitHubAPIIntegration:
 
         result = find_pr_by_branch("comfyanonymous", "ComfyUI", "testuser", "test-branch")
         assert result is None
+
+    @patch("requests.get")
+    def test_find_pr_by_branch_rate_limit(self, mock_get):
+        """A rate-limited 403 surfaces as GitHubRateLimitError, not a silent "no PR found\""""
+        mock_response = Mock()
+        mock_response.status_code = 403
+        mock_response.headers = {"x-ratelimit-remaining": "0", "x-ratelimit-reset": "1777415867"}
+        mock_get.return_value = mock_response
+
+        with pytest.raises(GitHubRateLimitError):
+            find_pr_by_branch("comfyanonymous", "ComfyUI", "testuser", "test-branch")
+
+    @patch("requests.get")
+    def test_fetch_pr_info_deleted_fork(self, mock_get):
+        """A deleted source fork (head.repo = null) reports a clear reason, not a TypeError"""
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "number": 123,
+            "title": "Test PR",
+            "head": {"repo": None, "ref": "test-branch"},
+            "base": {"repo": {"clone_url": "https://github.com/comfyanonymous/ComfyUI.git"}, "ref": "master"},
+            "mergeable": True,
+        }
+        mock_get.return_value = mock_response
+
+        with pytest.raises(ValueError, match="source repository has been deleted"):
+            fetch_pr_info("comfyanonymous", "ComfyUI", 123)
+
+    @patch("requests.get")
+    def test_fetch_pr_info_mergeable_null(self, mock_get):
+        """A null 'mergeable' (still computing) is unknown, not un-mergeable"""
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "number": 123,
+            "title": "Test PR",
+            "head": {
+                "repo": {"clone_url": "https://github.com/testuser/ComfyUI.git", "owner": {"login": "testuser"}},
+                "ref": "test-branch",
+            },
+            "base": {"repo": {"clone_url": "https://github.com/comfyanonymous/ComfyUI.git"}, "ref": "master"},
+            "mergeable": None,
+        }
+        mock_get.return_value = mock_response
+
+        assert fetch_pr_info("comfyanonymous", "ComfyUI", 123).mergeable is True
+
+    @patch("requests.get")
+    def test_github_get_rejects_non_github_urls(self, mock_get):
+        """_github_get attaches GITHUB_TOKEN, so a non-api.github.com URL must not be requested"""
+        with patch.dict("os.environ", {"GITHUB_TOKEN": "test-token"}):
+            with pytest.raises(ValueError):
+                _github_get("https://evil.example.com/x", timeout=5)
+
+        mock_get.assert_not_called()
 
 
 class TestGitOperations:
