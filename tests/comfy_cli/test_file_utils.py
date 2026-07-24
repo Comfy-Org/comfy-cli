@@ -1,6 +1,9 @@
 import zipfile
 
+import pytest
+
 from comfy_cli import file_utils
+from comfy_cli.file_utils import atomic_write_text
 
 
 def test_zip_files_respects_comfyignore(tmp_path, monkeypatch):
@@ -81,3 +84,47 @@ def test_zip_files_without_git_falls_back_to_walk(tmp_path, monkeypatch):
 
     assert "file.txt" in names
     assert "node.zip" not in names
+
+
+def test_atomic_write_text_creates_file_and_parents(tmp_path):
+    target = tmp_path / "sub" / "dir" / "out.json"
+    atomic_write_text(target, '{"a": 1}')
+
+    assert target.read_text(encoding="utf-8") == '{"a": 1}'
+    # No stray tmp files left behind.
+    assert list(target.parent.glob("*.tmp")) == []
+
+
+def test_atomic_write_text_overwrites_existing(tmp_path):
+    target = tmp_path / "out.txt"
+    target.write_text("old", encoding="utf-8")
+
+    atomic_write_text(target, "new")
+
+    assert target.read_text(encoding="utf-8") == "new"
+
+
+def test_atomic_write_text_fsync_true_still_writes(tmp_path):
+    target = tmp_path / "durable.txt"
+    atomic_write_text(target, "durable", fsync=True)
+
+    assert target.read_text(encoding="utf-8") == "durable"
+    assert list(target.parent.glob("*.tmp")) == []
+
+
+def test_atomic_write_text_cleans_up_tmp_on_failure(tmp_path, monkeypatch):
+    target = tmp_path / "out.txt"
+    target.write_text("original", encoding="utf-8")
+
+    def boom(src, dst):
+        raise OSError("replace failed")
+
+    # Fail at the rename step, after the tmp file has been written.
+    monkeypatch.setattr(file_utils.os, "replace", boom)
+
+    with pytest.raises(OSError):
+        atomic_write_text(target, "new content")
+
+    # The tmp file is cleaned up and the destination is untouched.
+    assert list(target.parent.glob("*.tmp")) == []
+    assert target.read_text(encoding="utf-8") == "original"

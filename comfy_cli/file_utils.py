@@ -13,6 +13,44 @@ from pathspec import PathSpec
 from comfy_cli import constants, ui
 
 
+def atomic_write_text(path: pathlib.Path, content: str, *, fsync: bool = False) -> None:
+    """Atomically write ``content`` to ``path`` via a sibling tmp file + ``os.replace``.
+
+    The write goes to a per-process tmp file in the same directory (so the rename
+    stays on one filesystem and is atomic), which is then renamed over ``path``.
+    A SIGINT or crash mid-write therefore never leaves a half-written or empty
+    file at the destination — readers see either the old contents or the new.
+    On any failure the tmp file is cleaned up and the exception re-raised.
+
+    Args:
+        path: destination file. Parent directories are created if missing.
+        content: text to write (UTF-8).
+        fsync: if True, flush the tmp file's contents to disk before the rename
+            (durability against power loss, at the cost of a sync). Best-effort:
+            a failing fsync is ignored, matching the prior per-site behavior.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + f".{os.getpid()}.tmp")
+    try:
+        tmp.write_text(content, encoding="utf-8")
+        if fsync:
+            try:
+                fd = os.open(str(tmp), os.O_RDONLY)
+                try:
+                    os.fsync(fd)
+                finally:
+                    os.close(fd)
+            except OSError:
+                pass
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
+
+
 class DownloadException(Exception):
     pass
 

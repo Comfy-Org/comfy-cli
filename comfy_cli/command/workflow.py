@@ -23,6 +23,7 @@ from typing import Annotated, Any
 import typer
 
 from comfy_cli import tracking
+from comfy_cli.file_utils import atomic_write_text
 from comfy_cli.output import get_renderer, rprint
 
 app = typer.Typer(no_args_is_help=True, help="Slot-based editing of frontend-format ComfyUI workflows.")
@@ -113,22 +114,6 @@ def _get_graph(input_path: str | None, host: str | None, port: int | None, on_st
             hint=e.details.get("hint", "pass --input <path>, or start the server with `comfy launch`"),
         )
         raise typer.Exit(code=1) from e
-
-
-def _atomic_write_text(path: Path, content: str) -> None:
-    """Write via tmp + rename so SIGINT mid-write can't leave a half-written file."""
-    import os
-
-    tmp = path.with_suffix(path.suffix + f".{os.getpid()}.tmp")
-    try:
-        tmp.write_text(content, encoding="utf-8")
-        os.replace(tmp, path)
-    except Exception:
-        try:
-            tmp.unlink()
-        except OSError:
-            pass
-        raise
 
 
 def _parse_value(raw: str) -> Any:
@@ -275,7 +260,7 @@ def set_slot_cmd(
         sys.stdout.write("\n")
         return
 
-    _atomic_write_text(p, serialized)
+    atomic_write_text(p, serialized)
 
     payload = {
         "workflow": str(p),
@@ -372,7 +357,7 @@ def vary_cmd(
         out.mkdir(parents=True, exist_ok=True)
         for i, wf in enumerate(workflows):
             target = out / f"{p.stem}_{i:03d}.json"
-            _atomic_write_text(target, json.dumps(wf, indent=2))
+            atomic_write_text(target, json.dumps(wf, indent=2))
             written.append(str(target))
     else:
         import sys
