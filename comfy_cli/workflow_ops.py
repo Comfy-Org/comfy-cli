@@ -58,6 +58,8 @@ import re
 import uuid
 from typing import Any
 
+from comfy_cli import layout
+
 # New ids live in [2**40, 2**53): always large (never collides with small
 # frontend counter ids), always inside JS Number.MAX_SAFE_INTEGER.
 _ID_FLOOR = 1 << 40
@@ -202,7 +204,17 @@ def add_node(
     m = graph.node(class_type)
     if m is None:
         raise ValueError(f"unknown node type {class_type!r}")
-    node = _build_node(mint_id(), class_type, m, graph, pos)
+    size = layout.estimate_size(
+        len([p for p in m.inputs if p.is_link]),
+        len(m.outputs),
+        len(graph.widget_order(class_type)),
+    )
+    if pos is None:
+        # Layout-aware default: right of the current graph, collision-free.
+        # Decided at mint time so the position freezes into the op and replay
+        # stays convergent (P1). Existing nodes are never moved.
+        pos = layout.cascade_pos(workflow, size)
+    node = _build_node(mint_id(), class_type, m, graph, pos, size)
     op = _new_op(
         "add_node",
         actor,
@@ -1019,7 +1031,7 @@ def strip_internal(workflow: dict) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def _build_node(node_id: int, class_type: str, m, graph, pos: list | None) -> dict:
+def _build_node(node_id: int, class_type: str, m, graph, pos: list, size: list) -> dict:
     inputs = [{"name": p.name, "type": p.type, "link": None} for p in m.inputs if p.is_link]
     outputs = [{"name": p.name, "type": p.type, "links": []} for p in m.outputs]
     # Widget values in positional order, including dynamic-combo selectors and
@@ -1029,8 +1041,8 @@ def _build_node(node_id: int, class_type: str, m, graph, pos: list | None) -> di
     return {
         "id": node_id,
         "type": class_type,
-        "pos": list(pos) if pos else [0, 0],
-        "size": [210, 100],
+        "pos": list(pos),
+        "size": list(size),
         "flags": {},
         "order": 0,
         "mode": 0,

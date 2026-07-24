@@ -113,8 +113,12 @@ def add_node_cmd(
     graph = _graph_or_exit(input_path, host, port, renderer, where)
     pos = None
     if at:
+        parts = [s.strip() for s in at.split(",")]
+        if len(parts) != 2:
+            renderer.error(code="workflow_edit_invalid", message=f"--at must be 'x,y', got {at!r}")
+            raise typer.Exit(code=1)
         try:
-            pos = [float(x) for x in at.split(",", 1)]
+            pos = [float(x) for x in parts]
         except ValueError as e:
             renderer.error(code="workflow_edit_invalid", message=f"--at must be 'x,y': {e}")
             raise typer.Exit(code=1) from e

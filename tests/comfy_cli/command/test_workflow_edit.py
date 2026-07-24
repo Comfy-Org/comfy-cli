@@ -441,6 +441,47 @@ class TestAddNode:
         # Not a small sequential counter value — minted from a large space.
         assert id1 > 10_000 and id2 > 10_000
 
+    def test_add_node_without_at_does_not_stack(self):
+        """No explicit `pos` → the layout-aware cascade default, not the old
+        blind [0, 0] every node used to land on (they used to stack exactly)."""
+        g = _graph()
+        wf = {"nodes": [], "links": [], "last_node_id": 0, "last_link_id": 0}
+        wf, op1 = workflow_ops.add_node(wf, g, "KSampler")
+        wf, op2 = workflow_ops.add_node(wf, g, "KSampler")
+        n1, n2 = wf["nodes"][-2], wf["nodes"][-1]
+        assert n1["pos"] != [0, 0] and n2["pos"] != [0, 0]
+        assert n1["pos"] != n2["pos"]
+        # position is frozen into the op for convergent replay
+        assert op1["pos"] == n1["pos"]
+        assert op2["pos"] == n2["pos"]
+
+    def test_add_node_explicit_pos_is_honored(self):
+        """`pos=` still passes straight through unchanged — Task 3's pre-pass
+        depends on this."""
+        g = _graph()
+        wf = {"nodes": [], "links": [], "last_node_id": 0, "last_link_id": 0}
+        wf, op = workflow_ops.add_node(wf, g, "KSampler", pos=[400, 200])
+        assert wf["nodes"][-1]["pos"] == [400, 200]
+        assert op["pos"] == [400, 200]
+
+    def test_add_node_size_reflects_widget_count(self):
+        """Size is estimated from the node's real inputs/outputs/widgets, not
+        the old blind [210, 100] default."""
+        g = _graph()
+        wf = {"nodes": [], "links": [], "last_node_id": 0, "last_link_id": 0}
+        wf, _ = workflow_ops.add_node(wf, g, "KSampler")
+        node = wf["nodes"][-1]
+        assert node["size"] != [210, 100]  # no longer the blind default
+        assert node["size"][1] >= 60
+
+    def test_add_node_cmd_rejects_single_coordinate(self, patched_graph, tmp_path, capsys):
+        """`--at 400` (no comma, so `--at=400`) used to silently become a
+        length-1 `pos` list instead of erroring — arity must be enforced."""
+        path = _write(tmp_path, _base_workflow())
+        env = _run(["add-node", str(path), "KSampler", "--at", "400"], capsys)
+        assert env["ok"] is False, env
+        assert env["error"]["code"] == "workflow_edit_invalid"
+
 
 # ---------------------------------------------------------------------------
 # set-widget (name-addressed)
