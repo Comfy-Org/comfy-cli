@@ -607,11 +607,11 @@ def _authed_request(
     loosely to keep urllib out of the module's top-level imports."""
     import urllib.request
 
+    from comfy_cli.http import target_auth_headers
+
     req = urllib.request.Request(url, data=data, method=method)
-    if target.api_key:
-        req.add_header("X-API-Key", target.api_key)
-    elif target.auth_token:
-        req.add_header("Authorization", f"Bearer {target.auth_token}")
+    for k, v in target_auth_headers(target).items():
+        req.add_header(k, v)
     if content_type:
         req.add_header("Content-Type", content_type)
     return req

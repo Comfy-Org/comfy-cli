@@ -1065,10 +1065,10 @@ def _cloud_cancel(prompt_id: str) -> None:
     # upstream too; encoding here is defense in depth.
     url = target.url("jobs", urllib.parse.quote(prompt_id, safe=""), "cancel")
     req = urllib.request.Request(url, data=b"", method="POST")
-    if target.api_key:
-        req.add_header("X-API-Key", target.api_key)
-    elif target.auth_token:
-        req.add_header("Authorization", f"Bearer {target.auth_token}")
+    from comfy_cli.http import target_auth_headers
+
+    for k, v in target_auth_headers(target).items():
+        req.add_header(k, v)
 
     try:
         with urllib.request.urlopen(req, timeout=15) as resp:

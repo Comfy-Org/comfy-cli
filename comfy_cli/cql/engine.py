@@ -1249,11 +1249,10 @@ def _load_from_target(*, mode: str = "local", host: str | None = None, port: int
     req.add_header("Accept", "application/json")
 
     # Auth headers (cloud only — local has no auth)
-    if target.is_cloud:
-        if target.api_key:
-            req.add_header("X-API-Key", target.api_key)
-        elif target.auth_token:
-            req.add_header("Authorization", f"Bearer {target.auth_token}")
+    from comfy_cli.http import target_auth_headers
+
+    for k, v in target_auth_headers(target).items():
+        req.add_header(k, v)
 
     try:
         with _opener.open(req, timeout=30.0) as resp:
