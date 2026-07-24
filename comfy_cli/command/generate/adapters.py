@@ -24,12 +24,14 @@ from __future__ import annotations
 import base64
 import mimetypes
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 
+from comfy_cli.command.generate import spec
 from comfy_cli.command.generate.client import ApiError
 from comfy_cli.command.generate.schema import FlagDef
 
@@ -44,6 +46,12 @@ class Adapter:
 
 # ── Gemini / nano-banana ──────────────────────────────────────────────────
 
+_GEMINI_ENDPOINT_ID = "vertexai/gemini/{model}"
+
+# Fallback only — the active openapi spec's enum wins when it carries one
+# (see _spec_model_flags). Gemini's model lives in the URL path, not the
+# request body, so the spec has no body enum for it today and this tuple is
+# the effective list.
 GEMINI_IMAGE_MODELS = (
     "gemini-2.5-flash-image",
     "gemini-2.5-flash-image-preview",
@@ -128,7 +136,7 @@ _gemini_adapter = Adapter(
             name="model",
             kind="enum",
             required=False,
-            default="gemini-2.5-flash-image",
+            default=GEMINI_IMAGE_MODELS[0],
             description="Gemini image-model variant.",
             enum=list(GEMINI_IMAGE_MODELS),
         ),
@@ -141,6 +149,11 @@ _gemini_adapter = Adapter(
 
 # ── Seedance ──────────────────────────────────────────────────────────────
 
+_SEEDANCE_ENDPOINT_ID = "byteplus/api/v3/contents/generations/tasks"
+
+# Fallback only — the active openapi spec's request-body enum wins when it
+# carries one (see _spec_model_flags), so new Seedance releases need a spec
+# refresh, not a CLI release.
 SEEDANCE_MODELS = (
     "seedance-1-0-pro-250528",
     "seedance-1-0-pro-fast-251015",
@@ -176,13 +189,20 @@ def _seedance_image_url(value: str, api_key: str) -> str:
     return upload.upload_path(Path(value).expanduser(), api_key).url
 
 
+def _seedance_default_model() -> str:
+    """Default model when the user didn't pass ``--model`` — the pinned default
+    if the active spec's enum still lists it, else the enum's first entry."""
+    models = spec.model_enum(_SEEDANCE_ENDPOINT_ID) or list(SEEDANCE_MODELS)
+    return SEEDANCE_MODELS[0] if SEEDANCE_MODELS[0] in models else models[0]
+
+
 def _seedance_build_body(values: dict, api_key: str) -> dict[str, Any]:
     content: list[dict[str, Any]] = [{"type": "text", "text": _seedance_text(values)}]
     image = values.get("image")
     if image:
         content.append({"type": "image_url", "image_url": {"url": _seedance_image_url(str(image), api_key)}})
     body: dict[str, Any] = {
-        "model": values.get("model") or SEEDANCE_MODELS[0],
+        "model": values.get("model") or _seedance_default_model(),
         "content": content,
     }
     if "generate_audio" in values:
@@ -206,7 +226,7 @@ _seedance_adapter = Adapter(
             name="model",
             kind="enum",
             required=False,
-            default="seedance-1-0-pro-250528",
+            default=SEEDANCE_MODELS[0],
             description="Seedance model variant.",
             enum=list(SEEDANCE_MODELS),
         ),
@@ -242,13 +262,37 @@ _seedance_adapter = Adapter(
 
 
 _ADAPTERS: dict[str, Adapter] = {
-    "vertexai/gemini/{model}": _gemini_adapter,
-    "byteplus/api/v3/contents/generations/tasks": _seedance_adapter,
+    _GEMINI_ENDPOINT_ID: _gemini_adapter,
+    _SEEDANCE_ENDPOINT_ID: _seedance_adapter,
 }
 
 
+def _spec_model_flags(endpoint_id: str, flags: list[FlagDef]) -> list[FlagDef]:
+    """Return ``flags`` with the ``model`` enum refreshed from the active spec.
+
+    Resolved lazily at lookup time (not import) so a refreshed openapi cache
+    surfaces new partner models with zero code changes; the hardcoded tuples
+    above stay as the fallback when the spec carries no enum. The pinned
+    default is kept while the derived enum still lists it; otherwise the first
+    enum entry takes over (a spec that drops a deprecated default must not
+    break the CLI)."""
+    derived = spec.model_enum(endpoint_id)
+    if not derived:
+        return flags
+    out: list[FlagDef] = []
+    for f in flags:
+        if f.name == "model" and f.kind == "enum":
+            default = f.default if f.default in derived else derived[0]
+            f = replace(f, enum=list(derived), default=default)
+        out.append(f)
+    return out
+
+
 def get(endpoint_id: str) -> Adapter | None:
-    return _ADAPTERS.get(endpoint_id)
+    adapter = _ADAPTERS.get(endpoint_id)
+    if adapter is None:
+        return None
+    return replace(adapter, flags=_spec_model_flags(endpoint_id, adapter.flags))
 
 
 def resolve_path(template: str, values: dict, adapter: Adapter) -> str:
@@ -264,4 +308,11 @@ def resolve_path(template: str, values: dict, adapter: Adapter) -> str:
                 break
     if not val:
         raise ApiError(0, "", f"Missing --{adapter.path_param}: required to fill in the URL path.")
-    return template.replace("{" + adapter.path_param + "}", str(val))
+    # The value may come from a spec-derived enum (refreshable cache), so pin it
+    # to a single path segment: percent-encode reserved characters ("/", "?",
+    # "#", …) and reject dot segments outright — a tampered spec must not be
+    # able to redirect the proxied request via path traversal.
+    val = str(val)
+    if val in (".", ".."):
+        raise ApiError(0, "", f"Invalid --{adapter.path_param} value: {val!r}.")
+    return template.replace("{" + adapter.path_param + "}", quote(val, safe=""))

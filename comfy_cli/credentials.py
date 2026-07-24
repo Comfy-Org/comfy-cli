@@ -123,6 +123,7 @@ def resolve_cloud_credential(
     explicit: str | None = None,
     base_url: str | None = None,
     refresh: bool = True,
+    allow_clear: bool = True,
 ) -> Credential | None:
     """Resolve the active credential for ``purpose``, or ``None``.
 
@@ -137,12 +138,19 @@ def resolve_cloud_credential(
        authenticate against).
     3. The purpose's env var (``COMFY_CLOUD_API_KEY`` / ``COMFY_API_KEY``).
     4. The stored ``comfy-cloud-api-key`` key (``comfy cloud set-key``).
+
+    ``allow_clear=False`` is forwarded into :func:`get_session` (and on to
+    ``ensure_fresh_session``) so a fatal refresh error on THIS call does not
+    wipe the shared stored session. Best-effort, read-mostly callers that must
+    never log the user off the shared session (e.g. the local partner-node
+    injector) pass this; a failed refresh then just falls through to the
+    env/stored-key tail instead of destroying the login.
     """
     explicit_key = explicit.strip() if isinstance(explicit, str) else ""
     if explicit_key:
         return Credential(kind="api_key", value=explicit_key, source="flag")
 
-    session = get_session(refresh=refresh)
+    session = get_session(refresh=refresh, allow_clear=allow_clear)
     if (
         session is not None
         and not session.is_expired()
