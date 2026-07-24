@@ -880,6 +880,271 @@ class TestSSRFGuardIntact:
         assert transfer._local_source_path(url) == Path("/abs/path.png")
 
 
+class TestDownloadHelperExtraction:
+    """Direct, guard-pinning unit tests for the per-URL helpers extracted from
+    ``execute_download`` (BE-3273): ``_download_one_url`` orchestrates naming +
+    the symlink-dest refusal + branch dispatch; ``_copy_local_one`` and
+    ``_stream_http_one`` carry the two download branches. The behavior-preserving
+    extraction must keep every guard, envelope code, and exit intact — and the
+    ``_local_source_path`` gate must stay pinned to ``is_local_job``.
+    """
+
+    def _json_renderer(self):
+        # Pass the renderer explicitly (the helpers take it as an argument), so
+        # no process-wide singleton state leaks between direct-call tests.
+        return Renderer(mode=OutputMode.JSON, command="download")
+
+    def _error(self, capsys) -> dict:
+        lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]
+        envelope = json.loads(lines[-1])
+        assert envelope["type"] == "envelope"
+        assert envelope["ok"] is False
+        return envelope["error"]
+
+    # -- _download_one_url ---------------------------------------------------
+
+    def test_non_local_job_never_calls_local_source_path_and_ssrf_rejects(self, tmp_path, capsys, monkeypatch):
+        # With is_local_job=False the local-copy path is never consulted:
+        # _local_source_path must NOT be called (monkeypatched to explode), and a
+        # bare filesystem path flows to the HTTP branch where the SSRF assert
+        # rejects it as a non-HTTP URL.
+        import typer
+
+        def _boom(url):
+            raise AssertionError("_local_source_path must not be called for a non-local job")
+
+        monkeypatch.setattr(transfer, "_local_source_path", _boom)
+        dest = tmp_path / "out"
+        dest.mkdir()
+        with pytest.raises(typer.Exit) as excinfo:
+            transfer._download_one_url(
+                "/etc/passwd",
+                0,
+                dest=dest,
+                annotations=[(None, None)],
+                item_counters={},
+                short_id="prompt-d",
+                is_local_job=False,
+                auth_hdrs={},
+                renderer=self._json_renderer(),
+            )
+        assert excinfo.value.exit_code == 1
+        err = self._error(capsys)
+        assert err["code"] == "download_failed"
+        assert "non-HTTP URL" in err["message"]
+        assert err["details"] == {"url": "/etc/passwd", "index": 0}
+        # Nothing was written.
+        assert list(dest.iterdir()) == []
+
+    def test_local_job_copies_and_shares_per_item_counter(self, tmp_path, capsys):
+        # A real local source file is copied in, the entry reports the written
+        # path + true size, and a shared item_counters dict advances the per-item
+        # index across two calls.
+        src_dir = tmp_path / "src"
+        src_dir.mkdir()
+        src_a = src_dir / "a.png"
+        src_a.write_bytes(b"\x89PNG-a-bytes")
+        src_b = src_dir / "b.png"
+        src_b.write_bytes(b"\x89PNG-longer-b-bytes")
+        dest = tmp_path / "out"
+        dest.mkdir()
+
+        annotations = [("5", "s1"), ("5", "s1")]
+        item_counters: dict[str, int] = {}
+        renderer = self._json_renderer()
+
+        entry0 = transfer._download_one_url(
+            str(src_a),
+            0,
+            dest=dest,
+            annotations=annotations,
+            item_counters=item_counters,
+            short_id="prompt-d",
+            is_local_job=True,
+            auth_hdrs={},
+            renderer=renderer,
+        )
+        entry1 = transfer._download_one_url(
+            str(src_b),
+            1,
+            dest=dest,
+            annotations=annotations,
+            item_counters=item_counters,
+            short_id="prompt-d",
+            is_local_job=True,
+            auth_hdrs={},
+            renderer=renderer,
+        )
+
+        assert Path(entry0["path"]).name == "s1_000.png"
+        assert Path(entry1["path"]).name == "s1_001.png"
+        assert item_counters == {"s1": 2}
+        assert Path(entry0["path"]).read_bytes() == b"\x89PNG-a-bytes"
+        assert entry0["size"] == len(b"\x89PNG-a-bytes")
+        assert entry1["size"] == len(b"\x89PNG-longer-b-bytes")
+        assert entry0["node_id"] == "5" and entry0["item"] == "s1"
+        # Source files are copied, not moved.
+        assert src_a.is_file() and src_b.is_file()
+
+    def test_symlink_destination_refused_before_copy_or_fetch(self, tmp_path, capsys, monkeypatch):
+        # The dest-symlink guard fires before either branch runs. _collision_safe_path
+        # normally skips symlinks, so pin it to the planted symlink to reach the guard,
+        # and make both branch sinks explode to prove neither is entered.
+        import typer
+
+        dest = tmp_path / "out"
+        dest.mkdir()
+        target = tmp_path / "elsewhere.png"
+        target.write_bytes(b"attacker-target")
+        link = dest / "s1_000.png"
+        link.symlink_to(target)
+
+        monkeypatch.setattr(transfer, "_collision_safe_path", lambda p: link)
+        monkeypatch.setattr(
+            transfer,
+            "_copy_local_output_capped",
+            lambda *a: (_ for _ in ()).throw(AssertionError("copy must not run")),
+        )
+        monkeypatch.setattr(
+            transfer._DOWNLOAD_OPENER,
+            "open",
+            lambda *a, **k: (_ for _ in ()).throw(AssertionError("fetch must not run")),
+        )
+
+        src = tmp_path / "src.png"
+        src.write_bytes(b"local")
+        with pytest.raises(typer.Exit) as excinfo:
+            transfer._download_one_url(
+                str(src),
+                0,
+                dest=dest,
+                annotations=[("5", "s1")],
+                item_counters={},
+                short_id="prompt-d",
+                is_local_job=True,
+                auth_hdrs={},
+                renderer=self._json_renderer(),
+            )
+        assert excinfo.value.exit_code == 1
+        err = self._error(capsys)
+        assert err["code"] == "download_failed"
+        assert "Refusing to write to symlink" in err["message"]
+        # The symlink and its target are untouched.
+        assert link.is_symlink()
+        assert target.read_bytes() == b"attacker-target"
+
+    # -- _stream_http_one ----------------------------------------------------
+
+    def _stream(self, tmp_path, capsys, resp, *, expect_exit=True):
+        import typer
+
+        dest = tmp_path / "out"
+        dest.mkdir(exist_ok=True)
+        local_path = dest / "img.png"
+        renderer = self._json_renderer()
+        with patch.object(transfer._DOWNLOAD_OPENER, "open", side_effect=lambda req, timeout=None: resp):
+            if expect_exit:
+                with pytest.raises(typer.Exit) as excinfo:
+                    transfer._stream_http_one("https://x/view?filename=a.png", 0, local_path, {}, renderer)
+                assert excinfo.value.exit_code == 1
+                return self._error(capsys), dest, local_path
+            transfer._stream_http_one("https://x/view?filename=a.png", 0, local_path, {}, renderer)
+            return None, dest, local_path
+
+    def test_stream_declared_over_cap_refused_before_body_read(self, tmp_path, capsys, monkeypatch):
+        monkeypatch.setattr(transfer, "_MAX_DOWNLOAD_BYTES", 100)
+        resp = _FakeResp(b"x" * 40, content_length=500)
+        err, dest, _ = self._stream(tmp_path, capsys, resp)
+        assert err["code"] == "download_failed"
+        assert err["details"]["declared_bytes"] == 500
+        assert resp.reads == 0  # refused before the first body read
+        assert list(dest.glob("*")) == []
+
+    def test_stream_over_declared_midstream_aborts(self, tmp_path, capsys):
+        resp = _FakeResp(b"x" * 400, content_length=100, chunk_size=32)
+        err, dest, _ = self._stream(tmp_path, capsys, resp)
+        assert err["code"] == "download_failed"
+        assert err["details"]["declared_bytes"] == 100
+        assert err["details"]["received_bytes"] > 100
+        assert resp.reads > 1  # aborted mid-stream, not only post-loop
+        assert list(dest.glob("*")) == []
+
+    def test_stream_running_cap_aborts(self, tmp_path, capsys, monkeypatch):
+        monkeypatch.setattr(transfer, "_MAX_DOWNLOAD_BYTES", 100)
+        resp = _FakeResp(b"x" * 400, content_length=None, chunk_size=32)
+        err, dest, _ = self._stream(tmp_path, capsys, resp)
+        assert err["code"] == "download_failed"
+        assert err["details"]["received_bytes"] > 100
+        assert list(dest.glob("*")) == []
+
+    def test_stream_truncation_aborts(self, tmp_path, capsys):
+        resp = _FakeResp(b"x" * 400, content_length=1000)
+        err, dest, _ = self._stream(tmp_path, capsys, resp)
+        assert err["code"] == "download_failed"
+        assert err["details"]["declared_bytes"] == 1000
+        assert err["details"]["received_bytes"] == 400
+        assert list(dest.glob("*")) == []
+
+    def test_stream_success_renames_part_to_final_no_sibling(self, tmp_path, capsys):
+        _, dest, local_path = self._stream(tmp_path, capsys, _FakeResp(), expect_exit=False)
+        assert local_path.read_bytes() == b"\x89PNG-fake"
+        assert list(dest.glob("*.part")) == []
+        assert [p.name for p in dest.iterdir()] == ["img.png"]
+
+    # -- _copy_local_one -----------------------------------------------------
+
+    def test_copy_missing_source_envelope(self, tmp_path, capsys):
+        import typer
+
+        dest = tmp_path / "out"
+        dest.mkdir()
+        missing = tmp_path / "gone.png"
+        with pytest.raises(typer.Exit) as excinfo:
+            transfer._copy_local_one(str(missing), 0, missing, dest / "img.png", self._json_renderer())
+        assert excinfo.value.exit_code == 1
+        err = self._error(capsys)
+        assert err["code"] == "download_failed"
+        assert "not found on disk" in err["message"]
+        assert list(dest.iterdir()) == []
+
+    def test_copy_stat_cap_breach_envelope(self, tmp_path, capsys, monkeypatch):
+        import typer
+
+        monkeypatch.setattr(transfer, "_MAX_DOWNLOAD_BYTES", 100)
+        src = tmp_path / "big.png"
+        src.write_bytes(b"x" * 300)
+        dest = tmp_path / "out"
+        dest.mkdir()
+        with pytest.raises(typer.Exit) as excinfo:
+            transfer._copy_local_one(str(src), 0, src, dest / "img.png", self._json_renderer())
+        assert excinfo.value.exit_code == 1
+        err = self._error(capsys)
+        assert err["code"] == "download_failed"
+        assert "safety limit" in err["message"]
+        assert err["details"]["size"] == 300
+        assert list(dest.iterdir()) == []
+
+    @pytest.mark.parametrize("exc", [OSError("disk full"), ValueError("mid-copy cap")])
+    def test_copy_capped_failure_surfaces_as_envelope(self, tmp_path, capsys, monkeypatch, exc):
+        import typer
+
+        src = tmp_path / "src.png"
+        src.write_bytes(b"\x89PNG-local")
+        dest = tmp_path / "out"
+        dest.mkdir()
+
+        def _raise(src_, dst_):
+            raise exc
+
+        monkeypatch.setattr(transfer, "_copy_local_output_capped", _raise)
+        with pytest.raises(typer.Exit) as excinfo:
+            transfer._copy_local_one(str(src), 0, src, dest / "img.png", self._json_renderer())
+        assert excinfo.value.exit_code == 1
+        err = self._error(capsys)
+        assert err["code"] == "download_failed"
+        assert "Failed to copy local output" in err["message"]
+
+
 # ---------------------------------------------------------------------------
 # _default_out_dir — project/1 root wins over the legacy config key
 # ---------------------------------------------------------------------------
@@ -923,3 +1188,141 @@ class TestDefaultOutDir:
 
         monkeypatch.setattr(config_manager, "ConfigManager", _FakeCM)
         assert transfer._default_out_dir() == "./outputs"
+
+
+class TestDownloadExtensionSanitized:
+    """The download extension can be derived from an untrusted `?filename=`
+    query param (a compromised/malicious server). Unlike the `item` token, it
+    was never sanitized, so control/ANSI bytes reached the on-disk name and
+    the echoed path — a terminal-injection vector in human mode. `_sanitize_ext`
+    whitelists it to a safe charset while preserving the no-traversal guarantee
+    (BE-3326)."""
+
+    # A real ESC control byte, exactly as a hostile server could return it.
+    _ATTACK_NAME = "out.png\x1b[31mHACK"
+
+    @staticmethod
+    def _has_control_bytes(s: str) -> bool:
+        return any(ord(c) < 0x20 or ord(c) == 0x7F for c in s)
+
+    def _write_cloud_state(self, target: Target, outputs: list[str]) -> None:
+        state = jobs_state.JobState(
+            prompt_id=PROMPT_ID,
+            client_id=None,
+            workflow="/abs/composed.json",
+            where="cloud",
+            base_url=target.base_url,
+            status="completed",
+            outputs=outputs,
+            record=None,
+            item_map=None,
+        )
+        assert jobs_state.write(state) is not None
+
+    def _run(self, fake_target, tmp_path, capsys) -> tuple[list[str], dict]:
+        set_renderer(Renderer(mode=OutputMode.NDJSON, command="download"))
+        with (
+            patch("comfy_cli.command.transfer.resolve_target", return_value=fake_target),
+            patch.object(transfer._DOWNLOAD_OPENER, "open", side_effect=lambda req, timeout=None: _FakeResp()),
+        ):
+            paths = transfer.execute_download(PROMPT_ID, out_dir=str(tmp_path / "out"))
+        lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]
+        return paths, json.loads(lines[-1])["data"]
+
+    def test_query_param_control_bytes_stripped_from_ext(self, fake_target, tmp_path, capsys):
+        # A hostile server names the output with a control-byte-laden extension.
+        url = f"https://cloud.example.com/api/view?filename={self._ATTACK_NAME}&subfolder=&type=output"
+        self._write_cloud_state(fake_target, [url])
+
+        paths, data = self._run(fake_target, tmp_path, capsys)
+
+        assert len(paths) == 1
+        name = Path(paths[0]).name
+        echoed = data["files"][0]["path"]
+        # No control/ANSI bytes survive into the on-disk name or the echoed path.
+        assert not self._has_control_bytes(name), repr(name)
+        assert not self._has_control_bytes(echoed), repr(echoed)
+        # Exact name: control/ANSI bytes are gone (`\x1b`, `[` stripped) while the
+        # benign alphanumeric payload remnant survives the whitelist. Asserting the
+        # full name (not just a `.png` prefix) catches any regression that leaks
+        # control bytes after `.png`.
+        assert name == f"{SHORT_ID}_000.png31mHACK", name
+        assert Path(paths[0]).is_file()
+
+    def test_query_param_no_directory_traversal(self, fake_target, tmp_path, capsys):
+        # `Path(...).suffix` already drops directory components; confirm a
+        # traversal-shaped filename never escapes the out-dir and degrades to
+        # the `.png` default (no dotted suffix to keep).
+        out_dir = tmp_path / "out"
+        url = "https://cloud.example.com/api/view?filename=../../../etc/passwd&subfolder=&type=output"
+        self._write_cloud_state(fake_target, [url])
+
+        paths, _ = self._run(fake_target, tmp_path, capsys)
+
+        assert len(paths) == 1
+        written = Path(paths[0])
+        assert written.name == f"{SHORT_ID}_000.png"
+        # Nothing was written outside the requested out-dir.
+        assert written.resolve().parent == out_dir.resolve()
+
+    def test_local_source_control_bytes_stripped_from_ext(self, fake_target, tmp_path, capsys):
+        # The local-copy branch derives `ext` from the on-disk source name and
+        # must be sanitized too (BE-3326 applies to both branches).
+        src_dir = tmp_path / "output"
+        src_dir.mkdir()
+        src = src_dir / self._ATTACK_NAME
+        src.write_bytes(b"\x89PNG-local")
+        state = jobs_state.JobState(
+            prompt_id=PROMPT_ID,
+            client_id=None,
+            workflow="/abs/composed.json",
+            where="local",
+            base_url="http://127.0.0.1:8188",
+            status="completed",
+            outputs=[str(src)],
+            record=None,
+            item_map=None,
+        )
+        assert jobs_state.write(state) is not None
+
+        set_renderer(Renderer(mode=OutputMode.NDJSON, command="download"))
+        with patch("comfy_cli.command.transfer.resolve_target", return_value=fake_target):
+            paths = transfer.execute_download(PROMPT_ID, out_dir=str(tmp_path / "out"))
+
+        assert len(paths) == 1
+        name = Path(paths[0]).name
+        assert not self._has_control_bytes(name), repr(name)
+        # Exact name (see query-param twin above): control bytes stripped, benign
+        # payload remnant kept — asserting the full name catches control-byte leaks.
+        assert name == f"{SHORT_ID}_000.png31mHACK", name
+        assert Path(paths[0]).is_file()
+
+    @pytest.mark.parametrize(
+        "suffix",
+        [
+            ".💥",  # emoji-only
+            ".日本語",  # unicode-only
+            ".\x1b",  # lone control byte
+            ".",  # already just a dot
+            "..",  # multiple dots
+            ".-_",  # dots/dashes/underscores, no alnum
+            "",  # empty
+        ],
+    )
+    def test_sanitize_ext_collapses_extensionless_suffix_to_empty(self, suffix):
+        # A suffix with no surviving alphanumeric char carries no real extension:
+        # it must return "" so the caller's `or ".png"` fallback applies rather than
+        # a truthy bare-dot result that bypasses the fallback and writes `<id>_000.`.
+        assert transfer._sanitize_ext(suffix) == ""
+
+    def test_sanitize_ext_keeps_real_extension(self):
+        assert transfer._sanitize_ext(".png") == ".png"
+        assert transfer._sanitize_ext(".7z") == ".7z"
+        assert transfer._sanitize_ext(".tar.gz") == ".tar.gz"
+
+    def test_sanitize_ext_caps_length(self):
+        # A hostile `?filename=out.<thousands of safe chars>` must not yield an
+        # over-long extension that pushes local_name past NAME_MAX.
+        result = transfer._sanitize_ext("." + "a" * 5000)
+        assert len(result) <= transfer._MAX_EXT_LEN
+        assert not self._has_control_bytes(result)
