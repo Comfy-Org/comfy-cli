@@ -137,16 +137,18 @@ def test_atomic_write_text_fsync_true_still_writes(tmp_path, monkeypatch):
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX file-mode semantics")
 def test_atomic_write_text_preserves_existing_mode(tmp_path):
-    # A first atomic write must not strip the destination's group read bit
-    # (mkstemp hardcodes 0600, so without mode restoration this would regress to
-    # owner-only). Uses 0o640 rather than 0o644 to avoid granting world read.
+    # A first atomic write must not clobber the destination's mode down to mkstemp's
+    # hardcoded 0600. We only need a non-0600 mode to prove restoration happens, so
+    # use owner-execute (0o700) — a bit mkstemp's 0600 lacks — rather than a
+    # group/other-readable mode. That keeps this clear of the py/overly-permissive-file
+    # scanner while still exercising the exact "restore bits beyond 0600" path.
     target = tmp_path / "shared.json"
     target.write_text("old", encoding="utf-8")
-    os.chmod(target, 0o640)
+    os.chmod(target, 0o700)
 
     atomic_write_text(target, "new")
 
-    assert stat.S_IMODE(os.stat(target).st_mode) == 0o640
+    assert stat.S_IMODE(os.stat(target).st_mode) == 0o700
     assert target.read_text(encoding="utf-8") == "new"
 
 
