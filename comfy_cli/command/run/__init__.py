@@ -8,6 +8,7 @@ patch surface stays stable.
 """
 
 import json
+import sys
 import time
 import uuid
 from datetime import timedelta
@@ -48,6 +49,45 @@ from comfy_cli.workflow_to_api import WorkflowConversionError, convert_ui_to_api
 from comfy_cli.workspace_manager import WorkspaceManager
 
 workspace_manager = WorkspaceManager()
+
+
+def _spend_gate(renderer, partner_nodes: list[str], allow_spend: bool, *, details: dict) -> None:
+    """Consent interlock for partner-API (paid) nodes (BE-4326).
+
+    Mirrors the ``comfy run-template`` gate (BE-4113): a workflow that embeds
+    partner-API nodes (Veo/Kling/BFL/Gemini/…) spends Comfy credits when it
+    runs, so require explicit consent before submitting. A no-op when there are
+    no partner nodes or ``--allow-spend`` was passed, so partner-free runs are
+    byte-identical.
+
+    Fires BEFORE any partner-credential resolution / cloud auth so a refusal
+    never triggers a network OAuth refresh. Raises ``typer.Exit(1)`` when
+    consent is withheld; returns normally when the run may proceed.
+    """
+    if not partner_nodes or allow_spend:
+        return
+    if renderer.is_pretty() and sys.stdin.isatty():
+        pprint(
+            "[yellow]⚠ This workflow uses partner-API nodes that spend Comfy "
+            f"credits: {', '.join(partner_nodes)}.[/yellow]"
+        )
+        if not typer.confirm("Run anyway and spend credits?", default=False):
+            renderer.error(
+                code="spend_consent_required",
+                message="declined — workflow not submitted, no credits spent",
+                details=details,
+            )
+            raise typer.Exit(code=1)
+    else:
+        renderer.error(
+            code="spend_consent_required",
+            message=(
+                "workflow uses partner-API (paid) nodes; re-run with --allow-spend to consent to spending Comfy credits"
+            ),
+            hint="paid nodes only run with explicit consent; free (non-partner) workflows run without this flag",
+            details=details,
+        )
+        raise typer.Exit(code=1)
 
 
 # Mapping from the deleted legacy `comfy run --json` dialect (JsonEmitter,
@@ -105,6 +145,7 @@ def execute(
     api_key: str | None = None,
     print_prompt: bool = False,
     preloaded: tuple[dict, str, bool] | None = None,
+    allow_spend: bool = False,
 ):
     # `0.0.0.0` is a wildcard bind, not a connect address. macOS / Windows
     # clients can't reach it; on Linux it happens to resolve to a loopback.
@@ -215,6 +256,17 @@ def execute(
     # the cloud submit path uses.
     object_info = _fetch_object_info(host, port)
     partner_nodes = _detect_partner_nodes(workflow, object_info)
+    # Spend gate (BE-4326): partner-API nodes spend Comfy credits. Require
+    # explicit consent before resolving a credential or submitting. Fires
+    # BEFORE _resolve_partner_credential() below so a refusal never triggers a
+    # network OAuth refresh. Detection stays fail-open (object_info == {} → no
+    # partner_nodes → no gate), same posture as run-template.
+    _spend_gate(
+        renderer,
+        partner_nodes,
+        allow_spend,
+        details={"partner_nodes": partner_nodes, "host": host, "port": port},
+    )
     extra_data: dict | None = None
     if api_key:
         extra_data = {"api_key_comfy_org": api_key}
@@ -500,6 +552,7 @@ def execute_cloud(
     notify: bool = False,
     print_prompt: bool = False,
     preloaded: tuple[dict, str, bool] | None = None,
+    allow_spend: bool = False,
 ):
     """Run a workflow against Comfy Cloud via the stored OAuth session.
 
@@ -600,6 +653,18 @@ def execute_cloud(
         cloud_object_info = {}
 
     _preflight_validate(renderer, parsed_workflow, cloud_object_info, target_label="cloud")
+
+    # Spend gate (BE-4326): the cloud also bills partner-API nodes, so apply the
+    # same consent interlock as the local path before authenticating/submitting.
+    # Fail-open on detection (empty cloud object_info → no gate), and fire before
+    # Client() so a refusal never triggers cloud auth.
+    partner_nodes = _detect_partner_nodes(parsed_workflow, cloud_object_info)
+    _spend_gate(
+        renderer,
+        partner_nodes,
+        allow_spend,
+        details={"partner_nodes": partner_nodes, "where": "cloud"},
+    )
 
     target = resolve_target(where="cloud")
     try:

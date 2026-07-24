@@ -936,6 +936,11 @@ def run_template_cmd(
             verbose=verbose,
             timeout=timeout,
             api_key=api_key,
+            # run-template's own spend gate (above) has already consented (or
+            # found no paid nodes), so forward consent to avoid a second gate in
+            # execute() (BE-4326). run-template's gate is strictly stronger — it
+            # also inspects gallery signals — and has already run.
+            allow_spend=True,
         )
     finally:
         try:

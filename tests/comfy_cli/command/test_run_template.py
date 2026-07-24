@@ -317,6 +317,20 @@ def test_allow_spend_unblocks_paid_template(app, gallery_file, template_body, se
     assert len(run_spy.calls) == 1
 
 
+def test_consented_handoff_forwards_allow_spend_so_run_does_not_regate(
+    app, gallery_file, template_body, server_up, run_spy
+):
+    # BE-4326: run-template's spend gate has already consented, so the handoff
+    # to `comfy run`'s execute() must forward allow_spend=True — otherwise
+    # execute()'s own gate would fail closed a second time under --json.
+    _force_json_renderer()
+    result = CliRunner().invoke(
+        app, ["run-template", "--gallery", gallery_file, "api_flux2", "--allow-spend", *HOSTPORT]
+    )
+    assert result.exit_code == 0, result.output
+    assert run_spy.calls[0]["allow_spend"] is True
+
+
 def test_interactive_decline_blocks_without_submitting(
     app, gallery_file, template_body, server_up, run_spy, monkeypatch
 ):
