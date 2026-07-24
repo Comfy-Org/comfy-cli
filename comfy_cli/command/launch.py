@@ -16,7 +16,7 @@ from rich.panel import Panel
 from comfy_cli import constants, utils
 from comfy_cli.command.custom_nodes.cm_cli_util import find_cm_cli, resolve_manager_gui_mode
 from comfy_cli.config_manager import ConfigManager
-from comfy_cli.env_checker import check_comfy_server_running
+from comfy_cli.env_checker import _bracket_host, check_comfy_server_running
 from comfy_cli.output import get_renderer
 from comfy_cli.output import rprint as print  # context-aware print: stderr in JSON mode
 from comfy_cli.resolve_python import resolve_workspace_python
@@ -52,6 +52,16 @@ def _get_manager_flags() -> list[str]:
         return ["--enable-manager"]  # fallback to default
 
 
+def _format_url(listen, port) -> str:
+    """Build the ComfyUI ``http://host:port`` URL, bracketing IPv6 literals.
+
+    An IPv6 ``--listen`` (e.g. ``::1`` or ``::``) must be wrapped in brackets or
+    the bare ``host:port`` join yields an invalid URL like ``http://::1:8188``.
+    Delegates the bracketing to the shared ``_bracket_host`` choke point.
+    """
+    return f"http://{_bracket_host(str(listen))}:{port}"
+
+
 def _emit_launch_success(listen, port, pid) -> None:
     """Emit the background-launch success ``envelope/1`` for ``--json`` callers.
 
@@ -66,7 +76,7 @@ def _emit_launch_success(listen, port, pid) -> None:
                 "background": True,
                 "listen": listen,
                 "port": port,
-                "url": f"http://{listen}:{port}",
+                "url": _format_url(listen, port),
                 "pid": pid,
             },
             command="launch",
@@ -106,8 +116,14 @@ def launch_comfyui(extra, frontend_pr=None, python=sys.executable):
 
     if "COMFY_CLI_BACKGROUND" not in os.environ:
         # If not running in background mode, there's no need to use popen. This can prevent the issue of linefeeds occurring with tqdm.
+        # Under --json the child inherits stdout by default, so ComfyUI's raw
+        # non-JSON output would land on stdout ahead of our envelope and break
+        # the single-envelope-on-stdout contract for machine callers. Redirect
+        # the child's stdout to stderr in JSON mode; leave it inherited in pretty
+        # mode so humans still see ComfyUI's output on the terminal.
+        child_stdout = sys.stderr if get_renderer().is_json() else None
         while True:
-            res = subprocess.run([python, "main.py"] + extra, env=new_env, check=False)
+            res = subprocess.run([python, "main.py"] + extra, env=new_env, check=False, stdout=child_stdout)
 
             if reboot_path is None:
                 print("[bold red]ComfyUI is not installed.[/bold red]\n")
@@ -257,32 +273,44 @@ def background_launch(extra, frontend_pr=None):
     listen = "127.0.0.1"
 
     if extra is not None:
-        for i in range(len(extra) - 1):
-            if extra[i] == "--port":
+        # Accept both the two-token (``--port 9000``) and the ``--port=9000``
+        # forms; the latter is common and was previously ignored, leaving port
+        # at the 8188 default and silently disagreeing with what ComfyUI binds.
+        for i, tok in enumerate(extra):
+            if tok == "--port" and i + 1 < len(extra):
                 port = extra[i + 1]
-            if extra[i] == "--listen":
+            elif tok.startswith("--port="):
+                port = tok[len("--port=") :]
+            elif tok == "--listen" and i + 1 < len(extra):
                 listen = extra[i + 1]
+            elif tok.startswith("--listen="):
+                listen = tok[len("--listen=") :]
 
         if len(extra) > 0:
             extra = ["--"] + extra
     else:
         extra = []
 
-    # Validate --port as an integer. It flows into the log path
-    # (``comfyui_<port>.log``); a non-integer value like ``../../etc/x`` would
-    # otherwise escape the workspace when the logfile is created.
+    # Validate --port as an integer in the valid TCP range. It flows into the log
+    # path (``comfyui_<port>.log``); a non-integer value like ``../../etc/x``
+    # would otherwise escape the workspace when the logfile is created, and an
+    # out-of-range value (e.g. -1 or 70000) would degrade to a generic
+    # launch_failed instead of this precise port_invalid verdict.
     try:
-        port = int(port)
+        port_int = int(port)
     except (TypeError, ValueError):
-        print(f"[bold red]Invalid --port value {port!r}; expected an integer.[/bold red]\n")
+        port_int = None
+    if port_int is None or not (1 <= port_int <= 65535):
+        print(f"[bold red]Invalid --port value {port!r}; expected an integer in 1-65535.[/bold red]\n")
         if renderer.is_json():
             renderer.error(
                 code="port_invalid",
-                message=f"Invalid --port value {port!r}; expected an integer.",
+                message=f"Invalid --port value {port!r}; expected an integer in 1-65535.",
                 command="launch",
                 details={"port": port},
             )
         raise typer.Exit(code=1)
+    port = port_int
 
     if check_comfy_server_running(port):
         print(f"[bold red]The {port} port is already in use. A new ComfyUI server cannot be launched.\n[bold red]\n")
@@ -326,7 +354,7 @@ def background_launch(extra, frontend_pr=None):
             code="launch_failed",
             message="Execution error: failed to launch ComfyUI",
             command="launch",
-            details={"log": "".join(log)} if log else None,
+            details={"log": _bounded_log(log)} if log else None,
         )
     # NOTE: os.exit(0) doesn't work
     os._exit(1)
@@ -444,7 +472,7 @@ async def launch_and_monitor(cmd, listen, port):
             logging_flag = True
         if "To see the GUI go to:" in line:
             print(
-                f"[bold yellow]ComfyUI is successfully launched in the background.[/bold yellow]\nTo see the GUI go to: http://{listen}:{port}"
+                f"[bold yellow]ComfyUI is successfully launched in the background.[/bold yellow]\nTo see the GUI go to: {_format_url(listen, port)}"
             )
             # CONFIG_KEY_BACKGROUND_LOG was already recorded before launch; here
             # we add the running background info now that startup succeeded.
@@ -533,6 +561,23 @@ def read_log_tail(
         truncated = True
 
     return lines, truncated
+
+
+def _bounded_log(lines, *, max_lines: int = LOGS_MAX_LINES, max_bytes: int = LOGS_MAX_BYTES) -> str:
+    """Join an in-memory captured log (list of lines) for a JSON envelope,
+    applying the same ``LOGS_MAX_LINES``/``LOGS_MAX_BYTES`` caps as
+    ``read_log_tail``. A verbose failing launch can otherwise produce an
+    unbounded JSON payload (and leak any secrets present in the log) to machine
+    consumers. Keeps the last ``max_lines`` lines, then trims from the top until
+    within ``max_bytes``.
+    """
+    tail = list(lines)[-max_lines:]
+    size = sum(len(s.encode("utf-8")) for s in tail)
+    while len(tail) > 1 and size > max_bytes:
+        size -= len(tail.pop(0).encode("utf-8"))
+    if tail and size > max_bytes:
+        tail[-1] = tail[-1].encode("utf-8")[-max_bytes:].decode("utf-8", errors="replace")
+    return "".join(tail)
 
 
 def resolve_background_log_path() -> str | None:

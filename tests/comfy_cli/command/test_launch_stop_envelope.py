@@ -90,12 +90,33 @@ class TestStopEnvelope:
             patch("comfy_cli.cmdline.ConfigManager", return_value=cfg),
             patch("comfy_cli.cmdline.utils.kill_all", return_value=False),
         ):
-            stop()
+            with pytest.raises(typer.Exit) as exc:
+                stop()
+        assert exc.value.exit_code == 1
+
+        # A failed kill must NOT drop the record — else a still-alive server is
+        # orphaned and a retried `comfy stop` can no longer target it.
+        cfg.remove_background.assert_not_called()
 
         env = _envelopes(capsys.readouterr().out)[-1]
         assert env["ok"] is False
         assert env["error"]["code"] == "stop_failed"
         assert env["error"]["details"]["pid"] == 4242
+
+    def test_kill_failure_pretty_mode_exits_nonzero(self, capsys):
+        # In pretty mode the failure previously printed but returned 0, so
+        # `$?`-checking scripts saw success. It must exit non-zero.
+        _pretty_renderer("stop")
+        cfg = self._config(("127.0.0.1", 8188, 4242))
+        with (
+            patch("comfy_cli.cmdline.ConfigManager", return_value=cfg),
+            patch("comfy_cli.cmdline.utils.kill_all", return_value=False),
+        ):
+            with pytest.raises(typer.Exit) as exc:
+                stop()
+        assert exc.value.exit_code == 1
+        cfg.remove_background.assert_not_called()
+        assert "Failed to stop" in capsys.readouterr().out
 
     def test_pretty_mode_stdout_has_no_json(self, capsys):
         _pretty_renderer("stop")
@@ -215,3 +236,57 @@ class TestLaunchEnvelope:
         assert env["command"] == "launch"
         assert env["error"]["code"] == "launch_failed"
         assert env["error"]["details"]["log"] == "boom\n"
+
+    def test_format_url_brackets_ipv6(self):
+        assert launch_mod._format_url("::1", 8188) == "http://[::1]:8188"
+        assert launch_mod._format_url("::", 8188) == "http://[::]:8188"
+        # Already-bracketed and plain IPv4/hostnames are left as-is.
+        assert launch_mod._format_url("[::1]", 8188) == "http://[::1]:8188"
+        assert launch_mod._format_url("127.0.0.1", 8188) == "http://127.0.0.1:8188"
+
+    def test_background_success_helper_ipv6_url(self, capsys):
+        _json_renderer("launch")
+        launch_mod._emit_launch_success("::1", 8188, 9999)
+        env = _envelopes(capsys.readouterr().out)[-1]
+        assert env["data"]["url"] == "http://[::1]:8188"
+
+    def test_background_port_eq_form_parsed(self, capsys):
+        # The ``--port=9000`` form must be honored (was previously ignored).
+        _json_renderer("launch")
+        cfg = MagicMock()
+        cfg.background = None
+        with (
+            patch("comfy_cli.command.launch.ConfigManager", return_value=cfg),
+            patch("comfy_cli.command.launch.check_comfy_server_running", return_value=True),
+        ):
+            with pytest.raises(typer.Exit) as exc:
+                launch_mod.background_launch(extra=["--port=9000"])
+        assert exc.value.exit_code == 1
+        env = _envelopes(capsys.readouterr().out)[-1]
+        assert env["error"]["code"] == "port_in_use"
+        assert env["error"]["details"]["port"] == 9000
+
+    def test_background_out_of_range_port_is_invalid(self, capsys):
+        _json_renderer("launch")
+        cfg = MagicMock()
+        cfg.background = None
+        with patch("comfy_cli.command.launch.ConfigManager", return_value=cfg):
+            with pytest.raises(typer.Exit) as exc:
+                launch_mod.background_launch(extra=["--port", "70000"])
+        assert exc.value.exit_code == 1
+        env = _envelopes(capsys.readouterr().out)[-1]
+        assert env["error"]["code"] == "port_invalid"
+        assert env["error"]["details"]["port"] == "70000"
+
+    def test_bounded_log_caps_bytes(self):
+        # A verbose failing launch must not embed an unbounded log payload.
+        huge = [f"line {i}\n" for i in range(100)]
+        out = launch_mod._bounded_log(huge, max_lines=1000, max_bytes=20)
+        assert len(out.encode("utf-8")) <= 20
+        # Keeps the tail (most recent lines), trimming from the top.
+        assert out.endswith("line 99\n")
+
+    def test_bounded_log_caps_lines(self):
+        huge = [f"line {i}\n" for i in range(100)]
+        out = launch_mod._bounded_log(huge, max_lines=3, max_bytes=1_000_000)
+        assert out.splitlines() == ["line 97", "line 98", "line 99"]
