@@ -1,3 +1,6 @@
+import os
+import stat
+import sys
 import zipfile
 
 import pytest
@@ -104,12 +107,57 @@ def test_atomic_write_text_overwrites_existing(tmp_path):
     assert target.read_text(encoding="utf-8") == "new"
 
 
-def test_atomic_write_text_fsync_true_still_writes(tmp_path):
+def test_atomic_write_text_fsync_true_still_writes(tmp_path, monkeypatch):
     target = tmp_path / "durable.txt"
+
+    # Spy on os.fsync so we assert it's actually invoked, not silently no-op'd
+    # (the class of bug flagged for the Windows O_RDONLY case). Delegate to the
+    # real fsync so durability behavior is preserved.
+    real_fsync = file_utils.os.fsync
+    synced_fds = []
+
+    def spy_fsync(fd):
+        synced_fds.append(fd)
+        return real_fsync(fd)
+
+    monkeypatch.setattr(file_utils.os, "fsync", spy_fsync)
+
     atomic_write_text(target, "durable", fsync=True)
 
     assert target.read_text(encoding="utf-8") == "durable"
     assert list(target.parent.glob("*.tmp")) == []
+    # The tmp file fd is always fsynced (O_RDWR, works cross-platform). On POSIX
+    # the parent directory fd is fsynced too; Windows can't open a dir for fsync
+    # and best-effort skips it, so only require the extra sync off Windows.
+    if sys.platform == "win32":
+        assert len(synced_fds) >= 1
+    else:
+        assert len(synced_fds) == 2
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX file-mode semantics")
+def test_atomic_write_text_preserves_existing_mode(tmp_path):
+    # A first atomic write must not strip the destination's group/other read bits.
+    target = tmp_path / "shared.json"
+    target.write_text("old", encoding="utf-8")
+    os.chmod(target, 0o644)
+
+    atomic_write_text(target, "new")
+
+    assert stat.S_IMODE(os.stat(target).st_mode) == 0o644
+    assert target.read_text(encoding="utf-8") == "new"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX file-mode semantics")
+def test_atomic_write_text_new_file_uses_umask_default(tmp_path):
+    # A new destination gets the umask-derived default, not mkstemp's hardcoded 0600.
+    old_umask = os.umask(0o022)
+    try:
+        target = tmp_path / "fresh.json"
+        atomic_write_text(target, "data")
+        assert stat.S_IMODE(os.stat(target).st_mode) == (0o666 & ~0o022)
+    finally:
+        os.umask(old_umask)
 
 
 def test_atomic_write_text_cleans_up_tmp_on_failure(tmp_path, monkeypatch):

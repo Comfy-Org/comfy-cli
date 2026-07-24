@@ -1,6 +1,7 @@
 import json
 import os
 import pathlib
+import stat
 import subprocess
 import tempfile
 import time
@@ -49,6 +50,22 @@ def atomic_write_text(path: pathlib.Path, content: str, *, fsync: bool = False) 
                     os.fsync(f.fileno())  # O_RDWR fd, so fsync works on Windows too
                 except OSError:
                     pass
+        # mkstemp hardcodes the tmp file to 0600, and os.replace carries that mode
+        # onto the destination — so without this a first atomic write would quietly
+        # strip the group/other read access a shared output is meant to have. Restore
+        # the intended mode before the rename: reuse the existing destination's bits,
+        # else fall back to the umask-derived default (0666 & ~umask) for a new file.
+        try:
+            dest_mode = stat.S_IMODE(os.stat(path).st_mode)
+        except OSError:
+            umask = os.umask(0)
+            os.umask(umask)
+            dest_mode = 0o666 & ~umask
+        try:
+            os.chmod(tmp_name, dest_mode)
+        except OSError:
+            # Windows / filesystems without POSIX perms: best-effort, matching fsync.
+            pass
         os.replace(tmp_name, path)
         if fsync:
             # Also fsync the parent directory so the rename itself is durable.
