@@ -92,7 +92,7 @@ def _preflight_validate(renderer, workflow: dict, object_info: dict, *, target_l
         errors = validation.get("errors", [])
         hint_parts = []
         for e in errors[:5]:
-            line = f"node {e.get('node_id', '?')}: {e.get('message', '')}"
+            line = f"node {e.get('node_id') or '?'}: {e.get('message', '')}"
             suggestions = e.get("suggestions") or []
             if suggestions:
                 line += f" (did you mean: {', '.join(suggestions)}?)"
