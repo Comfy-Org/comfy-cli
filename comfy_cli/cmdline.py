@@ -943,6 +943,7 @@ def validate(
     from pathlib import Path
 
     from comfy_cli.command.run import is_ui_workflow
+    from comfy_cli.command.run.preflight import _detect_partner_nodes
     from comfy_cli.cql.engine import Graph, LoadError
     from comfy_cli.workflow_to_api import WorkflowConversionError, convert_ui_to_api
 
@@ -1026,6 +1027,14 @@ def validate(
 
     result = graph.validate_workflow(wf_data)
 
+    # Preview credit spend: partner-API (paid) nodes spend Comfy credits when the
+    # workflow is run. This is the same detection `comfy run` uses (authoritative
+    # `api_node: true`, `partner/...` category fallback), surfaced here read-only
+    # so agents can answer "will this spend credits?" without running. `wf_data`
+    # is API format at this point (any UI export already converted above), which
+    # is the format the detector reads. Purely informational — no exit-code gate.
+    partner_nodes = _detect_partner_nodes(wf_data, graph.object_info)
+
     payload = {
         "workflow": str(wf_path),
         "valid": result["valid"],
@@ -1033,6 +1042,8 @@ def validate(
         "warning_count": len(result["warnings"]),
         "errors": result["errors"],
         "warnings": result["warnings"],
+        "partner_nodes": partner_nodes,
+        "spends_credits": bool(partner_nodes),
     }
     if converted_from_ui:
         # Signal that validation ran against the converted graph, not the file's
@@ -1055,6 +1066,10 @@ def validate(
                 rprint(f"  [red]•[/red] node {e.get('node_id') or '?'}: {msg}")
             for w in result["warnings"]:
                 rprint(f"  [yellow]⚠[/yellow] {w.get('message', '')}")
+        if partner_nodes:
+            rprint(
+                f"[yellow]⚠ uses partner-API (paid) nodes that spend Comfy credits: {', '.join(partner_nodes)}[/yellow]"
+            )
     renderer.emit(payload, command="validate", ok=result["valid"])
 
     if not result["valid"]:
