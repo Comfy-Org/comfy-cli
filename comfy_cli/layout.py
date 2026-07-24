@@ -39,12 +39,7 @@ def _rect(node: dict) -> tuple[float, float, float, float]:
 def _overlaps(a: tuple, b: tuple, margin: float = _MARGIN) -> bool:
     ax, ay, aw, ah = a
     bx, by, bw, bh = b
-    return not (
-        ax + aw + margin <= bx
-        or bx + bw + margin <= ax
-        or ay + ah + margin <= by
-        or by + bh + margin <= ay
-    )
+    return not (ax + aw + margin <= bx or bx + bw + margin <= ax or ay + ah + margin <= by or by + bh + margin <= ay)
 
 
 def _bbox(nodes: list) -> tuple[float, float, float, float] | None:
