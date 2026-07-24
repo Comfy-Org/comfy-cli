@@ -238,12 +238,8 @@ class TestGitOperations:
     """Test Git operations for PR checkout"""
 
     @patch("subprocess.run")
-    @patch("os.chdir")
-    @patch("os.getcwd")
-    def test_checkout_pr_fork_success(self, mock_getcwd, mock_chdir, mock_subprocess, sample_pr_info):
+    def test_checkout_pr_fork_success(self, mock_subprocess, sample_pr_info):
         """Test successful checkout of PR from fork"""
-        mock_getcwd.return_value = "/original/dir"
-
         mock_subprocess.side_effect = [
             subprocess.CompletedProcess([], 1),
             subprocess.CompletedProcess([], 0),
@@ -261,14 +257,12 @@ class TestGitOperations:
         assert "remote" in calls[1][0][0]
         assert "fetch" in calls[2][0][0]
         assert "checkout" in calls[3][0][0]
+        # Every git command runs against repo_path via cwd= (no process chdir).
+        assert all(call.kwargs.get("cwd") == "/repo/path" for call in calls)
 
     @patch("subprocess.run")
-    @patch("os.chdir")
-    @patch("os.getcwd")
-    def test_checkout_pr_non_fork_success(self, mock_getcwd, mock_chdir, mock_subprocess):
+    def test_checkout_pr_non_fork_success(self, mock_subprocess):
         """Test successful checkout of PR from same repo"""
-        mock_getcwd.return_value = "/original/dir"
-
         pr_info = PRInfo(
             number=123,
             head_repo_url="https://github.com/comfyanonymous/ComfyUI.git",
@@ -289,14 +283,11 @@ class TestGitOperations:
 
         assert result is True
         assert mock_subprocess.call_count == 2
+        assert all(call.kwargs.get("cwd") == "/repo/path" for call in mock_subprocess.call_args_list)
 
     @patch("subprocess.run")
-    @patch("os.chdir")
-    @patch("os.getcwd")
-    def test_checkout_pr_git_failure(self, mock_getcwd, mock_chdir, mock_subprocess, sample_pr_info):
+    def test_checkout_pr_git_failure(self, mock_subprocess, sample_pr_info):
         """Test Git operation failure"""
-        mock_getcwd.return_value = "/original/dir"
-
         error = subprocess.CalledProcessError(1, "git", stderr="Permission denied")
         mock_subprocess.side_effect = error
 
@@ -553,12 +544,8 @@ class TestEdgeCases:
             assert headers["Authorization"] == "Bearer test-token"
 
     @patch("subprocess.run")
-    @patch("os.chdir")
-    @patch("os.getcwd")
-    def test_checkout_pr_remote_already_exists(self, mock_getcwd, mock_chdir, mock_subprocess, sample_pr_info):
+    def test_checkout_pr_remote_already_exists(self, mock_subprocess, sample_pr_info):
         """Test checkout when remote already exists"""
-        mock_getcwd.return_value = "/dir"
-
         mock_subprocess.side_effect = [
             subprocess.CompletedProcess([], 0),
             subprocess.CompletedProcess([], 0),
@@ -569,6 +556,7 @@ class TestEdgeCases:
 
         assert result is True
         assert mock_subprocess.call_count == 3
+        assert all(call.kwargs.get("cwd") == "/repo" for call in mock_subprocess.call_args_list)
 
 
 class TestGetLatestRelease:
