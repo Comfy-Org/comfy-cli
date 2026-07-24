@@ -659,6 +659,22 @@ class TestOutputUrls:
             {"node_id": "7", "filename": "clip.webm", "subfolder": "", "type": "output"}
         ]
 
+    def test_extract_dedups_same_artifact_under_two_keys(self):
+        """A node that surfaces the same artifact under both the singular
+        "video" and plural "videos" keys must emit one entry, not two — else
+        the /view URL (and the downloaded file) is duplicated."""
+        record = {
+            "outputs": {
+                "7": {
+                    "video": [{"filename": "clip.webm", "subfolder": "", "type": "output"}],
+                    "videos": [{"filename": "clip.webm", "subfolder": "", "type": "output"}],
+                }
+            }
+        }
+        assert comfy_client.extract_output_entries(record) == [
+            {"node_id": "7", "filename": "clip.webm", "subfolder": "", "type": "output"}
+        ]
+
     def test_extract_skips_non_file_shaped_keys(self):
         """Keys carrying flags/metadata rather than file entries produce
         nothing: "animated" (boolean flags — explicitly skipped), "text"

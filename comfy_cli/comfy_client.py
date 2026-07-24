@@ -545,8 +545,15 @@ def extract_output_entries(record: dict) -> list[dict]:
     instead of returning ``download_no_outputs`` (BE-4417). The ``"animated"``
     key is skipped explicitly to match core semantics (it emits ``(True,)``
     boolean flags, not file entries).
+
+    Entries are de-duplicated on the full ``(node_id, filename, subfolder,
+    type)`` tuple, first occurrence wins. A node that surfaces the same
+    artifact under two keys — e.g. the cloud worker's singular ``"video"``
+    alongside the classic plural ``"videos"`` — would otherwise yield two
+    identical ``/view`` URLs and download the same file twice.
     """
     results: list[dict] = []
+    seen: set[tuple[str, str, str, str]] = set()
     outputs = record.get("outputs") or {}
     if not isinstance(outputs, dict):
         return results
@@ -558,14 +565,17 @@ def extract_output_entries(record: dict) -> list[dict]:
                 continue
             for item in items:
                 if isinstance(item, dict) and "filename" in item:
-                    results.append(
-                        {
-                            "node_id": str(node_id),
-                            "filename": str(item.get("filename", "")),
-                            "subfolder": str(item.get("subfolder", "")),
-                            "type": str(item.get("type", "output")),
-                        }
-                    )
+                    entry = {
+                        "node_id": str(node_id),
+                        "filename": str(item.get("filename", "")),
+                        "subfolder": str(item.get("subfolder", "")),
+                        "type": str(item.get("type", "output")),
+                    }
+                    dedup_key = (entry["node_id"], entry["filename"], entry["subfolder"], entry["type"])
+                    if dedup_key in seen:
+                        continue
+                    seen.add(dedup_key)
+                    results.append(entry)
     return results
 
 
