@@ -1169,14 +1169,19 @@ def validate_comfyui(_env_checker):
 @app.command(help="Stop background ComfyUI")
 @tracking.track_command()
 def stop():
-    if constants.CONFIG_KEY_BACKGROUND not in ConfigManager().config["DEFAULT"]:
-        rprint("[bold red]No ComfyUI is running in the background.[/bold red]\n")
-        raise typer.Exit(code=1)
-
-    bg_info = ConfigManager().background
+    renderer = get_renderer()
+    config = ConfigManager()
+    bg_info = config.background if constants.CONFIG_KEY_BACKGROUND in config.config["DEFAULT"] else None
     if not bg_info:
         rprint("[bold red]No ComfyUI is running in the background.[/bold red]\n")
+        if renderer.is_json():
+            renderer.error(
+                code="no_background_server",
+                message="No ComfyUI is running in the background.",
+                command="stop",
+            )
         raise typer.Exit(code=1)
+
     is_killed = utils.kill_all(bg_info[2])
 
     if not is_killed:
@@ -1184,7 +1189,22 @@ def stop():
     else:
         rprint(f"[bold yellow]Background ComfyUI is stopped.[/bold yellow] ({bg_info[0]}:{bg_info[1]})")
 
-    ConfigManager().remove_background()
+    config.remove_background()
+
+    if renderer.is_json():
+        if is_killed:
+            renderer.emit(
+                {"stopped": True, "host": bg_info[0], "port": bg_info[1], "pid": bg_info[2]},
+                command="stop",
+                changed=True,
+            )
+        else:
+            renderer.error(
+                code="stop_failed",
+                message="Failed to stop ComfyUI in the background.",
+                command="stop",
+                details={"pid": bg_info[2]},
+            )
 
 
 @app.command(help="Launch ComfyUI: ?[--background] ?[-- <extra args ...>]")

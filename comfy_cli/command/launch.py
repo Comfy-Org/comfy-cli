@@ -17,6 +17,7 @@ from comfy_cli import constants, utils
 from comfy_cli.command.custom_nodes.cm_cli_util import find_cm_cli, resolve_manager_gui_mode
 from comfy_cli.config_manager import ConfigManager
 from comfy_cli.env_checker import check_comfy_server_running
+from comfy_cli.output import get_renderer
 from comfy_cli.output import rprint as print  # context-aware print: stderr in JSON mode
 from comfy_cli.resolve_python import resolve_workspace_python
 from comfy_cli.workspace_manager import WorkspaceManager, WorkspaceType
@@ -49,6 +50,28 @@ def _get_manager_flags() -> list[str]:
     else:
         print(f"[bold yellow]Warning: Unknown manager mode '{mode}'. Falling back to --enable-manager.[/bold yellow]")
         return ["--enable-manager"]  # fallback to default
+
+
+def _emit_launch_success(listen, port, pid) -> None:
+    """Emit the background-launch success ``envelope/1`` for ``--json`` callers.
+
+    Extracted from ``launch_and_monitor``'s success handler (which ``os._exit``s
+    immediately after) so the terminal success envelope is unit-testable. No-op
+    in pretty mode, keeping human output unchanged.
+    """
+    renderer = get_renderer()
+    if renderer.is_json():
+        renderer.emit(
+            {
+                "background": True,
+                "listen": listen,
+                "port": port,
+                "url": f"http://{listen}:{port}",
+                "pid": pid,
+            },
+            command="launch",
+            changed=True,
+        )
 
 
 def launch_comfyui(extra, frontend_pr=None, python=sys.executable):
@@ -91,6 +114,24 @@ def launch_comfyui(extra, frontend_pr=None, python=sys.executable):
                 exit(res.returncode)
 
             if not os.path.exists(reboot_path):
+                # Foreground server exited (Ctrl-C, crash, or clean stop). Emit
+                # the lifecycle envelope so a `--json` caller gets a terminal
+                # verdict instead of nothing; no-op in pretty mode.
+                renderer = get_renderer()
+                if renderer.is_json():
+                    if res.returncode == 0:
+                        renderer.emit(
+                            {"background": False, "returncode": res.returncode},
+                            command="launch",
+                            changed=True,
+                        )
+                    else:
+                        renderer.error(
+                            code="launch_failed",
+                            message=f"ComfyUI exited with code {res.returncode}",
+                            command="launch",
+                            details={"returncode": res.returncode},
+                        )
                 exit(res.returncode)
 
             os.remove(reboot_path)
@@ -159,6 +200,14 @@ def launch(
             "\nComfyUI is not available.\nTo install ComfyUI, you can run:\n\n\tcomfy install\n\n",
             file=sys.stderr,
         )
+        renderer = get_renderer()
+        if renderer.is_json():
+            renderer.error(
+                code="not_in_workspace",
+                message="ComfyUI is not available.",
+                hint="run `comfy install`, or pass `--workspace`",
+                command="launch",
+            )
         raise typer.Exit(code=1)
 
     if (extra is None or len(extra) == 0) and workspace_manager.workspace_type == WorkspaceType.DEFAULT:
@@ -189,11 +238,19 @@ def launch(
 
 
 def background_launch(extra, frontend_pr=None):
+    renderer = get_renderer()
     config_background = ConfigManager().background
     if config_background is not None and utils.is_running(config_background[2]):
         print(
             "[bold red]ComfyUI is already running in background.\nYou cannot start more than one background service.[/bold red]\n"
         )
+        if renderer.is_json():
+            renderer.error(
+                code="server_already_running",
+                message="ComfyUI is already running in background.",
+                hint="run `comfy stop` before launching another background service",
+                command="launch",
+            )
         raise typer.Exit(code=1)
 
     port = 8188
@@ -218,10 +275,24 @@ def background_launch(extra, frontend_pr=None):
         port = int(port)
     except (TypeError, ValueError):
         print(f"[bold red]Invalid --port value {port!r}; expected an integer.[/bold red]\n")
+        if renderer.is_json():
+            renderer.error(
+                code="port_invalid",
+                message=f"Invalid --port value {port!r}; expected an integer.",
+                command="launch",
+                details={"port": port},
+            )
         raise typer.Exit(code=1)
 
     if check_comfy_server_running(port):
         print(f"[bold red]The {port} port is already in use. A new ComfyUI server cannot be launched.\n[bold red]\n")
+        if renderer.is_json():
+            renderer.error(
+                code="port_in_use",
+                message=f"The {port} port is already in use. A new ComfyUI server cannot be launched.",
+                command="launch",
+                details={"port": port},
+            )
         raise typer.Exit(code=1)
 
     cmd = [
@@ -238,6 +309,8 @@ def background_launch(extra, frontend_pr=None):
 
     log = asyncio.run(launch_and_monitor(cmd, listen, port))
 
+    # Reaching here means the monitor returned without seeing the success line
+    # (the success path emits its envelope and os._exit(0)s inside the monitor).
     if log is not None:
         print(
             Panel(
@@ -248,6 +321,13 @@ def background_launch(extra, frontend_pr=None):
         )
 
     print("\n[bold red]Execution error: failed to launch ComfyUI[/bold red]\n")
+    if renderer.is_json():
+        renderer.error(
+            code="launch_failed",
+            message="Execution error: failed to launch ComfyUI",
+            command="launch",
+            details={"log": "".join(log)} if log else None,
+        )
     # NOTE: os.exit(0) doesn't work
     os._exit(1)
 
@@ -318,6 +398,14 @@ async def launch_and_monitor(cmd, listen, port):
         logfh = _open_log_for_write(log_path)
     except OSError as e:
         print(f"[bold red]Could not open background log file {log_path}: {e}[/bold red]\n")
+        renderer = get_renderer()
+        if renderer.is_json():
+            renderer.error(
+                code="launch_failed",
+                message=f"Could not open background log file {log_path}: {e}",
+                command="launch",
+                details={"log_path": log_path},
+            )
         os._exit(1)
 
     # Record the log path up front so `comfy logs` can surface a crash log even
@@ -364,6 +452,8 @@ async def launch_and_monitor(cmd, listen, port):
             cfg.config["DEFAULT"][constants.CONFIG_KEY_BACKGROUND] = f"{(listen, port, process.pid)}"
             cfg.config["DEFAULT"][constants.CONFIG_KEY_BACKGROUND_LOG] = log_path
             cfg.write_config()
+
+            _emit_launch_success(listen, port, process.pid)
 
             # NOTE: os.exit(0) doesn't work.
             os._exit(0)
@@ -467,7 +557,6 @@ def resolve_background_log_path() -> str | None:
 def logs(tail: int = 200, where: str | None = None):
     """Print the tail of the background ComfyUI log captured by `comfy launch`."""
     from comfy_cli import where as where_mod
-    from comfy_cli.output import get_renderer
 
     renderer = get_renderer()
 

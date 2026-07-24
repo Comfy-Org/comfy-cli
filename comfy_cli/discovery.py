@@ -87,6 +87,9 @@ COMMAND_SCHEMAS: dict[str, str] = {
     "comfy templates show": "templates",
     "comfy templates fetch": "templates",
     "comfy templates refresh": "templates",
+    # lifecycle
+    "comfy launch": "launch",
+    "comfy stop": "stop",
     # file transfer
     "comfy upload": "transfer",
     "comfy download": "transfer",
