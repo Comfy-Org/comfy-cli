@@ -6,16 +6,19 @@ import json
 import logging as logginglib
 import os
 import sys
+import threading
+import time
 import uuid
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 import typer
-from mixpanel import Mixpanel
-from posthog import Posthog
 
 from comfy_cli import constants, logging, ui
 from comfy_cli.config_manager import ConfigManager
 from comfy_cli.workspace_manager import WorkspaceManager
+
+if TYPE_CHECKING:
+    from posthog import Posthog
 
 # Ignore logs from urllib3 that Mixpanel/PostHog use.
 logginglib.getLogger("urllib3").setLevel(logginglib.ERROR)
@@ -139,7 +142,21 @@ class TelemetryProvider(Protocol):
 
 class MixpanelProvider:
     def __init__(self, token: str):
-        self.client = Mixpanel(token) if token else None
+        self.client = None
+        if token:
+            # Imported here, not at module scope: see `_get_providers`.
+            from mixpanel import Consumer as MixpanelConsumer
+            from mixpanel import Mixpanel
+
+            # mixpanel-python's default Consumer uses request_timeout=None → an
+            # unbounded, synchronous requests.post on the main thread, so a
+            # blackholed telemetry endpoint (accepts TCP, never responds) hangs the
+            # CLI indefinitely (BE-3354/BE-3403). track() sends inline on the calling
+            # thread and flush() is a no-op, so this bound is the ONLY thing guarding
+            # the hot event path — it isn't covered by the atexit daemon deadline.
+            # retry_limit=1 (default is 4 with backoff) keeps a blackholed send to a
+            # single ~10s attempt instead of ~40s+ across retries.
+            self.client = Mixpanel(token, consumer=MixpanelConsumer(request_timeout=10, retry_limit=1))
         self.enabled = self.client is not None
 
     def track(self, event_name: str, distinct_id: str | None, properties: dict[str, Any]) -> None:
@@ -165,8 +182,22 @@ class PostHogProvider:
         self.enabled = False
         if not token:
             return
+        # Imported here, not at module scope: see `_get_providers`.
+        from posthog import Posthog
+
         # disable_geoip=False lets PostHog enrich events with IP-derived location.
-        self.client = Posthog(project_api_key=token, host=host, disable_geoip=False)
+        # max_retries/timeout tighten the consumer drain budget from the posthog
+        # 7.x defaults (3 × 15s ≈ 50s worst case) to ~21s, so the atexit flush
+        # can't linger on a blackholed endpoint after the terminal envelope is
+        # already on stdout (BE-3354/BE-3403).
+        self.client = Posthog(project_api_key=token, host=host, disable_geoip=False, max_retries=1, timeout=10)
+        # Posthog's constructor registers its own atexit.register(self.join),
+        # which runs self.join() synchronously on the main thread at shutdown —
+        # independently of _flush_all_providers and NOT bounded by its daemon
+        # deadline. Against a blackholed endpoint that join can still block ~21s
+        # after the terminal envelope is on stdout, defeating this change. Drop it
+        # so our bounded flush is the only shutdown drain path (BE-3403).
+        atexit.unregister(self.client.join)
         self.enabled = True
 
     def track(self, event_name: str, distinct_id: str | None, properties: dict[str, Any]) -> None:
@@ -186,10 +217,47 @@ class PostHogProvider:
         self.client.flush()
 
 
-PROVIDERS: list[TelemetryProvider] = [
-    MixpanelProvider(MIXPANEL_TOKEN),
-    PostHogProvider(POSTHOG_TOKEN, POSTHOG_HOST),
-]
+# Built on the first send, not at import. `mixpanel` pulls in pydantic (and thus
+# the compiled pydantic_core extension) for its feature-flags module, and importing
+# it here meant every `comfy` process held that .pyd open for its whole lifetime.
+# On Windows a loaded DLL cannot be replaced, so `comfy install` — which shells out
+# to `uv pip install` against its own interpreter's environment — could not upgrade
+# pydantic_core and died with "Access is denied (os error 5)", leaving the package
+# half-removed and every later `comfy` invocation unable to import it.
+# Deferring the import means a run that never sends telemetry (no consent, or
+# DO_NOT_TRACK) never loads the extension at all. See tests/comfy_cli/test_tracking_lazy_import.py.
+PROVIDERS: list[TelemetryProvider] | None = None
+
+# Building at import used to be single-shot courtesy of the import lock; keep that
+# guarantee now that it happens on demand. Racing builds would strand a PostHog
+# client — and its unflushed queue — in the list that lost.
+_PROVIDERS_LOCK = threading.Lock()
+
+
+def _get_providers() -> list[TelemetryProvider]:
+    global PROVIDERS
+    if PROVIDERS is None:
+        with _PROVIDERS_LOCK:
+            if PROVIDERS is None:
+                # Construction runs the deferred SDK imports, so it can fail on exactly
+                # the broken dependency tree this deferral exists to avoid (a half-removed
+                # pydantic_core raises ImportError). Telemetry is best-effort: degrade to a
+                # no-op rather than take the user's command down with us. Each provider is
+                # built independently so one unusable SDK doesn't silence the other, and the
+                # result is cached either way — including [] — so a doomed import isn't
+                # retried on every later event.
+                built = []
+                for name, factory in (
+                    ("MixpanelProvider", lambda: MixpanelProvider(MIXPANEL_TOKEN)),
+                    ("PostHogProvider", lambda: PostHogProvider(POSTHOG_TOKEN, POSTHOG_HOST)),
+                ):
+                    try:
+                        built.append(factory())
+                    except Exception as e:  # noqa: BLE001
+                        logging.warning(f"Failed to initialize telemetry provider {name}, skipping it: {e}")
+                PROVIDERS = built
+    return PROVIDERS
+
 
 app = typer.Typer()
 
@@ -215,7 +283,7 @@ def _dispatch(
     passive telemetry, env-only for feedback).
     """
     properties = {**properties, "cli_version": cli_version, "tracing_id": tracing_id}
-    for provider in PROVIDERS:
+    for provider in _get_providers():
         provider_event_name = (
             mixpanel_name if (mixpanel_name is not None and isinstance(provider, MixpanelProvider)) else event_name
         )
@@ -407,12 +475,55 @@ def init_tracking(enable_tracking: bool):
         track_event("install")
 
 
+def _flush_one(provider: TelemetryProvider) -> None:
+    try:
+        provider.flush()
+    except Exception as e:  # noqa: BLE001
+        logging.warning(f"Failed to flush telemetry provider {type(provider).__name__}: {e}")
+
+
+_FLUSH_DEADLINE_SECONDS = 5.0
+
+
 def _flush_all_providers() -> None:
-    for provider in PROVIDERS:
+    # Deliberately reads PROVIDERS rather than calling _get_providers(): a run that
+    # never sent anything has nothing to drain, and constructing providers from an
+    # atexit hook would import the SDKs we just went to the trouble of deferring.
+    # Taking the lock (without building) makes an in-flight build resolve first —
+    # otherwise we could read None mid-construction and exit without draining the
+    # racing thread's PostHog queue. Released before flushing so a slow network
+    # drain doesn't block a concurrent send.
+    with _PROVIDERS_LOCK:
+        providers = PROVIDERS
+    if providers is None:
+        return
+    # Telemetry is best-effort by contract: a blackholed endpoint (accepts TCP,
+    # never responds) must never let this atexit hook wedge every consumer of the
+    # CLI's stdout after the terminal envelope is already emitted (BE-3329/BE-3403).
+    # Start every provider's flush in a daemon thread, then join them all against
+    # a SINGLE shared deadline so total exit delay stays ~5s regardless of how
+    # many providers there are (a per-provider join would make it 5s × N).
+    # Dropping in-flight events beats hanging the process. t.start()/t.join() are
+    # wrapped defensively so nothing this hook does can raise and print a
+    # traceback to stderr after the terminal envelope.
+    deadline = time.monotonic() + _FLUSH_DEADLINE_SECONDS
+    threads: list[tuple[threading.Thread, TelemetryProvider]] = []
+    for provider in providers:
+        t = threading.Thread(target=_flush_one, args=(provider,), daemon=True)
         try:
-            provider.flush()
-        except Exception as e:  # noqa: BLE001
-            logging.warning(f"Failed to flush telemetry provider {type(provider).__name__}: {e}")
+            t.start()
+        except RuntimeError as e:  # e.g. a thread-creation race during shutdown
+            logging.warning(f"could not start telemetry flush for {type(provider).__name__}: {e}")
+            continue
+        threads.append((t, provider))
+    for t, provider in threads:
+        try:
+            t.join(timeout=max(0.0, deadline - time.monotonic()))
+        except RuntimeError as e:  # pragma: no cover - defensive
+            logging.warning(f"telemetry flush join failed for {type(provider).__name__}: {e}")
+            continue
+        if t.is_alive():
+            logging.warning(f"telemetry flush timed out for {type(provider).__name__}; dropping in-flight events")
 
 
 atexit.register(_flush_all_providers)

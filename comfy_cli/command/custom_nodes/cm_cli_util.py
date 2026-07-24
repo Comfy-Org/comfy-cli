@@ -9,9 +9,9 @@ import uuid
 from functools import lru_cache
 
 import typer
-from rich import print
 
 from comfy_cli.config_manager import ConfigManager
+from comfy_cli.output import rprint as print  # noqa: A001 - context-aware: stderr in JSON mode
 from comfy_cli.resolve_python import resolve_workspace_python
 from comfy_cli.uv import DependencyCompiler
 from comfy_cli.workspace_manager import WorkspaceManager, check_comfy_repo
