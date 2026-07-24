@@ -590,6 +590,35 @@ class TestSetWidgetSubgraph:
         wf = json.loads(path.read_text())
         assert _interior(wf, 27)["widgets_values"][0] == "a nested cat"
 
+    def test_flattened_colon_address_writes_interior_node(self, patched_graph, tmp_path, capsys):
+        """`57:27.text` — the FLATTENED id namespace `validate` and server
+        node_errors report after UI→API lowering (workflow_to_api composes inner
+        ids as `<outer>:<inner>`) — is accepted as an alias for `57/27.text`.
+        Without this, an agent that copies a node id out of a validate error gets
+        `node 57:27 not found in workflow` from the very tool that should fix it."""
+        path = _write(tmp_path, _subgraph_workflow())
+        env = _run(["set-widget", str(path), "57:27.text", "a flattened cat"], capsys)
+        assert env["ok"] is True, env
+        op = env["data"]["op"]
+        assert op["path"] == ["57", "27"]
+        assert op["inner_widget"] == "text"
+        wf = json.loads(path.read_text())
+        assert _interior(wf, 27)["widgets_values"][0] == "a flattened cat"
+
+    def test_flattened_colon_converges_with_nested_form(self):
+        """`57:27.text` and `57/27.text` resolve to the SAME CRDT write target."""
+        wf = _subgraph_workflow()
+        _, colon = workflow_ops.set_widget(copy.deepcopy(wf), _graph(), "57:27", "text", "A")
+        _, nested = workflow_ops.set_widget(copy.deepcopy(wf), _graph(), "57/27", "text", "B")
+        assert workflow_ops._write_target(colon) == workflow_ops._write_target(nested)
+
+    def test_flattened_colon_address_unknown_interior_errors(self, patched_graph, tmp_path, capsys):
+        path = _write(tmp_path, _subgraph_workflow())
+        env = _run(["set-widget", str(path), "57:99.text", "x"], capsys)
+        assert env["ok"] is False
+        assert env["error"]["code"] == "workflow_edit_invalid"
+        assert "interior node 99 not found" in env["error"]["message"]
+
     def test_flat_and_nested_share_a_conflict_target(self):
         """Flat `57.text` and nested `57/27.text` land on the same interior
         widget, so their ops must resolve to the SAME CRDT write target (they

@@ -1027,6 +1027,7 @@ def validate(
     # workflow MUST be lowered to API format FIRST, using the SAME converter
     # (and the SAME object_info resolution) the `run` path uses, so validate
     # inspects exactly what the server would execute.
+    lowered = False
     if not is_api_format(wf_data):
         try:
             wf_data = convert_ui_to_api(wf_data, object_info)
@@ -1037,8 +1038,22 @@ def validate(
                 hint="check that every node's required inputs are connected",
             )
             raise typer.Exit(code=1) from e
+        lowered = True
 
     result = graph.validate_workflow(wf_data)
+
+    # When the caller handed us a CANVAS graph, they have never seen the
+    # flattened ids the lowering mints for subgraph interiors (`57:3`) — their
+    # edit surface (slots / set-widget) speaks `57/3`. Key every issue by the
+    # editable address so a validate error can be acted on directly; keep the
+    # raw API id alongside for anyone correlating with server node_errors. An
+    # already-API input skips this: its ids address the document as given.
+    if lowered:
+        for issue in (*result["errors"], *result["warnings"]):
+            nid = str(issue.get("node_id", ""))
+            if ":" in nid:
+                issue["api_node_id"] = nid
+                issue["node_id"] = nid.replace(":", "/")
 
     payload = {
         "workflow": str(wf_path),

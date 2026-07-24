@@ -351,6 +351,13 @@ def _subgraph_write_target(workflow: dict, node_id: Any, widget: str) -> tuple[l
     # Nested interior form: the interior path is explicit.
     if _engine._SUBGRAPH_PATH_SEP in node_str:
         return node_str.split(_engine._SUBGRAPH_PATH_SEP), widget
+    # Flattened composite form ("57:27"): the id namespace UI→API lowering mints
+    # (workflow_to_api composes inner ids as `<outer>:<inner>`), which is what
+    # `validate` output and server node_errors carry. Callers copy those ids
+    # back into edit commands, so accept them as an alias for the editable
+    # `<outer>/<inner>` path — unless a literal node really has that id.
+    if ":" in node_str and _find_by_str(workflow, node_str) is None:
+        return node_str.split(":"), widget
 
     defs_by_id = _engine._subgraph_defs_by_id(workflow)
     if not defs_by_id:

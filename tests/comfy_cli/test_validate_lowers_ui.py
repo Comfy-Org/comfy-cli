@@ -204,6 +204,80 @@ def _envelope(result) -> dict:
     return json.loads(lines[-1])
 
 
+_SG_UUID = "f2fdebf6-dfaf-43b6-9eb2-7f70613cfdc1"
+
+
+def _subgraph_ui_workflow() -> dict:
+    """A frontend graph whose only real node is a KSampler INSIDE a subgraph
+    instance (id 57), with none of its link inputs wired — so lowering expands
+    it to the composite id ``57:3`` and validation flags its missing inputs."""
+    return {
+        "last_node_id": 60,
+        "last_link_id": 0,
+        "nodes": [
+            {
+                "id": 57,
+                "type": _SG_UUID,
+                "pos": [0, 0],
+                "inputs": [],
+                "outputs": [],
+                "properties": {},
+            }
+        ],
+        "links": [],
+        "definitions": {
+            "subgraphs": [
+                {
+                    "id": _SG_UUID,
+                    "name": "Sampler",
+                    "inputs": [],
+                    "outputs": [],
+                    "nodes": [
+                        {
+                            "id": 3,
+                            "type": "KSampler",
+                            "inputs": [],
+                            "widgets_values": [42, "fixed", 20, 8.0, "euler", "normal", 1.0],
+                        }
+                    ],
+                    "links": [],
+                }
+            ]
+        },
+    }
+
+
+class TestValidateSubgraphIdTranslation:
+    """Validate errors on subgraph interiors must be keyed by the EDITABLE
+    address (`57/3` — what set-widget/slots speak), not the flattened API id
+    (`57:3` — what lowering mints). Callers only ever saw the pre-flatten ids;
+    feeding `57:3` back into the edit surface used to dead-end with
+    `node 57:3 not found in workflow`."""
+
+    def test_lowered_subgraph_error_uses_editable_address(self, tmp_path):
+        result = _run_validate(tmp_path, _subgraph_ui_workflow(), _object_info())
+        assert result.exit_code == 1
+        env = _envelope(result)
+        missing = [e for e in env["data"]["errors"] if e["code"] == "missing_required_input"]
+        assert missing, env["data"]["errors"]
+        for e in missing:
+            assert e["node_id"] == "57/3", e
+            assert e["api_node_id"] == "57:3", e
+
+    def test_api_format_input_keeps_raw_ids(self, tmp_path):
+        # A caller that hands us an already-lowered API doc addresses THAT doc;
+        # its ids pass through untouched (no api_node_id annotation).
+        api = {"57:3": {"class_type": "KSampler", "inputs": {}}}
+        result = _run_validate(tmp_path, api, _object_info())
+        assert result.exit_code == 1
+        env = _envelope(result)
+        missing = [e for e in env["data"]["errors"] if e["code"] == "missing_required_input"]
+        assert missing
+        for e in missing:
+            assert e["node_id"] == "57:3", e
+            assert "api_node_id" not in e, e
+
+
 class TestValidateCLI:
     def test_broken_frontend_graph_is_flagged(self, tmp_path):
         result = _run_validate(tmp_path, _break_model_link(_sd15_ui()), _object_info())
