@@ -96,7 +96,8 @@ def assign_positions(workflow: dict, graph, specs: list) -> list:
 
     existing = {n.get("id"): n for n in workflow.get("nodes") or [] if isinstance(n, dict)}
     edges: list[tuple[str, str]] = []
-    anchors: list[dict] = []
+    src_anchors: list[dict] = []  # existing nodes that feed a new node (old -> new)
+    dst_anchors: list[dict] = []  # existing nodes fed by a new node (new -> old)
 
     def endpoint(ref):
         node_part = str(ref).partition(".")[0].strip()
@@ -112,32 +113,48 @@ def assign_positions(workflow: dict, graph, specs: list) -> list:
             continue
         skind, s = endpoint(spec.get("from", ""))
         tkind, t = endpoint(spec.get("to", ""))
-        if skind == "old":
-            anchors.append(existing[s])
-        if tkind == "old" and skind == "new":
-            anchors.append(existing[t])
-        if tkind == "new":
-            if skind == "new":
-                edges.append((s, t))
-            elif skind == "old":
-                adds[t]["depth"] = max(adds[t]["depth"], 1)
+        if skind == "old" and tkind == "new":
+            src_anchors.append(existing[s])
+            adds[t]["depth"] = max(adds[t]["depth"], 1)
+        elif skind == "new" and tkind == "old":
+            dst_anchors.append(existing[t])
+        elif skind == "new" and tkind == "new":
+            edges.append((s, t))
 
-    # Longest-path layering over new→new edges. Aliases are defined before use
-    # in a valid batch, so spec-order passes converge; run twice for safety.
-    for _ in range(2):
+    # Longest-path layering over new→new edges via relaxation to a fixpoint,
+    # bounded by the worst-case chain length. A valid batch has no cycles
+    # among new nodes, so this always converges within the bound regardless
+    # of the order connects appear in the spec list.
+    passes = max(1, len(adds) - 1)
+    for _ in range(passes):
+        changed = False
         for s, t in edges:
-            adds[t]["depth"] = max(adds[t]["depth"], adds[s]["depth"] + 1)
+            cand = adds[s]["depth"] + 1
+            if cand > adds[t]["depth"]:
+                adds[t]["depth"] = cand
+                changed = True
+        if not changed:
+            break
 
-    if anchors:
-        arects = [_rect(a) for a in anchors]
+    movable = [k for k in order if adds[k]["pinned"] is None]
+
+    if src_anchors:
+        # New nodes fed by existing ones: place right of the feeders, as before.
+        arects = [_rect(a) for a in src_anchors]
         base_x = max(r[0] + r[2] for r in arects) + COL_GAP
         base_y = min(r[1] for r in arects)
+    elif dst_anchors:
+        # New nodes that feed INTO existing ones: place the whole new block to
+        # the left so the edge still reads left-to-right, not backwards.
+        drects = [_rect(a) for a in dst_anchors]
+        max_depth = max((adds[k]["depth"] for k in movable), default=0)
+        base_x = min(r[0] for r in drects) - (max_depth + 1) * (NODE_W + COL_GAP)
+        base_y = min(r[1] for r in drects)
     else:
         box = _bbox(list(existing.values()))
         base_x, base_y = (box[2] + COL_GAP, box[1]) if box else ORIGIN
 
     col_y: dict[int, float] = {}
-    movable = [k for k in order if adds[k]["pinned"] is None]
     for k in movable:
         a = adds[k]
         x = base_x + a["depth"] * (NODE_W + COL_GAP)

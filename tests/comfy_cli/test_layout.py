@@ -82,3 +82,30 @@ def test_assign_positions_respects_explicit_at_and_is_deterministic():
     out2 = layout.assign_positions(wf, _FakeGraph(), specs)
     assert out1[0]["at"] == [999, 999]
     assert out1 == out2
+
+
+def test_assign_positions_new_source_into_existing_target_goes_left():
+    wf = {"nodes": [_node(7, (500, 100), (200, 120))], "links": []}
+    specs = [
+        {"op": "add_node", "class_type": "Upscale", "as": "u"},
+        {"op": "connect", "from": "u.0", "to": "7.image"},
+    ]
+    out = layout.assign_positions(wf, _FakeGraph(), specs)
+    assert out[0]["at"][0] + layout.NODE_W <= 500  # fully left of the anchor
+    assert not layout._overlaps((*out[0]["at"], layout.NODE_W, 100), layout._rect(wf["nodes"][0]))
+
+
+def test_assign_positions_reverse_order_connects_full_depth():
+    wf = {"nodes": [], "links": []}
+    specs = [
+        {"op": "add_node", "class_type": "A", "as": "a"},
+        {"op": "add_node", "class_type": "B", "as": "b"},
+        {"op": "add_node", "class_type": "C", "as": "c"},
+        {"op": "add_node", "class_type": "D", "as": "d"},
+        {"op": "connect", "from": "c.0", "to": "d.in"},
+        {"op": "connect", "from": "b.0", "to": "c.in"},
+        {"op": "connect", "from": "a.0", "to": "b.in"},
+    ]
+    out = layout.assign_positions(wf, _FakeGraph(), specs)
+    xa, xb, xc, xd = (out[i]["at"][0] for i in range(4))
+    assert xa < xb < xc < xd
