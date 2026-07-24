@@ -50,7 +50,7 @@ dependencies = [
   "rich",
   "ruff",
   "semver~=3.0.2",
-  "tomlkit",
+  "tomlkit>=0.13,<0.16",
   "typer>=0.12.5",
   "typing-extensions>=4.7",
   "uv>=0.11.15",

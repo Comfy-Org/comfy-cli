@@ -267,7 +267,7 @@ requires-dist = [
     { name = "ruff", marker = "extra == 'dev'" },
     { name = "semver", specifier = "~=3.0.2" },
     { name = "term-image", marker = "extra == 'preview'", specifier = ">=0.7,<0.8" },
-    { name = "tomlkit" },
+    { name = "tomlkit", specifier = ">=0.13,<0.16" },
     { name = "typer", specifier = ">=0.12.5" },
     { name = "typing-extensions", specifier = ">=4.7" },
     { name = "uv", specifier = ">=0.11.15" },
