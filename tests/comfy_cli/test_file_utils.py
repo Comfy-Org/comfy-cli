@@ -128,3 +128,42 @@ def test_atomic_write_text_cleans_up_tmp_on_failure(tmp_path, monkeypatch):
     # The tmp file is cleaned up and the destination is untouched.
     assert list(target.parent.glob("*.tmp")) == []
     assert target.read_text(encoding="utf-8") == "original"
+
+
+def test_atomic_write_text_tmp_name_is_unique_per_write(tmp_path, monkeypatch):
+    # Two writes from the "same" pid must not collide on a shared tmp path.
+    target = tmp_path / "out.txt"
+    seen = []
+    real_mkstemp = file_utils.tempfile.mkstemp
+
+    def spy(*args, **kwargs):
+        fd, name = real_mkstemp(*args, **kwargs)
+        seen.append(name)
+        return fd, name
+
+    monkeypatch.setattr(file_utils.tempfile, "mkstemp", spy)
+    monkeypatch.setattr(file_utils.os, "getpid", lambda: 4242)
+
+    atomic_write_text(target, "a")
+    atomic_write_text(target, "b")
+
+    assert len(seen) == 2
+    assert seen[0] != seen[1]
+    assert target.read_text(encoding="utf-8") == "b"
+
+
+def test_atomic_write_text_does_not_follow_symlinked_tmp(tmp_path):
+    # A pre-planted symlink at a predictable tmp path must not redirect the write.
+    target = tmp_path / "out.txt"
+    victim = tmp_path / "victim.txt"
+    victim.write_text("do-not-touch", encoding="utf-8")
+    # The old scheme used "<dest>.<pid>.tmp"; plant a symlink there.
+    import os as _os
+
+    decoy = tmp_path / f"out.txt.{_os.getpid()}.tmp"
+    decoy.symlink_to(victim)
+
+    atomic_write_text(target, "new")
+
+    assert target.read_text(encoding="utf-8") == "new"
+    assert victim.read_text(encoding="utf-8") == "do-not-touch"
