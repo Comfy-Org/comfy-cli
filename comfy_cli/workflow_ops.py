@@ -1139,6 +1139,29 @@ def _resolve_input_target(node: dict, graph, slot: Any, elem_type: str | None) -
     # Widget-backed input: convert the widget to a linked input.
     if graph is not None and isinstance(slot, str) and slot in graph.widget_order(node.get("type", "")):
         return None, {"name": slot, "type": elem_type or "*", "widget": slot}
+    # Bare autogrow ELEMENT name (`image1` for base `images`) — the guess agents
+    # make on classic batch nodes, and the top workflow-edit failure in alpha
+    # traffic. Map it onto the dotted key it implies and hold it to the same
+    # next-sequential rule as an explicit dotted target: the canonical next slot
+    # grows; anything else is rejected with the base and the exact next free key,
+    # instead of the generic not-found that never mentions autogrow at all.
+    if isinstance(slot, str):
+        for ag in ins:
+            base = ag.get("name")
+            if not base or not str(ag.get("type", "")).startswith("COMFY_AUTOGROW"):
+                continue
+            elem = base[:-1] if base.endswith("s") else base
+            if not re.fullmatch(re.escape(elem) + r"\d+", slot):
+                continue
+            grow = _plan_autogrow(ins, base, elem_type)
+            if f"{base}.{slot}" == grow["name"]:
+                return None, grow
+            grown = [i.get("name") for i in ins if str(i.get("name", "")).startswith(base + ".")]
+            raise ValueError(
+                f"input {slot!r} addresses autogrow input {base!r} on node {node.get('id')} "
+                f"but is not the next sequential slot (existing: {grown}) — connect to the "
+                f"base {base!r} to auto-append, or use the next free key {grow['name']!r}"
+            )
     names = [i.get("name") for i in ins]
     raise ValueError(f"input {slot!r} not found on node {node.get('id')}; inputs: {names}")
 

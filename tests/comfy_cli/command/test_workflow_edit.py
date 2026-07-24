@@ -717,6 +717,36 @@ class TestConnect:
         assert e2["ok"] is True, e2
         assert e2["data"]["op"]["grow"]["name"] == "images.image1"
 
+    def test_autogrow_accepts_bare_element_names(self, patched_graph, tmp_path, capsys):
+        """A bare element name (`image0`, `image1` — no `images.` prefix) is the guess
+        agents make on classic batch nodes, and was the top alpha workflow-edit
+        failure. The canonical next element grows; a non-next element is rejected
+        with an error that names the base and the exact next free key."""
+        path = _write(tmp_path, {"nodes": [], "links": [], "last_node_id": 0, "last_link_id": 0})
+        a = _run(["add-node", str(path), "VAEDecode"], capsys)["data"]["op"]["node_id"]
+        b = _run(["add-node", str(path), "VAEDecode"], capsys)["data"]["op"]["node_id"]
+        batch = _run(["add-node", str(path), "BatchImagesNode"], capsys)["data"]["op"]["node_id"]
+
+        # 1-indexed first guess (`image1` on an empty base) is rejected, and the
+        # error teaches both recovery paths.
+        env = _run(["connect", str(path), f"{a}.IMAGE", f"{batch}.image1"], capsys)
+        assert env["ok"] is False, env
+        assert env["error"]["code"] == "workflow_edit_invalid", env
+        assert "images.image0" in env["error"]["message"], env
+        assert "'images'" in env["error"]["message"], env
+
+        # 0-indexed sequential guesses just work.
+        e0 = _run(["connect", str(path), f"{a}.IMAGE", f"{batch}.image0"], capsys)
+        assert e0["ok"] is True, e0
+        assert e0["data"]["op"]["grow"]["name"] == "images.image0"
+        e1 = _run(["connect", str(path), f"{b}.IMAGE", f"{batch}.image1"], capsys)
+        assert e1["ok"] is True, e1
+        assert e1["data"]["op"]["grow"]["name"] == "images.image1"
+
+        # A name unrelated to any autogrow element still gets the generic error.
+        env = _run(["connect", str(path), f"{a}.IMAGE", f"{batch}.frames3"], capsys)
+        assert env["ok"] is False and "not found" in env["error"]["message"], env
+
     def test_connect_converts_widget_to_input(self, patched_graph, tmp_path, capsys):
         """connect onto a widget-backed input (KSampler.cfg) converts it to a link;
         widgets_values stays intact and the converter uses the link (fps-style wiring)."""
