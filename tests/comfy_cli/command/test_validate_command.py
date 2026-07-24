@@ -288,3 +288,23 @@ def test_invalid_workflow_still_reports_partner_nodes(runner, tmp_path):
     assert any(e["code"] == "unknown_class_type" for e in data["errors"])
     assert data["partner_nodes"] == ["AcmePartnerImage"]
     assert data["spends_credits"] is True
+
+
+def test_partner_node_name_with_markup_does_not_crash_pretty(runner, tmp_path):
+    """Regression: a partner `class_type` containing Rich-markup metacharacters
+    (e.g. `[/yellow]`) is escaped before it reaches `rprint`, so the pretty-mode
+    advisory line can't raise `MarkupError` and crash the command."""
+    name = "Acme[/yellow]Node"
+    oi = _write(tmp_path, "oi.json", {name: _node_info(category="image", api_node=True)})
+    wf = _write(tmp_path, "wf.json", {"1": {"class_type": name, "inputs": {}}})
+
+    result = runner.invoke(
+        app,
+        ["--no-json", "validate", "--workflow", str(wf), "--input", str(oi)],
+        env={"COMFY_WHERE": "local"},
+    )
+
+    assert result.exit_code == 0, result.stdout
+    assert result.exception is None, result.exception
+    # The name is still shown (escaped) in the paid-nodes advisory.
+    assert name in result.stdout

@@ -1067,8 +1067,13 @@ def validate(
             for w in result["warnings"]:
                 rprint(f"  [yellow]⚠[/yellow] {w.get('message', '')}")
         if partner_nodes:
+            # class_type strings come from the workflow / object_info and can
+            # contain Rich-markup metacharacters (e.g. `[/yellow]`); escape each
+            # so an odd node name can't raise MarkupError and crash the command.
+            from rich.markup import escape as _escape
+
             rprint(
-                f"[yellow]⚠ uses partner-API (paid) nodes that spend Comfy credits: {', '.join(partner_nodes)}[/yellow]"
+                f"[yellow]⚠ uses partner-API (paid) nodes that spend Comfy credits: {', '.join(_escape(n) for n in partner_nodes)}[/yellow]"
             )
     renderer.emit(payload, command="validate", ok=result["valid"])
 
