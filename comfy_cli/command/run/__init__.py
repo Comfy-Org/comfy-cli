@@ -15,6 +15,7 @@ from datetime import timedelta
 from urllib import request  # noqa: F401 — patch target for tests (run.request.urlopen)
 
 import typer
+from rich.markup import escape as _rich_escape
 from websocket import (  # noqa: F401 — patch target for tests (run.WebSocket)
     WebSocket,
     WebSocketException,
@@ -51,6 +52,24 @@ from comfy_cli.workspace_manager import WorkspaceManager
 workspace_manager = WorkspaceManager()
 
 
+def _stdin_is_interactive() -> bool:
+    """True only when stdin is a live TTY.
+
+    ``sys.stdin.isatty()`` assumes stdin is a live stream, but in detached /
+    ``pythonw`` contexts ``sys.stdin`` can be ``None`` (AttributeError on
+    ``.isatty``) or a closed file (ValueError). Treat both as non-interactive so
+    the spend gate falls through to the fail-closed machine-mode error instead
+    of raising an uncontrolled exception (BE-4326).
+    """
+    stdin = getattr(sys, "stdin", None)
+    if stdin is None:
+        return False
+    try:
+        return bool(stdin.isatty())
+    except (AttributeError, ValueError):
+        return False
+
+
 def _spend_gate(renderer, partner_nodes: list[str], allow_spend: bool, *, details: dict) -> None:
     """Consent interlock for partner-API (paid) nodes (BE-4326).
 
@@ -66,11 +85,12 @@ def _spend_gate(renderer, partner_nodes: list[str], allow_spend: bool, *, detail
     """
     if not partner_nodes or allow_spend:
         return
-    if renderer.is_pretty() and sys.stdin.isatty():
-        pprint(
-            "[yellow]⚠ This workflow uses partner-API nodes that spend Comfy "
-            f"credits: {', '.join(partner_nodes)}.[/yellow]"
-        )
+    if renderer.is_pretty() and _stdin_is_interactive():
+        # Escape class_type names before interpolating into Rich markup: a name
+        # containing markup like ``[bold]`` would otherwise be parsed as a tag
+        # (MarkupError/StyleSyntaxError, or injected formatting).
+        names = ", ".join(_rich_escape(n) for n in partner_nodes)
+        pprint(f"[yellow]⚠ This workflow uses partner-API nodes that spend Comfy credits: {names}.[/yellow]")
         if not typer.confirm("Run anyway and spend credits?", default=False):
             renderer.error(
                 code="spend_consent_required",

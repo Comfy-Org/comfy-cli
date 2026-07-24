@@ -1034,6 +1034,75 @@ class TestExecuteSpendGate:
         assert not any(e["code"] == "spend_consent_required" for e in errors)
 
 
+class TestSpendGateStdinAndMarkup:
+    """Robustness of the interactive spend prompt (BE-4326): a missing/closed
+    stdin must fall through to the fail-closed machine-mode error rather than
+    crash, and partner class_type names must not be interpreted as Rich markup."""
+
+    PARTNER_NODES = ["Veo3VideoGenerationNode"]
+
+    def _capture_errors(self, monkeypatch):
+        errors = []
+        from comfy_cli.output.renderer import Renderer
+
+        original_error = Renderer.error
+
+        def capture_error(self, *, code, message, hint=None, details=None, exit_code=1):
+            errors.append({"code": code, "message": message, "details": details})
+            return original_error(self, code=code, message=message, hint=hint, details=details, exit_code=exit_code)
+
+        monkeypatch.setattr(Renderer, "error", capture_error)
+        return errors
+
+    def test_stdin_none_is_non_interactive(self, monkeypatch):
+        """`sys.stdin is None` (detached/pythonw) → non-interactive, no crash."""
+        from comfy_cli.command.run import _stdin_is_interactive
+
+        monkeypatch.setattr("comfy_cli.command.run.sys.stdin", None)
+        assert _stdin_is_interactive() is False
+
+    def test_stdin_closed_is_non_interactive(self, monkeypatch):
+        """A closed stdin raises ValueError on `.isatty()` → non-interactive."""
+        from comfy_cli.command.run import _stdin_is_interactive
+
+        closed = io.StringIO()
+        closed.close()
+        monkeypatch.setattr("comfy_cli.command.run.sys.stdin", closed)
+        assert _stdin_is_interactive() is False
+
+    def test_pretty_with_dead_stdin_fails_closed_not_crash(self, monkeypatch):
+        """Pretty renderer + None stdin: the gate must emit the fail-closed
+        machine-mode error and Exit(1), never an uncontrolled AttributeError."""
+        from comfy_cli.command.run import _spend_gate
+        from comfy_cli.output.renderer import Renderer
+
+        monkeypatch.setattr(Renderer, "is_pretty", lambda self: True)
+        monkeypatch.setattr("comfy_cli.command.run.sys.stdin", None)
+        errors = self._capture_errors(monkeypatch)
+        renderer = Renderer()
+
+        with pytest.raises(typer.Exit) as exc_info:
+            _spend_gate(renderer, self.PARTNER_NODES, False, details={"partner_nodes": self.PARTNER_NODES})
+        assert exc_info.value.exit_code == 1
+        assert any(e["code"] == "spend_consent_required" for e in errors)
+
+    def test_markup_in_node_name_does_not_crash_confirm(self, monkeypatch):
+        """A class_type containing Rich markup like `[bold]` must be escaped,
+        not parsed — the interactive confirm renders without MarkupError."""
+        from comfy_cli.command.run import _spend_gate
+        from comfy_cli.output.renderer import Renderer
+
+        monkeypatch.setattr(Renderer, "is_pretty", lambda self: True)
+        monkeypatch.setattr("comfy_cli.command.run._stdin_is_interactive", lambda: True)
+        # Accept the prompt so the gate returns cleanly; the point is the render
+        # of the warning line above the prompt must not raise.
+        monkeypatch.setattr("typer.confirm", lambda *a, **k: True)
+        renderer = Renderer()
+
+        # Should not raise (MarkupError/StyleSyntaxError) despite the `[bold]`.
+        _spend_gate(renderer, ["Evil[bold]Node"], False, details={"partner_nodes": ["Evil[bold]Node"]})
+
+
 class TestExecuteUiWorkflow:
     UI = {
         "nodes": [
