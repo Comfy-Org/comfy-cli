@@ -121,6 +121,12 @@ def _telemetry_disabled_by_env() -> bool:
     return False
 
 
+# Click/Typer completion instruction tokens. The ``_*_COMPLETE`` var carries an
+# ``instruction_shell`` pair whose instruction is ``complete`` (resolve args) or
+# ``source`` (emit the completion script) — neither runs a command.
+_COMPLETION_INSTRUCTIONS = frozenset({"complete", "source"})
+
+
 def _in_shell_completion() -> bool:
     """Return True when the process is resolving shell tab-completion rather
     than running a real command.
@@ -133,8 +139,21 @@ def _in_shell_completion() -> bool:
     inert path (GitHub #506). The prog name varies with the invoking entrypoint
     (``comfy`` / ``comfy-cli`` / ``comfycli``) and any user alias, so match the
     ``_..._COMPLETE`` pattern rather than a fixed name.
+
+    The var's value is Click/Typer's completion *instruction* — ``complete_bash``
+    / ``source_zsh`` (Typer 8.x style) or ``bash_complete`` (Click 7.x style),
+    i.e. an ``instruction_shell`` / ``shell_instruction`` pair. Require a
+    recognized instruction token so a stray or empty user-exported
+    ``_FOO_COMPLETE`` can't silently suppress telemetry on a real command run.
+    Snapshot the keys with ``list(...)`` so a concurrent env mutation on another
+    thread can't raise ``RuntimeError: dictionary changed size during iteration``.
     """
-    return any(name.startswith("_") and name.endswith("_COMPLETE") for name in os.environ)
+    for name in list(os.environ):
+        if not (name.startswith("_") and name.endswith("_COMPLETE")):
+            continue
+        if _COMPLETION_INSTRUCTIONS & set(os.environ.get(name, "").split("_")):
+            return True
+    return False
 
 
 def _consent_enabled() -> bool:

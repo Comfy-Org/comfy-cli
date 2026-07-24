@@ -53,6 +53,23 @@ class TestInShellCompletionDetection:
         monkeypatch.setenv(name, "1")
         assert tracking_mod._in_shell_completion() is False
 
+    @pytest.mark.parametrize("value", ["", "0", "1", "garbage", "banana"])
+    def test_completion_var_with_non_instruction_value_is_not_detected(self, monkeypatch, value):
+        # A stray or empty user-exported `_FOO_COMPLETE` (no real completion
+        # instruction in its value) must NOT be mistaken for completion mode,
+        # else it would silently suppress telemetry on a genuine command run.
+        _clear_completion_env(monkeypatch)
+        monkeypatch.setenv("_SOMETOOL_COMPLETE", value)
+        assert tracking_mod._in_shell_completion() is False
+
+    @pytest.mark.parametrize("value", ["complete_bash", "source_zsh", "bash_complete", "complete_powershell"])
+    def test_recognized_instruction_values_are_detected(self, monkeypatch, value):
+        # Both the Typer 8.x (`instruction_shell`) and Click 7.x (`shell_instruction`)
+        # value styles carry a recognized instruction token and must trip the guard.
+        _clear_completion_env(monkeypatch)
+        monkeypatch.setenv("_COMFY_COMPLETE", value)
+        assert tracking_mod._in_shell_completion() is True
+
 
 class TestGetProvidersUnderCompletion:
     def test_no_providers_constructed_during_completion(self, monkeypatch):
@@ -102,9 +119,15 @@ class TestCompletionEndToEnd:
         monkeypatch.setenv("COMFY_HOME", str(tmp_path))
         monkeypatch.setenv("HOME", str(tmp_path))
         # Typer's completion protocol: instruction + the words resolved so far.
+        # The var each shell reads to recover those words differs — zsh/fish use
+        # _TYPER_COMPLETE_ARGS, while bash reads COMP_WORDS/COMP_CWORD (a hard
+        # KeyError if absent) — so set all of them to emulate ``comfy <TAB>``
+        # regardless of which shell instruction is under test.
         monkeypatch.setenv("_COMFY_COMPLETE", shell_instruction)
         monkeypatch.setenv("_TYPER_COMPLETE_ARGS", "comfy ")
         monkeypatch.setenv("_TYPER_COMPLETE_FISH_ACTION", "get-args")
+        monkeypatch.setenv("COMP_WORDS", "comfy ")
+        monkeypatch.setenv("COMP_CWORD", "1")
         monkeypatch.setattr("sys.argv", ["comfy"])
         monkeypatch.setattr(tracking_mod, "PROVIDERS", None)
 
