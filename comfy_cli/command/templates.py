@@ -629,6 +629,8 @@ def _enforce_spend_gate(
     """
     import sys
 
+    from rich.markup import escape
+
     paid_nodes = _detect_paid_nodes(workflow, object_info)
     gallery_signals = _gallery_paid_signals(row)
     if (paid_nodes or gallery_signals) and not allow_spend:
@@ -637,12 +639,14 @@ def _enforce_spend_gate(
             "partner_nodes": paid_nodes,
             "gallery_signals": gallery_signals,
         }
-        if renderer.is_pretty() and sys.stdin.isatty():
-            rprint(f"[yellow]⚠ Template [bold]{name}[/bold] uses partner-API nodes that spend Comfy credits.[/yellow]")
+        if renderer.is_pretty() and sys.stdin and sys.stdin.isatty():
+            rprint(
+                f"[yellow]⚠ Template [bold]{escape(name)}[/bold] uses partner-API nodes that spend Comfy credits.[/yellow]"
+            )
             if paid_nodes:
-                rprint(f"  [dim]nodes:[/dim] {', '.join(paid_nodes)}")
+                rprint(f"  [dim]nodes:[/dim] {escape(', '.join(paid_nodes))}")
             if gallery_signals:
-                rprint(f"  [dim]gallery:[/dim] {', '.join(gallery_signals)}")
+                rprint(f"  [dim]gallery:[/dim] {escape(', '.join(gallery_signals))}")
             if not typer.confirm("Run anyway and spend credits?", default=False):
                 renderer.error(
                     code="spend_consent_required",

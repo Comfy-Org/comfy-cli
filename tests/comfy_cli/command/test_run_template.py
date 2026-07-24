@@ -525,3 +525,39 @@ class TestEnforceSpendGate:
         env = _envelope(capsys.readouterr().out)
         assert env["error"]["details"]["gallery_signals"] == ["tag:API"]
         assert env["error"]["details"]["partner_nodes"] == []
+
+    def test_bracket_name_does_not_crash_prompt(self, monkeypatch):
+        # A template name containing Rich markup (e.g. "[test]") must be escaped
+        # before hitting rprint, or the interactive warning raises MarkupError
+        # and crashes the consent prompt. Accept path → returns None cleanly.
+        renderer = _force_pretty_renderer()
+        monkeypatch.setattr("sys.stdin.isatty", lambda: True, raising=False)
+        monkeypatch.setattr("typer.confirm", lambda *a, **k: True)
+        assert (
+            templates_cmd._enforce_spend_gate(
+                renderer,
+                name="[unbalanced [test]",
+                workflow=_PAID_WORKFLOW,
+                row={"name": "x", "tags": ["API"], "providers": ["[Provider]"]},
+                object_info=OBJECT_INFO,
+                allow_spend=False,
+            )
+            is None
+        )
+
+    def test_none_stdin_falls_through_to_hard_fail(self, capsys, monkeypatch):
+        # sys.stdin is None (detached process / closed stream): isatty() would
+        # raise AttributeError; the guard must fall through to the non-interactive
+        # hard-fail branch instead of crashing.
+        renderer = _force_pretty_renderer()
+        monkeypatch.setattr("sys.stdin", None, raising=False)
+        with pytest.raises(typer.Exit) as exc:
+            templates_cmd._enforce_spend_gate(
+                renderer,
+                name="api_flux2",
+                workflow=_PAID_WORKFLOW,
+                row=_OSS_ROW,
+                object_info=OBJECT_INFO,
+                allow_spend=False,
+            )
+        assert exc.value.exit_code == 1
