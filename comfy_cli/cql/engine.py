@@ -543,41 +543,13 @@ class Graph:
         result.sort(key=lambda m: m.id)
         return result
 
-    def pack_nodes(self, pack: str) -> list[Morphism]:
-        """All nodes belonging to a custom-node pack (case-insensitive)."""
-        p = pack.lower()
-        return sorted([m for m in self._nodes.values() if m.pack.lower() == p], key=lambda m: m.id)
-
-    def label_nodes(self, label: str) -> list[Morphism]:
-        """All nodes carrying a specific behavioral label."""
-        return sorted([m for m in self._nodes.values() if label in m.labels], key=lambda m: m.id)
-
-    def cloud_disabled_nodes(self) -> list[Morphism]:
-        """All nodes that are disabled on Comfy Cloud."""
-        return sorted([m for m in self._nodes.values() if m.cloud_disabled], key=lambda m: m.id)
-
     def cloud_enabled_nodes(self) -> list[Morphism]:
         """All nodes that are enabled on Comfy Cloud."""
         return sorted([m for m in self._nodes.values() if not m.cloud_disabled], key=lambda m: m.id)
 
-    def api_nodes(self) -> list[Morphism]:
-        """All partner API nodes."""
-        return sorted([m for m in self._nodes.values() if m.is_api_node], key=lambda m: m.id)
-
-    def output_nodes(self) -> list[Morphism]:
-        """All terminal output nodes (SaveImage, etc.)."""
-        return sorted([m for m in self._nodes.values() if m.is_output_node], key=lambda m: m.id)
-
     def packs(self) -> list[str]:
         """All known pack names, sorted."""
         return sorted(set(m.pack for m in self._nodes.values() if m.pack))
-
-    def known_labels(self) -> list[str]:
-        """All known labels, sorted."""
-        labels: set[str] = set()
-        for m in self._nodes.values():
-            labels.update(m.labels)
-        return sorted(labels)
 
     def find_paths(
         self,

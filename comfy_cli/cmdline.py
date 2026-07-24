@@ -351,13 +351,6 @@ def entry(
             )
         ctx.exit()
 
-    # TODO: Move this to proper place
-    # start_time = time.time()
-    # workspace_manager.scan_dir()
-    # end_time = time.time()
-    #
-    # logging.info(f"scan_dir took {end_time - start_time:.2f} seconds to run")
-
 
 def validate_commit_and_version(commit: str | None, ctx: typer.Context) -> str | None:
     """
@@ -1158,12 +1151,6 @@ def run_cli(
     raise typer.Exit(
         code=run_cli_inner.execute(pause_seconds=effective_pause, no_cleanup=no_cleanup, show_agent=show_agent)
     )
-
-
-def validate_comfyui(_env_checker):
-    if _env_checker.comfy_repo is None:
-        rprint("[bold red]If ComfyUI is not installed, this feature cannot be used.[/bold red]")
-        raise typer.Exit(code=1)
 
 
 @app.command(help="Stop background ComfyUI")
