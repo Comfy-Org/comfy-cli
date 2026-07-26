@@ -68,6 +68,19 @@ def format_hardware_summary(hw: dict) -> str:
     return f"{cpu} / {ram} RAM / {gpu_part}"
 
 
+def _bracket_host(host: str) -> str:
+    """Bracket a bare IPv6 literal (``::1`` -> ``[::1]``) for use in a URL.
+
+    Idempotent: an already-bracketed host (as returned by
+    ``host_port.resolve_host_port``) and hostnames / IPv4 (no ``:``) pass
+    through unchanged, so it's safe to apply at a shared choke point regardless
+    of whether the caller pre-bracketed.
+    """
+    if ":" in host and not host.startswith("["):
+        return f"[{host}]"
+    return host
+
+
 def check_comfy_server_running(port=8188, host="localhost", timeout: float = 5.0):
     """
     Checks if the Comfy server is running by making a GET request to the /history endpoint.
@@ -79,10 +92,27 @@ def check_comfy_server_running(port=8188, host="localhost", timeout: float = 5.0
         bool: True if the Comfy server is running, False otherwise.
     """
     try:
-        response = requests.get(f"http://{host}:{port}/history", timeout=timeout)
+        response = requests.get(f"http://{_bracket_host(host)}:{port}/history", timeout=timeout)
         return response.status_code == 200
     except requests.exceptions.RequestException:
         return False
+
+
+def _resolved_local_address() -> tuple[str, int]:
+    """The local ComfyUI ``(host, port)`` ``comfy env`` should probe + report.
+
+    Honors the same precedence as every other local command minus the
+    per-command flag (``comfy env`` takes none): ``COMFY_LOCAL_URL`` env >
+    ``config.background`` > ``127.0.0.1:8188``.
+    """
+    from comfy_cli.local_address import resolve_local_host_port
+
+    return resolve_local_host_port(None, None, background=ConfigManager().background)
+
+
+def _display_url(host: str, port: int) -> str:
+    """``http://host:port`` with IPv6 literals bracketed for a valid URL."""
+    return f"http://{_bracket_host(host)}:{port}"
 
 
 @singleton
@@ -144,11 +174,12 @@ class EnvChecker:
 
         data.append(("Hardware", format_hardware_summary(detect_hardware())))
 
-        if check_comfy_server_running():
+        host, port = _resolved_local_address()
+        if check_comfy_server_running(port=port, host=host):
             data.append(
                 (
                     "Comfy Server Running",
-                    "[bold green]Yes[/bold green]\nhttp://localhost:8188",
+                    f"[bold green]Yes[/bold green]\n{_display_url(host, port)}",
                 )
             )
         else:
@@ -164,7 +195,8 @@ class EnvChecker:
         against ``schemas/env.json``.
         """
         cm = ConfigManager()
-        server_running = check_comfy_server_running()
+        host, port = _resolved_local_address()
+        server_running = check_comfy_server_running(port=port, host=host)
         return {
             "python": {
                 "version": f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
@@ -175,7 +207,7 @@ class EnvChecker:
             "config": cm.get_data(),
             "server": {
                 "running": server_running,
-                "url": "http://localhost:8188" if server_running else None,
+                "url": _display_url(host, port) if server_running else None,
             },
             "hardware": detect_hardware(),
         }

@@ -23,6 +23,22 @@ def disable_tracking_prompt(monkeypatch):
     monkeypatch.setattr("comfy_cli.tracking.track_event", lambda *a, **kw: None)
 
 
+@pytest.fixture(autouse=True)
+def _isolate_spec_caches():
+    """spec.load_raw_spec / spec._registry are process-global lru_caches keyed off
+    the module-level _USER_CACHE path. The refresh tests below monkeypatch that
+    path to a temp cache; base_url() loads it into those caches, so without a
+    teardown clear a temp spec leaks into later tests (empty registry → spurious
+    'No models match' failures). Clear around every test to keep them isolated."""
+    from comfy_cli.command.generate import spec as _spec
+
+    _spec.load_raw_spec.cache_clear()
+    _spec._registry.cache_clear()
+    yield
+    _spec.load_raw_spec.cache_clear()
+    _spec._registry.cache_clear()
+
+
 @pytest.fixture
 def runner():
     return CliRunner()
@@ -388,9 +404,21 @@ def test_resume_with_download(runner, api_key, tmp_path, monkeypatch):
 
 # ─── refresh ─────────────────────────────────────────────────────────────
 
+# A minimal but structurally-valid openapi spec served as a JSON body — mirrors
+# how the live api.comfy.org/openapi endpoint responds (JSON, not YAML). It
+# carries a real curated endpoint so the cache round-trips through the registry.
+_VALID_JSON_SPEC = (
+    '{"openapi":"3.1.0","servers":[{"url":"https://api.comfy.org"}],'
+    '"paths":{"/proxy/openai/images/generations":{"post":{"summary":"Create image",'
+    '"requestBody":{"content":{"application/json":{"schema":{"type":"object",'
+    '"properties":{"prompt":{"type":"string"}}}}}},'
+    '"responses":{"200":{"content":{"application/json":{"schema":{"type":"object"}}}}}}}}}'
+)
 
-def test_refresh_writes_cache(runner, monkeypatch, tmp_path):
-    captured = {}
+
+def _fake_client_factory(responder, calls):
+    """Build a stand-in httpx.Client whose ``get`` delegates to ``responder(url)``
+    and records each requested URL in ``calls``."""
 
     class FakeClient:
         def __init__(self, *a, **kw):
@@ -403,39 +431,74 @@ def test_refresh_writes_cache(runner, monkeypatch, tmp_path):
             pass
 
         def get(self, url, headers=None):
-            captured["url"] = url
-            captured["headers"] = headers or {}
-            return httpx.Response(
-                200,
-                text="openapi: 3.0.0\n",
-                request=httpx.Request("GET", url),
-            )
+            calls.append((url, headers or {}))
+            return responder(url)
 
-    monkeypatch.setattr(gen_app.httpx, "Client", FakeClient)
+    return FakeClient
+
+
+def test_refresh_hits_openapi_and_writes_cache(runner, monkeypatch, tmp_path):
+    """(a) refresh fetches ``/openapi`` and caches a valid JSON spec body."""
+    calls = []
+
+    def responder(url):
+        return httpx.Response(200, text=_VALID_JSON_SPEC, request=httpx.Request("GET", url))
+
+    monkeypatch.setattr(gen_app.httpx, "Client", _fake_client_factory(responder, calls))
     monkeypatch.setattr("comfy_cli.command.generate.spec._USER_CACHE", tmp_path / "openapi-cache.yml")
 
     r = runner.invoke(cli_app, ["generate", "refresh"])
     assert r.exit_code == 0, r.stdout
     assert "Refreshed" in r.stdout
     assert (tmp_path / "openapi-cache.yml").exists()
-    assert captured["headers"].get("Comfy-Env") == "comfy-cli"
+    # First (and only) fetch targets the extension-less /openapi path.
+    assert len(calls) == 1
+    assert calls[0][0].endswith("/openapi")
+    assert calls[0][1].get("Comfy-Env") == "comfy-cli"
+
+
+def test_refresh_falls_back_to_openapi_yml_on_404(runner, monkeypatch, tmp_path):
+    """(b) a 404 on ``/openapi`` falls back to ``/openapi.yml``."""
+    calls = []
+
+    def responder(url):
+        if url.endswith("/openapi"):
+            return httpx.Response(404, text='{"message":"Not Found"}', request=httpx.Request("GET", url))
+        return httpx.Response(200, text=_VALID_JSON_SPEC, request=httpx.Request("GET", url))
+
+    monkeypatch.setattr(gen_app.httpx, "Client", _fake_client_factory(responder, calls))
+    monkeypatch.setattr("comfy_cli.command.generate.spec._USER_CACHE", tmp_path / "openapi-cache.yml")
+
+    r = runner.invoke(cli_app, ["generate", "refresh"])
+    assert r.exit_code == 0, r.stdout
+    assert (tmp_path / "openapi-cache.yml").exists()
+    assert [c[0].rsplit("/", 1)[-1] for c in calls] == ["openapi", "openapi.yml"]
+
+
+@pytest.mark.parametrize("body", ["not: [valid: yaml", '{"openapi":"3.1.0"}'])
+def test_refresh_invalid_body_exits_and_leaves_cache_untouched(runner, monkeypatch, tmp_path, body):
+    """(c) a non-parsing body OR a 200 with no ``paths`` exits 1 without writing."""
+    cache = tmp_path / "openapi-cache.yml"
+    cache.write_text("openapi: 3.0.0\npaths: {}\n", encoding="utf-8")  # pre-existing good cache
+    before = cache.read_text(encoding="utf-8")
+
+    def responder(url):
+        return httpx.Response(200, text=body, request=httpx.Request("GET", url))
+
+    monkeypatch.setattr(gen_app.httpx, "Client", _fake_client_factory(responder, []))
+    monkeypatch.setattr("comfy_cli.command.generate.spec._USER_CACHE", cache)
+
+    r = runner.invoke(cli_app, ["generate", "refresh"])
+    assert r.exit_code == 1
+    assert "Refusing to cache" in r.stdout
+    assert cache.read_text(encoding="utf-8") == before  # untouched
 
 
 def test_refresh_network_failure(runner, monkeypatch):
-    class FakeClient:
-        def __init__(self, *a, **kw):
-            pass
+    def responder(url):
+        raise httpx.ConnectError("no net")
 
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *a):
-            pass
-
-        def get(self, *a, **kw):
-            raise httpx.ConnectError("no net")
-
-    monkeypatch.setattr(gen_app.httpx, "Client", FakeClient)
+    monkeypatch.setattr(gen_app.httpx, "Client", _fake_client_factory(responder, []))
     r = runner.invoke(cli_app, ["generate", "refresh"])
     assert r.exit_code == 1
     assert "Failed to fetch" in r.stdout

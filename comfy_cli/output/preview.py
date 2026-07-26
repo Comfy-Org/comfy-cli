@@ -141,8 +141,9 @@ def _show_video_info(path: Path) -> None:
         size_bytes = int(fmt.get("size", 0))
         size_mb = size_bytes / 1048576
 
-        from rich import print as rprint
         from rich.panel import Panel
+
+        from comfy_cli.output import rprint
 
         rprint(
             Panel(
