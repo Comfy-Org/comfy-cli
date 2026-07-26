@@ -267,3 +267,41 @@ def test_consent_unknown_action_errors(runner):
     r = runner.invoke(cli_app, ["generate", "consent", "sometimes"])
     assert r.exit_code == 1
     assert "Unknown consent action" in r.stdout
+
+
+# ─── TTY stdin + machine stdout: prompt on stderr, stdout stays parseable ──
+
+
+def test_interactive_prompt_goes_to_stderr_when_stdout_is_machine(api_key, post_spy, interactive_tty):
+    """`comfy generate … | jq` from a terminal: stdin is a TTY (so the human can
+    answer) but stdout is the machine channel. Written to stdout the prompt is
+    invisible — the person sees a silent hang — and it splices human text ahead
+    of the JSON the caller parses. It belongs on stderr; a TTY user reads it on
+    the same terminal either way."""
+    split = CliRunner(mix_stderr=False)
+    r = split.invoke(cli_app, ["generate", "dalle", "--prompt", "x"], input="n\n")
+    assert r.exit_code == 1
+    assert post_spy == []
+    # stdout carries the decline envelope and no human text. (CliRunner echoes
+    # the piped keystroke back onto stdout; a real terminal echoes to the tty,
+    # so drop that artifact rather than pin it.)
+    lines = [ln for ln in r.stdout.strip().splitlines() if ln.strip() and ln.strip() != "n"]
+    assert "spends Comfy credits" not in r.stdout
+    assert "Proceed?" not in r.stdout
+    assert len(lines) == 1, f"stdout was polluted with human text: {lines!r}"
+    payload = json.loads(lines[0])
+    assert payload["schema"] == "envelope/1"
+    assert payload["error"]["code"] == "spend_consent_required"
+    # stderr: the notice and the prompt the human actually needs to see.
+    assert "spends Comfy credits" in r.stderr
+    assert "Proceed?" in r.stderr
+
+
+def test_pretty_interactive_prompt_stays_on_stdout(api_key, post_spy, interactive_tty):
+    """Pretty mode (a plain TTY run) is untouched: notice and prompt on stdout."""
+    split = CliRunner(mix_stderr=False)
+    r = split.invoke(cli_app, ["--no-json", "generate", "dalle", "--prompt", "x"], input="n\n")
+    assert r.exit_code == 1
+    assert post_spy == []
+    assert "spends Comfy credits" in r.stdout
+    assert "no credits were spent" in r.stdout

@@ -45,6 +45,7 @@ import typer
 # JSON-stream mode -- an envelope-consuming caller must never get exit 1 with a
 # blank stdout.
 from rich import print as rprint
+from rich.markup import escape
 from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
 
 from comfy_cli import constants, tracking, ui
@@ -85,10 +86,21 @@ def _fail(
       renderer already resolves to JSON) → exactly one `envelope/1` error on
       stdout with a stable `code`. Without this an envelope-consuming caller
       (comfy-local-mcp, scripts, agents) sees exit 1 with nothing to read.
-    - `legacy_json` → the pre-existing command-local `--json` error object, kept
-      byte-compatible for the paths that already emitted one.
+    - `legacy_json` → the command-local `--json` error object. The `error` key
+      is byte-compatible with what those paths already emitted; `code` is added
+      (additively — the `_consent` unknown-action and `_schema` usage/unknown-model
+      paths previously emitted `error` alone) so a machine caller on the local
+      flag gets the same stable identifier the envelope carries.
     - Otherwise → the historical rich-red line (plus a dim hint line where the
       path already printed one), so pretty/TTY output is unchanged.
+
+    The default pretty line escapes `message` as Rich markup: several call sites
+    interpolate server-controlled text (an `ApiError`'s body, a response
+    preview, a partner's failure reason), and a bracketed token Rich reads as a
+    tag would either swallow the text or raise `MarkupError` — turning a clean
+    error into a traceback. A caller-supplied `pretty` is passed through
+    verbatim: it is explicitly pre-formatted markup and escapes its own
+    interpolations.
 
     ``hint`` is only passed where pretty mode already printed that second line;
     everywhere else `renderer.error` falls back to the code's registered hint,
@@ -106,15 +118,39 @@ def _fail(
     if legacy_json:
         output.print_json({"error": message, "code": code})
         return
-    rprint(pretty if pretty is not None else f"[bold red]{message}[/bold red]")
+    rprint(pretty if pretty is not None else f"[bold red]{escape(message)}[/bold red]")
     if hint:
         rprint(f"[dim]{hint}[/dim]")
 
 
 def _transport_code(exc: BaseException) -> str:
     """`generate_network_error` for a transport failure, `generate_api_error` for
-    an HTTP/API-level one — the two arrive together on most call sites."""
+    an HTTP/API-level one — the two arrive together on most call sites.
+
+    `httpx.HTTPStatusError` subclasses `HTTPError` but is *not* a transport
+    failure: the request reached the server and came back non-2xx (e.g.
+    `upload_remote_url`'s `raise_for_status` on a 404 source URL). Calling that
+    a network error would tell automation to check connectivity and retry, which
+    is exactly the wrong move for a 4xx.
+    """
+    if isinstance(exc, httpx.HTTPStatusError):
+        return "generate_api_error"
     return "generate_network_error" if isinstance(exc, httpx.HTTPError) else "generate_api_error"
+
+
+def _notice(markup: str, *, err: bool) -> None:
+    """Print a human-facing Rich line to stdout, or to stderr when stdout is the
+    machine channel."""
+    if err:
+        get_renderer().stderr_console().print(markup)
+    else:
+        rprint(markup)
+
+
+def _track_kind(exc: BaseException) -> str:
+    """Tracking bucket matching `_transport_code` — an HTTP-status failure is an
+    API error, not a network one."""
+    return "network" if _transport_code(exc) == "generate_network_error" else "api"
 
 
 def register_with(parent: typer.Typer) -> None:
@@ -261,7 +297,9 @@ def _emit_result(result: poll.PollResult, *, request_id: str, download: str | No
                 details={"status": result.status, "response": result.raw},
             )
         else:
-            rprint(f"[bold red]{message}[/bold red]")
+            # `result.error` is the partner's own text — escape it so a bracketed
+            # token isn't parsed as Rich markup.
+            rprint(f"[bold red]{escape(message)}[/bold red]")
             output.print_json(result.raw)
         raise typer.Exit(code=1)
     if download and result.image_urls:
@@ -308,15 +346,27 @@ def _confirm_spend(*, model_name: str, assume_yes: bool, as_json: bool) -> None:
     if assume_yes or _spend_auto_confirmed():
         return
     if as_json or not _stdin_is_tty():
+        # `--json`/no-TTY: no prompt is answerable, so fail closed.
         msg = (
             f"`comfy generate {model_name}` spends Comfy credits and no consent was given. "
             "Re-run with --yes, or persist consent with `comfy generate consent always`."
         )
         _fail(code="spend_consent_required", message=msg, legacy_json=as_json)
         raise SpendNotConfirmed(msg)
-    rprint(f"[bold]{model_name}[/bold] runs via the partner API and [bold]spends Comfy credits[/bold].")
-    rprint("[dim]Skip this prompt with --yes; persist always-proceed with `comfy generate consent always`.[/dim]")
-    if not typer.confirm("Proceed?", default=False):
+    # A TTY stdin but a machine stdout (`comfy generate … | jq`) is a real
+    # combination, and the prompt is human I/O: written to a piped stdout it is
+    # invisible to the person being asked — they see a silent hang — and it
+    # splices human text ahead of whatever JSON the caller is parsing. Route the
+    # notice and the prompt to stderr in that case; a TTY user reads them
+    # exactly as before (same terminal) and stdout stays parseable. Pretty mode
+    # is untouched.
+    to_err = get_renderer().is_json()
+    _notice(f"[bold]{model_name}[/bold] runs via the partner API and [bold]spends Comfy credits[/bold].", err=to_err)
+    _notice(
+        "[dim]Skip this prompt with --yes; persist always-proceed with `comfy generate consent always`.[/dim]",
+        err=to_err,
+    )
+    if not typer.confirm("Proceed?", default=False, err=to_err):
         # Reachable with a TTY stdin but a redirected (JSON-mode) stdout, so the
         # decline still owes the caller an envelope rather than a bare line.
         _fail(
@@ -511,7 +561,7 @@ def _generate(model: str, extra_args: list[str]) -> None:
                 code="generate_api_error",
                 message=f"API error {e.status}",
                 details={"status": e.status, "body": e.body},
-                pretty=f"[bold red]API error {e.status}[/bold red]\n{e.body}",
+                pretty=f"[bold red]API error {e.status}[/bold red]\n{escape(str(e.body))}",
             )
             _track_error("api", e)
             raise typer.Exit(code=1) from e
@@ -535,7 +585,7 @@ def _generate(model: str, extra_args: list[str]) -> None:
                 code="generate_api_error",
                 message="Unexpected non-JSON response.",
                 details={"body_preview": preview},
-                pretty=f"[bold red]Unexpected non-JSON response.[/bold red]\n{preview}",
+                pretty=f"[bold red]Unexpected non-JSON response.[/bold red]\n{escape(preview)}",
             )
             _track_error("non_json_response", e)
             raise typer.Exit(code=1)
@@ -564,6 +614,7 @@ def _generate(model: str, extra_args: list[str]) -> None:
                 return
 
             poller = poll.get_poller(ep.polling)
+            poll_error: client.ApiError | httpx.HTTPError | None = None
             with _spinner() as prog:
                 task = prog.add_task(f"Generating with {name} (job {job_id})", total=None)
 
@@ -579,11 +630,19 @@ def _generate(model: str, extra_args: list[str]) -> None:
                         create_path=ep.path,
                     )
                 except (client.ApiError, httpx.HTTPError) as e:
-                    # The spinner is transient, so without this the run ended with
-                    # a bare exit 1 and an empty screen in EVERY mode.
-                    _fail(code=_transport_code(e), message=f"Job {job_id} failed while polling: {e}")
-                    _track_error("network" if isinstance(e, httpx.HTTPError) else "api", e)
-                    raise typer.Exit(code=1) from e
+                    poll_error = e
+            if poll_error is not None:
+                # The spinner is transient, so without this the run ended with a
+                # bare exit 1 and an empty screen in EVERY mode. Reported AFTER
+                # the `with` exits: inside it a transient Progress is still
+                # auto-refreshing on stdout, so on a TTY the envelope would come
+                # out interleaved with spinner control codes.
+                _fail(
+                    code=_transport_code(poll_error),
+                    message=f"Job {job_id} failed while polling: {poll_error}",
+                )
+                _track_error(_track_kind(poll_error), poll_error)
+                raise typer.Exit(code=1) from poll_error
             try:
                 _emit_result(result, request_id=job_id, download=download, as_json=as_json)
                 tracking.track_event("generate:success", gen_props)
@@ -880,7 +939,16 @@ def _resume(extra_args: list[str]) -> None:
     except client.ApiError as e:
         _fail(code="generate_api_error", message=str(e))
         raise typer.Exit(code=1)
-    timeout = float(meta.get("timeout") or 300.0) if isinstance(meta.get("timeout"), str) else 300.0
+    timeout_raw = meta.get("timeout")
+    try:
+        # Same guard as the submit path: an unguarded `float()` here let
+        # `generate resume <model> <job> --timeout nope` escape `main()` (which
+        # only traps KeyboardInterrupt/typer.Exit/SystemExit) as a traceback —
+        # exit 1 with a blank stdout, the exact failure this change removes.
+        timeout = float(timeout_raw or 300.0) if isinstance(timeout_raw, str) else 300.0
+    except ValueError:
+        _fail(code="generate_timeout_invalid", message=f"--timeout: expected number, got {timeout_raw!r}")
+        raise typer.Exit(code=1)
     download = meta.get("download") if isinstance(meta.get("download"), str) else None
     as_json = bool(meta.get("json", False))
 
@@ -891,6 +959,7 @@ def _resume(extra_args: list[str]) -> None:
         raise typer.Exit(code=1)
 
     poller = poll.get_poller(ep.polling)
+    poll_error: client.ApiError | httpx.HTTPError | None = None
     with _spinner() as prog:
         task = prog.add_task(f"Resuming job {job_id}", total=None)
 
@@ -906,10 +975,13 @@ def _resume(extra_args: list[str]) -> None:
                 create_path=ep.path,
             )
         except (client.ApiError, httpx.HTTPError) as e:
-            # Same transient-spinner trap as the submit path: an unhandled poll
-            # failure here used to surface as a raw traceback.
-            _fail(code=_transport_code(e), message=f"Job {job_id} failed while polling: {e}")
-            raise typer.Exit(code=1) from e
+            poll_error = e
+    if poll_error is not None:
+        # Same transient-spinner trap as the submit path: an unhandled poll
+        # failure here used to surface as a raw traceback, and reporting it
+        # inside the `with` would interleave the envelope with the live spinner.
+        _fail(code=_transport_code(poll_error), message=f"Job {job_id} failed while polling: {poll_error}")
+        raise typer.Exit(code=1) from poll_error
     _emit_result(result, request_id=job_id, download=download, as_json=as_json)
 
 

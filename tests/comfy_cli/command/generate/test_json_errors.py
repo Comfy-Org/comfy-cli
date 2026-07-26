@@ -240,3 +240,107 @@ def test_pretty_failed_job_output_unchanged(runner, api_key, monkeypatch):
     assert r.exit_code == 1
     assert "failed" in r.stdout.lower()
     assert "envelope/1" not in r.stdout
+
+
+# ─── review follow-ups: the remaining traceback / mis-code paths ─────────
+
+
+def test_json_resume_bad_timeout_envelope(runner, api_key):
+    """`generate resume … --timeout nope` parsed the value with a bare `float()`,
+    so the `ValueError` escaped `main()` (which traps only KeyboardInterrupt /
+    typer.Exit / SystemExit) as a traceback — exit 1, blank stdout, the exact
+    shape this change exists to remove. The submit path already guarded it."""
+    r = runner.invoke(cli_app, ["--json", "generate", "resume", "flux-pro", "job-1", "--timeout", "nope"])
+    assert r.exit_code == 1
+    assert _sole_envelope(r)["error"]["code"] == "generate_timeout_invalid"
+
+
+def test_json_non_json_poll_body_envelope(runner, api_key, monkeypatch):
+    """A 200 poll response with an unparseable body (a proxy/CDN HTML error
+    page) raised a bare `ValueError` out of `resp.json()` — neither `ApiError`
+    nor `httpx.HTTPError`, so every caller's `except` tuple missed it."""
+    submit = httpx.Response(200, json={"id": "job-xyz", "polling_url": "https://x/poll"})
+    monkeypatch.setattr(gen_app.client.httpx, "post", lambda *a, **kw: submit)
+    monkeypatch.setattr(
+        "comfy_cli.command.generate.client.get",
+        lambda *a, **kw: httpx.Response(200, text="<html>502 Bad Gateway</html>"),
+    )
+    monkeypatch.setattr("comfy_cli.command.generate.poll._sleep", lambda *_: None)
+    r = runner.invoke(cli_app, ["--json", *_GEN_ARGS])
+    assert r.exit_code == 1
+    env = _sole_envelope(r)
+    assert env["error"]["code"] == "generate_api_error"
+    assert "not JSON" in env["error"]["message"]
+
+
+def test_json_non_dict_poll_body_envelope(runner, api_key, monkeypatch):
+    """Valid JSON that isn't an object would blow up on `.get()` a line later."""
+    submit = httpx.Response(200, json={"id": "job-xyz", "polling_url": "https://x/poll"})
+    monkeypatch.setattr(gen_app.client.httpx, "post", lambda *a, **kw: submit)
+    monkeypatch.setattr(
+        "comfy_cli.command.generate.client.get",
+        lambda *a, **kw: httpx.Response(200, json=["not", "an", "object"]),
+    )
+    monkeypatch.setattr("comfy_cli.command.generate.poll._sleep", lambda *_: None)
+    r = runner.invoke(cli_app, ["--json", *_GEN_ARGS])
+    assert r.exit_code == 1
+    assert _sole_envelope(r)["error"]["code"] == "generate_api_error"
+
+
+def test_http_status_error_is_an_api_error_not_a_network_one(runner, api_key, monkeypatch):
+    """`upload_remote_url` calls `raise_for_status`, so a 404 source URL arrives
+    as `httpx.HTTPStatusError` — an `httpx.HTTPError` subclass. Reporting that
+    as `generate_network_error` tells automation to check connectivity and
+    retry, which is the wrong move for a 4xx that reached the server fine."""
+    req = httpx.Request("GET", "https://host/missing.png")
+    err = httpx.HTTPStatusError("404", request=req, response=httpx.Response(404, request=req))
+    monkeypatch.setattr(gen_app.upload, "upload_target", lambda *a, **kw: (_ for _ in ()).throw(err))
+    r = runner.invoke(cli_app, ["--json", "generate", "upload", "https://host/missing.png"])
+    assert r.exit_code == 1
+    assert _sole_envelope(r)["error"]["code"] == "generate_api_error"
+
+
+def test_transport_error_stays_a_network_error(runner, api_key, monkeypatch):
+    """The sibling of the above: a genuine transport failure keeps its code."""
+    err = httpx.ConnectError("connection refused")
+    monkeypatch.setattr(gen_app.upload, "upload_target", lambda *a, **kw: (_ for _ in ()).throw(err))
+    r = runner.invoke(cli_app, ["--json", "generate", "upload", "https://host/x.png"])
+    assert r.exit_code == 1
+    assert _sole_envelope(r)["error"]["code"] == "generate_network_error"
+
+
+def test_pretty_server_text_with_rich_tags_does_not_raise_markup_error(runner, api_key, monkeypatch):
+    """Server-controlled text is interpolated into the pretty error line, and a
+    bracketed token Rich reads as a closing tag (`[/path]`) raised MarkupError —
+    turning a clean error into a traceback."""
+    monkeypatch.setattr(
+        gen_app.client.httpx,
+        "post",
+        lambda *a, **kw: httpx.Response(400, json={"detail": "bad input at [/path] and [link]"}),
+    )
+    r = runner.invoke(cli_app, ["--no-json", *_GEN_ARGS])
+    assert r.exit_code == 1
+    assert r.exception is None or isinstance(r.exception, SystemExit)
+    # The literal text survives instead of being eaten as markup.
+    assert "[/path]" in r.stdout
+    assert "[link]" in r.stdout
+
+
+def test_pretty_failed_job_reason_with_rich_tags_survives(capsys):
+    """Same hazard on the partner's terminal-failure reason, which `_emit_result`
+    interpolates into its own red line rather than going through `_fail`."""
+    import typer
+
+    from comfy_cli.output.renderer import Renderer, get_renderer, reset_renderer_for_testing, set_renderer
+
+    set_renderer(Renderer.resolve(no_json_flag=True, env={}, is_stdout_tty=True))
+    try:
+        assert not get_renderer().is_json()
+        result = gen_app.poll.PollResult(
+            status="failed", raw={"status": "x"}, image_urls=[], error="moderated at [/path]"
+        )
+        with pytest.raises(typer.Exit):
+            gen_app._emit_result(result, request_id="job-1", download=None, as_json=False)
+    finally:
+        reset_renderer_for_testing()
+    assert "[/path]" in capsys.readouterr().out

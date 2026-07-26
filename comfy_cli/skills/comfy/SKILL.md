@@ -674,8 +674,9 @@ Mechanical contracts that bite agents — encode them, don't rediscover:
   failed/malformed `comfy --json generate …` emits exactly one `envelope/1`
   error on stdout with a stable code — `generate_target_required`,
   `generate_unknown_model`, `generate_bad_args`, `generate_timeout_invalid`,
-  `generate_api_error`, `generate_network_error`, `generate_spec_invalid`,
-  `spend_consent_required` — so branch on `error.code`, never on the text.
+  `generate_api_error`, `generate_network_error`, `generate_job_failed`,
+  `generate_spec_invalid`, `spend_consent_required` — so branch on
+  `error.code`, never on the text.
   (Success payloads are unchanged: still the raw API response, not an
   envelope.) In particular `comfy generate --prompt "…"` with no model alias
   is `generate_target_required`: `generate` is a paid cloud/partner verb and
