@@ -69,7 +69,24 @@ def interactive_tty(monkeypatch):
 
 
 def test_json_without_consent_fails_closed_and_spends_nothing(runner, api_key, post_spy):
+    # CliRunner's stdout is a pipe, so the global renderer resolves to JSON and
+    # the gate's refusal arrives as an `envelope/1` error rather than the
+    # command-local `{"error": …, "code": …}` object.
     r = runner.invoke(cli_app, ["generate", "dalle", "--prompt", "x", "--json"])
+    assert r.exit_code == 1
+    assert post_spy == []
+    payload = json.loads(r.stdout)
+    assert payload["schema"] == "envelope/1"
+    assert payload["ok"] is False
+    assert payload["error"]["code"] == "spend_consent_required"
+    assert "--yes" in payload["error"]["message"]
+
+
+def test_pretty_renderer_keeps_the_local_json_error_object(runner, api_key, post_spy):
+    """Global `--no-json` (a TTY-shaped run) + the command-local `--json`: the
+    pre-existing flat error object is unchanged — only the envelope-consuming
+    path was migrated."""
+    r = runner.invoke(cli_app, ["--no-json", "generate", "dalle", "--prompt", "x", "--json"])
     assert r.exit_code == 1
     assert post_spy == []
     payload = json.loads(r.stdout)
@@ -103,7 +120,7 @@ def test_gate_runs_before_auth_resolution(runner, post_spy):
     r = runner.invoke(cli_app, ["generate", "dalle", "--prompt", "x", "--json"])
     assert r.exit_code == 1
     assert post_spy == []
-    assert json.loads(r.stdout)["code"] == "spend_consent_required"
+    assert json.loads(r.stdout)["error"]["code"] == "spend_consent_required"
 
 
 # ─── Bypasses: --yes flag and spend.auto_confirm config ───────────────────
