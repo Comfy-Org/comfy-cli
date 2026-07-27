@@ -511,8 +511,10 @@ def test_logs_port_serves_that_ports_log(monkeypatch, tmp_path, capsys):
     assert env["data"]["path"] == str(wanted)
     assert env["data"]["source"] == "explicit_port"
     assert env["data"]["lines"] == ["port 8189\n"]
-    # The served file's port differs from the live background server's.
-    assert env["data"]["port_mismatch"] is True
+    # The served file's port differs from the live background server's, but the
+    # user asked for it explicitly — flagging that as a mismatch (and advising a
+    # retry on 8188) would contradict the request.
+    assert env["data"]["port_mismatch"] is False
 
 
 def test_logs_port_falls_back_to_unsuffixed(monkeypatch, tmp_path, capsys):
@@ -584,3 +586,189 @@ def test_resolve_glob_handles_workspace_with_glob_metacharacters(monkeypatch, tm
     _fake_env(monkeypatch, workspace=workspace)
 
     assert launch.resolve_background_log_path() == (str(log), "fallback_glob")
+
+
+# --------------------------------------------------------------------------- #
+# staleness / cross-workspace guards on the `recorded` pointer
+# --------------------------------------------------------------------------- #
+
+
+def test_stale_cross_workspace_recorded_log_does_not_shadow_local(monkeypatch, tmp_path, capsys):
+    """A dead pointer into ANOTHER workspace must lose to this workspace's log.
+
+    `clear_background_process` keeps CONFIG_KEY_BACKGROUND_LOG so a crash log
+    stays reachable; without a workspace check that leftover pointer would be
+    served from any other workspace, with no live server for `port_mismatch` to
+    flag it.
+    """
+    _force_json_renderer()
+    other_ws = tmp_path / "other"
+    other_ws.mkdir()
+    stale = _write_log(other_ws, "comfyui_9000.log", "someone else's log\n")
+
+    this_ws = tmp_path / "here"
+    this_ws.mkdir()
+    mine = _write_log(this_ws, "comfyui_8188.log", "my own log\n")
+
+    _fake_env(monkeypatch, workspace=this_ws, recorded=str(stale), background=None)
+
+    launch.logs(tail=10)
+
+    env = _envelope(capsys)
+    assert env["data"]["path"] == str(mine)
+    assert env["data"]["source"] == "default_port"
+    assert env["data"]["lines"] == ["my own log\n"]
+
+
+def test_cross_workspace_recorded_log_still_last_resort(monkeypatch, tmp_path):
+    """Demoted, not dropped: with no local log at all it is still served."""
+    other_ws = tmp_path / "other"
+    other_ws.mkdir()
+    stale = _write_log(other_ws, "comfyui_9000.log", "last resort\n")
+    this_ws = tmp_path / "here"
+    this_ws.mkdir()
+
+    _fake_env(monkeypatch, workspace=this_ws, recorded=str(stale), background=None)
+
+    candidates = launch.candidate_log_paths()
+    assert candidates[-1] == (str(stale), "recorded")
+    assert launch.resolve_background_log_path() == (str(stale), "recorded")
+
+
+def test_live_background_keeps_recorded_first_even_cross_workspace(monkeypatch, tmp_path):
+    """A LIVE server's pointer is authoritative wherever it points."""
+    other_ws = tmp_path / "other"
+    other_ws.mkdir()
+    live_log = _write_log(other_ws, "comfyui_9000.log", "live\n")
+    this_ws = tmp_path / "here"
+    this_ws.mkdir()
+    _write_log(this_ws, "comfyui_8188.log", "local\n")
+
+    _fake_env(
+        monkeypatch,
+        workspace=this_ws,
+        recorded=str(live_log),
+        background=("127.0.0.1", 9000, 1234),
+    )
+
+    assert launch.candidate_log_paths()[0] == (str(live_log), "recorded")
+    assert launch.resolve_background_log_path() == (str(live_log), "recorded")
+
+
+def test_same_workspace_recorded_crash_log_stays_first(monkeypatch, tmp_path):
+    """The crash-surviving pointer keeps priority inside its own workspace."""
+    crash = _write_log(tmp_path, "comfyui_8189.log", "Traceback\n")
+    _write_log(tmp_path, "comfyui_8188.log", "older default-port log\n")
+    _fake_env(monkeypatch, workspace=tmp_path, recorded=str(crash), background=None)
+
+    assert launch.resolve_background_log_path() == (str(crash), "recorded")
+
+
+def test_glob_fallback_skips_symlinks(monkeypatch, tmp_path):
+    """A planted symlink must not be followed, even as the newest match.
+
+    Read-side counterpart of `_open_log_for_write`'s O_NOFOLLOW: on a shared host
+    `<workspace>/user` may be writable by an attacker who links a `comfyui_*.log`
+    name at a file outside the workspace.
+    """
+    secret = tmp_path / "id_rsa"
+    secret.write_text("PRIVATE KEY\n")
+    real = _write_log(tmp_path, "comfyui_9001.log", "the real log\n")
+    link = tmp_path / "user" / "comfyui_9999.log"
+    link.symlink_to(secret)
+    os.utime(real, (1_600_000_000, 1_600_000_000))
+    # The link is the newest match — it must still lose.
+    os.utime(link, (1_900_000_000, 1_900_000_000), follow_symlinks=False)
+
+    _fake_env(monkeypatch, workspace=tmp_path)
+
+    assert launch.resolve_background_log_path() == (str(real), "fallback_glob")
+
+
+def test_explicit_port_still_serves_a_deliberate_symlink(monkeypatch, tmp_path):
+    """The symlink guard is scoped to the untrusted auto-scan, not to `--port`.
+
+    Skipping symlinks in the newest-mtime glob must not take away a user's own
+    deliberately symlinked logfile: naming it explicitly still resolves, because
+    only the attacker-controllable "pick whatever is newest in this directory"
+    step needs the guard.
+    """
+    real = tmp_path / "elsewhere.log"
+    real.write_text("a deliberately symlinked log\n")
+    user_dir = tmp_path / "user"
+    user_dir.mkdir()
+    (user_dir / "comfyui_9001.log").symlink_to(real)
+
+    _fake_env(monkeypatch, workspace=tmp_path)
+
+    # Guarded: the auto-scan will not follow it...
+    assert launch.resolve_background_log_path() is None
+    # ...but asking for that port by name still does.
+    assert launch.resolve_background_log_path(9001) == (
+        str(user_dir / "comfyui_9001.log"),
+        "explicit_port",
+    )
+
+
+def test_logs_metadata_survives_out_of_range_mtime(monkeypatch, tmp_path, capsys):
+    """A corrupt st_mtime degrades to null metadata, it does not crash."""
+    _force_json_renderer()
+    log = _write_log(tmp_path, "comfyui_8188.log", "abc\n")
+    _fake_env(monkeypatch, workspace=tmp_path, background=("127.0.0.1", 8188, 1234))
+
+    real_stat = os.stat
+
+    class _BadStat:
+        # st_mode is real so the isfile() candidate check still works; only the
+        # timestamp is corrupt.
+        st_mode = real_stat(log).st_mode
+        st_mtime = 1e30  # out of range for datetime.fromtimestamp
+        st_size = 4
+
+    monkeypatch.setattr(os, "stat", lambda p, *a, **k: _BadStat() if str(p) == str(log) else real_stat(p, *a, **k))
+
+    launch.logs(tail=10)
+
+    env = _envelope(capsys)
+    assert env["data"]["mtime"] is None
+    assert env["data"]["size"] is None
+    assert env["data"]["lines"] == ["abc\n"]
+
+
+def test_logs_pretty_no_mismatch_warning_for_explicit_port(monkeypatch, tmp_path, capsys):
+    """`--port 8189` while 8188 runs must not advise retrying on 8188."""
+    _write_log(tmp_path, "comfyui_8189.log", "asked for this\n")
+    _fake_env(monkeypatch, workspace=tmp_path, background=("127.0.0.1", 8188, 1234))
+
+    launch.logs(tail=10, port=8189)
+
+    out = capsys.readouterr().out
+    assert "asked for this\n" in out
+    assert "8188" not in out
+    assert "Warning" not in out
+
+
+def test_logs_pretty_warns_when_explicit_port_falls_back_to_unsuffixed(monkeypatch, tmp_path, capsys):
+    """The unsuffixed fallback encodes no port, so say so instead of staying silent."""
+    _write_log(tmp_path, "comfyui.log", "no --port in argv\n")
+    _fake_env(monkeypatch, workspace=tmp_path)
+
+    launch.logs(tail=10, port=8189)
+
+    out = capsys.readouterr().out
+    assert "comfyui_8189.log was found" in out
+    assert "does not" in out and "record which port" in out
+    assert "no --port in argv\n" in out
+
+
+def test_logs_pretty_warning_does_not_swallow_markup_in_path(monkeypatch, tmp_path, capsys):
+    """A workspace path holding Rich-style tags must survive verbatim."""
+    workspace = tmp_path / "ws[bold red]"
+    workspace.mkdir()
+    _write_log(workspace, "comfyui.log", "line\n")
+    _fake_env(monkeypatch, workspace=workspace)
+
+    launch.logs(tail=10, port=8189)
+
+    out = capsys.readouterr().out
+    assert "ws[bold red]" in out

@@ -11,9 +11,11 @@ import time
 import uuid
 from collections import deque
 from datetime import datetime, timezone
+from stat import S_ISREG
 
 import typer
 from rich.console import Console
+from rich.markup import escape
 from rich.panel import Panel
 
 from comfy_cli import constants, utils
@@ -471,6 +473,22 @@ def unsuffixed_log_path(workspace: str) -> str:
     return os.path.join(workspace, "user", "comfyui.log")
 
 
+def _path_within(path: str, directory: str) -> bool:
+    """True when ``path`` lies inside ``directory``, compared lexically.
+
+    Deliberately does NOT touch the filesystem (no ``realpath``): the caller
+    only needs to know whether a *recorded* path claims to belong to the current
+    workspace, and that question must stay answerable for a file that no longer
+    exists.
+    """
+    try:
+        target = os.path.normcase(os.path.abspath(path))
+        root = os.path.normcase(os.path.abspath(directory))
+    except (OSError, ValueError):
+        return False
+    return target == root or target.startswith(root.rstrip(os.sep) + os.sep)
+
+
 def candidate_log_paths(port: int | None = None) -> list[tuple[str, str]]:
     """The ordered candidates `comfy logs` considers, existing or not.
 
@@ -494,26 +512,39 @@ def candidate_log_paths(port: int | None = None) -> list[tuple[str, str]]:
         ]
 
     cfg = ConfigManager()
-    candidates: list[tuple[str, str]] = []
-
     recorded = cfg.get(constants.CONFIG_KEY_BACKGROUND_LOG)
-    if recorded:
-        candidates.append((recorded, "recorded"))
 
     if not workspace:
-        return candidates
+        # Nothing local to prefer it over, and nothing else to check.
+        return [(recorded, "recorded")] if recorded else []
 
     live_port = cfg.background[1] if cfg.background else None
     derived_port = live_port if live_port is not None else DEFAULT_LOG_PORT
-    candidates.append(
+    local: list[tuple[str, str]] = [
         (
             background_log_path(derived_port, workspace),
             "derived_port" if live_port is not None else "default_port",
-        )
-    )
-    candidates.append((unsuffixed_log_path(workspace), "fallback_unsuffixed"))
-    candidates.append((os.path.join(workspace, "user", "comfyui_*.log"), "fallback_glob"))
-    return candidates
+        ),
+        (unsuffixed_log_path(workspace), "fallback_unsuffixed"),
+        (os.path.join(workspace, "user", "comfyui_*.log"), "fallback_glob"),
+    ]
+
+    if not recorded:
+        return local
+
+    # The recorded pointer outranks the workspace-local candidates only when it
+    # is still relevant HERE: either the background server it describes is live,
+    # or it names a file inside the current workspace (the crash-log case — the
+    # pointer deliberately survives `comfy stop` and dead-pid cleanup).
+    #
+    # Otherwise it is a pointer into some OTHER workspace left over from an
+    # earlier run, and serving it ahead of this workspace's own `comfyui_*.log`
+    # would silently show a cross-workspace log with no live server to raise
+    # `port_mismatch`. Demote it to last so it is still a usable last resort
+    # when this workspace has no log at all, but never shadows a local one.
+    if live_port is not None or _path_within(recorded, workspace):
+        return [(recorded, "recorded"), *local]
+    return [*local, (recorded, "recorded")]
 
 
 def _newest_globbed_log(pattern: str) -> str | None:
@@ -522,6 +553,12 @@ def _newest_globbed_log(pattern: str) -> str | None:
     Only the BASENAME of ``pattern`` is a glob; its directory is escaped, so a
     workspace path containing glob metacharacters (``/Users/a[1]/comfy``) still
     matches instead of silently globbing nothing.
+
+    Symlinks are skipped: on a shared host an attacker with write access to
+    ``<workspace>/user`` could plant ``comfyui_<n>.log`` as a link to a file
+    outside the workspace and backdate/forward-date it to win the newest-mtime
+    pick, making `comfy logs` disclose the target. ``lstat`` + ``S_ISREG`` is the
+    read-side counterpart of ``_open_log_for_write``'s ``O_NOFOLLOW``.
     """
     directory, filename = os.path.split(pattern)
     newest: str | None = None
@@ -530,11 +567,13 @@ def _newest_globbed_log(pattern: str) -> str | None:
         if _ROTATED_LOG_RE.search(os.path.basename(path)):
             continue
         try:
-            if not os.path.isfile(path):
+            # lstat, not stat: a symlink must not be resolved to its target here.
+            st = os.lstat(path)
+            if not S_ISREG(st.st_mode):
                 continue
-            mtime = os.stat(path).st_mtime
+            mtime = st.st_mtime
         except OSError:
-            # Raced away between glob and stat, or unreadable — not a candidate.
+            # Raced away between glob and lstat, or unreadable — not a candidate.
             continue
         if mtime > newest_mtime:
             newest, newest_mtime = path, mtime
@@ -644,24 +683,41 @@ def logs(tail: int = 200, where: str | None = None, port: int | None = None):
     # and whether it belongs to a different port than the live background server
     # (the wrong-port-empty-log case a failed launch attempt leaves behind).
     try:
-        stat = os.stat(log_path)
-        mtime = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat()
-        size = stat.st_size
-    except OSError:
-        # Same TOCTOU window as the read above; metadata is best-effort.
+        st = os.stat(log_path)
+        mtime = datetime.fromtimestamp(st.st_mtime, tz=timezone.utc).isoformat()
+        size = st.st_size
+    except (OSError, ValueError, OverflowError):
+        # OSError: the same TOCTOU window as the read above. ValueError/OverflowError:
+        # an out-of-range or corrupt st_mtime that fromtimestamp can't represent
+        # (notably any negative value on Windows). Metadata is best-effort.
         mtime, size = None, None
 
     background = ConfigManager().background
     served_port = _served_log_port(log_path)
-    port_mismatch = bool(background and served_port is not None and served_port != background[1])
+    # Suppressed when --port was passed: there the served file is *by definition*
+    # the port the user asked for, so reporting it as a mismatch — and advising
+    # them to retry with the live port they deliberately did not ask for — would
+    # contradict the request they just made.
+    port_mismatch = bool(port is None and background and served_port is not None and served_port != background[1])
 
     if renderer.is_pretty():
         if port_mismatch:
             # Without this a human just sees an empty/stale file and no reason why.
             print(
-                f"[bold yellow]Warning: showing {log_path} (port {served_port}), but the running "
+                f"[bold yellow]Warning: showing {escape(log_path)} (port {served_port}), but the running "
                 f"background server is on port {background[1]}. "
                 f"Try `comfy logs --port {background[1]}`.[/bold yellow]"
+            )
+        elif port is not None and source == "fallback_unsuffixed":
+            # An explicit --port that resolved to the unsuffixed Manager log is a
+            # deliberate fallback (a server on that port started without a --port
+            # argv flag logs only there) — but that file encodes no port, so it
+            # can equally be some other port's log and `port_mismatch` cannot
+            # detect it. Say so rather than answering the request silently.
+            print(
+                f"[bold yellow]Warning: no comfyui_{port}.log was found; showing "
+                f"{escape(log_path)}, ComfyUI-Manager's unsuffixed log, which does not "
+                f"record which port it served.[/bold yellow]"
             )
         # Write raw so ComfyUI log text (which can contain '[...]') isn't
         # reinterpreted as Rich markup, and byte-for-byte matches the file.
