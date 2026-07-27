@@ -422,25 +422,50 @@ def vary_cmd(
 _NOTE_NODE_TYPES = frozenset({"Note", "MarkdownNote"})
 
 
+def _str_or_none(value: Any) -> str | None:
+    """Coerce an untrusted workflow value to the schema's ``string | null``.
+
+    ``notes[].title`` and ``notes[].subgraph.name`` are declared ``string|null``
+    in ``schemas/workflow.json``, but a hand-edited file can carry any JSON type
+    there. Stringify rather than drop, so the value still reaches the caller.
+    """
+    if value is None or isinstance(value, str):
+        return value
+    return str(value)
+
+
 def _extract_notes(workflow: dict) -> list[dict]:
     """Collect Note/MarkdownNote nodes from the top-level graph and subgraph defs.
 
     Note text is serialized at ``widgets_values[0]`` (the sole widget both note
     types register — see ComfyUI_frontend ``src/extensions/core/noteNode.ts``).
+
+    Every container is type-checked before it is walked: ``_is_frontend_format``
+    only vouches for the top-level ``nodes`` list, so ``definitions.subgraphs``,
+    a subgraph's own ``nodes``, and each node's ``type`` are all attacker-shaped
+    for a malformed-but-parseable file. A wrong type there must degrade to "no
+    notes found", never to an uncaught ``TypeError``.
     """
     out: list[dict] = []
 
     def _scan(nodes, subgraph):
-        for n in nodes or []:
-            if not isinstance(n, dict) or n.get("type") not in _NOTE_NODE_TYPES:
+        if not isinstance(nodes, list):
+            return
+        for n in nodes:
+            if not isinstance(n, dict):
+                continue
+            # Guard the type before the frozenset membership test: an unhashable
+            # value (list/dict) would raise TypeError rather than miss the set.
+            node_type = n.get("type")
+            if not isinstance(node_type, str) or node_type not in _NOTE_NODE_TYPES:
                 continue
             wv = n.get("widgets_values")
             text = wv[0] if isinstance(wv, list) and wv and isinstance(wv[0], str) else ""
             out.append(
                 {
                     "id": n.get("id"),
-                    "type": n.get("type"),
-                    "title": n.get("title"),
+                    "type": node_type,
+                    "title": _str_or_none(n.get("title")),
                     "text": text,
                     "pos": n.get("pos"),
                     "size": n.get("size"),
@@ -448,13 +473,13 @@ def _extract_notes(workflow: dict) -> list[dict]:
                 }
             )
 
-    if isinstance(workflow.get("nodes"), list):
-        _scan(workflow["nodes"], None)
+    _scan(workflow.get("nodes"), None)
     definitions = workflow.get("definitions")
     subgraphs = definitions.get("subgraphs") if isinstance(definitions, dict) else None
-    for sg in subgraphs or []:
-        if isinstance(sg, dict):
-            _scan(sg.get("nodes"), {"id": sg.get("id"), "name": sg.get("name")})
+    if isinstance(subgraphs, list):
+        for sg in subgraphs:
+            if isinstance(sg, dict):
+                _scan(sg.get("nodes"), {"id": sg.get("id"), "name": _str_or_none(sg.get("name"))})
     return out
 
 
@@ -494,9 +519,14 @@ def notes_cmd(
             # goes through _safe_console_text().
             for n in notes:
                 sg = n["subgraph"]
-                where = f" (subgraph {_safe_console_text(sg.get('name') or sg.get('id'))})" if sg else ""
+                # A note may carry no id, and a subgraph def no name/id — omit the
+                # fragment rather than printing a literal "#None" / "(subgraph None)".
+                sg_label = (sg.get("name") or sg.get("id")) if sg else None
+                where = f" (subgraph {_safe_console_text(sg_label)})" if sg_label is not None else ""
+                id_frag = f"#{_safe_console_text(n['id'])}" if n["id"] is not None else ""
                 heading = _safe_console_text(n["title"] or n["type"] or "Note")
-                rprint(f"[bold]{heading}[/bold] [dim]#{_safe_console_text(n['id'])}{where}[/dim]")
+                meta = f" [dim]{id_frag}{where}[/dim]" if (id_frag or where) else ""
+                rprint(f"[bold]{heading}[/bold]{meta}")
                 rprint(_safe_console_text(n["text"]))
                 rprint()
     renderer.emit(payload, command="workflow notes")
@@ -561,11 +591,36 @@ def _resolve_where_target(where: str | None):
     return resolve_target(where=where)
 
 
+# Codepoints that survive the C0/C1 filter but still let untrusted text lie
+# about what it says on a terminal:
+#   U+200B–U+200F  zero-width space/non-joiner/joiner + LRM/RLM
+#   U+202A–U+202E  bidi embedding/override (Trojan Source reordering)
+#   U+2060         word joiner
+#   U+2066–U+2069  bidi isolates
+#   U+FEFF         zero-width no-break space / BOM
+#   U+00AD         soft hyphen
+_SPOOFING_CODEPOINTS = frozenset(
+    {0x00AD, 0x2060, 0xFEFF} | set(range(0x200B, 0x2010)) | set(range(0x202A, 0x202F)) | set(range(0x2066, 0x206A))
+)
+
+
 def _strip_terminal_controls(text: str) -> str:
-    """Drop C0/C1 control chars (keeping tab / newline / carriage return) so
-    untrusted workflow content printed to a TTY can't emit ANSI/OSC escape
-    sequences that spoof output or manipulate the terminal."""
-    return "".join(ch for ch in text if ch in "\t\n\r" or (0x20 <= ord(ch) < 0x7F) or ord(ch) >= 0xA0)
+    """Drop everything untrusted workflow content could use to spoof a terminal.
+
+    Removes C0/C1 control chars (keeping only tab and newline) so the text can't
+    emit ANSI/OSC escape sequences, and drops the invisible Unicode codepoints in
+    ``_SPOOFING_CODEPOINTS``.
+
+    Carriage return is dropped too, not kept: a lone ``\\r`` returns the cursor to
+    column 0, letting a note overwrite text this command already printed —
+    the same output-spoofing the escape stripping exists to prevent. Dropping it
+    is lossless for CRLF content, which keeps its ``\\n``.
+    """
+    return "".join(
+        ch
+        for ch in text
+        if (ch in "\t\n" or (0x20 <= ord(ch) < 0x7F) or ord(ch) >= 0xA0) and ord(ch) not in _SPOOFING_CODEPOINTS
+    )
 
 
 def _reject_unsafe_workflow_key(renderer, key: str) -> str:

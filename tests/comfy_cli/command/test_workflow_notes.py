@@ -425,3 +425,123 @@ def test_extract_notes_handles_missing_nodes_key():
     assert workflow_cmd._extract_notes({"nodes": {}}) == []
     assert workflow_cmd._extract_notes({"definitions": "junk"}) == []
     assert workflow_cmd._extract_notes({"definitions": {"subgraphs": None}}) == []
+
+
+# ---------------------------------------------------------------------------
+# Malformed-but-parseable input must degrade to an envelope, never a TypeError.
+# Regression coverage for the cursor-review panel on PR #611: `_is_frontend_format`
+# only vouches for the top-level `nodes` list, so every nested container below is
+# attacker-shaped.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "workflow",
+    [
+        pytest.param({"nodes": [], "definitions": {"subgraphs": 1}}, id="subgraphs-is-truthy-scalar"),
+        pytest.param({"nodes": [], "definitions": {"subgraphs": True}}, id="subgraphs-is-bool"),
+        pytest.param({"nodes": [], "definitions": {"subgraphs": "abc"}}, id="subgraphs-is-str"),
+        pytest.param({"nodes": [], "definitions": {"subgraphs": [{"id": "s", "nodes": 1}]}}, id="sg-nodes-is-scalar"),
+        pytest.param({"nodes": [], "definitions": {"subgraphs": [{"id": "s", "nodes": {}}]}}, id="sg-nodes-is-dict"),
+        pytest.param({"nodes": [{"id": 1, "type": ["Note"]}]}, id="node-type-is-list"),
+        pytest.param({"nodes": [{"id": 1, "type": {"a": 1}}]}, id="node-type-is-dict"),
+        pytest.param({"nodes": [{"id": 1, "type": 7}]}, id="node-type-is-int"),
+    ],
+)
+def test_extract_notes_never_raises_on_malformed_containers(workflow):
+    assert workflow_cmd._extract_notes(workflow) == []
+
+
+def test_notes_cmd_emits_envelope_for_malformed_subgraphs(tmp_path, capsys):
+    """The CLI path must return a clean count=0 envelope, not crash."""
+    wf = {"nodes": [], "links": [], "definitions": {"subgraphs": 1}}
+    env = _run(["notes", str(_write_workflow(tmp_path, wf))], capsys)
+    assert env["data"]["count"] == 0
+    assert env["data"]["notes"] == []
+
+
+def test_non_string_title_and_subgraph_name_are_coerced_to_schema(tmp_path, capsys):
+    """schemas/workflow.json declares title / subgraph.name as `string|null`."""
+    import jsonschema
+
+    wf = {
+        "nodes": [{"id": 1, "type": "Note", "title": 42, "widgets_values": ["top"]}],
+        "links": [],
+        "definitions": {
+            "subgraphs": [
+                {
+                    "id": "sg-1",
+                    "name": {"nested": "object"},
+                    "nodes": [{"id": 2, "type": "Note", "title": ["a"], "widgets_values": ["inner"]}],
+                }
+            ]
+        },
+    }
+    env = _run(["notes", str(_write_workflow(tmp_path, wf))], capsys)
+    notes = env["data"]["notes"]
+    assert [n["title"] for n in notes] == ["42", "['a']"]
+    assert notes[1]["subgraph"]["name"] == "{'nested': 'object'}"
+
+    schema_path = Path(workflow_cmd.__file__).parent.parent / "schemas" / "workflow.json"
+    schema = json.loads(schema_path.read_text(encoding="utf-8"))
+    jsonschema.Draft202012Validator(schema).validate(env["data"])
+
+
+class TestConsoleSpoofingIsNeutralized:
+    """`notes` prints untrusted author content to a TTY."""
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            # Spelled as \u escapes on purpose: these codepoints are invisible, so
+            # writing them literally would make this test unreviewable in the very
+            # diff it defends.
+            pytest.param("safe\rEVIL", id="carriage-return-overwrite"),
+            pytest.param("safe\u202eEVIL", id="bidi-rtl-override"),
+            pytest.param("safe\u2066EVIL\u2069", id="bidi-isolate"),
+            pytest.param("safe\u202aEVIL\u202c", id="bidi-embedding"),
+            pytest.param("safe\u200bEVIL", id="zero-width-space"),
+            pytest.param("safe\u200dEVIL", id="zero-width-joiner"),
+            pytest.param("safe\u200eEVIL", id="left-to-right-mark"),
+            pytest.param("safe\u2060EVIL", id="word-joiner"),
+            pytest.param("safe\ufeffEVIL", id="bom"),
+            pytest.param("safe\u00adEVIL", id="soft-hyphen"),
+        ],
+    )
+    def test_spoofing_codepoints_are_dropped(self, raw):
+        cleaned = workflow_cmd._strip_terminal_controls(raw)
+        assert cleaned == "safeEVIL"
+
+    def test_ordinary_text_is_preserved(self):
+        # Tabs, newlines and printable non-ASCII must survive untouched.
+        text = "line one\n\tindented — café 日本語 ✓"
+        assert workflow_cmd._strip_terminal_controls(text) == text
+
+    def test_crlf_note_keeps_its_newline(self):
+        assert workflow_cmd._strip_terminal_controls("a\r\nb") == "a\nb"
+
+    def test_pretty_output_strips_carriage_returns(self, tmp_path):
+        wf = {
+            "nodes": [{"id": 1, "type": "Note", "widgets_values": ["visible\rHIDDEN"]}],
+            "links": [],
+        }
+        _force_pretty_renderer()
+        result = _invoke(["notes", str(_write_workflow(tmp_path, wf))])
+        assert result.exit_code == 0
+        assert "\r" not in result.output
+        assert "visibleHIDDEN" in result.output
+
+
+def test_pretty_omits_empty_id_and_subgraph_label(tmp_path):
+    """A note with no id must not render a literal `#None`."""
+    wf = {
+        "nodes": [{"type": "Note", "widgets_values": ["body text"]}],
+        "links": [],
+        "definitions": {"subgraphs": [{"nodes": [{"type": "Note", "widgets_values": ["inner body"]}]}]},
+    }
+    _force_pretty_renderer()
+    result = _invoke(["notes", str(_write_workflow(tmp_path, wf))])
+    assert result.exit_code == 0
+    assert "None" not in result.output
+    assert "body text" in result.output
+    assert "inner body" in result.output
