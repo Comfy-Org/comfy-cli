@@ -62,6 +62,22 @@ def _is_safe_path_segment(value: str) -> bool:
     )
 
 
+def _is_walkable_folder_name(value: str) -> bool:
+    """True if a *server-advertised* folder name is safe to walk.
+
+    Deliberately laxer than :func:`_is_safe_path_segment`, which gates
+    user-supplied arguments and stays strict-ASCII on purpose. Real installs
+    configure folders like ``my loras``, ``SDXL (base)``, or non-ASCII names;
+    holding those to the strict regex silently skipped them, so every model
+    inside them stayed unfindable by ``models search`` — the exact bug this
+    command is meant to fix. Only genuine traversal shapes are refused here;
+    everything else is percent-encoded by :func:`_local_folder_matches` before
+    it reaches the URL, so spaces, ``?``/``#``, and control characters can't
+    alter the request.
+    """
+    return bool(value) and ".." not in value and "/" not in value and "\\" not in value
+
+
 def _reject_unsafe_path_segment(value: str, *, kind: str, renderer) -> None:
     """Exit with an `invalid_argument` error if ``value`` isn't safe as a path segment."""
     if not _is_safe_path_segment(value):
@@ -423,13 +439,23 @@ def _local_folder_names(target) -> list[str]:
 
 
 def _local_folder_matches(target, folder: str, *, text: str | None) -> list[dict[str, Any]]:
-    """Rows for one ``/models/<folder>`` listing, client-side filtered by ``text``."""
-    data = _http_get_json(target.url(*_models_path_parts(target), folder), target)
+    """Rows for one ``/models/<folder>`` listing, client-side filtered by ``text``.
+
+    ``folder`` is percent-encoded into the path so folder names with spaces or
+    non-ASCII characters resolve correctly; the emitted rows carry the decoded
+    name so ``type``/``tags`` stay human-readable.
+    """
+    segment = urllib.parse.quote(folder, safe="")
+    data = _http_get_json(target.url(*_models_path_parts(target), segment), target)
     rows: list[dict[str, Any]] = []
     if isinstance(data, list):
         for entry in data:
             name = entry.get("name", "") if isinstance(entry, dict) else (entry if isinstance(entry, str) else "")
-            if not name:
+            # A dict entry's `name` is server-controlled and may not be a string;
+            # `name.lower()` below (and the cross-folder sort in `_local_search`)
+            # would blow up on a non-str, so drop those the way the folder-name
+            # normalizer does.
+            if not isinstance(name, str) or not name:
                 continue
             if text and text.lower() not in name.lower():
                 continue
@@ -465,6 +491,11 @@ def _local_search(
     outside it invisible to text search. Walking is cheap — filename-only
     listings against a localhost server, ~20 small GETs.
     """
+    # `--limit -1` would otherwise become a negative slice that silently drops
+    # the last N rows while `total` still reports the full count. Clamp like
+    # `_cloud_search` and `list_folder_cmd` already do.
+    limit = max(0, limit)
+
     if type_:
         scoped = _local_folder_matches(target, _TYPE_TO_FOLDER.get(type_, type_), text=text)
         return scoped[:limit], len(scoped)
@@ -473,15 +504,19 @@ def _local_search(
     seen: set[str] = set()
     for folder in _local_folder_names(target):
         # Folder names are server-provided, so they can't be trusted into a URL
-        # path. Skip anything unsafe silently — it isn't user input to reject.
-        if not _is_safe_path_segment(folder) or folder in seen:
+        # path. Skip traversal shapes silently — it isn't user input to reject.
+        if not _is_walkable_folder_name(folder) or folder in seen:
             continue
         seen.add(folder)
         try:
             all_matches.extend(_local_folder_matches(target, folder, text=text))
-        except urllib.error.HTTPError:
-            # An exotic folder the listing advertises but doesn't serve (404) or
-            # otherwise errors shouldn't sink the whole search.
+        except (OSError, ValueError):
+            # One misbehaving folder must not sink the whole walk: a folder the
+            # listing advertises but doesn't serve (HTTPError 404), a hung or
+            # refused fetch (URLError/OSError — HTTPError and URLError are both
+            # OSError subclasses), a proxy serving HTML instead of JSON
+            # (json.JSONDecodeError, a ValueError), or a body over the 64 MiB
+            # cap (ValueError).
             continue
     all_matches.sort(key=lambda r: (r["type"], r["name"]))
     return all_matches[:limit], len(all_matches)

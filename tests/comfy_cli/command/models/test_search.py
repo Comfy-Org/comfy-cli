@@ -395,12 +395,77 @@ class TestSearch:
         ]
         assert env["data"]["total"] == 3
 
+    @pytest.mark.parametrize(
+        "failure",
+        [
+            pytest.param(urllib.error.URLError("connection refused"), id="urlerror"),
+            pytest.param(OSError("socket hung up"), id="oserror"),
+            pytest.param(json.JSONDecodeError("Expecting value", "<html>", 0), id="html-proxy-page"),
+            pytest.param(ValueError("response exceeds 67108864 byte cap"), id="oversize-cap"),
+        ],
+    )
+    def test_local_folder_transport_errors_are_skipped(self, local_target, monkeypatch, capsys, failure):
+        """Every way `_http_get_json` can fail on ONE folder is tolerated, not fatal.
+
+        The walk used to catch only `HTTPError`, so a hung folder or a proxy
+        serving an HTML error page aborted the entire multi-folder search.
+        """
+        routes = _local_routes()
+        routes["127.0.0.1:8188/models/vae"] = failure
+        _patch_urlopen(monkeypatch, routes)
+        env = _run(["search", "--text", "ltx", "--where", "local"], capsys)
+        assert env["ok"] is True, env
+        assert [r["name"] for r in env["data"]["rows"]] == [
+            "ltx-video-2b-v0.9.safetensors",
+            "ltxv-13b-0.9.7-dev.safetensors",
+            "ltx-lora-detail.safetensors",
+        ]
+        assert env["data"]["total"] == 3
+
+    def test_local_folder_name_with_space_is_walked_and_encoded(self, local_target, monkeypatch, capsys):
+        """A user-configured folder like `my loras` is searched, not silently skipped."""
+        # Built explicitly (not via `_local_routes`) so the per-folder needle is
+        # registered before the bare `/models` one — first-wins substring match.
+        routes = {
+            "127.0.0.1:8188/models/my%20loras": [{"name": "ltx-custom.safetensors", "pathIndex": 0}],
+            "127.0.0.1:8188/models": ["my loras"],
+        }
+        calls = _patch_urlopen(monkeypatch, routes)
+        env = _run(["search", "--text", "ltx", "--where", "local"], capsys)
+        assert env["ok"] is True, env
+        assert [r["name"] for r in env["data"]["rows"]] == ["ltx-custom.safetensors"]
+        # The segment is percent-encoded on the wire but decoded in the payload.
+        assert [c["url"] for c in calls[1:]] == ["http://127.0.0.1:8188/models/my%20loras"]
+        assert env["data"]["rows"][0]["type"] == "my loras"
+        assert env["data"]["rows"][0]["tags"] == ["my loras"]
+
+    def test_local_non_string_entry_name_is_skipped(self, local_target, monkeypatch, capsys):
+        """A server sending a non-string `name` must not crash the walk or the sort."""
+        routes = _local_routes()
+        routes["127.0.0.1:8188/models/vae"] = [{"name": 1234, "pathIndex": 0}, {"name": "ltx-vae.safetensors"}]
+        _patch_urlopen(monkeypatch, routes)
+        env = _run(["search", "--text", "ltx", "--where", "local"], capsys)
+        assert env["ok"] is True, env
+        assert "ltx-vae.safetensors" in [r["name"] for r in env["data"]["rows"]]
+        assert all(isinstance(r["name"], str) for r in env["data"]["rows"])
+
     def test_local_limit_caps_rows_but_not_total(self, local_target, monkeypatch, capsys):
         _patch_urlopen(monkeypatch, _local_routes())
         env = _run(["search", "--text", "ltx", "--limit", "2", "--where", "local"], capsys)
         assert env["data"]["shown"] == 2
         assert len(env["data"]["rows"]) == 2
         assert env["data"]["total"] == 4
+
+    @pytest.mark.parametrize("extra", [[], ["--type", "lora"]])
+    def test_local_negative_limit_yields_no_rows_not_a_negative_slice(self, local_target, monkeypatch, capsys, extra):
+        """`--limit -1` must not silently drop the *last* row via a negative slice."""
+        _patch_urlopen(monkeypatch, _local_routes())
+        env = _run(["search", "--text", "ltx", "--limit", "-1", "--where", "local", *extra], capsys)
+        assert env["ok"] is True, env
+        assert env["data"]["rows"] == []
+        assert env["data"]["shown"] == 0
+        # `total` still reports every match behind the cap.
+        assert env["data"]["total"] == (1 if extra else 4)
 
     def test_local_unsafe_folder_name_is_skipped(self, local_target, monkeypatch, capsys):
         """A server-advertised folder that can't be a URL path segment is skipped, not fatal."""
