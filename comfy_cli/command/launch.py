@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import asyncio
+import glob
 import os
+import re
 import subprocess
 import sys
 import threading
 import time
 import uuid
 from collections import deque
+from datetime import datetime, timezone
 
 import typer
 from rich.console import Console
@@ -445,27 +448,133 @@ def read_log_tail(
     return lines, truncated
 
 
-def resolve_background_log_path() -> str | None:
-    """Locate the background logfile: the path recorded at launch, else the
-    default derived from the resolved workspace and background/default port.
+# ComfyUI-Manager rotates its logfile on startup: `comfyui.log` becomes
+# `comfyui.prev.log`, and the previous `.prev` becomes `.prev2`. Those rotations
+# are stale by construction, so the glob fallback must never serve one.
+_ROTATED_LOG_RE = re.compile(r"\.prev\d*\.log$")
 
-    Returns None when no workspace can be resolved and nothing was recorded.
+# `<workspace>/user/comfyui_<port>.log` — the suffix carries the port the server
+# was serving, which is what makes a port mismatch detectable after the fact.
+_PORTED_LOG_RE = re.compile(r"^comfyui_(\d+)\.log$")
+
+DEFAULT_LOG_PORT = 8188
+
+
+def unsuffixed_log_path(workspace: str) -> str:
+    """``<workspace>/user/comfyui.log`` — ComfyUI-Manager's own logfile.
+
+    Manager only appends ``_<port>`` when ``--port`` is in ComfyUI's argv, so a
+    server started outside ``comfy launch --background`` (foreground, desktop
+    app, no explicit ``--port``) logs here and nowhere else. `comfy install`
+    installs Manager, so this file exists on a default install.
     """
+    return os.path.join(workspace, "user", "comfyui.log")
+
+
+def candidate_log_paths(port: int | None = None) -> list[tuple[str, str]]:
+    """The ordered candidates `comfy logs` considers, existing or not.
+
+    Each entry is ``(path, source)``; the ``fallback_glob`` entry's "path" is a
+    glob PATTERN rather than a concrete file. Kept separate from resolution so
+    the miss path can report everything that was checked.
+
+    With ``port`` given (``comfy logs --port N``) the list is restricted to that
+    port's logfile plus the unsuffixed Manager file — the latter covers a server
+    on port N that was started without an explicit ``--port`` argv flag, which is
+    exactly when Manager omits the suffix.
+    """
+    workspace = workspace_manager.workspace_path
+
+    if port is not None:
+        if not workspace:
+            return []
+        return [
+            (background_log_path(port, workspace), "explicit_port"),
+            (unsuffixed_log_path(workspace), "fallback_unsuffixed"),
+        ]
+
     cfg = ConfigManager()
+    candidates: list[tuple[str, str]] = []
+
     recorded = cfg.get(constants.CONFIG_KEY_BACKGROUND_LOG)
     if recorded:
-        return recorded
+        candidates.append((recorded, "recorded"))
 
-    workspace = workspace_manager.workspace_path
     if not workspace:
-        return None
+        return candidates
 
-    port = cfg.background[1] if cfg.background else 8188
-    return background_log_path(port, workspace)
+    live_port = cfg.background[1] if cfg.background else None
+    derived_port = live_port if live_port is not None else DEFAULT_LOG_PORT
+    candidates.append(
+        (
+            background_log_path(derived_port, workspace),
+            "derived_port" if live_port is not None else "default_port",
+        )
+    )
+    candidates.append((unsuffixed_log_path(workspace), "fallback_unsuffixed"))
+    candidates.append((os.path.join(workspace, "user", "comfyui_*.log"), "fallback_glob"))
+    return candidates
 
 
-def logs(tail: int = 200, where: str | None = None):
-    """Print the tail of the background ComfyUI log captured by `comfy launch`."""
+def _newest_globbed_log(pattern: str) -> str | None:
+    """Newest-mtime match of ``pattern``, ignoring ComfyUI-Manager's rotations.
+
+    Only the BASENAME of ``pattern`` is a glob; its directory is escaped, so a
+    workspace path containing glob metacharacters (``/Users/a[1]/comfy``) still
+    matches instead of silently globbing nothing.
+    """
+    directory, filename = os.path.split(pattern)
+    newest: str | None = None
+    newest_mtime = float("-inf")
+    for path in glob.glob(os.path.join(glob.escape(directory), filename)):
+        if _ROTATED_LOG_RE.search(os.path.basename(path)):
+            continue
+        try:
+            if not os.path.isfile(path):
+                continue
+            mtime = os.stat(path).st_mtime
+        except OSError:
+            # Raced away between glob and stat, or unreadable — not a candidate.
+            continue
+        if mtime > newest_mtime:
+            newest, newest_mtime = path, mtime
+    return newest
+
+
+def resolve_background_log_path(port: int | None = None) -> tuple[str, str] | None:
+    """Locate a ComfyUI logfile, returning ``(path, source)`` for the first
+    candidate of :func:`candidate_log_paths` that actually exists.
+
+    Returns None when no candidate exists — including the "no workspace resolves
+    and nothing was recorded" case, where there is nothing to check at all.
+    """
+    for path, source in candidate_log_paths(port):
+        if source == "fallback_glob":
+            match = _newest_globbed_log(path)
+            if match:
+                return match, source
+        elif os.path.isfile(path):
+            return path, source
+    return None
+
+
+def _served_log_port(path: str) -> int | None:
+    """The port encoded in a ``comfyui_<port>.log`` filename, else None."""
+    match = _PORTED_LOG_RE.match(os.path.basename(path))
+    return int(match.group(1)) if match else None
+
+
+def logs(tail: int = 200, where: str | None = None, port: int | None = None):
+    """Print the tail of a captured ComfyUI log.
+
+    Resolution walks :func:`candidate_log_paths` — the path recorded by
+    `comfy launch --background`, the port-derived logfile, ComfyUI-Manager's
+    unsuffixed ``user/comfyui.log``, then the newest ``user/comfyui_*.log`` —
+    so a server started outside `comfy launch --background` is still readable.
+    ``port`` restricts that walk to a single port's log (plus the unsuffixed
+    file, which is where a server on that port lands when it was started without
+    an explicit ``--port`` argv flag).
+    """
     from comfy_cli import where as where_mod
     from comfy_cli.output import get_renderer
 
@@ -496,15 +605,19 @@ def logs(tail: int = 200, where: str | None = None):
         )
         raise typer.Exit(code=1)
 
-    log_path = resolve_background_log_path()
-    if not log_path or not os.path.isfile(log_path):
+    resolved = resolve_background_log_path(port)
+    if resolved is None:
+        # Report EVERY candidate that was checked, not just the last one — with
+        # four candidates "no log file" is otherwise unactionable.
+        checked = [path for path, _ in candidate_log_paths(port)]
         renderer.error(
             code="no_log_file",
-            message="No captured ComfyUI log was found." + (f" Looked for: {log_path}" if log_path else ""),
+            message="No captured ComfyUI log was found." + (f" Looked for: {', '.join(checked)}" if checked else ""),
             hint="start ComfyUI with `comfy launch` so its output is captured",
             command="logs",
         )
         raise typer.Exit(code=1)
+    log_path, source = resolved
 
     # Pretty output goes to a human terminal: honor the requested --tail. The
     # line/byte caps exist to keep JSON payloads bounded, so apply them only in
@@ -527,13 +640,43 @@ def logs(tail: int = 200, where: str | None = None):
         )
         raise typer.Exit(code=1)
 
+    # Staleness metadata: which candidate won, how old/big the served file is,
+    # and whether it belongs to a different port than the live background server
+    # (the wrong-port-empty-log case a failed launch attempt leaves behind).
+    try:
+        stat = os.stat(log_path)
+        mtime = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat()
+        size = stat.st_size
+    except OSError:
+        # Same TOCTOU window as the read above; metadata is best-effort.
+        mtime, size = None, None
+
+    background = ConfigManager().background
+    served_port = _served_log_port(log_path)
+    port_mismatch = bool(background and served_port is not None and served_port != background[1])
+
     if renderer.is_pretty():
+        if port_mismatch:
+            # Without this a human just sees an empty/stale file and no reason why.
+            print(
+                f"[bold yellow]Warning: showing {log_path} (port {served_port}), but the running "
+                f"background server is on port {background[1]}. "
+                f"Try `comfy logs --port {background[1]}`.[/bold yellow]"
+            )
         # Write raw so ComfyUI log text (which can contain '[...]') isn't
         # reinterpreted as Rich markup, and byte-for-byte matches the file.
         renderer.pretty_stream.write("".join(lines))
 
     renderer.emit(
-        {"lines": lines, "path": log_path, "truncated": truncated},
+        {
+            "lines": lines,
+            "path": log_path,
+            "truncated": truncated,
+            "source": source,
+            "mtime": mtime,
+            "size": size,
+            "port_mismatch": port_mismatch,
+        },
         command="logs",
         where="local",
     )
