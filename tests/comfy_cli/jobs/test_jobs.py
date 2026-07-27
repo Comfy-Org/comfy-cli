@@ -1348,3 +1348,167 @@ def test_watch_executing_escapes_server_controlled_node_markup():
     assert r"\[red]evil\[/red]" in r.printed[0]
     # The event stream still carries the raw node id.
     assert ("executing", {"node": "[red]evil[/red]", "prompt_id": "pid"}) in r.events
+
+
+# ---------------------------------------------------------------------------
+# watcher: local server death detection (server_died)
+# ---------------------------------------------------------------------------
+
+
+def _watched_local_job(monkeypatch, *, status="queued"):
+    """A real on-disk state file for a local job, plus a no-op sleep.
+
+    The autouse ``_isolate_jobs_state_dir`` fixture pins the state dir to a tmp
+    path, so ``watch_job`` reads/writes real files and the assertions can be
+    made against the file rather than an in-memory object.
+    """
+    from comfy_cli import jobs_state
+    from comfy_cli.command import job_watcher
+
+    monkeypatch.delenv("COMFY_LOCAL_URL", raising=False)
+    monkeypatch.setattr(job_watcher.time, "sleep", lambda s: None)
+    state = jobs_state.new(
+        prompt_id="pid-dead",
+        client_id="c",
+        workflow="/w.json",
+        where="local",
+        host="127.0.0.1",
+        port=8188,
+    )
+    state.status = status
+    jobs_state.write(state)
+    return state
+
+
+def _fake_probe(monkeypatch, results):
+    """Point the watcher's liveness probe at a scripted sequence of verdicts.
+
+    The last verdict repeats forever so a test can't hang on a short script.
+    """
+    seq = list(results)
+    calls = []
+
+    def probe(port, host, *a, **kw):
+        calls.append((host, port))
+        return seq[min(len(calls) - 1, len(seq) - 1)]
+
+    monkeypatch.setattr("comfy_cli.env_checker.check_comfy_server_running", probe)
+    return calls
+
+
+def test_watcher_records_server_died_after_consecutive_failed_probes(monkeypatch):
+    """A local server that dies mid-job (OOM kill) must be recorded as a
+    terminal ``server_died`` error instead of leaving a forever-'queued' ghost:
+    ``_snapshot`` swallows the connection failure, so only an explicit liveness
+    probe can see the death."""
+    from comfy_cli import jobs_state
+    from comfy_cli.command import job_watcher
+
+    _watched_local_job(monkeypatch)
+    calls = _fake_probe(monkeypatch, [False])
+    # The poll must never run against a server we just failed to probe.
+    monkeypatch.setattr(
+        "comfy_cli.command.jobs._snapshot",
+        lambda h, p, pid: pytest.fail("polled a server that failed its liveness probe"),
+    )
+    notified = []
+    monkeypatch.setattr(job_watcher, "_notify", notified.append)
+
+    job_watcher.watch_job("pid-dead", where="local")
+
+    assert len(calls) == job_watcher._SERVER_DOWN_CONSECUTIVE_LIMIT
+    on_disk = jobs_state.read("pid-dead")
+    assert on_disk is not None
+    assert on_disk.status == "error"
+    assert on_disk.error["code"] == "server_died"
+    assert on_disk.error["details"]["last_status"] == "queued"
+    assert on_disk.error["details"]["host"] == "127.0.0.1"
+    assert on_disk.error["details"]["port"] == 8188
+    assert on_disk.error["details"]["consecutive_failed_probes"] == job_watcher._SERVER_DOWN_CONSECUTIVE_LIMIT
+    assert "pid-dead" in on_disk.error["message"]
+    # ...and the user is told exactly once, with the final state.
+    assert len(notified) == 1
+    assert notified[0].status == "error"
+    assert notified[0].error["code"] == "server_died"
+
+
+def test_watcher_down_probe_streak_resets_on_recovery(monkeypatch):
+    """A transient blip (or a quick restart) must not be mistaken for death:
+    any successful probe resets the streak and the watcher keeps going."""
+    from comfy_cli import jobs_state
+    from comfy_cli.command import job_watcher
+
+    _watched_local_job(monkeypatch)
+    _fake_probe(monkeypatch, [False, False, True])
+    monkeypatch.setattr(
+        "comfy_cli.command.jobs._snapshot",
+        lambda h, p, pid: {"prompt_id": pid, "status": "completed", "outputs": ["a.png"]},
+    )
+    monkeypatch.setattr(job_watcher, "_notify", lambda s: None)
+
+    job_watcher.watch_job("pid-dead", where="local")
+
+    on_disk = jobs_state.read("pid-dead")
+    assert on_disk is not None
+    assert on_disk.status == "completed"
+    assert on_disk.error is None
+    assert on_disk.outputs == ["a.png"]
+
+
+def test_watcher_does_not_overwrite_a_terminal_state_when_server_dies(monkeypatch):
+    """A dead server can't invalidate a verdict the job already reached — the
+    watcher stops without rewriting a terminal state."""
+    from comfy_cli import jobs_state
+    from comfy_cli.command import job_watcher
+
+    state = _watched_local_job(monkeypatch, status="completed")
+    state.outputs = ["done.png"]
+    jobs_state.write(state)
+    _fake_probe(monkeypatch, [False])
+    monkeypatch.setattr(job_watcher, "_notify", lambda s: None)
+
+    job_watcher.watch_job("pid-dead", where="local")
+
+    on_disk = jobs_state.read("pid-dead")
+    assert on_disk is not None
+    assert on_disk.status == "completed"
+    assert on_disk.error is None
+    assert on_disk.outputs == ["done.png"]
+
+
+def test_watcher_probe_targets_the_same_address_the_poll_uses(monkeypatch):
+    """The liveness probe and the poll resolve their target through the same
+    helper, so they can never disagree about which server is being watched."""
+    from comfy_cli import jobs_state
+    from comfy_cli.command import job_watcher
+
+    state = jobs_state.new(
+        prompt_id="pid-v6",
+        client_id="c",
+        workflow="/w.json",
+        where="local",
+        host="::1",
+        port=9999,
+    )
+    monkeypatch.delenv("COMFY_LOCAL_URL", raising=False)
+    jobs_state.write(state)
+    monkeypatch.setattr(job_watcher.time, "sleep", lambda s: None)
+    calls = _fake_probe(monkeypatch, [False])
+    monkeypatch.setattr(job_watcher, "_notify", lambda s: None)
+
+    job_watcher.watch_job("pid-v6", where="local")
+
+    assert job_watcher._resolve_watch_target(state, None, None) == ("[::1]", 9999)
+    assert set(calls) == {("[::1]", 9999)}
+
+
+def test_server_alive_probe_never_raises(monkeypatch):
+    """An unexpected probe failure counts as 'down' rather than crashing the
+    watcher (which would strand the state file at its last status)."""
+    from comfy_cli.command import job_watcher
+
+    def boom(port, host, *a, **kw):
+        raise RuntimeError("probe exploded")
+
+    monkeypatch.setattr("comfy_cli.env_checker.check_comfy_server_running", boom)
+    assert job_watcher._server_alive("127.0.0.1", 8188) is False

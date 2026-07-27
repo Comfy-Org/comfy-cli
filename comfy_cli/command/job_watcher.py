@@ -40,6 +40,10 @@ _KNOWN_INFLIGHT_STATUSES = {"queued", "pending", "running", "executing", "alloca
 # An unknown status unchanged for this long → terminal error instead of
 # letting the watcher idle for the full 6h ceiling on a status we can't map.
 _UNKNOWN_STALL_S = 300.0
+# Consecutive failed liveness probes before we declare a local server dead:
+# ~3 polls x 2s ≈ 6s of confirmed unreachability, which tolerates a transient
+# blip / a quick server restart while still catching a real crash fast.
+_SERVER_DOWN_CONSECUTIVE_LIMIT = 3
 
 
 @app.command("_watch-job")
@@ -81,6 +85,9 @@ def watch_job(
     # currently watching, and when we first saw it.
     unknown_status: str | None = None
     unknown_since = 0.0
+    # Local-server death detection: how many consecutive liveness probes have
+    # failed. Reset by any successful probe (see _SERVER_DOWN_CONSECUTIVE_LIMIT).
+    consecutive_down = 0
     while True:
         if time.time() - start > _MAX_RUNTIME_S:
             prior_status = state.status
@@ -96,7 +103,43 @@ def watch_job(
         if where == "cloud":
             terminal = _poll_cloud_once(state, client=cloud_client)
         else:
-            terminal = _poll_local_once(state, host=host, port=port)
+            # A local server that is OOM-killed mid-job takes the queue and the
+            # history record with it, so `_snapshot` just reports "no record
+            # yet" forever and the watcher would poll a corpse until the 6h
+            # ceiling. Probe liveness explicitly so the death gets recorded.
+            h, p = _resolve_watch_target(state, host, port)
+            if _server_alive(h, p):
+                consecutive_down = 0
+                terminal = _poll_local_once(state, host=host, port=port)
+            else:
+                consecutive_down += 1
+                if consecutive_down >= _SERVER_DOWN_CONSECUTIVE_LIMIT:
+                    # A state that is already terminal keeps its own verdict —
+                    # a dead server can't invalidate a completed/failed job.
+                    if not state.is_terminal:
+                        prior = state.status
+                        state.status = "error"
+                        state.error = {
+                            "code": "server_died",
+                            "message": (
+                                f"ComfyUI server {h}:{p} became unreachable while job "
+                                f"{state.prompt_id} was '{prior}'. The server likely crashed or was "
+                                "killed while executing it (e.g. an out-of-memory allocation)."
+                            ),
+                            "details": {
+                                "host": h,
+                                "port": p,
+                                "last_status": prior,
+                                "consecutive_failed_probes": consecutive_down,
+                            },
+                        }
+                        jobs_state.write(state)
+                    # Server confirmed gone — there is nothing left to watch.
+                    break
+                # Unreachable but still under the limit — a blip or a restart.
+                # Skip the poll (it can only fail against a server we just
+                # failed to reach) and re-probe on the next cycle.
+                terminal = False
 
         jobs_state.write(state)
         if terminal:
@@ -137,9 +180,12 @@ def watch_job(
 # ---------------------------------------------------------------------------
 
 
-def _poll_local_once(state: jobs_state.JobState, *, host: str | None, port: int | None) -> bool:
-    """Update ``state`` in-place from a local ComfyUI server. Return True if terminal."""
-    from comfy_cli.command import jobs as jobs_module
+def _resolve_watch_target(state: jobs_state.JobState, host: str | None, port: int | None) -> tuple[str, int]:
+    """The local ``(host, port)`` this watcher is bound to.
+
+    Shared by the liveness probe and the poll so the two can never disagree
+    about which server they are talking about.
+    """
     from comfy_cli.local_address import resolve_local_host_port
 
     # Per-job recorded state (state.host/port, captured when the job was
@@ -150,6 +196,29 @@ def _poll_local_once(state: jobs_state.JobState, *, host: str | None, port: int 
     # an already-bracketed host, like the `jobs` resolver produces).
     if ":" in h and not h.startswith("["):
         h = f"[{h}]"
+    return h, p
+
+
+def _server_alive(host: str, port: int) -> bool:
+    """Is the local ComfyUI server reachable?
+
+    The same helper ``comfy jobs`` uses for its own up/down check, so the
+    watcher and the CLI never disagree. An unexpected error counts as *down*
+    rather than propagating — a probe must never crash the watcher.
+    """
+    from comfy_cli.env_checker import check_comfy_server_running
+
+    try:
+        return bool(check_comfy_server_running(port, host))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _poll_local_once(state: jobs_state.JobState, *, host: str | None, port: int | None) -> bool:
+    """Update ``state`` in-place from a local ComfyUI server. Return True if terminal."""
+    from comfy_cli.command import jobs as jobs_module
+
+    h, p = _resolve_watch_target(state, host, port)
     try:
         snap = jobs_module._snapshot(h, p, state.prompt_id)
     except Exception as e:  # noqa: BLE001 — never crash the watcher on transient errors

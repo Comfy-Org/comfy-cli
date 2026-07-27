@@ -335,6 +335,12 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "transient — the job is likely still running; re-run `comfy jobs watch <id>`",
     ),
     ErrorCode(
+        "server_died",
+        "The local ComfyUI server became unreachable while the job was in flight — "
+        "it likely crashed or was killed (e.g. an out-of-memory allocation).",
+        "check the ComfyUI server log, then `comfy launch` and re-submit the workflow",
+    ),
+    ErrorCode(
         "unknown_status_stall",
         "Cloud reported a status the CLI does not recognize and it did not change within the stall window.",
         "check `comfy jobs status <id> --where cloud`; report the status so it can be mapped",
