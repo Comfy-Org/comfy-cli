@@ -335,6 +335,29 @@ class TestListFolder:
         assert env["error"]["code"] == "invalid_argument"
         assert calls == []
 
+    @pytest.mark.parametrize("folder", ["%2e%2e%2fetc", "%2E%2E%2Fetc", "a%00b", "a\r\nX-Evil: 1"])
+    def test_encoded_traversal_and_injection_shapes_are_neutralized(self, local_target, monkeypatch, capsys, folder):
+        """`%` and control characters are no longer charset-rejected, so encoding must defuse them.
+
+        These are the shapes the old strict regex blocked incidentally. The
+        traversal guard alone lets them through — `..` and `/` are not
+        *literally* present — so the percent-encoding in `list_folder_cmd` is
+        what keeps them inside one path segment: `%` becomes `%25`, so an
+        encoded `../` can never be decoded back into one by the server.
+        """
+        segment = urllib.parse.quote(folder, safe="")
+        calls = _patch_urlopen(monkeypatch, {f"127.0.0.1:8188/models/{segment}": []})
+        env = _run(["list-folder", folder, "--where", "local"], capsys)
+        assert env["ok"] is True, env
+        url = calls[0]["url"]
+        assert url == f"http://127.0.0.1:8188/models/{segment}"
+        # Exactly one layer of encoding: the server decodes back to the literal
+        # folder name the user asked for, never to a traversal or a new header.
+        assert urllib.parse.unquote(segment) == folder
+        # And nothing escaped the segment on the wire.
+        assert url.count("/") == 4  # http:// + /127.0.0.1:8188 + /models + /<segment>
+        assert not any(c in url for c in "\r\n\x00")
+
 
 # ---------------------------------------------------------------------------
 # search
