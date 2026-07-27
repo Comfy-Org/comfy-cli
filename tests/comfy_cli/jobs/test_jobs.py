@@ -11,8 +11,10 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
+import requests
 
 from comfy_cli.command import jobs as jobs_mod
 
@@ -668,8 +670,8 @@ def test_snapshot_maps_interrupted_to_cancelled(monkeypatch):
 
 
 def test_poll_local_once_treats_cancelled_as_terminal(monkeypatch):
-    """_poll_local_once must return True (terminal) and set state.status='cancelled'
-    when _snapshot reports status='cancelled'."""
+    """_poll_local_once must report terminal (and a record it saw) and set
+    state.status='cancelled' when _snapshot reports status='cancelled'."""
     from comfy_cli import jobs_state
     from comfy_cli.command import job_watcher
 
@@ -678,7 +680,7 @@ def test_poll_local_once_treats_cancelled_as_terminal(monkeypatch):
         lambda h, p, pid: {"prompt_id": pid, "status": "cancelled", "outputs": []},
     )
     state = jobs_state.new(prompt_id="pid", client_id="c", workflow="w", where="local")
-    assert job_watcher._poll_local_once(state, host=None, port=None) is True
+    assert job_watcher._poll_local_once(state, host=None, port=None) == (True, True)
     assert state.status == "cancelled"
 
 
@@ -1383,16 +1385,23 @@ def _watched_local_job(monkeypatch, *, status="queued"):
 def _fake_probe(monkeypatch, results):
     """Point the watcher's liveness probe at a scripted sequence of verdicts.
 
-    The last verdict repeats forever so a test can't hang on a short script.
+    Each entry is a ``_PROBE_*`` constant, or a bool as shorthand for
+    alive/unreachable. The last verdict repeats forever so a test can't hang on
+    a short script.
     """
-    seq = list(results)
+    from comfy_cli.command import job_watcher
+
+    seq = [
+        (job_watcher._PROBE_ALIVE if r else job_watcher._PROBE_UNREACHABLE) if isinstance(r, bool) else r
+        for r in results
+    ]
     calls = []
 
-    def probe(port, host, *a, **kw):
+    def probe(host, port):
         calls.append((host, port))
         return seq[min(len(calls) - 1, len(seq) - 1)]
 
-    monkeypatch.setattr("comfy_cli.env_checker.check_comfy_server_running", probe)
+    monkeypatch.setattr(job_watcher, "_probe_local_server", probe)
     return calls
 
 
@@ -1406,10 +1415,12 @@ def test_watcher_records_server_died_after_consecutive_failed_probes(monkeypatch
 
     _watched_local_job(monkeypatch)
     calls = _fake_probe(monkeypatch, [False])
-    # The poll must never run against a server we just failed to probe.
+    # Only the one last-chance poll at the limit runs; the earlier cycles must
+    # not poll a port that just refused them.
+    polls = []
     monkeypatch.setattr(
         "comfy_cli.command.jobs._snapshot",
-        lambda h, p, pid: pytest.fail("polled a server that failed its liveness probe"),
+        lambda h, p, pid: polls.append((h, p)) or None,
     )
     notified = []
     monkeypatch.setattr(job_watcher, "_notify", notified.append)
@@ -1417,6 +1428,7 @@ def test_watcher_records_server_died_after_consecutive_failed_probes(monkeypatch
     job_watcher.watch_job("pid-dead", where="local")
 
     assert len(calls) == job_watcher._SERVER_DOWN_CONSECUTIVE_LIMIT
+    assert polls == [("127.0.0.1", 8188)]
     on_disk = jobs_state.read("pid-dead")
     assert on_disk is not None
     assert on_disk.status == "error"
@@ -1465,6 +1477,8 @@ def test_watcher_does_not_overwrite_a_terminal_state_when_server_dies(monkeypatc
     state.outputs = ["done.png"]
     jobs_state.write(state)
     _fake_probe(monkeypatch, [False])
+    # The dead server has nothing left to report to the last-chance poll.
+    monkeypatch.setattr("comfy_cli.command.jobs._snapshot", lambda h, p, pid: None)
     monkeypatch.setattr(job_watcher, "_notify", lambda s: None)
 
     job_watcher.watch_job("pid-dead", where="local")
@@ -1494,21 +1508,194 @@ def test_watcher_probe_targets_the_same_address_the_poll_uses(monkeypatch):
     jobs_state.write(state)
     monkeypatch.setattr(job_watcher.time, "sleep", lambda s: None)
     calls = _fake_probe(monkeypatch, [False])
+    polls = []
+    monkeypatch.setattr("comfy_cli.command.jobs._snapshot", lambda h, p, pid: polls.append((h, p)) or None)
     monkeypatch.setattr(job_watcher, "_notify", lambda s: None)
 
     job_watcher.watch_job("pid-v6", where="local")
 
     assert job_watcher._resolve_watch_target(state, None, None) == ("[::1]", 9999)
     assert set(calls) == {("[::1]", 9999)}
+    assert set(polls) == {("[::1]", 9999)}
 
 
-def test_server_alive_probe_never_raises(monkeypatch):
-    """An unexpected probe failure counts as 'down' rather than crashing the
-    watcher (which would strand the state file at its last status)."""
+@pytest.mark.parametrize(
+    "exc, expected",
+    [
+        # Nothing listening — the only signal that means "dead".
+        (requests.exceptions.ConnectionError("refused"), "unreachable"),
+        # Slow, not dead. ConnectTimeout subclasses ConnectionError as well as
+        # Timeout, so it would be misread as a death if the except order ever
+        # regressed — which is exactly the false server_died this guards.
+        (requests.exceptions.ReadTimeout("slow"), "unresponsive"),
+        (requests.exceptions.ConnectTimeout("slow"), "unresponsive"),
+        # A probe must never crash the watcher, and never invent a death.
+        (RuntimeError("probe exploded"), "unresponsive"),
+    ],
+)
+def test_probe_classifies_failures_without_inventing_a_death(monkeypatch, exc, expected):
+    """Only a refused connection counts as unreachable — a busy server (loading
+    a model into VRAM) times out and must stay merely 'unresponsive'."""
     from comfy_cli.command import job_watcher
 
-    def boom(port, host, *a, **kw):
-        raise RuntimeError("probe exploded")
+    urls = []
 
-    monkeypatch.setattr("comfy_cli.env_checker.check_comfy_server_running", boom)
-    assert job_watcher._server_alive("127.0.0.1", 8188) is False
+    def fake_get(url, **kw):
+        urls.append(url)
+        raise exc
+
+    monkeypatch.setattr(requests, "get", fake_get)
+
+    assert job_watcher._probe_local_server("127.0.0.1", 8188) == expected
+    # ...and the probe stays cheap: the unbounded /history body grows without
+    # limit on a long-lived server, which would time the probe out by itself.
+    assert urls == ["http://127.0.0.1:8188/history?max_items=1"]
+
+
+@pytest.mark.parametrize("status, expected", [(200, "alive"), (404, "unresponsive"), (500, "unresponsive")])
+def test_probe_treats_only_http_200_as_alive(monkeypatch, status, expected):
+    from comfy_cli.command import job_watcher
+
+    monkeypatch.setattr(requests, "get", lambda url, **kw: SimpleNamespace(status_code=status))
+    assert job_watcher._probe_local_server("127.0.0.1", 8188) == expected
+
+
+def test_watcher_keeps_polling_an_alive_but_unresponsive_server(monkeypatch):
+    """A server that is up but too slow to answer the probe must never be
+    declared dead — it is still polled, and its job still completes."""
+    from comfy_cli import jobs_state
+    from comfy_cli.command import job_watcher
+
+    _watched_local_job(monkeypatch)
+    # Unresponsive forever: if it counted toward the death streak, the watcher
+    # would file server_died instead of reading the completion below.
+    _fake_probe(monkeypatch, [job_watcher._PROBE_UNRESPONSIVE])
+    monkeypatch.setattr(
+        "comfy_cli.command.jobs._snapshot",
+        lambda h, p, pid: {"prompt_id": pid, "status": "completed", "outputs": ["slow.png"]},
+    )
+    monkeypatch.setattr(job_watcher, "_notify", lambda s: None)
+
+    job_watcher.watch_job("pid-dead", where="local")
+
+    on_disk = jobs_state.read("pid-dead")
+    assert on_disk is not None
+    assert on_disk.status == "completed"
+    assert on_disk.error is None
+
+
+def test_watcher_recovers_a_job_that_finished_during_the_down_streak(monkeypatch):
+    """The last-chance poll at the limit wins over the server_died verdict: a
+    job that completed as the probes started failing must not be reported as a
+    failure with empty outputs."""
+    from comfy_cli import jobs_state
+    from comfy_cli.command import job_watcher
+
+    _watched_local_job(monkeypatch)
+    _fake_probe(monkeypatch, [False])
+    monkeypatch.setattr(
+        "comfy_cli.command.jobs._snapshot",
+        lambda h, p, pid: {"prompt_id": pid, "status": "completed", "outputs": ["late.png"]},
+    )
+    monkeypatch.setattr(job_watcher, "_notify", lambda s: None)
+
+    job_watcher.watch_job("pid-dead", where="local")
+
+    on_disk = jobs_state.read("pid-dead")
+    assert on_disk is not None
+    assert on_disk.status == "completed"
+    assert on_disk.outputs == ["late.png"]
+    assert on_disk.error is None
+
+
+def test_watcher_records_server_died_when_a_restart_loses_the_job(monkeypatch):
+    """A server OOM-killed and restarted inside the detection window makes the
+    next probe succeed, but the fresh process has no record of the prompt. That
+    must be recorded as a death rather than polled until the 6h ceiling."""
+    from comfy_cli import jobs_state
+    from comfy_cli.command import job_watcher
+
+    _watched_local_job(monkeypatch, status="running")
+    # One outage, then back up — the streak resets well short of the limit.
+    _fake_probe(monkeypatch, [False, True])
+    # ...but the restarted server never heard of this prompt.
+    monkeypatch.setattr("comfy_cli.command.jobs._snapshot", lambda h, p, pid: None)
+    monkeypatch.setattr(job_watcher, "_LOST_AFTER_RESTART_S", 0.0)
+    monkeypatch.setattr(job_watcher, "_notify", lambda s: None)
+
+    job_watcher.watch_job("pid-dead", where="local")
+
+    on_disk = jobs_state.read("pid-dead")
+    assert on_disk is not None
+    assert on_disk.status == "error"
+    assert on_disk.error["code"] == "server_died"
+    assert on_disk.error["details"]["restarted"] is True
+    assert on_disk.error["details"]["last_status"] == "running"
+
+
+def test_watcher_does_not_call_a_missing_record_a_restart_without_an_outage(monkeypatch):
+    """No outage seen → a record the server hasn't published yet is just a slow
+    start, not a death. The restart guard must stay latched off."""
+    from comfy_cli import jobs_state
+    from comfy_cli.command import job_watcher
+
+    _watched_local_job(monkeypatch)
+    _fake_probe(monkeypatch, [True])
+    monkeypatch.setattr(job_watcher, "_LOST_AFTER_RESTART_S", 0.0)
+    monkeypatch.setattr(job_watcher, "_notify", lambda s: None)
+
+    seen = []
+
+    def snapshot(h, p, pid):
+        seen.append(pid)
+        # Missing for a while, then it shows up and completes.
+        if len(seen) < 4:
+            return None
+        return {"prompt_id": pid, "status": "completed", "outputs": ["ok.png"]}
+
+    monkeypatch.setattr("comfy_cli.command.jobs._snapshot", snapshot)
+
+    job_watcher.watch_job("pid-dead", where="local")
+
+    on_disk = jobs_state.read("pid-dead")
+    assert on_disk is not None
+    assert on_disk.status == "completed"
+    assert on_disk.error is None
+
+
+def test_watcher_does_not_clobber_a_concurrent_cancel_with_server_died(monkeypatch):
+    """`comfy jobs cancel` writing a verdict while the watcher is failing probes
+    must survive: the verdict is re-read from disk, not taken from the
+    watcher's stale in-memory copy."""
+    from comfy_cli import jobs_state
+    from comfy_cli.command import job_watcher
+
+    _watched_local_job(monkeypatch)
+    _fake_probe(monkeypatch, [False])
+    monkeypatch.setattr("comfy_cli.command.jobs._snapshot", lambda h, p, pid: None)
+
+    def poll_and_cancel_out_of_band(state, **kw):
+        """The last-chance poll, racing a concurrent `comfy jobs cancel`.
+
+        The cancel lands on disk while the watcher still holds its stale
+        pre-cancel copy of the state — the exact window the verdict re-read
+        has to cover.
+        """
+        other = jobs_state.read("pid-dead")
+        other.status = "cancelled"
+        other.error = {"code": "cancelled", "message": "user cancelled", "details": {}}
+        jobs_state.write(other)
+        return False, False
+
+    monkeypatch.setattr(job_watcher, "_poll_local_once", poll_and_cancel_out_of_band)
+    notified = []
+    monkeypatch.setattr(job_watcher, "_notify", notified.append)
+
+    job_watcher.watch_job("pid-dead", where="local")
+
+    on_disk = jobs_state.read("pid-dead")
+    assert on_disk is not None
+    assert on_disk.status == "cancelled"
+    assert on_disk.error["code"] == "cancelled"
+    # The notification reports the verdict that actually stands.
+    assert notified[0].status == "cancelled"

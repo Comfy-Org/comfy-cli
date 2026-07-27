@@ -336,8 +336,8 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ),
     ErrorCode(
         "server_died",
-        "The local ComfyUI server became unreachable while the job was in flight — "
-        "it likely crashed or was killed (e.g. an out-of-memory allocation).",
+        "The local ComfyUI server became unreachable (or restarted without the job) while it "
+        "was in flight — the server likely crashed or was killed (e.g. an out-of-memory allocation).",
         "check the ComfyUI server log, then `comfy launch` and re-submit the workflow",
     ),
     ErrorCode(
