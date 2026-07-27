@@ -20,8 +20,10 @@ def _make_mock_proc(returncode, stdout_lines=None, stderr_lines=None):
 @pytest.fixture(autouse=True)
 def _clear_find_cm_cli_cache():
     cm_cli_util.find_cm_cli.cache_clear()
+    cm_cli_util.find_legacy_manager_clone.cache_clear()
     yield
     cm_cli_util.find_cm_cli.cache_clear()
+    cm_cli_util.find_legacy_manager_clone.cache_clear()
 
 
 @pytest.fixture()
@@ -158,6 +160,84 @@ class TestFindCmCli:
             ),
         ):
             assert cm_cli_util.find_cm_cli() is False
+
+
+def _make_clone(custom_nodes, name, marker="glob/manager_core.py"):
+    """Create a fake custom node dir containing the given manager marker file."""
+    marker_path = custom_nodes / name / marker
+    marker_path.parent.mkdir(parents=True, exist_ok=True)
+    marker_path.write_text("# fake manager marker\n", encoding="utf-8")
+
+
+class TestFindLegacyManagerClone:
+    def test_returns_false_without_workspace(self):
+        with patch.object(cm_cli_util.workspace_manager, "workspace_path", None):
+            assert cm_cli_util.find_legacy_manager_clone() is False
+
+    def test_returns_false_when_custom_nodes_missing(self, tmp_path):
+        with patch.object(cm_cli_util.workspace_manager, "workspace_path", str(tmp_path)):
+            assert cm_cli_util.find_legacy_manager_clone() is False
+
+    def test_returns_false_for_empty_custom_nodes(self, tmp_path):
+        (tmp_path / "custom_nodes").mkdir()
+        with patch.object(cm_cli_util.workspace_manager, "workspace_path", str(tmp_path)):
+            assert cm_cli_util.find_legacy_manager_clone() is False
+
+    def test_detects_clone_under_arbitrary_name(self, tmp_path):
+        custom_nodes = tmp_path / "custom_nodes"
+        custom_nodes.mkdir()
+        _make_clone(custom_nodes, "SomeName")
+
+        with patch.object(cm_cli_util.workspace_manager, "workspace_path", str(tmp_path)):
+            assert cm_cli_util.find_legacy_manager_clone() is True
+
+    def test_detects_clone_via_cm_cli_script_marker(self, tmp_path):
+        custom_nodes = tmp_path / "custom_nodes"
+        custom_nodes.mkdir()
+        _make_clone(custom_nodes, "ComfyUI-Manager", marker="cm-cli.py")
+
+        with patch.object(cm_cli_util.workspace_manager, "workspace_path", str(tmp_path)):
+            assert cm_cli_util.find_legacy_manager_clone() is True
+
+    def test_ignores_disabled_clone(self, tmp_path):
+        custom_nodes = tmp_path / "custom_nodes"
+        custom_nodes.mkdir()
+        _make_clone(custom_nodes, "ComfyUI-Manager.disabled")
+
+        with patch.object(cm_cli_util.workspace_manager, "workspace_path", str(tmp_path)):
+            assert cm_cli_util.find_legacy_manager_clone() is False
+
+    def test_ignores_unrelated_custom_nodes(self, tmp_path):
+        custom_nodes = tmp_path / "custom_nodes"
+        (custom_nodes / "SomeOtherNode").mkdir(parents=True)
+        (custom_nodes / "SomeOtherNode" / "__init__.py").write_text("", encoding="utf-8")
+        (custom_nodes / "loose_file.py").write_text("", encoding="utf-8")
+
+        with patch.object(cm_cli_util.workspace_manager, "workspace_path", str(tmp_path)):
+            assert cm_cli_util.find_legacy_manager_clone() is False
+
+
+class TestDetectManagerInstallation:
+    def test_venv_package_wins(self):
+        with (
+            patch("comfy_cli.command.custom_nodes.cm_cli_util.find_cm_cli", return_value=True),
+            patch("comfy_cli.command.custom_nodes.cm_cli_util.find_legacy_manager_clone", return_value=True),
+        ):
+            assert cm_cli_util.detect_manager_installation() == "venv-package"
+
+    def test_legacy_clone_when_no_package(self):
+        with (
+            patch("comfy_cli.command.custom_nodes.cm_cli_util.find_cm_cli", return_value=False),
+            patch("comfy_cli.command.custom_nodes.cm_cli_util.find_legacy_manager_clone", return_value=True),
+        ):
+            assert cm_cli_util.detect_manager_installation() == "legacy-clone"
+
+    def test_none_when_nothing_installed(self):
+        with (
+            patch("comfy_cli.command.custom_nodes.cm_cli_util.find_cm_cli", return_value=False),
+            patch("comfy_cli.command.custom_nodes.cm_cli_util.find_legacy_manager_clone", return_value=False),
+        ):
+            assert cm_cli_util.detect_manager_installation() == "none"
 
 
 class TestResolveManagerGuiMode:

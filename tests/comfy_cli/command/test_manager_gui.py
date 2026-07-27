@@ -1,3 +1,4 @@
+import contextlib
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -808,6 +809,21 @@ class TestFillPrintTable:
             mock_cls.return_value = instance
             yield instance
 
+    @pytest.fixture(autouse=True)
+    def _manager_installed(self):
+        """Default these mode-rendering tests to "Manager is pip-installed".
+
+        fill_print_table() reconciles the configured mode against what is actually
+        installed; without this the real detector would run against the fake
+        workspace path and rewrite every enable-* mode to "not-installed". The
+        reconciliation itself is covered by TestManagerModeReconciliation.
+        """
+        with patch(
+            "comfy_cli.command.custom_nodes.cm_cli_util.detect_manager_installation",
+            return_value="venv-package",
+        ):
+            yield
+
     @patch("comfy_cli.command.custom_nodes.cm_cli_util.resolve_manager_gui_mode", return_value="disable")
     def test_fill_print_table_disable_mode(self, mock_resolve, mock_workspace_config_manager):
         """When mode is 'disable', status should show Disabled."""
@@ -950,6 +966,104 @@ class TestFillPrintTable:
 
         assert result[2][0] == "UV Compile Default"
         assert "Disabled" in result[2][1]
+
+
+class TestManagerModeReconciliation:
+    """`comfy env` reconciles the global manager_gui_mode config against reality."""
+
+    @pytest.fixture(autouse=True)
+    def _clear_detection_caches(self):
+        from comfy_cli.command.custom_nodes import cm_cli_util
+
+        cm_cli_util.find_cm_cli.cache_clear()
+        cm_cli_util.find_legacy_manager_clone.cache_clear()
+        yield
+        cm_cli_util.find_cm_cli.cache_clear()
+        cm_cli_util.find_legacy_manager_clone.cache_clear()
+
+    @contextlib.contextmanager
+    def _env(self, *, configured_mode, has_cm_cli, has_legacy_clone):
+        """Set up a workspace with the given config key + on-disk manager state."""
+
+        def _get(key):
+            if key == constants.CONFIG_KEY_MANAGER_GUI_MODE:
+                return configured_mode
+            return None
+
+        cm_cli_config = MagicMock()
+        cm_cli_config.get.side_effect = _get
+        workspace_config = MagicMock()
+        workspace_config.get.return_value = None
+
+        with (
+            patch("comfy_cli.command.custom_nodes.cm_cli_util.ConfigManager", return_value=cm_cli_config),
+            patch("comfy_cli.workspace_manager.ConfigManager", return_value=workspace_config),
+            patch("comfy_cli.command.custom_nodes.cm_cli_util.find_cm_cli", return_value=has_cm_cli),
+            patch(
+                "comfy_cli.command.custom_nodes.cm_cli_util.find_legacy_manager_clone",
+                return_value=has_legacy_clone,
+            ),
+        ):
+            from comfy_cli.workspace_manager import WorkspaceManager
+
+            # WorkspaceManager is a @singleton, so restore what we clobber.
+            ws = WorkspaceManager()
+            previous_path = ws.workspace_path
+            ws.workspace_path = "/fake/workspace"
+            try:
+                yield ws
+            finally:
+                ws.workspace_path = previous_path
+
+    @pytest.mark.parametrize(
+        ("configured_mode", "has_cm_cli", "has_legacy_clone", "expected_mode", "expected_detected"),
+        [
+            # No config at all — detection drives the answer.
+            (None, True, False, "enable-gui", "venv-package"),
+            (None, False, True, "legacy", "legacy-clone"),
+            (None, False, False, "not-installed", "none"),
+            # Stale global config claiming the manager is enabled, nothing installed.
+            ("enable-gui", False, False, "not-installed", "none"),
+            ("disable-gui", False, False, "not-installed", "none"),
+            ("enable-legacy-gui", False, False, "not-installed", "none"),
+            # "disable" is user intent — never rewritten.
+            ("disable", True, False, "disable", "venv-package"),
+            ("disable", False, True, "disable", "legacy-clone"),
+            ("disable", False, False, "disable", "none"),
+        ],
+    )
+    def test_fill_data_reconciliation_matrix(
+        self, configured_mode, has_cm_cli, has_legacy_clone, expected_mode, expected_detected
+    ):
+        with self._env(configured_mode=configured_mode, has_cm_cli=has_cm_cli, has_legacy_clone=has_legacy_clone) as ws:
+            data = ws.fill_data()
+
+        assert data["manager_mode"] == expected_mode
+        assert data["manager_detected"] == expected_detected
+
+    def test_fill_data_keeps_existing_fields(self):
+        """`manager_detected` is additive — the pre-existing payload keys stay put."""
+        with self._env(configured_mode=None, has_cm_cli=True, has_legacy_clone=False) as ws:
+            data = ws.fill_data()
+
+        assert set(data) == {"path", "type", "manager_mode", "manager_detected", "uv_compile_default"}
+        assert data["path"] == "/fake/workspace"
+        assert data["uv_compile_default"] is False
+
+    def test_fill_print_table_reports_legacy_clone(self):
+        """The table view matches the JSON view for the legacy-clone case."""
+        with self._env(configured_mode=None, has_cm_cli=False, has_legacy_clone=True) as ws:
+            result = ws.fill_print_table()
+
+        assert result[1][0] == "Manager"
+        assert "Legacy clone (cm-cli unavailable)" in result[1][1]
+
+    def test_fill_print_table_reports_stale_enable_config_as_not_installed(self):
+        with self._env(configured_mode="enable-gui", has_cm_cli=False, has_legacy_clone=False) as ws:
+            result = ws.fill_print_table()
+
+        assert result[1][0] == "Manager"
+        assert "Not Installed" in result[1][1]
 
 
 class TestResolveUvCompile:

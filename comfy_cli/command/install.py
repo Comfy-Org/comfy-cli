@@ -116,7 +116,7 @@ def pip_install_comfyui_dependencies(
 
 def pip_install_manager(repo_dir, python=sys.executable):
     """Install ComfyUI-Manager via manager_requirements.txt."""
-    from comfy_cli.command.custom_nodes.cm_cli_util import find_cm_cli
+    from comfy_cli.command.custom_nodes.cm_cli_util import find_cm_cli, find_legacy_manager_clone
 
     manager_req_path = os.path.join(repo_dir, constants.MANAGER_REQUIREMENTS_FILE)
     if not os.path.exists(manager_req_path):
@@ -138,8 +138,9 @@ def pip_install_manager(repo_dir, python=sys.executable):
             rprint(f"[dim]{result.stderr.strip()}[/dim]")
         return False
 
-    # Clear cache so find_cm_cli() picks up the newly installed module
+    # Clear caches so manager detection picks up the newly installed module
     find_cm_cli.cache_clear()
+    find_legacy_manager_clone.cache_clear()
     return True
 
 

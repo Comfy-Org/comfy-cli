@@ -54,6 +54,61 @@ def find_cm_cli() -> bool:
     return importlib.util.find_spec("cm_cli") is not None
 
 
+@lru_cache(maxsize=1)
+def find_legacy_manager_clone() -> bool:
+    """Check if ComfyUI-Manager exists as a plain git clone under ``custom_nodes/``.
+
+    This is the pre-pip-package install shape: the Manager repo cloned straight
+    into ``custom_nodes/``. It is invisible to :func:`find_cm_cli`, which only
+    tests whether the ``cm_cli`` module imports in the workspace Python.
+
+    Detection is by marker file, not directory name — users clone the Manager
+    under arbitrary names. Directories ending in ``.disabled`` (the Manager's own
+    disable convention) are skipped.
+
+    Results are cached for the session lifetime.
+    """
+    ws = workspace_manager.workspace_path
+    if not ws:
+        return False
+
+    custom_nodes = os.path.join(ws, "custom_nodes")
+    try:
+        entries = os.listdir(custom_nodes)
+    except OSError:
+        return False
+
+    for name in entries:
+        if name.endswith(".disabled"):
+            continue
+        node_dir = os.path.join(custom_nodes, name)
+        try:
+            if not os.path.isdir(node_dir):
+                continue
+            if os.path.isfile(os.path.join(node_dir, "glob", "manager_core.py")) or os.path.isfile(
+                os.path.join(node_dir, "cm-cli.py")
+            ):
+                return True
+        except OSError:
+            continue
+
+    return False
+
+
+def detect_manager_installation() -> str:
+    """Report how ComfyUI-Manager is installed for the current workspace.
+
+    Returns ``"venv-package"`` (the pip ``comfyui_manager`` package — cm-cli
+    usable), ``"legacy-clone"`` (an on-disk clone under ``custom_nodes/`` — cm-cli
+    integration unavailable), or ``"none"``.
+    """
+    if find_cm_cli():
+        return "venv-package"
+    if find_legacy_manager_clone():
+        return "legacy-clone"
+    return "none"
+
+
 def resolve_manager_gui_mode(not_installed_value: str | None = None) -> str | None:
     """Resolve manager GUI mode from config, with legacy migration.
 
