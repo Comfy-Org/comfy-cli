@@ -274,7 +274,12 @@ def execute(
     # None on the async path — that branch writes and owns its own state — and
     # before ``queue()`` has returned a prompt_id.
     wait_state: jobs_state.JobState | None = None
-    wait_state_file = None
+    # --wait success payload, rendered/emitted AFTER the try below rather than
+    # inside it. Writing to a closed stdout (`comfy run --wait … | head`)
+    # raises BrokenPipeError — a ConnectionError/OSError subclass the
+    # disconnect handler would otherwise catch, rewriting the just-persisted
+    # `completed` record to `error` and flipping a successful run's exit to 1.
+    completed_payload: dict | None = None
 
     try:
         if wait:
@@ -303,16 +308,27 @@ def execute(
             )
             wait_state.item_map = (compose_meta or {}).get("items")
             wait_state.status = "running"
-            wait_state_file = _write_state(wait_state)
+            _write_state(wait_state)
 
-            execution.watch_execution()
+            # `watch_execution` reports a terminal server event by rendering
+            # the error and raising `typer.Exit` (1 for `execution_error`, 130
+            # for `execution_interrupted`) — the ordinary failure path, not an
+            # exception the handlers below see. Finalize the submit-time
+            # record here, or a failed job is stranded as a phantom `running`
+            # forever: `jobs ls` only reaps non-terminal records whose
+            # `watcher_pid` is dead, and `--wait` never sets one.
+            try:
+                execution.watch_execution()
+            except typer.Exit as exit_exc:
+                _mark_watch_exit(wait_state, exit_exc.exit_code, execution)
+                raise
             end = time.time()
             if progress is not None:
                 progress.stop()
                 progress = None
 
             if token.is_set():
-                wait_state_file = _mark_cancelled(wait_state) or wait_state_file
+                _mark_cancelled(wait_state)
                 renderer.error(
                     code="cancelled",
                     message="Cancelled by user",
@@ -325,15 +341,11 @@ def execute(
             state = wait_state
             state.status = "completed"
             state.outputs = list(execution.outputs)
-            state_file = _write_state(state) or wait_state_file
-
-            if renderer.is_pretty():
-                if len(execution.outputs) > 0:
-                    pprint("[bold green]\nOutputs:[/bold green]")
-                    for f in execution.outputs:
-                        pprint(f)
-                elapsed = timedelta(seconds=end - start)
-                pprint(f"[bold green]\nWorkflow execution completed ({elapsed})[/bold green]")
+            # No fallback to the submit-time path: if the terminal write
+            # failed, that file still says `running`, so handing it back as
+            # the `completed` record's `state_file` would point the caller at
+            # contents contradicting what we just reported.
+            state_file = _write_state(state)
 
             # Grouped views of the same artifacts — local parity with the
             # cloud --wait envelope: by producing node always, and by
@@ -342,25 +354,21 @@ def execute(
 
             outputs_by_node, outputs_by_item = _group_outputs(list(execution.output_entries), state.item_map)
 
-            renderer.emit(
-                {
-                    "workflow": workflow_name,
-                    "status": "completed",
-                    "prompt_id": execution.prompt_id,
-                    "client_id": execution.client_id,
-                    "outputs": list(execution.outputs),
-                    "outputs_by_node": outputs_by_node,
-                    "outputs_by_item": outputs_by_item,
-                    "cached_node_ids": list(execution.cached_node_ids),
-                    "executed_node_ids": list(execution.executed_node_ids),
-                    "elapsed_seconds": end - start,
-                    "host": host,
-                    "port": port,
-                    "state_file": str(state_file) if state_file else None,
-                },
-                command="run",
-                where="local",
-            )
+            completed_payload = {
+                "workflow": workflow_name,
+                "status": "completed",
+                "prompt_id": execution.prompt_id,
+                "client_id": execution.client_id,
+                "outputs": list(execution.outputs),
+                "outputs_by_node": outputs_by_node,
+                "outputs_by_item": outputs_by_item,
+                "cached_node_ids": list(execution.cached_node_ids),
+                "executed_node_ids": list(execution.executed_node_ids),
+                "elapsed_seconds": end - start,
+                "host": host,
+                "port": port,
+                "state_file": str(state_file) if state_file else None,
+            }
         else:
             # Async path (the default). Write the initial state file and
             # spawn a detached watcher to keep it updated; the foreground
@@ -472,7 +480,9 @@ def execute(
                 "message": f"Lost connection to ComfyUI while job {prompt_id} was running: {e}",
                 "details": {},
             }
-            path = _write_state(wait_state) or wait_state_file
+            # Same rule as the success path: report a state_file only when
+            # this terminal write actually landed.
+            path = _write_state(wait_state)
             renderer.error(
                 code="ws_disconnected",
                 message=f"Lost connection to ComfyUI server while job {prompt_id} was running: {e}",
@@ -493,6 +503,19 @@ def execute(
         # async (no --wait) path connect() never ran so ws is None and this is
         # a no-op; it is idempotent with the SIGINT-token close wired above.
         _safe_close(execution)
+
+    # Deliberately outside the try: the job is done and persisted, so a
+    # BrokenPipeError from a closed stdout must surface as itself rather than
+    # be mistaken for the server disconnecting (see `completed_payload`).
+    if completed_payload is not None:
+        if renderer.is_pretty():
+            if completed_payload["outputs"]:
+                pprint("[bold green]\nOutputs:[/bold green]")
+                for f in completed_payload["outputs"]:
+                    pprint(f)
+            elapsed = timedelta(seconds=completed_payload["elapsed_seconds"])
+            pprint(f"[bold green]\nWorkflow execution completed ({elapsed})[/bold green]")
+        renderer.emit(completed_payload, command="run", where="local")
 
 
 def _write_state(state):
@@ -517,12 +540,42 @@ def _mark_cancelled(state):
 
     Returns the path written, or None when there is nothing to write — a
     Ctrl-C before ``queue()`` returned leaves ``state`` None, so there is no
-    prompt_id to file it under.
+    prompt_id to file it under, and a record that is ALREADY terminal is left
+    alone. That last guard matters because the Ctrl-C handler is shared by the
+    whole run: a Ctrl-C after the completion write has landed must not walk a
+    ``completed`` job backwards to ``cancelled``.
     """
-    if state is None:
+    if state is None or state.is_terminal:
         return None
     state.status = "cancelled"
     state.error = {"code": "cancelled", "message": "Cancelled by user", "details": {}}
+    return _write_state(state)
+
+
+def _mark_watch_exit(state, exit_code, execution):
+    """Finalize the submit-time record when ``watch_execution`` ends the run by
+    raising ``typer.Exit``: 130 is a server-side interrupt (``cancelled``),
+    anything else is a node failure (``error``).
+
+    The error envelope has already been rendered by the watcher, so this only
+    moves the on-disk record off ``running``. Prefers the classified verdict
+    ``on_error`` stashed on the execution; falls back to a generic
+    ``execution_error`` when there isn't one (or it isn't a real dict — mocked
+    executions hand back attribute stubs).
+    """
+    if state is None:
+        return None
+    if exit_code == 130:
+        return _mark_cancelled(state)
+    verdict = getattr(execution, "last_error", None)
+    if not isinstance(verdict, dict):
+        verdict = {
+            "code": "execution_error",
+            "message": "Workflow execution failed on the server",
+            "details": {},
+        }
+    state.status = "error"
+    state.error = verdict
     return _write_state(state)
 
 

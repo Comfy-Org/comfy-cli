@@ -690,6 +690,140 @@ class TestWaitStateFile:
 
         mock_exec.watch_execution.assert_called_once()
 
+    def test_server_execution_error_finalizes_the_record(self, workflow_file):
+        """`watch_execution` signals a failed node by raising `typer.Exit(1)`
+        after rendering the error — the ordinary failure path, not an
+        exception the disconnect handlers see. The submit-time `running`
+        record must still be moved to a terminal status, or the job is
+        stranded as a phantom nothing ever reaps (`jobs ls` only reaps
+        non-terminal records with a dead watcher_pid, which --wait never
+        sets)."""
+        from comfy_cli import jobs_state
+
+        mock_exec = self._mock_exec("wait-exec-error")
+        mock_exec.last_error = {
+            "code": "out_of_memory",
+            "message": "CUDA out of memory in KSampler",
+            "details": {"node_id": "3"},
+        }
+        mock_exec.watch_execution.side_effect = typer.Exit(code=1)
+
+        with pytest.raises(typer.Exit) as exc_info:
+            self._run(workflow_file, mock_exec)
+        assert exc_info.value.exit_code == 1
+
+        state = jobs_state.read("wait-exec-error")
+        assert state is not None
+        assert state.status == "error"
+        # The classified verdict `on_error` stashed, not a generic placeholder.
+        assert state.error["code"] == "out_of_memory"
+        assert state.error["message"] == "CUDA out of memory in KSampler"
+        assert state.completed_at is not None
+
+    def test_server_execution_error_without_verdict_falls_back(self, workflow_file):
+        """A mocked/older execution with no usable `last_error` still gets a
+        terminal record — a generic `execution_error` beats a phantom."""
+        from comfy_cli import jobs_state
+
+        mock_exec = self._mock_exec("wait-exec-bare")
+        mock_exec.last_error = None
+        mock_exec.watch_execution.side_effect = typer.Exit(code=1)
+
+        with pytest.raises(typer.Exit):
+            self._run(workflow_file, mock_exec)
+
+        state = jobs_state.read("wait-exec-bare")
+        assert state is not None
+        assert state.status == "error"
+        assert state.error["code"] == "execution_error"
+
+    def test_server_interrupt_finalizes_as_cancelled(self, workflow_file):
+        """`execution_interrupted` exits 130 — a cancellation, not a failure."""
+        from comfy_cli import jobs_state
+
+        mock_exec = self._mock_exec("wait-interrupted")
+        mock_exec.watch_execution.side_effect = typer.Exit(code=130)
+
+        with pytest.raises(typer.Exit) as exc_info:
+            self._run(workflow_file, mock_exec)
+        assert exc_info.value.exit_code == 130
+
+        state = jobs_state.read("wait-interrupted")
+        assert state is not None
+        assert state.status == "cancelled"
+        assert state.error["code"] == "cancelled"
+
+    def test_broken_pipe_while_rendering_keeps_the_completed_record(self, workflow_file, monkeypatch):
+        """`comfy run --wait … | head` closes stdout under us. The resulting
+        BrokenPipeError (a ConnectionError/OSError subclass) is raised AFTER
+        the job completed and was persisted, so it must not be mistaken for
+        the server disconnecting: no rewrite of the `completed` record to
+        `error`/`server_died`, and no bogus `ws_disconnected` exit 1."""
+        from comfy_cli import jobs_state
+        from comfy_cli.output.renderer import Renderer
+
+        errors = self._capture_errors(monkeypatch)
+        mock_exec = self._mock_exec("wait-brokenpipe")
+        mock_exec.outputs = ["http://127.0.0.1:8188/view?filename=a.png"]
+
+        def _broken_pipe(self, *args, **kwargs):
+            raise BrokenPipeError(32, "Broken pipe")
+
+        monkeypatch.setattr(Renderer, "emit", _broken_pipe)
+
+        with pytest.raises(BrokenPipeError):
+            self._run(workflow_file, mock_exec)
+
+        assert [e["code"] for e in errors] == []
+        state = jobs_state.read("wait-brokenpipe")
+        assert state is not None
+        assert state.status == "completed"
+        assert state.error is None
+
+    def test_ctrl_c_after_completion_does_not_uncomplete_the_record(self, workflow_file):
+        """The KeyboardInterrupt handler is shared by the whole run. A Ctrl-C
+        landing after the completion write must leave the terminal record
+        alone rather than walking it back to `cancelled`."""
+        from comfy_cli import jobs_state
+        from comfy_cli.command.run import _mark_cancelled
+
+        mock_exec = self._mock_exec("wait-late-ctrlc")
+        self._run(workflow_file, mock_exec)
+
+        state = jobs_state.read("wait-late-ctrlc")
+        assert state.status == "completed"
+
+        assert _mark_cancelled(state) is None
+        assert state.status == "completed"
+        assert jobs_state.read("wait-late-ctrlc").status == "completed"
+
+    def test_failed_terminal_write_reports_no_state_file(self, workflow_file, monkeypatch):
+        """When the completion write fails, don't hand back the submit-time
+        path: that file still says `running`, contradicting the `completed`
+        result we just reported."""
+        from comfy_cli import jobs_state
+        from comfy_cli.output.renderer import Renderer
+
+        emitted = []
+        monkeypatch.setattr(Renderer, "emit", lambda self, data=None, **kw: emitted.append(data))
+
+        real_write = jobs_state.write
+        calls = {"n": 0}
+
+        def _fail_after_first(state):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return real_write(state)
+            raise OSError(28, "No space left on device")
+
+        monkeypatch.setattr(jobs_state, "write", _fail_after_first)
+        mock_exec = self._mock_exec("wait-nospace")
+
+        self._run(workflow_file, mock_exec)
+
+        assert emitted and emitted[-1]["status"] == "completed"
+        assert emitted[-1]["state_file"] is None
+
 
 class TestDetectPartnerNodes:
     """Partner-API nodes (category `partner/...` or the authoritative
