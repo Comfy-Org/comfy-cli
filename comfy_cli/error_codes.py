@@ -330,6 +330,11 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "the job may still be running — check `comfy jobs status <id>`, or re-watch with a longer `--timeout`",
     ),
     ErrorCode(
+        "server_died",
+        "Server connection dropped while a foreground (`--wait`) job was in flight; recorded on the job state file.",
+        "check the server (it may have been OOM-killed); the prompt_id is in `comfy jobs status <id>`",
+    ),
+    ErrorCode(
         "watcher_poll_error",
         "Background watcher encountered a transient error polling the server.",
         "transient — the job is likely still running; re-run `comfy jobs watch <id>`",

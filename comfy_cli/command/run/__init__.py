@@ -268,6 +268,14 @@ def execute(
     token = cancellation.get_token()
     token.on_cancel(lambda: _safe_close(execution))
 
+    # --wait only: the state written right after a successful submit, kept in
+    # scope so the exception handlers below can record what happened to a
+    # prompt that was already in flight (e.g. the server dying mid-run). Stays
+    # None on the async path — that branch writes and owns its own state — and
+    # before ``queue()`` has returned a prompt_id.
+    wait_state: jobs_state.JobState | None = None
+    wait_state_file = None
+
     try:
         if wait:
             execution.connect()
@@ -280,24 +288,12 @@ def execute(
             execution.queue()
         _journal_run(workflow_name, execution.prompt_id, "local")
         if wait:
-            execution.watch_execution()
-            end = time.time()
-            if progress is not None:
-                progress.stop()
-                progress = None
-
-            if token.is_set():
-                renderer.error(
-                    code="cancelled",
-                    message="Cancelled by user",
-                    exit_code=130,
-                )
-                raise typer.Exit(code=130)
-
-            # Foreground (--wait) completion path also writes the state
-            # file so the on-disk record is consistent regardless of which
-            # mode the user ran in.
-            state = jobs_state.new(
+            # Write the state file at SUBMIT time, exactly like the async
+            # branch below — if the server dies mid-run the on-disk record is
+            # the only place the in-flight prompt_id survives. Status is
+            # "running" rather than "queued": this foreground process is
+            # actively watching it, not leaving it detached in the queue.
+            wait_state = jobs_state.new(
                 prompt_id=execution.prompt_id,
                 client_id=execution.client_id,
                 workflow=workflow_name,
@@ -305,10 +301,31 @@ def execute(
                 host=host,
                 port=port,
             )
+            wait_state.item_map = (compose_meta or {}).get("items")
+            wait_state.status = "running"
+            wait_state_file = _write_state(wait_state)
+
+            execution.watch_execution()
+            end = time.time()
+            if progress is not None:
+                progress.stop()
+                progress = None
+
+            if token.is_set():
+                wait_state_file = _mark_cancelled(wait_state) or wait_state_file
+                renderer.error(
+                    code="cancelled",
+                    message="Cancelled by user",
+                    exit_code=130,
+                )
+                raise typer.Exit(code=130)
+
+            # Completion updates the record written at submit — same file,
+            # same final shape (``jobs_state.write`` stamps the timestamps).
+            state = wait_state
             state.status = "completed"
             state.outputs = list(execution.outputs)
-            state.item_map = (compose_meta or {}).get("items")
-            state_file = jobs_state.write(state)
+            state_file = _write_state(state) or wait_state_file
 
             if renderer.is_pretty():
                 if len(execution.outputs) > 0:
@@ -398,6 +415,7 @@ def execute(
         if progress is not None:
             progress.stop()
             progress = None
+        _mark_cancelled(wait_state)
         if renderer.is_pretty():
             pprint("[yellow]Workflow execution was interrupted[/yellow]")
         renderer.error(
@@ -412,11 +430,17 @@ def execute(
                 f"[bold red]Error: WebSocket timed out after {timeout}s waiting for server response.[/bold red]\n"
                 "[yellow]For long-running workflows, increase the timeout: comfy run --workflow <file> --timeout 300[/yellow]"
             )
+        # The job may genuinely still be running server-side, so the
+        # submit-time "running" record is left as-is — not marked terminal.
+        details = {"timeout": timeout}
+        prompt_id = _submitted_prompt_id(execution)
+        if prompt_id is not None:
+            details["prompt_id"] = prompt_id
         renderer.error(
             code="ws_timeout",
             message=f"WebSocket timed out after {timeout}s waiting for server response.",
             hint="re-run with a larger --timeout (e.g. --timeout 300)",
-            details={"timeout": timeout},
+            details=details,
         )
         raise typer.Exit(code=1)
     except (WebSocketException, ConnectionError, OSError) as e:
@@ -428,6 +452,7 @@ def execute(
         if token.is_set():
             if progress is not None:
                 progress.stop()
+            _mark_cancelled(wait_state)
             renderer.error(
                 code="cancelled",
                 message="Cancelled by user",
@@ -436,6 +461,25 @@ def execute(
             raise typer.Exit(code=130) from e
         if renderer.is_pretty():
             pprint(f"[bold red]Error: Lost connection to ComfyUI server: {e}[/bold red]")
+        # The server died with a prompt of ours in flight: record that on the
+        # submit-time state file and name the prompt in the emitted error, so
+        # `comfy jobs status <id>` has something to consult afterwards.
+        prompt_id = _submitted_prompt_id(execution)
+        if prompt_id is not None and wait_state is not None:
+            wait_state.status = "error"
+            wait_state.error = {
+                "code": "server_died",
+                "message": f"Lost connection to ComfyUI while job {prompt_id} was running: {e}",
+                "details": {},
+            }
+            path = _write_state(wait_state) or wait_state_file
+            renderer.error(
+                code="ws_disconnected",
+                message=f"Lost connection to ComfyUI server while job {prompt_id} was running: {e}",
+                hint="check the server is still running; re-run the command",
+                details={"prompt_id": prompt_id, "state_file": str(path) if path else None},
+            )
+            raise typer.Exit(code=1)
         renderer.error(
             code="ws_disconnected",
             message=f"Lost connection to ComfyUI server: {e}",
@@ -449,6 +493,50 @@ def execute(
         # async (no --wait) path connect() never ran so ws is None and this is
         # a no-op; it is idempotent with the SIGINT-token close wired above.
         _safe_close(execution)
+
+
+def _write_state(state):
+    """Best-effort ``jobs_state.write``. Returns the path, or None if the
+    write was skipped, the state dir was unwritable, or the prompt_id was
+    unusable as a filename.
+
+    A state-file failure must never fail an otherwise-successful run — same
+    tolerance the async path gives a watcher that won't spawn. Swallowing
+    ``ValueError`` matters now that ``--wait`` writes at SUBMIT: a server
+    returning an id ``state_path()`` rejects must not stop us from watching
+    the run it just accepted.
+    """
+    try:
+        return jobs_state.write(state)
+    except (OSError, ValueError):
+        return None
+
+
+def _mark_cancelled(state):
+    """Record a user cancellation on the job state file (best effort).
+
+    Returns the path written, or None when there is nothing to write — a
+    Ctrl-C before ``queue()`` returned leaves ``state`` None, so there is no
+    prompt_id to file it under.
+    """
+    if state is None:
+        return None
+    state.status = "cancelled"
+    state.error = {"code": "cancelled", "message": "Cancelled by user", "details": {}}
+    return _write_state(state)
+
+
+def _submitted_prompt_id(execution) -> str | None:
+    """The prompt id if the server really returned one, else None.
+
+    Mirrors ``jobs_state.write``'s defensiveness about mocked executions: a
+    non-string id means no usable submit happened, so callers fall back to
+    their pre-prompt_id behavior.
+    """
+    prompt_id = getattr(execution, "prompt_id", None)
+    if isinstance(prompt_id, str) and prompt_id.strip():
+        return prompt_id
+    return None
 
 
 def _journal_run(workflow: str, prompt_id, where: str) -> None:

@@ -504,6 +504,193 @@ class TestExecuteErrorHandling:
             mock_progress.stop.assert_called()
 
 
+class TestWaitStateFile:
+    """`comfy run --wait` writes the jobs state file at SUBMIT time, not only
+    on success (BE-4750) — so a server that dies mid-run still leaves an
+    on-disk record of the prompt that was in flight, and the emitted error
+    names it."""
+
+    @pytest.fixture
+    def fresh_token(self):
+        """The cancellation token is process-wide; reset it around any test
+        that cancels so the flag can't leak into the rest of the suite."""
+        from comfy_cli import cancellation
+
+        cancellation.reset_for_testing()
+        yield cancellation
+        cancellation.reset_for_testing()
+
+    def _mock_exec(self, prompt_id):
+        mock_exec = MagicMock()
+        mock_exec.prompt_id = prompt_id
+        mock_exec.client_id = "cid-wait"
+        mock_exec.outputs = []
+        mock_exec.output_entries = []
+        mock_exec.cached_node_ids = []
+        mock_exec.executed_node_ids = []
+        return mock_exec
+
+    def _capture_errors(self, monkeypatch):
+        from comfy_cli.output.renderer import Renderer
+
+        captured = []
+        original_error = Renderer.error
+
+        def capture_error(self, *, code, message, hint=None, details=None, exit_code=1):
+            captured.append({"code": code, "message": message, "hint": hint, "details": details})
+            return original_error(self, code=code, message=message, hint=hint, details=details, exit_code=exit_code)
+
+        monkeypatch.setattr(Renderer, "error", capture_error)
+        return captured
+
+    def _run(self, workflow_file, mock_exec, **overrides):
+        kwargs = dict(host="127.0.0.1", port=8188, wait=True, timeout=30)
+        kwargs.update(overrides)
+        with (
+            patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),
+            patch("comfy_cli.command.run._fetch_object_info", return_value={}),
+            patch("comfy_cli.command.run.ExecutionProgress"),
+            patch("comfy_cli.command.run.WorkflowExecution", return_value=mock_exec),
+        ):
+            execute(workflow_file, **kwargs)
+
+    def test_state_file_is_running_before_watch_returns(self, workflow_file):
+        from comfy_cli import jobs_state
+
+        mock_exec = self._mock_exec("wait-happy")
+        mock_exec.outputs = ["http://127.0.0.1:8188/view?filename=a.png"]
+        mid_run = {}
+
+        def _observe_mid_run():
+            state = jobs_state.read("wait-happy")
+            mid_run["state"] = state
+
+        mock_exec.watch_execution.side_effect = _observe_mid_run
+
+        self._run(workflow_file, mock_exec)
+
+        # Submit-time record: on disk and non-terminal while the job runs.
+        assert mid_run["state"] is not None, "no state file existed while the job was running"
+        assert mid_run["state"].status == "running"
+        assert mid_run["state"].completed_at is None
+        # Completion updates that same record in place.
+        final = jobs_state.read("wait-happy")
+        assert final is not None
+        assert final.status == "completed"
+        assert final.outputs == ["http://127.0.0.1:8188/view?filename=a.png"]
+        assert final.completed_at is not None
+        assert final.submitted_at == mid_run["state"].submitted_at
+
+    def test_disconnect_mid_run_records_server_died(self, workflow_file, monkeypatch):
+        from comfy_cli import jobs_state
+
+        errors = self._capture_errors(monkeypatch)
+        mock_exec = self._mock_exec("wait-died")
+        mock_exec.watch_execution.side_effect = ConnectionError("server went away")
+
+        with pytest.raises(typer.Exit) as exc_info:
+            self._run(workflow_file, mock_exec)
+        assert exc_info.value.exit_code == 1
+
+        err = next(e for e in errors if e["code"] == "ws_disconnected")
+        assert "wait-died" in err["message"]
+        assert err["details"]["prompt_id"] == "wait-died"
+        assert err["details"]["state_file"].endswith("wait-died.json")
+
+        state = jobs_state.read("wait-died")
+        assert state is not None
+        assert state.status == "error"
+        assert state.error["code"] == "server_died"
+        assert "wait-died" in state.error["message"]
+        assert "server went away" in state.error["message"]
+
+    def test_disconnect_before_prompt_id_writes_no_state(self, workflow_file, monkeypatch):
+        from comfy_cli import jobs_state
+
+        errors = self._capture_errors(monkeypatch)
+        # The submit itself blew up, so no prompt_id was ever assigned.
+        mock_exec = self._mock_exec(None)
+        mock_exec.queue.side_effect = ConnectionError("connection refused")
+
+        with pytest.raises(typer.Exit) as exc_info:
+            self._run(workflow_file, mock_exec)
+        assert exc_info.value.exit_code == 1
+
+        # Today's bare error, unchanged — nothing to enrich it with.
+        err = next(e for e in errors if e["code"] == "ws_disconnected")
+        assert err["details"] is None
+        assert list(jobs_state.state_dir().glob("*.json")) == []
+
+    def test_timeout_names_prompt_id_and_leaves_state_running(self, workflow_file, monkeypatch):
+        from comfy_cli import jobs_state
+
+        errors = self._capture_errors(monkeypatch)
+        mock_exec = self._mock_exec("wait-slow")
+        mock_exec.watch_execution.side_effect = WebSocketTimeoutException("timed out")
+
+        with pytest.raises(typer.Exit) as exc_info:
+            self._run(workflow_file, mock_exec)
+        assert exc_info.value.exit_code == 1
+
+        err = next(e for e in errors if e["code"] == "ws_timeout")
+        assert err["details"] == {"timeout": 30, "prompt_id": "wait-slow"}
+
+        # A timed-out watch says nothing about the job — it may still be
+        # running server-side, so the record stays non-terminal.
+        state = jobs_state.read("wait-slow")
+        assert state is not None
+        assert state.status == "running"
+        assert state.completed_at is None
+
+    def test_token_cancel_records_cancelled_state(self, workflow_file, fresh_token):
+        from comfy_cli import jobs_state
+
+        mock_exec = self._mock_exec("wait-cancel")
+        mock_exec.watch_execution.side_effect = lambda: fresh_token.get_token().cancel()
+
+        with pytest.raises(typer.Exit) as exc_info:
+            self._run(workflow_file, mock_exec)
+        assert exc_info.value.exit_code == 130
+
+        state = jobs_state.read("wait-cancel")
+        assert state is not None
+        assert state.status == "cancelled"
+        assert state.error["code"] == "cancelled"
+
+    def test_keyboard_interrupt_records_cancelled_state(self, workflow_file):
+        from comfy_cli import jobs_state
+
+        mock_exec = self._mock_exec("wait-ctrlc")
+        mock_exec.watch_execution.side_effect = KeyboardInterrupt()
+
+        with pytest.raises(typer.Exit) as exc_info:
+            self._run(workflow_file, mock_exec)
+        assert exc_info.value.exit_code == 130
+
+        state = jobs_state.read("wait-ctrlc")
+        assert state is not None
+        assert state.status == "cancelled"
+        assert state.error["code"] == "cancelled"
+
+    @pytest.mark.parametrize("boom", [OSError(13, "Permission denied"), ValueError("unsafe prompt_id")])
+    def test_state_write_failure_does_not_fail_the_run(self, workflow_file, monkeypatch, boom):
+        """A state file that can't be written must never sink an otherwise
+        successful run — same tolerance the async path gives its watcher. The
+        submit-time write in particular must not stop us watching a run the
+        server already accepted."""
+        from comfy_cli import jobs_state
+
+        def _boom(_state):
+            raise boom
+
+        monkeypatch.setattr(jobs_state, "write", _boom)
+        mock_exec = self._mock_exec("wait-unwritable")
+
+        self._run(workflow_file, mock_exec)  # must not raise
+
+        mock_exec.watch_execution.assert_called_once()
+
+
 class TestDetectPartnerNodes:
     """Partner-API nodes (category `partner/...` or the authoritative
     `api_node: true` flag) must be detected before a local submit so we can
