@@ -12,6 +12,7 @@ from __future__ import annotations
 import io
 import json
 import urllib.error
+import urllib.parse
 from typing import Any
 
 import pytest
@@ -296,6 +297,44 @@ class TestListFolder:
         assert env["ok"] is False
         assert env["error"]["code"] == "folder_not_found"
 
+    def test_folder_name_with_space_is_accepted_and_encoded(self, local_target, monkeypatch, capsys):
+        """A user-configured folder like `my loras` lists, matching what `search --where local` finds."""
+        routes = {"127.0.0.1:8188/models/my%20loras": [{"name": "ltx-custom.safetensors", "pathIndex": 0}]}
+        calls = _patch_urlopen(monkeypatch, routes)
+        env = _run(["list-folder", "my loras", "--where", "local"], capsys)
+        assert env["ok"] is True, env
+        assert [c["url"] for c in calls] == ["http://127.0.0.1:8188/models/my%20loras"]
+        # The payload echoes the decoded name the user typed, not the wire form.
+        assert env["data"]["folder"] == "my loras"
+        assert [f["name"] for f in env["data"]["files"]] == ["ltx-custom.safetensors"]
+
+    @pytest.mark.parametrize(
+        "folder",
+        [
+            "SDXL (base)",  # parentheses
+            "モデル",  # non-ASCII
+            "_hidden",  # leading underscore — rejected by the old strict regex
+            "a?b#c",  # URL-significant characters, neutralized by percent-encoding
+        ],
+    )
+    def test_non_traversal_folder_names_are_accepted(self, local_target, monkeypatch, capsys, folder):
+        segment = urllib.parse.quote(folder, safe="")
+        calls = _patch_urlopen(monkeypatch, {f"127.0.0.1:8188/models/{segment}": []})
+        env = _run(["list-folder", folder, "--where", "local"], capsys)
+        assert env["ok"] is True, env
+        # Every character that could re-shape the request is encoded away.
+        assert [c["url"] for c in calls] == [f"http://127.0.0.1:8188/models/{segment}"]
+        assert env["data"]["folder"] == folder
+
+    @pytest.mark.parametrize("folder", ["../../etc", "..", "a/b", "a\\b", ""])
+    def test_traversal_shapes_still_rejected(self, local_target, monkeypatch, capsys, folder):
+        """Relaxing the charset must not relax the traversal guard — and no request is issued."""
+        calls = _patch_urlopen(monkeypatch, {})
+        env = _run(["list-folder", folder, "--where", "local"], capsys)
+        assert env["ok"] is False, env
+        assert env["error"]["code"] == "invalid_argument"
+        assert calls == []
+
 
 # ---------------------------------------------------------------------------
 # search
@@ -438,6 +477,24 @@ class TestSearch:
         assert [c["url"] for c in calls[1:]] == ["http://127.0.0.1:8188/models/my%20loras"]
         assert env["data"]["rows"][0]["type"] == "my loras"
         assert env["data"]["rows"][0]["tags"] == ["my loras"]
+
+    def test_local_type_with_space_scopes_to_that_folder(self, local_target, monkeypatch, capsys):
+        """`--type "my loras"` is an unmapped passthrough — it must scope, not error."""
+        routes = {"127.0.0.1:8188/models/my%20loras": [{"name": "ltx-custom.safetensors", "pathIndex": 0}]}
+        calls = _patch_urlopen(monkeypatch, routes)
+        env = _run(["search", "--text", "ltx", "--type", "my loras", "--where", "local"], capsys)
+        assert env["ok"] is True, env
+        # Scoped: the bare `/models` folder listing is never fetched.
+        assert [c["url"] for c in calls] == ["http://127.0.0.1:8188/models/my%20loras"]
+        assert [r["name"] for r in env["data"]["rows"]] == ["ltx-custom.safetensors"]
+        assert env["data"]["rows"][0]["type"] == "my loras"
+
+    def test_local_type_traversal_still_rejected(self, local_target, monkeypatch, capsys):
+        calls = _patch_urlopen(monkeypatch, {})
+        env = _run(["search", "--text", "ltx", "--type", "../../etc", "--where", "local"], capsys)
+        assert env["ok"] is False, env
+        assert env["error"]["code"] == "invalid_argument"
+        assert calls == []
 
     def test_local_non_string_entry_name_is_skipped(self, local_target, monkeypatch, capsys):
         """A server sending a non-string `name` must not crash the walk or the sort."""
