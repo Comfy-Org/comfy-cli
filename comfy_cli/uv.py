@@ -23,7 +23,7 @@ def _check_call(cmd: list[str], cwd: PathLike | None = None):
         subprocess.check_call(cmd, cwd=cwd)
     except subprocess.CalledProcessError:
         if len(cmd) >= 5 and cmd[1:4] == ["-m", "uv", "pip"] and cmd[4] in ("install", "sync"):
-            from rich import print as rprint
+            from comfy_cli.output import rprint
 
             rprint(
                 "\n[bold yellow]Hint:[/bold yellow] If you are on a network filesystem "
