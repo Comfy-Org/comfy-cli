@@ -306,14 +306,18 @@ class WorkspaceManager:
         The global per-user ``manager_gui_mode`` config key can drift out of sync
         with a given workspace, so ``comfy env`` reconciles the two:
 
-        * any manager-enabling mode (``enable-gui`` / ``disable-gui`` /
-          ``enable-legacy-gui`` — ``disable-gui`` still enables the Manager, it
-          only hides its UI) with no Manager anywhere is stale config → report
-          ``"not-installed"``;
-        * ``"not-installed"`` with an on-disk legacy clone → report ``"legacy"``
-          (the Manager is present, but cm-cli venv integration is unavailable).
+        Every mode that expects a working Manager — the enabling modes
+        (``enable-gui`` / ``disable-gui`` / ``enable-legacy-gui``; ``disable-gui``
+        still enables the Manager, it only hides its UI) and ``"not-installed"``
+        — is reconciled against what is actually on disk:
 
-        ``"disable"`` is user intent and is always left untouched.
+        * no Manager anywhere → report ``"not-installed"``;
+        * an on-disk legacy clone → report ``"legacy"`` (the Manager is present,
+          but cm-cli venv integration is unavailable, so an ``enable-*`` config
+          overstates what works).
+
+        ``"disable"`` is user intent and is always left untouched, as is any
+        unrecognised mode string.
 
         Returns ``(manager_mode, manager_detected)``.
         """
@@ -323,10 +327,11 @@ class WorkspaceManager:
         detected = detect_manager_installation()
         mode = resolve_manager_gui_mode(not_installed_value="not-installed")
 
-        if mode in ("enable-gui", "disable-gui", "enable-legacy-gui") and detected == "none":
-            mode = "not-installed"
-        elif mode == "not-installed" and detected == "legacy-clone":
-            mode = "legacy"
+        if mode in ("enable-gui", "disable-gui", "enable-legacy-gui", "not-installed"):
+            if detected == "none":
+                mode = "not-installed"
+            elif detected == "legacy-clone":
+                mode = "legacy"
 
         return mode, detected
 

@@ -146,6 +146,27 @@ class TestFindCmCli:
             mock_spec.return_value = MagicMock()
             assert cm_cli_util.find_cm_cli() is True
 
+    def test_cache_is_keyed_on_workspace_path(self):
+        """Probing before the workspace resolves must not poison the later answer."""
+        with (
+            patch("comfy_cli.command.custom_nodes.cm_cli_util.importlib.util.find_spec", return_value=None),
+            patch.object(cm_cli_util.workspace_manager, "workspace_path", None),
+        ):
+            assert cm_cli_util.find_cm_cli() is False
+
+        with (
+            patch.object(cm_cli_util.workspace_manager, "workspace_path", "/fake/workspace"),
+            patch(
+                "comfy_cli.command.custom_nodes.cm_cli_util.resolve_workspace_python",
+                return_value="/fake/venv/python",
+            ),
+            patch(
+                "comfy_cli.command.custom_nodes.cm_cli_util.subprocess.run",
+                return_value=MagicMock(returncode=0),
+            ),
+        ):
+            assert cm_cli_util.find_cm_cli() is True
+
     def test_returns_false_on_subprocess_timeout(self):
         """When workspace Python check times out, returns False (not fallback to cli)."""
         with (
@@ -206,6 +227,40 @@ class TestFindLegacyManagerClone:
 
         with patch.object(cm_cli_util.workspace_manager, "workspace_path", str(tmp_path)):
             assert cm_cli_util.find_legacy_manager_clone() is False
+
+    def test_cache_is_keyed_on_workspace_path(self, tmp_path):
+        """A first call before the workspace resolves must not poison later calls."""
+        custom_nodes = tmp_path / "custom_nodes"
+        custom_nodes.mkdir()
+        _make_clone(custom_nodes, "ComfyUI-Manager")
+
+        with patch.object(cm_cli_util.workspace_manager, "workspace_path", None):
+            assert cm_cli_util.find_legacy_manager_clone() is False
+
+        with patch.object(cm_cli_util.workspace_manager, "workspace_path", str(tmp_path)):
+            assert cm_cli_util.find_legacy_manager_clone() is True
+
+    def test_distinct_workspaces_get_distinct_answers(self, tmp_path):
+        with_clone = tmp_path / "with_clone"
+        (with_clone / "custom_nodes").mkdir(parents=True)
+        _make_clone(with_clone / "custom_nodes", "ComfyUI-Manager")
+        without_clone = tmp_path / "without_clone"
+        (without_clone / "custom_nodes").mkdir(parents=True)
+
+        with patch.object(cm_cli_util.workspace_manager, "workspace_path", str(with_clone)):
+            assert cm_cli_util.find_legacy_manager_clone() is True
+        with patch.object(cm_cli_util.workspace_manager, "workspace_path", str(without_clone)):
+            assert cm_cli_util.find_legacy_manager_clone() is False
+
+    def test_result_is_cached_per_workspace(self, tmp_path):
+        (tmp_path / "custom_nodes").mkdir()
+        with (
+            patch.object(cm_cli_util.workspace_manager, "workspace_path", str(tmp_path)),
+            patch("comfy_cli.command.custom_nodes.cm_cli_util.os.listdir", return_value=[]) as mock_listdir,
+        ):
+            assert cm_cli_util.find_legacy_manager_clone() is False
+            assert cm_cli_util.find_legacy_manager_clone() is False
+            mock_listdir.assert_called_once()
 
     def test_ignores_unrelated_custom_nodes(self, tmp_path):
         custom_nodes = tmp_path / "custom_nodes"

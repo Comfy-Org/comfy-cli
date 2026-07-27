@@ -1026,6 +1026,16 @@ class TestManagerModeReconciliation:
             ("enable-gui", False, False, "not-installed", "none"),
             ("disable-gui", False, False, "not-installed", "none"),
             ("enable-legacy-gui", False, False, "not-installed", "none"),
+            # Stale global config claiming the manager is enabled, but only a
+            # legacy clone is on disk — cm-cli is unavailable, so report "legacy".
+            ("enable-gui", False, True, "legacy", "legacy-clone"),
+            ("disable-gui", False, True, "legacy", "legacy-clone"),
+            ("enable-legacy-gui", False, True, "legacy", "legacy-clone"),
+            # An enabling config that matches reality is left alone.
+            ("enable-gui", True, False, "enable-gui", "venv-package"),
+            ("disable-gui", True, False, "disable-gui", "venv-package"),
+            # An unrecognised mode string is passed through untouched.
+            ("some-future-mode", False, False, "some-future-mode", "none"),
             # "disable" is user intent — never rewritten.
             ("disable", True, False, "disable", "venv-package"),
             ("disable", False, True, "disable", "legacy-clone"),
@@ -1064,6 +1074,15 @@ class TestManagerModeReconciliation:
 
         assert result[1][0] == "Manager"
         assert "Not Installed" in result[1][1]
+
+    def test_fill_print_table_does_not_claim_gui_enabled_for_legacy_clone(self):
+        """A stale enable-gui config plus a clone must not render as "GUI Enabled"."""
+        with self._env(configured_mode="enable-gui", has_cm_cli=False, has_legacy_clone=True) as ws:
+            result = ws.fill_print_table()
+
+        assert result[1][0] == "Manager"
+        assert "Legacy clone (cm-cli unavailable)" in result[1][1]
+        assert "GUI Enabled" not in result[1][1]
 
 
 class TestResolveUvCompile:

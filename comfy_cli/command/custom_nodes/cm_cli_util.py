@@ -25,19 +25,11 @@ _dependency_cmds = {
 }
 
 
-@lru_cache(maxsize=1)
-def find_cm_cli() -> bool:
-    """Check if cm_cli module is available in the workspace Python.
-
-    First checks the workspace venv Python (primary path — matches the Python
-    used by execute_cm_cli). Falls back to the current Python environment only
-    when the workspace Python is the same as sys.executable.
-
-    Results are cached for the session lifetime.
-    """
-    ws = workspace_manager.workspace_path
-    if ws:
-        python = resolve_workspace_python(ws)
+@lru_cache(maxsize=8)
+def _probe_cm_cli(workspace_path: str | None) -> bool:
+    """Probe for the ``cm_cli`` module for one workspace. Cached per workspace path."""
+    if workspace_path:
+        python = resolve_workspace_python(workspace_path)
         if python != sys.executable:
             # Workspace uses a different Python — check that one
             try:
@@ -54,25 +46,28 @@ def find_cm_cli() -> bool:
     return importlib.util.find_spec("cm_cli") is not None
 
 
-@lru_cache(maxsize=1)
-def find_legacy_manager_clone() -> bool:
-    """Check if ComfyUI-Manager exists as a plain git clone under ``custom_nodes/``.
+def find_cm_cli() -> bool:
+    """Check if cm_cli module is available in the workspace Python.
 
-    This is the pre-pip-package install shape: the Manager repo cloned straight
-    into ``custom_nodes/``. It is invisible to :func:`find_cm_cli`, which only
-    tests whether the ``cm_cli`` module imports in the workspace Python.
+    First checks the workspace venv Python (primary path — matches the Python
+    used by execute_cm_cli). Falls back to the current Python environment only
+    when the workspace Python is the same as sys.executable.
 
-    Detection is by marker file, not directory name — users clone the Manager
-    under arbitrary names. Directories ending in ``.disabled`` (the Manager's own
-    disable convention) are skipped.
-
-    Results are cached for the session lifetime.
+    Results are cached per workspace path, so resolving (or switching) the
+    workspace after a first call re-probes instead of returning a stale answer.
     """
     ws = workspace_manager.workspace_path
-    if not ws:
-        return False
+    return _probe_cm_cli(str(ws) if ws else None)
 
-    custom_nodes = os.path.join(ws, "custom_nodes")
+
+# Preserve the ``lru_cache`` API callers rely on to force a re-probe.
+find_cm_cli.cache_clear = _probe_cm_cli.cache_clear
+
+
+@lru_cache(maxsize=8)
+def _scan_for_legacy_manager_clone(workspace_path: str) -> bool:
+    """Scan one workspace's ``custom_nodes/`` for a Manager clone. Cached per path."""
+    custom_nodes = os.path.join(workspace_path, "custom_nodes")
     try:
         entries = os.listdir(custom_nodes)
     except OSError:
@@ -93,6 +88,30 @@ def find_legacy_manager_clone() -> bool:
             continue
 
     return False
+
+
+def find_legacy_manager_clone() -> bool:
+    """Check if ComfyUI-Manager exists as a plain git clone under ``custom_nodes/``.
+
+    This is the pre-pip-package install shape: the Manager repo cloned straight
+    into ``custom_nodes/``. It is invisible to :func:`find_cm_cli`, which only
+    tests whether the ``cm_cli`` module imports in the workspace Python.
+
+    Detection is by marker file, not directory name — users clone the Manager
+    under arbitrary names. Directories ending in ``.disabled`` (the Manager's own
+    disable convention) are skipped.
+
+    Results are cached per workspace path, so an unresolved workspace on the
+    first call does not poison the answer for the rest of the session.
+    """
+    ws = workspace_manager.workspace_path
+    if not ws:
+        return False
+    return _scan_for_legacy_manager_clone(str(ws))
+
+
+# Preserve the ``lru_cache`` API callers rely on to force a re-scan.
+find_legacy_manager_clone.cache_clear = _scan_for_legacy_manager_clone.cache_clear
 
 
 def detect_manager_installation() -> str:
