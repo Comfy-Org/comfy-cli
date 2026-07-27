@@ -11,10 +11,11 @@ import requests
 import typer
 from rich.markup import escape
 
-from comfy_cli import constants, download_state, tracking, ui, utils
+from comfy_cli import constants, download_state, tracking, ui
 from comfy_cli.config_manager import ConfigManager
 from comfy_cli.constants import DEFAULT_COMFY_MODEL_PATH
 from comfy_cli.file_utils import (
+    DownloadCancelled,
     DownloadException,
     _friendly_network_error,
     check_unauthorized,
@@ -425,16 +426,39 @@ def _hf_headers() -> dict | None:
     return {"Authorization": f"Bearer {token}"}
 
 
+def _host_allowed(url: str, hosts: tuple[str, ...]) -> bool:
+    """True when ``url``'s host is one of ``hosts`` or a subdomain of one."""
+    try:
+        host = (urlparse(url).hostname or "").lower()
+    except ValueError:
+        return False
+    if not host:
+        return False
+    return host in hosts or host.endswith(tuple(f".{h}" for h in hosts))
+
+
 def _worker_headers(state: download_state.DownloadState) -> dict | None:
     """Derive the transfer headers the worker should use.
 
     The state file deliberately records only *which* credential the resolved URL
     needs; the secret itself is re-read from config here, exactly as the
     foreground ``download()`` does.
+
+    The url is re-checked against the credential's own hosts before the token is
+    attached. ``needs_*_auth`` and ``url`` are separate fields of a file on disk,
+    so nothing structurally stops them from disagreeing — and a record that says
+    "use the CivitAI token" against ``https://attacker.example`` would hand the
+    user's bearer token to the attacker. The check costs nothing and makes that
+    combination inert.
     """
     if state.needs_civitai_auth:
-        return _civitai_headers()
+        headers = _civitai_headers() or {}
+        if not _host_allowed(state.url, constants.CIVITAI_ALLOWED_HOSTS):
+            headers.pop("Authorization", None)
+        return headers
     if state.needs_hf_auth:
+        if not _host_allowed(state.url, constants.HF_ALLOWED_HOSTS):
+            return None
         return _hf_headers()
     return None
 
@@ -522,17 +546,16 @@ def _submit_background_download(
         )
         raise typer.Exit(code=1) from e
 
-    # The worker writes its own os.getpid() on startup, but it may not have run
-    # yet — recording the Popen pid here means `download-cancel` works in that
-    # window. Re-read first and only patch an unclaimed file: a fast worker on a
-    # small file can already be `downloading` (or done) by now, and blindly
-    # writing this stale in-memory copy back would clobber its progress.
+    # Deliberately *not* writing the Popen pid back here. Only the worker
+    # records its pid, together with its start time, so the two can never
+    # disagree and a pid can never be trusted without its identity proof. The
+    # window before the worker's first write is covered instead by
+    # `reconcile`'s startup grace (a pidless `starting` record stays `starting`)
+    # and by the cancel sentinel (a worker that comes up after `download-cancel`
+    # sees the request and exits without downloading) — which also removes the
+    # read/write race this write-back used to have with a fast worker.
     on_disk = download_state.read_path(state_file)
     if on_disk is not None:
-        if on_disk.pid is None:
-            on_disk.pid = pid
-            with contextlib.suppress(OSError, ValueError):
-                download_state.write_path(state_file, on_disk)
         state = on_disk
 
     print(f"Downloading in the background: [cyan]{state.id}[/cyan] → {dest}")
@@ -566,7 +589,25 @@ def _download_worker(
         # only happens if it was deleted underneath us. Nothing to do.
         raise typer.Exit(code=1)
 
+    cancel_marker = download_state.cancel_marker_for(path)
+
+    def cancelled() -> bool:
+        return cancel_marker.exists()
+
+    # `download-cancel` may have landed while we were still starting up — it
+    # can't signal a process that has no pid on file yet, so the sentinel is how
+    # it reaches us. Check before claiming the record, and never write a status
+    # after one appears.
+    if cancelled() or state.is_terminal:
+        if not state.is_terminal:
+            state.status = "cancelled"
+            state.error = None
+            with contextlib.suppress(OSError):
+                download_state.write_path(path, state)
+        raise typer.Exit(code=0)
+
     state.pid = os.getpid()
+    state.pid_create_time = download_state.process_create_time(os.getpid())
     state.status = "downloading"
     download_state.write_path(path, state)
 
@@ -581,6 +622,11 @@ def _download_worker(
         if now - last_write < download_state.PROGRESS_THROTTLE_S:
             return
         last_write = now
+        # Poll for cancellation on the same tick as the progress write, so a
+        # cancelled download is never resurrected to `downloading` by a write
+        # that raced it.
+        if cancelled():
+            raise DownloadCancelled()
         with contextlib.suppress(OSError):
             download_state.write_path(path, state)
 
@@ -592,6 +638,15 @@ def _download_worker(
             downloader=state.downloader,
             progress_callback=on_progress,
         )
+    except DownloadCancelled:
+        state.status = "cancelled"
+        state.error = None
+        with contextlib.suppress(OSError):
+            pathlib.Path(state.dest).unlink(missing_ok=True)
+        state.completed_bytes = 0
+        with contextlib.suppress(OSError):
+            download_state.write_path(path, state)
+        raise typer.Exit(code=0) from None
     except BaseException as e:  # noqa: BLE001 — any failure must reach the state file
         state.status = "failed"
         state.error = _friendly_network_error(e) if isinstance(e, Exception) else f"{type(e).__name__}"
@@ -599,6 +654,10 @@ def _download_worker(
             download_state.write_path(path, state)
         raise typer.Exit(code=1) from None
 
+    # A transfer that beat the cancel to the finish line stays `completed` and
+    # keeps its file — `download-cancel` re-reads this record before deciding
+    # what to delete, so both sides agree that a fully-downloaded model is not
+    # something to throw away.
     state.status = "completed"
     state.error = None
     actual = pathlib.Path(state.dest)
@@ -613,7 +672,15 @@ def _download_worker(
 
 
 def _render_download_rows(rows: list[dict]) -> None:
-    """Human rendering shared by `download-status` and `downloads`."""
+    """Human rendering shared by `download-status` and `downloads`.
+
+    A no-op in JSON/NDJSON mode: `ui.display_table` writes to its own Rich
+    console on stdout, which is reserved for the envelope, and a table prepended
+    to the JSON would make the output unparseable for the agents this contract
+    exists for. They get the same rows in `downloads` / the status payload.
+    """
+    if get_renderer().is_json():
+        return
 
     def _size(value) -> str:
         if value is None:
@@ -709,36 +776,81 @@ def download_cancel(
         )
         raise typer.Exit(code=1)
 
+    # Reconcile before deciding there is anything to cancel: a worker SIGKILLed
+    # after the last byte landed but before it could persist `completed` still
+    # reads as `downloading`, and cancelling that would delete a finished model.
+    # Only a *finished* transfer short-circuits — a dead worker that left a
+    # partial behind is exactly what the user is trying to clean up, so it goes
+    # through the normal cancel path below.
+    if state.status not in download_state.TERMINAL_STATUSES:
+        fresh = download_state.reconcile(state)
+        if fresh.status == "completed":
+            state = fresh
+            with contextlib.suppress(OSError, ValueError):
+                download_state.write(workspace, state)
+
     if state.status in download_state.TERMINAL_STATUSES:
         payload = download_state.status_payload(state)
         print(f"Download {download_id} is already {state.status}; nothing to cancel.")
         renderer.emit(payload, command="model download-cancel", changed=False)
         return
 
-    killed = download_state.kill_worker(state.pid)
-    # Give the worker a moment to die so it can't resurrect the state file with
-    # a stale progress write after we mark it cancelled.
-    if killed:
-        deadline = time.monotonic() + 2.0
-        while time.monotonic() < deadline and utils.is_running(state.pid):
-            time.sleep(0.05)
+    # Sentinel first, then the signal. The sentinel is what a worker that is
+    # still starting up (no pid on file yet) — or one that outlives SIGTERM —
+    # will see, and once it exists the worker can only write `cancelled`.
+    with contextlib.suppress(OSError, ValueError):
+        download_state.request_cancel(download_state.cancel_path(workspace, download_id))
+
+    # Re-read before signalling: a worker that was still starting up when we
+    # first read has claimed its pid by now, and stopping the wrong (or no)
+    # process is how a "cancelled" download keeps writing bytes.
+    state = download_state.read(workspace, download_id) or state
+
+    # Escalates to SIGKILL if the worker doesn't go quietly; nothing below may
+    # touch the destination file until it is confirmed gone, or the worker would
+    # simply re-create what we delete.
+    stopped = download_state.stop_worker(state)
+
+    # Re-read the worker's last word before touching the destination. Our copy
+    # predates the kill and can still be missing the total the worker learned
+    # from the response headers — and that total is the only thing that tells a
+    # finished file from a partial one.
+    state = download_state.read(workspace, download_id) or state
 
     removed = False
+    partial = pathlib.Path(state.dest)
+    size = None
     with contextlib.suppress(OSError):
-        partial = pathlib.Path(state.dest)
-        if partial.exists():
-            partial.unlink()
-            removed = True
+        size = partial.stat().st_size
 
-    state.status = "cancelled"
-    state.error = None
-    if removed:
-        state.completed_bytes = 0
+    finished = state.status == "completed" or (
+        size is not None and state.total_bytes is not None and size >= state.total_bytes
+    )
+    if finished:
+        # The bytes are all there. Keep the file and record what actually
+        # happened rather than deleting a complete model out from under the user.
+        state.status = "completed"
+        state.error = None
+        if size is not None:
+            state.completed_bytes = size
+    else:
+        if stopped and size is not None:
+            with contextlib.suppress(OSError):
+                partial.unlink()
+                removed = True
+        state.status = "cancelled"
+        state.error = None if stopped else "worker may still be running; partial file left in place"
+        if removed:
+            state.completed_bytes = 0
+
     with contextlib.suppress(OSError, ValueError):
         download_state.write(workspace, state)
 
     payload = download_state.status_payload(state)
-    print(f"Cancelled download [cyan]{download_id}[/cyan].")
+    if finished:
+        print(f"Download [cyan]{download_id}[/cyan] had already finished; kept {partial}.")
+    else:
+        print(f"Cancelled download [cyan]{download_id}[/cyan].")
     renderer.emit(payload, command="model download-cancel", changed=True)
 
 

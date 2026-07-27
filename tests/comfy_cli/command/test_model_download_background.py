@@ -431,7 +431,11 @@ class TestWorkerThrottle:
 
     def test_worker_rederives_auth_headers_from_config_not_state(self, workspace, monkeypatch, tmp_path):
         """The state file records *which* credential is needed, never the secret."""
-        state = _state(dest=str(tmp_path / "m.safetensors"), needs_civitai_auth=True)
+        state = _state(
+            url="https://civitai.com/api/download/models/1",
+            dest=str(tmp_path / "m.safetensors"),
+            needs_civitai_auth=True,
+        )
         path = download_state.write(workspace, state)
         assert "Authorization" not in path.read_text()
 
@@ -446,6 +450,41 @@ class TestWorkerThrottle:
         models._download_worker(state_file=str(path))
 
         assert seen["headers"] == {"Authorization": "Bearer from-config"}
+
+
+class TestWorkerCredentialScoping:
+    """A state file is data on disk; `needs_*_auth` and `url` can disagree.
+
+    Whoever can write one must not be able to aim the user's bearer token at a
+    host of their choosing.
+    """
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://attacker.example/m.safetensors",
+            "https://civitai.com.attacker.example/m.safetensors",
+            "https://notcivitai.com/m.safetensors",
+        ],
+    )
+    def test_civitai_token_is_withheld_from_a_foreign_host(self, monkeypatch, url):
+        monkeypatch.setattr(models, "_civitai_headers", lambda: {"Authorization": "Bearer secret"})
+        headers = models._worker_headers(_state(url=url, needs_civitai_auth=True))
+        assert "Authorization" not in (headers or {})
+
+    @pytest.mark.parametrize("url", ["https://civitai.com/x", "https://cdn.civitai.com/x", "https://civitai.red/x"])
+    def test_civitai_token_is_sent_to_civitai(self, monkeypatch, url):
+        monkeypatch.setattr(models, "_civitai_headers", lambda: {"Authorization": "Bearer secret"})
+        assert models._worker_headers(_state(url=url, needs_civitai_auth=True))["Authorization"] == "Bearer secret"
+
+    def test_hf_token_is_withheld_from_a_foreign_host(self, monkeypatch):
+        monkeypatch.setattr(models, "_hf_headers", lambda: {"Authorization": "Bearer secret"})
+        assert models._worker_headers(_state(url="https://attacker.example/m", needs_hf_auth=True)) is None
+
+    @pytest.mark.parametrize("url", ["https://huggingface.co/x", "https://cdn-lfs.huggingface.co/x", "https://hf.co/x"])
+    def test_hf_token_is_sent_to_hugging_face(self, monkeypatch, url):
+        monkeypatch.setattr(models, "_hf_headers", lambda: {"Authorization": "Bearer secret"})
+        assert models._worker_headers(_state(url=url, needs_hf_auth=True))["Authorization"] == "Bearer secret"
 
 
 # ---------------------------------------------------------------------------
@@ -538,13 +577,33 @@ class TestSubmitEnvelope:
         assert data["dest"] == str(workspace / "models" / "loras" / "m.safetensors")
         assert Path(data["dest"]).is_absolute()
 
-    def test_writes_a_state_file_with_the_spawn_pid(self, workspace, monkeypatch, json_renderer):
+    def test_writes_a_state_file_the_worker_has_not_claimed_yet(self, workspace, monkeypatch, json_renderer):
+        """The submitter never writes a pid — only the worker does, together
+        with the start time that proves the pid is still that worker."""
         self._submit(workspace, monkeypatch)
         download_id = json_renderer()["data"]["download_id"]
 
         state = download_state.read(workspace, download_id)
-        assert (state.pid, state.status, state.schema) == (31337, "starting", "download-state/1")
+        assert (state.pid, state.pid_create_time) == (None, None)
+        assert (state.status, state.schema) == ("starting", "download-state/1")
         assert state.url == "https://example.com/m.safetensors"
+
+    def test_a_pidless_starting_record_is_not_declared_dead_immediately(self, workspace, json_renderer, tmp_path):
+        """Reconcile has to tolerate the worker's interpreter startup, or every
+        poll issued in the first moments would report a phantom failure."""
+        state = _state(dest=str(tmp_path / "m.safetensors"), status="starting", pid=None)
+        download_state.write(workspace, state)
+
+        models.download_status(None, download_id=state.id)
+        assert json_renderer()["data"]["status"] == "starting"
+
+    def test_a_starting_record_that_never_claims_a_pid_eventually_fails(self, workspace, json_renderer, tmp_path):
+        state = _state(dest=str(tmp_path / "m.safetensors"), status="starting", pid=None)
+        state.started_at = "2020-01-01T00:00:00+00:00"
+        download_state.write(workspace, state)
+
+        models.download_status(None, download_id=state.id)
+        assert json_renderer()["data"]["status"] == "failed"
 
     def test_creates_the_destination_directory_up_front(self, workspace, monkeypatch, json_renderer):
         self._submit(workspace, monkeypatch)
@@ -783,14 +842,18 @@ class TestPollVerbs:
     def test_cancel_kills_the_worker_and_removes_the_partial(self, workspace, json_renderer, tmp_path):
         dest = tmp_path / "m.safetensors"
         dest.write_bytes(b"x" * 10)
-        state = _state(dest=str(dest), status="downloading", pid=5150, total_bytes=100, completed_bytes=10)
+        state = _state(
+            dest=str(dest), status="downloading", pid=5150, pid_create_time=1.0, total_bytes=100, completed_bytes=10
+        )
         download_state.write(workspace, state)
 
-        with patch.object(download_state, "kill_worker", return_value=True) as kill:
-            with patch("comfy_cli.utils.is_running", return_value=False):
+        # Alive for the identity check, then gone once it has been signalled.
+        alive = [True, True, False]
+        with patch.object(download_state, "is_worker_process", side_effect=lambda *a: alive.pop(0) if alive else False):
+            with patch.object(download_state, "kill_worker", return_value=True) as kill:
                 models.download_cancel(None, download_id=state.id)
 
-        kill.assert_called_once_with(5150)
+        kill.assert_called_once_with(5150, 1.0)
         assert not dest.exists()
 
         env = json_renderer()
@@ -799,6 +862,44 @@ class TestPollVerbs:
         assert env["data"]["status"] == "cancelled"
         assert env["data"]["completed_bytes"] == 0
         assert download_state.read(workspace, state.id).status == "cancelled"
+
+    def test_cancel_writes_the_sentinel_before_signalling(self, workspace, json_renderer, tmp_path):
+        """A worker still in interpreter startup has no pid to signal; the
+        sentinel is the only thing that reaches it."""
+        state = _state(dest=str(tmp_path / "m.safetensors"), status="starting", pid=None)
+        download_state.write(workspace, state)
+
+        models.download_cancel(None, download_id=state.id)
+
+        assert download_state.cancel_path(workspace, state.id).exists()
+        assert json_renderer()["data"]["status"] == "cancelled"
+
+    def test_cancel_keeps_a_file_that_finished_during_the_kill_window(self, workspace, json_renderer, tmp_path):
+        """A worker SIGKILLed after the last byte landed but before it could
+        persist `completed` still reads as `downloading`. Deleting its file
+        would be silent data loss."""
+        dest = tmp_path / "m.safetensors"
+        dest.write_bytes(b"x" * 100)
+        state = _state(dest=str(dest), status="downloading", pid=5150, total_bytes=100, completed_bytes=10)
+        download_state.write(workspace, state)
+
+        with patch.object(download_state, "is_worker_process", return_value=False):
+            models.download_cancel(None, download_id=state.id)
+
+        assert dest.exists(), "a fully-downloaded file must never be deleted by cancel"
+        assert json_renderer()["data"]["status"] == "completed"
+
+    def test_cancel_of_a_dead_worker_still_clears_the_partial(self, workspace, json_renderer, tmp_path):
+        dest = tmp_path / "m.safetensors"
+        dest.write_bytes(b"x" * 10)
+        state = _state(dest=str(dest), status="downloading", pid=5150, total_bytes=100, completed_bytes=10)
+        download_state.write(workspace, state)
+
+        with patch.object(download_state, "is_worker_process", return_value=False):
+            models.download_cancel(None, download_id=state.id)
+
+        assert not dest.exists()
+        assert json_renderer()["data"]["status"] == "cancelled"
 
     def test_cancel_of_a_terminal_download_is_a_no_op(self, workspace, json_renderer, tmp_path):
         dest = tmp_path / "m.safetensors"
@@ -867,11 +968,15 @@ class TestKillWorker:
         import signal
 
         killed = []
+        monkeypatch.setattr(download_state, "is_worker_process", lambda *a: True)
         monkeypatch.setattr(os, "getpgid", lambda pid: pid)
         monkeypatch.setattr(os, "killpg", lambda pgid, sig: killed.append((pgid, sig)))
 
-        assert download_state.kill_worker(4242) is True
+        assert download_state.kill_worker(4242, 1.0) is True
         assert killed == [(4242, signal.SIGTERM)]
+
+        assert download_state.kill_worker(4242, 1.0, force=True) is True
+        assert killed[-1] == (4242, signal.SIGKILL)
 
     @pytest.mark.skipif(sys.platform == "win32", reason="killpg is POSIX-only")
     def test_an_already_dead_worker_reports_false(self, monkeypatch):
@@ -879,3 +984,227 @@ class TestKillWorker:
         monkeypatch.setattr("psutil.Process", MagicMock(side_effect=Exception("no such process")))
 
         assert download_state.kill_worker(4242) is False
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="killpg is POSIX-only")
+    def test_a_recycled_pid_is_never_signalled(self, monkeypatch):
+        """The worker died and the OS handed its number to something else.
+        Signalling it would kill an unrelated process group."""
+        killed = []
+        monkeypatch.setattr(os, "getpgid", lambda pid: pid)
+        monkeypatch.setattr(os, "killpg", lambda pgid, sig: killed.append((pgid, sig)))
+        monkeypatch.setattr("psutil.Process", MagicMock(return_value=MagicMock(create_time=lambda: 9999.0)))
+
+        assert download_state.kill_worker(4242, 1.0) is False
+        assert killed == []
+
+    def test_a_pid_with_no_recorded_start_time_falls_back_to_argv(self, monkeypatch):
+        stranger = MagicMock(cmdline=lambda: ["/usr/bin/vim", "notes.txt"])
+        monkeypatch.setattr("psutil.Process", MagicMock(return_value=stranger))
+        assert download_state.is_worker_process(4242, None) is False
+
+        worker = MagicMock(cmdline=lambda: [sys.executable, "-m", "comfy_cli", "model", "_download-worker", "--state"])
+        monkeypatch.setattr("psutil.Process", MagicMock(return_value=worker))
+        assert download_state.is_worker_process(4242, None) is True
+
+
+class TestMachineOutputIsParseable:
+    """The whole point of the envelope is that `jq` / `json.loads` can read it.
+
+    `ui.display_table` writes to its own Rich console on stdout, so a table
+    rendered in JSON mode would be prepended to the envelope and break every
+    strict consumer.
+    """
+
+    def test_status_emits_only_the_envelope(self, workspace, capsys, tmp_path):
+        set_renderer(Renderer(mode=OutputMode.JSON, version="test"))
+        dest = tmp_path / "m.safetensors"
+        dest.write_bytes(b"x" * 50)
+        state = _state(dest=str(dest), status="downloading", pid=os.getpid(), total_bytes=200)
+        download_state.write(workspace, state)
+
+        models.download_status(None, download_id=state.id)
+
+        out = capsys.readouterr().out
+        assert json.loads(out)["data"]["id"] == state.id
+
+    def test_downloads_emits_only_the_envelope(self, workspace, capsys, tmp_path):
+        set_renderer(Renderer(mode=OutputMode.JSON, version="test"))
+        dest = tmp_path / "m.safetensors"
+        dest.write_bytes(b"x" * 50)
+        download_state.write(workspace, _state(dest=str(dest), status="downloading", pid=os.getpid(), total_bytes=200))
+
+        models.downloads(None)
+
+        assert json.loads(capsys.readouterr().out)["data"]["total"] == 1
+
+
+class TestCancellationReachesTheWorker:
+    """SIGTERM alone doesn't cancel: a worker that is still starting up has no
+    pid to signal, and one wedged in a syscall can outlive the grace period.
+    Either way it must not go on downloading — or resurrect a cancelled record.
+    """
+
+    def test_worker_exits_without_downloading_when_the_sentinel_is_already_there(
+        self, workspace, monkeypatch, tmp_path
+    ):
+        dest = tmp_path / "m.safetensors"
+        state = _state(dest=str(dest), status="starting", pid=None)
+        path = download_state.write(workspace, state)
+        download_state.request_cancel(download_state.cancel_path(workspace, state.id))
+
+        monkeypatch.setattr(
+            models,
+            "download_file",
+            MagicMock(side_effect=AssertionError("a cancelled download must never transfer bytes")),
+        )
+        with pytest.raises(typer.Exit) as exc:
+            models._download_worker(state_file=str(path))
+
+        assert exc.value.exit_code == 0
+        assert download_state.read(workspace, state.id).status == "cancelled"
+        assert not dest.exists()
+
+    def test_worker_aborts_mid_transfer_and_clears_the_partial(self, workspace, monkeypatch, tmp_path):
+        dest = tmp_path / "m.safetensors"
+        state = _state(dest=str(dest), status="starting", pid=None)
+        path = download_state.write(workspace, state)
+
+        def transfer(url, filepath, headers, downloader, progress_callback):
+            filepath.write_bytes(b"partial")
+            # The cancel lands after the transfer is already under way.
+            download_state.request_cancel(download_state.cancel_path(workspace, state.id))
+            progress_callback(7, 4096)
+
+        monkeypatch.setattr(models, "download_file", transfer)
+        monkeypatch.setattr(download_state, "PROGRESS_THROTTLE_S", 0.0)
+
+        with pytest.raises(typer.Exit) as exc:
+            models._download_worker(state_file=str(path))
+
+        assert exc.value.exit_code == 0
+        final = download_state.read(workspace, state.id)
+        assert (final.status, final.completed_bytes) == ("cancelled", 0)
+        assert not dest.exists(), "the partial file must not survive the cancel"
+
+    def test_a_transfer_that_beat_the_cancel_keeps_its_file(self, workspace, json_renderer, monkeypatch, tmp_path):
+        """Both sides have to agree on this one, or cancel deletes a model that
+        the state file calls `completed`."""
+        dest = tmp_path / "m.safetensors"
+        state = _state(dest=str(dest), status="starting", pid=None)
+        path = download_state.write(workspace, state)
+
+        def transfer(url, filepath, headers, downloader, progress_callback):
+            filepath.write_bytes(b"done")
+            download_state.request_cancel(download_state.cancel_path(workspace, state.id))
+
+        monkeypatch.setattr(models, "download_file", transfer)
+        models._download_worker(state_file=str(path))
+        assert download_state.read(workspace, state.id).status == "completed"
+
+        with patch.object(download_state, "is_worker_process", return_value=False):
+            models.download_cancel(None, download_id=state.id)
+
+        assert dest.exists()
+        assert json_renderer()["data"]["status"] == "completed"
+
+    def test_cancel_does_not_delete_a_finished_file_when_the_total_was_unknown(
+        self, workspace, json_renderer, monkeypatch, tmp_path
+    ):
+        """The canceller's in-memory copy predates the worker learning the size
+        from the response headers; only the file on disk is up to date."""
+        dest = tmp_path / "m.safetensors"
+        state = _state(dest=str(dest), status="downloading", pid=None, total_bytes=None)
+        download_state.write(workspace, state)
+
+        # The worker finishes (and records the total) between our read and the kill.
+        def stop(_state, **_kwargs):
+            done = download_state.read(workspace, state.id)
+            dest.write_bytes(b"x" * 4096)
+            done.status, done.total_bytes, done.completed_bytes = "completed", 4096, 4096
+            download_state.write(workspace, done)
+            return True
+
+        monkeypatch.setattr(download_state, "stop_worker", stop)
+        models.download_cancel(None, download_id=state.id)
+
+        assert dest.exists(), "cancel must not delete a model the worker had already finished"
+        assert json_renderer()["data"]["status"] == "completed"
+
+
+class TestStateFilePermissions:
+    """A resolved url can carry a presigned/SAS query token, so these files are
+    secrets on a shared host — and a writable one is an attack surface."""
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX mode bits")
+    def test_directory_is_owner_only(self, workspace):
+        base = download_state.state_dir(workspace)
+        assert base.stat().st_mode & 0o777 == 0o700
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX mode bits")
+    def test_state_file_is_owner_only(self, workspace):
+        path = download_state.write(workspace, _state())
+        assert path.stat().st_mode & 0o777 == 0o600
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX mode bits")
+    def test_a_preexisting_loose_directory_is_tightened(self, workspace):
+        base = workspace / download_state.STATE_DIRNAME
+        base.mkdir(mode=0o777)
+        assert download_state.state_dir(workspace).stat().st_mode & 0o777 == 0o700
+
+
+class TestCorruptStateFiles:
+    """A tampered or truncated file must read as *absent*, not construct a
+    DownloadState that raises a TypeError deep inside kill_worker/reconcile and
+    takes `downloads` down with it."""
+
+    @pytest.mark.parametrize(
+        "field,value",
+        [
+            ("pid", "not-a-pid"),
+            ("pid", True),
+            ("total_bytes", "1024"),
+            ("completed_bytes", None),
+            ("needs_civitai_auth", "yes"),
+            ("error", 42),
+            ("dest", ["/tmp/x"]),
+            ("pid_create_time", "soon"),
+        ],
+    )
+    def test_a_wrongly_typed_field_reads_as_absent(self, workspace, tmp_path, field, value):
+        path = tmp_path / "corrupt.json"
+        payload = _state().to_dict()
+        payload[field] = value
+        path.write_text(json.dumps(payload), encoding="utf-8")
+
+        assert download_state.read_path(path) is None
+
+    def test_list_all_skips_a_corrupt_file_instead_of_crashing(self, workspace):
+        good = _state()
+        download_state.write(workspace, good)
+        (download_state.state_dir(workspace) / "bad.json").write_text('{"pid": "nope"}', encoding="utf-8")
+
+        assert [s.id for s in download_state.list_all(workspace)] == [good.id]
+
+
+class TestWorkerIdentity:
+    def test_reconcile_ignores_liveness_when_the_start_time_disagrees(self, tmp_path):
+        """A live-but-recycled pid must not pin a dead transfer at `downloading`
+        forever — pollers would loop on it indefinitely."""
+        dest = tmp_path / "m.safetensors"
+        dest.write_bytes(b"x" * 10)
+        state = _state(dest=str(dest), status="downloading", pid=4242, pid_create_time=1.0, total_bytes=100)
+
+        with patch("psutil.Process", MagicMock(return_value=MagicMock(create_time=lambda: 9999.0))):
+            fresh = download_state.reconcile(state, pid_alive=lambda pid: True)
+
+        assert fresh.status == "failed"
+
+    def test_reconcile_trusts_a_matching_start_time(self, tmp_path):
+        dest = tmp_path / "m.safetensors"
+        dest.write_bytes(b"x" * 10)
+        state = _state(dest=str(dest), status="downloading", pid=4242, pid_create_time=1.0, total_bytes=100)
+
+        with patch("psutil.Process", MagicMock(return_value=MagicMock(create_time=lambda: 1.0))):
+            fresh = download_state.reconcile(state, pid_alive=lambda pid: True)
+
+        assert fresh.status == "downloading"

@@ -24,16 +24,30 @@ class DownloadException(Exception):
 ProgressCallback = Callable[[int, int | None], None]
 
 
+class DownloadCancelled(Exception):
+    """Raised by a progress callback to abort an in-flight download.
+
+    The one thing an observer is allowed to say that isn't advisory. The
+    background-download worker polls its cancel sentinel from the progress
+    callback and raises this to unwind out of the transfer; every other
+    exception a callback raises is swallowed by :func:`_report_progress`.
+    """
+
+
 def _report_progress(callback: ProgressCallback | None, completed: int, total: int | None) -> None:
     """Invoke a progress callback, swallowing anything it raises.
 
     A misbehaving observer (a full disk while persisting state, say) must never
-    abort an otherwise-healthy download.
+    abort an otherwise-healthy download. :class:`DownloadCancelled` is the sole
+    exception: it means the caller wants the transfer stopped, not that
+    reporting failed.
     """
     if callback is None:
         return
     try:
         callback(completed, total)
+    except DownloadCancelled:
+        raise
     except Exception:  # noqa: BLE001 — progress reporting is strictly advisory
         pass
 
@@ -93,6 +107,11 @@ def _poll_aria2_download(download, progress_callback: ProgressCallback | None = 
     on every poll, with ``total_bytes`` None until aria2 knows the size. It is
     fed from the same ``completed_length``/``total_length`` pair the progress bar
     uses, so a background worker sees exactly what the human would.
+
+    If the callback raises :class:`DownloadCancelled` the daemon-side transfer is
+    removed before the exception propagates: with aria2 the bytes move inside the
+    aria2c process, not this one, so simply walking away would leave it happily
+    finishing a download the user just cancelled.
     """
     import time
 
@@ -114,30 +133,42 @@ def _poll_aria2_download(download, progress_callback: ProgressCallback | None = 
     ) as progress:
         task = progress.add_task("Downloading...", total=None)
 
-        while True:
-            try:
-                download.update()
-            except Exception as e:
-                raise DownloadException(f"Lost connection to aria2 RPC server: {e}") from e
+        try:
+            while True:
+                try:
+                    download.update()
+                except Exception as e:
+                    raise DownloadException(f"Lost connection to aria2 RPC server: {e}") from e
 
-            total = download.total_length if download.total_length > 0 else None
-            if total is not None:
-                progress.update(task, total=total, completed=download.completed_length)
-            _report_progress(progress_callback, download.completed_length, total)
-
-            if download.is_complete:
+                total = download.total_length if download.total_length > 0 else None
                 if total is not None:
-                    progress.update(task, completed=total)
-                    _report_progress(progress_callback, total, total)
-                break
-            elif download.has_failed:
-                raise DownloadException(
-                    f"aria2 download failed: {download.error_message} (code: {download.error_code})"
-                )
-            elif download.is_removed:
-                raise DownloadException("aria2 download was removed before completion")
+                    progress.update(task, total=total, completed=download.completed_length)
+                _report_progress(progress_callback, download.completed_length, total)
 
-            time.sleep(0.5)
+                if download.is_complete:
+                    if total is not None:
+                        progress.update(task, completed=total)
+                        _report_progress(progress_callback, total, total)
+                    break
+                elif download.has_failed:
+                    raise DownloadException(
+                        f"aria2 download failed: {download.error_message} (code: {download.error_code})"
+                    )
+                elif download.is_removed:
+                    raise DownloadException("aria2 download was removed before completion")
+
+                time.sleep(0.5)
+        except DownloadCancelled:
+            _remove_aria2_download(download)
+            raise
+
+
+def _remove_aria2_download(download) -> None:
+    """Stop and forget a daemon-side aria2 transfer. Best effort."""
+    try:
+        download.remove(force=True, files=True)
+    except Exception:  # noqa: BLE001 — the daemon may already have dropped it
+        pass
 
 
 def _download_file_aria2(

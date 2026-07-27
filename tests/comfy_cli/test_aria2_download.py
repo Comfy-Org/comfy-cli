@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, Mock, patch
 import pytest
 
 from comfy_cli import constants
-from comfy_cli.file_utils import DownloadException, _download_file_aria2, download_file
+from comfy_cli.file_utils import DownloadCancelled, DownloadException, _download_file_aria2, download_file
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -269,6 +269,72 @@ class TestAria2Download:
 
         with pytest.raises(DownloadException, match="Lost connection to aria2"):
             _download_file_aria2("http://example.com/f.bin", tmp_path / "f.bin")
+
+    def test_cancelling_removes_the_daemon_side_download(self, tmp_path, aria2_env, fake_aria2p):
+        """With aria2 the bytes move inside the aria2c daemon, not in this
+        process. Walking away from the poll loop would leave it finishing a
+        download the user just cancelled — and re-creating the file the caller
+        deleted. The transfer has to be removed over RPC."""
+        mock_download = Mock(
+            total_length=1024,
+            completed_length=10,
+            is_complete=False,
+            has_failed=False,
+            is_removed=False,
+            update=Mock(),
+        )
+        mock_api = Mock()
+        mock_api.add_uris.return_value = mock_download
+        fake_aria2p.API.return_value = mock_api
+
+        def cancel_on_first_progress(_completed, _total):
+            raise DownloadCancelled()
+
+        with pytest.raises(DownloadCancelled):
+            _download_file_aria2(
+                "http://example.com/f.bin",
+                tmp_path / "f.bin",
+                progress_callback=cancel_on_first_progress,
+            )
+
+        mock_download.remove.assert_called_once_with(force=True, files=True)
+
+    def test_a_failed_removal_does_not_mask_the_cancellation(self, tmp_path, aria2_env, fake_aria2p):
+        mock_download = Mock(
+            total_length=1024,
+            completed_length=10,
+            is_complete=False,
+            has_failed=False,
+            is_removed=False,
+            update=Mock(),
+            remove=Mock(side_effect=ConnectionError("RPC server gone")),
+        )
+        mock_api = Mock()
+        mock_api.add_uris.return_value = mock_download
+        fake_aria2p.API.return_value = mock_api
+
+        def cancel_on_first_progress(_completed, _total):
+            raise DownloadCancelled()
+
+        with pytest.raises(DownloadCancelled):
+            _download_file_aria2(
+                "http://example.com/f.bin",
+                tmp_path / "f.bin",
+                progress_callback=cancel_on_first_progress,
+            )
+
+    def test_an_ordinary_callback_failure_is_still_swallowed(self, tmp_path, mock_aria2_success):
+        """Progress reporting stays advisory; only cancellation aborts."""
+
+        def boom(_completed, _total):
+            raise RuntimeError("disk full while persisting state")
+
+        _download_file_aria2(
+            "http://example.com/f.bin",
+            tmp_path / "f.bin",
+            progress_callback=boom,
+        )
+        mock_aria2_success["download"].remove.assert_not_called()
 
     def test_file_missing_after_download_raises(self, tmp_path, aria2_env, fake_aria2p):
         """Error when aria2 reports success but file is not on disk."""
