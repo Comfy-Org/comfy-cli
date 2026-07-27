@@ -6,6 +6,10 @@ Three primitives:
     comfy workflow set-slot <file> ADDR=VALUE [...]    # tweak one or more
     comfy workflow vary <file> --slot ADDR='[v1,v2]'   # produce N variants
 
+Plus one read-only reader that needs no object_info at all:
+
+    comfy workflow notes <file>                        # what did the author write?
+
 Workflows must be **frontend-format** (the regular ComfyUI save — has
 ``nodes[]`` / ``links[]``, may contain subgraphs). API-format (the export
 that ``comfy run`` consumes) is rejected with a clean envelope and a hint.
@@ -404,6 +408,98 @@ def vary_cmd(
         for w in warnings:
             rprint(f"  [yellow]warning:[/yellow] {w}")
     renderer.emit(payload, command="workflow vary", changed=bool(written))
+
+
+# ---------------------------------------------------------------------------
+# notes
+# ---------------------------------------------------------------------------
+
+# The two documentation-note types the ComfyUI frontend registers
+# (``src/extensions/core/noteNode.ts``). Both are UI-only virtual nodes — they
+# carry no schema and are stripped by API conversion (see
+# ``workflow_to_api._UI_ONLY_NODE_TYPES``), so reading them is pure JSON
+# parsing: no object_info, no running server.
+_NOTE_NODE_TYPES = frozenset({"Note", "MarkdownNote"})
+
+
+def _extract_notes(workflow: dict) -> list[dict]:
+    """Collect Note/MarkdownNote nodes from the top-level graph and subgraph defs.
+
+    Note text is serialized at ``widgets_values[0]`` (the sole widget both note
+    types register — see ComfyUI_frontend ``src/extensions/core/noteNode.ts``).
+    """
+    out: list[dict] = []
+
+    def _scan(nodes, subgraph):
+        for n in nodes or []:
+            if not isinstance(n, dict) or n.get("type") not in _NOTE_NODE_TYPES:
+                continue
+            wv = n.get("widgets_values")
+            text = wv[0] if isinstance(wv, list) and wv and isinstance(wv[0], str) else ""
+            out.append(
+                {
+                    "id": n.get("id"),
+                    "type": n.get("type"),
+                    "title": n.get("title"),
+                    "text": text,
+                    "pos": n.get("pos"),
+                    "size": n.get("size"),
+                    "subgraph": subgraph,
+                }
+            )
+
+    if isinstance(workflow.get("nodes"), list):
+        _scan(workflow["nodes"], None)
+    definitions = workflow.get("definitions")
+    subgraphs = definitions.get("subgraphs") if isinstance(definitions, dict) else None
+    for sg in subgraphs or []:
+        if isinstance(sg, dict):
+            _scan(sg.get("nodes"), {"id": sg.get("id"), "name": sg.get("name")})
+    return out
+
+
+def _safe_console_text(value: Any) -> str:
+    """Render an untrusted workflow-file value safely for the pretty console.
+
+    Strips terminal control sequences (so note text can't emit ANSI/OSC escapes)
+    and then neutralizes rich markup (so a literal ``[/]`` in a note renders as
+    itself instead of raising ``MarkupError`` or spoofing styled output).
+    """
+    from rich.markup import escape
+
+    return escape(_strip_terminal_controls(str(value)))
+
+
+@app.command("notes", help="List the documentation notes (Note/MarkdownNote nodes) a workflow carries.")
+@tracking.track_command("workflow")
+def notes_cmd(
+    file: Annotated[str, typer.Argument(help="Frontend-format workflow JSON.")],
+):
+    """Read the authored notes out of a workflow — offline, read-only.
+
+    Notes are where template authors put the human-facing documentation an
+    agent otherwise has to ``grep`` the raw JSON for (LoRA trigger words, model
+    download links, usage caveats). API-format files are rejected: the
+    conversion drops note nodes entirely, so there is nothing to read there.
+    """
+    renderer = get_renderer()
+    p, workflow = _load_workflow_or_fail(renderer, file)
+    notes = _extract_notes(workflow)
+    payload = {"workflow": str(p), "count": len(notes), "notes": notes}
+    if renderer.is_pretty():
+        if not notes:
+            rprint("[dim]No notes in this workflow.[/dim]")
+        else:
+            # Every field interpolated below is untrusted file content, so it
+            # goes through _safe_console_text().
+            for n in notes:
+                sg = n["subgraph"]
+                where = f" (subgraph {_safe_console_text(sg.get('name') or sg.get('id'))})" if sg else ""
+                heading = _safe_console_text(n["title"] or n["type"] or "Note")
+                rprint(f"[bold]{heading}[/bold] [dim]#{_safe_console_text(n['id'])}{where}[/dim]")
+                rprint(_safe_console_text(n["text"]))
+                rprint()
+    renderer.emit(payload, command="workflow notes")
 
 
 # ---------------------------------------------------------------------------
