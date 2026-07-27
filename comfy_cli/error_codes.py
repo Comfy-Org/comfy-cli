@@ -534,6 +534,22 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "The prompt_id wasn't found in state files or the server API.",
         "check the prompt_id and ensure the job has completed",
     ),
+    # --- background model downloads (`model download --background`) ----------
+    ErrorCode(
+        "download_not_found",
+        "No background download state file matches the given download id.",
+        "list the known downloads with `comfy model downloads`",
+    ),
+    ErrorCode(
+        "download_state_unwritable",
+        "The `<workspace>/.comfy-downloads` state directory could not be written.",
+        "check the workspace is writable, or run without --background",
+    ),
+    ErrorCode(
+        "download_worker_spawn_failed",
+        "The detached background download worker could not be started.",
+        "run without --background to download in the foreground",
+    ),
     ErrorCode(
         "setup_missing_where",
         "--non-interactive requires --where (local or cloud).",

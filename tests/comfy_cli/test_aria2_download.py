@@ -326,7 +326,9 @@ class TestDownloadFileDispatch:
         """When downloader='aria2', aria2 backend is used."""
         with patch("comfy_cli.file_utils._download_file_aria2") as mock_aria2:
             download_file("http://example.com/f.bin", tmp_path / "f.bin", downloader="aria2")
-            mock_aria2.assert_called_once_with("http://example.com/f.bin", tmp_path / "f.bin", None)
+            # Trailing None is the optional progress_callback (unused in the
+            # foreground path; fed by the background download worker).
+            mock_aria2.assert_called_once_with("http://example.com/f.bin", tmp_path / "f.bin", None, None)
 
     def test_invalid_downloader_raises(self, tmp_path):
         """Invalid downloader value raises DownloadException."""
