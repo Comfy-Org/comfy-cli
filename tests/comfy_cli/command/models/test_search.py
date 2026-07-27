@@ -94,6 +94,33 @@ _CLOUD_FILES_LORAS = [
 ]
 
 
+# A local install as BE-4733 found it: the interesting models (flux, ltx) live
+# OUTSIDE `checkpoints`, spread across diffusion_models / loras / vae.
+_LOCAL_SEARCH_FOLDERS = ["checkpoints", "diffusion_models", "loras", "vae"]
+
+_LOCAL_FILES_BY_FOLDER: dict[str, list[dict[str, Any]]] = {
+    "checkpoints": [{"name": "sd_xl_base_1.0.safetensors", "pathIndex": 0}],
+    "diffusion_models": [
+        {"name": "flux1-dev.safetensors", "pathIndex": 0},
+        {"name": "ltx-video-2b-v0.9.safetensors", "pathIndex": 0},
+        {"name": "ltxv-13b-0.9.7-dev.safetensors", "pathIndex": 0},
+    ],
+    "loras": [{"name": "ltx-lora-detail.safetensors", "pathIndex": 0}],
+    "vae": [{"name": "ltx-vae.safetensors", "pathIndex": 0}],
+}
+
+
+def _local_routes() -> dict[str, Any]:
+    """Routes for a local `models search`: the per-folder listings, then `/models`.
+
+    Order matters — `_patch_urlopen` matches URL substrings first-wins, and the
+    bare `/models` needle would otherwise swallow every `/models/<folder>` hit.
+    """
+    routes: dict[str, Any] = {f"127.0.0.1:8188/models/{f}": files for f, files in _LOCAL_FILES_BY_FOLDER.items()}
+    routes["127.0.0.1:8188/models"] = _LOCAL_SEARCH_FOLDERS
+    return routes
+
+
 _ASSETS_RESPONSE = {
     "assets": [
         {
@@ -308,33 +335,98 @@ class TestSearch:
         assert "include_tags=models%2Cloras" in url
 
     def test_local_falls_back_to_folder_listing(self, local_target, monkeypatch, capsys):
-        _patch_urlopen(
-            monkeypatch,
-            {"127.0.0.1:8188/models/checkpoints": [{"name": "sd_xl_base_1.0.safetensors", "pathIndex": 0}]},
-        )
+        _patch_urlopen(monkeypatch, _local_routes())
         env = _run(["search", "--text", "sd_xl", "--where", "local"], capsys)
         assert env["ok"] is True
         assert env["data"]["mode"] == "local"
         rows = env["data"]["rows"]
         assert len(rows) == 1
         assert rows[0]["name"] == "sd_xl_base_1.0.safetensors"
+        assert rows[0]["type"] == "checkpoints"
         # Local has no enrichment.
         assert rows[0]["base_model"] is None
         assert rows[0]["source_url"] is None
 
     def test_local_text_filter_is_client_side(self, local_target, monkeypatch, capsys):
-        _patch_urlopen(
-            monkeypatch,
-            {
-                "127.0.0.1:8188/models/checkpoints": [
-                    {"name": "sd_xl_base_1.0.safetensors", "pathIndex": 0},
-                    {"name": "flux1-dev.safetensors", "pathIndex": 0},
-                ]
-            },
-        )
+        _patch_urlopen(monkeypatch, _local_routes())
         env = _run(["search", "--text", "flux", "--where", "local"], capsys)
         names = [r["name"] for r in env["data"]["rows"]]
+        # BE-4733: flux lives in diffusion_models, not checkpoints — it must still be found.
         assert names == ["flux1-dev.safetensors"]
+        assert env["data"]["rows"][0]["type"] == "diffusion_models"
+
+    def test_local_text_matches_across_folders(self, local_target, monkeypatch, capsys):
+        """BE-4733: every on-disk ltx* file is returned, whatever folder it lives in."""
+        _patch_urlopen(monkeypatch, _local_routes())
+        env = _run(["search", "--text", "ltx", "--where", "local"], capsys)
+        rows = env["data"]["rows"]
+        by_name = {r["name"]: r["type"] for r in rows}
+        assert by_name == {
+            "ltx-video-2b-v0.9.safetensors": "diffusion_models",
+            "ltxv-13b-0.9.7-dev.safetensors": "diffusion_models",
+            "ltx-lora-detail.safetensors": "loras",
+            "ltx-vae.safetensors": "vae",
+        }
+        # `tags` mirrors the source folder, and `total` counts every cross-folder match.
+        assert all(r["tags"] == [r["type"]] for r in rows)
+        assert env["data"]["total"] == 4
+        assert env["data"]["shown"] == 4
+
+    def test_local_type_still_scopes_to_one_folder(self, local_target, monkeypatch, capsys):
+        calls = _patch_urlopen(monkeypatch, _local_routes())
+        env = _run(["search", "--text", "ltx", "--type", "lora", "--where", "local"], capsys)
+        assert [r["name"] for r in env["data"]["rows"]] == ["ltx-lora-detail.safetensors"]
+        # Exactly one fetch, of /models/loras — no folder-list walk.
+        assert [c["url"] for c in calls] == ["http://127.0.0.1:8188/models/loras"]
+
+    def test_local_folder_fetch_error_is_skipped(self, local_target, monkeypatch, capsys):
+        routes = _local_routes()
+        routes["127.0.0.1:8188/models/vae"] = urllib.error.HTTPError(
+            "http://127.0.0.1:8188/models/vae", 404, "Not Found", {}, io.BytesIO(b"nope")
+        )
+        _patch_urlopen(monkeypatch, routes)
+        env = _run(["search", "--text", "ltx", "--where", "local"], capsys)
+        assert env["ok"] is True
+        # The vae hit is gone; the other folders' matches still come back.
+        assert [r["name"] for r in env["data"]["rows"]] == [
+            "ltx-video-2b-v0.9.safetensors",
+            "ltxv-13b-0.9.7-dev.safetensors",
+            "ltx-lora-detail.safetensors",
+        ]
+        assert env["data"]["total"] == 3
+
+    def test_local_limit_caps_rows_but_not_total(self, local_target, monkeypatch, capsys):
+        _patch_urlopen(monkeypatch, _local_routes())
+        env = _run(["search", "--text", "ltx", "--limit", "2", "--where", "local"], capsys)
+        assert env["data"]["shown"] == 2
+        assert len(env["data"]["rows"]) == 2
+        assert env["data"]["total"] == 4
+
+    def test_local_unsafe_folder_name_is_skipped(self, local_target, monkeypatch, capsys):
+        """A server-advertised folder that can't be a URL path segment is skipped, not fatal."""
+        routes = _local_routes()
+        routes["127.0.0.1:8188/models"] = ["../../etc", "loras"]
+        calls = _patch_urlopen(monkeypatch, routes)
+        env = _run(["search", "--text", "ltx", "--where", "local"], capsys)
+        assert env["ok"] is True
+        assert [r["name"] for r in env["data"]["rows"]] == ["ltx-lora-detail.safetensors"]
+        assert not any("etc" in c["url"] for c in calls)
+
+    def test_local_duplicate_folder_is_fetched_once(self, local_target, monkeypatch, capsys):
+        """A folder listed twice by the server must not double-count its files."""
+        routes = _local_routes()
+        routes["127.0.0.1:8188/models"] = ["loras", "loras", "vae"]
+        calls = _patch_urlopen(monkeypatch, routes)
+        env = _run(["search", "--text", "ltx", "--where", "local"], capsys)
+        assert [r["name"] for r in env["data"]["rows"]] == ["ltx-lora-detail.safetensors", "ltx-vae.safetensors"]
+        assert env["data"]["total"] == 2
+        assert sum(1 for c in calls if c["url"].endswith("/models/loras")) == 1
+
+    def test_local_folder_list_error_surfaces_server_not_running(self, local_target, monkeypatch, capsys):
+        _patch_urlopen(monkeypatch, {"127.0.0.1:8188/models": urllib.error.URLError("connection refused")})
+        env = _run(["search", "--text", "ltx", "--where", "local"], capsys)
+        assert env["ok"] is False
+        assert env["error"]["code"] == "server_not_running"
 
     def test_cloud_http_error_decodes_body(self, cloud_target, monkeypatch, capsys):
         # Shared `_emit_http_error` path via the search handler.

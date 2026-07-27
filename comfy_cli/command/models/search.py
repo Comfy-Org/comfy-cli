@@ -4,7 +4,7 @@ Four subcommands, all routed by ``--where`` (cloud auto-detect by default):
 
     comfy models list-folders           # GET /api/experiment/models  | /models
     comfy models list-folder <folder>   # GET /api/experiment/models/<folder> | /models/<folder>
-    comfy models search [--text] [--type] [--limit]  # cloud: /api/assets; local: /models/<folder>
+    comfy models search [--text] [--type] [--limit]  # cloud: /api/assets; local: /models/<folder>, all folders w/o --type
     comfy models show <name>            # exact-match name across the catalog
 
 The search surface mirrors the asset→model extraction used by Comfy-Org's
@@ -16,8 +16,10 @@ ride along when present.
 
 Local-mode caveats:
   * ``/models/<folder>`` returns ``[{name, pathIndex}, ...]`` — filenames only,
-    no enrichment. ``search`` on local degrades to substring on the listing
-    of the resolved folder.
+    no enrichment. ``search`` on local degrades to a filename substring match:
+    without ``--type`` it walks *every* folder reported by ``/models`` (so a
+    diffusion_models/vae/lora file is findable by name), and ``--type`` scopes
+    the walk to that single folder.
   * The cloud asset catalog (``/api/assets``) has no local equivalent —
     local search is intentionally simpler.
 """
@@ -53,9 +55,16 @@ _MAX_RESPONSE_BYTES = 64 * 1024 * 1024
 _PATH_SAFE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.\-]*$")
 
 
+def _is_safe_path_segment(value: str) -> bool:
+    """True if ``value`` can be interpolated into a URL path as a single segment."""
+    return (
+        bool(value) and ".." not in value and "/" not in value and "\\" not in value and bool(_PATH_SAFE.match(value))
+    )
+
+
 def _reject_unsafe_path_segment(value: str, *, kind: str, renderer) -> None:
     """Exit with an `invalid_argument` error if ``value`` isn't safe as a path segment."""
-    if not value or ".." in value or "/" in value or "\\" in value or not _PATH_SAFE.match(value):
+    if not _is_safe_path_segment(value):
         renderer.error(
             code="invalid_argument",
             message=f"{kind} {value!r} contains characters that aren't allowed in a path segment",
@@ -391,23 +400,32 @@ def _cloud_search(
     return rows, int(body.get("total") or len(rows))
 
 
-def _local_search(
-    target,
-    *,
-    text: str | None,
-    type_: str | None,
-    limit: int,
-) -> tuple[list[dict[str, Any]], int]:
-    """Filename listing from /models/<folder>. No enrichment available on local."""
-    if not type_:
-        # No tag-based filtering on local — pick a default that's almost always
-        # populated rather than scanning every folder (which would be slow).
-        folder = "checkpoints"
-    else:
-        folder = _TYPE_TO_FOLDER.get(type_, type_)
-    url = target.url(*_models_path_parts(target), folder)
-    data = _http_get_json(url, target)
-    items = []
+def _local_folder_names(target) -> list[str]:
+    """Fetch the backend's model-folder list, normalized to plain folder names.
+
+    Same endpoint (and same tolerant normalizer) as ``list_folders_cmd``: local
+    serves a flat list of folder-name strings, but the dict-entry shape is
+    accepted too so both server generations work.
+    """
+    data = _http_get_json(target.url(*_models_path_parts(target)), target)
+    names: list[str] = []
+    if isinstance(data, list):
+        for entry in data:
+            if isinstance(entry, dict):
+                name = entry.get("name", "")
+            elif isinstance(entry, str):
+                name = entry
+            else:
+                continue
+            if isinstance(name, str) and name:
+                names.append(name)
+    return names
+
+
+def _local_folder_matches(target, folder: str, *, text: str | None) -> list[dict[str, Any]]:
+    """Rows for one ``/models/<folder>`` listing, client-side filtered by ``text``."""
+    data = _http_get_json(target.url(*_models_path_parts(target), folder), target)
+    rows: list[dict[str, Any]] = []
     if isinstance(data, list):
         for entry in data:
             name = entry.get("name", "") if isinstance(entry, dict) else (entry if isinstance(entry, str) else "")
@@ -415,7 +433,7 @@ def _local_search(
                 continue
             if text and text.lower() not in name.lower():
                 continue
-            items.append(
+            rows.append(
                 {
                     "name": name,
                     "type": folder,
@@ -429,13 +447,52 @@ def _local_search(
                     "id": None,
                 }
             )
-    total = len(items)
-    return items[:limit], total
+    return rows
+
+
+def _local_search(
+    target,
+    *,
+    text: str | None,
+    type_: str | None,
+    limit: int,
+) -> tuple[list[dict[str, Any]], int]:
+    """Filename listing from /models/<folder>. No enrichment available on local.
+
+    With ``--type`` this is a single-folder fetch. Without it we walk every
+    folder ``/models`` reports: local has no tag-based filtering, so a
+    single-folder default (historically ``checkpoints``) made every model
+    outside it invisible to text search. Walking is cheap — filename-only
+    listings against a localhost server, ~20 small GETs.
+    """
+    if type_:
+        scoped = _local_folder_matches(target, _TYPE_TO_FOLDER.get(type_, type_), text=text)
+        return scoped[:limit], len(scoped)
+
+    all_matches: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for folder in _local_folder_names(target):
+        # Folder names are server-provided, so they can't be trusted into a URL
+        # path. Skip anything unsafe silently — it isn't user input to reject.
+        if not _is_safe_path_segment(folder) or folder in seen:
+            continue
+        seen.add(folder)
+        try:
+            all_matches.extend(_local_folder_matches(target, folder, text=text))
+        except urllib.error.HTTPError:
+            # An exotic folder the listing advertises but doesn't serve (404) or
+            # otherwise errors shouldn't sink the whole search.
+            continue
+    all_matches.sort(key=lambda r: (r["type"], r["name"]))
+    return all_matches[:limit], len(all_matches)
 
 
 @app.command(
     "search",
-    help="Search models. Cloud: enriched via /api/assets. Local: filename substring on /models/<folder>.",
+    help=(
+        "Search models. Cloud: enriched via /api/assets. "
+        "Local: filename substring across every /models folder (--type scopes it to one)."
+    ),
 )
 @tracking.track_command("models")
 def search_cmd(
