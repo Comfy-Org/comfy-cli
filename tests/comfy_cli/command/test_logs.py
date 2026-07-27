@@ -82,6 +82,20 @@ def _fake_env(
     monkeypatch.setattr(launch, "ConfigManager", lambda: _FakeConfigManager(recorded, background))
 
 
+def _symlink_or_skip(link, target) -> None:
+    """``link -> target``, skipping the test where the OS forbids symlinks.
+
+    Windows only grants SeCreateSymbolicLinkPrivilege under Developer Mode or
+    elevation, so an unprivileged runner raises OSError here. The behaviour under
+    test (never follow a symlink out of the glob scan) is a shared-host POSIX
+    concern, so skipping is the right degradation rather than failing the suite.
+    """
+    try:
+        link.symlink_to(target)
+    except (OSError, NotImplementedError) as e:  # pragma: no cover - platform dependent
+        pytest.skip(f"cannot create symlinks on this platform: {e}")
+
+
 def _write_log(workspace, name: str, text: str = "hello\n"):
     user_dir = workspace / "user"
     user_dir.mkdir(exist_ok=True)
@@ -674,11 +688,12 @@ def test_glob_fallback_skips_symlinks(monkeypatch, tmp_path):
     secret = tmp_path / "id_rsa"
     secret.write_text("PRIVATE KEY\n")
     real = _write_log(tmp_path, "comfyui_9001.log", "the real log\n")
-    link = tmp_path / "user" / "comfyui_9999.log"
-    link.symlink_to(secret)
+    _symlink_or_skip(tmp_path / "user" / "comfyui_9999.log", secret)
     os.utime(real, (1_600_000_000, 1_600_000_000))
-    # The link is the newest match — it must still lose.
-    os.utime(link, (1_900_000_000, 1_900_000_000), follow_symlinks=False)
+    # Backdate the real log and forward-date the link's TARGET: that is what the
+    # pre-guard code compared (it stat'd through the link), so the link was the
+    # newest match and won. It must now lose regardless.
+    os.utime(secret, (1_900_000_000, 1_900_000_000))
 
     _fake_env(monkeypatch, workspace=tmp_path)
 
@@ -697,7 +712,7 @@ def test_explicit_port_still_serves_a_deliberate_symlink(monkeypatch, tmp_path):
     real.write_text("a deliberately symlinked log\n")
     user_dir = tmp_path / "user"
     user_dir.mkdir()
-    (user_dir / "comfyui_9001.log").symlink_to(real)
+    _symlink_or_skip(user_dir / "comfyui_9001.log", real)
 
     _fake_env(monkeypatch, workspace=tmp_path)
 
