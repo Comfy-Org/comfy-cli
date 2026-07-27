@@ -99,6 +99,8 @@ COMMAND_SCHEMAS: dict[str, str] = {
     "comfy version": "version",
     # installed-vs-latest report
     "comfy outdated": "outdated",
+    # per-pack declared-vs-installed Python dependency report
+    "comfy node deps": "node_deps",
     # background server logs
     "comfy logs": "logs",
 }
