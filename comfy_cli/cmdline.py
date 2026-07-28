@@ -915,7 +915,11 @@ def run(
 
 
 @app.command(
-    help="Validate an API-format workflow without submitting. Checks class_types, input shapes, enum values, and edge wiring."
+    help=(
+        "Validate a workflow without submitting (UI exports are converted to API format first). "
+        "Checks class_types, input shapes, enum values, edge wiring, and the dotted sub-inputs a "
+        "dynamic combo's selected option requires."
+    )
 )
 @tracking.track_command()
 def validate(
