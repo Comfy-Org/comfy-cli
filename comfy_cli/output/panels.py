@@ -18,6 +18,8 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
+from comfy_cli.output.sanitize import sanitize, sanitize_optional, sanitize_value
+
 _TARGET_DIM_CHAR = "·"
 
 
@@ -54,7 +56,15 @@ def error_panel(
         │ details:                                                      │
         │   key=value                                                   │
         ╰───────────────────────────────────────────────────────────────╯
+
+    ``code``, ``message``, ``hint`` and the stringified ``details`` are all
+    sanitized here: any of them can carry server-supplied text, and this panel
+    is the pretty-mode boundary where it would otherwise reach the terminal as
+    live escape sequences (see ``comfy_cli.output.sanitize``).
     """
+    code = sanitize(code)
+    message = sanitize(message)
+    hint = sanitize_optional(hint)
     body: list[Any] = [Text(message, style="white")]
     if hint:
         body.append(Text(""))
@@ -66,7 +76,7 @@ def error_panel(
         for k, v in details.items():
             if v is None:
                 continue
-            rows.append((str(k), str(v)))
+            rows.append((sanitize_value(k), sanitize_value(v)))
         if rows:
             body.append(_kv_table(rows, label_style="dim", value_style="dim"))
     return Panel(

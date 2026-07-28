@@ -69,6 +69,35 @@ def test_error_panel_renders_details():
     assert "8188" in out
 
 
+def test_error_panel_strips_server_supplied_escape_sequences():
+    """Server-supplied text must not reach the terminal as live escapes.
+
+    A remote/shared ComfyUI picks the ``prompt_id`` and writes the exception
+    text the CLI interpolates, so every field here is attacker-influenced.
+    ``_render`` only removes the SGR codes Rich itself emits, so any ESC left
+    in ``out`` came from the payload.
+    """
+    out = _render(
+        error_panel(
+            code="ws_disconnected",
+            message="job \x1b[2Jevil running",
+            hint="retry \x1b]0;pwned\x07soon",
+            details={"prompt_id": "\x1b[2Jabc", "\x1b[2Jkey": "value"},
+        )
+    )
+    assert "\x1b" not in out
+    assert "job evil running" in out
+    assert "retry soon" in out
+    assert "abc" in out
+    assert "key" in out
+
+
+def test_error_panel_strips_escape_sequences_from_code():
+    out = _render(error_panel(code="ws_\x1b[2Jdisconnected", message="boom"))
+    assert "\x1b" not in out
+    assert "ws_disconnected" in out
+
+
 # ---------------------------------------------------------------------------
 # discover_panel
 # ---------------------------------------------------------------------------

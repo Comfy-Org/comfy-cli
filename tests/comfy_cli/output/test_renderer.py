@@ -250,3 +250,84 @@ def test_get_renderer_default_is_pretty():
     # No prior set; default is pretty so unsuspecting callers don't crash.
     r = get_renderer()
     assert r.is_pretty()
+
+
+# ---------------------------------------------------------------------------
+# Control-sequence sanitizing at the pretty boundary (BE-4794)
+# ---------------------------------------------------------------------------
+
+_EVIL = "job \x1b[2Jevil"
+
+
+def _pretty_output(call) -> str:
+    """Run ``call(renderer)`` in pretty mode and return what hit the stream.
+
+    ``force_terminal`` is left off, so Rich emits no SGR of its own: every ESC
+    in the result would have come from the message itself.
+    """
+    stream = io.StringIO()
+    r = _resolve()
+    r.mode = OutputMode.PRETTY
+    r.pretty_stream = stream
+    call(r)
+    return stream.getvalue()
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda r: r.warn(_EVIL),
+        lambda r: r.warn("ok", hint=_EVIL),
+        lambda r: r.info(_EVIL),
+        lambda r: r.info("ok", hint=_EVIL),
+        lambda r: r.success(_EVIL),
+        lambda r: r.error("ws_disconnected", _EVIL, hint=_EVIL, details={"prompt_id": _EVIL}),
+    ],
+    ids=["warn", "warn-hint", "info", "info-hint", "success", "error-panel"],
+)
+def test_pretty_helpers_strip_escape_sequences(call):
+    out = _pretty_output(call)
+    assert "\x1b" not in out
+    assert "evil" in out  # the text survives; only the escape is gone
+
+
+def test_json_error_envelope_is_unchanged_by_sanitizing():
+    """The machine path must stay byte-identical: ``json.dumps`` already
+    neutralizes ESC as ``\\u001b``, and stripping it would mutate data agents
+    parse."""
+    stream = io.StringIO()
+    r = _resolve()
+    r.mode = OutputMode.JSON
+    r.machine_stream = stream
+    r.command = "run"
+    r.error("ws_disconnected", _EVIL, hint=_EVIL, details={"prompt_id": "\x1b[2Jx"})
+    raw = stream.getvalue()
+
+    # Byte level: escaped, never raw — and never stripped.
+    assert "\x1b" not in raw
+    assert raw.count("\\u001b") == 3
+    # Value level: the payload round-trips exactly as it went in.
+    env = json.loads(raw.strip())
+    assert env["error"]["message"] == _EVIL
+    assert env["error"]["hint"] == _EVIL
+    assert env["error"]["details"] == {"prompt_id": "\x1b[2Jx"}
+
+
+def test_ndjson_event_payload_is_unchanged_by_sanitizing():
+    stream = io.StringIO()
+    r = _resolve()
+    r.mode = OutputMode.NDJSON
+    r.machine_stream = stream
+    r.event("progress", prompt_id="\x1b[2Jx")
+    raw = stream.getvalue()
+    assert "\x1b" not in raw
+    assert "\\u001b" in raw
+    assert json.loads(raw.strip())["prompt_id"] == "\x1b[2Jx"
+
+
+def test_pretty_helpers_tolerate_non_string_messages():
+    """The f-string interpolation these helpers used to do coerced anything to
+    ``str``; sanitizing must not turn a loose caller into a TypeError."""
+    assert "42" in _pretty_output(lambda r: r.warn(42))
+    assert "42" in _pretty_output(lambda r: r.info(42))
+    assert "42" in _pretty_output(lambda r: r.success(42))
