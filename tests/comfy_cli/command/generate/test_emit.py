@@ -9,7 +9,7 @@ import pytest
 from typer.testing import CliRunner
 
 from comfy_cli.cmdline import app as cli_app
-from comfy_cli.command.generate import emit
+from comfy_cli.command.generate import emit, spec
 
 
 @pytest.fixture(autouse=True)
@@ -27,7 +27,7 @@ def runner():
 
 
 def test_build_flux_text_to_image_class_type_and_params():
-    wf = emit.build_workflow("flux-pro", {"prompt": "a fox", "width": 512})
+    wf = emit.build_workflow("flux-2", {"prompt": "a fox", "width": 512})
     # partner node is "1"
     assert wf["1"]["class_type"] == "Flux2ProImageNode"
     assert wf["1"]["inputs"]["prompt"] == "a fox"
@@ -71,11 +71,49 @@ def test_unknown_model_lists_supported():
     with pytest.raises(emit.EmitError) as ei:
         emit.build_workflow("dalle", {"prompt": "x"})
     msg = str(ei.value)
-    assert "flux-pro" in msg and "nano-banana" in msg
+    assert "flux-2" in msg and "flux-ultra" in msg and "nano-banana" in msg
+
+
+def test_every_mapped_node_endpoint_matches_its_alias():
+    # A NodeSpec's endpoint records what the ComfyUI node actually calls;
+    # the alias must proxy to the same endpoint, or emit silently swaps models.
+    assert emit.MODEL_NODE_MAP, "an empty map would make this invariant vacuous"
+    known = spec.aliases()
+    for alias, ns in emit.MODEL_NODE_MAP.items():
+        # `resolve_alias` echoes an unrecognized name back unchanged, so a
+        # typo'd key would otherwise satisfy the equality below against itself.
+        assert alias in known, alias
+        assert spec.resolve_alias(alias) == ns.endpoint, alias
+
+
+def test_flux_pro_is_rejected_no_node_for_flux_pro_1_1():
+    # `flux-pro` means BFL Flux Pro 1.1, which has no ComfyUI node — emit must
+    # fail loudly rather than quietly emit a graph for a different Flux model.
+    with pytest.raises(emit.EmitError) as ei:
+        emit.build_workflow("flux-pro", {"prompt": "x"})
+    assert "flux-ultra" in str(ei.value)
+
+
+def test_build_flux_ultra_folds_width_height_into_aspect_ratio():
+    wf = emit.build_workflow("flux-ultra", {"prompt": "a fox", "width": 1024, "height": 768})
+    assert wf["1"]["class_type"] == "FluxProUltraImageNode"
+    # the node takes an aspect ratio, not w/h — the two flags fold into it
+    assert wf["1"]["inputs"]["aspect_ratio"] == "1024:768"
+    assert wf["1"]["inputs"]["prompt"] == "a fox"
+    # the Ultra node's own default, unlike Flux2Pro's True
+    assert wf["1"]["inputs"]["prompt_upsampling"] is False
+    save = [n for n in wf.values() if n["class_type"] == "SaveImage"]
+    assert len(save) == 1
+    assert save[0]["inputs"]["images"] == ["1", 0]
+
+
+def test_build_flux_ultra_without_width_height_keeps_default_aspect_ratio():
+    wf = emit.build_workflow("flux-ultra", {"prompt": "a fox"})
+    assert wf["1"]["inputs"]["aspect_ratio"] == "16:9"
 
 
 def test_emitted_workflow_is_api_format_node_ids_are_strings():
-    wf = emit.build_workflow("flux-pro", {"prompt": "p"})
+    wf = emit.build_workflow("flux-2", {"prompt": "p"})
     for k, node in wf.items():
         assert isinstance(k, str)
         assert "class_type" in node
@@ -91,7 +129,7 @@ def test_cli_emit_writes_file_no_api_key(runner, tmp_path, monkeypatch):
     out = tmp_path / "wf.json"
     r = runner.invoke(
         cli_app,
-        ["generate", "flux-pro", "--prompt", "a cat", "--emit-workflow", str(out)],
+        ["generate", "flux-2", "--prompt", "a cat", "--emit-workflow", str(out)],
     )
     assert r.exit_code == 0, r.stdout
     assert out.is_file()
@@ -128,7 +166,7 @@ def test_emit_workflow_uses_envelope(runner, monkeypatch, tmp_path):
     out = tmp_path / "wf.json"
     r = runner.invoke(
         cli_app,
-        ["generate", "flux-pro", "--prompt", "x", "--width", "1024", "--height", "768", "--emit-workflow", str(out)],
+        ["generate", "flux-2", "--prompt", "x", "--width", "1024", "--height", "768", "--emit-workflow", str(out)],
     )
     assert r.exit_code == 0, r.stdout
     lines = [ln for ln in r.stdout.splitlines() if ln.strip().startswith("{")]
@@ -157,7 +195,7 @@ def test_cli_emit_output_prefix(runner, tmp_path, monkeypatch):
         cli_app,
         [
             "generate",
-            "flux-pro",
+            "flux-2",
             "--prompt",
             "p",
             "--emit-workflow",
