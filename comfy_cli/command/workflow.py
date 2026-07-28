@@ -21,6 +21,7 @@ Slot addresses follow CQL's format: ``<instance_id>.<input_name>``. Run
 from __future__ import annotations
 
 import json
+import unicodedata
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -591,35 +592,37 @@ def _resolve_where_target(where: str | None):
     return resolve_target(where=where)
 
 
-# Codepoints that survive the C0/C1 filter but still let untrusted text lie
-# about what it says on a terminal:
-#   U+200B–U+200F  zero-width space/non-joiner/joiner + LRM/RLM
-#   U+202A–U+202E  bidi embedding/override (Trojan Source reordering)
-#   U+2060         word joiner
-#   U+2066–U+2069  bidi isolates
-#   U+FEFF         zero-width no-break space / BOM
-#   U+00AD         soft hyphen
-_SPOOFING_CODEPOINTS = frozenset(
-    {0x00AD, 0x2060, 0xFEFF} | set(range(0x200B, 0x2010)) | set(range(0x202A, 0x202F)) | set(range(0x2066, 0x206A))
-)
+# Unicode categories that survive the C0/C1 filter but still let untrusted text
+# lie about what it says on a terminal. Matching by category rather than by a
+# hand-rolled codepoint list keeps this exhaustive as Unicode grows:
+#   Cf  format characters — zero-width space/non-joiner/joiner, LRM/RLM/ALM,
+#       bidi embeddings + overrides + isolates (Trojan Source reordering), word
+#       joiner, BOM, soft hyphen, the invisible math operators, and the
+#       U+E0020–U+E007F tag block
+#   Zl  U+2028 line separator, and Zp U+2029 paragraph separator — not newlines,
+#       but some terminals honour them as line breaks
+_SPOOFING_CATEGORIES = frozenset({"Cf", "Zl", "Zp"})
 
 
 def _strip_terminal_controls(text: str) -> str:
     """Drop everything untrusted workflow content could use to spoof a terminal.
 
     Removes C0/C1 control chars (keeping only tab and newline) so the text can't
-    emit ANSI/OSC escape sequences, and drops the invisible Unicode codepoints in
-    ``_SPOOFING_CODEPOINTS``.
+    emit ANSI/OSC escape sequences, and drops every invisible Unicode codepoint
+    in ``_SPOOFING_CATEGORIES``.
 
     Carriage return is dropped too, not kept: a lone ``\\r`` returns the cursor to
     column 0, letting a note overwrite text this command already printed —
     the same output-spoofing the escape stripping exists to prevent. Dropping it
     is lossless for CRLF content, which keeps its ``\\n``.
     """
+    # ASCII is settled by range alone — no Cf/Zl/Zp lives below U+00A0 — so the
+    # category lookup only runs for non-ASCII, keeping large payloads cheap.
     return "".join(
         ch
         for ch in text
-        if (ch in "\t\n" or (0x20 <= ord(ch) < 0x7F) or ord(ch) >= 0xA0) and ord(ch) not in _SPOOFING_CODEPOINTS
+        if (ch in "\t\n" or 0x20 <= ord(ch) < 0x7F)
+        or (ord(ch) >= 0xA0 and unicodedata.category(ch) not in _SPOOFING_CATEGORIES)
     )
 
 

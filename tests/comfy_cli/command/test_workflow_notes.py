@@ -319,6 +319,8 @@ class TestNotesEnvelopes:
     def test_rejects_invalid_json(self, tmp_path, capsys):
         path = tmp_path / "broken.json"
         path.write_text("{not json", encoding="utf-8")
+        _force_json_renderer()
+        assert _invoke(["notes", str(path)]).exit_code == 1
         env = _run(["notes", str(path)], capsys)
         assert env["ok"] is False
         assert env["error"]["code"] == "workflow_invalid_json"
@@ -506,11 +508,22 @@ class TestConsoleSpoofingIsNeutralized:
             pytest.param("safe\u2060EVIL", id="word-joiner"),
             pytest.param("safe\ufeffEVIL", id="bom"),
             pytest.param("safe\u00adEVIL", id="soft-hyphen"),
+            pytest.param("safe\u061cEVIL", id="arabic-letter-mark"),
+            pytest.param("safe\u2028EVIL", id="line-separator"),
+            pytest.param("safe\u2029EVIL", id="paragraph-separator"),
+            pytest.param("safe\U000e0041EVIL", id="invisible-tag-block"),
+            pytest.param("safe\u2062EVIL", id="invisible-times"),
         ],
     )
     def test_spoofing_codepoints_are_dropped(self, raw):
         cleaned = workflow_cmd._strip_terminal_controls(raw)
         assert cleaned == "safeEVIL"
+
+    def test_visible_separators_and_marks_survive(self):
+        # The category filter targets Cf/Zl/Zp only: visible non-ASCII spacing
+        # and punctuation (Zs, Pd, Mn) must not get caught in the sweep.
+        text = "a\u00a0b\u202fc\u2010d\u0301e"
+        assert workflow_cmd._strip_terminal_controls(text) == text
 
     def test_ordinary_text_is_preserved(self):
         # Tabs, newlines and printable non-ASCII must survive untouched.
