@@ -1169,22 +1169,47 @@ def validate_comfyui(_env_checker):
 @app.command(help="Stop background ComfyUI")
 @tracking.track_command()
 def stop():
-    if constants.CONFIG_KEY_BACKGROUND not in ConfigManager().config["DEFAULT"]:
-        rprint("[bold red]No ComfyUI is running in the background.[/bold red]\n")
-        raise typer.Exit(code=1)
-
-    bg_info = ConfigManager().background
+    renderer = get_renderer()
+    config = ConfigManager()
+    bg_info = config.background if constants.CONFIG_KEY_BACKGROUND in config.config["DEFAULT"] else None
     if not bg_info:
         rprint("[bold red]No ComfyUI is running in the background.[/bold red]\n")
+        if renderer.is_json():
+            renderer.error(
+                code="no_background_server",
+                message="No ComfyUI is running in the background.",
+                command="stop",
+            )
         raise typer.Exit(code=1)
+
     is_killed = utils.kill_all(bg_info[2])
 
     if not is_killed:
+        # The kill failed (permissions, a race, or the process is still alive).
+        # Do NOT remove the background record — it is the only handle a retried
+        # `comfy stop` has to target this PID/host/port; dropping it here would
+        # orphan a live server. Surface a non-zero exit in BOTH pretty and JSON
+        # mode so `$?`-checking scripts see the failure (pretty mode otherwise
+        # printed the error yet returned 0).
         rprint("[bold red]Failed to stop ComfyUI in the background.[/bold red]\n")
-    else:
-        rprint(f"[bold yellow]Background ComfyUI is stopped.[/bold yellow] ({bg_info[0]}:{bg_info[1]})")
+        if renderer.is_json():
+            renderer.error(
+                code="stop_failed",
+                message="Failed to stop ComfyUI in the background.",
+                command="stop",
+                details={"pid": bg_info[2]},
+            )
+        raise typer.Exit(code=1)
 
-    ConfigManager().remove_background()
+    rprint(f"[bold yellow]Background ComfyUI is stopped.[/bold yellow] ({bg_info[0]}:{bg_info[1]})")
+    config.remove_background()
+
+    if renderer.is_json():
+        renderer.emit(
+            {"stopped": True, "host": bg_info[0], "port": bg_info[1], "pid": bg_info[2]},
+            command="stop",
+            changed=True,
+        )
 
 
 @app.command(help="Launch ComfyUI: ?[--background] ?[-- <extra args ...>]")

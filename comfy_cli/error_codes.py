@@ -47,6 +47,38 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "Resolved no workspace where one was required (e.g. `comfy which`).",
         "run `comfy install`, or pass `--workspace`",
     ),
+    # --- launch / stop lifecycle ---------------------------------------------
+    ErrorCode(
+        "server_already_running",
+        "`comfy launch --background` found a background ComfyUI already running.",
+        "run `comfy stop` before launching another background service",
+    ),
+    ErrorCode(
+        "port_invalid",
+        "`comfy launch --background` got a non-integer `--port`. `details.port` carries the offending value.",
+        "pass an integer `--port` (e.g. `--port 8188`)",
+    ),
+    ErrorCode(
+        "port_in_use",
+        "`comfy launch --background` found the target port already in use. `details.port` carries the port.",
+        "stop the process on that port or pass a different `--port`",
+    ),
+    ErrorCode(
+        "launch_failed",
+        "ComfyUI failed to launch (background monitor saw no success line) or a "
+        "foreground launch exited non-zero. `details` carries the log / returncode.",
+        "check the error log for the underlying failure",
+    ),
+    ErrorCode(
+        "no_background_server",
+        "`comfy stop` found no background ComfyUI recorded as running.",
+        "run `comfy launch --background` first",
+    ),
+    ErrorCode(
+        "stop_failed",
+        "`comfy stop` could not kill the recorded background ComfyUI process. `details.pid` carries the process id.",
+        "kill the process manually if it is still running",
+    ),
     # --- workflow loading ----------------------------------------------------
     ErrorCode(
         "workflow_not_found",
