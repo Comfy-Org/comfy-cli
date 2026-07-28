@@ -687,7 +687,7 @@ def _handle_cloud_http_error(renderer, e, *, operation: str, workflow_id: str | 
         renderer.error(
             code="cloud_http_error",
             message=f"{operation} failed: {e}",
-            hint="check network / `comfy auth whoami`",
+            hint="check network / `comfy cloud whoami`",
         )
     return typer.Exit(code=1)
 

@@ -262,14 +262,16 @@ def _get_providers() -> list[TelemetryProvider]:
 app = typer.Typer()
 
 
-@app.command()
+@app.command(help="Opt in to anonymous usage analytics.")
 def enable():
+    """Opt in to anonymous usage analytics."""
     init_tracking(True)
     typer.echo("Tracking is now enabled.")
 
 
-@app.command()
+@app.command(help="Opt out of anonymous usage analytics.")
 def disable():
+    """Opt out of anonymous usage analytics."""
     init_tracking(False)
     typer.echo("Tracking is now disabled.")
 

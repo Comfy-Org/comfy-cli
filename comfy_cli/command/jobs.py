@@ -356,7 +356,7 @@ def ls_cmd(
     limit: Annotated[int, typer.Option(help="How many history entries to include.")] = 10,
     where: Annotated[
         str | None,
-        typer.Option("--where", help="'local' (default) or 'cloud'. Cloud requires `comfy auth login`."),
+        typer.Option("--where", help="'local' (default) or 'cloud'. Cloud requires `comfy cloud login`."),
     ] = None,
     local_only: Annotated[
         bool,
@@ -1094,7 +1094,7 @@ def _cloud_cancel(prompt_id: str) -> None:
         renderer.error(
             code="cloud_http_error",
             message=f"cancel failed: {e}",
-            hint="check network / `comfy auth whoami`",
+            hint="check network / `comfy cloud whoami`",
         )
         raise typer.Exit(code=1) from e
 
@@ -1439,7 +1439,7 @@ def _cloud_client():
         return Client(target, clear_session_on_auth_failure=False)
     except Unauthenticated as e:
         renderer = get_renderer()
-        renderer.error(code="cloud_unauthorized", message=str(e), hint="run: comfy auth login")
+        renderer.error(code="cloud_unauthorized", message=str(e), hint="run: comfy cloud login")
         raise typer.Exit(code=1) from e
 
 

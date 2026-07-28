@@ -722,7 +722,7 @@ class Graph:
 
         for node_id, node_data in workflow.items():
             # `_meta` is the compose/run provenance block (schema/blueprint/items),
-            # stripped before submit — not a node and not a mistake. `comfy compose`
+            # stripped before submit — not a node and not a mistake. `comfy workflow compose`
             # adds it itself, so warning here is self-inflicted noise.
             if node_id == "_meta":
                 continue

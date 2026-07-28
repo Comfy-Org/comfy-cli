@@ -551,11 +551,11 @@ def install(
         return None
 
     if nvidia and platform == constants.OS.MACOS:
-        rprint("[bold red]Nvidia GPU is never on MacOS. What are you smoking? 🤔[/bold red]")
+        rprint("[bold red]--nvidia is not available on macOS. Use --m-series (Apple Silicon) or --cpu.[/bold red]")
         raise typer.Exit(code=1)
 
     if platform != constants.OS.MACOS and m_series:
-        rprint(f"[bold red]You are on {platform} bruh [/bold red]")
+        rprint(f"[bold yellow]--m-series is a macOS option; detected platform is {platform}.[/bold yellow]")
 
     gpu = None
 
@@ -690,7 +690,10 @@ def run(
             show_default=False,
             help=(
                 "Positive text prompt for the bundled default text2img workflow "
-                "(used when --workflow is omitted). Cannot be combined with --workflow."
+                "(used when --workflow is omitted). Cannot be combined with --workflow. "
+                "The bundled graph loads an SD1.5 checkpoint (v1-5-pruned-emaonly.ckpt) "
+                "that is NOT downloaded for you — install it, or point elsewhere with "
+                "--set checkpoint=<name>."
             ),
         ),
     ] = None,
@@ -844,7 +847,11 @@ def run(
                     hint="drop --workflow to use the bundled default, or edit the workflow file directly",
                 )
                 raise typer.Exit(code=1)
-            from comfy_cli.cql.default_workflow import PromptInjectionError, build_default_workflow
+            from comfy_cli.cql.default_workflow import (
+                PromptInjectionError,
+                build_default_workflow,
+                default_checkpoint,
+            )
 
             try:
                 injected = build_default_workflow(prompt=prompt, overrides=set_overrides)
@@ -852,6 +859,21 @@ def run(
                 renderer.error(code=e.code, message=str(e), hint=e.hint)
                 raise typer.Exit(code=1) from e
             preloaded = (injected, "default_text2img", False)
+            # The bundled graph pins an SD1.5 checkpoint that comfy-cli neither
+            # ships nor auto-downloads. Without it the run dies server-side on a
+            # bare validation error, so state the dependency up front. Pretty
+            # output only — the JSON dialects carry a fixed event contract.
+            ckpt = default_checkpoint(injected)
+            if ckpt and renderer.is_pretty():
+                from rich.markup import escape as _escape
+
+                # `--set checkpoint=…` puts a user string here; escape it so a
+                # value containing [brackets] can't be read as rich markup.
+                rprint(
+                    f"[dim]Using the bundled default text2img workflow — it needs the[/dim] "
+                    f"[bold]{_escape(ckpt)}[/bold] [dim]checkpoint in models/checkpoints. "
+                    f"Override it with --set checkpoint=<name>.[/dim]"
+                )
         elif workflow is None:
             renderer.error(
                 code="prompt_rejected",
@@ -1624,7 +1646,6 @@ def agent_review(
     )
 
 
-@app.command(hidden=True)
 @app.command(
     help="Given an existing installation of comfy core and any custom nodes, installs any needed python dependencies"
 )
@@ -1692,7 +1713,11 @@ def standalone(
 
 
 generate_command.register_with(app)
-app.add_typer(models_command.app, name="model", help="Manage models.")
+app.add_typer(
+    models_command.app,
+    name="model",
+    help="Manage the model files in this workspace — download, list, remove. (Search/discovery lives under `comfy models`.)",
+)
 app.add_typer(
     models_search_command.app,
     name="models",

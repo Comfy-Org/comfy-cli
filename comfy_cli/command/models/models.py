@@ -854,7 +854,7 @@ def download_cancel(
     renderer.emit(payload, command="model download-cancel", changed=True)
 
 
-@app.command()
+@app.command(help="Remove downloaded model files, by name or through an interactive picker.")
 @tracking.track_command("model")
 def remove(
     ctx: typer.Context,
@@ -931,7 +931,7 @@ def list_models(path: pathlib.Path) -> list[pathlib.Path]:
     return sorted(f for f in path.rglob("*") if f.is_file())
 
 
-@app.command("list")
+@app.command("list", help="List the models downloaded into this workspace, as a table.")
 @tracking.track_command("model")
 def list_command(
     ctx: typer.Context,

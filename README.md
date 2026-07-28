@@ -314,6 +314,36 @@ the bisect tool can help you pinpoint the custom node that causes the issue.
 
   `comfy model list ?[--relative-path <PATH>]`
 
+### Running on Comfy Cloud (`--where cloud`)
+
+Comfy Cloud runs your workflow on Comfy's GPUs — no local ComfyUI install and no GPU required. The same verbs you use locally take `--where cloud`; the only extra step is signing in once.
+
+Prerequisites — a Comfy account with a credit balance ([add credits](https://docs.comfy.org/interface/credits); cloud runs are metered per GPU-second):
+
+```bash
+comfy cloud login                   # opens your browser (OAuth + PKCE), stores a session
+comfy cloud whoami                  # confirm who you're signed in as
+```
+
+Then submit, watch, and collect:
+
+```bash
+comfy run --workflow my_workflow_api.json --where cloud   # submits, prints a prompt_id, returns
+comfy jobs ls --where cloud                               # queue + history for your account
+comfy jobs status <prompt_id> --where cloud               # one job's state
+comfy jobs watch <prompt_id> --where cloud                # live progress until it finishes
+comfy download <prompt_id> --where cloud                  # fetch the outputs
+```
+
+Notes:
+
+- `--where cloud` is per-invocation. Make it the default with `comfy set-default --where cloud`; every command then honors it without the flag, and `--where local` overrides it for one call. Clear it again with `comfy set-default --clear-where`.
+- Add `--wait` to `comfy run` to block until the job completes instead of returning immediately.
+- `comfy run --prompt "<text>"` (no `--workflow`) runs a bundled default text2img graph. **That graph loads the SD1.5 checkpoint `v1-5-pruned-emaonly.ckpt`, which comfy-cli does not download for you** — install it into `models/checkpoints`, or point the graph at a checkpoint you do have with `comfy run --prompt "…" --set checkpoint=<name>`. The same applies on cloud, where the checkpoint must exist in your cloud assets.
+- `comfy download` also reads a `prompt_id` from piped stdin, so `comfy run ... --where cloud | comfy download --where cloud` works.
+- Models and custom nodes must exist on the cloud side. `comfy models search --where cloud` lists the cloud asset catalog, and `comfy nodes ls --where cloud` lists the node classes cloud can run.
+- Sign out with `comfy cloud logout`. If a run fails with `cloud_unauthorized`, your session expired — re-run `comfy cloud login`.
+
 ### Calling partner nodes (`comfy generate`)
 
 `comfy generate` calls Comfy's partner nodes directly from the terminal — no
