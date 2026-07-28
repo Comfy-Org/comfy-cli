@@ -140,6 +140,44 @@ def _enrich_resolution_error(e: ValueError, workflow: dict, graph, *, widget: An
     return e
 
 
+# Both enrichment forms above append their hint at the END of the message, so
+# truncating from the first marker strips the whole (now-stale) clause.
+_MIDBATCH_HINT_RE = re.compile(r"\.\s*(?:Nodes in this workflow:|Did you mean:).*\Z", re.S)
+
+
+def _rehint_discarded_batch(e: Exception, pre_batch_hint: str) -> ValueError:
+    """Re-render a batch failure's identifier hint against the PRE-batch graph.
+
+    ``apply_specs`` threads an accumulating ``workflow`` through the batch, so by
+    the time spec #N fails that dict already holds the nodes added by specs
+    #0..N-1, and :func:`_enrich_resolution_error` renders its "Nodes in this
+    workflow" / "Did you mean" inventory from it. Every caller then discards that
+    graph — ``apply`` is atomic, ``foreach`` drops the failing param-set — so the
+    ids in the hint are fictional the moment the command returns.
+
+    The hint is phrased as an instruction ("Use an id from ... never rebuild
+    it"), so a model reasonably treats those ids as authoritative and addresses
+    them next. Measured on prod comfy-agent traces (2026-07-27): 16/16 of every
+    "node <id> not found in workflow" edit failure used an id an earlier FAILED
+    batch had advertised this way; one trace burned seven consecutive connects
+    on ids that never existed.
+
+    So: strip the mid-batch inventory, restate it from the graph as it actually
+    stands, and say plainly that nothing was applied.
+    """
+    # The regex eats the separator before the stripped clause, so re-punctuate
+    # rather than emit "inputs: ['images'] No changes were applied".
+    msg = _MIDBATCH_HINT_RE.sub("", str(e)).rstrip().rstrip(".")
+    suffix = ". No changes were applied — the batch was discarded."
+    if pre_batch_hint:
+        suffix += (
+            f" The workflow still contains: {pre_batch_hint}. "
+            "Any node id minted by this batch is gone; re-read ids with "
+            "`comfy workflow slots` / `ls-nodes` before addressing nodes."
+        )
+    return ValueError(msg + suffix)
+
+
 def _find_by_str(workflow: dict, node_id: Any) -> dict | None:
     """Locate a node comparing ids as strings — subgraph op paths carry string
     ids while top-level node ids are ints."""
@@ -737,51 +775,57 @@ def apply_specs(
 ) -> tuple[dict, list, dict]:
     """Apply edit specs to ``workflow`` in order. Returns (workflow, ops, aliases)."""
     specs = layout.assign_positions(workflow, graph, specs)
+    # Snapshot the inventory BEFORE any op mutates the graph — on failure the
+    # caller discards everything below, so this is what actually survives.
+    pre_batch_hint = _available_nodes_hint(workflow)
     aliases: dict[str, Any] = {}
     ops: list[dict] = []
-    for i, spec in enumerate(specs):
-        if not isinstance(spec, dict) or "op" not in spec:
-            raise ValueError(f"spec #{i} must be an object with an 'op' field")
-        kind = spec["op"]
-        # A missing required field surfaces as a bare KeyError (just the key name);
-        # wrap it so the batch/recipe caller learns WHICH spec and op are malformed.
-        try:
-            if kind == "add_node":
-                workflow, op = add_node(
-                    workflow, graph, spec["class_type"], pos=spec.get("at"), actor=actor, base_version=base_version
-                )
-                alias = spec.get("as")
-                if alias:
-                    # A duplicate alias would silently clobber the earlier node, so a
-                    # later `${alias}` reference resolves to the wrong node. Recipes
-                    # are generated/templated, so an accidental repeat is plausible —
-                    # fail loudly instead.
-                    if alias in aliases:
-                        raise ValueError(f"spec #{i}: alias {alias!r} is already defined by an earlier spec")
-                    aliases[alias] = op["node_id"]
-            elif kind == "connect":
-                fn, fs = _split_ref_slot(spec["from"], aliases)
-                tn, ts = _split_ref_slot(spec["to"], aliases)
-                workflow, op = connect(workflow, graph, fn, fs, tn, ts, actor=actor, base_version=base_version)
-            elif kind == "set_widget":
-                workflow, op = set_widget(
-                    workflow,
-                    graph,
-                    resolve_ref(spec["node"], aliases),
-                    spec["widget"],
-                    spec["value"],
-                    actor=actor,
-                    base_version=base_version,
-                )
-            elif kind == "delete_node":
-                workflow, op = delete_node(
-                    workflow, graph, resolve_ref(spec["node"], aliases), actor=actor, base_version=base_version
-                )
-            else:
-                raise ValueError(f"spec #{i}: unknown op {kind!r}")
-        except KeyError as e:
-            raise ValueError(f"spec #{i} ({kind}) is missing required field {e}") from e
-        ops.append(op)
+    try:
+        for i, spec in enumerate(specs):
+            if not isinstance(spec, dict) or "op" not in spec:
+                raise ValueError(f"spec #{i} must be an object with an 'op' field")
+            kind = spec["op"]
+            # A missing required field surfaces as a bare KeyError (just the key name);
+            # wrap it so the batch/recipe caller learns WHICH spec and op are malformed.
+            try:
+                if kind == "add_node":
+                    workflow, op = add_node(
+                        workflow, graph, spec["class_type"], pos=spec.get("at"), actor=actor, base_version=base_version
+                    )
+                    alias = spec.get("as")
+                    if alias:
+                        # A duplicate alias would silently clobber the earlier node, so a
+                        # later `${alias}` reference resolves to the wrong node. Recipes
+                        # are generated/templated, so an accidental repeat is plausible —
+                        # fail loudly instead.
+                        if alias in aliases:
+                            raise ValueError(f"spec #{i}: alias {alias!r} is already defined by an earlier spec")
+                        aliases[alias] = op["node_id"]
+                elif kind == "connect":
+                    fn, fs = _split_ref_slot(spec["from"], aliases)
+                    tn, ts = _split_ref_slot(spec["to"], aliases)
+                    workflow, op = connect(workflow, graph, fn, fs, tn, ts, actor=actor, base_version=base_version)
+                elif kind == "set_widget":
+                    workflow, op = set_widget(
+                        workflow,
+                        graph,
+                        resolve_ref(spec["node"], aliases),
+                        spec["widget"],
+                        spec["value"],
+                        actor=actor,
+                        base_version=base_version,
+                    )
+                elif kind == "delete_node":
+                    workflow, op = delete_node(
+                        workflow, graph, resolve_ref(spec["node"], aliases), actor=actor, base_version=base_version
+                    )
+                else:
+                    raise ValueError(f"spec #{i}: unknown op {kind!r}")
+            except KeyError as e:
+                raise ValueError(f"spec #{i} ({kind}) is missing required field {e}") from e
+            ops.append(op)
+    except (ValueError, KeyError) as e:
+        raise _rehint_discarded_batch(e, pre_batch_hint) from e
     return workflow, ops, aliases
 
 
