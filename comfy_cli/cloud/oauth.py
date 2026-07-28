@@ -450,6 +450,13 @@ def run_login(
         if on_url_ready is not None:
             try:
                 on_url_ready(authorize_url)
+            except OSError:
+                # A broken output stream (e.g. a piped `--json` parent hung up)
+                # means we can no longer surface the URL — don't block the full
+                # `timeout_s` on a callback nobody will complete. Propagate so
+                # the caller can fail fast. Non-I/O callback errors (rendering,
+                # etc.) stay isolated below and must not break login.
+                raise
             except Exception:  # noqa: BLE001 — callback errors must not break login
                 pass
 
