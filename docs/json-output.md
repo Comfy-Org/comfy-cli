@@ -110,6 +110,7 @@ line, ending the stream early.
 | `executed`         | Node finished and reported its outputs               |
 | `output`           | One file-like output became available (`url`)        |
 | `execution_error`  | Server reported a node exception (error envelope follows) |
+| `login_url`        | `comfy cloud login`: OAuth authorize URL, before the browser-callback wait |
 
 Agents must ignore events whose `type` they do not recognise — new event
 kinds may be added in a backward-compatible manner. Agents must ignore
@@ -264,6 +265,21 @@ envelope alone.
 
 ```json
 {"schema": "event/1", "type": "execution_error", "prompt_id": "9b1c…", "details": {"node_id": "1", "exception_message": "API key invalid", "...": "..."}}
+```
+
+### `login_url`
+
+Emitted by `comfy cloud login` under `--json`/`--json-stream` — this event is
+part of the sign-in stream, not the `run` stream. It carries the OAuth
+authorize URL as soon as it is built, and is flushed **before** the command
+blocks (up to `timeout_s` seconds) waiting for the loopback browser callback,
+so a parent process driving login headlessly can open (or forward) `url` in
+time. If the callback never arrives, the terminal envelope is an
+`oauth_timeout` error; on success it is the login envelope (`data.action:
+"login"`, `data.session` with tokens redacted).
+
+```json
+{"schema": "event/1", "type": "login_url", "url": "https://api.comfy.org/oauth/authorize?...", "timeout_s": 300}
 ```
 
 ## Success envelope

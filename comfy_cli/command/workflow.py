@@ -89,7 +89,7 @@ def _get_graph(input_path: str | None, host: str | None, port: int | None, on_st
     try:
         if input_path is not None:
             # Explicit offline dump — Graph.load reads + annotates it.
-            return Graph.load(input_path=input_path, host=host or "127.0.0.1", port=port or 8188)
+            return Graph.load(input_path=input_path, host=host, port=port)
         # Live fetch: resolve mode from global routing chain, then use resilient loader.
         from comfy_cli import where as where_module
 
@@ -99,8 +99,8 @@ def _get_graph(input_path: str | None, host: str | None, port: int | None, on_st
 
         raw = resilient_load_object_info(
             mode=mode,
-            host=host or "127.0.0.1",
-            port=port or 8188,
+            host=host,
+            port=port,
             on_stale=on_stale,
         )
         graph = Graph.from_object_info(raw)
@@ -433,9 +433,24 @@ _WORKFLOWS_DIR = "workflows"
 # silently writing a partial workflow and reporting success.
 _USERDATA_MAX_BYTES = 64 * 1024 * 1024
 
+# Same cap for a single cloud API response. Kept separate from
+# ``_USERDATA_MAX_BYTES`` so the two surfaces can diverge without surprise.
+_HTTP_MAX_BYTES = 64 * 1024 * 1024
+
 
 class _ResponseTooLarge(Exception):
-    """A ``/userdata`` response exceeded ``_USERDATA_MAX_BYTES`` — refuse to truncate."""
+    """A response exceeded the surface's byte cap — refuse to truncate."""
+
+
+# Per-operation guidance for an oversize cloud response. ``save``/``delete``
+# have already sent their request by the time the response is read, so the
+# server-side write may well have landed — say so rather than implying it did not.
+_TOO_LARGE_HINTS = {
+    "list": "narrow the result set with `--limit` or `--name`",
+    "get": "the saved workflow is unexpectedly large; inspect it directly in the cloud UI",
+    "save": "the workflow may still have been saved; confirm with `comfy --json workflow list`",
+    "delete": "the workflow may still have been deleted; confirm with `comfy --json workflow list`",
+}
 
 
 # Map the cloud ``--sort`` fields onto local FileInfo keys (client-side sort;
@@ -606,7 +621,9 @@ def _http_request(
     url: str, target, *, method: str = "GET", body: dict | None = None, timeout: float = 30.0
 ) -> tuple[int, dict | None]:
     """Authed HTTP call returning (status, parsed_json_or_none). Raises
-    urllib errors verbatim so callers can surface the right error code."""
+    urllib errors verbatim so callers can surface the right error code, and
+    ``_ResponseTooLarge`` when the body exceeds ``_HTTP_MAX_BYTES`` — an
+    oversize body must not masquerade as an unparseable one."""
     import urllib.request
 
     data = json.dumps(body).encode("utf-8") if body is not None else None
@@ -614,12 +631,17 @@ def _http_request(
     req = _authed_request(url, target, method=method, data=data, content_type=ct)
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         status = resp.status
-        raw = resp.read(64 * 1024 * 1024)  # 64 MiB cap
+        # Read one byte past the cap so we can tell a full body from a truncated one.
+        raw = resp.read(_HTTP_MAX_BYTES + 1)
+    if len(raw) > _HTTP_MAX_BYTES:
+        raise _ResponseTooLarge()
     if not raw:
         return status, None
     try:
         return status, json.loads(raw)
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        # UnicodeDecodeError is a ValueError but *not* a JSONDecodeError, so a
+        # body that isn't valid UTF-8 needs naming here or it escapes uncaught.
         return status, None
 
 
@@ -627,8 +649,17 @@ def _handle_cloud_http_error(renderer, e, *, operation: str, workflow_id: str | 
     """Map HTTP failures to envelope codes. Returns an Exit to ``raise from``."""
     import urllib.error
 
-    if isinstance(e, urllib.error.HTTPError):
-        body = (e.read() or b"")[:1000].decode("utf-8", "replace")
+    if isinstance(e, _ResponseTooLarge):
+        renderer.error(
+            code="workflow_too_large",
+            message=f"cloud API response during {operation} exceeded the {_HTTP_MAX_BYTES // (1024 * 1024)} MiB cap",
+            hint=_TOO_LARGE_HINTS.get(operation, "the cloud response was unexpectedly large"),
+            details={"operation": operation, "workflow_id": workflow_id, "limit_bytes": _HTTP_MAX_BYTES},
+        )
+    elif isinstance(e, urllib.error.HTTPError):
+        # Bound the read itself; slicing after an unbounded read would still
+        # have pulled an arbitrarily large error body into memory first.
+        body = (e.read(1000) or b"").decode("utf-8", "replace")
         if e.code == 404:
             renderer.error(
                 code="workflow_not_found",
@@ -935,7 +966,7 @@ def list_cmd(
 
     try:
         _, body = _http_request(url, target)
-    except (urllib.error.HTTPError, urllib.error.URLError, OSError) as e:
+    except (urllib.error.HTTPError, urllib.error.URLError, OSError, _ResponseTooLarge) as e:
         raise _handle_cloud_http_error(renderer, e, operation="list") from e
 
     rows = (body or {}).get("data") or []
@@ -1006,7 +1037,7 @@ def get_cmd(
     url = target.url("workflows", _up.quote(workflow_id, safe=""), "content")
     try:
         _, body = _http_request(url, target)
-    except (urllib.error.HTTPError, urllib.error.URLError, OSError) as e:
+    except (urllib.error.HTTPError, urllib.error.URLError, OSError, _ResponseTooLarge) as e:
         raise _handle_cloud_http_error(renderer, e, operation="get", workflow_id=workflow_id) from e
 
     if not isinstance(body, dict) or "workflow_json" not in body:
@@ -1101,7 +1132,7 @@ def save_cmd(
     url = target.url("workflows")
     try:
         _, resp = _http_request(url, target, method="POST", body=body)
-    except (urllib.error.HTTPError, urllib.error.URLError, OSError) as e:
+    except (urllib.error.HTTPError, urllib.error.URLError, OSError, _ResponseTooLarge) as e:
         raise _handle_cloud_http_error(renderer, e, operation="save") from e
 
     workflow_id = (resp or {}).get("id") if isinstance(resp, dict) else None
@@ -1137,7 +1168,7 @@ def delete_cmd(
     url = target.url("workflows", _up.quote(workflow_id, safe=""))
     try:
         _, _body = _http_request(url, target, method="DELETE")
-    except (urllib.error.HTTPError, urllib.error.URLError, OSError) as e:
+    except (urllib.error.HTTPError, urllib.error.URLError, OSError, _ResponseTooLarge) as e:
         raise _handle_cloud_http_error(renderer, e, operation="delete", workflow_id=workflow_id) from e
 
     payload = {"workflow_id": workflow_id, "deleted": True}

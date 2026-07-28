@@ -657,6 +657,19 @@ def update(
         rprint(f"[yellow]Failed to update node id cache: {e}[/yellow]")
 
 
+@app.command(help="Report installed-vs-latest versions for ComfyUI core and custom node packs (read-only).")
+@tracking.track_command()
+def outdated(
+    refresh: Annotated[
+        bool,
+        typer.Option("--refresh", help="Bypass the 1h latest-version cache and re-query the network."),
+    ] = False,
+):
+    from comfy_cli.command import outdated as outdated_command
+
+    outdated_command.execute(get_renderer(), workspace_manager.workspace_path, refresh=refresh)
+
+
 @app.command(help="Run an API workflow. Submits and returns immediately by default; pass --wait to block.")
 def run(
     workflow: Annotated[
@@ -929,7 +942,9 @@ def validate(
 ):
     from pathlib import Path
 
+    from comfy_cli.command.run import is_ui_workflow
     from comfy_cli.cql.engine import Graph, LoadError
+    from comfy_cli.workflow_to_api import WorkflowConversionError, convert_ui_to_api
 
     renderer = get_renderer()
 
@@ -962,7 +977,7 @@ def validate(
             pass
 
     try:
-        graph = Graph.load(mode=mode, input_path=input_path, host=host or "127.0.0.1", port=port or 8188)
+        graph = Graph.load(mode=mode, input_path=input_path, host=host, port=port)
     except LoadError as e:
         renderer.error(
             code="cql_no_graph",
@@ -971,6 +986,43 @@ def validate(
             details=e.details,
         )
         raise typer.Exit(code=1) from e
+
+    # Detect a UI-export (frontend/canvas) workflow and lower it to API format
+    # before validating — exactly as `comfy run` does. Without this the wrapper
+    # keys (`nodes`, `links`, `groups`, `config`, …) each emit a `non_node_key`
+    # warning, zero nodes are checked, and the result is a vacuous `valid:true`.
+    # The converter reuses the object_info the graph was already built from
+    # (`graph.object_info`), so offline `--input` works and no second fetch happens.
+    converted_from_ui = False
+    if is_ui_workflow(wf_data):
+        if renderer.is_pretty():
+            rprint("[yellow]Detected UI-format workflow, converting to API format...[/yellow]")
+        try:
+            converted = convert_ui_to_api(wf_data, graph.object_info)
+        except WorkflowConversionError as e:
+            renderer.error(
+                code="workflow_not_api_format",
+                message=f"Workflow is a UI export that could not be converted to API format: {e}",
+                hint="use ComfyUI's 'File > Export (API)' to save as API format",
+            )
+            raise typer.Exit(code=1) from e
+        except Exception as e:  # noqa: BLE001 — never leak a raw traceback to the agent flow
+            renderer.error(
+                code="conversion_crash",
+                message=f"Workflow conversion crashed unexpectedly: {type(e).__name__}: {e}",
+                hint="report this at https://github.com/Comfy-Org/comfy-cli/issues",
+                details={"exception_type": type(e).__name__},
+            )
+            raise typer.Exit(code=1) from e
+        if not converted:
+            renderer.error(
+                code="workflow_not_api_format",
+                message="Workflow is a UI export that converted to no executable nodes",
+                hint="use ComfyUI's 'File > Export (API)' to save as API format",
+            )
+            raise typer.Exit(code=1)
+        wf_data = converted
+        converted_from_ui = True
 
     result = graph.validate_workflow(wf_data)
 
@@ -982,6 +1034,11 @@ def validate(
         "errors": result["errors"],
         "warnings": result["warnings"],
     }
+    if converted_from_ui:
+        # Signal that validation ran against the converted graph, not the file's
+        # literal bytes, and report how many nodes the conversion produced.
+        payload["converted_from_ui"] = True
+        payload["converted_node_count"] = len(wf_data)
 
     if renderer.is_pretty():
         if result["valid"]:
@@ -995,7 +1052,7 @@ def validate(
                 suggestions = e.get("suggestions", [])
                 if suggestions:
                     msg += f" (did you mean: {', '.join(suggestions[:3])}?)"
-                rprint(f"  [red]•[/red] node {e.get('node_id', '?')}: {msg}")
+                rprint(f"  [red]•[/red] node {e.get('node_id') or '?'}: {msg}")
             for w in result["warnings"]:
                 rprint(f"  [yellow]⚠[/yellow] {w.get('message', '')}")
     renderer.emit(payload, command="validate", ok=result["valid"])
@@ -1327,13 +1384,11 @@ def which():
     if renderer.is_pretty():
         import sys as _sys
 
+        from comfy_cli.env_checker import _display_url
+        from comfy_cli.local_address import resolve_local_host_port
         from comfy_cli.output.panels import which_panel
 
-        cfg_bg = ConfigManager().background
-        if cfg_bg is not None:
-            host, port = cfg_bg[0], cfg_bg[1]
-        else:
-            host, port = "127.0.0.1", 8188
+        host, port = resolve_local_host_port(None, None, background=ConfigManager().background)
         try:
             server_running = env_checker.check_comfy_server_running(host=host, port=port, timeout=0.5)
         except Exception:  # noqa: BLE001
@@ -1345,7 +1400,7 @@ def which():
                 python_executable=_sys.executable,
                 python_version=f"{_sys.version_info.major}.{_sys.version_info.minor}.{_sys.version_info.micro}",
                 server_running=server_running,
-                server_url=f"http://{host}:{port}",
+                server_url=_display_url(host, port),
                 version=ConfigManager().get_cli_version(),
             )
         )
@@ -1621,6 +1676,13 @@ app.add_typer(
 app.add_typer(custom_nodes.app, name="node", help="Manage custom nodes.")
 app.add_typer(nodes_command.app, name="nodes", help="Introspect ComfyUI node classes (inputs, outputs, categories).")
 app.add_typer(templates_command.app, name="templates", help="Browse the Comfy workflow-template gallery.")
+app.command(
+    "run-template",
+    help=(
+        "Fetch a gallery template, fill its parameterized inputs (--param KEY=VALUE), "
+        "and run it to completion on local ComfyUI. Paid partner-API templates require --allow-spend."
+    ),
+)(templates_command.run_template_cmd)
 app.add_typer(workflow_command.app, name="workflow", help="Slot-based editing of frontend-format ComfyUI workflows.")
 app.command(
     "preview",

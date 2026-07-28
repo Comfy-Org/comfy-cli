@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 from typing import Annotated
 
 import typer
+from rich import markup as rich_markup
 
 from comfy_cli import tracking
 from comfy_cli.auth import store
@@ -39,7 +40,14 @@ app = typer.Typer(
 # ---------------------------------------------------------------------------
 
 
-@app.command("login", help="Sign in to Comfy Cloud via your browser (OAuth + PKCE).")
+@app.command(
+    "login",
+    help=(
+        "Sign in to Comfy Cloud via your browser (OAuth + PKCE). Under --json/--json-stream "
+        "the authorize URL is emitted as a `login_url` event before the command blocks on the "
+        "browser callback, so an agent/MCP parent can open it; see docs/json-output.md."
+    ),
+)
 @tracking.track_command("cloud")
 def login_cmd(
     no_browser: Annotated[
@@ -65,14 +73,27 @@ def login_cmd(
         rprint(f"Signing in to [bold cyan]Comfy Cloud[/bold cyan] ([dim]{base_url}[/dim])")
 
     def _on_url(url: str) -> None:
-        if not renderer.is_pretty():
+        if renderer.is_pretty():
+            # Escape the URL for Rich: an IPv6 base_url (e.g. `http://[::1]:8188`)
+            # would otherwise make Rich parse `[::1]` as markup and raise.
+            safe_url = rich_markup.escape(url)
+            if no_browser:
+                rprint("\nOpen this URL in your browser to sign in:")
+                rprint(f"  [cyan]{safe_url}[/cyan]\n")
+            else:
+                rprint("[dim]Opening browser… (if it doesn't appear, copy this URL)[/dim]")
+                rprint(f"[dim]  {safe_url}[/dim]")
             return
-        if no_browser:
-            rprint("\nOpen this URL in your browser to sign in:")
-            rprint(f"  [cyan]{url}[/cyan]\n")
-        else:
-            rprint("[dim]Opening browser… (if it doesn't appear, copy this URL)[/dim]")
-            rprint(f"[dim]  {url}[/dim]")
+        # Machine mode: surface the authorize URL as a `login_url` event so an
+        # agent/MCP parent driving `comfy --json cloud login` can open (or hand
+        # off) the URL. run_login then blocks up to `timeout` seconds on the
+        # loopback callback, so upgrade to the NDJSON stream and emit the line
+        # now — `event()` writes + flushes, so the parent sees the URL *before*
+        # we block on the wait. If the write raises (the piped parent hung up),
+        # let it propagate: run_login re-raises OSError from the callback rather
+        # than blocking the full timeout on a stream nobody is reading.
+        renderer.force_stream()
+        renderer.event("login_url", url=url, timeout_s=timeout)
 
     try:
         result = run_login(
@@ -92,6 +113,11 @@ def login_cmd(
             hint=e.hint,
             details=e.details,
         )
+        raise typer.Exit(code=1)
+    except OSError:
+        # The machine stream broke while emitting `login_url` (the piped parent
+        # hung up), so run_login bailed instead of blocking the full timeout.
+        # We can't write an envelope to a dead stream — just fail fast.
         raise typer.Exit(code=1)
 
     session = store.save_cloud_session(
