@@ -54,6 +54,9 @@ CIVITAI_API_TOKEN_ENV_KEY = "CIVITAI_API_TOKEN"
 CIVITAI_ALLOWED_HOSTS: tuple[str, ...] = ("civitai.com", "civitai.red")
 HF_API_TOKEN_KEY = "hf_api_token"
 HF_API_TOKEN_ENV_KEY = "HF_API_TOKEN"
+# Hosts the HF bearer token may be sent to. `check_huggingface_url` accepts the
+# first two; `hf.co` is the official short form Hugging Face redirects from.
+HF_ALLOWED_HOSTS: tuple[str, ...] = ("huggingface.co", "huggingface.com", "hf.co")
 
 ARIA2_SERVER_ENV_KEY = "COMFYUI_MANAGER_ARIA2_SERVER"
 ARIA2_SECRET_ENV_KEY = "COMFYUI_MANAGER_ARIA2_SECRET"

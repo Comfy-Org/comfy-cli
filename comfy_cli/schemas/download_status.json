@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://comfy.org/schemas/download_status.json",
+  "title": "comfy model download-status <id> --json data payload",
+  "description": "Reconciled progress for one background download. The reported status is the state file corrected against reality: completed_bytes prefers a live stat() of dest, and an 'downloading' record whose worker pid is gone resolves to 'completed' (size reached the known total) or 'failed' (it did not).",
+  "type": "object",
+  "$defs": {
+    "row": {
+      "type": "object",
+      "required": ["id", "status", "completed_bytes", "total_bytes", "percent", "elapsed_seconds", "dest", "error"],
+      "additionalProperties": true,
+      "properties": {
+        "id": { "type": "string" },
+        "status": {
+          "type": "string",
+          "enum": ["starting", "downloading", "completed", "failed", "cancelled"]
+        },
+        "completed_bytes": { "type": "integer" },
+        "total_bytes": {
+          "type": ["integer", "null"],
+          "description": "Null while the size is unknown (no Content-Length yet)."
+        },
+        "percent": {
+          "type": ["number", "null"],
+          "description": "Null when total_bytes is unknown."
+        },
+        "elapsed_seconds": { "type": "number" },
+        "dest": { "type": "string" },
+        "error": {
+          "type": ["string", "null"],
+          "description": "Friendly failure description; null unless status is 'failed'."
+        }
+      }
+    }
+  },
+  "allOf": [{ "$ref": "#/$defs/row" }]
+}
