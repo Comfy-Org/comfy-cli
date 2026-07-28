@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from comfy_cli.output.sanitize import sanitize, sanitize_optional, sanitize_value
+from comfy_cli.output.sanitize import sanitize, sanitize_markup, sanitize_optional, sanitize_value
 
 
 @pytest.mark.parametrize(
@@ -26,6 +26,10 @@ from comfy_cli.output.sanitize import sanitize, sanitize_optional, sanitize_valu
         # 8-bit C1 forms of CSI and OSC.
         ("a\x9b2Jb", "ab"),
         ("a\x9d0;pwned\x9cb", "ab"),
+        # 8-bit SOS, the C1 counterpart of ``\x1bX`` — consumed as a unit, so
+        # its payload does not survive as visible garbage.
+        ("a\x98payload\x9cb", "ab"),
+        ("a\x1bXpayload\x1b\\b", "ab"),
         # Bare control characters, including a lone trailing ESC and DEL.
         ("a\x00b\x07c\x7fd", "abcd"),
         ("trailing\x1b", "trailing"),
@@ -44,7 +48,9 @@ from comfy_cli.output.sanitize import sanitize, sanitize_optional, sanitize_valu
         ("", ""),
         ("plain ascii", "plain ascii"),
         ("héllo · 世界 ✓", "héllo · 世界 ✓"),
-        # Rich markup is NOT stripped — call sites rely on it for styling.
+        # Rich markup is NOT stripped here — ``sanitize`` only removes the
+        # bytes a terminal acts on. Neutralizing markup is ``sanitize_markup``'s
+        # job, and only for sinks that actually parse it.
         ("[bold]styled[/bold]", "[bold]styled[/bold]"),
     ],
 )
@@ -76,10 +82,38 @@ def test_sanitize_optional_passes_none_through():
     assert sanitize_optional("a\x1b[2Jb") == "ab"
 
 
+def test_sanitize_optional_stringifies_non_strings():
+    # A caller that ignores the ``str | None`` annotation must not hit the
+    # ``TypeError`` ``re.sub`` raises on a non-string.
+    assert sanitize_optional(42) == "42"
+
+
 def test_sanitize_value_stringifies_non_strings():
     assert sanitize_value(42) == "42"
     assert sanitize_value(None) == "None"
     assert sanitize_value("\x1b[2Jkeep") == "keep"
+
+
+def test_sanitize_markup_escapes_rich_markup():
+    # Rich would turn these back into a live OSC 8 hyperlink / a restyled line.
+    assert sanitize_markup("[link=https://attacker.example]x[/link]") == (r"\[link=https://attacker.example]x\[/link]")
+    assert sanitize_markup("[red]spoof[/red]") == r"\[red]spoof\[/red]"
+
+
+def test_sanitize_markup_also_strips_control_sequences():
+    out = sanitize_markup("job \x1b[2J[bold]evil[/bold]")
+    assert "\x1b" not in out
+    assert out == r"job \[bold]evil\[/bold]"
+
+
+def test_sanitize_markup_leaves_markup_free_text_untouched():
+    # The overwhelmingly common case must be byte-identical to sanitize_value.
+    for text in ["plain ascii", "col1\tcol2\nrow2", "héllo · 世界 ✓", "8188"]:
+        assert sanitize_markup(text) == sanitize_value(text) == text
+
+
+def test_sanitize_markup_stringifies_non_strings():
+    assert sanitize_markup(42) == "42"
 
 
 def test_sanitize_value_leaves_container_repr_inert():

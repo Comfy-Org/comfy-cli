@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+import re
 
 import pytest
 
@@ -289,6 +290,63 @@ def test_pretty_helpers_strip_escape_sequences(call):
     out = _pretty_output(call)
     assert "\x1b" not in out
     assert "evil" in out  # the text survives; only the escape is gone
+
+
+# Rich re-creates escape sequences from *markup* it finds in the text, so
+# stripping the raw bytes above is only half the boundary. These need a real
+# terminal: Rich only emits OSC 8 hyperlinks when the console is a tty.
+_MARKUP_LINK = "job [link=https://attacker.example]click[/link] done"
+_MARKUP_UNBALANCED = "server said [/] oops"
+_RICH_SGR_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+@pytest.fixture
+def force_terminal(monkeypatch):
+    """Make Rich treat the StringIO stream as a color terminal."""
+    monkeypatch.setenv("FORCE_COLOR", "1")
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda r: r.warn(_MARKUP_LINK),
+        lambda r: r.warn("ok", hint=_MARKUP_LINK),
+        lambda r: r.info(_MARKUP_LINK),
+        lambda r: r.info("ok", hint=_MARKUP_LINK),
+        lambda r: r.success(_MARKUP_LINK),
+        lambda r: r.error("ws_disconnected", "boom", details={"prompt_id": _MARKUP_LINK}),
+    ],
+    ids=["warn", "warn-hint", "info", "info-hint", "success", "error-panel-details"],
+)
+def test_pretty_helpers_do_not_let_markup_forge_escape_sequences(call, force_terminal):
+    """``[link=...]`` must not become a live OSC 8 hyperlink.
+
+    Only the SGR codes Rich emits for its own styling may remain; once those
+    are stripped, any surviving ESC was manufactured from the payload.
+    """
+    out = _pretty_output(call)
+    assert "\x1b]8;" not in out  # no hyperlink sequence
+    assert "\x1b" not in _RICH_SGR_RE.sub("", out)
+    assert "link=https://attacker.example" in _RICH_SGR_RE.sub("", out)  # shown as inert text
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda r: r.warn(_MARKUP_UNBALANCED),
+        lambda r: r.warn("ok", hint=_MARKUP_UNBALANCED),
+        lambda r: r.info(_MARKUP_UNBALANCED),
+        lambda r: r.info("ok", hint=_MARKUP_UNBALANCED),
+        lambda r: r.success(_MARKUP_UNBALANCED),
+        lambda r: r.error("ws_disconnected", "boom", details={"prompt_id": _MARKUP_UNBALANCED}),
+    ],
+    ids=["warn", "warn-hint", "info", "info-hint", "success", "error-panel-details"],
+)
+def test_pretty_helpers_survive_unbalanced_markup(call):
+    """An unbalanced ``[/]`` used to raise ``MarkupError`` and kill the CLI
+    while it was merely printing a line."""
+    out = _pretty_output(call)
+    assert "oops" in out
 
 
 def test_json_error_envelope_is_unchanged_by_sanitizing():

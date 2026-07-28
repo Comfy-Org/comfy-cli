@@ -19,12 +19,18 @@ legitimate layout in multi-line messages. Carriage return is removed, since it
 lets a message overwrite a line that has already been printed. Non-control
 Unicode is left alone; homoglyph and bidi-override spoofing are a different
 problem and deliberately out of scope here.
+
+Removing the escape *bytes* is only half the boundary: Rich manufactures new
+ones from markup it finds in a string, so text bound for a markup-interpreting
+sink also needs ``sanitize_markup`` (see its docstring).
 """
 
 from __future__ import annotations
 
 import re
 from typing import Any
+
+from rich.markup import escape as _escape_markup
 
 # One pass over the ANSI escape forms a terminal will act on. Ordered so the
 # multi-character sequences are consumed before the lone-ESC fallback.
@@ -33,7 +39,7 @@ _ESCAPE_SEQUENCE_RE = re.compile(
       \x1b\[ [\x30-\x3f]* [\x20-\x2f]* [\x40-\x7e]?      # CSI, 7-bit (ESC [ ...)
     | \x9b   [\x30-\x3f]* [\x20-\x2f]* [\x40-\x7e]?      # CSI, 8-bit C1 form
     | \x1b[\]PX^_] .*? (?: \x1b\\ | \x9c | \x07 | \Z )   # OSC/DCS/SOS/PM/APC, 7-bit
-    | [\x90\x9d\x9e\x9f] .*? (?: \x1b\\ | \x9c | \x07 | \Z )  # same, 8-bit C1 form
+    | [\x90\x98\x9d\x9e\x9f] .*? (?: \x1b\\ | \x9c | \x07 | \Z )  # same, 8-bit C1 form (DCS/SOS/OSC/PM/APC)
     | \x1b [\x20-\x2f]* [\x30-\x7e]                      # two-/three-char escapes (ESC ( B, ESC =, ...)
     """,
     re.VERBOSE | re.DOTALL,
@@ -55,10 +61,32 @@ def sanitize(text: str) -> str:
 
 
 def sanitize_optional(text: str | None) -> str | None:
-    """``sanitize`` for the many call sites whose value is an optional string."""
-    return None if text is None else sanitize(text)
+    """``sanitize`` for the many call sites whose value is an optional string.
+
+    Non-``None`` values go through ``sanitize_value``, so a caller that ignores
+    the ``str`` annotation gets the ``str()`` coercion the old f-strings did
+    rather than a ``TypeError`` from ``re.sub``.
+    """
+    return None if text is None else sanitize_value(text)
 
 
 def sanitize_value(value: Any) -> str:
     """Stringify ``value`` and sanitize it — for panel fields rendered via ``str()``."""
     return sanitize(value if isinstance(value, str) else str(value))
+
+
+def sanitize_markup(value: Any) -> str:
+    """``sanitize_value`` plus Rich-markup escaping, for markup-interpreting sinks.
+
+    Stripping the escape bytes is not enough on its own: Rich re-creates them
+    from markup found in the string. A server-supplied ``[link=http://evil]x[/link]``
+    renders as a live OSC 8 hyperlink, ``[red]`` restyles the line to spoof
+    other output, and an unbalanced ``[/]`` raises ``rich.errors.MarkupError``
+    — crashing the CLI while it is merely printing an info line.
+
+    Use this for anything interpolated into a markup string or handed to
+    ``Table.add_row``. Do NOT use it for a value passed to ``rich.text.Text``:
+    ``Text`` never parses markup, so the escaping backslashes would show up
+    verbatim on screen.
+    """
+    return _escape_markup(sanitize_value(value))

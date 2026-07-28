@@ -23,7 +23,7 @@ from typing import Any, TextIO
 from rich.console import Console
 
 from comfy_cli.caller import Caller, detect_caller
-from comfy_cli.output.sanitize import sanitize_value
+from comfy_cli.output.sanitize import sanitize_markup
 
 # Machine-output contract versions, surfaced in every envelope/event line and
 # in `comfy discover` (output_contract). Bump rule: additive optional fields =
@@ -198,26 +198,32 @@ class Renderer:
 
     # These four take a plain string and hand it to the terminal, so they are a
     # pretty-mode boundary in the same sense ``error_panel`` is: anything the
-    # message carries — including a remote server's text — is sanitized before
-    # it can be acted on as an escape sequence. Rich *markup* is deliberately
-    # left intact; call sites use it for styling (and escape untrusted text with
-    # ``rich.markup.escape``). ``print`` is not sanitized: it is the generic
-    # passthrough and takes arbitrary Rich renderables, not just strings.
-    # ``sanitize_value`` (not ``sanitize``) so a caller that ignores the ``str``
-    # annotation still gets the ``str()`` coercion the f-strings used to do.
+    # message carries — including a remote server's text — is neutralized before
+    # it can be acted on as an escape sequence. The message lands inside a Rich
+    # *markup* string, so ``sanitize_markup`` also escapes the markup: Rich would
+    # otherwise turn ``[link=http://evil]x[/link]`` back into a live OSC 8
+    # sequence, and an unbalanced ``[/]`` would raise ``MarkupError`` and crash
+    # the CLI mid-print. Escaping here rather than asking every call site to
+    # remember ``rich.markup.escape`` is the whole point of having a boundary;
+    # the cost is that these four helpers no longer accept caller markup, which
+    # is fine — they style the line themselves and no call site passed any.
+    # ``print`` is deliberately not sanitized: it is the generic passthrough and
+    # takes arbitrary Rich renderables, not just strings.
+    # ``sanitize_value`` semantics (not ``sanitize``) so a caller that ignores
+    # the ``str`` annotation still gets the ``str()`` coercion f-strings did.
 
     def info(self, message: str, *, hint: str | None = None) -> None:
-        self.print(sanitize_value(message))
+        self.print(sanitize_markup(message))
         if hint:
-            self.print(f"[yellow]Hint:[/yellow] {sanitize_value(hint)}")
+            self.print(f"[yellow]Hint:[/yellow] {sanitize_markup(hint)}")
 
     def warn(self, message: str, *, hint: str | None = None) -> None:
-        self.print(f"[yellow]{sanitize_value(message)}[/yellow]")
+        self.print(f"[yellow]{sanitize_markup(message)}[/yellow]")
         if hint:
-            self.print(f"[yellow]Hint:[/yellow] {sanitize_value(hint)}")
+            self.print(f"[yellow]Hint:[/yellow] {sanitize_markup(hint)}")
 
     def success(self, message: str) -> None:
-        self.print(f"[bold green]{sanitize_value(message)}[/bold green]")
+        self.print(f"[bold green]{sanitize_markup(message)}[/bold green]")
 
     # ----- structured output -----
 

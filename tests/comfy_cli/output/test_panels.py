@@ -98,6 +98,38 @@ def test_error_panel_strips_escape_sequences_from_code():
     assert "ws_disconnected" in out
 
 
+def test_error_panel_details_do_not_let_markup_forge_escape_sequences():
+    """``Table.add_row`` parses Rich markup, so a server-supplied
+    ``[link=...]`` detail would otherwise emit a live OSC 8 hyperlink."""
+    buf = io.StringIO()
+    # A real terminal: Rich only emits hyperlinks when the console is a tty.
+    Console(file=buf, force_terminal=True, width=100, no_color=True).print(
+        error_panel(
+            code="ws_disconnected",
+            message="boom",
+            details={"prompt_id": "[link=https://attacker.example]x[/link]"},
+        )
+    )
+    raw = buf.getvalue()
+    assert "\x1b]8;" not in raw
+    assert "\x1b" not in _ANSI_RE.sub("", raw)
+
+
+def test_error_panel_details_survive_unbalanced_markup():
+    # ``[/]`` used to raise rich.errors.MarkupError and kill the CLI.
+    out = _render(error_panel(code="ws_disconnected", message="boom", details={"prompt_id": "a[/]b"}))
+    assert "prompt_id" in out
+
+
+def test_error_panel_tolerates_non_string_code_and_message():
+    # The renderer's helpers coerce via ``str()``; the panel must match so a
+    # loose caller doesn't hit a TypeError from ``re.sub``.
+    out = _render(error_panel(code=42, message=7, hint=13))
+    assert "42" in out
+    assert "7" in out
+    assert "13" in out
+
+
 # ---------------------------------------------------------------------------
 # discover_panel
 # ---------------------------------------------------------------------------
