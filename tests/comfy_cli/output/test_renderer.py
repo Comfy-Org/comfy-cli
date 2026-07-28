@@ -302,8 +302,14 @@ _RICH_SGR_RE = re.compile(r"\x1b\[[0-9;]*m")
 
 @pytest.fixture
 def force_terminal(monkeypatch):
-    """Make Rich treat the StringIO stream as a color terminal."""
+    """Make Rich treat the StringIO stream as a color terminal.
+
+    ``COLUMNS`` is pinned too: these assertions look for an un-wrapped
+    substring, and ``rich.print`` gives no way to pass ``width`` through, so
+    without it the result depends on the runner's default console width.
+    """
     monkeypatch.setenv("FORCE_COLOR", "1")
+    monkeypatch.setenv("COLUMNS", "200")
 
 
 @pytest.mark.parametrize(
