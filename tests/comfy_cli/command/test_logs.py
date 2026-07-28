@@ -785,5 +785,9 @@ def test_logs_pretty_warning_does_not_swallow_markup_in_path(monkeypatch, tmp_pa
 
     launch.logs(tail=10, port=8189)
 
-    out = capsys.readouterr().out
+    # Rich soft-wraps the warning line to the console width, which can fold a
+    # long tmp_path right inside the literal "[bold red]" text depending on
+    # the absolute path length (environment-dependent) — strip the wrap
+    # newlines rather than assert on a specific layout.
+    out = capsys.readouterr().out.replace("\n", "")
     assert "ws[bold red]" in out
