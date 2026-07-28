@@ -18,7 +18,7 @@ from pathlib import Path
 import pytest
 
 from comfy_cli.cmdline import app
-from comfy_cli.command_mentions import Mention, check_mention, check_text, extract_mentions
+from comfy_cli.command_mentions import Mention, check_mention, check_text, extract_mentions, global_options
 from comfy_cli.help_json import build_help_json
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -34,6 +34,11 @@ PROSE_SCAN_EXCLUDED = {PACKAGE_ROOT / "discovery.py"}
 @pytest.fixture(scope="module")
 def tree() -> dict:
     return build_help_json(app)["commands"]
+
+
+@pytest.fixture(scope="module")
+def globals_() -> dict:
+    return global_options(build_help_json(app))
 
 
 def _scanned_files() -> list[Path]:
@@ -68,11 +73,24 @@ def test_scan_covers_the_expected_surface():
     assert any(p.name == "SKILL.md" for p in files)
 
 
-def test_no_mentions_of_nonexistent_commands(tree):
+def test_scan_reaches_the_readmes_fenced_examples():
+    """The README's copy-pasteable examples are bare lines in ```bash fences.
+
+    They carry no backticks of their own, so they are invisible to the
+    backtick/quoted patterns — if fenced extraction regresses, the guardrail
+    stops covering the most-copied surface in the repo while still passing.
+    """
+    readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+    found = {m.text for m in extract_mentions(readme, path="README.md")}
+    assert "comfy cloud login" in found
+    assert "comfy generate list" in found
+
+
+def test_no_mentions_of_nonexistent_commands(tree, globals_):
     violations = []
     for path in _scanned_files():
         text = path.read_text(encoding="utf-8", errors="replace")
-        violations += check_text(text, path=str(path.relative_to(REPO_ROOT)), tree=tree)
+        violations += check_text(text, path=str(path.relative_to(REPO_ROOT)), tree=tree, globals_=globals_)
     assert not violations, "help/hint strings reference commands that do not exist:\n" + "\n".join(
         str(v) for v in violations
     )
@@ -124,8 +142,8 @@ def test_command_schema_keys_are_commands_or_emitted_envelopes():
 # --- resolver unit tests: the lint is only as good as its false-positive rate ---
 
 
-def _check(text: str, tree: dict):
-    return check_mention(Mention(text=text, path="<test>", line=1), tree)
+def _check(text: str, tree: dict, globals_: dict | None = None):
+    return check_mention(Mention(text=text, path="<test>", line=1), tree, globals_=globals_)
 
 
 @pytest.mark.parametrize(
@@ -135,15 +153,18 @@ def _check(text: str, tree: dict):
         "comfy install --nvidia",
         "comfy run --prompt 'a red fox in snow'",
         "comfy model download --url https://example.com/x.safetensors",
-        "comfy --json env",  # stops at the global option; no false positive
+        "comfy --json env",  # global option skipped, then a real command
+        "comfy --where cloud jobs ls",  # value-taking global; 'cloud' is its value, not a subcommand
+        "comfy --where=cloud jobs ls",  # inline value form
         "comfy node show installed",  # positional argument to a leaf command
         "comfy manager disable-gui",
         "comfy",
         "comfy auth",  # a bare group mention is fine
+        "comfy --not-a-real-flag auth login",  # unknown option: stop clean rather than guess
     ],
 )
-def test_valid_mentions_pass(text, tree):
-    assert _check(text, tree) is None
+def test_valid_mentions_pass(text, tree, globals_):
+    assert _check(text, tree, globals_) is None
 
 
 @pytest.mark.parametrize(
@@ -153,12 +174,27 @@ def test_valid_mentions_pass(text, tree):
         ("comfy cloud singin", "singin"),
         ("comfy nope", "nope"),
         ("comfy model downlaod --url x", "downlaod"),
+        # A leading global option must not end the scan before the subcommand.
+        ("comfy --json auth login", "login"),
+        ("comfy --where cloud cloud singin", "singin"),
     ],
 )
-def test_invalid_mentions_are_flagged(text, unknown, tree):
-    violation = _check(text, tree)
+def test_invalid_mentions_are_flagged(text, unknown, tree, globals_):
+    violation = _check(text, tree, globals_)
     assert violation is not None
     assert violation.unknown_token == unknown
+
+
+def test_global_options_are_derived_from_the_live_root_callback(globals_):
+    """Hardcoding the set would silently rot as root options change."""
+    assert globals_["--json"] is False  # a flag: consumes no value
+    assert globals_["--where"] is True  # takes a value
+    assert "--help-json" in globals_
+
+
+def test_without_globals_the_resolver_still_stops_at_the_first_option(tree):
+    """Default (no ``globals_``) keeps the old conservative behaviour."""
+    assert _check("comfy --json auth login", tree) is None
 
 
 def test_extract_finds_backticked_and_run_prefixed_mentions():
@@ -179,3 +215,26 @@ def test_extract_finds_bare_quoted_invocations(tree):
 def test_extract_ignores_non_command_comfy_words():
     text = "`comfy-cli` installs things and writes `comfy.yaml`."
     assert extract_mentions(text, path="<test>") == []
+
+
+def test_extract_reads_markdown_fenced_code_blocks():
+    """The README's primary examples are bare shell lines inside ```bash fences."""
+    text = "Sign in:\n\n```bash\ncomfy cloud login                   # opens your browser\n$ comfy jobs ls --where cloud\n```\n"
+    found = {m.text for m in extract_mentions(text, path="<test>")}
+    assert "comfy cloud login" in found
+    assert "comfy jobs ls --where cloud" in found
+
+
+def test_fenced_mentions_report_their_own_line():
+    text = "intro\n\n```bash\ncomfy auth login\n```\n"
+    (mention,) = extract_mentions(text, path="<test>")
+    assert mention.line == 4
+    assert text.splitlines()[mention.line - 1] == "comfy auth login"
+
+
+def test_run_prefixed_mention_at_line_start_reports_its_own_line():
+    """``_RUN_PREFIX``'s boundary class eats the preceding newline; the line must not shift."""
+    text = "first line\nsecond line\nrun: comfy cloud login\n"
+    (mention,) = extract_mentions(text, path="<test>")
+    assert mention.line == 3
+    assert text.splitlines()[mention.line - 1] == "run: comfy cloud login"

@@ -554,8 +554,16 @@ def install(
         rprint("[bold red]--nvidia is not available on macOS. Use --m-series (Apple Silicon) or --cpu.[/bold red]")
         raise typer.Exit(code=1)
 
-    if platform != constants.OS.MACOS and m_series:
-        rprint(f"[bold yellow]--m-series is a macOS option; detected platform is {platform}.[/bold yellow]")
+    if m_series and platform != constants.OS.MACOS:
+        # Warning-only here used to fall through to `elif m_series:` below and
+        # set GPU_OPTION.MAC_M_SERIES, which installs the nightly CPU torch
+        # wheels — silently giving a Linux/Windows user a CPU-only nightly and
+        # no GPU support. Exit like the symmetric --nvidia-on-macOS check.
+        rprint(
+            f"[bold red]--m-series is a macOS (Apple Silicon) option; detected platform is {platform}.[/bold red]\n"
+            "[bold red]Use --nvidia, --amd or --intel-arc for a GPU install, or --cpu for CPU-only.[/bold red]"
+        )
+        raise typer.Exit(code=1)
 
     gpu = None
 
@@ -867,11 +875,18 @@ def run(
             if ckpt and renderer.is_pretty():
                 from rich.markup import escape as _escape
 
+                # The checkpoint has to exist wherever the run is routed, so
+                # name that environment: pointing a `--where cloud` run at the
+                # local models/checkpoints sends the user to fix the wrong box.
+                if decision.target is where_module.WhereTarget.CLOUD:
+                    where_ckpt = "in your cloud assets (`comfy models search --where cloud`)"
+                else:
+                    where_ckpt = "in models/checkpoints"
                 # `--set checkpoint=…` puts a user string here; escape it so a
                 # value containing [brackets] can't be read as rich markup.
                 rprint(
                     f"[dim]Using the bundled default text2img workflow — it needs the[/dim] "
-                    f"[bold]{_escape(ckpt)}[/bold] [dim]checkpoint in models/checkpoints. "
+                    f"[bold]{_escape(ckpt)}[/bold] [dim]checkpoint {where_ckpt}. "
                     f"Override it with --set checkpoint=<name>.[/dim]"
                 )
         elif workflow is None:
