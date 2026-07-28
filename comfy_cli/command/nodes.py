@@ -74,8 +74,8 @@ def _get_graph(
             return Graph.load(
                 mode=mode,
                 input_path=input_path,
-                host=host or "127.0.0.1",
-                port=port or 8188,
+                host=host,
+                port=port,
             )
         # Live fetch goes through the resilient loader: auto-cache on success,
         # refresh-and-retry once, then fall back to the last cached dump (with
@@ -84,8 +84,8 @@ def _get_graph(
 
         raw = resilient_load_object_info(
             mode=mode,
-            host=host or "127.0.0.1",
-            port=port or 8188,
+            host=host,
+            port=port,
             on_stale=on_stale,
         )
         graph = Graph.from_object_info(raw)

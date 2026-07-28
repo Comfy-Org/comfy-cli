@@ -430,6 +430,21 @@ class Graph:
         self._consumers: dict[str, list[Morphism]] = defaultdict(list)
         self._types: set[str] = set()
         self._annotated = False
+        # The raw ``/object_info`` payload this graph was built from. Retained
+        # verbatim so callers that also need to lower a UI-format workflow to
+        # API format (``convert_ui_to_api``) can reuse it without a second fetch.
+        self._raw: dict[str, Any] = {}
+
+    @property
+    def object_info(self) -> dict[str, Any]:
+        """The raw ``/object_info`` dict this graph was built from (``{}`` if
+        the graph was constructed without one).
+
+        Read-only: this is the graph's live internal schema state, returned by
+        reference to avoid copying a large payload. Callers (e.g. the validate
+        command handing it to ``convert_ui_to_api``) must not mutate it.
+        """
+        return self._raw
 
     @classmethod
     def from_object_info(cls, object_info: dict[str, Any]) -> Graph:
@@ -439,6 +454,7 @@ class Graph:
                 details={"top_level_type": type(object_info).__name__},
             )
         g = cls()
+        g._raw = object_info
         for node_id, raw in object_info.items():
             if not isinstance(raw, dict):
                 continue
@@ -699,6 +715,10 @@ class Graph:
         errors: list[dict] = []
         warnings: list[dict] = []
         all_names = list(self._nodes.keys())
+        # No-outputs check: the server rejects any prompt with zero output nodes
+        # (execution.py:1155-1162, prompt_no_outputs). Track whether any
+        # recognized node is an output node.
+        has_output_node = False
 
         for node_id, node_data in workflow.items():
             # `_meta` is the compose/run provenance block (schema/blueprint/items),
@@ -743,6 +763,9 @@ class Graph:
                     }
                 )
                 continue
+
+            if m.is_output_node:
+                has_output_node = True
 
             port_by_name = {p.name: p for p in m.inputs}
             # V3 autogrow inputs are declared once (e.g. `images`) but wired as
@@ -867,6 +890,28 @@ class Graph:
                 warnings.extend(cat_warnings)
 
             errors.extend(_check_autogrow_required(node_id, autogrow_ports, autogrow_seen, node_data))
+            errors.extend(_check_required_present(node_id, m, node_data))
+
+        # No-outputs check: the server rejects any prompt with zero output
+        # nodes (execution.py:1155-1162, prompt_no_outputs) — including an
+        # empty/node-less prompt. Suppress it only when an unknown_class_type
+        # error is present: that node could be the real (custom) output node we
+        # just can't see, so the missing-output message would be misleading
+        # noise on top of the unknown-class error the user must resolve first.
+        has_unknown_class = any(e.get("code") == "unknown_class_type" for e in errors)
+        if not has_output_node and not has_unknown_class:
+            errors.append(
+                {
+                    # workflow-level error: no owning node, hence None (keeps the
+                    # node_id/field keys every other error carries, for schema
+                    # consistency).
+                    "node_id": None,
+                    "field": None,
+                    "code": "prompt_no_outputs",
+                    "message": "workflow has no output nodes — the server will reject it (prompt_no_outputs)",
+                    "hint": "add an output node such as SaveImage/PreviewImage",
+                }
+            )
 
         return {
             "valid": len(errors) == 0,
@@ -908,8 +953,8 @@ class Graph:
         *,
         mode: str = "local",
         input_path: str | None = None,
-        host: str = "127.0.0.1",
-        port: int = 8188,
+        host: str | None = None,
+        port: int | None = None,
         supported_nodes_yaml: bytes | None = None,
         cloud_disable_yaml: bytes | None = None,
         no_gpu_json: bytes | None = None,
@@ -1020,8 +1065,9 @@ def _validate_catalog_value(
 ) -> tuple[list[dict], list[dict]]:
     """Enum-membership and other catalog checks for one scalar input value.
 
-    Returns (errors, warnings): an unknown enum value is a hard error carrying
-    the valid options; every other catalog finding is a namespaced warning.
+    Returns (errors, warnings): unknown-enum and out-of-range values are hard
+    errors (the server rejects them); every other catalog finding is a
+    namespaced warning.
     """
     errors: list[dict] = []
     warnings: list[dict] = []
@@ -1046,10 +1092,71 @@ def _validate_catalog_value(
                     "valid_options": list(port.enum_values),
                 }
             )
+        elif w["code"] in ("below_min", "above_max"):
+            # The server hard-rejects out-of-range values
+            # (value_smaller_than_min / value_bigger_than_max, execution.py:1008-1033),
+            # so promote these to errors — same as unknown_enum_value above. One
+            # theoretical over-strictness: the server skips its built-in range
+            # checks for args covered by a node's custom VALIDATE_INPUTS
+            # (execution.py:1007); we accept that trade-off exactly as the
+            # unknown_enum_value hard error does.
+            bound = port.options.min if w["code"] == "below_min" else port.options.max
+            op = ">=" if w["code"] == "below_min" else "<="
+            errors.append(
+                {
+                    "node_id": node_id,
+                    "field": input_name,
+                    "code": w["code"],
+                    "message": w["message"],
+                    "hint": f"use a value {op} {bound}",
+                }
+            )
         else:
             w["field"] = f"{node_id}.{class_type}.{w['field']}"
             warnings.append(w)
     return errors, warnings
+
+
+def _check_required_present(node_id: str, m: Morphism, node_data: dict) -> list[dict]:
+    """Required inputs that are absent from ``node_data["inputs"]`` entirely.
+
+    Mirrors the server (execution.py:884-900): any required input the frontend
+    didn't serialize is a hard reject (required_input_missing). The per-input
+    loop only inspects keys that ARE present, so this catches the absent ones.
+    Skipped, because each is handled by its own path (and would otherwise
+    double-error): autogrow ports (``_check_autogrow_required``) and the dynamic
+    types COMFY_DYNAMICCOMBO / COMFY_DYNAMICSLOT (DynamicSlot is always optional
+    server-side anyway). The server has NO exemption for required inputs that
+    carry a default — the frontend always serializes widget values, so absence
+    is a genuine authoring error; we do not skip ports with defaults.
+    """
+    present = node_data.get("inputs") or {}
+    errors: list[dict] = []
+    for port in m.inputs:
+        if not port.required or port.is_autogrow:
+            continue
+        if port.type.startswith("COMFY_DYNAMICCOMBO") or port.type.startswith("COMFY_DYNAMICSLOT"):
+            continue
+        if port.name in present:
+            continue
+        errors.append(
+            {
+                "node_id": node_id,
+                "field": port.name,
+                "code": "required_input_missing",
+                "message": (
+                    f"required input {port.name!r} is missing — "
+                    f"the server will reject this node (required_input_missing)"
+                ),
+                "hint": f"add {port.name!r} to inputs"
+                + (
+                    f" (e.g. a {port.type} value)"
+                    if not port.is_link
+                    else f" (wire a {port.type} link: [<node_id>, <output_index>])"
+                ),
+            }
+        )
+    return errors
 
 
 def _check_autogrow_required(
@@ -1113,7 +1220,7 @@ def _load_from_file(path: str) -> dict[str, Any]:
         raise LoadError(f"invalid JSON in {p}: {e}", details={"path": str(p)}) from e
 
 
-def _load_from_target(*, mode: str = "local", host: str = "127.0.0.1", port: int = 8188) -> dict[str, Any]:
+def _load_from_target(*, mode: str = "local", host: str | None = None, port: int | None = None) -> dict[str, Any]:
     """Fetch /object_info from the resolved target — local or cloud.
 
     Both paths are the same HTTP fetch; only the base URL, path prefix,

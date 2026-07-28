@@ -524,3 +524,421 @@ def fetch_cmd(
     if renderer.is_pretty() and out:
         rprint(f"[green]✓[/green] wrote {len(body):,} bytes ({payload['node_count']} nodes) to {target_repr}")
     renderer.emit(payload, command="templates fetch")
+
+
+# ---------------------------------------------------------------------------
+# run-template — fetch → fill params → spend-gate → run via the run path
+# ---------------------------------------------------------------------------
+
+
+def _parse_param_value(raw: str) -> Any:
+    """Parse a ``--param`` value as JSON; fall back to the literal string.
+
+    Mirrors ``comfy workflow set-slot`` semantics so `--param seed=42` writes
+    an int and `--param prompt="a cat"` writes a string.
+    """
+    try:
+        return json.loads(raw)
+    except (json.JSONDecodeError, ValueError):
+        return raw
+
+
+def _workflow_node_types(workflow: Any) -> set[str]:
+    """Collect node class names from a workflow in either format.
+
+    Frontend format: ``nodes[].type`` plus every ``definitions.subgraphs[].nodes[].type``
+    (gallery templates routinely hide partner nodes inside UUID subgraphs).
+    API format: ``values()[].class_type``.
+    """
+    types: set[str] = set()
+    if not isinstance(workflow, dict):
+        return types
+    if isinstance(workflow.get("nodes"), list):
+        node_lists = [workflow.get("nodes") or []]
+        subgraphs = (workflow.get("definitions") or {}).get("subgraphs") or []
+        for sg in subgraphs:
+            if isinstance(sg, dict):
+                node_lists.append(sg.get("nodes") or [])
+        for nodes in node_lists:
+            for node in nodes:
+                if isinstance(node, dict) and isinstance(node.get("type"), str):
+                    types.add(node["type"])
+        return types
+    for node in workflow.values():
+        if isinstance(node, dict) and isinstance(node.get("class_type"), str):
+            types.add(node["class_type"])
+    return types
+
+
+def _detect_paid_nodes(workflow: Any, object_info: dict) -> list[str]:
+    """Sorted node class names in ``workflow`` that are partner-API (paid) nodes.
+
+    Same signals as ``comfy_cli.command.run``'s partner detection — the
+    authoritative ``api_node: true`` flag with a ``partner/`` category-prefix
+    fallback — but format-agnostic so it works on the frontend-format JSON
+    gallery templates ship as (run's detector only reads API format).
+    """
+    from comfy_cli.command.run import PARTNER_NODE_CATEGORY_PREFIXES
+
+    out: list[str] = []
+    for ct in _workflow_node_types(workflow):
+        info = object_info.get(ct) or {}
+        if not isinstance(info, dict):
+            continue
+        if info.get("api_node") is True:
+            out.append(ct)
+            continue
+        category = info.get("category")
+        if isinstance(category, str) and category.startswith(PARTNER_NODE_CATEGORY_PREFIXES):
+            out.append(ct)
+    return sorted(out)
+
+
+def _gallery_paid_signals(row: dict[str, Any]) -> list[str]:
+    """Gallery-index evidence that a template runs partner/API nodes.
+
+    Belt-and-suspenders for the spend gate: when the local server's
+    object_info is unavailable (fail-open fetch) node detection can miss, but
+    the curated gallery still marks paid templates with the ``API`` tag and
+    provider logos. Returns human-readable signal strings, empty = no signal.
+    """
+    signals: list[str] = []
+    for tag in row.get("tags") or []:
+        if isinstance(tag, str) and tag.lower() == "api":
+            signals.append("tag:API")
+    for prov in row.get("providers") or []:
+        if isinstance(prov, str) and prov:
+            signals.append(f"provider:{prov}")
+    return signals
+
+
+def _resolve_param_addresses(
+    renderer,
+    overrides: dict[str, Any],
+    slots: list[dict],
+) -> dict[str, Any]:
+    """Map ``--param KEY=VALUE`` keys onto slot addresses.
+
+    KEY may be a full slot address (``6.text``, ``62/34.text``) or a bare slot
+    name (``prompt``) when exactly one slot carries that name. Ambiguous or
+    unknown keys error with the candidate list so agents can self-correct.
+    """
+    addresses = {s.get("address") for s in slots if isinstance(s, dict)}
+    by_name: dict[str, list[str]] = {}
+    for s in slots:
+        if not isinstance(s, dict):
+            continue
+        n = s.get("name")
+        if isinstance(n, str) and n:
+            by_name.setdefault(n.lower(), []).append(str(s.get("address")))
+
+    resolved: dict[str, Any] = {}
+    for key, value in overrides.items():
+        if key in addresses:
+            resolved[key] = value
+            continue
+        candidates = by_name.get(key.lower(), [])
+        if len(candidates) == 1:
+            resolved[candidates[0]] = value
+            continue
+        if len(candidates) > 1:
+            renderer.error(
+                code="workflow_slot_invalid",
+                message=f"--param key {key!r} is ambiguous: {len(candidates)} slots share that name",
+                hint="use the full slot address instead: " + ", ".join(f"{a}={key}" for a in candidates[:5]),
+                details={"key": key, "candidates": candidates},
+            )
+            raise typer.Exit(code=1)
+        sample = sorted(a for a in addresses if a)[:10]
+        renderer.error(
+            code="workflow_slot_invalid",
+            message=f"--param key {key!r} matches no slot in this template",
+            hint=(
+                "valid addresses include: " + ", ".join(sample)
+                if sample
+                else "this template exposes no tweakable slots"
+            ),
+            details={"key": key, "available": sample},
+        )
+        raise typer.Exit(code=1)
+    return resolved
+
+
+@tracking.track_command("templates")
+def run_template_cmd(
+    name: Annotated[str, typer.Argument(help="Template name (matches `comfy templates ls` rows).")],
+    params: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--param",
+            "-p",
+            metavar="KEY=VALUE",
+            show_default=False,
+            help=(
+                "Fill a parameterized input before running (repeatable). KEY is a slot "
+                "address (`6.text`) or a unique slot name (`prompt`); VALUE parses as "
+                "JSON with string fallback. List slots with `comfy templates fetch "
+                "<name> -o wf.json && comfy workflow slots wf.json`."
+            ),
+        ),
+    ] = None,
+    allow_spend: Annotated[
+        bool,
+        typer.Option(
+            "--allow-spend",
+            help=(
+                "Consent to running partner-API (paid) nodes that spend Comfy credits. "
+                "Required for API templates when not confirming interactively."
+            ),
+        ),
+    ] = False,
+    async_: Annotated[
+        bool,
+        typer.Option(
+            "--async",
+            show_default=False,
+            help="Submit and return immediately instead of waiting for completion.",
+        ),
+    ] = False,
+    host: Annotated[
+        str | None,
+        typer.Option(show_default=False, help="ComfyUI host (default 127.0.0.1)."),
+    ] = None,
+    port: Annotated[
+        int | None,
+        typer.Option(show_default=False, help="ComfyUI port (default 8188)."),
+    ] = None,
+    timeout: Annotated[
+        int,
+        typer.Option(help="Per-event timeout in seconds (same semantics as `comfy run --timeout`)."),
+    ] = 120,
+    verbose: Annotated[
+        bool,
+        typer.Option(help="Verbose execution output."),
+    ] = False,
+    api_key: Annotated[
+        str | None,
+        typer.Option(
+            "--api-key",
+            envvar="COMFY_API_KEY",
+            help="Comfy API key for partner-API nodes (prefer the COMFY_API_KEY env var).",
+        ),
+    ] = None,
+    gallery_path: Annotated[
+        str | None,
+        typer.Option("--gallery", show_default=False, help="Path to a local index.json (skips the cache + fetch)."),
+    ] = None,
+    refresh: Annotated[
+        bool,
+        typer.Option("--refresh", help="Re-fetch the gallery index from GitHub before resolving."),
+    ] = False,
+    json_output: Annotated[
+        bool,
+        typer.Option(
+            "--json",
+            help="Stream NDJSON run events to stdout (same dialect as `comfy run --json`).",
+        ),
+    ] = False,
+):
+    """Fetch a gallery template, fill its parameterized inputs, and run it on local ComfyUI.
+
+    OSS templates need their referenced models installed locally first
+    (`comfy model download`); missing models surface through the normal run
+    validation errors. Templates that embed partner-API nodes spend Comfy
+    credits and are gated behind --allow-spend / an interactive confirmation.
+    """
+    import sys
+    import tempfile
+
+    from comfy_cli.command import run as run_module
+    from comfy_cli.env_checker import check_comfy_server_running
+
+    renderer = get_renderer()
+    if json_output:
+        renderer.force_stream()
+
+    # -- Parse --param pairs up front so syntax errors fail before any I/O.
+    overrides: dict[str, Any] = {}
+    for raw in params or []:
+        if "=" not in raw:
+            renderer.error(
+                code="workflow_slot_invalid",
+                message=f"Expected `--param KEY=VALUE`, got {raw!r}",
+                hint='example: --param 6.text="a cat" or --param prompt="a cat"',
+            )
+            raise typer.Exit(code=1)
+        key, _, val = raw.partition("=")
+        overrides[key.strip()] = _parse_param_value(val)
+
+    # -- Resolve the template against the gallery index (close-matches on miss).
+    try:
+        cats = _load_gallery(gallery_path, refresh=refresh)
+    except (urllib.error.URLError, OSError, json.JSONDecodeError) as e:
+        renderer.error(code="gallery_load_failed", message=str(e))
+        raise typer.Exit(code=1) from e
+
+    rows = _flatten_templates(cats)
+    row = next((r for r in rows if r["name"] == name), None)
+    if row is None:
+        lower = name.lower()
+        close = [r["name"] for r in rows if lower in r["name"].lower()][:5]
+        renderer.error(
+            code="template_not_found",
+            message=f"no template named {name!r} in the gallery",
+            hint="try `comfy templates ls --name <substring>` to search",
+            details={"close_matches": close},
+        )
+        raise typer.Exit(code=1)
+
+    # -- Fetch + parse the template's workflow JSON.
+    try:
+        body = _fetch_template_workflow(name)
+    except (urllib.error.HTTPError, urllib.error.URLError, OSError) as e:
+        status = getattr(e, "code", None)
+        renderer.error(
+            code="template_fetch_failed",
+            message=f"failed to fetch workflow for {name!r}: {e}",
+            hint=(
+                "the gallery index references a template whose workflow JSON "
+                "is missing upstream — report at "
+                "https://github.com/Comfy-Org/workflow_templates/issues"
+                if status == 404
+                else "check network connectivity"
+            ),
+            details={"status": status} if status else None,
+        )
+        raise typer.Exit(code=1) from e
+    try:
+        workflow = json.loads(body)
+    except json.JSONDecodeError as e:
+        renderer.error(
+            code="template_workflow_invalid_json",
+            message=f"upstream returned non-JSON for {name!r}: {e}",
+            hint="report at https://github.com/Comfy-Org/workflow_templates/issues",
+        )
+        raise typer.Exit(code=1) from e
+
+    # -- Resolve host/port through the shared resolver, exactly like `comfy
+    # run`'s local branch (cmdline.py). This validates the host (rejecting
+    # URL-injection characters), brackets IPv6 literals, and honors
+    # config.background — behavior the old hand-rolled block lacked.
+    from comfy_cli.host_port import parse_host_port_arg, resolve_host_port
+
+    if host:
+        host, parsed_port = parse_host_port_arg(host)
+        if not port and parsed_port is not None:
+            port = parsed_port
+    host, port = resolve_host_port(host, port)
+
+    if not check_comfy_server_running(port, host, timeout=timeout):
+        renderer.error(
+            code="server_not_running",
+            message=f"ComfyUI not running on specified address ({host}:{port})",
+            hint="run: comfy launch",
+            details={"host": host, "port": port},
+        )
+        raise typer.Exit(code=1)
+
+    # object_info powers both slot filling and paid-node detection. Fail-open
+    # ({}) keeps template runs working against bare servers — the gallery-index
+    # signals below still gate paid templates in that case.
+    object_info = run_module._fetch_object_info(host, port)
+
+    # -- Fill parameterized inputs via the CQL slot engine.
+    if overrides:
+        if not isinstance(workflow.get("nodes"), list):
+            renderer.error(
+                code="workflow_slot_invalid",
+                message=f"template {name!r} is not a frontend-format workflow; --param is not supported for it",
+                hint="run it without --param, or fetch + edit it directly",
+            )
+            raise typer.Exit(code=1)
+        if not object_info:
+            renderer.error(
+                code="object_info_unavailable",
+                message="could not fetch /object_info from the server; --param needs the node catalog to fill slots",
+                hint="check the ComfyUI server logs, or run without --param",
+            )
+            raise typer.Exit(code=1)
+        from comfy_cli.cql.engine import Graph
+
+        graph = Graph.from_object_info(object_info)
+        graph._try_default_annotations()
+        try:
+            schema = graph.get_template_schema(name, workflow)
+        except (ValueError, KeyError) as e:
+            renderer.error(code="workflow_slot_invalid", message=f"Could not extract slots: {e}")
+            raise typer.Exit(code=1) from e
+        resolved = _resolve_param_addresses(renderer, overrides, schema.get("slots") or [])
+        try:
+            workflow, warnings = graph.apply_slots(workflow, resolved)
+        except ValueError as e:
+            renderer.error(
+                code="workflow_slot_invalid",
+                message=str(e),
+                hint="fetch the template and run `comfy workflow slots <file>` to see valid addresses + types",
+            )
+            raise typer.Exit(code=1) from e
+        if renderer.is_pretty():
+            rprint(f"[bold green]✓[/bold green] filled {len(resolved)} parameter(s)")
+            for addr in resolved:
+                rprint(f"  [dim]·[/dim] {addr}")
+            for w in warnings:
+                rprint(f"  [yellow]warning:[/yellow] {w}")
+
+    # -- Spend gate (BE-4113): partner-API nodes spend Comfy credits. Require
+    # explicit consent before submitting anything that would burn them.
+    paid_nodes = _detect_paid_nodes(workflow, object_info)
+    gallery_signals = _gallery_paid_signals(row)
+    if (paid_nodes or gallery_signals) and not allow_spend:
+        evidence = {
+            "template": name,
+            "partner_nodes": paid_nodes,
+            "gallery_signals": gallery_signals,
+        }
+        if renderer.is_pretty() and sys.stdin.isatty():
+            rprint(f"[yellow]⚠ Template [bold]{name}[/bold] uses partner-API nodes that spend Comfy credits.[/yellow]")
+            if paid_nodes:
+                rprint(f"  [dim]nodes:[/dim] {', '.join(paid_nodes)}")
+            if gallery_signals:
+                rprint(f"  [dim]gallery:[/dim] {', '.join(gallery_signals)}")
+            if not typer.confirm("Run anyway and spend credits?", default=False):
+                renderer.error(
+                    code="spend_consent_required",
+                    message="declined — template not submitted, no credits spent",
+                    details=evidence,
+                )
+                raise typer.Exit(code=1)
+        else:
+            renderer.error(
+                code="spend_consent_required",
+                message=(
+                    f"template {name!r} uses partner-API (paid) nodes; "
+                    "re-run with --allow-spend to consent to spending Comfy credits"
+                ),
+                hint="paid nodes only run with explicit consent; OSS templates run without this flag",
+                details=evidence,
+            )
+            raise typer.Exit(code=1)
+
+    # -- Hand off to the existing run path (UI→API conversion, partner
+    # credential injection, preflight validation, execution, jobs state).
+    safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in name)
+    fd, tmp_path = tempfile.mkstemp(prefix=f"comfy_template_{safe}_", suffix=".json")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(workflow, f)
+        run_module.execute(
+            tmp_path,
+            host,
+            port,
+            wait=not async_,
+            verbose=verbose,
+            timeout=timeout,
+            api_key=api_key,
+        )
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
