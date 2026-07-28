@@ -358,6 +358,49 @@ class TestListFolder:
         assert url.count("/") == 4  # http:// + /127.0.0.1:8188 + /models + /<segment>
         assert not any(c in url for c in "\r\n\x00")
 
+    @pytest.mark.parametrize("folder", ["model..v2", "my..folder", "..hidden", "trailing.."])
+    def test_dots_inside_a_name_are_not_traversal(self, local_target, monkeypatch, capsys, folder):
+        """Only the exact segments `.`/`..` are dot-segments; `..` mid-name is an ordinary name.
+
+        A substring `".." not in value` guard silently skipped these on the
+        `search --where local` walk and rejected them outright here, even though
+        `/models/model..v2` resolves to exactly that folder — no resolver rewrites it.
+        """
+        segment = urllib.parse.quote(folder, safe="")
+        calls = _patch_urlopen(monkeypatch, {f"127.0.0.1:8188/models/{segment}": []})
+        env = _run(["list-folder", folder, "--where", "local"], capsys)
+        assert env["ok"] is True, env
+        assert [c["url"] for c in calls] == [f"http://127.0.0.1:8188/models/{segment}"]
+        assert env["data"]["folder"] == folder
+
+    @pytest.mark.parametrize("folder", [".", ".."])
+    def test_bare_dot_segments_are_rejected(self, local_target, monkeypatch, capsys, folder):
+        """`.` and `..` are rewritten by a URL resolver, so they can't stay one segment.
+
+        `quote(..., safe="")` leaves `.` untouched, so a bare `.` would reach the
+        server as `/models/.` and normalize back to the `/models` *collection* —
+        rendering the folder list as if it were a file listing.
+        """
+        calls = _patch_urlopen(monkeypatch, {})
+        env = _run(["list-folder", folder, "--where", "local"], capsys)
+        assert env["ok"] is False, env
+        assert env["error"]["code"] == "invalid_argument"
+        assert calls == []
+
+    def test_undecodable_argv_bytes_error_cleanly(self, local_target, monkeypatch, capsys):
+        """A non-UTF-8 filename from argv must be `invalid_argument`, not a traceback.
+
+        Python decodes undecodable argv bytes into lone surrogates (PEP 383
+        `surrogateescape`). `quote(..., safe="")` raises `UnicodeEncodeError` on
+        those, and it runs *before* `list_folder_cmd`'s try block — so without a
+        guard the CLI dies with an uncaught stack trace.
+        """
+        calls = _patch_urlopen(monkeypatch, {})
+        env = _run(["list-folder", "a\udcffb", "--where", "local"], capsys)
+        assert env["ok"] is False, env
+        assert env["error"]["code"] == "invalid_argument"
+        assert calls == []
+
 
 # ---------------------------------------------------------------------------
 # search
@@ -518,6 +561,40 @@ class TestSearch:
         assert env["ok"] is False, env
         assert env["error"]["code"] == "invalid_argument"
         assert calls == []
+
+    def test_local_type_undecodable_argv_bytes_error_cleanly(self, local_target, monkeypatch, capsys):
+        """`--type` reaches `quote` via `_local_folder_matches`, whose handler misses this.
+
+        `search`'s except clause catches `json.JSONDecodeError` but not bare
+        `ValueError`, so the `UnicodeEncodeError` a surrogate raises would escape
+        uncaught. The guard rejects it up front instead.
+        """
+        calls = _patch_urlopen(monkeypatch, {})
+        env = _run(["search", "--text", "ltx", "--type", "a\udcffb", "--where", "local"], capsys)
+        assert env["ok"] is False, env
+        assert env["error"]["code"] == "invalid_argument"
+        assert calls == []
+
+    def test_local_walk_skips_undecodable_server_folder_name(self, local_target, monkeypatch, capsys):
+        """A server-advertised name carrying a lone surrogate is skipped, not fatal.
+
+        `json.loads('"\\udcff"')` yields a lone surrogate, so this shape is
+        reachable from a malicious or buggy backend. The walk must drop just that
+        folder and still return every other folder's models.
+        """
+        routes = {
+            "127.0.0.1:8188/models/loras": [{"name": "ltx-lora-detail.safetensors", "pathIndex": 0}],
+            "127.0.0.1:8188/models": ["loras", "bad\udcffname"],
+        }
+        calls = _patch_urlopen(monkeypatch, routes)
+        env = _run(["search", "--text", "ltx", "--where", "local"], capsys)
+        assert env["ok"] is True, env
+        assert [r["name"] for r in env["data"]["rows"]] == ["ltx-lora-detail.safetensors"]
+        # The undecodable folder is never fetched at all.
+        assert [c["url"] for c in calls] == [
+            "http://127.0.0.1:8188/models",
+            "http://127.0.0.1:8188/models/loras",
+        ]
 
     def test_local_non_string_entry_name_is_skipped(self, local_target, monkeypatch, capsys):
         """A server sending a non-string `name` must not crash the walk or the sort."""

@@ -64,7 +64,30 @@ def _is_walkable_folder_name(value: str) -> bool:
     the URL, so spaces, ``?``/``#``, and control characters can't alter the
     request.
     """
-    return bool(value) and ".." not in value and "/" not in value and "\\" not in value
+    if not value or "/" in value or "\\" in value:
+        return False
+    # Only the *exact* segments `.` and `..` are rewritten by a URL resolver
+    # (RFC 3986 remove_dot_segments); `..` merely *inside* a name (`model..v2`)
+    # is an ordinary run of characters and must stay usable. `quote` leaves `.`
+    # unencoded, so a bare `.` would otherwise reach the server as `/models/.`
+    # and normalize back to the `/models` collection.
+    if value in (".", ".."):
+        return False
+    try:
+        # argv can carry undecodable bytes as lone surrogates (PEP 383
+        # `surrogateescape`), and a JSON `"\udcff"` escape does the same for
+        # server-advertised names. `quote(..., safe="")` raises
+        # `UnicodeEncodeError` on those — a `ValueError` that no call site's
+        # handler catches, so it would surface as an uncaught traceback.
+        # Rejecting costs no reachable capability: `quote(..., errors=
+        # "surrogateescape")` would encode the raw bytes instead, but a backend's
+        # folder names are config-defined `str` keys (`folder_names_and_paths`,
+        # `extra_model_paths.yaml`) that are always valid UTF-8, so such a segment
+        # can never match one — it would only turn this clear error into a 404.
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
 
 
 def _reject_unsafe_path_segment(value: str, *, kind: str, renderer) -> None:
@@ -73,7 +96,10 @@ def _reject_unsafe_path_segment(value: str, *, kind: str, renderer) -> None:
         renderer.error(
             code="invalid_argument",
             message=f"{kind} {value!r} is not usable as a single path segment",
-            hint=f"a {kind} name must be non-empty and must not contain `..`, `/`, or `\\`",
+            hint=(
+                f"a {kind} name must be non-empty, must not be `.` or `..`, must not contain "
+                "`/` or `\\`, and must be valid UTF-8"
+            ),
         )
         raise typer.Exit(code=1)
 
