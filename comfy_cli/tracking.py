@@ -23,15 +23,40 @@ if TYPE_CHECKING:
 # Ignore logs from urllib3 that Mixpanel/PostHog use.
 logginglib.getLogger("urllib3").setLevel(logginglib.ERROR)
 
+# posthog-python reports every failed upload at ERROR on the "posthog" logger
+# (it never logs above ERROR). Telemetry is best-effort by contract — a failed
+# upload must not look like a product failure on the user's stderr — so silence
+# it entirely unless the user is explicitly debugging (LOG_LEVEL=DEBUG).
+if os.environ.get("LOG_LEVEL", "").upper() != "DEBUG":
+    logginglib.getLogger("posthog").setLevel(logginglib.CRITICAL)
+
 MIXPANEL_TOKEN = "93aeab8962b622d431ac19800ccc9f67"
 
 # phc_* are public client-side write keys designed for embedding — safe to commit, same as MIXPANEL_TOKEN above.
-# Override with $POSTHOG_API_KEY.
-POSTHOG_TOKEN = os.environ.get(
-    "POSTHOG_API_KEY",
-    "phc_iKfK86id4xVYws9LybMje0h44eGtfwFgRPIBehmy8rO",
-)
+# Override with $POSTHOG_API_KEY (see _resolve_posthog_token for the accepted shapes).
+_POSTHOG_DEFAULT_TOKEN = "phc_iKfK86id4xVYws9LybMje0h44eGtfwFgRPIBehmy8rO"
 POSTHOG_HOST = "https://t.comfy.org"
+
+
+def _resolve_posthog_token() -> str:
+    """Resolve the PostHog project write key, guarding against the
+    $POSTHOG_API_KEY name collision: PostHog's own tooling uses that name for a
+    personal (phx_) API key, which the ingestion endpoint rejects with a 401.
+    Only a phc_* project write key is accepted as an override; an empty string
+    still disables the provider (existing escape hatch); anything else is
+    ignored in favor of the committed default.
+    """
+    raw = os.environ.get("POSTHOG_API_KEY")
+    if raw is None:
+        return _POSTHOG_DEFAULT_TOKEN
+    if raw == "" or raw.startswith("phc_"):
+        return raw
+    logging.warning(
+        "Ignoring $POSTHOG_API_KEY: not a phc_* project write key "
+        "(personal phx_ keys cannot ingest events); using the built-in key."
+    )
+    return _POSTHOG_DEFAULT_TOKEN
+
 
 # Only these events get the tracing_id --> workflow_run_id alias on PostHog.
 EXECUTION_EVENTS = frozenset({"execution_start", "execution_success", "execution_error"})
@@ -249,7 +274,7 @@ def _get_providers() -> list[TelemetryProvider]:
                 built = []
                 for name, factory in (
                     ("MixpanelProvider", lambda: MixpanelProvider(MIXPANEL_TOKEN)),
-                    ("PostHogProvider", lambda: PostHogProvider(POSTHOG_TOKEN, POSTHOG_HOST)),
+                    ("PostHogProvider", lambda: PostHogProvider(_resolve_posthog_token(), POSTHOG_HOST)),
                 ):
                     try:
                         built.append(factory())
