@@ -26,31 +26,94 @@ class NoRedirectHandler(urllib.request.HTTPRedirectHandler):
     http_error_302 = http_error_303 = http_error_307 = http_error_308 = http_error_301
 
 
-def _build_authed_opener() -> urllib.request.OpenerDirector:
-    """Build the credential-carrying opener with http/https handlers only.
+def _http_only_proxy_handler() -> urllib.request.ProxyHandler:
+    """A ProxyHandler that can only proxy http(s).
 
-    ``build_opener()`` would also install ``FileHandler``/``FTPHandler``. Every
-    call site builds its URL from a trusted ``target.base_url``, so that isn't
-    reachable today, but this is the opener that attaches credentials — pinning
-    it to http(s) means a future caller can't be steered into a ``file://`` or
-    ``ftp://`` fetch. Unknown schemes fall to ``UnknownHandler``, which raises
-    ``URLError("unknown url type")``.
+    ``ProxyHandler()`` defaults to ``getproxies()`` and registers a
+    ``<scheme>_open`` method for *every* entry it finds, so an ``ftp_proxy`` in
+    the environment would give the opener an ``ftp_open`` — servicing
+    ``ftp://`` through the proxy and stepping straight past the
+    ``UnknownHandler`` that ``build_http_only_opener`` relies on. Filtering the
+    map to http(s) keeps real proxy support (``proxy_bypass``/``no_proxy`` read
+    the environment directly, not this dict) while leaving non-http schemes
+    with nowhere to go.
     """
+    proxies = {scheme: url for scheme, url in urllib.request.getproxies().items() if scheme in ("http", "https")}
+    return urllib.request.ProxyHandler(proxies)
+
+
+def build_http_only_opener(*handlers: urllib.request.BaseHandler) -> urllib.request.OpenerDirector:
+    """Build an opener that speaks http(s) and nothing else.
+
+    ``build_opener()`` would also install ``FileHandler``/``FTPHandler``/
+    ``DataHandler``. Our call sites build their URLs from a trusted
+    ``target.base_url``, so that isn't reachable today, but these openers
+    attach credentials — pinning them to http(s) means a future caller can't
+    be steered into a ``file://``, ``ftp://`` or ``data:`` fetch. Unknown
+    schemes fall to ``UnknownHandler``, which raises
+    ``URLError("unknown url type")``.
+
+    ``handlers`` are the caller's own additions (e.g. a redirect policy). As in
+    ``build_opener``, a caller-supplied handler replaces the default it
+    subclasses rather than being appended behind it. Note that no redirect
+    handler is installed unless the caller passes one, so a bare opener
+    surfaces a 30x as an ``HTTPError`` rather than following it.
+    """
+    defaults = [
+        (urllib.request.ProxyHandler, _http_only_proxy_handler),
+        (urllib.request.HTTPHandler, urllib.request.HTTPHandler),
+        (urllib.request.HTTPDefaultErrorHandler, urllib.request.HTTPDefaultErrorHandler),
+        (urllib.request.HTTPErrorProcessor, urllib.request.HTTPErrorProcessor),
+        (urllib.request.UnknownHandler, urllib.request.UnknownHandler),
+    ]
+    # urllib.request only defines HTTPSHandler on an SSL-capable build; naming it
+    # unconditionally would blow up at import time on one without.
+    if hasattr(urllib.request, "HTTPSHandler"):
+        defaults.append((urllib.request.HTTPSHandler, urllib.request.HTTPSHandler))
+
     opener = urllib.request.OpenerDirector()
-    for handler in (
-        urllib.request.ProxyHandler(),
-        urllib.request.HTTPHandler(),
-        urllib.request.HTTPSHandler(),
-        urllib.request.HTTPDefaultErrorHandler(),
-        urllib.request.HTTPErrorProcessor(),
-        NoRedirectHandler(),
-        urllib.request.UnknownHandler(),
-    ):
+    for klass, factory in defaults:
+        if not any(isinstance(handler, klass) for handler in handlers):
+            opener.add_handler(factory())
+    for handler in handlers:
         opener.add_handler(handler)
     return opener
 
 
-_AUTHED_OPENER = _build_authed_opener()
+_AUTHED_OPENER = build_http_only_opener(NoRedirectHandler())
+
+# The uncredentialed fetches — the template gallery on raw.githubusercontent.com
+# and the REST calls against a local ``http://{host}:{port}`` ComfyUI server.
+# These reached for ``urllib.request.urlopen()``, i.e. the global default
+# opener, which also speaks ``file://``, ``ftp://`` and ``data:``. Nothing here
+# attaches a credential header, so unlike ``_AUTHED_OPENER`` there is no
+# redirect-replay exposure and ``HTTPRedirectHandler`` is installed explicitly
+# to keep the redirect-following those call sites have always had. What the
+# pinning buys is that a URL which stops being trusted — a gallery URL that
+# becomes configurable, say — still can't be steered into a local-file read.
+_PLAIN_OPENER = build_http_only_opener(urllib.request.HTTPRedirectHandler())
+
+
+def plain_urlopen(url, *, timeout: float = 30.0):
+    """Open an uncredentialed request via the http(s)-only shared opener.
+
+    ``url`` is a full URL or a prepared ``Request``. Redirects are followed, as
+    they were when these call sites used the global default opener.
+    """
+    return _PLAIN_OPENER.open(url, timeout=timeout)
+
+
+def no_redirect_urlopen(url, *, timeout: float = 30.0):
+    """Open a prepared credential-bearing ``Request`` without following redirects.
+
+    ``authed_urlopen`` covers the common case where the credential rides a
+    header we attach ourselves. This is the escape hatch for a request whose
+    credential the caller has already placed somewhere we can't build — the
+    ``/prompt`` submit carries ``api_key_comfy_org`` inside its JSON body — and
+    which therefore wants the same no-redirect policy without the header
+    mechanics.
+    """
+    return _AUTHED_OPENER.open(url, timeout=timeout)
 
 
 def build_authed_request(

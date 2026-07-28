@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from comfy_cli.cql._net import is_loopback_host
-from comfy_cli.http import NoRedirectHandler
+from comfy_cli.http import NoRedirectHandler, build_http_only_opener
 
 # ---------------------------------------------------------------------------
 # Types — mirrors nodegraph/types.go
@@ -1194,7 +1194,7 @@ _logger = logging.getLogger(__name__)
 _MAX_OBJECT_INFO_BYTES = 64 * 1024 * 1024
 
 
-_opener = urllib.request.build_opener(NoRedirectHandler())
+_opener = build_http_only_opener(NoRedirectHandler())
 
 
 class LoadError(Exception):

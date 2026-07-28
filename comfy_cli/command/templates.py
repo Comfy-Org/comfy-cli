@@ -28,6 +28,7 @@ from typing import Annotated, Any
 import typer
 
 from comfy_cli import tracking
+from comfy_cli.http import plain_urlopen
 from comfy_cli.output import get_renderer, rprint
 
 app = typer.Typer(no_args_is_help=True, help="Browse the Comfy workflow-template gallery.")
@@ -48,7 +49,7 @@ def _cache_path() -> Path:
 
 def _fetch_gallery(url: str = GALLERY_URL, timeout: float = 15.0) -> bytes:
     req = urllib.request.Request(url, headers={"User-Agent": "comfy-cli"})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
+    with plain_urlopen(req, timeout=timeout) as resp:
         if resp.status != 200:
             raise RuntimeError(f"gallery fetch failed: HTTP {resp.status}")
         return resp.read()
@@ -410,7 +411,7 @@ def _fetch_template_workflow(name: str, *, timeout: float = 15.0) -> bytes:
     """Pull a single template's workflow JSON from the canonical GitHub raw URL."""
     url = _TEMPLATE_WORKFLOW_URL.format(name=urllib.parse.quote(name, safe=""))
     req = urllib.request.Request(url, headers={"User-Agent": "comfy-cli"})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
+    with plain_urlopen(req, timeout=timeout) as resp:
         if resp.status != 200:
             raise RuntimeError(f"template workflow fetch failed: HTTP {resp.status}")
         return resp.read()

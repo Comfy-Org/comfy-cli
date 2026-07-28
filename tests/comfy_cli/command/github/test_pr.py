@@ -179,7 +179,7 @@ class TestGitHubAPIIntegration:
 
     @patch("requests.get")
     def test_find_pr_by_branch_rate_limit(self, mock_get):
-        """A rate-limited 403 surfaces as GitHubRateLimitError, not a silent "no PR found\""""
+        """A rate-limited 403 surfaces as GitHubRateLimitError, not a silent "no PR found\" """
         mock_response = Mock()
         mock_response.status_code = 403
         mock_response.headers = {"x-ratelimit-remaining": "0", "x-ratelimit-reset": "1777415867"}

@@ -23,7 +23,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from comfy_cli.http import NoRedirectHandler
+from comfy_cli.http import NoRedirectHandler, build_http_only_opener
 from comfy_cli.target import Target
 
 _LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1", "[::1]"}
@@ -95,7 +95,7 @@ class Unauthenticated(Exception):
     """Target needs auth but no valid session is present."""
 
 
-_OPENER = urllib.request.build_opener(NoRedirectHandler())
+_OPENER = build_http_only_opener(NoRedirectHandler())
 
 
 def _assert_safe_url(url: str) -> None:
