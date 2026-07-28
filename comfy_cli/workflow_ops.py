@@ -108,6 +108,38 @@ def _available_nodes_hint(workflow: dict, *, limit: int = 12) -> str:
     return ", ".join(out)
 
 
+def _slot_types(t: Any) -> set[str]:
+    """Split a slot type into the set of types it accepts.
+
+    ComfyUI expresses a multi-type input as a COMMA-SEPARATED UNION, e.g.
+    ``MESH,FILE_3D_GLB,FILE_3D_GLTF,...`` on a 3D importer's ``mesh`` input.
+    """
+    return {p.strip() for p in str(t or "").split(",") if p.strip()}
+
+
+def _types_compatible(link_type: Any, dst_type: Any) -> bool:
+    """Whether an output of ``link_type`` may drive an input of ``dst_type``.
+
+    Compatible when the two type sets INTERSECT, not when their raw strings are
+    equal: comparing whole strings refused a ``FILE_3D_GLB`` output from an input
+    declaring ``MESH,FILE_3D_GLB,...`` even though it explicitly accepts it.
+    Measured on prod agent traces (2026-07-23 → 07-28): ~23 connect/apply_ops
+    failures of that shape, each one a correct edit being refused — and the error
+    names the source type inside the accepted list, so the agent saw its own type
+    listed and retried the identical call.
+
+    Intersection (not substring) matters: ``FILE_3D_GL`` must NOT satisfy an input
+    accepting only ``FILE_3D_GLTF``/``FILE_3D_GLB``. An unknown type on either
+    side, or a ``*`` wildcard, stays permissive as before.
+    """
+    src, dst = _slot_types(link_type), _slot_types(dst_type)
+    if not src or not dst:
+        return True
+    if "*" in src or "*" in dst:
+        return True
+    return bool(src & dst)
+
+
 def _enrich_resolution_error(e: ValueError, workflow: dict, graph, *, widget: Any = None) -> ValueError:
     """Turn a *not-found* edit error into an actionable one.
 
@@ -499,12 +531,13 @@ def _connect_impl(
     dst = _require(workflow, to_node)
     out_idx, link_type = _resolve_output_slot(src, graph, from_slot)
     in_idx, grow = _resolve_input_target(dst, graph, to_slot, link_type)
-    # Type-check concrete slots: an output only connects to an input of the same
-    # type (or a wildcard "*"). Autogrow slots are minted with the source type,
-    # so they need no check. Without this, a mis-wire silently clobbers a link.
+    # Type-check concrete slots: an output only connects to an input that accepts
+    # its type (or a wildcard "*"). Autogrow slots are minted with the source
+    # type, so they need no check. Without this, a mis-wire silently clobbers a
+    # link.
     if in_idx is not None:
         dst_type = (dst.get("inputs") or [])[in_idx].get("type")
-        if link_type and dst_type and link_type != dst_type and "*" not in (link_type, dst_type):
+        if not _types_compatible(link_type, dst_type):
             raise ValueError(
                 f"type mismatch: {link_type} output of node {from_node} cannot connect to "
                 f"{dst_type} input {(dst.get('inputs') or [])[in_idx].get('name')!r} of node {to_node}"
