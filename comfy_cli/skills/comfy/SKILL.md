@@ -663,6 +663,15 @@ Mechanical contracts that bite agents — encode them, don't rediscover:
   `comfy generate consent always` (revert: `consent ask`; inspect:
   `consent show`). `list` / `schema` / `refresh` / `upload` / `resume` /
   `--emit-workflow` spend nothing and are not gated.
+- **Discovery is structured — never scrape the table.** `generate list --json`
+  and `generate schema <model> --json` both emit a full renderer envelope
+  (`command: "generate list"` / `"generate schema"`, schemas `generate_list` /
+  `generate_schema` in `comfy discover`). `data.models[]` carries
+  `{alias, id, partner, category, mode, summary}` with the **untruncated**
+  summary; `data.params[]` carries `{name, type, required, default, enum,
+  description}`. Unknown model → `generate_model_unknown`; missing model arg →
+  `missing_argument`. This catalog is **not** in `comfy discover` — `generate
+  list` is the only source of the alias list.
 - **Machine-readable output:** `generate <model> --json` prints the raw API
   response as JSON; `generate upload <file> --json` emits structured
   `{url, expires_at, …}`; `generate <model> --emit-workflow out.json` goes

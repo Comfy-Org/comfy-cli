@@ -170,6 +170,18 @@ class Renderer:
         """
         self.mode = OutputMode.NDJSON
 
+    def force_json(self) -> None:
+        """Upgrade a pretty renderer to single-envelope JSON mode.
+
+        Counterpart to ``force_stream`` for commands whose ``--json`` is
+        parsed out of an argv tail the global callback never sees — e.g.
+        ``comfy generate list --json``, where ``generate`` takes
+        ``allow_extra_args`` and hand-parses its own meta flags. Already-JSON
+        modes are left alone so this can never *downgrade* an NDJSON stream.
+        """
+        if self.mode is OutputMode.PRETTY:
+            self.mode = OutputMode.JSON
+
     # ----- printing -----
 
     def print(self, *args: Any, **kwargs: Any) -> None:
