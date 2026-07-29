@@ -363,11 +363,6 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "the job may still be running — check `comfy jobs status <id>`, or re-watch with a longer `--timeout`",
     ),
     ErrorCode(
-        "server_died",
-        "Server connection dropped while a foreground (`--wait`) job was in flight; recorded on the job state file.",
-        "check the server (it may have been OOM-killed); the prompt_id is in `comfy jobs status <id>`",
-    ),
-    ErrorCode(
         "watcher_poll_error",
         "Background watcher encountered a transient error polling the server.",
         "transient — the job is likely still running; re-run `comfy jobs watch <id>`",
@@ -375,8 +370,10 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ErrorCode(
         "server_died",
         "The local ComfyUI server became unreachable (or restarted without the job) while it "
-        "was in flight — the server likely crashed or was killed (e.g. an out-of-memory allocation).",
-        "check the ComfyUI server log, then `comfy launch` and re-submit the workflow",
+        "was in flight — the server likely crashed or was killed (e.g. an out-of-memory allocation). "
+        "Raised by the background watcher and by a foreground (`--wait`) run; recorded on the job state file.",
+        "check the ComfyUI server log (it may have been OOM-killed), then `comfy launch` and re-submit; "
+        "the prompt_id is in `comfy jobs status <id>`",
     ),
     ErrorCode(
         "unknown_status_stall",
