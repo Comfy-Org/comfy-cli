@@ -934,7 +934,10 @@ Hard-won lessons per domain. Not a tutorial — a reference card.
 - Preprocessor output ≠ ControlNet model (two separate things)
 - Don't feed raw photos into ControlNet without preprocessing first
 - ImageCompositeMasked: mask MUST match SOURCE size, not destination
-- COMFY_DYNAMICCOMBO_V3: use flat dotted keys (`"model.max_tokens": 800`), not nested
+- COMFY_DYNAMICCOMBO_V3: use flat dotted keys (`"model.max_tokens": 800`), not nested.
+  Which dotted keys are required depends on the option the selector names, and
+  `comfy validate` expands that option — so it reports a missing/mistyped
+  sub-input instead of letting `/prompt` reject it.
 - First/last frame transitions: wire start_frame + end_frame → I2V node fills in between
 - Wiring: ControlNetApplyAdvanced takes CONDITIONING + IMAGE + CONTROL_NET → modified CONDITIONING
 

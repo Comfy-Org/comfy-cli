@@ -47,6 +47,38 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "Resolved no workspace where one was required (e.g. `comfy which`).",
         "run `comfy install`, or pass `--workspace`",
     ),
+    # --- launch / stop lifecycle ---------------------------------------------
+    ErrorCode(
+        "server_already_running",
+        "`comfy launch --background` found a background ComfyUI already running.",
+        "run `comfy stop` before launching another background service",
+    ),
+    ErrorCode(
+        "port_invalid",
+        "`comfy launch --background` got a non-integer `--port`. `details.port` carries the offending value.",
+        "pass an integer `--port` (e.g. `--port 8188`)",
+    ),
+    ErrorCode(
+        "port_in_use",
+        "`comfy launch --background` found the target port already in use. `details.port` carries the port.",
+        "stop the process on that port or pass a different `--port`",
+    ),
+    ErrorCode(
+        "launch_failed",
+        "ComfyUI failed to launch (background monitor saw no success line) or a "
+        "foreground launch exited non-zero. `details` carries the log / returncode.",
+        "check the error log for the underlying failure",
+    ),
+    ErrorCode(
+        "no_background_server",
+        "`comfy stop` found no background ComfyUI recorded as running.",
+        "run `comfy launch --background` first",
+    ),
+    ErrorCode(
+        "stop_failed",
+        "`comfy stop` could not kill the recorded background ComfyUI process. `details.pid` carries the process id.",
+        "kill the process manually if it is still running",
+    ),
     # --- workflow loading ----------------------------------------------------
     ErrorCode(
         "workflow_not_found",
@@ -330,6 +362,11 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "the job may still be running — check `comfy jobs status <id>`, or re-watch with a longer `--timeout`",
     ),
     ErrorCode(
+        "server_died",
+        "Server connection dropped while a foreground (`--wait`) job was in flight; recorded on the job state file.",
+        "check the server (it may have been OOM-killed); the prompt_id is in `comfy jobs status <id>`",
+    ),
+    ErrorCode(
         "watcher_poll_error",
         "Background watcher encountered a transient error polling the server.",
         "transient — the job is likely still running; re-run `comfy jobs watch <id>`",
@@ -533,6 +570,22 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "download_job_not_found",
         "The prompt_id wasn't found in state files or the server API.",
         "check the prompt_id and ensure the job has completed",
+    ),
+    # --- background model downloads (`model download --background`) ----------
+    ErrorCode(
+        "download_not_found",
+        "No background download state file matches the given download id.",
+        "list the known downloads with `comfy model downloads`",
+    ),
+    ErrorCode(
+        "download_state_unwritable",
+        "The `<workspace>/.comfy-downloads` state directory could not be written.",
+        "check the workspace is writable, or run without --background",
+    ),
+    ErrorCode(
+        "download_worker_spawn_failed",
+        "The detached background download worker could not be started.",
+        "run without --background to download in the foreground",
     ),
     ErrorCode(
         "setup_missing_where",

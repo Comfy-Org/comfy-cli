@@ -82,11 +82,19 @@ COMMAND_SCHEMAS: dict[str, str] = {
     "comfy models show": "models",
     "comfy models list-folders": "models",
     "comfy models list-folder": "models",
+    # background model downloads (`comfy model download --background`)
+    "comfy model download": "download",
+    "comfy model download-status": "download_status",
+    "comfy model download-cancel": "download_status",
+    "comfy model downloads": "downloads",
     # template gallery
     "comfy templates ls": "templates",
     "comfy templates show": "templates",
     "comfy templates fetch": "templates",
     "comfy templates refresh": "templates",
+    # lifecycle
+    "comfy launch": "launch",
+    "comfy stop": "stop",
     # file transfer
     "comfy upload": "transfer",
     "comfy download": "transfer",

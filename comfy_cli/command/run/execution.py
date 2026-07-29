@@ -121,6 +121,11 @@ class WorkflowExecution:
         # compute nodes that never fire a server-side `executed` event.
         self.cached_node_ids: list[str] = []
         self.executed_node_ids: list[str] = []
+        # Classified verdict of a terminal server-side `execution_error`,
+        # stashed by `on_error` before it raises `typer.Exit`. The `--wait`
+        # caller only sees the exit, so this is how the real cause reaches
+        # the job state file.
+        self.last_error: dict | None = None
 
     def connect(self):
         # Resolve via the package namespace so tests can patch
@@ -550,6 +555,11 @@ class WorkflowExecution:
         # the error envelope carries the classified one-line verdict.
         self.renderer.event("execution_error", prompt_id=self.prompt_id, details=data)
         verdict = execution_errors.classify(data)
+        self.last_error = {
+            "code": verdict["code"],
+            "message": verdict["message"],
+            "details": dict(verdict["details"]),
+        }
         self.renderer.error(
             code=verdict["code"],
             message=verdict["message"],
