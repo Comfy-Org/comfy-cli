@@ -670,6 +670,20 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "rest of the report still succeeds.",
         "check the file's permissions under `custom_nodes/<pack>/`",
     ),
+    ErrorCode(
+        "registry_unavailable",
+        "`comfy node deps --registry <node-id>` could not reach the Comfy registry (network failure, timeout, "
+        "or a non-200 response), so that candidate's row carries `declared: null` plus a per-entry `warning`. "
+        "Surfaced in `data.warnings[]` (not as an error envelope): every other pack still reports normally.",
+        "check network access to api.comfy.org, then re-run (add `--refresh` to bypass the 1h cache)",
+    ),
+    ErrorCode(
+        "registry_no_dependency_metadata",
+        "`comfy node deps --registry <node-id>` reached the registry, but it published no dependency metadata "
+        "for that pack's latest version, so the row carries `declared: null` rather than an empty list — the "
+        'API cannot distinguish "declares nothing" from "field absent". Surfaced in `data.warnings[]`.',
+        "the pack publisher must publish a version declaring its dependencies; nothing to fix locally",
+    ),
 )
 
 

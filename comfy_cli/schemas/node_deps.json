@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "comfy node deps",
-  "description": "Per-pack Python dependency report: each installed custom node pack's declared requirements (requirements.txt and/or pyproject.toml [project] dependencies) against the versions installed in the workspace venv. Read-only: no installs, no cm-cli, no network. Exit code is 0 even when requirements are missing or mismatched — this is a report, not a check.",
+  "description": "Per-pack Python dependency report: each installed custom node pack's declared requirements (requirements.txt and/or pyproject.toml [project] dependencies) against the versions installed in the workspace venv. `--registry <node-id>` adds a row for a NOT-yet-installed registry pack, diffing its published latest-version dependencies against the same venv so conflict risk can be assessed before installing. Read-only: no installs, no cm-cli, and no network except the registry's side-effect-free GET /nodes/{id} for --registry ids. Exit code is 0 even when requirements are missing or mismatched — this is a report, not a check.",
   "type": "object",
   "properties": {
     "workspace": { "type": "string", "description": "Resolved ComfyUI workspace path." },
@@ -20,24 +20,44 @@
     },
     "packs": {
       "type": "array",
-      "description": "One row per reported pack, in directory-name order (or in the order requested on the command line).",
+      "description": "One row per reported pack, in directory-name order (or in the order requested on the command line); `--registry` candidates follow, in the order given. `pack` is NOT a unique key: naming the same id both positionally and via `--registry` deliberately yields two rows for it — an installed one and a `registry` one. Key on (`pack`, `registry`) if you need uniqueness.",
       "items": {
         "type": "object",
         "properties": {
-          "pack": { "type": "string", "description": "Pack directory name." },
+          "pack": {
+            "type": "string",
+            "description": "Pack directory name, or the registry node id on a `registry` row."
+          },
           "path": {
             "type": ["string", "null"],
-            "description": "Pack path relative to the workspace, or null when the named pack is not installed."
+            "description": "Pack path relative to the workspace; null when the named pack is not installed, and always null on a `registry` row."
           },
           "status": {
             "type": "string",
-            "enum": ["installed", "not_installed"],
-            "description": "`not_installed` when a name given on the command line matched no pack directory."
+            "enum": ["installed", "not_installed", "registry"],
+            "description": "`not_installed` when a name given on the command line matched no pack directory. `registry` marks a `--registry <node-id>` candidate: a pack that is NOT installed, whose requirements come from the registry's published metadata."
+          },
+          "registry": {
+            "type": "boolean",
+            "description": "Present and true only on a `--registry` candidate row. Absent on rows sourced from the local workspace."
+          },
+          "version": {
+            "type": ["string", "null"],
+            "description": "Registry rows only: the LATEST published version whose dependencies this row describes (null when the registry returned none). The registry exposes no read-only endpoint for a pinned version's dependencies, so this is always the latest — not necessarily what an install would resolve to."
+          },
+          "declared": {
+            "type": ["array", "null"],
+            "description": "Registry rows only: the dependency strings the registry published for `version`, verbatim. Null (with `warning` set) when the registry returned no usable dependency metadata — distinct from an empty list, which is never emitted because the API cannot distinguish 'declares nothing' from 'field absent'.",
+            "items": { "type": "string" }
+          },
+          "warning": {
+            "type": "string",
+            "description": "Registry rows only: why this row carries no requirements (registry unreachable, or no dependency metadata published). Never fails the command — other rows still render."
           },
           "requirement_files": {
             "type": "array",
-            "description": "Which declaration files contributed requirements.",
-            "items": { "type": "string", "enum": ["requirements.txt", "pyproject.toml"] }
+            "description": "Which declaration sources contributed requirements. `registry` is not a file — it is the registry's published metadata for a `--registry` candidate.",
+            "items": { "type": "string", "enum": ["requirements.txt", "pyproject.toml", "registry"] }
           },
           "requirements": {
             "type": "array",
@@ -57,7 +77,7 @@
                   "type": "string",
                   "description": "PEP 508 environment marker, when declared. NOT evaluated — the relevant environment is the workspace venv's, not the CLI's."
                 },
-                "source": { "type": "string", "enum": ["requirements.txt", "pyproject.toml"] },
+                "source": { "type": "string", "enum": ["requirements.txt", "pyproject.toml", "registry"] },
                 "installed": {
                   "type": ["string", "null"],
                   "description": "Version found in the workspace venv, or null when missing/unparseable/unknown."
@@ -89,7 +109,7 @@
     },
     "warnings": {
       "type": "array",
-      "description": "Non-fatal problems. `installed_versions_unavailable` means the pip probe failed, so every requirement is `unknown`.",
+      "description": "Non-fatal problems. `installed_versions_unavailable` means the pip probe failed, so every requirement is `unknown`. `registry_unavailable` / `registry_no_dependency_metadata` mean a `--registry` candidate could not be diffed; every other row is unaffected.",
       "items": {
         "type": "object",
         "properties": {

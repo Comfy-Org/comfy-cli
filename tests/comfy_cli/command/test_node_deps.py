@@ -38,6 +38,17 @@ def _renderer_isolation():
     reset_renderer_for_testing()
 
 
+@pytest.fixture(autouse=True)
+def _isolated_registry_cache(tmp_path, monkeypatch):
+    """Point the shared ``outdated.json`` registry cache at a throwaway dir.
+
+    ``--registry`` reuses ``comfy outdated``'s cache file, which is resolved
+    from ``XDG_CACHE_HOME`` at call time — without this, a test run would read
+    and rewrite the developer's real cache.
+    """
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+
+
 class _FakePipList:
     """Stand-in for ``subprocess.run``; records every invocation."""
 
@@ -312,6 +323,326 @@ def test_no_names_reports_every_pack(workspace, fake_pip):
     report, _ = node_deps_cmd.build_report(str(workspace), python="/fake/python")
 
     assert sorted(p["pack"] for p in report["packs"]) == ["Registry-Pack", "comfyui-impact-pack"]
+
+
+# ---------------------------------------------------------------------------
+# --registry (not-yet-installed candidates)
+# ---------------------------------------------------------------------------
+
+
+def _node(node_id: str, version: str | None = "1.2.3", dependencies=None):
+    """A registry ``Node`` as ``RegistryAPI.get_node`` would return one."""
+    from comfy_cli.registry.types import Node, NodeVersion
+
+    latest = None
+    if version is not None:
+        latest = NodeVersion(
+            changelog="",
+            # ``map_node_version`` defaults a missing key to [], so [] is what
+            # "the registry published no dependency metadata" looks like here.
+            dependencies=[] if dependencies is None else dependencies,
+            deprecated=False,
+            id=f"{node_id}@{version}",
+            version=version,
+            download_url="https://example.invalid/pack.zip",
+        )
+    return Node(id=node_id, name=node_id, description="", latest_version=latest)
+
+
+class _FakeRegistry:
+    """Records every ``get_node`` call; ``install_node`` must never be reached."""
+
+    def __init__(self, node=None, error: Exception | None = None):
+        self.calls: list[str] = []
+        self._node = node
+        self._error = error
+
+    def get_node(self, node_id):
+        self.calls.append(node_id)
+        if self._error is not None:
+            raise self._error
+        return self._node
+
+    def install_node(self, node_id, version=None):  # pragma: no cover - a failure, not a path
+        raise AssertionError("install_node must never be called: it records an install + analytics event")
+
+
+def _registry_row(report: dict) -> dict:
+    rows = [p for p in report["packs"] if p.get("registry")]
+    assert len(rows) == 1, f"expected exactly one registry row, got {[p['pack'] for p in report['packs']]}"
+    return rows[0]
+
+
+def test_registry_candidate_is_diffed_against_the_same_pip_list(workspace, fake_pip):
+    api = _FakeRegistry(
+        _node(
+            "comfyui-impact-pack",
+            "8.28.3",
+            # satisfied / mismatch / missing / unparseable, in that order.
+            ["numpy>=1.20", "opencv-python<4.0", "segment-anything", "-r extra.txt"],
+        )
+    )
+    report, warnings = node_deps_cmd.build_report(
+        str(workspace), registry_ids=["comfyui-impact-pack"], python="/fake/python", registry_api=api
+    )
+
+    row = _registry_row(report)
+    assert api.calls == ["comfyui-impact-pack"]
+    assert row["pack"] == "comfyui-impact-pack"
+    assert row["status"] == "registry"
+    assert row["path"] is None
+    assert row["version"] == "8.28.3"
+    assert row["declared"] == ["numpy>=1.20", "opencv-python<4.0", "segment-anything", "-r extra.txt"]
+    assert row["requirement_files"] == ["registry"]
+    assert "warning" not in row
+    assert warnings == []
+
+    reqs = _reqs_by_raw(row)
+    assert reqs["numpy>=1.20"]["status"] == "satisfied"
+    assert reqs["numpy>=1.20"]["installed"] == "1.26.4"
+    assert reqs["opencv-python<4.0"]["status"] == "mismatch"
+    assert reqs["opencv-python<4.0"]["installed"] == "4.9.0.80"
+    assert reqs["segment-anything"]["status"] == "missing"
+    assert reqs["-r extra.txt"]["status"] == "unparseable"
+    assert all(r["source"] == "registry" for r in row["requirements"])
+    assert row["summary"] == {"satisfied": 1, "mismatch": 1, "missing": 1, "unparseable": 1, "unknown": 0}
+
+    # A single `pip list`, shared with the installed packs — not one per entry.
+    assert len(fake_pip.calls) == 1
+
+
+def test_registry_without_dependency_metadata_warns_honestly(workspace, fake_pip):
+    api = _FakeRegistry(_node("bare-pack", "1.0.0", []))
+    report, warnings = node_deps_cmd.build_report(
+        str(workspace), registry_ids=["bare-pack"], python="/fake/python", registry_api=api
+    )
+
+    row = _registry_row(report)
+    # `declared: null`, NOT `[]`: the API cannot distinguish "declares nothing"
+    # from "field absent", so we must not claim the former.
+    assert row["declared"] is None
+    assert row["registry"] is True
+    assert row["requirements"] == []
+    assert row["requirement_files"] == []
+    assert row["warning"] == "registry did not return dependency metadata for this pack"
+    assert [w["code"] for w in warnings] == ["registry_no_dependency_metadata"]
+
+
+def test_registry_node_without_latest_version_warns_honestly(workspace, fake_pip):
+    api = _FakeRegistry(_node("unpublished-pack", version=None))
+    report, warnings = node_deps_cmd.build_report(
+        str(workspace), registry_ids=["unpublished-pack"], python="/fake/python", registry_api=api
+    )
+
+    row = _registry_row(report)
+    assert row["version"] is None
+    assert row["declared"] is None
+    assert row["warning"] == "registry did not return dependency metadata for this pack"
+    assert [w["code"] for w in warnings] == ["registry_no_dependency_metadata"]
+
+
+def test_registry_non_list_dependencies_do_not_become_one_row_per_character(workspace, fake_pip):
+    """A malformed payload must degrade to the honest warning, not to garbage."""
+    api = _FakeRegistry(_node("odd-pack", "1.0.0", "numpy"))
+    report, warnings = node_deps_cmd.build_report(
+        str(workspace), registry_ids=["odd-pack"], python="/fake/python", registry_api=api
+    )
+
+    row = _registry_row(report)
+    assert row["declared"] is None
+    assert row["requirements"] == []
+    assert row["warning"] == "registry did not return dependency metadata for this pack"
+    assert [w["code"] for w in warnings] == ["registry_no_dependency_metadata"]
+
+
+def test_registry_blank_only_dependencies_degrade_to_the_warning(workspace, fake_pip):
+    api = _FakeRegistry(_node("blank-pack", "1.0.0", ["", "   "]))
+    report, warnings = node_deps_cmd.build_report(
+        str(workspace), registry_ids=["blank-pack"], python="/fake/python", registry_api=api
+    )
+
+    row = _registry_row(report)
+    assert row["declared"] is None
+    assert [w["code"] for w in warnings] == ["registry_no_dependency_metadata"]
+
+
+def test_registry_network_failure_is_a_per_entry_warning_not_a_failed_command(workspace, fake_pip):
+    import requests
+
+    api = _FakeRegistry(error=requests.exceptions.RequestException("connection timed out"))
+    report, warnings = node_deps_cmd.build_report(
+        str(workspace),
+        ["comfyui-impact-pack"],
+        registry_ids=["some-pack"],
+        python="/fake/python",
+        registry_api=api,
+    )
+
+    row = _registry_row(report)
+    assert row["declared"] is None
+    assert row["version"] is None
+    assert "connection timed out" in row["warning"]
+    assert [w["code"] for w in warnings] == ["registry_unavailable"]
+
+    # The installed pack's section is untouched by the registry failure.
+    installed = _packs_by_name(report)["comfyui-impact-pack"]
+    assert installed["status"] == "installed"
+    assert _reqs_by_raw(installed)["numpy<1.20"]["status"] == "mismatch"
+
+
+def test_registry_never_calls_install_node(workspace, fake_pip, monkeypatch):
+    """The install endpoint records an install + analytics event server-side."""
+    from unittest import mock
+
+    from comfy_cli.registry import RegistryAPI
+
+    with (
+        mock.patch.object(RegistryAPI, "install_node", autospec=True) as install,
+        mock.patch.object(RegistryAPI, "get_node", autospec=True) as get_node,
+    ):
+        get_node.return_value = _node("some-pack", "2.0.0", ["numpy"])
+        # No injected api: build_report must construct the real RegistryAPI and
+        # still only reach for the read-only endpoint.
+        report, warnings = node_deps_cmd.build_report(str(workspace), registry_ids=["some-pack"], python="/fake/python")
+
+    install.assert_not_called()
+    assert get_node.call_count == 1
+    assert _registry_row(report)["declared"] == ["numpy"]
+    assert warnings == []
+
+
+def test_registry_lookup_is_cached_and_refresh_bypasses_it(workspace, fake_pip):
+    api = _FakeRegistry(_node("cached-pack", "3.0.0", ["numpy"]))
+
+    for _ in range(2):
+        report, _ = node_deps_cmd.build_report(
+            str(workspace), registry_ids=["cached-pack"], python="/fake/python", registry_api=api
+        )
+        assert _registry_row(report)["version"] == "3.0.0"
+    assert api.calls == ["cached-pack"], "second lookup must be served from the 1h cache"
+
+    node_deps_cmd.build_report(
+        str(workspace), registry_ids=["cached-pack"], python="/fake/python", registry_api=api, refresh=True
+    )
+    assert api.calls == ["cached-pack", "cached-pack"], "--refresh must bypass the cache"
+
+
+def test_registry_failure_is_not_cached(workspace, fake_pip):
+    """A transient outage must not poison the next hour of lookups."""
+    import requests
+
+    api = _FakeRegistry(error=requests.exceptions.RequestException("boom"))
+    for _ in range(2):
+        node_deps_cmd.build_report(str(workspace), registry_ids=["flaky-pack"], python="/fake/python", registry_api=api)
+    assert api.calls == ["flaky-pack", "flaky-pack"]
+
+
+def test_registry_only_invocation_does_not_dump_every_installed_pack(workspace, fake_pip):
+    api = _FakeRegistry(_node("some-pack", "1.0.0", ["numpy"]))
+    report, _ = node_deps_cmd.build_report(
+        str(workspace), registry_ids=["some-pack"], python="/fake/python", registry_api=api
+    )
+
+    assert [p["pack"] for p in report["packs"]] == ["some-pack"]
+
+
+def test_registry_is_additive_with_positional_pack_names(workspace, fake_pip):
+    api = _FakeRegistry(_node("some-pack", "1.0.0", ["numpy"]))
+    report, _ = node_deps_cmd.build_report(
+        str(workspace),
+        ["Registry-Pack"],
+        registry_ids=["some-pack"],
+        python="/fake/python",
+        registry_api=api,
+    )
+
+    assert [p["pack"] for p in report["packs"]] == ["Registry-Pack", "some-pack"]
+    assert report["packs"][0]["status"] == "installed"
+
+
+def test_registry_ids_are_deduped_and_blanks_dropped(workspace, fake_pip):
+    api = _FakeRegistry(_node("some-pack", "1.0.0", ["numpy"]))
+    report, _ = node_deps_cmd.build_report(
+        str(workspace),
+        registry_ids=["some-pack", "  some-pack ", "", "   "],
+        python="/fake/python",
+        registry_api=api,
+    )
+
+    assert [p["pack"] for p in report["packs"]] == ["some-pack"]
+    assert api.calls == ["some-pack"]
+
+
+def test_registry_rows_validate_against_the_shipped_schema(workspace, fake_pip):
+    import jsonschema
+
+    from comfy_cli import discovery
+
+    schema = discovery._read_schema("node_deps")
+
+    api = _FakeRegistry(_node("some-pack", "1.0.0", ["numpy>=1.20", "-r extra.txt"]))
+    report, _ = node_deps_cmd.build_report(
+        str(workspace), ["Registry-Pack"], registry_ids=["some-pack"], python="/fake/python", registry_api=api
+    )
+    report["warnings"] = []
+    jsonschema.validate(report, schema)
+
+    # the no-metadata / unreachable shapes must validate too
+    bare, _ = node_deps_cmd.build_report(
+        str(workspace), registry_ids=["bare"], python="/fake/python", registry_api=_FakeRegistry(_node("bare", "1.0"))
+    )
+    bare["warnings"] = []
+    jsonschema.validate(bare, schema)
+
+
+def test_registry_pretty_mode_renders_version_and_status(workspace, fake_pip, capsys):
+    from unittest import mock
+
+    from comfy_cli.registry import RegistryAPI
+
+    reset_renderer_for_testing()
+    r = Renderer(mode=OutputMode.PRETTY)
+    set_renderer(r)
+
+    with mock.patch.object(RegistryAPI, "get_node", autospec=True) as get_node:
+        get_node.return_value = _node("some-pack", "9.9.9", ["numpy>=1.20"])
+        node_deps_cmd.execute(r, str(workspace), registry_ids=["some-pack"])
+
+    out = capsys.readouterr().out
+    assert "some-pack" in out
+    assert "9.9.9" in out
+    assert "satisfied" in out
+
+
+def test_registry_pretty_mode_renders_the_warning_row(workspace, fake_pip, capsys):
+    from unittest import mock
+
+    from comfy_cli.registry import RegistryAPI
+
+    reset_renderer_for_testing()
+    r = Renderer(mode=OutputMode.PRETTY)
+    set_renderer(r)
+
+    with mock.patch.object(RegistryAPI, "get_node", autospec=True) as get_node:
+        get_node.return_value = _node("bare-pack", "1.0.0", [])
+        node_deps_cmd.execute(r, str(workspace), registry_ids=["bare-pack"])
+
+    out = capsys.readouterr().out
+    assert "bare-pack" in out
+    assert "did not return dependency metadata" in out
+    assert r.exit_code == 0  # a report, not a check
+
+
+def test_registry_flags_are_registered_on_the_deps_command():
+    import click
+    import typer
+
+    from comfy_cli.command.custom_nodes.command import app
+
+    command = next(c for c in app.registered_commands if c.name == "deps")
+    click_command = typer.main.get_command_from_info(command, pretty_exceptions_short=False, rich_markup_mode="rich")
+    opts = {opt for p in click_command.params if isinstance(p, click.Option) for opt in p.opts}
+    assert {"--registry", "--refresh"} <= opts
 
 
 def test_unreadable_requirements_file_warns_instead_of_crashing(tmp_path, fake_pip, monkeypatch):

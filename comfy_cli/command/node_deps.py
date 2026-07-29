@@ -6,10 +6,17 @@ line), reports the pack's *declared* Python requirements — from its
 — alongside the version actually installed in the workspace venv and a
 computed status per requirement.
 
-Read-only by construction: it never installs anything, never shells out to
-``cm-cli``, and never touches the network. The only subprocess it runs is a
-single ``<workspace python> -m pip list --format=json`` for the whole report
-(not once per pack).
+``--registry <node-id>`` extends the same diff to a pack that is **not yet
+installed**: the registry's published dependency list for that pack's latest
+version, diffed against the very same ``pip list`` map, so conflict risk can be
+assessed *before* installing anything.
+
+Read-only by construction: it never installs anything and never shells out to
+``cm-cli``. The only subprocess it runs is a single ``<workspace python> -m pip
+list --format=json`` for the whole report (not once per pack). The only network
+call is the registry's side-effect-free ``GET /nodes/{id}``, made solely for
+``--registry`` ids — never ``install_node``, whose endpoint records an
+installation and fires an analytics event server-side on every call.
 
 Statuses:
 
@@ -30,6 +37,11 @@ parser (:func:`comfy_cli.command.pack_scan.read_pyproject`), which drops the
 ``comfyui-frontend-package`` pin from ``[project] dependencies``. Such a pin is
 a core-ComfyUI concern rather than a pack dependency, so it will not appear in
 this report even though it is declared.
+
+Known caveat (``--registry``): the registry exposes dependency metadata only on
+a node's *latest* published version — there is no read-only endpoint for a
+pinned version's dependencies — so a ``--registry`` row always describes the
+latest version, whatever version an eventual install would pick.
 """
 
 from __future__ import annotations
@@ -57,6 +69,14 @@ STATUSES = ("satisfied", "mismatch", "missing", "unparseable", "unknown")
 
 SOURCE_REQUIREMENTS_TXT = "requirements.txt"
 SOURCE_PYPROJECT = "pyproject.toml"
+# Not a file: the registry's published metadata for a not-yet-installed pack.
+SOURCE_REGISTRY = "registry"
+
+# Namespaced away from ``outdated``'s own ``pack:<id>`` entries, which share the
+# cache file but hold a bare version string rather than this dict.
+REGISTRY_CACHE_PREFIX = "deps-registry:"
+
+NO_REGISTRY_DEPENDENCY_METADATA = "registry did not return dependency metadata for this pack"
 
 
 # ---------------------------------------------------------------------------
@@ -250,6 +270,113 @@ def _pack_report(pack_dir: Path, workspace: Path, installed_versions: dict[str, 
     )
 
 
+# ---------------------------------------------------------------------------
+# Registry candidates (not-yet-installed packs)
+# ---------------------------------------------------------------------------
+
+
+def _registry_declared(
+    node_id: str,
+    cache: dict[str, Any],
+    refresh: bool,
+    registry_api: Any,
+) -> tuple[list[str] | None, str | None, str | None]:
+    """Return ``(declared, version, error)`` for a registry node id.
+
+    ``declared`` is the latest version's published dependency list, or ``None``
+    when the registry gave us nothing usable. Results (including "the registry
+    published no dependencies") are cached for an hour under the same file
+    ``comfy outdated`` uses, so repeated agent calls stay cheap; ``refresh``
+    bypasses the read.
+    """
+    from comfy_cli.command.outdated import _cache_get, _cache_set
+
+    key = f"{REGISTRY_CACHE_PREFIX}{node_id}"
+    if not refresh:
+        cached = _cache_get(cache, key)
+        if isinstance(cached, dict):
+            declared = cached.get("dependencies")
+            version = cached.get("version")
+            return (
+                declared if isinstance(declared, list) else None,
+                version if isinstance(version, str) else None,
+                None,
+            )
+
+    try:
+        # get_node, NOT install_node: the install endpoint records an
+        # installation + fires an analytics event server-side on every call, so
+        # a pre-install *report* must never touch it.
+        node = registry_api.get_node(node_id)
+    except Exception as e:  # noqa: BLE001 - registry unreachable → a per-entry warning, not a failed command
+        return None, None, f"could not fetch registry metadata for '{node_id}': {e}"
+
+    latest = getattr(node, "latest_version", None)
+    version = getattr(latest, "version", None)
+    dependencies = getattr(latest, "dependencies", None)
+    # ``map_node_version`` defaults a missing ``dependencies`` to ``[]``, so an
+    # empty list is indistinguishable from "the field was absent" — we must not
+    # claim the pack declares zero dependencies. Both collapse to `declared:
+    # null` + the honest warning below, as does anything that isn't a list of
+    # strings (iterating a stray bare string would yield one row per character).
+    declared = None
+    if isinstance(dependencies, list):
+        declared = [d.strip() for d in dependencies if isinstance(d, str) and d.strip()] or None
+
+    _cache_set(cache, key, {"version": version if isinstance(version, str) else None, "dependencies": declared})
+    return declared, (version if isinstance(version, str) else None), None
+
+
+def _registry_report(
+    node_id: str,
+    installed_versions: dict[str, str] | None,
+    cache: dict[str, Any],
+    refresh: bool,
+    registry_api: Any,
+) -> tuple[dict[str, Any], list[dict[str, str]]]:
+    """Build one registry-candidate row. Returns ``(row, warnings)``."""
+    declared, version, error = _registry_declared(node_id, cache, refresh, registry_api)
+
+    warnings: list[dict[str, str]] = []
+    row: dict[str, Any] = {
+        "pack": node_id,
+        "path": None,
+        "status": "registry",
+        "registry": True,
+        "version": version,
+        "declared": declared,
+        "requirement_files": [],
+        "requirements": [],
+        "summary": dict.fromkeys(STATUSES, 0),
+    }
+
+    if error is not None:
+        row["warning"] = error
+        warnings.append({"code": "registry_unavailable", "message": error})
+        return row, warnings
+
+    if declared is None:
+        row["warning"] = NO_REGISTRY_DEPENDENCY_METADATA
+        warnings.append(
+            {
+                "code": "registry_no_dependency_metadata",
+                "message": f"{NO_REGISTRY_DEPENDENCY_METADATA}: '{node_id}'",
+            }
+        )
+        return row, warnings
+
+    # Same per-requirement diff, against the same single ``pip list`` map.
+    rows: dict[str, dict[str, Any]] = {}
+    for line in declared:
+        if line not in rows:
+            rows[line] = {**_classify(line, installed_versions), "source": SOURCE_REGISTRY}
+    row["requirements"] = list(rows.values())
+    row["requirement_files"] = [SOURCE_REGISTRY]
+    for req in row["requirements"]:
+        row["summary"][req["status"]] += 1
+    return row, warnings
+
+
 def _not_installed_row(name: str) -> dict[str, Any]:
     return {
         "pack": name,
@@ -271,6 +398,9 @@ def build_report(
     pack_names: list[str] | None = None,
     *,
     python: str | None = None,
+    registry_ids: list[str] | None = None,
+    refresh: bool = False,
+    registry_api: Any | None = None,
 ) -> tuple[dict[str, Any] | None, list[dict[str, str]]]:
     """Build the per-pack dependency report.
 
@@ -278,6 +408,10 @@ def build_report(
     resolves to no usable workspace — the caller turns that into a
     ``not_in_workspace`` error envelope. Each warning is
     ``{"code": ..., "message": ...}``.
+
+    *registry_ids* names not-yet-installed registry packs to include as extra
+    rows (``status: "registry"``). Inject *registry_api* (anything with
+    ``get_node``) to unit-test without the network.
     """
     from comfy_cli.resolve_python import resolve_workspace_python
 
@@ -301,6 +435,10 @@ def build_report(
             }
         )
 
+    # Dedupe (order-preserving) and drop blanks — an empty id would otherwise
+    # become a request for the registry's whole node collection.
+    wanted_registry = list(dict.fromkeys(i.strip() for i in (registry_ids or []) if i and i.strip()))
+
     pack_dirs = iter_pack_dirs(workspace / "custom_nodes")
     packs: list[dict[str, Any]] = []
     if pack_names:
@@ -313,11 +451,30 @@ def build_report(
             row, pack_warnings = _pack_report(match, workspace, installed_versions)
             packs.append(row)
             warnings.extend({"code": "pack_read_error", "message": w} for w in pack_warnings)
-    else:
+    elif not wanted_registry:
+        # Bare `comfy node deps` reports the whole workspace. A `--registry`-only
+        # invocation is a targeted pre-install question, so it does NOT also dump
+        # every installed pack; name packs positionally to get both.
         for pack_dir in pack_dirs:
             row, pack_warnings = _pack_report(pack_dir, workspace, installed_versions)
             packs.append(row)
             warnings.extend({"code": "pack_read_error", "message": w} for w in pack_warnings)
+
+    if wanted_registry:
+        from comfy_cli.command.outdated import _load_cache, _save_cache
+
+        # Shares ``comfy outdated``'s 1h cache file under a distinct key prefix.
+        cache = _load_cache()
+        api = registry_api
+        if api is None:
+            from comfy_cli.registry import RegistryAPI
+
+            api = RegistryAPI()
+        for node_id in wanted_registry:
+            row, registry_warnings = _registry_report(node_id, installed_versions, cache, refresh, api)
+            packs.append(row)
+            warnings.extend(registry_warnings)
+        _save_cache(cache)
 
     compiled = workspace / "requirements.compiled"
     compiled_present = compiled.is_file()
@@ -354,11 +511,15 @@ def _render_pretty(renderer, report: dict[str, Any]) -> None:
     console = renderer.console()
     for pack in report["packs"]:
         title = escape(pack["pack"])
+        if pack.get("registry"):
+            version = pack.get("version")
+            title += " [dim](registry, latest " + (escape(version) if version else "unknown") + ")[/dim]"
         if pack["status"] == "not_installed":
             renderer.print(f"[bold]{title}[/bold] — [yellow]not installed[/yellow]")
             continue
         if not pack["requirements"]:
-            renderer.print(f"[bold]{title}[/bold] — [dim]no declared requirements[/dim]")
+            reason = pack.get("warning") or "no declared requirements"
+            renderer.print(f"[bold]{title}[/bold] — [dim]{escape(reason)}[/dim]")
             continue
 
         tbl = Table(show_header=True, header_style="bold", title=title, title_justify="left")
@@ -391,11 +552,18 @@ def _render_pretty(renderer, report: dict[str, Any]) -> None:
         renderer.print(f"[dim]compiled lock: {escape(report['compiled_lock']['path'])}[/dim]")
 
 
-def execute(renderer, comfy_path: str | None, pack_names: list[str] | None = None) -> None:
+def execute(
+    renderer,
+    comfy_path: str | None,
+    pack_names: list[str] | None = None,
+    *,
+    registry_ids: list[str] | None = None,
+    refresh: bool = False,
+) -> None:
     """Entry point wired from ``comfy node deps``."""
     from rich.markup import escape
 
-    report, warnings = build_report(comfy_path, pack_names)
+    report, warnings = build_report(comfy_path, pack_names, registry_ids=registry_ids, refresh=refresh)
     if report is None:
         import typer
 
