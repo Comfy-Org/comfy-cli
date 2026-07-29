@@ -23,6 +23,12 @@ from typing import Annotated, Any
 import typer
 
 from comfy_cli import tracking
+
+# Aliased at module scope rather than lazy-imported: a class used in ``except``
+# clauses at module scope cannot be resolved lazily. ``comfy_cli.http`` is
+# stdlib-only and tiny, and ``search.py``/``jobs.py`` already pull
+# ``urllib.request`` in at import time, so the precedent exists.
+from comfy_cli.http import ResponseTooLarge as _ResponseTooLarge
 from comfy_cli.output import get_renderer, rprint
 
 app = typer.Typer(no_args_is_help=True, help="Slot-based editing of frontend-format ComfyUI workflows.")
@@ -438,10 +444,6 @@ _USERDATA_MAX_BYTES = 64 * 1024 * 1024
 _HTTP_MAX_BYTES = 64 * 1024 * 1024
 
 
-class _ResponseTooLarge(Exception):
-    """A response exceeded the surface's byte cap — refuse to truncate."""
-
-
 # Per-operation guidance for an oversize cloud response. ``save``/``delete``
 # have already sent their request by the time the response is read, so the
 # server-side write may well have landed — say so rather than implying it did not.
@@ -619,30 +621,18 @@ def _authed_request(
 
 def _http_request(
     url: str, target, *, method: str = "GET", body: dict | None = None, timeout: float = 30.0
-) -> tuple[int, dict | None]:
+) -> tuple[int, dict | list | None]:
     """Authed HTTP call returning (status, parsed_json_or_none). Raises
     urllib errors verbatim so callers can surface the right error code, and
     ``_ResponseTooLarge`` when the body exceeds ``_HTTP_MAX_BYTES`` — an
-    oversize body must not masquerade as an unparseable one."""
-    import urllib.request
+    oversize body must not masquerade as an unparseable one.
 
-    data = json.dumps(body).encode("utf-8") if body is not None else None
-    ct = "application/json" if data is not None else None
-    req = _authed_request(url, target, method=method, data=data, content_type=ct)
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        status = resp.status
-        # Read one byte past the cap so we can tell a full body from a truncated one.
-        raw = resp.read(_HTTP_MAX_BYTES + 1)
-    if len(raw) > _HTTP_MAX_BYTES:
-        raise _ResponseTooLarge()
-    if not raw:
-        return status, None
-    try:
-        return status, json.loads(raw)
-    except (json.JSONDecodeError, UnicodeDecodeError):
-        # UnicodeDecodeError is a ValueError but *not* a JSONDecodeError, so a
-        # body that isn't valid UTF-8 needs naming here or it escapes uncaught.
-        return status, None
+    Thin wrapper over the shared ``comfy_cli.http.request_json``; kept as a
+    named function so call sites (and tests) keep a stable entry point, and so
+    ``_HTTP_MAX_BYTES`` is read from the module global at call time."""
+    from comfy_cli.http import request_json
+
+    return request_json(url, target, method=method, body=body, timeout=timeout, max_bytes=_HTTP_MAX_BYTES)
 
 
 def _handle_cloud_http_error(renderer, e, *, operation: str, workflow_id: str | None = None) -> typer.Exit:

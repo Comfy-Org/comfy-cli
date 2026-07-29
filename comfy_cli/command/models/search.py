@@ -28,12 +28,12 @@ import json
 import re
 import urllib.error
 import urllib.parse
-import urllib.request
 from typing import Annotated, Any, NoReturn
 
 import typer
 
 from comfy_cli import tracking
+from comfy_cli.http import ResponseTooLarge
 from comfy_cli.output import get_renderer, rprint
 
 app = typer.Typer(no_args_is_help=True, help="Discover models — folders, files, and the cloud asset catalog.")
@@ -98,30 +98,21 @@ def _models_path_parts(target) -> tuple[str, ...]:
     return ("experiment", "models") if target.is_cloud else ("models",)
 
 
-def _authed_request(url: str, target) -> urllib.request.Request:
-    from comfy_cli.http import target_auth_headers
-
-    req = urllib.request.Request(url)
-    for k, v in target_auth_headers(target).items():
-        req.add_header(k, v)
-    return req
-
-
 def _http_get_json(url: str, target, timeout: float = 30.0) -> Any:
     """Issue an authenticated GET and decode JSON. Raises urllib/JSON errors verbatim.
 
     Response body is capped at ``_MAX_RESPONSE_BYTES`` to bound memory use on a
-    misbehaving server. A ``ValueError`` is raised if the cap is exceeded.
+    misbehaving server; exceeding it raises ``ResponseTooLarge``, which every
+    caller routes to an envelope error alongside the urllib/JSON families.
     """
-    req = _authed_request(url, target)
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        # ``read(N)`` returns up to N bytes; reading N+1 lets us distinguish
-        # "fits exactly" from "exceeds cap" without buffering the whole stream
-        # twice on the happy path.
-        body = resp.read(_MAX_RESPONSE_BYTES + 1)
-        if len(body) > _MAX_RESPONSE_BYTES:
-            raise ValueError(f"response from {url} exceeds {_MAX_RESPONSE_BYTES} byte cap")
-        return json.loads(body)
+    from comfy_cli.http import request_json
+
+    _, body = request_json(url, target, timeout=timeout, max_bytes=_MAX_RESPONSE_BYTES)
+    if body is None:
+        # Callers route JSONDecodeError to an envelope error; an empty or
+        # unparseable body must surface the same way, not crash on body.get().
+        raise json.JSONDecodeError("empty or unparseable response body", "", 0)
+    return body
 
 
 def _emit_http_error(e: urllib.error.HTTPError, *, renderer, target, message: str, hint: str) -> NoReturn:
@@ -177,7 +168,7 @@ def list_folders_cmd(
             if target.is_cloud
             else "run `comfy launch` to start a local server",
         )
-    except (urllib.error.URLError, OSError, json.JSONDecodeError) as e:
+    except (urllib.error.URLError, OSError, json.JSONDecodeError, ResponseTooLarge) as e:
         renderer.error(
             code="server_not_running" if not target.is_cloud else "cloud_http_error",
             message=f"failed to fetch {url}: {e}",
@@ -262,7 +253,7 @@ def list_folder_cmd(
                 details={"status": e.code, "folder": folder},
             )
         raise typer.Exit(code=1) from e
-    except (urllib.error.URLError, OSError, json.JSONDecodeError) as e:
+    except (urllib.error.URLError, OSError, json.JSONDecodeError, ResponseTooLarge) as e:
         renderer.error(
             code="cloud_http_error" if target.is_cloud else "server_not_running",
             message=f"failed to fetch {url}: {e}",
@@ -485,7 +476,7 @@ def search_cmd(
             message=f"HTTP {e.code} during models search",
             hint="check auth (`comfy cloud whoami`) or network",
         )
-    except (urllib.error.URLError, OSError, json.JSONDecodeError) as e:
+    except (urllib.error.URLError, OSError, json.JSONDecodeError, ResponseTooLarge) as e:
         renderer.error(
             code="cloud_http_error" if target.is_cloud else "server_not_running",
             message=f"models search failed: {e}",
@@ -573,7 +564,7 @@ def show_cmd(
                 details={"status": e.code},
             )
             raise typer.Exit(code=1) from e
-        except (urllib.error.URLError, OSError, json.JSONDecodeError) as e:
+        except (urllib.error.URLError, OSError, json.JSONDecodeError, ResponseTooLarge) as e:
             renderer.error(code="cloud_http_error", message=f"models show failed: {e}")
             raise typer.Exit(code=1) from e
 
