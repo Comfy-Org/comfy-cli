@@ -781,6 +781,28 @@ def test_expired_registry_cache_entries_are_pruned_on_save(workspace, fake_pip):
     assert "pack:someone-elses-expired" in saved, "pruning is scoped to this command's own key space"
 
 
+def test_cache_round_trips_a_non_ascii_registry_id(workspace, fake_pip):
+    """`--registry` takes arbitrary caller-supplied ids, so a non-ASCII one can
+    reach a cache key. `_load_cache` decodes bytes as JSON (UTF-8/16/32 only),
+    so the writer must not emit anything a non-UTF-8 locale would mangle — the
+    whole cache silently resets to `{}` on the next read if it does. Two
+    independent guards hold that today (`json.dumps` escapes to pure ASCII,
+    `_save_cache` pins `encoding="utf-8"`); this pins the round-trip itself so
+    dropping either one fails here rather than in a Windows user's cache.
+    """
+    from comfy_cli.command import outdated as outdated_cmd
+
+    key = f"{node_deps_cmd.REGISTRY_CACHE_PREFIX}https://api.comfy.org:café-pack"
+    cache = outdated_cmd._load_cache()
+    outdated_cmd._cache_set(cache, key, {"version": "1.0.0", "dependencies": ["numpé>=1.20"]})
+    outdated_cmd._save_cache(cache)
+
+    assert outdated_cmd._cache_get(outdated_cmd._load_cache(), key) == {
+        "version": "1.0.0",
+        "dependencies": ["numpé>=1.20"],
+    }
+
+
 def test_registry_rows_validate_against_the_shipped_schema(workspace, fake_pip):
     import jsonschema
 
@@ -847,8 +869,7 @@ def test_registry_flags_are_registered_on_the_deps_command():
 
     from comfy_cli.command.custom_nodes.command import app
 
-    command = next(c for c in app.registered_commands if c.name == "deps")
-    click_command = typer.main.get_command_from_info(command, pretty_exceptions_short=False, rich_markup_mode="rich")
+    click_command = typer.main.get_command(app).commands["deps"]
     opts = {opt for p in click_command.params if isinstance(p, click.Option) for opt in p.opts}
     assert {"--registry", "--refresh"} <= opts
 

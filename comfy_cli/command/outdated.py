@@ -85,7 +85,13 @@ def _save_cache(cache: dict[str, Any]) -> None:
         # must not share (and truncate) one temp path.
         tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
         try:
-            tmp.write_text(json.dumps(cache))
+            # `encoding` pinned rather than left to the platform locale:
+            # `_load_cache` decodes bytes as JSON, which only accepts
+            # UTF-8/16/32. Today `json.dumps` defaults to `ensure_ascii=True`,
+            # so the payload is pure ASCII and any locale would round-trip —
+            # this keeps that a property of the writer, not a lucky default, if
+            # a non-ASCII pack id ever reaches the file verbatim.
+            tmp.write_text(json.dumps(cache), encoding="utf-8")
             os.replace(tmp, path)
         finally:
             tmp.unlink(missing_ok=True)
