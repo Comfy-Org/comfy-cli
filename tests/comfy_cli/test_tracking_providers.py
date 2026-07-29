@@ -420,7 +420,9 @@ class TestPostHogTokenResolution:
 
         warnings = _override_warnings(caplog)
         assert len(warnings) == 1
-        assert warnings[0].levelno == logging.WARNING
+        # ERROR, not WARNING: the default LOG_LEVEL is ERROR, so this must be
+        # visible to the user by default (see comfy_cli/tracking.py).
+        assert warnings[0].levelno == logging.ERROR
 
 
 class _FakePosthogClient:

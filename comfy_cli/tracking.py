@@ -51,7 +51,10 @@ def _resolve_posthog_token() -> str:
         return _POSTHOG_DEFAULT_TOKEN
     if raw == "" or raw.startswith("phc_"):
         return raw
-    logging.warning(
+    # ERROR, not WARNING: the CLI's default LOG_LEVEL is ERROR (see
+    # logging.setup_logging), so a WARNING here would be silently dropped and
+    # the user would never learn their override was ignored.
+    logging.error(
         "Ignoring $POSTHOG_API_KEY: not a phc_* project write key "
         "(personal phx_ keys cannot ingest events); using the built-in key."
     )
