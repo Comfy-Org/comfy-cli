@@ -47,6 +47,38 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "Resolved no workspace where one was required (e.g. `comfy which`).",
         "run `comfy install`, or pass `--workspace`",
     ),
+    # --- launch / stop lifecycle ---------------------------------------------
+    ErrorCode(
+        "server_already_running",
+        "`comfy launch --background` found a background ComfyUI already running.",
+        "run `comfy stop` before launching another background service",
+    ),
+    ErrorCode(
+        "port_invalid",
+        "`comfy launch --background` got a non-integer `--port`. `details.port` carries the offending value.",
+        "pass an integer `--port` (e.g. `--port 8188`)",
+    ),
+    ErrorCode(
+        "port_in_use",
+        "`comfy launch --background` found the target port already in use. `details.port` carries the port.",
+        "stop the process on that port or pass a different `--port`",
+    ),
+    ErrorCode(
+        "launch_failed",
+        "ComfyUI failed to launch (background monitor saw no success line) or a "
+        "foreground launch exited non-zero. `details` carries the log / returncode.",
+        "check the error log for the underlying failure",
+    ),
+    ErrorCode(
+        "no_background_server",
+        "`comfy stop` found no background ComfyUI recorded as running.",
+        "run `comfy launch --background` first",
+    ),
+    ErrorCode(
+        "stop_failed",
+        "`comfy stop` could not kill the recorded background ComfyUI process. `details.pid` carries the process id.",
+        "kill the process manually if it is still running",
+    ),
     # --- workflow loading ----------------------------------------------------
     ErrorCode(
         "workflow_not_found",
@@ -146,8 +178,9 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "Workflow uses a partner-API node (category `partner/*` — Veo, Kling, BFL, Gemini, etc.) "
         "but no `api_key_comfy_org` credential is available. Local submit would succeed at /prompt "
         "and then fail opaquely at execute time with `Unauthorized: Please login first`.",
-        "re-submit with `--where cloud` (the CLI auto-injects the credential there), or run "
-        "`comfy auth set comfy-cloud-api-key --key …` so the local submit path can inject it too",
+        "run: comfy cloud login (or set COMFY_API_KEY in the environment, or persist a key with "
+        "`comfy cloud set-key --key …` so the local submit path can inject it too; cloud runs "
+        "auto-inject via --where cloud)",
     ),
     ErrorCode(
         "workflow_empty",
@@ -232,8 +265,9 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "safe-path validation — e.g. a `comfy model download` filename (from `--filename` or "
         "from the CivitAI API response) that carries a path separator, a drive letter or `..` "
         "and would write outside the workspace.",
-        "use only alphanumerics, `_`, `-`, or `.` in path-segment arguments; choose the "
-        "destination directory with `--relative-path`",
+        "a path-segment argument must be a single segment: non-empty, not `.` or `..`, and free "
+        "of `/` and `\\`; for `model download`, choose the destination directory with "
+        "`--relative-path` instead",
     ),
     ErrorCode(
         "folder_not_found",
@@ -337,6 +371,14 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "watcher_poll_error",
         "Background watcher encountered a transient error polling the server.",
         "transient — the job is likely still running; re-run `comfy jobs watch <id>`",
+    ),
+    ErrorCode(
+        "server_died",
+        "The local ComfyUI server became unreachable (or restarted without the job) while it "
+        "was in flight — the server likely crashed or was killed (e.g. an out-of-memory allocation). "
+        "Raised by the background watcher and by a foreground (`--wait`) run; recorded on the job state file.",
+        "check the ComfyUI server log (it may have been OOM-killed), then `comfy launch` and re-submit; "
+        "the prompt_id is in `comfy jobs status <id>`",
     ),
     ErrorCode(
         "unknown_status_stall",
@@ -555,6 +597,22 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "The prompt_id wasn't found in state files or the server API.",
         "check the prompt_id and ensure the job has completed",
     ),
+    # --- background model downloads (`model download --background`) ----------
+    ErrorCode(
+        "download_not_found",
+        "No background download state file matches the given download id.",
+        "list the known downloads with `comfy model downloads`",
+    ),
+    ErrorCode(
+        "download_state_unwritable",
+        "The `<workspace>/.comfy-downloads` state directory could not be written.",
+        "check the workspace is writable, or run without --background",
+    ),
+    ErrorCode(
+        "download_worker_spawn_failed",
+        "The detached background download worker could not be started.",
+        "run without --background to download in the foreground",
+    ),
     ErrorCode(
         "setup_missing_where",
         "--non-interactive requires --where (local or cloud).",
@@ -594,6 +652,12 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ),
     # --- generate / emit -----------------------------------------------------
     ErrorCode(
+        "generate_model_unknown",
+        "`comfy generate schema <model>` got a name that is neither a known alias nor a curated "
+        "endpoint id. `details.requested` carries the name as typed; the message lists close matches.",
+        "run `comfy generate list` to see the available model aliases",
+    ),
+    ErrorCode(
         "emit_workflow_failed",
         "`generate --emit-workflow` could not build the partner-node workflow.",
         "check the model name and that all required inputs are provided",
@@ -609,11 +673,53 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "consent to the spend and re-run — `comfy run-template --allow-spend`, or "
         "`comfy generate --yes` (persist with `comfy generate consent always`)",
     ),
+    # --- update / version switch --------------------------------------------
+    ErrorCode(
+        "update_version_target_invalid",
+        "`comfy update --version` was combined with a target other than `comfy`.",
+        "run `comfy update comfy --version <version>`",
+    ),
+    ErrorCode(
+        "version_switch_unknown_version",
+        "`comfy update comfy --version X` could not resolve X to a ComfyUI tag; the workspace was left untouched.",
+        "run `git tag --list 'v*'` in your ComfyUI workspace to see every available version",
+    ),
+    ErrorCode(
+        "version_switch_dirty_tree",
+        "`comfy update comfy --version X --no-stash` found uncommitted changes and refused to switch.",
+        "commit or stash your changes, or re-run without --no-stash to stash them automatically",
+    ),
+    ErrorCode(
+        "version_switch_failed",
+        "A git operation during `comfy update comfy --version X` failed; any stash that was created is preserved.",
+        "resolve the git error in your ComfyUI workspace, then re-run",
+    ),
+    ErrorCode(
+        "version_switch_deps_failed",
+        "The version switch checked out successfully but reinstalling requirements.txt failed.",
+        "re-run the same command once the cause is fixed; it is idempotent and safe to repeat",
+    ),
     # --- feedback ------------------------------------------------------------
     ErrorCode(
         "feedback_message_required",
         "`comfy feedback` was run in JSON/non-interactive mode without an inline message.",
         'comfy feedback "your feedback here"',
+    ),
+    # --- custom node dependency report (`comfy node deps`) --------------------
+    ErrorCode(
+        "installed_versions_unavailable",
+        "`comfy node deps` could not read the workspace venv's installed packages (`pip list --format=json` "
+        "failed, timed out, or returned unparseable output), so every parseable requirement is reported with "
+        '`status: "unknown"`. Surfaced in `data.warnings[]` (not as an error envelope) so the declared '
+        "requirements are still reported.",
+        "check the workspace venv has pip (`comfy env`), then re-run",
+    ),
+    ErrorCode(
+        "pack_read_error",
+        "A pack's `requirements.txt` existed but could not be read (permissions, I/O). That pack's row omits "
+        "the unreadable file's requirements. Surfaced in `data.warnings[]` (not as an error envelope) so the "
+        "rest of the report still succeeds.",
+        "check the file's permissions under `custom_nodes/<pack>/`",
     ),
 )
 

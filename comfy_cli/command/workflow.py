@@ -6,6 +6,10 @@ Three primitives:
     comfy workflow set-slot <file> ADDR=VALUE [...]    # tweak one or more
     comfy workflow vary <file> --slot ADDR='[v1,v2]'   # produce N variants
 
+Plus one read-only reader that needs no object_info at all:
+
+    comfy workflow notes <file>                        # what did the author write?
+
 Workflows must be **frontend-format** (the regular ComfyUI save — has
 ``nodes[]`` / ``links[]``, may contain subgraphs). API-format (the export
 that ``comfy run`` consumes) is rejected with a clean envelope and a hint.
@@ -17,6 +21,7 @@ Slot addresses follow CQL's format: ``<instance_id>.<input_name>``. Run
 from __future__ import annotations
 
 import json
+import unicodedata
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -407,6 +412,128 @@ def vary_cmd(
 
 
 # ---------------------------------------------------------------------------
+# notes
+# ---------------------------------------------------------------------------
+
+# The two documentation-note types the ComfyUI frontend registers
+# (``src/extensions/core/noteNode.ts``). Both are UI-only virtual nodes — they
+# carry no schema and are stripped by API conversion (see
+# ``workflow_to_api._UI_ONLY_NODE_TYPES``), so reading them is pure JSON
+# parsing: no object_info, no running server.
+_NOTE_NODE_TYPES = frozenset({"Note", "MarkdownNote"})
+
+
+def _str_or_none(value: Any) -> str | None:
+    """Coerce an untrusted workflow value to the schema's ``string | null``.
+
+    ``notes[].title`` and ``notes[].subgraph.name`` are declared ``string|null``
+    in ``schemas/workflow.json``, but a hand-edited file can carry any JSON type
+    there. Stringify rather than drop, so the value still reaches the caller.
+    """
+    if value is None or isinstance(value, str):
+        return value
+    return str(value)
+
+
+def _extract_notes(workflow: dict) -> list[dict]:
+    """Collect Note/MarkdownNote nodes from the top-level graph and subgraph defs.
+
+    Note text is serialized at ``widgets_values[0]`` (the sole widget both note
+    types register — see ComfyUI_frontend ``src/extensions/core/noteNode.ts``).
+
+    Every container is type-checked before it is walked: ``_is_frontend_format``
+    only vouches for the top-level ``nodes`` list, so ``definitions.subgraphs``,
+    a subgraph's own ``nodes``, and each node's ``type`` are all attacker-shaped
+    for a malformed-but-parseable file. A wrong type there must degrade to "no
+    notes found", never to an uncaught ``TypeError``.
+    """
+    out: list[dict] = []
+
+    def _scan(nodes, subgraph):
+        if not isinstance(nodes, list):
+            return
+        for n in nodes:
+            if not isinstance(n, dict):
+                continue
+            # Guard the type before the frozenset membership test: an unhashable
+            # value (list/dict) would raise TypeError rather than miss the set.
+            node_type = n.get("type")
+            if not isinstance(node_type, str) or node_type not in _NOTE_NODE_TYPES:
+                continue
+            wv = n.get("widgets_values")
+            text = wv[0] if isinstance(wv, list) and wv and isinstance(wv[0], str) else ""
+            out.append(
+                {
+                    "id": n.get("id"),
+                    "type": node_type,
+                    "title": _str_or_none(n.get("title")),
+                    "text": text,
+                    "pos": n.get("pos"),
+                    "size": n.get("size"),
+                    "subgraph": subgraph,
+                }
+            )
+
+    _scan(workflow.get("nodes"), None)
+    definitions = workflow.get("definitions")
+    subgraphs = definitions.get("subgraphs") if isinstance(definitions, dict) else None
+    if isinstance(subgraphs, list):
+        for sg in subgraphs:
+            if isinstance(sg, dict):
+                _scan(sg.get("nodes"), {"id": sg.get("id"), "name": _str_or_none(sg.get("name"))})
+    return out
+
+
+def _safe_console_text(value: Any) -> str:
+    """Render an untrusted workflow-file value safely for the pretty console.
+
+    Strips terminal control sequences (so note text can't emit ANSI/OSC escapes)
+    and then neutralizes rich markup (so a literal ``[/]`` in a note renders as
+    itself instead of raising ``MarkupError`` or spoofing styled output).
+    """
+    from rich.markup import escape
+
+    return escape(_strip_terminal_controls(str(value)))
+
+
+@app.command("notes", help="List the documentation notes (Note/MarkdownNote nodes) a workflow carries.")
+@tracking.track_command("workflow")
+def notes_cmd(
+    file: Annotated[str, typer.Argument(help="Frontend-format workflow JSON.")],
+):
+    """Read the authored notes out of a workflow — offline, read-only.
+
+    Notes are where template authors put the human-facing documentation an
+    agent otherwise has to ``grep`` the raw JSON for (LoRA trigger words, model
+    download links, usage caveats). API-format files are rejected: the
+    conversion drops note nodes entirely, so there is nothing to read there.
+    """
+    renderer = get_renderer()
+    p, workflow = _load_workflow_or_fail(renderer, file)
+    notes = _extract_notes(workflow)
+    payload = {"workflow": str(p), "count": len(notes), "notes": notes}
+    if renderer.is_pretty():
+        if not notes:
+            rprint("[dim]No notes in this workflow.[/dim]")
+        else:
+            # Every field interpolated below is untrusted file content, so it
+            # goes through _safe_console_text().
+            for n in notes:
+                sg = n["subgraph"]
+                # A note may carry no id, and a subgraph def no name/id — omit the
+                # fragment rather than printing a literal "#None" / "(subgraph None)".
+                sg_label = (sg.get("name") or sg.get("id")) if sg else None
+                where = f" (subgraph {_safe_console_text(sg_label)})" if sg_label is not None else ""
+                id_frag = f"#{_safe_console_text(n['id'])}" if n["id"] is not None else ""
+                heading = _safe_console_text(n["title"] or n["type"] or "Note")
+                meta = f" [dim]{id_frag}{where}[/dim]" if (id_frag or where) else ""
+                rprint(f"[bold]{heading}[/bold]{meta}")
+                rprint(_safe_console_text(n["text"]))
+                rprint()
+    renderer.emit(payload, command="workflow notes")
+
+
+# ---------------------------------------------------------------------------
 # Saved workflows — list, get, save, delete.
 # ---------------------------------------------------------------------------
 #
@@ -465,11 +592,38 @@ def _resolve_where_target(where: str | None):
     return resolve_target(where=where)
 
 
+# Unicode categories that survive the C0/C1 filter but still let untrusted text
+# lie about what it says on a terminal. Matching by category rather than by a
+# hand-rolled codepoint list keeps this exhaustive as Unicode grows:
+#   Cf  format characters — zero-width space/non-joiner/joiner, LRM/RLM/ALM,
+#       bidi embeddings + overrides + isolates (Trojan Source reordering), word
+#       joiner, BOM, soft hyphen, the invisible math operators, and the
+#       U+E0020–U+E007F tag block
+#   Zl  U+2028 line separator, and Zp U+2029 paragraph separator — not newlines,
+#       but some terminals honour them as line breaks
+_SPOOFING_CATEGORIES = frozenset({"Cf", "Zl", "Zp"})
+
+
 def _strip_terminal_controls(text: str) -> str:
-    """Drop C0/C1 control chars (keeping tab / newline / carriage return) so
-    untrusted workflow content printed to a TTY can't emit ANSI/OSC escape
-    sequences that spoof output or manipulate the terminal."""
-    return "".join(ch for ch in text if ch in "\t\n\r" or (0x20 <= ord(ch) < 0x7F) or ord(ch) >= 0xA0)
+    """Drop everything untrusted workflow content could use to spoof a terminal.
+
+    Removes C0/C1 control chars (keeping only tab and newline) so the text can't
+    emit ANSI/OSC escape sequences, and drops every invisible Unicode codepoint
+    in ``_SPOOFING_CATEGORIES``.
+
+    Carriage return is dropped too, not kept: a lone ``\\r`` returns the cursor to
+    column 0, letting a note overwrite text this command already printed —
+    the same output-spoofing the escape stripping exists to prevent. Dropping it
+    is lossless for CRLF content, which keeps its ``\\n``.
+    """
+    # ASCII is settled by range alone — no Cf/Zl/Zp lives below U+00A0 — so the
+    # category lookup only runs for non-ASCII, keeping large payloads cheap.
+    return "".join(
+        ch
+        for ch in text
+        if (ch in "\t\n" or 0x20 <= ord(ch) < 0x7F)
+        or (ord(ch) >= 0xA0 and unicodedata.category(ch) not in _SPOOFING_CATEGORIES)
+    )
 
 
 def _reject_unsafe_workflow_key(renderer, key: str) -> str:
@@ -607,11 +761,11 @@ def _authed_request(
     loosely to keep urllib out of the module's top-level imports."""
     import urllib.request
 
+    from comfy_cli.http import target_auth_headers
+
     req = urllib.request.Request(url, data=data, method=method)
-    if target.api_key:
-        req.add_header("X-API-Key", target.api_key)
-    elif target.auth_token:
-        req.add_header("Authorization", f"Bearer {target.auth_token}")
+    for k, v in target_auth_headers(target).items():
+        req.add_header(k, v)
     if content_type:
         req.add_header("Content-Type", content_type)
     return req
@@ -687,7 +841,7 @@ def _handle_cloud_http_error(renderer, e, *, operation: str, workflow_id: str | 
         renderer.error(
             code="cloud_http_error",
             message=f"{operation} failed: {e}",
-            hint="check network / `comfy auth whoami`",
+            hint="check network / `comfy cloud whoami`",
         )
     return typer.Exit(code=1)
 
