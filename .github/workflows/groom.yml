@@ -14,13 +14,27 @@ name: Groom
 #
 #   gh variable set GROOM_INTERVAL_DAYS --repo Comfy-Org/comfy-cli --body 14
 #
+# Expected value: a whole number of days, sensibly 1..30 (7 is the fallback when
+# the variable is unset or empty). The reusable owns normalization — its parser
+# degrades blank/garbage/negative to 7 — so a typo cannot fail the run closed.
+# Two values are meaningful but sharp, so set them deliberately: `0` DISABLES the
+# interval throttle (the sweep then runs on every daily tick), and a very large
+# value parks the sweep indefinitely. Both are silent, so prefer a value in range
+# over using this variable as an off switch — to stop grooming, disable the
+# workflow.
+#
 # PREREQUISITE (operator): `secrets.ANTHROPIC_API_KEY` must reach this repo, at
 # org or repo level. The finder and verifier agents bill through it and the
 # reusable declares it required, so an absent key fails the run LOUD at the agent
-# step by design rather than leaving the sweep silently inert. `vars.APP_ID` plus
-# `secrets.CLOUD_CODE_BOT_PRIVATE_KEY` are optional: with them, issues are filed
-# as cloud-code-bot, and without them the reusable degrades to
-# github-actions[bot] rather than failing.
+# step by design rather than leaving the sweep silently inert.
+#
+# `vars.APP_ID` and `secrets.CLOUD_CODE_BOT_PRIVATE_KEY` are optional, but they
+# are ALL-OR-NOTHING and must be set/rotated together. The reusable gates App
+# token minting on `bot_app_id != ''` — the ID alone, NOT the key — so it
+# degrades to github-actions[bot] only when APP_ID is absent. With APP_ID present
+# (including inherited from the org) and the private key missing or rotated out,
+# the token step fails in the `file` job, i.e. AFTER the finder and verifier have
+# already billed, discarding that run's findings. If you unset one, unset both.
 
 on:
   schedule:
@@ -40,6 +54,15 @@ on:
           be filed to the job summary. Use this for the first run to confirm the
           agent credentials resolve and to eyeball finding quality before
           trusting live filing.
+        type: boolean
+        default: false
+      force:
+        description: >-
+          Run the audit even if nothing merged recently (turns the reusable's
+          volume gate OFF for this dispatch). `workflow_dispatch` already
+          bypasses the interval gate, but NOT the volume gate, so without this a
+          live manual run on a quiet repo silently no-ops with no failure signal.
+          Ignored on the schedule, which always keeps the gate on.
         type: boolean
         default: false
 
@@ -74,7 +97,20 @@ jobs:
       # that match the workflow filing the issues.
       workflows_ref: ece4c3eaa71812a5a665f48d5d1f4bb0ff5f655e
       # Manual dispatch can dry-run; the scheduled run always files live.
-      dry_run: ${{ github.event.inputs.dry_run == 'true' }}
+      #
+      # BOTH comparisons are load-bearing, and the `inputs` context is NOT usable
+      # here. A `type: boolean` dispatch input arrives as the STRING 'true' from
+      # the Actions UI but as a JSON BOOLEAN from a REST/`gh api -F` dispatch, and
+      # GitHub compares mismatched types by coercing to number — boolean true
+      # becomes 1 while 'true' becomes NaN, so `true == 'true'` is FALSE. Testing
+      # only the string form would silently downgrade an API-requested dry run to
+      # a live, issue-filing run: failing open toward the destructive side. The
+      # typed `inputs` context would collapse both cases, but it is empty on the
+      # `schedule` event (workflow_dispatch defaults are not applied there), so it
+      # would feed '' to these boolean reusable inputs on every scheduled tick.
+      # Reading the raw payload and accepting either shape is correct on both
+      # triggers: on `schedule` the key is absent, so both sides are false.
+      dry_run: ${{ github.event.inputs.dry_run == 'true' || github.event.inputs.dry_run == true }}
       # Effective cadence. A tick inside this window no-ops before the
       # finder spins up, so retuning is a repo-variable edit with no workflow
       # change. Fallback 7 matches this repo's recent merge activity.
@@ -83,7 +119,15 @@ jobs:
       # expensive audit when nothing merged in that window. A dry-run bypasses it
       # so the spot-check always exercises the full audit.
       cadence: ${{ vars.GROOM_INTERVAL_DAYS || '7' }}
-      volume_gate: ${{ github.event.inputs.dry_run != 'true' }}
+      # An explicit `force` also bypasses it — the only way to make a LIVE manual
+      # run reach the finder on a quiet repo. Same dual string/boolean comparison
+      # as dry_run above, for the same reason.
+      volume_gate: ${{ !(github.event.inputs.dry_run == 'true' || github.event.inputs.dry_run == true) && !(github.event.inputs.force == 'true' || github.event.inputs.force == true) }}
     secrets:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-      CLOUD_CODE_BOT_PRIVATE_KEY: ${{ secrets.CLOUD_CODE_BOT_PRIVATE_KEY }}
+      # NAME ON THE LEFT IS THE REUSABLE'S, not this repo's. The reusable declares
+      # `BOT_APP_PRIVATE_KEY` under `on.workflow_call.secrets`; GitHub validates
+      # reusable secret names at STARTUP, so passing our local secret's name as the
+      # key fails every tick and dispatch before any job runs ("Invalid secret,
+      # CLOUD_CODE_BOT_PRIVATE_KEY is not defined in the referenced workflow").
+      BOT_APP_PRIVATE_KEY: ${{ secrets.CLOUD_CODE_BOT_PRIVATE_KEY }}
