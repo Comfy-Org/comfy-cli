@@ -1207,6 +1207,49 @@ def validate_comfyui(_env_checker):
         raise typer.Exit(code=1)
 
 
+@app.command(
+    "system-stats",
+    help="Show ComfyUI system stats: per-device VRAM + system RAM/version (GET /system_stats).",
+)
+@tracking.track_command()
+def system_stats(
+    where: Annotated[
+        str | None,
+        typer.Option("--where", show_default=False, help="Routing target: 'local' (default) or 'cloud'."),
+    ] = None,
+):
+    from comfy_cli.command import system as system_command
+
+    system_command.system_stats_execute(get_renderer(), where=where)
+
+
+@app.command(
+    help="Ask ComfyUI to unload models / free the executor cache (POST /free). "
+    "Applies on the worker's next iteration — never interrupts a running job."
+)
+@tracking.track_command()
+def free(
+    unload_models: Annotated[
+        bool,
+        typer.Option("--unload-models/--no-unload-models", help="Unload all models from VRAM."),
+    ] = True,
+    free_memory: Annotated[
+        bool,
+        typer.Option(
+            "--free-memory",
+            help="Also reset the executor cache; implies --unload-models on the server side.",
+        ),
+    ] = False,
+    where: Annotated[
+        str | None,
+        typer.Option("--where", show_default=False, help="Routing target: 'local' (default) or 'cloud'."),
+    ] = None,
+):
+    from comfy_cli.command import system as system_command
+
+    system_command.free_execute(get_renderer(), where=where, unload_models=unload_models, free_memory=free_memory)
+
+
 @app.command(help="Stop background ComfyUI")
 @tracking.track_command()
 def stop():
