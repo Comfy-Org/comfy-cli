@@ -215,6 +215,81 @@ def test_watcher_output_urls_are_inert(pretty):
 
 
 # ---------------------------------------------------------------------------
+# nodes.py — `object_info` off the same --host/--port the run path uses
+# ---------------------------------------------------------------------------
+
+# Every string here is chosen by whoever answers /object_info.
+HOSTILE_OBJECT_INFO = {
+    EVIL: {
+        "input": {"required": {UNBALANCED: ["IMAGE", {}]}},
+        "output": [EVIL],
+        "output_name": [EVIL],
+        "name": EVIL,
+        "display_name": UNBALANCED,
+        "description": EVIL,
+        "category": UNBALANCED,
+    }
+}
+
+
+@pytest.fixture
+def hostile_object_info():
+    with patch("comfy_cli.cql.loader.resilient_load_object_info", return_value=HOSTILE_OBJECT_INFO):
+        yield
+
+
+def test_nodes_ls_is_inert(pretty, hostile_object_info):
+    from comfy_cli.command.nodes import ls_cmd
+
+    ls_cmd(
+        produces=None,
+        accepts=None,
+        category=None,
+        pack=None,
+        label=None,
+        cloud_disabled=False,
+        api_only=False,
+        output_only=False,
+        exclude_deprecated=False,
+        limit=None,
+        input_path=None,
+        host=None,
+        port=None,
+        where=None,
+    )
+    assert_inert(pretty)
+
+
+def test_nodes_show_is_inert(pretty, hostile_object_info):
+    """`comfy nodes show --host <hostile>` — same flag pair as `comfy run`."""
+    from comfy_cli.command.nodes import show_cmd
+
+    show_cmd(name=EVIL, where=None, input_path=None, host=None, port=None)
+    assert "boom" in assert_inert(pretty)
+
+
+def test_nodes_search_is_inert(pretty, hostile_object_info):
+    from comfy_cli.command.nodes import search_cmd
+
+    search_cmd(query="boom", limit=20, input_path=None, host=None, port=None, where=None)
+    assert_inert(pretty)
+
+
+def test_nodes_types_is_inert(pretty, hostile_object_info):
+    from comfy_cli.command.nodes import types_cmd
+
+    types_cmd(limit=None, input_path=None, host=None, port=None, where=None)
+    assert_inert(pretty)
+
+
+def test_nodes_categories_is_inert(pretty, hostile_object_info):
+    from comfy_cli.command.nodes import categories_cmd
+
+    categories_cmd(prefix=None, limit=None, input_path=None, host=None, port=None, where=None)
+    assert_inert(pretty)
+
+
+# ---------------------------------------------------------------------------
 # models/search.py — the cloud asset catalog is server-supplied too
 # ---------------------------------------------------------------------------
 
