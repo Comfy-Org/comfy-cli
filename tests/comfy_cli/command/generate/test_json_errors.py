@@ -92,7 +92,15 @@ def test_help_flags_are_not_treated_as_a_flag_shaped_target(runner, flag):
 def test_json_stream_target_required_envelope_is_the_terminal_line(runner):
     r = runner.invoke(cli_app, ["--json-stream", "generate", "--prompt=x"])
     assert r.exit_code == 1
-    last = json.loads(r.stdout.strip().splitlines()[-1])
+    objs = [json.loads(ln) for ln in r.stdout.strip().splitlines() if ln.strip()]
+    # Stream mode may legitimately precede the envelope with progress events, so
+    # the contract is terminal-line, not sole-line. What must NOT happen is a
+    # SECOND error object — the legacy flat `{"error": ...}` alongside the
+    # envelope would leave a caller reading whichever it hit first.
+    errors = [o for o in objs if "error" in o]
+    assert len(errors) == 1, f"expected exactly one error object, got {errors!r}"
+    last = objs[-1]
+    assert errors[0] is last
     assert last["schema"] == "envelope/1"
     assert last["ok"] is False
     assert last["error"]["code"] == "generate_target_required"
