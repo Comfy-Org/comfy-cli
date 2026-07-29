@@ -18,6 +18,7 @@ import typer
 from comfy_cli.command.run.loader import _MAX_BODY_PREVIEW
 from comfy_cli.output import get_renderer
 from comfy_cli.output import rprint as pprint
+from comfy_cli.output.sanitize import sanitize_markup
 
 # Partner-API nodes live under `partner/...` in ComfyUI/cloud object_info
 # (e.g. `partner/video/ByteDance`). The category prefix is only the fallback —
@@ -92,7 +93,7 @@ def _preflight_validate(renderer, workflow: dict, object_info: dict, *, target_l
         errors = validation.get("errors", [])
         hint_parts = []
         for e in errors[:5]:
-            line = f"node {e.get('node_id', '?')}: {e.get('message', '')}"
+            line = f"node {e.get('node_id') or '?'}: {e.get('message', '')}"
             suggestions = e.get("suggestions") or []
             if suggestions:
                 line += f" (did you mean: {', '.join(suggestions)}?)"
@@ -108,7 +109,9 @@ def _preflight_validate(renderer, workflow: dict, object_info: dict, *, target_l
     warnings = validation.get("warnings", [])
     if warnings and renderer.is_pretty():
         for w in warnings:
-            pprint(f"[yellow]⚠ {w.get('field', '?')}: {w.get('message', '')}[/yellow]")
+            pprint(
+                f"[yellow]⚠ {sanitize_markup(w.get('field', '?'))}: {sanitize_markup(w.get('message', ''))}[/yellow]"
+            )
 
 
 def _fetch_object_info(host: str, port: int) -> dict:
