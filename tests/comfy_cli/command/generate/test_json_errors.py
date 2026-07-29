@@ -352,3 +352,106 @@ def test_pretty_failed_job_reason_with_rich_tags_survives(capsys):
     finally:
         reset_renderer_for_testing()
     assert "[/path]" in capsys.readouterr().out
+
+
+# ─── #614: markup escaping alone is not enough for remote text ───────────
+#
+# `rich.markup.escape` neutralizes `[tag]` but passes `\x1b` through untouched, so
+# these paths need `sanitize_markup`. Without it a partner API can emit CSI/OSC and
+# clear the user's screen, rewrite the window title, or repaint earlier lines to
+# spoof CLI output. `generate` prints via a bare `rich.print`, so it gets none of
+# `Renderer`'s automatic coverage and must sanitize at each site itself.
+
+# ESC[2J clears the screen; ESC]0;…BEL rewrites the window title; ESC[31m restyles.
+_ANSI_ATTACK = "denied \x1b[2J\x1b]0;pwned\x07 really \x1b[31mred"
+
+
+def _assert_ansi_neutralized(text: str) -> None:
+    assert "\x1b[2J" not in text, "screen-clear sequence reached the terminal"
+    assert "\x1b]0;" not in text, "window-title sequence reached the terminal"
+    assert "\x1b" not in text
+    # The human-readable words survive — only the control bytes are dropped.
+    assert "denied" in text and "really" in text
+
+
+def test_pretty_api_error_body_strips_ansi(runner, api_key, monkeypatch):
+    """`content=` (not `json=`) on purpose: `e.body` is the response's *raw text*, so
+    a compliant server that encodes ESC as `\\u001b` is already inert and would make
+    this test vacuous. The hazard is a body carrying live escape bytes, which is
+    exactly what a non-JSON error page from a proxy or gateway delivers."""
+    monkeypatch.setattr(
+        gen_app.client.httpx,
+        "post",
+        lambda *a, **kw: httpx.Response(400, content=_ANSI_ATTACK.encode()),
+    )
+    r = runner.invoke(cli_app, ["--no-json", *_GEN_ARGS])
+    assert r.exit_code == 1
+    _assert_ansi_neutralized(r.stdout)
+
+
+def test_pretty_non_json_response_preview_strips_ansi(runner, api_key, monkeypatch):
+    """The `resp.text[:500]` preview path — a 200 whose body isn't JSON. Same raw-byte
+    exposure as above, reached through a different `_fail` call site."""
+    monkeypatch.setattr(
+        gen_app.client.httpx,
+        "post",
+        lambda *a, **kw: httpx.Response(200, content=_ANSI_ATTACK.encode()),
+    )
+    r = runner.invoke(cli_app, ["--no-json", *_GEN_ARGS])
+    assert r.exit_code == 1
+    _assert_ansi_neutralized(r.stdout)
+
+
+def test_pretty_failed_job_reason_strips_ansi(capsys):
+    """The `_emit_result` red line, which builds its own markup instead of `_fail`'s."""
+    import typer
+
+    from comfy_cli.output.renderer import Renderer, get_renderer, reset_renderer_for_testing, set_renderer
+
+    set_renderer(Renderer.resolve(no_json_flag=True, env={}, is_stdout_tty=True))
+    try:
+        assert not get_renderer().is_json()
+        result = gen_app.poll.PollResult(status="failed", raw={"status": "x"}, image_urls=[], error=_ANSI_ATTACK)
+        with pytest.raises(typer.Exit):
+            gen_app._emit_result(result, request_id="job-1", download=None, as_json=False)
+    finally:
+        reset_renderer_for_testing()
+    _assert_ansi_neutralized(capsys.readouterr().out)
+
+
+def test_pretty_schema_unknown_model_with_markup_does_not_traceback(runner):
+    """`generate schema`'s pretty branch interpolated the `SpecError` — which quotes
+    the requested alias verbatim — straight into markup, so a name Rich reads as an
+    unbalanced closing tag crashed with `MarkupError` and printed NOTHING. Exit 1
+    with empty stdout is the undiagnosable failure this module is meant to prevent,
+    so it is pinned here even though the line arrived via #621 rather than this PR.
+    """
+    r = runner.invoke(cli_app, ["--no-json", "generate", "schema", "[/bold]"])
+    assert r.exit_code == 1
+    assert r.exception is None or isinstance(r.exception, SystemExit), r.exception
+    # Something actionable actually reached the user.
+    assert r.stdout.strip()
+    assert "[/bold]" in r.stdout
+
+
+def test_json_envelope_preserves_ansi_bytes(runner, api_key, monkeypatch):
+    """The machine path must NOT sanitize: `json.dumps` already encodes `\\x1b` as a
+    `\\u001b` escape, which is inert on the wire, and stripping it here would
+    silently mutate the bytes an agent parses (and diverge from the raw response
+    it may be diffing against). Pins the pretty/machine split so a future
+    'sanitize everywhere' change can't quietly corrupt envelope data."""
+    monkeypatch.setattr(
+        gen_app.client.httpx,
+        "post",
+        lambda *a, **kw: httpx.Response(400, content=_ANSI_ATTACK.encode()),
+    )
+    r = runner.invoke(cli_app, ["--json", *_GEN_ARGS])
+    assert r.exit_code == 1
+    env = _sole_envelope(r)
+    # Encoded, not emitted: the envelope line carries no live escape byte, so nothing
+    # acts on the terminal even though the data is fully intact.
+    assert "\x1b" not in r.stdout
+    assert "\\u001b" in r.stdout
+    # And the decoded value is the partner's string byte-for-byte — sanitizing here
+    # would have silently dropped the ESCs from what the agent parses.
+    assert env["error"]["details"]["body"] == _ANSI_ATTACK

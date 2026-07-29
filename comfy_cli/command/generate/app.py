@@ -45,13 +45,13 @@ import typer
 # JSON-stream mode -- an envelope-consuming caller must never get exit 1 with a
 # blank stdout.
 from rich import print as rprint
-from rich.markup import escape
 from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
 
 from comfy_cli import constants, tracking, ui
 from comfy_cli.command.generate import adapters, client, emit, output, poll, schema, spec, upload
 from comfy_cli.config_manager import ConfigManager
 from comfy_cli.output.renderer import Renderer, get_renderer
+from comfy_cli.output.sanitize import sanitize_markup
 
 _HELP = "Generate images via ComfyUI partner nodes (Flux, Ideogram, DALL·E, Recraft, Stability, …)."
 
@@ -80,7 +80,7 @@ def _fail(
     legacy_json: bool = False,
     pretty: str | None = None,
 ) -> None:
-    """Report a `generate` failure through whichever channel the caller asked for.
+    r"""Report a `generate` failure through whichever channel the caller asked for.
 
     - Global `--json` / `--json-stream` (and any non-TTY stdout, which the
       renderer already resolves to JSON) → exactly one `envelope/1` error on
@@ -94,13 +94,24 @@ def _fail(
     - Otherwise → the historical rich-red line (plus a dim hint line where the
       path already printed one), so pretty/TTY output is unchanged.
 
-    The default pretty line escapes `message` as Rich markup: several call sites
-    interpolate server-controlled text (an `ApiError`'s body, a response
-    preview, a partner's failure reason), and a bracketed token Rich reads as a
-    tag would either swallow the text or raise `MarkupError` — turning a clean
-    error into a traceback. A caller-supplied `pretty` is passed through
-    verbatim: it is explicitly pre-formatted markup and escapes its own
-    interpolations.
+    The default pretty line runs `message` (and `hint`) through `sanitize_markup`:
+    several call sites interpolate server-controlled text (an `ApiError`'s body, a
+    response preview, a partner's failure reason). Markup escaping alone is not
+    enough for remote text — it stops a bracketed token from being read as a tag
+    (which would swallow the text or raise `MarkupError`), but `\x1b` survives it,
+    so a CSI/OSC sequence would reach the terminal and could clear the screen or
+    repaint earlier lines to spoof CLI output. `sanitize_markup` strips the escape
+    bytes *and* escapes markup; see `comfy_cli.output.sanitize` (#614), which this
+    module must call explicitly because `generate` prints via a bare `rich.print`
+    rather than through `Renderer`.
+
+    A caller-supplied `pretty` is passed through verbatim: it is explicitly
+    pre-formatted markup and is responsible for sanitizing its own interpolations
+    (the two that carry remote text do).
+
+    The JSON/NDJSON paths above deliberately do NOT sanitize: `json.dumps` encodes
+    `\x1b` as a `\u` escape already, and stripping there would mutate the data
+    agents parse.
 
     ``hint`` is only passed where pretty mode already printed that second line;
     everywhere else `renderer.error` falls back to the code's registered hint,
@@ -118,9 +129,9 @@ def _fail(
     if legacy_json:
         output.print_json({"error": message, "code": code})
         return
-    rprint(pretty if pretty is not None else f"[bold red]{escape(message)}[/bold red]")
+    rprint(pretty if pretty is not None else f"[bold red]{sanitize_markup(message)}[/bold red]")
     if hint:
-        rprint(f"[dim]{hint}[/dim]")
+        rprint(f"[dim]{sanitize_markup(hint)}[/dim]")
 
 
 def _transport_code(exc: BaseException) -> str:
@@ -297,9 +308,11 @@ def _emit_result(result: poll.PollResult, *, request_id: str, download: str | No
                 details={"status": result.status, "response": result.raw},
             )
         else:
-            # `result.error` is the partner's own text — escape it so a bracketed
-            # token isn't parsed as Rich markup.
-            rprint(f"[bold red]{escape(message)}[/bold red]")
+            # `result.error` is the partner's own text. `sanitize_markup` (not a bare
+            # `escape`) because it is remote: escaping alone stops a bracketed token
+            # from being parsed as Rich markup but passes `\x1b` straight through,
+            # letting the partner clear the screen or repaint earlier lines (#614).
+            rprint(f"[bold red]{sanitize_markup(message)}[/bold red]")
             output.print_json(result.raw)
         raise typer.Exit(code=1)
     if download and result.image_urls:
@@ -561,7 +574,7 @@ def _generate(model: str, extra_args: list[str]) -> None:
                 code="generate_api_error",
                 message=f"API error {e.status}",
                 details={"status": e.status, "body": e.body},
-                pretty=f"[bold red]API error {e.status}[/bold red]\n{escape(str(e.body))}",
+                pretty=f"[bold red]API error {e.status}[/bold red]\n{sanitize_markup(e.body)}",
             )
             _track_error("api", e)
             raise typer.Exit(code=1) from e
@@ -585,7 +598,7 @@ def _generate(model: str, extra_args: list[str]) -> None:
                 code="generate_api_error",
                 message="Unexpected non-JSON response.",
                 details={"body_preview": preview},
-                pretty=f"[bold red]Unexpected non-JSON response.[/bold red]\n{escape(preview)}",
+                pretty=f"[bold red]Unexpected non-JSON response.[/bold red]\n{sanitize_markup(preview)}",
             )
             _track_error("non_json_response", e)
             raise typer.Exit(code=1)
@@ -815,7 +828,11 @@ def _schema(extra_args: list[str]) -> None:
         ep = spec.get_endpoint(clean[0])
     except spec.SpecError as e:
         if renderer.is_pretty():
-            rprint(f"[bold red]{e}[/bold red]")
+            # The message embeds `clean[0]` verbatim, so `comfy generate schema
+            # '[/bold]'` reached Rich as an unbalanced closing tag and died with a
+            # MarkupError traceback and empty stdout — the exact failure this
+            # module's `_fail` path exists to prevent.
+            rprint(f"[bold red]{sanitize_markup(e)}[/bold red]")
         else:
             renderer.error(
                 code="generate_unknown_model",
@@ -900,7 +917,6 @@ def _upload(extra_args: list[str]) -> None:
         _fail(
             code="generate_bad_args",
             message="Usage: comfy generate upload <file-or-url> [--json]",
-            pretty="[bold red]Usage: comfy generate upload <file-or-url> [--json][/bold red]",
         )
         raise typer.Exit(code=1)
     target = remaining[0]
@@ -974,7 +990,6 @@ def _resume(extra_args: list[str]) -> None:
         _fail(
             code="generate_bad_args",
             message="Usage: comfy generate resume <model> <job_id> [--download PATH] [--json]",
-            pretty="[bold red]Usage: comfy generate resume <model> <job_id> [--download PATH] [--json][/bold red]",
         )
         raise typer.Exit(code=1)
     model, job_id = extra_args[0], extra_args[1]
