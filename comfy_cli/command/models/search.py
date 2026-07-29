@@ -99,11 +99,11 @@ def _models_path_parts(target) -> tuple[str, ...]:
 
 
 def _authed_request(url: str, target) -> urllib.request.Request:
+    from comfy_cli.http import target_auth_headers
+
     req = urllib.request.Request(url)
-    if target.api_key:
-        req.add_header("X-API-Key", target.api_key)
-    elif target.auth_token:
-        req.add_header("Authorization", f"Bearer {target.auth_token}")
+    for k, v in target_auth_headers(target).items():
+        req.add_header(k, v)
     return req
 
 

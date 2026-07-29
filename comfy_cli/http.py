@@ -24,3 +24,21 @@ class NoRedirectHandler(urllib.request.HTTPRedirectHandler):
         raise urllib.error.HTTPError(req.full_url, code, self._message, headers, fp)
 
     http_error_302 = http_error_303 = http_error_307 = http_error_308 = http_error_301
+
+
+def target_auth_headers(target) -> dict[str, str]:
+    """Auth headers for a routing Target — cloud only.
+
+    Local ComfyUI has no auth; refusing to attach credentials to a non-cloud
+    target means a stray token on a local Target can never leak to a
+    plaintext server (same defense-in-depth gate as comfy_client.Client).
+    ``resolve_target`` populates at most one of api_key / auth_token, so the
+    precedence branch is mechanics, not policy.
+    """
+    headers: dict[str, str] = {}
+    if target.is_cloud:
+        if target.api_key:
+            headers["X-API-Key"] = target.api_key
+        elif target.auth_token:
+            headers["Authorization"] = f"Bearer {target.auth_token}"
+    return headers
