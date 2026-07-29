@@ -78,6 +78,21 @@ REGISTRY_CACHE_PREFIX = "deps-registry:"
 
 NO_REGISTRY_DEPENDENCY_METADATA = "registry did not return dependency metadata for this pack"
 
+# A registry node id is an opaque server-side slug that ``RegistryAPI.get_node``
+# interpolates unescaped into ``GET {base_url}/nodes/{id}``. Every id in the
+# public registry matches this charset, so nothing legitimate is rejected — but
+# ``/``, ``?`` and ``#`` are URL-significant: ``--registry <pack>/install``
+# would build the exact URL of ``install_node`` (itself a GET on
+# ``/nodes/{id}/install``, which records an installation server-side), and
+# ``?``/``#`` inject a query string or truncate the path. A read-only report
+# must not be steerable into those, so ids are validated before any request.
+_REGISTRY_NODE_ID_RE = re.compile(r"[A-Za-z0-9._-]+")
+
+# A registry failure message is server-controlled text — on a captive-portal or
+# misbehaving-proxy network it is a whole HTML page — and gets copied into the
+# single-line JSON envelope consumers parse. Clamp it first.
+MAX_REGISTRY_ERROR_CHARS = 300
+
 
 # ---------------------------------------------------------------------------
 # Installed versions
@@ -275,33 +290,99 @@ def _pack_report(pack_dir: Path, workspace: Path, installed_versions: dict[str, 
 # ---------------------------------------------------------------------------
 
 
+def _truncate(message: str, limit: int = MAX_REGISTRY_ERROR_CHARS) -> str:
+    """Clamp server-controlled error text before it enters the JSON envelope.
+
+    Whitespace is collapsed first so a multi-line HTML error page cannot break
+    the single-line JSON output consumers read.
+    """
+    text = " ".join(message.split())
+    return text if len(text) <= limit else text[:limit] + "… (truncated)"
+
+
+def _registry_cache_key(registry_api: Any, node_id: str) -> str:
+    """Cache key for one registry lookup.
+
+    Includes the registry base URL because ``RegistryAPI`` selects localhost,
+    staging or production from ``ENVIRONMENT``: metadata fetched from a dev or
+    staging registry must not be served to a later production run, where it
+    could hide a real dependency conflict. The id is lower-cased because the
+    registry resolves ids case-insensitively (``GET /nodes/comfyui-lcm`` 302s to
+    ``/nodes/ComfyUI-LCM``), so two spellings share one entry rather than
+    duplicating both the request and the stored value.
+    """
+    base = getattr(registry_api, "base_url", "") or ""
+    return f"{REGISTRY_CACHE_PREFIX}{base}:{node_id.lower()}"
+
+
+def _normalize_dependencies(dependencies: Any) -> tuple[list[str] | None, bool]:
+    """Return ``(declared, dropped_any)`` for a raw registry dependency list.
+
+    ``map_node_version`` defaults a missing ``dependencies`` to ``[]``, so an
+    empty list is indistinguishable from "the field was absent" — we must not
+    claim the pack declares zero dependencies. Both collapse to ``None``, as
+    does anything that isn't a list of strings (iterating a stray bare string
+    would yield one row per character). ``dropped_any`` reports whether a
+    non-string entry was filtered out, so a caller holding an otherwise usable
+    list can warn that the row is partial rather than silently under-reporting.
+
+    Applied to the cached value as well as the network one: a cache entry
+    written by another comfy-cli version (or hand-edited) can hold ``[null]``,
+    which would reach ``_classify`` and raise ``AttributeError`` on
+    ``raw.startswith`` — aborting the whole report, the opposite of this
+    module's degrade-to-a-warning design.
+    """
+    if not isinstance(dependencies, list):
+        return None, False
+    kept = [d.strip() for d in dependencies if isinstance(d, str) and d.strip()]
+    dropped = any(not (isinstance(d, str) and d.strip()) for d in dependencies)
+    return (kept or None), dropped
+
+
+def _registry_error(node_id: str, exc: Exception) -> dict[str, str]:
+    """Map a ``get_node`` failure to a ``{"code", "message"}`` warning.
+
+    A 404 is permanent — the id is misspelled or was never published — and must
+    not be reported as ``registry_unavailable``, whose hint tells the caller to
+    check network access and retry with ``--refresh``. An agent following that
+    hint against a 404 retries forever against an id that will never resolve.
+    """
+    if getattr(exc, "status_code", None) == 404:
+        return {
+            "code": "registry_node_not_found",
+            "message": f"registry has no node '{node_id}' (HTTP 404) — check the id, or the pack may be unpublished",
+        }
+    return {
+        "code": "registry_unavailable",
+        "message": f"could not fetch registry metadata for '{node_id}': {_truncate(str(exc))}",
+    }
+
+
 def _registry_declared(
     node_id: str,
     cache: dict[str, Any],
     refresh: bool,
     registry_api: Any,
-) -> tuple[list[str] | None, str | None, str | None]:
-    """Return ``(declared, version, error)`` for a registry node id.
+) -> tuple[list[str] | None, str | None, dict[str, str] | None, bool]:
+    """Return ``(declared, version, error, partial)`` for a registry node id.
 
     ``declared`` is the latest version's published dependency list, or ``None``
-    when the registry gave us nothing usable. Results (including "the registry
-    published no dependencies") are cached for an hour under the same file
-    ``comfy outdated`` uses, so repeated agent calls stay cheap; ``refresh``
-    bypasses the read.
+    when the registry gave us nothing usable. ``error`` is a ``{"code",
+    "message"}`` warning. ``partial`` marks an otherwise usable list that lost malformed
+    entries. Results (including "the registry published no dependencies") are
+    cached for an hour under the same file ``comfy outdated`` uses, so repeated
+    agent calls stay cheap; ``refresh`` bypasses the read.
     """
     from comfy_cli.command.outdated import _cache_get, _cache_set
 
-    key = f"{REGISTRY_CACHE_PREFIX}{node_id}"
+    key = _registry_cache_key(registry_api, node_id)
     if not refresh:
         cached = _cache_get(cache, key)
         if isinstance(cached, dict):
-            declared = cached.get("dependencies")
+            # Normalized on the way out too — see ``_normalize_dependencies``.
+            declared, _ = _normalize_dependencies(cached.get("dependencies"))
             version = cached.get("version")
-            return (
-                declared if isinstance(declared, list) else None,
-                version if isinstance(version, str) else None,
-                None,
-            )
+            return declared, (version if isinstance(version, str) else None), None, False
 
     try:
         # get_node, NOT install_node: the install endpoint records an
@@ -309,22 +390,14 @@ def _registry_declared(
         # a pre-install *report* must never touch it.
         node = registry_api.get_node(node_id)
     except Exception as e:  # noqa: BLE001 - registry unreachable → a per-entry warning, not a failed command
-        return None, None, f"could not fetch registry metadata for '{node_id}': {e}"
+        return None, None, _registry_error(node_id, e), False
 
     latest = getattr(node, "latest_version", None)
     version = getattr(latest, "version", None)
-    dependencies = getattr(latest, "dependencies", None)
-    # ``map_node_version`` defaults a missing ``dependencies`` to ``[]``, so an
-    # empty list is indistinguishable from "the field was absent" — we must not
-    # claim the pack declares zero dependencies. Both collapse to `declared:
-    # null` + the honest warning below, as does anything that isn't a list of
-    # strings (iterating a stray bare string would yield one row per character).
-    declared = None
-    if isinstance(dependencies, list):
-        declared = [d.strip() for d in dependencies if isinstance(d, str) and d.strip()] or None
+    declared, partial = _normalize_dependencies(getattr(latest, "dependencies", None))
 
     _cache_set(cache, key, {"version": version if isinstance(version, str) else None, "dependencies": declared})
-    return declared, (version if isinstance(version, str) else None), None
+    return declared, (version if isinstance(version, str) else None), None, partial
 
 
 def _registry_report(
@@ -335,7 +408,7 @@ def _registry_report(
     registry_api: Any,
 ) -> tuple[dict[str, Any], list[dict[str, str]]]:
     """Build one registry-candidate row. Returns ``(row, warnings)``."""
-    declared, version, error = _registry_declared(node_id, cache, refresh, registry_api)
+    declared, version, error, partial = _registry_declared(node_id, cache, refresh, registry_api)
 
     warnings: list[dict[str, str]] = []
     row: dict[str, Any] = {
@@ -351,8 +424,8 @@ def _registry_report(
     }
 
     if error is not None:
-        row["warning"] = error
-        warnings.append({"code": "registry_unavailable", "message": error})
+        row["warning"] = error["message"]
+        warnings.append(error)
         return row, warnings
 
     if declared is None:
@@ -364,6 +437,13 @@ def _registry_report(
             }
         )
         return row, warnings
+
+    if partial:
+        # The list is usable but lossy: a dropped entry that would have
+        # conflicted is invisible, so the row must not read as complete metadata.
+        message = f"registry returned malformed dependency entries for '{node_id}'; this row is incomplete"
+        row["warning"] = message
+        warnings.append({"code": "registry_partial_dependency_metadata", "message": message})
 
     # Same per-requirement diff, against the same single ``pip list`` map.
     rows: dict[str, dict[str, Any]] = {}
@@ -435,9 +515,32 @@ def build_report(
             }
         )
 
-    # Dedupe (order-preserving) and drop blanks — an empty id would otherwise
-    # become a request for the registry's whole node collection.
-    wanted_registry = list(dict.fromkeys(i.strip() for i in (registry_ids or []) if i and i.strip()))
+    # Validate, then dedupe (order-preserving). Dedupe is case-insensitive
+    # because the registry resolves ids that way, so `--registry Some-Pack
+    # --registry some-pack` is one pack, not two rows and two network calls;
+    # the first spelling seen is the one reported. Every rejected id is
+    # surfaced as a warning rather than dropped silently — a caller whose only
+    # `--registry` value was rejected must not read an empty report as "no
+    # conflicts".
+    wanted_registry: list[str] = []
+    seen_registry: set[str] = set()
+    for raw_id in registry_ids or []:
+        candidate = (raw_id or "").strip()
+        if not _REGISTRY_NODE_ID_RE.fullmatch(candidate):
+            warnings.append(
+                {
+                    "code": "registry_invalid_node_id",
+                    "message": (
+                        f"ignored --registry value {candidate!r}: a registry node id must be non-empty and "
+                        "match [A-Za-z0-9._-]"
+                    ),
+                }
+            )
+            continue
+        if candidate.lower() in seen_registry:
+            continue
+        seen_registry.add(candidate.lower())
+        wanted_registry.append(candidate)
 
     pack_dirs = iter_pack_dirs(workspace / "custom_nodes")
     packs: list[dict[str, Any]] = []
@@ -451,17 +554,20 @@ def build_report(
             row, pack_warnings = _pack_report(match, workspace, installed_versions)
             packs.append(row)
             warnings.extend({"code": "pack_read_error", "message": w} for w in pack_warnings)
-    elif not wanted_registry:
+    elif not registry_ids:
         # Bare `comfy node deps` reports the whole workspace. A `--registry`-only
         # invocation is a targeted pre-install question, so it does NOT also dump
-        # every installed pack; name packs positionally to get both.
+        # every installed pack; name packs positionally to get both. Keyed on the
+        # *requested* ids, not the surviving ones: if every `--registry` value
+        # was rejected above, the answer is that targeted question's warning, not
+        # a surprise dump of every installed pack.
         for pack_dir in pack_dirs:
             row, pack_warnings = _pack_report(pack_dir, workspace, installed_versions)
             packs.append(row)
             warnings.extend({"code": "pack_read_error", "message": w} for w in pack_warnings)
 
     if wanted_registry:
-        from comfy_cli.command.outdated import _load_cache, _save_cache
+        from comfy_cli.command.outdated import _cache_get, _load_cache, _save_cache
 
         # Shares ``comfy outdated``'s 1h cache file under a distinct key prefix.
         cache = _load_cache()
@@ -470,11 +576,39 @@ def build_report(
             from comfy_cli.registry import RegistryAPI
 
             api = RegistryAPI()
+        touched: set[str] = set()
         for node_id in wanted_registry:
+            key = _registry_cache_key(api, node_id)
+            before = cache.get(key)
             row, registry_warnings = _registry_report(node_id, installed_versions, cache, refresh, api)
             packs.append(row)
             warnings.extend(registry_warnings)
-        _save_cache(cache)
+            # Identity, not membership: a lookup that failed (or was served from
+            # cache) leaves any pre-existing entry untouched, and an *expired*
+            # one of those must stay prunable below rather than being carried
+            # forward as though we had just written it.
+            if cache.get(key) is not before:
+                touched.add(key)
+
+        # `node deps` is a second writer of a file `comfy outdated` already
+        # owns, so it must not blind-write the dict it read minutes ago: re-read
+        # and merge only our own keys, or a concurrent `outdated` run's writes
+        # are silently discarded. (`_save_cache` renames into place, so a reader
+        # never sees a half-written file — but this is still last-writer-wins on
+        # a genuinely simultaneous write, which for a rebuildable 1h cache costs
+        # only a re-fetch.)
+        fresh = _load_cache()
+        for key in touched:
+            fresh[key] = cache[key]
+        # Prune expired registry entries while we hold the file. `_cache_get`
+        # only checks the TTL at read time and `_save_cache` rewrites every key,
+        # so without this these never leave: unlike `outdated`'s keys, this
+        # prefix's key space is arbitrary caller-supplied ids holding whole
+        # dependency lists, which a loop over many ids would grow without bound.
+        for key in [k for k in fresh if k.startswith(REGISTRY_CACHE_PREFIX) and k not in touched]:
+            if _cache_get(fresh, key) is None:
+                del fresh[key]
+        _save_cache(fresh)
 
     compiled = workspace / "requirements.compiled"
     compiled_present = compiled.is_file()

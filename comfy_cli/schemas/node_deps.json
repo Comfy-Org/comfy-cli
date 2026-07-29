@@ -52,7 +52,7 @@
           },
           "warning": {
             "type": "string",
-            "description": "Registry rows only: why this row carries no requirements (registry unreachable, or no dependency metadata published). Never fails the command — other rows still render."
+            "description": "Registry rows only: why this row carries no requirements (registry unreachable, no such node, or no dependency metadata published) — or, when requirements ARE present, that they are incomplete because the registry returned malformed entries. Never fails the command — other rows still render."
           },
           "requirement_files": {
             "type": "array",
@@ -109,7 +109,7 @@
     },
     "warnings": {
       "type": "array",
-      "description": "Non-fatal problems. `installed_versions_unavailable` means the pip probe failed, so every requirement is `unknown`. `registry_unavailable` / `registry_no_dependency_metadata` mean a `--registry` candidate could not be diffed; every other row is unaffected.",
+      "description": "Non-fatal problems. `installed_versions_unavailable` means the pip probe failed, so every requirement is `unknown`. `registry_unavailable` (transient — retry) / `registry_node_not_found` (permanent 404 — do NOT retry) / `registry_no_dependency_metadata` mean a `--registry` candidate could not be diffed; `registry_partial_dependency_metadata` means its `declared` list lost malformed entries and is incomplete; `registry_invalid_node_id` means a `--registry` value was blank or outside `[A-Za-z0-9._-]` and was rejected without a request. Every other row is unaffected.",
       "items": {
         "type": "object",
         "properties": {

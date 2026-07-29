@@ -364,19 +364,16 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ),
     ErrorCode(
         "server_died",
-        "Server connection dropped while a foreground (`--wait`) job was in flight; recorded on the job state file.",
-        "check the server (it may have been OOM-killed); the prompt_id is in `comfy jobs status <id>`",
+        "The local ComfyUI server became unreachable (or restarted without the job) while a job was in "
+        "flight — the server likely crashed or was killed (e.g. an out-of-memory allocation). Recorded on "
+        "the job state file, both for a foreground (`--wait`) run and for the background watcher.",
+        "check the ComfyUI server log (it may have been OOM-killed), then `comfy launch` and re-submit; "
+        "the prompt_id is in `comfy jobs status <id>`",
     ),
     ErrorCode(
         "watcher_poll_error",
         "Background watcher encountered a transient error polling the server.",
         "transient — the job is likely still running; re-run `comfy jobs watch <id>`",
-    ),
-    ErrorCode(
-        "server_died",
-        "The local ComfyUI server became unreachable (or restarted without the job) while it "
-        "was in flight — the server likely crashed or was killed (e.g. an out-of-memory allocation).",
-        "check the ComfyUI server log, then `comfy launch` and re-submit the workflow",
     ),
     ErrorCode(
         "unknown_status_stall",
@@ -676,6 +673,31 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "or a non-200 response), so that candidate's row carries `declared: null` plus a per-entry `warning`. "
         "Surfaced in `data.warnings[]` (not as an error envelope): every other pack still reports normally.",
         "check network access to api.comfy.org, then re-run (add `--refresh` to bypass the 1h cache)",
+    ),
+    ErrorCode(
+        "registry_invalid_node_id",
+        "A `comfy node deps --registry <node-id>` value was blank or contained characters outside "
+        "`[A-Za-z0-9._-]`, so it was rejected without a network call. Registry ids never contain `/`, `?` "
+        "or `#`; interpolated into the lookup URL those would retarget the request at a different path "
+        "(including the side-effecting install endpoint) or inject a query string. "
+        "Surfaced in `data.warnings[]`: the other `--registry` ids still report normally.",
+        "pass the pack's registry id as shown by `comfy node registry-list` (e.g. `comfyui-example`), "
+        "not a URL, an `owner/repo` path, or a local directory name",
+    ),
+    ErrorCode(
+        "registry_node_not_found",
+        "`comfy node deps --registry <node-id>` reached the Comfy registry, which reported no such node "
+        "(HTTP 404) — a misspelled id, or a pack that was never published to the registry. Distinct from "
+        "`registry_unavailable`: retrying or `--refresh` will never resolve it. Surfaced in `data.warnings[]`.",
+        "check the id with `comfy node registry-list`; an unpublished pack has no registry metadata, so "
+        "install it and re-run `comfy node deps` to read its requirements from disk instead",
+    ),
+    ErrorCode(
+        "registry_partial_dependency_metadata",
+        "`comfy node deps --registry <node-id>` got a dependency list from the registry containing "
+        "non-string entries (e.g. `null`), which were dropped. The row's `declared` list is therefore "
+        "incomplete — a dropped entry that would have conflicted is not reported. Surfaced in `data.warnings[]`.",
+        "treat that row as partial; read the pack's own `requirements.txt` upstream to confirm the full set",
     ),
     ErrorCode(
         "registry_no_dependency_metadata",
