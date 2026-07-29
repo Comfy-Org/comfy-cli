@@ -1,0 +1,89 @@
+name: Groom
+
+# Thin caller for the shared reusable code-cleanup sweep. All of the logic (the
+# two-phase finder then independent verifier audit, the durable dedup ledger, the
+# GitHub-issue sink) lives in Comfy-Org/github-workflows. This repo carries only
+# the pin and its cadence, exactly like the other shared-workflow callers here.
+#
+# FINDS ONLY. The opt-in auto-builder (`builder: true`, which turns findings into
+# review-gated PRs) is deliberately left OFF. Groom files issues a human triages;
+# it opens no PRs, writes no commits, and never merges.
+#
+# CADENCE lives in the repo Actions variable GROOM_INTERVAL_DAYS, not in this
+# file. Retuning is a variable edit with no workflow change:
+#
+#   gh variable set GROOM_INTERVAL_DAYS --repo Comfy-Org/comfy-cli --body 14
+#
+# PREREQUISITE (operator): `secrets.ANTHROPIC_API_KEY` must reach this repo, at
+# org or repo level. The finder and verifier agents bill through it and the
+# reusable declares it required, so an absent key fails the run LOUD at the agent
+# step by design rather than leaving the sweep silently inert. `vars.APP_ID` plus
+# `secrets.CLOUD_CODE_BOT_PRIVATE_KEY` are optional: with them, issues are filed
+# as cloud-code-bot, and without them the reusable degrades to
+# github-actions[bot] rather than failing.
+
+on:
+  schedule:
+    # DAILY base tick, deliberately NOT the effective cadence. GitHub Actions cron
+    # is static in the file, so "every N days" is a frequent tick plus the
+    # reusable's runtime interval gate: a tick inside GROOM_INTERVAL_DAYS of the
+    # last real run no-ops cheaply, before the finder ever spins up. Never fires
+    # on a PR. Off-peak and on a non-round minute to dodge scheduler congestion,
+    # staggered from the other groom callers so the org's runs do not all land in
+    # the same minute.
+    - cron: '53 9 * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: >-
+          Run the full audit and dedup but do NOT open issues. Prints what WOULD
+          be filed to the job summary. Use this for the first run to confirm the
+          agent credentials resolve and to eyeball finding quality before
+          trusting live filing.
+        type: boolean
+        default: false
+
+# NOTE: intentionally NO caller-level `concurrency:`. The reusable already
+# declares `concurrency: groom-${{ github.repository }}` (cancel-in-progress:
+# false), which is the real TOCTOU guard for the read-then-file dedup ledger.
+# Repeating that group here would DEADLOCK the run: the caller would hold the
+# group while its `uses:` job waits on the identical group.
+
+jobs:
+  groom:
+    permissions:
+      # REQUIRED UNION. A reusable's nested jobs cannot request more GITHUB_TOKEN
+      # scope than the caller grants, and GitHub validates this at STARTUP, so a
+      # short grant fails the run before any job with an opaque "workflow file
+      # issue".
+      contents: read
+      issues: write
+      pull-requests: read
+      # REQUIRED by the reusable's `gate` job, which lists THIS caller's Actions
+      # run history to find the last real groom run for the interval gate.
+      # Omitting it rejects the run outright ("requesting 'actions: read', but is
+      # only allowed 'actions: none'").
+      actions: read
+    uses: Comfy-Org/github-workflows/.github/workflows/groom.yml@ece4c3eaa71812a5a665f48d5d1f4bb0ff5f655e # main @ ece4c3e
+    with:
+      # File as cloud-code-bot (App token) rather than github-actions[bot]. Absent
+      # APP_ID degrades to github-actions[bot] instead of failing.
+      bot_app_id: ${{ vars.APP_ID }}
+      # Keep the assets ref (finder and verifier briefs plus dedup ledger) in
+      # lock-step with the `uses:` ref above, so a run always loads the briefs
+      # that match the workflow filing the issues.
+      workflows_ref: ece4c3eaa71812a5a665f48d5d1f4bb0ff5f655e
+      # Manual dispatch can dry-run; the scheduled run always files live.
+      dry_run: ${{ github.event.inputs.dry_run == 'true' }}
+      # Effective cadence. A tick inside this window no-ops before the
+      # finder spins up, so retuning is a repo-variable edit with no workflow
+      # change. Fallback 7 matches this repo's recent merge activity.
+      interval_days: ${{ vars.GROOM_INTERVAL_DAYS || '7' }}
+      # Volume-gate window, kept in lock-step with the cadence above: skip the
+      # expensive audit when nothing merged in that window. A dry-run bypasses it
+      # so the spot-check always exercises the full audit.
+      cadence: ${{ vars.GROOM_INTERVAL_DAYS || '7' }}
+      volume_gate: ${{ github.event.inputs.dry_run != 'true' }}
+    secrets:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      CLOUD_CODE_BOT_PRIVATE_KEY: ${{ secrets.CLOUD_CODE_BOT_PRIVATE_KEY }}
