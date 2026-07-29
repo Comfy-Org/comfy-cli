@@ -785,10 +785,10 @@ def test_cache_round_trips_a_non_ascii_registry_id(workspace, fake_pip):
     """`--registry` takes arbitrary caller-supplied ids, so a non-ASCII one can
     reach a cache key. `_load_cache` decodes bytes as JSON (UTF-8/16/32 only),
     so the writer must not emit anything a non-UTF-8 locale would mangle — the
-    whole cache silently resets to `{}` on the next read if it does. Two
-    independent guards hold that today (`json.dumps` escapes to pure ASCII,
-    `_save_cache` pins `encoding="utf-8"`); this pins the round-trip itself so
-    dropping either one fails here rather than in a Windows user's cache.
+    whole cache silently resets to `{}` on the next read if it does. This is the
+    end-to-end guard; it passes on any host today because `json.dumps` escapes
+    the payload to pure ASCII. The `encoding="utf-8"` pin that holds once that
+    is no longer true is asserted separately, below.
     """
     from comfy_cli.command import outdated as outdated_cmd
 
@@ -801,6 +801,34 @@ def test_cache_round_trips_a_non_ascii_registry_id(workspace, fake_pip):
         "version": "1.0.0",
         "dependencies": ["numpé>=1.20"],
     }
+
+
+def test_save_cache_pins_the_write_encoding(monkeypatch):
+    """The round-trip above cannot catch a dropped `encoding="utf-8"`: the bytes
+    it writes are pure ASCII, which every locale encodes identically, so the
+    pin only matters the day `json.dumps` stops escaping. Nor can the ambient
+    encoding be faked — CPython resolves `write_text`'s default below the Python
+    `locale` module. So assert the writer's contract directly: `_save_cache`
+    names its encoding rather than inheriting the host's, and what lands on disk
+    is the UTF-8 that `_load_cache`'s `json.loads(bytes)` can decode.
+    """
+    import time
+
+    from comfy_cli.command import outdated as outdated_cmd
+
+    seen: dict[str, object] = {}
+    real_write_text = Path.write_text
+
+    def spy(self, data, encoding=None, **kwargs):
+        seen["encoding"] = encoding
+        return real_write_text(self, data, encoding=encoding, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", spy)
+    key = f"{node_deps_cmd.REGISTRY_CACHE_PREFIX}https://api.comfy.org:café-pack"
+    outdated_cmd._save_cache({key: {"value": "1.0.0", "ts": time.time()}})
+
+    assert seen["encoding"] == "utf-8", "the host locale must not pick the cache encoding"
+    assert json.loads(outdated_cmd._cache_path().read_bytes())[key]["value"] == "1.0.0"
 
 
 def test_registry_rows_validate_against_the_shipped_schema(workspace, fake_pip):
