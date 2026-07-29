@@ -28,6 +28,7 @@ import typer
 from comfy_cli import jobs_state
 from comfy_cli.comfy_client import Client, Unauthenticated, extract_output_entries
 from comfy_cli.http import NoRedirectHandler
+from comfy_cli.http import target_auth_headers as _auth_headers
 from comfy_cli.output import get_renderer
 from comfy_cli.output import rprint as pprint
 from comfy_cli.target import resolve_target
@@ -65,17 +66,6 @@ def _default_out_dir() -> str:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-
-def _auth_headers(target: Any) -> dict[str, str]:
-    """Build auth headers for a target (cloud only)."""
-    headers: dict[str, str] = {}
-    if target.is_cloud:
-        if target.api_key:
-            headers["X-API-Key"] = target.api_key
-        elif target.auth_token:
-            headers["Authorization"] = f"Bearer {target.auth_token}"
-    return headers
 
 
 # Stripped on every download redirect so auth never crosses origins.

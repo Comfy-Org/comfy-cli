@@ -51,7 +51,7 @@ from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
 from comfy_cli import constants, tracking, ui
 from comfy_cli.command.generate import adapters, client, emit, output, poll, schema, spec, upload
 from comfy_cli.config_manager import ConfigManager
-from comfy_cli.output.renderer import get_renderer
+from comfy_cli.output.renderer import Renderer, get_renderer
 
 _HELP = "Generate images via ComfyUI partner nodes (Flux, Ideogram, DALL·E, Recraft, Stability, …)."
 
@@ -703,6 +703,55 @@ def _arg_value(args: list[str], *names: str) -> str | None:
     return None
 
 
+def _renderer_for(meta: dict[str, str | bool]) -> Renderer:
+    """Resolve the renderer for a `generate` sub-action.
+
+    ``generate`` runs with ``allow_extra_args``, so a trailing ``--json`` never
+    reaches the global Typer callback that resolves output mode — it lands in
+    ``meta`` instead. Honor both spellings: the global ``comfy --json generate
+    list`` (already reflected in the renderer's mode) and the tail
+    ``comfy generate list --json`` (upgrade a still-pretty renderer).
+    """
+    renderer = get_renderer()
+    if meta.get("json"):
+        renderer.force_json()
+    return renderer
+
+
+def _model_record(e: spec.Endpoint) -> dict[str, object]:
+    """One structured catalog row. ``category`` is what the human table renders
+    under its "Style" column; ``summary`` is the FULL text, not the ``…``-
+    truncated form the table has to cut to fit its width."""
+    return {
+        "alias": spec.preferred_alias(e.id) or e.id,
+        "id": e.id,
+        "partner": e.partner,
+        "category": e.category,
+        "mode": "async" if e.polling else "sync",
+        "summary": e.summary,
+    }
+
+
+def _param_record(f: schema.FlagDef) -> dict[str, object]:
+    """One structured parameter row for `generate schema`.
+
+    ``kind`` is retained alongside ``type`` because it is the vocabulary
+    ``comfy_cli.command.generate.schema`` uses internally and the name the
+    pre-envelope ``--json`` payload shipped; they always carry the same value.
+    """
+    return {
+        "name": f.name,
+        "type": f.kind,
+        "kind": f.kind,
+        "required": f.required,
+        "default": f.default,
+        "enum": list(f.enum),
+        "description": f.description,
+        "item_type": f.item_kind,
+        "upload_mode": f.upload_mode,
+    }
+
+
 def _list_models(extra_args: list[str]) -> None:
     """`comfy generate list` — show available models with their short aliases."""
     try:
@@ -712,40 +761,34 @@ def _list_models(extra_args: list[str]) -> None:
         # used to escape as an unhandled SchemaError traceback.
         _fail(code="generate_bad_args", message=str(e))
         raise typer.Exit(code=1)
-    as_json = bool(meta.get("json", False))
+    renderer = _renderer_for(meta)
     partner = _arg_value(clean, "--partner", "-p")
     category = _arg_value(clean, "--category", "--style", "-c")
     query = _arg_value(clean, "--query", "-q")
     eps = spec.list_endpoints(partner=partner, category=category, query=query)
-    if as_json:
-        models = [
-            {
-                "alias": spec.preferred_alias(e.id) or e.id,
-                "id": e.id,
-                "partner": e.partner,
-                "category": e.category,
-                "mode": "async" if e.polling else "sync",
-                "summary": e.summary,
-            }
+    payload = {
+        "models": [_model_record(e) for e in eps],
+        "count": len(eps),
+        "filters": {"partner": partner, "category": category, "query": query},
+    }
+    if renderer.is_pretty():
+        if not eps:
+            rprint("[yellow]No models match those filters.[/yellow]")
+            raise typer.Exit(code=0)
+        rows = [
+            (
+                spec.preferred_alias(e.id) or e.id,
+                e.partner,
+                e.category,
+                "async" if e.polling else "sync",
+                (e.summary[:60] + "…") if len(e.summary) > 61 else e.summary,
+            )
             for e in eps
         ]
-        output.print_json({"models": models, "count": len(models)})
+        ui.display_table(rows, ["Model", "Partner", "Style", "Mode", "Summary"], title="Comfy Generate — Models")
+        rprint("\n[dim]Run `comfy generate schema <model>` to see parameters for a model.[/dim]")
         return
-    if not eps:
-        rprint("[yellow]No models match those filters.[/yellow]")
-        raise typer.Exit(code=0)
-    rows = [
-        (
-            spec.preferred_alias(e.id) or e.id,
-            e.partner,
-            e.category,
-            "async" if e.polling else "sync",
-            (e.summary[:60] + "…") if len(e.summary) > 61 else e.summary,
-        )
-        for e in eps
-    ]
-    ui.display_table(rows, ["Model", "Partner", "Style", "Mode", "Summary"], title="Comfy Generate — Models")
-    rprint("\n[dim]Run `comfy generate schema <model>` to see parameters for a model.[/dim]")
+    renderer.emit(payload, command="generate list")
 
 
 def _schema(extra_args: list[str]) -> None:
@@ -755,36 +798,53 @@ def _schema(extra_args: list[str]) -> None:
     except schema.SchemaError as e:
         _fail(code="generate_bad_args", message=str(e))
         raise typer.Exit(code=1)
-    as_json = bool(meta.get("json", False))
+    renderer = _renderer_for(meta)
     if not clean or clean[0].startswith("-"):
-        _fail(code="generate_bad_args", message="Usage: comfy generate schema <model>", legacy_json=as_json)
+        if renderer.is_pretty():
+            rprint("[bold red]Usage: comfy generate schema <model>[/bold red]")
+        else:
+            renderer.error(
+                code="generate_bad_args",
+                message="Usage: comfy generate schema <model>",
+                hint="pass a model alias, e.g. `comfy generate schema flux-pro` "
+                "(run `comfy generate list` to see them)",
+                command="generate schema",
+            )
         raise typer.Exit(code=1)
     try:
         ep = spec.get_endpoint(clean[0])
     except spec.SpecError as e:
-        _fail(code="generate_unknown_model", message=str(e), details={"model": clean[0]}, legacy_json=as_json)
+        if renderer.is_pretty():
+            rprint(f"[bold red]{e}[/bold red]")
+        else:
+            renderer.error(
+                code="generate_unknown_model",
+                message=str(e),
+                hint="run `comfy generate list` to see the available model aliases",
+                details={"requested": clean[0]},
+                command="generate schema",
+            )
         raise typer.Exit(code=1)
-    if as_json:
-        flags = schema.flags_for(ep)
-        output.print_json(
-            {
-                "model": spec.preferred_alias(ep.id) or ep.id,
-                "id": ep.id,
-                "params": [
-                    {
-                        "name": f.name,
-                        "kind": f.kind,
-                        "required": f.required,
-                        "default": f.default,
-                        "enum": f.enum,
-                        "description": f.description,
-                    }
-                    for f in flags
-                ],
-            }
-        )
+    if renderer.is_pretty():
+        _show_schema_help(ep)
         return
-    _show_schema_help(ep)
+    flags = schema.flags_for(ep)
+    name = spec.preferred_alias(ep.id) or ep.id
+    renderer.emit(
+        {
+            "model": name,
+            "id": ep.id,
+            "partner": ep.partner,
+            "category": ep.category,
+            "summary": ep.summary,
+            "mode": "async" if ep.polling else "sync",
+            "polling": ep.polling,
+            "content_type": ep.request_content_type,
+            "params": [_param_record(f) for f in flags],
+            "example": schema.example_invocation(ep, flags, display_name=name),
+        },
+        command="generate schema",
+    )
 
 
 def _fetch_spec(url: str) -> httpx.Response:
@@ -999,7 +1059,7 @@ def _print_top_help() -> None:
     )
     rprint('  comfy generate dalle --prompt "a watercolor whale" --download whale.png')
     rprint(
-        '  comfy generate flux-pro --prompt "a fox" --emit-workflow flux.json   '
+        '  comfy generate flux-2 --prompt "a fox" --emit-workflow flux.json   '
         "[dim]# write a runnable workflow instead of calling the proxy[/dim]"
     )
     rprint("")

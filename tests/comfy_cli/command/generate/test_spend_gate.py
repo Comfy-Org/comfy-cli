@@ -184,7 +184,7 @@ def test_interactive_prompt_default_is_no(runner, api_key, post_spy, interactive
 def test_emit_workflow_is_not_gated(runner, post_spy, tmp_path):
     # --emit-workflow writes a local artifact, calls no proxy, spends nothing.
     out = tmp_path / "wf.json"
-    r = runner.invoke(cli_app, ["generate", "flux-pro", "--prompt", "x", "--emit-workflow", str(out)])
+    r = runner.invoke(cli_app, ["generate", "flux-2", "--prompt", "x", "--emit-workflow", str(out)])
     assert r.exit_code == 0, r.stdout
     assert out.exists()
     assert post_spy == []

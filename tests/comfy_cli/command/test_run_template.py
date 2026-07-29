@@ -387,3 +387,177 @@ def test_temp_workflow_file_is_cleaned_up(app, gallery_file, template_body, serv
     result = CliRunner().invoke(app, ["run-template", "--gallery", gallery_file, "image_local_sd", *HOSTPORT])
     assert result.exit_code == 0, result.output
     assert list(tmp_path.glob("comfy_template_*")) == []
+
+
+# ---------------------------------------------------------------------------
+# Direct unit tests for the extracted spend gate (_enforce_spend_gate, BE-4367)
+# ---------------------------------------------------------------------------
+
+# A workflow embedding a partner-API node (FluxProNode carries api_node:True in
+# OBJECT_INFO) so node detection alone trips the gate.
+_PAID_WORKFLOW = {"nodes": [{"id": 1, "type": "FluxProNode", "widgets_values": ["x"]}], "links": []}
+# An OSS gallery row: no API tag, no provider logos → zero gallery signals.
+_OSS_ROW = {"name": "image_local_sd", "tags": ["Local"], "providers": []}
+
+
+def _force_pretty_renderer() -> Renderer:
+    r = Renderer.resolve(
+        is_stdout_tty=True,
+        env={},
+        caller=Caller(kind="user", agentic=False, source_env=None),
+        json_flag=False,
+    )
+    r.mode = OutputMode.PRETTY
+    set_renderer(r)
+    return r
+
+
+class TestEnforceSpendGate:
+    """Direct coverage of the consent interlock extracted from run_template_cmd,
+    exercising each branch — including the interactive ACCEPT path that had no
+    test anywhere before BE-4367."""
+
+    def test_allow_spend_proceeds(self):
+        # Paid node present, but --allow-spend consents up front → no gate.
+        renderer = _force_json_renderer()
+        assert (
+            templates_cmd._enforce_spend_gate(
+                renderer,
+                name="api_flux2",
+                workflow=_PAID_WORKFLOW,
+                row=_OSS_ROW,
+                object_info=OBJECT_INFO,
+                allow_spend=True,
+            )
+            is None
+        )
+
+    def test_non_interactive_hard_fail(self, capsys):
+        # Stream (non-pretty) renderer + no consent → structured hard error.
+        renderer = _force_json_renderer()
+        with pytest.raises(typer.Exit) as exc:
+            templates_cmd._enforce_spend_gate(
+                renderer,
+                name="image_local_sd",
+                workflow=_PAID_WORKFLOW,
+                row=_OSS_ROW,
+                object_info=OBJECT_INFO,
+                allow_spend=False,
+            )
+        assert exc.value.exit_code == 1
+        env = _envelope(capsys.readouterr().out)
+        assert env["error"]["code"] == "spend_consent_required"
+        assert env["error"]["details"]["partner_nodes"] == ["FluxProNode"]
+
+    def test_interactive_decline(self, capsys, monkeypatch):
+        # Pretty + tty + a "no" at the prompt → decline, nothing submitted.
+        renderer = _force_pretty_renderer()
+        monkeypatch.setattr("sys.stdin.isatty", lambda: True, raising=False)
+        monkeypatch.setattr("typer.confirm", lambda *a, **k: False)
+        with pytest.raises(typer.Exit) as exc:
+            templates_cmd._enforce_spend_gate(
+                renderer,
+                name="api_flux2",
+                workflow=_PAID_WORKFLOW,
+                row=_OSS_ROW,
+                object_info=OBJECT_INFO,
+                allow_spend=False,
+            )
+        assert exc.value.exit_code == 1
+        out = capsys.readouterr().out
+        assert "spend_consent_required" in out
+        assert "declined" in out
+
+    def test_interactive_accept_proceeds(self, monkeypatch):
+        # Pretty + tty + a "yes" at the prompt → run proceeds (returns None).
+        # This branch had no coverage anywhere before BE-4367.
+        renderer = _force_pretty_renderer()
+        monkeypatch.setattr("sys.stdin.isatty", lambda: True, raising=False)
+        monkeypatch.setattr("typer.confirm", lambda *a, **k: True)
+        assert (
+            templates_cmd._enforce_spend_gate(
+                renderer,
+                name="api_flux2",
+                workflow=_PAID_WORKFLOW,
+                row=_OSS_ROW,
+                object_info=OBJECT_INFO,
+                allow_spend=False,
+            )
+            is None
+        )
+
+    def test_no_paid_signals_never_prompts(self, monkeypatch):
+        # OSS row + non-partner workflow → nothing to gate; confirm must not
+        # even be consulted.
+        renderer = _force_json_renderer()
+
+        def _boom(*a, **k):
+            raise AssertionError("typer.confirm called on an OSS template")
+
+        monkeypatch.setattr("typer.confirm", _boom)
+        assert (
+            templates_cmd._enforce_spend_gate(
+                renderer,
+                name="image_local_sd",
+                workflow=TEMPLATE_WORKFLOW,
+                row=_OSS_ROW,
+                object_info=OBJECT_INFO,
+                allow_spend=False,
+            )
+            is None
+        )
+
+    def test_gallery_signals_only(self, capsys):
+        # object_info fetch failed (fail-open → {}), so node detection is blind;
+        # the gallery API tag is the sole paid signal and must still gate.
+        renderer = _force_json_renderer()
+        row = {"name": "api_flux2", "tags": ["API"], "providers": []}
+        with pytest.raises(typer.Exit) as exc:
+            templates_cmd._enforce_spend_gate(
+                renderer,
+                name="api_flux2",
+                workflow=_PAID_WORKFLOW,
+                row=row,
+                object_info={},
+                allow_spend=False,
+            )
+        assert exc.value.exit_code == 1
+        env = _envelope(capsys.readouterr().out)
+        assert env["error"]["details"]["gallery_signals"] == ["tag:API"]
+        assert env["error"]["details"]["partner_nodes"] == []
+
+    def test_bracket_name_does_not_crash_prompt(self, monkeypatch):
+        # A template name containing Rich markup (e.g. "[test]") must be escaped
+        # before hitting rprint, or the interactive warning raises MarkupError
+        # and crashes the consent prompt. Accept path → returns None cleanly.
+        renderer = _force_pretty_renderer()
+        monkeypatch.setattr("sys.stdin.isatty", lambda: True, raising=False)
+        monkeypatch.setattr("typer.confirm", lambda *a, **k: True)
+        assert (
+            templates_cmd._enforce_spend_gate(
+                renderer,
+                name="[unbalanced [test]",
+                workflow=_PAID_WORKFLOW,
+                row={"name": "x", "tags": ["API"], "providers": ["[Provider]"]},
+                object_info=OBJECT_INFO,
+                allow_spend=False,
+            )
+            is None
+        )
+
+    def test_none_stdin_falls_through_to_hard_fail(self, capsys, monkeypatch):
+        # sys.stdin is None (detached process / closed stream): isatty() would
+        # raise AttributeError; the guard must fall through to the non-interactive
+        # hard-fail branch instead of crashing.
+        renderer = _force_pretty_renderer()
+        monkeypatch.setattr("sys.stdin", None, raising=False)
+        with pytest.raises(typer.Exit) as exc:
+            templates_cmd._enforce_spend_gate(
+                renderer,
+                name="api_flux2",
+                workflow=_PAID_WORKFLOW,
+                row=_OSS_ROW,
+                object_info=OBJECT_INFO,
+                allow_spend=False,
+            )
+        assert exc.value.exit_code == 1
