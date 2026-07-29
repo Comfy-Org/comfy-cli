@@ -108,7 +108,7 @@ def _http_error(status: int, body: bytes) -> urllib.error.HTTPError:
 
 def _queue_against(ex, exc):
     """Run ``ex.queue()`` with ``/prompt`` raising ``exc``. Always exits 1."""
-    with patch("comfy_cli.command.run.execution.request.urlopen", side_effect=exc):
+    with patch("comfy_cli.command.run.execution.no_redirect_urlopen", side_effect=exc):
         with pytest.raises(typer.Exit):
             ex.queue()
 

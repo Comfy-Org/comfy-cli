@@ -17,10 +17,10 @@ from comfy_cli.http import (
 from comfy_cli.target import Target
 
 
-def _target(*, api_key=None, auth_token=None):
-    """Minimal stand-in for a resolved Target — build_authed_request only reads
-    ``.api_key`` and ``.auth_token``."""
-    return types.SimpleNamespace(api_key=api_key, auth_token=auth_token)
+def _target(*, api_key=None, auth_token=None, is_cloud=True):
+    """Minimal stand-in for a resolved Target — build_authed_request reads
+    ``.api_key``, ``.auth_token`` and ``.is_cloud`` (via target_auth_headers)."""
+    return types.SimpleNamespace(api_key=api_key, auth_token=auth_token, is_cloud=is_cloud)
 
 
 def _call(handler, method_name, code=302):
@@ -81,6 +81,15 @@ def test_bearer_when_only_auth_token():
 def test_no_auth_header_when_uncredentialed():
     """A local (uncredentialed) target gets no credential header."""
     req = build_authed_request("https://x/thing", _target())
+    assert req.get_header("Authorization") is None
+    assert req.get_header("X-api-key") is None
+
+
+def test_no_auth_header_for_local_target_even_with_stray_creds():
+    """A local Target must never carry a credential, even if one is stray-set —
+    build_authed_request delegates to target_auth_headers's is_cloud gate
+    rather than attaching headers unconditionally."""
+    req = build_authed_request("http://127.0.0.1:8188/thing", _target(api_key="k", auth_token="t", is_cloud=False))
     assert req.get_header("Authorization") is None
     assert req.get_header("X-api-key") is None
 

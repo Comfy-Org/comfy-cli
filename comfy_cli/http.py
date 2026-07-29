@@ -144,15 +144,13 @@ def build_authed_request(
 ) -> urllib.request.Request:
     """Build a urllib Request carrying the target's credential header.
 
-    api_key wins over auth_token; the policy layer (resolve_target) populates
-    at most one, so this is a mechanic, not a policy choice. No header is
-    attached for an uncredentialed (local) target.
+    Delegates to ``target_auth_headers`` for the header itself — that's the
+    single ``is_cloud`` gate every other call site goes through, so a local
+    Target can't carry a stray credential into this path either.
     """
     req = urllib.request.Request(url, data=data, method=method)
-    if target.api_key:
-        req.add_header("X-API-Key", target.api_key)
-    elif target.auth_token:
-        req.add_header("Authorization", f"Bearer {target.auth_token}")
+    for k, v in target_auth_headers(target).items():
+        req.add_header(k, v)
     if content_type:
         req.add_header("Content-Type", content_type)
     return req
