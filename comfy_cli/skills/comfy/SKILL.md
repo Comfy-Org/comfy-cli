@@ -663,6 +663,15 @@ Mechanical contracts that bite agents — encode them, don't rediscover:
   `comfy generate consent always` (revert: `consent ask`; inspect:
   `consent show`). `list` / `schema` / `refresh` / `upload` / `resume` /
   `--emit-workflow` spend nothing and are not gated.
+- **Discovery is structured — never scrape the table.** `generate list --json`
+  and `generate schema <model> --json` both emit a full renderer envelope
+  (`command: "generate list"` / `"generate schema"`, schemas `generate_list` /
+  `generate_schema` in `comfy discover`). `data.models[]` carries
+  `{alias, id, partner, category, mode, summary}` with the **untruncated**
+  summary; `data.params[]` carries `{name, type, required, default, enum,
+  description}`. Unknown model → `generate_model_unknown`; missing model arg →
+  `missing_argument`. This catalog is **not** in `comfy discover` — `generate
+  list` is the only source of the alias list.
 - **Machine-readable output:** `generate <model> --json` prints the raw API
   response as JSON; `generate upload <file> --json` emits structured
   `{url, expires_at, …}`; `generate <model> --emit-workflow out.json` goes
@@ -934,7 +943,10 @@ Hard-won lessons per domain. Not a tutorial — a reference card.
 - Preprocessor output ≠ ControlNet model (two separate things)
 - Don't feed raw photos into ControlNet without preprocessing first
 - ImageCompositeMasked: mask MUST match SOURCE size, not destination
-- COMFY_DYNAMICCOMBO_V3: use flat dotted keys (`"model.max_tokens": 800`), not nested
+- COMFY_DYNAMICCOMBO_V3: use flat dotted keys (`"model.max_tokens": 800`), not nested.
+  Which dotted keys are required depends on the option the selector names, and
+  `comfy validate` expands that option — so it reports a missing/mistyped
+  sub-input instead of letting `/prompt` reject it.
 - First/last frame transitions: wire start_frame + end_frame → I2V node fills in between
 - Wiring: ControlNetApplyAdvanced takes CONDITIONING + IMAGE + CONTROL_NET → modified CONDITIONING
 

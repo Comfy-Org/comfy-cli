@@ -432,6 +432,33 @@ class Client:
                 return None
             raise
 
+    # ----- resource management -----
+
+    def get_system_stats(self, *, timeout: float | None = None) -> dict | None:
+        """GET {prefix}/system_stats.
+
+        Per-device VRAM (``vram_total``/``vram_free``/``torch_vram_total``/
+        ``torch_vram_free``) plus system RAM and version info. Same shape on
+        local and cloud — passed through unmodified so the schema tracks
+        whatever ComfyUI itself reports.
+        """
+        return self._request("GET", ("system_stats",), timeout=timeout)
+
+    def post_free(self, *, unload_models: bool = True, free_memory: bool = False, timeout: float | None = None) -> None:
+        """POST {prefix}/free — ask the queue worker to unload models / free the cache.
+
+        ``free_memory=True`` implies unloading models on the server side even
+        when ``unload_models`` is False. The flags apply the next time the
+        worker iterates: immediately if it's idle, after the current job if
+        one is running — this never interrupts an in-flight job.
+        """
+        self._request(
+            "POST",
+            ("free",),
+            body={"unload_models": unload_models, "free_memory": free_memory},
+            timeout=timeout,
+        )
+
     # ----- polling helpers -----
 
     def wait_for_completion(
@@ -533,29 +560,49 @@ def extract_output_entries(record: dict) -> list[dict]:
     (e.g. ``comfy download`` reading a state file) can join them back to
     producing nodes on the (filename, subfolder, type) triple — the same one
     :meth:`Client.view_url` encodes as query params. Ordering is stable:
-    record ``outputs`` insertion order, then media-key order, then item order.
+    record ``outputs`` insertion order, then node-output key insertion order,
+    then item order.
+
+    Detection is shape-based, mirroring ComfyUI core's ``normalize_outputs``
+    and the cloud worker's ``isFileOutputArray``: any node-output key whose
+    value is a list of dicts carrying a ``filename`` is treated as file
+    outputs. This deliberately covers keys beyond the classic
+    ``images/gifs/videos/audio/files`` — notably SaveGLB's ``"3d"`` key and
+    the cloud worker's singular ``"video"`` key — so 3D/mesh jobs resolve
+    instead of returning ``download_no_outputs`` (BE-4417). The ``"animated"``
+    key is skipped explicitly to match core semantics (it emits ``(True,)``
+    boolean flags, not file entries).
+
+    Entries are de-duplicated on the full ``(node_id, filename, subfolder,
+    type)`` tuple, first occurrence wins. A node that surfaces the same
+    artifact under two keys — e.g. the cloud worker's singular ``"video"``
+    alongside the classic plural ``"videos"`` — would otherwise yield two
+    identical ``/view`` URLs and download the same file twice.
     """
     results: list[dict] = []
+    seen: set[tuple[str, str, str, str]] = set()
     outputs = record.get("outputs") or {}
     if not isinstance(outputs, dict):
         return results
     for node_id, node_output in outputs.items():
         if not isinstance(node_output, dict):
             continue
-        for key in ("images", "gifs", "videos", "audio", "files"):
-            items = node_output.get(key) or []
-            if not isinstance(items, list):
+        for key, items in node_output.items():
+            if key == "animated" or not isinstance(items, list):
                 continue
             for item in items:
                 if isinstance(item, dict) and "filename" in item:
-                    results.append(
-                        {
-                            "node_id": str(node_id),
-                            "filename": str(item.get("filename", "")),
-                            "subfolder": str(item.get("subfolder", "")),
-                            "type": str(item.get("type", "output")),
-                        }
-                    )
+                    entry = {
+                        "node_id": str(node_id),
+                        "filename": str(item.get("filename", "")),
+                        "subfolder": str(item.get("subfolder", "")),
+                        "type": str(item.get("type", "output")),
+                    }
+                    dedup_key = (entry["node_id"], entry["filename"], entry["subfolder"], entry["type"])
+                    if dedup_key in seen:
+                        continue
+                    seen.add(dedup_key)
+                    results.append(entry)
     return results
 
 

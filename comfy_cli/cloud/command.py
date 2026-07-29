@@ -333,7 +333,6 @@ def set_base_url_cmd(
 
 @app.command(
     "set-key",
-    hidden=True,
     help="Persist a Comfy Cloud API key (testing path; canonical sign-in is `comfy cloud login`).",
 )
 @tracking.track_command("cloud")

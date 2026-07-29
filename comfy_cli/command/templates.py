@@ -613,6 +613,61 @@ def _gallery_paid_signals(row: dict[str, Any]) -> list[str]:
     return signals
 
 
+def _enforce_spend_gate(
+    renderer,
+    *,
+    name: str,
+    workflow: Any,
+    row: dict[str, Any],
+    object_info: dict,
+    allow_spend: bool,
+) -> None:
+    """Consent interlock before submitting a template that spends Comfy credits.
+
+    Returns None when the run may proceed (no paid signals, --allow-spend, or
+    an interactive yes); raises typer.Exit(1) otherwise. Behavior is the
+    BE-4113 gate moved verbatim out of run_template_cmd.
+    """
+    import sys
+
+    from rich.markup import escape
+
+    paid_nodes = _detect_paid_nodes(workflow, object_info)
+    gallery_signals = _gallery_paid_signals(row)
+    if (paid_nodes or gallery_signals) and not allow_spend:
+        evidence = {
+            "template": name,
+            "partner_nodes": paid_nodes,
+            "gallery_signals": gallery_signals,
+        }
+        if renderer.is_pretty() and sys.stdin and sys.stdin.isatty():
+            rprint(
+                f"[yellow]⚠ Template [bold]{escape(name)}[/bold] uses partner-API nodes that spend Comfy credits.[/yellow]"
+            )
+            if paid_nodes:
+                rprint(f"  [dim]nodes:[/dim] {escape(', '.join(paid_nodes))}")
+            if gallery_signals:
+                rprint(f"  [dim]gallery:[/dim] {escape(', '.join(gallery_signals))}")
+            if not typer.confirm("Run anyway and spend credits?", default=False):
+                renderer.error(
+                    code="spend_consent_required",
+                    message="declined — template not submitted, no credits spent",
+                    details=evidence,
+                )
+                raise typer.Exit(code=1)
+        else:
+            renderer.error(
+                code="spend_consent_required",
+                message=(
+                    f"template {name!r} uses partner-API (paid) nodes; "
+                    "re-run with --allow-spend to consent to spending Comfy credits"
+                ),
+                hint="paid nodes only run with explicit consent; OSS templates run without this flag",
+                details=evidence,
+            )
+            raise typer.Exit(code=1)
+
+
 def _resolve_param_addresses(
     renderer,
     overrides: dict[str, Any],
@@ -748,7 +803,6 @@ def run_template_cmd(
     validation errors. Templates that embed partner-API nodes spend Comfy
     credits and are gated behind --allow-spend / an interactive confirmation.
     """
-    import sys
     import tempfile
 
     from comfy_cli.command import run as run_module
@@ -889,38 +943,14 @@ def run_template_cmd(
 
     # -- Spend gate (BE-4113): partner-API nodes spend Comfy credits. Require
     # explicit consent before submitting anything that would burn them.
-    paid_nodes = _detect_paid_nodes(workflow, object_info)
-    gallery_signals = _gallery_paid_signals(row)
-    if (paid_nodes or gallery_signals) and not allow_spend:
-        evidence = {
-            "template": name,
-            "partner_nodes": paid_nodes,
-            "gallery_signals": gallery_signals,
-        }
-        if renderer.is_pretty() and sys.stdin.isatty():
-            rprint(f"[yellow]⚠ Template [bold]{name}[/bold] uses partner-API nodes that spend Comfy credits.[/yellow]")
-            if paid_nodes:
-                rprint(f"  [dim]nodes:[/dim] {', '.join(paid_nodes)}")
-            if gallery_signals:
-                rprint(f"  [dim]gallery:[/dim] {', '.join(gallery_signals)}")
-            if not typer.confirm("Run anyway and spend credits?", default=False):
-                renderer.error(
-                    code="spend_consent_required",
-                    message="declined — template not submitted, no credits spent",
-                    details=evidence,
-                )
-                raise typer.Exit(code=1)
-        else:
-            renderer.error(
-                code="spend_consent_required",
-                message=(
-                    f"template {name!r} uses partner-API (paid) nodes; "
-                    "re-run with --allow-spend to consent to spending Comfy credits"
-                ),
-                hint="paid nodes only run with explicit consent; OSS templates run without this flag",
-                details=evidence,
-            )
-            raise typer.Exit(code=1)
+    _enforce_spend_gate(
+        renderer,
+        name=name,
+        workflow=workflow,
+        row=row,
+        object_info=object_info,
+        allow_spend=allow_spend,
+    )
 
     # -- Hand off to the existing run path (UI→API conversion, partner
     # credential injection, preflight validation, execution, jobs state).

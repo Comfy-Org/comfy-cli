@@ -7,7 +7,14 @@ from unittest.mock import patch
 import pytest
 
 import comfy_cli.http as http_mod
-from comfy_cli.http import NoRedirectHandler, authed_urlopen, build_authed_request, no_redirect_urlopen
+from comfy_cli.http import (
+    NoRedirectHandler,
+    authed_urlopen,
+    build_authed_request,
+    no_redirect_urlopen,
+    target_auth_headers,
+)
+from comfy_cli.target import Target
 
 
 def _target(*, api_key=None, auth_token=None):
@@ -181,3 +188,36 @@ def test_authed_opener_handler_set():
     names = {type(h).__name__ for h in http_mod._AUTHED_OPENER.handlers}
     assert {"HTTPHandler", "HTTPSHandler", "NoRedirectHandler"} <= names
     assert not names & {"FileHandler", "FTPHandler", "DataHandler"}
+
+
+# ---------------------------------------------------------------------------
+# target_auth_headers
+# ---------------------------------------------------------------------------
+
+
+def test_target_auth_headers_local_attaches_nothing_even_with_creds():
+    """The security property this builder exists to enforce: a local Target
+    NEVER contributes auth headers, even if stray credentials are set on it
+    (the exact misuse the ``is_cloud`` gate defends against)."""
+    target = Target(
+        kind="local",
+        base_url="http://127.0.0.1:8188",
+        auth_token="stray",
+        api_key="stray",
+    )
+    assert target_auth_headers(target) == {}
+
+
+def test_target_auth_headers_cloud_api_key_only():
+    target = Target(kind="cloud", base_url="https://cloud.example", api_key="k")
+    assert target_auth_headers(target) == {"X-API-Key": "k"}
+
+
+def test_target_auth_headers_cloud_auth_token_only():
+    target = Target(kind="cloud", base_url="https://cloud.example", auth_token="t")
+    assert target_auth_headers(target) == {"Authorization": "Bearer t"}
+
+
+def test_target_auth_headers_cloud_both_api_key_wins():
+    target = Target(kind="cloud", base_url="https://cloud.example", auth_token="t", api_key="k")
+    assert target_auth_headers(target) == {"X-API-Key": "k"}
