@@ -804,7 +804,7 @@ def _print_top_help() -> None:
     )
     rprint('  comfy generate dalle --prompt "a watercolor whale" --download whale.png')
     rprint(
-        '  comfy generate flux-pro --prompt "a fox" --emit-workflow flux.json   '
+        '  comfy generate flux-2 --prompt "a fox" --emit-workflow flux.json   '
         "[dim]# write a runnable workflow instead of calling the proxy[/dim]"
     )
     rprint("")
