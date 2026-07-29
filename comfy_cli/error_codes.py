@@ -651,6 +651,32 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "consent to the spend and re-run — `comfy run-template --allow-spend`, or "
         "`comfy generate --yes` (persist with `comfy generate consent always`)",
     ),
+    # --- update / version switch --------------------------------------------
+    ErrorCode(
+        "update_version_target_invalid",
+        "`comfy update --version` was combined with a target other than `comfy`.",
+        "run `comfy update comfy --version <version>`",
+    ),
+    ErrorCode(
+        "version_switch_unknown_version",
+        "`comfy update comfy --version X` could not resolve X to a ComfyUI tag; the workspace was left untouched.",
+        "run `git tag --list 'v*'` in your ComfyUI workspace to see every available version",
+    ),
+    ErrorCode(
+        "version_switch_dirty_tree",
+        "`comfy update comfy --version X --no-stash` found uncommitted changes and refused to switch.",
+        "commit or stash your changes, or re-run without --no-stash to stash them automatically",
+    ),
+    ErrorCode(
+        "version_switch_failed",
+        "A git operation during `comfy update comfy --version X` failed; any stash that was created is preserved.",
+        "resolve the git error in your ComfyUI workspace, then re-run",
+    ),
+    ErrorCode(
+        "version_switch_deps_failed",
+        "The version switch checked out successfully but reinstalling requirements.txt failed.",
+        "re-run the same command once the cause is fixed; it is idempotent and safe to repeat",
+    ),
     # --- feedback ------------------------------------------------------------
     ErrorCode(
         "feedback_message_required",

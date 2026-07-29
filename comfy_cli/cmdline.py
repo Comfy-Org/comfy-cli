@@ -39,7 +39,7 @@ from comfy_cli.command import transfer as transfer_inner
 from comfy_cli.command import (
     workflow as workflow_command,
 )
-from comfy_cli.command.install import validate_version
+from comfy_cli.command.install import validate_optional_version, validate_version
 from comfy_cli.command.launch import launch as launch_command
 from comfy_cli.command.launch import logs as logs_command
 from comfy_cli.command.models import models as models_command
@@ -616,6 +616,56 @@ def install(
     rprint(f"ComfyUI is installed at: {comfy_path}")
 
 
+def _switch_comfy_version(comfy_path: str, version: str, *, stash: bool) -> None:
+    """`comfy update comfy --version X` — move the workspace, then reinstall its deps.
+
+    Torch is deliberately left alone: a version switch is ComfyUI-version-specific
+    while the torch build is machine-specific, so re-resolving it would need the
+    GPU input this headless path exists to avoid.
+    """
+    renderer = get_renderer()
+
+    try:
+        result = install_inner.switch_comfyui_version(comfy_path, version, stash=stash)
+    except install_inner.VersionSwitchError as e:
+        renderer.error(code=e.code, message=e.message, hint=e.hint)
+        raise typer.Exit(code=1)
+
+    python = resolve_workspace_python(comfy_path)
+    # A uv-managed venv may have no pip — bootstrap it first so the install
+    # below doesn't crash with `No module named pip` (no-op if pip exists).
+    ensure_pip(python, cwd=comfy_path)
+    deps = subprocess.run(
+        [python, "-m", "pip", "install", "-r", "requirements.txt"],
+        cwd=comfy_path,
+        check=False,
+    )
+    if deps.returncode != 0:
+        renderer.error(
+            code="version_switch_deps_failed",
+            message=(
+                f"ComfyUI is now on {result['current']}, but installing its requirements.txt failed — "
+                "dependencies may be incomplete."
+            ),
+            hint="re-run the same command once the cause is fixed; it is idempotent and safe to repeat",
+        )
+        raise typer.Exit(code=1)
+
+    if renderer.is_pretty():
+        rprint(f"Switched ComfyUI: [bold]{result['previous']}[/bold] -> [bold]{result['current']}[/bold]")
+        if result["stashed"]:
+            rprint(
+                f"[yellow]Uncommitted changes were stashed as {result['stash_ref']} and left there — "
+                "restore them with `git stash pop`.[/yellow]"
+            )
+        if version != "nightly":
+            rprint(
+                "[dim]This is a tag checkout, so the workspace is on a detached HEAD. "
+                "Roll forward with `comfy update comfy --version nightly` (or `--version latest`).[/dim]"
+            )
+    renderer.emit(result, command="update")
+
+
 @app.command(help="Update ComfyUI Environment [all|comfy|cli]")
 @tracking.track_command()
 def update(
@@ -624,11 +674,46 @@ def update(
         help="\\[all|comfy|cli]",
         autocompletion=utils.create_choice_completer(["all", "comfy", "cli"]),
     ),
+    version: Annotated[
+        str | None,
+        typer.Option(
+            "--version",
+            show_default=False,
+            callback=validate_optional_version,
+            help=(
+                "Switch the existing ComfyUI workspace to a specific version instead of pulling the current "
+                "branch. Accepts 'nightly' (the default branch), 'latest' (newest stable release), or a version "
+                "number such as 0.3.0. Only valid for target 'comfy'. Uncommitted changes are stashed first and "
+                "never popped automatically; a version number checks out a tag, leaving a detached HEAD — roll "
+                "forward again with --version nightly. Dependencies are reinstalled from requirements.txt; torch "
+                "is left untouched."
+            ),
+        ),
+    ] = None,
+    no_stash: Annotated[
+        bool,
+        typer.Option(
+            "--no-stash",
+            show_default=False,
+            help=(
+                "With --version, refuse to switch when the ComfyUI workspace has uncommitted changes "
+                "instead of stashing them."
+            ),
+        ),
+    ] = False,
 ):
     if target not in ["all", "comfy", "cli"]:
         typer.echo(
             f"Invalid target: {target}. Allowed targets are 'all', 'comfy', 'cli'.",
             err=True,
+        )
+        raise typer.Exit(code=1)
+
+    if version is not None and target != "comfy":
+        get_renderer().error(
+            code="update_version_target_invalid",
+            message=f"--version is only supported for target 'comfy', not '{target}'.",
+            hint="run `comfy update comfy --version <version>`",
         )
         raise typer.Exit(code=1)
 
@@ -648,16 +733,19 @@ def update(
         if comfy_path is None:
             rprint("ComfyUI path is not found.")
             raise typer.Exit(code=1)
-        os.chdir(comfy_path)
-        subprocess.run(["git", "pull"], check=True)
-        python = resolve_workspace_python(comfy_path)
-        # A uv-managed venv may have no pip — bootstrap it first so the install
-        # below doesn't crash with `No module named pip` (no-op if pip exists).
-        ensure_pip(python, cwd=comfy_path)
-        subprocess.run(
-            [python, "-m", "pip", "install", "-r", "requirements.txt"],
-            check=True,
-        )
+        if version is not None:
+            _switch_comfy_version(comfy_path, version, stash=not no_stash)
+        else:
+            os.chdir(comfy_path)
+            subprocess.run(["git", "pull"], check=True)
+            python = resolve_workspace_python(comfy_path)
+            # A uv-managed venv may have no pip — bootstrap it first so the install
+            # below doesn't crash with `No module named pip` (no-op if pip exists).
+            ensure_pip(python, cwd=comfy_path)
+            subprocess.run(
+                [python, "-m", "pip", "install", "-r", "requirements.txt"],
+                check=True,
+            )
 
     try:
         custom_nodes.command.update_node_id_cache()
