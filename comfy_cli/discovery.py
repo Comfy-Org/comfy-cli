@@ -104,6 +104,9 @@ COMMAND_SCHEMAS: dict[str, str] = {
     "comfy assets push": "assets",
     # config
     "comfy set-default": "set_default",
+    # Not a subcommand: the root `--version` flag emits `command="version"`,
+    # and this map is keyed by "comfy <emit name>". Verified by
+    # tests/comfy_cli/output/test_discovery.py.
     "comfy version": "version",
     # installed-vs-latest report
     "comfy outdated": "outdated",

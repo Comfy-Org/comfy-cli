@@ -173,7 +173,7 @@ def list_folders_cmd(
             renderer=renderer,
             target=target,
             message=f"HTTP {e.code} from {url}",
-            hint="run `comfy auth whoami` to verify auth"
+            hint="run `comfy cloud whoami` to verify auth"
             if target.is_cloud
             else "run `comfy launch` to start a local server",
         )
@@ -483,7 +483,7 @@ def search_cmd(
             renderer=renderer,
             target=target,
             message=f"HTTP {e.code} during models search",
-            hint="check auth (`comfy auth whoami`) or network",
+            hint="check auth (`comfy cloud whoami`) or network",
         )
     except (urllib.error.URLError, OSError, json.JSONDecodeError) as e:
         renderer.error(

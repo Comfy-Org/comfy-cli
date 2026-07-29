@@ -277,7 +277,7 @@ def enable_gui():
     print("[dim]ComfyUI will launch with: --enable-manager[/dim]")
 
 
-@manager_app.command("disable-gui", help="Enable ComfyUI-Manager without GUI")
+@manager_app.command("disable-gui", help="Disable the ComfyUI-Manager GUI (Manager stays enabled, headless)")
 @tracking.track_command("node")
 def disable_gui():
     """Enable ComfyUI-Manager but disable its GUI."""
