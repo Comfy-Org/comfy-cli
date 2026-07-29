@@ -229,7 +229,7 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ErrorCode(
         "invalid_argument",
         "An argument intended for a URL path failed safe-path validation.",
-        "use only alphanumerics, `_`, `-`, or `.` in path-segment arguments",
+        "a path-segment argument must be a single segment: non-empty, not `.` or `..`, and free of `/` and `\\`",
     ),
     ErrorCode(
         "folder_not_found",

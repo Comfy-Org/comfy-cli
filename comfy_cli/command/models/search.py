@@ -27,7 +27,6 @@ Local-mode caveats:
 from __future__ import annotations
 
 import json
-import re
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -46,45 +45,61 @@ app = typer.Typer(no_args_is_help=True, help="Discover models — folders, files
 # a misconfigured backend or hostile and would only serve to OOM the CLI.
 _MAX_RESPONSE_BYTES = 64 * 1024 * 1024
 
-# Folder + asset-name arguments are interpolated into URL paths or query
-# strings. We disallow path-traversal sequences and control characters so a
-# crafted argument can't escape the intended endpoint. The set of legitimate
-# folder names (loras, checkpoints, …) is alphanumeric + ``_``/`-`/`.`; the
-# regex below is permissive enough for real-world filenames while rejecting
-# the obvious attack shapes.
-_PATH_SAFE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.\-]*$")
-
-
-def _is_safe_path_segment(value: str) -> bool:
-    """True if ``value`` can be interpolated into a URL path as a single segment."""
-    return (
-        bool(value) and ".." not in value and "/" not in value and "\\" not in value and bool(_PATH_SAFE.match(value))
-    )
+# Folder names are interpolated into URL paths, so they must stay a *single*
+# path segment. Only genuine traversal shapes are refused; everything else is
+# percent-encoded before it reaches the URL (see `_is_walkable_folder_name`).
 
 
 def _is_walkable_folder_name(value: str) -> bool:
-    """True if a *server-advertised* folder name is safe to walk.
+    """True if ``value`` is usable as a single URL path segment.
 
-    Deliberately laxer than :func:`_is_safe_path_segment`, which gates
-    user-supplied arguments and stays strict-ASCII on purpose. Real installs
-    configure folders like ``my loras``, ``SDXL (base)``, or non-ASCII names;
-    holding those to the strict regex silently skipped them, so every model
-    inside them stayed unfindable by ``models search`` — the exact bug this
-    command is meant to fix. Only genuine traversal shapes are refused here;
-    everything else is percent-encoded by :func:`_local_folder_matches` before
-    it reaches the URL, so spaces, ``?``/``#``, and control characters can't
-    alter the request.
+    Applies to both server-advertised folder names (the ``models search
+    --where local`` walk) and user-supplied ones (``models list-folder <folder>``,
+    ``models search --type``). Real installs configure folders like ``my loras``,
+    ``SDXL (base)``, or non-ASCII names; holding those to a strict-ASCII regex
+    silently skipped them on the walk and rejected them outright on user input,
+    leaving every model inside them unreachable even though ComfyUI serves the
+    folder fine. Only genuine traversal shapes are refused here; every call site
+    percent-encodes the segment with ``quote(..., safe="")`` before it reaches
+    the URL, so spaces, ``?``/``#``, and control characters can't alter the
+    request.
     """
-    return bool(value) and ".." not in value and "/" not in value and "\\" not in value
+    if not value or "/" in value or "\\" in value:
+        return False
+    # Only the *exact* segments `.` and `..` are rewritten by a URL resolver
+    # (RFC 3986 remove_dot_segments); `..` merely *inside* a name (`model..v2`)
+    # is an ordinary run of characters and must stay usable. `quote` leaves `.`
+    # unencoded, so a bare `.` would otherwise reach the server as `/models/.`
+    # and normalize back to the `/models` collection.
+    if value in (".", ".."):
+        return False
+    try:
+        # argv can carry undecodable bytes as lone surrogates (PEP 383
+        # `surrogateescape`), and a JSON `"\udcff"` escape does the same for
+        # server-advertised names. `quote(..., safe="")` raises
+        # `UnicodeEncodeError` on those — a `ValueError` that no call site's
+        # handler catches, so it would surface as an uncaught traceback.
+        # Rejecting costs no reachable capability: `quote(..., errors=
+        # "surrogateescape")` would encode the raw bytes instead, but a backend's
+        # folder names are config-defined `str` keys (`folder_names_and_paths`,
+        # `extra_model_paths.yaml`) that are always valid UTF-8, so such a segment
+        # can never match one — it would only turn this clear error into a 404.
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
 
 
 def _reject_unsafe_path_segment(value: str, *, kind: str, renderer) -> None:
     """Exit with an `invalid_argument` error if ``value`` isn't safe as a path segment."""
-    if not _is_safe_path_segment(value):
+    if not _is_walkable_folder_name(value):
         renderer.error(
             code="invalid_argument",
-            message=f"{kind} {value!r} contains characters that aren't allowed in a path segment",
-            hint=f"valid {kind} names are alphanumeric with `_`, `-`, or `.`",
+            message=f"{kind} {value!r} is not usable as a single path segment",
+            hint=(
+                f"a {kind} name must be non-empty, must not be `.` or `..`, must not contain "
+                "`/` or `\\`, and must be valid UTF-8"
+            ),
         )
         raise typer.Exit(code=1)
 
@@ -260,7 +275,11 @@ def list_folder_cmd(
     renderer = get_renderer()
     _reject_unsafe_path_segment(folder, kind="folder", renderer=renderer)
     target = resolve_target(where=where)
-    url = target.url(*_models_path_parts(target), folder)
+    # Percent-encoded for the same reason `_local_folder_matches` does it: the
+    # relaxed validation above admits spaces, `?`/`#`, and non-ASCII, none of
+    # which may be allowed to alter the request. Error payloads below carry the
+    # decoded `folder` so the user sees what they typed.
+    url = target.url(*_models_path_parts(target), urllib.parse.quote(folder, safe=""))
 
     try:
         data = _http_get_json(url, target)
