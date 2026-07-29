@@ -88,6 +88,11 @@ COMMAND_SCHEMAS: dict[str, str] = {
     "comfy model download-status": "download_status",
     "comfy model download-cancel": "download_status",
     "comfy model downloads": "downloads",
+    # partner-model discovery (`comfy generate`'s two read-only sub-actions —
+    # they are argv-tail actions, not Typer subcommands, so they have no node in
+    # the help tree; agents resolve them through `command_schemas`).
+    "comfy generate list": "generate_list",
+    "comfy generate schema": "generate_schema",
     # template gallery
     "comfy templates ls": "templates",
     "comfy templates show": "templates",

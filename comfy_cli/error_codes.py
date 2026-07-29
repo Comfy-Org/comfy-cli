@@ -630,6 +630,12 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ),
     # --- generate / emit -----------------------------------------------------
     ErrorCode(
+        "generate_model_unknown",
+        "`comfy generate schema <model>` got a name that is neither a known alias nor a curated "
+        "endpoint id. `details.requested` carries the name as typed; the message lists close matches.",
+        "run `comfy generate list` to see the available model aliases",
+    ),
+    ErrorCode(
         "emit_workflow_failed",
         "`generate --emit-workflow` could not build the partner-node workflow.",
         "check the model name and that all required inputs are provided",
