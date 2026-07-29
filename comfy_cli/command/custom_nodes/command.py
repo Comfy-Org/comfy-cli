@@ -24,6 +24,7 @@ from comfy_cli.file_utils import (
     zip_files,
 )
 from comfy_cli.output import rprint as print  # context-aware: stderr in JSON mode
+from comfy_cli.output.renderer import get_renderer
 from comfy_cli.registry import (
     RegistryAPI,
     extract_node_configuration,
@@ -469,6 +470,26 @@ def node_completer(incomplete: str) -> list[str]:
         with open(tmp_path, encoding="UTF-8", errors="ignore") as cache_file:
             return [node_id for node_id in cache_file.readlines() if node_id.startswith(incomplete)]
 
+    except Exception:
+        return []
+
+
+def installed_pack_completer(incomplete: str) -> list[str]:
+    """Complete against *installed pack directory names*.
+
+    Deliberately not ``node_completer``: that one serves the registry node-id
+    cache, and a git-cloned pack's directory name is its repo name, not its
+    registry id. ``comfy node deps`` matches on directory name.
+    """
+    try:
+        from comfy_cli.command.pack_scan import iter_pack_dirs
+
+        workspace = workspace_manager.workspace_path
+        if not workspace:
+            return []
+        return [
+            p.name for p in iter_pack_dirs(pathlib.Path(workspace) / "custom_nodes") if p.name.startswith(incomplete)
+        ]
     except Exception:
         return []
 
@@ -965,6 +986,28 @@ def deps_in_workflow(
         channel,
         mode=mode,
     )
+
+
+@app.command(
+    "deps",
+    help="Report each pack's declared Python requirements vs the versions installed in the workspace venv (read-only).",
+)
+@tracking.track_command("node")
+def deps(
+    pack_names: Annotated[
+        list[str] | None,
+        typer.Argument(
+            show_default=False,
+            help="Pack directory names to report on (case-insensitive). Omit to report every installed pack.",
+            autocompletion=installed_pack_completer,
+        ),
+    ] = None,
+):
+    # Native + read-only on purpose: no cm-cli, no pip install, no network, so
+    # it works on a workspace that never installed ComfyUI-Manager.
+    from comfy_cli.command import node_deps
+
+    node_deps.execute(get_renderer(), workspace_manager.workspace_path, pack_names)
 
 
 def validate_node_for_publishing():

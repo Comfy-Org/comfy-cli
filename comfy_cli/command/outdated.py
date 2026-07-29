@@ -34,19 +34,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from comfy_cli.registry import RegistryAPI, extract_node_configuration
-
-
-def _read_pyproject(path: str):
-    """Parse a pack/core ``pyproject.toml`` via the shared registry parser.
-
-    ``extract_node_configuration`` emits its own validation warnings through
-    ``typer.echo``/rich to *stdout*; in JSON mode that would corrupt the single
-    envelope on stdout. Route those side-messages to stderr where they belong.
-    """
-    with contextlib.redirect_stdout(sys.stderr):
-        return extract_node_configuration(path)
-
+from comfy_cli.command.pack_scan import iter_pack_dirs as _iter_pack_dirs
+from comfy_cli.command.pack_scan import read_pyproject as _read_pyproject
+from comfy_cli.registry import RegistryAPI
 
 CACHE_TTL_SECONDS = 3600  # 1 hour
 GIT_TIMEOUT_SECONDS = 10
@@ -283,19 +273,6 @@ def _core_latest(cache: dict[str, Any], refresh: bool, warn: Callable[[str], Non
 # ---------------------------------------------------------------------------
 # Custom node packs
 # ---------------------------------------------------------------------------
-
-
-def _iter_pack_dirs(custom_nodes_dir: Path) -> list[Path]:
-    if not custom_nodes_dir.is_dir():
-        return []
-    packs = []
-    for entry in sorted(custom_nodes_dir.iterdir()):
-        if not entry.is_dir():
-            continue
-        if entry.name.startswith(".") or entry.name == "__pycache__":
-            continue
-        packs.append(entry)
-    return packs
 
 
 def _registry_latest(
