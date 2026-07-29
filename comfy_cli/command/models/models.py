@@ -9,7 +9,6 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 import requests
 import typer
-from rich.markup import escape
 
 from comfy_cli import constants, download_state, tracking, ui
 from comfy_cli.config_manager import ConfigManager
@@ -23,6 +22,7 @@ from comfy_cli.file_utils import (
 )
 from comfy_cli.output import get_renderer
 from comfy_cli.output import rprint as print  # context-aware: stderr in JSON mode
+from comfy_cli.output.sanitize import sanitize_markup
 from comfy_cli.workspace_manager import WorkspaceManager
 
 app = typer.Typer()
@@ -396,9 +396,12 @@ def download(
         try:
             download_file(url, local_filepath, headers, downloader=resolved_downloader)
         except DownloadException as e:
-            # escape() so a dynamic error message containing "[/]" or similar
-            # rich-markup syntax doesn't trigger MarkupError or get mis-rendered.
-            print(f"[bold red]{escape(str(e))}[/bold red]")
+            # sanitize_markup() is escape() plus ANSI/control-byte stripping: the
+            # markup half stops "[/]" in a dynamic message from raising
+            # MarkupError, and the strip stops a server-chosen message (the 401
+            # branch of guess_status_code_reason echoes one, and aria2 relays its
+            # own) from clearing the screen or repainting earlier output.
+            print(f"[bold red]{sanitize_markup(e)}[/bold red]")
             raise typer.Exit(code=1) from None
 
     elapsed = time.monotonic() - start_time
@@ -701,7 +704,9 @@ def _render_download_rows(rows: list[dict]) -> None:
     ui.display_table(data, ["ID", "Status", "%", "Bytes", "Elapsed", "Destination"])
     for row in rows:
         if row.get("error"):
-            print(f"[bold red]{row['id']}: {escape(str(row['error']))}[/bold red]")
+            # The state file is written by a detached worker, so this string is
+            # server-influenced text read back from disk — sanitize on the way out.
+            print(f"[bold red]{row['id']}: {sanitize_markup(row['error'])}[/bold red]")
 
 
 def _reconciled(state: download_state.DownloadState) -> tuple[download_state.DownloadState, bool]:

@@ -346,3 +346,140 @@ def test_models_list_folders_table_cells_are_inert(pretty, cloud_catalog):
     cloud_catalog.return_value = [{"name": EVIL, "folders": [UNBALANCED]}]
     list_folders_cmd(where=None)
     assert_inert(pretty)
+
+
+# ---------------------------------------------------------------------------
+# models/models.py — the download-server error text (BE-5023)
+# ---------------------------------------------------------------------------
+#
+# `comfy model download --url <host>` renders whatever the host put in a failed
+# response. Only one branch of `guess_status_code_reason` echoes server text —
+# the 401 one, which interpolates the response body's JSON `message` — so a
+# CivitAI-shaped mirror or a MITM'd model host answering 401 chooses the string
+# that lands on the terminal. These drive that real body through the real print
+# sites: `download`'s `except DownloadException` line and the per-row error line
+# `download-status` / `downloads` print under the table.
+
+
+class _FakeErrorResponse:
+    """An `httpx.stream` context manager that fails with a chosen body."""
+
+    def __init__(self, status_code: int, body: bytes):
+        self.status_code = status_code
+        self.headers = {}
+        self._body = body
+
+    def read(self) -> bytes:
+        return self._body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def _hostile_401_body(message: str) -> bytes:
+    return json.dumps({"message": message}).encode()
+
+
+@pytest.fixture
+def download_workspace(tmp_path, monkeypatch):
+    """Point `models.get_workspace()` at a per-test directory."""
+    from comfy_cli.command.models import models
+
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+    monkeypatch.setattr(models, "get_workspace", lambda: ws)
+    return ws
+
+
+def _download_against_401(body: bytes) -> None:
+    """`comfy model download` where the host answers 401 with `body`.
+
+    Nothing is stubbed between the response and the print site: the real
+    `guess_status_code_reason` builds the reason, the real `DownloadException`
+    carries it, and the real `except` clause renders it.
+    """
+    from comfy_cli.command.models import models
+
+    with patch("httpx.stream", return_value=_FakeErrorResponse(401, body)):
+        with pytest.raises(typer.Exit):
+            models.download(
+                None,
+                url="https://hostile.example/m.safetensors",
+                relative_path="models/loras",
+                filename="m.safetensors",
+            )
+
+
+def test_guess_status_code_reason_401_strips_server_escapes():
+    """The boundary itself, so every consumer of the reason benefits — the
+    `comfy node install` path renders it too, without markup interpretation."""
+    from comfy_cli.file_utils import guess_status_code_reason
+
+    reason = guess_status_code_reason(401, _hostile_401_body(EVIL))
+
+    assert "\x1b" not in reason
+    assert "boom" in reason
+
+
+def test_guess_status_code_reason_leaves_benign_text_alone():
+    """The sanitizer is a no-op on a realistic message — no silent mangling."""
+    from comfy_cli.file_utils import guess_status_code_reason
+
+    assert "Your API key is invalid" in guess_status_code_reason(401, _hostile_401_body("Your API key is invalid"))
+
+
+def test_download_error_is_inert(pretty, download_workspace):
+    _download_against_401(_hostile_401_body(EVIL))
+    assert "boom" in assert_inert(pretty)
+
+
+def test_download_error_with_unbalanced_markup_does_not_crash(pretty, download_workspace):
+    """An unbalanced `[/]` in the server's message used to be the `escape()`
+    call's whole job; `sanitize_markup` keeps that guarantee."""
+    _download_against_401(_hostile_401_body(UNBALANCED))
+    assert "oops" in assert_inert(pretty)
+
+
+def test_download_status_row_error_is_inert(pretty):
+    """The poll verbs re-print the failure recorded in the state file, which a
+    detached worker wrote from the same server-chosen reason."""
+    from comfy_cli.command.models.models import _render_download_rows
+
+    _render_download_rows(
+        [
+            {
+                "id": "abc123",
+                "status": "failed",
+                "percent": None,
+                "completed_bytes": None,
+                "total_bytes": None,
+                "elapsed_seconds": 1.0,
+                "dest": "/tmp/m.safetensors",
+                "error": EVIL,
+            }
+        ]
+    )
+    assert "boom" in assert_inert(pretty)
+
+
+def test_download_status_row_error_with_unbalanced_markup_does_not_crash(pretty):
+    from comfy_cli.command.models.models import _render_download_rows
+
+    _render_download_rows(
+        [
+            {
+                "id": "abc123",
+                "status": "failed",
+                "percent": None,
+                "completed_bytes": None,
+                "total_bytes": None,
+                "elapsed_seconds": 1.0,
+                "dest": "/tmp/m.safetensors",
+                "error": UNBALANCED,
+            }
+        ]
+    )
+    assert "oops" in assert_inert(pretty)
