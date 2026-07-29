@@ -53,6 +53,7 @@ COMMAND_SCHEMAS: dict[str, str] = {
     "comfy workflow slots": "workflow",
     "comfy workflow set-slot": "workflow",
     "comfy workflow vary": "workflow",
+    "comfy workflow notes": "workflow",
     # workflow cloud CRUD + fragment composition
     "comfy workflow list": "workflow",
     "comfy workflow get": "workflow",
