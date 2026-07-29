@@ -109,14 +109,19 @@ def _invoke(args: list[str], **patches):
         cfg.get_or_override.return_value = None
         cfg.get.return_value = None
 
-    with (
-        patch("comfy_cli.command.models.models.check_civitai_url", return_value=(False, False, None, None)),
-        patch("comfy_cli.command.models.models.check_huggingface_url", return_value=(False, None, None, None, None)),
-        patch("comfy_cli.command.models.models.config_manager", cfg),
-    ):
+    # The two source probes are defaults rather than fixtures so a CivitAI/HF test
+    # can override them through the same `**patches` door as everything else,
+    # instead of rebuilding the whole stack by hand.
+    merged = {
+        "check_civitai_url": {"return_value": (False, False, None, None)},
+        "check_huggingface_url": {"return_value": (False, None, None, None, None)},
+        **patches,
+    }
+
+    with patch("comfy_cli.command.models.models.config_manager", cfg):
         stack = []
         try:
-            for target, kwargs in patches.items():
+            for target, kwargs in merged.items():
                 p = patch(f"comfy_cli.command.models.models.{target}", **kwargs)
                 stack.append(p)
                 p.start()
@@ -217,25 +222,10 @@ def test_file_exists_does_not_download(tmp_path):
 
 
 def test_hf_unauthorized_without_token_emits_error(tmp_path):
-    cfg = Mock()
-    cfg.get_or_override.return_value = None  # no CivitAI token, no HF token
-    cfg.get.return_value = None
-
-    with (
-        patch("comfy_cli.command.models.models.check_civitai_url", return_value=(False, False, None, None)),
-        patch(
-            "comfy_cli.command.models.models.check_huggingface_url",
-            return_value=(True, "org/repo", "m.safetensors", None, "main"),
-        ),
-        patch("comfy_cli.command.models.models.check_unauthorized", return_value=True),
-        patch("comfy_cli.command.models.models.get_workspace", return_value=tmp_path),
-        patch("comfy_cli.command.models.models.download_file") as mock_dl,
-        patch("comfy_cli.command.models.models.config_manager", cfg),
-    ):
-        result = runner.invoke(
-            app,
+    # `_invoke`'s default config_manager already reports no CivitAI and no HF token.
+    with patch("comfy_cli.command.models.models.download_file") as mock_dl:
+        result = _invoke(
             [
-                "download",
                 "--url",
                 "https://huggingface.co/org/repo/resolve/main/m.safetensors",
                 "--relative-path",
@@ -243,6 +233,9 @@ def test_hf_unauthorized_without_token_emits_error(tmp_path):
                 "--filename",
                 "m.safetensors",
             ],
+            check_huggingface_url={"return_value": (True, "org/repo", "m.safetensors", None, "main")},
+            check_unauthorized={"return_value": True},
+            get_workspace={"return_value": tmp_path},
         )
 
     env = _assert_error_envelope(result, "hf_unauthorized")
@@ -289,37 +282,24 @@ def test_cancelled_filename_prompt_emits_missing_argument(tmp_path):
 
 
 def test_civitai_lookup_failure_emits_download_failed(tmp_path):
-    with (
-        patch("comfy_cli.command.models.models.check_civitai_url", return_value=(True, False, 4242, None)),
-        patch("comfy_cli.command.models.models.check_huggingface_url", return_value=(False, None, None, None, None)),
-        patch(
-            "comfy_cli.command.models.models.request_civitai_model_api",
-            side_effect=RuntimeError("404 Client Error"),
-        ),
-        patch("comfy_cli.command.models.models.get_workspace", return_value=tmp_path),
-        patch("comfy_cli.command.models.models.config_manager", Mock(**{"get_or_override.return_value": None})),
-    ):
-        result = runner.invoke(
-            app,
-            ["download", "--url", "https://civitai.com/models/4242", "--filename", "x.safetensors"],
-        )
+    result = _invoke(
+        ["--url", "https://civitai.com/models/4242", "--filename", "x.safetensors"],
+        check_civitai_url={"return_value": (True, False, 4242, None)},
+        request_civitai_model_api={"side_effect": RuntimeError("404 Client Error")},
+        get_workspace={"return_value": tmp_path},
+    )
 
     env = _assert_error_envelope(result, "download_failed")
     assert env["error"]["details"]["stage"] == "resolve"
 
 
 def test_civitai_version_without_primary_file_emits_download_failed(tmp_path):
-    with (
-        patch("comfy_cli.command.models.models.check_civitai_url", return_value=(False, True, None, 777)),
-        patch("comfy_cli.command.models.models.check_huggingface_url", return_value=(False, None, None, None, None)),
-        patch("comfy_cli.command.models.models.request_civitai_model_version_api", return_value=None),
-        patch("comfy_cli.command.models.models.get_workspace", return_value=tmp_path),
-        patch("comfy_cli.command.models.models.config_manager", Mock(**{"get_or_override.return_value": None})),
-    ):
-        result = runner.invoke(
-            app,
-            ["download", "--url", "https://civitai.com/api/download/models/777", "--filename", "x.safetensors"],
-        )
+    result = _invoke(
+        ["--url", "https://civitai.com/api/download/models/777", "--filename", "x.safetensors"],
+        check_civitai_url={"return_value": (False, True, None, 777)},
+        request_civitai_model_version_api={"return_value": None},
+        get_workspace={"return_value": tmp_path},
+    )
 
     env = _assert_error_envelope(result, "download_failed")
     assert env["error"]["details"]["stage"] == "resolve"
@@ -413,18 +393,15 @@ def test_plain_filename_is_still_accepted(tmp_path):
 
 def test_traversing_civitai_basemodel_is_rejected(tmp_path):
     """`version["baseModel"]` is remote input joined straight into the destination path."""
-    with (
-        patch("comfy_cli.command.models.models.check_civitai_url", return_value=(False, True, None, 777)),
-        patch("comfy_cli.command.models.models.check_huggingface_url", return_value=(False, None, None, None, None)),
-        patch(
-            "comfy_cli.command.models.models.request_civitai_model_version_api",
-            return_value=("m.safetensors", "https://civitai.com/x", "checkpoint", "../../../.."),
-        ),
-        patch("comfy_cli.command.models.models.get_workspace", return_value=tmp_path),
-        patch("comfy_cli.command.models.models.download_file") as mock_dl,
-        patch("comfy_cli.command.models.models.config_manager", Mock(**{"get_or_override.return_value": None})),
-    ):
-        result = runner.invoke(app, ["download", "--url", "https://civitai.com/api/download/models/777"])
+    with patch("comfy_cli.command.models.models.download_file") as mock_dl:
+        result = _invoke(
+            ["--url", "https://civitai.com/api/download/models/777"],
+            check_civitai_url={"return_value": (False, True, None, 777)},
+            request_civitai_model_version_api={
+                "return_value": ("m.safetensors", "https://civitai.com/x", "checkpoint", "../../../..")
+            },
+            get_workspace={"return_value": tmp_path},
+        )
 
     _assert_error_envelope(result, "invalid_argument")
     assert not mock_dl.called
@@ -489,21 +466,9 @@ def test_hf_download_honours_explicit_filename(tmp_path):
     cfg.get_or_override.return_value = "hf_token"
     cfg.get.return_value = None
 
-    with (
-        patch.dict(sys.modules, {"huggingface_hub": fake_hub}),
-        patch("comfy_cli.command.models.models.check_civitai_url", return_value=(False, False, None, None)),
-        patch(
-            "comfy_cli.command.models.models.check_huggingface_url",
-            return_value=(True, "org/repo", "repo-name.safetensors", None, "main"),
-        ),
-        patch("comfy_cli.command.models.models.check_unauthorized", return_value=True),
-        patch("comfy_cli.command.models.models.get_workspace", return_value=tmp_path),
-        patch("comfy_cli.command.models.models.config_manager", cfg),
-    ):
-        result = runner.invoke(
-            app,
+    with patch.dict(sys.modules, {"huggingface_hub": fake_hub}):
+        result = _invoke(
             [
-                "download",
                 "--url",
                 "https://huggingface.co/org/repo/resolve/main/repo-name.safetensors",
                 "--relative-path",
@@ -511,8 +476,48 @@ def test_hf_download_honours_explicit_filename(tmp_path):
                 "--filename",
                 "mine.safetensors",
             ],
+            config_manager=cfg,
+            check_huggingface_url={"return_value": (True, "org/repo", "repo-name.safetensors", None, "main")},
+            check_unauthorized={"return_value": True},
+            get_workspace={"return_value": tmp_path},
         )
 
     assert result.exit_code == 0, result.output
     assert (tmp_path / "models" / "checkpoints" / "mine.safetensors").read_bytes() == b"weights"
+    assert not hf_written.exists()
+
+
+def test_hf_download_honours_prompted_filename(tmp_path):
+    """The same split, via the prompt door: with no `--filename` the name comes from
+    `ui.prompt_input`, whose default is only a *suggestion* — a user can type
+    something else. Gating the move on `filename is not None` left that case landing
+    at the repo path while the exists-guard and its hint pointed at the typed name."""
+    hf_written = tmp_path / "models" / "checkpoints" / "repo-name.safetensors"
+    hf_written.parent.mkdir(parents=True)
+    hf_written.write_bytes(b"weights")
+
+    fake_hub = Mock()
+    fake_hub.hf_hub_download.return_value = str(hf_written)
+
+    cfg = Mock()
+    cfg.get_or_override.return_value = "hf_token"
+    cfg.get.return_value = None
+
+    with patch.dict(sys.modules, {"huggingface_hub": fake_hub}):
+        result = _invoke(
+            [
+                "--url",
+                "https://huggingface.co/org/repo/resolve/main/repo-name.safetensors",
+                "--relative-path",
+                "models/checkpoints",
+            ],
+            config_manager=cfg,
+            check_huggingface_url={"return_value": (True, "org/repo", "repo-name.safetensors", None, "main")},
+            check_unauthorized={"return_value": True},
+            get_workspace={"return_value": tmp_path},
+            ui={"new": Mock(**{"prompt_input.return_value": "typed.safetensors"})},
+        )
+
+    assert result.exit_code == 0, result.output
+    assert (tmp_path / "models" / "checkpoints" / "typed.safetensors").read_bytes() == b"weights"
     assert not hf_written.exists()

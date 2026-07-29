@@ -512,9 +512,10 @@ class TestSubmitFailsFast:
         `envelope/1` error (BE-4217), not a raw `DownloadException`."""
         monkeypatch.setattr(models.ui, "prompt_input", lambda *a, **k: k.get("default", ""))
 
-        with pytest.raises(typer.Exit):
+        with pytest.raises(typer.Exit) as exc:
             models.download(None, url="ftp://example.com/model.safetensors", background=True)
 
+        assert exc.value.exit_code == 1
         assert "Could not determine a filename" in capsys.readouterr().out
 
     def test_destination_exists_never_detaches(self, workspace, no_spawn, monkeypatch, capsys):
@@ -523,7 +524,7 @@ class TestSubmitFailsFast:
         dest.write_bytes(b"already here")
         monkeypatch.setattr(models.ui, "prompt_input", lambda *a, **k: k.get("default", ""))
 
-        with pytest.raises(typer.Exit):
+        with pytest.raises(typer.Exit) as exc:
             models.download(
                 None,
                 url="https://example.com/already.safetensors",
@@ -532,21 +533,23 @@ class TestSubmitFailsFast:
                 background=True,
             )
 
+        assert exc.value.exit_code == 1
         assert "already exists" in capsys.readouterr().out
 
     def test_unresolvable_filename_under_skip_prompting_never_detaches(self, workspace, no_spawn, monkeypatch, capsys):
         monkeypatch.setattr(models.ui, "prompt_input", lambda *a, **k: k.get("default", ""))
 
-        with pytest.raises(typer.Exit):
+        with pytest.raises(typer.Exit) as exc:
             models.download(None, url="https://example.com/", background=True)
 
+        assert exc.value.exit_code == 1
         assert "Could not determine a filename" in capsys.readouterr().out
 
     def test_missing_hf_token_never_detaches(self, workspace, no_spawn, monkeypatch, capsys):
         monkeypatch.setattr(models, "check_unauthorized", lambda url, headers: True)
         monkeypatch.setattr(models.config_manager, "get_or_override", lambda *a, **k: None)
 
-        with pytest.raises(typer.Exit):
+        with pytest.raises(typer.Exit) as exc:
             models.download(
                 None,
                 url="https://huggingface.co/org/repo/resolve/main/model.safetensors",
@@ -555,6 +558,7 @@ class TestSubmitFailsFast:
                 background=True,
             )
 
+        assert exc.value.exit_code == 1
         assert "Hugging Face API token" in capsys.readouterr().out
 
 

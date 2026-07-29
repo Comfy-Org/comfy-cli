@@ -558,14 +558,17 @@ def download(
                 details={"url": _scrub_url(url), "repo_id": repo_id},
             ) from None
 
-        # `hf_hub_download` names the file after the *repo* path (`hf_filename`),
-        # so an explicit `--filename` was silently ignored on this branch only —
-        # the public-HF path below goes through download_file(local_filepath) and
-        # honours it. That split made the `local_filepath.exists()` guard above
-        # check a path this branch never writes, and made its `model_file_exists`
-        # hint ("pass `--filename`") impossible to act on. Move the result to the
-        # requested name so both are true on every path.
-        if filename is not None and pathlib.Path(output_path) != local_filepath:
+        # `hf_hub_download` names the file after the *repo* path (`hf_filename`)
+        # and nests it under `hf_folder_name`, so the resolved `local_filename` was
+        # silently ignored on this branch only — the public-HF path below goes
+        # through download_file(local_filepath) and honours it. That split made the
+        # `local_filepath.exists()` guard above check a path this branch never
+        # writes, and made its `model_file_exists` hint ("pass `--filename`")
+        # impossible to act on. Gate the move on the *resolved* name rather than on
+        # `--filename`: `local_filename` can equally come from the prompt above
+        # (whose default is only a suggestion), so keying on `filename is not None`
+        # left the same split open via the prompt door.
+        if pathlib.Path(output_path) != local_filepath:
             try:
                 local_filepath.parent.mkdir(parents=True, exist_ok=True)
                 shutil.move(str(output_path), str(local_filepath))
