@@ -956,7 +956,9 @@ def list_cmd(
 
     try:
         _, body = _http_request(url, target)
-    except (urllib.error.HTTPError, urllib.error.URLError, OSError, _ResponseTooLarge) as e:
+        if body is not None and not isinstance(body, dict):
+            raise json.JSONDecodeError(f"unexpected response shape (not an object) from {url}", "", 0)
+    except (urllib.error.HTTPError, urllib.error.URLError, OSError, _ResponseTooLarge, json.JSONDecodeError) as e:
         raise _handle_cloud_http_error(renderer, e, operation="list") from e
 
     rows = (body or {}).get("data") or []

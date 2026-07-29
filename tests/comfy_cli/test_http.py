@@ -5,6 +5,7 @@ import urllib.request
 
 import pytest
 
+from comfy_cli import http as comfy_http
 from comfy_cli.http import NoRedirectHandler, ResponseTooLarge, request_json, target_auth_headers
 from comfy_cli.target import Target
 
@@ -99,7 +100,12 @@ def _fake_resp(body: bytes, status: int = 200):
 
 
 def _patch_urlopen(monkeypatch: pytest.MonkeyPatch, payload, status: int = 200):
-    """Route every urlopen call to ``payload`` (bytes) and record the Requests seen."""
+    """Route every ``request_json`` call to ``payload`` (bytes) and record the Requests seen.
+
+    ``request_json`` opens through the shared ``_OPENER`` (built with
+    ``NoRedirectHandler``), not the bare ``urllib.request.urlopen`` function,
+    so the fake must patch the opener's ``open`` method.
+    """
     seen: list[urllib.request.Request] = []
 
     def _fake(req, timeout=None):
@@ -108,7 +114,7 @@ def _patch_urlopen(monkeypatch: pytest.MonkeyPatch, payload, status: int = 200):
             raise payload
         return _fake_resp(payload, status)
 
-    monkeypatch.setattr("urllib.request.urlopen", _fake)
+    monkeypatch.setattr(comfy_http._OPENER, "open", _fake)
     return seen
 
 
@@ -220,3 +226,56 @@ def test_request_json_max_bytes_is_keyword_required(cloud_target):
     # No default: each caller keeps owning its own cap constant.
     with pytest.raises(TypeError):
         request_json("https://cloud.example/api/thing", cloud_target)
+
+
+@pytest.mark.parametrize("max_bytes", [0, -1])
+def test_request_json_rejects_non_positive_max_bytes(cloud_target, max_bytes):
+    with pytest.raises(ValueError, match="max_bytes"):
+        request_json("https://cloud.example/api/thing", cloud_target, max_bytes=max_bytes)
+
+
+def test_request_json_opens_via_shared_opener_with_no_redirect_handler():
+    # A 30x with an authenticated request in flight must not be followed —
+    # NoRedirectHandler on the shared opener is what refuses it. Assert the
+    # opener request_json actually uses carries that handler, so a future
+    # revert to the bare default opener (which follows redirects and copies
+    # headers onto the new request) is caught here rather than in production.
+    assert any(isinstance(h, NoRedirectHandler) for h in comfy_http._OPENER.handlers)
+
+
+def test_request_json_refuses_plaintext_http_for_cloud_target(monkeypatch, cloud_target):
+    # A credential must never go out over cleartext HTTP to a non-loopback
+    # host — even if some misconfiguration points COMFY_CLOUD_BASE_URL at
+    # http://. No urlopen call should happen at all in this case.
+    seen = _patch_urlopen(monkeypatch, b"{}")
+    with pytest.raises(ValueError, match="non-https"):
+        request_json("http://cloud.example/api/thing", cloud_target, max_bytes=1024)
+    assert seen == []
+
+
+def test_request_json_allows_plaintext_http_for_loopback(monkeypatch, local_target):
+    # Loopback has no network to sniff, so plaintext is fine — this is the
+    # normal case for local ComfyUI.
+    _patch_urlopen(monkeypatch, b"{}")
+    assert request_json("http://127.0.0.1:8188/models", local_target, max_bytes=1024) == (200, {})
+
+
+def test_request_json_no_auth_headers_skips_https_gate(monkeypatch):
+    # A cloud target with no credentials at all (e.g. logged out) attaches no
+    # headers, so there's nothing to protect — the https/loopback gate must
+    # not block that request.
+    target = Target(kind="cloud", base_url="http://cloud.example", path_prefix="/api")
+    _patch_urlopen(monkeypatch, b"{}")
+    assert request_json("http://cloud.example/api/thing", target, max_bytes=1024) == (200, {})
+
+
+def test_request_json_recursion_error_returns_none(monkeypatch, cloud_target):
+    # A pathologically nested body can exhaust the interpreter stack in
+    # json.loads; RecursionError is neither JSONDecodeError nor
+    # UnicodeDecodeError, so it needs naming here or it escapes uncaught like
+    # the other two. Forced directly (rather than via real deep nesting,
+    # which CPython's C-accelerated decoder tolerates to very large depths)
+    # so this test stays fast and deterministic.
+    _patch_urlopen(monkeypatch, b'{"a": 1}')
+    monkeypatch.setattr(comfy_http.json, "loads", lambda *a, **kw: (_ for _ in ()).throw(RecursionError()))
+    assert request_json("https://cloud.example/api/thing", cloud_target, max_bytes=1024) == (200, None)

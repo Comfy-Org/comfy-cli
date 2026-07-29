@@ -125,7 +125,13 @@ def _patch_urlopen(monkeypatch: pytest.MonkeyPatch, routes: dict):
                 return _fake_resp(json.dumps(payload).encode())
         raise AssertionError(f"unexpected URL: {url}")
 
+    # Local (``--where local``) saved-workflow verbs go through
+    # ``_userdata_request``, which still calls the bare ``urllib.request.urlopen``.
+    # Cloud verbs go through the shared ``comfy_cli.http.request_json``, which
+    # opens via its own ``_OPENER`` (built with NoRedirectHandler). Patch both
+    # so either path is intercepted regardless of which one a given test hits.
     monkeypatch.setattr("urllib.request.urlopen", _fake)
+    monkeypatch.setattr("comfy_cli.http._OPENER.open", _fake)
     return calls
 
 

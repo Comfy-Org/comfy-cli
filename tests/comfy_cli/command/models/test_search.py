@@ -192,7 +192,10 @@ def _patch_urlopen(monkeypatch: pytest.MonkeyPatch, routes: dict[str, Any]):
                 return _fake_resp(body)
         raise AssertionError(f"unexpected URL hit by mock: {url}")
 
-    monkeypatch.setattr("urllib.request.urlopen", _fake)
+    # models/search.py routes every request through the shared
+    # comfy_cli.http.request_json, which opens via the module's ``_OPENER``
+    # (built with NoRedirectHandler), not the bare urlopen function.
+    monkeypatch.setattr("comfy_cli.http._OPENER.open", _fake)
     return calls
 
 

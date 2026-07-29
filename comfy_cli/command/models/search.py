@@ -377,6 +377,11 @@ def _cloud_search(
     qs = urllib.parse.urlencode(params)
     url = target.url("assets") + "?" + qs
     body = _http_get_json(url, target)
+    if not isinstance(body, dict):
+        # Callers route JSONDecodeError to an envelope error; a non-object
+        # top-level body (list/scalar) must surface the same way, not crash
+        # on body.get().
+        raise json.JSONDecodeError(f"unexpected response shape (not an object) from {url}", "", 0)
     assets = body.get("assets") or []
     rows = [_asset_to_row(a) for a in assets if isinstance(a, dict)]
     return rows, int(body.get("total") or len(rows))
@@ -556,6 +561,8 @@ def show_cmd(
         url = target.url("assets") + "?" + qs
         try:
             body = _http_get_json(url, target)
+            if not isinstance(body, dict):
+                raise json.JSONDecodeError(f"unexpected response shape (not an object) from {url}", "", 0)
         except urllib.error.HTTPError as e:
             renderer.error(
                 code="cloud_http_error",
