@@ -35,6 +35,7 @@ import typer
 
 from comfy_cli import tracking
 from comfy_cli.output import get_renderer, rprint
+from comfy_cli.output.sanitize import sanitize_markup
 
 app = typer.Typer(no_args_is_help=True, help="Discover models — folders, files, and the cloud asset catalog.")
 
@@ -208,7 +209,11 @@ def list_folders_cmd(
         tbl.add_column("folder")
         tbl.add_column("subfolders", style="dim")
         for r in rows[:200]:
-            tbl.add_row(r["name"], ", ".join(r["subfolders"]) if r["subfolders"] else "")
+            # ``add_row`` parses markup in ``str`` cells; these are server names.
+            tbl.add_row(
+                sanitize_markup(r["name"]),
+                sanitize_markup(", ".join(r["subfolders"])) if r["subfolders"] else "",
+            )
         renderer.console().print(tbl)
         rprint(f"[dim]{len(rows)} folders ({payload['mode']})[/dim]")
     renderer.emit(payload, command="models list-folders")
@@ -296,7 +301,7 @@ def list_folder_cmd(
         tbl.add_column("name")
         tbl.add_column("pathIndex", style="dim", justify="right")
         for f in files:
-            tbl.add_row(f["name"], str(f["pathIndex"]))
+            tbl.add_row(sanitize_markup(f["name"]), sanitize_markup(f["pathIndex"]))
         renderer.console().print(tbl)
         tail = f" (of {total})" if total != len(files) else ""
         rprint(f"[dim]{len(files)} files in {folder!r}{tail} ({payload['mode']})[/dim]")
@@ -509,11 +514,14 @@ def search_cmd(
         tbl.add_column("base_model", style="dim")
         tbl.add_column("source", style="dim")
         for r in rows:
+            # Truncate first, then sanitize: escaping last keeps the markup
+            # escapes balanced, and a sequence cut in half by the slice is
+            # cleaned up rather than left dangling.
             tbl.add_row(
-                r["name"][:60],
-                r["type"] or "",
-                r["base_model"] or "",
-                (r["source_url"] or "")[:48],
+                sanitize_markup(r["name"][:60]),
+                sanitize_markup(r["type"] or ""),
+                sanitize_markup(r["base_model"] or ""),
+                sanitize_markup((r["source_url"] or "")[:48]),
             )
         renderer.console().print(tbl)
         tail = f" (of {total} total)" if total != len(rows) else ""
@@ -603,19 +611,21 @@ def show_cmd(
     }
     if renderer.is_pretty():
         row = payload["row"]
-        rprint(f"[bold]{row['name']}[/bold]")
-        rprint(f"  type:        {row['type']}")
+        # Every field below is catalog text the server chose, interpolated into
+        # a markup-parsing sink — sanitize each one (see comfy_cli.output.sanitize).
+        rprint(f"[bold]{sanitize_markup(row['name'])}[/bold]")
+        rprint(f"  type:        {sanitize_markup(row['type'])}")
         if row.get("base_model"):
-            rprint(f"  base_model:  {row['base_model']}")
+            rprint(f"  base_model:  {sanitize_markup(row['base_model'])}")
         if row.get("tags"):
-            rprint(f"  tags:        {', '.join(row['tags'])}")
+            rprint(f"  tags:        {sanitize_markup(', '.join(row['tags']))}")
         if row.get("source_url"):
-            rprint(f"  source:      {row['source_url']}")
+            rprint(f"  source:      {sanitize_markup(row['source_url'])}")
         if row.get("preview_url"):
-            rprint(f"  preview:     {row['preview_url']}")
+            rprint(f"  preview:     {sanitize_markup(row['preview_url'])}")
         if row.get("size"):
             rprint(f"  size:        {row['size']:,} bytes")
         trained = row.get("trained_words")
         if trained:
-            rprint(f"  trained:     {', '.join(trained)}")
+            rprint(f"  trained:     {sanitize_markup(', '.join(trained))}")
     renderer.emit(payload, command="models show")
