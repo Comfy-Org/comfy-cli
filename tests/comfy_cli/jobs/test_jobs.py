@@ -240,6 +240,118 @@ def test_jobs_status_no_server_emits_error_envelope():
 
 
 # ---------------------------------------------------------------------------
+# `jobs status` with the server down — fall back to the on-disk state file
+# ---------------------------------------------------------------------------
+
+
+def _invoke_status(prompt_id: str, *extra: str):
+    """Run `jobs status <id>` in-process with an NDJSON renderer installed.
+
+    Returns the CliRunner result; parse its stdout with ``_last_json``.
+    """
+    from typer.testing import CliRunner
+
+    from comfy_cli.output import Renderer, set_renderer
+    from comfy_cli.output.renderer import OutputMode
+
+    set_renderer(Renderer(mode=OutputMode.NDJSON, command="jobs status"))
+    return CliRunner().invoke(jobs_mod.app, ["status", prompt_id, "--where", "local", *extra])
+
+
+def test_jobs_status_server_down_no_state_file_keeps_bare_error(monkeypatch: pytest.MonkeyPatch):
+    """No state file for the prompt -> the pre-existing `server_not_running`
+    envelope, unchanged (backward compatibility for untracked prompts)."""
+    monkeypatch.setattr(jobs_mod, "check_comfy_server_running", lambda port, host: False)
+
+    result = _invoke_status("untracked-id", "--host", "127.0.0.1", "--port", "65431")
+    assert result.exit_code == 1, result.output
+    env = _last_json(result.stdout)
+    assert env["ok"] is False
+    err = env["error"]
+    assert err["code"] == "server_not_running"
+    assert err["message"] == "ComfyUI not running on 127.0.0.1:65431"
+    assert err["hint"] == "run: comfy launch"
+    assert err["details"] == {"host": "127.0.0.1", "port": 65431}
+
+
+def test_jobs_status_server_down_non_terminal_state_attributes_the_death(monkeypatch: pytest.MonkeyPatch):
+    """A job recorded as `running` when the server was last seen: same error
+    code, but the message/details say what the job was doing."""
+    from comfy_cli import jobs_state
+
+    monkeypatch.setattr(jobs_mod, "check_comfy_server_running", lambda port, host: False)
+    st = jobs_state.new(prompt_id="dead-run", client_id="c", workflow="/tmp/wf.json", where="local")
+    st.status = "running"
+    jobs_state.write(st)
+
+    result = _invoke_status("dead-run", "--host", "127.0.0.1", "--port", "65431")
+    assert result.exit_code == 1, result.output
+    env = _last_json(result.stdout)
+    assert env["ok"] is False
+    err = env["error"]
+    assert err["code"] == "server_not_running"
+    assert "dead-run" in err["message"]
+    assert "was 'running'" in err["message"]
+    assert "out-of-memory" in err["message"]
+    details = err["details"]
+    assert details["last_known_status"] == "running"
+    assert details["prompt_id"] == "dead-run"
+    assert details["workflow"] == "/tmp/wf.json"
+    assert details["submitted_at"] == st.submitted_at
+    assert details["updated_at"] == st.updated_at
+
+
+def test_jobs_status_server_down_terminal_state_emits_ok_envelope(monkeypatch: pytest.MonkeyPatch):
+    """A job that completed before the server stopped is a normal result —
+    OK envelope sourced from the state file, exit 0."""
+    from comfy_cli import jobs_state
+
+    monkeypatch.setattr(jobs_mod, "check_comfy_server_running", lambda port, host: False)
+    st = jobs_state.new(prompt_id="done-run", client_id="c", workflow="/tmp/wf.json", where="local")
+    st.status = "completed"
+    st.outputs = ["http://127.0.0.1:8188/view?filename=out.png"]
+    jobs_state.write(st)
+
+    result = _invoke_status("done-run", "--host", "127.0.0.1", "--port", "65431")
+    assert result.exit_code == 0, result.output
+    env = _last_json(result.stdout)
+    assert env["ok"] is True
+    data = env["data"]
+    assert data["prompt_id"] == "done-run"
+    assert data["status"] == "completed"
+    assert data["server_running"] is False
+    assert data["source"] == "state_file"
+    assert data["outputs"] == ["http://127.0.0.1:8188/view?filename=out.png"]
+    assert data["error"] is None
+    assert data["workflow"] == "/tmp/wf.json"
+    assert data["submitted_at"] == st.submitted_at
+
+
+def test_jobs_status_server_up_still_uses_live_snapshot(monkeypatch: pytest.MonkeyPatch):
+    """Server up: the live `/history` snapshot wins — the state file is never
+    consulted and the payload carries no state-file markers."""
+    from comfy_cli import jobs_state
+
+    monkeypatch.setattr(jobs_mod, "check_comfy_server_running", lambda port, host: True)
+    monkeypatch.setattr(
+        jobs_mod,
+        "_snapshot",
+        lambda h, p, pid: {"prompt_id": pid, "status": "running", "outputs": [], "host": h, "port": p},
+    )
+    # A stale terminal state file must NOT shadow the live answer.
+    st = jobs_state.new(prompt_id="live-run", client_id="c", workflow="/tmp/wf.json", where="local")
+    st.status = "completed"
+    jobs_state.write(st)
+
+    result = _invoke_status("live-run", "--host", "127.0.0.1", "--port", "8188")
+    assert result.exit_code == 0, result.output
+    data = _last_json(result.stdout)["data"]
+    assert data["status"] == "running"
+    assert "source" not in data
+    assert "server_running" not in data
+
+
+# ---------------------------------------------------------------------------
 # `jobs ls --orphaned` — surface watcher_crashed jobs for cleanup
 # ---------------------------------------------------------------------------
 
