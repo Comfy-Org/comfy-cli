@@ -222,8 +222,19 @@ def build_workflow(model: str, values: dict[str, Any], *, output_prefix: str = "
 
     # Nodes that take an aspect ratio instead of width/height: fold the two
     # proxy flags into the node's single "W:H" input when both are present.
-    if ns.aspect_from_wh and values.get("width") and values.get("height"):
-        node_inputs[ns.aspect_from_wh] = f"{values['width']}:{values['height']}"
+    # A lone --width/--height has no fixed default to fall back on here (unlike
+    # flux-2's independent param_map entries), so silently keeping the default
+    # aspect ratio would drop the user's flag with no error - fail loudly instead.
+    if ns.aspect_from_wh:
+        width_given = values.get("width") is not None
+        height_given = values.get("height") is not None
+        if width_given != height_given:
+            raise EmitError(
+                f"--emit-workflow for {model!r} needs --width and --height together "
+                "to set the aspect ratio; only one was provided."
+            )
+        if width_given and height_given:
+            node_inputs[ns.aspect_from_wh] = f"{values['width']}:{values['height']}"
 
     partner = {
         "class_type": ns.node_class,

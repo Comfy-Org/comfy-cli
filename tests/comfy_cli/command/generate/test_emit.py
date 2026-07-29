@@ -112,6 +112,20 @@ def test_build_flux_ultra_without_width_height_keeps_default_aspect_ratio():
     assert wf["1"]["inputs"]["aspect_ratio"] == "16:9"
 
 
+def test_build_flux_ultra_only_width_errors_instead_of_dropping_it():
+    # flux-ultra has no fixed width/height fallback (unlike flux-2), so a lone
+    # --width would otherwise be silently dropped in favor of the "16:9" default.
+    with pytest.raises(emit.EmitError) as ei:
+        emit.build_workflow("flux-ultra", {"prompt": "a fox", "width": 1024})
+    assert "--width" in str(ei.value) and "--height" in str(ei.value)
+
+
+def test_build_flux_ultra_only_height_errors_instead_of_dropping_it():
+    with pytest.raises(emit.EmitError) as ei:
+        emit.build_workflow("flux-ultra", {"prompt": "a fox", "height": 768})
+    assert "--width" in str(ei.value) and "--height" in str(ei.value)
+
+
 def test_emitted_workflow_is_api_format_node_ids_are_strings():
     wf = emit.build_workflow("flux-2", {"prompt": "p"})
     for k, node in wf.items():
