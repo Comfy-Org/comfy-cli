@@ -114,6 +114,9 @@ COMMAND_SCHEMAS: dict[str, str] = {
     "comfy node deps": "node_deps",
     # background server logs
     "comfy logs": "logs",
+    # resource management (ComfyUI /system_stats + /free passthrough)
+    "comfy system-stats": "system_stats",
+    "comfy free": "free",
 }
 
 

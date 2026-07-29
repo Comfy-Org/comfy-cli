@@ -206,6 +206,9 @@ Comfy provides commands that allow you to easily run the installed ComfyUI.
   - Maximum of 10 PR builds are kept (oldest are removed automatically)
   - Cache limits help manage disk space while keeping recent builds available
 
+- To check VRAM/RAM usage: `comfy system-stats` (add `--where cloud` to target Comfy Cloud instead of local)
+- To unload models / free the executor cache: `comfy free` (pass `--free-memory` to also reset the executor cache)
+
 ### Managing Custom Nodes
 
 comfy provides a convenient way to manage custom nodes for extending ComfyUI's functionality. Here are some examples:

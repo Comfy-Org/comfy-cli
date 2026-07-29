@@ -432,6 +432,33 @@ class Client:
                 return None
             raise
 
+    # ----- resource management -----
+
+    def get_system_stats(self, *, timeout: float | None = None) -> dict | None:
+        """GET {prefix}/system_stats.
+
+        Per-device VRAM (``vram_total``/``vram_free``/``torch_vram_total``/
+        ``torch_vram_free``) plus system RAM and version info. Same shape on
+        local and cloud — passed through unmodified so the schema tracks
+        whatever ComfyUI itself reports.
+        """
+        return self._request("GET", ("system_stats",), timeout=timeout)
+
+    def post_free(self, *, unload_models: bool = True, free_memory: bool = False, timeout: float | None = None) -> None:
+        """POST {prefix}/free — ask the queue worker to unload models / free the cache.
+
+        ``free_memory=True`` implies unloading models on the server side even
+        when ``unload_models`` is False. The flags apply the next time the
+        worker iterates: immediately if it's idle, after the current job if
+        one is running — this never interrupts an in-flight job.
+        """
+        self._request(
+            "POST",
+            ("free",),
+            body={"unload_models": unload_models, "free_memory": free_memory},
+            timeout=timeout,
+        )
+
     # ----- polling helpers -----
 
     def wait_for_completion(
