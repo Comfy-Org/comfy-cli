@@ -1313,7 +1313,7 @@ def launch(
     launch_command(background, extra, frontend_pr)
 
 
-@app.command(help="Show the captured background ComfyUI log (from `comfy launch --background`).")
+@app.command(help="Show a captured ComfyUI log (from `comfy launch --background`, or ComfyUI-Manager's own logfile).")
 @tracking.track_command()
 def logs(
     tail: Annotated[
@@ -1324,8 +1324,18 @@ def logs(
         str | None,
         typer.Option("--where", show_default=False, help="Routing target. Only 'local' is supported."),
     ] = None,
+    port: Annotated[
+        int | None,
+        typer.Option(
+            "--port",
+            show_default=False,
+            help="Show the log for this port instead of auto-resolving "
+            "(falls back to user/comfyui.log, which is where a server started "
+            "without an explicit --port logs).",
+        ),
+    ] = None,
 ):
-    logs_command(tail=tail, where=where)
+    logs_command(tail=tail, where=where, port=port)
 
 
 @app.command("setup", help="Interactive setup wizard — routing, auth, and agent skills in one step.")
