@@ -8,10 +8,17 @@ passes ``\x1b`` straight through, so a CSI/OSC sequence reaches the user's
 terminal and can clear the screen, rewrite the window title, or repaint earlier
 lines to spoof CLI output.
 
-This module is the single sanitizing boundary for **pretty** rendering only.
-The JSON/NDJSON envelope paths must NOT use it: ``json.dumps`` already escapes
-``\x1b`` as a ``\u`` escape, and stripping there would silently mutate
-the data agents parse.
+This module sanitizes **pretty** rendering only. The JSON/NDJSON envelope paths
+must NOT use it: ``json.dumps`` already escapes ``\x1b`` as a ``\u`` escape, and
+stripping there would silently mutate the data agents parse.
+
+``Renderer`` is not the only path to the terminal, so applying it there is not
+sufficient on its own. Command modules also call ``rich.print`` directly under
+their own ``is_pretty()`` gates, and those never route through ``Renderer``:
+they must call ``sanitize_markup`` on each server-supplied value themselves,
+as the ``comfy run`` and ``comfy models`` paths do. Automatic coverage stops at
+``Renderer``; treat a bare ``rich.print`` of remote text as unsanitized until
+you have checked it.
 
 Scope: C0/C1 control characters and ANSI escape sequences (CSI, OSC, DCS, and
 the shorter two-character forms). Tab and newline are preserved — they are

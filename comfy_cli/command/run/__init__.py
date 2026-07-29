@@ -44,6 +44,7 @@ from comfy_cli.command.run.watcher import _tail_state_file as _tail_state_file
 from comfy_cli.env_checker import check_comfy_server_running
 from comfy_cli.output import get_renderer
 from comfy_cli.output import rprint as pprint
+from comfy_cli.output.sanitize import sanitize_markup
 from comfy_cli.workflow_to_api import WorkflowConversionError, convert_ui_to_api
 from comfy_cli.workspace_manager import WorkspaceManager
 
@@ -314,7 +315,8 @@ def execute(
                 if len(execution.outputs) > 0:
                     pprint("[bold green]\nOutputs:[/bold green]")
                     for f in execution.outputs:
-                        pprint(f)
+                        # Output paths are built from server-chosen filenames.
+                        pprint(sanitize_markup(f))
                 elapsed = timedelta(seconds=end - start)
                 pprint(f"[bold green]\nWorkflow execution completed ({elapsed})[/bold green]")
 
@@ -435,7 +437,7 @@ def execute(
             )
             raise typer.Exit(code=130) from e
         if renderer.is_pretty():
-            pprint(f"[bold red]Error: Lost connection to ComfyUI server: {e}[/bold red]")
+            pprint(f"[bold red]Error: Lost connection to ComfyUI server: {sanitize_markup(e)}[/bold red]")
         renderer.error(
             code="ws_disconnected",
             message=f"Lost connection to ComfyUI server: {e}",
@@ -816,9 +818,9 @@ def execute_cloud(
         if output_urls:
             pprint("[bold green]\nOutputs:[/bold green]")
             for u in output_urls:
-                pprint(u)
+                pprint(sanitize_markup(u))
         for w in warnings:
-            pprint(f"[yellow]⚠ {w['message']}[/yellow]")
+            pprint(f"[yellow]⚠ {sanitize_markup(w['message'])}[/yellow]")
         pprint(f"[bold green]\nCloud workflow completed ({timedelta(seconds=end - start)})[/bold green]")
 
     # Grouped views of the same artifacts: by producing node always, and by
