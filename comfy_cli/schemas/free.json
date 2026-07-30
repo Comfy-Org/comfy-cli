@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://comfy.org/schemas/free.json",
+  "title": "comfy free",
+  "description": "Result of POST /free — echoes back what was requested. The flags apply the next time the queue worker iterates (immediate if idle, after the current job if busy); they never interrupt a running job.",
+  "type": "object",
+  "required": ["requested", "note"],
+  "additionalProperties": true,
+  "properties": {
+    "requested": {
+      "type": "object",
+      "required": ["unload_models", "free_memory"],
+      "additionalProperties": false,
+      "properties": {
+        "unload_models": { "type": "boolean" },
+        "free_memory": { "type": "boolean" }
+      }
+    },
+    "note": { "type": "string" }
+  }
+}

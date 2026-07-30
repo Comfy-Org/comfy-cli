@@ -6,6 +6,9 @@ with the standard CLI properties and aliases ``tracing_id`` to
 ``workflow_run_id`` on the canonical execution lifecycle events.
 """
 
+import importlib
+import logging
+import threading
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -216,6 +219,45 @@ class TestProviderConstruction:
         provider = MixpanelProvider("")
         assert provider.enabled is False
 
+    def test_mixpanel_client_has_bounded_request_timeout(self):
+        """Regression guard for BE-3354/BE-3403: mixpanel-python's default
+        Consumer uses request_timeout=None → an unbounded requests.post that
+        hangs the CLI forever on a blackholed endpoint. The provider must build
+        its Mixpanel client with an explicit 10s consumer timeout so this can't
+        silently regress to None. retry_limit must also be 1: the Consumer
+        default is 4 with backoff, which would let a blackholed send run ~40s+
+        across retries even with a 10s per-attempt timeout — and this send is
+        synchronous on the main thread, not covered by the atexit deadline."""
+        provider = MixpanelProvider("token-mp")
+        assert provider.client is not None
+        consumer = provider.client._consumer
+        assert consumer._request_timeout == 10
+        # retry_limit is threaded into the session's urllib3 Retry.total.
+        adapter = consumer._session.get_adapter("https://api.mixpanel.com")
+        assert adapter.max_retries.total == 1
+
+    def test_posthog_unregisters_its_own_atexit_join(self):
+        """Regression guard for BE-3403: Posthog's constructor registers its own
+        ``atexit.register(self.join)``, which flushes synchronously on the main
+        thread at shutdown, unbounded by ``_flush_all_providers``' 5s daemon
+        deadline. Against a blackholed endpoint that join can block ~21s after
+        the terminal envelope. The provider must unregister it so the bounded
+        flush is the only shutdown drain path."""
+        import comfy_cli.tracking as tracking_mod
+
+        fake_client = MagicMock()
+        with (
+            # PostHogProvider imports `Posthog` lazily inside __init__ (see
+            # `_get_providers`), so there's no module-level attribute to patch —
+            # patch the source it's imported from instead.
+            patch("posthog.Posthog", return_value=fake_client),
+            patch.object(tracking_mod, "atexit") as fake_atexit,
+        ):
+            provider = PostHogProvider("phc_test", "https://t.comfy.org")
+
+        assert provider.enabled is True
+        fake_atexit.unregister.assert_called_once_with(fake_client.join)
+
     def test_posthog_track_skips_when_distinct_id_is_none(self, tracking_with_two_providers):
         tracking_mod, _, ph_provider = tracking_with_two_providers
         with patch.object(tracking_mod, "user_id", None):
@@ -296,3 +338,172 @@ class TestAtexitFlush:
             tracking_mod._flush_all_providers()
 
         p2.flush.assert_called_once()
+
+    def test_flush_returns_before_deadline_when_a_provider_hangs(self):
+        """A provider whose flush() blocks (e.g. a blackholed telemetry endpoint)
+        must not wedge the atexit hook past its per-provider deadline. The hook
+        runs each flush in a daemon thread and joins with a ~5s timeout, so a
+        60s-hanging provider is abandoned rather than allowed to hang the CLI
+        (BE-3354/BE-3403). Bounds the total at well under the 60s hang."""
+        import time
+
+        import comfy_cli.tracking as tracking_mod
+
+        release = threading.Event()
+
+        class _HangingProvider:
+            def flush(self):
+                # Blocks until the test tears down; the deadline must fire first.
+                release.wait(timeout=60)
+
+        fast = MagicMock()
+        try:
+            with patch.object(tracking_mod, "PROVIDERS", [_HangingProvider(), fast]):
+                start = time.monotonic()
+                tracking_mod._flush_all_providers()
+                elapsed = time.monotonic() - start
+
+            # Deadline is 5s per provider; allow generous slack but stay far
+            # under the 60s the hanging provider would otherwise cost.
+            assert elapsed < 8.0, f"flush did not honor the deadline (took {elapsed:.1f}s)"
+            # The healthy provider after the hanging one is still drained.
+            fast.flush.assert_called_once()
+        finally:
+            release.set()
+
+
+def _override_warnings(caplog):
+    """The $POSTHOG_API_KEY-was-ignored warnings captured so far."""
+    return [r for r in caplog.records if "POSTHOG_API_KEY" in r.getMessage()]
+
+
+class TestPostHogTokenResolution:
+    """BE-4931: $POSTHOG_API_KEY is also what posthog-cli calls a *personal*
+    (``phx_``) API key, which the ingestion endpoint rejects with a 401. Only a
+    ``phc_`` project write key may override the committed default."""
+
+    def test_unset_env_uses_the_committed_default(self, monkeypatch):
+        import comfy_cli.tracking as tracking_mod
+
+        monkeypatch.delenv("POSTHOG_API_KEY", raising=False)
+        assert tracking_mod._resolve_posthog_token() == tracking_mod._POSTHOG_DEFAULT_TOKEN
+
+    def test_phc_override_is_honored_without_warning(self, monkeypatch, caplog):
+        import comfy_cli.tracking as tracking_mod
+
+        monkeypatch.setenv("POSTHOG_API_KEY", "phc_custom")
+        with caplog.at_level(logging.WARNING):
+            assert tracking_mod._resolve_posthog_token() == "phc_custom"
+        assert _override_warnings(caplog) == []
+
+    def test_empty_override_still_disables_the_provider(self, monkeypatch, caplog):
+        # The pre-existing escape hatch: an empty string opts the PostHog pipe
+        # out entirely (PostHogProvider.__init__ returns early on a falsy token —
+        # see test_posthog_with_empty_token_is_disabled_and_silent).
+        import comfy_cli.tracking as tracking_mod
+
+        monkeypatch.setenv("POSTHOG_API_KEY", "")
+        with caplog.at_level(logging.WARNING):
+            assert tracking_mod._resolve_posthog_token() == ""
+        assert _override_warnings(caplog) == []
+
+        provider = PostHogProvider(tracking_mod._resolve_posthog_token(), tracking_mod.POSTHOG_HOST)
+        assert provider.enabled is False
+
+    @pytest.mark.parametrize("bad_value", ["phx_test", "not-a-key", "phc-typo"])
+    def test_non_phc_override_warns_and_falls_back(self, monkeypatch, caplog, bad_value):
+        import comfy_cli.tracking as tracking_mod
+
+        monkeypatch.setenv("POSTHOG_API_KEY", bad_value)
+        with caplog.at_level(logging.WARNING):
+            assert tracking_mod._resolve_posthog_token() == tracking_mod._POSTHOG_DEFAULT_TOKEN
+
+        warnings = _override_warnings(caplog)
+        assert len(warnings) == 1
+        # ERROR, not WARNING: the default LOG_LEVEL is ERROR, so this must be
+        # visible to the user by default (see comfy_cli/tracking.py).
+        assert warnings[0].levelno == logging.ERROR
+
+
+class _FakePosthogClient:
+    """Stands in for ``posthog.Posthog`` so provider construction records the
+    token it was handed without starting a real consumer thread."""
+
+    def __init__(self, *, project_api_key, host, **_kwargs):
+        self.api_key = project_api_key
+        self.host = host
+        self.join = MagicMock()
+        self.capture = MagicMock()
+        self.flush = MagicMock()
+
+
+class TestPostHogTokenResolutionThroughProviderBuild:
+    def test_phx_env_still_builds_a_provider_on_the_default_key(self, monkeypatch, caplog):
+        """End to end: a developer with a personal key exported gets working
+        telemetry and exactly one warning, no matter how many events fire —
+        the resolve happens inside the once-only provider factory."""
+        import comfy_cli.tracking as tracking_mod
+
+        monkeypatch.setenv("POSTHOG_API_KEY", "phx_test")
+        monkeypatch.delenv("DO_NOT_TRACK", raising=False)
+        monkeypatch.delenv("COMFY_NO_TELEMETRY", raising=False)
+
+        with (
+            # Both SDKs are imported lazily inside the providers, so patch the
+            # source modules rather than a tracking attribute.
+            patch("posthog.Posthog", _FakePosthogClient),
+            patch("mixpanel.Mixpanel", return_value=MagicMock()),
+            patch.object(tracking_mod, "PROVIDERS", None),
+            patch.object(tracking_mod, "_session_only_tracking", True),
+            patch.object(tracking_mod, "user_id", "test-distinct-id"),
+            caplog.at_level(logging.WARNING),
+        ):
+            tracking_mod.track_event("first_event")
+            tracking_mod.track_event("second_event")
+            providers = list(tracking_mod.PROVIDERS)
+
+        posthog_providers = [p for p in providers if type(p).__name__ == "PostHogProvider"]
+        assert len(posthog_providers) == 1
+        posthog_provider = posthog_providers[0]
+        assert posthog_provider.enabled is True
+        assert posthog_provider.client.api_key == tracking_mod._POSTHOG_DEFAULT_TOKEN
+        # Two events, one build, one warning.
+        assert len(_override_warnings(caplog)) == 1
+        assert posthog_provider.client.capture.call_count == 2
+
+
+class TestPostHogLoggerIsQuiet:
+    """posthog-python logs every failed upload — 401, offline, DNS, 5xx — at
+    ERROR on the single ``posthog`` logger, which comfy-cli's root handler
+    prints in red. Telemetry is best-effort, so that must not reach stderr."""
+
+    @pytest.fixture(autouse=True)
+    def _restore_module_state(self, monkeypatch):
+        posthog_logger = logging.getLogger("posthog")
+        original_level = posthog_logger.level
+        yield
+        # Undo the reloads: leave the module (and the logger) exactly as a
+        # normal import would, so test ordering can't leak either one.
+        monkeypatch.delenv("LOG_LEVEL", raising=False)
+        import comfy_cli.tracking as tracking_mod
+
+        importlib.reload(tracking_mod)
+        posthog_logger.setLevel(original_level)
+
+    def test_import_silences_the_posthog_logger(self, monkeypatch):
+        monkeypatch.delenv("LOG_LEVEL", raising=False)
+        import comfy_cli.tracking as tracking_mod
+
+        logging.getLogger("posthog").setLevel(logging.NOTSET)
+        importlib.reload(tracking_mod)
+
+        assert logging.getLogger("posthog").level == logging.CRITICAL
+
+    def test_log_level_debug_leaves_the_posthog_logger_alone(self, monkeypatch):
+        monkeypatch.setenv("LOG_LEVEL", "debug")  # setup_logging upper()s it too
+        import comfy_cli.tracking as tracking_mod
+
+        logging.getLogger("posthog").setLevel(logging.NOTSET)
+        importlib.reload(tracking_mod)
+
+        assert logging.getLogger("posthog").level == logging.NOTSET
