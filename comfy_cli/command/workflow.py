@@ -6,6 +6,10 @@ Three primitives:
     comfy workflow set-slot <file> ADDR=VALUE [...]    # tweak one or more
     comfy workflow vary <file> --slot ADDR='[v1,v2]'   # produce N variants
 
+Plus one read-only reader that needs no object_info at all:
+
+    comfy workflow notes <file>                        # what did the author write?
+
 Workflows must be **frontend-format** (the regular ComfyUI save — has
 ``nodes[]`` / ``links[]``, may contain subgraphs). API-format (the export
 that ``comfy run`` consumes) is rejected with a clean envelope and a hint.
@@ -17,6 +21,7 @@ Slot addresses follow CQL's format: ``<instance_id>.<input_name>``. Run
 from __future__ import annotations
 
 import json
+import unicodedata
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -237,7 +242,9 @@ def set_slot_cmd(
         typer.Option(
             "--stdout/--in-place",
             show_default=False,
-            help="Print the result to stdout instead of writing back to <file>.",
+            help="Return the result instead of writing back to <file>: `data.workflow_json` in the "
+            "envelope under --json, or the raw workflow on stdout with --no-json. Redirecting "
+            "stdout selects JSON mode, so `--stdout > new.json` needs --no-json to get a raw workflow.",
         ),
     ] = False,
     input_path: Annotated[str | None, typer.Option("--input", show_default=False)] = None,
@@ -266,35 +273,53 @@ def set_slot_cmd(
         )
         raise typer.Exit(code=1) from e
 
-    serialized = json.dumps(new_workflow, indent=2)
+    # Fold the stale-cache note into `warnings` up front so every exit path —
+    # including the `--stdout` early return below — reports it.
+    if _stale:
+        warnings = list(warnings) + [
+            {"code": "object_info_stale", "message": f"served from cache ({_stale['source']}): {_stale['reason']}"}
+        ]
 
-    if stdout:
+    # `--stdout` in human mode is a pipe target: print the raw workflow so
+    # `comfy workflow set-slot ... --stdout --no-json > new.json` keeps working.
+    # `--no-json` is required there: a redirect makes stdout a non-TTY, which
+    # `Renderer.resolve` reads as JSON mode. In JSON mode stdout is reserved
+    # for the envelope (see docs/json-output.md), so the modified workflow
+    # rides in `data.workflow_json` instead — a bare workflow object is not an
+    # `envelope/1` and machine callers reject it.
+    if stdout and renderer.is_pretty():
         import sys
 
-        sys.stdout.write(serialized)
+        sys.stdout.write(json.dumps(new_workflow, indent=2))
         sys.stdout.write("\n")
+        sys.stdout.flush()
+        # stdout now holds exactly the workflow; warnings would corrupt it, so
+        # they go to stderr rather than being dropped.
+        for w in warnings:
+            renderer.stderr_console().print(f"[yellow]warning:[/yellow] {w}")
         return
 
-    _atomic_write_text(p, serialized)
+    if not stdout:
+        _atomic_write_text(p, json.dumps(new_workflow, indent=2))
 
-    payload = {
+    payload: dict[str, Any] = {
         "workflow": str(p),
         "applied": list(overrides_dict.keys()),
         "warnings": warnings,
-        "wrote": str(p),
+        "wrote": None if stdout else str(p),
     }
+    if stdout:
+        payload["out"] = "stdout"
+        payload["workflow_json"] = new_workflow
     if _stale:
         payload["stale"] = True
-        payload["warnings"] = list(warnings) + [
-            {"code": "object_info_stale", "message": f"served from cache ({_stale['source']}): {_stale['reason']}"}
-        ]
     if renderer.is_pretty():
         rprint(f"[bold green]✓[/bold green] applied {len(overrides_dict)} slot(s) → [dim]{p}[/dim]")
         for addr in overrides_dict:
             rprint(f"  [dim]·[/dim] {addr}")
         for w in warnings:
             rprint(f"  [yellow]warning:[/yellow] {w}")
-    renderer.emit(payload, command="workflow set-slot", changed=True)
+    renderer.emit(payload, command="workflow set-slot", changed=not stdout)
 
 
 # ---------------------------------------------------------------------------
@@ -302,7 +327,10 @@ def set_slot_cmd(
 # ---------------------------------------------------------------------------
 
 
-@app.command("vary", help="Produce N workflow variants from a per-slot value list. Emits NDJSON.")
+@app.command(
+    "vary",
+    help="Produce N workflow variants from a per-slot value list. Emits NDJSON (or `data.variants` under --json).",
+)
 @tracking.track_command("workflow")
 def vary_cmd(
     file: Annotated[str, typer.Argument(help="Frontend-format workflow JSON.")],
@@ -321,7 +349,9 @@ def vary_cmd(
         typer.Option(
             "--out-dir",
             show_default=False,
-            help="If set, write each variation to <out-dir>/<stem>_<N>.json. Otherwise emit NDJSON to stdout.",
+            help="If set, write each variation to <out-dir>/<stem>_<N>.json. Otherwise return the "
+            "variants: `data.variants` in the envelope under --json, or NDJSON on stdout with "
+            "--no-json. Redirecting stdout selects JSON mode, so `> out.ndjson` needs --no-json.",
         ),
     ] = None,
 ):
@@ -366,7 +396,20 @@ def vary_cmd(
         renderer.error(code="workflow_slot_invalid", message=str(e))
         raise typer.Exit(code=1) from e
 
+    if _stale:
+        warnings = list(warnings) + [
+            {"code": "object_info_stale", "message": f"served from cache ({_stale['source']}): {_stale['reason']}"}
+        ]
+
     written: list[str] = []
+    # Same envelope contract as set-slot --stdout: raw NDJSON on stdout is the
+    # human/pipe form; in JSON mode stdout belongs to the envelope, so the
+    # variants ride in `data.variants` instead.
+    variants: list[dict[str, Any]] | None = None
+    # True once stdout carries the NDJSON stream — the human summary below must
+    # then go to stderr, or `comfy workflow vary ... --no-json > out.ndjson`
+    # ends with a non-JSON line and breaks strict line-delimited consumers.
+    piped_ndjson = False
     if out_dir:
         out = Path(out_dir).expanduser()
         out.mkdir(parents=True, exist_ok=True)
@@ -374,36 +417,160 @@ def vary_cmd(
             target = out / f"{p.stem}_{i:03d}.json"
             _atomic_write_text(target, json.dumps(wf, indent=2))
             written.append(str(target))
-    else:
+    elif renderer.is_pretty():
         import sys
 
         for wf in workflows:
             sys.stdout.write(json.dumps(wf))
             sys.stdout.write("\n")
         sys.stdout.flush()
+        piped_ndjson = True
+    else:
+        variants = list(workflows)
 
-    payload = {
+    payload: dict[str, Any] = {
         "workflow": str(p),
         "count": len(workflows),
         "warnings": warnings,
         "out_dir": str(Path(out_dir).expanduser()) if out_dir else None,
         "written": written,
+        "variants": variants,
     }
     if _stale:
         payload["stale"] = True
-        payload["warnings"] = list(warnings) + [
-            {"code": "object_info_stale", "message": f"served from cache ({_stale['source']}): {_stale['reason']}"}
-        ]
     if renderer.is_pretty():
-        rprint(f"[bold green]✓[/bold green] produced {len(workflows)} variation(s)")
+        say = renderer.stderr_console().print if piped_ndjson else rprint
+        say(f"[bold green]✓[/bold green] produced {len(workflows)} variation(s)")
         if written:
             for path in written[:5]:
-                rprint(f"  [dim]→[/dim] {path}")
+                say(f"  [dim]→[/dim] {path}")
             if len(written) > 5:
-                rprint(f"  [dim]… and {len(written) - 5} more[/dim]")
+                say(f"  [dim]… and {len(written) - 5} more[/dim]")
         for w in warnings:
-            rprint(f"  [yellow]warning:[/yellow] {w}")
+            say(f"  [yellow]warning:[/yellow] {w}")
     renderer.emit(payload, command="workflow vary", changed=bool(written))
+
+
+# ---------------------------------------------------------------------------
+# notes
+# ---------------------------------------------------------------------------
+
+# The two documentation-note types the ComfyUI frontend registers
+# (``src/extensions/core/noteNode.ts``). Both are UI-only virtual nodes — they
+# carry no schema and are stripped by API conversion (see
+# ``workflow_to_api._UI_ONLY_NODE_TYPES``), so reading them is pure JSON
+# parsing: no object_info, no running server.
+_NOTE_NODE_TYPES = frozenset({"Note", "MarkdownNote"})
+
+
+def _str_or_none(value: Any) -> str | None:
+    """Coerce an untrusted workflow value to the schema's ``string | null``.
+
+    ``notes[].title`` and ``notes[].subgraph.name`` are declared ``string|null``
+    in ``schemas/workflow.json``, but a hand-edited file can carry any JSON type
+    there. Stringify rather than drop, so the value still reaches the caller.
+    """
+    if value is None or isinstance(value, str):
+        return value
+    return str(value)
+
+
+def _extract_notes(workflow: dict) -> list[dict]:
+    """Collect Note/MarkdownNote nodes from the top-level graph and subgraph defs.
+
+    Note text is serialized at ``widgets_values[0]`` (the sole widget both note
+    types register — see ComfyUI_frontend ``src/extensions/core/noteNode.ts``).
+
+    Every container is type-checked before it is walked: ``_is_frontend_format``
+    only vouches for the top-level ``nodes`` list, so ``definitions.subgraphs``,
+    a subgraph's own ``nodes``, and each node's ``type`` are all attacker-shaped
+    for a malformed-but-parseable file. A wrong type there must degrade to "no
+    notes found", never to an uncaught ``TypeError``.
+    """
+    out: list[dict] = []
+
+    def _scan(nodes, subgraph):
+        if not isinstance(nodes, list):
+            return
+        for n in nodes:
+            if not isinstance(n, dict):
+                continue
+            # Guard the type before the frozenset membership test: an unhashable
+            # value (list/dict) would raise TypeError rather than miss the set.
+            node_type = n.get("type")
+            if not isinstance(node_type, str) or node_type not in _NOTE_NODE_TYPES:
+                continue
+            wv = n.get("widgets_values")
+            text = wv[0] if isinstance(wv, list) and wv and isinstance(wv[0], str) else ""
+            out.append(
+                {
+                    "id": n.get("id"),
+                    "type": node_type,
+                    "title": _str_or_none(n.get("title")),
+                    "text": text,
+                    "pos": n.get("pos"),
+                    "size": n.get("size"),
+                    "subgraph": subgraph,
+                }
+            )
+
+    _scan(workflow.get("nodes"), None)
+    definitions = workflow.get("definitions")
+    subgraphs = definitions.get("subgraphs") if isinstance(definitions, dict) else None
+    if isinstance(subgraphs, list):
+        for sg in subgraphs:
+            if isinstance(sg, dict):
+                _scan(sg.get("nodes"), {"id": sg.get("id"), "name": _str_or_none(sg.get("name"))})
+    return out
+
+
+def _safe_console_text(value: Any) -> str:
+    """Render an untrusted workflow-file value safely for the pretty console.
+
+    Strips terminal control sequences (so note text can't emit ANSI/OSC escapes)
+    and then neutralizes rich markup (so a literal ``[/]`` in a note renders as
+    itself instead of raising ``MarkupError`` or spoofing styled output).
+    """
+    from rich.markup import escape
+
+    return escape(_strip_terminal_controls(str(value)))
+
+
+@app.command("notes", help="List the documentation notes (Note/MarkdownNote nodes) a workflow carries.")
+@tracking.track_command("workflow")
+def notes_cmd(
+    file: Annotated[str, typer.Argument(help="Frontend-format workflow JSON.")],
+):
+    """Read the authored notes out of a workflow — offline, read-only.
+
+    Notes are where template authors put the human-facing documentation an
+    agent otherwise has to ``grep`` the raw JSON for (LoRA trigger words, model
+    download links, usage caveats). API-format files are rejected: the
+    conversion drops note nodes entirely, so there is nothing to read there.
+    """
+    renderer = get_renderer()
+    p, workflow = _load_workflow_or_fail(renderer, file)
+    notes = _extract_notes(workflow)
+    payload = {"workflow": str(p), "count": len(notes), "notes": notes}
+    if renderer.is_pretty():
+        if not notes:
+            rprint("[dim]No notes in this workflow.[/dim]")
+        else:
+            # Every field interpolated below is untrusted file content, so it
+            # goes through _safe_console_text().
+            for n in notes:
+                sg = n["subgraph"]
+                # A note may carry no id, and a subgraph def no name/id — omit the
+                # fragment rather than printing a literal "#None" / "(subgraph None)".
+                sg_label = (sg.get("name") or sg.get("id")) if sg else None
+                where = f" (subgraph {_safe_console_text(sg_label)})" if sg_label is not None else ""
+                id_frag = f"#{_safe_console_text(n['id'])}" if n["id"] is not None else ""
+                heading = _safe_console_text(n["title"] or n["type"] or "Note")
+                meta = f" [dim]{id_frag}{where}[/dim]" if (id_frag or where) else ""
+                rprint(f"[bold]{heading}[/bold]{meta}")
+                rprint(_safe_console_text(n["text"]))
+                rprint()
+    renderer.emit(payload, command="workflow notes")
 
 
 # ---------------------------------------------------------------------------
@@ -453,6 +620,26 @@ _TOO_LARGE_HINTS = {
 }
 
 
+class _ResponseUnparseable(Exception):
+    """A non-empty 200 body could not be decoded as JSON — surface it as a loud
+    error instead of a misleading empty/success result (an empty body is still a
+    legitimate ``None`` and is *not* this)."""
+
+
+# What an oversize ``/userdata`` response means depends on the verb, so the hint
+# has to as well. ``list`` fetches the whole ``workflows/`` listing, so oversize
+# means *too many* workflows — not one big one. ``save``/``delete`` have already
+# sent their request by the time the body is read, so the write may well have
+# landed: their hints must not imply a clean failure the user should retry.
+_LOCAL_TOO_LARGE_HINTS = {
+    "list": "too many saved workflows on the server; prune the ComfyUI `workflows/` userdata directory "
+    "(`--limit`/`--name` filter client-side, so they cannot shrink the response)",
+    "get": "the saved workflow is unexpectedly large; inspect it directly on the server",
+    "save": "the workflow may still have been saved; confirm with `comfy --json --where local workflow list`",
+    "delete": "the workflow may still have been deleted; confirm with `comfy --json --where local workflow list`",
+}
+
+
 # Map the cloud ``--sort`` fields onto local FileInfo keys (client-side sort;
 # ComfyUI's /userdata listing has no server-side sort/limit/filter).
 _LOCAL_SORT_KEYS = {"create_time": "created", "update_time": "modified", "name": "path"}
@@ -465,11 +652,38 @@ def _resolve_where_target(where: str | None):
     return resolve_target(where=where)
 
 
+# Unicode categories that survive the C0/C1 filter but still let untrusted text
+# lie about what it says on a terminal. Matching by category rather than by a
+# hand-rolled codepoint list keeps this exhaustive as Unicode grows:
+#   Cf  format characters — zero-width space/non-joiner/joiner, LRM/RLM/ALM,
+#       bidi embeddings + overrides + isolates (Trojan Source reordering), word
+#       joiner, BOM, soft hyphen, the invisible math operators, and the
+#       U+E0020–U+E007F tag block
+#   Zl  U+2028 line separator, and Zp U+2029 paragraph separator — not newlines,
+#       but some terminals honour them as line breaks
+_SPOOFING_CATEGORIES = frozenset({"Cf", "Zl", "Zp"})
+
+
 def _strip_terminal_controls(text: str) -> str:
-    """Drop C0/C1 control chars (keeping tab / newline / carriage return) so
-    untrusted workflow content printed to a TTY can't emit ANSI/OSC escape
-    sequences that spoof output or manipulate the terminal."""
-    return "".join(ch for ch in text if ch in "\t\n\r" or (0x20 <= ord(ch) < 0x7F) or ord(ch) >= 0xA0)
+    """Drop everything untrusted workflow content could use to spoof a terminal.
+
+    Removes C0/C1 control chars (keeping only tab and newline) so the text can't
+    emit ANSI/OSC escape sequences, and drops every invisible Unicode codepoint
+    in ``_SPOOFING_CATEGORIES``.
+
+    Carriage return is dropped too, not kept: a lone ``\\r`` returns the cursor to
+    column 0, letting a note overwrite text this command already printed —
+    the same output-spoofing the escape stripping exists to prevent. Dropping it
+    is lossless for CRLF content, which keeps its ``\\n``.
+    """
+    # ASCII is settled by range alone — no Cf/Zl/Zp lives below U+00A0 — so the
+    # category lookup only runs for non-ASCII, keeping large payloads cheap.
+    return "".join(
+        ch
+        for ch in text
+        if (ch in "\t\n" or 0x20 <= ord(ch) < 0x7F)
+        or (ord(ch) >= 0xA0 and unicodedata.category(ch) not in _SPOOFING_CATEGORIES)
+    )
 
 
 def _reject_unsafe_workflow_key(renderer, key: str) -> str:
@@ -515,13 +729,12 @@ def _userdata_request(
     """Authed HTTP call to a ComfyUI ``/userdata`` endpoint returning (status, raw_bytes).
 
     Raises urllib errors verbatim so callers can map them to envelope codes.
-    Local ComfyUI needs no auth; ``_authed_request`` is a no-op on the headers
-    when the Target carries no credential.
+    Local ComfyUI needs no auth; ``authed_urlopen`` attaches no header when the
+    Target carries no credential.
     """
-    import urllib.request
+    from comfy_cli.http import authed_urlopen
 
-    req = _authed_request(url, target, method=method, data=data, content_type=content_type)
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
+    with authed_urlopen(url, target, method=method, data=data, content_type=content_type, timeout=timeout) as resp:
         status = resp.status
         # Read one byte past the cap so we can tell a full body from a truncated one.
         raw = resp.read(_USERDATA_MAX_BYTES + 1)
@@ -545,7 +758,7 @@ def _handle_local_http_error(renderer, e, *, operation: str, workflow_id: str | 
             code="workflow_too_large",
             message=f"local ComfyUI /userdata response during {operation} exceeded the "
             f"{_USERDATA_MAX_BYTES // (1024 * 1024)} MiB cap",
-            hint="the saved workflow is unexpectedly large; inspect it directly on the server",
+            hint=_LOCAL_TOO_LARGE_HINTS.get(operation, "the local response was unexpectedly large"),
             details={"operation": operation, "limit_bytes": _USERDATA_MAX_BYTES},
         )
     elif isinstance(e, urllib.error.HTTPError) and e.code == 404:
@@ -600,23 +813,6 @@ def _userdata_file_url(target, key: str, query: dict | None = None) -> str:
     return url
 
 
-def _authed_request(
-    url: str, target, *, method: str = "GET", data: bytes | None = None, content_type: str | None = None
-):
-    """Build an authenticated urllib Request. The return type is annotated
-    loosely to keep urllib out of the module's top-level imports."""
-    import urllib.request
-
-    req = urllib.request.Request(url, data=data, method=method)
-    if target.api_key:
-        req.add_header("X-API-Key", target.api_key)
-    elif target.auth_token:
-        req.add_header("Authorization", f"Bearer {target.auth_token}")
-    if content_type:
-        req.add_header("Content-Type", content_type)
-    return req
-
-
 def _http_request(
     url: str, target, *, method: str = "GET", body: dict | None = None, timeout: float = 30.0
 ) -> tuple[int, dict | None]:
@@ -624,12 +820,11 @@ def _http_request(
     urllib errors verbatim so callers can surface the right error code, and
     ``_ResponseTooLarge`` when the body exceeds ``_HTTP_MAX_BYTES`` — an
     oversize body must not masquerade as an unparseable one."""
-    import urllib.request
+    from comfy_cli.http import authed_urlopen
 
     data = json.dumps(body).encode("utf-8") if body is not None else None
     ct = "application/json" if data is not None else None
-    req = _authed_request(url, target, method=method, data=data, content_type=ct)
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
+    with authed_urlopen(url, target, method=method, data=data, content_type=ct, timeout=timeout) as resp:
         status = resp.status
         # Read one byte past the cap so we can tell a full body from a truncated one.
         raw = resp.read(_HTTP_MAX_BYTES + 1)
@@ -638,18 +833,35 @@ def _http_request(
     if not raw:
         return status, None
     try:
-        return status, json.loads(raw)
-    except (json.JSONDecodeError, UnicodeDecodeError):
-        # UnicodeDecodeError is a ValueError but *not* a JSONDecodeError, so a
-        # body that isn't valid UTF-8 needs naming here or it escapes uncaught.
-        return status, None
+        return status, json.loads(raw.decode("utf-8"))
+    except (ValueError, RecursionError) as e:
+        # A non-empty body that won't decode as JSON is a *malformed* response, not
+        # "no data": returning ``None`` here would let callers report an empty list
+        # or a null id as success. Raise instead so it surfaces as a loud, mapped
+        # error. Decode as UTF-8 *explicitly* first: handed raw bytes, ``json.loads``
+        # auto-detects UTF-16/32 (RFC 4627) and would silently accept a non-UTF-8 body
+        # the contract treats as malformed. Non-UTF-8 bytes -> ``UnicodeDecodeError``;
+        # valid-UTF-8 non-JSON text -> ``JSONDecodeError``; both subclass ``ValueError``.
+        # Catch the ``ValueError`` base to also map the parser's *other* rejections that
+        # aren't ``JSONDecodeError`` — e.g. a JSON integer past CPython's 4300-digit
+        # int/str limit raises a bare ``ValueError`` — plus ``RecursionError`` from
+        # pathologically nested input (the 64 MiB cap permits deep nesting). Otherwise
+        # those escape the mapping and crash the CLI with a raw traceback.
+        raise _ResponseUnparseable() from e
 
 
 def _handle_cloud_http_error(renderer, e, *, operation: str, workflow_id: str | None = None) -> typer.Exit:
     """Map HTTP failures to envelope codes. Returns an Exit to ``raise from``."""
     import urllib.error
 
-    if isinstance(e, _ResponseTooLarge):
+    if isinstance(e, _ResponseUnparseable):
+        renderer.error(
+            code="workflow_unparseable",
+            message=f"cloud returned a non-empty but unparseable (non-JSON) response during {operation}",
+            hint="the server sent a malformed body; retry, and report it if it persists",
+            details={"operation": operation, "workflow_id": workflow_id},
+        )
+    elif isinstance(e, _ResponseTooLarge):
         renderer.error(
             code="workflow_too_large",
             message=f"cloud API response during {operation} exceeded the {_HTTP_MAX_BYTES // (1024 * 1024)} MiB cap",
@@ -657,8 +869,8 @@ def _handle_cloud_http_error(renderer, e, *, operation: str, workflow_id: str | 
             details={"operation": operation, "workflow_id": workflow_id, "limit_bytes": _HTTP_MAX_BYTES},
         )
     elif isinstance(e, urllib.error.HTTPError):
-        # Bound the read itself; slicing after an unbounded read would still
-        # have pulled an arbitrarily large error body into memory first.
+        # Cap the read itself — ``[:1000]`` after a full ``read()`` would still pull an
+        # arbitrarily large (or malicious) error page into memory before slicing.
         body = (e.read(1000) or b"").decode("utf-8", "replace")
         if e.code == 404:
             renderer.error(
@@ -687,7 +899,7 @@ def _handle_cloud_http_error(renderer, e, *, operation: str, workflow_id: str | 
         renderer.error(
             code="cloud_http_error",
             message=f"{operation} failed: {e}",
-            hint="check network / `comfy auth whoami`",
+            hint="check network / `comfy cloud whoami`",
         )
     return typer.Exit(code=1)
 
@@ -966,10 +1178,42 @@ def list_cmd(
 
     try:
         _, body = _http_request(url, target)
-    except (urllib.error.HTTPError, urllib.error.URLError, OSError, _ResponseTooLarge) as e:
+    except (
+        urllib.error.HTTPError,
+        urllib.error.URLError,
+        OSError,
+        _ResponseUnparseable,
+        _ResponseTooLarge,
+    ) as e:
         raise _handle_cloud_http_error(renderer, e, operation="list") from e
 
-    rows = (body or {}).get("data") or []
+    # A non-empty body decodes here only if it was valid JSON; guard the shape the
+    # way ``get``/``save`` do. An empty body is a legitimate ``None`` (→ no rows), but
+    # a valid-JSON *non-dict* 200 (an array like ``[1, 2, 3]`` or a scalar) is malformed:
+    # ``(body).get("data")`` would raise a raw ``AttributeError``, and coercing it to an
+    # empty list would masquerade the malformed shape as a genuinely-empty listing.
+    if body is not None and not isinstance(body, dict):
+        renderer.error(
+            code="cloud_http_error",
+            message="unexpected response shape from /api/workflows (expected a JSON object)",
+            details={"got_type": type(body).__name__},
+        )
+        raise typer.Exit(code=1)
+
+    # A missing/empty ``data`` is a legitimately-empty listing, but a present non-list
+    # ``data`` is malformed the same way a non-dict body is: a scalar (``{"data": 42}``)
+    # would raise a raw ``TypeError`` in the comprehension below, and a str/dict would
+    # iterate silently and masquerade as an empty listing. Reject it with the same envelope.
+    rows = (body or {}).get("data")
+    if rows is None:
+        rows = []
+    elif not isinstance(rows, list):
+        renderer.error(
+            code="cloud_http_error",
+            message="unexpected response shape from /api/workflows (data must be a JSON array)",
+            details={"got_type": type(rows).__name__},
+        )
+        raise typer.Exit(code=1)
     payload = {
         "count": len(rows),
         "workflows": [
@@ -1037,7 +1281,13 @@ def get_cmd(
     url = target.url("workflows", _up.quote(workflow_id, safe=""), "content")
     try:
         _, body = _http_request(url, target)
-    except (urllib.error.HTTPError, urllib.error.URLError, OSError, _ResponseTooLarge) as e:
+    except (
+        urllib.error.HTTPError,
+        urllib.error.URLError,
+        OSError,
+        _ResponseUnparseable,
+        _ResponseTooLarge,
+    ) as e:
         raise _handle_cloud_http_error(renderer, e, operation="get", workflow_id=workflow_id) from e
 
     if not isinstance(body, dict) or "workflow_json" not in body:
@@ -1132,7 +1382,13 @@ def save_cmd(
     url = target.url("workflows")
     try:
         _, resp = _http_request(url, target, method="POST", body=body)
-    except (urllib.error.HTTPError, urllib.error.URLError, OSError, _ResponseTooLarge) as e:
+    except (
+        urllib.error.HTTPError,
+        urllib.error.URLError,
+        OSError,
+        _ResponseUnparseable,
+        _ResponseTooLarge,
+    ) as e:
         raise _handle_cloud_http_error(renderer, e, operation="save") from e
 
     workflow_id = (resp or {}).get("id") if isinstance(resp, dict) else None
@@ -1168,7 +1424,13 @@ def delete_cmd(
     url = target.url("workflows", _up.quote(workflow_id, safe=""))
     try:
         _, _body = _http_request(url, target, method="DELETE")
-    except (urllib.error.HTTPError, urllib.error.URLError, OSError, _ResponseTooLarge) as e:
+    except (
+        urllib.error.HTTPError,
+        urllib.error.URLError,
+        OSError,
+        _ResponseUnparseable,
+        _ResponseTooLarge,
+    ) as e:
         raise _handle_cloud_http_error(renderer, e, operation="delete", workflow_id=workflow_id) from e
 
     payload = {"workflow_id": workflow_id, "deleted": True}

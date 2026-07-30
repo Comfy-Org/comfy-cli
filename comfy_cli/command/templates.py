@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -28,11 +30,27 @@ from typing import Annotated, Any
 import typer
 
 from comfy_cli import tracking
+from comfy_cli.http import plain_urlopen
 from comfy_cli.output import get_renderer, rprint
 
 app = typer.Typer(no_args_is_help=True, help="Browse the Comfy workflow-template gallery.")
 
 GALLERY_URL = "https://raw.githubusercontent.com/Comfy-Org/workflow_templates/main/templates/index.json"
+
+# How long a cached gallery index stays fresh before ``_load_gallery`` transparently
+# re-fetches it. 24h (not the spec's 7 days): the gallery updates weekly-ish and the
+# fetch is one small JSON file, so a tighter TTL keeps agents off a frozen catalog
+# cheaply. A network-down machine still lists from the stale cache (fetch failure
+# falls back), and ``comfy templates refresh`` remains the manual force-refresh.
+GALLERY_TTL_SECONDS = 24 * 60 * 60
+
+# Everything a gallery load can throw. ``_fetch_gallery`` raises ``RuntimeError``
+# on a non-200 status (which ``urlopen`` doesn't already turn into an
+# ``HTTPError``), the fetch itself raises ``URLError``/``OSError``, and decoding a
+# 200-with-garbage body raises ``JSONDecodeError`` — all of which must route
+# through the same stale-cache fallback / command-level error, never an uncaught
+# traceback.
+_GALLERY_LOAD_ERRORS = (urllib.error.URLError, OSError, RuntimeError, json.JSONDecodeError)
 
 
 # ---------------------------------------------------------------------------
@@ -48,7 +66,7 @@ def _cache_path() -> Path:
 
 def _fetch_gallery(url: str = GALLERY_URL, timeout: float = 15.0) -> bytes:
     req = urllib.request.Request(url, headers={"User-Agent": "comfy-cli"})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
+    with plain_urlopen(req, timeout=timeout) as resp:
         if resp.status != 200:
             raise RuntimeError(f"gallery fetch failed: HTTP {resp.status}")
         return resp.read()
@@ -63,17 +81,106 @@ def _load_gallery(
 
     Returns the raw decoded JSON (a list of category dicts). The CLI does
     its own filtering on top.
+
+    A cache older than ``GALLERY_TTL_SECONDS`` is transparently re-fetched so
+    ``templates ls/show`` never serves a frozen catalog forever. If that refresh
+    fails (offline / GitHub down), we fall back to the stale cache with a
+    non-fatal renderer warning rather than erroring out.
     """
     if explicit_path:
         return json.loads(Path(explicit_path).read_bytes())
 
     cache = _cache_path()
-    if refresh or not cache.exists():
+    have_cache = cache.exists()
+
+    if not refresh and have_cache and not _cache_is_stale(cache):
+        return json.loads(cache.read_bytes())
+
+    # A TTL-expired cache is refreshed transparently, so a fetch failure here
+    # must NOT break `templates ls` — fall back to the stale cache with a
+    # non-fatal warning. An explicit `--refresh` (or a genuinely absent cache),
+    # by contrast, surfaces the fetch error so the user learns it failed.
+    ttl_auto_refresh = have_cache and not refresh
+    try:
         data = _fetch_gallery()
+        # Validate BEFORE we touch the cache: a 200 with a non-JSON body
+        # (rate-limit HTML, captive portal, truncated response) must never
+        # clobber the last-known-good cache with garbage.
+        parsed = json.loads(data)
+    except _GALLERY_LOAD_ERRORS as e:
+        if ttl_auto_refresh:
+            # The stale cache is our fallback — but a concurrent `refresh` may
+            # have removed it or left it corrupt mid-write. If reading it back
+            # also fails, surface the original fetch error, not the read error.
+            try:
+                stale = json.loads(cache.read_bytes())
+            except (OSError, json.JSONDecodeError):
+                raise e
+            get_renderer().warn(
+                f"gallery refresh failed ({e}); using cached index (last updated {_cache_age_str(cache)} ago)",
+                hint="run `comfy templates refresh` once back online to update it",
+            )
+            return stale
+        raise
+    _persist_cache(cache, data)
+    return parsed
+
+
+def _persist_cache(cache: Path, data: bytes) -> None:
+    """Persist a freshly fetched index to the cache, atomically and best-effort.
+
+    * Atomic — write to a temp file in the same directory then ``os.replace``
+      it into place, so a concurrent ``templates`` reader never observes a
+      half-written index (which would parse-fail as ``gallery_load_failed``).
+    * Best-effort — a read-only cache dir (e.g. a gallery baked into a
+      container image) or a full disk must not break the command once we
+      already hold valid data, so a write failure is swallowed rather than
+      propagated.
+    """
+    try:
         cache.parent.mkdir(parents=True, exist_ok=True)
-        cache.write_bytes(data)
-        return json.loads(data)
-    return json.loads(cache.read_bytes())
+        fd, tmp = tempfile.mkstemp(dir=str(cache.parent), prefix=".index-", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "wb") as f:
+                f.write(data)
+            os.replace(tmp, cache)
+        except OSError:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+    except OSError:
+        # Couldn't persist (read-only dir, disk full, …). We still have valid
+        # data in hand, so proceed without caching rather than failing the run.
+        pass
+
+
+def _cache_is_stale(cache: Path) -> bool:
+    """True when the cache file is older than ``GALLERY_TTL_SECONDS``."""
+    try:
+        age = time.time() - cache.stat().st_mtime
+    except OSError:
+        # Can't stat it → treat as stale so we attempt a refresh.
+        return True
+    # A future mtime (clock skew, or a restored/tampered file) yields a
+    # negative age; treat it as stale so the cache can't be pinned "fresh"
+    # indefinitely until wall-clock time catches up.
+    return age < 0 or age > GALLERY_TTL_SECONDS
+
+
+def _cache_age_str(cache: Path) -> str:
+    """Human-friendly age of the cache file for the stale-fallback warning."""
+    try:
+        age = max(0.0, time.time() - cache.stat().st_mtime)
+    except OSError:
+        return "unknown time"
+    hours = age / 3600.0
+    if hours >= 24:
+        return f"{hours / 24:.1f}d"
+    if hours >= 1:
+        return f"{hours:.1f}h"
+    return f"{age / 60:.0f}m"
 
 
 def _as_str_list(value: Any) -> list[str]:
@@ -264,7 +371,7 @@ def ls_cmd(
 
     try:
         cats = _load_gallery(gallery_path, refresh=refresh)
-    except (urllib.error.URLError, OSError, json.JSONDecodeError) as e:
+    except _GALLERY_LOAD_ERRORS as e:
         renderer.error(
             code="gallery_load_failed",
             message=str(e),
@@ -361,7 +468,7 @@ def show_cmd(
     renderer = get_renderer()
     try:
         cats = _load_gallery(gallery_path, refresh=refresh)
-    except (urllib.error.URLError, OSError, json.JSONDecodeError) as e:
+    except _GALLERY_LOAD_ERRORS as e:
         renderer.error(code="gallery_load_failed", message=str(e))
         raise typer.Exit(code=1) from e
 
@@ -423,7 +530,7 @@ def _fetch_template_workflow(name: str, *, timeout: float = 15.0) -> bytes:
     """Pull a single template's workflow JSON from the canonical GitHub raw URL."""
     url = _TEMPLATE_WORKFLOW_URL.format(name=urllib.parse.quote(name, safe=""))
     req = urllib.request.Request(url, headers={"User-Agent": "comfy-cli"})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
+    with plain_urlopen(req, timeout=timeout) as resp:
         if resp.status != 200:
             raise RuntimeError(f"template workflow fetch failed: HTTP {resp.status}")
         return resp.read()
@@ -460,7 +567,7 @@ def fetch_cmd(
     # of letting the user hit a raw GitHub 404.
     try:
         cats = _load_gallery(gallery_path, refresh=refresh)
-    except (urllib.error.URLError, OSError, json.JSONDecodeError) as e:
+    except _GALLERY_LOAD_ERRORS as e:
         renderer.error(code="gallery_load_failed", message=str(e))
         raise typer.Exit(code=1) from e
 
@@ -1009,6 +1116,61 @@ def _gallery_paid_signals(row: dict[str, Any]) -> list[str]:
     return signals
 
 
+def _enforce_spend_gate(
+    renderer,
+    *,
+    name: str,
+    workflow: Any,
+    row: dict[str, Any],
+    object_info: dict,
+    allow_spend: bool,
+) -> None:
+    """Consent interlock before submitting a template that spends Comfy credits.
+
+    Returns None when the run may proceed (no paid signals, --allow-spend, or
+    an interactive yes); raises typer.Exit(1) otherwise. Behavior is the
+    BE-4113 gate moved verbatim out of run_template_cmd.
+    """
+    import sys
+
+    from rich.markup import escape
+
+    paid_nodes = _detect_paid_nodes(workflow, object_info)
+    gallery_signals = _gallery_paid_signals(row)
+    if (paid_nodes or gallery_signals) and not allow_spend:
+        evidence = {
+            "template": name,
+            "partner_nodes": paid_nodes,
+            "gallery_signals": gallery_signals,
+        }
+        if renderer.is_pretty() and sys.stdin and sys.stdin.isatty():
+            rprint(
+                f"[yellow]⚠ Template [bold]{escape(name)}[/bold] uses partner-API nodes that spend Comfy credits.[/yellow]"
+            )
+            if paid_nodes:
+                rprint(f"  [dim]nodes:[/dim] {escape(', '.join(paid_nodes))}")
+            if gallery_signals:
+                rprint(f"  [dim]gallery:[/dim] {escape(', '.join(gallery_signals))}")
+            if not typer.confirm("Run anyway and spend credits?", default=False):
+                renderer.error(
+                    code="spend_consent_required",
+                    message="declined — template not submitted, no credits spent",
+                    details=evidence,
+                )
+                raise typer.Exit(code=1)
+        else:
+            renderer.error(
+                code="spend_consent_required",
+                message=(
+                    f"template {name!r} uses partner-API (paid) nodes; "
+                    "re-run with --allow-spend to consent to spending Comfy credits"
+                ),
+                hint="paid nodes only run with explicit consent; OSS templates run without this flag",
+                details=evidence,
+            )
+            raise typer.Exit(code=1)
+
+
 def _resolve_param_addresses(
     renderer,
     overrides: dict[str, Any],
@@ -1144,7 +1306,6 @@ def run_template_cmd(
     validation errors. Templates that embed partner-API nodes spend Comfy
     credits and are gated behind --allow-spend / an interactive confirmation.
     """
-    import sys
     import tempfile
 
     from comfy_cli.command import run as run_module
@@ -1285,38 +1446,14 @@ def run_template_cmd(
 
     # -- Spend gate (BE-4113): partner-API nodes spend Comfy credits. Require
     # explicit consent before submitting anything that would burn them.
-    paid_nodes = _detect_paid_nodes(workflow, object_info)
-    gallery_signals = _gallery_paid_signals(row)
-    if (paid_nodes or gallery_signals) and not allow_spend:
-        evidence = {
-            "template": name,
-            "partner_nodes": paid_nodes,
-            "gallery_signals": gallery_signals,
-        }
-        if renderer.is_pretty() and sys.stdin.isatty():
-            rprint(f"[yellow]⚠ Template [bold]{name}[/bold] uses partner-API nodes that spend Comfy credits.[/yellow]")
-            if paid_nodes:
-                rprint(f"  [dim]nodes:[/dim] {', '.join(paid_nodes)}")
-            if gallery_signals:
-                rprint(f"  [dim]gallery:[/dim] {', '.join(gallery_signals)}")
-            if not typer.confirm("Run anyway and spend credits?", default=False):
-                renderer.error(
-                    code="spend_consent_required",
-                    message="declined — template not submitted, no credits spent",
-                    details=evidence,
-                )
-                raise typer.Exit(code=1)
-        else:
-            renderer.error(
-                code="spend_consent_required",
-                message=(
-                    f"template {name!r} uses partner-API (paid) nodes; "
-                    "re-run with --allow-spend to consent to spending Comfy credits"
-                ),
-                hint="paid nodes only run with explicit consent; OSS templates run without this flag",
-                details=evidence,
-            )
-            raise typer.Exit(code=1)
+    _enforce_spend_gate(
+        renderer,
+        name=name,
+        workflow=workflow,
+        row=row,
+        object_info=object_info,
+        allow_spend=allow_spend,
+    )
 
     # -- Hand off to the existing run path (UI→API conversion, partner
     # credential injection, preflight validation, execution, jobs state).
@@ -1333,6 +1470,11 @@ def run_template_cmd(
             verbose=verbose,
             timeout=timeout,
             api_key=api_key,
+            # run-template's own spend gate (above) has already consented (or
+            # found no paid nodes), so forward consent to avoid a second gate in
+            # execute() (BE-4326). run-template's gate is strictly stronger — it
+            # also inspects gallery signals — and has already run.
+            allow_spend=True,
         )
     finally:
         try:

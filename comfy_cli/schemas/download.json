@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://comfy.org/schemas/download.json",
+  "title": "comfy model download --background --json data payload",
+  "description": "Submit receipt for a backgrounded model download. Resolution (metadata, tokens, filename, destination-exists) already succeeded synchronously; only the byte transfer is detached. Poll with `comfy model download-status <download_id>`.",
+  "type": "object",
+  "required": ["download_id", "pid", "dest", "total_bytes", "status"],
+  "additionalProperties": true,
+  "properties": {
+    "download_id": {
+      "type": "string",
+      "description": "Opaque id for this download; the key for download-status / download-cancel."
+    },
+    "pid": {
+      "type": "integer",
+      "description": "PID of the detached worker process."
+    },
+    "dest": {
+      "type": "string",
+      "description": "Absolute path the model will be written to."
+    },
+    "total_bytes": {
+      "type": ["integer", "null"],
+      "description": "Total size in bytes. Null at submit time — the worker learns it from the response headers."
+    },
+    "status": {
+      "type": "string",
+      "enum": ["starting", "downloading", "completed", "failed", "cancelled"],
+      "description": "Lifecycle status. Always 'starting' in a submit receipt."
+    }
+  }
+}
