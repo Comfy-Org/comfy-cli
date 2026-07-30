@@ -261,8 +261,13 @@ REGISTRY: tuple[ErrorCode, ...] = (
     # --- models / templates introspection ------------------------------------
     ErrorCode(
         "invalid_argument",
-        "An argument intended for a URL path failed safe-path validation.",
-        "a path-segment argument must be a single segment: non-empty, not `.` or `..`, and free of `/` and `\\`",
+        "An argument intended for a URL path or for a filesystem path component failed "
+        "safe-path validation — e.g. a `comfy model download` filename (from `--filename` or "
+        "from the CivitAI API response) that carries a path separator, a drive letter or `..` "
+        "and would write outside the workspace.",
+        "a path-segment argument must be a single segment: non-empty, not `.` or `..`, and free "
+        "of `/` and `\\`; for `model download`, choose the destination directory with "
+        "`--relative-path` instead",
     ),
     ErrorCode(
         "folder_not_found",
@@ -557,8 +562,25 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ),
     ErrorCode(
         "download_failed",
-        "HTTP error while downloading an output file.",
-        "check that the job completed successfully and the server is reachable",
+        "A download failed. Either an HTTP error while fetching a job's output file, or "
+        "`comfy model download` failing to fetch the model (transfer error, Hugging Face "
+        "download error, or an unresolvable CivitAI model/version). `details.url` carries the "
+        "source URL; `details.stage` is `resolve` when the failure was metadata lookup, not transfer.",
+        "check that the source URL is reachable and the job completed successfully",
+    ),
+    ErrorCode(
+        "model_file_exists",
+        "`comfy model download` refused to overwrite an existing file at the target path "
+        "(`details.path`). The download was NOT performed — the command fails rather than "
+        "exiting 0, so a caller can't mistake the skip for a completed download.",
+        "pass `--filename` to save under a different name, or remove the existing file",
+    ),
+    ErrorCode(
+        "hf_unauthorized",
+        "Hugging Face returned 401 for the model URL and no Hugging Face API token is configured "
+        "(gated or private repo).",
+        "set the token via `comfy model download --set-hf-api-token <token>` or the `HF_API_TOKEN` "
+        "environment variable",
     ),
     ErrorCode(
         "download_no_outputs",
