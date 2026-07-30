@@ -32,15 +32,26 @@ def target_auth_headers(target) -> dict[str, str]:
     Local ComfyUI has no auth; refusing to attach credentials to a non-cloud
     target means a stray token on a local Target can never leak to a
     plaintext server (same defense-in-depth gate as comfy_client.Client).
-    ``resolve_target`` populates at most one of api_key / auth_token, so the
-    precedence branch is mechanics, not policy.
+
+    ``resolve_target`` resolves a single credential, so at most one of
+    api_key / auth_token is ever populated and the tie-break is unreachable in
+    production. It is still ordered OAuth-first, to match every other
+    credential decision in the codebase: ``resolve_target``'s own precedence
+    (a live session beats API keys, which are on a deprecation path), the
+    ``auth_token_comfy_org`` credential ``submit_prompt`` injects into
+    ``extra_data`` for partner-API nodes, and ``Client._try_refresh_token``,
+    which can only self-heal a 401 when the request rode an OAuth token. A
+    lone api_key-first branch here would be the one place that disagrees:
+    given both credentials it would authenticate at the gateway as the API
+    key while handing partner-API nodes the OAuth identity, and the resulting
+    401 could never refresh.
     """
     headers: dict[str, str] = {}
     if target.is_cloud:
-        if target.api_key:
-            headers["X-API-Key"] = target.api_key
-        elif target.auth_token:
+        if target.auth_token:
             headers["Authorization"] = f"Bearer {target.auth_token}"
+        elif target.api_key:
+            headers["X-API-Key"] = target.api_key
     return headers
 
 

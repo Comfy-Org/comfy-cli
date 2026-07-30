@@ -65,11 +65,14 @@ def test_custom_message_passthrough():
 # ---------------------------------------------------------------------------
 
 
-def test_api_key_wins_over_auth_token():
-    """When both credentials are set, X-API-Key is attached and Authorization is not."""
+def test_oauth_wins_over_api_key():
+    """When both credentials are set, Authorization is attached and X-API-Key is
+    not — the same OAuth-first precedence as ``resolve_target`` and as the
+    ``extra_data`` credential ``submit_prompt`` sends, so the header and the
+    body can never name different identities."""
     req = build_authed_request("https://x/thing", _target(api_key="k", auth_token="t"))
-    assert req.get_header("X-api-key") == "k"
-    assert req.get_header("Authorization") is None
+    assert req.get_header("Authorization") == "Bearer t"
+    assert req.get_header("X-api-key") is None
 
 
 def test_bearer_when_only_auth_token():
@@ -227,6 +230,17 @@ def test_target_auth_headers_cloud_auth_token_only():
     assert target_auth_headers(target) == {"Authorization": "Bearer t"}
 
 
-def test_target_auth_headers_cloud_both_api_key_wins():
+def test_target_auth_headers_cloud_both_oauth_wins():
+    """Unreachable in production (``resolve_target`` resolves one credential),
+    but pinned so the tie-break stays OAuth-first: an API-key header here would
+    disagree with the OAuth identity ``submit_prompt`` puts in ``extra_data``
+    and would make the resulting 401 unrefreshable."""
     target = Target(kind="cloud", base_url="https://cloud.example", auth_token="t", api_key="k")
-    assert target_auth_headers(target) == {"X-API-Key": "k"}
+    assert target_auth_headers(target) == {"Authorization": "Bearer t"}
+
+
+def test_target_auth_headers_cloud_uncredentialed_is_empty():
+    """A cloud Target with no credential contributes no headers — callers add
+    nothing rather than an empty/``None`` credential header."""
+    target = Target(kind="cloud", base_url="https://cloud.example")
+    assert target_auth_headers(target) == {}
