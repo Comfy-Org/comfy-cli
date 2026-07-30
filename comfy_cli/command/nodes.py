@@ -25,6 +25,7 @@ import typer
 from comfy_cli import tracking
 from comfy_cli.cql.engine import Graph, LoadError
 from comfy_cli.output import get_renderer, rprint
+from comfy_cli.output.sanitize import sanitize_markup
 
 app = typer.Typer(no_args_is_help=True, help="Introspect ComfyUI node classes (inputs, outputs, categories).")
 
@@ -281,8 +282,10 @@ def ls_cmd(
             tbl.add_column("category", style="dim")
             tbl.add_column("outputs")
             for m in nodes:
-                outs = ", ".join(m.output_types()) or "[dim]—[/dim]"
-                tbl.add_row(m.id, m.category or "", outs)
+                # object_info text into a markup sink; the em-dash fallback is
+                # ours, so only the joined server values are escaped.
+                outs = sanitize_markup(", ".join(m.output_types())) or "[dim]—[/dim]"
+                tbl.add_row(sanitize_markup(m.id), sanitize_markup(m.category or ""), outs)
             renderer.console().print(tbl)
             rprint(f"[dim]{len(nodes)} node(s)[/dim]")
     renderer.emit(payload, command="nodes ls")
@@ -356,18 +359,18 @@ def show_cmd(
         from rich.table import Table
 
         rprint(
-            f"[bold]{payload['name']}[/bold]"
+            f"[bold]{sanitize_markup(payload['name'])}[/bold]"
             + (
-                f"  [dim]({payload['display_name']})[/dim]"
+                f"  [dim]({sanitize_markup(payload['display_name'])})[/dim]"
                 if payload["display_name"] and payload["display_name"] != payload["name"]
                 else ""
             )
         )
         if payload["category"]:
-            rprint(f"[dim]category[/dim]  {payload['category']}")
+            rprint(f"[dim]category[/dim]  {sanitize_markup(payload['category'])}")
         if payload["description"]:
-            rprint(f"[dim]{payload['description']}[/dim]")
-        outs = ", ".join(payload["output_types"]) or "(none)"
+            rprint(f"[dim]{sanitize_markup(payload['description'])}[/dim]")
+        outs = sanitize_markup(", ".join(payload["output_types"])) or "(none)"
         rprint(f"[dim]outputs[/dim]   {outs}")
         rprint("")
         if payload["inputs"]:
@@ -380,10 +383,10 @@ def show_cmd(
                 opts = i.get("options") or {}
                 default = opts.get("default")
                 tbl.add_row(
-                    str(i.get("name") or ""),
-                    str(i.get("type") or ""),
-                    str(i.get("section") or ""),
-                    "" if default is None else str(default),
+                    sanitize_markup(i.get("name") or ""),
+                    sanitize_markup(i.get("type") or ""),
+                    sanitize_markup(i.get("section") or ""),
+                    "" if default is None else sanitize_markup(default),
                 )
             renderer.console().print(tbl)
     renderer.emit(payload, command="nodes show")
@@ -487,8 +490,9 @@ def search_cmd(
             tbl.add_column("category", style="dim")
             tbl.add_column("description", style="dim")
             for m in matched:
-                desc = m.description[:60]
-                tbl.add_row(m.id, m.category or "", desc)
+                # Truncate first, then escape, so the escapes stay balanced.
+                desc = sanitize_markup(m.description[:60])
+                tbl.add_row(sanitize_markup(m.id), sanitize_markup(m.category or ""), desc)
             renderer.console().print(tbl)
             rprint(f"[dim]{len(matched)} node(s)[/dim]")
     renderer.emit(payload, command="nodes search")
@@ -559,8 +563,8 @@ def upstream_cmd(
             tbl.add_column("category", style="dim")
             tbl.add_column("outputs")
             for r in rows:
-                outs = ", ".join(r["output_types"]) or "[dim]—[/dim]"
-                tbl.add_row(r["name"] or "", r["category"] or "", outs)
+                outs = sanitize_markup(", ".join(r["output_types"])) or "[dim]—[/dim]"
+                tbl.add_row(sanitize_markup(r["name"] or ""), sanitize_markup(r["category"] or ""), outs)
             renderer.console().print(tbl)
             tail = f" of {total_upstream}" if total_upstream != len(rows) else ""
             rprint(f"[dim]{len(rows)} upstream node(s){tail}[/dim]")
@@ -617,8 +621,8 @@ def downstream_cmd(
             tbl.add_column("category", style="dim")
             tbl.add_column("outputs")
             for r in rows:
-                outs = ", ".join(r["output_types"]) or "[dim]—[/dim]"
-                tbl.add_row(r["name"] or "", r["category"] or "", outs)
+                outs = sanitize_markup(", ".join(r["output_types"])) or "[dim]—[/dim]"
+                tbl.add_row(sanitize_markup(r["name"] or ""), sanitize_markup(r["category"] or ""), outs)
             renderer.console().print(tbl)
             tail = f" of {total_downstream}" if total_downstream != len(rows) else ""
             rprint(f"[dim]{len(rows)} downstream node(s){tail}[/dim]")
@@ -700,8 +704,13 @@ def path_cmd(
             )
         else:
             for p in paths:
-                chain = " [dim]→[/dim] ".join(f"[bold]{s.get('node')}[/bold]" for s in (p.get("steps") or []))
-                rprint(f"[cyan]{p.get('from')}[/cyan]  {chain}  [cyan]{p.get('to')}[/cyan]")
+                chain = " [dim]→[/dim] ".join(
+                    f"[bold]{sanitize_markup(s.get('node'))}[/bold]" for s in (p.get("steps") or [])
+                )
+                rprint(
+                    f"[cyan]{sanitize_markup(p.get('from'))}[/cyan]  {chain}  "
+                    f"[cyan]{sanitize_markup(p.get('to'))}[/cyan]"
+                )
             rprint(f"[dim]{len(paths)} path(s)[/dim]")
     renderer.emit(payload, command="nodes path")
 
@@ -750,7 +759,7 @@ def types_cmd(
     if renderer.is_pretty():
         from rich.columns import Columns
 
-        renderer.console().print(Columns([f"[cyan]{t}[/cyan]" for t in types], expand=True))
+        renderer.console().print(Columns([f"[cyan]{sanitize_markup(t)}[/cyan]" for t in types], expand=True))
         rprint(f"[dim]{len(types)} type(s)[/dim]")
     renderer.emit(payload, command="nodes types")
 
@@ -844,7 +853,7 @@ def categories_cmd(
             tbl.add_column("category")
             tbl.add_column("nodes", justify="right", style="dim")
             for p, c in flat:
-                tbl.add_row(p, str(c))
+                tbl.add_row(sanitize_markup(p), sanitize_markup(c))
             renderer.console().print(tbl)
             rprint(f"[dim]{len(flat)} categories[/dim]")
     renderer.emit(payload, command="nodes categories")

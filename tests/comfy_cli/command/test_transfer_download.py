@@ -232,6 +232,42 @@ class TestExtractOutputEntries:
         assert outputs[0]["url"] == "https://cloud.example.com/api/view?filename=ComfyUI_a.png&subfolder=&type=output"
 
 
+GLB_RECORD = {
+    "status": {"completed": True, "status_str": "success"},
+    "outputs": {"10": {"3d": [{"filename": "abc123.glb", "subfolder": "3d", "type": "output"}]}},
+}
+
+
+class TestSaveGlb3dDownload:
+    """Regression (BE-4417): a SaveGLB job emits its output under the "3d"
+    key. Shape-based extraction must resolve it so `comfy download` saves the
+    `.glb` instead of erroring `download_no_outputs`."""
+
+    def test_3d_only_record_downloads_glb(self, fake_target, tmp_path, capsys):
+        urls = comfy_client.Client(fake_target).extract_output_urls(GLB_RECORD)
+        assert urls == ["https://cloud.example.com/api/view?filename=abc123.glb&subfolder=3d&type=output"]
+        state = jobs_state.JobState(
+            prompt_id=PROMPT_ID,
+            client_id=None,
+            workflow="/abs/mesh.json",
+            where="cloud",
+            base_url=fake_target.base_url,
+            status="completed",
+            outputs=urls,
+            record=GLB_RECORD,
+            item_map=None,
+        )
+        assert jobs_state.write(state) is not None
+
+        paths, data = _run_download(fake_target, tmp_path, capsys)
+
+        assert len(paths) == 1
+        # Extension derives from the URL's filename query param → `.glb`.
+        assert Path(paths[0]).suffix == ".glb"
+        assert Path(paths[0]).is_file()
+        assert data["files"][0]["node_id"] == "10"
+
+
 class TestCollisionSafeNaming:
     """A retry fan-out reusing the same item ids re-downloads into the same
     out-dir; attempt 1 must never be silently clobbered (fennec friction #3,

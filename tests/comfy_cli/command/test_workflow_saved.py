@@ -15,6 +15,7 @@ import urllib.error
 from typing import Any
 
 import pytest
+import typer
 from typer.testing import CliRunner
 
 from comfy_cli.caller import Caller
@@ -125,13 +126,12 @@ def _patch_urlopen(monkeypatch: pytest.MonkeyPatch, routes: dict):
                 return _fake_resp(json.dumps(payload).encode())
         raise AssertionError(f"unexpected URL: {url}")
 
-    # Local (``--where local``) saved-workflow verbs go through
-    # ``_userdata_request``, which still calls the bare ``urllib.request.urlopen``.
-    # Cloud verbs go through the shared ``comfy_cli.http.request_json``, which
-    # opens via its own ``_OPENER`` (built with NoRedirectHandler). Patch both
-    # so either path is intercepted regardless of which one a given test hits.
-    monkeypatch.setattr("urllib.request.urlopen", _fake)
-    monkeypatch.setattr("comfy_cli.http._OPENER.open", _fake)
+    # Both the local ``/userdata`` and cloud workflow paths now open through the
+    # shared no-redirect opener in ``comfy_cli.http``; the fake still receives a
+    # ``Request`` object, so the route-matching above is unchanged.
+    import comfy_cli.http as http_mod
+
+    monkeypatch.setattr(http_mod._AUTHED_OPENER, "open", _fake)
     return calls
 
 
@@ -424,6 +424,57 @@ class TestLocalDelete:
         assert env["error"]["code"] == "invalid_argument"
 
 
+class TestLocalTooLargeHints:
+    """An oversize /userdata response means something different per verb, so the
+    hint must too — a `list` overflow is too many workflows, and save/delete have
+    already sent their write by the time the body is read."""
+
+    def _args(self, verb: str, tmp_path) -> list[str]:
+        if verb == "list":
+            return ["list", "--where", "local"]
+        if verb == "get":
+            return ["get", "flux.json", "--out", str(tmp_path / "o.json"), "--where", "local"]
+        if verb == "save":
+            src = tmp_path / "src.json"
+            src.write_text(json.dumps(_LOCAL_WORKFLOW))
+            return ["save", str(src), "--name", "flux", "--where", "local"]
+        return ["delete", "flux.json", "--where", "local"]
+
+    @pytest.mark.parametrize("verb", ["list", "get", "save", "delete"])
+    def test_hint_is_per_operation(self, verb, local_target, tmp_path, monkeypatch, capsys):
+        monkeypatch.setattr(workflow_cmd, "_USERDATA_MAX_BYTES", 4)
+        _patch_urlopen(monkeypatch, {"/userdata": (b'[{"path": "flux.json"}]', 200)})
+        env = _run(self._args(verb, tmp_path), capsys)
+        assert env["ok"] is False
+        assert env["error"]["code"] == "workflow_too_large"
+        assert env["error"]["details"]["operation"] == verb
+        assert env["error"]["hint"] == workflow_cmd._LOCAL_TOO_LARGE_HINTS[verb]
+
+    def test_list_hint_does_not_name_a_single_workflow(self):
+        # The listing is the whole workflows/ dir — "the saved workflow" (the old
+        # hardcoded hint) names a thing that doesn't exist for this verb.
+        assert "the saved workflow is" not in workflow_cmd._LOCAL_TOO_LARGE_HINTS["list"]
+
+    @pytest.mark.parametrize("verb", ["save", "delete"])
+    def test_write_verb_hints_do_not_imply_the_write_was_rejected(self, verb):
+        # The request is already on the wire before the body is read, so the
+        # mutation may have landed. The hint must send the user to confirm, not
+        # imply a clean failure they should retry.
+        hint = workflow_cmd._LOCAL_TOO_LARGE_HINTS[verb]
+        assert "may still have been" in hint
+        assert "workflow list" in hint
+
+    def test_unknown_operation_falls_back(self, capsys):
+        # Defensive: a future call site with a new operation still gets a hint,
+        # and one that claims nothing about what did or didn't happen.
+        renderer = _force_json_renderer()
+        exit_exc = workflow_cmd._handle_local_http_error(renderer, workflow_cmd._ResponseTooLarge(), operation="purge")
+        assert isinstance(exit_exc, typer.Exit)
+        env = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+        assert env["error"]["code"] == "workflow_too_large"
+        assert env["error"]["hint"] == "the local response was unexpectedly large"
+
+
 # ---------------------------------------------------------------------------
 # list
 # ---------------------------------------------------------------------------
@@ -508,12 +559,15 @@ class TestHttpRequestCap:
         target = workflow_cmd._resolve_where_target("cloud")
         assert workflow_cmd._http_request(target.url("workflows"), target) == (200, None)
 
-    def test_non_utf8_body_returns_none_rather_than_raising(self, cloud_target, monkeypatch):
-        # UnicodeDecodeError is a ValueError but not a JSONDecodeError; if it is
-        # not caught it escapes _http_request and no call site handles it.
+    def test_non_utf8_body_raises_unparseable(self, cloud_target, monkeypatch):
+        # UnicodeDecodeError is a ValueError but not a JSONDecodeError. A non-empty
+        # body that won't decode must not masquerade as "no data" (200, None); it is
+        # malformed and must raise _ResponseUnparseable so a call site maps it to a
+        # loud envelope rather than reporting empty success.
         _patch_urlopen(monkeypatch, {"/api/workflows": (b"\xff\xfe\x00not json", 200)})
         target = workflow_cmd._resolve_where_target("cloud")
-        assert workflow_cmd._http_request(target.url("workflows"), target) == (200, None)
+        with pytest.raises(workflow_cmd._ResponseUnparseable):
+            workflow_cmd._http_request(target.url("workflows"), target)
 
     def test_non_utf8_body_surfaces_envelope_not_traceback(self, cloud_target, monkeypatch, capsys):
         # End-to-end: the undecodable body must reach the user as an envelope.
@@ -616,3 +670,102 @@ class TestDelete:
         env = _run(["delete", "ghost", "--where", "cloud"], capsys)
         assert env["ok"] is False
         assert env["error"]["code"] == "workflow_not_found"
+
+
+# ---------------------------------------------------------------------------
+# unparseable 200 body — must surface a loud error, not empty/success (BE-3334)
+# ---------------------------------------------------------------------------
+
+# A non-empty 200 body the client can't decode as JSON. Four shapes, all malformed:
+#   - a valid-UTF-8 non-JSON page (e.g. an HTML proxy/error page returned 200) -> JSONDecodeError;
+#   - a non-UTF-8 byte string that isn't valid UTF-8 at all -> UnicodeDecodeError;
+#   - valid JSON encoded as UTF-16, which the *contract* treats as malformed. ``json.loads``
+#     auto-detects UTF-16/32 byte input (RFC 4627), so handed raw bytes it would silently
+#     accept this; decoding as UTF-8 first surfaces it as UnicodeDecodeError. Locks that in.
+#   - a JSON integer past CPython's 4300-digit int/str conversion limit: ``json.loads`` raises
+#     a *bare* ``ValueError`` (not ``JSONDecodeError``), which the narrow catch would have let
+#     escape as a raw traceback. Locks in the broadened ``ValueError``-base catch.
+# ``JSONDecodeError`` and ``UnicodeDecodeError`` both subclass ``ValueError``; catching the base
+# maps all four. None may be reported as "no data" (empty list / null id).
+_UNPARSEABLE_BODIES = [
+    pytest.param(b"<html>502 Bad Gateway</html>", id="non-json"),
+    pytest.param(b"\xff\xfe\x00bad", id="non-utf8"),
+    pytest.param(json.dumps({"data": [], "id": "x"}).encode("utf-16"), id="utf16-json"),
+    pytest.param(b"1" + b"0" * 4400, id="bigint-valueerror"),
+]
+
+
+class TestUnparseableResponse:
+    @pytest.mark.parametrize("raw", _UNPARSEABLE_BODIES)
+    def test_list_surfaces_error_not_empty(self, cloud_target, monkeypatch, capsys, raw):
+        _patch_urlopen(monkeypatch, {"/api/workflows": (raw, 200)})
+        env = _run(["list", "--where", "cloud"], capsys)
+        # Must NOT masquerade as a successful, genuinely-empty list.
+        assert env["ok"] is False
+        assert env["error"]["code"] == "workflow_unparseable"
+        assert env["error"]["details"]["operation"] == "list"
+
+    @pytest.mark.parametrize("raw", _UNPARSEABLE_BODIES)
+    def test_save_surfaces_error_not_null_id(self, cloud_target, tmp_path, monkeypatch, capsys, raw):
+        wf_path = tmp_path / "wf.json"
+        wf_path.write_text(json.dumps({"1": {"class_type": "KSampler", "inputs": {}}}))
+        _patch_urlopen(monkeypatch, {"/api/workflows": (raw, 200)})
+        env = _run(["save", str(wf_path), "--name", "x", "--where", "cloud"], capsys)
+        # Must NOT claim success with a null workflow_id.
+        assert env["ok"] is False
+        assert env["error"]["code"] == "workflow_unparseable"
+        assert env["error"]["details"]["operation"] == "save"
+
+    @pytest.mark.parametrize("raw", _UNPARSEABLE_BODIES)
+    def test_get_surfaces_error_not_missing_content(self, cloud_target, monkeypatch, capsys, raw):
+        _patch_urlopen(monkeypatch, {"/api/workflows/wf-uuid/content": (raw, 200)})
+        env = _run(["get", "wf-uuid", "--where", "cloud"], capsys)
+        # Must NOT be reported as missing/invalid content — it's a malformed transport body.
+        assert env["ok"] is False
+        assert env["error"]["code"] == "workflow_unparseable"
+        assert env["error"]["details"]["operation"] == "get"
+
+    @pytest.mark.parametrize("raw", _UNPARSEABLE_BODIES)
+    def test_delete_surfaces_error_not_success(self, cloud_target, monkeypatch, capsys, raw):
+        _patch_urlopen(monkeypatch, {"/api/workflows/wf-uuid": (raw, 200)})
+        env = _run(["delete", "wf-uuid", "--where", "cloud"], capsys)
+        # Must NOT claim a successful delete off an unparseable body.
+        assert env["ok"] is False
+        assert env["error"]["code"] == "workflow_unparseable"
+        assert env["error"]["details"]["operation"] == "delete"
+
+
+class TestListMalformedShape:
+    """A valid-JSON but wrongly-shaped 200 body reaches ``list`` (``get``/``save`` already
+    guard with ``isinstance``). It must map to an error, not raise a raw ``AttributeError``
+    and not coerce to a masquerading empty list."""
+
+    @pytest.mark.parametrize("raw", [pytest.param(b"[1, 2, 3]", id="array"), pytest.param(b"42", id="scalar")])
+    def test_list_non_dict_body_surfaces_error(self, cloud_target, monkeypatch, capsys, raw):
+        _patch_urlopen(monkeypatch, {"/api/workflows": (raw, 200)})
+        env = _run(["list", "--where", "cloud"], capsys)
+        assert env["ok"] is False
+        assert env["error"]["code"] == "cloud_http_error"
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            pytest.param(b'{"data": 42}', id="scalar"),
+            pytest.param(b'{"data": "oops"}', id="string"),
+            pytest.param(b'{"data": {"a": 1}}', id="object"),
+        ],
+    )
+    def test_list_non_list_data_surfaces_error(self, cloud_target, monkeypatch, capsys, raw):
+        # A dict body with a non-list ``data`` must not raise a raw TypeError (scalar)
+        # nor iterate silently into a masquerading empty listing (str/dict).
+        _patch_urlopen(monkeypatch, {"/api/workflows": (raw, 200)})
+        env = _run(["list", "--where", "cloud"], capsys)
+        assert env["ok"] is False
+        assert env["error"]["code"] == "cloud_http_error"
+
+    def test_list_missing_data_is_empty(self, cloud_target, monkeypatch, capsys):
+        # A dict body with no ``data`` key is a legitimately-empty listing, not an error.
+        _patch_urlopen(monkeypatch, {"/api/workflows": (b"{}", 200)})
+        env = _run(["list", "--where", "cloud"], capsys)
+        assert env["ok"] is True
+        assert env["data"]["count"] == 0
