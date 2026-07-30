@@ -11,18 +11,24 @@ from __future__ import annotations
 
 import json
 import urllib.error
-from urllib import request
 
 import typer
 
 from comfy_cli.command.run.loader import _MAX_BODY_PREVIEW
+from comfy_cli.http import plain_urlopen
 from comfy_cli.output import get_renderer
 from comfy_cli.output import rprint as pprint
+from comfy_cli.output.sanitize import sanitize_markup
 
 # Partner-API nodes live under `partner/...` in ComfyUI/cloud object_info
 # (e.g. `partner/video/ByteDance`). The category prefix is only the fallback —
 # the authoritative signal is the `api_node: true` flag.
 PARTNER_NODE_CATEGORY_PREFIXES = ("partner/",)
+
+# Cap on what we'll pull off the wire for /object_info, success or error. A
+# real schema dump is a few MiB at most; the bound is there so a wedged or
+# hostile server can't stream us out of memory.
+_MAX_OBJECT_INFO_BYTES = 64 * 1024 * 1024
 
 
 def fetch_object_info(host, port, timeout):
@@ -37,10 +43,10 @@ def fetch_object_info(host, port, timeout):
     renderer = get_renderer()
     url = f"http://{host}:{port}/object_info"
     try:
-        with request.urlopen(url, timeout=timeout) as resp:
-            body = resp.read(64 * 1024 * 1024)
+        with plain_urlopen(url, timeout=timeout) as resp:
+            body = resp.read(_MAX_OBJECT_INFO_BYTES)
     except urllib.error.HTTPError as e:
-        body_text = e.read().decode("utf-8", errors="replace").strip()
+        body_text = e.read(_MAX_OBJECT_INFO_BYTES).decode("utf-8", errors="replace").strip()
         renderer.error(
             code="object_info_unavailable",
             message=f"Failed to fetch /object_info (HTTP {e.code})",
@@ -108,7 +114,9 @@ def _preflight_validate(renderer, workflow: dict, object_info: dict, *, target_l
     warnings = validation.get("warnings", [])
     if warnings and renderer.is_pretty():
         for w in warnings:
-            pprint(f"[yellow]⚠ {w.get('field', '?')}: {w.get('message', '')}[/yellow]")
+            pprint(
+                f"[yellow]⚠ {sanitize_markup(w.get('field', '?'))}: {sanitize_markup(w.get('message', ''))}[/yellow]"
+            )
 
 
 def _fetch_object_info(host: str, port: int) -> dict:
