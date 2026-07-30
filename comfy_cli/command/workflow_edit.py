@@ -126,8 +126,32 @@ def add_node_cmd(
         workflow, op = workflow_ops.add_node(
             workflow, graph, class_type, pos=pos, actor=actor, base_version=base_version
         )
+    except workflow_ops.UnknownNodeType as e:
+        # Same envelope shape as `nodes show` so a caller can self-correct from
+        # the error alone. (The old hint pointed at `comfy nodes types`, which
+        # lists connection types — MODEL/LATENT/IMAGE — not class_types.)
+        if e.ui_only:
+            hint = "use a real node class; to annotate the graph, set a title/widget on an existing node instead"
+        elif e.subgraph_id:
+            hint = "pick a node CLASS from `comfy nodes search <text>`; a subgraph instance cannot be added"
+        elif e.close_matches:
+            hint = f"did you mean: {', '.join(e.close_matches)}?"
+        else:
+            hint = "run `comfy nodes search <text>` to find the class_type"
+        renderer.error(
+            code="node_not_found",
+            message=str(e),
+            hint=hint,
+            details={
+                "requested": e.class_type,
+                "close_matches": e.close_matches,
+                "ui_only": e.ui_only,
+                "subgraph_instance_id": e.subgraph_id,
+            },
+        )
+        raise typer.Exit(code=1) from e
     except ValueError as e:
-        renderer.error(code="workflow_edit_invalid", message=str(e), hint="run `comfy nodes types` to list class_types")
+        renderer.error(code="workflow_edit_invalid", message=str(e))
         raise typer.Exit(code=1) from e
     _finish(renderer, p, workflow, op, base_version, stdout, "workflow add-node")
 
@@ -259,6 +283,12 @@ def clear_cmd(
 
 
 # ---------------------------------------------------------------------------
+# Litegraph node modes worth surfacing on ls-nodes. 0 (always) and 1 (on-event)
+# are normal execution and are deliberately unlabeled. Mirrors workflow_to_api's
+# _MODE_MUTED / _MODE_BYPASS.
+_MODE_LABELS = {2: "mute", 4: "bypass"}
+
+
 # ls-nodes — recover node ids/types (so an agent can address minted nodes)
 # ---------------------------------------------------------------------------
 
@@ -274,13 +304,20 @@ def ls_nodes_cmd(
     for n in workflow.get("nodes") or []:
         if not isinstance(n, dict):
             continue
-        rows.append(
-            {
-                "id": n.get("id"),
-                "type": n.get("type"),
-                "title": n.get("title") or (n.get("properties") or {}).get("Node name for S&R"),
-            }
-        )
+        row = {
+            "id": n.get("id"),
+            "type": n.get("type"),
+            "title": n.get("title") or (n.get("properties") or {}).get("Node name for S&R"),
+        }
+        # ComfyUI disables a node without deleting it: mode 4 = bypass (input
+        # passes through), mode 2 = mute/never (dropped from execution). Both are
+        # invisible in id/type/title, so a caller could not tell a disabled node
+        # from a live one — and would "repair" a graph that is merely bypassed,
+        # or call a workflow runnable while a required node is muted.
+        # Emitted only when set, so a normal node stays a single clean row.
+        if (label := _MODE_LABELS.get(n.get("mode"))) is not None:
+            row["mode"] = label
+        rows.append(row)
     payload = {"workflow": str(p), "count": len(rows), "nodes": rows}
     if renderer.is_pretty():
         from rich.table import Table

@@ -1435,21 +1435,33 @@ def _node_widget_slots(node: dict, prefix: str, graph: Graph) -> list[dict]:
         return []
     widgets = node.get("widgets_values") or []
     order = graph.widget_order_for_node(node_type, widgets)
+    # Drive from `order`, not m.inputs. A COMFY_DYNAMICCOMBO_V3 input is ONE port
+    # (`model`) whose selected option contributes extra widgets addressed as
+    # `model.<sub>`; those dotted names exist in `order` but have no Port, so
+    # iterating m.inputs hid them. The only place they surfaced was the
+    # set-widget error ("available: model, model.prompt, model.resolution") —
+    # i.e. the CLI knew the answer and would not advertise it. 102 catalog types
+    # carry a dynamic combo.
+    by_name = {p.name: p for p in m.inputs if not p.is_link}
     slots: list[dict] = []
-    for port in m.inputs:
-        if port.is_link:
-            continue
-        try:
-            idx = order.index(port.name)
-        except ValueError:
-            continue
-        current = widgets[idx] if idx < len(widgets) else None
+    for idx, wname in enumerate(order):
+        port = by_name.get(wname)
+        if port is None:
+            # A dotted sub-widget: inherit type from its base port so the slot
+            # still advertises something useful. Skip if the base is unknown.
+            base = wname.split(".", 1)[0]
+            base_port = by_name.get(base)
+            if base_port is None:
+                continue
+            slot_type = base_port.type
+        else:
+            slot_type = port.type
         slots.append(
             {
-                "address": f"{prefix}.{port.name}",
-                "name": port.name,
-                "type": port.type,
-                "current_value": current,
+                "address": f"{prefix}.{wname}",
+                "name": wname,
+                "type": slot_type,
+                "current_value": widgets[idx] if idx < len(widgets) else None,
                 "instance_id": prefix,
                 "node_type": node_type,
             }

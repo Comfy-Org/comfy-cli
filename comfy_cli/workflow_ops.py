@@ -81,6 +81,49 @@ def _new_op(kind: str, actor: str, base_version: int, **fields: Any) -> dict[str
     }
 
 
+# Node types that live only in the UI graph and never reach the API — the
+# frontend's isVirtualNode set. Mirrors workflow_to_api._UI_ONLY_NODE_TYPES;
+# duplicated rather than imported to keep workflow_ops import-free of the
+# converter. Keep the two in sync.
+UI_ONLY_NODE_TYPES = frozenset({"Note", "MarkdownNote", "PrimitiveNode", "GetNode", "SetNode", "Reroute"})
+
+# A subgraph INSTANCE's node `type` is the UUID id of its definition, and
+# `ls-nodes` prints that verbatim — so a caller reading ls-nodes output can
+# mistake it for a class name. There is no instantiate-a-subgraph command, so
+# such an add can never succeed; say why instead of "unknown node type".
+_UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I)
+
+
+class UnknownNodeType(ValueError):
+    """add_node was given a class_type the catalog does not have.
+
+    Carries the machine-readable detail the command layer needs to emit the same
+    envelope `nodes show` does (code=node_not_found + details.close_matches), so
+    a caller can self-correct in one retry. Before this, add-node emitted a bare
+    workflow_edit_invalid with a hint pointing at `comfy nodes types` — which
+    lists CONNECTION types, not class_types.
+    """
+
+    def __init__(self, class_type: str, *, close_matches: list[str] | None = None, ui_only: bool = False, subgraph_id: bool = False):
+        self.class_type = class_type
+        self.close_matches = close_matches or []
+        self.ui_only = ui_only
+        self.subgraph_id = subgraph_id
+        if ui_only:
+            msg = (
+                f"{class_type!r} is a UI-only node (it exists in the editor graph but never reaches the API), "
+                "so it cannot be added through this surface"
+            )
+        elif subgraph_id:
+            msg = (
+                f"{class_type!r} is a subgraph INSTANCE id, not a node class. `ls-nodes` prints a subgraph "
+                "instance's definition uuid as its type; there is no command to instantiate a subgraph"
+            )
+        else:
+            msg = f"unknown node type {class_type!r}"
+        super().__init__(msg)
+
+
 def _find(workflow: dict, node_id: Any) -> dict | None:
     for n in workflow.get("nodes") or []:
         if isinstance(n, dict) and n.get("id") == node_id:
@@ -273,7 +316,14 @@ def add_node(
 ) -> tuple[dict, dict]:
     m = graph.node(class_type)
     if m is None:
-        raise ValueError(f"unknown node type {class_type!r}")
+        if class_type in UI_ONLY_NODE_TYPES:
+            raise UnknownNodeType(class_type, ui_only=True)
+        if _UUID_RE.match(class_type.strip()):
+            raise UnknownNodeType(class_type, subgraph_id=True)
+        import difflib
+
+        names = [n.id for n in graph.all_nodes()]
+        raise UnknownNodeType(class_type, close_matches=difflib.get_close_matches(class_type, names, n=5, cutoff=0.6))
     size = layout.estimate_size(
         len([p for p in m.inputs if p.is_link]),
         len(m.outputs),
@@ -1178,6 +1228,19 @@ def _validate_widget(graph, class_type: str, widget: str, value: Any) -> list[di
     return port.validate_catalog(value)
 
 
+def _normalize_slot_name(name: Any) -> str:
+    """Case/separator-insensitive key for a slot name.
+
+    Lowercased with every run of non-alphanumerics collapsed to a single "_", so
+    `IMAGE`/`image`, `model task_id`/`MODEL_TASK_ID` and `Florence2_Model`/
+    `florence2_model` all agree. Used only as a FALLBACK after exact matching, and
+    only when it identifies exactly one slot.
+    """
+    if not isinstance(name, str):
+        return ""
+    return re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")
+
+
 def _resolve_output_slot(node: dict, graph, slot: Any) -> tuple[int, str]:
     outs = node.get("outputs") or []
     if isinstance(slot, int) or (isinstance(slot, str) and slot.lstrip("-").isdigit()):
@@ -1188,6 +1251,18 @@ def _resolve_output_slot(node: dict, graph, slot: Any) -> tuple[int, str]:
     for i, o in enumerate(outs):
         if o.get("name") == slot:
             return i, o.get("type", "*")
+    # Exact match failed. Accept an unambiguous case/separator variant: an output
+    # named `image` addressed as `IMAGE`, or `model task_id` as `MODEL_TASK_ID`.
+    # Callers reach for the TYPE string when they were never shown the name, and
+    # for these the intent is unambiguous. Guarded to EXACTLY ONE match so a node
+    # carrying both `mask` and `MASK` (the only such collision class in the 3573
+    # -node catalog) keeps failing rather than being silently guessed.
+    want = _normalize_slot_name(slot)
+    if want:
+        hits = [i for i, o in enumerate(outs) if _normalize_slot_name(o.get("name")) == want]
+        if len(hits) == 1:
+            i = hits[0]
+            return i, outs[i].get("type", "*")
     names = [o.get("name") for o in outs]
     raise ValueError(f"output {slot!r} not found on node {node.get('id')}; outputs: {names}")
 
