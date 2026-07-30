@@ -316,6 +316,18 @@ def _checkpoint_enum(object_info: dict) -> list | None:
     return None
 
 
+def _basename(name: str) -> str:
+    """Last path segment of a ComfyUI-enumerated model name.
+
+    ``folder_paths`` builds these names with ``os.path.relpath``, so the
+    separator is the SERVER's, not ours: a subfoldered checkpoint arrives as
+    ``SD1.5/name.safetensors`` from a POSIX host and ``SD1.5\\name.safetensors``
+    from a Windows one. Normalize both before comparing basenames — splitting on
+    ``/`` alone would miss the Windows form and trigger a needless substitution.
+    """
+    return name.replace("\\", "/").rsplit("/", 1)[-1]
+
+
 def resolve_default_checkpoint(
     workflow: dict, object_info: dict, *, target: str = "the server"
 ) -> tuple[dict, CheckpointResolution]:
@@ -357,9 +369,9 @@ def resolve_default_checkpoint(
     # subfolder (e.g. ``SD1.5/v1-5-…safetensors``). Prefer a basename match to
     # the *intended* checkpoint before falling back to an arbitrary substitute.
     if isinstance(pinned, str):
-        pinned_base = pinned.rsplit("/", 1)[-1]
+        pinned_base = _basename(pinned)
         for entry in enum:
-            if isinstance(entry, str) and entry.rsplit("/", 1)[-1] == pinned_base:
+            if isinstance(entry, str) and _basename(entry) == pinned_base:
                 inputs["ckpt_name"] = entry
                 return workflow, CheckpointResolution()
 

@@ -787,8 +787,9 @@ def run(
             help=(
                 "Positive text prompt for the bundled default text2img workflow "
                 "(used when --workflow is omitted). Cannot be combined with --workflow. "
-                "The bundled graph loads an SD1.5 checkpoint (v1-5-pruned-emaonly.ckpt) "
-                "that is NOT downloaded for you — install it, or point elsewhere with "
+                "The bundled graph prefers an SD1.5 checkpoint "
+                "(v1-5-pruned-emaonly-fp16.safetensors); if the target doesn't have it, "
+                "an installed checkpoint is substituted and reported. Pin your own with "
                 "--set checkpoint=<name>."
             ),
         ),

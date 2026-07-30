@@ -259,10 +259,24 @@ class TestResolveDefaultCheckpoint:
         assert res.substituted_to is None
         assert res.no_checkpoint is False
 
+    def test_pinned_matched_by_basename_windows_separator(self):
+        # A Windows server's folder_paths builds relative names with `\`, so the
+        # basename match must normalize separators — otherwise the intended
+        # checkpoint is missed and enum[0] is substituted needlessly. This is
+        # about the SERVER's separator, so it must hold on any client OS.
+        wf = build_default_workflow(prompt="fox")
+        subfoldered = f"SD1.5\\{DEFAULT_CHECKPOINT_NAME}"
+        oi = _object_info_with_checkpoints(["other.safetensors", subfoldered])
+        out, res = resolve_default_checkpoint(wf, oi)
+        assert out[CHECKPOINT_LOADER_ID]["inputs"]["ckpt_name"] == subfoldered
+        assert res.note is None
+        assert res.substituted_to is None
+        assert res.no_checkpoint is False
+
     def test_object_info_without_checkpoint_node_fails_open(self):
         # object_info present but no CheckpointLoaderSimple → can't tell → fail open.
         wf = build_default_workflow(prompt="fox")
-        out, res = resolve_default_checkpoint(wf, {"KSampler": {"input": {"required": {}}}})
+        _, res = resolve_default_checkpoint(wf, {"KSampler": {"input": {"required": {}}}})
         assert res.no_checkpoint is False
         assert res.note is None
 

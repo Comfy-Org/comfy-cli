@@ -684,6 +684,13 @@ def execute_cloud(
             renderer.error(code=e.code, message=str(e), hint=e.hint)
             raise typer.Exit(code=1) from e
 
+    # The cloud object_info snapshot is used twice below (UI→API conversion and
+    # checkpoint resolution/preflight). `_load_from_target` is a live, uncached
+    # HTTPS fetch, so load it at most once and share it across both. `None`
+    # means "not fetched yet" — distinct from a fetched-but-empty snapshot,
+    # which must NOT trigger a second round-trip.
+    cloud_object_info: dict | None = None
+
     if is_ui:
         # Frontend-format workflows (the `nodes`+`links` shape from the canvas
         # exporter and `comfy templates fetch`) have to be lowered to the API
@@ -694,7 +701,7 @@ def execute_cloud(
         if renderer.is_pretty():
             pprint("[yellow]Detected UI-format workflow, converting to API format…[/yellow]")
         try:
-            object_info = _load_from_target(mode="cloud")
+            object_info = cloud_object_info = _load_from_target(mode="cloud")
         except Exception as e:  # noqa: BLE001
             renderer.error(
                 code="cql_no_graph",
@@ -741,12 +748,14 @@ def execute_cloud(
     # Cloud path uses cached/bundled object_info (no live server needed). Load
     # it up front so checkpoint resolution can run BEFORE the preview/print
     # below — the audit trail must advertise the graph we actually submit.
-    try:
-        from comfy_cli.cql.engine import _load_from_target
+    # Already fetched above when the workflow arrived in UI format.
+    if cloud_object_info is None:
+        try:
+            from comfy_cli.cql.engine import _load_from_target
 
-        cloud_object_info = _load_from_target(mode="cloud")
-    except Exception:  # noqa: BLE001
-        cloud_object_info = {}
+            cloud_object_info = _load_from_target(mode="cloud")
+        except Exception:  # noqa: BLE001
+            cloud_object_info = {}
 
     # Runtime checkpoint resolution for the bundled `--prompt` default (mirrors
     # the local path): swap the pinned checkpoint for one Comfy Cloud actually
