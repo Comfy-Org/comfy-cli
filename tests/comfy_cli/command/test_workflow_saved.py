@@ -125,7 +125,12 @@ def _patch_urlopen(monkeypatch: pytest.MonkeyPatch, routes: dict):
                 return _fake_resp(json.dumps(payload).encode())
         raise AssertionError(f"unexpected URL: {url}")
 
-    monkeypatch.setattr("urllib.request.urlopen", _fake)
+    # Both the local ``/userdata`` and cloud workflow paths now open through the
+    # shared no-redirect opener in ``comfy_cli.http``; the fake still receives a
+    # ``Request`` object, so the route-matching above is unchanged.
+    import comfy_cli.http as http_mod
+
+    monkeypatch.setattr(http_mod._AUTHED_OPENER, "open", _fake)
     return calls
 
 

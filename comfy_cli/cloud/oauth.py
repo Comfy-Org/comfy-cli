@@ -52,7 +52,7 @@ from comfy_cli.cloud import (
     CLIENT_NAME,
     get_base_url,
 )
-from comfy_cli.http import NoRedirectHandler
+from comfy_cli.http import NoRedirectHandler, build_http_only_opener
 
 # ---------------------------------------------------------------------------
 # Error types — caller maps these to renderer.error(code=...) codes.
@@ -889,7 +889,7 @@ def _assert_https_or_loopback(url: str) -> None:
     raise _HTTPFail(0, f"refusing plaintext HTTP for OAuth endpoint: {url}")
 
 
-_OAUTH_OPENER = urllib.request.build_opener(NoRedirectHandler())
+_OAUTH_OPENER = build_http_only_opener(NoRedirectHandler())
 
 
 def _send_and_parse(req: urllib.request.Request) -> dict:
