@@ -309,6 +309,39 @@ Without `--wait` (the default), the stream ends at the `queued` envelope
 watcher keeps the state file updated; follow up with
 `comfy jobs watch <prompt_id>` or `comfy jobs status <prompt_id>`.
 
+## `comfy validate --json` envelope
+
+`comfy validate --workflow <file> --json` checks a workflow without submitting
+it and emits a single envelope (no event stream). On a valid workflow `ok` is
+`true` and `data` carries:
+
+| Field                  | Type          | Description                                                                                     |
+| ---------------------- | ------------- | ----------------------------------------------------------------------------------------------- |
+| `workflow`             | str           | Absolute path of the validated workflow file                                                    |
+| `valid`                | bool          | Whether the graph passed validation (also the envelope `ok`)                                     |
+| `error_count`          | number        | Number of entries in `errors`                                                                    |
+| `warning_count`        | number        | Number of entries in `warnings`                                                                  |
+| `errors`               | array of dict | Per-node validation errors (empty when `valid`)                                                  |
+| `warnings`             | array of dict | Non-fatal validation warnings                                                                    |
+| `partner_nodes`        | array of str  | Sorted class_types in the workflow that are partner-API (paid) nodes. **Always present**; `[]` when none |
+| `spends_credits`       | bool          | `true` iff `partner_nodes` is non-empty — a convenience flag for "will this workflow spend Comfy credits?" |
+| `converted_from_ui`    | bool          | Present and `true` only when the input was a UI export that was lowered to API format before validating |
+| `converted_node_count` | number        | Present only alongside `converted_from_ui`: node count of the converted graph                    |
+
+`partner_nodes` / `spends_credits` are **informational only** — they never
+change validate's exit code (validate stays advisory; the credit-spend gate
+lives in `comfy run`). Detection is the same authoritative `api_node: true`
+flag (with a `partner/...` category fallback) that `comfy run` uses, run over
+the loaded `object_info`; in offline `--input` mode where the `object_info`
+lacks `api_node` flags the list is simply empty (fail-open). When
+`spends_credits` is `true`, pretty (non-`--json`) mode also prints a yellow
+`⚠ uses partner-API (paid) nodes …` line after the verdict.
+
+Invalid workflows emit `ok: false` with the same `data` fields (`valid: false`,
+a populated `errors` array, `partner_nodes`/`spends_credits` still present) and
+exit code `1`. Structural failures (missing file, non-object JSON, an
+unconvertible UI export) emit an [error object](#error-object) instead.
+
 ## Error object
 
 Every failure envelope carries:
