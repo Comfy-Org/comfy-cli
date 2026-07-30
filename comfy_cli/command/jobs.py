@@ -36,6 +36,7 @@ from websocket import WebSocket, WebSocketException, WebSocketTimeoutException
 from comfy_cli import cancellation, execution_errors, tracking
 from comfy_cli.env_checker import check_comfy_server_running
 from comfy_cli.host_port import resolve_host_port as _resolve_host_port
+from comfy_cli.http import authed_urlopen, plain_urlopen
 from comfy_cli.output import get_renderer
 from comfy_cli.where import cloud_preflight_or_exit
 
@@ -83,10 +84,15 @@ def _server_or_error(host: str, port: int, *, raise_on_missing: bool = True) -> 
 def _http_get_json(url: str, *, timeout: float = 10.0) -> Any:
     req = urllib.request.Request(url)
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with plain_urlopen(req, timeout=timeout) as resp:
             return json.loads(resp.read())
     except urllib.error.URLError as e:
         raise RuntimeError(f"failed to GET {url}: {e}") from e
+    except ValueError as e:
+        # json.JSONDecodeError is a ValueError — a non-JSON 200 (captive
+        # portal, proxy error page) must look like any other GET failure to
+        # callers, not crash them with an uncaught decode error.
+        raise RuntimeError(f"failed to parse JSON from {url}: {e}") from e
 
 
 # ---------------------------------------------------------------------------
@@ -376,7 +382,7 @@ def ls_cmd(
     limit: Annotated[int, typer.Option(help="How many history entries to include.")] = 10,
     where: Annotated[
         str | None,
-        typer.Option("--where", help="'local' (default) or 'cloud'. Cloud requires `comfy auth login`."),
+        typer.Option("--where", help="'local' (default) or 'cloud'. Cloud requires `comfy cloud login`."),
     ] = None,
     local_only: Annotated[
         bool,
@@ -661,7 +667,72 @@ def status_cmd(
         return _cloud_status(prompt_id)
 
     h, p = _resolve_host_port(host, port)
-    _server_or_error(h, p)
+    if not _server_or_error(h, p, raise_on_missing=False):
+        # Server is down. The on-disk state file (written by `comfy run` and
+        # maintained by the async watcher) still knows what this prompt was
+        # doing when the server was last seen — a bare `server_not_running`
+        # throws that attribution away.
+        from comfy_cli import jobs_state
+
+        try:
+            st = jobs_state.read(prompt_id)
+        except ValueError:  # unsafe prompt_id — no state file to read
+            st = None
+
+        if st is None:
+            # Untracked prompt: same envelope as before, byte for byte.
+            renderer.error(
+                code="server_not_running",
+                message=f"ComfyUI not running on {h}:{p}",
+                hint="run: comfy launch",
+                details={"host": h, "port": p},
+            )
+            raise typer.Exit(code=1)
+
+        if st.is_terminal:
+            # The job finished before the server stopped — the state file is
+            # the authoritative record, so this is a normal result, not an
+            # error. Callers branch on `status`/`error`.
+            snapshot = {
+                "prompt_id": prompt_id,
+                "status": st.status,
+                "outputs": list(st.outputs or []),
+                "error": st.error,
+                "host": h,
+                "port": p,
+                "server_running": False,
+                "source": "state_file",
+                "submitted_at": st.submitted_at,
+                "updated_at": st.updated_at,
+                "workflow": st.workflow,
+            }
+            if renderer.is_pretty():
+                _render_status_pretty(snapshot, host=h, port=p)
+            renderer.emit(snapshot, command="jobs status")
+            return
+
+        # Non-terminal: the job was queued/running when the server was last
+        # seen, so the server most likely died underneath it. Keep the
+        # `server_not_running` code (callers key on it) and attribute.
+        renderer.error(
+            code="server_not_running",
+            message=(
+                f"ComfyUI not running on {h}:{p} — job {prompt_id} was {st.status!r} when the server "
+                f"was last seen (submitted {st.submitted_at}, last update {st.updated_at}). The server "
+                f"may have died while executing it (e.g. killed by the OS on an out-of-memory allocation)."
+            ),
+            hint="run: comfy launch — then check `comfy jobs ls` for the job's last recorded state",
+            details={
+                "host": h,
+                "port": p,
+                "prompt_id": prompt_id,
+                "last_known_status": st.status,
+                "submitted_at": st.submitted_at,
+                "updated_at": st.updated_at,
+                "workflow": st.workflow,
+            },
+        )
+        raise typer.Exit(code=1)
 
     snapshot = _snapshot(h, p, prompt_id)
     if snapshot is None:
@@ -1014,7 +1085,7 @@ def wait_cmd(
 
 @app.command(
     "cancel",
-    help="Cancel a job. Idempotent — calling on an already-terminal prompt returns ok.",
+    help="Cancel a job. Idempotent for known jobs; unknown ids error with prompt_not_found.",
 )
 @tracking.track_command("jobs")
 def cancel_cmd(
@@ -1038,44 +1109,111 @@ def _local_cancel(prompt_id: str, host: str, port: int) -> None:
     interrupting any in-flight execution. ComfyUI splits these into two
     endpoints; we hit both so the call works regardless of phase.
 
-    Returns 200 (ok) regardless of whether the prompt was actually
-    queued/running — mirrors cloud's idempotent behavior.
+    Idempotent for prompts we can prove exist — running, pending, in the
+    server's history, or in the local state store — including already-terminal
+    ones, which return ok. An id that is nowhere is a `prompt_not_found` error
+    (exit 1), matching what the cloud path does with a 404: ``POST /queue
+    {"delete": [id]}`` 200s for unknown ids, so without the probe below a
+    typo'd id is indistinguishable from a real cancel.
     """
     renderer = get_renderer()
     base = f"http://{host}:{port}"
+    from comfy_cli import jobs_state
 
-    # 1. Remove from the pending queue (no-op if not pending).
+    # 0. An empty/whitespace id can never name a real prompt, and it would turn
+    #    the /history/<id> probe below into `GET /history/` — the list-ALL
+    #    endpoint, whose non-empty body would read as "found". Reject it up
+    #    front, before any probe or mutation.
+    if not prompt_id.strip():
+        renderer.error(
+            code="prompt_not_found",
+            message="prompt id must be a non-empty string",
+            hint="check `comfy jobs ls`",
+            details={"prompt_id": prompt_id, "host": host, "port": port},
+        )
+        raise typer.Exit(code=1)
+
+    # 1. Existence probe, BEFORE mutating anything — the queue delete in step 2
+    #    would erase the only evidence that a pending prompt ever existed.
+    try:
+        queue = _http_get_json(f"{base}/queue")
+        queue_reachable_pre = True
+    except RuntimeError:
+        queue = {}
+        queue_reachable_pre = False
+    if not isinstance(queue, dict):
+        queue = {}
+    running_ids = {str(_safe_queue_entry(entry)[0]) for entry in (queue.get("queue_running") or [])}
+    pending_ids = {str(_safe_queue_entry(entry)[0]) for entry in (queue.get("queue_pending") or [])}
+
+    # A state file means WE submitted it, so it existed even if the server has
+    # since forgotten it (restart, history trimmed). Read for existence only —
+    # the status write at the end re-reads, so a concurrent `jobs watch` update
+    # in the meantime isn't clobbered.
+    found = prompt_id in running_ids or prompt_id in pending_ids or jobs_state.read(prompt_id) is not None
+    probes_reachable = queue_reachable_pre
+    if not found and queue_reachable_pre:
+        # /history/<id> is `{}` for an unknown id, and a dict keyed by the id
+        # for a known one (running, completed, errored, or cancelled). Quote the
+        # id into the path so a hostile value can't escape the segment — same
+        # defense in depth as the cloud path.
+        try:
+            history = _http_get_json(f"{base}/history/{urllib.parse.quote(prompt_id, safe='')}")
+            found = isinstance(history, dict) and bool(history)
+        except RuntimeError:
+            # Unreachable is not "absent" — absence of evidence isn't evidence
+            # of absence, so fall through to the idempotent path instead.
+            probes_reachable = False
+
+    if not found and probes_reachable:
+        renderer.error(
+            code="prompt_not_found",
+            message=f"no local job with id {prompt_id!r}",
+            hint="check `comfy jobs ls`",
+            details={"prompt_id": prompt_id, "host": host, "port": port},
+        )
+        raise typer.Exit(code=1)
+
+    # 2. Remove from the pending queue (no-op if not pending).
     queue_body = json.dumps({"delete": [prompt_id]}).encode("utf-8")
     queue_req = urllib.request.Request(
         f"{base}/queue", data=queue_body, method="POST", headers={"Content-Type": "application/json"}
     )
     queue_ok = True
     try:
-        with urllib.request.urlopen(queue_req, timeout=10) as resp:
+        with plain_urlopen(queue_req, timeout=10) as resp:
             _ = resp.read()
     except (urllib.error.HTTPError, urllib.error.URLError, OSError):
         # Server refused the delete; common when the prompt isn't in queue.
         # Don't fail the whole command — try the interrupt next.
         queue_ok = False
 
-    # 2. Interrupt only if THIS prompt is the one currently executing.
+    # 3. Interrupt only if THIS prompt is the one currently executing.
     #    /interrupt takes NO prompt_id — it kills whatever is running — so
     #    blindly posting it after a pending-job delete would also abort an
-    #    unrelated running job ("cancel B" silently cancelling A). Gate on
-    #    /queue's queue_running list; the queue delete above already covers
-    #    pending jobs.
-    interrupt_ok = True
+    #    unrelated running job ("cancel B" silently cancelling A). Gate on a
+    #    FRESH read of /queue's queue_running: the step-1 snapshot predates the
+    #    delete round-trip, and in that window our prompt can go pending→running
+    #    (missing it = silent cancel failure) or a different prompt can take
+    #    over the running slot (interrupting it = cancelling A instead of B).
     try:
-        queue = _http_get_json(f"{base}/queue")
+        queue_now = _http_get_json(f"{base}/queue")
         queue_reachable = True
+        if not isinstance(queue_now, dict):
+            queue_now = {}
+        is_running = prompt_id in {str(_safe_queue_entry(entry)[0]) for entry in (queue_now.get("queue_running") or [])}
     except RuntimeError:
-        queue = {}
+        # Can't confirm; fall back to the step-1 snapshot. The server is very
+        # likely down, in which case /interrupt fails harmlessly too — better
+        # a best-effort interrupt than a silently skipped cancel.
         queue_reachable = False
-    running_ids = {str(_safe_queue_entry(entry)[0]) for entry in (queue.get("queue_running") or [])}
-    if prompt_id in running_ids:
+        is_running = prompt_id in running_ids
+
+    interrupt_ok = True
+    if is_running:
         interrupt_req = urllib.request.Request(f"{base}/interrupt", method="POST")
         try:
-            with urllib.request.urlopen(interrupt_req, timeout=10) as resp:
+            with plain_urlopen(interrupt_req, timeout=10) as resp:
                 _ = resp.read()
         except (urllib.error.HTTPError, urllib.error.URLError, OSError):
             interrupt_ok = False
@@ -1094,13 +1232,19 @@ def _local_cancel(prompt_id: str, host: str, port: int) -> None:
         "where": "local",
         "host": host,
         "port": port,
+        "found": found,
         "queue_delete_ok": queue_ok,
         "interrupt_ok": interrupt_ok,
     }
-    from comfy_cli import jobs_state
 
+    # Re-read right before the write: the step-1 read predates three network
+    # round-trips, and a concurrent `jobs watch` may have recorded newer
+    # status/outputs in the meantime (the per-file lock stops torn writes, not
+    # stale overwrites). Already-terminal jobs keep their recorded outcome —
+    # cancelling a finished job is an idempotent ok, not a re-labelling of a
+    # 'completed' run as 'cancelled'.
     existing = jobs_state.read(prompt_id)
-    if existing is not None:
+    if existing is not None and not existing.is_terminal:
         existing.status = "cancelled"
         jobs_state.write(existing)
 
@@ -1124,14 +1268,9 @@ def _cloud_cancel(prompt_id: str) -> None:
     # escape (e.g. ``../foo`` → ``%2E%2E%2Ffoo``). Cloud rejects bad UUIDs
     # upstream too; encoding here is defense in depth.
     url = target.url("jobs", urllib.parse.quote(prompt_id, safe=""), "cancel")
-    req = urllib.request.Request(url, data=b"", method="POST")
-    if target.api_key:
-        req.add_header("X-API-Key", target.api_key)
-    elif target.auth_token:
-        req.add_header("Authorization", f"Bearer {target.auth_token}")
 
     try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
+        with authed_urlopen(url, target, method="POST", data=b"", timeout=15) as resp:
             body = resp.read()
     except urllib.error.HTTPError as e:
         body_text = (e.read() or b"")[:1000].decode("utf-8", "replace")
@@ -1154,7 +1293,7 @@ def _cloud_cancel(prompt_id: str) -> None:
         renderer.error(
             code="cloud_http_error",
             message=f"cancel failed: {e}",
-            hint="check network / `comfy auth whoami`",
+            hint="check network / `comfy cloud whoami`",
         )
         raise typer.Exit(code=1) from e
 
@@ -1499,7 +1638,7 @@ def _cloud_client():
         return Client(target, clear_session_on_auth_failure=False)
     except Unauthenticated as e:
         renderer = get_renderer()
-        renderer.error(code="cloud_unauthorized", message=str(e), hint="run: comfy auth login")
+        renderer.error(code="cloud_unauthorized", message=str(e), hint="run: comfy cloud login")
         raise typer.Exit(code=1) from e
 
 

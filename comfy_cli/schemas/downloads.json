@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://comfy.org/schemas/downloads.json",
+  "title": "comfy model downloads --json data payload",
+  "description": "Every background download this workspace knows about, newest first. Each row is reconciled exactly as `download-status` reconciles a single id.",
+  "type": "object",
+  "required": ["total", "downloads"],
+  "additionalProperties": true,
+  "properties": {
+    "total": { "type": "integer" },
+    "downloads": {
+      "type": "array",
+      "items": { "$ref": "download_status.json#/$defs/row" }
+    }
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "comfy stop",
+  "description": "Output shape for the stop command's success envelope.",
+  "type": "object",
+  "properties": {
+    "stopped": { "type": "boolean" },
+    "host": { "type": "string" },
+    "port": { "type": ["integer", "string"] },
+    "pid": { "type": "integer" }
+  },
+  "required": ["stopped"]
+}
