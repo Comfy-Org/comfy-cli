@@ -13,6 +13,7 @@ import sys
 
 from comfy_cli.output import get_renderer
 from comfy_cli.output import rprint as pprint
+from comfy_cli.output.sanitize import sanitize_markup
 
 
 def _tail_state_file(prompt_id: str, *, seconds: float = 8.0) -> None:
@@ -63,7 +64,7 @@ def _tail_state_file(prompt_id: str, *, seconds: float = 8.0) -> None:
     if final_state.is_terminal:
         pprint(f"  {glyph} [dim]· finished in {elapsed:.1f}s[/dim]")
         for u in (final_state.outputs or [])[:3]:
-            pprint(f"  [dim]→[/dim] [cyan]{u}[/cyan]")
+            pprint(f"  [dim]→[/dim] [cyan]{sanitize_markup(u)}[/cyan]")
     else:
         pprint(f"  {glyph} [dim]· still in flight — track:[/dim] [cyan]comfy jobs ls --watch[/cyan]")
 

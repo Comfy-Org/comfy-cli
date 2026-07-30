@@ -119,4 +119,4 @@ def test_url_error_surfaces_network_hint():
 
     call = renderer.calls[0]
     assert call["code"] == "cloud_http_error"
-    assert "comfy auth whoami" in call["hint"]
+    assert "comfy cloud whoami" in call["hint"]

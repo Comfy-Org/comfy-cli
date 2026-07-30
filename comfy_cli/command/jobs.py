@@ -356,7 +356,7 @@ def ls_cmd(
     limit: Annotated[int, typer.Option(help="How many history entries to include.")] = 10,
     where: Annotated[
         str | None,
-        typer.Option("--where", help="'local' (default) or 'cloud'. Cloud requires `comfy auth login`."),
+        typer.Option("--where", help="'local' (default) or 'cloud'. Cloud requires `comfy cloud login`."),
     ] = None,
     local_only: Annotated[
         bool,
@@ -601,7 +601,72 @@ def status_cmd(
         return _cloud_status(prompt_id)
 
     h, p = _resolve_host_port(host, port)
-    _server_or_error(h, p)
+    if not _server_or_error(h, p, raise_on_missing=False):
+        # Server is down. The on-disk state file (written by `comfy run` and
+        # maintained by the async watcher) still knows what this prompt was
+        # doing when the server was last seen — a bare `server_not_running`
+        # throws that attribution away.
+        from comfy_cli import jobs_state
+
+        try:
+            st = jobs_state.read(prompt_id)
+        except ValueError:  # unsafe prompt_id — no state file to read
+            st = None
+
+        if st is None:
+            # Untracked prompt: same envelope as before, byte for byte.
+            renderer.error(
+                code="server_not_running",
+                message=f"ComfyUI not running on {h}:{p}",
+                hint="run: comfy launch",
+                details={"host": h, "port": p},
+            )
+            raise typer.Exit(code=1)
+
+        if st.is_terminal:
+            # The job finished before the server stopped — the state file is
+            # the authoritative record, so this is a normal result, not an
+            # error. Callers branch on `status`/`error`.
+            snapshot = {
+                "prompt_id": prompt_id,
+                "status": st.status,
+                "outputs": list(st.outputs or []),
+                "error": st.error,
+                "host": h,
+                "port": p,
+                "server_running": False,
+                "source": "state_file",
+                "submitted_at": st.submitted_at,
+                "updated_at": st.updated_at,
+                "workflow": st.workflow,
+            }
+            if renderer.is_pretty():
+                _render_status_pretty(snapshot, host=h, port=p)
+            renderer.emit(snapshot, command="jobs status")
+            return
+
+        # Non-terminal: the job was queued/running when the server was last
+        # seen, so the server most likely died underneath it. Keep the
+        # `server_not_running` code (callers key on it) and attribute.
+        renderer.error(
+            code="server_not_running",
+            message=(
+                f"ComfyUI not running on {h}:{p} — job {prompt_id} was {st.status!r} when the server "
+                f"was last seen (submitted {st.submitted_at}, last update {st.updated_at}). The server "
+                f"may have died while executing it (e.g. killed by the OS on an out-of-memory allocation)."
+            ),
+            hint="run: comfy launch — then check `comfy jobs ls` for the job's last recorded state",
+            details={
+                "host": h,
+                "port": p,
+                "prompt_id": prompt_id,
+                "last_known_status": st.status,
+                "submitted_at": st.submitted_at,
+                "updated_at": st.updated_at,
+                "workflow": st.workflow,
+            },
+        )
+        raise typer.Exit(code=1)
 
     snapshot = _snapshot(h, p, prompt_id)
     if snapshot is None:
@@ -1065,10 +1130,10 @@ def _cloud_cancel(prompt_id: str) -> None:
     # upstream too; encoding here is defense in depth.
     url = target.url("jobs", urllib.parse.quote(prompt_id, safe=""), "cancel")
     req = urllib.request.Request(url, data=b"", method="POST")
-    if target.api_key:
-        req.add_header("X-API-Key", target.api_key)
-    elif target.auth_token:
-        req.add_header("Authorization", f"Bearer {target.auth_token}")
+    from comfy_cli.http import target_auth_headers
+
+    for k, v in target_auth_headers(target).items():
+        req.add_header(k, v)
 
     try:
         with urllib.request.urlopen(req, timeout=15) as resp:
@@ -1428,7 +1493,7 @@ def _cloud_client():
         return Client(target, clear_session_on_auth_failure=False)
     except Unauthenticated as e:
         renderer = get_renderer()
-        renderer.error(code="cloud_unauthorized", message=str(e), hint="run: comfy auth login")
+        renderer.error(code="cloud_unauthorized", message=str(e), hint="run: comfy cloud login")
         raise typer.Exit(code=1) from e
 
 

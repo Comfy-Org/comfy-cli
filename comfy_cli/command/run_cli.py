@@ -429,26 +429,18 @@ def _build_steps(state: _DemoState) -> list[Step]:
             ],
         ),
         Step(
-            title="query — CQL against the live node graph",
+            # Was a "query" subcommand that has never been registered, so this
+            # step failed on every run. `comfy nodes ls` is the CQL engine's real
+            # query surface (comfy_cli.cql.engine.Graph).
+            title="nodes ls — CQL against the live node graph",
             invocations=[
                 Invocation(
-                    argv=[
-                        *comfy,
-                        "query",
-                        "-q",
-                        "from nodes where name in ('EmptyImage','ImageInvert','SaveImage') select name, category",
-                    ],
-                    label="comfy query",
+                    argv=[*comfy, "nodes", "ls", "--category", "image*", "--limit", "5"],
+                    label="comfy nodes ls",
                 ),
                 Invocation(
-                    argv=[
-                        *comfy,
-                        "--json",
-                        "query",
-                        "-q",
-                        "from nodes where name in ('EmptyImage','ImageInvert','SaveImage') select name, category",
-                    ],
-                    label="comfy --json query",
+                    argv=[*comfy, "--json", "nodes", "ls", "--category", "image*", "--limit", "5"],
+                    label="comfy --json nodes ls",
                 ),
             ],
         ),
@@ -516,13 +508,13 @@ def _build_steps(state: _DemoState) -> list[Step]:
             custom=_fleet_step,
         ),
         Step(
-            title="auth whoami — Comfy Cloud sign-in state",
-            desc="Same commands work against Comfy Cloud via --where cloud (after `comfy auth login`).",
+            title="cloud whoami — Comfy Cloud sign-in state",
+            desc="Same commands work against Comfy Cloud via --where cloud (after `comfy cloud login`).",
             invocations=[
-                Invocation(argv=[*comfy, "auth", "whoami"], label="comfy auth whoami", optional=True),
+                Invocation(argv=[*comfy, "cloud", "whoami"], label="comfy cloud whoami", optional=True),
                 Invocation(
-                    argv=[*comfy, "--json", "auth", "whoami"],
-                    label="comfy --json auth whoami",
+                    argv=[*comfy, "--json", "cloud", "whoami"],
+                    label="comfy --json cloud whoami",
                     optional=True,
                 ),
             ],
@@ -561,9 +553,9 @@ def execute(*, pause_seconds: float, no_cleanup: bool, show_agent: bool) -> int:
 
     _print_banner("Done")
     pprint(
-        "[bold]Capabilities shown:[/bold] env · which · discover · query · "
+        "[bold]Capabilities shown:[/bold] env · which · discover · nodes ls · "
         "run (sync/verbose/json/async) · jobs (ls/status/watch) · "
-        f"parallel fleet ×{FLEET_SIZE} · auth whoami."
+        f"parallel fleet ×{FLEET_SIZE} · cloud whoami."
     )
 
     paths_to_clean = [wf_path, *state.fleet_workflow_paths]
