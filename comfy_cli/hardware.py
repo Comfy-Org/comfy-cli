@@ -16,103 +16,30 @@ import ctypes
 import logging
 import os
 import platform
-import shutil
 import subprocess
 
 import psutil
 
-from comfy_cli import cuda_detect
+from comfy_cli import _safe_exec, cuda_detect
 
 logger = logging.getLogger(__name__)
 
 _SUBPROCESS_TIMEOUT = 5
 
 
-def _is_planted_in_cwd(path: str) -> bool:
-    """Return ``True`` only if ``path`` resolves to a file sitting *directly* in
-    ``os.getcwd()`` — the signature of a planted probe binary.
-
-    ``shutil.which`` searches the current directory first on Windows (and on any
-    platform whose ``$PATH`` contains ``.`` or an empty entry), so an attacker who
-    controls the directory the user runs ``comfy env`` from can drop a malicious
-    ``nvidia-smi.exe`` there. Such a plant always lands in the CWD *itself*, so we
-    reject only a resolved binary whose parent directory **is** the CWD. A
-    legitimate system binary in a *subdirectory* — e.g. ``System32`` even when the
-    CWD is ``C:\\Windows``, or a drive root — is left untouched, honouring the
-    "a legitimate system binary is never rejected" guarantee. Paths are compared
-    with :func:`os.path.normcase` so Windows' case-insensitivity can't fail the
-    guard open. Ambiguity — a path on a different drive, or an unresolvable one —
-    is treated as *not* planted so a legitimate binary is never rejected.
-    """
-    try:
-        cwd = os.path.normcase(os.path.realpath(os.getcwd()))
-        # ``os.path.dirname`` of a bare/relative ``which`` result is "", which
-        # ``realpath`` correctly resolves against the CWD.
-        parent = os.path.normcase(os.path.realpath(os.path.dirname(path)))
-        return parent == cwd
-    except (OSError, ValueError):
-        # Different drives (Windows) or an unresolvable path → not planted.
-        return False
-
-
-def _resolve_binary(name: str) -> str | None:
-    """Resolve a probe binary to a trusted absolute path, or ``None`` to skip it.
-
-    :func:`shutil.which` performs a PATH lookup and returns ``None`` when the
-    binary is absent (so the probe simply degrades to ``None``). Passing the
-    resolved absolute path to :func:`subprocess.check_output` — rather than the
-    bare name — prevents Windows ``CreateProcess`` from searching the current
-    working directory, so running ``comfy env`` from an attacker-controlled
-    directory cannot execute a planted ``nvidia-smi.exe``.
-
-    ``shutil.which`` may itself resolve against the current directory (always on
-    Windows; on any platform when ``$PATH`` holds ``.`` or an empty entry), so as
-    defense-in-depth two CWD-anchored results are additionally rejected on every
-    platform:
-
-    * a **relative** result. ``which`` returns ``os.path.join(entry, name)``, so a
-      relative path means the matching ``$PATH`` entry was itself relative (``.``,
-      an empty entry, ``subdir``, or Windows' implicitly prepended ``os.curdir``)
-      and the binary therefore lives under the attacker-controlled CWD. Handing
-      that string to :func:`subprocess.check_output` would re-resolve it against
-      the CWD — exactly the hijack this function exists to prevent — so the probe
-      is skipped instead. A binary found through a normal absolute ``$PATH`` entry
-      always comes back absolute and is unaffected.
-    * an absolute result sitting directly **in** the CWD (see
-      :func:`_is_planted_in_cwd`), which covers the CWD appearing in ``$PATH`` as
-      an absolute entry.
-
-    A legitimate system binary (e.g. ``nvidia-smi.exe`` under ``System32``) is
-    unaffected by either check.
-    """
-    try:
-        path = shutil.which(name)
-        if path is None:
-            return None
-        if not os.path.isabs(path):
-            logger.debug("skipping hardware probe %r: relative PATH match anchored in CWD (%s)", name, path)
-            return None
-        if _is_planted_in_cwd(path):
-            logger.debug("skipping hardware probe %r: resolved into CWD (%s)", name, path)
-            return None
-        return path
-    except Exception:
-        logger.debug("resolving hardware probe binary %r failed", name, exc_info=True)
-        return None
-
-
 def _run(cmd: list[str]) -> str | None:
     """Run ``cmd`` and return stripped stdout, or ``None`` on any failure.
 
-    ``cmd[0]`` is resolved to a trusted absolute path via :func:`_resolve_binary`
-    before execution (skipping the probe when absent or CWD-planted), and the run
-    is bounded by ``timeout=5`` so a hung binary can never block the probe. An
-    empty ``cmd`` degrades to ``None`` rather than raising, honouring the
-    module's never-raise contract.
+    ``cmd[0]`` is resolved to a trusted absolute path via
+    :func:`comfy_cli._safe_exec.resolve_binary` before execution (skipping the
+    probe when the binary is absent or CWD-planted), and the run is bounded by
+    ``timeout=5`` so a hung binary can never block the probe. An empty ``cmd``
+    degrades to ``None`` rather than raising, honouring the module's never-raise
+    contract.
     """
     if not cmd:
         return None
-    resolved = _resolve_binary(cmd[0])
+    resolved = _safe_exec.resolve_binary(cmd[0])
     if resolved is None:
         return None
     try:
