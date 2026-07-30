@@ -20,7 +20,7 @@ def _resolve_base_url() -> str:
     override = os.environ.get("COMFY_CLOUD_BASE_URL")
     if override:
         return override.rstrip("/")
-    # Persisted config (set via `comfy auth set-base-url <url>`).
+    # Persisted config (set via `comfy cloud set-base-url <url>`).
     try:
         from comfy_cli.config_manager import ConfigManager
 
