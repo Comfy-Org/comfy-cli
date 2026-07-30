@@ -333,7 +333,7 @@ def _load_object_info(renderer, *, input_path: str | None, host: str | None, por
 
         decision = where_module.resolve_default()
         mode = "cloud" if decision.target is where_module.WhereTarget.CLOUD else "local"
-        return resilient_load_object_info(mode=mode, host=host or "127.0.0.1", port=port or 8188)
+        return resilient_load_object_info(mode=mode, host=host, port=port)
     except (OSError, json.JSONDecodeError) as e:
         renderer.error(
             code="object_info_unavailable",

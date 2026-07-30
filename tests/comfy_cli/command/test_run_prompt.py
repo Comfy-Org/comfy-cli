@@ -131,3 +131,40 @@ class TestRunCliWiring:
         with pytest.raises(typer.Exit) as e:
             self._call_run(prompt="fox", set_overrides=["bogus=1"])
         assert e.value.exit_code == 1
+
+
+class TestDefaultCheckpointNotice:
+    """The bundled graph's checkpoint is not downloaded for you, so `run` says so.
+
+    The notice has to name the environment the run was ROUTED to: telling a
+    `--where cloud` user to drop a file in the local ``models/checkpoints``
+    points them at the wrong machine (the README says cloud runs need it in
+    cloud assets).
+    """
+
+    def _run(self, where: str, capsys):
+        renderer = MagicMock()
+        renderer.is_pretty.return_value = True
+        with (
+            patch("comfy_cli.cmdline.tracking.track_event"),
+            patch("comfy_cli.cmdline.get_renderer", return_value=renderer),
+            patch("comfy_cli.cmdline.where_module.cloud_preflight", return_value=None),
+            patch("comfy_cli.command.run.execute"),
+            patch("comfy_cli.command.run.execute_cloud"),
+        ):
+            run_command(where=where, prompt="a red fox in snow")
+        return capsys.readouterr().out
+
+    def test_local_run_points_at_the_local_model_dir(self, capsys):
+        out = self._run("local", capsys)
+        assert "models/checkpoints" in out
+        assert "cloud assets" not in out
+
+    def test_cloud_run_points_at_cloud_assets(self, capsys):
+        out = self._run("cloud", capsys)
+        assert "cloud assets" in out
+        assert "models/checkpoints" not in out
+
+    def test_notice_names_the_checkpoint(self, capsys):
+        out = self._run("local", capsys)
+        assert "v1-5-pruned-emaonly.ckpt" in out

@@ -83,11 +83,16 @@ def test_list_partner_filter(runner):
 
 
 def test_list_json_emits_parseable_models(runner):
+    """--json is an `envelope/1` on stdout, never a Rich table (BE-4933).
+    Full envelope/schema coverage lives in test_list_schema_envelope.py."""
     import json
 
     r = runner.invoke(cli_app, ["generate", "list", "--json"])
     assert r.exit_code == 0
-    payload = json.loads(r.stdout)  # must be pure JSON, no Rich table
+    envelope = json.loads(r.stdout)  # must be pure JSON, no Rich table
+    assert envelope["schema"] == "envelope/1"
+    assert envelope["command"] == "generate list"
+    payload = envelope["data"]
     assert payload["count"] == len(payload["models"]) >= 1
     fields = {"alias", "id", "partner", "category", "mode", "summary"}
     assert fields <= set(payload["models"][0])
@@ -99,10 +104,13 @@ def test_schema_json_emits_parseable_params(runner):
 
     r = runner.invoke(cli_app, ["generate", "schema", "flux-pro", "--json"])
     assert r.exit_code == 0
-    payload = json.loads(r.stdout)
+    envelope = json.loads(r.stdout)
+    assert envelope["schema"] == "envelope/1"
+    assert envelope["command"] == "generate schema"
+    payload = envelope["data"]
     assert payload["model"]
     assert isinstance(payload["params"], list) and payload["params"]
-    assert {"name", "kind", "required"} <= set(payload["params"][0])
+    assert {"name", "type", "kind", "required"} <= set(payload["params"][0])
 
 
 def test_list_partner_eq_form(runner):
@@ -124,7 +132,10 @@ def test_list_query_filter(runner):
 
 
 def test_list_no_matches(runner):
-    r = runner.invoke(cli_app, ["generate", "list", "--partner", "nonexistent"])
+    # --no-json pins pretty mode: CliRunner has no TTY, and since BE-4933 a
+    # non-TTY `generate list` resolves to the JSON envelope like every other
+    # renderer-backed command.
+    r = runner.invoke(cli_app, ["--no-json", "generate", "list", "--partner", "nonexistent"])
     assert r.exit_code == 0
     assert "No models" in r.stdout
 
@@ -133,7 +144,8 @@ def test_list_no_matches(runner):
 
 
 def test_schema_alias(runner):
-    r = runner.invoke(cli_app, ["generate", "schema", "flux-pro"])
+    # --no-json pins the human prose view (see test_list_no_matches).
+    r = runner.invoke(cli_app, ["--no-json", "generate", "schema", "flux-pro"])
     assert r.exit_code == 0
     assert "prompt" in r.stdout
     assert "Example" in r.stdout
