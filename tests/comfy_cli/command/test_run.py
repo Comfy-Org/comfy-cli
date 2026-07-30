@@ -1179,7 +1179,9 @@ class TestExecutePartnerNodePreflight:
             patch("comfy_cli.command.run.WorkflowExecution") as MockExec,
         ):
             with pytest.raises(typer.Exit) as exc_info:
-                execute(wf_file, host="127.0.0.1", port=8188, wait=True, timeout=30)
+                # allow_spend=True: consent is granted, so the spend gate is a
+                # no-op and we reach the credential-resolution path under test.
+                execute(wf_file, host="127.0.0.1", port=8188, wait=True, timeout=30, allow_spend=True)
             assert exc_info.value.exit_code == 1
             # /prompt must NOT be hit — refuse pre-submit.
             MockExec.assert_not_called()
@@ -1208,7 +1210,9 @@ class TestExecutePartnerNodePreflight:
             mock_exec = MagicMock()
             MockExec.return_value = mock_exec
             mock_exec.outputs = []
-            execute(wf_file, host="127.0.0.1", port=8188, wait=True, timeout=30)
+            # allow_spend=True: consent granted, so the spend gate is a no-op
+            # and the credential is resolved + injected as before.
+            execute(wf_file, host="127.0.0.1", port=8188, wait=True, timeout=30, allow_spend=True)
 
             # WorkflowExecution receives the credential via the
             # ``extra_data`` constructor kwarg.
@@ -1237,6 +1241,234 @@ class TestExecutePartnerNodePreflight:
             mock_exec.outputs = []
             execute(workflow_file, host="127.0.0.1", port=8188, wait=True, timeout=30)
             MockExec.assert_called_once()
+
+
+class TestExecuteSpendGate:
+    """`comfy run` gates partner-API (paid) workflows on `--allow-spend`
+    (BE-4326), mirroring `comfy run-template`'s spend gate. A partner-node
+    workflow must not silently spend Comfy credits: machine mode fails closed
+    with `spend_consent_required`; a TTY prompts; consent (flag or "yes") lets
+    the run proceed to the credential path unchanged. Partner-free workflows
+    are byte-identical (no gate)."""
+
+    PARTNER_WF = {
+        "1": {"class_type": "Veo3VideoGenerationNode", "inputs": {"prompt": "x"}},
+        "2": {"class_type": "SaveVideo", "inputs": {"video": ["1", 0]}},
+    }
+    OBJECT_INFO = {
+        "Veo3VideoGenerationNode": {
+            "category": "partner/video/Veo",
+            "output": ["VIDEO"],
+            "output_name": ["VIDEO"],
+        },
+        "SaveVideo": {"category": "video", "output": [], "output_name": [], "output_node": True},
+    }
+
+    def _wf_file(self, tmp_path):
+        path = tmp_path / "partner.json"
+        path.write_text(json.dumps(self.PARTNER_WF))
+        return str(path)
+
+    def _capture_errors(self, monkeypatch):
+        """Patch Renderer.error to record every emitted code/details."""
+        errors = []
+        from comfy_cli.output.renderer import Renderer
+
+        original_error = Renderer.error
+
+        def capture_error(self, *, code, message, hint=None, details=None, exit_code=1):
+            errors.append({"code": code, "message": message, "details": details})
+            return original_error(self, code=code, message=message, hint=hint, details=details, exit_code=exit_code)
+
+        monkeypatch.setattr(Renderer, "error", capture_error)
+        return errors
+
+    def test_paid_node_machine_mode_fails_closed_without_flag(self, tmp_path, monkeypatch):
+        """No `--allow-spend`, non-TTY: exit 1, `spend_consent_required`,
+        `partner_nodes` in details, and /prompt never hit."""
+        wf_file = self._wf_file(tmp_path)
+        monkeypatch.setattr("comfy_cli.command.run.sys.stdin.isatty", lambda: False, raising=False)
+        errors = self._capture_errors(monkeypatch)
+
+        with (
+            patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),
+            patch("comfy_cli.command.run._fetch_object_info", return_value=self.OBJECT_INFO),
+            patch("comfy_cli.command.run._resolve_partner_credential") as MockCred,
+            patch("comfy_cli.command.run.WorkflowExecution") as MockExec,
+        ):
+            with pytest.raises(typer.Exit) as exc_info:
+                execute(wf_file, host="127.0.0.1", port=8188, wait=True, timeout=30)
+            assert exc_info.value.exit_code == 1
+            # Nothing submitted, and the gate fired BEFORE credential resolution
+            # (no network OAuth refresh on a refusal).
+            MockExec.assert_not_called()
+            MockCred.assert_not_called()
+
+        assert errors and errors[0]["code"] == "spend_consent_required"
+        assert "Veo3VideoGenerationNode" in (errors[0]["details"] or {}).get("partner_nodes", [])
+
+    def test_paid_node_with_allow_spend_proceeds(self, tmp_path, monkeypatch):
+        """`--allow-spend` skips the gate and reaches submission unchanged."""
+        wf_file = self._wf_file(tmp_path)
+        errors = self._capture_errors(monkeypatch)
+
+        with (
+            patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),
+            patch("comfy_cli.command.run._fetch_object_info", return_value=self.OBJECT_INFO),
+            patch("comfy_cli.command.run._resolve_partner_credential", return_value=None),
+            patch("comfy_cli.command.run.ExecutionProgress"),
+            patch("comfy_cli.command.run.WorkflowExecution") as MockExec,
+        ):
+            mock_exec = MagicMock()
+            MockExec.return_value = mock_exec
+            mock_exec.outputs = []
+            # A stored api_key means the missing-credential path is satisfied,
+            # so the run submits.
+            execute(wf_file, host="127.0.0.1", port=8188, wait=True, timeout=30, api_key="k", allow_spend=True)
+            MockExec.assert_called_once()
+
+        assert not any(e["code"] == "spend_consent_required" for e in errors)
+
+    def test_no_paid_nodes_never_gates(self, workflow_file, monkeypatch):
+        """A partner-free workflow submits with no gate, flag or not."""
+        errors = self._capture_errors(monkeypatch)
+        with (
+            patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),
+            patch(
+                "comfy_cli.command.run._fetch_object_info",
+                return_value={
+                    "EmptyLatentImage": {"category": "latent", "output": ["LATENT"], "output_name": ["LATENT"]},
+                    "PreviewAny": {"category": "image", "output": [], "output_name": [], "output_node": True},
+                },
+            ),
+            patch("comfy_cli.command.run.ExecutionProgress"),
+            patch("comfy_cli.command.run.WorkflowExecution") as MockExec,
+        ):
+            mock_exec = MagicMock()
+            MockExec.return_value = mock_exec
+            mock_exec.outputs = []
+            execute(workflow_file, host="127.0.0.1", port=8188, wait=True, timeout=30)
+            MockExec.assert_called_once()
+        assert not any(e["code"] == "spend_consent_required" for e in errors)
+
+    def test_tty_confirm_declined_blocks(self, tmp_path, monkeypatch):
+        """Pretty + TTY: a declined confirm blocks with `spend_consent_required`
+        and submits nothing."""
+        wf_file = self._wf_file(tmp_path)
+        from comfy_cli.output.renderer import Renderer
+
+        monkeypatch.setattr(Renderer, "is_pretty", lambda self: True)
+        monkeypatch.setattr("comfy_cli.command.run.sys.stdin.isatty", lambda: True, raising=False)
+        monkeypatch.setattr("typer.confirm", lambda *a, **k: False)
+        errors = self._capture_errors(monkeypatch)
+
+        with (
+            patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),
+            patch("comfy_cli.command.run._fetch_object_info", return_value=self.OBJECT_INFO),
+            patch("comfy_cli.command.run._resolve_partner_credential") as MockCred,
+            patch("comfy_cli.command.run.WorkflowExecution") as MockExec,
+        ):
+            with pytest.raises(typer.Exit) as exc_info:
+                execute(wf_file, host="127.0.0.1", port=8188, wait=True, timeout=30)
+            assert exc_info.value.exit_code == 1
+            MockExec.assert_not_called()
+            MockCred.assert_not_called()
+
+        assert any(e["code"] == "spend_consent_required" for e in errors)
+
+    def test_tty_confirm_accepted_proceeds(self, tmp_path, monkeypatch):
+        """Pretty + TTY: an accepted confirm proceeds to submission."""
+        wf_file = self._wf_file(tmp_path)
+        from comfy_cli.output.renderer import Renderer
+
+        monkeypatch.setattr(Renderer, "is_pretty", lambda self: True)
+        monkeypatch.setattr("comfy_cli.command.run.sys.stdin.isatty", lambda: True, raising=False)
+        monkeypatch.setattr("typer.confirm", lambda *a, **k: True)
+        errors = self._capture_errors(monkeypatch)
+
+        with (
+            patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),
+            patch("comfy_cli.command.run._fetch_object_info", return_value=self.OBJECT_INFO),
+            patch("comfy_cli.command.run._resolve_partner_credential", return_value=None),
+            patch("comfy_cli.command.run.ExecutionProgress"),
+            patch("comfy_cli.command.run.WorkflowExecution") as MockExec,
+        ):
+            mock_exec = MagicMock()
+            MockExec.return_value = mock_exec
+            mock_exec.outputs = []
+            execute(wf_file, host="127.0.0.1", port=8188, wait=True, timeout=30, api_key="k")
+            MockExec.assert_called_once()
+
+        assert not any(e["code"] == "spend_consent_required" for e in errors)
+
+
+class TestSpendGateStdinAndMarkup:
+    """Robustness of the interactive spend prompt (BE-4326): a missing/closed
+    stdin must fall through to the fail-closed machine-mode error rather than
+    crash, and partner class_type names must not be interpreted as Rich markup."""
+
+    PARTNER_NODES = ["Veo3VideoGenerationNode"]
+
+    def _capture_errors(self, monkeypatch):
+        errors = []
+        from comfy_cli.output.renderer import Renderer
+
+        original_error = Renderer.error
+
+        def capture_error(self, *, code, message, hint=None, details=None, exit_code=1):
+            errors.append({"code": code, "message": message, "details": details})
+            return original_error(self, code=code, message=message, hint=hint, details=details, exit_code=exit_code)
+
+        monkeypatch.setattr(Renderer, "error", capture_error)
+        return errors
+
+    def test_stdin_none_is_non_interactive(self, monkeypatch):
+        """`sys.stdin is None` (detached/pythonw) → non-interactive, no crash."""
+        from comfy_cli.command.run import _stdin_is_interactive
+
+        monkeypatch.setattr("comfy_cli.command.run.sys.stdin", None)
+        assert _stdin_is_interactive() is False
+
+    def test_stdin_closed_is_non_interactive(self, monkeypatch):
+        """A closed stdin raises ValueError on `.isatty()` → non-interactive."""
+        from comfy_cli.command.run import _stdin_is_interactive
+
+        closed = io.StringIO()
+        closed.close()
+        monkeypatch.setattr("comfy_cli.command.run.sys.stdin", closed)
+        assert _stdin_is_interactive() is False
+
+    def test_pretty_with_dead_stdin_fails_closed_not_crash(self, monkeypatch):
+        """Pretty renderer + None stdin: the gate must emit the fail-closed
+        machine-mode error and Exit(1), never an uncontrolled AttributeError."""
+        from comfy_cli.command.run import _spend_gate
+        from comfy_cli.output.renderer import Renderer
+
+        monkeypatch.setattr(Renderer, "is_pretty", lambda self: True)
+        monkeypatch.setattr("comfy_cli.command.run.sys.stdin", None)
+        errors = self._capture_errors(monkeypatch)
+        renderer = Renderer()
+
+        with pytest.raises(typer.Exit) as exc_info:
+            _spend_gate(renderer, self.PARTNER_NODES, False, details={"partner_nodes": self.PARTNER_NODES})
+        assert exc_info.value.exit_code == 1
+        assert any(e["code"] == "spend_consent_required" for e in errors)
+
+    def test_markup_in_node_name_does_not_crash_confirm(self, monkeypatch):
+        """A class_type containing Rich markup like `[bold]` must be escaped,
+        not parsed — the interactive confirm renders without MarkupError."""
+        from comfy_cli.command.run import _spend_gate
+        from comfy_cli.output.renderer import Renderer
+
+        monkeypatch.setattr(Renderer, "is_pretty", lambda self: True)
+        monkeypatch.setattr("comfy_cli.command.run._stdin_is_interactive", lambda: True)
+        # Accept the prompt so the gate returns cleanly; the point is the render
+        # of the warning line above the prompt must not raise.
+        monkeypatch.setattr("typer.confirm", lambda *a, **k: True)
+        renderer = Renderer()
+
+        # Should not raise (MarkupError/StyleSyntaxError) despite the `[bold]`.
+        _spend_gate(renderer, ["Evil[bold]Node"], False, details={"partner_nodes": ["Evil[bold]Node"]})
 
 
 class TestExecuteUiWorkflow:
@@ -1543,6 +1775,64 @@ class TestExecuteCloudAutoConvert:
             with pytest.raises(typer.Exit) as exc_info:
                 execute_cloud(ui_workflow_file, wait=False)
             assert exc_info.value.exit_code == 1
+
+
+class TestExecuteCloudSpendGate:
+    """The cloud submit also bills partner-API nodes server-side, so BE-4326
+    applies the same consent gate there. Detection is fail-open (empty cloud
+    object_info → no gate), and the gate fires before cloud auth/submit."""
+
+    PARTNER_WF = {"1": {"class_type": "Veo3VideoGenerationNode", "inputs": {"prompt": "x"}}}
+    CLOUD_OI = {
+        "Veo3VideoGenerationNode": {"category": "partner/video/Veo", "output": ["VIDEO"], "output_name": ["VIDEO"]}
+    }
+
+    def _wf(self, tmp_path):
+        p = tmp_path / "cloud_partner.json"
+        p.write_text(json.dumps(self.PARTNER_WF))
+        return str(p)
+
+    def test_cloud_partner_node_machine_mode_fails_closed(self, tmp_path, monkeypatch):
+        from comfy_cli.command.run import execute_cloud
+
+        monkeypatch.setattr("comfy_cli.command.run.sys.stdin.isatty", lambda: False, raising=False)
+        with (
+            patch("comfy_cli.cql.engine._load_from_target", return_value=self.CLOUD_OI),
+            patch("comfy_cli.command.run._preflight_validate"),
+            patch("comfy_cli.target.resolve_target") as mock_target,
+            patch("comfy_cli.comfy_client.Client") as MockClient,
+        ):
+            with pytest.raises(typer.Exit) as exc:
+                execute_cloud(self._wf(tmp_path), wait=False)
+            assert exc.value.exit_code == 1
+            # The gate fires before cloud auth/submit.
+            mock_target.assert_not_called()
+            MockClient.assert_not_called()
+
+    def test_cloud_partner_node_allow_spend_proceeds(self, tmp_path):
+        from comfy_cli.comfy_client import SubmitResult
+        from comfy_cli.command.run import execute_cloud
+        from comfy_cli.target import Target
+
+        target = Target(
+            kind="cloud",
+            base_url="https://cloud.example.com",
+            path_prefix="/api",
+            history_path="history_v2",
+            jobs_path="jobs",
+            api_key="k",
+        )
+        mock_client = MagicMock()
+        mock_client.submit_prompt.return_value = SubmitResult(prompt_id="p1", number=1, node_errors={})
+        with (
+            patch("comfy_cli.cql.engine._load_from_target", return_value=self.CLOUD_OI),
+            patch("comfy_cli.command.run._preflight_validate"),
+            patch("comfy_cli.target.resolve_target", return_value=target),
+            patch("comfy_cli.comfy_client.Client", return_value=mock_client),
+            patch("comfy_cli.command.run._spawn_watcher"),
+        ):
+            execute_cloud(self._wf(tmp_path), wait=False, allow_spend=True)
+        assert mock_client.submit_prompt.called
 
 
 # ---------------------------------------------------------------------------

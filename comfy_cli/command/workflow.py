@@ -242,7 +242,9 @@ def set_slot_cmd(
         typer.Option(
             "--stdout/--in-place",
             show_default=False,
-            help="Print the result to stdout instead of writing back to <file>.",
+            help="Return the result instead of writing back to <file>: `data.workflow_json` in the "
+            "envelope under --json, or the raw workflow on stdout with --no-json. Redirecting "
+            "stdout selects JSON mode, so `--stdout > new.json` needs --no-json to get a raw workflow.",
         ),
     ] = False,
     input_path: Annotated[str | None, typer.Option("--input", show_default=False)] = None,
@@ -271,35 +273,53 @@ def set_slot_cmd(
         )
         raise typer.Exit(code=1) from e
 
-    serialized = json.dumps(new_workflow, indent=2)
+    # Fold the stale-cache note into `warnings` up front so every exit path —
+    # including the `--stdout` early return below — reports it.
+    if _stale:
+        warnings = list(warnings) + [
+            {"code": "object_info_stale", "message": f"served from cache ({_stale['source']}): {_stale['reason']}"}
+        ]
 
-    if stdout:
+    # `--stdout` in human mode is a pipe target: print the raw workflow so
+    # `comfy workflow set-slot ... --stdout --no-json > new.json` keeps working.
+    # `--no-json` is required there: a redirect makes stdout a non-TTY, which
+    # `Renderer.resolve` reads as JSON mode. In JSON mode stdout is reserved
+    # for the envelope (see docs/json-output.md), so the modified workflow
+    # rides in `data.workflow_json` instead — a bare workflow object is not an
+    # `envelope/1` and machine callers reject it.
+    if stdout and renderer.is_pretty():
         import sys
 
-        sys.stdout.write(serialized)
+        sys.stdout.write(json.dumps(new_workflow, indent=2))
         sys.stdout.write("\n")
+        sys.stdout.flush()
+        # stdout now holds exactly the workflow; warnings would corrupt it, so
+        # they go to stderr rather than being dropped.
+        for w in warnings:
+            renderer.stderr_console().print(f"[yellow]warning:[/yellow] {w}")
         return
 
-    _atomic_write_text(p, serialized)
+    if not stdout:
+        _atomic_write_text(p, json.dumps(new_workflow, indent=2))
 
-    payload = {
+    payload: dict[str, Any] = {
         "workflow": str(p),
         "applied": list(overrides_dict.keys()),
         "warnings": warnings,
-        "wrote": str(p),
+        "wrote": None if stdout else str(p),
     }
+    if stdout:
+        payload["out"] = "stdout"
+        payload["workflow_json"] = new_workflow
     if _stale:
         payload["stale"] = True
-        payload["warnings"] = list(warnings) + [
-            {"code": "object_info_stale", "message": f"served from cache ({_stale['source']}): {_stale['reason']}"}
-        ]
     if renderer.is_pretty():
         rprint(f"[bold green]✓[/bold green] applied {len(overrides_dict)} slot(s) → [dim]{p}[/dim]")
         for addr in overrides_dict:
             rprint(f"  [dim]·[/dim] {addr}")
         for w in warnings:
             rprint(f"  [yellow]warning:[/yellow] {w}")
-    renderer.emit(payload, command="workflow set-slot", changed=True)
+    renderer.emit(payload, command="workflow set-slot", changed=not stdout)
 
 
 # ---------------------------------------------------------------------------
@@ -307,7 +327,10 @@ def set_slot_cmd(
 # ---------------------------------------------------------------------------
 
 
-@app.command("vary", help="Produce N workflow variants from a per-slot value list. Emits NDJSON.")
+@app.command(
+    "vary",
+    help="Produce N workflow variants from a per-slot value list. Emits NDJSON (or `data.variants` under --json).",
+)
 @tracking.track_command("workflow")
 def vary_cmd(
     file: Annotated[str, typer.Argument(help="Frontend-format workflow JSON.")],
@@ -326,7 +349,9 @@ def vary_cmd(
         typer.Option(
             "--out-dir",
             show_default=False,
-            help="If set, write each variation to <out-dir>/<stem>_<N>.json. Otherwise emit NDJSON to stdout.",
+            help="If set, write each variation to <out-dir>/<stem>_<N>.json. Otherwise return the "
+            "variants: `data.variants` in the envelope under --json, or NDJSON on stdout with "
+            "--no-json. Redirecting stdout selects JSON mode, so `> out.ndjson` needs --no-json.",
         ),
     ] = None,
 ):
@@ -371,7 +396,20 @@ def vary_cmd(
         renderer.error(code="workflow_slot_invalid", message=str(e))
         raise typer.Exit(code=1) from e
 
+    if _stale:
+        warnings = list(warnings) + [
+            {"code": "object_info_stale", "message": f"served from cache ({_stale['source']}): {_stale['reason']}"}
+        ]
+
     written: list[str] = []
+    # Same envelope contract as set-slot --stdout: raw NDJSON on stdout is the
+    # human/pipe form; in JSON mode stdout belongs to the envelope, so the
+    # variants ride in `data.variants` instead.
+    variants: list[dict[str, Any]] | None = None
+    # True once stdout carries the NDJSON stream — the human summary below must
+    # then go to stderr, or `comfy workflow vary ... --no-json > out.ndjson`
+    # ends with a non-JSON line and breaks strict line-delimited consumers.
+    piped_ndjson = False
     if out_dir:
         out = Path(out_dir).expanduser()
         out.mkdir(parents=True, exist_ok=True)
@@ -379,35 +417,37 @@ def vary_cmd(
             target = out / f"{p.stem}_{i:03d}.json"
             _atomic_write_text(target, json.dumps(wf, indent=2))
             written.append(str(target))
-    else:
+    elif renderer.is_pretty():
         import sys
 
         for wf in workflows:
             sys.stdout.write(json.dumps(wf))
             sys.stdout.write("\n")
         sys.stdout.flush()
+        piped_ndjson = True
+    else:
+        variants = list(workflows)
 
-    payload = {
+    payload: dict[str, Any] = {
         "workflow": str(p),
         "count": len(workflows),
         "warnings": warnings,
         "out_dir": str(Path(out_dir).expanduser()) if out_dir else None,
         "written": written,
+        "variants": variants,
     }
     if _stale:
         payload["stale"] = True
-        payload["warnings"] = list(warnings) + [
-            {"code": "object_info_stale", "message": f"served from cache ({_stale['source']}): {_stale['reason']}"}
-        ]
     if renderer.is_pretty():
-        rprint(f"[bold green]✓[/bold green] produced {len(workflows)} variation(s)")
+        say = renderer.stderr_console().print if piped_ndjson else rprint
+        say(f"[bold green]✓[/bold green] produced {len(workflows)} variation(s)")
         if written:
             for path in written[:5]:
-                rprint(f"  [dim]→[/dim] {path}")
+                say(f"  [dim]→[/dim] {path}")
             if len(written) > 5:
-                rprint(f"  [dim]… and {len(written) - 5} more[/dim]")
+                say(f"  [dim]… and {len(written) - 5} more[/dim]")
         for w in warnings:
-            rprint(f"  [yellow]warning:[/yellow] {w}")
+            say(f"  [yellow]warning:[/yellow] {w}")
     renderer.emit(payload, command="workflow vary", changed=bool(written))
 
 
@@ -578,6 +618,12 @@ _TOO_LARGE_HINTS = {
     "save": "the workflow may still have been saved; confirm with `comfy --json workflow list`",
     "delete": "the workflow may still have been deleted; confirm with `comfy --json workflow list`",
 }
+
+
+class _ResponseUnparseable(Exception):
+    """A non-empty 200 body could not be decoded as JSON — surface it as a loud
+    error instead of a misleading empty/success result (an empty body is still a
+    legitimate ``None`` and is *not* this)."""
 
 
 # Map the cloud ``--sort`` fields onto local FileInfo keys (client-side sort;
@@ -773,18 +819,35 @@ def _http_request(
     if not raw:
         return status, None
     try:
-        return status, json.loads(raw)
-    except (json.JSONDecodeError, UnicodeDecodeError):
-        # UnicodeDecodeError is a ValueError but *not* a JSONDecodeError, so a
-        # body that isn't valid UTF-8 needs naming here or it escapes uncaught.
-        return status, None
+        return status, json.loads(raw.decode("utf-8"))
+    except (ValueError, RecursionError) as e:
+        # A non-empty body that won't decode as JSON is a *malformed* response, not
+        # "no data": returning ``None`` here would let callers report an empty list
+        # or a null id as success. Raise instead so it surfaces as a loud, mapped
+        # error. Decode as UTF-8 *explicitly* first: handed raw bytes, ``json.loads``
+        # auto-detects UTF-16/32 (RFC 4627) and would silently accept a non-UTF-8 body
+        # the contract treats as malformed. Non-UTF-8 bytes -> ``UnicodeDecodeError``;
+        # valid-UTF-8 non-JSON text -> ``JSONDecodeError``; both subclass ``ValueError``.
+        # Catch the ``ValueError`` base to also map the parser's *other* rejections that
+        # aren't ``JSONDecodeError`` — e.g. a JSON integer past CPython's 4300-digit
+        # int/str limit raises a bare ``ValueError`` — plus ``RecursionError`` from
+        # pathologically nested input (the 64 MiB cap permits deep nesting). Otherwise
+        # those escape the mapping and crash the CLI with a raw traceback.
+        raise _ResponseUnparseable() from e
 
 
 def _handle_cloud_http_error(renderer, e, *, operation: str, workflow_id: str | None = None) -> typer.Exit:
     """Map HTTP failures to envelope codes. Returns an Exit to ``raise from``."""
     import urllib.error
 
-    if isinstance(e, _ResponseTooLarge):
+    if isinstance(e, _ResponseUnparseable):
+        renderer.error(
+            code="workflow_unparseable",
+            message=f"cloud returned a non-empty but unparseable (non-JSON) response during {operation}",
+            hint="the server sent a malformed body; retry, and report it if it persists",
+            details={"operation": operation, "workflow_id": workflow_id},
+        )
+    elif isinstance(e, _ResponseTooLarge):
         renderer.error(
             code="workflow_too_large",
             message=f"cloud API response during {operation} exceeded the {_HTTP_MAX_BYTES // (1024 * 1024)} MiB cap",
@@ -792,8 +855,8 @@ def _handle_cloud_http_error(renderer, e, *, operation: str, workflow_id: str | 
             details={"operation": operation, "workflow_id": workflow_id, "limit_bytes": _HTTP_MAX_BYTES},
         )
     elif isinstance(e, urllib.error.HTTPError):
-        # Bound the read itself; slicing after an unbounded read would still
-        # have pulled an arbitrarily large error body into memory first.
+        # Cap the read itself — ``[:1000]`` after a full ``read()`` would still pull an
+        # arbitrarily large (or malicious) error page into memory before slicing.
         body = (e.read(1000) or b"").decode("utf-8", "replace")
         if e.code == 404:
             renderer.error(
@@ -1101,10 +1164,42 @@ def list_cmd(
 
     try:
         _, body = _http_request(url, target)
-    except (urllib.error.HTTPError, urllib.error.URLError, OSError, _ResponseTooLarge) as e:
+    except (
+        urllib.error.HTTPError,
+        urllib.error.URLError,
+        OSError,
+        _ResponseUnparseable,
+        _ResponseTooLarge,
+    ) as e:
         raise _handle_cloud_http_error(renderer, e, operation="list") from e
 
-    rows = (body or {}).get("data") or []
+    # A non-empty body decodes here only if it was valid JSON; guard the shape the
+    # way ``get``/``save`` do. An empty body is a legitimate ``None`` (→ no rows), but
+    # a valid-JSON *non-dict* 200 (an array like ``[1, 2, 3]`` or a scalar) is malformed:
+    # ``(body).get("data")`` would raise a raw ``AttributeError``, and coercing it to an
+    # empty list would masquerade the malformed shape as a genuinely-empty listing.
+    if body is not None and not isinstance(body, dict):
+        renderer.error(
+            code="cloud_http_error",
+            message="unexpected response shape from /api/workflows (expected a JSON object)",
+            details={"got_type": type(body).__name__},
+        )
+        raise typer.Exit(code=1)
+
+    # A missing/empty ``data`` is a legitimately-empty listing, but a present non-list
+    # ``data`` is malformed the same way a non-dict body is: a scalar (``{"data": 42}``)
+    # would raise a raw ``TypeError`` in the comprehension below, and a str/dict would
+    # iterate silently and masquerade as an empty listing. Reject it with the same envelope.
+    rows = (body or {}).get("data")
+    if rows is None:
+        rows = []
+    elif not isinstance(rows, list):
+        renderer.error(
+            code="cloud_http_error",
+            message="unexpected response shape from /api/workflows (data must be a JSON array)",
+            details={"got_type": type(rows).__name__},
+        )
+        raise typer.Exit(code=1)
     payload = {
         "count": len(rows),
         "workflows": [
@@ -1172,7 +1267,13 @@ def get_cmd(
     url = target.url("workflows", _up.quote(workflow_id, safe=""), "content")
     try:
         _, body = _http_request(url, target)
-    except (urllib.error.HTTPError, urllib.error.URLError, OSError, _ResponseTooLarge) as e:
+    except (
+        urllib.error.HTTPError,
+        urllib.error.URLError,
+        OSError,
+        _ResponseUnparseable,
+        _ResponseTooLarge,
+    ) as e:
         raise _handle_cloud_http_error(renderer, e, operation="get", workflow_id=workflow_id) from e
 
     if not isinstance(body, dict) or "workflow_json" not in body:
@@ -1267,7 +1368,13 @@ def save_cmd(
     url = target.url("workflows")
     try:
         _, resp = _http_request(url, target, method="POST", body=body)
-    except (urllib.error.HTTPError, urllib.error.URLError, OSError, _ResponseTooLarge) as e:
+    except (
+        urllib.error.HTTPError,
+        urllib.error.URLError,
+        OSError,
+        _ResponseUnparseable,
+        _ResponseTooLarge,
+    ) as e:
         raise _handle_cloud_http_error(renderer, e, operation="save") from e
 
     workflow_id = (resp or {}).get("id") if isinstance(resp, dict) else None
@@ -1303,7 +1410,13 @@ def delete_cmd(
     url = target.url("workflows", _up.quote(workflow_id, safe=""))
     try:
         _, _body = _http_request(url, target, method="DELETE")
-    except (urllib.error.HTTPError, urllib.error.URLError, OSError, _ResponseTooLarge) as e:
+    except (
+        urllib.error.HTTPError,
+        urllib.error.URLError,
+        OSError,
+        _ResponseUnparseable,
+        _ResponseTooLarge,
+    ) as e:
         raise _handle_cloud_http_error(renderer, e, operation="delete", workflow_id=workflow_id) from e
 
     payload = {"workflow_id": workflow_id, "deleted": True}
