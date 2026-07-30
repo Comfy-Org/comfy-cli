@@ -354,6 +354,35 @@ def test_run_login_times_out_when_browser_never_returns(monkeypatch: pytest.Monk
     assert exc.value.code == "oauth_timeout"
 
 
+def test_run_login_propagates_oserror_from_url_callback(monkeypatch: pytest.MonkeyPatch):
+    """A broken output stream in `on_url_ready` (e.g. a piped `--json` parent
+    that hung up) must fail fast — run_login re-raises the OSError instead of
+    swallowing it and blocking the full `timeout_s` on a callback wait nobody
+    will complete. Non-I/O callback errors stay isolated (tested elsewhere)."""
+    monkeypatch.setattr(
+        oauth,
+        "_post_json",
+        lambda url, body: {"client_id": "mcp-dyn-X", "redirect_uris": body["redirect_uris"]},
+    )
+
+    def broken_callback(_url: str) -> None:
+        raise BrokenPipeError("parent hung up")
+
+    start = time.monotonic()
+    with patch.object(oauth.webbrowser, "open", return_value=True):
+        with pytest.raises(OSError):
+            oauth.run_login(
+                base_url="https://testcloud.comfy.org",
+                resource="https://testcloud.comfy.org/mcp",
+                # A long timeout would be a multi-second hang if the OSError were
+                # swallowed; failing fast means we never reach the wait.
+                timeout_s=30.0,
+                open_browser=False,
+                on_url_ready=broken_callback,
+            )
+    assert time.monotonic() - start < 5.0  # never blocked on the callback wait
+
+
 # ---------------------------------------------------------------------------
 # Store round-trip
 # ---------------------------------------------------------------------------

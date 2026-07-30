@@ -94,6 +94,26 @@ def load_default_workflow() -> dict:
         ) from e
 
 
+def default_checkpoint(workflow: dict | None = None) -> str:
+    """Return the ``ckpt_name`` the bundled default graph loads (``""`` if absent).
+
+    ``comfy run --prompt`` silently depends on this checkpoint already being
+    present in the target's ``models/checkpoints`` — comfy-cli neither bundles
+    it nor downloads it on demand, so the run fails server-side with a bare
+    validation error when it is missing. Callers surface the requirement up
+    front instead. Pass an already-built graph to avoid re-reading the bundle.
+    """
+    graph = load_default_workflow() if workflow is None else workflow
+    node = graph.get(CHECKPOINT_LOADER_ID)
+    if not isinstance(node, dict):
+        return ""
+    inputs = node.get("inputs")
+    if not isinstance(inputs, dict):
+        return ""
+    name = inputs.get("ckpt_name")
+    return name if isinstance(name, str) else ""
+
+
 def _coerce(value: str, existing):
     """Coerce a string CLI value to the API-format type it should carry.
 

@@ -4,7 +4,8 @@ import urllib.request
 
 import pytest
 
-from comfy_cli.http import NoRedirectHandler
+from comfy_cli.http import NoRedirectHandler, target_auth_headers
+from comfy_cli.target import Target
 
 
 def _call(handler, method_name, code=302):
@@ -42,3 +43,31 @@ def test_custom_message_passthrough():
         _call(handler, "http_error_302", code=302)
     assert str(exc_info.value.reason) == "redirect refused (auth leak prevention)"
     assert exc_info.value.code == 302
+
+
+def test_target_auth_headers_local_attaches_nothing_even_with_creds():
+    """The security property this builder exists to enforce: a local Target
+    NEVER contributes auth headers, even if stray credentials are set on it
+    (the exact misuse the ``is_cloud`` gate defends against)."""
+    target = Target(
+        kind="local",
+        base_url="http://127.0.0.1:8188",
+        auth_token="stray",
+        api_key="stray",
+    )
+    assert target_auth_headers(target) == {}
+
+
+def test_target_auth_headers_cloud_api_key_only():
+    target = Target(kind="cloud", base_url="https://cloud.example", api_key="k")
+    assert target_auth_headers(target) == {"X-API-Key": "k"}
+
+
+def test_target_auth_headers_cloud_auth_token_only():
+    target = Target(kind="cloud", base_url="https://cloud.example", auth_token="t")
+    assert target_auth_headers(target) == {"Authorization": "Bearer t"}
+
+
+def test_target_auth_headers_cloud_both_api_key_wins():
+    target = Target(kind="cloud", base_url="https://cloud.example", auth_token="t", api_key="k")
+    assert target_auth_headers(target) == {"X-API-Key": "k"}

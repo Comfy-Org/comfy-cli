@@ -64,6 +64,22 @@ class TestCheckComfyServerRunning:
         check_comfy_server_running(port=8188, host="127.0.0.1", timeout=42)
         assert mock_get.call_args.kwargs["timeout"] == 42
 
+    @patch("comfy_cli.env_checker.requests.get")
+    def test_bare_ipv6_host_is_bracketed_in_probe_url(self, mock_get):
+        # A bare IPv6 literal must be bracketed or the probe URL is malformed
+        # (``http://::1:8189/history``) and the server always reads as "down".
+        mock_get.return_value.status_code = 200
+        check_comfy_server_running(port=8189, host="::1")
+        assert mock_get.call_args.args == ("http://[::1]:8189/history",)
+
+    @patch("comfy_cli.env_checker.requests.get")
+    def test_already_bracketed_ipv6_host_is_not_double_bracketed(self, mock_get):
+        # Callers that pre-bracket (e.g. host_port.resolve_host_port) must not
+        # yield ``http://[[::1]]:8189``.
+        mock_get.return_value.status_code = 200
+        check_comfy_server_running(port=8189, host="[::1]")
+        assert mock_get.call_args.args == ("http://[::1]:8189/history",)
+
 
 class TestEnvChecker:
     @pytest.fixture
