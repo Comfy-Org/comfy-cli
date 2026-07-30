@@ -1,6 +1,8 @@
 import contextlib
 import os
 import pathlib
+import subprocess
+import sys
 import time
 from typing import Annotated
 from urllib.parse import parse_qs, unquote, urlparse
@@ -9,10 +11,17 @@ import requests
 import typer
 from rich.markup import escape
 
-from comfy_cli import constants, tracking, ui
+from comfy_cli import constants, download_state, tracking, ui
 from comfy_cli.config_manager import ConfigManager
 from comfy_cli.constants import DEFAULT_COMFY_MODEL_PATH
-from comfy_cli.file_utils import DownloadException, check_unauthorized, download_file
+from comfy_cli.file_utils import (
+    DownloadCancelled,
+    DownloadException,
+    _friendly_network_error,
+    check_unauthorized,
+    download_file,
+)
+from comfy_cli.output import get_renderer
 from comfy_cli.output import rprint as print  # context-aware: stderr in JSON mode
 from comfy_cli.workspace_manager import WorkspaceManager
 
@@ -243,6 +252,16 @@ def download(
             show_default=False,
         ),
     ] = None,
+    background: Annotated[
+        bool,
+        typer.Option(
+            "--background",
+            help=(
+                "Detach the byte transfer to a background worker and return immediately with a "
+                "download id. Poll it with `comfy model download-status <id>`."
+            ),
+        ),
+    ] = False,
 ):
     if relative_path is not None:
         relative_path = os.path.expanduser(relative_path)
@@ -325,36 +344,53 @@ def download(
 
     start_time = time.monotonic()
 
+    # Every resolution step above (metadata requests, token config, filename,
+    # destination-exists) has now run in the foreground, so a bad URL, a missing
+    # token, or an already-present file still fails fast and synchronously. Only
+    # the byte transfer below is eligible to detach.
+    needs_hf_auth = False
     if is_huggingface_url and check_unauthorized(url, headers):
         if hf_api_token is None:
             print(
                 f"Unauthorized access to Hugging Face model. Please set the Hugging Face API token using `comfy model download --set-hf-api-token` or via the `{constants.HF_API_TOKEN_ENV_KEY}` environment variable"
             )
             return
-        else:
-            try:
-                import huggingface_hub
-            except ImportError:
-                print("huggingface_hub not found. Installing...")
-                import subprocess
+        needs_hf_auth = True
 
-                from comfy_cli.resolve_python import resolve_workspace_python
+    if background:
+        _submit_background_download(
+            url=url,
+            dest=local_filepath,
+            downloader=resolved_downloader,
+            needs_civitai_auth=bool(is_civitai_model_url or is_civitai_api_url),
+            needs_hf_auth=needs_hf_auth,
+        )
+        return
 
-                python = resolve_workspace_python(str(get_workspace()))
-                subprocess.check_call([python, "-m", "pip", "install", "huggingface_hub"])
-                import huggingface_hub
+    if needs_hf_auth:
+        try:
+            import huggingface_hub
+        except ImportError:
+            print("huggingface_hub not found. Installing...")
+            import subprocess
 
-            print(f"Downloading model {model_id} from Hugging Face...")
-            output_path = huggingface_hub.hf_hub_download(
-                repo_id=repo_id,
-                filename=hf_filename,
-                subfolder=hf_folder_name,
-                revision=hf_branch_name,
-                token=hf_api_token,
-                local_dir=get_workspace() / relative_path,
-                cache_dir=get_workspace() / relative_path,
-            )
-            print(f"Model downloaded successfully to: {output_path}")
+            from comfy_cli.resolve_python import resolve_workspace_python
+
+            python = resolve_workspace_python(str(get_workspace()))
+            subprocess.check_call([python, "-m", "pip", "install", "huggingface_hub"])
+            import huggingface_hub
+
+        print(f"Downloading model {model_id} from Hugging Face...")
+        output_path = huggingface_hub.hf_hub_download(
+            repo_id=repo_id,
+            filename=hf_filename,
+            subfolder=hf_folder_name,
+            revision=hf_branch_name,
+            token=hf_api_token,
+            local_dir=get_workspace() / relative_path,
+            cache_dir=get_workspace() / relative_path,
+        )
+        print(f"Model downloaded successfully to: {output_path}")
     else:
         print(f"Start downloading URL: {url} into {local_filepath}")
         try:
@@ -369,7 +405,456 @@ def download(
     print(f"Done in {_format_elapsed(elapsed)}")
 
 
-@app.command()
+# ---------------------------------------------------------------------------
+# background downloads: submit, worker, and the poll verbs
+# ---------------------------------------------------------------------------
+
+
+def _civitai_headers() -> dict | None:
+    """Rebuild CivitAI request headers from config — never from persisted state."""
+    headers = {"Content-Type": "application/json"}
+    token = config_manager.get_or_override(constants.CIVITAI_API_TOKEN_ENV_KEY, constants.CIVITAI_API_TOKEN_KEY, None)
+    if token is not None:
+        headers["Authorization"] = f"Bearer {token}"
+    return headers
+
+
+def _hf_headers() -> dict | None:
+    token = config_manager.get_or_override(constants.HF_API_TOKEN_ENV_KEY, constants.HF_API_TOKEN_KEY, None)
+    if token is None:
+        return None
+    return {"Authorization": f"Bearer {token}"}
+
+
+def _host_allowed(url: str, hosts: tuple[str, ...]) -> bool:
+    """True when ``url``'s host is one of ``hosts`` or a subdomain of one."""
+    try:
+        host = (urlparse(url).hostname or "").lower()
+    except ValueError:
+        return False
+    if not host:
+        return False
+    return host in hosts or host.endswith(tuple(f".{h}" for h in hosts))
+
+
+def _worker_headers(state: download_state.DownloadState) -> dict | None:
+    """Derive the transfer headers the worker should use.
+
+    The state file deliberately records only *which* credential the resolved URL
+    needs; the secret itself is re-read from config here, exactly as the
+    foreground ``download()`` does.
+
+    The url is re-checked against the credential's own hosts before the token is
+    attached. ``needs_*_auth`` and ``url`` are separate fields of a file on disk,
+    so nothing structurally stops them from disagreeing — and a record that says
+    "use the CivitAI token" against ``https://attacker.example`` would hand the
+    user's bearer token to the attacker. The check costs nothing and makes that
+    combination inert.
+    """
+    if state.needs_civitai_auth:
+        headers = _civitai_headers() or {}
+        if not _host_allowed(state.url, constants.CIVITAI_ALLOWED_HOSTS):
+            headers.pop("Authorization", None)
+        return headers
+    if state.needs_hf_auth:
+        if not _host_allowed(state.url, constants.HF_ALLOWED_HOSTS):
+            return None
+        return _hf_headers()
+    return None
+
+
+def _spawn_download_worker(state_file: pathlib.Path, log_file: pathlib.Path) -> int:
+    """Detach the transfer worker and return its pid.
+
+    stdin is /dev/null and stdout/stderr are *appended* to the download's log so
+    a crashed worker leaves a trace. POSIX gets its own session (so the worker
+    outlives the terminal and `download-cancel` can signal one process group);
+    Windows gets DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP for the equivalent.
+    """
+    argv = [sys.executable, "-m", "comfy_cli", "model", "_download-worker", "--state", str(state_file)]
+
+    kwargs: dict = {}
+    if sys.platform == "win32":
+        # Not module-level attributes on POSIX, hence the getattr lookups.
+        detached = getattr(subprocess, "DETACHED_PROCESS", 0)
+        new_group = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        kwargs["creationflags"] = detached | new_group
+    else:
+        kwargs["start_new_session"] = True
+
+    logfh = open(log_file, "ab")
+    try:
+        proc = subprocess.Popen(
+            argv,
+            stdin=subprocess.DEVNULL,
+            stdout=logfh,
+            stderr=subprocess.STDOUT,
+            close_fds=True,
+            **kwargs,
+        )
+    finally:
+        logfh.close()
+    return proc.pid
+
+
+def _submit_background_download(
+    *,
+    url: str,
+    dest: pathlib.Path,
+    downloader: str,
+    needs_civitai_auth: bool,
+    needs_hf_auth: bool,
+) -> None:
+    """Write the state file, detach the worker, and emit the submit envelope."""
+    renderer = get_renderer()
+    workspace = get_workspace()
+    dest = pathlib.Path(dest).absolute()
+
+    state = download_state.new(
+        url=url,
+        dest=str(dest),
+        downloader=downloader,
+        needs_civitai_auth=needs_civitai_auth,
+        needs_hf_auth=needs_hf_auth,
+    )
+
+    try:
+        # The parent directory has to exist before the worker starts writing, and
+        # creating it here means a permission problem surfaces synchronously.
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        state_file = download_state.write(workspace, state)
+        log_file = download_state.log_path(workspace, state.id)
+    except OSError as e:
+        renderer.error(
+            code="download_state_unwritable",
+            message=f"Could not create the background download state: {e}",
+            hint=f"check that {workspace} is writable, or run without --background",
+        )
+        raise typer.Exit(code=1) from e
+
+    try:
+        pid = _spawn_download_worker(state_file, log_file)
+    except OSError as e:
+        state.status = "failed"
+        state.error = f"could not start the background worker: {e}"
+        with contextlib.suppress(OSError):
+            download_state.write(workspace, state)
+        renderer.error(
+            code="download_worker_spawn_failed",
+            message=f"Could not start the background download worker: {e}",
+            hint="run without --background to download in the foreground",
+        )
+        raise typer.Exit(code=1) from e
+
+    # Deliberately *not* writing the Popen pid back here. Only the worker
+    # records its pid, together with its start time, so the two can never
+    # disagree and a pid can never be trusted without its identity proof. The
+    # window before the worker's first write is covered instead by
+    # `reconcile`'s startup grace (a pidless `starting` record stays `starting`)
+    # and by the cancel sentinel (a worker that comes up after `download-cancel`
+    # sees the request and exits without downloading) — which also removes the
+    # read/write race this write-back used to have with a fast worker.
+    on_disk = download_state.read_path(state_file)
+    if on_disk is not None:
+        state = on_disk
+
+    print(f"Downloading in the background: [cyan]{state.id}[/cyan] → {dest}")
+    print(f"Track it with: [cyan]comfy model download-status {state.id}[/cyan]")
+    renderer.emit(
+        {
+            "download_id": state.id,
+            "pid": pid,
+            "dest": str(dest),
+            "total_bytes": state.total_bytes,
+            "status": state.status,
+        },
+        command="model download",
+        changed=True,
+    )
+
+
+@app.command("_download-worker", hidden=True)
+def _download_worker(
+    state_file: Annotated[str, typer.Option("--state", help="Path to the download state file.")],
+):
+    """Detached worker that performs the byte transfer for one background download.
+
+    Hidden: agents address downloads through `comfy model download-status` /
+    `downloads` / `download-cancel`, never by invoking this directly.
+    """
+    path = pathlib.Path(state_file)
+    state = download_state.read_path(path)
+    if state is None:
+        # The submitter always writes the state file before spawning us, so this
+        # only happens if it was deleted underneath us. Nothing to do.
+        raise typer.Exit(code=1)
+
+    cancel_marker = download_state.cancel_marker_for(path)
+
+    def cancelled() -> bool:
+        return cancel_marker.exists()
+
+    # `download-cancel` may have landed while we were still starting up — it
+    # can't signal a process that has no pid on file yet, so the sentinel is how
+    # it reaches us. Check before claiming the record, and never write a status
+    # after one appears.
+    if cancelled() or state.is_terminal:
+        if not state.is_terminal:
+            state.status = "cancelled"
+            state.error = None
+            with contextlib.suppress(OSError):
+                download_state.write_path(path, state)
+        raise typer.Exit(code=0)
+
+    state.pid = os.getpid()
+    state.pid_create_time = download_state.process_create_time(os.getpid())
+    state.status = "downloading"
+    download_state.write_path(path, state)
+
+    last_write = 0.0
+
+    def on_progress(completed: int, total: int | None) -> None:
+        nonlocal last_write
+        state.completed_bytes = completed
+        if total is not None:
+            state.total_bytes = total
+        now = time.monotonic()
+        if now - last_write < download_state.PROGRESS_THROTTLE_S:
+            return
+        last_write = now
+        # Poll for cancellation on the same tick as the progress write, so a
+        # cancelled download is never resurrected to `downloading` by a write
+        # that raced it.
+        if cancelled():
+            raise DownloadCancelled()
+        with contextlib.suppress(OSError):
+            download_state.write_path(path, state)
+
+    try:
+        download_file(
+            state.url,
+            pathlib.Path(state.dest),
+            _worker_headers(state),
+            downloader=state.downloader,
+            progress_callback=on_progress,
+        )
+    except DownloadCancelled:
+        state.status = "cancelled"
+        state.error = None
+        with contextlib.suppress(OSError):
+            pathlib.Path(state.dest).unlink(missing_ok=True)
+        state.completed_bytes = 0
+        with contextlib.suppress(OSError):
+            download_state.write_path(path, state)
+        raise typer.Exit(code=0) from None
+    except BaseException as e:  # noqa: BLE001 — any failure must reach the state file
+        state.status = "failed"
+        state.error = _friendly_network_error(e) if isinstance(e, Exception) else f"{type(e).__name__}"
+        with contextlib.suppress(OSError):
+            download_state.write_path(path, state)
+        raise typer.Exit(code=1) from None
+
+    # A transfer that beat the cancel to the finish line stays `completed` and
+    # keeps its file — `download-cancel` re-reads this record before deciding
+    # what to delete, so both sides agree that a fully-downloaded model is not
+    # something to throw away.
+    state.status = "completed"
+    state.error = None
+    actual = pathlib.Path(state.dest)
+    try:
+        state.completed_bytes = actual.stat().st_size
+    except OSError:
+        pass
+    if state.total_bytes is None:
+        state.total_bytes = state.completed_bytes
+    with contextlib.suppress(OSError):
+        download_state.write_path(path, state)
+
+
+def _render_download_rows(rows: list[dict]) -> None:
+    """Human rendering shared by `download-status` and `downloads`.
+
+    A no-op in JSON/NDJSON mode: `ui.display_table` writes to its own Rich
+    console on stdout, which is reserved for the envelope, and a table prepended
+    to the JSON would make the output unparseable for the agents this contract
+    exists for. They get the same rows in `downloads` / the status payload.
+    """
+    if get_renderer().is_json():
+        return
+
+    def _size(value) -> str:
+        if value is None:
+            return "?"
+        return f"{value / (1024 * 1024):.1f} MB"
+
+    data = [
+        (
+            row["id"],
+            row["status"],
+            "—" if row["percent"] is None else f"{row['percent']:.1f}%",
+            f"{_size(row['completed_bytes'])} / {_size(row['total_bytes'])}",
+            f"{row['elapsed_seconds']:.1f}s",
+            row["dest"],
+        )
+        for row in rows
+    ]
+    ui.display_table(data, ["ID", "Status", "%", "Bytes", "Elapsed", "Destination"])
+    for row in rows:
+        if row.get("error"):
+            print(f"[bold red]{row['id']}: {escape(str(row['error']))}[/bold red]")
+
+
+def _reconciled(state: download_state.DownloadState) -> tuple[download_state.DownloadState, bool]:
+    """Reconcile ``state`` against reality, persisting a *status* correction.
+
+    Only a status change is written back. Byte counts are re-derived from
+    ``stat(dest)`` on every poll anyway, so persisting them buys nothing — and
+    would let a poll racing a live worker rewind the file to whatever this
+    reader happened to load a moment earlier.
+    """
+    fresh = download_state.reconcile(state)
+    changed = fresh.status != state.status
+    if changed:
+        with contextlib.suppress(OSError, ValueError):
+            download_state.write(get_workspace(), fresh)
+    return fresh, changed
+
+
+@app.command("download-status")
+@tracking.track_command("model")
+def download_status(
+    _ctx: typer.Context,
+    download_id: Annotated[str, typer.Argument(help="The download id returned by `download --background`.")],
+):
+    """Report the progress of one background download."""
+    renderer = get_renderer()
+    state = download_state.read(get_workspace(), download_id)
+    if state is None:
+        renderer.error(
+            code="download_not_found",
+            message=f"No background download with id {download_id!r}.",
+            hint="list the known downloads with `comfy model downloads`",
+            details={"id": download_id},
+        )
+        raise typer.Exit(code=1)
+
+    fresh, _ = _reconciled(state)
+    payload = download_state.status_payload(fresh)
+    _render_download_rows([payload])
+    renderer.emit(payload, command="model download-status")
+
+
+@app.command("downloads")
+@tracking.track_command("model")
+def downloads(_ctx: typer.Context):
+    """List every background download this workspace knows about, newest first."""
+    renderer = get_renderer()
+    rows = [download_state.status_payload(_reconciled(s)[0]) for s in download_state.list_all(get_workspace())]
+    if not rows:
+        print("No background downloads found.")
+    else:
+        _render_download_rows(rows)
+    renderer.emit({"total": len(rows), "downloads": rows}, command="model downloads")
+
+
+@app.command("download-cancel")
+@tracking.track_command("model")
+def download_cancel(
+    _ctx: typer.Context,
+    download_id: Annotated[str, typer.Argument(help="The download id returned by `download --background`.")],
+):
+    """Kill a background download's worker and remove its partial file."""
+    renderer = get_renderer()
+    workspace = get_workspace()
+    state = download_state.read(workspace, download_id)
+    if state is None:
+        renderer.error(
+            code="download_not_found",
+            message=f"No background download with id {download_id!r}.",
+            hint="list the known downloads with `comfy model downloads`",
+            details={"id": download_id},
+        )
+        raise typer.Exit(code=1)
+
+    # Reconcile before deciding there is anything to cancel: a worker SIGKILLed
+    # after the last byte landed but before it could persist `completed` still
+    # reads as `downloading`, and cancelling that would delete a finished model.
+    # Only a *finished* transfer short-circuits — a dead worker that left a
+    # partial behind is exactly what the user is trying to clean up, so it goes
+    # through the normal cancel path below.
+    if state.status not in download_state.TERMINAL_STATUSES:
+        fresh = download_state.reconcile(state)
+        if fresh.status == "completed":
+            state = fresh
+            with contextlib.suppress(OSError, ValueError):
+                download_state.write(workspace, state)
+
+    if state.status in download_state.TERMINAL_STATUSES:
+        payload = download_state.status_payload(state)
+        print(f"Download {download_id} is already {state.status}; nothing to cancel.")
+        renderer.emit(payload, command="model download-cancel", changed=False)
+        return
+
+    # Sentinel first, then the signal. The sentinel is what a worker that is
+    # still starting up (no pid on file yet) — or one that outlives SIGTERM —
+    # will see, and once it exists the worker can only write `cancelled`.
+    with contextlib.suppress(OSError, ValueError):
+        download_state.request_cancel(download_state.cancel_path(workspace, download_id))
+
+    # Re-read before signalling: a worker that was still starting up when we
+    # first read has claimed its pid by now, and stopping the wrong (or no)
+    # process is how a "cancelled" download keeps writing bytes.
+    state = download_state.read(workspace, download_id) or state
+
+    # Escalates to SIGKILL if the worker doesn't go quietly; nothing below may
+    # touch the destination file until it is confirmed gone, or the worker would
+    # simply re-create what we delete.
+    stopped = download_state.stop_worker(state)
+
+    # Re-read the worker's last word before touching the destination. Our copy
+    # predates the kill and can still be missing the total the worker learned
+    # from the response headers — and that total is the only thing that tells a
+    # finished file from a partial one.
+    state = download_state.read(workspace, download_id) or state
+
+    removed = False
+    partial = pathlib.Path(state.dest)
+    size = None
+    with contextlib.suppress(OSError):
+        size = partial.stat().st_size
+
+    finished = state.status == "completed" or (
+        size is not None and state.total_bytes is not None and size >= state.total_bytes
+    )
+    if finished:
+        # The bytes are all there. Keep the file and record what actually
+        # happened rather than deleting a complete model out from under the user.
+        state.status = "completed"
+        state.error = None
+        if size is not None:
+            state.completed_bytes = size
+    else:
+        if stopped and size is not None:
+            with contextlib.suppress(OSError):
+                partial.unlink()
+                removed = True
+        state.status = "cancelled"
+        state.error = None if stopped else "worker may still be running; partial file left in place"
+        if removed:
+            state.completed_bytes = 0
+
+    with contextlib.suppress(OSError, ValueError):
+        download_state.write(workspace, state)
+
+    payload = download_state.status_payload(state)
+    if finished:
+        print(f"Download [cyan]{download_id}[/cyan] had already finished; kept {partial}.")
+    else:
+        print(f"Cancelled download [cyan]{download_id}[/cyan].")
+    renderer.emit(payload, command="model download-cancel", changed=True)
+
+
+@app.command(help="Remove downloaded model files, by name or through an interactive picker.")
 @tracking.track_command("model")
 def remove(
     ctx: typer.Context,
