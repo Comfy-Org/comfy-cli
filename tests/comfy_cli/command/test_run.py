@@ -413,6 +413,25 @@ class TestExecuteErrorHandling:
             mock_exec.connect.assert_called_once()
             mock_exec.queue.assert_called_once()
             mock_exec.watch_execution.assert_called_once()
+            # The run WebSocket must be closed on the success path (BE-3404) —
+            # the finally-block _safe_close, not left open until teardown.
+            mock_exec.ws.close.assert_called_once()
+
+    def test_websocket_closed_on_watch_failure(self, workflow_file):
+        # BE-3404: the finally-block close also fires when watch_execution
+        # raises, so a mid-run error doesn't linger the server-side session.
+        with (
+            patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),
+            patch("comfy_cli.command.run.ExecutionProgress"),
+            patch("comfy_cli.command.run.WorkflowExecution") as MockExec,
+        ):
+            mock_exec = MagicMock()
+            MockExec.return_value = mock_exec
+            mock_exec.watch_execution.side_effect = WebSocketTimeoutException("timed out")
+
+            with pytest.raises(typer.Exit):
+                execute(workflow_file, host="127.0.0.1", port=8188, wait=True, timeout=30)
+            mock_exec.ws.close.assert_called_once()
 
     def test_file_not_found_exits(self):
         with pytest.raises(typer.Exit) as exc_info:
@@ -483,6 +502,327 @@ class TestExecuteErrorHandling:
             with pytest.raises(typer.Exit):
                 execute(workflow_file, host="127.0.0.1", port=8188, wait=True, timeout=30)
             mock_progress.stop.assert_called()
+
+
+class TestWaitStateFile:
+    """`comfy run --wait` writes the jobs state file at SUBMIT time, not only
+    on success (BE-4750) — so a server that dies mid-run still leaves an
+    on-disk record of the prompt that was in flight, and the emitted error
+    names it."""
+
+    @pytest.fixture
+    def fresh_token(self):
+        """The cancellation token is process-wide; reset it around any test
+        that cancels so the flag can't leak into the rest of the suite."""
+        from comfy_cli import cancellation
+
+        cancellation.reset_for_testing()
+        yield cancellation
+        cancellation.reset_for_testing()
+
+    def _mock_exec(self, prompt_id):
+        mock_exec = MagicMock()
+        mock_exec.prompt_id = prompt_id
+        mock_exec.client_id = "cid-wait"
+        mock_exec.outputs = []
+        mock_exec.output_entries = []
+        mock_exec.cached_node_ids = []
+        mock_exec.executed_node_ids = []
+        return mock_exec
+
+    def _capture_errors(self, monkeypatch):
+        from comfy_cli.output.renderer import Renderer
+
+        captured = []
+        original_error = Renderer.error
+
+        def capture_error(self, *, code, message, hint=None, details=None, exit_code=1):
+            captured.append({"code": code, "message": message, "hint": hint, "details": details})
+            return original_error(self, code=code, message=message, hint=hint, details=details, exit_code=exit_code)
+
+        monkeypatch.setattr(Renderer, "error", capture_error)
+        return captured
+
+    def _run(self, workflow_file, mock_exec, **overrides):
+        kwargs = dict(host="127.0.0.1", port=8188, wait=True, timeout=30)
+        kwargs.update(overrides)
+        with (
+            patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),
+            patch("comfy_cli.command.run._fetch_object_info", return_value={}),
+            patch("comfy_cli.command.run.ExecutionProgress"),
+            patch("comfy_cli.command.run.WorkflowExecution", return_value=mock_exec),
+        ):
+            execute(workflow_file, **kwargs)
+
+    def test_state_file_is_running_before_watch_returns(self, workflow_file):
+        from comfy_cli import jobs_state
+
+        mock_exec = self._mock_exec("wait-happy")
+        mock_exec.outputs = ["http://127.0.0.1:8188/view?filename=a.png"]
+        mid_run = {}
+
+        def _observe_mid_run():
+            state = jobs_state.read("wait-happy")
+            mid_run["state"] = state
+
+        mock_exec.watch_execution.side_effect = _observe_mid_run
+
+        self._run(workflow_file, mock_exec)
+
+        # Submit-time record: on disk and non-terminal while the job runs.
+        assert mid_run["state"] is not None, "no state file existed while the job was running"
+        assert mid_run["state"].status == "running"
+        assert mid_run["state"].completed_at is None
+        # Completion updates that same record in place.
+        final = jobs_state.read("wait-happy")
+        assert final is not None
+        assert final.status == "completed"
+        assert final.outputs == ["http://127.0.0.1:8188/view?filename=a.png"]
+        assert final.completed_at is not None
+        assert final.submitted_at == mid_run["state"].submitted_at
+
+    def test_disconnect_mid_run_records_server_died(self, workflow_file, monkeypatch):
+        from comfy_cli import jobs_state
+
+        errors = self._capture_errors(monkeypatch)
+        mock_exec = self._mock_exec("wait-died")
+        mock_exec.watch_execution.side_effect = ConnectionError("server went away")
+
+        with pytest.raises(typer.Exit) as exc_info:
+            self._run(workflow_file, mock_exec)
+        assert exc_info.value.exit_code == 1
+
+        err = next(e for e in errors if e["code"] == "ws_disconnected")
+        assert "wait-died" in err["message"]
+        assert err["details"]["prompt_id"] == "wait-died"
+        assert err["details"]["state_file"].endswith("wait-died.json")
+
+        state = jobs_state.read("wait-died")
+        assert state is not None
+        assert state.status == "error"
+        assert state.error["code"] == "server_died"
+        assert "wait-died" in state.error["message"]
+        assert "server went away" in state.error["message"]
+
+    def test_disconnect_before_prompt_id_writes_no_state(self, workflow_file, monkeypatch):
+        from comfy_cli import jobs_state
+
+        errors = self._capture_errors(monkeypatch)
+        # The submit itself blew up, so no prompt_id was ever assigned.
+        mock_exec = self._mock_exec(None)
+        mock_exec.queue.side_effect = ConnectionError("connection refused")
+
+        with pytest.raises(typer.Exit) as exc_info:
+            self._run(workflow_file, mock_exec)
+        assert exc_info.value.exit_code == 1
+
+        # Today's bare error, unchanged — nothing to enrich it with.
+        err = next(e for e in errors if e["code"] == "ws_disconnected")
+        assert err["details"] is None
+        assert list(jobs_state.state_dir().glob("*.json")) == []
+
+    def test_timeout_names_prompt_id_and_leaves_state_running(self, workflow_file, monkeypatch):
+        from comfy_cli import jobs_state
+
+        errors = self._capture_errors(monkeypatch)
+        mock_exec = self._mock_exec("wait-slow")
+        mock_exec.watch_execution.side_effect = WebSocketTimeoutException("timed out")
+
+        with pytest.raises(typer.Exit) as exc_info:
+            self._run(workflow_file, mock_exec)
+        assert exc_info.value.exit_code == 1
+
+        err = next(e for e in errors if e["code"] == "ws_timeout")
+        assert err["details"] == {"timeout": 30, "prompt_id": "wait-slow"}
+
+        # A timed-out watch says nothing about the job — it may still be
+        # running server-side, so the record stays non-terminal.
+        state = jobs_state.read("wait-slow")
+        assert state is not None
+        assert state.status == "running"
+        assert state.completed_at is None
+
+    def test_token_cancel_records_cancelled_state(self, workflow_file, fresh_token):
+        from comfy_cli import jobs_state
+
+        mock_exec = self._mock_exec("wait-cancel")
+        mock_exec.watch_execution.side_effect = lambda: fresh_token.get_token().cancel()
+
+        with pytest.raises(typer.Exit) as exc_info:
+            self._run(workflow_file, mock_exec)
+        assert exc_info.value.exit_code == 130
+
+        state = jobs_state.read("wait-cancel")
+        assert state is not None
+        assert state.status == "cancelled"
+        assert state.error["code"] == "cancelled"
+
+    def test_keyboard_interrupt_records_cancelled_state(self, workflow_file):
+        from comfy_cli import jobs_state
+
+        mock_exec = self._mock_exec("wait-ctrlc")
+        mock_exec.watch_execution.side_effect = KeyboardInterrupt()
+
+        with pytest.raises(typer.Exit) as exc_info:
+            self._run(workflow_file, mock_exec)
+        assert exc_info.value.exit_code == 130
+
+        state = jobs_state.read("wait-ctrlc")
+        assert state is not None
+        assert state.status == "cancelled"
+        assert state.error["code"] == "cancelled"
+
+    @pytest.mark.parametrize("boom", [OSError(13, "Permission denied"), ValueError("unsafe prompt_id")])
+    def test_state_write_failure_does_not_fail_the_run(self, workflow_file, monkeypatch, boom):
+        """A state file that can't be written must never sink an otherwise
+        successful run — same tolerance the async path gives its watcher. The
+        submit-time write in particular must not stop us watching a run the
+        server already accepted."""
+        from comfy_cli import jobs_state
+
+        def _boom(_state):
+            raise boom
+
+        monkeypatch.setattr(jobs_state, "write", _boom)
+        mock_exec = self._mock_exec("wait-unwritable")
+
+        self._run(workflow_file, mock_exec)  # must not raise
+
+        mock_exec.watch_execution.assert_called_once()
+
+    def test_server_execution_error_finalizes_the_record(self, workflow_file):
+        """`watch_execution` signals a failed node by raising `typer.Exit(1)`
+        after rendering the error — the ordinary failure path, not an
+        exception the disconnect handlers see. The submit-time `running`
+        record must still be moved to a terminal status, or the job is
+        stranded as a phantom nothing ever reaps (`jobs ls` only reaps
+        non-terminal records with a dead watcher_pid, which --wait never
+        sets)."""
+        from comfy_cli import jobs_state
+
+        mock_exec = self._mock_exec("wait-exec-error")
+        mock_exec.last_error = {
+            "code": "out_of_memory",
+            "message": "CUDA out of memory in KSampler",
+            "details": {"node_id": "3"},
+        }
+        mock_exec.watch_execution.side_effect = typer.Exit(code=1)
+
+        with pytest.raises(typer.Exit) as exc_info:
+            self._run(workflow_file, mock_exec)
+        assert exc_info.value.exit_code == 1
+
+        state = jobs_state.read("wait-exec-error")
+        assert state is not None
+        assert state.status == "error"
+        # The classified verdict `on_error` stashed, not a generic placeholder.
+        assert state.error["code"] == "out_of_memory"
+        assert state.error["message"] == "CUDA out of memory in KSampler"
+        assert state.completed_at is not None
+
+    def test_server_execution_error_without_verdict_falls_back(self, workflow_file):
+        """A mocked/older execution with no usable `last_error` still gets a
+        terminal record — a generic `execution_error` beats a phantom."""
+        from comfy_cli import jobs_state
+
+        mock_exec = self._mock_exec("wait-exec-bare")
+        mock_exec.last_error = None
+        mock_exec.watch_execution.side_effect = typer.Exit(code=1)
+
+        with pytest.raises(typer.Exit):
+            self._run(workflow_file, mock_exec)
+
+        state = jobs_state.read("wait-exec-bare")
+        assert state is not None
+        assert state.status == "error"
+        assert state.error["code"] == "execution_error"
+
+    def test_server_interrupt_finalizes_as_cancelled(self, workflow_file):
+        """`execution_interrupted` exits 130 — a cancellation, not a failure."""
+        from comfy_cli import jobs_state
+
+        mock_exec = self._mock_exec("wait-interrupted")
+        mock_exec.watch_execution.side_effect = typer.Exit(code=130)
+
+        with pytest.raises(typer.Exit) as exc_info:
+            self._run(workflow_file, mock_exec)
+        assert exc_info.value.exit_code == 130
+
+        state = jobs_state.read("wait-interrupted")
+        assert state is not None
+        assert state.status == "cancelled"
+        assert state.error["code"] == "cancelled"
+
+    def test_broken_pipe_while_rendering_keeps_the_completed_record(self, workflow_file, monkeypatch):
+        """`comfy run --wait … | head` closes stdout under us. The resulting
+        BrokenPipeError (a ConnectionError/OSError subclass) is raised AFTER
+        the job completed and was persisted, so it must not be mistaken for
+        the server disconnecting: no rewrite of the `completed` record to
+        `error`/`server_died`, and no bogus `ws_disconnected` exit 1."""
+        from comfy_cli import jobs_state
+        from comfy_cli.output.renderer import Renderer
+
+        errors = self._capture_errors(monkeypatch)
+        mock_exec = self._mock_exec("wait-brokenpipe")
+        mock_exec.outputs = ["http://127.0.0.1:8188/view?filename=a.png"]
+
+        def _broken_pipe(self, *args, **kwargs):
+            raise BrokenPipeError(32, "Broken pipe")
+
+        monkeypatch.setattr(Renderer, "emit", _broken_pipe)
+
+        with pytest.raises(BrokenPipeError):
+            self._run(workflow_file, mock_exec)
+
+        assert [e["code"] for e in errors] == []
+        state = jobs_state.read("wait-brokenpipe")
+        assert state is not None
+        assert state.status == "completed"
+        assert state.error is None
+
+    def test_ctrl_c_after_completion_does_not_uncomplete_the_record(self, workflow_file):
+        """The KeyboardInterrupt handler is shared by the whole run. A Ctrl-C
+        landing after the completion write must leave the terminal record
+        alone rather than walking it back to `cancelled`."""
+        from comfy_cli import jobs_state
+        from comfy_cli.command.run import _mark_cancelled
+
+        mock_exec = self._mock_exec("wait-late-ctrlc")
+        self._run(workflow_file, mock_exec)
+
+        state = jobs_state.read("wait-late-ctrlc")
+        assert state.status == "completed"
+
+        assert _mark_cancelled(state) is None
+        assert state.status == "completed"
+        assert jobs_state.read("wait-late-ctrlc").status == "completed"
+
+    def test_failed_terminal_write_reports_no_state_file(self, workflow_file, monkeypatch):
+        """When the completion write fails, don't hand back the submit-time
+        path: that file still says `running`, contradicting the `completed`
+        result we just reported."""
+        from comfy_cli import jobs_state
+        from comfy_cli.output.renderer import Renderer
+
+        emitted = []
+        monkeypatch.setattr(Renderer, "emit", lambda self, data=None, **kw: emitted.append(data))
+
+        real_write = jobs_state.write
+        calls = {"n": 0}
+
+        def _fail_after_first(state):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return real_write(state)
+            raise OSError(28, "No space left on device")
+
+        monkeypatch.setattr(jobs_state, "write", _fail_after_first)
+        mock_exec = self._mock_exec("wait-nospace")
+
+        self._run(workflow_file, mock_exec)
+
+        assert emitted and emitted[-1]["status"] == "completed"
+        assert emitted[-1]["state_file"] is None
 
 
 class TestDetectPartnerNodes:
@@ -618,13 +958,28 @@ class TestPartialExecutionDiff:
 
 class TestResolvePartnerCredential:
     """The credential the local submit can inject into ``extra_data`` so a
-    partner-API node finds it. Three sources, env > stored key > OAuth."""
+    partner-API node finds it. Precedence session > env > stored key.
 
-    def test_uses_env_var_first(self, monkeypatch: pytest.MonkeyPatch):
+    The OAuth session is refreshed when possible (``refresh=True``) but never
+    cleared from this best-effort path (``allow_clear=False``): access tokens
+    are short-lived, so a signed-in user's token routinely lapses between
+    commands — refreshing keeps local runs working, without ever logging the
+    user off the shared session. The refresh happens inside
+    ``oauth.ensure_fresh_session`` (mocked here); its allow_clear semantics are
+    exercised end-to-end in ``tests/comfy_cli/test_credentials.py``.
+    """
+
+    def _no_session(self, monkeypatch: pytest.MonkeyPatch):
+        from comfy_cli.cloud import oauth
+
+        monkeypatch.setattr(oauth, "ensure_fresh_session", lambda **kw: None)
+
+    def test_uses_env_var_when_no_session(self, monkeypatch: pytest.MonkeyPatch):
         monkeypatch.setenv("COMFY_CLOUD_API_KEY", "env-key-123")
         from comfy_cli.auth import store as auth_store
 
         monkeypatch.setattr(auth_store, "get", lambda _: None)
+        self._no_session(monkeypatch)
         assert _resolve_partner_credential() == ("api_key_comfy_org", "env-key-123")
 
     def test_falls_back_to_stored_provider_key(self, monkeypatch: pytest.MonkeyPatch):
@@ -639,38 +994,86 @@ class TestResolvePartnerCredential:
             "get",
             lambda name: record if name == CLOUD_API_KEY_PROVIDER else None,
         )
-        monkeypatch.setattr(auth_store, "get_cloud_session", lambda: None)
+        self._no_session(monkeypatch)
         assert _resolve_partner_credential() == ("api_key_comfy_org", "stored-key-456")
 
-    def test_falls_back_to_oauth_token(self, monkeypatch: pytest.MonkeyPatch):
+    def test_refreshes_and_uses_oauth_token(self, monkeypatch: pytest.MonkeyPatch):
+        """A signed-in user whose access token lapsed gets a REFRESHED token
+        here — the whole point of BE-3361 — rather than being skipped and
+        hitting ``partner_node_requires_credential``."""
         monkeypatch.delenv("COMFY_CLOUD_API_KEY", raising=False)
         from comfy_cli.auth import store as auth_store
+        from comfy_cli.cloud import oauth
 
-        session = MagicMock()
-        session.is_expired.return_value = False
-        session.access_token = "oauth-bearer-789"
+        # ensure_fresh_session refreshes the lapsed token and returns a fresh,
+        # non-expired session carrying the NEW access token.
+        refreshed = MagicMock()
+        refreshed.is_expired.return_value = False
+        refreshed.access_token = "refreshed-bearer-789"
+        refreshed.base_url = "https://cloud.comfy.org"
         monkeypatch.setattr(auth_store, "get", lambda _: None)
-        monkeypatch.setattr(auth_store, "get_cloud_session", lambda: session)
-        assert _resolve_partner_credential() == ("auth_token_comfy_org", "oauth-bearer-789")
+        monkeypatch.setattr(oauth, "ensure_fresh_session", lambda **kw: refreshed)
+        assert _resolve_partner_credential() == ("auth_token_comfy_org", "refreshed-bearer-789")
+
+    def test_passes_allow_clear_false_to_refresh(self, monkeypatch: pytest.MonkeyPatch):
+        """This best-effort injector must NEVER clear the shared session on a
+        fatal refresh: it refreshes with ``allow_clear=False``."""
+        monkeypatch.delenv("COMFY_CLOUD_API_KEY", raising=False)
+        from comfy_cli.auth import store as auth_store
+        from comfy_cli.cloud import oauth
+
+        seen: dict = {}
+
+        def _refresh(**kw):
+            seen.update(kw)
+            return None
+
+        monkeypatch.setattr(auth_store, "get", lambda _: None)
+        monkeypatch.setattr(oauth, "ensure_fresh_session", _refresh)
+        _resolve_partner_credential()
+        assert seen.get("allow_clear") is False
 
     def test_returns_none_when_nothing_configured(self, monkeypatch: pytest.MonkeyPatch):
         monkeypatch.delenv("COMFY_CLOUD_API_KEY", raising=False)
         from comfy_cli.auth import store as auth_store
 
         monkeypatch.setattr(auth_store, "get", lambda _: None)
-        monkeypatch.setattr(auth_store, "get_cloud_session", lambda: None)
+        self._no_session(monkeypatch)
         assert _resolve_partner_credential() is None
 
-    def test_treats_expired_session_as_no_creds(self, monkeypatch: pytest.MonkeyPatch):
+    def test_stale_session_from_transient_failure_falls_through(self, monkeypatch: pytest.MonkeyPatch):
+        """A transient refresh failure returns the STALE (expired) session; it
+        fails its own expiry check and the resolver falls through — unchanged
+        from the pre-BE-3361 behavior on a network flake."""
         monkeypatch.delenv("COMFY_CLOUD_API_KEY", raising=False)
         from comfy_cli.auth import store as auth_store
+        from comfy_cli.cloud import oauth
 
-        session = MagicMock()
-        session.is_expired.return_value = True
-        session.access_token = "stale"
+        stale = MagicMock()
+        stale.is_expired.return_value = True
+        stale.access_token = "stale"
+        stale.base_url = "https://cloud.comfy.org"
         monkeypatch.setattr(auth_store, "get", lambda _: None)
-        monkeypatch.setattr(auth_store, "get_cloud_session", lambda: session)
+        monkeypatch.setattr(oauth, "ensure_fresh_session", lambda **kw: stale)
         assert _resolve_partner_credential() is None
+
+    def test_refresh_path_error_falls_through_to_env_key(self, monkeypatch: pytest.MonkeyPatch):
+        """The refresh leg does network + file-locked persist; ``ensure_fresh_session``
+        only swallows transient/timeout cases, so an unexpected ``OSError`` (lock
+        acquire / token persist) would otherwise abort the run. This best-effort
+        injector must catch it and still return the env/stored key network-free."""
+        monkeypatch.setenv("COMFY_CLOUD_API_KEY", "env-key-fallback")
+        from comfy_cli.auth import store as auth_store
+        from comfy_cli.cloud import oauth
+
+        def _boom(**kw):
+            raise OSError("cannot acquire refresh lock")
+
+        monkeypatch.setattr(auth_store, "get", lambda _: None)
+        # refresh=True raises; the network-free fallback reads the store as-is.
+        monkeypatch.setattr(oauth, "ensure_fresh_session", _boom)
+        monkeypatch.setattr(auth_store, "get_cloud_session", lambda: None)
+        assert _resolve_partner_credential() == ("api_key_comfy_org", "env-key-fallback")
 
 
 class TestExecutePartnerNodePreflight:
@@ -1046,7 +1449,9 @@ class TestExecuteCloudAutoConvert:
             patch("comfy_cli.command.run.convert_ui_to_api", return_value=self.CONVERTED) as mock_convert,
             patch(
                 "comfy_cli.cql.engine._load_from_target",
-                return_value={"KSampler": {}},  # any truthy dict suffices for the converter
+                # An output-node KSampler so preflight's no-outputs check passes
+                # (the converter is mocked and ignores object_info anyway).
+                return_value={"KSampler": {"output_node": True}},
             ),
             patch("comfy_cli.comfy_client.Client", return_value=mock_client),
             patch("comfy_cli.command.run._spawn_watcher"),

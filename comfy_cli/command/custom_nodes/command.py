@@ -24,6 +24,7 @@ from comfy_cli.file_utils import (
     zip_files,
 )
 from comfy_cli.output import rprint as print  # context-aware: stderr in JSON mode
+from comfy_cli.output.renderer import get_renderer
 from comfy_cli.registry import (
     RegistryAPI,
     extract_node_configuration,
@@ -277,7 +278,7 @@ def enable_gui():
     print("[dim]ComfyUI will launch with: --enable-manager[/dim]")
 
 
-@manager_app.command("disable-gui", help="Enable ComfyUI-Manager without GUI")
+@manager_app.command("disable-gui", help="Disable the ComfyUI-Manager GUI (Manager stays enabled, headless)")
 @tracking.track_command("node")
 def disable_gui():
     """Enable ComfyUI-Manager but disable its GUI."""
@@ -473,6 +474,26 @@ def node_completer(incomplete: str) -> list[str]:
         return []
 
 
+def installed_pack_completer(incomplete: str) -> list[str]:
+    """Complete against *installed pack directory names*.
+
+    Deliberately not ``node_completer``: that one serves the registry node-id
+    cache, and a git-cloned pack's directory name is its repo name, not its
+    registry id. ``comfy node deps`` matches on directory name.
+    """
+    try:
+        from comfy_cli.command.pack_scan import iter_pack_dirs
+
+        workspace = workspace_manager.workspace_path
+        if not workspace:
+            return []
+        return [
+            p.name for p in iter_pack_dirs(pathlib.Path(workspace) / "custom_nodes") if p.name.startswith(incomplete)
+        ]
+    except Exception:
+        return []
+
+
 def node_or_all_completer(incomplete: str) -> list[str]:
     try:
         config_manager = ConfigManager()
@@ -515,7 +536,7 @@ def show(
     ] = None,
     mode: str = typer.Option(
         None,
-        help="[remote|local|cache]",
+        help="\\[remote|local|cache]",
         autocompletion=mode_completer,
     ),
 ):
@@ -540,7 +561,7 @@ def simple_show(
     ] = None,
     mode: str = typer.Option(
         None,
-        help="[remote|local|cache]",
+        help="\\[remote|local|cache]",
         autocompletion=mode_completer,
     ),
 ):
@@ -595,7 +616,7 @@ def install(
     ] = False,
     mode: str = typer.Option(
         None,
-        help="[remote|local|cache]",
+        help="\\[remote|local|cache]",
         autocompletion=mode_completer,
     ),
 ):
@@ -664,7 +685,7 @@ def reinstall(
     ] = None,
     mode: str = typer.Option(
         None,
-        help="[remote|local|cache]",
+        help="\\[remote|local|cache]",
         autocompletion=mode_completer,
     ),
 ):
@@ -709,7 +730,7 @@ def uninstall(
     ] = None,
     mode: str = typer.Option(
         None,
-        help="[remote|local|cache]",
+        help="\\[remote|local|cache]",
         autocompletion=mode_completer,
     ),
 ):
@@ -748,7 +769,7 @@ def update_node_id_cache():
 def update(
     nodes: list[str] = typer.Argument(
         ...,
-        help="[all|List of custom nodes to update]",
+        help="\\[all|List of custom nodes to update]",
         autocompletion=node_or_all_completer,
     ),
     channel: Annotated[
@@ -769,7 +790,7 @@ def update(
     ] = None,
     mode: str = typer.Option(
         None,
-        help="[remote|local|cache]",
+        help="\\[remote|local|cache]",
         autocompletion=mode_completer,
     ),
 ):
@@ -785,7 +806,7 @@ def update(
 def disable(
     nodes: list[str] = typer.Argument(
         ...,
-        help="[all|List of custom nodes to disable]",
+        help="\\[all|List of custom nodes to disable]",
         autocompletion=node_or_all_completer,
     ),
     channel: Annotated[
@@ -798,7 +819,7 @@ def disable(
     ] = None,
     mode: str = typer.Option(
         None,
-        help="[remote|local|cache]",
+        help="\\[remote|local|cache]",
         autocompletion=mode_completer,
     ),
 ):
@@ -812,7 +833,7 @@ def disable(
 def enable(
     nodes: list[str] = typer.Argument(
         ...,
-        help="[all|List of custom nodes to enable]",
+        help="\\[all|List of custom nodes to enable]",
         autocompletion=node_or_all_completer,
     ),
     channel: Annotated[
@@ -825,7 +846,7 @@ def enable(
     ] = None,
     mode: str = typer.Option(
         None,
-        help="[remote|local|cache]",
+        help="\\[remote|local|cache]",
         autocompletion=mode_completer,
     ),
 ):
@@ -839,7 +860,7 @@ def enable(
 def fix(
     nodes: list[str] = typer.Argument(
         ...,
-        help="[all|List of custom nodes to fix]",
+        help="\\[all|List of custom nodes to fix]",
         autocompletion=node_or_all_completer,
     ),
     channel: Annotated[
@@ -860,7 +881,7 @@ def fix(
     ] = None,
     mode: str = typer.Option(
         None,
-        help="[remote|local|cache]",
+        help="\\[remote|local|cache]",
         autocompletion=mode_completer,
     ),
 ):
@@ -901,7 +922,7 @@ def install_deps(
     ] = None,
     mode: str = typer.Option(
         None,
-        help="[remote|local|cache]",
+        help="\\[remote|local|cache]",
         autocompletion=mode_completer,
     ),
 ):
@@ -951,7 +972,7 @@ def deps_in_workflow(
     ] = None,
     mode: str = typer.Option(
         None,
-        help="[remote|local|cache]",
+        help="\\[remote|local|cache]",
         autocompletion=mode_completer,
     ),
 ):
@@ -965,6 +986,28 @@ def deps_in_workflow(
         channel,
         mode=mode,
     )
+
+
+@app.command(
+    "deps",
+    help="Report each pack's declared Python requirements vs the versions installed in the workspace venv (read-only).",
+)
+@tracking.track_command("node")
+def deps(
+    pack_names: Annotated[
+        list[str] | None,
+        typer.Argument(
+            show_default=False,
+            help="Pack directory names to report on (case-insensitive). Omit to report every installed pack.",
+            autocompletion=installed_pack_completer,
+        ),
+    ] = None,
+):
+    # Native + read-only on purpose: no cm-cli, no pip install, no network, so
+    # it works on a workspace that never installed ComfyUI-Manager.
+    from comfy_cli.command import node_deps
+
+    node_deps.execute(get_renderer(), workspace_manager.workspace_path, pack_names)
 
 
 def validate_node_for_publishing():
