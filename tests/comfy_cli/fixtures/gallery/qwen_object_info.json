@@ -1,0 +1,248 @@
+{
+  "LoadImage": {
+    "input": {
+      "required": {
+        "image": [["02_qwen_Image_edit_subgraphed_input_image.png"], {"image_upload": true}]
+      }
+    },
+    "input_order": {"required": ["image"]},
+    "output": ["IMAGE", "MASK"],
+    "output_name": ["IMAGE", "MASK"],
+    "category": "image",
+    "display_name": "Load Image",
+    "python_module": "nodes"
+  },
+  "SaveImage": {
+    "input": {
+      "required": {
+        "images": "IMAGE",
+        "filename_prefix": ["STRING", {"default": "ComfyUI"}]
+      }
+    },
+    "input_order": {"required": ["images", "filename_prefix"]},
+    "output": [],
+    "output_name": [],
+    "category": "image",
+    "display_name": "Save Image",
+    "output_node": true,
+    "python_module": "nodes"
+  },
+  "GetImageSize": {
+    "input": {
+      "required": {
+        "image": "IMAGE"
+      }
+    },
+    "input_order": {"required": ["image"]},
+    "output": ["INT", "INT", "INT"],
+    "output_name": ["width", "height", "batch_size"],
+    "category": "image",
+    "display_name": "Get Image Size",
+    "python_module": "nodes"
+  },
+  "ImageCompare": {
+    "input": {
+      "required": {
+        "image_a": "IMAGE",
+        "image_b": "IMAGE"
+      }
+    },
+    "input_order": {"required": ["image_a", "image_b"]},
+    "output": [],
+    "output_name": [],
+    "category": "image",
+    "display_name": "Image Compare",
+    "output_node": true,
+    "python_module": "nodes"
+  },
+  "ResizeImageMaskNode": {
+    "input": {
+      "required": {
+        "resize_type": [["scale total pixels", "scale by ratio", "resize to dimensions"]],
+        "scale": ["FLOAT", {"default": 1.0, "min": 0.01, "max": 100.0, "step": 0.01}],
+        "interpolation": [["area", "nearest-exact", "bilinear", "bicubic", "lanczos"]]
+      },
+      "optional": {
+        "image": "IMAGE",
+        "mask": "MASK"
+      }
+    },
+    "input_order": {"required": ["resize_type", "scale", "interpolation"], "optional": ["image", "mask"]},
+    "output": ["IMAGE", "MASK"],
+    "output_name": ["IMAGE", "MASK"],
+    "category": "transform",
+    "display_name": "Resize Image/Mask",
+    "python_module": "nodes"
+  },
+  "UNETLoader": {
+    "input": {
+      "required": {
+        "unet_name": [["qwen_image_edit_2509_fp8_e4m3fn.safetensors"]],
+        "weight_dtype": [["default", "fp8_e4m3fn", "fp8_e4m3fn_fast", "fp8_e5m2"]]
+      }
+    },
+    "input_order": {"required": ["unet_name", "weight_dtype"]},
+    "output": ["MODEL"],
+    "output_name": ["MODEL"],
+    "category": "advanced/loaders",
+    "display_name": "Load Diffusion Model",
+    "python_module": "nodes"
+  },
+  "CLIPLoader": {
+    "input": {
+      "required": {
+        "clip_name": [["qwen_2.5_vl_7b_fp8_scaled.safetensors"]],
+        "type": [["stable_diffusion", "sd3", "flux", "wan", "hidream", "chroma", "ace", "omnigen2", "qwen_image"]]
+      },
+      "optional": {
+        "device": [["default", "cpu"], {"advanced": true}]
+      }
+    },
+    "input_order": {"required": ["clip_name", "type"], "optional": ["device"]},
+    "output": ["CLIP"],
+    "output_name": ["CLIP"],
+    "category": "advanced/loaders",
+    "display_name": "Load CLIP",
+    "python_module": "nodes"
+  },
+  "VAELoader": {
+    "input": {
+      "required": {
+        "vae_name": [["qwen_image_vae.safetensors"]]
+      }
+    },
+    "input_order": {"required": ["vae_name"]},
+    "output": ["VAE"],
+    "output_name": ["VAE"],
+    "category": "loaders",
+    "display_name": "Load VAE",
+    "python_module": "nodes"
+  },
+  "LoraLoaderModelOnly": {
+    "input": {
+      "required": {
+        "model": "MODEL",
+        "lora_name": [["Qwen-Image-Edit-2509-Lightning-4steps-V1.0-bf16.safetensors"]],
+        "strength_model": ["FLOAT", {"default": 1.0, "min": -100.0, "max": 100.0, "step": 0.01}]
+      }
+    },
+    "input_order": {"required": ["model", "lora_name", "strength_model"]},
+    "output": ["MODEL"],
+    "output_name": ["MODEL"],
+    "category": "loaders",
+    "display_name": "LoraLoaderModelOnly",
+    "python_module": "nodes"
+  },
+  "TextEncodeQwenImageEditPlus": {
+    "input": {
+      "required": {
+        "clip": "CLIP",
+        "prompt": ["STRING", {"multiline": true, "dynamicPrompts": true}]
+      },
+      "optional": {
+        "vae": "VAE",
+        "image1": "IMAGE",
+        "image2": "IMAGE",
+        "image3": "IMAGE"
+      }
+    },
+    "input_order": {"required": ["clip", "prompt"], "optional": ["vae", "image1", "image2", "image3"]},
+    "output": ["CONDITIONING"],
+    "output_name": ["CONDITIONING"],
+    "category": "advanced/conditioning",
+    "display_name": "TextEncodeQwenImageEditPlus",
+    "python_module": "nodes"
+  },
+  "ModelSamplingAuraFlow": {
+    "input": {
+      "required": {
+        "model": "MODEL",
+        "shift": ["FLOAT", {"default": 3.0, "min": 0.0, "max": 100.0, "step": 0.01}]
+      }
+    },
+    "input_order": {"required": ["model", "shift"]},
+    "output": ["MODEL"],
+    "output_name": ["MODEL"],
+    "category": "advanced/model",
+    "display_name": "ModelSamplingAuraFlow",
+    "python_module": "nodes"
+  },
+  "CFGNorm": {
+    "input": {
+      "required": {
+        "model": "MODEL",
+        "strength": ["FLOAT", {"default": 1.0, "min": 0.0, "max": 100.0, "step": 0.01}]
+      }
+    },
+    "input_order": {"required": ["model", "strength"]},
+    "output": ["MODEL"],
+    "output_name": ["patched_model"],
+    "category": "advanced/guidance",
+    "display_name": "CFGNorm",
+    "python_module": "nodes"
+  },
+  "EmptySD3LatentImage": {
+    "input": {
+      "required": {
+        "width": ["INT", {"default": 1024, "min": 16, "max": 16384, "step": 8}],
+        "height": ["INT", {"default": 1024, "min": 16, "max": 16384, "step": 8}],
+        "batch_size": ["INT", {"default": 1, "min": 1, "max": 4096}]
+      }
+    },
+    "input_order": {"required": ["width", "height", "batch_size"]},
+    "output": ["LATENT"],
+    "output_name": ["LATENT"],
+    "category": "latent/sd3",
+    "display_name": "EmptySD3LatentImage",
+    "python_module": "nodes"
+  },
+  "KSampler": {
+    "input": {
+      "required": {
+        "model": "MODEL",
+        "seed": ["INT", {"default": 0, "min": 0, "max": 18446744073709551615, "control_after_generate": true}],
+        "steps": ["INT", {"default": 20, "min": 1, "max": 10000}],
+        "cfg": ["FLOAT", {"default": 8.0, "min": 0.0, "max": 100.0, "step": 0.1}],
+        "sampler_name": [["euler", "euler_ancestral", "dpmpp_2m", "res_multistep"]],
+        "scheduler": [["normal", "karras", "simple", "sgm_uniform"]],
+        "positive": "CONDITIONING",
+        "negative": "CONDITIONING",
+        "latent_image": "LATENT",
+        "denoise": ["FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}]
+      }
+    },
+    "input_order": {
+      "required": [
+        "model",
+        "seed",
+        "steps",
+        "cfg",
+        "sampler_name",
+        "scheduler",
+        "positive",
+        "negative",
+        "latent_image",
+        "denoise"
+      ]
+    },
+    "output": ["LATENT"],
+    "output_name": ["LATENT"],
+    "category": "sampling",
+    "display_name": "KSampler",
+    "python_module": "nodes"
+  },
+  "VAEDecode": {
+    "input": {
+      "required": {
+        "samples": "LATENT",
+        "vae": "VAE"
+      }
+    },
+    "input_order": {"required": ["samples", "vae"]},
+    "output": ["IMAGE"],
+    "output_name": ["IMAGE"],
+    "category": "latent",
+    "display_name": "VAE Decode",
+    "python_module": "nodes"
+  }
+}

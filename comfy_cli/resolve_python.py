@@ -6,7 +6,7 @@ import subprocess
 import sys
 import sysconfig
 
-from rich import print as rprint
+from comfy_cli.output import rprint
 
 
 def _get_python_binary(env_path: str) -> str:

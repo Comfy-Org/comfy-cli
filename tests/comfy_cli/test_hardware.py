@@ -207,6 +207,10 @@ class TestDetectHardwareNeverRaises:
             patch.object(hardware.platform, "system", side_effect=RuntimeError),
             patch.object(hardware.platform, "machine", side_effect=RuntimeError),
             patch.object(hardware.platform, "release", side_effect=RuntimeError),
+            # Block the real GPU probes too: without these, a dev box with an
+            # actual GPU detects it and the `gpu is None` assert fails.
+            patch.object(hardware, "_run", side_effect=TimeoutError("boom")),
+            patch.object(hardware.cuda_detect, "_load_libcuda", side_effect=OSError),
         ):
             hw = hardware.detect_hardware()
         assert hw["os"] is None
@@ -255,6 +259,20 @@ class TestDetectGpuAmd:
             gpu = hardware._detect_gpu_amd()
         assert gpu["model"] == "AMD Radeon RX 7900 XTX"
         assert gpu["vram_bytes"] == 25757220864
+
+    def test_amd_empty_first_card_falls_through_to_next(self):
+        """A card entry lacking the queried fields must not mask a later card
+        that has them (heterogeneous multi-GPU payloads)."""
+        payload = json.dumps(
+            {
+                "card0": {"Something Unrelated": "x"},
+                "card1": {"GPU Name": "AMD Instinct MI210", "VRAM Total Memory (B)": "68702699520"},
+            }
+        )
+        with patch.object(hardware, "_run", return_value=payload):
+            gpu = hardware._detect_gpu_amd()
+        assert gpu["model"] == "AMD Instinct MI210"
+        assert gpu["vram_bytes"] == 68702699520
 
     def test_amd_all_none_reports_no_gpu(self):
         """An error/metadata-only payload with nothing parseable must yield None,
