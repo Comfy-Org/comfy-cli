@@ -32,6 +32,11 @@ class EmitError(RuntimeError):
 class NodeSpec:
     """How to render one partner model as a ComfyUI node.
 
+    ``endpoint`` is the canonical ``/proxy/`` endpoint id the node's ``execute()``
+    posts to (read off the ComfyUI source). It must equal the endpoint the alias
+    itself proxies to — otherwise ``--emit-workflow`` would silently swap the
+    model out from under the user; ``test_emit.py`` asserts that invariant.
+
     ``param_map`` maps a ``comfy generate`` flag name → the partner node's input
     key. ``image_params`` lists flag names whose value is a local image path
     that must be materialized with a ``LoadImage`` node and wired into the
@@ -42,11 +47,15 @@ class NodeSpec:
     """
 
     node_class: str
+    endpoint: str  # canonical /proxy/ endpoint id the node's execute() posts to
     param_map: dict[str, str]
     output: str  # "IMAGE" | "VIDEO"
     fixed: dict[str, Any] = field(default_factory=dict)
     image_params: dict[str, str] = field(default_factory=dict)  # flag -> node input key
     media_port: int = 0
+    # Node input to set to "{width}:{height}" when the user passes both flags —
+    # for nodes that take an aspect ratio where the proxy schema takes w/h.
+    aspect_from_wh: str | None = None
 
 
 # proxy model alias → partner node spec. Param keys are the *generate* flag
@@ -56,6 +65,7 @@ MODEL_NODE_MAP: dict[str, NodeSpec] = {
     # Google Gemini Flash Image (nano-banana). Node: GeminiImageNode.
     "nano-banana": NodeSpec(
         node_class="GeminiImageNode",
+        endpoint="vertexai/gemini/{model}",
         param_map={
             "prompt": "prompt",
             "model": "model",
@@ -69,6 +79,7 @@ MODEL_NODE_MAP: dict[str, NodeSpec] = {
     # ByteDance Seedance image-to-video. Node: ByteDanceImageToVideoNode.
     "seedance": NodeSpec(
         node_class="ByteDanceImageToVideoNode",
+        endpoint="byteplus/api/v3/contents/generations/tasks",
         param_map={
             "prompt": "prompt",
             "model": "model",
@@ -86,9 +97,16 @@ MODEL_NODE_MAP: dict[str, NodeSpec] = {
         },
         output="VIDEO",
     ),
-    # BFL Flux (text-to-image). Node: Flux2ProImageNode.
-    "flux-pro": NodeSpec(
+    # BFL Flux 2 [pro] (text-to-image). Node: Flux2ProImageNode.
+    #
+    # There is deliberately NO "flux-pro" entry: that alias means BFL Flux Pro
+    # 1.1 (`bfl/flux-pro-1.1/generate`), and ComfyUI has no node for it — the
+    # only `flux-pro-1.1` node is the Ultra variant below. Mapping it to
+    # Flux2ProImageNode would emit a workflow for a *different* model, so
+    # `flux-pro` falls through to the EmitError instead.
+    "flux-2": NodeSpec(
         node_class="Flux2ProImageNode",
+        endpoint="bfl/flux-2-pro/generate",
         param_map={
             "prompt": "prompt",
             "width": "width",
@@ -99,21 +117,24 @@ MODEL_NODE_MAP: dict[str, NodeSpec] = {
         fixed={"width": 1024, "height": 768, "seed": 0, "prompt_upsampling": True},
         output="IMAGE",
     ),
-    "flux-2": NodeSpec(
-        node_class="Flux2ProImageNode",
+    # BFL Flux 1.1 [pro] Ultra (text-to-image). Node: FluxProUltraImageNode.
+    # The node takes an `aspect_ratio` string where the proxy schema takes
+    # width/height, so w/h are folded into it via `aspect_from_wh`.
+    "flux-ultra": NodeSpec(
+        node_class="FluxProUltraImageNode",
+        endpoint="bfl/flux-pro-1.1-ultra/generate",
         param_map={
             "prompt": "prompt",
-            "width": "width",
-            "height": "height",
             "seed": "seed",
-            "prompt_upsampling": "prompt_upsampling",
         },
-        fixed={"width": 1024, "height": 768, "seed": 0, "prompt_upsampling": True},
+        fixed={"aspect_ratio": "16:9", "raw": False, "prompt_upsampling": False, "seed": 0},
+        aspect_from_wh="aspect_ratio",
         output="IMAGE",
     ),
     # Kling image-to-video. Node: KlingImage2VideoNode.
     "kling-i2v": NodeSpec(
         node_class="KlingImage2VideoNode",
+        endpoint="kling/v1/videos/image2video",
         param_map={
             "prompt": "prompt",
             "negative_prompt": "negative_prompt",
@@ -198,6 +219,22 @@ def build_workflow(model: str, values: dict[str, Any], *, output_prefix: str = "
     for flag, node_key in ns.param_map.items():
         if flag in values and values[flag] is not None:
             node_inputs[node_key] = values[flag]
+
+    # Nodes that take an aspect ratio instead of width/height: fold the two
+    # proxy flags into the node's single "W:H" input when both are present.
+    # A lone --width/--height has no fixed default to fall back on here (unlike
+    # flux-2's independent param_map entries), so silently keeping the default
+    # aspect ratio would drop the user's flag with no error - fail loudly instead.
+    if ns.aspect_from_wh:
+        width_given = values.get("width") is not None
+        height_given = values.get("height") is not None
+        if width_given != height_given:
+            raise EmitError(
+                f"--emit-workflow for {model!r} needs --width and --height together "
+                "to set the aspect ratio; only one was provided."
+            )
+        if width_given and height_given:
+            node_inputs[ns.aspect_from_wh] = f"{values['width']}:{values['height']}"
 
     partner = {
         "class_type": ns.node_class,
