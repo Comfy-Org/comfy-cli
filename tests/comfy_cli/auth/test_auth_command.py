@@ -172,6 +172,15 @@ def test_auth_set_comfy_cloud_rejected(cli_env):
     assert "comfy cloud login" in (env["error"]["hint"] or "")
 
 
+def test_cloud_set_key_visible_in_help(cli_env):
+    """`set-key` is no longer hidden — it must show up in `comfy cloud --help`.
+    The ecosystem (and comfy-local-mcp's missing-credential guidance) routes
+    users to `comfy cloud set-key`, so it can't be an undiscoverable back door."""
+    res = _run(["cloud", "--help"], cli_env)
+    assert res.returncode == 0, res.stderr
+    assert "set-key" in res.stdout
+
+
 def test_cloud_whoami_not_signed_in(cli_env):
     """`whoami` lives under the `cloud` namespace now, not `auth`."""
     res = _run(["--json", "cloud", "whoami"], cli_env)

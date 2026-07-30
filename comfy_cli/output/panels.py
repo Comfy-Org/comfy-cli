@@ -18,11 +18,17 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
+from comfy_cli.output.sanitize import sanitize_markup, sanitize_optional, sanitize_value
+
 _TARGET_DIM_CHAR = "·"
 
 
 def _kv_table(rows: Sequence[tuple[str, str]], *, label_style: str = "bold cyan", value_style: str = "") -> Table:
-    """Two-column borderless table used inside panels to align label/value rows."""
+    """Two-column borderless table used inside panels to align label/value rows.
+
+    ``Table.add_row`` parses Rich markup in a ``str`` cell, so any caller
+    passing untrusted text must run it through ``sanitize_markup`` first.
+    """
     tbl = Table.grid(padding=(0, 2), expand=False)
     tbl.add_column(justify="right", style=label_style, no_wrap=True)
     tbl.add_column(style=value_style, overflow="fold")
@@ -54,7 +60,20 @@ def error_panel(
         │ details:                                                      │
         │   key=value                                                   │
         ╰───────────────────────────────────────────────────────────────╯
+
+    ``code``, ``message``, ``hint`` and the stringified ``details`` are all
+    sanitized here: any of them can carry server-supplied text, and this panel
+    is the pretty-mode boundary where it would otherwise reach the terminal as
+    live escape sequences (see ``comfy_cli.output.sanitize``).
+
+    ``code``/``message``/``hint`` are rendered through ``Text``, which never
+    parses markup, so stripping the control bytes is enough for them. The
+    ``details`` rows go to ``Table.add_row``, which *does* parse markup, so
+    those additionally need ``sanitize_markup``.
     """
+    code = sanitize_value(code)
+    message = sanitize_value(message)
+    hint = sanitize_optional(hint)
     body: list[Any] = [Text(message, style="white")]
     if hint:
         body.append(Text(""))
@@ -66,7 +85,7 @@ def error_panel(
         for k, v in details.items():
             if v is None:
                 continue
-            rows.append((str(k), str(v)))
+            rows.append((sanitize_markup(k), sanitize_markup(v)))
         if rows:
             body.append(_kv_table(rows, label_style="dim", value_style="dim"))
     return Panel(

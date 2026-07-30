@@ -11,6 +11,10 @@ import mimetypes
 from pathlib import Path
 
 import httpx
+
+# NOT migrated to `comfy_cli.output.rprint` on purpose: `print_urls` / `print_saved`
+# are `generate`'s primary result, and `generate` emits no renderer envelope. See
+# the note in `comfy_cli/command/generate/app.py`.
 from rich import print as rprint
 
 from comfy_cli.command.generate import client
