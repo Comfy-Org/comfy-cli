@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import ctypes
 import json
+import os
 from pathlib import Path
 from unittest.mock import patch
 
@@ -472,3 +473,44 @@ class TestResolveBinaryCwdGuard:
             patch.object(hardware.shutil, "which", return_value=str(resolved)),
         ):
             assert hardware._resolve_binary("sysctl") == str(resolved)
+
+
+class TestResolveBinaryRejectsRelativeMatches:
+    """``shutil.which`` returns ``os.path.join(entry, name)``, so a relative
+    ``$PATH`` entry yields a relative match anchored in the CWD. Executing that
+    string would let ``subprocess`` re-resolve it against the attacker-controlled
+    CWD, so such a match is skipped rather than run."""
+
+    def test_rejects_relative_subdirectory_match(self):
+        """``PATH=subdir`` → ``subdir/nvidia-smi``: not *directly* in the CWD, so
+        the planted-in-CWD guard lets it through — the absolute-path check is what
+        stops it."""
+        relative = os.path.join("subdir", "nvidia-smi")
+        # Precondition: this is exactly the case the CWD guard does NOT catch.
+        assert not hardware._is_planted_in_cwd(relative)
+        with patch.object(hardware.shutil, "which", return_value=relative):
+            assert hardware._resolve_binary("nvidia-smi") is None
+
+    def test_rejects_dot_relative_match(self):
+        """Windows prepends ``os.curdir`` to the search path, so a CWD plant comes
+        back as ``.\\nvidia-smi.exe``."""
+        with (
+            patch.object(hardware.platform, "system", return_value="Windows"),
+            patch.object(hardware.shutil, "which", return_value=os.path.join(os.curdir, "nvidia-smi.exe")),
+        ):
+            assert hardware._resolve_binary("nvidia-smi") is None
+
+    def test_rejects_bare_name_match(self):
+        """An empty ``$PATH`` entry joins to a bare name, which ``subprocess``
+        would resolve by its own PATH/CWD search — the bare-name invocation this
+        PR removes."""
+        with patch.object(hardware.shutil, "which", return_value="nvidia-smi"):
+            assert hardware._resolve_binary("nvidia-smi") is None
+
+    def test_run_never_spawns_a_relative_path(self):
+        with (
+            patch.object(hardware.shutil, "which", return_value=os.path.join("subdir", "nvidia-smi")),
+            patch.object(hardware.subprocess, "check_output") as mock_run,
+        ):
+            assert hardware._run(["nvidia-smi", "--query-gpu=name"]) is None
+        mock_run.assert_not_called()

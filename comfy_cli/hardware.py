@@ -67,13 +67,30 @@ def _resolve_binary(name: str) -> str | None:
 
     ``shutil.which`` may itself resolve against the current directory (always on
     Windows; on any platform when ``$PATH`` holds ``.`` or an empty entry), so as
-    defense-in-depth a resolved path planted directly in the CWD is additionally
-    rejected on every platform. A legitimate system binary (e.g. ``nvidia-smi.exe``
-    under ``System32``) is unaffected.
+    defense-in-depth two CWD-anchored results are additionally rejected on every
+    platform:
+
+    * a **relative** result. ``which`` returns ``os.path.join(entry, name)``, so a
+      relative path means the matching ``$PATH`` entry was itself relative (``.``,
+      an empty entry, ``subdir``, or Windows' implicitly prepended ``os.curdir``)
+      and the binary therefore lives under the attacker-controlled CWD. Handing
+      that string to :func:`subprocess.check_output` would re-resolve it against
+      the CWD — exactly the hijack this function exists to prevent — so the probe
+      is skipped instead. A binary found through a normal absolute ``$PATH`` entry
+      always comes back absolute and is unaffected.
+    * an absolute result sitting directly **in** the CWD (see
+      :func:`_is_planted_in_cwd`), which covers the CWD appearing in ``$PATH`` as
+      an absolute entry.
+
+    A legitimate system binary (e.g. ``nvidia-smi.exe`` under ``System32``) is
+    unaffected by either check.
     """
     try:
         path = shutil.which(name)
         if path is None:
+            return None
+        if not os.path.isabs(path):
+            logger.debug("skipping hardware probe %r: relative PATH match anchored in CWD (%s)", name, path)
             return None
         if _is_planted_in_cwd(path):
             logger.debug("skipping hardware probe %r: resolved into CWD (%s)", name, path)
