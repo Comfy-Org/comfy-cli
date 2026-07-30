@@ -293,17 +293,16 @@ mechanisms:
 
   `comfy node install comfyui-impact-pack`
 
-- **`comfy node registry-install <id> [version]`** talks directly to the
+- **`comfy node registry-install <id> [--version <v>]`** talks directly to the
   [Comfy Registry](https://registry.comfy.org) API. It downloads the published
-  archive for a single node (optionally pinned to a specific `version`),
-  extracts it into `custom_nodes/`, and runs the node's own install script. It
-  does **not** go through ComfyUI-Manager, so it does not require the Manager to
-  be installed — this is the command the Registry's own install instructions
-  use.
+  archive for a single node (optionally pinned with `--version`), extracts it
+  into `custom_nodes/`, and runs the node's own install script. It does **not**
+  go through ComfyUI-Manager, so it does not require the Manager to be
+  installed — this is the command the Registry's own install instructions use.
 
   `comfy node registry-install comfyui-impact-pack`
 
-  `comfy node registry-install comfyui-impact-pack 1.0.0`  # install a specific version
+  `comfy node registry-install comfyui-impact-pack --version 1.0.0`  # install a specific version
 
   Because `registry-install` bypasses the Manager's dependency machinery and
   simply runs the node's bundled install script, it only accepts
@@ -329,7 +328,9 @@ it can identify which node packs have incompatible dependencies and why.
 
   `comfy node uv-sync`
 
-- `--uv-compile` is mutually exclusive with `--fast-deps` and `--no-deps`.
+- `--uv-compile` is mutually exclusive with `--fast-deps` and `--no-deps` —
+  except on `restore-snapshot`, where `--fast-deps` selects the `--uv-compile`
+  path instead (see [--fast-deps](#--fast-deps) below).
 
 - To make `--uv-compile` the default for all commands, see
   [uv-compile default](#uv-compile-default) below.
@@ -345,8 +346,8 @@ built-in `uv`-based resolver (`DependencyCompiler`), which is significantly
 faster and only requires `uv` (no ComfyUI-Manager). On a dependency version
 conflict it prompts you interactively to pick a version.
 
-- Accepted by: `comfy install`, `comfy node install`, and
-  `comfy node reinstall`.
+- Accepted by: `comfy install`, `comfy node install`, `comfy node reinstall`,
+  and `comfy node restore-snapshot`.
 
   `comfy install --fast-deps`
 
@@ -356,7 +357,22 @@ conflict it prompts you interactively to pick a version.
   node directly from the Comfy Registry by running the node's own bundled
   install script, so it never touches comfy-cli's dependency resolver (see
   [`install` vs `registry-install`](#install-vs-registry-install) above).
-- Mutually exclusive with `--no-deps` and `--uv-compile`.
+- Mutually exclusive with `--no-deps` and `--uv-compile`, where those flags
+  exist — the exact pairing is per-command:
+
+  | Command | Rejected combination |
+  |---------|----------------------|
+  | `comfy node install` | `--fast-deps --no-deps`, `--fast-deps --uv-compile` |
+  | `comfy node reinstall` | `--fast-deps --uv-compile` (no `--no-deps` on this command) |
+  | `comfy node restore-snapshot` | `--fast-deps --no-uv-compile` (see below) |
+  | `comfy install` | none (neither flag exists on this command) |
+
+- **Exception — `comfy node restore-snapshot`:** here `--fast-deps` *selects*
+  the `--uv-compile` fast path rather than conflicting with it. ComfyUI-Manager's
+  `cm-cli` has no `--no-deps` on `restore-snapshot`, and its `--uv-compile`
+  already implies no-deps internally, so the two are synonyms on this command.
+  Combining `--fast-deps` with `--no-uv-compile` is the contradiction, and it
+  errors: `Cannot use --fast-deps with --no-uv-compile`.
 
 #### --fast-deps vs --uv-compile
 
@@ -365,7 +381,7 @@ Both flags use `uv` for faster dependency resolution, but they work differently:
 |                       | `--fast-deps`                                   | `--uv-compile`                                |
 |-----------------------|-------------------------------------------------|-----------------------------------------------|
 | **Resolver**          | comfy-cli built-in (`DependencyCompiler`)       | ComfyUI-Manager (`UnifiedDepResolver`)        |
-| **Scope**             | `comfy install`, `comfy node install/reinstall` | Custom node commands only                     |
+| **Scope**             | `comfy install`, `comfy node install/reinstall/restore-snapshot` | Custom node commands only    |
 | **Conflict handling** | Interactive prompt to pick a version            | Automatic detection with node attribution     |
 | **Config default**    | No                                              | Yes (`comfy manager uv-compile-default true`) |
 | **Requires**          | Only `uv`                                       | ComfyUI-Manager v4.1+                         |
