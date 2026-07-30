@@ -853,6 +853,7 @@ def download_cancel(
         print(f"Cancelled download [cyan]{download_id}[/cyan].")
     renderer.emit(payload, command="model download-cancel", changed=True)
 
+
 @app.command(help="Remove one or more downloaded models by name or via interactive selection.")
 @tracking.track_command("model")
 def remove(
