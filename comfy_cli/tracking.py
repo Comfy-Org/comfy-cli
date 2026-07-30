@@ -149,6 +149,41 @@ def _telemetry_disabled_by_env() -> bool:
     return False
 
 
+# Click/Typer completion instruction tokens. The ``_*_COMPLETE`` var carries an
+# ``instruction_shell`` pair whose instruction is ``complete`` (resolve args) or
+# ``source`` (emit the completion script) — neither runs a command.
+_COMPLETION_INSTRUCTIONS = frozenset({"complete", "source"})
+
+
+def _in_shell_completion() -> bool:
+    """Return True when the process is resolving shell tab-completion rather
+    than running a real command.
+
+    Click/Typer trigger completion by re-invoking the CLI with a
+    ``_<PROG_NAME>_COMPLETE`` environment variable set (e.g. ``_COMFY_COMPLETE``
+    under fish, bash, and zsh). No command actually runs on that path, so there
+    is no telemetry to send — detecting it lets us skip standing up the PostHog
+    client (a background thread + network setup), which is wasted work on an
+    inert path (GitHub #506). The prog name varies with the invoking entrypoint
+    (``comfy`` / ``comfy-cli`` / ``comfycli``) and any user alias, so match the
+    ``_..._COMPLETE`` pattern rather than a fixed name.
+
+    The var's value is Click/Typer's completion *instruction* — ``complete_bash``
+    / ``source_zsh`` (Typer 8.x style) or ``bash_complete`` (Click 7.x style),
+    i.e. an ``instruction_shell`` / ``shell_instruction`` pair. Require a
+    recognized instruction token so a stray or empty user-exported
+    ``_FOO_COMPLETE`` can't silently suppress telemetry on a real command run.
+    Snapshot the keys with ``list(...)`` so a concurrent env mutation on another
+    thread can't raise ``RuntimeError: dictionary changed size during iteration``.
+    """
+    for name in list(os.environ):
+        if not (name.startswith("_") and name.endswith("_COMPLETE")):
+            continue
+        if _COMPLETION_INSTRUCTIONS & set(os.environ.get(name, "").split("_")):
+            return True
+    return False
+
+
 def _consent_enabled() -> bool:
     """Whether passive telemetry may be sent right now: no env opt-out AND the
     user has consented (persisted flag) or a session-only opt-in is active.
@@ -264,6 +299,14 @@ _PROVIDERS_LOCK = threading.Lock()
 
 def _get_providers() -> list[TelemetryProvider]:
     global PROVIDERS
+    # Shell tab-completion (fish/bash/zsh) resolves the command tree without ever
+    # running a command, so nothing is sent — don't stand up (or even import) the
+    # telemetry SDKs on that inert path (GitHub #506). Today's lazy construction
+    # already keeps completion inert because _dispatch never runs there; this makes
+    # that guarantee explicit and independent of *when* providers get built.
+    # Returned uncached so a real invocation is never affected.
+    if _in_shell_completion():
+        return []
     if PROVIDERS is None:
         with _PROVIDERS_LOCK:
             if PROVIDERS is None:

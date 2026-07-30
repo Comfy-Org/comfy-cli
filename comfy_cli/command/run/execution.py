@@ -38,6 +38,7 @@ from rich.table import Column, Table
 
 from comfy_cli import execution_errors
 from comfy_cli.command.run.loader import _MAX_BODY_PREVIEW, _node_errors_to_list
+from comfy_cli.http import no_redirect_urlopen
 from comfy_cli.output import get_renderer
 from comfy_cli.output import rprint as pprint
 from comfy_cli.output.sanitize import sanitize_markup
@@ -173,8 +174,12 @@ class WorkflowExecution:
         req = request.Request(f"http://{self.host}:{self.port}/prompt", json.dumps(data).encode("utf-8"))
         req.add_header("Comfy-Usage-Source", "comfy-cli")
         try:
-            resp = request.urlopen(req, timeout=self.timeout)
-            raw_body = resp.read()
+            # No-redirect, not ``plain_urlopen``: ``extra_data`` can carry a
+            # Comfy Org credential, so this submit gets the same refuse-a-30x
+            # policy as every other credentialed call rather than leaning on
+            # urllib happening to drop the body when it follows a redirect.
+            with no_redirect_urlopen(req, timeout=self.timeout) as resp:
+                raw_body = resp.read()
         except urllib.error.HTTPError as e:
             body_bytes = e.read()
             body_text = body_bytes.decode("utf-8", errors="replace").strip() if body_bytes else ""

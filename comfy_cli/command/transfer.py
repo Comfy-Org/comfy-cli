@@ -27,7 +27,7 @@ import typer
 
 from comfy_cli import jobs_state
 from comfy_cli.comfy_client import Client, Unauthenticated, extract_output_entries
-from comfy_cli.http import NoRedirectHandler
+from comfy_cli.http import NoRedirectHandler, build_http_only_opener
 from comfy_cli.http import target_auth_headers as _auth_headers
 from comfy_cli.output import get_renderer
 from comfy_cli.output import rprint as pprint
@@ -95,8 +95,8 @@ class _DownloadRedirectHandler(urllib.request.HTTPRedirectHandler):
         return new_req
 
 
-_TRANSFER_OPENER = urllib.request.build_opener(NoRedirectHandler("redirect refused (auth leak prevention)"))
-_DOWNLOAD_OPENER = urllib.request.build_opener(_DownloadRedirectHandler())
+_TRANSFER_OPENER = build_http_only_opener(NoRedirectHandler("redirect refused (auth leak prevention)"))
+_DOWNLOAD_OPENER = build_http_only_opener(_DownloadRedirectHandler())
 
 # Per-output safety cap, shared by the HTTP download stream and local-output copies.
 _MAX_DOWNLOAD_BYTES = 10 * 1024 * 1024 * 1024  # 10 GB

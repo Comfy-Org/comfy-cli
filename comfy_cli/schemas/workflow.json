@@ -32,7 +32,12 @@
     },
     "applied": { "type": "array" },
     "warnings": { "type": "array" },
-    "wrote": { "type": "string" },
+    "wrote": { "type": ["string", "null"], "description": "file written, or null when nothing was written (set-slot --stdout)" },
+    "out": { "type": "string", "description": "set-slot: where the result went — \"stdout\" when --stdout returned it instead of writing the file" },
+    "workflow_json": { "type": "object", "description": "set-slot --stdout: the modified workflow itself (human mode prints it raw on stdout instead)" },
+    "variants": { "type": ["array", "null"], "description": "vary without --out-dir: the produced workflows (human mode prints them as NDJSON on stdout instead); null when they were written to --out-dir" },
+    "written": { "type": "array" },
+    "out_dir": { "type": ["string", "null"] },
     "variations_summary": { "type": "array" },
     "item_map": {
       "type": "object",

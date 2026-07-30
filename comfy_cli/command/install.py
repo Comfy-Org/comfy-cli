@@ -82,7 +82,7 @@ def pip_install_comfyui_dependencies(
 
         if result and result.returncode != 0:
             rprint("Failed to install PyTorch dependencies. Please check your environment (`comfy env`) and try again")
-            sys.exit(1)
+            raise typer.Exit(code=1)
 
         # install directml for AMD windows
         if gpu == GPU_OPTION.AMD and plat == constants.OS.WINDOWS:
@@ -112,7 +112,7 @@ def pip_install_comfyui_dependencies(
     result = subprocess.run([python, "-m", "pip", "install", "-r", "requirements.txt"], check=False)
     if result.returncode != 0:
         rprint("Failed to install ComfyUI dependencies. Please check your environment (`comfy env`) and try again.")
-        sys.exit(1)
+        raise typer.Exit(code=1)
 
 
 def pip_install_manager(repo_dir, python=sys.executable):
@@ -143,6 +143,26 @@ def pip_install_manager(repo_dir, python=sys.executable):
     find_cm_cli.cache_clear()
     find_legacy_manager_clone.cache_clear()
     return True
+
+
+def _install_manager_with_fallback(repo_dir, python, *, bootstrap_pip: bool):
+    """Install ComfyUI-Manager, degrading gracefully when it fails.
+
+    On failure, disable the manager GUI mode so a later ``comfy launch`` doesn't
+    inject manager flags for a manager that isn't actually installed.
+
+    ``bootstrap_pip`` bootstraps pip first (no-op if already present): the
+    fast_deps path leaves a uv-managed venv that may ship no pip, whereas the
+    pip path has already bootstrapped it earlier in ``execute``.
+    """
+    if bootstrap_pip:
+        ensure_pip(python)
+    if not pip_install_manager(repo_dir, python=python):
+        # Manager installation failed - disable to prevent launch issues
+        from comfy_cli.config_manager import ConfigManager
+
+        ConfigManager().set(constants.CONFIG_KEY_MANAGER_GUI_MODE, "disable")
+        rprint("[yellow]Manager not installed. Launch will run without manager flags.[/yellow]")
 
 
 def execute(
@@ -191,7 +211,7 @@ def execute(
             checkout_stable_comfyui(version=version, repo_dir=repo_dir, url=url)
         except GitHubRateLimitError as e:
             rprint(f"[bold red]Error checking out ComfyUI version: {e}[/bold red]")
-            sys.exit(1)
+            raise typer.Exit(code=1) from e
 
     elif not check_comfy_repo(repo_dir)[0]:
         # Get actual remote URL for better error message
@@ -210,7 +230,7 @@ def execute(
             rprint(
                 f"[bold red]'{repo_dir}' already exists. But it is an invalid ComfyUI repository. Remove it and retry.[/bold red]"
             )
-        sys.exit(-1)
+        raise typer.Exit(code=1)
 
     # checkout specified commit
     if commit is not None:
@@ -251,12 +271,8 @@ def execute(
     else:
         rprint("\nInstalling ComfyUI-Manager..")
         if not fast_deps:
-            if not pip_install_manager(repo_dir, python=python):
-                # Manager installation failed - disable to prevent launch issues
-                from comfy_cli.config_manager import ConfigManager
-
-                ConfigManager().set(constants.CONFIG_KEY_MANAGER_GUI_MODE, "disable")
-                rprint("[yellow]Manager not installed. Launch will run without manager flags.[/yellow]")
+            # pip was already bootstrapped above for the pip path.
+            _install_manager_with_fallback(repo_dir, python, bootstrap_pip=False)
 
     if fast_deps:
         if python != sys.executable:
@@ -283,14 +299,9 @@ def execute(
         depComp.install_deps()
         # Install manager separately (not included in DependencyCompiler).
         # fast_deps leaves a uv-managed venv that may have no pip, but the
-        # manager install uses pip — bootstrap it first (no-op if present).
+        # manager install uses pip — the helper bootstraps it first.
         if not skip_manager:
-            ensure_pip(python)
-            if not pip_install_manager(repo_dir, python=python):
-                from comfy_cli.config_manager import ConfigManager
-
-                ConfigManager().set(constants.CONFIG_KEY_MANAGER_GUI_MODE, "disable")
-                rprint("[yellow]Manager not installed. Launch will run without manager flags.[/yellow]")
+            _install_manager_with_fallback(repo_dir, python, bootstrap_pip=True)
 
     if not skip_manager:
         try:
@@ -601,7 +612,7 @@ def checkout_stable_comfyui(version: str, repo_dir: str, url: str | None = None)
             selected_release = get_latest_release(owner, repo)
             if selected_release is None:
                 rprint(f"Error: No release found for version '{version}'.")
-                sys.exit(1)
+                raise typer.Exit(code=1)
             tag = str(selected_release["tag"])
         elif not fetch_ok:
             # Tag list comes from a cached state — flag it so the user knows
@@ -628,7 +639,7 @@ def checkout_stable_comfyui(version: str, repo_dir: str, url: str | None = None)
         if not success:
             console.print(f"\n[bold red]Failed to checkout tag '{tag}'![/bold red]")
             console.print("[yellow]The version may not exist. Please check available versions.[/yellow]")
-            sys.exit(1)
+            raise typer.Exit(code=1)
 
 
 class VersionSwitchError(Exception):
