@@ -29,12 +29,12 @@ from __future__ import annotations
 import json
 import urllib.error
 import urllib.parse
-import urllib.request
 from typing import Annotated, Any, NoReturn
 
 import typer
 
 from comfy_cli import tracking
+from comfy_cli.http import authed_urlopen
 from comfy_cli.output import get_renderer, rprint
 from comfy_cli.output.sanitize import sanitize_markup
 
@@ -139,23 +139,13 @@ def _models_path_parts(target) -> tuple[str, ...]:
     return ("experiment", "models") if target.is_cloud else ("models",)
 
 
-def _authed_request(url: str, target) -> urllib.request.Request:
-    from comfy_cli.http import target_auth_headers
-
-    req = urllib.request.Request(url)
-    for k, v in target_auth_headers(target).items():
-        req.add_header(k, v)
-    return req
-
-
 def _http_get_json(url: str, target, timeout: float = 30.0) -> Any:
     """Issue an authenticated GET and decode JSON. Raises urllib/JSON errors verbatim.
 
     Response body is capped at ``_MAX_RESPONSE_BYTES`` to bound memory use on a
     misbehaving server. A ``ValueError`` is raised if the cap is exceeded.
     """
-    req = _authed_request(url, target)
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
+    with authed_urlopen(url, target, timeout=timeout) as resp:
         # ``read(N)`` returns up to N bytes; reading N+1 lets us distinguish
         # "fits exactly" from "exceeds cap" without buffering the whole stream
         # twice on the happy path.

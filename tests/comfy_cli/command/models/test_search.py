@@ -218,7 +218,12 @@ def _patch_urlopen(monkeypatch: pytest.MonkeyPatch, routes: dict[str, Any]):
                 return _fake_resp(body)
         raise AssertionError(f"unexpected URL hit by mock: {url}")
 
-    monkeypatch.setattr("urllib.request.urlopen", _fake)
+    # ``_http_get_json`` now opens through the shared no-redirect opener in
+    # ``comfy_cli.http``; the fake still receives a ``Request`` object, so the
+    # route-matching above is unchanged.
+    import comfy_cli.http as http_mod
+
+    monkeypatch.setattr(http_mod._AUTHED_OPENER, "open", _fake)
     return calls
 
 

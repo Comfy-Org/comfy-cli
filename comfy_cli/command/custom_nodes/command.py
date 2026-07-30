@@ -219,6 +219,15 @@ def restore_snapshot(
         show_default=False,
         help="Restore for pip packages specified by local paths.",
     ),
+    fast_deps: Annotated[
+        bool,
+        typer.Option(
+            "--fast-deps",
+            show_default=False,
+            help="Use the fast (uv) dependency installer, matching `comfy install --fast-deps`. "
+            "For snapshot restore this runs the uv-compile fast path (requires ComfyUI-Manager v4.1+).",
+        ),
+    ] = False,
     uv_compile: Annotated[
         bool | None,
         typer.Option(
@@ -228,6 +237,16 @@ def restore_snapshot(
         ),
     ] = None,
 ):
+    # `--fast-deps` mirrors the `comfy install --fast-deps` UX (issue #217). cm_cli's
+    # `restore-snapshot` does NOT accept `--no-deps`, so the DependencyCompiler-based
+    # fast path used by `install`/`reinstall` is unavailable here; the fast uv path
+    # restore-snapshot *does* support is `--uv-compile` (it sets no-deps + batch-resolves
+    # with uv internally). So `--fast-deps` forwards the uv-compile fast path. Passing it
+    # alongside an explicit `--no-uv-compile` is contradictory.
+    if fast_deps and uv_compile is False:
+        typer.echo("Cannot use --fast-deps with --no-uv-compile", err=True)
+        raise typer.Exit(code=1)
+
     extras = []
 
     if pip_non_url:
@@ -239,8 +258,12 @@ def restore_snapshot(
     if pip_local_url:
         extras += ["--pip-local-url"]
 
+    effective_uv_compile = _resolve_uv_compile(uv_compile)
+    if fast_deps:
+        effective_uv_compile = True
+
     path = os.path.abspath(path)
-    execute_cm_cli(["restore-snapshot", path] + extras, uv_compile=_resolve_uv_compile(uv_compile))
+    execute_cm_cli(["restore-snapshot", path] + extras, uv_compile=effective_uv_compile)
 
 
 @app.command("restore-dependencies", help="Restore dependencies from installed custom nodes")
