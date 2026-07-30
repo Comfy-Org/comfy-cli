@@ -31,7 +31,7 @@ from typing import Any
 from comfy_cli.cql._net import is_loopback_host
 from comfy_cli.cql.errors import CQLRuntimeError
 from comfy_cli.file_utils import atomic_write_text
-from comfy_cli.http import NoRedirectHandler
+from comfy_cli.http import NoRedirectHandler, build_http_only_opener
 
 # Cap raw bytes read from disk or the network. Real `object_info` dumps are a
 # few MB; anything past 256 MiB is almost certainly a wrong path or a hostile
@@ -39,7 +39,7 @@ from comfy_cli.http import NoRedirectHandler
 MAX_INPUT_BYTES = 256 * 1024 * 1024
 
 
-_LOADER_OPENER = urllib.request.build_opener(NoRedirectHandler())
+_LOADER_OPENER = build_http_only_opener(NoRedirectHandler())
 
 
 def load_graph(
