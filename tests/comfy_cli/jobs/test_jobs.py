@@ -1490,6 +1490,63 @@ def test_render_status_pretty_previews_text_truncated(monkeypatch, capsys):
     assert tail not in out  # second line never rendered
 
 
+def test_render_status_pretty_text_preview_skips_leading_blank_lines(monkeypatch, capsys):
+    """A leading blank line must not blank out the preview — the first
+    *non-blank* line is what should surface, not the empty string before it."""
+    from comfy_cli.output import Renderer, set_renderer
+    from comfy_cli.output.renderer import OutputMode
+
+    set_renderer(Renderer(mode=OutputMode.PRETTY))
+    snap = {
+        "prompt_id": "p",
+        "status": "completed",
+        "outputs": [],
+        "text_outputs": {"7": ["\n\nactual content"]},
+    }
+    jobs_mod._render_status_pretty(snap, host="h", port=8188)
+    out = capsys.readouterr().out
+    assert "actual content" in out
+
+
+def test_render_status_pretty_text_preview_is_not_rich_markup(monkeypatch, capsys):
+    """Node ids/text are server-supplied and may contain `[...]` — the preview
+    must render it literally instead of letting Rich interpret it as markup
+    (which would otherwise corrupt output or raise on unmatched tags)."""
+    from comfy_cli.output import Renderer, set_renderer
+    from comfy_cli.output.renderer import OutputMode
+
+    set_renderer(Renderer(mode=OutputMode.PRETTY))
+    snap = {
+        "prompt_id": "p",
+        "status": "completed",
+        "outputs": [],
+        "text_outputs": {"7": ["[bold red]not a style tag[/] and an unmatched ]"]},
+    }
+    jobs_mod._render_status_pretty(snap, host="h", port=8188)
+    out = capsys.readouterr().out
+    assert "[bold red]not a style tag[/] and an unmatched ]" in out
+
+
+def test_render_status_pretty_text_preview_bounds_entry_count(monkeypatch, capsys):
+    """Many text-output entries must not blow up the pretty table — the
+    preview caps the number of lines shown and notes how many were dropped."""
+    from comfy_cli.output import Renderer, set_renderer
+    from comfy_cli.output.renderer import OutputMode
+
+    set_renderer(Renderer(mode=OutputMode.PRETTY))
+    snap = {
+        "prompt_id": "p",
+        "status": "completed",
+        "outputs": [],
+        "text_outputs": {"7": [f"entry {i}" for i in range(jobs_mod._TEXT_PREVIEW_LIMIT + 5)]},
+    }
+    jobs_mod._render_status_pretty(snap, host="h", port=8188)
+    out = capsys.readouterr().out
+    assert f"entry {jobs_mod._TEXT_PREVIEW_LIMIT - 1}" in out
+    assert f"entry {jobs_mod._TEXT_PREVIEW_LIMIT}" not in out
+    assert "5 more" in out
+
+
 def test_emit_terminal_verdicts():
     import typer
 

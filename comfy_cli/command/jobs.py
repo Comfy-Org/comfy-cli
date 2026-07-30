@@ -769,6 +769,9 @@ def _snapshot(host: str, port: int, prompt_id: str) -> dict | None:
     }
 
 
+_TEXT_PREVIEW_LIMIT = 20
+
+
 def _render_status_pretty(snap: dict, *, host: str, port: int) -> None:
     from rich.console import Group
     from rich.panel import Panel
@@ -793,17 +796,28 @@ def _render_status_pretty(snap: dict, *, host: str, port: int) -> None:
     if snap.get("outputs"):
         tbl.add_row("outputs", "\n".join(snap["outputs"]))
     if snap.get("text_outputs"):
-        # Bounded preview only — first line, ~120 chars per entry. The full
-        # untruncated text ships on the `--json` path (renderer.emit).
-        preview_lines = []
+        # Bounded preview: first non-blank line, ~120 chars per entry, capped at
+        # _TEXT_PREVIEW_LIMIT entries total. The full untruncated text ships on
+        # the `--json` path (renderer.emit). Built as Text (not markup strings)
+        # since node ids / node text are server-supplied and may contain `[...]`
+        # that Rich would otherwise interpret as style markup.
+        preview_lines: list[Text] = []
+        total = sum(len(texts) for texts in snap["text_outputs"].values())
         for node_id, texts in snap["text_outputs"].items():
             for text in texts:
-                first = str(text).splitlines()[0] if str(text).strip() else ""
+                if len(preview_lines) >= _TEXT_PREVIEW_LIMIT:
+                    break
+                stripped = str(text).strip()
+                first = stripped.splitlines()[0] if stripped else ""
                 if len(first) > 120:
                     first = first[:117] + "…"
-                preview_lines.append(f"[{node_id}] {first}")
+                preview_lines.append(Text(f"[{node_id}] {first}"))
+            if len(preview_lines) >= _TEXT_PREVIEW_LIMIT:
+                break
+        if total > len(preview_lines):
+            preview_lines.append(Text(f"… ({total - len(preview_lines)} more)", style="dim"))
         if preview_lines:
-            tbl.add_row("text", "\n".join(preview_lines))
+            tbl.add_row("text", Text("\n").join(preview_lines))
     if snap.get("error"):
         tbl.add_row("error", str(snap["error"])[:600])
 
