@@ -34,6 +34,18 @@ def _mock_response(payload):
     return _Resp(payload)
 
 
+def _header(req, name: str) -> str | None:
+    """Case-insensitive header lookup.
+
+    ``urllib.request.Request.headers`` is a plain dict keyed by
+    ``str.capitalize()``d names, so ``add_header("X-API-Key", ...)`` is stored
+    as ``"X-api-key"`` and both a literal ``"X-API-Key"`` lookup and
+    ``get_header`` are one casing change away from silently missing. A leak
+    guard that can quietly stop testing anything is worse than no guard.
+    """
+    return next((v for k, v in req.headers.items() if k.lower() == name.lower()), None)
+
+
 def _http_error(status: int, body: bytes = b""):
     return urllib.error.HTTPError(
         url="https://cloud/x",
@@ -175,6 +187,37 @@ class TestSubmitPrompt:
         assert retry_req.headers["Authorization"] == "Bearer fresh-token"
         assert json.loads(retry_req.data)["extra_data"]["auth_token_comfy_org"] == "fresh-token"
 
+    def test_local_target_with_stray_credentials_sends_no_auth_header(self):
+        """The leak guard the shared header selection carries: credentials that
+        somehow ended up on a LOCAL Target are never sent to the plaintext
+        server. ``_assert_safe_url`` only covers cloud targets, so the
+        ``is_cloud`` gate is the whole defense for the header.
+
+        The body is a second, independent gate: ``submit_prompt`` has its own
+        ``is_cloud`` check before injecting ``auth_token_comfy_org`` into
+        ``extra_data``, so asserting only the headers would stay green while a
+        regression there leaked the stray token to the plaintext server.
+        """
+        local_with_creds = Target(
+            kind="local",
+            base_url="http://127.0.0.1:8188",
+            history_path="history",
+            auth_token="stray-token",
+            api_key="stray-key",
+            host="127.0.0.1",
+            port=8188,
+        )
+        with patch.object(
+            comfy_client._OPENER,
+            "open",
+            return_value=_mock_response({"prompt_id": "pid", "number": 1, "node_errors": {}}),
+        ) as urlopen:
+            comfy_client.Client(local_with_creds).submit_prompt({"1": {"class_type": "X", "inputs": {}}}, "cid")
+        req = urlopen.call_args.args[0]
+        assert _header(req, "Authorization") is None
+        assert _header(req, "X-API-Key") is None
+        assert json.loads(req.data)["extra_data"] == {"comfy_usage_source": "comfy-cli"}
+
     def test_cloud_with_api_key_sends_x_api_key_header(self):
         cloud_apikey = Target(
             kind="cloud",
@@ -199,8 +242,17 @@ class TestSubmitPrompt:
         body = json.loads(req.data)
         assert body["extra_data"] == {"api_key_comfy_org": "sk-test-1234", "comfy_usage_source": "comfy-cli"}
 
-    def test_cloud_oauth_wins_over_api_key_when_both_set(self):
-        """OAuth-first: if both are configured, the Bearer token wins."""
+    def test_cloud_both_credentials_uses_one_identity_for_header_and_body(self):
+        """Both credentials set is UNREACHABLE in production — ``resolve_target``
+        resolves a single credential, so at most one of api_key / auth_token is
+        ever populated. The tie-break is pinned anyway, because the two paths
+        must not diverge if it ever becomes reachable: the header comes from
+        ``http.target_auth_headers`` and the ``extra_data`` credential from
+        ``submit_prompt``, and both are OAuth-first. A split — gateway
+        authenticated as the API key, partner-API nodes handed the OAuth
+        identity — would also be unrecoverable, since ``_try_refresh_token``
+        early-returns when ``api_key`` is set and so could never heal the 401.
+        """
         cloud_both = Target(
             kind="cloud",
             base_url="https://cloud.example.com",
@@ -218,8 +270,8 @@ class TestSubmitPrompt:
             client = comfy_client.Client(cloud_both)
             client.submit_prompt({"1": {"class_type": "X", "inputs": {}}}, "cid")
         req = urlopen.call_args.args[0]
-        assert req.headers["Authorization"] == "Bearer bearer-token"
-        assert "X-api-key" not in req.headers
+        assert _header(req, "Authorization") == "Bearer bearer-token"
+        assert _header(req, "X-API-Key") is None
         body = json.loads(req.data)
         assert "auth_token_comfy_org" in body["extra_data"]
         assert "api_key_comfy_org" not in body["extra_data"]

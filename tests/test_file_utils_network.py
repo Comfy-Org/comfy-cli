@@ -108,6 +108,25 @@ def test_download_file_success_without_content_length(mock_stream, tmp_path):
 
 
 @patch("httpx.stream")
+def test_download_file_success_with_garbage_content_length(mock_stream, tmp_path):
+    """A non-numeric Content-Length (broken server/proxy) must degrade to an
+    indeterminate progress bar, not blow the transfer up with a ValueError out of
+    ``int()`` — which escaped `model download`'s handlers as a bare traceback."""
+    mock_response = Mock()
+    mock_response.status_code = 200
+    mock_response.headers = {"Content-Length": "not-a-number"}
+    mock_response.iter_bytes.return_value = [b"chunk1", b"chunk2"]
+    mock_response.__enter__ = Mock(return_value=mock_response)
+    mock_response.__exit__ = Mock(return_value=None)
+    mock_stream.return_value = mock_response
+
+    test_file = tmp_path / "test.txt"
+    download_file("http://example.com", test_file)
+
+    assert test_file.read_bytes() == b"chunk1chunk2"
+
+
+@patch("httpx.stream")
 def test_download_file_failure(mock_stream):
     mock_response = Mock()
     mock_response.status_code = 404

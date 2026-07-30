@@ -113,6 +113,14 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "the saved workflow is unexpectedly large; inspect it directly on the server",
     ),
     ErrorCode(
+        "workflow_unparseable",
+        "A cloud `/api/workflows` call returned a non-empty 200 body that couldn't be decoded as JSON "
+        "(non-UTF-8 bytes or a non-JSON body such as an HTML proxy/error page). Distinct from an empty "
+        "body (legitimately no data): the malformed body is surfaced as a hard error rather than a "
+        "misleading empty list / null id. `details.operation` carries the verb.",
+        "the server sent a malformed body; retry, and report it if it persists",
+    ),
+    ErrorCode(
         "workflow_content_not_json",
         "`workflow get` fetched content that isn't parseable JSON (non-UTF-8 bytes or a non-JSON body such "
         "as an HTML error page); the raw bytes were still written. Surfaced in `data.warnings[]`, not as an "
@@ -271,8 +279,13 @@ REGISTRY: tuple[ErrorCode, ...] = (
     # --- models / templates introspection ------------------------------------
     ErrorCode(
         "invalid_argument",
-        "An argument intended for a URL path failed safe-path validation.",
-        "a path-segment argument must be a single segment: non-empty, not `.` or `..`, and free of `/` and `\\`",
+        "An argument intended for a URL path or for a filesystem path component failed "
+        "safe-path validation — e.g. a `comfy model download` filename (from `--filename` or "
+        "from the CivitAI API response) that carries a path separator, a drive letter or `..` "
+        "and would write outside the workspace.",
+        "a path-segment argument must be a single segment: non-empty, not `.` or `..`, and free "
+        "of `/` and `\\`; for `model download`, choose the destination directory with "
+        "`--relative-path` instead",
     ),
     ErrorCode(
         "folder_not_found",
@@ -567,8 +580,25 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ),
     ErrorCode(
         "download_failed",
-        "HTTP error while downloading an output file.",
-        "check that the job completed successfully and the server is reachable",
+        "A download failed. Either an HTTP error while fetching a job's output file, or "
+        "`comfy model download` failing to fetch the model (transfer error, Hugging Face "
+        "download error, or an unresolvable CivitAI model/version). `details.url` carries the "
+        "source URL; `details.stage` is `resolve` when the failure was metadata lookup, not transfer.",
+        "check that the source URL is reachable and the job completed successfully",
+    ),
+    ErrorCode(
+        "model_file_exists",
+        "`comfy model download` refused to overwrite an existing file at the target path "
+        "(`details.path`). The download was NOT performed — the command fails rather than "
+        "exiting 0, so a caller can't mistake the skip for a completed download.",
+        "pass `--filename` to save under a different name, or remove the existing file",
+    ),
+    ErrorCode(
+        "hf_unauthorized",
+        "Hugging Face returned 401 for the model URL and no Hugging Face API token is configured "
+        "(gated or private repo).",
+        "set the token via `comfy model download --set-hf-api-token <token>` or the `HF_API_TOKEN` "
+        "environment variable",
     ),
     ErrorCode(
         "download_no_outputs",
@@ -640,10 +670,55 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ),
     # --- generate / emit -----------------------------------------------------
     ErrorCode(
-        "generate_model_unknown",
-        "`comfy generate schema <model>` got a name that is neither a known alias nor a curated "
-        "endpoint id. `details.requested` carries the name as typed; the message lists close matches.",
-        "run `comfy generate list` to see the available model aliases",
+        "generate_target_required",
+        "`comfy generate` was invoked with a flag token where its first positional argument (the "
+        "partner model alias) belongs — e.g. `comfy generate --prompt=x`. `generate` is a "
+        "cloud/partner verb that spends credits; it always needs a model alias first.",
+        'name a model alias first (`comfy generate flux-pro --prompt "…"`, `comfy generate list` to '
+        "browse them), or use `comfy run-template` for local text-to-image",
+    ),
+    ErrorCode(
+        "generate_unknown_model",
+        "The model alias/id passed to `comfy generate` (or `generate schema` / `generate resume`) is "
+        "not in the partner-endpoint catalog.",
+        "run `comfy generate list` to see available models; `comfy generate refresh` re-fetches the catalog",
+    ),
+    ErrorCode(
+        "generate_bad_args",
+        "`comfy generate` could not parse its arguments: a missing/malformed flag value, a missing "
+        "required model parameter, a bad subcommand usage, or a resume of a non-polling model.",
+        "run `comfy generate schema <model>` for the parameter list, or `comfy generate --help` for usage",
+    ),
+    ErrorCode(
+        "generate_timeout_invalid",
+        "`comfy generate --timeout` was given a value that isn't a number.",
+        "pass seconds as a number, e.g. `--timeout 300`",
+    ),
+    ErrorCode(
+        "generate_api_error",
+        "The partner-proxy API rejected the call or returned an unusable response (auth failure, "
+        "non-2xx status, non-JSON body). `details.status` / `details.body` carry the response when "
+        "the failure was an HTTP status.",
+        "check `comfy cloud login` / COMFY_API_KEY and the reported status; retry if it was a 5xx",
+    ),
+    ErrorCode(
+        "generate_network_error",
+        "A transport-level failure (DNS, TLS, connect, read timeout) while talking to the partner "
+        "proxy — the request may never have reached it.",
+        "check network connectivity and retry; raise `--timeout` if the model is slow",
+    ),
+    ErrorCode(
+        "generate_job_failed",
+        "The partner job reached a terminal non-succeeded state (failed/cancelled). "
+        "`details.response` carries the raw partner response.",
+        "check `details.response` for the partner's reason; fix the inputs and re-run, or "
+        "`comfy generate resume <model> <job_id>` if the job may still settle",
+    ),
+    ErrorCode(
+        "generate_spec_invalid",
+        "`comfy generate refresh` fetched an OpenAPI document that failed validation, so it was "
+        "refused rather than cached over the working catalog.",
+        "check COMFY_API_BASE_URL points at the Comfy API; the existing cached catalog is still usable",
     ),
     ErrorCode(
         "emit_workflow_failed",
