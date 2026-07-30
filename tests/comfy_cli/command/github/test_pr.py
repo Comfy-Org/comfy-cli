@@ -4,6 +4,7 @@ from unittest.mock import Mock, patch
 
 import pytest
 import requests
+import typer
 from typer.testing import CliRunner
 
 from comfy_cli.cmdline import app, g_exclusivity, g_gpu_exclusivity
@@ -946,7 +947,7 @@ class TestCheckoutStableComfyUI:
     @patch("comfy_cli.command.install.get_latest_release", return_value=None)
     @patch("comfy_cli.command.install._resolve_latest_tag_from_local", return_value=(None, True))
     def test_latest_exits_when_both_local_and_api_fail(self, mock_local, mock_api, mock_co):
-        with pytest.raises(SystemExit):
+        with pytest.raises(typer.Exit):
             checkout_stable_comfyui("latest", "/repo")
         mock_co.assert_not_called()
 

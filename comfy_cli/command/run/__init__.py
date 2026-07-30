@@ -8,12 +8,14 @@ patch surface stays stable.
 """
 
 import json
+import sys
 import time
 import uuid
 from datetime import timedelta
 from urllib import request  # noqa: F401 — patch target for tests (run.request.urlopen)
 
 import typer
+from rich.markup import escape as _rich_escape
 from websocket import (  # noqa: F401 — patch target for tests (run.WebSocket)
     WebSocket,
     WebSocketException,
@@ -49,6 +51,64 @@ from comfy_cli.workflow_to_api import WorkflowConversionError, convert_ui_to_api
 from comfy_cli.workspace_manager import WorkspaceManager
 
 workspace_manager = WorkspaceManager()
+
+
+def _stdin_is_interactive() -> bool:
+    """True only when stdin is a live TTY.
+
+    ``sys.stdin.isatty()`` assumes stdin is a live stream, but in detached /
+    ``pythonw`` contexts ``sys.stdin`` can be ``None`` (AttributeError on
+    ``.isatty``) or a closed file (ValueError). Treat both as non-interactive so
+    the spend gate falls through to the fail-closed machine-mode error instead
+    of raising an uncontrolled exception (BE-4326).
+    """
+    stdin = getattr(sys, "stdin", None)
+    if stdin is None:
+        return False
+    try:
+        return bool(stdin.isatty())
+    except (AttributeError, ValueError):
+        return False
+
+
+def _spend_gate(renderer, partner_nodes: list[str], allow_spend: bool, *, details: dict) -> None:
+    """Consent interlock for partner-API (paid) nodes (BE-4326).
+
+    Mirrors the ``comfy run-template`` gate (BE-4113): a workflow that embeds
+    partner-API nodes (Veo/Kling/BFL/Gemini/…) spends Comfy credits when it
+    runs, so require explicit consent before submitting. A no-op when there are
+    no partner nodes or ``--allow-spend`` was passed, so partner-free runs are
+    byte-identical.
+
+    Fires BEFORE any partner-credential resolution / cloud auth so a refusal
+    never triggers a network OAuth refresh. Raises ``typer.Exit(1)`` when
+    consent is withheld; returns normally when the run may proceed.
+    """
+    if not partner_nodes or allow_spend:
+        return
+    if renderer.is_pretty() and _stdin_is_interactive():
+        # Escape class_type names before interpolating into Rich markup: a name
+        # containing markup like ``[bold]`` would otherwise be parsed as a tag
+        # (MarkupError/StyleSyntaxError, or injected formatting).
+        names = ", ".join(_rich_escape(n) for n in partner_nodes)
+        pprint(f"[yellow]⚠ This workflow uses partner-API nodes that spend Comfy credits: {names}.[/yellow]")
+        if not typer.confirm("Run anyway and spend credits?", default=False):
+            renderer.error(
+                code="spend_consent_required",
+                message="declined — workflow not submitted, no credits spent",
+                details=details,
+            )
+            raise typer.Exit(code=1)
+    else:
+        renderer.error(
+            code="spend_consent_required",
+            message=(
+                "workflow uses partner-API (paid) nodes; re-run with --allow-spend to consent to spending Comfy credits"
+            ),
+            hint="paid nodes only run with explicit consent; free (non-partner) workflows run without this flag",
+            details=details,
+        )
+        raise typer.Exit(code=1)
 
 
 # Mapping from the deleted legacy `comfy run --json` dialect (JsonEmitter,
@@ -106,6 +166,7 @@ def execute(
     api_key: str | None = None,
     print_prompt: bool = False,
     preloaded: tuple[dict, str, bool] | None = None,
+    allow_spend: bool = False,
 ):
     # `0.0.0.0` is a wildcard bind, not a connect address. macOS / Windows
     # clients can't reach it; on Linux it happens to resolve to a loopback.
@@ -216,6 +277,17 @@ def execute(
     # the cloud submit path uses.
     object_info = _fetch_object_info(host, port)
     partner_nodes = _detect_partner_nodes(workflow, object_info)
+    # Spend gate (BE-4326): partner-API nodes spend Comfy credits. Require
+    # explicit consent before resolving a credential or submitting. Fires
+    # BEFORE _resolve_partner_credential() below so a refusal never triggers a
+    # network OAuth refresh. Detection stays fail-open (object_info == {} → no
+    # partner_nodes → no gate), same posture as run-template.
+    _spend_gate(
+        renderer,
+        partner_nodes,
+        allow_spend,
+        details={"partner_nodes": partner_nodes, "host": host, "port": port},
+    )
     extra_data: dict | None = None
     if api_key:
         extra_data = {"api_key_comfy_org": api_key}
@@ -233,8 +305,9 @@ def execute(
                 code="partner_node_requires_credential",
                 message=msg,
                 hint=(
-                    "re-submit with `--where cloud` (the CLI auto-injects the key there), "
-                    "or store the key locally with `comfy auth set comfy-cloud-api-key --key …`"
+                    "run: comfy cloud login   (or set COMFY_API_KEY in the environment, "
+                    "or persist a key with `comfy cloud set-key --key …`; "
+                    "cloud runs auto-inject via --where cloud)"
                 ),
                 details={
                     "partner_nodes": partner_nodes,
@@ -643,6 +716,7 @@ def execute_cloud(
     notify: bool = False,
     print_prompt: bool = False,
     preloaded: tuple[dict, str, bool] | None = None,
+    allow_spend: bool = False,
 ):
     """Run a workflow against Comfy Cloud via the stored OAuth session.
 
@@ -744,11 +818,23 @@ def execute_cloud(
 
     _preflight_validate(renderer, parsed_workflow, cloud_object_info, target_label="cloud")
 
+    # Spend gate (BE-4326): the cloud also bills partner-API nodes, so apply the
+    # same consent interlock as the local path before authenticating/submitting.
+    # Fail-open on detection (empty cloud object_info → no gate), and fire before
+    # Client() so a refusal never triggers cloud auth.
+    partner_nodes = _detect_partner_nodes(parsed_workflow, cloud_object_info)
+    _spend_gate(
+        renderer,
+        partner_nodes,
+        allow_spend,
+        details={"partner_nodes": partner_nodes, "where": "cloud"},
+    )
+
     target = resolve_target(where="cloud")
     try:
         client = Client(target, timeout=float(timeout))
     except Unauthenticated as e:
-        renderer.error(code="cloud_unauthorized", message=str(e), hint="run: comfy auth login")
+        renderer.error(code="cloud_unauthorized", message=str(e), hint="run: comfy cloud login")
         raise typer.Exit(code=1) from e
 
     client_id = str(uuid.uuid4())

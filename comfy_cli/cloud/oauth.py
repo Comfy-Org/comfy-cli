@@ -52,7 +52,7 @@ from comfy_cli.cloud import (
     CLIENT_NAME,
     get_base_url,
 )
-from comfy_cli.http import NoRedirectHandler
+from comfy_cli.http import NoRedirectHandler, build_http_only_opener
 
 # ---------------------------------------------------------------------------
 # Error types — caller maps these to renderer.error(code=...) codes.
@@ -473,12 +473,12 @@ def run_login(
         if not got:
             raise OAuthTimeout(
                 f"timed out waiting for browser callback after {int(timeout_s)}s",
-                hint="re-run `comfy auth login` and complete the sign-in in your browser",
+                hint="re-run `comfy cloud login` and complete the sign-in in your browser",
             )
         if capture.error or not capture.code:
             raise OAuthAuthorizeError(
                 f"authorization failed: {capture.error or 'no code returned'}",
-                hint="re-run `comfy auth login` and check for typos or browser blockers",
+                hint="re-run `comfy cloud login` and check for typos or browser blockers",
                 details={
                     "oauth_error": capture.error,
                     "oauth_error_description": capture.error_description,
@@ -561,7 +561,7 @@ def exchange_code(
     except _HTTPFail as e:
         raise OAuthTokenError(
             f"token exchange failed: {e}",
-            hint="re-run `comfy auth login` to start a fresh authorization",
+            hint="re-run `comfy cloud login` to start a fresh authorization",
             details={"status": e.status, "body": e.body},
         ) from None
     return _token_set_from_response(resp)
@@ -589,7 +589,7 @@ def refresh_tokens(
     except _HTTPFail as e:
         raise OAuthRefreshError(
             f"refresh failed: {e}",
-            hint="run `comfy auth login` to sign in again",
+            hint="run `comfy cloud login` to sign in again",
             details={"status": e.status, "body": e.body},
         ) from None
     return _token_set_from_response(resp)
@@ -889,7 +889,7 @@ def _assert_https_or_loopback(url: str) -> None:
     raise _HTTPFail(0, f"refusing plaintext HTTP for OAuth endpoint: {url}")
 
 
-_OAUTH_OPENER = urllib.request.build_opener(NoRedirectHandler())
+_OAUTH_OPENER = build_http_only_opener(NoRedirectHandler())
 
 
 def _send_and_parse(req: urllib.request.Request) -> dict:

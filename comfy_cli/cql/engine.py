@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from comfy_cli.cql._net import is_loopback_host
-from comfy_cli.http import NoRedirectHandler
+from comfy_cli.http import NoRedirectHandler, build_http_only_opener
 
 # ---------------------------------------------------------------------------
 # Types — mirrors nodegraph/types.go
@@ -740,7 +740,7 @@ class Graph:
 
         for node_id, node_data in workflow.items():
             # `_meta` is the compose/run provenance block (schema/blueprint/items),
-            # stripped before submit — not a node and not a mistake. `comfy compose`
+            # stripped before submit — not a node and not a mistake. `comfy workflow compose`
             # adds it itself, so warning here is self-inflicted noise.
             if node_id == "_meta":
                 continue
@@ -1446,7 +1446,7 @@ _logger = logging.getLogger(__name__)
 _MAX_OBJECT_INFO_BYTES = 64 * 1024 * 1024
 
 
-_opener = urllib.request.build_opener(NoRedirectHandler())
+_opener = build_http_only_opener(NoRedirectHandler())
 
 
 class LoadError(Exception):
@@ -1501,11 +1501,10 @@ def _load_from_target(*, mode: str = "local", host: str | None = None, port: int
     req.add_header("Accept", "application/json")
 
     # Auth headers (cloud only — local has no auth)
-    if target.is_cloud:
-        if target.api_key:
-            req.add_header("X-API-Key", target.api_key)
-        elif target.auth_token:
-            req.add_header("Authorization", f"Bearer {target.auth_token}")
+    from comfy_cli.http import target_auth_headers
+
+    for k, v in target_auth_headers(target).items():
+        req.add_header(k, v)
 
     try:
         with _opener.open(req, timeout=30.0) as resp:

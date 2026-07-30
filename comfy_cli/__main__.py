@@ -11,7 +11,7 @@ shell/CI/agent downstream.
 
 The exit 0 is only ever granted to a command that *succeeded*. A closed reader
 on a command that failed still exits with the failure's code — `comfy --json
-some-failing-cmd | head` is a failure that happened to be piped, not a success.
+<failing-cmd> | head` is a failure that happened to be piped, not a success.
 Absorbing the broken pipe there would launder a genuine error into 0, which is
 the one outcome worse than the exit 1 this wrapper exists to remove.
 
