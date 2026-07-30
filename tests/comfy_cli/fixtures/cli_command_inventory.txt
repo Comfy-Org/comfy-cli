@@ -11,15 +11,16 @@ comfy cloud
 comfy cloud login
 comfy cloud logout
 comfy cloud set-base-url
-comfy cloud set-key	[hidden]
+comfy cloud set-key
 comfy cloud whoami
 comfy code-search
 comfy cs	[hidden]
-comfy dependency	[hidden]
+comfy dependency
 comfy discover
 comfy download
 comfy env
 comfy feedback
+comfy free
 comfy generate
 comfy help
 comfy install
@@ -40,7 +41,11 @@ comfy manager enable-legacy-gui
 comfy manager migrate-legacy
 comfy manager uv-compile-default
 comfy model
+comfy model _download-worker	[hidden]
 comfy model download
+comfy model download-cancel
+comfy model download-status
+comfy model downloads
 comfy model list
 comfy model remove
 comfy models
@@ -54,6 +59,7 @@ comfy node bisect bad
 comfy node bisect good
 comfy node bisect reset
 comfy node bisect start
+comfy node deps
 comfy node deps-in-workflow
 comfy node disable
 comfy node enable
@@ -87,6 +93,7 @@ comfy nodes search
 comfy nodes show
 comfy nodes types
 comfy nodes upstream
+comfy outdated
 comfy pr-cache
 comfy pr-cache clean
 comfy pr-cache list
@@ -96,6 +103,7 @@ comfy project init
 comfy project status
 comfy run
 comfy run-cli
+comfy run-template
 comfy set-default
 comfy setup
 comfy skill	[hidden]
@@ -114,6 +122,7 @@ comfy skills uninstall
 comfy skills validate
 comfy standalone
 comfy stop
+comfy system-stats
 comfy templates
 comfy templates fetch
 comfy templates ls
@@ -136,6 +145,7 @@ comfy workflow fragment show
 comfy workflow fragment validate
 comfy workflow get
 comfy workflow list
+comfy workflow notes
 comfy workflow save
 comfy workflow set-slot
 comfy workflow slots
