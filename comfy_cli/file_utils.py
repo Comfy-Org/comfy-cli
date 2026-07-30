@@ -4,6 +4,7 @@ import pathlib
 import subprocess
 import time
 import zipfile
+from collections.abc import Callable
 from http import HTTPStatus
 
 import httpx
@@ -16,6 +17,40 @@ from comfy_cli.http import DEFAULT_HTTP_TIMEOUT, DOWNLOAD_TIMEOUT
 
 class DownloadException(Exception):
     pass
+
+
+# ``(completed_bytes, total_bytes_or_None)``. Called from inside the transfer
+# loop, so implementations must be cheap and must never raise — see
+# ``_report_progress``.
+ProgressCallback = Callable[[int, int | None], None]
+
+
+class DownloadCancelled(Exception):
+    """Raised by a progress callback to abort an in-flight download.
+
+    The one thing an observer is allowed to say that isn't advisory. The
+    background-download worker polls its cancel sentinel from the progress
+    callback and raises this to unwind out of the transfer; every other
+    exception a callback raises is swallowed by :func:`_report_progress`.
+    """
+
+
+def _report_progress(callback: ProgressCallback | None, completed: int, total: int | None) -> None:
+    """Invoke a progress callback, swallowing anything it raises.
+
+    A misbehaving observer (a full disk while persisting state, say) must never
+    abort an otherwise-healthy download. :class:`DownloadCancelled` is the sole
+    exception: it means the caller wants the transfer stopped, not that
+    reporting failed.
+    """
+    if callback is None:
+        return
+    try:
+        callback(completed, total)
+    except DownloadCancelled:
+        raise
+    except Exception:  # noqa: BLE001 — progress reporting is strictly advisory
+        pass
 
 
 def guess_status_code_reason(status_code: int, message: str) -> str:
@@ -68,8 +103,19 @@ def check_unauthorized(url: str, headers: dict | None = None) -> bool:
         return False
 
 
-def _poll_aria2_download(download) -> None:
-    """Poll an aria2 download until completion, showing progress."""
+def _poll_aria2_download(download, progress_callback: ProgressCallback | None = None) -> None:
+    """Poll an aria2 download until completion, showing progress.
+
+    ``progress_callback`` (optional) receives ``(completed_bytes, total_bytes)``
+    on every poll, with ``total_bytes`` None until aria2 knows the size. It is
+    fed from the same ``completed_length``/``total_length`` pair the progress bar
+    uses, so a background worker sees exactly what the human would.
+
+    If the callback raises :class:`DownloadCancelled` the daemon-side transfer is
+    removed before the exception propagates: with aria2 the bytes move inside the
+    aria2c process, not this one, so simply walking away would leave it happily
+    finishing a download the user just cancelled.
+    """
     import time
 
     from rich.progress import (
@@ -90,30 +136,50 @@ def _poll_aria2_download(download) -> None:
     ) as progress:
         task = progress.add_task("Downloading...", total=None)
 
-        while True:
-            try:
-                download.update()
-            except Exception as e:
-                raise DownloadException(f"Lost connection to aria2 RPC server: {e}") from e
+        try:
+            while True:
+                try:
+                    download.update()
+                except Exception as e:
+                    raise DownloadException(f"Lost connection to aria2 RPC server: {e}") from e
 
-            if download.total_length > 0:
-                progress.update(task, total=download.total_length, completed=download.completed_length)
+                total = download.total_length if download.total_length > 0 else None
+                if total is not None:
+                    progress.update(task, total=total, completed=download.completed_length)
+                _report_progress(progress_callback, download.completed_length, total)
 
-            if download.is_complete:
-                if download.total_length > 0:
-                    progress.update(task, completed=download.total_length)
-                break
-            elif download.has_failed:
-                raise DownloadException(
-                    f"aria2 download failed: {download.error_message} (code: {download.error_code})"
-                )
-            elif download.is_removed:
-                raise DownloadException("aria2 download was removed before completion")
+                if download.is_complete:
+                    if total is not None:
+                        progress.update(task, completed=total)
+                        _report_progress(progress_callback, total, total)
+                    break
+                elif download.has_failed:
+                    raise DownloadException(
+                        f"aria2 download failed: {download.error_message} (code: {download.error_code})"
+                    )
+                elif download.is_removed:
+                    raise DownloadException("aria2 download was removed before completion")
 
-            time.sleep(0.5)
+                time.sleep(0.5)
+        except DownloadCancelled:
+            _remove_aria2_download(download)
+            raise
 
 
-def _download_file_aria2(url: str, local_filepath: pathlib.Path, headers: dict | None = None) -> None:
+def _remove_aria2_download(download) -> None:
+    """Stop and forget a daemon-side aria2 transfer. Best effort."""
+    try:
+        download.remove(force=True, files=True)
+    except Exception:  # noqa: BLE001 — the daemon may already have dropped it
+        pass
+
+
+def _download_file_aria2(
+    url: str,
+    local_filepath: pathlib.Path,
+    headers: dict | None = None,
+    progress_callback: ProgressCallback | None = None,
+) -> None:
     """Download a file using aria2 RPC."""
     try:
         import aria2p
@@ -160,7 +226,7 @@ def _download_file_aria2(url: str, local_filepath: pathlib.Path, headers: dict |
     except Exception as e:
         raise DownloadException(f"Failed to add download to aria2: {e}") from e
 
-    _poll_aria2_download(download)
+    _poll_aria2_download(download, progress_callback)
 
     if not local_filepath.exists():
         raise DownloadException(f"aria2 download completed but file not found at expected path: {local_filepath}")
@@ -234,8 +300,14 @@ def _download_file_httpx(
     headers: dict | None = None,
     *,
     state: dict | None = None,
+    progress_callback: ProgressCallback | None = None,
 ) -> None:
     """Download a file using httpx streaming. Raises on HTTP or network errors.
+
+    ``progress_callback`` (optional) receives ``(completed_bytes, total_bytes)``
+    as chunks land — ``total_bytes`` comes from Content-Length and is None when
+    the server doesn't send one. It fires once with ``(0, total)`` before the
+    first chunk so a caller learns the size as soon as the headers are read.
 
     If ``state`` is provided, ``state["file_opened"]`` is set to True immediately
     after the output file is opened for writing. Callers use this to distinguish
@@ -255,7 +327,16 @@ def _download_file_httpx(
             raise DownloadException(f"Failed to download file.\n{status_reason}")
 
         content_length = response.headers.get("Content-Length")
-        total = int(content_length) if content_length is not None else None
+        try:
+            total = int(content_length) if content_length is not None else None
+        except ValueError:
+            # A broken server/proxy can send a non-numeric Content-Length. That is not
+            # a reason to fail the transfer — treat it exactly like a missing header
+            # (indeterminate progress) instead of letting ValueError escape the whole
+            # download and end the command with a traceback.
+            total = None
+        if total is not None and total < 0:
+            total = None
         if total is not None:
             description = f"Downloading {total // 1024 // 1024} MB"
         else:
@@ -264,16 +345,36 @@ def _download_file_httpx(
         with open(local_filepath, "wb") as f:
             if state is not None:
                 state["file_opened"] = True
+            # Announce the size (and the zeroed counter) before the first chunk
+            # so a background observer stops reporting `total_bytes: null` as
+            # soon as the headers are in.
+            _report_progress(progress_callback, 0, total)
+            completed = 0
             for data in ui.show_progress(
                 response.iter_bytes(),
                 total,
                 description=description,
             ):
                 f.write(data)
+                completed += len(data)
+                _report_progress(progress_callback, completed, total)
 
 
-def download_file(url: str, local_filepath: pathlib.Path, headers: dict | None = None, downloader: str = "httpx"):
-    """Helper function to download a file."""
+def download_file(
+    url: str,
+    local_filepath: pathlib.Path,
+    headers: dict | None = None,
+    downloader: str = "httpx",
+    progress_callback: ProgressCallback | None = None,
+):
+    """Helper function to download a file.
+
+    ``progress_callback`` (optional) is invoked with ``(completed_bytes,
+    total_bytes)`` as the transfer advances; ``total_bytes`` is None until the
+    size is known. When a retry discards a partial file the callback is reset to
+    ``(0, None)`` first, so an observer never sees a counter run backwards from
+    a stale high-water mark.
+    """
     if downloader not in _VALID_DOWNLOADERS:
         raise DownloadException(
             f"Unknown downloader: {downloader!r}. Valid options: {', '.join(sorted(_VALID_DOWNLOADERS))}"
@@ -282,7 +383,7 @@ def download_file(url: str, local_filepath: pathlib.Path, headers: dict | None =
     local_filepath.parent.mkdir(parents=True, exist_ok=True)
 
     if downloader == "aria2":
-        return _download_file_aria2(url, local_filepath, headers)
+        return _download_file_aria2(url, local_filepath, headers, progress_callback)
 
     last_exc: Exception | None = None
     state: dict = {"file_opened": False}
@@ -290,7 +391,7 @@ def download_file(url: str, local_filepath: pathlib.Path, headers: dict | None =
     for attempt in range(_DOWNLOAD_MAX_RETRIES):
         state["file_opened"] = False
         try:
-            _download_file_httpx(url, local_filepath, headers, state=state)
+            _download_file_httpx(url, local_filepath, headers, state=state, progress_callback=progress_callback)
             return
         except _RETRIABLE_EXCEPTIONS as exc:
             last_exc = exc
@@ -298,6 +399,7 @@ def download_file(url: str, local_filepath: pathlib.Path, headers: dict | None =
             # otherwise we'd delete an unrelated pre-existing file at the same path.
             if state["file_opened"]:
                 _cleanup_partial(local_filepath)
+                _report_progress(progress_callback, 0, None)
             if attempt < _DOWNLOAD_MAX_RETRIES - 1:
                 wait = _DOWNLOAD_RETRY_BACKOFF * (attempt + 1)
                 print(f"Download error (attempt {attempt + 1}/{_DOWNLOAD_MAX_RETRIES}): {_friendly_network_error(exc)}")

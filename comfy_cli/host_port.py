@@ -81,16 +81,15 @@ def _to_port(s: str, original: str) -> int:
 
 
 def resolve_host_port(host: str | None, port: int | None) -> tuple[str, int]:
-    """Fill host/port from ``config.background`` then defaults; validate and
-    bracket IPv6 literals so callers building ``'http://{host}:{port}'`` get a
-    well-formed URL (e.g. ``'::1'`` -> ``'[::1]'``)."""
+    """Resolve host/port by precedence — explicit flag > ``COMFY_LOCAL_URL``
+    env > ``config.background`` > defaults — then validate and bracket IPv6
+    literals so callers building ``'http://{host}:{port}'`` get a well-formed
+    URL (e.g. ``'::1'`` -> ``'[::1]'``)."""
+    from comfy_cli.local_address import resolve_local_host_port
+
     cfg = ConfigManager()
-    bg = cfg.background
-    if not host and bg is not None:
-        host = bg[0]
-    if not port and bg is not None:
-        port = bg[1]
-    h = validate_host(host or DEFAULT_HOST)
+    host, port = resolve_local_host_port(host, port, background=cfg.background)
+    h = validate_host(host)
     if ":" in h and not h.startswith("["):
         h = f"[{h}]"
-    return (h, int(port or DEFAULT_PORT))
+    return (h, int(port))

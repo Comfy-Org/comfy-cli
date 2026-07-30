@@ -62,7 +62,10 @@ def _send_smoketest_event(nonce: str) -> tuple[str, str]:
     if tracking._telemetry_disabled_by_env():
         _die("telemetry is opted out via DO_NOT_TRACK / COMFY_NO_TELEMETRY — unset it to verify")
 
-    posthog_providers = [p for p in tracking.PROVIDERS if isinstance(p, tracking.PostHogProvider) and p.enabled]
+    # _get_providers(), not PROVIDERS: providers are built on first send, so the
+    # module global is still None until something asks for them.
+    providers = tracking._get_providers()
+    posthog_providers = [p for p in providers if isinstance(p, tracking.PostHogProvider) and p.enabled]
     if not posthog_providers:
         _die("no enabled PostHog provider — check POSTHOG_API_KEY token")
 
