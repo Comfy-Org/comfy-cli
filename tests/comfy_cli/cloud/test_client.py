@@ -175,6 +175,30 @@ class TestSubmitPrompt:
         assert retry_req.headers["Authorization"] == "Bearer fresh-token"
         assert json.loads(retry_req.data)["extra_data"]["auth_token_comfy_org"] == "fresh-token"
 
+    def test_local_target_with_stray_credentials_sends_no_auth_header(self):
+        """The leak guard the shared header selection carries: credentials that
+        somehow ended up on a LOCAL Target are never sent to the plaintext
+        server. ``_assert_safe_url`` only covers cloud targets, so this
+        ``is_cloud`` gate is the whole defense here."""
+        local_with_creds = Target(
+            kind="local",
+            base_url="http://127.0.0.1:8188",
+            history_path="history",
+            auth_token="stray-token",
+            api_key="stray-key",
+            host="127.0.0.1",
+            port=8188,
+        )
+        with patch.object(
+            comfy_client._OPENER,
+            "open",
+            return_value=_mock_response({"prompt_id": "pid", "number": 1, "node_errors": {}}),
+        ) as urlopen:
+            comfy_client.Client(local_with_creds).submit_prompt({"1": {"class_type": "X", "inputs": {}}}, "cid")
+        req = urlopen.call_args.args[0]
+        assert "Authorization" not in req.headers
+        assert "X-api-key" not in req.headers
+
     def test_cloud_with_api_key_sends_x_api_key_header(self):
         cloud_apikey = Target(
             kind="cloud",
@@ -199,8 +223,16 @@ class TestSubmitPrompt:
         body = json.loads(req.data)
         assert body["extra_data"] == {"api_key_comfy_org": "sk-test-1234", "comfy_usage_source": "comfy-cli"}
 
-    def test_cloud_oauth_wins_over_api_key_when_both_set(self):
-        """OAuth-first: if both are configured, the Bearer token wins."""
+    def test_cloud_both_credentials_uses_shared_header_selection(self):
+        """Both credentials set is UNREACHABLE in production — ``resolve_target``
+        resolves a single credential, so at most one of api_key / auth_token is
+        ever populated. This pins the tie-break anyway: the auth header comes
+        from ``http.target_auth_headers``, which is api_key-first (the same
+        selection transfer and the CQL engine use). The ``extra_data`` body path
+        is a separate concern and keeps its own OAuth-first ordering; asserting
+        both here records current behavior for a state that cannot occur, not a
+        contract that the header and body must disagree.
+        """
         cloud_both = Target(
             kind="cloud",
             base_url="https://cloud.example.com",
@@ -218,8 +250,8 @@ class TestSubmitPrompt:
             client = comfy_client.Client(cloud_both)
             client.submit_prompt({"1": {"class_type": "X", "inputs": {}}}, "cid")
         req = urlopen.call_args.args[0]
-        assert req.headers["Authorization"] == "Bearer bearer-token"
-        assert "X-api-key" not in req.headers
+        assert req.headers["X-api-key"] == "api-key-1234"
+        assert "Authorization" not in req.headers
         body = json.loads(req.data)
         assert "auth_token_comfy_org" in body["extra_data"]
         assert "api_key_comfy_org" not in body["extra_data"]

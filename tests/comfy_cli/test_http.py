@@ -230,3 +230,10 @@ def test_target_auth_headers_cloud_auth_token_only():
 def test_target_auth_headers_cloud_both_api_key_wins():
     target = Target(kind="cloud", base_url="https://cloud.example", auth_token="t", api_key="k")
     assert target_auth_headers(target) == {"X-API-Key": "k"}
+
+
+def test_target_auth_headers_cloud_uncredentialed_is_empty():
+    """A cloud Target with no credential contributes no headers — callers add
+    nothing rather than an empty/``None`` credential header."""
+    target = Target(kind="cloud", base_url="https://cloud.example")
+    assert target_auth_headers(target) == {}
