@@ -256,12 +256,13 @@ class Client:
         req.add_header("Comfy-Usage-Source", "comfy-cli")
         if data is not None:
             req.add_header("Content-Type", "application/json")
-        # Cloud auth: the policy layer (`resolve_target`) is OAuth-first and
-        # populates at most one of api_key / auth_token, so which header we
-        # send is mechanics, not policy — `target_auth_headers` owns that
-        # selection for every authed call site. It also carries the `is_cloud`
-        # gate, so a stray auth_token on a local target can't leak credentials
-        # to a plaintext server.
+        # Cloud auth: `target_auth_headers` owns the header selection for
+        # every authed call site. It is OAuth-first, matching both the policy
+        # layer (`resolve_target`, which populates at most one of api_key /
+        # auth_token anyway) and the `extra_data` credential `submit_prompt`
+        # injects below — header and body can never name different identities.
+        # It also carries the `is_cloud` gate, so a stray auth_token on a
+        # local target can't leak credentials to a plaintext server.
         for header, value in target_auth_headers(self.target).items():
             req.add_header(header, value)
         try:
