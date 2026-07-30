@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import json
 
 import httpx
 import pytest
@@ -125,6 +126,18 @@ def test_gemini_resolve_path_substitutes_model():
     adapter = adapters.get(ep.id)
     url = adapters.resolve_path(ep.path, {"model": "gemini-2.5-flash-image"}, adapter)
     assert url == "/proxy/vertexai/gemini/gemini-2.5-flash-image"
+
+
+def test_resolve_path_pins_value_to_one_segment():
+    """A path-param value can come from a refreshable spec cache — reserved
+    characters are percent-encoded and dot segments rejected, so a tampered
+    enum can't redirect the proxied request."""
+    ep = spec.get_endpoint("nano-banana")
+    adapter = adapters.get(ep.id)
+    url = adapters.resolve_path(ep.path, {"model": "../../admin?x=1#f"}, adapter)
+    assert url == "/proxy/vertexai/gemini/..%2F..%2Fadmin%3Fx%3D1%23f"
+    with pytest.raises(adapters.ApiError):
+        adapters.resolve_path(ep.path, {"model": ".."}, adapter)
 
 
 def test_gemini_send_request_hits_substituted_path(monkeypatch):
@@ -254,6 +267,108 @@ def test_seedance_send_request_passes_through_body(monkeypatch):
     assert captured["url"].endswith("/proxy/byteplus/api/v3/contents/generations/tasks")
     assert captured["json"]["model"]
     assert captured["json"]["content"][0]["type"] == "text"
+
+
+# ── Spec-derived model enums ──────────────────────────────────────────────
+
+
+def _seedance_fixture_spec(model_prop: dict) -> str:
+    """A minimal JSON spec carrying the byteplus tasks endpoint with the given
+    ``model`` property schema — what a refreshed api.comfy.org spec looks like."""
+    return json.dumps(
+        {
+            "openapi": "3.1.0",
+            "servers": [{"url": "https://api.comfy.org"}],
+            "paths": {
+                "/proxy/byteplus/api/v3/contents/generations/tasks": {
+                    "post": {
+                        "summary": "Seedance video generation tasks",
+                        "requestBody": {
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "object",
+                                        "properties": {
+                                            "model": model_prop,
+                                            "content": {"type": "array", "items": {"type": "object"}},
+                                        },
+                                        "required": ["model", "content"],
+                                    }
+                                }
+                            }
+                        },
+                        "responses": {"200": {"content": {"application/json": {"schema": {"type": "object"}}}}},
+                    }
+                }
+            },
+        }
+    )
+
+
+@pytest.fixture
+def _spec_cache(monkeypatch, tmp_path):
+    """Redirect the user spec cache to tmp and clean module caches afterwards."""
+    monkeypatch.setattr(spec, "_USER_CACHE", tmp_path / "openapi-cache.yml")
+    try:
+        yield
+    finally:
+        spec.load_raw_spec.cache_clear()
+        spec._registry.cache_clear()
+
+
+def test_seedance_models_follow_refreshed_spec(_spec_cache):
+    """After a spec refresh (simulated via write_cache), the seedance schema
+    lists the spec's models — a new partner release needs zero code changes."""
+    new_models = ["seedance-2-0-260128", "seedance-2-0-fast-260128", "seedance-1-0-pro-250528"]
+    spec.write_cache(_seedance_fixture_spec({"type": "string", "enum": new_models}))
+    ep = spec.get_endpoint("seedance")
+    model = next(f for f in schema.flags_for(ep) if f.name == "model")
+    assert model.enum == new_models
+    # The pinned default survives while the spec still lists it.
+    assert model.default == "seedance-1-0-pro-250528"
+
+
+def test_seedance_default_falls_back_when_pinned_model_dropped(_spec_cache):
+    """A spec that drops the deprecated pinned default must not break: the
+    first enum entry takes over, in the flag default and in build_body."""
+    new_models = ["seedance-2-0-260128", "seedance-2-0-fast-260128"]
+    spec.write_cache(_seedance_fixture_spec({"type": "string", "enum": new_models}))
+    ep = spec.get_endpoint("seedance")
+    model = next(f for f in schema.flags_for(ep) if f.name == "model")
+    assert model.default == "seedance-2-0-260128"
+    body = adapters._seedance_build_body({"prompt": "a wave"}, api_key="k")
+    assert body["model"] == "seedance-2-0-260128"
+
+
+def test_seedance_models_fall_back_to_hardcoded_without_spec_enum(_spec_cache):
+    """A spec whose model property carries no enum keeps the hardcoded tuple."""
+    spec.write_cache(_seedance_fixture_spec({"type": "string"}))
+    ep = spec.get_endpoint("seedance")
+    model = next(f for f in schema.flags_for(ep) if f.name == "model")
+    assert model.enum == list(adapters.SEEDANCE_MODELS)
+    assert model.default == adapters.SEEDANCE_MODELS[0]
+    body = adapters._seedance_build_body({"prompt": "a wave"}, api_key="k")
+    assert body["model"] == adapters.SEEDANCE_MODELS[0]
+
+
+def test_validation_error_lists_spec_derived_models(_spec_cache):
+    """Flag validation rejects an unknown model naming the derived enum, so
+    agents introspecting the error see the fresh list."""
+    new_models = ["seedance-2-0-260128", "seedance-2-0-fast-260128"]
+    spec.write_cache(_seedance_fixture_spec({"type": "string", "enum": new_models}))
+    ep = spec.get_endpoint("seedance")
+    flags = schema.flags_for(ep)
+    with pytest.raises(schema.SchemaError, match="seedance-2-0-260128"):
+        schema.parse_args(flags, ["--prompt", "x", "--model", "bogus"])
+
+
+def test_gemini_models_keep_hardcoded_fallback():
+    """Gemini's model is a URL path param — the spec has no body enum, so the
+    hardcoded tuple (and its pinned default) stays in effect."""
+    ep = spec.get_endpoint("nano-banana")
+    model = next(f for f in schema.flags_for(ep) if f.name == "model")
+    assert model.enum == list(adapters.GEMINI_IMAGE_MODELS)
+    assert model.default == adapters.GEMINI_IMAGE_MODELS[0]
 
 
 # ── Seedance polling ──────────────────────────────────────────────────────

@@ -466,6 +466,85 @@ class TestGet:
         assert env["ok"] is False
         assert env["error"]["code"] == "workflow_not_found"
 
+    def test_response_over_cap_refuses_to_truncate(self, cloud_target, monkeypatch, capsys):
+        # Shrink the cap so the mocked body exceeds it. An oversize body used to
+        # be truncated, fail to parse, and get swallowed into (status, None) —
+        # indistinguishable from an empty body. It must fail loudly instead.
+        monkeypatch.setattr(workflow_cmd, "_HTTP_MAX_BYTES", 4)
+        _patch_urlopen(monkeypatch, {"/api/workflows/wf-uuid/content": _WORKFLOW_CONTENT_RESPONSE})
+        env = _run(["get", "wf-uuid", "--where", "cloud"], capsys)
+        assert env["ok"] is False
+        assert env["error"]["code"] == "workflow_too_large"
+        assert env["error"]["details"]["limit_bytes"] == 4
+
+
+class TestHttpRequestCap:
+    """``_http_request`` must distinguish an oversize body from an empty one."""
+
+    def test_oversize_body_raises_rather_than_returning_none(self, cloud_target, monkeypatch):
+        monkeypatch.setattr(workflow_cmd, "_HTTP_MAX_BYTES", 4)
+        _patch_urlopen(monkeypatch, {"/api/workflows": (b'{"data": []}', 200)})
+        target = workflow_cmd._resolve_where_target("cloud")
+        with pytest.raises(workflow_cmd._ResponseTooLarge):
+            workflow_cmd._http_request(target.url("workflows"), target)
+
+    def test_body_exactly_at_cap_still_parses(self, cloud_target, monkeypatch):
+        # Boundary: len(raw) == cap is a *complete* body, not a truncated one.
+        body = b'{"a": 1}'
+        monkeypatch.setattr(workflow_cmd, "_HTTP_MAX_BYTES", len(body))
+        _patch_urlopen(monkeypatch, {"/api/workflows": (body, 200)})
+        target = workflow_cmd._resolve_where_target("cloud")
+        assert workflow_cmd._http_request(target.url("workflows"), target) == (200, {"a": 1})
+
+    def test_empty_body_still_returns_none(self, cloud_target, monkeypatch):
+        # The (status, None) contract for a genuinely empty body is unchanged.
+        _patch_urlopen(monkeypatch, {"/api/workflows": (b"", 200)})
+        target = workflow_cmd._resolve_where_target("cloud")
+        assert workflow_cmd._http_request(target.url("workflows"), target) == (200, None)
+
+    def test_non_utf8_body_returns_none_rather_than_raising(self, cloud_target, monkeypatch):
+        # UnicodeDecodeError is a ValueError but not a JSONDecodeError; if it is
+        # not caught it escapes _http_request and no call site handles it.
+        _patch_urlopen(monkeypatch, {"/api/workflows": (b"\xff\xfe\x00not json", 200)})
+        target = workflow_cmd._resolve_where_target("cloud")
+        assert workflow_cmd._http_request(target.url("workflows"), target) == (200, None)
+
+    def test_non_utf8_body_surfaces_envelope_not_traceback(self, cloud_target, monkeypatch, capsys):
+        # End-to-end: the undecodable body must reach the user as an envelope.
+        _patch_urlopen(monkeypatch, {"/api/workflows/wf-uuid/content": (b"\xff\xfe\x00not json", 200)})
+        env = _run(["get", "wf-uuid", "--where", "cloud"], capsys)
+        assert env["ok"] is False
+
+    @pytest.mark.parametrize("verb", ["list", "get", "save", "delete"])
+    def test_every_call_site_routes_oversize_to_envelope(self, verb, cloud_target, tmp_path, monkeypatch, capsys):
+        # Each of the four _http_request call sites must catch _ResponseTooLarge;
+        # an uncaught one would surface as a traceback rather than an envelope.
+        monkeypatch.setattr(workflow_cmd, "_HTTP_MAX_BYTES", 4)
+        _patch_urlopen(monkeypatch, {"/api/workflows": (b'{"data": []}', 200)})
+        args = {
+            "list": ["list"],
+            "get": ["get", "wf-uuid"],
+            "delete": ["delete", "wf-uuid"],
+        }.get(verb)
+        if args is None:
+            wf_path = tmp_path / "wf.json"
+            wf_path.write_text(json.dumps({"1": {"class_type": "KSampler", "inputs": {}}}))
+            args = ["save", str(wf_path), "--name", "x"]
+        env = _run([*args, "--where", "cloud"], capsys)
+        assert env["ok"] is False
+        assert env["error"]["code"] == "workflow_too_large"
+        assert env["error"]["details"]["operation"] == verb
+        # The hint must speak to the operation that actually failed; a single
+        # hardcoded "saved workflow is too large" is wrong for list/save/delete.
+        assert env["error"]["hint"] == workflow_cmd._TOO_LARGE_HINTS[verb]
+
+    @pytest.mark.parametrize("verb", ["save", "delete"])
+    def test_mutating_verbs_do_not_claim_the_write_was_rejected(self, verb):
+        # save/delete have already sent their request by the time the response
+        # is read, so the server-side change may have landed. The hint must not
+        # imply otherwise, or users will wrongly retry a completed mutation.
+        assert "may still have been" in workflow_cmd._TOO_LARGE_HINTS[verb]
+
 
 # ---------------------------------------------------------------------------
 # save

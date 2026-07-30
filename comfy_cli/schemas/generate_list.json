@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://comfy.org/schemas/generate_list.json",
+  "title": "comfy generate list",
+  "description": "The partner-model catalog `comfy generate list` exposes. This is the only source of the alias list — `comfy discover` does not carry it. Under --json the summary is the FULL text, not the '…'-truncated form the human table cuts to fit its column.",
+  "type": "object",
+  "required": ["models", "count"],
+  "properties": {
+    "models": {
+      "type": "array",
+      "description": "One record per model, ordered by (partner, id) — the same order the human table renders.",
+      "items": {
+        "type": "object",
+        "required": ["alias", "id", "partner", "category", "mode", "summary"],
+        "properties": {
+          "alias": {
+            "type": "string",
+            "description": "Short creative-facing name to pass to `comfy generate <alias>` / `comfy generate schema <alias>`. Falls back to `id` when the endpoint has no curated alias. Rendered as the table's 'Model' column."
+          },
+          "id": {
+            "type": "string",
+            "description": "Canonical endpoint id (the openapi path with /proxy/ stripped), e.g. 'bfl/flux-pro-1.1/generate'. Accepted anywhere an alias is."
+          },
+          "partner": {
+            "type": "string",
+            "description": "Partner namespace — the first path segment under /proxy/ (bfl, openai, ideogram, …)."
+          },
+          "category": {
+            "type": "string",
+            "description": "Model style: text-to-image, image-edit, controlnet, inpaint, outpaint, video, … Rendered as the table's 'Style' column and filterable via `--style` / `--category`."
+          },
+          "mode": {
+            "type": "string",
+            "enum": ["sync", "async"],
+            "description": "'async' when the partner returns a job to poll (resumable via `comfy generate resume`); 'sync' when the result comes back on the create call."
+          },
+          "summary": {
+            "type": "string",
+            "description": "Full one-line description from the openapi spec — never truncated."
+          }
+        }
+      }
+    },
+    "count": {
+      "type": "integer",
+      "description": "Number of records in `models` after filtering."
+    },
+    "filters": {
+      "type": "object",
+      "description": "The filters that produced this result, echoed back. Null where the flag was not passed.",
+      "properties": {
+        "partner": { "type": ["string", "null"] },
+        "category": { "type": ["string", "null"] },
+        "query": { "type": ["string", "null"] }
+      }
+    }
+  }
+}
