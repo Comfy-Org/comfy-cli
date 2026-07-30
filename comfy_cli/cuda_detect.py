@@ -9,6 +9,8 @@ import platform
 import re
 import subprocess
 
+from comfy_cli import _safe_exec
+
 logger = logging.getLogger(__name__)
 
 PYTORCH_CUDA_WHEELS: list[str] = [
@@ -77,15 +79,34 @@ def _detect_via_ctypes() -> int | None:
 
 
 def _detect_via_nvidia_smi() -> tuple[int, int] | None:
-    """Parse CUDA version from nvidia-smi output, or return None."""
+    """Parse CUDA version from nvidia-smi output, or return None.
+
+    ``nvidia-smi`` is resolved to a trusted absolute path first: invoking it by
+    bare name would let Windows' ``CreateProcess`` pick up an ``nvidia-smi.exe``
+    planted in the current working directory. A binary that is absent, or whose
+    only match is anchored in the CWD, resolves to ``None`` and the probe is
+    skipped — the same degrade-to-``None`` outcome as a failed run.
+
+    Spawning a resolved absolute path surfaces ``OSError`` variants that a bare
+    name never reached: ``PermissionError`` on a ``noexec``/SELinux-restricted
+    mount, or ``OSError: [Errno 8] Exec format error`` for a file that is ``+x``
+    but not a valid executable. Those are caught alongside
+    :class:`subprocess.SubprocessError` so the promised degradation to ``None``
+    holds instead of aborting ``comfy install`` with a traceback.
+    """
+    nvidia_smi = _safe_exec.resolve_binary("nvidia-smi")
+    if nvidia_smi is None:
+        return None
+
     try:
         output = subprocess.check_output(
-            ["nvidia-smi"],
+            [nvidia_smi],
             text=True,
             timeout=10,
             stderr=subprocess.DEVNULL,
         )
-    except (FileNotFoundError, subprocess.SubprocessError):
+    except (OSError, subprocess.SubprocessError):
+        logger.debug("nvidia-smi probe failed", exc_info=True)
         return None
 
     match = re.search(r"CUDA Version:\s*(\d+)\.(\d+)", output)
