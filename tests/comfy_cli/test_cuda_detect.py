@@ -111,6 +111,22 @@ class TestDetectViaNvidiaSmi:
         ):
             assert _detect_via_nvidia_smi() is None
 
+    @pytest.mark.parametrize(
+        "error",
+        [
+            PermissionError(13, "Permission denied"),
+            OSError(8, "Exec format error"),
+        ],
+        ids=["noexec_or_selinux_denial", "exec_format_error"],
+    )
+    def test_spawn_oserrors_degrade_to_none(self, error):
+        """Spawning a *resolved absolute path* reaches ``OSError`` variants a bare
+        name never did — a probe on a ``noexec`` mount, or a ``+x`` file that is
+        not a valid executable. Both must degrade to ``None`` rather than abort
+        ``comfy install`` with a traceback."""
+        with patch("comfy_cli.cuda_detect.subprocess.check_output", side_effect=error):
+            assert _detect_via_nvidia_smi() is None
+
 
 class TestDetectViaNvidiaSmiResolvesBinaryPath:
     """``_detect_via_nvidia_smi`` must spawn a resolved absolute path, never the
