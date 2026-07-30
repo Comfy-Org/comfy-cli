@@ -169,3 +169,142 @@ def test_empty_dict_payload_not_converted_and_rejected(runner, tmp_path):
     assert "converted_from_ui" not in data
     assert data["valid"] is False
     assert any(e["code"] == "prompt_no_outputs" for e in data["errors"])
+
+
+# --- partner-node (paid) visibility (BE-4328) -----------------------------------
+#
+# `comfy validate` now previews credit spend: it reports `partner_nodes` (the
+# partner-API nodes a workflow uses) and `spends_credits` in its payload, using
+# the same detection `comfy run` gates on (authoritative `api_node: true`, with a
+# `partner/...` category fallback). It stays advisory — no exit-code change.
+#
+# These tests build a minimal object_info per case (a partner node needs only to
+# exist, be an output node, and have no required inputs to validate clean), so the
+# detection is exercised without depending on any real partner node's full schema.
+
+
+def _validate_against(runner: CliRunner, workflow: Path, object_info: Path):
+    """`comfy --json validate` offline against a caller-supplied object_info."""
+    return runner.invoke(
+        app,
+        ["--json", "validate", "--workflow", str(workflow), "--input", str(object_info)],
+        env={"COMFY_WHERE": "local"},
+    )
+
+
+def _node_info(*, category: str, api_node: bool | None = None) -> dict:
+    """A minimal output-node object_info entry with no required inputs — it
+    validates clean, so a one-node workflow using it is `valid: true`."""
+    info = {"input": {"required": {}}, "output": [], "output_node": True, "category": category}
+    if api_node is not None:
+        info["api_node"] = api_node
+    return info
+
+
+def test_partner_node_via_api_node_flag(runner, tmp_path):
+    """A valid API workflow whose node carries the authoritative `api_node: true`
+    flag → `partner_nodes` lists it, `spends_credits` is true, and the exit code
+    is unchanged (0, since the workflow is otherwise valid)."""
+    oi = _write(tmp_path, "oi.json", {"AcmePartnerImage": _node_info(category="image", api_node=True)})
+    wf = _write(tmp_path, "wf.json", {"1": {"class_type": "AcmePartnerImage", "inputs": {}}})
+
+    result = _validate_against(runner, wf, oi)
+
+    assert result.exit_code == 0, result.stdout
+    data = _envelope(result)["data"]
+    assert data["valid"] is True
+    assert data["partner_nodes"] == ["AcmePartnerImage"]
+    assert data["spends_credits"] is True
+
+
+def test_no_partner_nodes_is_empty_list(runner, tmp_path):
+    """A workflow with no partner nodes → `partner_nodes: []` (always present)
+    and `spends_credits: false`."""
+    oi = _write(tmp_path, "oi.json", {"PlainSave": _node_info(category="image")})
+    wf = _write(tmp_path, "wf.json", {"1": {"class_type": "PlainSave", "inputs": {}}})
+
+    result = _validate_against(runner, wf, oi)
+
+    assert result.exit_code == 0, result.stdout
+    data = _envelope(result)["data"]
+    assert data["valid"] is True
+    assert data["partner_nodes"] == []
+    assert data["spends_credits"] is False
+
+
+def test_partner_node_via_category_prefix_fallback(runner, tmp_path):
+    """A node with a `partner/...` category and no `api_node` flag is still
+    detected via the category-prefix fallback."""
+    oi = _write(tmp_path, "oi.json", {"AcmeVideo": _node_info(category="partner/video/Acme")})
+    wf = _write(tmp_path, "wf.json", {"1": {"class_type": "AcmeVideo", "inputs": {}}})
+
+    result = _validate_against(runner, wf, oi)
+
+    assert result.exit_code == 0, result.stdout
+    data = _envelope(result)["data"]
+    assert data["partner_nodes"] == ["AcmeVideo"]
+    assert data["spends_credits"] is True
+
+
+def test_partner_detection_runs_on_converted_ui_graph(runner, tmp_path):
+    """A UI-format workflow using a partner node: detection runs on the CONVERTED
+    (API-format) graph, so the partner node still surfaces alongside
+    `converted_from_ui: true`."""
+    oi = _write(tmp_path, "oi.json", {"AcmePartnerImage": _node_info(category="image", api_node=True)})
+    ui = {
+        "nodes": [{"id": 1, "type": "AcmePartnerImage", "mode": 0, "inputs": [], "outputs": [], "widgets_values": []}],
+        "links": [],
+    }
+    wf = _write(tmp_path, "ui.json", ui)
+
+    result = _validate_against(runner, wf, oi)
+
+    assert result.exit_code == 0, result.stdout
+    data = _envelope(result)["data"]
+    assert data["converted_from_ui"] is True
+    assert data["partner_nodes"] == ["AcmePartnerImage"]
+    assert data["spends_credits"] is True
+
+
+def test_invalid_workflow_still_reports_partner_nodes(runner, tmp_path):
+    """An invalid workflow that also uses a partner node: both `errors` and
+    `partner_nodes` are present (visibility is independent of validity), and the
+    exit code is 1 because of the error — not because of the partner node."""
+    oi = _write(tmp_path, "oi.json", {"AcmePartnerImage": _node_info(category="image", api_node=True)})
+    wf = _write(
+        tmp_path,
+        "wf.json",
+        {
+            "1": {"class_type": "AcmePartnerImage", "inputs": {}},
+            "2": {"class_type": "TotallyUnknownNode", "inputs": {}},
+        },
+    )
+
+    result = _validate_against(runner, wf, oi)
+
+    assert result.exit_code == 1
+    data = _envelope(result)["data"]
+    assert data["valid"] is False
+    assert any(e["code"] == "unknown_class_type" for e in data["errors"])
+    assert data["partner_nodes"] == ["AcmePartnerImage"]
+    assert data["spends_credits"] is True
+
+
+def test_partner_node_name_with_markup_does_not_crash_pretty(runner, tmp_path):
+    """Regression: a partner `class_type` containing Rich-markup metacharacters
+    (e.g. `[/yellow]`) is escaped before it reaches `rprint`, so the pretty-mode
+    advisory line can't raise `MarkupError` and crash the command."""
+    name = "Acme[/yellow]Node"
+    oi = _write(tmp_path, "oi.json", {name: _node_info(category="image", api_node=True)})
+    wf = _write(tmp_path, "wf.json", {"1": {"class_type": name, "inputs": {}}})
+
+    result = runner.invoke(
+        app,
+        ["--no-json", "validate", "--workflow", str(wf), "--input", str(oi)],
+        env={"COMFY_WHERE": "local"},
+    )
+
+    assert result.exit_code == 0, result.stdout
+    assert result.exception is None, result.exception
+    # The name is still shown (escaped) in the paid-nodes advisory.
+    assert name in result.stdout

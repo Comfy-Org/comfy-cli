@@ -27,7 +27,8 @@ import typer
 
 from comfy_cli import jobs_state
 from comfy_cli.comfy_client import Client, Unauthenticated, extract_output_entries
-from comfy_cli.http import NoRedirectHandler
+from comfy_cli.http import NoRedirectHandler, build_http_only_opener
+from comfy_cli.http import target_auth_headers as _auth_headers
 from comfy_cli.output import get_renderer
 from comfy_cli.output import rprint as pprint
 from comfy_cli.target import resolve_target
@@ -67,17 +68,6 @@ def _default_out_dir() -> str:
 # ---------------------------------------------------------------------------
 
 
-def _auth_headers(target: Any) -> dict[str, str]:
-    """Build auth headers for a target (cloud only)."""
-    headers: dict[str, str] = {}
-    if target.is_cloud:
-        if target.api_key:
-            headers["X-API-Key"] = target.api_key
-        elif target.auth_token:
-            headers["Authorization"] = f"Bearer {target.auth_token}"
-    return headers
-
-
 # Stripped on every download redirect so auth never crosses origins.
 _AUTH_HEADERS_TO_STRIP = frozenset({"authorization", "x-api-key", "x-comfy-api-key", "cookie"})
 _MAX_REDIRECTS = 5
@@ -105,8 +95,8 @@ class _DownloadRedirectHandler(urllib.request.HTTPRedirectHandler):
         return new_req
 
 
-_TRANSFER_OPENER = urllib.request.build_opener(NoRedirectHandler("redirect refused (auth leak prevention)"))
-_DOWNLOAD_OPENER = urllib.request.build_opener(_DownloadRedirectHandler())
+_TRANSFER_OPENER = build_http_only_opener(NoRedirectHandler("redirect refused (auth leak prevention)"))
+_DOWNLOAD_OPENER = build_http_only_opener(_DownloadRedirectHandler())
 
 # Per-output safety cap, shared by the HTTP download stream and local-output copies.
 _MAX_DOWNLOAD_BYTES = 10 * 1024 * 1024 * 1024  # 10 GB

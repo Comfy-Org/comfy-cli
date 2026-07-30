@@ -49,6 +49,9 @@ def _validator_for(name: str) -> jsonschema.Validator:
         "which.json",
         "run.json",
         "run_event.json",
+        "download.json",
+        "download_status.json",
+        "downloads.json",
     ],
 )
 def test_schemas_are_well_formed(schema_name):

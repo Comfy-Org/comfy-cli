@@ -1,0 +1,95 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://comfy.org/schemas/generate_schema.json",
+  "title": "comfy generate schema <model>",
+  "description": "A single partner model's callable parameters, derived from the active openapi spec. Every entry in `params` is a `--<name> <value>` flag on `comfy generate <model>`.",
+  "type": "object",
+  "required": ["model", "id", "params"],
+  "properties": {
+    "model": {
+      "type": "string",
+      "description": "Preferred short alias for the model, or the endpoint id when it has none."
+    },
+    "id": {
+      "type": "string",
+      "description": "Canonical endpoint id (the openapi path with /proxy/ stripped)."
+    },
+    "partner": {
+      "type": "string",
+      "description": "Partner namespace (bfl, openai, ideogram, …)."
+    },
+    "category": {
+      "type": "string",
+      "description": "Model style: text-to-image, image-edit, inpaint, video, … Matches the `category` field in `generate list`."
+    },
+    "summary": {
+      "type": "string",
+      "description": "Full one-line description from the openapi spec."
+    },
+    "mode": {
+      "type": "string",
+      "enum": ["sync", "async"],
+      "description": "'async' when the partner returns a job to poll; 'sync' otherwise."
+    },
+    "polling": {
+      "type": ["string", "null"],
+      "description": "Poller family driving the async result fetch (bfl, kling, luma, topaz), or null for sync models."
+    },
+    "content_type": {
+      "type": "string",
+      "description": "Request content type the proxy call uses: 'application/json' or 'multipart/form-data'."
+    },
+    "params": {
+      "type": "array",
+      "description": "Callable parameters, required ones first.",
+      "items": {
+        "type": "object",
+        "required": ["name", "type", "required", "enum", "description"],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Parameter name. The CLI flag is '--' + name."
+          },
+          "type": {
+            "type": "string",
+            "enum": ["string", "integer", "number", "boolean", "enum", "object", "array", "binary"],
+            "description": "Value type. 'enum' means `enum` below lists the only accepted values; 'binary' means a local file path streamed as multipart."
+          },
+          "kind": {
+            "type": "string",
+            "description": "Deprecated alias of `type`, always identical to it. Retained because it is the name the pre-envelope --json payload shipped; prefer `type`."
+          },
+          "required": {
+            "type": "boolean",
+            "description": "True when `comfy generate <model>` rejects the call without this flag."
+          },
+          "default": {
+            "description": "Default applied when the flag is omitted; null when the spec declares none."
+          },
+          "enum": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Accepted values (e.g. output_format = ['jpeg', 'png']). Empty when the parameter is not enumerated."
+          },
+          "description": {
+            "type": "string",
+            "description": "Full parameter description from the openapi spec."
+          },
+          "item_type": {
+            "type": ["string", "null"],
+            "description": "For `type` == 'array', the type of each element; null otherwise."
+          },
+          "upload_mode": {
+            "type": ["string", "null"],
+            "enum": ["base64", "url", null],
+            "description": "Set when a local file path passed to this parameter is auto-transformed before the proxy call: 'base64' inlines the bytes, 'url' uploads and substitutes a signed URL. Null means the value is sent as typed."
+          }
+        }
+      }
+    },
+    "example": {
+      "type": "string",
+      "description": "Copy-pasteable invocation filling every required parameter."
+    }
+  }
+}
