@@ -494,13 +494,11 @@ def _status(outdated: bool, latest: Any) -> str:
 
 def execute(renderer, comfy_path: str | None, *, refresh: bool = False) -> None:
     """Entry point wired from ``comfy outdated`` in cmdline.py."""
-    from rich.markup import escape
-
     report, warnings = build_report(comfy_path, refresh=refresh)
     if renderer.is_pretty():
         _render_pretty(renderer, report)
     for w in warnings:
-        # Warnings embed pack names/error text; escape so a name like ``foo[/]``
-        # can't trip renderer.warn's markup pass.
-        renderer.warn(escape(w))
+        # Warnings embed pack names/error text, but ``renderer.warn`` escapes
+        # markup itself now — escaping again here would render the backslashes.
+        renderer.warn(w)
     renderer.emit(report, command="outdated")

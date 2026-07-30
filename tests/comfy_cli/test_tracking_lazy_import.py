@@ -94,7 +94,7 @@ def test_broken_sdk_import_degrades_instead_of_crashing_the_command():
         "builtins.__import__ = boom\n"
         "import comfy_cli.tracking as t\n"
         "t.MIXPANEL_TOKEN = 'tok'\n"
-        "t.POSTHOG_TOKEN = 'tok'\n"
+        "t._POSTHOG_DEFAULT_TOKEN = 'tok'\n"
         # The send path must survive: _get_providers() is called in _dispatch's loop
         # header, outside the per-provider try/except that only guards .track().
         "t._dispatch('evt', {}, distinct_id='abc')\n"
@@ -118,7 +118,7 @@ def test_one_broken_sdk_does_not_silence_the_other():
         "builtins.__import__ = boom\n"
         "import comfy_cli.tracking as t\n"
         "t.MIXPANEL_TOKEN = 'tok'\n"
-        "t.POSTHOG_TOKEN = 'tok'\n"
+        "t._POSTHOG_DEFAULT_TOKEN = 'tok'\n"
         "providers = t._get_providers()\n"
         "names = [type(p).__name__ for p in providers]\n"
         "assert names == ['MixpanelProvider'], f'lost the healthy provider: {names!r}'\n"

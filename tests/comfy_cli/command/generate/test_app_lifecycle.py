@@ -92,6 +92,30 @@ class TestSubActionEvents:
         assert r.exit_code == 1
         assert "Usage: comfy generate resume" in r.output
 
+    @pytest.mark.parametrize(
+        ("argv", "usage"),
+        [
+            (["--no-json", "generate", "upload"], "Usage: comfy generate upload <file-or-url> [--json]"),
+            (
+                ["--no-json", "generate", "resume"],
+                "Usage: comfy generate resume <model> <job_id> [--download PATH] [--json]",
+            ),
+        ],
+    )
+    def test_usage_errors_render_bracketed_flags_literally(self, runner, captured_events, argv, usage):
+        # `--no-json` is load-bearing: under CliRunner stdout is not a TTY, so the
+        # renderer defaults to JSON (renderer.py precedence rule 6) and the assertion
+        # would pass on the envelope's `message` field without ever rendering markup.
+        # The pretty branch is what an interactive user actually sees, and it feeds
+        # the text through Rich — `[--json]` / `[--download PATH]` survive only
+        # because `_fail` runs `message` through `sanitize_markup`. A hand-rolled
+        # unescaped `pretty=` override would swallow those brackets (or raise
+        # MarkupError on a tag-shaped token); this pins the rendered line so that
+        # regresses loudly.
+        r = runner.invoke(cli_app, argv)
+        assert r.exit_code == 1
+        assert usage in r.output
+
     def test_refresh_fires_generate_refresh(self, runner, captured_events, monkeypatch):
         # Mock the httpx call so we don't actually hit the network.
         monkeypatch.setattr(

@@ -99,6 +99,32 @@ dependencies using the following precedence:
      tool environment): a `.venv` is created inside the ComfyUI workspace.
      Use `comfy launch` to start ComfyUI with the correct Python.
 
+### Updating ComfyUI
+
+`comfy update` brings an existing workspace up to date:
+
+- `comfy update` (or `comfy update comfy`): pull the branch the workspace is currently on and reinstall `requirements.txt`.
+- `comfy update all`: also update every installed custom node.
+- `comfy update cli`: upgrade comfy-cli itself.
+
+#### Switching to a specific version
+
+`comfy update comfy --version <X>` moves an existing workspace to a specific ComfyUI version — a downgrade (rollback) or an upgrade — without prompting for anything, so it is safe to run headlessly or from a script. `<X>` is `nightly` (the repo's default branch), `latest` (the newest stable release), or a version number such as `0.3.0` (a leading `v` is optional).
+
+```bash
+comfy update comfy --version 0.3.0      # roll back to the v0.3.0 release
+comfy update comfy --version latest     # newest stable release
+comfy update comfy --version nightly    # roll forward to the default branch
+```
+
+Behavior worth knowing:
+
+- **The target is validated before anything is touched.** An unknown version exits non-zero, lists the nearest available versions, and leaves the working tree exactly as it was.
+- **Uncommitted changes are stashed by default** (`git stash push -u`) and are *never* popped or dropped automatically — the stash ref is printed so you can restore them with `git stash pop`. Pass `--no-stash` if you would rather the command refuse to run on a dirty tree.
+- **A version number checks out a tag, which leaves a detached HEAD.** That is expected. Roll forward again with `comfy update comfy --version nightly` (or `--version latest`); a plain `comfy update` cannot advance a detached HEAD.
+- **Dependencies are reinstalled** from the target version's `requirements.txt`. PyTorch is deliberately left alone: the ComfyUI version doesn't determine your torch build, your machine does. If the dependency install fails, the command exits non-zero and says so — the tree is already on the new version, and re-running the same command is safe.
+- `--version` and `--no-stash` apply only to target `comfy`; combining `--version` with `all` or `cli` is an error.
+
 ### Specifying execution path
 
 - You can specify the path of ComfyUI where the command will be applied through path indicators as follows:
@@ -205,6 +231,9 @@ Comfy provides commands that allow you to easily run the installed ComfyUI.
   - Cache automatically expires after 7 days
   - Maximum of 10 PR builds are kept (oldest are removed automatically)
   - Cache limits help manage disk space while keeping recent builds available
+
+- To check VRAM/RAM usage: `comfy system-stats` (add `--where cloud` to target Comfy Cloud instead of local)
+- To unload models / free the executor cache: `comfy free` (pass `--free-memory` to also reset the executor cache)
 
 ### Managing Custom Nodes
 
