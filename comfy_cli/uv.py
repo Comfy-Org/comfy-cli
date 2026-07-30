@@ -325,42 +325,6 @@ class DependencyCompiler:
         return _check_call(cmd, cwd)
 
     @staticmethod
-    def Download(
-        cwd: PathLike,
-        executable: PathLike = sys.executable,
-        extraUrl: str | None = None,
-        noDeps: bool = False,
-        out: PathLike | None = None,
-        reqs: list[str] | None = None,
-        reqFile: list[PathLike] | None = None,
-    ) -> None:
-        """For now, the `download` cmd has no uv support, so use pip"""
-        cmd = [
-            str(executable),
-            "-m",
-            "pip",
-            "download",
-        ]
-
-        if extraUrl is not None:
-            cmd.extend(["--extra-index-url", extraUrl])
-
-        if noDeps:
-            cmd.append("--no-deps")
-
-        if out is not None:
-            cmd.extend(["-d", str(out)])
-
-        if reqs is not None:
-            cmd.extend(reqs)
-
-        if reqFile is not None:
-            for rf in reqFile:
-                cmd.extend(["--requirement", rf])
-
-        return _check_call(cmd, cwd)
-
-    @staticmethod
     def Wheel(
         cwd: PathLike,
         executable: PathLike = sys.executable,
@@ -577,26 +541,6 @@ class DependencyCompiler:
             reqFile=[self.out],
         )
 
-    def install_dists(self):
-        DependencyCompiler.Install(
-            cwd=self.cwd,
-            executable=self.executable,
-            find_links=[self.outDir / "dists"],
-            no_deps=True,
-            no_index=True,
-            reqFile=[self.out],
-        )
-
-    def install_wheels(self):
-        DependencyCompiler.Install(
-            cwd=self.cwd,
-            executable=self.executable,
-            find_links=[self.outDir / "wheels"],
-            no_deps=True,
-            no_index=True,
-            reqFile=[self.out],
-        )
-
     def install_wheels_directly(self):
         DependencyCompiler.Install(
             cwd=self.cwd,
@@ -604,29 +548,6 @@ class DependencyCompiler:
             no_deps=True,
             no_index=True,
             reqs=(self.outDir / "wheels").glob("*.whl"),
-        )
-
-    def sync_core_plus_ext(self):
-        DependencyCompiler.Sync(
-            cwd=self.cwd,
-            reqFile=[self.out],
-            executable=self.executable,
-            extraUrl=self.gpuUrl,
-        )
-
-    def fetch_dep_dists(self, skip_uv: bool = False):
-        skips = ["uv"] if skip_uv else None
-        reqs = parse_req_file(self.out, skips=skips)
-
-        extraUrl = None if "--extra-index-url" in reqs else self.gpuUrl
-
-        DependencyCompiler.Download(
-            cwd=self.cwd,
-            executable=self.executable,
-            extraUrl=extraUrl,
-            noDeps=True,
-            out=self.outDir / "dists",
-            reqs=reqs,
         )
 
     def fetch_dep_wheels(self, skip_uv: bool = False):

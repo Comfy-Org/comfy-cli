@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://comfy.org/schemas/system_stats.json",
+  "title": "comfy system-stats",
+  "description": "Passthrough of ComfyUI's GET /system_stats response — per-device VRAM plus system RAM/version info. Shape tracks whatever ComfyUI itself reports, so this schema only pins the fields agents rely on.",
+  "type": "object",
+  "additionalProperties": true,
+  "properties": {
+    "system": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "ram_total": { "type": "number" },
+        "ram_free": { "type": "number" },
+        "comfyui_version": { "type": "string" }
+      }
+    },
+    "devices": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true,
+        "properties": {
+          "name": { "type": "string" },
+          "type": { "type": "string" },
+          "index": { "type": "integer" },
+          "vram_total": { "type": "number" },
+          "vram_free": { "type": "number" },
+          "torch_vram_total": { "type": "number" },
+          "torch_vram_free": { "type": "number" }
+        }
+      }
+    }
+  }
+}

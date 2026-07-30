@@ -42,6 +42,18 @@ def _force_json_renderer():
     return r
 
 
+def _force_pretty_renderer():
+    r = Renderer.resolve(
+        is_stdout_tty=True,
+        env={},
+        caller=Caller(kind="user", agentic=False, source_env=None),
+        no_json_flag=True,
+    )
+    r.mode = OutputMode.PRETTY
+    set_renderer(r)
+    return r
+
+
 def _object_info():
     return {
         "KSampler": {
@@ -283,13 +295,20 @@ def _template_workflow():
     }
 
 
-def _run(args: list[str], capsys) -> dict[str, Any]:
-    _force_json_renderer()
+def _invoke(args: list[str], capsys, renderer_factory=_force_json_renderer) -> tuple[str, str, Any]:
+    """Run the command and return (stdout text, stderr text, CliRunner result)."""
+    renderer_factory()
     runner = CliRunner()
     result = runner.invoke(workflow_cmd.app, args, standalone_mode=False)
-    captured = capsys.readouterr().out
+    streams = capsys.readouterr()
+    captured = streams.out
     if not captured.strip():
         captured = result.stdout or ""
+    return captured, streams.err, result
+
+
+def _run(args: list[str], capsys) -> dict[str, Any]:
+    captured, _err, result = _invoke(args, capsys)
     lines = [ln for ln in captured.strip().splitlines() if ln.strip()]
     for line in reversed(lines):
         try:
@@ -362,16 +381,52 @@ class TestSetSlotDirectMode:
         wf = _direct_workflow()
         path = _write_workflow(tmp_path, wf)
         original_text = path.read_text()
-        # --stdout prints to stdout instead of modifying file
-        _force_json_renderer()
-        runner = CliRunner()
-        runner.invoke(
-            workflow_cmd.app,
-            ["set-slot", str(path), '6.text="a dog"', "--stdout"],
-            standalone_mode=False,
-        )
+        # --stdout returns the result instead of modifying the file
+        _invoke(["set-slot", str(path), '6.text="a dog"', "--stdout"], capsys)
         # File should be unchanged
         assert path.read_text() == original_text
+
+    def test_set_slot_stdout_emits_envelope_under_json(self, patched_graph, tmp_path, capsys):
+        """`--json ... --stdout` must emit an envelope/1 carrying the modified workflow.
+
+        Regression: it used to write the bare workflow object to stdout and skip
+        `renderer.emit`, so every machine caller (the local MCP's default
+        `set_workflow_slot`) saw "no JSON" and failed.
+        """
+        path = _write_workflow(tmp_path, _direct_workflow())
+        original_text = path.read_text()
+        captured, _stderr, _ = _invoke(["set-slot", str(path), '6.text="a dog"', "--stdout"], capsys)
+
+        lines = [ln for ln in captured.strip().splitlines() if ln.strip()]
+        assert len(lines) == 1, f"JSON mode must put exactly one envelope on stdout, got {lines[:3]}"
+        env = json.loads(lines[0])
+        assert env["schema"] == "envelope/1"
+        assert env["type"] == "envelope"
+        assert env["ok"] is True
+        assert env["changed"] is False, "--stdout writes nothing, so the envelope must not claim a change"
+
+        data = env["data"]
+        assert data["out"] == "stdout"
+        assert data["wrote"] is None
+        assert data["applied"] == ["6.text"]
+        # data round-trips the applied override…
+        clip = next(n for n in data["workflow_json"]["nodes"] if n["id"] == 6)
+        assert clip["widgets_values"][0] == "a dog"
+        # …and the source file is untouched.
+        assert path.read_text() == original_text
+
+    def test_set_slot_stdout_prints_raw_workflow_in_human_mode(self, patched_graph, tmp_path, capsys):
+        """Without --json, --stdout still prints the bare workflow so it stays pipeable."""
+        path = _write_workflow(tmp_path, _direct_workflow())
+        captured, _stderr, _ = _invoke(
+            ["set-slot", str(path), '6.text="a dog"', "--stdout"],
+            capsys,
+            _force_pretty_renderer,
+        )
+        wf = json.loads(captured)
+        assert "nodes" in wf and "type" not in wf, "human mode must print the workflow, not an envelope"
+        clip = next(n for n in wf["nodes"] if n["id"] == 6)
+        assert clip["widgets_values"][0] == "a dog"
 
     def test_set_slot_invalid_format(self, patched_graph, tmp_path, capsys):
         path = _write_workflow(tmp_path, _direct_workflow())
@@ -408,8 +463,50 @@ class TestVaryDirectMode:
         )
         assert env["ok"] is True
         assert env["data"]["count"] == 3
+        # Variants went to disk, so they are not inlined in the envelope.
+        assert env["data"]["variants"] is None
         files = sorted(out_dir.glob("*.json"))
         assert len(files) == 3
+
+    def test_vary_without_out_dir_puts_variants_in_envelope(self, patched_graph, tmp_path, capsys):
+        """Same envelope contract as set-slot --stdout: under --json the variants
+        ride in `data.variants` instead of being dumped raw onto stdout."""
+        path = _write_workflow(tmp_path, _direct_workflow())
+        captured, _stderr, _ = _invoke(["vary", str(path), "--slot", "3.seed=[1,2]"], capsys)
+
+        lines = [ln for ln in captured.strip().splitlines() if ln.strip()]
+        assert len(lines) == 1, f"JSON mode must put exactly one envelope on stdout, got {lines[:3]}"
+        env = json.loads(lines[0])
+        assert env["ok"] is True
+        assert env["data"]["count"] == 2
+        variants = env["data"]["variants"]
+        assert len(variants) == 2
+        seeds = [next(n for n in wf["nodes"] if n["id"] == 3)["widgets_values"][0] for wf in variants]
+        assert seeds == [1, 2]
+
+    def test_vary_without_out_dir_still_ndjson_in_human_mode(self, patched_graph, tmp_path, capsys):
+        """Without --json, the variants stay raw NDJSON on stdout for piping.
+
+        stdout must be *strictly* line-delimited JSON: the `✓ produced N
+        variation(s)` summary used to be appended to it, which broke
+        `comfy workflow vary ... --no-json > out.ndjson` for strict consumers.
+        It belongs on stderr.
+        """
+        path = _write_workflow(tmp_path, _direct_workflow())
+        _force_pretty_renderer()
+        # Called directly rather than through CliRunner: CliRunner merges
+        # stderr into stdout, and the stdout/stderr split is what's under test.
+        workflow_cmd.vary_cmd(str(path), ["3.seed=[1,2]"])
+        streams = capsys.readouterr()
+        captured, stderr = streams.out, streams.err
+        lines = [ln for ln in captured.splitlines() if ln.strip()]
+        # Every non-blank stdout line parses as JSON — no summary/footer.
+        wfs = [json.loads(ln) for ln in lines]
+        assert len(wfs) == 2
+        seeds = [next(n for n in wf["nodes"] if n["id"] == 3)["widgets_values"][0] for wf in wfs]
+        assert seeds == [1, 2]
+        # The human summary is still shown, just not on the NDJSON stream.
+        assert "produced 2 variation(s)" in stderr
 
     def test_vary_mismatched_lengths_rejected(self, patched_graph, tmp_path, capsys):
         path = _write_workflow(tmp_path, _direct_workflow())

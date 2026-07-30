@@ -6,6 +6,7 @@ No I/O, no CLI invocation — just the engine in isolation.
 
 from __future__ import annotations
 
+import copy
 from typing import Any
 
 import pytest
@@ -15,6 +16,7 @@ from comfy_cli.cql.engine import (
     Graph,
     _apply_one_slot,
     _extract_frontend_slots,
+    _write_widget,
 )
 
 # ---------------------------------------------------------------------------
@@ -428,6 +430,71 @@ class TestWidgetOrderDynamicCombo:
         # the whole nested span (mode, mode.steps, mode.refine) is replaced by
         # alpha's defaults (size first-enum, width default).
         assert out["nodes"][0]["widgets_values"] == ["p", "alpha", "S", 512, 7, "fixed"]
+
+
+def _dynamic_combo_implicit_seed_object_info() -> dict:
+    """A COMFY_DYNAMICCOMBO_V3 option whose sub-input is an implicit
+    seed/noise_seed INT — the frontend's ``useIntWidget`` composable
+    companions it with a control_after_generate marker even without the
+    schema's ``control_after_generate`` flag (mirrors
+    ``workflow_to_api._has_control_after_generate_companion``)."""
+    return {
+        "SeedComboNode": {
+            "input": {
+                "required": {
+                    "mode": [
+                        "COMFY_DYNAMICCOMBO_V3",
+                        {"options": [{"key": "a", "inputs": {"required": {"seed": ["INT", {"default": 0}]}}}]},
+                    ],
+                },
+            },
+            "input_order": {"required": ["mode"]},
+            "output": ["IMAGE"],
+            "output_name": ["IMAGE"],
+            "category": "test",
+            "display_name": "SeedComboNode",
+            "python_module": "nodes",
+        }
+    }
+
+
+def _prefixed_dynamic_combo_object_info() -> dict:
+    """Same as above but with a leading widget, so the combo's selector sits
+    at a non-zero positional index — needed to exercise padding-before-write."""
+    info = _dynamic_combo_implicit_seed_object_info()
+    info["PrefixedDynNode"] = info.pop("SeedComboNode")
+    info["PrefixedDynNode"]["display_name"] = "PrefixedDynNode"
+    info["PrefixedDynNode"]["input"]["required"] = {
+        "prefix": ["STRING", {"default": ""}],
+        **info["PrefixedDynNode"]["input"]["required"],
+    }
+    info["PrefixedDynNode"]["input_order"] = {"required": ["prefix", "mode"]}
+    return info
+
+
+class TestDynamicComboImplicitControlAfterGenerate:
+    """Sub-input seed/noise_seed widgets companion a control_after_generate
+    marker even without the schema flag — same rule as the UI→API converter."""
+
+    @pytest.fixture
+    def seed_graph(self) -> Graph:
+        return Graph.from_object_info(_dynamic_combo_implicit_seed_object_info())
+
+    def test_value_aware_order_includes_implicit_marker(self, seed_graph: Graph):
+        order = seed_graph.widget_order_for_node("SeedComboNode", ["a", 0, "fixed"])
+        assert order == ["mode", "mode.seed", "control_after_generate"]
+
+    def test_roster_rebuild_synthesizes_implicit_marker_default(self, seed_graph: Graph):
+        wf = {"nodes": [{"id": 1, "type": "SeedComboNode", "widgets_values": [None]}]}
+        out, warnings = seed_graph.apply_slots(wf, {"1.mode": "a"})
+        assert [w["code"] for w in warnings] == ["dynamic_combo_roster_rebuilt"]
+        assert out["nodes"][0]["widgets_values"] == ["a", 0, "fixed"]
+
+    def test_roster_rebuild_respects_extend_false(self):
+        graph = Graph.from_object_info(_prefixed_dynamic_combo_object_info())
+        node = {"id": 1, "type": "PrefixedDynNode", "widgets_values": []}
+        with pytest.raises(ValueError, match="out of range"):
+            _write_widget(node, "mode", "a", graph, extend=False)
 
 
 # ===========================================================================
@@ -1120,6 +1187,253 @@ class TestValidateServerParity:
         result = graph_sd15.validate_workflow(wf)
         assert result["valid"] is True, result["errors"]
         assert [e for e in result["errors"] if e.get("node_id") == "_meta"] == []
+
+
+class TestValidateDynamicCombo:
+    """Validate expands a ``COMFY_DYNAMICCOMBO_V3`` selector's chosen option and
+    checks the dotted sub-inputs the server will actually require (BE-3777).
+
+    object_info declares only the selector (``model``); the frontend and
+    ``convert_ui_to_api`` lower the selected option's own INPUT_TYPES into
+    ``model.width`` / ``model.size_preset`` / … keys. Before this, none of those
+    keys were reachable from the schema, so every one of the cases below came
+    back ``valid: true`` and was then rejected at ``/prompt`` with
+    ``required_input_missing`` / ``shape_mismatch``.
+    """
+
+    @pytest.fixture
+    def seedream_graph(self) -> Graph:
+        """The captured ByteDance Seedream catalog plus a minimal output node, so
+        a converted single-node workflow isn't drowned in prompt_no_outputs."""
+        import json
+        from pathlib import Path
+
+        fixture = Path(__file__).parent.parent / "fixtures" / "object_info_bytedance_seedream_v2.json"
+        object_info = json.loads(fixture.read_text())
+        object_info["SaveImageAdvanced"] = {
+            "input": {"required": {"images": ["IMAGE", {}]}},
+            "output": [],
+            "output_name": [],
+            "output_node": True,
+            "python_module": "nodes",
+        }
+        return Graph.from_object_info(object_info)
+
+    @pytest.fixture
+    def seedream_api(self, seedream_graph: Graph) -> dict:
+        """The ticket's repro payload: the pristine Seedream 5.0 Pro UI export,
+        lowered to API format by the same converter ``comfy run`` / ``comfy
+        validate`` use — i.e. the exact bytes that reach ``/prompt``."""
+        import json
+        from pathlib import Path
+
+        from comfy_cli.workflow_to_api import convert_ui_to_api
+
+        ui = json.loads((Path(__file__).parent.parent / "fixtures" / "seedream_5_0_pro_t2i_ui.json").read_text())
+        return convert_ui_to_api(ui, seedream_graph.object_info)
+
+    def test_converted_seedream_workflow_is_valid(self, seedream_graph: Graph, seedream_api: dict):
+        """Guard against over-strictness: the pristine template — whose
+        ``model.images`` autogrow sub-input is declared *required* with
+        ``min: 0`` and legitimately emits no key — must still validate clean."""
+        result = seedream_graph.validate_workflow(seedream_api)
+        assert result["valid"] is True, result["errors"]
+
+    def test_missing_sub_input_errors(self, seedream_graph: Graph, seedream_api: dict):
+        wf = copy.deepcopy(seedream_api)
+        del wf["1"]["inputs"]["model.width"]
+        result = seedream_graph.validate_workflow(wf)
+        assert result["valid"] is False
+        err = next(e for e in result["errors"] if e["field"] == "model.width")
+        assert err["code"] == "required_input_missing"
+        assert err["node_id"] == "1"
+
+    def test_sub_input_shape_mismatch_errors(self, seedream_graph: Graph, seedream_api: dict):
+        wf = copy.deepcopy(seedream_api)
+        wf["1"]["inputs"]["model.width"] = "wide"  # INT declared, non-numeric string given
+        result = seedream_graph.validate_workflow(wf)
+        assert result["valid"] is False
+        err = next(e for e in result["errors"] if e["field"] == "model.width")
+        assert err["code"] == "shape_mismatch"
+
+    def test_sub_input_range_and_enum_checked(self, seedream_graph: Graph, seedream_api: dict):
+        """Sub-inputs go through the same Port machinery as top-level inputs, so
+        they inherit the range and enum-membership hard errors."""
+        wf = copy.deepcopy(seedream_api)
+        wf["1"]["inputs"]["model.width"] = 8  # catalog min is 1024
+        wf["1"]["inputs"]["model.size_preset"] = "(9K) nope"
+        result = seedream_graph.validate_workflow(wf)
+        codes = {(e["field"], e["code"]) for e in result["errors"]}
+        assert ("model.width", "below_min") in codes
+        assert ("model.size_preset", "unknown_enum_value") in codes
+
+    def test_selecting_another_option_switches_the_required_set(self, seedream_graph: Graph, seedream_api: dict):
+        """Flipping the selector to ``seedream 5.0 lite`` — which declares
+        ``max_images``/``fail_on_partial`` the pro option does not — makes those
+        sub-inputs required, exactly as the server would."""
+        wf = copy.deepcopy(seedream_api)
+        wf["1"]["inputs"]["model"] = "seedream 5.0 lite"
+        result = seedream_graph.validate_workflow(wf)
+        assert result["valid"] is False
+        missing = {e["field"] for e in result["errors"] if e["code"] == "required_input_missing"}
+        assert missing == {"model.max_images", "model.fail_on_partial"}
+
+    def test_unknown_selector_errors_with_options(self, seedream_graph: Graph, seedream_api: dict):
+        """A selector naming no option is where the converter silently misaligns
+        the following widget values, so it must not pass as valid."""
+        wf = copy.deepcopy(seedream_api)
+        wf["1"]["inputs"]["model"] = "seedream 9.9 ultra"
+        result = seedream_graph.validate_workflow(wf)
+        assert result["valid"] is False
+        err = next(e for e in result["errors"] if e["field"] == "model")
+        assert err["code"] == "unknown_enum_value"
+        assert "seedream 5.0 pro" in err["valid_options"]
+
+    def test_unresolvable_selector_messages_say_execution_not_prompt(self, seedream_graph: Graph, seedream_api: dict):
+        """An unresolvable selector is a hard error, but the message must NOT
+        claim a ``/prompt`` rejection: with nothing to expand, the server never
+        adds the selector to its finalized input set, so ``/prompt`` accepts the
+        prompt and the node dies at execution — after a paid node is entered.
+        Only the *sub-input* errors are genuine ``/prompt`` rejections."""
+        for bad in ({"model": "seedream 9.9 ultra"}, {}):
+            wf = copy.deepcopy(seedream_api)
+            wf["1"]["inputs"].pop("model")
+            wf["1"]["inputs"].update(bad)
+            err = next(e for e in seedream_graph.validate_workflow(wf)["errors"] if e["field"] == "model")
+            assert "execution" in err["message"]
+            assert "will reject" not in err["message"]
+
+    def test_missing_selector_errors_once(self, seedream_graph: Graph, seedream_api: dict):
+        """The absent selector is reported by the dynamic path only —
+        ``_check_required_present`` exempts it, so exactly one error, and it
+        carries the valid options."""
+        wf = copy.deepcopy(seedream_api)
+        del wf["1"]["inputs"]["model"]
+        result = seedream_graph.validate_workflow(wf)
+        errs = [e for e in result["errors"] if e["field"] == "model"]
+        assert len(errs) == 1
+        assert errs[0]["code"] == "required_input_missing"
+        assert "seedream 5.0 pro" in errs[0]["valid_options"]
+        # No sub-input errors pile on top — the option set is unknown.
+        assert [e for e in result["errors"] if e["field"].startswith("model.")] == []
+
+    # -- synthetic catalogs for the shapes the captured fixture doesn't cover --
+
+    @staticmethod
+    def _dyn_object_info(options: list[dict]) -> dict:
+        return {
+            "DynNode": {
+                "input": {"required": {"mode": ["COMFY_DYNAMICCOMBO_V3", {"options": options}]}},
+                "output": [],
+                "output_name": [],
+                "output_node": True,
+                "python_module": "nodes",
+            },
+        }
+
+    def test_optional_sub_input_absent_is_clean(self):
+        """A sub-input in the option's ``optional`` section may be absent."""
+        g = Graph.from_object_info(
+            self._dyn_object_info(
+                [{"key": "go", "inputs": {"required": {"a": ["INT", {}]}, "optional": {"b": ["INT", {}]}}}]
+            )
+        )
+        result = g.validate_workflow({"1": {"class_type": "DynNode", "inputs": {"mode": "go", "mode.a": 1}}})
+        assert result["valid"] is True, result["errors"]
+
+    def test_optional_sub_input_present_is_still_shape_checked(self):
+        g = Graph.from_object_info(
+            self._dyn_object_info(
+                [{"key": "go", "inputs": {"required": {"a": ["INT", {}]}, "optional": {"b": ["INT", {}]}}}]
+            )
+        )
+        result = g.validate_workflow(
+            {"1": {"class_type": "DynNode", "inputs": {"mode": "go", "mode.a": 1, "mode.b": "nope"}}}
+        )
+        assert result["valid"] is False
+        assert next(e for e in result["errors"] if e["field"] == "mode.b")["code"] == "shape_mismatch"
+
+    def test_nested_dynamic_combo_expands(self):
+        """An option's sub-input can itself be a dynamic combo — the inner
+        option's own required sub-inputs are checked at ``mode.inner.leaf``."""
+        inner = ["COMFY_DYNAMICCOMBO_V3", {"options": [{"key": "deep", "inputs": {"required": {"leaf": ["INT", {}]}}}]}]
+        g = Graph.from_object_info(self._dyn_object_info([{"key": "go", "inputs": {"required": {"inner": inner}}}]))
+        wf = {"1": {"class_type": "DynNode", "inputs": {"mode": "go", "mode.inner": "deep"}}}
+        result = g.validate_workflow(wf)
+        assert result["valid"] is False
+        assert {e["field"] for e in result["errors"]} == {"mode.inner.leaf"}
+
+        wf["1"]["inputs"]["mode.inner.leaf"] = 3
+        assert g.validate_workflow(wf)["valid"] is True
+
+    def test_wired_selector_skips_expansion(self):
+        """A selector wired as a link resolves at execution time, so there is no
+        static option to expand — no phantom missing-sub-input errors."""
+        object_info = self._dyn_object_info([{"key": "go", "inputs": {"required": {"a": ["INT", {}]}}}])
+        object_info["IntSource"] = {
+            "input": {"required": {}},
+            "output": ["INT"],
+            "output_name": ["INT"],
+            "output_node": False,
+            "python_module": "nodes",
+        }
+        g = Graph.from_object_info(object_info)
+        result = g.validate_workflow(
+            {
+                "1": {"class_type": "DynNode", "inputs": {"mode": ["2", 0]}},
+                "2": {"class_type": "IntSource", "inputs": {}},
+            }
+        )
+        assert result["valid"] is True, result["errors"]
+
+    def test_wired_sub_input_is_not_presence_or_shape_flagged(self):
+        """A sub-input satisfied by a link counts as present, and its value is a
+        ``[node_id, index]`` pair — not a shape violation."""
+        object_info = self._dyn_object_info([{"key": "go", "inputs": {"required": {"a": ["INT", {}]}}}])
+        object_info["IntSource"] = {
+            "input": {"required": {}},
+            "output": ["INT"],
+            "output_name": ["INT"],
+            "output_node": False,
+            "python_module": "nodes",
+        }
+        g = Graph.from_object_info(object_info)
+        result = g.validate_workflow(
+            {
+                "1": {"class_type": "DynNode", "inputs": {"mode": "go", "mode.a": ["2", 0]}},
+                "2": {"class_type": "IntSource", "inputs": {}},
+            }
+        )
+        assert result["valid"] is True, result["errors"]
+
+    def test_malformed_option_block_does_not_crash(self):
+        """object_info is server-supplied — a junk option block degrades to
+        'no sub-inputs to check', never an exception."""
+        g = Graph.from_object_info(self._dyn_object_info([{"key": "go", "inputs": "not-a-dict"}, "junk"]))
+        result = g.validate_workflow({"1": {"class_type": "DynNode", "inputs": {"mode": "go"}}})
+        assert result["valid"] is True, result["errors"]
+
+    def test_optional_selector_absent_is_clean(self):
+        """An *optional* dynamic combo that is absent is not a missing input."""
+        object_info = {
+            "OptDyn": {
+                "input": {
+                    "optional": {
+                        "mode": [
+                            "COMFY_DYNAMICCOMBO_V3",
+                            {"options": [{"key": "go", "inputs": {"required": {"a": ["INT", {}]}}}]},
+                        ]
+                    }
+                },
+                "output": [],
+                "output_name": [],
+                "output_node": True,
+                "python_module": "nodes",
+            },
+        }
+        g = Graph.from_object_info(object_info)
+        result = g.validate_workflow({"1": {"class_type": "OptDyn", "inputs": {}}})
+        assert result["valid"] is True, result["errors"]
 
 
 # ===========================================================================
