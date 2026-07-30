@@ -51,12 +51,7 @@ ALLOWED_NONINVOKABLE_REFS = frozenset({"comfy version"})
 # were corrected in their own change, separate from adding this guard). Removing
 # the rot must also remove its baseline entry — test_baseline_is_not_stale enforces
 # that so the baseline can never silently outlive the bug.
-#
-#   "comfy query" — the CQL query surface is documented in HELP_EXAMPLES and
-#   demoed by ``comfy run-cli``, but no ``query`` command is registered on the
-#   app. Whether to wire one up or rewrite the examples is a product call, so
-#   it is left for a dedicated fix ticket rather than bundled into this guard.
-BASELINE_INVALID_REFS = frozenset({"comfy query"})
+BASELINE_INVALID_REFS = frozenset()
 
 
 # --------------------------------------------------------------------------- #
