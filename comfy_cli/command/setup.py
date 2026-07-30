@@ -336,6 +336,12 @@ def _auth_browser(console) -> bool:
         if e.hint:
             pprint(f"  [dim]{e.hint}[/dim]")
         return False
+    except OSError:
+        # A broken output stream (run_login re-raises OSError from the URL
+        # callback rather than blocking the full timeout on a dead terminal).
+        # In this interactive wizard the session is already unusable — degrade
+        # to a failed sign-in instead of an unhandled traceback.
+        return False
 
     store.save_cloud_session(
         base_url=result.base_url,
@@ -600,10 +606,13 @@ def _verify_cloud(console) -> None:
 
 def _verify_local(console) -> None:
     """Check if local ComfyUI server is running."""
-    from comfy_cli.env_checker import check_comfy_server_running
+    from comfy_cli.config_manager import ConfigManager
+    from comfy_cli.env_checker import _bracket_host, check_comfy_server_running
+    from comfy_cli.local_address import resolve_local_host_port
 
-    if check_comfy_server_running(8188, "127.0.0.1"):
-        pprint("  [bold green]✓[/bold green] Local server running on [cyan]127.0.0.1:8188[/cyan]")
+    host, port = resolve_local_host_port(None, None, background=ConfigManager().background)
+    if check_comfy_server_running(port, host):
+        pprint(f"  [bold green]✓[/bold green] Local server running on [cyan]{_bracket_host(host)}:{port}[/cyan]")
     else:
         pprint("  [dim yellow]⚠[/dim yellow] Local server not running")
         pprint("  [dim]  Start it with: [cyan]comfy launch[/cyan][/dim]")

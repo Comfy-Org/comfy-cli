@@ -23,6 +23,7 @@ from typing import Any, TextIO
 from rich.console import Console
 
 from comfy_cli.caller import Caller, detect_caller
+from comfy_cli.output.sanitize import sanitize_markup
 
 # Machine-output contract versions, surfaced in every envelope/event line and
 # in `comfy discover` (output_contract). Bump rule: additive optional fields =
@@ -170,6 +171,18 @@ class Renderer:
         """
         self.mode = OutputMode.NDJSON
 
+    def force_json(self) -> None:
+        """Upgrade a pretty renderer to single-envelope JSON mode.
+
+        Counterpart to ``force_stream`` for commands whose ``--json`` is
+        parsed out of an argv tail the global callback never sees — e.g.
+        ``comfy generate list --json``, where ``generate`` takes
+        ``allow_extra_args`` and hand-parses its own meta flags. Already-JSON
+        modes are left alone so this can never *downgrade* an NDJSON stream.
+        """
+        if self.mode is OutputMode.PRETTY:
+            self.mode = OutputMode.JSON
+
     # ----- printing -----
 
     def print(self, *args: Any, **kwargs: Any) -> None:
@@ -195,18 +208,34 @@ class Renderer:
 
     # ----- semantic helpers -----
 
+    # These four take a plain string and hand it to the terminal, so they are a
+    # pretty-mode boundary in the same sense ``error_panel`` is: anything the
+    # message carries — including a remote server's text — is neutralized before
+    # it can be acted on as an escape sequence. The message lands inside a Rich
+    # *markup* string, so ``sanitize_markup`` also escapes the markup: Rich would
+    # otherwise turn ``[link=http://evil]x[/link]`` back into a live OSC 8
+    # sequence, and an unbalanced ``[/]`` would raise ``MarkupError`` and crash
+    # the CLI mid-print. Escaping here rather than asking every call site to
+    # remember ``rich.markup.escape`` is the whole point of having a boundary;
+    # the cost is that these four helpers no longer accept caller markup, which
+    # is fine — they style the line themselves and no call site passed any.
+    # ``print`` is deliberately not sanitized: it is the generic passthrough and
+    # takes arbitrary Rich renderables, not just strings.
+    # ``sanitize_value`` semantics (not ``sanitize``) so a caller that ignores
+    # the ``str`` annotation still gets the ``str()`` coercion f-strings did.
+
     def info(self, message: str, *, hint: str | None = None) -> None:
-        self.print(message)
+        self.print(sanitize_markup(message))
         if hint:
-            self.print(f"[yellow]Hint:[/yellow] {hint}")
+            self.print(f"[yellow]Hint:[/yellow] {sanitize_markup(hint)}")
 
     def warn(self, message: str, *, hint: str | None = None) -> None:
-        self.print(f"[yellow]{message}[/yellow]")
+        self.print(f"[yellow]{sanitize_markup(message)}[/yellow]")
         if hint:
-            self.print(f"[yellow]Hint:[/yellow] {hint}")
+            self.print(f"[yellow]Hint:[/yellow] {sanitize_markup(hint)}")
 
     def success(self, message: str) -> None:
-        self.print(f"[bold green]{message}[/bold green]")
+        self.print(f"[bold green]{sanitize_markup(message)}[/bold green]")
 
     # ----- structured output -----
 

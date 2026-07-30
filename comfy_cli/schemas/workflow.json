@@ -1,15 +1,43 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "comfy workflow *",
-  "description": "Output shape for workflow editing commands (slots, set-slot, vary).",
+  "description": "Output shape for workflow editing commands (slots, set-slot, vary) and the read-only notes reader.",
   "type": "object",
   "properties": {
     "workflow": { "type": "string" },
     "count": { "type": "integer" },
     "slots": { "type": "array" },
+    "notes": {
+      "type": "array",
+      "description": "notes: the Note/MarkdownNote documentation nodes the workflow carries, in graph order (top-level nodes first, then each subgraph definition).",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": { "description": "node id as serialized in the workflow" },
+          "type": { "type": "string", "enum": ["Note", "MarkdownNote"] },
+          "title": { "type": ["string", "null"], "description": "author-set node title; null when the node uses its default title" },
+          "text": { "type": "string", "description": "the note body (widgets_values[0]); empty string when the node carries no usable text" },
+          "pos": { "description": "canvas position, passed through verbatim — litegraph has serialized this as both [x, y] and {\"0\": x, \"1\": y}; null when absent" },
+          "size": { "description": "canvas size, passed through verbatim (same shape caveat as pos); null when absent" },
+          "subgraph": {
+            "type": ["object", "null"],
+            "description": "null for a top-level note; {id, name} of the owning subgraph definition otherwise",
+            "properties": {
+              "id": {},
+              "name": { "type": ["string", "null"] }
+            }
+          }
+        }
+      }
+    },
     "applied": { "type": "array" },
     "warnings": { "type": "array" },
-    "wrote": { "type": "string" },
+    "wrote": { "type": ["string", "null"], "description": "file written, or null when nothing was written (set-slot --stdout)" },
+    "out": { "type": "string", "description": "set-slot: where the result went — \"stdout\" when --stdout returned it instead of writing the file" },
+    "workflow_json": { "type": "object", "description": "set-slot --stdout: the modified workflow itself (human mode prints it raw on stdout instead)" },
+    "variants": { "type": ["array", "null"], "description": "vary without --out-dir: the produced workflows (human mode prints them as NDJSON on stdout instead); null when they were written to --out-dir" },
+    "written": { "type": "array" },
+    "out_dir": { "type": ["string", "null"] },
     "variations_summary": { "type": "array" },
     "item_map": {
       "type": "object",

@@ -59,6 +59,14 @@ comfy --json cloud whoami   # signed_in, auth_method, base_url
 If the user is signed in, commands auto-route to cloud — just run them
 without `--where`. Mention routing only when the user asks to switch.
 
+`COMFY_WHERE` picks the backend; `COMFY_LOCAL_URL` sets the **local
+address** for every command when it isn't `127.0.0.1:8188` (e.g. a ComfyUI
+started outside comfy-cli): `export COMFY_LOCAL_URL=http://127.0.0.1:8189`
+(accepts `http://host:port`, `host:port`, or `http://host`; port defaults to
+`8188`; IPv6 as `http://[::1]:8189`). Per-command precedence: `--host`/`--port`
+flag → `COMFY_LOCAL_URL` → a comfy-cli-launched background server →
+`127.0.0.1:8188`.
+
 ## Error codes — react, don't guess
 
 The most common error codes and what to do:
@@ -624,6 +632,16 @@ the prompt_id mid-flight (it's hidden until the job finishes).
 It defaults **on** in pretty/human async mode, and **off** in JSON/agent
 contexts and with `--wait`. Override explicitly with `--notify` or `--no-notify`.
 
+**Spend gate — a workflow embedding partner-API (paid) nodes spends the
+user's Comfy credits.** Interactive TTY runs confirm before spending; `--json`
+/ non-TTY runs **fail closed** with error code `spend_consent_required` (exit
+1, nothing submitted, nothing spent) unless `--allow-spend` is passed. Add
+`--allow-spend` only when the human has actually approved the spend — do not
+reflexively add it to make the error go away. Free (non-partner) workflows run
+without the flag and are byte-identical. (`comfy run-template` gates the same
+way with the same flag, and forwards consent to `comfy run` once its own gate
+has passed.)
+
 **Scope:** the async-first / `jobs watch` / state-file pattern above is the
 **`comfy run`** workflow path only. `comfy generate` (partner-API one-call)
 has its own waiting model — see the next section.
@@ -646,6 +664,24 @@ comfy generate resume <model> <job_id> --download outputs/x.mp4
 
 Mechanical contracts that bite agents — encode them, don't rediscover:
 
+- **Spend gate — generation spends the user's Comfy credits and requires
+  consent.** Interactive TTY runs confirm before spending; `--json` / non-TTY
+  runs **fail closed** with error code `spend_consent_required` (exit 1,
+  nothing spent) unless consent is supplied. Pass `--yes` only when the human
+  has actually approved the spend — do not reflexively add it to make the
+  error go away. A human can persist always-proceed with
+  `comfy generate consent always` (revert: `consent ask`; inspect:
+  `consent show`). `list` / `schema` / `refresh` / `upload` / `resume` /
+  `--emit-workflow` spend nothing and are not gated.
+- **Discovery is structured — never scrape the table.** `generate list --json`
+  and `generate schema <model> --json` both emit a full renderer envelope
+  (`command: "generate list"` / `"generate schema"`, schemas `generate_list` /
+  `generate_schema` in `comfy discover`). `data.models[]` carries
+  `{alias, id, partner, category, mode, summary}` with the **untruncated**
+  summary; `data.params[]` carries `{name, type, required, default, enum,
+  description}`. Unknown model → `generate_unknown_model`; missing model arg →
+  `generate_bad_args`. This catalog is **not** in `comfy discover` — `generate
+  list` is the only source of the alias list.
 - **Machine-readable output:** `generate <model> --json` prints the raw API
   response as JSON; `generate upload <file> --json` emits structured
   `{url, expires_at, …}`; `generate <model> --emit-workflow out.json` goes
@@ -653,6 +689,18 @@ Mechanical contracts that bite agents — encode them, don't rediscover:
   error code `emit_workflow_failed`) — the output is a runnable partner-node
   workflow you can compose with (fragments+`run` route, no extra API key).
   The default pretty path (no flags) is still human-only — do not parse it.
+- **Failures always come back as an envelope under global `--json`.** Any
+  failed/malformed `comfy --json generate …` emits exactly one `envelope/1`
+  error on stdout with a stable code — `generate_target_required`,
+  `generate_unknown_model`, `generate_bad_args`, `generate_timeout_invalid`,
+  `generate_api_error`, `generate_network_error`, `generate_job_failed`,
+  `generate_spec_invalid`, `spend_consent_required` — so branch on
+  `error.code`, never on the text.
+  (Success payloads are unchanged: still the raw API response, not an
+  envelope.) In particular `comfy generate --prompt "…"` with no model alias
+  is `generate_target_required`: `generate` is a paid cloud/partner verb and
+  always needs an alias first. For **local** text-to-image, use
+  `comfy run-template` instead.
 - **`--emit-workflow` resolves the escape-hatch vs. quality tradeoff:**
   fragments+`run` is the default for graph work; `generate` is the
   highest-quality single-shot for partner models. With
@@ -917,7 +965,10 @@ Hard-won lessons per domain. Not a tutorial — a reference card.
 - Preprocessor output ≠ ControlNet model (two separate things)
 - Don't feed raw photos into ControlNet without preprocessing first
 - ImageCompositeMasked: mask MUST match SOURCE size, not destination
-- COMFY_DYNAMICCOMBO_V3: use flat dotted keys (`"model.max_tokens": 800`), not nested
+- COMFY_DYNAMICCOMBO_V3: use flat dotted keys (`"model.max_tokens": 800`), not nested.
+  Which dotted keys are required depends on the option the selector names, and
+  `comfy validate` expands that option — so it reports a missing/mistyped
+  sub-input instead of letting `/prompt` reject it.
 - First/last frame transitions: wire start_frame + end_frame → I2V node fills in between
 - Wiring: ControlNetApplyAdvanced takes CONDITIONING + IMAGE + CONTROL_NET → modified CONDITIONING
 
