@@ -6,6 +6,7 @@ No I/O, no CLI invocation — just the engine in isolation.
 
 from __future__ import annotations
 
+import copy
 from typing import Any
 
 import pytest
@@ -185,6 +186,17 @@ def graph() -> Graph:
     return Graph.from_object_info(_object_info())
 
 
+@pytest.fixture
+def graph_sd15() -> Graph:
+    """Graph built from the real captured sd15 object_info fixture — the same
+    catalog the BE-3349 repro / BE-3357 acceptance criterion runs against."""
+    import json
+    from pathlib import Path
+
+    fixture = Path(__file__).parent.parent / "fixtures" / "sd15_object_info.json"
+    return Graph.from_object_info(json.loads(fixture.read_text()))
+
+
 # ---------------------------------------------------------------------------
 # Direct-mode workflow fixture
 # ---------------------------------------------------------------------------
@@ -356,7 +368,16 @@ class TestTraversal:
 class TestValidateWorkflow:
     """Tests graph.validate_workflow(api_workflow)."""
 
+    @staticmethod
+    def _errors_excluding_no_outputs(result: dict) -> list[dict]:
+        """Errors other than the workflow-level no-outputs check — for
+        single-node fixtures that (deliberately) carry no output node."""
+        return [e for e in result["errors"] if e.get("code") != "prompt_no_outputs"]
+
     def _valid_workflow(self) -> dict:
+        # A complete, server-valid pipeline: every required input present and a
+        # SaveImage output node (so it passes the required-presence and
+        # no-outputs checks, not just the edge/shape checks).
         return {
             "1": {
                 "class_type": "CheckpointLoaderSimple",
@@ -389,6 +410,14 @@ class TestValidateWorkflow:
                     "denoise": 1.0,
                 },
             },
+            "6": {
+                "class_type": "VAEDecode",
+                "inputs": {"samples": ["2", 0], "vae": ["1", 2]},
+            },
+            "7": {
+                "class_type": "SaveImage",
+                "inputs": {"images": ["6", 0], "filename_prefix": "out"},
+            },
         }
 
     def test_valid_workflow(self, graph: Graph):
@@ -398,15 +427,9 @@ class TestValidateWorkflow:
 
     def test_non_node_key_warns(self, graph: Graph):
         """An unrecognized non-node key should produce a warning, not an error."""
-        wf = {
-            "notanode": {"title": "My Workflow"},
-            "1": {
-                "class_type": "CheckpointLoaderSimple",
-                "inputs": {"ckpt_name": "sd_xl_base.safetensors"},
-            },
-        }
+        wf = {**self._valid_workflow(), "notanode": {"title": "My Workflow"}}
         result = graph.validate_workflow(wf)
-        assert result["valid"] is True
+        assert result["valid"] is True, result["errors"]
         non_node = [w for w in result["warnings"] if w["code"] == "non_node_key"]
         assert len(non_node) == 1
         assert non_node[0]["node_id"] == "notanode"
@@ -415,28 +438,16 @@ class TestValidateWorkflow:
     def test_meta_provenance_key_is_not_warned(self, graph: Graph):
         """`_meta` is the compose/run provenance block (stripped before submit),
         not a stray key — validating composed output must not nag about it."""
-        wf = {
-            "_meta": {"schema": "compose/1", "blueprint": "blueprints/x.yaml"},
-            "1": {
-                "class_type": "CheckpointLoaderSimple",
-                "inputs": {"ckpt_name": "sd_xl_base.safetensors"},
-            },
-        }
+        wf = {"_meta": {"schema": "compose/1", "blueprint": "blueprints/x.yaml"}, **self._valid_workflow()}
         result = graph.validate_workflow(wf)
-        assert result["valid"] is True
+        assert result["valid"] is True, result["errors"]
         assert [w for w in result["warnings"] if w["node_id"] == "_meta"] == []
 
     def test_non_dict_node_value_warns(self, graph: Graph):
         """A string value for a key should warn, not crash."""
-        wf = {
-            "_comment": "this is a comment",
-            "1": {
-                "class_type": "CheckpointLoaderSimple",
-                "inputs": {"ckpt_name": "sd_xl_base.safetensors"},
-            },
-        }
+        wf = {**self._valid_workflow(), "_comment": "this is a comment"}
         result = graph.validate_workflow(wf)
-        assert result["valid"] is True
+        assert result["valid"] is True, result["errors"]
         non_node = [w for w in result["warnings"] if w["code"] == "non_node_key"]
         assert len(non_node) == 1
         assert non_node[0]["node_id"] == "_comment"
@@ -491,25 +502,7 @@ class TestValidateWorkflow:
 
     def test_valid_edges_pass(self, graph: Graph):
         """Well-wired edges don't produce errors."""
-        wf = {
-            "1": {
-                "class_type": "CheckpointLoaderSimple",
-                "inputs": {"ckpt_name": "sd_xl_base.safetensors"},
-            },
-            "2": {
-                "class_type": "KSampler",
-                "inputs": {
-                    "model": ["1", 0],  # MODEL from CheckpointLoaderSimple[0]
-                    "seed": 42,
-                    "steps": 20,
-                    "cfg": 8.0,
-                    "sampler_name": "euler",
-                    "scheduler": "normal",
-                    "denoise": 1.0,
-                },
-            },
-        }
-        result = graph.validate_workflow(wf)
+        result = graph.validate_workflow(self._valid_workflow())
         assert result["valid"] is True
         assert result["errors"] == []
 
@@ -552,20 +545,13 @@ class TestValidateWorkflow:
 
         This is advisory (warning, not error) — ComfyUI allows cross-type
         wiring via reroutes and converters; the server is the authority."""
-        wf = {
-            "1": {
-                "class_type": "CheckpointLoaderSimple",
-                "inputs": {"ckpt_name": "sd_xl_base.safetensors"},
-            },
-            "2": {
-                "class_type": "KSampler",
-                # Output index 1 is CLIP, but model input expects MODEL
-                "inputs": {"model": ["1", 1]},
-            },
-        }
+        wf = self._valid_workflow()
+        # Output index 1 is CLIP, but the model input expects MODEL — still a
+        # present input, so only an advisory warning (not a hard error).
+        wf["2"]["inputs"]["model"] = ["1", 1]
         result = graph.validate_workflow(wf)
         # edge_type_mismatch is a warning, not a hard error
-        assert result["valid"] is True
+        assert result["valid"] is True, result["errors"]
         warns = [w for w in result["warnings"] if w["code"] == "edge_type_mismatch"]
         assert len(warns) == 1
         assert "CLIP" in warns[0]["message"]
@@ -581,8 +567,9 @@ class TestValidateWorkflow:
             },
         }
         result = graph.validate_workflow(wf)
-        assert result["valid"] is True
-        assert result["errors"] == []
+        # This single-node fixture has no output node, so the only error is the
+        # workflow-level no-outputs one; the int-valued combo itself is clean.
+        assert self._errors_excluding_no_outputs(result) == []
 
     def test_int_valued_combo_unknown_option_is_enum_error(self, graph: Graph):
         """An int outside the combo's options is an unknown_enum_value (same as
@@ -597,7 +584,7 @@ class TestValidateWorkflow:
         result = graph.validate_workflow(wf)
         assert result["valid"] is False
         # 7 is not in [6, 8, 10, 12]; it's an enum error, not a shape error.
-        errs = [e for e in result["errors"] if e["field"] == "duration"]
+        errs = [e for e in result["errors"] if e.get("field") == "duration"]
         assert len(errs) == 1
         assert errs[0]["code"] == "unknown_enum_value"
 
@@ -664,7 +651,8 @@ class TestValidateWorkflow:
             },
         }
         result = graph.validate_workflow(wf)
-        assert result["valid"] is True
+        # Lenient on type (no combo error); the only error is the no-outputs one.
+        assert self._errors_excluding_no_outputs(result) == []
 
     def test_wildcard_type_compatible(self, graph: Graph):
         """'*' type on either side should not trigger a mismatch."""
@@ -715,28 +703,37 @@ class TestValidateWorkflow:
         dangling = [e for e in result["errors"] if e["code"] == "dangling_edge"]
         assert len(dangling) == 3
 
-    def test_below_min_warning(self, graph: Graph):
+    def test_below_min_error(self, graph: Graph):
+        """A value below the catalog min is a hard error (the server rejects it
+        with value_smaller_than_min) — was a warning before BE-3357."""
         wf = {
             "1": {
-                "class_type": "KSampler",
-                "inputs": {"steps": 0},
+                "class_type": "EmptyLatentImage",
+                "inputs": {"width": 0, "height": 512, "batch_size": 1},
             },
         }
         result = graph.validate_workflow(wf)
-        # below_min is a warning, not an error
-        codes = [w["code"] for w in result["warnings"]]
-        assert "below_min" in codes
+        assert result["valid"] is False
+        errs = [e for e in result["errors"] if e["code"] == "below_min"]
+        assert len(errs) == 1
+        assert errs[0]["field"] == "width"
+        # No longer surfaced as a warning.
+        assert "below_min" not in [w["code"] for w in result["warnings"]]
 
-    def test_above_max_warning(self, graph: Graph):
+    def test_above_max_error(self, graph: Graph):
+        """A value above the catalog max is a hard error (value_bigger_than_max)."""
         wf = {
             "1": {
-                "class_type": "KSampler",
-                "inputs": {"steps": 99999},
+                "class_type": "EmptyLatentImage",
+                "inputs": {"width": 999999, "height": 512, "batch_size": 1},
             },
         }
         result = graph.validate_workflow(wf)
-        codes = [w["code"] for w in result["warnings"]]
-        assert "above_max" in codes
+        assert result["valid"] is False
+        errs = [e for e in result["errors"] if e["code"] == "above_max"]
+        assert len(errs) == 1
+        assert errs[0]["field"] == "width"
+        assert "above_max" not in [w["code"] for w in result["warnings"]]
 
 
 class TestAutogrowInputs:
@@ -752,12 +749,19 @@ class TestAutogrowInputs:
         }
 
     def test_dotted_slots_validate_clean(self, graph: Graph):
+        # A fully server-valid workflow: two IMAGE producers with all their
+        # required inputs wired, autogrown into BatchImagesNode, terminating in
+        # a SaveImage output node.
         wf = {
-            **self._loaders(),
+            "1": {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": "sd_xl_base.safetensors"}},
+            "2": {"class_type": "EmptyLatentImage", "inputs": {"width": 512, "height": 512, "batch_size": 1}},
+            "10": {"class_type": "VAEDecode", "inputs": {"samples": ["2", 0], "vae": ["1", 2]}},
+            "11": {"class_type": "VAEDecode", "inputs": {"samples": ["2", 0], "vae": ["1", 2]}},
             "20": {
                 "class_type": "BatchImagesNode",
                 "inputs": {"images.image0": ["10", 0], "images.image1": ["11", 0]},
             },
+            "30": {"class_type": "SaveImage", "inputs": {"images": ["20", 0], "filename_prefix": "out"}},
         }
         result = graph.validate_workflow(wf)
         assert result["valid"] is True, result["errors"]
@@ -807,6 +811,438 @@ class TestAutogrowInputs:
         # Non-autogrow inputs don't carry the keys.
         ks = graph.morphism_to_dict(graph.node("KSampler"))
         assert all("autogrow" not in i for i in ks["inputs"])
+
+
+# ===========================================================================
+# TestValidateServerParity — BE-3357: presence, no-outputs, range = errors
+# ===========================================================================
+
+
+class TestValidateServerParity:
+    """Validate mirrors the three server-side rejections that `validate` used to
+    pass silently (BE-3349 / BE-3357), against the captured sd15 catalog:
+    required-input presence, the no-outputs check, and range violations."""
+
+    def _sd15_full(self) -> dict:
+        """A complete, server-valid sd15 txt2img graph (SaveImage output, every
+        required input present)."""
+        return {
+            "4": {
+                "class_type": "CheckpointLoaderSimple",
+                "inputs": {"ckpt_name": "v1-5-pruned-emaonly-fp16.safetensors"},
+            },
+            "6": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["4", 1], "text": "a cat"}},
+            "7": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["4", 1], "text": "blurry"}},
+            "5": {"class_type": "EmptyLatentImage", "inputs": {"width": 512, "height": 512, "batch_size": 1}},
+            "3": {
+                "class_type": "KSampler",
+                "inputs": {
+                    "model": ["4", 0],
+                    "positive": ["6", 0],
+                    "negative": ["7", 0],
+                    "latent_image": ["5", 0],
+                    "seed": 42,
+                    "steps": 20,
+                    "cfg": 8.0,
+                    "sampler_name": "euler",
+                    "scheduler": "simple",
+                    "denoise": 1.0,
+                },
+            },
+            "8": {"class_type": "VAEDecode", "inputs": {"samples": ["3", 0], "vae": ["4", 2]}},
+            "9": {"class_type": "SaveImage", "inputs": {"images": ["8", 0], "filename_prefix": "ComfyUI"}},
+        }
+
+    def test_full_workflow_is_valid(self, graph_sd15: Graph):
+        """Regression guard: a KSampler with all 10 required inputs present, in a
+        graph with an output node, validates clean."""
+        result = graph_sd15.validate_workflow(self._sd15_full())
+        assert result["valid"] is True, result["errors"]
+        assert result["errors"] == []
+
+    def test_missing_widget_inputs_each_error(self, graph_sd15: Graph):
+        """KSampler missing `seed`/`steps` → one required_input_missing per
+        missing input, `field` set to the input name."""
+        wf = self._sd15_full()
+        del wf["3"]["inputs"]["seed"]
+        del wf["3"]["inputs"]["steps"]
+        result = graph_sd15.validate_workflow(wf)
+        assert result["valid"] is False
+        missing = [e for e in result["errors"] if e["code"] == "required_input_missing"]
+        assert {e["field"] for e in missing} == {"seed", "steps"}
+        assert len(missing) == 2
+
+    def test_missing_required_link_errors(self, graph_sd15: Graph):
+        """A missing required *link* input (`model`) is also required_input_missing,
+        and its hint tells you to wire a link."""
+        wf = self._sd15_full()
+        del wf["3"]["inputs"]["model"]
+        result = graph_sd15.validate_workflow(wf)
+        assert result["valid"] is False
+        err = next(e for e in result["errors"] if e["code"] == "required_input_missing" and e["field"] == "model")
+        assert "wire" in err["hint"] and "MODEL" in err["hint"]
+
+    def test_be3349_repro_only_links_wired(self, graph_sd15: Graph):
+        """The BE-3349 acceptance case: a KSampler with only its four link inputs
+        wired is missing all six widget inputs → six required_input_missing errors."""
+        wf = self._sd15_full()
+        wf["3"]["inputs"] = {
+            "model": ["4", 0],
+            "positive": ["6", 0],
+            "negative": ["7", 0],
+            "latent_image": ["5", 0],
+        }
+        result = graph_sd15.validate_workflow(wf)
+        assert result["valid"] is False
+        missing = [e for e in result["errors"] if e["code"] == "required_input_missing" and e["node_id"] == "3"]
+        assert {e["field"] for e in missing} == {"seed", "steps", "cfg", "sampler_name", "scheduler", "denoise"}
+        assert len(missing) == 6
+
+    def test_optional_inputs_absent_no_error(self):
+        """A required input that is absent errors, but an *optional* input that is
+        absent does not."""
+        object_info = {
+            "OptNode": {
+                "input": {
+                    "required": {"needed": ["STRING", {}]},
+                    "optional": {"maybe": ["STRING", {}]},
+                },
+                "output": [],
+                "output_name": [],
+                "output_node": True,
+                "python_module": "nodes",
+            },
+        }
+        g = Graph.from_object_info(object_info)
+        # Optional absent, required present → clean.
+        clean = g.validate_workflow({"1": {"class_type": "OptNode", "inputs": {"needed": "x"}}})
+        assert clean["valid"] is True, clean["errors"]
+        # Required absent → error; the optional one is never flagged.
+        missing = g.validate_workflow({"1": {"class_type": "OptNode", "inputs": {}}})
+        codes = {(e["field"], e["code"]) for e in missing["errors"]}
+        assert ("needed", "required_input_missing") in codes
+        assert not any(e["field"] == "maybe" for e in missing["errors"])
+
+    def test_no_output_node_errors(self, graph_sd15: Graph):
+        """A workflow of recognized nodes with no output node is rejected
+        (prompt_no_outputs); adding SaveImage clears it."""
+        wf = self._sd15_full()
+        del wf["9"]  # remove the only output node (SaveImage)
+        result = graph_sd15.validate_workflow(wf)
+        no_out = [e for e in result["errors"] if e["code"] == "prompt_no_outputs"]
+        assert len(no_out) == 1
+
+        # With SaveImage present, no such error.
+        result2 = graph_sd15.validate_workflow(self._sd15_full())
+        assert [e for e in result2["errors"] if e["code"] == "prompt_no_outputs"] == []
+
+    def test_no_output_error_emitted_once(self, graph_sd15: Graph):
+        """The no-outputs error is appended once, not per node."""
+        wf = self._sd15_full()
+        del wf["9"]
+        result = graph_sd15.validate_workflow(wf)
+        assert len([e for e in result["errors"] if e["code"] == "prompt_no_outputs"]) == 1
+
+    def test_all_unknown_nodes_no_false_no_outputs(self, graph_sd15: Graph):
+        """An unknown node could itself be the (custom) output node — we can't
+        see it — so we don't pile a no-outputs error on top of the
+        unknown-class errors the user must resolve first."""
+        result = graph_sd15.validate_workflow({"1": {"class_type": "TotallyMadeUp", "inputs": {}}})
+        assert [e for e in result["errors"] if e["code"] == "prompt_no_outputs"] == []
+
+    def test_empty_workflow_is_no_outputs(self, graph_sd15: Graph):
+        """An empty prompt has zero output nodes, which the server rejects
+        (prompt_no_outputs); a node-less prompt must not slip through as valid."""
+        result = graph_sd15.validate_workflow({})
+        no_out = [e for e in result["errors"] if e["code"] == "prompt_no_outputs"]
+        assert len(no_out) == 1
+        assert result["valid"] is False
+        # workflow-level error still carries the node_id/field schema keys.
+        assert no_out[0]["node_id"] is None
+        assert no_out[0]["field"] is None
+
+    def test_meta_only_workflow_is_no_outputs(self, graph_sd15: Graph):
+        """A prompt that is only a `_meta` block (no nodes) has no outputs."""
+        result = graph_sd15.validate_workflow({"_meta": {"schema": "x"}})
+        assert len([e for e in result["errors"] if e["code"] == "prompt_no_outputs"]) == 1
+
+    def test_unknown_output_node_no_double_no_outputs(self, graph_sd15: Graph):
+        """A recognized non-output node plus an unknown node (which could be the
+        real output) must not stack prompt_no_outputs on the unknown-class
+        error — the fix is installing the custom node, not adding an output."""
+        wf = {
+            "1": {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": "v1-5.safetensors"}},
+            "2": {"class_type": "MyCustomSaver", "inputs": {"images": ["1", 0]}},
+        }
+        result = graph_sd15.validate_workflow(wf)
+        assert any(e["code"] == "unknown_class_type" for e in result["errors"])
+        assert [e for e in result["errors"] if e["code"] == "prompt_no_outputs"] == []
+
+    def test_width_below_min_is_error(self, graph_sd15: Graph):
+        """EmptyLatentImage width below the catalog min is a hard error (was a
+        warning before BE-3357)."""
+        wf = self._sd15_full()
+        wf["5"]["inputs"]["width"] = 1  # sd15 min is 16
+        result = graph_sd15.validate_workflow(wf)
+        assert result["valid"] is False
+        errs = [e for e in result["errors"] if e["code"] == "below_min" and e["field"] == "width"]
+        assert len(errs) == 1
+        assert "16" in errs[0]["hint"]
+
+    def test_meta_key_still_exempt(self, graph_sd15: Graph):
+        """`_meta` provenance is still ignored — not counted as a node, never a
+        required/no-outputs trigger."""
+        wf = {"_meta": {"schema": "compose/1"}, **self._sd15_full()}
+        result = graph_sd15.validate_workflow(wf)
+        assert result["valid"] is True, result["errors"]
+        assert [e for e in result["errors"] if e.get("node_id") == "_meta"] == []
+
+
+class TestValidateDynamicCombo:
+    """Validate expands a ``COMFY_DYNAMICCOMBO_V3`` selector's chosen option and
+    checks the dotted sub-inputs the server will actually require (BE-3777).
+
+    object_info declares only the selector (``model``); the frontend and
+    ``convert_ui_to_api`` lower the selected option's own INPUT_TYPES into
+    ``model.width`` / ``model.size_preset`` / … keys. Before this, none of those
+    keys were reachable from the schema, so every one of the cases below came
+    back ``valid: true`` and was then rejected at ``/prompt`` with
+    ``required_input_missing`` / ``shape_mismatch``.
+    """
+
+    @pytest.fixture
+    def seedream_graph(self) -> Graph:
+        """The captured ByteDance Seedream catalog plus a minimal output node, so
+        a converted single-node workflow isn't drowned in prompt_no_outputs."""
+        import json
+        from pathlib import Path
+
+        fixture = Path(__file__).parent.parent / "fixtures" / "object_info_bytedance_seedream_v2.json"
+        object_info = json.loads(fixture.read_text())
+        object_info["SaveImageAdvanced"] = {
+            "input": {"required": {"images": ["IMAGE", {}]}},
+            "output": [],
+            "output_name": [],
+            "output_node": True,
+            "python_module": "nodes",
+        }
+        return Graph.from_object_info(object_info)
+
+    @pytest.fixture
+    def seedream_api(self, seedream_graph: Graph) -> dict:
+        """The ticket's repro payload: the pristine Seedream 5.0 Pro UI export,
+        lowered to API format by the same converter ``comfy run`` / ``comfy
+        validate`` use — i.e. the exact bytes that reach ``/prompt``."""
+        import json
+        from pathlib import Path
+
+        from comfy_cli.workflow_to_api import convert_ui_to_api
+
+        ui = json.loads((Path(__file__).parent.parent / "fixtures" / "seedream_5_0_pro_t2i_ui.json").read_text())
+        return convert_ui_to_api(ui, seedream_graph.object_info)
+
+    def test_converted_seedream_workflow_is_valid(self, seedream_graph: Graph, seedream_api: dict):
+        """Guard against over-strictness: the pristine template — whose
+        ``model.images`` autogrow sub-input is declared *required* with
+        ``min: 0`` and legitimately emits no key — must still validate clean."""
+        result = seedream_graph.validate_workflow(seedream_api)
+        assert result["valid"] is True, result["errors"]
+
+    def test_missing_sub_input_errors(self, seedream_graph: Graph, seedream_api: dict):
+        wf = copy.deepcopy(seedream_api)
+        del wf["1"]["inputs"]["model.width"]
+        result = seedream_graph.validate_workflow(wf)
+        assert result["valid"] is False
+        err = next(e for e in result["errors"] if e["field"] == "model.width")
+        assert err["code"] == "required_input_missing"
+        assert err["node_id"] == "1"
+
+    def test_sub_input_shape_mismatch_errors(self, seedream_graph: Graph, seedream_api: dict):
+        wf = copy.deepcopy(seedream_api)
+        wf["1"]["inputs"]["model.width"] = "wide"  # INT declared, non-numeric string given
+        result = seedream_graph.validate_workflow(wf)
+        assert result["valid"] is False
+        err = next(e for e in result["errors"] if e["field"] == "model.width")
+        assert err["code"] == "shape_mismatch"
+
+    def test_sub_input_range_and_enum_checked(self, seedream_graph: Graph, seedream_api: dict):
+        """Sub-inputs go through the same Port machinery as top-level inputs, so
+        they inherit the range and enum-membership hard errors."""
+        wf = copy.deepcopy(seedream_api)
+        wf["1"]["inputs"]["model.width"] = 8  # catalog min is 1024
+        wf["1"]["inputs"]["model.size_preset"] = "(9K) nope"
+        result = seedream_graph.validate_workflow(wf)
+        codes = {(e["field"], e["code"]) for e in result["errors"]}
+        assert ("model.width", "below_min") in codes
+        assert ("model.size_preset", "unknown_enum_value") in codes
+
+    def test_selecting_another_option_switches_the_required_set(self, seedream_graph: Graph, seedream_api: dict):
+        """Flipping the selector to ``seedream 5.0 lite`` — which declares
+        ``max_images``/``fail_on_partial`` the pro option does not — makes those
+        sub-inputs required, exactly as the server would."""
+        wf = copy.deepcopy(seedream_api)
+        wf["1"]["inputs"]["model"] = "seedream 5.0 lite"
+        result = seedream_graph.validate_workflow(wf)
+        assert result["valid"] is False
+        missing = {e["field"] for e in result["errors"] if e["code"] == "required_input_missing"}
+        assert missing == {"model.max_images", "model.fail_on_partial"}
+
+    def test_unknown_selector_errors_with_options(self, seedream_graph: Graph, seedream_api: dict):
+        """A selector naming no option is where the converter silently misaligns
+        the following widget values, so it must not pass as valid."""
+        wf = copy.deepcopy(seedream_api)
+        wf["1"]["inputs"]["model"] = "seedream 9.9 ultra"
+        result = seedream_graph.validate_workflow(wf)
+        assert result["valid"] is False
+        err = next(e for e in result["errors"] if e["field"] == "model")
+        assert err["code"] == "unknown_enum_value"
+        assert "seedream 5.0 pro" in err["valid_options"]
+
+    def test_unresolvable_selector_messages_say_execution_not_prompt(self, seedream_graph: Graph, seedream_api: dict):
+        """An unresolvable selector is a hard error, but the message must NOT
+        claim a ``/prompt`` rejection: with nothing to expand, the server never
+        adds the selector to its finalized input set, so ``/prompt`` accepts the
+        prompt and the node dies at execution — after a paid node is entered.
+        Only the *sub-input* errors are genuine ``/prompt`` rejections."""
+        for bad in ({"model": "seedream 9.9 ultra"}, {}):
+            wf = copy.deepcopy(seedream_api)
+            wf["1"]["inputs"].pop("model")
+            wf["1"]["inputs"].update(bad)
+            err = next(e for e in seedream_graph.validate_workflow(wf)["errors"] if e["field"] == "model")
+            assert "execution" in err["message"]
+            assert "will reject" not in err["message"]
+
+    def test_missing_selector_errors_once(self, seedream_graph: Graph, seedream_api: dict):
+        """The absent selector is reported by the dynamic path only —
+        ``_check_required_present`` exempts it, so exactly one error, and it
+        carries the valid options."""
+        wf = copy.deepcopy(seedream_api)
+        del wf["1"]["inputs"]["model"]
+        result = seedream_graph.validate_workflow(wf)
+        errs = [e for e in result["errors"] if e["field"] == "model"]
+        assert len(errs) == 1
+        assert errs[0]["code"] == "required_input_missing"
+        assert "seedream 5.0 pro" in errs[0]["valid_options"]
+        # No sub-input errors pile on top — the option set is unknown.
+        assert [e for e in result["errors"] if e["field"].startswith("model.")] == []
+
+    # -- synthetic catalogs for the shapes the captured fixture doesn't cover --
+
+    @staticmethod
+    def _dyn_object_info(options: list[dict]) -> dict:
+        return {
+            "DynNode": {
+                "input": {"required": {"mode": ["COMFY_DYNAMICCOMBO_V3", {"options": options}]}},
+                "output": [],
+                "output_name": [],
+                "output_node": True,
+                "python_module": "nodes",
+            },
+        }
+
+    def test_optional_sub_input_absent_is_clean(self):
+        """A sub-input in the option's ``optional`` section may be absent."""
+        g = Graph.from_object_info(
+            self._dyn_object_info(
+                [{"key": "go", "inputs": {"required": {"a": ["INT", {}]}, "optional": {"b": ["INT", {}]}}}]
+            )
+        )
+        result = g.validate_workflow({"1": {"class_type": "DynNode", "inputs": {"mode": "go", "mode.a": 1}}})
+        assert result["valid"] is True, result["errors"]
+
+    def test_optional_sub_input_present_is_still_shape_checked(self):
+        g = Graph.from_object_info(
+            self._dyn_object_info(
+                [{"key": "go", "inputs": {"required": {"a": ["INT", {}]}, "optional": {"b": ["INT", {}]}}}]
+            )
+        )
+        result = g.validate_workflow(
+            {"1": {"class_type": "DynNode", "inputs": {"mode": "go", "mode.a": 1, "mode.b": "nope"}}}
+        )
+        assert result["valid"] is False
+        assert next(e for e in result["errors"] if e["field"] == "mode.b")["code"] == "shape_mismatch"
+
+    def test_nested_dynamic_combo_expands(self):
+        """An option's sub-input can itself be a dynamic combo — the inner
+        option's own required sub-inputs are checked at ``mode.inner.leaf``."""
+        inner = ["COMFY_DYNAMICCOMBO_V3", {"options": [{"key": "deep", "inputs": {"required": {"leaf": ["INT", {}]}}}]}]
+        g = Graph.from_object_info(self._dyn_object_info([{"key": "go", "inputs": {"required": {"inner": inner}}}]))
+        wf = {"1": {"class_type": "DynNode", "inputs": {"mode": "go", "mode.inner": "deep"}}}
+        result = g.validate_workflow(wf)
+        assert result["valid"] is False
+        assert {e["field"] for e in result["errors"]} == {"mode.inner.leaf"}
+
+        wf["1"]["inputs"]["mode.inner.leaf"] = 3
+        assert g.validate_workflow(wf)["valid"] is True
+
+    def test_wired_selector_skips_expansion(self):
+        """A selector wired as a link resolves at execution time, so there is no
+        static option to expand — no phantom missing-sub-input errors."""
+        object_info = self._dyn_object_info([{"key": "go", "inputs": {"required": {"a": ["INT", {}]}}}])
+        object_info["IntSource"] = {
+            "input": {"required": {}},
+            "output": ["INT"],
+            "output_name": ["INT"],
+            "output_node": False,
+            "python_module": "nodes",
+        }
+        g = Graph.from_object_info(object_info)
+        result = g.validate_workflow(
+            {
+                "1": {"class_type": "DynNode", "inputs": {"mode": ["2", 0]}},
+                "2": {"class_type": "IntSource", "inputs": {}},
+            }
+        )
+        assert result["valid"] is True, result["errors"]
+
+    def test_wired_sub_input_is_not_presence_or_shape_flagged(self):
+        """A sub-input satisfied by a link counts as present, and its value is a
+        ``[node_id, index]`` pair — not a shape violation."""
+        object_info = self._dyn_object_info([{"key": "go", "inputs": {"required": {"a": ["INT", {}]}}}])
+        object_info["IntSource"] = {
+            "input": {"required": {}},
+            "output": ["INT"],
+            "output_name": ["INT"],
+            "output_node": False,
+            "python_module": "nodes",
+        }
+        g = Graph.from_object_info(object_info)
+        result = g.validate_workflow(
+            {
+                "1": {"class_type": "DynNode", "inputs": {"mode": "go", "mode.a": ["2", 0]}},
+                "2": {"class_type": "IntSource", "inputs": {}},
+            }
+        )
+        assert result["valid"] is True, result["errors"]
+
+    def test_malformed_option_block_does_not_crash(self):
+        """object_info is server-supplied — a junk option block degrades to
+        'no sub-inputs to check', never an exception."""
+        g = Graph.from_object_info(self._dyn_object_info([{"key": "go", "inputs": "not-a-dict"}, "junk"]))
+        result = g.validate_workflow({"1": {"class_type": "DynNode", "inputs": {"mode": "go"}}})
+        assert result["valid"] is True, result["errors"]
+
+    def test_optional_selector_absent_is_clean(self):
+        """An *optional* dynamic combo that is absent is not a missing input."""
+        object_info = {
+            "OptDyn": {
+                "input": {
+                    "optional": {
+                        "mode": [
+                            "COMFY_DYNAMICCOMBO_V3",
+                            {"options": [{"key": "go", "inputs": {"required": {"a": ["INT", {}]}}}]},
+                        ]
+                    }
+                },
+                "output": [],
+                "output_name": [],
+                "output_node": True,
+                "python_module": "nodes",
+            },
+        }
+        g = Graph.from_object_info(object_info)
+        result = g.validate_workflow({"1": {"class_type": "OptDyn", "inputs": {}}})
+        assert result["valid"] is True, result["errors"]
 
 
 # ===========================================================================

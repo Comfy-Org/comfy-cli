@@ -8,6 +8,8 @@ shape, and the not-found error code.
 from __future__ import annotations
 
 import json
+import os
+import time
 from pathlib import Path
 
 import pytest
@@ -274,3 +276,278 @@ def test_fetch_non_json_upstream_surfaces_workflow_invalid(gallery_file, monkeyp
     assert result.exit_code != 0
     env = _envelope(result.output)
     assert env["error"]["code"] == "template_workflow_invalid_json"
+
+
+# ---------------------------------------------------------------------------
+# Gallery cache TTL (BE-3393): fresh-within-TTL serves the cache, expired
+# re-fetches, and a fetch failure on an expired cache falls back to stale.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def cache_file(tmp_path: Path, monkeypatch) -> Path:
+    """Point ``_cache_path`` at a tmp file seeded with the fixture index."""
+    path = tmp_path / "cache" / "index.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(FIXTURE))
+    monkeypatch.setattr(templates_cmd, "_cache_path", lambda: path)
+    return path
+
+
+def _set_mtime(path: Path, seconds_ago: float) -> None:
+    """Backdate a file's mtime so the cache reads as ``seconds_ago`` old."""
+    when = time.time() - seconds_ago
+    os.utime(path, (when, when))
+
+
+def _fetch_boom(*args, **kwargs):
+    raise AssertionError("_fetch_gallery must not be called")
+
+
+def test_fresh_cache_within_ttl_serves_cache_without_fetching(cache_file, monkeypatch):
+    # mtime is "now" (fixture just written) → well within the 24h TTL.
+    monkeypatch.setattr(templates_cmd, "_fetch_gallery", _fetch_boom)
+    _force_json_renderer()
+
+    runner = CliRunner()
+    result = runner.invoke(templates_cmd.app, ["ls"])
+    assert result.exit_code == 0, result.output
+    env = _envelope(result.output)
+    assert env["data"]["total_in_gallery"] == 3
+
+
+def test_expired_cache_refetches_and_rewrites(cache_file, monkeypatch):
+    # Backdate the cache past the TTL so a refresh is due.
+    _set_mtime(cache_file, templates_cmd.GALLERY_TTL_SECONDS + 3600)
+
+    # A single-category "refreshed" gallery, distinct from the 3-row fixture.
+    refreshed = [
+        {
+            "moduleName": "default",
+            "category": "GENERATION TYPE",
+            "title": "Image",
+            "type": "image",
+            "templates": [
+                {
+                    "name": "brand_new_template",
+                    "title": "Brand New",
+                    "description": "Freshly fetched.",
+                    "tags": [],
+                    "models": [],
+                    "logos": [],
+                }
+            ],
+        }
+    ]
+    fetched = {"count": 0}
+
+    def _fake_fetch(*args, **kwargs):
+        fetched["count"] += 1
+        return json.dumps(refreshed).encode()
+
+    monkeypatch.setattr(templates_cmd, "_fetch_gallery", _fake_fetch)
+    _force_json_renderer()
+
+    runner = CliRunner()
+    result = runner.invoke(templates_cmd.app, ["ls"])
+    assert result.exit_code == 0, result.output
+    assert fetched["count"] == 1
+
+    env = _envelope(result.output)
+    names = [r["name"] for r in env["data"]["rows"]]
+    assert names == ["brand_new_template"]
+    # Cache was rewritten with the refreshed payload.
+    assert json.loads(cache_file.read_bytes()) == refreshed
+
+
+def test_expired_cache_fetch_failure_falls_back_to_stale(cache_file, monkeypatch, capsys):
+    import urllib.error
+
+    _set_mtime(cache_file, templates_cmd.GALLERY_TTL_SECONDS + 3600)
+
+    def _boom(*args, **kwargs):
+        raise urllib.error.URLError("network down")
+
+    monkeypatch.setattr(templates_cmd, "_fetch_gallery", _boom)
+    _force_json_renderer()
+
+    runner = CliRunner()
+    result = runner.invoke(templates_cmd.app, ["ls"])
+    # Offline machine still lists from the stale cache — exit 0, original rows.
+    assert result.exit_code == 0, result.output
+    env = _envelope(result.output)
+    assert env["data"]["total_in_gallery"] == 3
+    # The stale cache is untouched (not overwritten by a failed fetch).
+    assert json.loads(cache_file.read_bytes()) == FIXTURE
+
+
+def test_expired_cache_fetch_failure_with_no_cache_is_fatal(tmp_path, monkeypatch):
+    import urllib.error
+
+    # No cache on disk at all → a fetch failure has nothing to fall back to.
+    missing = tmp_path / "cache" / "index.json"
+    monkeypatch.setattr(templates_cmd, "_cache_path", lambda: missing)
+
+    def _boom(*args, **kwargs):
+        raise urllib.error.URLError("network down")
+
+    monkeypatch.setattr(templates_cmd, "_fetch_gallery", _boom)
+    _force_json_renderer()
+
+    runner = CliRunner()
+    result = runner.invoke(templates_cmd.app, ["ls"])
+    assert result.exit_code != 0
+    env = _envelope(result.output)
+    assert env["ok"] is False
+    assert env["error"]["code"] == "gallery_load_failed"
+
+
+def test_explicit_refresh_fetch_failure_is_fatal_not_stale_fallback(cache_file, monkeypatch):
+    import urllib.error
+
+    # Even with a warm cache, `--refresh` is an explicit request: a fetch
+    # failure surfaces the error rather than silently serving stale.
+    def _boom(*args, **kwargs):
+        raise urllib.error.URLError("network down")
+
+    monkeypatch.setattr(templates_cmd, "_fetch_gallery", _boom)
+    _force_json_renderer()
+
+    runner = CliRunner()
+    result = runner.invoke(templates_cmd.app, ["ls", "--refresh"])
+    assert result.exit_code != 0
+    env = _envelope(result.output)
+    assert env["ok"] is False
+    assert env["error"]["code"] == "gallery_load_failed"
+
+
+def test_expired_cache_garbage_200_keeps_stale_and_does_not_clobber(cache_file, monkeypatch):
+    # A 200 with a non-JSON body (rate-limit HTML / captive portal) must NOT
+    # overwrite the last-known-good cache — we validate before persisting and
+    # fall back to the stale cache.
+    _set_mtime(cache_file, templates_cmd.GALLERY_TTL_SECONDS + 3600)
+
+    def _garbage(*args, **kwargs):
+        return b"<html>rate limited</html>"
+
+    monkeypatch.setattr(templates_cmd, "_fetch_gallery", _garbage)
+    _force_json_renderer()
+
+    runner = CliRunner()
+    result = runner.invoke(templates_cmd.app, ["ls"])
+    # Offline-equivalent: stale cache still serves, exit 0, original rows.
+    assert result.exit_code == 0, result.output
+    env = _envelope(result.output)
+    assert env["data"]["total_in_gallery"] == 3
+    # The good cache was left untouched, not clobbered with the HTML garbage.
+    assert json.loads(cache_file.read_bytes()) == FIXTURE
+
+
+def test_explicit_refresh_garbage_200_is_fatal(cache_file, monkeypatch):
+    # A 200-with-garbage body under an explicit `--refresh` surfaces the decode
+    # error as gallery_load_failed rather than silently serving stale.
+    def _garbage(*args, **kwargs):
+        return b"<html>rate limited</html>"
+
+    monkeypatch.setattr(templates_cmd, "_fetch_gallery", _garbage)
+    _force_json_renderer()
+
+    runner = CliRunner()
+    result = runner.invoke(templates_cmd.app, ["ls", "--refresh"])
+    assert result.exit_code != 0
+    env = _envelope(result.output)
+    assert env["error"]["code"] == "gallery_load_failed"
+    # Good cache left intact.
+    assert json.loads(cache_file.read_bytes()) == FIXTURE
+
+
+def test_non_200_status_falls_back_to_stale_not_uncaught(cache_file, monkeypatch):
+    # `_fetch_gallery` raises RuntimeError on a non-200 status; during a TTL
+    # auto-refresh that must route through the stale-cache fallback, never
+    # escape as an uncaught traceback.
+    _set_mtime(cache_file, templates_cmd.GALLERY_TTL_SECONDS + 3600)
+
+    def _non_200(*args, **kwargs):
+        raise RuntimeError("gallery fetch failed: HTTP 429")
+
+    monkeypatch.setattr(templates_cmd, "_fetch_gallery", _non_200)
+    _force_json_renderer()
+
+    runner = CliRunner()
+    result = runner.invoke(templates_cmd.app, ["ls"])
+    assert result.exit_code == 0, result.output
+    env = _envelope(result.output)
+    assert env["data"]["total_in_gallery"] == 3
+
+
+def test_non_200_status_under_refresh_is_fatal_not_uncaught(cache_file, monkeypatch):
+    # Same RuntimeError under an explicit `--refresh` surfaces cleanly as
+    # gallery_load_failed instead of crashing.
+    def _non_200(*args, **kwargs):
+        raise RuntimeError("gallery fetch failed: HTTP 500")
+
+    monkeypatch.setattr(templates_cmd, "_fetch_gallery", _non_200)
+    _force_json_renderer()
+
+    runner = CliRunner()
+    result = runner.invoke(templates_cmd.app, ["ls", "--refresh"])
+    assert result.exit_code != 0
+    env = _envelope(result.output)
+    assert env["ok"] is False
+    assert env["error"]["code"] == "gallery_load_failed"
+
+
+def test_future_mtime_clock_skew_is_treated_as_stale(cache_file, monkeypatch):
+    # A future mtime (clock skew / restored file) yields a negative age; it must
+    # read as stale so the cache can't be pinned "fresh" forever.
+    _set_mtime(cache_file, -2 * 3600)  # mtime 2h in the future
+
+    fetched = {"count": 0}
+
+    def _fake_fetch(*args, **kwargs):
+        fetched["count"] += 1
+        return json.dumps(FIXTURE).encode()
+
+    monkeypatch.setattr(templates_cmd, "_fetch_gallery", _fake_fetch)
+    _force_json_renderer()
+
+    runner = CliRunner()
+    result = runner.invoke(templates_cmd.app, ["ls"])
+    assert result.exit_code == 0, result.output
+    # A refresh was attempted rather than the future-dated cache being trusted.
+    assert fetched["count"] == 1
+
+
+def test_readonly_cache_dir_still_serves_fetched_data(cache_file, monkeypatch):
+    # If persisting the freshly fetched index fails (read-only dir / disk full),
+    # the command must still succeed on the in-hand data, not error out.
+    _set_mtime(cache_file, templates_cmd.GALLERY_TTL_SECONDS + 3600)
+
+    refreshed = [
+        {
+            "moduleName": "default",
+            "category": "GENERATION TYPE",
+            "title": "Image",
+            "type": "image",
+            "templates": [{"name": "brand_new_template", "title": "Brand New", "tags": [], "models": [], "logos": []}],
+        }
+    ]
+
+    def _fake_fetch(*args, **kwargs):
+        return json.dumps(refreshed).encode()
+
+    def _boom_mkstemp(*args, **kwargs):
+        raise OSError("read-only file system")
+
+    monkeypatch.setattr(templates_cmd, "_fetch_gallery", _fake_fetch)
+    # Make the real _persist_cache's write fail (read-only dir / disk full);
+    # it must swallow the error and let the command proceed on in-hand data.
+    monkeypatch.setattr(templates_cmd.tempfile, "mkstemp", _boom_mkstemp)
+    _force_json_renderer()
+
+    runner = CliRunner()
+    result = runner.invoke(templates_cmd.app, ["ls"])
+    assert result.exit_code == 0, result.output
+    env = _envelope(result.output)
+    names = [r["name"] for r in env["data"]["rows"]]
+    assert names == ["brand_new_template"]
