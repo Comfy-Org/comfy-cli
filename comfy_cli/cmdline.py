@@ -899,6 +899,16 @@ def run(
             ),
         ),
     ] = False,
+    allow_spend: Annotated[
+        bool,
+        typer.Option(
+            "--allow-spend",
+            help=(
+                "Consent to running partner-API (paid) nodes that spend Comfy credits. "
+                "Required for workflows embedding partner nodes when not confirming interactively."
+            ),
+        ),
+    ] = False,
 ):
     # Snapshot kwargs before the body mutates api_key/host/port — analytics should record what user actually supplied.
     _track_props = tracking.filter_command_kwargs(dict(locals()))
@@ -996,6 +1006,7 @@ def run(
                 notify=effective_notify,
                 print_prompt=print_prompt,
                 preloaded=preloaded,
+                allow_spend=allow_spend,
             )
             return
 
@@ -1019,6 +1030,7 @@ def run(
             api_key=api_key,
             print_prompt=print_prompt,
             preloaded=preloaded,
+            allow_spend=allow_spend,
         )
     except typer.Exit as e:
         if (e.exit_code or 0) == 0:

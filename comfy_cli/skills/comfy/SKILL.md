@@ -632,6 +632,16 @@ the prompt_id mid-flight (it's hidden until the job finishes).
 It defaults **on** in pretty/human async mode, and **off** in JSON/agent
 contexts and with `--wait`. Override explicitly with `--notify` or `--no-notify`.
 
+**Spend gate — a workflow embedding partner-API (paid) nodes spends the
+user's Comfy credits.** Interactive TTY runs confirm before spending; `--json`
+/ non-TTY runs **fail closed** with error code `spend_consent_required` (exit
+1, nothing submitted, nothing spent) unless `--allow-spend` is passed. Add
+`--allow-spend` only when the human has actually approved the spend — do not
+reflexively add it to make the error go away. Free (non-partner) workflows run
+without the flag and are byte-identical. (`comfy run-template` gates the same
+way with the same flag, and forwards consent to `comfy run` once its own gate
+has passed.)
+
 **Scope:** the async-first / `jobs watch` / state-file pattern above is the
 **`comfy run`** workflow path only. `comfy generate` (partner-API one-call)
 has its own waiting model — see the next section.
