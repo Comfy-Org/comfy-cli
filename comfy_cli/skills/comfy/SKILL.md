@@ -669,8 +669,8 @@ Mechanical contracts that bite agents — encode them, don't rediscover:
   `generate_schema` in `comfy discover`). `data.models[]` carries
   `{alias, id, partner, category, mode, summary}` with the **untruncated**
   summary; `data.params[]` carries `{name, type, required, default, enum,
-  description}`. Unknown model → `generate_model_unknown`; missing model arg →
-  `missing_argument`. This catalog is **not** in `comfy discover` — `generate
+  description}`. Unknown model → `generate_unknown_model`; missing model arg →
+  `generate_bad_args`. This catalog is **not** in `comfy discover` — `generate
   list` is the only source of the alias list.
 - **Machine-readable output:** `generate <model> --json` prints the raw API
   response as JSON; `generate upload <file> --json` emits structured
@@ -679,6 +679,18 @@ Mechanical contracts that bite agents — encode them, don't rediscover:
   error code `emit_workflow_failed`) — the output is a runnable partner-node
   workflow you can compose with (fragments+`run` route, no extra API key).
   The default pretty path (no flags) is still human-only — do not parse it.
+- **Failures always come back as an envelope under global `--json`.** Any
+  failed/malformed `comfy --json generate …` emits exactly one `envelope/1`
+  error on stdout with a stable code — `generate_target_required`,
+  `generate_unknown_model`, `generate_bad_args`, `generate_timeout_invalid`,
+  `generate_api_error`, `generate_network_error`, `generate_job_failed`,
+  `generate_spec_invalid`, `spend_consent_required` — so branch on
+  `error.code`, never on the text.
+  (Success payloads are unchanged: still the raw API response, not an
+  envelope.) In particular `comfy generate --prompt "…"` with no model alias
+  is `generate_target_required`: `generate` is a paid cloud/partner verb and
+  always needs an alias first. For **local** text-to-image, use
+  `comfy run-template` instead.
 - **`--emit-workflow` resolves the escape-hatch vs. quality tradeoff:**
   fragments+`run` is the default for graph work; `generate` is the
   highest-quality single-shot for partner models. With
