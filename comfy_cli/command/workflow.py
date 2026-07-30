@@ -620,6 +620,12 @@ _TOO_LARGE_HINTS = {
 }
 
 
+class _ResponseUnparseable(Exception):
+    """A non-empty 200 body could not be decoded as JSON — surface it as a loud
+    error instead of a misleading empty/success result (an empty body is still a
+    legitimate ``None`` and is *not* this)."""
+
+
 # Map the cloud ``--sort`` fields onto local FileInfo keys (client-side sort;
 # ComfyUI's /userdata listing has no server-side sort/limit/filter).
 _LOCAL_SORT_KEYS = {"create_time": "created", "update_time": "modified", "name": "path"}
@@ -813,18 +819,35 @@ def _http_request(
     if not raw:
         return status, None
     try:
-        return status, json.loads(raw)
-    except (json.JSONDecodeError, UnicodeDecodeError):
-        # UnicodeDecodeError is a ValueError but *not* a JSONDecodeError, so a
-        # body that isn't valid UTF-8 needs naming here or it escapes uncaught.
-        return status, None
+        return status, json.loads(raw.decode("utf-8"))
+    except (ValueError, RecursionError) as e:
+        # A non-empty body that won't decode as JSON is a *malformed* response, not
+        # "no data": returning ``None`` here would let callers report an empty list
+        # or a null id as success. Raise instead so it surfaces as a loud, mapped
+        # error. Decode as UTF-8 *explicitly* first: handed raw bytes, ``json.loads``
+        # auto-detects UTF-16/32 (RFC 4627) and would silently accept a non-UTF-8 body
+        # the contract treats as malformed. Non-UTF-8 bytes -> ``UnicodeDecodeError``;
+        # valid-UTF-8 non-JSON text -> ``JSONDecodeError``; both subclass ``ValueError``.
+        # Catch the ``ValueError`` base to also map the parser's *other* rejections that
+        # aren't ``JSONDecodeError`` — e.g. a JSON integer past CPython's 4300-digit
+        # int/str limit raises a bare ``ValueError`` — plus ``RecursionError`` from
+        # pathologically nested input (the 64 MiB cap permits deep nesting). Otherwise
+        # those escape the mapping and crash the CLI with a raw traceback.
+        raise _ResponseUnparseable() from e
 
 
 def _handle_cloud_http_error(renderer, e, *, operation: str, workflow_id: str | None = None) -> typer.Exit:
     """Map HTTP failures to envelope codes. Returns an Exit to ``raise from``."""
     import urllib.error
 
-    if isinstance(e, _ResponseTooLarge):
+    if isinstance(e, _ResponseUnparseable):
+        renderer.error(
+            code="workflow_unparseable",
+            message=f"cloud returned a non-empty but unparseable (non-JSON) response during {operation}",
+            hint="the server sent a malformed body; retry, and report it if it persists",
+            details={"operation": operation, "workflow_id": workflow_id},
+        )
+    elif isinstance(e, _ResponseTooLarge):
         renderer.error(
             code="workflow_too_large",
             message=f"cloud API response during {operation} exceeded the {_HTTP_MAX_BYTES // (1024 * 1024)} MiB cap",
@@ -832,8 +855,8 @@ def _handle_cloud_http_error(renderer, e, *, operation: str, workflow_id: str | 
             details={"operation": operation, "workflow_id": workflow_id, "limit_bytes": _HTTP_MAX_BYTES},
         )
     elif isinstance(e, urllib.error.HTTPError):
-        # Bound the read itself; slicing after an unbounded read would still
-        # have pulled an arbitrarily large error body into memory first.
+        # Cap the read itself — ``[:1000]`` after a full ``read()`` would still pull an
+        # arbitrarily large (or malicious) error page into memory before slicing.
         body = (e.read(1000) or b"").decode("utf-8", "replace")
         if e.code == 404:
             renderer.error(
@@ -1141,10 +1164,42 @@ def list_cmd(
 
     try:
         _, body = _http_request(url, target)
-    except (urllib.error.HTTPError, urllib.error.URLError, OSError, _ResponseTooLarge) as e:
+    except (
+        urllib.error.HTTPError,
+        urllib.error.URLError,
+        OSError,
+        _ResponseUnparseable,
+        _ResponseTooLarge,
+    ) as e:
         raise _handle_cloud_http_error(renderer, e, operation="list") from e
 
-    rows = (body or {}).get("data") or []
+    # A non-empty body decodes here only if it was valid JSON; guard the shape the
+    # way ``get``/``save`` do. An empty body is a legitimate ``None`` (→ no rows), but
+    # a valid-JSON *non-dict* 200 (an array like ``[1, 2, 3]`` or a scalar) is malformed:
+    # ``(body).get("data")`` would raise a raw ``AttributeError``, and coercing it to an
+    # empty list would masquerade the malformed shape as a genuinely-empty listing.
+    if body is not None and not isinstance(body, dict):
+        renderer.error(
+            code="cloud_http_error",
+            message="unexpected response shape from /api/workflows (expected a JSON object)",
+            details={"got_type": type(body).__name__},
+        )
+        raise typer.Exit(code=1)
+
+    # A missing/empty ``data`` is a legitimately-empty listing, but a present non-list
+    # ``data`` is malformed the same way a non-dict body is: a scalar (``{"data": 42}``)
+    # would raise a raw ``TypeError`` in the comprehension below, and a str/dict would
+    # iterate silently and masquerade as an empty listing. Reject it with the same envelope.
+    rows = (body or {}).get("data")
+    if rows is None:
+        rows = []
+    elif not isinstance(rows, list):
+        renderer.error(
+            code="cloud_http_error",
+            message="unexpected response shape from /api/workflows (data must be a JSON array)",
+            details={"got_type": type(rows).__name__},
+        )
+        raise typer.Exit(code=1)
     payload = {
         "count": len(rows),
         "workflows": [
@@ -1212,7 +1267,13 @@ def get_cmd(
     url = target.url("workflows", _up.quote(workflow_id, safe=""), "content")
     try:
         _, body = _http_request(url, target)
-    except (urllib.error.HTTPError, urllib.error.URLError, OSError, _ResponseTooLarge) as e:
+    except (
+        urllib.error.HTTPError,
+        urllib.error.URLError,
+        OSError,
+        _ResponseUnparseable,
+        _ResponseTooLarge,
+    ) as e:
         raise _handle_cloud_http_error(renderer, e, operation="get", workflow_id=workflow_id) from e
 
     if not isinstance(body, dict) or "workflow_json" not in body:
@@ -1307,7 +1368,13 @@ def save_cmd(
     url = target.url("workflows")
     try:
         _, resp = _http_request(url, target, method="POST", body=body)
-    except (urllib.error.HTTPError, urllib.error.URLError, OSError, _ResponseTooLarge) as e:
+    except (
+        urllib.error.HTTPError,
+        urllib.error.URLError,
+        OSError,
+        _ResponseUnparseable,
+        _ResponseTooLarge,
+    ) as e:
         raise _handle_cloud_http_error(renderer, e, operation="save") from e
 
     workflow_id = (resp or {}).get("id") if isinstance(resp, dict) else None
@@ -1343,7 +1410,13 @@ def delete_cmd(
     url = target.url("workflows", _up.quote(workflow_id, safe=""))
     try:
         _, _body = _http_request(url, target, method="DELETE")
-    except (urllib.error.HTTPError, urllib.error.URLError, OSError, _ResponseTooLarge) as e:
+    except (
+        urllib.error.HTTPError,
+        urllib.error.URLError,
+        OSError,
+        _ResponseUnparseable,
+        _ResponseTooLarge,
+    ) as e:
         raise _handle_cloud_http_error(renderer, e, operation="delete", workflow_id=workflow_id) from e
 
     payload = {"workflow_id": workflow_id, "deleted": True}
