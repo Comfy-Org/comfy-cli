@@ -626,6 +626,20 @@ class _ResponseUnparseable(Exception):
     legitimate ``None`` and is *not* this)."""
 
 
+# What an oversize ``/userdata`` response means depends on the verb, so the hint
+# has to as well. ``list`` fetches the whole ``workflows/`` listing, so oversize
+# means *too many* workflows — not one big one. ``save``/``delete`` have already
+# sent their request by the time the body is read, so the write may well have
+# landed: their hints must not imply a clean failure the user should retry.
+_LOCAL_TOO_LARGE_HINTS = {
+    "list": "too many saved workflows on the server; prune the ComfyUI `workflows/` userdata directory "
+    "(`--limit`/`--name` filter client-side, so they cannot shrink the response)",
+    "get": "the saved workflow is unexpectedly large; inspect it directly on the server",
+    "save": "the workflow may still have been saved; confirm with `comfy --json --where local workflow list`",
+    "delete": "the workflow may still have been deleted; confirm with `comfy --json --where local workflow list`",
+}
+
+
 # Map the cloud ``--sort`` fields onto local FileInfo keys (client-side sort;
 # ComfyUI's /userdata listing has no server-side sort/limit/filter).
 _LOCAL_SORT_KEYS = {"create_time": "created", "update_time": "modified", "name": "path"}
@@ -744,7 +758,7 @@ def _handle_local_http_error(renderer, e, *, operation: str, workflow_id: str | 
             code="workflow_too_large",
             message=f"local ComfyUI /userdata response during {operation} exceeded the "
             f"{_USERDATA_MAX_BYTES // (1024 * 1024)} MiB cap",
-            hint="the saved workflow is unexpectedly large; inspect it directly on the server",
+            hint=_LOCAL_TOO_LARGE_HINTS.get(operation, "the local response was unexpectedly large"),
             details={"operation": operation, "limit_bytes": _USERDATA_MAX_BYTES},
         )
     elif isinstance(e, urllib.error.HTTPError) and e.code == 404:

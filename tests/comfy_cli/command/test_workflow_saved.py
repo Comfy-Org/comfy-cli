@@ -15,6 +15,7 @@ import urllib.error
 from typing import Any
 
 import pytest
+import typer
 from typer.testing import CliRunner
 
 from comfy_cli.caller import Caller
@@ -421,6 +422,57 @@ class TestLocalDelete:
         env = _run(["delete", "/etc/passwd", "--where", "local"], capsys)
         assert env["ok"] is False
         assert env["error"]["code"] == "invalid_argument"
+
+
+class TestLocalTooLargeHints:
+    """An oversize /userdata response means something different per verb, so the
+    hint must too — a `list` overflow is too many workflows, and save/delete have
+    already sent their write by the time the body is read."""
+
+    def _args(self, verb: str, tmp_path) -> list[str]:
+        if verb == "list":
+            return ["list", "--where", "local"]
+        if verb == "get":
+            return ["get", "flux.json", "--out", str(tmp_path / "o.json"), "--where", "local"]
+        if verb == "save":
+            src = tmp_path / "src.json"
+            src.write_text(json.dumps(_LOCAL_WORKFLOW))
+            return ["save", str(src), "--name", "flux", "--where", "local"]
+        return ["delete", "flux.json", "--where", "local"]
+
+    @pytest.mark.parametrize("verb", ["list", "get", "save", "delete"])
+    def test_hint_is_per_operation(self, verb, local_target, tmp_path, monkeypatch, capsys):
+        monkeypatch.setattr(workflow_cmd, "_USERDATA_MAX_BYTES", 4)
+        _patch_urlopen(monkeypatch, {"/userdata": (b'[{"path": "flux.json"}]', 200)})
+        env = _run(self._args(verb, tmp_path), capsys)
+        assert env["ok"] is False
+        assert env["error"]["code"] == "workflow_too_large"
+        assert env["error"]["details"]["operation"] == verb
+        assert env["error"]["hint"] == workflow_cmd._LOCAL_TOO_LARGE_HINTS[verb]
+
+    def test_list_hint_does_not_name_a_single_workflow(self):
+        # The listing is the whole workflows/ dir — "the saved workflow" (the old
+        # hardcoded hint) names a thing that doesn't exist for this verb.
+        assert "the saved workflow is" not in workflow_cmd._LOCAL_TOO_LARGE_HINTS["list"]
+
+    @pytest.mark.parametrize("verb", ["save", "delete"])
+    def test_write_verb_hints_do_not_imply_the_write_was_rejected(self, verb):
+        # The request is already on the wire before the body is read, so the
+        # mutation may have landed. The hint must send the user to confirm, not
+        # imply a clean failure they should retry.
+        hint = workflow_cmd._LOCAL_TOO_LARGE_HINTS[verb]
+        assert "may still have been" in hint
+        assert "workflow list" in hint
+
+    def test_unknown_operation_falls_back(self, capsys):
+        # Defensive: a future call site with a new operation still gets a hint,
+        # and one that claims nothing about what did or didn't happen.
+        renderer = _force_json_renderer()
+        exit_exc = workflow_cmd._handle_local_http_error(renderer, workflow_cmd._ResponseTooLarge(), operation="purge")
+        assert isinstance(exit_exc, typer.Exit)
+        env = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+        assert env["error"]["code"] == "workflow_too_large"
+        assert env["error"]["hint"] == "the local response was unexpectedly large"
 
 
 # ---------------------------------------------------------------------------
