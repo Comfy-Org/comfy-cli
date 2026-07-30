@@ -2,31 +2,49 @@
 
 UX shape, modeled on fal-ai's genmedia but creative-user-first:
 
-    comfy generate <model> [--<param> value]... [--download P] [--async]
+    comfy generate <model> [--<param> value]... [--download P] [--async] [--yes]
     comfy generate list [--partner P] [--style S]
     comfy generate schema <model>
     comfy generate refresh
     comfy generate resume <model> <job_id> [--download P]
+    comfy generate consent [show|always|ask]
 
 The first positional is either a reserved action (``list``/``schema``/
-``refresh``/``resume``) or a model alias (``flux-pro``, ``ideogram-edit``, …).
-Anything not in the reserved set falls through to the generate path.
+``refresh``/``resume``/``consent``) or a model alias (``flux-pro``,
+``ideogram-edit``, …). Anything not in the reserved set falls through to the
+generate path.
+
+Spend gate: a generation call spends Comfy credits, so the proxy call sits
+behind a consent interlock (``_confirm_spend``) — an interactive TTY prompt,
+bypassed by ``--yes`` or the persisted ``spend.auto_confirm`` config, and
+fail-closed (error, no spend) when neither is present and no prompt is
+possible (``--json`` or no TTY).
 """
 
 from __future__ import annotations
 
+import sys
 import uuid
 from pathlib import Path
 from typing import Annotated
 
 import httpx
 import typer
+
+# NOT migrated to `comfy_cli.output.rprint` on purpose. `generate` carries its own
+# `--json` flag (see `_emit_result` / `output.print_json`) and never emits a
+# renderer envelope on its submit/sync/resume paths. Routing these calls through
+# the shim would send the command's *primary result* (job ids, image URLs) to
+# stderr whenever stdout isn't a TTY, leaving stdout empty -- so `comfy generate
+# ... > out.txt` would write an empty file. Migrate only once `generate` emits
+# envelopes via the renderer.
 from rich import print as rprint
 from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
 
-from comfy_cli import tracking, ui
+from comfy_cli import constants, tracking, ui
 from comfy_cli.command.generate import adapters, client, emit, output, poll, schema, spec, upload
-from comfy_cli.output.renderer import get_renderer
+from comfy_cli.config_manager import ConfigManager
+from comfy_cli.output.renderer import Renderer, get_renderer
 
 _HELP = "Generate images via ComfyUI partner nodes (Flux, Ideogram, DALL·E, Recraft, Stability, …)."
 
@@ -50,7 +68,7 @@ def register_with(parent: typer.Typer) -> None:
             str | None,
             typer.Argument(
                 help="A model alias (e.g. flux-pro, ideogram-edit, dalle) "
-                "or one of: list, schema, refresh, upload, resume.",
+                "or one of: list, schema, refresh, upload, resume, consent.",
             ),
         ] = None,
     ) -> None:
@@ -79,12 +97,16 @@ def register_with(parent: typer.Typer) -> None:
                 {"model": resume_model, "job_id": resume_job_id},
             )
             return _resume(extra)
+        if target == "consent":
+            consent_action = extra[0] if extra and not extra[0].startswith("-") else None
+            tracking.track_event("generate:consent", {"action": consent_action})
+            return _consent(extra)
         _generate(target, extra)
 
 
 def _separate_meta_flags(extra_args: list[str]) -> tuple[list[str], dict[str, str | bool]]:
     """Pull run-level flags out of the user's argv tail."""
-    meta_names = {"download", "async", "json", "timeout", "api-key", "emit-workflow", "output-prefix"}
+    meta_names = {"download", "async", "json", "timeout", "api-key", "emit-workflow", "output-prefix", "yes"}
     meta: dict[str, str | bool] = {}
     remaining: list[str] = []
     i = 0
@@ -96,7 +118,7 @@ def _separate_meta_flags(extra_args: list[str]) -> tuple[list[str], dict[str, st
             if "=" in body:
                 body, raw = body.split("=", 1)
             if body in meta_names:
-                if body in {"async", "json"}:
+                if body in {"async", "json", "yes"}:
                     meta[body] = True if raw is None else raw.lower() not in {"false", "0", "no"}
                     i += 1
                     continue
@@ -163,6 +185,90 @@ def _emit_result(result: poll.PollResult, *, request_id: str, download: str | No
         output.print_urls(result.image_urls, request_id=request_id)
         if download and not result.image_urls:
             rprint("[yellow]--download requested but no image URLs found in response.[/yellow]")
+
+
+class SpendNotConfirmed(RuntimeError):
+    """A credit-spending call lacked consent — declined at the prompt, or
+    fail-closed because no prompt was possible and nothing pre-authorized it."""
+
+
+def _spend_auto_confirmed() -> bool:
+    """True only when the persisted ``spend.auto_confirm`` config is an
+    affirmative boolean. A missing key or a garbage value never authorizes
+    spending — the gate fails closed."""
+    try:
+        return bool(ConfigManager().get_bool(constants.CONFIG_KEY_SPEND_AUTO_CONFIRM))
+    except ValueError:
+        return False
+
+
+def _stdin_is_tty() -> bool:
+    try:
+        return sys.stdin is not None and sys.stdin.isatty()
+    except ValueError:
+        # stdin already closed (e.g. daemonized caller) — no prompt possible.
+        return False
+
+
+def _confirm_spend(*, model_name: str, assume_yes: bool, as_json: bool) -> None:
+    """The money interlock: explicit consent before a credit-spending proxy call.
+
+    - ``--yes`` or persisted ``spend.auto_confirm=true`` → proceed.
+    - Interactive TTY → prompt, default No.
+    - ``--json`` or no TTY with neither → fail closed: raise, spend nothing.
+      Never hang on a prompt a machine caller can't answer.
+    """
+    if assume_yes or _spend_auto_confirmed():
+        return
+    if as_json or not _stdin_is_tty():
+        msg = (
+            f"`comfy generate {model_name}` spends Comfy credits and no consent was given. "
+            "Re-run with --yes, or persist consent with `comfy generate consent always`."
+        )
+        if as_json:
+            output.print_json({"error": msg, "code": "spend_consent_required"})
+        else:
+            rprint(f"[bold red]{msg}[/bold red]")
+        raise SpendNotConfirmed(msg)
+    rprint(f"[bold]{model_name}[/bold] runs via the partner API and [bold]spends Comfy credits[/bold].")
+    rprint("[dim]Skip this prompt with --yes; persist always-proceed with `comfy generate consent always`.[/dim]")
+    if not typer.confirm("Proceed?", default=False):
+        rprint("Canceled — no credits were spent.")
+        raise SpendNotConfirmed("user declined the spend confirmation prompt")
+
+
+def _consent(extra_args: list[str]) -> None:
+    """``comfy generate consent [show|always|ask]`` — inspect or persist the
+    spend gate's always-proceed setting (``spend.auto_confirm`` in config.ini,
+    the same store that backs the CLI's other persisted settings)."""
+    try:
+        clean, meta = _separate_meta_flags(extra_args)
+    except schema.SchemaError as e:
+        rprint(f"[bold red]{e}[/bold red]")
+        raise typer.Exit(code=1)
+    as_json = bool(meta.get("json", False))
+    action = clean[0] if clean and not clean[0].startswith("-") else "show"
+    if action not in {"show", "always", "ask"}:
+        msg = f"Unknown consent action {action!r}. Usage: comfy generate consent [show|always|ask]"
+        if as_json:
+            output.print_json({"error": msg})
+        else:
+            rprint(f"[bold red]{msg}[/bold red]")
+        raise typer.Exit(code=1)
+    if action == "always":
+        ConfigManager().set(constants.CONFIG_KEY_SPEND_AUTO_CONFIRM, "true")
+    elif action == "ask":
+        ConfigManager().set(constants.CONFIG_KEY_SPEND_AUTO_CONFIRM, "false")
+    auto = _spend_auto_confirmed()
+    if as_json:
+        output.print_json({"spend_auto_confirm": auto, "action": action})
+        return
+    if auto:
+        rprint("[bold]spend.auto_confirm: true[/bold] — `comfy generate` spends credits without prompting.")
+        rprint("[dim]Revert with `comfy generate consent ask`.[/dim]")
+    else:
+        rprint("[bold]spend.auto_confirm: false[/bold] — credit-spending calls prompt first (or need --yes).")
+        rprint("[dim]Persist always-proceed with `comfy generate consent always`.[/dim]")
 
 
 def _generate(model: str, extra_args: list[str]) -> None:
@@ -263,6 +369,20 @@ def _generate(model: str, extra_args: list[str]) -> None:
                 command="generate emit-workflow",
             )
             return
+
+        # Spend gate — a proxy call spends Comfy credits, so consent comes
+        # BEFORE any network side effect (auth refresh, asset uploads, the
+        # generation request itself). Everything above this line is local:
+        # spec lookup, arg parsing, emit-workflow.
+        try:
+            _confirm_spend(
+                model_name=str(gen_props["model_alias"] or ep.id),
+                assume_yes=bool(meta.get("yes", False)),
+                as_json=as_json,
+            )
+        except SpendNotConfirmed as e:
+            _track_error("consent", e)
+            raise typer.Exit(code=1) from e
 
         try:
             api_key = client.resolve_api_key(meta.get("api-key") if isinstance(meta.get("api-key"), str) else None)
@@ -421,96 +541,177 @@ def _arg_value(args: list[str], *names: str) -> str | None:
     return None
 
 
+def _renderer_for(meta: dict[str, str | bool]) -> Renderer:
+    """Resolve the renderer for a `generate` sub-action.
+
+    ``generate`` runs with ``allow_extra_args``, so a trailing ``--json`` never
+    reaches the global Typer callback that resolves output mode — it lands in
+    ``meta`` instead. Honor both spellings: the global ``comfy --json generate
+    list`` (already reflected in the renderer's mode) and the tail
+    ``comfy generate list --json`` (upgrade a still-pretty renderer).
+    """
+    renderer = get_renderer()
+    if meta.get("json"):
+        renderer.force_json()
+    return renderer
+
+
+def _model_record(e: spec.Endpoint) -> dict[str, object]:
+    """One structured catalog row. ``category`` is what the human table renders
+    under its "Style" column; ``summary`` is the FULL text, not the ``…``-
+    truncated form the table has to cut to fit its width."""
+    return {
+        "alias": spec.preferred_alias(e.id) or e.id,
+        "id": e.id,
+        "partner": e.partner,
+        "category": e.category,
+        "mode": "async" if e.polling else "sync",
+        "summary": e.summary,
+    }
+
+
+def _param_record(f: schema.FlagDef) -> dict[str, object]:
+    """One structured parameter row for `generate schema`.
+
+    ``kind`` is retained alongside ``type`` because it is the vocabulary
+    ``comfy_cli.command.generate.schema`` uses internally and the name the
+    pre-envelope ``--json`` payload shipped; they always carry the same value.
+    """
+    return {
+        "name": f.name,
+        "type": f.kind,
+        "kind": f.kind,
+        "required": f.required,
+        "default": f.default,
+        "enum": list(f.enum),
+        "description": f.description,
+        "item_type": f.item_kind,
+        "upload_mode": f.upload_mode,
+    }
+
+
 def _list_models(extra_args: list[str]) -> None:
     """`comfy generate list` — show available models with their short aliases."""
     clean, meta = _separate_meta_flags(extra_args)
-    as_json = bool(meta.get("json", False))
+    renderer = _renderer_for(meta)
     partner = _arg_value(clean, "--partner", "-p")
     category = _arg_value(clean, "--category", "--style", "-c")
     query = _arg_value(clean, "--query", "-q")
     eps = spec.list_endpoints(partner=partner, category=category, query=query)
-    if as_json:
-        models = [
-            {
-                "alias": spec.preferred_alias(e.id) or e.id,
-                "id": e.id,
-                "partner": e.partner,
-                "category": e.category,
-                "mode": "async" if e.polling else "sync",
-                "summary": e.summary,
-            }
+    payload = {
+        "models": [_model_record(e) for e in eps],
+        "count": len(eps),
+        "filters": {"partner": partner, "category": category, "query": query},
+    }
+    if renderer.is_pretty():
+        if not eps:
+            rprint("[yellow]No models match those filters.[/yellow]")
+            raise typer.Exit(code=0)
+        rows = [
+            (
+                spec.preferred_alias(e.id) or e.id,
+                e.partner,
+                e.category,
+                "async" if e.polling else "sync",
+                (e.summary[:60] + "…") if len(e.summary) > 61 else e.summary,
+            )
             for e in eps
         ]
-        output.print_json({"models": models, "count": len(models)})
+        ui.display_table(rows, ["Model", "Partner", "Style", "Mode", "Summary"], title="Comfy Generate — Models")
+        rprint("\n[dim]Run `comfy generate schema <model>` to see parameters for a model.[/dim]")
         return
-    if not eps:
-        rprint("[yellow]No models match those filters.[/yellow]")
-        raise typer.Exit(code=0)
-    rows = [
-        (
-            spec.preferred_alias(e.id) or e.id,
-            e.partner,
-            e.category,
-            "async" if e.polling else "sync",
-            (e.summary[:60] + "…") if len(e.summary) > 61 else e.summary,
-        )
-        for e in eps
-    ]
-    ui.display_table(rows, ["Model", "Partner", "Style", "Mode", "Summary"], title="Comfy Generate — Models")
-    rprint("\n[dim]Run `comfy generate schema <model>` to see parameters for a model.[/dim]")
+    renderer.emit(payload, command="generate list")
 
 
 def _schema(extra_args: list[str]) -> None:
     """`comfy generate schema <model>` — show params for a model (fal-style)."""
     clean, meta = _separate_meta_flags(extra_args)
-    as_json = bool(meta.get("json", False))
+    renderer = _renderer_for(meta)
     if not clean or clean[0].startswith("-"):
-        if as_json:
-            output.print_json({"error": "Usage: comfy generate schema <model>"})
-            raise typer.Exit(code=1)
-        rprint("[bold red]Usage: comfy generate schema <model>[/bold red]")
+        if renderer.is_pretty():
+            rprint("[bold red]Usage: comfy generate schema <model>[/bold red]")
+        else:
+            renderer.error(
+                code="missing_argument",
+                message="Usage: comfy generate schema <model>",
+                hint="pass a model alias, e.g. `comfy generate schema flux-pro` "
+                "(run `comfy generate list` to see them)",
+                command="generate schema",
+            )
         raise typer.Exit(code=1)
     try:
         ep = spec.get_endpoint(clean[0])
     except spec.SpecError as e:
-        if as_json:
-            output.print_json({"error": str(e)})
-            raise typer.Exit(code=1)
-        rprint(f"[bold red]{e}[/bold red]")
+        if renderer.is_pretty():
+            rprint(f"[bold red]{e}[/bold red]")
+        else:
+            renderer.error(
+                code="generate_model_unknown",
+                message=str(e),
+                hint="run `comfy generate list` to see the available model aliases",
+                details={"requested": clean[0]},
+                command="generate schema",
+            )
         raise typer.Exit(code=1)
-    if as_json:
-        flags = schema.flags_for(ep)
-        output.print_json(
-            {
-                "model": spec.preferred_alias(ep.id) or ep.id,
-                "id": ep.id,
-                "params": [
-                    {
-                        "name": f.name,
-                        "kind": f.kind,
-                        "required": f.required,
-                        "default": f.default,
-                        "enum": f.enum,
-                        "description": f.description,
-                    }
-                    for f in flags
-                ],
-            }
-        )
+    if renderer.is_pretty():
+        _show_schema_help(ep)
         return
-    _show_schema_help(ep)
+    flags = schema.flags_for(ep)
+    name = spec.preferred_alias(ep.id) or ep.id
+    renderer.emit(
+        {
+            "model": name,
+            "id": ep.id,
+            "partner": ep.partner,
+            "category": ep.category,
+            "summary": ep.summary,
+            "mode": "async" if ep.polling else "sync",
+            "polling": ep.polling,
+            "content_type": ep.request_content_type,
+            "params": [_param_record(f) for f in flags],
+            "example": schema.example_invocation(ep, flags, display_name=name),
+        },
+        command="generate schema",
+    )
+
+
+def _fetch_spec(url: str) -> httpx.Response:
+    with httpx.Client(timeout=30.0, follow_redirects=True) as cli:
+        r = cli.get(url, headers={"Comfy-Env": "comfy-cli", "User-Agent": "comfy-cli/api"})
+        r.raise_for_status()
+        return r
 
 
 def _refresh() -> None:
-    url = spec.base_url() + "/openapi.yml"
+    base = spec.base_url()
+    # The live spec is served at ``/openapi`` (no extension, JSON body). Older /
+    # custom ``COMFY_API_BASE_URL`` deployments may still serve ``/openapi.yml``,
+    # so fall back to it on a 404 to keep those working.
+    primary, fallback = base + "/openapi", base + "/openapi.yml"
+    fetched_from = primary
     try:
-        with httpx.Client(timeout=30.0, follow_redirects=True) as cli:
-            r = cli.get(url, headers={"Comfy-Env": "comfy-cli", "User-Agent": "comfy-cli/api"})
-            r.raise_for_status()
+        try:
+            r = _fetch_spec(primary)
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code != 404:
+                raise
+            fetched_from = fallback
+            r = _fetch_spec(fallback)
     except httpx.HTTPError as e:
-        rprint(f"[bold red]Failed to fetch {url}: {e}[/bold red]")
+        rprint(f"[bold red]Failed to fetch {fetched_from}: {e}[/bold red]")
         raise typer.Exit(code=1)
-    path = spec.write_cache(r.text)
+
+    # Validate before caching so a 200-with-garbage response never poisons the
+    # ~/.comfy/openapi-cache.yml cache (used for CACHE_TTL_SECONDS by every
+    # subsequent `comfy generate`).
+    body = r.text
+    try:
+        spec.validate_spec_text(body)
+    except spec.SpecError as e:
+        rprint(f"[bold red]Refusing to cache spec from {fetched_from}: {e}[/bold red]")
+        raise typer.Exit(code=1)
+
+    path = spec.write_cache(body)
     rprint(f"[bold green]Refreshed model catalog at {path}[/bold green]")
 
 
@@ -648,7 +849,7 @@ def _print_top_help() -> None:
     rprint("[bold]comfy generate[/bold] — call ComfyUI partner nodes")
     rprint("")
     rprint("[bold]Usage:[/bold]")
-    rprint("  comfy generate <model> [--<param> value]... [--download PATH] [--async] [--api-key KEY]")
+    rprint("  comfy generate <model> [--<param> value]... [--download PATH] [--async] [--yes] [--api-key KEY]")
     rprint("")
     rprint("[bold]Examples:[/bold]")
     rprint('  comfy generate flux-pro --prompt "a cat on the moon" --width 1024 --height 1024 --download cat.png')
@@ -657,7 +858,7 @@ def _print_top_help() -> None:
     )
     rprint('  comfy generate dalle --prompt "a watercolor whale" --download whale.png')
     rprint(
-        '  comfy generate flux-pro --prompt "a fox" --emit-workflow flux.json   '
+        '  comfy generate flux-2 --prompt "a fox" --emit-workflow flux.json   '
         "[dim]# write a runnable workflow instead of calling the proxy[/dim]"
     )
     rprint("")
@@ -667,7 +868,12 @@ def _print_top_help() -> None:
     rprint("  comfy generate refresh                 Refresh the model catalog")
     rprint("  comfy generate upload <file-or-url>    Host a local file or remote URL and print its signed URL")
     rprint("  comfy generate resume <model> <job>    Resume an async job")
+    rprint("  comfy generate consent [show|always|ask]  Inspect/persist the credit-spend confirmation")
     rprint("")
+    rprint(
+        "[dim]Generation spends Comfy credits: interactive runs confirm first; pass --yes (or "
+        "`comfy generate consent always`) to skip, required for --json / non-TTY runs.[/dim]"
+    )
     rprint(
         "[dim]Auth: run `comfy cloud login` (session outranks env var), set COMFY_API_KEY, or pass --api-key. Get one at https://platform.comfy.org.[/dim]"
     )

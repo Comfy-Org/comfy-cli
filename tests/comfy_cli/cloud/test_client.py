@@ -641,6 +641,56 @@ class TestOutputUrls:
         client = comfy_client.Client(CLOUD)
         assert client.extract_output_urls(record) == [o["url"] for o in client.extract_outputs(record)]
 
+    def test_extract_resolves_saveglb_3d_key(self):
+        """SaveGLB emits entries under the "3d" key, not the classic media
+        keys — shape-based detection must still resolve them (BE-4417)."""
+        record = {"outputs": {"10": {"3d": [{"filename": "abc123.glb", "subfolder": "3d", "type": "output"}]}}}
+        assert comfy_client.extract_output_entries(record) == [
+            {"node_id": "10", "filename": "abc123.glb", "subfolder": "3d", "type": "output"}
+        ]
+        urls = comfy_client.Client(CLOUD).extract_output_urls(record)
+        assert urls == ["https://cloud.example.com/api/view?filename=abc123.glb&subfolder=3d&type=output"]
+
+    def test_extract_resolves_singular_video_key(self):
+        """The cloud worker's synthesizeMediaTypeFromResult emits a singular
+        "video" key; shape-based detection covers it too."""
+        record = {"outputs": {"7": {"video": [{"filename": "clip.webm", "subfolder": "", "type": "output"}]}}}
+        assert comfy_client.extract_output_entries(record) == [
+            {"node_id": "7", "filename": "clip.webm", "subfolder": "", "type": "output"}
+        ]
+
+    def test_extract_dedups_same_artifact_under_two_keys(self):
+        """A node that surfaces the same artifact under both the singular
+        "video" and plural "videos" keys must emit one entry, not two — else
+        the /view URL (and the downloaded file) is duplicated."""
+        record = {
+            "outputs": {
+                "7": {
+                    "video": [{"filename": "clip.webm", "subfolder": "", "type": "output"}],
+                    "videos": [{"filename": "clip.webm", "subfolder": "", "type": "output"}],
+                }
+            }
+        }
+        assert comfy_client.extract_output_entries(record) == [
+            {"node_id": "7", "filename": "clip.webm", "subfolder": "", "type": "output"}
+        ]
+
+    def test_extract_skips_non_file_shaped_keys(self):
+        """Keys carrying flags/metadata rather than file entries produce
+        nothing: "animated" (boolean flags — explicitly skipped), "text"
+        (strings), "dims" (dicts without a filename)."""
+        record = {
+            "outputs": {
+                "3": {
+                    "animated": [True],
+                    "text": ["hello"],
+                    "dims": [{"width": 512}],
+                }
+            }
+        }
+        assert comfy_client.extract_output_entries(record) == []
+        assert comfy_client.Client(CLOUD).extract_output_urls(record) == []
+
 
 class TestGroupOutputs:
     """_group_outputs: pure grouping of extract_outputs entries by node and

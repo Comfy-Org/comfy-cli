@@ -41,9 +41,25 @@ class TestStepBuilders:
             "jobs status",
             "jobs watch",
             "fleet",
-            "whoami",
+            "cloud whoami",
         ]:
             assert needle in titles, f"missing coverage for: {needle}"
+
+    def test_whoami_step_targets_cloud_not_auth(self):
+        # Sign-in status lives under `comfy cloud whoami`; `comfy auth` is the
+        # model-host token group. Guard against regressing back to `auth whoami`.
+        state = run_cli._DemoState(workflow_path="/tmp/x.json")
+        steps = run_cli._build_steps(state)
+        whoami = [s for s in steps if "whoami" in s.title.lower()]
+        assert len(whoami) == 1, "expected exactly one whoami demo step"
+        invs = whoami[0].invocations or []
+        assert invs, "whoami step should expose invocations"
+        for inv in invs:
+            assert "whoami" in inv.argv, f"unexpected whoami argv: {inv.argv}"
+            assert "cloud" in inv.argv, f"whoami step must target cloud: {inv.argv}"
+            assert "auth" not in inv.argv, f"whoami step must not use auth: {inv.argv}"
+            assert "cloud whoami" in inv.label, f"unexpected whoami label: {inv.label}"
+            assert "auth whoami" not in inv.label, f"whoami label must not use auth: {inv.label}"
 
     def test_build_steps_includes_parallel_fleet(self):
         state = run_cli._DemoState(workflow_path="/tmp/x.json")

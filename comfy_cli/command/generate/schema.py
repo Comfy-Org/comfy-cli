@@ -259,6 +259,8 @@ def help_text(endpoint: Endpoint, flags: list[FlagDef]) -> str:
     lines.append("  --download <path>  Save outputs locally. Supports {request_id}, {index}, {ext}.")
     lines.append("  --async            Submit and return job id without waiting.")
     lines.append("  --json             Emit raw JSON response instead of pretty output.")
+    lines.append("  --yes              Skip the credit-spend confirmation (required for --json/non-TTY runs")
+    lines.append("                     unless `comfy generate consent always` was set).")
     lines.append("  --timeout <sec>    Override sync-poll timeout (default 300).")
     lines.append("  --api-key <key>    Per-call override. Auth: --api-key > login session > COMFY_API_KEY env.")
     lines.append("  --emit-workflow <path>  Write a runnable partner-node workflow instead of calling the proxy.")

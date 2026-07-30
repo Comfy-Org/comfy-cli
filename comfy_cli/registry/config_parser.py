@@ -7,6 +7,7 @@ from urllib.parse import urlparse, urlunparse
 import tomlkit
 import tomlkit.exceptions
 import typer
+from tomlkit.items import Comment, Trivia
 
 from comfy_cli import ui
 from comfy_cli.registry.types import (
@@ -44,6 +45,40 @@ _VERSION_RE: re.Pattern[str] = re.compile(
 )
 
 
+# Hint blocks the generated pyproject.toml carries as commented-out TOML for the user to
+# uncomment. Each line is the comment BODY — tomlkit renders the leading "# ". They are
+# emitted one comment item per line because tomlkit >= 0.15 rejects a comment containing
+# line breaks (`ValueError: Comment cannot contain line breaks`).
+_REQUIRES_COMFYUI_HINT = '"requires-comfyui" = ">=1.0.0"  # ComfyUI version compatibility'
+
+_CLASSIFIERS_HINT = """\
+classifiers = [
+    # For OS-independent nodes (works on all operating systems)
+    "Operating System :: OS Independent",
+
+    # OR for OS-specific nodes, specify the supported systems:
+    "Operating System :: Microsoft :: Windows",  # Windows specific
+    "Operating System :: POSIX :: Linux",  # Linux specific
+    "Operating System :: MacOS",  # macOS specific
+
+    # GPU Accelerator support. Pick the ones that are supported by your extension.
+    "Environment :: GPU :: NVIDIA CUDA",    # NVIDIA CUDA support
+    "Environment :: GPU :: AMD ROCm",       # AMD ROCm support
+    "Environment :: GPU :: Intel Arc",      # Intel Arc support
+    "Environment :: NPU :: Huawei Ascend",  # Huawei Ascend support
+    "Environment :: GPU :: Apple Metal",    # Apple Metal support
+]"""
+
+
+def _append_hint(table: tomlkit.items.Table, hint: str) -> None:
+    """Append a hint block to `table` as one comment item per line."""
+    for line in hint.split("\n"):
+        # Blank separators are emitted as a bare "#" so the block stays one contiguous
+        # comment. tomlkit.comment("") would render "# " and leave trailing whitespace
+        # in the file we hand the user.
+        table.add(tomlkit.comment(line) if line.strip() else Comment(Trivia(comment_ws="", comment="#")))
+
+
 def create_comfynode_config():
     # Create the initial structure of the TOML document
     document = tomlkit.document()
@@ -72,9 +107,7 @@ def create_comfynode_config():
     comfy["includes"] = tomlkit.array()
 
     # Add uncommentable hint for ComfyUI version compatibility, below of "[tool.comfy].includes" field.
-    comfy["includes"].comment("""
-# "requires-comfyui" = ">=1.0.0"  # ComfyUI version compatibility
-""")
+    _append_hint(comfy, _REQUIRES_COMFYUI_HINT)
 
     tool.add("comfy", comfy)
     document.add("tool", tool)
@@ -228,7 +261,6 @@ def initialize_project_config():
     urls["Documentation"] = git_remote_url + "/wiki"
     urls["Bug Tracker"] = git_remote_url + "/issues"
 
-    project["urls"] = urls
     project["name"] = sanitize_node_name(repo_name)
     project["description"] = ""
     project["version"] = "1.0.0"
@@ -236,35 +268,13 @@ def initialize_project_config():
     # Use PEP 639 SPDX license identifier
     project["license"] = "MIT"
 
-    # [project].classifiers Classifiers uncommentable hint for OS/GPU support
-    # Attach classifiers comments to the project, below of "license" field.
-    # will generate a comment like this:
-    #
-    # [project]
-    # ...
-    # license = "MIT"
-    # # classifiers = [
-    # #     # For OS-independent nodes (works on all operating systems)
-    # ...
-
-    project["license"].comment("""
-# classifiers = [
-#     # For OS-independent nodes (works on all operating systems)
-#     "Operating System :: OS Independent",
-#
-#     # OR for OS-specific nodes, specify the supported systems:
-#     "Operating System :: Microsoft :: Windows",  # Windows specific
-#     "Operating System :: POSIX :: Linux",  # Linux specific
-#     "Operating System :: MacOS",  # macOS specific
-#
-#     # GPU Accelerator support. Pick the ones that are supported by your extension.
-#     "Environment :: GPU :: NVIDIA CUDA",    # NVIDIA CUDA support
-#     "Environment :: GPU :: AMD ROCm",       # AMD ROCm support
-#     "Environment :: GPU :: Intel Arc",      # Intel Arc support
-#     "Environment :: NPU :: Huawei Ascend",  # Huawei Ascend support
-#     "Environment :: GPU :: Apple Metal",    # Apple Metal support
-# ]
-""")
+    # [project].classifiers uncommentable hint for OS/GPU support, below of "license"
+    # field. `urls` is removed and re-added so the hint lands between the two rather
+    # than after the [project.urls] sub-table, which is where an append would put it.
+    if "urls" in project:
+        del project["urls"]
+    _append_hint(project, _CLASSIFIERS_HINT)
+    project["urls"] = urls
 
     tool = document.get("tool", tomlkit.table())
     comfy = tool.get("comfy", tomlkit.table())
