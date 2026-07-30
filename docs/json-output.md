@@ -110,6 +110,7 @@ line, ending the stream early.
 | `executed`         | Node finished and reported its outputs               |
 | `output`           | One file-like output became available (`url`)        |
 | `execution_error`  | Server reported a node exception (error envelope follows) |
+| `login_url`        | `comfy cloud login`: OAuth authorize URL, before the browser-callback wait |
 
 Agents must ignore events whose `type` they do not recognise — new event
 kinds may be added in a backward-compatible manner. Agents must ignore
@@ -266,6 +267,21 @@ envelope alone.
 {"schema": "event/1", "type": "execution_error", "prompt_id": "9b1c…", "details": {"node_id": "1", "exception_message": "API key invalid", "...": "..."}}
 ```
 
+### `login_url`
+
+Emitted by `comfy cloud login` under `--json`/`--json-stream` — this event is
+part of the sign-in stream, not the `run` stream. It carries the OAuth
+authorize URL as soon as it is built, and is flushed **before** the command
+blocks (up to `timeout_s` seconds) waiting for the loopback browser callback,
+so a parent process driving login headlessly can open (or forward) `url` in
+time. If the callback never arrives, the terminal envelope is an
+`oauth_timeout` error; on success it is the login envelope (`data.action:
+"login"`, `data.session` with tokens redacted).
+
+```json
+{"schema": "event/1", "type": "login_url", "url": "https://api.comfy.org/oauth/authorize?...", "timeout_s": 300}
+```
+
 ## Success envelope
 
 On `--wait` success, `data` carries:
@@ -292,6 +308,39 @@ Without `--wait` (the default), the stream ends at the `queued` envelope
 (`data.status: "queued"`, `data.watcher_spawned: bool`) and a detached
 watcher keeps the state file updated; follow up with
 `comfy jobs watch <prompt_id>` or `comfy jobs status <prompt_id>`.
+
+## `comfy validate --json` envelope
+
+`comfy validate --workflow <file> --json` checks a workflow without submitting
+it and emits a single envelope (no event stream). On a valid workflow `ok` is
+`true` and `data` carries:
+
+| Field                  | Type          | Description                                                                                     |
+| ---------------------- | ------------- | ----------------------------------------------------------------------------------------------- |
+| `workflow`             | str           | Absolute path of the validated workflow file                                                    |
+| `valid`                | bool          | Whether the graph passed validation (also the envelope `ok`)                                     |
+| `error_count`          | number        | Number of entries in `errors`                                                                    |
+| `warning_count`        | number        | Number of entries in `warnings`                                                                  |
+| `errors`               | array of dict | Per-node validation errors (empty when `valid`)                                                  |
+| `warnings`             | array of dict | Non-fatal validation warnings                                                                    |
+| `partner_nodes`        | array of str  | Sorted class_types in the workflow that are partner-API (paid) nodes. **Always present**; `[]` when none |
+| `spends_credits`       | bool          | `true` iff `partner_nodes` is non-empty — a convenience flag for "will this workflow spend Comfy credits?" |
+| `converted_from_ui`    | bool          | Present and `true` only when the input was a UI export that was lowered to API format before validating |
+| `converted_node_count` | number        | Present only alongside `converted_from_ui`: node count of the converted graph                    |
+
+`partner_nodes` / `spends_credits` are **informational only** — they never
+change validate's exit code (validate stays advisory; the credit-spend gate
+lives in `comfy run`). Detection is the same authoritative `api_node: true`
+flag (with a `partner/...` category fallback) that `comfy run` uses, run over
+the loaded `object_info`; in offline `--input` mode where the `object_info`
+lacks `api_node` flags the list is simply empty (fail-open). When
+`spends_credits` is `true`, pretty (non-`--json`) mode also prints a yellow
+`⚠ uses partner-API (paid) nodes …` line after the verdict.
+
+Invalid workflows emit `ok: false` with the same `data` fields (`valid: false`,
+a populated `errors` array, `partner_nodes`/`spends_credits` still present) and
+exit code `1`. Structural failures (missing file, non-object JSON, an
+unconvertible UI export) emit an [error object](#error-object) instead.
 
 ## Error object
 
@@ -324,6 +373,7 @@ registry test enforces this) and surfaced by `comfy discover`.
 | `connection_error`        | Server unreachable mid-flow: `URLError`, `TimeoutError`, or other `OSError` (including on `/object_info`) | —                       | 1 |
 | `workflow_unknown_nodes`  | Pre-submit validation found unknown class_types / shape mismatches              | `errors` (array), `warnings` (array)               | 1 |
 | `partner_node_requires_credential` | Workflow uses a partner-API node and no `api_key_comfy_org` credential is available | `partner_nodes` (array of str), `host`, `port` | 1 |
+| `spend_consent_required`  | Workflow embeds partner-API (paid) nodes and `--allow-spend` was not passed (machine mode) or interactive consent was declined; re-run with `--allow-spend`. Free (non-partner) workflows are unaffected. | `partner_nodes` (array of str); local path also carries `host`, `port`, the cloud path carries `where: "cloud"` | 1 |
 | `prompt_rejected`         | Server returned HTTP 400 with `node_errors`                                     | `status` (400), `node_errors` (array — [shape](#node_errors-shape)) | 1 |
 | `client_error`            | Server returned another HTTP 4xx response                                       | `status` (int, 4xx), `body` (str)                  | 1 |
 | `server_error`            | Server returned an HTTP 5xx response                                            | `status` (int, 5xx), `body` (str)                  | 1 |

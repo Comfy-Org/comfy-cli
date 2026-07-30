@@ -36,6 +36,7 @@ from websocket import WebSocket, WebSocketException, WebSocketTimeoutException
 from comfy_cli import cancellation, execution_errors, tracking
 from comfy_cli.env_checker import check_comfy_server_running
 from comfy_cli.host_port import resolve_host_port as _resolve_host_port
+from comfy_cli.http import authed_urlopen, plain_urlopen
 from comfy_cli.output import get_renderer
 from comfy_cli.where import cloud_preflight_or_exit
 
@@ -83,7 +84,7 @@ def _server_or_error(host: str, port: int, *, raise_on_missing: bool = True) -> 
 def _http_get_json(url: str, *, timeout: float = 10.0) -> Any:
     req = urllib.request.Request(url)
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with plain_urlopen(req, timeout=timeout) as resp:
             return json.loads(resp.read())
     except urllib.error.URLError as e:
         raise RuntimeError(f"failed to GET {url}: {e}") from e
@@ -356,7 +357,7 @@ def ls_cmd(
     limit: Annotated[int, typer.Option(help="How many history entries to include.")] = 10,
     where: Annotated[
         str | None,
-        typer.Option("--where", help="'local' (default) or 'cloud'. Cloud requires `comfy auth login`."),
+        typer.Option("--where", help="'local' (default) or 'cloud'. Cloud requires `comfy cloud login`."),
     ] = None,
     local_only: Annotated[
         bool,
@@ -601,7 +602,72 @@ def status_cmd(
         return _cloud_status(prompt_id)
 
     h, p = _resolve_host_port(host, port)
-    _server_or_error(h, p)
+    if not _server_or_error(h, p, raise_on_missing=False):
+        # Server is down. The on-disk state file (written by `comfy run` and
+        # maintained by the async watcher) still knows what this prompt was
+        # doing when the server was last seen — a bare `server_not_running`
+        # throws that attribution away.
+        from comfy_cli import jobs_state
+
+        try:
+            st = jobs_state.read(prompt_id)
+        except ValueError:  # unsafe prompt_id — no state file to read
+            st = None
+
+        if st is None:
+            # Untracked prompt: same envelope as before, byte for byte.
+            renderer.error(
+                code="server_not_running",
+                message=f"ComfyUI not running on {h}:{p}",
+                hint="run: comfy launch",
+                details={"host": h, "port": p},
+            )
+            raise typer.Exit(code=1)
+
+        if st.is_terminal:
+            # The job finished before the server stopped — the state file is
+            # the authoritative record, so this is a normal result, not an
+            # error. Callers branch on `status`/`error`.
+            snapshot = {
+                "prompt_id": prompt_id,
+                "status": st.status,
+                "outputs": list(st.outputs or []),
+                "error": st.error,
+                "host": h,
+                "port": p,
+                "server_running": False,
+                "source": "state_file",
+                "submitted_at": st.submitted_at,
+                "updated_at": st.updated_at,
+                "workflow": st.workflow,
+            }
+            if renderer.is_pretty():
+                _render_status_pretty(snapshot, host=h, port=p)
+            renderer.emit(snapshot, command="jobs status")
+            return
+
+        # Non-terminal: the job was queued/running when the server was last
+        # seen, so the server most likely died underneath it. Keep the
+        # `server_not_running` code (callers key on it) and attribute.
+        renderer.error(
+            code="server_not_running",
+            message=(
+                f"ComfyUI not running on {h}:{p} — job {prompt_id} was {st.status!r} when the server "
+                f"was last seen (submitted {st.submitted_at}, last update {st.updated_at}). The server "
+                f"may have died while executing it (e.g. killed by the OS on an out-of-memory allocation)."
+            ),
+            hint="run: comfy launch — then check `comfy jobs ls` for the job's last recorded state",
+            details={
+                "host": h,
+                "port": p,
+                "prompt_id": prompt_id,
+                "last_known_status": st.status,
+                "submitted_at": st.submitted_at,
+                "updated_at": st.updated_at,
+                "workflow": st.workflow,
+            },
+        )
+        raise typer.Exit(code=1)
 
     snapshot = _snapshot(h, p, prompt_id)
     if snapshot is None:
@@ -991,7 +1057,7 @@ def _local_cancel(prompt_id: str, host: str, port: int) -> None:
     )
     queue_ok = True
     try:
-        with urllib.request.urlopen(queue_req, timeout=10) as resp:
+        with plain_urlopen(queue_req, timeout=10) as resp:
             _ = resp.read()
     except (urllib.error.HTTPError, urllib.error.URLError, OSError):
         # Server refused the delete; common when the prompt isn't in queue.
@@ -1015,7 +1081,7 @@ def _local_cancel(prompt_id: str, host: str, port: int) -> None:
     if prompt_id in running_ids:
         interrupt_req = urllib.request.Request(f"{base}/interrupt", method="POST")
         try:
-            with urllib.request.urlopen(interrupt_req, timeout=10) as resp:
+            with plain_urlopen(interrupt_req, timeout=10) as resp:
                 _ = resp.read()
         except (urllib.error.HTTPError, urllib.error.URLError, OSError):
             interrupt_ok = False
@@ -1064,14 +1130,9 @@ def _cloud_cancel(prompt_id: str) -> None:
     # escape (e.g. ``../foo`` → ``%2E%2E%2Ffoo``). Cloud rejects bad UUIDs
     # upstream too; encoding here is defense in depth.
     url = target.url("jobs", urllib.parse.quote(prompt_id, safe=""), "cancel")
-    req = urllib.request.Request(url, data=b"", method="POST")
-    if target.api_key:
-        req.add_header("X-API-Key", target.api_key)
-    elif target.auth_token:
-        req.add_header("Authorization", f"Bearer {target.auth_token}")
 
     try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
+        with authed_urlopen(url, target, method="POST", data=b"", timeout=15) as resp:
             body = resp.read()
     except urllib.error.HTTPError as e:
         body_text = (e.read() or b"")[:1000].decode("utf-8", "replace")
@@ -1094,7 +1155,7 @@ def _cloud_cancel(prompt_id: str) -> None:
         renderer.error(
             code="cloud_http_error",
             message=f"cancel failed: {e}",
-            hint="check network / `comfy auth whoami`",
+            hint="check network / `comfy cloud whoami`",
         )
         raise typer.Exit(code=1) from e
 
@@ -1439,7 +1500,7 @@ def _cloud_client():
         return Client(target, clear_session_on_auth_failure=False)
     except Unauthenticated as e:
         renderer = get_renderer()
-        renderer.error(code="cloud_unauthorized", message=str(e), hint="run: comfy auth login")
+        renderer.error(code="cloud_unauthorized", message=str(e), hint="run: comfy cloud login")
         raise typer.Exit(code=1) from e
 
 

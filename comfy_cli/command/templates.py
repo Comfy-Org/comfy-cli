@@ -28,6 +28,7 @@ from typing import Annotated, Any
 import typer
 
 from comfy_cli import tracking
+from comfy_cli.http import plain_urlopen
 from comfy_cli.output import get_renderer, rprint
 
 app = typer.Typer(no_args_is_help=True, help="Browse the Comfy workflow-template gallery.")
@@ -48,7 +49,7 @@ def _cache_path() -> Path:
 
 def _fetch_gallery(url: str = GALLERY_URL, timeout: float = 15.0) -> bytes:
     req = urllib.request.Request(url, headers={"User-Agent": "comfy-cli"})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
+    with plain_urlopen(req, timeout=timeout) as resp:
         if resp.status != 200:
             raise RuntimeError(f"gallery fetch failed: HTTP {resp.status}")
         return resp.read()
@@ -410,7 +411,7 @@ def _fetch_template_workflow(name: str, *, timeout: float = 15.0) -> bytes:
     """Pull a single template's workflow JSON from the canonical GitHub raw URL."""
     url = _TEMPLATE_WORKFLOW_URL.format(name=urllib.parse.quote(name, safe=""))
     req = urllib.request.Request(url, headers={"User-Agent": "comfy-cli"})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
+    with plain_urlopen(req, timeout=timeout) as resp:
         if resp.status != 200:
             raise RuntimeError(f"template workflow fetch failed: HTTP {resp.status}")
         return resp.read()
@@ -612,6 +613,61 @@ def _gallery_paid_signals(row: dict[str, Any]) -> list[str]:
     return signals
 
 
+def _enforce_spend_gate(
+    renderer,
+    *,
+    name: str,
+    workflow: Any,
+    row: dict[str, Any],
+    object_info: dict,
+    allow_spend: bool,
+) -> None:
+    """Consent interlock before submitting a template that spends Comfy credits.
+
+    Returns None when the run may proceed (no paid signals, --allow-spend, or
+    an interactive yes); raises typer.Exit(1) otherwise. Behavior is the
+    BE-4113 gate moved verbatim out of run_template_cmd.
+    """
+    import sys
+
+    from rich.markup import escape
+
+    paid_nodes = _detect_paid_nodes(workflow, object_info)
+    gallery_signals = _gallery_paid_signals(row)
+    if (paid_nodes or gallery_signals) and not allow_spend:
+        evidence = {
+            "template": name,
+            "partner_nodes": paid_nodes,
+            "gallery_signals": gallery_signals,
+        }
+        if renderer.is_pretty() and sys.stdin and sys.stdin.isatty():
+            rprint(
+                f"[yellow]⚠ Template [bold]{escape(name)}[/bold] uses partner-API nodes that spend Comfy credits.[/yellow]"
+            )
+            if paid_nodes:
+                rprint(f"  [dim]nodes:[/dim] {escape(', '.join(paid_nodes))}")
+            if gallery_signals:
+                rprint(f"  [dim]gallery:[/dim] {escape(', '.join(gallery_signals))}")
+            if not typer.confirm("Run anyway and spend credits?", default=False):
+                renderer.error(
+                    code="spend_consent_required",
+                    message="declined — template not submitted, no credits spent",
+                    details=evidence,
+                )
+                raise typer.Exit(code=1)
+        else:
+            renderer.error(
+                code="spend_consent_required",
+                message=(
+                    f"template {name!r} uses partner-API (paid) nodes; "
+                    "re-run with --allow-spend to consent to spending Comfy credits"
+                ),
+                hint="paid nodes only run with explicit consent; OSS templates run without this flag",
+                details=evidence,
+            )
+            raise typer.Exit(code=1)
+
+
 def _resolve_param_addresses(
     renderer,
     overrides: dict[str, Any],
@@ -747,7 +803,6 @@ def run_template_cmd(
     validation errors. Templates that embed partner-API nodes spend Comfy
     credits and are gated behind --allow-spend / an interactive confirmation.
     """
-    import sys
     import tempfile
 
     from comfy_cli.command import run as run_module
@@ -888,38 +943,14 @@ def run_template_cmd(
 
     # -- Spend gate (BE-4113): partner-API nodes spend Comfy credits. Require
     # explicit consent before submitting anything that would burn them.
-    paid_nodes = _detect_paid_nodes(workflow, object_info)
-    gallery_signals = _gallery_paid_signals(row)
-    if (paid_nodes or gallery_signals) and not allow_spend:
-        evidence = {
-            "template": name,
-            "partner_nodes": paid_nodes,
-            "gallery_signals": gallery_signals,
-        }
-        if renderer.is_pretty() and sys.stdin.isatty():
-            rprint(f"[yellow]⚠ Template [bold]{name}[/bold] uses partner-API nodes that spend Comfy credits.[/yellow]")
-            if paid_nodes:
-                rprint(f"  [dim]nodes:[/dim] {', '.join(paid_nodes)}")
-            if gallery_signals:
-                rprint(f"  [dim]gallery:[/dim] {', '.join(gallery_signals)}")
-            if not typer.confirm("Run anyway and spend credits?", default=False):
-                renderer.error(
-                    code="spend_consent_required",
-                    message="declined — template not submitted, no credits spent",
-                    details=evidence,
-                )
-                raise typer.Exit(code=1)
-        else:
-            renderer.error(
-                code="spend_consent_required",
-                message=(
-                    f"template {name!r} uses partner-API (paid) nodes; "
-                    "re-run with --allow-spend to consent to spending Comfy credits"
-                ),
-                hint="paid nodes only run with explicit consent; OSS templates run without this flag",
-                details=evidence,
-            )
-            raise typer.Exit(code=1)
+    _enforce_spend_gate(
+        renderer,
+        name=name,
+        workflow=workflow,
+        row=row,
+        object_info=object_info,
+        allow_spend=allow_spend,
+    )
 
     # -- Hand off to the existing run path (UI→API conversion, partner
     # credential injection, preflight validation, execution, jobs state).
@@ -936,6 +967,11 @@ def run_template_cmd(
             verbose=verbose,
             timeout=timeout,
             api_key=api_key,
+            # run-template's own spend gate (above) has already consented (or
+            # found no paid nodes), so forward consent to avoid a second gate in
+            # execute() (BE-4326). run-template's gate is strictly stronger — it
+            # also inspects gallery signals — and has already run.
+            allow_spend=True,
         )
     finally:
         try:

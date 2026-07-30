@@ -24,6 +24,7 @@ from comfy_cli.file_utils import (
     zip_files,
 )
 from comfy_cli.output import rprint as print  # context-aware: stderr in JSON mode
+from comfy_cli.output.renderer import get_renderer
 from comfy_cli.registry import (
     RegistryAPI,
     extract_node_configuration,
@@ -218,6 +219,15 @@ def restore_snapshot(
         show_default=False,
         help="Restore for pip packages specified by local paths.",
     ),
+    fast_deps: Annotated[
+        bool,
+        typer.Option(
+            "--fast-deps",
+            show_default=False,
+            help="Use the fast (uv) dependency installer, matching `comfy install --fast-deps`. "
+            "For snapshot restore this runs the uv-compile fast path (requires ComfyUI-Manager v4.1+).",
+        ),
+    ] = False,
     uv_compile: Annotated[
         bool | None,
         typer.Option(
@@ -227,6 +237,16 @@ def restore_snapshot(
         ),
     ] = None,
 ):
+    # `--fast-deps` mirrors the `comfy install --fast-deps` UX (issue #217). cm_cli's
+    # `restore-snapshot` does NOT accept `--no-deps`, so the DependencyCompiler-based
+    # fast path used by `install`/`reinstall` is unavailable here; the fast uv path
+    # restore-snapshot *does* support is `--uv-compile` (it sets no-deps + batch-resolves
+    # with uv internally). So `--fast-deps` forwards the uv-compile fast path. Passing it
+    # alongside an explicit `--no-uv-compile` is contradictory.
+    if fast_deps and uv_compile is False:
+        typer.echo("Cannot use --fast-deps with --no-uv-compile", err=True)
+        raise typer.Exit(code=1)
+
     extras = []
 
     if pip_non_url:
@@ -238,8 +258,12 @@ def restore_snapshot(
     if pip_local_url:
         extras += ["--pip-local-url"]
 
+    effective_uv_compile = _resolve_uv_compile(uv_compile)
+    if fast_deps:
+        effective_uv_compile = True
+
     path = os.path.abspath(path)
-    execute_cm_cli(["restore-snapshot", path] + extras, uv_compile=_resolve_uv_compile(uv_compile))
+    execute_cm_cli(["restore-snapshot", path] + extras, uv_compile=effective_uv_compile)
 
 
 @app.command("restore-dependencies", help="Restore dependencies from installed custom nodes")
@@ -277,7 +301,7 @@ def enable_gui():
     print("[dim]ComfyUI will launch with: --enable-manager[/dim]")
 
 
-@manager_app.command("disable-gui", help="Enable ComfyUI-Manager without GUI")
+@manager_app.command("disable-gui", help="Disable the ComfyUI-Manager GUI (Manager stays enabled, headless)")
 @tracking.track_command("node")
 def disable_gui():
     """Enable ComfyUI-Manager but disable its GUI."""
@@ -469,6 +493,26 @@ def node_completer(incomplete: str) -> list[str]:
         with open(tmp_path, encoding="UTF-8", errors="ignore") as cache_file:
             return [node_id for node_id in cache_file.readlines() if node_id.startswith(incomplete)]
 
+    except Exception:
+        return []
+
+
+def installed_pack_completer(incomplete: str) -> list[str]:
+    """Complete against *installed pack directory names*.
+
+    Deliberately not ``node_completer``: that one serves the registry node-id
+    cache, and a git-cloned pack's directory name is its repo name, not its
+    registry id. ``comfy node deps`` matches on directory name.
+    """
+    try:
+        from comfy_cli.command.pack_scan import iter_pack_dirs
+
+        workspace = workspace_manager.workspace_path
+        if not workspace:
+            return []
+        return [
+            p.name for p in iter_pack_dirs(pathlib.Path(workspace) / "custom_nodes") if p.name.startswith(incomplete)
+        ]
     except Exception:
         return []
 
@@ -965,6 +1009,28 @@ def deps_in_workflow(
         channel,
         mode=mode,
     )
+
+
+@app.command(
+    "deps",
+    help="Report each pack's declared Python requirements vs the versions installed in the workspace venv (read-only).",
+)
+@tracking.track_command("node")
+def deps(
+    pack_names: Annotated[
+        list[str] | None,
+        typer.Argument(
+            show_default=False,
+            help="Pack directory names to report on (case-insensitive). Omit to report every installed pack.",
+            autocompletion=installed_pack_completer,
+        ),
+    ] = None,
+):
+    # Native + read-only on purpose: no cm-cli, no pip install, no network, so
+    # it works on a workspace that never installed ComfyUI-Manager.
+    from comfy_cli.command import node_deps
+
+    node_deps.execute(get_renderer(), workspace_manager.workspace_path, pack_names)
 
 
 def validate_node_for_publishing():
