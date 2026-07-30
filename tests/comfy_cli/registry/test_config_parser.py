@@ -6,6 +6,7 @@ import tomlkit
 
 from comfy_cli.registry.config_parser import (
     _strip_url_credentials,
+    create_comfynode_config,
     extract_node_configuration,
     initialize_project_config,
     validate_and_extract_accelerator_classifiers,
@@ -1066,3 +1067,80 @@ def test_initialize_project_config_vcs_with_inline_comment(tmp_path, monkeypatch
         data = tomlkit.parse(f.read())
     deps = [str(d) for d in data["project"]["dependencies"]]
     assert deps == ["git+https://github.com/org/mono.git#subdirectory=pkg"]
+
+
+def test_create_comfynode_config_emits_requires_comfyui_hint(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    create_comfynode_config()
+    content = (tmp_path / "pyproject.toml").read_text()
+
+    hint = '# "requires-comfyui" = ">=1.0.0"  # ComfyUI version compatibility'
+    assert hint in content
+    # The hint documents [tool.comfy].includes, so it must render below that field.
+    assert content.index("includes = [") < content.index(hint)
+    tomlkit.parse(content)
+
+
+def test_initialize_project_config_emits_classifiers_hint(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "remote", "add", "origin", "https://github.com/user/ComfyUI-MyNode.git"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+    initialize_project_config()
+    content = (tmp_path / "pyproject.toml").read_text()
+
+    for line in (
+        "# classifiers = [",
+        '#     "Operating System :: OS Independent",',
+        '#     "Environment :: GPU :: Apple Metal",    # Apple Metal support',
+        "# ]",
+    ):
+        assert line in content
+    # The hint documents [project].classifiers, so it must render below "license" and
+    # still inside the [project] table.
+    assert content.index('license = "MIT"') < content.index("# classifiers = [") < content.index("[project.urls]")
+    tomlkit.parse(content)
+
+
+def test_classifiers_hint_is_valid_toml_once_uncommented(tmp_path, monkeypatch):
+    """The hint's whole promise is that a user can uncomment it in place."""
+    monkeypatch.chdir(tmp_path)
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "remote", "add", "origin", "https://github.com/user/ComfyUI-MyNode.git"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+    initialize_project_config()
+    content = (tmp_path / "pyproject.toml").read_text()
+
+    uncommented = []
+    for line in content.splitlines():
+        if line.startswith("# classifiers = [") or (uncommented and not uncommented[-1].endswith("]")):
+            uncommented.append(line.removeprefix("# ").removeprefix("#"))
+    data = tomlkit.parse("[project]\n" + "\n".join(uncommented))
+    assert "Operating System :: OS Independent" in data["project"]["classifiers"]
+
+
+def test_generated_pyproject_has_no_trailing_whitespace(tmp_path, monkeypatch):
+    """Blank hint separators must render as a bare "#", not "# " — user repos commonly
+    run a trailing-whitespace pre-commit hook over the file we generate."""
+    monkeypatch.chdir(tmp_path)
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "remote", "add", "origin", "https://github.com/user/ComfyUI-MyNode.git"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+    initialize_project_config()
+    content = (tmp_path / "pyproject.toml").read_text()
+
+    assert [line for line in content.splitlines() if line != line.rstrip()] == []
+    # The separators must still be comments, so the block stays one uncommentable unit.
+    assert "#\n#     # OR for OS-specific nodes" in content

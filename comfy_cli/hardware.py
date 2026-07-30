@@ -258,27 +258,34 @@ def _detect_gpu_amd() -> dict | None:
     if not isinstance(payload, dict) or not payload:
         return None
 
-    # rocm-smi keys cards as "card0", "card1", ...; take the first card entry.
-    # Gate on the "card" prefix so a non-card metadata block (e.g. a "system"
-    # dict) that iterates first isn't mistaken for the GPU.
+    # rocm-smi keys cards as "card0", "card1", ...; take the first card entry
+    # that yields any data (a card missing the queried fields shouldn't mask a
+    # later card that has them). Gate on the "card" prefix so a non-card
+    # metadata block (e.g. a "system" dict) that iterates first isn't mistaken
+    # for the GPU.
     model = None
     vram_bytes = None
     for key, card in payload.items():
         if not str(key).lower().startswith("card") or not isinstance(card, dict):
             continue
+        card_model = None
+        card_vram_bytes = None
         for field, value in card.items():
             lowered = field.lower()
-            if model is None and "name" in lowered:
-                model = str(value).strip() or None
+            if card_model is None and "name" in lowered:
+                card_model = str(value).strip() or None
             # Match the total-capacity key ("VRAM Total Memory (B)"), excluding
             # the usage key ("VRAM Total Used Memory (B)") which also contains
             # both "vram" and "total" and would otherwise understate capacity.
-            if vram_bytes is None and "vram" in lowered and "total" in lowered and "used" not in lowered:
+            if card_vram_bytes is None and "vram" in lowered and "total" in lowered and "used" not in lowered:
                 try:
-                    vram_bytes = int(value)
+                    card_vram_bytes = int(value)
                 except (ValueError, TypeError):
                     pass
-        break
+        if card_model is not None or card_vram_bytes is not None:
+            model = card_model
+            vram_bytes = card_vram_bytes
+            break
 
     # Report no GPU rather than a phantom all-None AMD block (which would spoof
     # GPU presence for routing decisions), matching the NVIDIA probes.

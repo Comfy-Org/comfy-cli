@@ -1,0 +1,104 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "comfy node deps",
+  "description": "Per-pack Python dependency report: each installed custom node pack's declared requirements (requirements.txt and/or pyproject.toml [project] dependencies) against the versions installed in the workspace venv. Read-only: no installs, no cm-cli, no network. Exit code is 0 even when requirements are missing or mismatched — this is a report, not a check.",
+  "type": "object",
+  "properties": {
+    "workspace": { "type": "string", "description": "Resolved ComfyUI workspace path." },
+    "python": {
+      "type": "string",
+      "description": "Interpreter whose site-packages were probed (`pip list --format=json`, run once for the whole report)."
+    },
+    "compiled_lock": {
+      "type": "object",
+      "description": "Presence + path of the workspace `requirements.compiled` written by the uv-compile install path. Never parsed or diffed in v1.",
+      "properties": {
+        "present": { "type": "boolean" },
+        "path": { "type": ["string", "null"] }
+      },
+      "required": ["present", "path"]
+    },
+    "packs": {
+      "type": "array",
+      "description": "One row per reported pack, in directory-name order (or in the order requested on the command line).",
+      "items": {
+        "type": "object",
+        "properties": {
+          "pack": { "type": "string", "description": "Pack directory name." },
+          "path": {
+            "type": ["string", "null"],
+            "description": "Pack path relative to the workspace, or null when the named pack is not installed."
+          },
+          "status": {
+            "type": "string",
+            "enum": ["installed", "not_installed"],
+            "description": "`not_installed` when a name given on the command line matched no pack directory."
+          },
+          "requirement_files": {
+            "type": "array",
+            "description": "Which declaration files contributed requirements.",
+            "items": { "type": "string", "enum": ["requirements.txt", "pyproject.toml"] }
+          },
+          "requirements": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "raw": { "type": "string", "description": "The declared line, verbatim (comments stripped)." },
+                "name": {
+                  "type": ["string", "null"],
+                  "description": "Requirement name, or null when the line is unparseable."
+                },
+                "specifier": {
+                  "type": ["string", "null"],
+                  "description": "PEP 440 specifier (empty string for a bare name), or null when unparseable."
+                },
+                "marker": {
+                  "type": "string",
+                  "description": "PEP 508 environment marker, when declared. NOT evaluated — the relevant environment is the workspace venv's, not the CLI's."
+                },
+                "source": { "type": "string", "enum": ["requirements.txt", "pyproject.toml"] },
+                "installed": {
+                  "type": ["string", "null"],
+                  "description": "Version found in the workspace venv, or null when missing/unparseable/unknown."
+                },
+                "status": {
+                  "type": "string",
+                  "enum": ["satisfied", "mismatch", "missing", "unparseable", "unknown"],
+                  "description": "`unparseable` covers pip options (-r, --extra-index-url) and bare VCS/URL lines; `unknown` means the comparison could not be made (the pip probe failed, or the installed dist records a non-PEP-440 version)."
+                }
+              },
+              "required": ["raw", "name", "specifier", "source", "installed", "status"]
+            }
+          },
+          "summary": {
+            "type": "object",
+            "description": "Per-status counts for this pack. Every status key is always present.",
+            "properties": {
+              "satisfied": { "type": "integer" },
+              "mismatch": { "type": "integer" },
+              "missing": { "type": "integer" },
+              "unparseable": { "type": "integer" },
+              "unknown": { "type": "integer" }
+            },
+            "required": ["satisfied", "mismatch", "missing", "unparseable", "unknown"]
+          }
+        },
+        "required": ["pack", "path", "status", "requirement_files", "requirements", "summary"]
+      }
+    },
+    "warnings": {
+      "type": "array",
+      "description": "Non-fatal problems. `installed_versions_unavailable` means the pip probe failed, so every requirement is `unknown`.",
+      "items": {
+        "type": "object",
+        "properties": {
+          "code": { "type": "string" },
+          "message": { "type": "string" }
+        },
+        "required": ["code", "message"]
+      }
+    }
+  },
+  "required": ["workspace", "python", "compiled_lock", "packs"]
+}
