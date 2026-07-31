@@ -123,3 +123,15 @@ def test_coerce_string_array_malformed_json_still_errors():
     # not be silently reinterpreted as a filename starting with '['.
     with pytest.raises(schema.SchemaError):
         schema._coerce(_string_array_flag(), '["a.jpg",')
+
+
+def test_coerce_string_array_empty_raises():
+    # Empty string splits and strips to no items; should raise SchemaError, not return [].
+    with pytest.raises(schema.SchemaError, match="expected at least one value"):
+        schema._coerce(_string_array_flag(), "")
+
+
+def test_coerce_string_array_commas_only_raises():
+    # Commas and whitespace split/strip to no items; should raise SchemaError, not return [].
+    with pytest.raises(schema.SchemaError, match="expected at least one value"):
+        schema._coerce(_string_array_flag(), ", ,")

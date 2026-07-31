@@ -157,7 +157,10 @@ def _coerce(flag: FlagDef, raw: str) -> Any:
             # string array (prod: --image 'Linked profile pic.jpeg'); demanding
             # JSON here only manufactures failures. Explicit JSON ('[' prefix)
             # still takes the strict path below.
-            return [p.strip() for p in raw.split(",") if p.strip()]
+            items = [p.strip() for p in raw.split(",") if p.strip()]
+            if not items:
+                raise SchemaError(f"--{flag.name}: expected at least one value")
+            return items
         try:
             return json.loads(raw)
         except json.JSONDecodeError as e:
