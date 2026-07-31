@@ -25,6 +25,7 @@ from comfy_cli.file_utils import (
 )
 from comfy_cli.output import get_renderer
 from comfy_cli.output import rprint as print  # context-aware: stderr in JSON mode
+from comfy_cli.output.sanitize import sanitize_markup
 from comfy_cli.workspace_manager import WorkspaceManager
 
 app = typer.Typer()
@@ -587,6 +588,11 @@ def download(
         try:
             download_file(url, local_filepath, headers, downloader=resolved_downloader)
         except DownloadException as e:
+            # `message` is rendered through `Text` (see `_download_failure`), which
+            # never parses markup, and `error_panel` sanitizes it (ANSI/control-byte
+            # strip) before it reaches the terminal — so a server-chosen message (the
+            # 401 branch of guess_status_code_reason echoes one, and aria2 relays its
+            # own) can't clear the screen or repaint earlier output.
             raise _download_failure(
                 code="download_failed",
                 message=str(e),
@@ -915,7 +921,9 @@ def _render_download_rows(rows: list[dict]) -> None:
     ui.display_table(data, ["ID", "Status", "%", "Bytes", "Elapsed", "Destination"])
     for row in rows:
         if row.get("error"):
-            print(f"[bold red]{row['id']}: {escape(str(row['error']))}[/bold red]")
+            # The state file is written by a detached worker, so this string is
+            # server-influenced text read back from disk — sanitize on the way out.
+            print(f"[bold red]{row['id']}: {sanitize_markup(row['error'])}[/bold red]")
 
 
 def _reconciled(state: download_state.DownloadState) -> tuple[download_state.DownloadState, bool]:

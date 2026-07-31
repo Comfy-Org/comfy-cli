@@ -12,6 +12,7 @@ import requests
 from pathspec import PathSpec
 
 from comfy_cli import constants, ui
+from comfy_cli.output.sanitize import sanitize_value
 
 
 class DownloadException(Exception):
@@ -53,6 +54,18 @@ def _report_progress(callback: ProgressCallback | None, completed: int, total: i
 
 
 def guess_status_code_reason(status_code: int, message: str) -> str:
+    """Describe an HTTP failure for a human.
+
+    Every branch but 401 returns a canned string. The 401 branch echoes the
+    server's own JSON ``message`` back to the terminal, so that one value is
+    attacker-chosen: it goes through :func:`sanitize_value` before it is
+    interpolated. Sanitizing here rather than at each print site means every
+    consumer of the reason — the ``comfy model download`` error line, the
+    background-download state file, ``comfy node install`` — gets the same
+    guarantee without having to remember. Markup escaping is deliberately NOT
+    applied here: not every consumer renders through a markup-interpreting
+    sink, and the escaping backslashes would be visible in the ones that don't.
+    """
     if status_code == 401:
 
         def parse_json(input_data):
@@ -72,7 +85,8 @@ def guess_status_code_reason(status_code: int, message: str) -> str:
         msg_json = parse_json(message)
         if msg_json is not None:
             if "message" in msg_json:
-                return f"Unauthorized download ({status_code}).\n{msg_json['message']}\nor you can set a CivitAI API token using `comfy model download --set-civitai-api-token` or via the `{constants.CIVITAI_API_TOKEN_ENV_KEY}` environment variable"
+                server_message = sanitize_value(msg_json["message"])
+                return f"Unauthorized download ({status_code}).\n{server_message}\nor you can set a CivitAI API token using `comfy model download --set-civitai-api-token` or via the `{constants.CIVITAI_API_TOKEN_ENV_KEY}` environment variable"
         return f"Unauthorized download ({status_code}), you might need to manually log into a browser to download this"
     elif status_code == 403:
         return f"Forbidden url ({status_code}), you might need to manually log into a browser to download this"
