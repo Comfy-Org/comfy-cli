@@ -204,6 +204,107 @@ def _graph_with_autogrow_template(template: dict) -> Graph:
     return Graph.from_object_info(_object_info_with_autogrow_template(template))
 
 
+def _object_info_with_inputcount() -> dict[str, Any]:
+    """``_object_info()`` plus ``ImageBatchMulti`` — the kijai KJNodes family
+    (also MaskBatchMulti, ConditioningMultiCombine, JoinStringMulti, …) that
+    is NOT autogrow-typed: the schema declares fixed ``image_1``/``image_2``
+    inputs plus a required INT ``inputcount`` widget the node reads at
+    runtime to decide how many ``image_N`` slots to look at. Shape pinned
+    against the production catalog snapshot
+    (``services/ingest/data/object_info.json``, key ``ImageBatchMulti``):
+
+        "required": {
+          "inputcount": ["INT", {"default": 2, "min": 2, "max": 1000, "step": 1}],
+          "image_1": ["IMAGE"]
+        },
+        "optional": {"image_2": ["IMAGE"]}
+
+    Detection signal for the connect path (see ``_inputcount_family_match`` in
+    ``workflow_ops.py``): a required INT widget literally named ``inputcount``
+    PLUS a ``{elem}_1`` sibling input for the requested element — both must be
+    present so an unrelated node with a coincidental ``foo_1`` input is never
+    misclassified. Bare 1-based keys (``image_3``) are the CORRECT wire
+    address for this family — unlike autogrow's dotted ``base.elemN`` — which
+    is exactly what prod agents were sending and the CLI wrongly refused.
+    """
+    info = copy.deepcopy(_object_info())
+    info["ImageBatchMulti"] = {
+        "input": {
+            "required": {
+                "inputcount": ["INT", {"default": 2, "min": 2, "max": 1000, "step": 1}],
+                "image_1": ["IMAGE"],
+            },
+            "optional": {"image_2": ["IMAGE"]},
+        },
+        "input_order": {"required": ["inputcount", "image_1"], "optional": ["image_2"]},
+        "output": ["IMAGE"],
+        "output_name": ["images"],
+        "category": "KJNodes/image",
+        "display_name": "Image Batch Multi",
+        "python_module": "custom_nodes.ComfyUI-KJNodes",
+    }
+    return info
+
+
+def _graph_with_inputcount() -> Graph:
+    return Graph.from_object_info(_object_info_with_inputcount())
+
+
+def _inputcount_workflow(existing: int = 2) -> dict:
+    """An ``ImageBatchMulti`` node (id 20) with ``existing`` numbered
+    ``image_N`` inputs already wired (from dummy VAEDecode sources 21, 22,
+    …), plus one more unwired VAEDecode source (id 20 + existing + 1) to
+    connect the next slot from."""
+    nodes = []
+    links = []
+    link_id = 0
+    for i in range(1, existing + 1):
+        src_id = 20 + i
+        nodes.append(
+            {
+                "id": src_id,
+                "type": "VAEDecode",
+                "pos": [0, i * 100],
+                "inputs": [
+                    {"name": "samples", "type": "LATENT", "link": None},
+                    {"name": "vae", "type": "VAE", "link": None},
+                ],
+                "outputs": [{"name": "IMAGE", "type": "IMAGE", "links": [link_id]}],
+                "widgets_values": [],
+            }
+        )
+        links.append([link_id, src_id, 0, 20, i - 1, "IMAGE"])
+        link_id += 1
+    batch_inputs = [
+        {"name": f"image_{i}", "type": "IMAGE", "link": i - 1} for i in range(1, existing + 1)
+    ]
+    nodes.append(
+        {
+            "id": 20,
+            "type": "ImageBatchMulti",
+            "pos": [400, 0],
+            "inputs": batch_inputs,
+            "outputs": [{"name": "IMAGE", "type": "IMAGE", "links": []}],
+            "widgets_values": [existing],
+        }
+    )
+    extra_src_id = 20 + existing + 1
+    nodes.append(
+        {
+            "id": extra_src_id,
+            "type": "VAEDecode",
+            "pos": [0, (existing + 1) * 100],
+            "inputs": [
+                {"name": "samples", "type": "LATENT", "link": None},
+                {"name": "vae", "type": "VAE", "link": None},
+            ],
+            "outputs": [{"name": "IMAGE", "type": "IMAGE", "links": []}],
+            "widgets_values": [],
+        }
+    )
+    return {"last_node_id": extra_src_id, "last_link_id": link_id, "nodes": nodes, "links": links}
+
+
 @pytest.fixture
 def patched_graph(monkeypatch):
     monkeypatch.setattr(workflow_edit, "_get_graph", lambda *a, **kw: _graph())
@@ -878,6 +979,84 @@ class TestConnect:
         # old source's out-links no longer carry the retired link
         old_src = next(n for n in wf["nodes"] if n["id"] == 7)
         assert 1 not in (old_src["outputs"][0]["links"] or [])
+
+    def test_inputcount_family_bare_key_grows_and_bumps_count(self):
+        """kijai ``inputcount`` family (ImageBatchMulti et al.): bare 1-based
+        ``image_3`` IS the correct wire address (unlike autogrow's dotted
+        ``base.elemN``) — prod agents sent exactly this and the CLI wrongly
+        refused it. Growing the slot must ALSO bump the ``inputcount`` widget
+        to N, or the node never reads the new slot at runtime. Detection
+        signal pinned against ImageBatchMulti's real object_info entry (see
+        ``_object_info_with_inputcount``): a required INT ``inputcount``
+        widget plus a ``{elem}_1`` sibling input."""
+        g = _graph_with_inputcount()
+        wf = _inputcount_workflow(existing=2)  # image_1, image_2 already wired
+        wf, op = workflow_ops.connect(wf, g, 23, "IMAGE", 20, "image_3", actor="a")
+        assert op["grow"]["name"] == "image_3"
+        node = next(n for n in wf["nodes"] if n["id"] == 20)
+        assert any(i["name"] == "image_3" and i["link"] is not None for i in node["inputs"])
+        idx = g.widget_order("ImageBatchMulti").index("inputcount")
+        assert node["widgets_values"][idx] == 3
+
+    def test_inputcount_family_out_of_sequence_rejected_with_next_key(self):
+        """Skipping ahead (``image_5`` when only 2 slots exist) is rejected
+        with the guided next-free-key error, mirroring autogrow's
+        out-of-sequence guidance — never a silent/bogus grow."""
+        g = _graph_with_inputcount()
+        wf = _inputcount_workflow(existing=2)
+        with pytest.raises(ValueError, match="image_3"):
+            workflow_ops.connect(wf, g, 23, "IMAGE", 20, "image_5", actor="a")
+        node = next(n for n in wf["nodes"] if n["id"] == 20)
+        assert not any(i["name"] == "image_5" for i in node["inputs"])
+
+    def test_inputcount_family_concurrent_connects_stay_bare_and_converge(self):
+        """Two concurrent connects both minted against the same next slot
+        (``image_3``) must both survive (no clobber, mirroring autogrow's P9
+        commutativity) — and the loser's collision-resolved name MUST stay a
+        bare inputcount key (``image_4``), never autogrow's dotted
+        ``base.elemN`` fallback, which the server can't map. The inputcount
+        widget bump uses each op's mint-time-planned value (not one re-derived
+        from its post-collision slot number) specifically so the two apply
+        orders converge to the SAME final value — a value derived from the
+        renamed slot would make the winning stamp carry different values in
+        each order and break convergence (P9)."""
+        g = _graph_with_inputcount()
+        base = _inputcount_workflow(existing=2)
+        extra_src_id = base["last_node_id"]  # the unwired VAEDecode _inputcount_workflow adds
+        base["nodes"].append(
+            {
+                "id": extra_src_id + 1,
+                "type": "VAEDecode",
+                "pos": [0, 999],
+                "inputs": [
+                    {"name": "samples", "type": "LATENT", "link": None},
+                    {"name": "vae", "type": "VAE", "link": None},
+                ],
+                "outputs": [{"name": "IMAGE", "type": "IMAGE", "links": []}],
+                "widgets_values": [],
+            }
+        )
+        _, op1 = workflow_ops.connect(copy.deepcopy(base), g, extra_src_id, "IMAGE", 20, "image_3", actor="a")
+        _, op2 = workflow_ops.connect(copy.deepcopy(base), g, extra_src_id + 1, "IMAGE", 20, "image_3", actor="b")
+        ab = workflow_ops.apply_op(workflow_ops.apply_op(copy.deepcopy(base), op1, g), op2, g)
+        ba = workflow_ops.apply_op(workflow_ops.apply_op(copy.deepcopy(base), op2, g), op1, g)
+        idx = g.widget_order("ImageBatchMulti").index("inputcount")
+        for out in (ab, ba):
+            node = next(n for n in out["nodes"] if n["id"] == 20)
+            names = {i["name"] for i in node["inputs"]}
+            assert names == {"image_1", "image_2", "image_3", "image_4"}, names  # both survive, bare
+            assert not any("." in n for n in names)  # never the dotted autogrow fallback
+            assert node["widgets_values"][idx] == 3  # each op planned 3 at mint time
+        assert workflow_ops.canonical(ab) == workflow_ops.canonical(ba)
+
+    def test_non_family_unknown_input_error_unchanged(self):
+        """A non-family node (BatchImagesNode, autogrow-typed but NOT in the
+        inputcount family) keeps the exact generic not-found error text for a
+        key that matches neither autogrow nor inputcount shapes."""
+        g = _graph()
+        wf = _autogrow_workflow()
+        with pytest.raises(ValueError, match="not found on node"):
+            workflow_ops.connect(wf, g, 20, "IMAGE", 10, "bogus_7", actor="a")
 
 
 # ---------------------------------------------------------------------------

@@ -337,6 +337,26 @@ def _next_autogrow_name(ins: list, requested: str, template: dict | None = None)
     return name
 
 
+def _next_inputcount_name(ins: list, requested: str) -> str:
+    """A free ``inputcount``-family slot name (bare ``{elem}_N``, NOT the
+    dotted ``base.elemN`` autogrow shape). Prefers the op's requested
+    (mint-time-planned) name; if a concurrent connect already claimed it,
+    grows the next free bare key instead. Bare keys are this family's actual
+    wire address (see :func:`_inputcount_family_match`), so collision
+    resolution must stay bare too — reusing :func:`_next_autogrow_name` here
+    would mint a dotted name (``image_3.image_30``) the server can't map."""
+    taken = {i.get("name") for i in ins}
+    if requested not in taken:
+        return requested
+    elem, _, n_str = requested.rpartition("_")
+    n = int(n_str) if n_str.isdigit() else 1
+    name = f"{elem}_{n}"
+    while name in taken:
+        n += 1
+        name = f"{elem}_{n}"
+    return name
+
+
 # ---------------------------------------------------------------------------
 # primitives — each returns (workflow, op); the op is applied via apply_op so
 # apply(base, op) == primitive(base) holds by construction (P1 fidelity).
@@ -1018,6 +1038,37 @@ def _apply_set_widget(workflow: dict, op: dict, graph) -> None:
     _lww_commit(workflow, op)
 
 
+def _apply_inputcount_bump(workflow: dict, dst: dict, op: dict, graph, widget: str, value: Any) -> None:
+    """Bump a kijai ``inputcount``-family widget as part of applying a connect
+    that grew a numbered slot (see ``_inputcount_family_match`` /
+    ``_resolve_input_target``). Goes through the SAME last-writer-wins gate
+    ``_apply_set_widget`` uses (``_lww_gate``/``_lww_commit``), stamped with
+    the connect op's own stamp/op_id — so this widget write shares the
+    connect's causal position, and a concurrent explicit
+    ``set_widget(..., "inputcount", ...)`` resolves deterministically
+    regardless of apply order. A no-op when ``graph`` is unavailable (offline
+    edit/merge replay without a catalog) — the slot still grows, just without
+    the count bump, which callers with a real catalog never hit."""
+    if graph is None:
+        return
+    widget_op = {
+        "op": "set_widget",
+        "node_id": op["to_node"],
+        "widget": widget,
+        "op_id": op["op_id"],
+        "stamp": op.get("stamp"),
+        "base_version": op.get("base_version"),
+    }
+    if not _lww_gate(workflow, widget_op):
+        return
+    widgets = dst.setdefault("widgets_values", [])
+    idx = _widget_index(graph, dst.get("type", ""), widget, widgets)
+    if idx >= len(widgets):
+        widgets.extend([None] * (idx + 1 - len(widgets)))
+    widgets[idx] = value
+    _lww_commit(workflow, widget_op)
+
+
 def _apply_connect(workflow: dict, op: dict, graph) -> None:
     # Totality: either endpoint concurrently deleted => no-op (delete wins), so a
     # merge consumer can replay a connect and a delete in either order without a
@@ -1038,10 +1089,18 @@ def _apply_connect(workflow: dict, op: dict, graph) -> None:
         ins = dst.setdefault("inputs", [])
         to_idx = next((k for k, i in enumerate(ins) if i.get("grow_id") == op["link_id"]), None)
         if to_idx is None:
-            base = str(grow["name"]).split(".", 1)[0]
-            template = None if grow.get("widget") else _autogrow_template(graph, dst.get("type", ""), base)
+            inputcount = grow.get("inputcount")
+            if inputcount is not None:
+                # Bare-key family (see _next_inputcount_name): a collision must
+                # still grow the next free BARE key, never autogrow's dotted
+                # base.elemN fallback — that name is meaningless for this family.
+                name = _next_inputcount_name(ins, grow["name"])
+            else:
+                base = str(grow["name"]).split(".", 1)[0]
+                template = None if grow.get("widget") else _autogrow_template(graph, dst.get("type", ""), base)
+                name = _next_autogrow_name(ins, grow["name"], template)
             entry = {
-                "name": _next_autogrow_name(ins, grow["name"], template),
+                "name": name,
                 "type": grow["type"],
                 "link": None,
                 "grow_id": op["link_id"],
@@ -1052,6 +1111,21 @@ def _apply_connect(workflow: dict, op: dict, graph) -> None:
                 entry["widget"] = {"name": grow["widget"]}
             ins.append(entry)
             to_idx = len(ins) - 1
+            if inputcount is not None:
+                # Bump using the op's mint-time-planned value (NOT re-derived
+                # from a post-collision-renamed slot number): every op's
+                # contribution to this LWW register must be a static property
+                # of the op, independent of what else has applied first, or
+                # the two apply orders' winning stamp would carry DIFFERENT
+                # values and the graph would fail to converge (P9). Two
+                # concurrent connects that both minted against the same next
+                # slot (a genuine same-instant race) both plan the same
+                # value, so this still converges for that case; a slot that
+                # loses the bare-key naming race to a higher number is a
+                # known, accepted LWW-register limitation (not a monotonic
+                # counter) — the widget may undercount until the next
+                # explicit set_widget or connect on this node corrects it.
+                _apply_inputcount_bump(workflow, dst, op, graph, inputcount["widget"], inputcount["value"])
     else:
         to_idx = op["to_slot"]
         # A concrete input holds at most one link. Replacing it must fully retire
@@ -1322,6 +1396,48 @@ def _resolve_input_slot(node: dict, graph, slot: Any) -> int:
     raise ValueError(f"input {slot!r} not found on node {node.get('id')}; inputs: {names}")
 
 
+_INPUTCOUNT_KEY_RE = re.compile(r"^(.+)_(\d+)$")
+
+
+def _inputcount_family_match(graph, node_type: str, slot: str) -> tuple[str, int] | None:
+    """Detect a kijai ``inputcount``-family numbered key (e.g. ``image_3`` on
+    ImageBatchMulti) and split it into ``(elem, n)``. This family is NOT
+    autogrow-typed (no ``COMFY_AUTOGROW`` marker) — the schema declares fixed
+    inputs plus an ``inputcount`` widget the node reads at runtime, and bare
+    1-based keys ARE the correct wire address (unlike autogrow's dotted
+    ``base.elemN``).
+
+    Detection signal — pinned against ImageBatchMulti's production
+    object_info entry (``services/ingest/data/object_info.json``): the
+    schema declares a required INT widget named exactly ``inputcount`` PLUS
+    a ``{elem}_1`` sibling input for the requested element (``image_1``,
+    ``mask_1``, ``conditioning_1``, ``string_1``, … across the KJNodes
+    ``*Multi`` family — ImageBatchMulti, MaskBatchMulti,
+    ConditioningMultiCombine, ImageConcatMulti, JoinStringMulti, …). Both
+    signals must be present so a coincidentally-named ``foo_3`` input on an
+    unrelated node type is never misclassified.
+
+    Returns ``None`` when ``graph`` is unavailable (offline edit), ``slot``
+    isn't shaped ``{elem}_<N>``, or the node's schema doesn't carry both
+    signals."""
+    m = _INPUTCOUNT_KEY_RE.fullmatch(slot)
+    if not m or graph is None:
+        return None
+    elem, n_str = m.group(1), m.group(2)
+    n = int(n_str)
+    if n < 1:
+        return None
+    schema = graph.node(node_type)
+    if schema is None:
+        return None
+    has_inputcount = any(p.name == "inputcount" and p.type == "INT" and not p.is_link for p in schema.inputs)
+    if not has_inputcount:
+        return None
+    if not any(p.name == f"{elem}_1" for p in schema.inputs):
+        return None
+    return elem, n
+
+
 def _resolve_input_target(node: dict, graph, slot: Any, elem_type: str | None) -> tuple[int | None, dict | None]:
     """Resolve a connect target. Returns ``(index, None)`` for a concrete input,
     or ``(None, grow)`` where ``grow`` is the input slot to append (autogrow slot,
@@ -1395,6 +1511,30 @@ def _resolve_input_target(node: dict, graph, slot: Any, elem_type: str | None) -
                 f"input {slot!r} addresses autogrow input {base!r} on node {node.get('id')} "
                 f"but is not the next sequential slot (existing: {grown}) — connect to the "
                 f"base {base!r} to auto-append, or use the next free key {grow['name']!r}"
+            )
+    # kijai `inputcount` family (ImageBatchMulti, MaskBatchMulti, …) — see
+    # _inputcount_family_match. Bare 1-based keys are the correct address;
+    # growing one must also bump the `inputcount` widget (carried on `grow`
+    # and applied through the same LWW-stamped path set_widget uses, see
+    # _apply_connect) or the node never reads the new slot.
+    if isinstance(slot, str):
+        fam = _inputcount_family_match(graph, node_type, slot)
+        if fam is not None:
+            elem, n = fam
+            existing = [i for i in ins if re.fullmatch(rf"{re.escape(elem)}_\d+", str(i.get("name", "")))]
+            next_n = len(existing) + 1
+            if n == next_n:
+                return None, {
+                    "name": slot,
+                    "type": elem_type or "*",
+                    "inputcount": {"widget": "inputcount", "value": n},
+                }
+            grown = [i.get("name") for i in existing]
+            next_key = f"{elem}_{next_n}"
+            raise ValueError(
+                f"input {slot!r} addresses inputcount input {elem!r} on node {node.get('id')} "
+                f"but is not the next sequential slot (existing: {grown}) — inputcount nodes "
+                f"grow sequentially; use the next free key {next_key!r}"
             )
     names = [i.get("name") for i in ins]
     raise ValueError(f"input {slot!r} not found on node {node.get('id')}; inputs: {names}")
