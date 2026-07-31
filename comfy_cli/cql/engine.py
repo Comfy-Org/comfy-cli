@@ -1448,6 +1448,25 @@ def _subgraph_defs_by_id(workflow: dict) -> dict[str, dict]:
     return by_id
 
 
+def _widgets_as_list(widgets_values: Any) -> list[Any]:
+    """Normalize ``widgets_values`` to a list positionally indexable by widget order.
+
+    ComfyUI's own convention is a positional LIST, but some custom nodes —
+    VideoHelperSuite's ``VHS_*`` family (e.g. ``VHS_LoadVideo``) — serialize it
+    as a NAMED DICT instead: ``{"video": "...", "force_rate": 0, ...}``. Every
+    call site in this module indexes ``widgets_values`` by INTEGER position
+    against the schema's widget ``order``; a dict is truthy (so a bare
+    ``widgets_values or []`` guard doesn't catch it) and indexing it with an int
+    raises ``KeyError``, while ``.extend()`` on it raises ``AttributeError``.
+    Anything that isn't a list reads as "no positional values known" — mirrors
+    ``workflow_to_api.py``'s non-list handling
+    (``test_tolerates_non_list_widgets_values``) so the two code paths agree;
+    a node whose widgets can't be positionally read shows as unset rather than
+    crashing slot extraction or a set-widget write.
+    """
+    return list(widgets_values) if isinstance(widgets_values, list) else []
+
+
 def _node_widget_slots(node: dict, prefix: str, graph: Graph) -> list[dict]:
     """Surface a regular node's widget inputs as slots under ``prefix``.
 
@@ -1459,7 +1478,7 @@ def _node_widget_slots(node: dict, prefix: str, graph: Graph) -> list[dict]:
     m = graph.node(node_type)
     if m is None:
         return []
-    widgets = node.get("widgets_values") or []
+    widgets = _widgets_as_list(node.get("widgets_values"))
     order = graph.widget_order_for_node(node_type, widgets)
     # Drive from `order`, not m.inputs. A COMFY_DYNAMICCOMBO_V3 input is ONE port
     # (`model`) whose selected option contributes extra widgets addressed as
@@ -1652,7 +1671,7 @@ def _write_widget(node: dict, input_name: str, value: Any, graph: Graph, *, exte
             f"widget {input_name!r} not found on {node_type}; "
             f"available widgets: {', '.join(avail) if avail else '(none — all inputs are links)'}"
         )
-    widgets = node.get("widgets_values") or []
+    widgets = _widgets_as_list(node.get("widgets_values"))
     if widget_idx >= len(widgets):
         if not extend:
             raise ValueError(f"widget index {widget_idx} out of range for {node_type}")

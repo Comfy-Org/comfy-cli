@@ -460,6 +460,8 @@ def _set_widget_impl(
     actor: str = "cli",
     base_version: int = 0,
 ) -> tuple[dict, dict]:
+    from comfy_cli.cql import engine as _engine
+
     # Subgraph-aware: a subgraph instance's *promoted* input (flat ``57.text`` —
     # exactly what ``comfy workflow slots`` advertises) or an interior node
     # (nested ``57/27.text``) resolves INTO the subgraph definition. Both forms
@@ -472,7 +474,7 @@ def _set_widget_impl(
         target = _navigate_subgraph_path(workflow, segments)  # read-only: current value + schema
         inner_type = target.get("type", "")
         value, norm_note = _normalize_combo(graph, inner_type, inner_widget, value)
-        cur = target.get("widgets_values") or []
+        cur = _engine._widgets_as_list(target.get("widgets_values"))
         order = graph.widget_order_for_node(inner_type, cur)
         old = None
         if inner_widget in order:
@@ -498,7 +500,7 @@ def _set_widget_impl(
 
     node = _require(workflow, node_id)
     class_type = node.get("type", "")
-    widgets = node.get("widgets_values") or []
+    widgets = _engine._widgets_as_list(node.get("widgets_values"))
     idx = _widget_index(graph, class_type, widget, widgets)  # raises on unknown widget name
     value, norm_note = _normalize_combo(graph, class_type, widget, value)
     old = widgets[idx] if idx < len(widgets) else None
@@ -1030,7 +1032,10 @@ def _apply_set_widget(workflow: dict, op: dict, graph) -> None:
     node = _find(workflow, op["node_id"])
     if node is None:
         return  # target concurrently deleted => no-op (delete wins).
-    widgets = node.setdefault("widgets_values", [])
+    from comfy_cli.cql import engine as _engine
+
+    widgets = _engine._widgets_as_list(node.get("widgets_values"))
+    node["widgets_values"] = widgets
     idx = _widget_index(graph, node.get("type", ""), op["widget"], widgets)
     if idx >= len(widgets):
         widgets.extend([None] * (idx + 1 - len(widgets)))
