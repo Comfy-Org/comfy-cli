@@ -96,3 +96,30 @@ def test_parse_args_object_accepts_json():
         ],
     )
     assert values["color_palette"] == {"name": "PASTEL"}
+
+
+def _string_array_flag():
+    return schema.FlagDef(
+        name="image", kind="array", required=False, description="",
+        default=None, enum=[], item_kind="string", upload_mode=None,
+    )
+
+
+def test_coerce_string_array_accepts_bare_value():
+    # prod: --image 'Linked profile pic.jpeg' (spaces, no JSON) must not error
+    assert schema._coerce(_string_array_flag(), "Linked profile pic.jpeg") == ["Linked profile pic.jpeg"]
+
+
+def test_coerce_string_array_accepts_comma_list():
+    assert schema._coerce(_string_array_flag(), "a.jpg, b.png") == ["a.jpg", "b.png"]
+
+
+def test_coerce_string_array_json_still_works():
+    assert schema._coerce(_string_array_flag(), '["a.jpg","b.png"]') == ["a.jpg", "b.png"]
+
+
+def test_coerce_string_array_malformed_json_still_errors():
+    # An explicit-JSON attempt ('[' prefix) that is broken must keep failing loudly,
+    # not be silently reinterpreted as a filename starting with '['.
+    with pytest.raises(schema.SchemaError):
+        schema._coerce(_string_array_flag(), '["a.jpg",')
