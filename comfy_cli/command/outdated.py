@@ -78,7 +78,23 @@ def _save_cache(cache: dict[str, Any]) -> None:
     path = _cache_path()
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(cache))
+        # Write-then-rename: an interrupt mid-write must not leave a truncated
+        # file that the next `_load_cache` silently resets to `{}`. `os.replace`
+        # is atomic within a filesystem, and the temp file is a sibling so the
+        # rename never crosses one. Unique per process — two concurrent writers
+        # must not share (and truncate) one temp path.
+        tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+        try:
+            # `encoding` pinned rather than left to the platform locale:
+            # `_load_cache` decodes bytes as JSON, which only accepts
+            # UTF-8/16/32. Today `json.dumps` defaults to `ensure_ascii=True`,
+            # so the payload is pure ASCII and any locale would round-trip —
+            # this keeps that a property of the writer, not a lucky default, if
+            # a non-ASCII pack id ever reaches the file verbatim.
+            tmp.write_text(json.dumps(cache), encoding="utf-8")
+            os.replace(tmp, path)
+        finally:
+            tmp.unlink(missing_ok=True)
     except OSError:
         # A read-only cache dir must never break a read-only report.
         pass
