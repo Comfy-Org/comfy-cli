@@ -141,9 +141,6 @@ class EnvChecker:
         self.python_version = sys.version_info
         self.check()
 
-    def is_isolated_env(self):
-        return self.virtualenv_path or self.conda_env
-
     def get_isolated_env(self):
         if self.virtualenv_path:
             return self.virtualenv_path
