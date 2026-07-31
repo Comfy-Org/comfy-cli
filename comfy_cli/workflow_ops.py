@@ -1391,6 +1391,14 @@ def _resolve_output_slot(node: dict, graph, slot: Any) -> tuple[int, str]:
         if len(hits) == 1:
             i = hits[0]
             return i, outs[i].get("type", "*")
+    # Still unmatched. When the node has exactly ONE output there is no
+    # ambiguity to guess through — it's the only thing the caller could have
+    # meant, even when the requested name is an outright rename rather than a
+    # case/separator variant (prod: LUMA_RAY32_KEYFRAME -> 'keyframes',
+    # ELEVENLABS_VOICE -> 'voice', IMAGE -> 'images'). Multi-output nodes keep
+    # today's behavior: an unmatched name stays ambiguous and errors below.
+    if len(outs) == 1:
+        return 0, outs[0].get("type", "*")
     names = [o.get("name") for o in outs]
     raise ValueError(f"output {slot!r} not found on node {node.get('id')}; outputs: {names}")
 

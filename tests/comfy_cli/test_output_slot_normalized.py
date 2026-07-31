@@ -59,6 +59,9 @@ def test_ambiguous_normalized_match_still_fails(g):
 
 
 def test_unrelated_name_still_fails_with_the_name_list(g):
+    # Two outputs, so the ask stays genuinely ambiguous (a single-output node
+    # auto-resolves any name — see test_single_output_slot_alias.py — so this
+    # regression guard needs a node where "unrelated" really is unrelated).
     with pytest.raises(ValueError) as ei:
-        W._resolve_output_slot(_node([("image", "IMAGE")]), g, "LATENT")
+        W._resolve_output_slot(_node([("image", "IMAGE"), ("alpha", "MASK")]), g, "LATENT")
     assert "image" in str(ei.value), "the error must still list the real names"
