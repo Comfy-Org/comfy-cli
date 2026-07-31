@@ -16,12 +16,12 @@ from rich.panel import Panel
 from rich.prompt import Confirm
 
 from comfy_cli import constants, ui
-from comfy_cli._safe_exec import resolve_required_binary
+from comfy_cli._safe_exec import BinaryNotFoundError, resolve_required_binary
 from comfy_cli.command.custom_nodes.command import update_node_id_cache
 from comfy_cli.command.github.pr_info import PRInfo
 from comfy_cli.constants import GPU_OPTION
 from comfy_cli.cuda_detect import DEFAULT_CUDA_TAG
-from comfy_cli.git_utils import checkout_pr, git_checkout_tag
+from comfy_cli.git_utils import checkout_pr, git_checkout_tag, reject_option_like_ref
 from comfy_cli.output import rprint
 from comfy_cli.resolve_python import ensure_workspace_python
 from comfy_cli.uv import DependencyCompiler, ensure_pip
@@ -235,6 +235,16 @@ def execute(
 
     # checkout specified commit
     if commit is not None:
+        # A ``--`` separator cannot protect this argument: git scans for options
+        # *before* the first positional, so ``--upload-pack=…`` would be read as
+        # an option wherever the separator sits. Git refnames may not begin with
+        # ``-`` at all, so refusing such a value rejects only inputs that could
+        # never have worked.
+        try:
+            reject_option_like_ref(commit, "commit")
+        except ValueError as e:
+            rprint(f"[bold red]{e}[/bold red]")
+            raise typer.Exit(code=1) from None
         # Resolved before the chdir: ``repo_dir`` is user-supplied, so a ``git``
         # planted there must not be found — nor shadow the real one.
         git_bin = resolve_required_binary("git")
@@ -488,12 +498,16 @@ def clone_comfyui(url: str, repo_dir: str):
     Clone the ComfyUI repository from the specified URL.
     """
     git_bin = resolve_required_binary("git")
+    # ``--`` ends option parsing: git permutes options among positionals, so a
+    # ``url`` (or ``repo_dir``) beginning with ``--`` would otherwise be read as
+    # an option — ``--upload-pack=<cmd>`` and ``--config=<k>=<v>`` both turn a
+    # clone into arbitrary command execution.
     if "@" in url:
         # clone specific branch
         url, branch = url.rsplit("@", 1)
-        subprocess.run([git_bin, "clone", "-b", branch, url, repo_dir], check=True)
+        subprocess.run([git_bin, "clone", "-b", branch, "--", url, repo_dir], check=True)
     else:
-        subprocess.run([git_bin, "clone", url, repo_dir], check=True)
+        subprocess.run([git_bin, "clone", "--", url, repo_dir], check=True)
 
 
 def _resolve_latest_tag_from_local(repo_dir: str) -> tuple[str | None, bool]:
@@ -811,6 +825,20 @@ def switch_comfyui_version(
 
     :raises VersionSwitchError: on any resolution, stash, or checkout failure.
     """
+    # Checked up front and named for what it is. ``_git_capture`` deliberately
+    # never raises, so without this a git that could not be trusted-resolved
+    # would just look like rc=1 to the first caller below — and the first caller
+    # is a `rev-parse --verify <tag>`, whose non-zero result reports "version not
+    # found: no tag vX". That sends the user hunting for a version that exists.
+    try:
+        resolve_required_binary("git")
+    except BinaryNotFoundError as exc:
+        raise VersionSwitchError(
+            code="version_switch_git_unavailable",
+            message=str(exc),
+            hint="a version switch needs a usable git — install it, or run from a directory that has no git binary in it",
+        ) from exc
+
     previous = _describe_head(comfy_path)
 
     # --- 1. Resolve + validate the target before touching anything -----------

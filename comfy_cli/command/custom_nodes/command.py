@@ -12,6 +12,7 @@ import typer
 from rich.console import Console
 
 from comfy_cli import constants, logging, tracking, ui, utils
+from comfy_cli._safe_exec import BinaryNotFoundError
 from comfy_cli.command.custom_nodes.bisect_custom_nodes import bisect_app
 from comfy_cli.command.custom_nodes.cm_cli_util import execute_cm_cli, find_cm_cli
 from comfy_cli.config_manager import ConfigManager
@@ -1342,7 +1343,13 @@ def pack():
     if includes:
         typer.echo(f"Including additional directories: {', '.join(includes)}")
 
-    zip_files(zip_filename, includes=includes)
+    try:
+        zip_files(zip_filename, includes=includes)
+    except BinaryNotFoundError as e:
+        # git was found and refused; packing anyway would sweep in untracked and
+        # gitignored files. Abort with the reason rather than a traceback.
+        ui.display_error_message(str(e))
+        raise typer.Exit(code=1) from None
 
     typer.echo(f"Created zip file: {NODE_ZIP_FILENAME}")
     logging.info("Node has been packed successfully.")

@@ -10,6 +10,12 @@ itself. Here the contract under test is per *call site*:
   fails loudly (required binaries) or degrades exactly as it already did when the
   binary was simply absent (tolerant sites and the best-effort previewer).
 
+"Degrades as if absent" has one deliberate exception, covered below:
+:func:`comfy_cli.file_utils.list_git_tracked_files`. There ``[]`` means "not a
+git repository" and makes :func:`~comfy_cli.file_utils.zip_files` package the
+whole directory, so a *refused* git raises rather than silently widening the
+archive ``comfy node publish`` uploads.
+
 The sites that ``os.chdir`` into a user-supplied directory before spawning get an
 explicit test each, because there the attacker-controlled directory *is* the CWD
 by construction rather than by the user happening to be standing in it.
@@ -152,7 +158,12 @@ class TestGitUtilsResolvesBeforeChdir:
         assert str(planted) not in recorder.argv0s
 
     def test_checkout_tag_refuses_a_git_planted_in_the_cwd(self, tmp_path, system_bin, monkeypatch):
-        """The remaining shape: the *process* CWD is the attacker's directory."""
+        """The remaining shape: the *process* CWD is the attacker's directory.
+
+        ``git_checkout_tag`` is documented to return ``False`` on failure and both
+        callers rely on that for a clean CLI error, so a refusal has to come back
+        as ``False`` rather than escaping as a traceback past them.
+        """
         _plant(system_bin, "git")
         attacker_cwd = tmp_path / "attacker"
         planted = _plant(attacker_cwd, "git")
@@ -164,9 +175,8 @@ class TestGitUtilsResolvesBeforeChdir:
         with (
             patch.object(_safe_exec.shutil, "which", _cwd_first_which(system_bin)),
             patch.object(git_utils.subprocess, "run", recorder),
-            pytest.raises(_safe_exec.BinaryNotFoundError),
         ):
-            git_utils.git_checkout_tag(str(repo), "v1.2.3")
+            assert git_utils.git_checkout_tag(str(repo), "v1.2.3") is False
 
         assert recorder.calls == [], f"planted {planted} must never be executed"
 
@@ -175,12 +185,42 @@ class TestGitUtilsResolvesBeforeChdir:
         process inside the repo directory."""
         repo = tmp_path / "repo"
         repo.mkdir()
+        with patch.object(_safe_exec.shutil, "which", _cwd_first_which(system_bin)):
+            assert git_utils.git_checkout_tag(str(repo), "v1.2.3") is False
+        assert Path(os.getcwd()).resolve() == neutral_cwd.resolve()
+
+    def test_checkout_pr_returns_false_when_git_is_unresolvable(self, tmp_path, system_bin, neutral_cwd):
+        """Same contract for the PR checkout path."""
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        pr_info = PRInfo(
+            number=42,
+            head_repo_url="https://github.com/comfy/comfy.git",
+            head_branch="feature/x",
+            base_repo_url="https://github.com/comfy/comfy.git",
+            base_branch="main",
+            title="t",
+            user="u",
+            mergeable=True,
+        )
+        with patch.object(_safe_exec.shutil, "which", _cwd_first_which(system_bin)):
+            assert git_utils.checkout_pr(str(repo), pr_info) is False
+        assert Path(os.getcwd()).resolve() == neutral_cwd.resolve()
+
+    def test_checkout_tag_refuses_an_option_like_tag(self, tmp_path, system_bin, neutral_cwd):
+        """``git checkout <rev>`` has no end-of-options escape, so a tag that git
+        would parse as an option (``--upload-pack=<cmd>``) is rejected outright."""
+        _plant(system_bin, "git")
+        repo = tmp_path / "repo"
+        repo.mkdir()
+
+        recorder = _Recorder()
         with (
             patch.object(_safe_exec.shutil, "which", _cwd_first_which(system_bin)),
-            pytest.raises(_safe_exec.BinaryNotFoundError),
+            patch.object(git_utils.subprocess, "run", recorder),
         ):
-            git_utils.git_checkout_tag(str(repo), "v1.2.3")
-        assert Path(os.getcwd()).resolve() == neutral_cwd.resolve()
+            assert git_utils.git_checkout_tag(str(repo), "--upload-pack=touch /tmp/pwned") is False
+        assert recorder.calls == []
 
 
 # --- tolerant git sites: degrade exactly as a missing git already did -------
@@ -207,7 +247,25 @@ class TestTolerantGitSitesDegrade:
 
         assert recorded[0][0] == str(legit)
 
-    def test_list_git_tracked_files_returns_empty_for_cwd_planted_git(self, tmp_path, system_bin, monkeypatch):
+    def test_list_git_tracked_files_returns_empty_when_git_is_absent(self, tmp_path, neutral_cwd):
+        """An *absent* git still degrades to ``[]`` — that has always meant "no
+        git answer", and ``zip_files`` reads it as "not a git repository"."""
+        recorder = _Recorder()
+        with (
+            patch.object(_safe_exec.shutil, "which", lambda *_a, **_k: None),
+            patch.object(file_utils.subprocess, "check_output", recorder),
+        ):
+            assert file_utils.list_git_tracked_files(str(tmp_path)) == []
+        assert recorder.calls == []
+
+    def test_list_git_tracked_files_raises_for_cwd_planted_git(self, tmp_path, system_bin, monkeypatch):
+        """A *refused* git must not be flattened into the same ``[]``.
+
+        ``zip_files`` treats ``[]`` as "not a git repository" and falls back to
+        walking the whole directory — which would sweep untracked and gitignored
+        files (``.env``, keys, venvs) into the archive ``comfy node publish``
+        uploads. Refusing loudly is the only safe answer here.
+        """
         _plant(system_bin, "git")
         attacker_cwd = tmp_path / "attacker"
         _plant(attacker_cwd, "git")
@@ -217,9 +275,24 @@ class TestTolerantGitSitesDegrade:
         with (
             patch.object(_safe_exec.shutil, "which", _cwd_first_which(system_bin)),
             patch.object(file_utils.subprocess, "check_output", recorder),
+            pytest.raises(_safe_exec.BinaryNotFoundError),
         ):
-            assert file_utils.list_git_tracked_files(str(tmp_path)) == []
+            file_utils.list_git_tracked_files(str(tmp_path))
         assert recorder.calls == []
+
+    def test_zip_files_does_not_walk_everything_when_git_is_refused(self, tmp_path, system_bin, monkeypatch):
+        """End-to-end shape of the above: the publish archive is never widened."""
+        _plant(system_bin, "git")
+        attacker_cwd = tmp_path / "attacker"
+        _plant(attacker_cwd, "git")
+        (attacker_cwd / ".env").write_text("SECRET=hunter2")
+        monkeypatch.chdir(attacker_cwd)
+
+        with (
+            patch.object(_safe_exec.shutil, "which", _cwd_first_which(system_bin)),
+            pytest.raises(_safe_exec.BinaryNotFoundError),
+        ):
+            file_utils.zip_files(str(tmp_path / "node.zip"))
 
     def test_outdated_git_output_uses_resolved_path(self, tmp_path, system_bin, neutral_cwd):
         legit = _plant(system_bin, "git")

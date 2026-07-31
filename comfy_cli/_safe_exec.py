@@ -20,19 +20,67 @@ Two entry points share one set of gates:
 * :func:`resolve_required_binary` — for binaries a command cannot run without
   (``git``, ``ffmpeg``). Raises :class:`BinaryNotFoundError` with an actionable
   message instead of returning ``None``. It is a thin wrapper over
-  :func:`resolve_binary`, so the CWD/qualification gates cannot drift apart.
+  :func:`resolve_binary_detail`, so the CWD/qualification gates cannot drift
+  apart.
+
+Both are built on :func:`resolve_binary_detail`, which reports *why* a name was
+refused (:class:`BinaryRefusal`). "Absent from ``$PATH``" and "present but
+refused because it resolved into the CWD" are very different events — one is a
+missing install, the other is a possible planted binary — and collapsing them
+into one message tells a user with a perfectly good ``git`` to go install ``git``.
+Callers that surface the failure should branch on
+:attr:`BinaryNotFoundError.reason`.
 """
 
 from __future__ import annotations
 
+import enum
 import logging
 import ntpath
 import os
 import shutil
+from typing import NamedTuple
 
 logger = logging.getLogger(__name__)
 
 _PATH_SEPARATORS = ("/", "\\")
+
+
+class BinaryRefusal(enum.Enum):
+    """Why :func:`resolve_binary_detail` declined to hand back a path."""
+
+    ABSENT = "absent"
+    """``shutil.which`` found no match at all — the binary is not installed."""
+
+    NOT_BARE_NAME = "not_bare_name"
+    """The caller passed something carrying a path component; see
+    :func:`_is_bare_name`. A programming error, not a user-fixable condition."""
+
+    CWD_ANCHORED = "cwd_anchored"
+    """A match was found, but it is anchored in the current working directory
+    (a relative ``$PATH`` entry, or an absolute entry that *is* the CWD). The
+    binary may well be legitimate — running from a directory that is itself a
+    ``$PATH`` entry such as ``/usr/bin`` lands here — but it cannot be
+    distinguished from a plant, so it is refused."""
+
+    UNVERIFIABLE = "unverifiable"
+    """A match was found but could not be placed relative to the CWD (a deleted
+    or unreadable CWD, an unresolvable path). Refused fail-closed."""
+
+
+class BinaryResolution(NamedTuple):
+    """What :func:`resolve_binary_detail` concluded about one name."""
+
+    path: str | None
+    """The trusted absolute path, or ``None`` if the name was refused."""
+
+    reason: BinaryRefusal | None
+    """``None`` on success; otherwise why the name was refused."""
+
+    candidate: str | None
+    """The path ``shutil.which`` returned, even when it was then refused — so a
+    diagnostic can name the file it declined to run. ``None`` when the lookup
+    never got that far."""
 
 
 class BinaryNotFoundError(RuntimeError, FileNotFoundError):
@@ -40,6 +88,9 @@ class BinaryNotFoundError(RuntimeError, FileNotFoundError):
 
     Raised by :func:`resolve_required_binary` — either the binary is absent from
     ``$PATH``, or the only match was CWD-anchored and therefore refused.
+    :attr:`reason` says which, so callers can render an accurate diagnostic
+    instead of always claiming the binary is not installed; :attr:`candidate`
+    carries the path that was refused, when there was one.
 
     It deliberately subclasses **both** ``RuntimeError`` and
     ``FileNotFoundError``. ``FileNotFoundError`` is the exception ``subprocess``
@@ -51,6 +102,29 @@ class BinaryNotFoundError(RuntimeError, FileNotFoundError):
     than starting to crash. ``RuntimeError`` is carried for callers that want to
     name the failure explicitly without reaching for an OS-error class.
     """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        binary: str,
+        reason: BinaryRefusal,
+        candidate: str | None = None,
+    ):
+        super().__init__(message)
+        self.binary = binary
+        self.reason = reason
+        self.candidate = candidate
+
+    @property
+    def is_absent(self) -> bool:
+        """``True`` only when the binary is genuinely not installed.
+
+        Everything else means a match *was* found and then refused — the
+        distinction callers need before telling a user to install something they
+        already have.
+        """
+        return self.reason is BinaryRefusal.ABSENT
 
 
 def _is_bare_name(name: str) -> bool:
@@ -104,16 +178,32 @@ def is_planted_in_cwd(path: str) -> bool:
     the caller then skips the probe, which is the same degradation as the binary
     being absent. Failing open here would be the module's only error path that
     hands an unvetted string to :mod:`subprocess`.
+
+    Callers that need to *tell those two apart* — "definitely in the CWD" vs "we
+    could not look" — should use :func:`_place_relative_to_cwd`, which keeps them
+    separate; this wrapper collapses both to the refusing answer.
+    """
+    return _place_relative_to_cwd(path) is not False
+
+
+def _place_relative_to_cwd(path: str) -> bool | None:
+    """Tri-state companion to :func:`is_planted_in_cwd`.
+
+    ``True`` — ``path``'s immediate parent *is* the CWD. ``False`` — it
+    demonstrably is not. ``None`` — the comparison could not be made at all
+    (deleted CWD, unresolvable path). Both ``True`` and ``None`` are refusals,
+    but only ``True`` is evidence of a plant, and the two deserve different
+    messages.
     """
     try:
         cwd = os.path.normcase(os.path.realpath(os.getcwd()))
         # ``os.path.dirname`` of a bare/relative ``which`` result is "", which
         # ``realpath`` correctly resolves against the CWD.
         parent = os.path.normcase(os.path.realpath(os.path.dirname(path)))
-        return parent == cwd
     except (OSError, ValueError):
         logger.debug("cannot place %r relative to the CWD; treating as planted", path, exc_info=True)
-        return True
+        return None
+    return parent == cwd
 
 
 def resolve_binary(name: str) -> str | None:
@@ -154,23 +244,46 @@ def resolve_binary(name: str) -> str | None:
     ``C:\\Windows\\System32``): the probe is then skipped and the caller degrades
     exactly as it would if the binary were not installed.
     """
+    return resolve_binary_detail(name).path
+
+
+def resolve_binary_detail(name: str) -> BinaryResolution:
+    """The gate shared by :func:`resolve_binary` and :func:`resolve_required_binary`.
+
+    Returns a :class:`BinaryResolution`: ``path`` set and ``reason`` ``None`` on
+    success, or ``path`` ``None`` and ``reason`` naming the
+    :class:`BinaryRefusal` that stopped it. See :func:`resolve_binary` for the
+    full rationale behind each gate; this function exists so the *required*
+    wrapper can say which gate fired rather than emitting one message that
+    guesses.
+
+    Like :func:`resolve_binary`, it never raises: an unexpected error degrades to
+    :attr:`BinaryRefusal.UNVERIFIABLE`.
+    """
     try:
         if not _is_bare_name(name):
             logger.debug("refusing to resolve %r: not a bare binary name", name)
-            return None
+            return BinaryResolution(None, BinaryRefusal.NOT_BARE_NAME, None)
         path = shutil.which(name)
         if path is None:
-            return None
+            return BinaryResolution(None, BinaryRefusal.ABSENT, None)
         if not _is_fully_qualified(path):
+            # ``which`` returns ``os.path.join(entry, name)``, so a relative
+            # result means the matching ``$PATH`` entry was relative — i.e. the
+            # match lives under the CWD.
             logger.debug("skipping %r: match is not fully qualified (%s)", name, path)
-            return None
-        if is_planted_in_cwd(path):
+            return BinaryResolution(None, BinaryRefusal.CWD_ANCHORED, path)
+        in_cwd = _place_relative_to_cwd(path)
+        if in_cwd is None:
+            logger.debug("skipping %r: cannot place match relative to the CWD (%s)", name, path)
+            return BinaryResolution(None, BinaryRefusal.UNVERIFIABLE, path)
+        if in_cwd:
             logger.debug("skipping %r: resolved into CWD (%s)", name, path)
-            return None
-        return path
+            return BinaryResolution(None, BinaryRefusal.CWD_ANCHORED, path)
+        return BinaryResolution(path, None, path)
     except Exception:
         logger.debug("resolving binary %r failed", name, exc_info=True)
-        return None
+        return BinaryResolution(None, BinaryRefusal.UNVERIFIABLE, None)
 
 
 def resolve_required_binary(name: str) -> str:
@@ -190,14 +303,42 @@ def resolve_required_binary(name: str) -> str:
     first means a plant in the target directory cannot even shadow a legitimate
     binary into a hard failure.
 
+    The raised error names the *specific* gate that fired (see
+    :attr:`BinaryNotFoundError.reason`), because "not installed" and "installed
+    but refused" need opposite remedies — telling someone with a working ``git``
+    to install ``git`` sends them the wrong way and hides the fact that a binary
+    was found sitting in their working directory.
+
     :raises BinaryNotFoundError: the binary is not on ``$PATH``, or the only match
         resolved into the current working directory and was refused.
     """
-    path = resolve_binary(name)
-    if path is None:
+    resolution = resolve_binary_detail(name)
+    if resolution.path is None:
         raise BinaryNotFoundError(
-            f"{name!r} was not found on PATH, or the only match resolved into the current directory "
-            f"(which is not trusted). Install {name} and make sure it is on PATH outside the directory "
-            f"you are running from."
+            _refusal_message(name, resolution),
+            binary=name,
+            reason=resolution.reason or BinaryRefusal.UNVERIFIABLE,
+            candidate=resolution.candidate,
         )
-    return path
+    return resolution.path
+
+
+def _refusal_message(name: str, resolution: BinaryResolution) -> str:
+    """An actionable one-liner for the gate that refused ``name``."""
+    where = f" ({resolution.candidate})" if resolution.candidate else ""
+    if resolution.reason is BinaryRefusal.ABSENT:
+        return f"{name!r} was not found on PATH. Install {name} and make sure it is on PATH, then try again."
+    if resolution.reason is BinaryRefusal.CWD_ANCHORED:
+        return (
+            f"refusing to run {name!r}: the only match on PATH{where} is in the directory you are "
+            f"running from, which is not trusted — a program planted there would run instead of the "
+            f"real {name}. Run from a different directory, or make sure {name} is installed on PATH "
+            f"outside your working directory."
+        )
+    if resolution.reason is BinaryRefusal.UNVERIFIABLE:
+        return (
+            f"refusing to run {name!r}: could not check whether the match on PATH{where} lives in the "
+            f"directory you are running from (the working directory may have been deleted). "
+            f"Run from a directory that still exists and try again."
+        )
+    return f"refusing to resolve {name!r}: not a bare binary name."

@@ -246,8 +246,12 @@ def initialize_project_config():
         git_bin = resolve_required_binary("git")
         git_remote_url = subprocess.check_output([git_bin, "remote", "get-url", "origin"]).decode().strip()
         git_remote_url = _strip_url_credentials(git_remote_url)
-    except subprocess.CalledProcessError as e:
-        raise Exception("Could not retrieve Git remote URL. Are you in a Git repository?") from e
+    except (subprocess.CalledProcessError, OSError) as e:
+        # ``OSError`` also covers ``BinaryNotFoundError`` — git absent, or found
+        # and refused. Without it that escapes as a traceback *after*
+        # ``create_comfynode_config()`` above has already written pyproject.toml,
+        # leaving a half-initialized project behind.
+        raise Exception(f"Could not retrieve Git remote URL. Are you in a Git repository? ({e})") from e
 
     # Convert SSH URL to HTTPS if needed
     if git_remote_url.startswith("git@github.com:"):

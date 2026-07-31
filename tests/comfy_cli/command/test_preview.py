@@ -53,7 +53,11 @@ def test_classify_audio():
 # --- pure: build the ffmpeg command ----------------------------------------
 
 
-_FFMPEG = os.path.join(os.sep, "usr", "bin", "ffmpeg")
+# ``os.path.join(os.sep, ...)`` yields the drive-less ``\usr\bin\<name>`` on Windows,
+# which ``_safe_exec._is_fully_qualified`` rejects — pin a drive-qualified path there
+# so these tests exercise the resolver instead of a ``BinaryNotFoundError`` on the very
+# platform the hardening targets.
+_FFMPEG = r"C:\tools\bin\ffmpeg" if os.name == "nt" else os.path.join(os.sep, "usr", "bin", "ffmpeg")
 
 
 def test_build_cmd_video_is_contact_sheet():

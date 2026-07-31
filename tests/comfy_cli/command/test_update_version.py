@@ -24,7 +24,11 @@ from typer.testing import CliRunner
 from comfy_cli import _safe_exec, cmdline
 from comfy_cli.command import install as install_inner
 
-_FAKE_GIT_BIN = os.path.join(os.sep, "usr", "bin", "git")
+# ``os.path.join(os.sep, ...)`` yields the drive-less ``\usr\bin\<name>`` on Windows,
+# which ``_safe_exec._is_fully_qualified`` rejects — pin a drive-qualified path there
+# so these tests exercise the resolver instead of a ``BinaryNotFoundError`` on the very
+# platform the hardening targets.
+_FAKE_GIT_BIN = r"C:\tools\bin\git" if os.name == "nt" else os.path.join(os.sep, "usr", "bin", "git")
 
 
 def _is_git(argv: list[str]) -> bool:

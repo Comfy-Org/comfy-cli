@@ -228,8 +228,11 @@ class TestResolveRequiredBinary:
 
     def test_raises_when_the_binary_is_absent(self):
         with patch.object(_safe_exec.shutil, "which", return_value=None):
-            with pytest.raises(_safe_exec.BinaryNotFoundError, match="git"):
+            with pytest.raises(_safe_exec.BinaryNotFoundError, match="not found on PATH") as exc_info:
                 _safe_exec.resolve_required_binary("git")
+        assert exc_info.value.reason is _safe_exec.BinaryRefusal.ABSENT
+        assert exc_info.value.is_absent is True
+        assert exc_info.value.binary == "git"
 
     def test_raises_for_a_binary_planted_in_the_cwd(self, tmp_path):
         planted = tmp_path / "git"
@@ -238,8 +241,44 @@ class TestResolveRequiredBinary:
             patch.object(_safe_exec.os, "getcwd", return_value=str(tmp_path)),
             patch.object(_safe_exec.shutil, "which", return_value=str(planted)),
         ):
-            with pytest.raises(_safe_exec.BinaryNotFoundError, match="current directory"):
+            with pytest.raises(_safe_exec.BinaryNotFoundError, match="refusing to run") as exc_info:
                 _safe_exec.resolve_required_binary("git")
+        assert exc_info.value.reason is _safe_exec.BinaryRefusal.CWD_ANCHORED
+        assert exc_info.value.candidate == str(planted)
+
+    def test_a_refusal_is_not_reported_as_an_absent_binary(self, tmp_path):
+        """The distinction the diagnostics hang on: a refused binary is present.
+
+        Telling a user with a working ``git`` to go install ``git`` sends them
+        the wrong way and hides the interesting part — something named ``git``
+        was found sitting in the directory they ran from.
+        """
+        planted = tmp_path / "git"
+        planted.write_text("")
+        with (
+            patch.object(_safe_exec.os, "getcwd", return_value=str(tmp_path)),
+            patch.object(_safe_exec.shutil, "which", return_value=str(planted)),
+        ):
+            with pytest.raises(_safe_exec.BinaryNotFoundError) as exc_info:
+                _safe_exec.resolve_required_binary("git")
+        assert exc_info.value.is_absent is False
+        assert "install" not in str(exc_info.value).lower().split("make sure")[0]
+        assert str(planted) in str(exc_info.value)
+
+    def test_an_unplaceable_match_is_reported_as_unverifiable(self, tmp_path):
+        """A deleted/unreadable CWD is refused too, but it is not evidence of a
+        plant, so it gets its own reason rather than borrowing the plant's."""
+        legit = tmp_path / "System32" / "git"
+        legit.parent.mkdir()
+        legit.write_text("")
+        with (
+            patch.object(_safe_exec.os, "getcwd", side_effect=OSError("cwd deleted")),
+            patch.object(_safe_exec.shutil, "which", return_value=str(legit)),
+        ):
+            with pytest.raises(_safe_exec.BinaryNotFoundError) as exc_info:
+                _safe_exec.resolve_required_binary("git")
+        assert exc_info.value.reason is _safe_exec.BinaryRefusal.UNVERIFIABLE
+        assert exc_info.value.is_absent is False
 
     def test_raises_for_a_non_bare_name(self):
         """The gates are shared with ``resolve_binary`` — a name carrying a path
