@@ -1143,7 +1143,15 @@ def _apply_connect(workflow: dict, op: dict, graph) -> None:
     if not any(ln[0] == op["link_id"] for ln in links):
         links.append(link)
     dst["inputs"][to_idx]["link"] = op["link_id"]
-    out_links = src["outputs"][op["from_slot"]].setdefault("links", [])
+    out_port = src["outputs"][op["from_slot"]]
+    # A real ComfyUI-serialized never-wired output carries `"links": null` — the
+    # key EXISTS, so `setdefault` returns the existing `None` instead of
+    # installing a fresh list, and the membership check below would raise
+    # `TypeError: argument of type 'NoneType' is not iterable`. Check for None
+    # explicitly rather than relying on setdefault's "key missing" semantics.
+    if out_port.get("links") is None:
+        out_port["links"] = []
+    out_links = out_port["links"]
     if op["link_id"] not in out_links:
         out_links.append(op["link_id"])
 
