@@ -61,3 +61,66 @@ def test_filter_by_partner_and_category():
 def test_proxy_prefix_accepted():
     ep = spec.get_endpoint("/proxy/bfl/flux-pro-1.1/generate")
     assert ep.id == "bfl/flux-pro-1.1/generate"
+
+
+def test_unknown_model_suggests_leading_token_family(monkeypatch):
+    """Test that unknown-model errors suggest family members keyed on leading token."""
+    # Mock registry with kling-extend, kling-lipsync (kling family), plus some other endpoints
+    mock_registry = {
+        "kling/v1/videos/video-extend": spec.Endpoint(
+            id="kling/v1/videos/video-extend",
+            path="/proxy/kling/v1/videos/video-extend",
+            method="post",
+            partner="kling",
+            summary="Extend video",
+            category="video-extend",
+            request_schema={},
+            request_content_type="application/json",
+            response_schema={},
+            polling="kling",
+        ),
+        "kling/v1/videos/lip-sync": spec.Endpoint(
+            id="kling/v1/videos/lip-sync",
+            path="/proxy/kling/v1/videos/lip-sync",
+            method="post",
+            partner="kling",
+            summary="Lip sync",
+            category="lipsync",
+            request_schema={},
+            request_content_type="application/json",
+            response_schema={},
+            polling="kling",
+        ),
+        "runway/image_to_video": spec.Endpoint(
+            id="runway/image_to_video",
+            path="/proxy/runway/image_to_video",
+            method="post",
+            partner="runway",
+            summary="Image to video",
+            category="image-to-video",
+            request_schema={},
+            request_content_type="application/json",
+            response_schema={},
+            polling=None,
+        ),
+    }
+    # Clear the cache before patching so the mock takes effect
+    spec._registry.cache_clear()
+    monkeypatch.setattr(spec, "_registry", lambda: mock_registry)
+
+    msg = spec._unknown_endpoint_message("kling-image-to-video")
+
+    # Should contain kling family members
+    assert "kling/v1/videos/video-extend" in msg or "kling-extend" in msg or "video-extend" in msg
+    assert "kling/v1/videos/lip-sync" in msg or "kling-lipsync" in msg or "lip-sync" in msg
+    # Should start correctly
+    assert msg.startswith("Unknown model: 'kling-image-to-video'")
+    # Should end with the help message
+    assert "comfy generate list" in msg
+
+
+def test_unknown_model_no_family_still_helpful():
+    """Test that errors are helpful even when there's no family match."""
+    msg = spec._unknown_endpoint_message("krea-2")
+    assert msg.startswith("Unknown model: 'krea-2'")
+    assert "comfy generate list" in msg
