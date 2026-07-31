@@ -28,6 +28,12 @@ from typing import Annotated, Any
 import typer
 
 from comfy_cli import tracking
+
+# Aliased at module scope rather than lazy-imported: a class used in ``except``
+# clauses at module scope cannot be resolved lazily. ``comfy_cli.http`` is
+# stdlib-only and tiny, and ``search.py``/``jobs.py`` already pull
+# ``urllib.request`` in at import time, so the precedent exists.
+from comfy_cli.http import ResponseTooLarge as _ResponseTooLarge
 from comfy_cli.output import get_renderer, rprint
 
 app = typer.Typer(no_args_is_help=True, help="Slot-based editing of frontend-format ComfyUI workflows.")
@@ -605,10 +611,6 @@ _USERDATA_MAX_BYTES = 64 * 1024 * 1024
 _HTTP_MAX_BYTES = 64 * 1024 * 1024
 
 
-class _ResponseTooLarge(Exception):
-    """A response exceeded the surface's byte cap — refuse to truncate."""
-
-
 # Per-operation guidance for an oversize cloud response. ``save``/``delete``
 # have already sent their request by the time the response is read, so the
 # server-side write may well have landed — say so rather than implying it did not.
@@ -815,7 +817,7 @@ def _userdata_file_url(target, key: str, query: dict | None = None) -> str:
 
 def _http_request(
     url: str, target, *, method: str = "GET", body: dict | None = None, timeout: float = 30.0
-) -> tuple[int, dict | None]:
+) -> tuple[int, dict | list | None]:
     """Authed HTTP call returning (status, parsed_json_or_none). Raises
     urllib errors verbatim so callers can surface the right error code, and
     ``_ResponseTooLarge`` when the body exceeds ``_HTTP_MAX_BYTES`` — an

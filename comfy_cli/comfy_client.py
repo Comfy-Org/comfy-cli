@@ -24,9 +24,8 @@ from dataclasses import dataclass
 from typing import Any
 
 from comfy_cli.http import NoRedirectHandler, build_http_only_opener, target_auth_headers
+from comfy_cli.http import assert_safe_url as _assert_safe_url
 from comfy_cli.target import Target
-
-_LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1", "[::1]"}
 
 # Transient HTTP failures during polling should back off and retry, not abort.
 # 429 (rate limit) is retried for any method — the request was rejected, not
@@ -96,24 +95,6 @@ class Unauthenticated(Exception):
 
 
 _OPENER = build_http_only_opener(NoRedirectHandler())
-
-
-def _assert_safe_url(url: str) -> None:
-    """Reject plaintext HTTP for non-loopback hosts.
-
-    Anything carrying a Bearer token over the wire must be HTTPS unless the
-    host is a loopback address (where there's no network to sniff).
-    """
-    parsed = urllib.parse.urlsplit(url)
-    if parsed.scheme == "https":
-        return
-    host = (parsed.hostname or "").lower()
-    if host in _LOOPBACK_HOSTS:
-        return
-    raise ValueError(
-        f"refusing to send request to non-https, non-loopback URL: {url} "
-        "(set COMFY_CLOUD_BASE_URL to an https:// endpoint)"
-    )
 
 
 @dataclass
