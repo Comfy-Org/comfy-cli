@@ -44,6 +44,10 @@ class PortOptions:
     # engine can expand key-dependent sub-widgets (e.g. model → model.resolution),
     # matching the converter. None for ordinary inputs.
     dynamic_options: list | None = None
+    # For COMFY_AUTOGROW_V3: the raw ``template`` dict object_info carries for an
+    # autogrow input (e.g. {"input": {...}, "prefix": "image", "min": 1, "max": 50}).
+    # Use ``Port.autogrow_template`` to pull out just the naming fields.
+    template: dict | None = None
 
 
 @dataclass
@@ -68,6 +72,26 @@ class Port:
         convention is the singular of the input name (images → image0)."""
         stem = self.name[:-1] if self.name.endswith("s") else self.name
         return f"{self.name}.{stem}0, {self.name}.{stem}1, …"
+
+    @property
+    def autogrow_template(self) -> dict | None:
+        """The V3 autogrow element-naming template from object_info, if the
+        catalog carries one: ``{"names": [...]}`` verbatim, or ``{"prefix":
+        "..."}`` — the two never co-occur (0/108 catalog cases). None when this
+        port isn't autogrow, or the schema carries no template (older/partial
+        catalogs, offline edits), so callers fall back to the historical
+        ``{base[:-1]}{N}`` pluralization guess in :meth:`autogrow_slot_example`.
+        """
+        t = self.options.template
+        if not self.is_autogrow or not isinstance(t, dict):
+            return None
+        names = t.get("names")
+        if isinstance(names, list) and names:
+            return {"names": list(names)}
+        prefix = t.get("prefix")
+        if isinstance(prefix, str) and prefix:
+            return {"prefix": prefix}
+        return None
 
     def canonical_combo(self, value: Any) -> Any | None:
         """Map a *mangled* COMBO value to the real option it clearly means, or
@@ -274,6 +298,7 @@ def _derive_pack(python_module: str) -> str:
 
 
 def _parse_port_options(opts_raw: dict) -> PortOptions:
+    template_raw = opts_raw.get("template")
     return PortOptions(
         min=opts_raw.get("min"),
         max=opts_raw.get("max"),
@@ -282,6 +307,7 @@ def _parse_port_options(opts_raw: dict) -> PortOptions:
         multiline=bool(opts_raw.get("multiline", False)),
         control_after_generate=_control_after_generate_set(opts_raw.get("control_after_generate")),
         force_input=bool(opts_raw.get("forceInput", False)),
+        template=template_raw if isinstance(template_raw, dict) else None,
     )
 
 

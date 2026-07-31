@@ -284,19 +284,57 @@ def _lww_commit(workflow: dict, op: dict) -> None:
     workflow.setdefault("_widget_stamps", {})[json.dumps(_write_target(op), default=str)] = _stamp_key(op)
 
 
-def _next_autogrow_name(ins: list, requested: str) -> str:
+def _autogrow_template(graph, node_type: str, base: str) -> dict | None:
+    """The schema-declared element-naming template for the ``base`` autogrow
+    input on ``node_type`` — looked up from the same object_info-derived
+    ``graph`` the connect path already resolves node schemas from (see
+    ``cql.engine.Port.autogrow_template``). None when ``graph`` is unavailable,
+    ``node_type`` isn't in the catalog (offline edit), or the catalog entry
+    carries no template — callers then fall back to the historical
+    pluralization heuristic in :func:`_autogrow_elem_name`."""
+    if graph is None:
+        return None
+    m = graph.node(node_type)
+    if m is None:
+        return None
+    for p in m.inputs:
+        if p.name == base and p.is_autogrow:
+            return p.autogrow_template
+    return None
+
+
+def _autogrow_elem_name(base: str, n: int, template: dict | None) -> str:
+    """The 0-based Nth autogrow element name for ``base``. Comes from the node
+    schema when known — ``template["names"][N]`` verbatim (overflow past the
+    list keeps growing as ``f"{names[-1]}{n}"``), else ``f"{prefix}{n}"`` —
+    falling back to the historical ``{base[:-1]}{n}`` pluralization guess only
+    when ``template`` is None (schema unavailable: offline edit, catalog miss)."""
+    if template:
+        names = template.get("names")
+        if names:
+            return names[n] if n < len(names) else f"{names[-1]}{n}"
+        prefix = template.get("prefix")
+        if prefix:
+            return f"{prefix}{n}"
+    stem = base[:-1] if base.endswith("s") else base
+    return f"{stem}{n}"
+
+
+def _next_autogrow_name(ins: list, requested: str, template: dict | None = None) -> str:
     """A free autogrow slot name. Prefer the op's requested name; if a concurrent
-    connect already took it, grow the next sequential ``{base}.{elem}{N}`` so no
-    slot is ever clobbered (the server convention stays sequential)."""
+    connect already took it, grow the next sequential schema-derived slot (see
+    :func:`_autogrow_elem_name`) so no slot is ever clobbered (the server
+    convention stays sequential)."""
     taken = {i.get("name") for i in ins}
     if requested not in taken:
         return requested
-    base, _, stem = requested.partition(".")
-    elem = stem.rstrip("0123456789") or "slot"
-    n = 0
-    while f"{base}.{elem}{n}" in taken:
+    base = requested.split(".", 1)[0]
+    n = len([i for i in ins if str(i.get("name", "")).startswith(base + ".")])
+    name = f"{base}.{_autogrow_elem_name(base, n, template)}"
+    while name in taken:
         n += 1
-    return f"{base}.{elem}{n}"
+        name = f"{base}.{_autogrow_elem_name(base, n, template)}"
+    return name
 
 
 # ---------------------------------------------------------------------------
@@ -929,7 +967,7 @@ def apply_op(workflow: dict, op: dict, graph) -> dict:
     elif kind == "set_widget":
         _apply_set_widget(workflow, op, graph)
     elif kind == "connect":
-        _apply_connect(workflow, op)
+        _apply_connect(workflow, op, graph)
     elif kind == "delete_node":
         _apply_delete_node(workflow, op)
     elif kind == "clear":
@@ -980,7 +1018,7 @@ def _apply_set_widget(workflow: dict, op: dict, graph) -> None:
     _lww_commit(workflow, op)
 
 
-def _apply_connect(workflow: dict, op: dict) -> None:
+def _apply_connect(workflow: dict, op: dict, graph) -> None:
     # Totality: either endpoint concurrently deleted => no-op (delete wins), so a
     # merge consumer can replay a connect and a delete in either order without a
     # crash or a dangling link. Resolve both before mutating anything.
@@ -995,12 +1033,15 @@ def _apply_connect(workflow: dict, op: dict) -> None:
         # autogrow that minted the same requested name gets its own fresh slot
         # instead of overwriting this one, so neither connection is lost. The
         # slot's convergence identity is ``grow_id``; its display name stays
-        # sequential per the server's ``images.imageN`` convention.
+        # sequential per the server's ``images.imageN`` convention (or the
+        # schema's own element names, when the catalog carries a template).
         ins = dst.setdefault("inputs", [])
         to_idx = next((k for k, i in enumerate(ins) if i.get("grow_id") == op["link_id"]), None)
         if to_idx is None:
+            base = str(grow["name"]).split(".", 1)[0]
+            template = None if grow.get("widget") else _autogrow_template(graph, dst.get("type", ""), base)
             entry = {
-                "name": _next_autogrow_name(ins, grow["name"]),
+                "name": _next_autogrow_name(ins, grow["name"], template),
                 "type": grow["type"],
                 "link": None,
                 "grow_id": op["link_id"],
@@ -1296,12 +1337,14 @@ def _resolve_input_target(node: dict, graph, slot: Any, elem_type: str | None) -
       the API converter reads the link and skips the widget by name.
     """
     ins = node.get("inputs") or []
+    node_type = node.get("type", "")
     # Concrete slot (index or exact name) that is NOT an autogrow base.
     try:
         idx = _resolve_input_slot(node, None, slot)
         if str(ins[idx].get("type", "")).startswith("COMFY_AUTOGROW"):
             base = ins[idx].get("name")
-            return None, _plan_autogrow(ins, base, elem_type)
+            template = _autogrow_template(graph, node_type, base)
+            return None, _plan_autogrow(ins, base, elem_type, template)
         return idx, None
     except ValueError:
         pass
@@ -1312,7 +1355,8 @@ def _resolve_input_target(node: dict, graph, slot: Any, elem_type: str | None) -
             (i for i in ins if i.get("name") == base and str(i.get("type", "")).startswith("COMFY_AUTOGROW")), None
         )
         if ag is not None:
-            grow = _plan_autogrow(ins, base, elem_type)  # canonical next sequential slot
+            template = _autogrow_template(graph, node_type, base)
+            grow = _plan_autogrow(ins, base, elem_type, template)  # canonical next sequential slot
             # Addressing the bare base auto-appends. A dotted key is accepted ONLY if
             # it names that exact next slot; an index gap (images.image4), a doubled
             # prefix (images.images.image0), or a stray element (images.foo) would mint
@@ -1327,7 +1371,7 @@ def _resolve_input_target(node: dict, graph, slot: Any, elem_type: str | None) -
                 )
             return None, grow
     # Widget-backed input: convert the widget to a linked input.
-    if graph is not None and isinstance(slot, str) and slot in graph.widget_order(node.get("type", "")):
+    if graph is not None and isinstance(slot, str) and slot in graph.widget_order(node_type):
         return None, {"name": slot, "type": elem_type or "*", "widget": slot}
     # Bare autogrow ELEMENT name (`image1` for base `images`) — the guess agents
     # make on classic batch nodes, and the top workflow-edit failure in alpha
@@ -1340,10 +1384,10 @@ def _resolve_input_target(node: dict, graph, slot: Any, elem_type: str | None) -
             base = ag.get("name")
             if not base or not str(ag.get("type", "")).startswith("COMFY_AUTOGROW"):
                 continue
-            elem = base[:-1] if base.endswith("s") else base
-            if not re.fullmatch(re.escape(elem) + r"\d+", slot):
+            template = _autogrow_template(graph, node_type, base)
+            if not _autogrow_bare_slot_pattern(base, template).fullmatch(slot):
                 continue
-            grow = _plan_autogrow(ins, base, elem_type)
+            grow = _plan_autogrow(ins, base, elem_type, template)
             if f"{base}.{slot}" == grow["name"]:
                 return None, grow
             grown = [i.get("name") for i in ins if str(i.get("name", "")).startswith(base + ".")]
@@ -1356,11 +1400,33 @@ def _resolve_input_target(node: dict, graph, slot: Any, elem_type: str | None) -
     raise ValueError(f"input {slot!r} not found on node {node.get('id')}; inputs: {names}")
 
 
-def _plan_autogrow(ins: list, base: str, elem_type: str | None) -> dict:
-    """The canonical next autogrow slot for ``base`` — one sequential
-    ``{base}.{elem}{N}`` per existing slot, minted with the source ``elem_type``.
-    Callers validate any explicitly requested key against this name before growing."""
+def _autogrow_bare_slot_pattern(base: str, template: dict | None) -> re.Pattern:
+    """A regex recognizing a bare element name (no ``base.`` prefix, e.g.
+    ``image1`` for base ``images``) as plausibly addressing this autogrow
+    input, so a guessed bare name resolves to the actionable fix rather than a
+    generic not-found. Matches the schema's element vocabulary when known —
+    any literal ``names`` entry, or its ``{names[-1]}N`` overflow form, or
+    ``{prefix}N`` — else the historical ``{stem}N`` pluralization guess when
+    ``template`` is None."""
+    if template:
+        names = template.get("names")
+        if names:
+            alts = "|".join(re.escape(n) for n in names)
+            return re.compile(rf"(?:{alts})|{re.escape(names[-1])}\d+")
+        prefix = template.get("prefix")
+        if prefix:
+            return re.compile(re.escape(prefix) + r"\d+")
+    stem = base[:-1] if base.endswith("s") else base
+    return re.compile(re.escape(stem) + r"\d+")
+
+
+def _plan_autogrow(ins: list, base: str, elem_type: str | None, template: dict | None = None) -> dict:
+    """The canonical next autogrow slot for ``base``. Element name comes from
+    the node schema when known — ``template["names"][N]`` verbatim, else
+    ``f"{prefix}{N}"`` (0-based) — falling back to the historical
+    ``{base}.{base[:-1]}{N}`` heuristic only when ``template`` is unavailable
+    (schema unavailable: offline edit, catalog miss). Callers validate any
+    explicitly requested key against this name before growing."""
     existing = [i for i in ins if str(i.get("name", "")).startswith(base + ".")]
-    elem = base[:-1] if base.endswith("s") else base
-    name = f"{base}.{elem}{len(existing)}"
-    return {"name": name, "type": elem_type or "*"}
+    elem = _autogrow_elem_name(base, len(existing), template)
+    return {"name": f"{base}.{elem}", "type": elem_type or "*"}

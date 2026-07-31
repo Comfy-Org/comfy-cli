@@ -189,6 +189,21 @@ def _graph() -> Graph:
     return Graph.from_object_info(_object_info())
 
 
+def _object_info_with_autogrow_template(template: dict) -> dict[str, Any]:
+    """``_object_info()`` with ``BatchImagesNode.images`` carrying a V3 autogrow
+    element-naming template — the shape checked into
+    ``tests/comfy_cli/fixtures/subgraph_object_info.json`` for the live cloud
+    BatchImagesNode: ``["COMFY_AUTOGROW_V3", {"template": {"prefix": ..., ...}}]``.
+    ``template`` here is just the ``names``/``prefix`` pair the engine consumes."""
+    info = copy.deepcopy(_object_info())
+    info["BatchImagesNode"]["input"]["required"]["images"] = ["COMFY_AUTOGROW_V3", {"template": template}]
+    return info
+
+
+def _graph_with_autogrow_template(template: dict) -> Graph:
+    return Graph.from_object_info(_object_info_with_autogrow_template(template))
+
+
 @pytest.fixture
 def patched_graph(monkeypatch):
     monkeypatch.setattr(workflow_edit, "_get_graph", lambda *a, **kw: _graph())
@@ -1468,6 +1483,67 @@ class TestOpModel:
             link_srcs = {ln[1] for ln in out.get("links") or []}
             assert {20, 21} <= link_srcs, out.get("links")
         # ...and the two orders converge.
+        assert ops.canonical(ab) == ops.canonical(ba)
+
+    def test_autogrow_uses_schema_prefix_zero_based(self):
+        """A ``{"prefix": "frame"}`` template names grown slots verbatim from
+        the schema, 0-based (images.frame0, images.frame1) — a prefix that
+        deliberately differs from the ``{base[:-1]}`` pluralization guess
+        ("image"), so this only passes when the name truly comes from the
+        schema template, not the heuristic."""
+        ops = self._ops()
+        g = _graph_with_autogrow_template({"prefix": "frame"})
+        wf = _autogrow_workflow()
+        wf, op1 = ops.connect(wf, g, 20, "IMAGE", 10, "images", actor="a")
+        wf, op2 = ops.connect(wf, g, 21, "IMAGE", 10, "images", actor="a")
+        assert op1["grow"]["name"] == "images.frame0"
+        assert op2["grow"]["name"] == "images.frame1"
+        grown = [i["name"] for i in next(n for n in wf["nodes"] if n["id"] == 10)["inputs"] if str(i["name"]).startswith("images.")]
+        assert grown == ["images.frame0", "images.frame1"]
+
+    def test_autogrow_uses_schema_names_verbatim(self):
+        """A ``{"names": [...]}`` template uses the literal element names from
+        the schema, not a pluralization guess — e.g. a node whose V3 definition
+        calls its slots "first"/"second" rather than "image0"/"image1"."""
+        ops = self._ops()
+        g = _graph_with_autogrow_template({"names": ["first", "second"]})
+        wf = _autogrow_workflow()
+        wf, op1 = ops.connect(wf, g, 20, "IMAGE", 10, "images", actor="a")
+        wf, op2 = ops.connect(wf, g, 21, "IMAGE", 10, "images", actor="a")
+        assert op1["grow"]["name"] == "images.first"
+        assert op2["grow"]["name"] == "images.second"
+        grown = [i["name"] for i in next(n for n in wf["nodes"] if n["id"] == 10)["inputs"] if str(i["name"]).startswith("images.")]
+        assert grown == ["images.first", "images.second"]
+
+    def test_autogrow_without_template_keeps_heuristic(self):
+        """No schema template (offline edit, or a catalog entry — like this
+        file's ``_object_info()`` — that never populated one) keeps the
+        historical ``{base}.{base[:-1]}{N}`` guess. Regression: the existing
+        fixture's contract must not change just because the feature shipped."""
+        ops = self._ops()
+        g = _graph()  # BatchImagesNode.images is bare "COMFY_AUTOGROW_V3": no template
+        wf = _autogrow_workflow()
+        wf, op = ops.connect(wf, g, 20, "IMAGE", 10, "images", actor="a")
+        assert op["grow"]["name"] == "images.image0"
+        grown = [i["name"] for i in next(n for n in wf["nodes"] if n["id"] == 10)["inputs"] if str(i["name"]).startswith("images.")]
+        assert grown == ["images.image0"]
+
+    def test_p9_autogrow_names_template_converges(self):
+        """Two concurrent autogrow connects onto a ``names``-templated base still
+        converge to the schema's two literal element names in either apply
+        order — the conflict-resolution path (``_next_autogrow_name``) must
+        derive from the schema too, not just the first-planned request."""
+        ops = self._ops()
+        g = _graph_with_autogrow_template({"names": ["first", "second"]})
+        base = _autogrow_workflow()
+        _, op1 = ops.connect(copy.deepcopy(base), g, 20, "IMAGE", 10, "images", actor="a")
+        _, op2 = ops.connect(copy.deepcopy(base), g, 21, "IMAGE", 10, "images", actor="b")
+        ab = ops.apply_op(ops.apply_op(copy.deepcopy(base), op1, g), op2, g)
+        ba = ops.apply_op(ops.apply_op(copy.deepcopy(base), op2, g), op1, g)
+        for out in (ab, ba):
+            ins = next(n for n in out["nodes"] if n["id"] == 10)["inputs"]
+            names = {i["name"] for i in ins if str(i["name"]).startswith("images.")}
+            assert names == {"images.first", "images.second"}, names
         assert ops.canonical(ab) == ops.canonical(ba)
 
     def test_p9_autogrow_grow_id_survives_api_conversion(self):
