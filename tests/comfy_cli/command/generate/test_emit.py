@@ -240,3 +240,28 @@ def test_cli_emit_output_prefix(runner, tmp_path, monkeypatch):
     wf = json.loads(out.read_text())
     save = next(n for n in wf.values() if n["class_type"] == "SaveImage")
     assert save["inputs"]["filename_prefix"] == "myfox"
+
+
+def test_build_workflow_single_element_list_unwraps():
+    wf = emit.build_workflow("nano-banana", {"prompt": "p", "image": ["ref.jpg"]})
+    loaders = [n for n in wf.values() if n["class_type"] == "LoadImage"]
+    assert len(loaders) == 1
+    assert not any(n["class_type"] == "ImageBatch" for n in wf.values())
+
+
+def test_build_workflow_two_images_chains_imagebatch():
+    wf = emit.build_workflow("nano-banana", {"prompt": "p", "image": ["a.jpg", "b.jpg"]})
+    loaders = {i: n for i, n in wf.items() if n["class_type"] == "LoadImage"}
+    batches = {i: n for i, n in wf.items() if n["class_type"] == "ImageBatch"}
+    assert len(loaders) == 2 and len(batches) == 1
+    (batch_id, batch), = batches.items()
+    assert {batch["inputs"]["image1"][0], batch["inputs"]["image2"][0]} == set(loaders)
+    assert wf["1"]["inputs"]["images"] == [batch_id, 0]
+
+
+def test_build_workflow_three_images_chains_two_batches():
+    wf = emit.build_workflow("nano-banana", {"prompt": "p", "image": ["a.jpg", "b.jpg", "c.jpg"]})
+    batches = [i for i, n in wf.items() if n["class_type"] == "ImageBatch"]
+    assert len(batches) == 2
+    # terminal batch feeds the partner node
+    assert wf["1"]["inputs"]["images"][0] in batches

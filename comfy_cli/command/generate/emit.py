@@ -223,20 +223,31 @@ def build_workflow(model: str, values: dict[str, Any], *, output_prefix: str = "
         raw = values.get(flag)
         if raw is None:
             continue
-        if isinstance(raw, list | tuple):
-            raise EmitError(
-                f"--{flag} received multiple files, but emit-workflow currently "
-                "maps this input to a single LoadImage node."
-            )
-        path = str(Path(raw).expanduser())
-        loader_id = str(next_id)
-        next_id += 1
-        workflow[loader_id] = {
-            "class_type": "LoadImage",
-            "_meta": {"title": f"load {Path(path).name}"},
-            "inputs": {"image": path},
-        }
-        node_inputs[node_key] = [loader_id, 0]
+        paths = [str(Path(p).expanduser()) for p in (raw if isinstance(raw, list | tuple) else [raw])]
+        loader_ids: list[str] = []
+        for path in paths:
+            loader_id = str(next_id)
+            next_id += 1
+            workflow[loader_id] = {
+                "class_type": "LoadImage",
+                "_meta": {"title": f"load {Path(path).name}"},
+                "inputs": {"image": path},
+            }
+            loader_ids.append(loader_id)
+        # One file wires straight in; several fold through chained core
+        # ImageBatch nodes (2-input, always present) so the partner still
+        # receives a single IMAGE stream.
+        upstream, upstream_out = loader_ids[0], 0
+        for lid in loader_ids[1:]:
+            batch_id = str(next_id)
+            next_id += 1
+            workflow[batch_id] = {
+                "class_type": "ImageBatch",
+                "_meta": {"title": "batch reference images"},
+                "inputs": {"image1": [upstream, upstream_out], "image2": [lid, 0]},
+            }
+            upstream, upstream_out = batch_id, 0
+        node_inputs[node_key] = [upstream, upstream_out]
 
     # Scalar params → node inputs, honoring the explicit param_map.
     for flag, node_key in ns.param_map.items():
