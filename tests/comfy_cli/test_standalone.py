@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import requests
 
+from comfy_cli.http import DEFAULT_HTTP_TIMEOUT
 from comfy_cli.standalone import (
     _latest_release_json_url,
     _resolve_python_version,
@@ -79,7 +80,8 @@ ccc  cpython-3.12.9+20260310-x86_64-install_only.tar.gz
     def test_url_construction(self, mock_get):
         mock_get.return_value = _mock_response(SAMPLE_SHA256SUMS)
         _resolve_python_version("https://example.com/release/", "3.12")
-        mock_get.assert_called_once_with("https://example.com/release/SHA256SUMS")
+        # A timeout must always be passed so a stalled peer can't hang the CLI.
+        mock_get.assert_called_once_with("https://example.com/release/SHA256SUMS", timeout=DEFAULT_HTTP_TIMEOUT)
 
     @patch("comfy_cli.standalone.requests.get")
     def test_no_false_match_across_minor(self, mock_get):
@@ -119,6 +121,17 @@ class TestDownloadStandalonePython:
 
         # Should have fetched only latest-release.json, not SHA256SUMS
         assert mock_get.call_count == 1
+
+    @patch("comfy_cli.standalone.download_url")
+    @patch("comfy_cli.standalone.requests.get")
+    def test_latest_release_fetch_passes_timeout(self, mock_get, mock_download):
+        """The latest-release.json fetch must set a timeout so a stalled peer can't hang."""
+        mock_get.return_value = _mock_response('{"tag": "20260310", "asset_url_prefix": "https://example.com/release"}')
+        mock_download.return_value = "python.tar.gz"
+
+        download_standalone_python(platform="linux", proc="x86_64", version="3.12.13")
+
+        assert mock_get.call_args.kwargs["timeout"] == DEFAULT_HTTP_TIMEOUT
 
 
 _require_network = pytest.mark.skipif(

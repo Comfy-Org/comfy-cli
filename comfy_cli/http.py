@@ -1,7 +1,18 @@
-"""Shared HTTP helpers with an auth-leak-safe redirect policy."""
+"""Shared HTTP helpers: default timeouts and an auth-leak-safe redirect policy."""
 
 import urllib.error
 import urllib.request
+
+# Default timeout (seconds) for plain, non-streaming API calls. Without an
+# explicit timeout ``requests`` blocks forever on a stalled peer; this makes such
+# a call fail fast with a typed ``requests.Timeout`` instead of hanging the CLI.
+DEFAULT_HTTP_TIMEOUT = 30.0
+
+# Timeout for streaming downloads and large uploads, as a (connect, read) tuple.
+# ``requests`` applies the read timeout per socket read rather than to the whole
+# transfer, so this caps how long we wait to *start* connecting/receiving without
+# capping a legitimately long transfer.
+DOWNLOAD_TIMEOUT = (10.0, 60.0)
 
 
 class NoRedirectHandler(urllib.request.HTTPRedirectHandler):

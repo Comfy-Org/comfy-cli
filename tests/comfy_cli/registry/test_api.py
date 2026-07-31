@@ -4,6 +4,7 @@ import json
 import unittest
 from unittest.mock import MagicMock, patch
 
+from comfy_cli.http import DEFAULT_HTTP_TIMEOUT
 from comfy_cli.registry import PyProjectConfig
 from comfy_cli.registry.api import RegistryAPI
 from comfy_cli.registry.types import ComfyConfig, License, ProjectConfig, URLs
@@ -201,6 +202,54 @@ class TestRegistryAPI(unittest.TestCase):
             self.registry_api.install_node("node1")
         self.assertIn("Failed to install node", str(context.exception))
 
+    @patch("requests.post")
+    def test_publish_node_version_passes_timeout(self, mock_post):
+        """Registry calls must set a timeout so a stalled peer can't hang the CLI."""
+        mock_response = MagicMock()
+        mock_response.status_code = 201
+        mock_response.json.return_value = {
+            "node_version": {
+                "id": "test_node",
+                "version": "0.1.0",
+                "changelog": "",
+                "dependencies": [],
+                "deprecated": False,
+                "downloadUrl": "https://example.com/download",
+            },
+            "signedUrl": "https://example.com/signed",
+        }
+        mock_post.return_value = mock_response
+
+        self.registry_api.publish_node_version(self.node_config, self.token)
+        self.assertEqual(mock_post.call_args.kwargs["timeout"], DEFAULT_HTTP_TIMEOUT)
+
+    @patch("requests.get")
+    def test_list_all_nodes_passes_timeout(self, mock_get):
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {"nodes": []}
+        mock_get.return_value = mock_response
+
+        self.registry_api.list_all_nodes()
+        self.assertEqual(mock_get.call_args.kwargs["timeout"], DEFAULT_HTTP_TIMEOUT)
+
+    @patch("requests.get")
+    def test_install_node_passes_timeout(self, mock_get):
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "id": "node1",
+            "version": "1.0.0",
+            "changelog": "",
+            "dependencies": [],
+            "deprecated": False,
+            "downloadUrl": "https://example.com/download1",
+        }
+        mock_get.return_value = mock_response
+
+        self.registry_api.install_node("node1")
+        self.assertEqual(mock_get.call_args.kwargs["timeout"], DEFAULT_HTTP_TIMEOUT)
+
     @patch("requests.get")
     def test_get_node_success(self, mock_get):
         mock_response = MagicMock()
@@ -233,3 +282,17 @@ class TestRegistryAPI(unittest.TestCase):
         with self.assertRaises(Exception) as context:
             self.registry_api.get_node("node1")
         self.assertIn("Failed to retrieve node", str(context.exception))
+
+    @patch("requests.get")
+    def test_get_node_passes_timeout(self, mock_get):
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "id": "node1",
+            "name": "Node One",
+            "description": "A node",
+        }
+        mock_get.return_value = mock_response
+
+        self.registry_api.get_node("node1")
+        self.assertEqual(mock_get.call_args.kwargs["timeout"], DEFAULT_HTTP_TIMEOUT)

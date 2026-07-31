@@ -8,6 +8,8 @@ import pytest
 
 import comfy_cli.http as http_mod
 from comfy_cli.http import (
+    DEFAULT_HTTP_TIMEOUT,
+    DOWNLOAD_TIMEOUT,
     NoRedirectHandler,
     authed_urlopen,
     build_authed_request,
@@ -21,6 +23,20 @@ def _target(*, api_key=None, auth_token=None, is_cloud=True):
     """Minimal stand-in for a resolved Target — build_authed_request reads
     ``.api_key``, ``.auth_token`` and ``.is_cloud`` (via target_auth_headers)."""
     return types.SimpleNamespace(api_key=api_key, auth_token=auth_token, is_cloud=is_cloud)
+
+
+def test_default_http_timeout_is_a_positive_scalar():
+    assert isinstance(DEFAULT_HTTP_TIMEOUT, (int, float))
+    assert DEFAULT_HTTP_TIMEOUT > 0
+
+
+def test_download_timeout_is_a_connect_read_tuple():
+    # A (connect, read) tuple so connect failures fail fast while a legitimately
+    # long transfer is not capped (requests applies read timeout per socket read).
+    assert isinstance(DOWNLOAD_TIMEOUT, tuple)
+    assert len(DOWNLOAD_TIMEOUT) == 2
+    connect, read = DOWNLOAD_TIMEOUT
+    assert connect > 0 and read > 0
 
 
 def _call(handler, method_name, code=302):
