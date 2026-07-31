@@ -206,3 +206,54 @@ class TestResolveBinaryRequiresFullyQualifiedMatch:
             patch.object(_safe_exec.shutil, "which", return_value=r"\tools\nvidia-smi.exe"),
         ):
             assert _safe_exec.resolve_binary("nvidia-smi") is None
+
+
+class TestResolveRequiredBinary:
+    """The required-binary companion: same gates, but a failure is loud.
+
+    ``git``/``ffmpeg`` failing is fatal to the command that wanted them, so
+    "return ``None`` and let the caller skip" — right for a probe — would just
+    push a ``TypeError`` one frame down."""
+
+    def test_returns_the_resolved_path(self, tmp_path):
+        system_dir = tmp_path / "System32"
+        system_dir.mkdir()
+        legit = system_dir / "git"
+        legit.write_text("")
+        with (
+            patch.object(_safe_exec.os, "getcwd", return_value=str(tmp_path)),
+            patch.object(_safe_exec.shutil, "which", return_value=str(legit)),
+        ):
+            assert _safe_exec.resolve_required_binary("git") == str(legit)
+
+    def test_raises_when_the_binary_is_absent(self):
+        with patch.object(_safe_exec.shutil, "which", return_value=None):
+            with pytest.raises(_safe_exec.BinaryNotFoundError, match="git"):
+                _safe_exec.resolve_required_binary("git")
+
+    def test_raises_for_a_binary_planted_in_the_cwd(self, tmp_path):
+        planted = tmp_path / "git"
+        planted.write_text("")
+        with (
+            patch.object(_safe_exec.os, "getcwd", return_value=str(tmp_path)),
+            patch.object(_safe_exec.shutil, "which", return_value=str(planted)),
+        ):
+            with pytest.raises(_safe_exec.BinaryNotFoundError, match="current directory"):
+                _safe_exec.resolve_required_binary("git")
+
+    def test_raises_for_a_non_bare_name(self):
+        """The gates are shared with ``resolve_binary`` — a name carrying a path
+        component is refused here too, rather than looked up."""
+        with pytest.raises(_safe_exec.BinaryNotFoundError):
+            _safe_exec.resolve_required_binary("./git")
+
+    @pytest.mark.parametrize("caught_as", [FileNotFoundError, OSError, RuntimeError])
+    def test_is_catchable_by_the_existing_degradation_handlers(self, caught_as):
+        """Call sites that already tolerated a missing binary catch
+        ``FileNotFoundError``/``OSError``; the ``RuntimeError`` base is there for
+        callers that want to name the failure without an OS-error class. Both
+        must hold, or converting a tolerant site would silently turn a graceful
+        degradation into a crash."""
+        with patch.object(_safe_exec.shutil, "which", return_value=None):
+            with pytest.raises(caught_as):
+                _safe_exec.resolve_required_binary("git")

@@ -16,7 +16,6 @@ and unit-tested; the Typer shell runs ffprobe/ffmpeg and renders the envelope.
 from __future__ import annotations
 
 import json
-import shutil
 import subprocess
 from pathlib import Path
 from typing import Annotated, Any
@@ -24,6 +23,7 @@ from typing import Annotated, Any
 import typer
 
 from comfy_cli import tracking
+from comfy_cli._safe_exec import BinaryNotFoundError, resolve_required_binary
 from comfy_cli.output import get_renderer, rprint
 
 _IMAGE_FORMAT_HINTS = ("_pipe", "image2", "png", "jpeg", "mjpeg", "gif", "webp", "bmp", "apng")
@@ -93,10 +93,23 @@ def classify_streams(probe: dict) -> dict:
 
 
 def build_preview_cmd(
-    kind: str, input_path: str, out_path: str, *, grid: tuple[int, int], width: int, duration: float | None
+    kind: str,
+    input_path: str,
+    out_path: str,
+    *,
+    grid: tuple[int, int],
+    width: int,
+    duration: float | None,
+    ffmpeg_bin: str,
 ) -> list[str]:
-    """Build the ffmpeg argv for a preview of ``kind``. I/O-free."""
-    base = ["ffmpeg", "-v", "error", "-y", "-i", input_path]
+    """Build the ffmpeg argv for a preview of ``kind``. I/O-free.
+
+    ``ffmpeg_bin`` is the trusted absolute path from
+    :func:`comfy_cli._safe_exec.resolve_required_binary`; it is a *required*
+    keyword rather than one defaulting to ``"ffmpeg"`` so no caller can
+    reintroduce the bare-name spawn this argument exists to prevent.
+    """
+    base = [ffmpeg_bin, "-v", "error", "-y", "-i", input_path]
     if kind == "video":
         cols, rows = grid
         n = max(1, cols * rows)
@@ -110,9 +123,9 @@ def build_preview_cmd(
     return base + ["-frames:v", "1", "-vf", f"scale='min({width},iw)':-1", out_path]
 
 
-def _ffprobe(path: Path) -> dict:
+def _ffprobe(path: Path, ffprobe_bin: str) -> dict:
     proc = subprocess.run(
-        ["ffprobe", "-v", "error", "-print_format", "json", "-show_streams", "-show_format", str(path)],
+        [ffprobe_bin, "-v", "error", "-print_format", "json", "-show_streams", "-show_format", str(path)],
         capture_output=True,
         text=True,
     )
@@ -137,16 +150,24 @@ def preview_cmd(
     if not file.is_file():
         renderer.error(code="preview_input_not_found", message=f"File not found: {file}", hint="check the path")
         raise typer.Exit(code=1)
-    if not (shutil.which("ffmpeg") and shutil.which("ffprobe")):
+    # One resolution pass doubles as the presence check: both binaries are looked
+    # up once, to trusted absolute paths that are reused for every spawn below.
+    # A CWD-anchored match is refused, so running ``comfy preview`` from a
+    # directory holding a planted ``ffmpeg.exe`` reports it as unavailable rather
+    # than executing it.
+    try:
+        ffmpeg_bin = resolve_required_binary("ffmpeg")
+        ffprobe_bin = resolve_required_binary("ffprobe")
+    except BinaryNotFoundError:
         renderer.error(
             code="ffmpeg_unavailable",
             message="ffmpeg/ffprobe not found on PATH — `comfy preview` needs them.",
             hint="install ffmpeg (e.g. `brew install ffmpeg` / `apt install ffmpeg`)",
         )
-        raise typer.Exit(code=1)
+        raise typer.Exit(code=1) from None
 
     try:
-        info = classify_streams(_ffprobe(file))
+        info = classify_streams(_ffprobe(file, ffprobe_bin))
     except (RuntimeError, json.JSONDecodeError) as e:
         renderer.error(code="preview_failed", message=f"Could not probe {file}: {e}")
         raise typer.Exit(code=1) from e
@@ -166,7 +187,13 @@ def preview_cmd(
 
     out_path = out or (file.parent / f"{file.stem}.preview.png")
     cmd = build_preview_cmd(
-        info["kind"], str(file), str(out_path), grid=(cols, rows), width=width, duration=info["duration"]
+        info["kind"],
+        str(file),
+        str(out_path),
+        grid=(cols, rows),
+        width=width,
+        duration=info["duration"],
+        ffmpeg_bin=ffmpeg_bin,
     )
     proc = subprocess.run(cmd, capture_output=True, text=True)
     if proc.returncode != 0 or not out_path.is_file():

@@ -12,9 +12,15 @@ The module is a leaf on purpose: it imports nothing from ``comfy_cli``, so both
 the import cycle that would come from ``cuda_detect`` importing ``hardware``
 (``hardware`` already imports ``cuda_detect``).
 
-Contract: **never raises.** Every failure — a missing binary, a broken ``$PATH``
-lookup, an unresolvable path — degrades to ``None`` so callers can keep their
-existing degrade-to-``None`` behaviour without new error handling.
+Two entry points share one set of gates:
+
+* :func:`resolve_binary` — for *optional* probes. **Never raises**; every failure
+  (a missing binary, a broken ``$PATH`` lookup, an unresolvable path) degrades to
+  ``None`` so callers keep their existing degrade-to-``None`` behaviour.
+* :func:`resolve_required_binary` — for binaries a command cannot run without
+  (``git``, ``ffmpeg``). Raises :class:`BinaryNotFoundError` with an actionable
+  message instead of returning ``None``. It is a thin wrapper over
+  :func:`resolve_binary`, so the CWD/qualification gates cannot drift apart.
 """
 
 from __future__ import annotations
@@ -27,6 +33,24 @@ import shutil
 logger = logging.getLogger(__name__)
 
 _PATH_SEPARATORS = ("/", "\\")
+
+
+class BinaryNotFoundError(RuntimeError, FileNotFoundError):
+    """A binary a command cannot run without could not be trusted-resolved.
+
+    Raised by :func:`resolve_required_binary` — either the binary is absent from
+    ``$PATH``, or the only match was CWD-anchored and therefore refused.
+
+    It deliberately subclasses **both** ``RuntimeError`` and
+    ``FileNotFoundError``. ``FileNotFoundError`` is the exception ``subprocess``
+    already raises today when a bare-name spawn finds no such binary, so every
+    call site that already degrades on a missing binary (``except
+    (subprocess.SubprocessError, FileNotFoundError)`` in
+    :mod:`comfy_cli.file_utils`, ``except OSError`` in
+    :mod:`comfy_cli.command.outdated`, …) keeps degrading *identically* rather
+    than starting to crash. ``RuntimeError`` is carried for callers that want to
+    name the failure explicitly without reaching for an OS-error class.
+    """
 
 
 def _is_bare_name(name: str) -> bool:
@@ -147,3 +171,33 @@ def resolve_binary(name: str) -> str | None:
     except Exception:
         logger.debug("resolving binary %r failed", name, exc_info=True)
         return None
+
+
+def resolve_required_binary(name: str) -> str:
+    """Resolve a *required* system binary to a trusted absolute path.
+
+    The required-binary companion to :func:`resolve_binary`: identical gates
+    (bare-name check, fully-qualified check, CWD-plant check), but a failure
+    raises :class:`BinaryNotFoundError` instead of returning ``None``. Use it for
+    binaries whose absence is fatal to the command — ``git``, ``ffmpeg``,
+    ``ffprobe`` — where "skip this probe" is not a meaningful degradation.
+
+    Resolving deliberately happens at *call* time, not import time, so the answer
+    reflects the ``$PATH`` and CWD in force when the process is actually spawned.
+    Callers that ``os.chdir`` into a user-supplied directory should resolve
+    **before** the ``chdir``: the absolute path returned here already defeats
+    ``CreateProcess``'s current-directory search at spawn time, and resolving
+    first means a plant in the target directory cannot even shadow a legitimate
+    binary into a hard failure.
+
+    :raises BinaryNotFoundError: the binary is not on ``$PATH``, or the only match
+        resolved into the current working directory and was refused.
+    """
+    path = resolve_binary(name)
+    if path is None:
+        raise BinaryNotFoundError(
+            f"{name!r} was not found on PATH, or the only match resolved into the current directory "
+            f"(which is not trusted). Install {name} and make sure it is on PATH outside the directory "
+            f"you are running from."
+        )
+    return path

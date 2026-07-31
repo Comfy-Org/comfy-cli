@@ -10,6 +10,7 @@ import typer
 from tomlkit.items import Comment, Trivia
 
 from comfy_cli import ui
+from comfy_cli._safe_exec import resolve_required_binary
 from comfy_cli.registry.types import (
     ComfyConfig,
     License,
@@ -242,7 +243,8 @@ def initialize_project_config():
 
     # Get the current git remote URL
     try:
-        git_remote_url = subprocess.check_output(["git", "remote", "get-url", "origin"]).decode().strip()
+        git_bin = resolve_required_binary("git")
+        git_remote_url = subprocess.check_output([git_bin, "remote", "get-url", "origin"]).decode().strip()
         git_remote_url = _strip_url_credentials(git_remote_url)
     except subprocess.CalledProcessError as e:
         raise Exception("Could not retrieve Git remote URL. Are you in a Git repository?") from e

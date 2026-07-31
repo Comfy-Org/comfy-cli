@@ -11,6 +11,7 @@ from rich.console import Console
 
 from comfy_cli import cancellation, constants, env_checker, logging, tracking, ui, utils
 from comfy_cli import where as where_module
+from comfy_cli._safe_exec import resolve_required_binary
 from comfy_cli.auth import command as auth_command
 from comfy_cli.cloud import command as cloud_command
 from comfy_cli.command import (
@@ -736,8 +737,11 @@ def update(
         if version is not None:
             _switch_comfy_version(comfy_path, version, stash=not no_stash)
         else:
+            # Resolved before the chdir so a ``git`` planted in ``comfy_path``
+            # can neither be picked up nor shadow the real one.
+            git_bin = resolve_required_binary("git")
             os.chdir(comfy_path)
-            subprocess.run(["git", "pull"], check=True)
+            subprocess.run([git_bin, "pull"], check=True)
             python = resolve_workspace_python(comfy_path)
             # A uv-managed venv may have no pip — bootstrap it first so the install
             # below doesn't crash with `No module named pip` (no-op if pip exists).

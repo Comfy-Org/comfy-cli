@@ -5,6 +5,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.text import Text
 
+from comfy_cli._safe_exec import resolve_required_binary
 from comfy_cli.command.github.pr_info import PRInfo
 
 console = Console()
@@ -38,7 +39,14 @@ def git_checkout_tag(repo_path: str, tag: str) -> bool:
     :param repo_path: Path to the Git repository
     :param tag: The tag to checkout
     :return: True if the checkout succeeds, False if any git command failed.
+    :raises BinaryNotFoundError: ``git`` is absent from ``$PATH`` (previously a
+        bare ``FileNotFoundError`` from ``subprocess``, which was equally
+        uncaught here — the message is the only thing that changed).
     """
+    # Resolved BEFORE the ``os.chdir`` below so the lookup can't see a ``git``
+    # planted in the caller-supplied ``repo_path``, and so the absolute path we
+    # spawn defeats Windows' current-directory search once we are inside it.
+    git_bin = resolve_required_binary("git")
     original_dir = os.getcwd()
     try:
         # Change to the repository directory
@@ -48,7 +56,7 @@ def git_checkout_tag(repo_path: str, tag: str) -> bool:
         # Skip the network fetch when the tag is already present locally.
         tag_present_locally = (
             subprocess.run(
-                ["git", "rev-parse", "--verify", f"refs/tags/{tag}"],
+                [git_bin, "rev-parse", "--verify", f"refs/tags/{tag}"],
                 capture_output=True,
                 text=True,
                 check=False,
@@ -56,10 +64,10 @@ def git_checkout_tag(repo_path: str, tag: str) -> bool:
             == 0
         )
         if not tag_present_locally:
-            subprocess.run(["git", "fetch", "--tags"], check=True, capture_output=True, text=True)
+            subprocess.run([git_bin, "fetch", "--tags"], check=True, capture_output=True, text=True)
 
         # Checkout the specified tag
-        subprocess.run(["git", "checkout", tag], check=True, capture_output=True, text=True)
+        subprocess.run([git_bin, "checkout", tag], check=True, capture_output=True, text=True)
 
         console.print(f"[bold green]Successfully checked out tag: [cyan]{tag}[/cyan][/bold green]")
 
@@ -92,6 +100,8 @@ def git_checkout_tag(repo_path: str, tag: str) -> bool:
 
 
 def checkout_pr(repo_path: str, pr_info: PRInfo) -> bool:
+    # See ``git_checkout_tag``: resolve before the ``os.chdir`` into ``repo_path``.
+    git_bin = resolve_required_binary("git")
     original_dir = os.getcwd()
 
     try:
@@ -100,18 +110,18 @@ def checkout_pr(repo_path: str, pr_info: PRInfo) -> bool:
         if pr_info.is_fork:
             remote_name = f"pr-{pr_info.number}-{pr_info.user}"
 
-            result = subprocess.run(["git", "remote", "get-url", remote_name], capture_output=True, text=True)
+            result = subprocess.run([git_bin, "remote", "get-url", remote_name], capture_output=True, text=True)
 
             if result.returncode != 0:
                 subprocess.run(
-                    ["git", "remote", "add", remote_name, pr_info.head_repo_url],
+                    [git_bin, "remote", "add", remote_name, pr_info.head_repo_url],
                     check=True,
                     capture_output=True,
                     text=True,
                 )
 
             subprocess.run(
-                ["git", "fetch", remote_name, pr_info.head_branch], check=True, capture_output=True, text=True
+                [git_bin, "fetch", remote_name, pr_info.head_branch], check=True, capture_output=True, text=True
             )
 
             # fix: "feature/add-support" -> "pr-123-feature-add-support"
@@ -119,20 +129,22 @@ def checkout_pr(repo_path: str, pr_info: PRInfo) -> bool:
             local_branch = f"pr-{pr_info.number}-{sanitized_branch}"
 
             subprocess.run(
-                ["git", "checkout", "-B", local_branch, f"{remote_name}/{pr_info.head_branch}"],
+                [git_bin, "checkout", "-B", local_branch, f"{remote_name}/{pr_info.head_branch}"],
                 check=True,
                 capture_output=True,
                 text=True,
             )
 
         else:
-            subprocess.run(["git", "fetch", "origin", pr_info.head_branch], check=True, capture_output=True, text=True)
+            subprocess.run(
+                [git_bin, "fetch", "origin", pr_info.head_branch], check=True, capture_output=True, text=True
+            )
 
             sanitized_branch = sanitize_for_local_branch(pr_info.head_branch)
             local_branch = f"pr-{pr_info.number}-{sanitized_branch}"
 
             subprocess.run(
-                ["git", "checkout", "-B", local_branch, f"origin/{pr_info.head_branch}"],
+                [git_bin, "checkout", "-B", local_branch, f"origin/{pr_info.head_branch}"],
                 check=True,
                 capture_output=True,
                 text=True,

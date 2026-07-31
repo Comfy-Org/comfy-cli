@@ -12,6 +12,7 @@ import requests
 from pathspec import PathSpec
 
 from comfy_cli import constants, ui
+from comfy_cli._safe_exec import resolve_required_binary
 
 
 class DownloadException(Exception):
@@ -445,8 +446,11 @@ def _load_comfyignore_spec(ignore_filename: str = ".comfyignore") -> PathSpec | 
 
 def list_git_tracked_files(base_path: str | os.PathLike = ".") -> list[str]:
     try:
+        # ``BinaryNotFoundError`` subclasses ``FileNotFoundError``, so an absent —
+        # or CWD-planted, hence refused — ``git`` degrades to ``[]`` here exactly
+        # as a missing ``git`` already did.
         result = subprocess.check_output(
-            ["git", "-C", os.fspath(base_path), "ls-files"],
+            [resolve_required_binary("git"), "-C", os.fspath(base_path), "ls-files"],
             text=True,
         )
     except (subprocess.SubprocessError, FileNotFoundError):
