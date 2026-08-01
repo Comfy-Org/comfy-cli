@@ -22,7 +22,7 @@ from websocket import (  # noqa: F401 — patch target for tests (run.WebSocket)
     WebSocketTimeoutException,
 )
 
-from comfy_cli import cancellation, execution_errors, jobs_state
+from comfy_cli import cancellation, execution_errors, jobs_state, tracking
 
 # Re-exports — names patched by tests live at this namespace.
 from comfy_cli.command.run.credentials import _resolve_partner_credential as _resolve_partner_credential
@@ -291,32 +291,55 @@ def execute(
     extra_data: dict | None = None
     if api_key:
         extra_data = {"api_key_comfy_org": api_key}
-    # Only resolve an injected credential when an explicit --api-key hasn't
-    # already satisfied the partner node: the resolver may perform a network
-    # OAuth refresh, so skipping it here keeps an explicit-key run network-free.
-    if partner_nodes and not extra_data:
-        cred = _resolve_partner_credential()
-        if cred is None:
-            msg = (
-                "Workflow uses partner-API node(s) that need an `api_key_comfy_org` "
-                "credential the local server doesn't have: " + ", ".join(partner_nodes) + "."
-            )
-            renderer.error(
-                code="partner_node_requires_credential",
-                message=msg,
-                hint=(
-                    "run: comfy cloud login   (or set COMFY_API_KEY in the environment, "
-                    "or persist a key with `comfy cloud set-key --key …`; "
-                    "cloud runs auto-inject via --where cloud)"
-                ),
-                details={
-                    "partner_nodes": partner_nodes,
-                    "host": host,
-                    "port": port,
-                },
-            )
-            raise typer.Exit(code=1)
-        extra_data = {cred[0]: cred[1]}
+    if partner_nodes:
+        # Only resolve an injected credential when an explicit --api-key hasn't
+        # already satisfied the partner node: the resolver may perform a network
+        # OAuth refresh, so skipping it here keeps an explicit-key run network-free.
+        # Resolved once — the result feeds both the telemetry prop below and the
+        # credential gate that follows.
+        cred = _resolve_partner_credential() if not extra_data else None
+        # Fired BEFORE the reject-for-missing-credential branch so runs that are
+        # turned away are still counted: that funnel is exactly what the metric
+        # is for, and `credential_present: False` marks them. class_types are
+        # node names, not PII — the same data `workflow_unknown_nodes` reports.
+        # It does sit AFTER the BE-4326 spend gate, so a run refused for lack of
+        # `--allow-spend` emits no event: the gate deliberately precedes any
+        # credential resolution (a refusal must not trigger a network OAuth
+        # refresh), and `credential_present` needs that resolution. The
+        # spend-declined funnel wants its own event rather than an early
+        # resolve here.
+        tracking.track_event(
+            "partner_nodes_detected",
+            {
+                # Cap defends against pathological graphs; the count stays exact.
+                "partner_nodes": partner_nodes[:20],
+                "partner_node_count": len(partner_nodes),
+                "where": "local",
+                "credential_present": bool(api_key) or cred is not None,
+            },
+        )
+        if not extra_data:
+            if cred is None:
+                msg = (
+                    "Workflow uses partner-API node(s) that need an `api_key_comfy_org` "
+                    "credential the local server doesn't have: " + ", ".join(partner_nodes) + "."
+                )
+                renderer.error(
+                    code="partner_node_requires_credential",
+                    message=msg,
+                    hint=(
+                        "run: comfy cloud login   (or set COMFY_API_KEY in the environment, "
+                        "or persist a key with `comfy cloud set-key --key …`; "
+                        "cloud runs auto-inject via --where cloud)"
+                    ),
+                    details={
+                        "partner_nodes": partner_nodes,
+                        "host": host,
+                        "port": port,
+                    },
+                )
+                raise typer.Exit(code=1)
+            extra_data = {cred[0]: cred[1]}
 
     # Pre-submit validation via pure-Python CQL engine (checks class_types + input shapes).
     _preflight_validate(renderer, workflow, object_info, target_label="server")

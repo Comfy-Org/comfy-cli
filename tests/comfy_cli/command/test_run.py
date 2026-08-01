@@ -1243,6 +1243,185 @@ class TestExecutePartnerNodePreflight:
             MockExec.assert_called_once()
 
 
+class TestPartnerNodesDetectedTelemetry:
+    """Partner-node detection runs on every local `comfy run`; this is the
+    telemetry that makes partner-API usage measurable. It fires whenever the
+    workflow has partner nodes — including runs that are then rejected for a
+    missing credential, which is exactly the funnel the metric is for."""
+
+    PARTNER_WF = {
+        "1": {"class_type": "SomePartnerNode", "inputs": {"prompt": "x"}},
+        "2": {"class_type": "PreviewAny", "inputs": {"source": ["1", 0]}},
+    }
+    # The authoritative signal is `api_node: true` (category prefix is a fallback).
+    OBJECT_INFO = {
+        "SomePartnerNode": {
+            "category": "image",
+            "api_node": True,
+            "output": ["IMAGE"],
+            "output_name": ["IMAGE"],
+        },
+        "PreviewAny": {"category": "image", "output": [], "output_name": [], "output_node": True},
+    }
+
+    def _wf_file(self, tmp_path, workflow=None):
+        path = tmp_path / "partner-telemetry.json"
+        path.write_text(json.dumps(self.PARTNER_WF if workflow is None else workflow))
+        return str(path)
+
+    @staticmethod
+    def _partner_events(mock_track):
+        """Props of every ``partner_nodes_detected`` call on the mock."""
+        return [
+            call.args[1] for call in mock_track.call_args_list if call.args and call.args[0] == "partner_nodes_detected"
+        ]
+
+    def _no_credentials(self, monkeypatch):
+        monkeypatch.delenv("COMFY_CLOUD_API_KEY", raising=False)
+        from comfy_cli.auth import store as auth_store
+
+        monkeypatch.setattr(auth_store, "get", lambda _: None)
+        monkeypatch.setattr(auth_store, "get_cloud_session", lambda: None)
+
+    def test_fires_with_credential_present_when_api_key_supplied(self, tmp_path, monkeypatch):
+        wf_file = self._wf_file(tmp_path)
+        self._no_credentials(monkeypatch)
+
+        with (
+            patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),
+            patch("comfy_cli.command.run._fetch_object_info", return_value=self.OBJECT_INFO),
+            patch("comfy_cli.command.run.ExecutionProgress"),
+            patch("comfy_cli.command.run.WorkflowExecution") as MockExec,
+            patch("comfy_cli.tracking.track_event") as mock_track,
+        ):
+            mock_exec = MagicMock()
+            MockExec.return_value = mock_exec
+            mock_exec.outputs = []
+            execute(wf_file, host="127.0.0.1", port=8188, wait=True, timeout=30, api_key="k", allow_spend=True)
+
+        events = self._partner_events(mock_track)
+        assert len(events) == 1
+        assert events[0] == {
+            "partner_nodes": ["SomePartnerNode"],
+            "partner_node_count": 1,
+            "where": "local",
+            "credential_present": True,
+        }
+
+    def test_fires_with_credential_present_when_env_key_available(self, tmp_path, monkeypatch):
+        wf_file = self._wf_file(tmp_path)
+        monkeypatch.setenv("COMFY_CLOUD_API_KEY", "test-key-abc")
+        from comfy_cli.auth import store as auth_store
+
+        monkeypatch.setattr(auth_store, "get", lambda _: None)
+
+        with (
+            patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),
+            patch("comfy_cli.command.run._fetch_object_info", return_value=self.OBJECT_INFO),
+            patch("comfy_cli.command.run.ExecutionProgress"),
+            patch("comfy_cli.command.run.WorkflowExecution") as MockExec,
+            patch("comfy_cli.tracking.track_event") as mock_track,
+        ):
+            mock_exec = MagicMock()
+            MockExec.return_value = mock_exec
+            mock_exec.outputs = []
+            execute(wf_file, host="127.0.0.1", port=8188, wait=True, timeout=30, allow_spend=True)
+
+        events = self._partner_events(mock_track)
+        assert len(events) == 1
+        assert events[0]["credential_present"] is True
+        assert events[0]["partner_nodes"] == ["SomePartnerNode"]
+
+    def test_does_not_fire_for_partner_free_workflow(self, workflow_file):
+        with (
+            patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),
+            patch(
+                "comfy_cli.command.run._fetch_object_info",
+                return_value={
+                    "EmptyLatentImage": {"category": "latent", "output": ["LATENT"], "output_name": ["LATENT"]},
+                    "PreviewAny": {"category": "image", "output": [], "output_name": [], "output_node": True},
+                },
+            ),
+            patch("comfy_cli.command.run.ExecutionProgress"),
+            patch("comfy_cli.command.run.WorkflowExecution") as MockExec,
+            patch("comfy_cli.tracking.track_event") as mock_track,
+        ):
+            mock_exec = MagicMock()
+            MockExec.return_value = mock_exec
+            mock_exec.outputs = []
+            execute(workflow_file, host="127.0.0.1", port=8188, wait=True, timeout=30)
+
+        assert self._partner_events(mock_track) == []
+
+    def test_fires_even_when_run_is_rejected_for_missing_credential(self, tmp_path, monkeypatch):
+        """The rejected-for-missing-credential funnel is what this metric is
+        for — the event must precede the error branch, with
+        ``credential_present: False`` marking those runs."""
+        wf_file = self._wf_file(tmp_path)
+        self._no_credentials(monkeypatch)
+
+        with (
+            patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),
+            patch("comfy_cli.command.run._fetch_object_info", return_value=self.OBJECT_INFO),
+            patch("comfy_cli.command.run.WorkflowExecution") as MockExec,
+            patch("comfy_cli.tracking.track_event") as mock_track,
+        ):
+            with pytest.raises(typer.Exit) as exc_info:
+                execute(wf_file, host="127.0.0.1", port=8188, wait=True, timeout=30, allow_spend=True)
+            assert exc_info.value.exit_code == 1
+            MockExec.assert_not_called()
+
+        events = self._partner_events(mock_track)
+        assert len(events) == 1
+        assert events[0]["credential_present"] is False
+        assert events[0]["partner_node_count"] == 1
+
+    def test_does_not_fire_when_the_spend_gate_refuses(self, tmp_path, monkeypatch):
+        """Documents the one funnel this event does NOT cover: the BE-4326 spend
+        gate refuses before any credential resolution (so a refusal never
+        triggers a network OAuth refresh), and ``credential_present`` depends on
+        that resolution — so a run declined for lack of ``--allow-spend`` emits
+        nothing. That funnel needs its own event, not an early resolve here."""
+        wf_file = self._wf_file(tmp_path)
+        self._no_credentials(monkeypatch)
+        monkeypatch.setattr("comfy_cli.command.run.sys.stdin.isatty", lambda: False, raising=False)
+
+        with (
+            patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),
+            patch("comfy_cli.command.run._fetch_object_info", return_value=self.OBJECT_INFO),
+            patch("comfy_cli.command.run._resolve_partner_credential") as MockCred,
+            patch("comfy_cli.command.run.WorkflowExecution"),
+            patch("comfy_cli.tracking.track_event") as mock_track,
+        ):
+            with pytest.raises(typer.Exit):
+                execute(wf_file, host="127.0.0.1", port=8188, wait=True, timeout=30)
+            MockCred.assert_not_called()
+
+        assert self._partner_events(mock_track) == []
+
+    def test_partner_nodes_list_is_capped_but_count_is_exact(self, tmp_path, monkeypatch):
+        """A pathological graph must not ship an unbounded property; the count
+        stays exact so the cap never distorts the metric."""
+        workflow = {str(i): {"class_type": f"PartnerNode{i:02d}", "inputs": {}} for i in range(30)}
+        object_info = {f"PartnerNode{i:02d}": {"category": "image", "api_node": True} for i in range(30)}
+        wf_file = self._wf_file(tmp_path, workflow)
+        self._no_credentials(monkeypatch)
+
+        with (
+            patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),
+            patch("comfy_cli.command.run._fetch_object_info", return_value=object_info),
+            patch("comfy_cli.command.run.WorkflowExecution"),
+            patch("comfy_cli.tracking.track_event") as mock_track,
+        ):
+            with pytest.raises(typer.Exit):
+                execute(wf_file, host="127.0.0.1", port=8188, wait=True, timeout=30, allow_spend=True)
+
+        events = self._partner_events(mock_track)
+        assert len(events) == 1
+        assert events[0]["partner_node_count"] == 30
+        assert events[0]["partner_nodes"] == [f"PartnerNode{i:02d}" for i in range(20)]
+
+
 class TestExecuteSpendGate:
     """`comfy run` gates partner-API (paid) workflows on `--allow-spend`
     (BE-4326), mirroring `comfy run-template`'s spend gate. A partner-node

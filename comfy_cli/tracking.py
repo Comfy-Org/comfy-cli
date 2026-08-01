@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 import typer
 
 from comfy_cli import constants, logging, ui
+from comfy_cli.caller import detect_caller
 from comfy_cli.config_manager import ConfigManager
 from comfy_cli.workspace_manager import WorkspaceManager
 
@@ -124,6 +125,10 @@ cli_version = config_manager.get_cli_version()
 user_id = config_manager.get(constants.CONFIG_KEY_USER_ID)
 # tracking all events for a single command
 tracing_id = str(uuid.uuid4())
+# Who is driving this process: "user" | "pipe" | "agent" | "claude-code" | a
+# lowercased custom COMFY_USER_AGENT label. Computed once at import, matching
+# the cli_version/tracing_id pattern above, so we don't re-run isatty per event.
+_caller_kind = detect_caller().kind
 workspace_manager = WorkspaceManager()
 
 # Process-scoped opt-in used when running non-interactively before the
@@ -350,12 +355,16 @@ def disable():
 def _dispatch(
     event_name: str, properties: dict[str, Any], *, distinct_id: str | None, mixpanel_name: str | None = None
 ):
-    """Fan an event out to every provider. Enriches with cli_version/tracing_id.
+    """Fan an event out to every provider. Enriches with cli_version/tracing_id/caller_kind.
 
     This is the shared send path; callers above own the gating (consent for
     passive telemetry, env-only for feedback).
+
+    ``caller_kind`` lands on EVERY event (execution_*, partner_nodes_detected,
+    feedback, …) — that is the point: it makes agent-vs-human analytics possible
+    across the whole stream. Purely additive, so no existing dashboard breaks.
     """
-    properties = {**properties, "cli_version": cli_version, "tracing_id": tracing_id}
+    properties = {**properties, "cli_version": cli_version, "tracing_id": tracing_id, "caller_kind": _caller_kind}
     for provider in _get_providers():
         provider_event_name = (
             mixpanel_name if (mixpanel_name is not None and isinstance(provider, MixpanelProvider)) else event_name

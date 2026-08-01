@@ -1,3 +1,4 @@
+import os
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -80,13 +81,56 @@ class TestTrackEvent:
         tracking_module.track_event("some_event")
         tracking_module.provider.track.assert_called_once()
         _, _, properties = _last_track_call(tracking_module.provider)
-        assert set(properties.keys()) == {"cli_version", "tracing_id"}
+        assert set(properties.keys()) == {"cli_version", "tracing_id", "caller_kind"}
 
     def test_swallows_provider_errors(self, tracking_module):
         tracking_module.config_manager.set(constants.CONFIG_KEY_ENABLE_TRACKING, "True")
         tracking_module.provider.track.side_effect = RuntimeError("boom")
         tracking_module.track_event("some_event")
         tracking_module.provider.track.assert_called_once()
+
+
+class TestCallerKindEnrichment:
+    """``_dispatch`` stamps every event with the caller kind (human vs agent),
+    the same way it stamps cli_version/tracing_id — that is what makes
+    agent-vs-human analytics possible across the whole event stream."""
+
+    def test_track_event_carries_caller_kind(self, tracking_module):
+        tracking_module.config_manager.set(constants.CONFIG_KEY_ENABLE_TRACKING, "True")
+        tracking_module.track_event("some_event", {"k": "v"})
+        _, _, properties = _last_track_call(tracking_module.provider)
+        assert properties["caller_kind"] == tracking_module._caller_kind
+        assert isinstance(properties["caller_kind"], str) and properties["caller_kind"]
+
+    @pytest.mark.skipif(
+        bool(os.environ.get("COMFY_USER_AGENT")),
+        reason="a custom COMFY_USER_AGENT label legitimately replaces the intrinsic kinds",
+    )
+    def test_caller_kind_is_one_of_the_known_kinds_by_default(self, tracking_module):
+        # Without a COMFY_USER_AGENT override the module-scope value must be one
+        # of the four intrinsic kinds detect_caller() can return.
+        assert tracking_module._caller_kind in {"user", "pipe", "agent", "claude-code"}
+
+    def test_feedback_carries_caller_kind(self, tracking_module):
+        # Feedback rides the same _dispatch path, so it is enriched too.
+        tracking_module.submit_feedback("nice tool")
+        _, _, properties = _last_track_call(tracking_module.provider)
+        assert properties["caller_kind"] == tracking_module._caller_kind
+
+    def test_explicit_user_agent_label_flows_through(self, tracking_module):
+        """An explicit ``COMFY_USER_AGENT`` label reaches the provider verbatim
+        (lowercased by detect_caller). Patched onto the module because
+        ``_caller_kind`` is evaluated once at import, not per event."""
+        from comfy_cli.caller import detect_caller
+
+        kind = detect_caller(env={"COMFY_USER_AGENT": "My-Harness"}, is_tty=True).kind
+        assert kind == "my-harness"
+
+        tracking_module.config_manager.set(constants.CONFIG_KEY_ENABLE_TRACKING, "True")
+        with patch.object(tracking_module, "_caller_kind", kind):
+            tracking_module.track_event("some_event")
+        _, _, properties = _last_track_call(tracking_module.provider)
+        assert properties["caller_kind"] == "my-harness"
 
 
 class TestSubmitFeedback:
