@@ -397,10 +397,21 @@ def show_cmd(
 # ---------------------------------------------------------------------------
 
 
-@app.command("search", help="Fuzzy-search node classes by name, display name, or description.")
+@app.command(
+    "search",
+    help=(
+        "Search node classes by name, display name, category, or description "
+        "(case-insensitive, word-order-independent; falls back to close-name matches)."
+    ),
+)
 @tracking.track_command("nodes")
 def search_cmd(
-    query: Annotated[str, typer.Argument(help="Text to search for (case-insensitive substring).")],
+    query: Annotated[
+        str,
+        typer.Argument(
+            help=("Text to search for (case-insensitive, word-order-independent; falls back to close-name matches).")
+        ),
+    ],
     limit: Annotated[int, typer.Option(help="Cap output to N rows.")] = 20,
     input_path: Annotated[
         str | None,
@@ -429,30 +440,51 @@ def search_cmd(
         on_stale=lambda key, err: _stale.update(stale=True, source=key, reason=err),
     )
 
+    # Token-AND matching: every whitespace-separated token must be present, in
+    # any order. `q_joined` additionally lets a spaced query hit a CamelCase
+    # class name ('ksampler advanced' -> 'ksampleradvanced' == KSamplerAdvanced).
     q = query.lower()
+    tokens = q.split() or [q]
+    q_joined = "".join(tokens)
     scored: list[tuple[int, Any]] = []
     for m in graph.all_nodes():
         name_l = m.id.lower()
         display_l = m.display_name.lower()
         desc_l = m.description.lower()
-        # Simple scoring: exact name hit > prefix > substring in name > display > description.
-        if name_l == q:
+        cat_l = (m.category or "").lower()
+        blob = " ".join((name_l, display_l, desc_l, cat_l))
+        # Tiered: exact name > name prefix > all tokens in name > display > category > anywhere.
+        if name_l == q or name_l == q_joined:
             score = 0
-        elif name_l.startswith(q):
+        elif name_l.startswith(q) or name_l.startswith(q_joined):
             score = 1
-        elif q in name_l:
+        elif all(t in name_l for t in tokens):
             score = 2
-        elif q in display_l:
+        elif all(t in display_l for t in tokens):
             score = 3
-        elif q in desc_l:
+        elif all(t in cat_l for t in tokens):
             score = 4
+        elif all(t in blob for t in tokens):
+            score = 5
         else:
             continue
         scored.append((score, m))
 
     scored.sort(key=lambda x: (x[0], x[1].id))
-    total_matched = len(scored)
-    matched = [m for _, m in scored[: max(0, limit)]]
+    close_match = False
+    if scored:
+        total_matched = len(scored)
+        matched = [m for _, m in scored[: max(0, limit)]]
+    else:
+        # Zero hits: fall back to the closest node names, so a typo
+        # ('KSampeler') still points the caller at 'KSampler'.
+        by_lower: dict[str, Any] = {}
+        for m in graph.all_nodes():
+            by_lower.setdefault(m.id.lower(), m)
+        close = difflib.get_close_matches(q_joined, list(by_lower), n=max(1, limit), cutoff=0.6) if q_joined else []
+        matched = [by_lower[name_l] for name_l in close][: max(0, limit)]
+        total_matched = len(matched)
+        close_match = bool(matched)
 
     payload = {
         "query": query,
@@ -465,6 +497,7 @@ def search_cmd(
                 "display_name": m.display_name,
                 "description": m.description,
                 "output_types": m.output_types(),
+                **({"close_match": True} if close_match else {}),
             }
             for m in matched
         ],
@@ -480,9 +513,14 @@ def search_cmd(
         ]
 
     if renderer.is_pretty():
+        # The query is echoed back into a markup-interpreting sink, so escape it
+        # for the same reason the table cells below do.
+        query_safe = sanitize_markup(repr(query))
         if not matched:
-            rprint(f"[dim]No nodes match {query!r}.[/dim]")
+            rprint(f"[dim]No nodes match {query_safe}.[/dim]")
         else:
+            if close_match:
+                rprint(f"[dim]No nodes match {query_safe} — showing close name matches.[/dim]")
             from rich.table import Table
 
             tbl = Table(show_header=True, header_style="bold")

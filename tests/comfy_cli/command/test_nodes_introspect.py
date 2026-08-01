@@ -97,6 +97,35 @@ def _fake_object_info() -> dict[str, Any]:
     }
 
 
+def _search_object_info() -> dict[str, Any]:
+    """`_fake_object_info` plus the node names the search tiers discriminate on.
+
+    Kept separate so the `ls` tests keep their exact-count assertions.
+    """
+    info = _fake_object_info()
+    info["KSamplerAdvanced"] = {
+        "input": {"required": {"model": ["MODEL"]}},
+        "output": ["LATENT"],
+        "output_name": ["LATENT"],
+        "category": "sampling",
+        "display_name": "KSampler (Advanced)",
+        "description": "Denoise the latent with extra knobs.",
+        "output_node": False,
+        "python_module": "nodes",
+    }
+    info["VAEDecode"] = {
+        "input": {"required": {"samples": ["LATENT"], "vae": ["VAE"]}},
+        "output": ["IMAGE"],
+        "output_name": ["IMAGE"],
+        "category": "latent",
+        "display_name": "VAE Decode",
+        "description": "Turn a latent back into pixels.",
+        "output_node": False,
+        "python_module": "nodes",
+    }
+    return info
+
+
 def _fake_graph():
     """Build a Graph from the fake object_info."""
     from comfy_cli.cql.engine import Graph
@@ -218,6 +247,15 @@ class TestShow:
 
 
 class TestSearch:
+    @pytest.fixture
+    def patched_loader(self, monkeypatch: pytest.MonkeyPatch):
+        """Class-local override: search asserts on tiering, so it needs the
+        richer node set (`KSamplerAdvanced`, `VAEDecode`)."""
+        from comfy_cli.cql.engine import Graph
+
+        graph = Graph.from_object_info(_search_object_info())
+        monkeypatch.setattr(nodes_cmd, "_get_graph", lambda *a, **kw: graph)
+
     def test_exact_name_wins(self, patched_loader, capsys):
         env = _run(["search", "KSampler"], capsys)
         assert env["data"]["count"] >= 1
@@ -242,6 +280,62 @@ class TestSearch:
     def test_limit_caps_results(self, patched_loader, capsys):
         env = _run(["search", "e", "--limit", "2"], capsys)
         assert env["data"]["count"] <= 2
+
+    def test_multi_word_query_hits_camelcase_class(self, patched_loader, capsys):
+        """'ksampler advanced' must find KSamplerAdvanced — the display name's
+        parens used to defeat the contiguous-substring match."""
+        env = _run(["search", "ksampler advanced"], capsys)
+        assert env["data"]["total"] >= 1
+        assert env["data"]["rows"][0]["name"] == "KSamplerAdvanced"
+
+    def test_multi_word_query_is_word_order_independent(self, patched_loader, capsys):
+        env = _run(["search", "advanced ksampler"], capsys)
+        assert env["data"]["total"] >= 1
+        assert env["data"]["rows"][0]["name"] == "KSamplerAdvanced"
+
+    @pytest.mark.parametrize("query", ["vae decode", "decode vae"])
+    def test_spaced_query_matches_either_order(self, query, patched_loader, capsys):
+        env = _run(["search", query], capsys)
+        names = [r["name"] for r in env["data"]["rows"]]
+        assert "VAEDecode" in names
+
+    def test_category_is_searched(self, patched_loader, capsys):
+        """`sampling` is only in the category field of the KSampler nodes."""
+        env = _run(["search", "sampling"], capsys)
+        names = [r["name"] for r in env["data"]["rows"]]
+        assert "KSampler" in names
+        assert "KSamplerAdvanced" in names
+
+    def test_exact_name_outranks_prefix_sibling(self, patched_loader, capsys):
+        """Regression: tier 0 (exact) must beat KSamplerAdvanced's tier 1."""
+        env = _run(["search", "KSampler"], capsys)
+        assert env["data"]["rows"][0]["name"] == "KSampler"
+
+    def test_typo_falls_back_to_close_matches(self, patched_loader, capsys):
+        env = _run(["search", "KSampeler"], capsys)
+        rows = env["data"]["rows"]
+        assert rows, "close-match fallback should surface something for a typo"
+        assert rows[0]["name"] == "KSampler"
+        assert all(r["close_match"] is True for r in rows)
+        assert env["data"]["total"] == env["data"]["count"]
+
+    def test_exact_matches_carry_no_close_match_flag(self, patched_loader, capsys):
+        env = _run(["search", "KSampler"], capsys)
+        assert all("close_match" not in r for r in env["data"]["rows"])
+
+    def test_no_match_and_no_close_match_returns_empty(self, patched_loader, capsys):
+        """Nothing is within difflib's 0.6 cutoff of this, so the fallback is
+        empty too — an agent gets a clean zero, not noise."""
+        env = _run(["search", "xyzzy_nothing"], capsys)
+        assert env["data"]["total"] == 0
+        assert env["data"]["rows"] == []
+
+    def test_zero_limit_does_not_crash_the_fallback(self, patched_loader, capsys):
+        """`difflib.get_close_matches` rejects n <= 0; the fallback must not
+        pass the raw limit straight through."""
+        env = _run(["search", "KSampeler", "--limit", "0"], capsys)
+        assert env["ok"] is True
+        assert env["data"]["rows"] == []
 
 
 class TestFlattenCategoryTree:
