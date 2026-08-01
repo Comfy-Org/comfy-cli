@@ -443,11 +443,15 @@ def search_cmd(
     # Token-AND matching: every whitespace-separated token must be present, in
     # any order. `q_joined` additionally lets a spaced query hit a CamelCase
     # class name ('ksampler advanced' -> 'ksampleradvanced' == KSamplerAdvanced).
+    # A query with no tokens (empty or all-whitespace) has nothing to match on.
+    # Don't fall back to the raw string: `" "` would then be a substring of every
+    # blob and match the entire catalog, and `all(...)` over an empty token list
+    # is vacuously true, which does the same. Both mean "no match".
     q = query.lower()
-    tokens = q.split() or [q]
+    tokens = q.split()
     q_joined = "".join(tokens)
     scored: list[tuple[int, Any]] = []
-    for m in graph.all_nodes():
+    for m in graph.all_nodes() if tokens else ():
         name_l = m.id.lower()
         display_l = m.display_name.lower()
         desc_l = m.description.lower()
@@ -477,19 +481,31 @@ def search_cmd(
         matched = [m for _, m in scored[: max(0, limit)]]
     else:
         # Zero hits: fall back to the closest node names, so a typo
-        # ('KSampeler') still points the caller at 'KSampler'.
-        by_lower: dict[str, Any] = {}
+        # ('KSampeler') still points the caller at 'KSampler'. Ids are bucketed
+        # by their lowered form (difflib needs unique candidates) but every node
+        # in a colliding bucket is surfaced — a pack may register both
+        # 'LoadImage' and 'loadimage', and dropping one hides a real suggestion.
+        by_lower: dict[str, list[Any]] = {}
         for m in graph.all_nodes():
-            by_lower.setdefault(m.id.lower(), m)
+            by_lower.setdefault(m.id.lower(), []).append(m)
         close = difflib.get_close_matches(q_joined, list(by_lower), n=max(1, limit), cutoff=0.6) if q_joined else []
-        matched = [by_lower[name_l] for name_l in close][: max(0, limit)]
-        total_matched = len(matched)
-        close_match = bool(matched)
+        candidates = [m for name_l in close for m in by_lower[name_l]]
+        # Count before truncating, like every other path here (`ls`, `upstream`,
+        # and the scored branch above) — otherwise `--limit 0` reports total 0
+        # and silently erases the fact that a close match exists.
+        total_matched = len(candidates)
+        matched = candidates[: max(0, limit)]
+        close_match = bool(candidates)
 
     payload = {
         "query": query,
         "total": total_matched,
         "count": len(matched),
+        # Top-level too, not just per-row: a caller that gates on `count == 0` to
+        # mean "no such node" would otherwise have to inspect every row to notice
+        # the search actually found nothing and is guessing. Always present, so
+        # `data["close_match"]` is a stable check rather than a key-exists probe.
+        "close_match": close_match,
         "rows": [
             {
                 "name": m.id,
@@ -516,8 +532,13 @@ def search_cmd(
         # The query is echoed back into a markup-interpreting sink, so escape it
         # for the same reason the table cells below do.
         query_safe = sanitize_markup(repr(query))
-        if not matched:
+        # Key the empty-state on the pre-slice count, not on `matched`: with
+        # `--limit 0` the slice is empty even though the search found hits, and
+        # printing "no nodes match" there contradicts the JSON's `total`.
+        if not total_matched:
             rprint(f"[dim]No nodes match {query_safe}.[/dim]")
+        elif not matched:
+            rprint(f"[dim]{total_matched} node(s) match {query_safe}; --limit {limit} returned none.[/dim]")
         else:
             if close_match:
                 rprint(f"[dim]No nodes match {query_safe} — showing close name matches.[/dim]")

@@ -496,8 +496,10 @@ comfy --json templates ls --limit 1              # template count
 The `total` field in `nodes ls`, `nodes search`, and `models search`
 gives the full count even when `--limit` caps the returned rows.
 (One exception: when `nodes search` finds nothing it falls back to the
-closest node names and flags each row `close_match: true` — those rows are
-name-similarity guesses, not matches, and `total` is just how many it found.)
+closest node names and sets `data.close_match: true` — check that flag, not
+just `count`, because those rows are name-similarity guesses rather than
+matches, and `total` is only how many guesses it found. Each row carries
+`close_match: true` as well.)
 
 ## Workflows — what can I tweak?
 

@@ -337,6 +337,91 @@ class TestSearch:
         assert env["ok"] is True
         assert env["data"]["rows"] == []
 
+    @pytest.mark.parametrize("query", [" ", "   ", "\t ", ""])
+    def test_blank_query_matches_nothing(self, query, patched_loader, capsys):
+        """A query with no tokens must not match the whole catalog.
+
+        `" "` is a substring of every blob (the fields are joined with spaces)
+        and an empty token list makes `all(...)` vacuously true, so both used to
+        return every node as a "match".
+        """
+        env = _run(["search", query], capsys)
+        assert env["ok"] is True
+        assert env["data"]["total"] == 0
+        assert env["data"]["rows"] == []
+        assert env["data"]["close_match"] is False
+
+    def test_close_match_flag_is_always_present_at_top_level(self, patched_loader, capsys):
+        """A caller gating on `count == 0` needs one stable place to learn the
+        search is guessing, without inspecting every row."""
+        hit = _run(["search", "KSampler"], capsys)
+        assert hit["data"]["close_match"] is False
+        guess = _run(["search", "KSampeler"], capsys)
+        assert guess["data"]["close_match"] is True
+
+    def test_zero_limit_still_reports_the_close_match_total(self, patched_loader, capsys):
+        """`total` counts before the `--limit` slice on the fallback path too,
+        so `--limit 0` doesn't erase the fact that a close match exists."""
+        env = _run(["search", "KSampeler", "--limit", "0"], capsys)
+        assert env["data"]["total"] >= 1
+        assert env["data"]["count"] == 0
+        assert env["data"]["close_match"] is True
+
+    def test_zero_limit_keeps_the_scored_total(self, patched_loader, capsys):
+        """Same invariant on the normal path: rows are capped, `total` isn't."""
+        env = _run(["search", "KSampler", "--limit", "0"], capsys)
+        assert env["data"]["total"] >= 1
+        assert env["data"]["rows"] == []
+
+    def test_case_colliding_ids_are_both_suggested(self, monkeypatch, capsys):
+        """A pack may register both `LoadImage` and `loadimage`; bucketing ids by
+        their lowered form for difflib must not drop one of them."""
+        from comfy_cli.cql.engine import Graph
+
+        info = _search_object_info()
+        for node_id in ("LoadImage", "loadimage"):
+            info[node_id] = {
+                "input": {"required": {}},
+                "output": ["IMAGE"],
+                "output_name": ["IMAGE"],
+                "category": "image",
+                "display_name": node_id,
+                "description": "Load an image.",
+                "python_module": "nodes",
+            }
+        graph = Graph.from_object_info(info)
+        monkeypatch.setattr(nodes_cmd, "_get_graph", lambda *a, **kw: graph)
+
+        env = _run(["search", "loadimgae"], capsys)
+        names = [r["name"] for r in env["data"]["rows"]]
+        assert env["data"]["close_match"] is True
+        assert "LoadImage" in names
+        assert "loadimage" in names
+
+    def test_non_string_category_does_not_crash(self, monkeypatch, capsys):
+        """/object_info is server-supplied; a custom node can declare a category
+        that isn't a string, and `.lower()` on it used to raise a raw
+        AttributeError that took down every search."""
+        from comfy_cli.cql.engine import Graph
+
+        info = _search_object_info()
+        info["HostileNode"] = {
+            "input": {"required": {}},
+            "output": [],
+            "output_name": [],
+            "category": 42,
+            "display_name": ["not", "a", "string"],
+            "description": {"nope": True},
+            "python_module": 7,
+            "output_node": False,
+        }
+        graph = Graph.from_object_info(info)
+        monkeypatch.setattr(nodes_cmd, "_get_graph", lambda *a, **kw: graph)
+
+        env = _run(["search", "sampling"], capsys)
+        assert env["ok"] is True
+        assert "KSampler" in [r["name"] for r in env["data"]["rows"]]
+
 
 class TestFlattenCategoryTree:
     """Pin the shape contract for the wasm CategoryTree, since the flattener

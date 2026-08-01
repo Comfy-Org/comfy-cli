@@ -360,11 +360,16 @@ def _parse_morphism(node_id: str, raw: dict) -> Morphism:
         t = out if isinstance(out, str) else "COMBO"
         outputs.append(Port(name=name, type=t, required=True, is_link=True))
 
+    # These are declared `str` and every consumer treats them as one (`.lower()`,
+    # `.startswith()`, markup escaping). /object_info is server-supplied and a
+    # custom node can put any JSON type here, so coerce rather than trust the
+    # annotation — an int category used to crash `nodes search` with a raw
+    # AttributeError instead of the structured error the command otherwise emits.
     return Morphism(
         id=node_id,
-        display_name=raw.get("display_name") or node_id,
-        description=raw.get("description") or "",
-        category=raw.get("category") or "",
+        display_name=str(raw.get("display_name") or node_id),
+        description=str(raw.get("description") or ""),
+        category=str(raw.get("category") or ""),
         inputs=inputs,
         outputs=outputs,
         is_output_node=bool(raw.get("output_node", False)),
@@ -372,7 +377,7 @@ def _parse_morphism(node_id: str, raw: dict) -> Morphism:
         deprecated=bool(raw.get("deprecated", False)),
         experimental=bool(raw.get("experimental", False)),
         search_aliases=_unmarshal_string_list(raw.get("search_aliases")),
-        pack=_derive_pack(raw.get("python_module") or ""),
+        pack=_derive_pack(str(raw.get("python_module") or "")),
     )
 
 
