@@ -236,9 +236,11 @@ class TestExecute:
 
 
 def test_cloud_print_prompt_does_not_submit(monkeypatch, tmp_path):
-    """--print-prompt on the cloud route prints the graph and never submits."""
-    import typer
+    """--print-prompt on the cloud route prints the graph and never submits.
 
+    It also *returns* rather than raising `typer.Exit(0)` — same termination as
+    the local path's dry run (both exit 0 through the CLI either way).
+    """
     import comfy_cli.comfy_client as cc
     from comfy_cli.command.run import execute_cloud
 
@@ -257,9 +259,7 @@ def test_cloud_print_prompt_does_not_submit(monkeypatch, tmp_path):
     # should return BEFORE Client is even constructed.
     monkeypatch.setattr(cc, "Client", FakeClient)
 
-    with pytest.raises(typer.Exit) as exc:
-        execute_cloud(str(wf), wait=True, print_prompt=True, timeout=5)
-    assert exc.value.exit_code == 0
+    assert execute_cloud(str(wf), wait=True, print_prompt=True, timeout=5) is None
 
 
 if __name__ == "__main__":

@@ -97,6 +97,67 @@ Where `[node events]*` is zero or more interleaved `execution_cached`,
 may or may not appear. An error envelope can replace any non-terminal
 line, ending the stream early.
 
+These archetypes hold for **both** `--where local` and `--where cloud`, with
+one exception: `comfy run --where cloud` produces no `[node events]*` — use
+`comfy jobs watch --where cloud` for in-flight cloud progress (see
+[Per-target differences](#per-target-differences)). Everything else — the
+`converted` / `prompt_preview` / `queued` prefix, the single terminal
+envelope, and the exit-code mapping — is identical on both targets.
+
+## Per-target differences
+
+`comfy run` has two execution targets — `--where local` (the default: an HTTP
+submit plus a WebSocket session against a ComfyUI server you run) and
+`--where cloud` (an HTTPS submit plus polling against Comfy Cloud). They emit
+the **same event dialect** and the same envelope framing, but the targets are
+not the same machine and a few things genuinely cannot match. The complete
+list of differences:
+
+| Aspect | `--where local` | `--where cloud` |
+| ------ | --------------- | --------------- |
+| Per-node events (`executing`, `execution_cached`, `progress`, `executed`, `output`, `execution_error`) | Emitted, streamed live from the server WebSocket | Not emitted by `comfy run`. The cloud API is polled for a terminal record, so a `--wait` run goes straight from `queued` to the final envelope. For in-flight cloud progress, watch the job instead: `comfy --json-stream jobs watch <prompt_id> --where cloud` emits a coarse `state` event per status transition plus an `output` event per artifact |
+| `queued.validation_warnings` | May be non-empty: the server can accept a prompt (HTTP 200) while reporting per-node issues | Always `[]` — the cloud rejects any submit carrying `node_errors` outright, as a `prompt_rejected` error envelope |
+| `queued.base_url` | Absent | Present — the cloud endpoint the prompt was submitted to |
+| Envelope `where` | `"local"` | `"cloud"` |
+| Envelope target fields | `data.host` (str), `data.port` (int) | `data.base_url` (str) |
+| Envelope `data.cached_node_ids` / `data.executed_node_ids` | Present on `--wait` | Absent — they are derived from the per-node event stream, which the cloud has none of |
+| Envelope `data.warnings` | Absent | Present on `--wait` success: an array of non-fatal warning objects (currently only `partial_execution`, see below). `[]` when there are none |
+| `prompt_rejected` `details` | `status` (400) and `node_errors` | `node_errors` only — the cloud reports rejected nodes on an otherwise-2xx submit, so there is no 4xx status to report. The `node_errors` value has the same [array-of-records shape](#node_errors-shape) on both targets |
+| Error codes | The local set below | The workflow/pre-flight codes and the node-failure codes (`execution_error`, `transient_auth`, `prompt_rejected`, `cancelled`, `spend_consent_required`) plus the cloud-only codes below. The local-server- and WebSocket-specific codes cannot occur: `server_not_running`, `object_info_unavailable`, `connection_error`, `ws_timeout`, `ws_disconnected`, `invalid_response`, `client_error`, `server_error`, `partner_node_requires_credential` (the cloud injects the caller's credential itself) |
+
+Everything not in that table is the same on both targets, including
+`converted`, `prompt_preview`, the `queued` field set, `data.status`,
+`data.prompt_id` / `client_id` / `outputs` / `outputs_by_node` /
+`outputs_by_item` / `state_file` / `watcher_spawned` / `elapsed_seconds`, and
+the `--print-prompt` and `--no-wait` stream shapes.
+
+### Cloud-only error codes
+
+| `code`               | Triggered when                                                     | `details`                       | Exit |
+| -------------------- | ------------------------------------------------------------------ | -------------------------------- | ---- |
+| `cloud_unauthorized` | No usable cloud session, or the session was rejected — run `comfy cloud login` | —                     | 1 |
+| `cloud_http_error`   | The cloud API returned a non-2xx response on submit or while polling | `status` (int), `body` (str) on submit; `status`, `prompt_id` while polling | 1 |
+| `cloud_timeout`      | The cloud job produced no progress for `--timeout` seconds          | `prompt_id` (str)               | 1 |
+| `cql_no_graph`       | A UI-format workflow needs the cloud `object_info` snapshot to be lowered to API format, and it could not be loaded — run `comfy nodes refresh --where cloud` | — | 1 |
+
+All of these are registered in `comfy_cli/error_codes.py` and listed by
+`comfy --json discover`, exactly like the local codes.
+
+### `partial_execution` warning
+
+The cloud prunes workflow branches that fail server-side validation and still
+reports the job as completed. On a `--wait` success the CLI diffs the output
+nodes it submitted against the ones that returned outputs and, when some are
+missing, appends a warning object to `data.warnings` rather than passing the
+run off as a clean success:
+
+```json
+{"code": "partial_execution", "message": "submitted 2 output node(s) but the cloud returned outputs for only 1; 1 branch(es) were pruned server-side (likely failed validation) and produced nothing", "submitted_output_nodes": 2, "returned_output_nodes": 1}
+```
+
+The envelope is still `ok: true` (exit `0`) — the job did run. Agents that
+need all-or-nothing semantics should check `data.warnings` is empty.
+
 ## Event reference
 
 | `type`             | When                                                 |
@@ -152,7 +213,8 @@ final envelope and exits 0 without queuing.
 
 ### `queued`
 
-Emitted after `POST /prompt` returns 200.
+Emitted after the submit request returns success — `POST /prompt` returning
+200 locally, the equivalent cloud submit under `--where cloud`.
 
 ```json
 {
@@ -174,6 +236,11 @@ Emitted after `POST /prompt` returns 200.
 | `client_id`           | str           | Client-generated UUID (sent with `/prompt`)            |
 | `validation_warnings` | array of dict | Per-node validation issues ComfyUI reported alongside a successful queue (some output chains validated, others didn't). Same record shape as `prompt_rejected`'s `details.node_errors` (see [shape](#node_errors-shape)). Empty (`[]`) in the common case. |
 | `nodes`               | array of dict | Manifest of every node in the submitted (post-conversion) workflow: `node_id` (str), `class_type` (str), `title` (str). Lets piped consumers render a per-node UI without the workflow file. |
+| `base_url`            | str           | **Cloud only.** The cloud endpoint the prompt was submitted to. Absent on `--where local`. |
+
+`queued` is emitted **after** the submit call returns successfully, on both
+targets — it means the server has the prompt. A run whose submit fails emits
+its error envelope with no `queued` line at all.
 
 ### `executing`
 
@@ -293,21 +360,30 @@ On `--wait` success, `data` carries:
 | `prompt_id`         | str             | Server-assigned prompt UUID                            |
 | `client_id`         | str             | Client-generated UUID                                  |
 | `outputs`           | array of str    | URL (or local path) per file-like output, deduplicated |
-| `cached_node_ids`   | array of str    | Node IDs the server reported as cached                 |
-| `executed_node_ids` | array of str    | Node IDs the executor *ran* — the union of every node that appeared in an `executing` or `executed` event, including intermediate compute nodes |
+| `outputs_by_node`   | dict            | The same outputs grouped by the node id that produced them |
+| `outputs_by_item`   | dict            | The same outputs grouped by `compose` foreach item; `{}` when the workflow carried no item map |
+| `cached_node_ids`   | array of str    | **Local only.** Node IDs the server reported as cached  |
+| `executed_node_ids` | array of str    | **Local only.** Node IDs the executor *ran* — the union of every node that appeared in an `executing` or `executed` event, including intermediate compute nodes |
+| `warnings`          | array of dict   | **Cloud only.** Non-fatal warnings about the completed run — see [`partial_execution`](#partial_execution-warning). `[]` when there are none |
 | `elapsed_seconds`   | float \| null   | Wall-clock duration (null when not waiting)            |
-| `host` / `port`     | str / int       | Target server                                          |
+| `host` / `port`     | str / int       | **Local only.** Target server                          |
+| `base_url`          | str             | **Cloud only.** Target cloud endpoint                  |
 | `state_file`        | str \| null     | Path of the job state file (poll with `comfy jobs status`) |
 
 `cached_node_ids` and `executed_node_ids` may overlap: a cached
 output-bearing node emits both `execution_cached` and `executed`. Agents
 wanting "ran fresh, not from cache" should compute
-`set(executed_node_ids) - set(cached_node_ids)`.
+`set(executed_node_ids) - set(cached_node_ids)`. Both are derived from the
+per-node event stream and so are local-only — see
+[Per-target differences](#per-target-differences).
 
 Without `--wait` (the default), the stream ends at the `queued` envelope
 (`data.status: "queued"`, `data.watcher_spawned: bool`) and a detached
 watcher keeps the state file updated; follow up with
-`comfy jobs watch <prompt_id>` or `comfy jobs status <prompt_id>`.
+`comfy jobs watch <prompt_id>` or `comfy jobs status <prompt_id>`. This is
+the same on both targets, `watcher_spawned` included (add `--where cloud` to
+the follow-up commands for a cloud job). The async envelope carries no
+`outputs_by_node` / `outputs_by_item` / `warnings` — nothing has run yet.
 
 ## `comfy validate --json` envelope
 
@@ -357,7 +433,9 @@ Every failure envelope carries:
 
 Codes raised by `comfy run` against a local server, with their `details`
 payloads. All of them are registered in `comfy_cli/error_codes.py` (the
-registry test enforces this) and surfaced by `comfy discover`.
+registry test enforces this) and surfaced by `comfy discover`. For
+`--where cloud`, see [Cloud-only error codes](#cloud-only-error-codes) — it
+lists what the cloud adds and which of the codes below cannot occur there.
 
 | `code`                    | Triggered when                                                                  | `details`                                          | Exit |
 | ------------------------- | ------------------------------------------------------------------------------- | -------------------------------------------------- | ---- |
@@ -382,6 +460,7 @@ registry test enforces this) and surfaced by `comfy discover`.
 | `ws_disconnected`         | WebSocket connection dropped mid-execution                                      | —                                                  | 1 |
 | `cancelled`               | Run was interrupted — client `SIGINT` (Ctrl-C) or the server's `execution_interrupted` (e.g. `/interrupt`) | —                       | 130 |
 | `execution_error`         | A node raised during execution (server emitted `execution_error`)               | `node_id` (str), `class_type` (str), `title` (str), `exception_type` (str), `traceback` (str) | 1 |
+| `transient_auth`          | The `execution_error` cause was an API node's server-side session token expiring mid-execution — transient, so resubmitting the same workflow succeeds. Local credentials are fine; `comfy cloud login` does not help | Same fields as `execution_error` | 1 |
 
 ### `exception_type` field
 
@@ -472,6 +551,19 @@ Stderr may contain a Python traceback in these cases.
 {"schema":"event/1","type":"executed","node":"2","title":"Save Image","class_type":"SaveImage","outputs":[{"category":"images","node_id":"2","class_type":"SaveImage","title":"Save Image","filename":"banana_test_00001_.png","subfolder":"","type":"output","url":"http://127.0.0.1:8188/view?filename=banana_test_00001_.png&subfolder=&type=output"}],"prompt_id":"9b1c…"}
 {"schema":"event/1","type":"output","url":"http://127.0.0.1:8188/view?filename=banana_test_00001_.png&subfolder=&type=output","prompt_id":"9b1c…"}
 {"schema":"envelope/1","type":"envelope","ok":true,"command":"run","version":"1.6.1","where":"local","data":{"workflow":"/path/wf.json","status":"completed","prompt_id":"9b1c…","client_id":"fe2a…","outputs":["http://127.0.0.1:8188/view?filename=banana_test_00001_.png&subfolder=&type=output"],"cached_node_ids":[],"executed_node_ids":["1","2"],"elapsed_seconds":8.342,"host":"127.0.0.1","port":8188,"state_file":"…"},"error":null}
+```
+
+Exit code: `0`.
+
+### Successful cloud run (`--where cloud --wait`)
+
+Same prefix as the local stream; no per-node events, because the cloud path
+polls for a terminal record instead of streaming a WebSocket session.
+
+```json
+{"schema":"event/1","type":"prompt_preview","prompt":{"1":{"class_type":"GeminiNanoBanana2","inputs":{"prompt":"a banana"}},"2":{"class_type":"SaveImage","inputs":{"filename_prefix":"banana_test","images":["1",0]}}}}
+{"schema":"event/1","type":"queued","prompt_id":"9b1c…","client_id":"fe2a…","validation_warnings":[],"nodes":[{"node_id":"1","class_type":"GeminiNanoBanana2","title":"GeminiNanoBanana2"},{"node_id":"2","class_type":"SaveImage","title":"SaveImage"}],"base_url":"https://api.comfy.org"}
+{"schema":"envelope/1","type":"envelope","ok":true,"command":"run","version":"1.6.1","where":"cloud","data":{"workflow":"/path/wf.json","status":"completed","prompt_id":"9b1c…","client_id":"fe2a…","outputs":["https://…/banana_test_00001_.png"],"outputs_by_node":{"2":["https://…/banana_test_00001_.png"]},"outputs_by_item":{},"warnings":[],"elapsed_seconds":21.7,"base_url":"https://api.comfy.org","state_file":"…"},"error":null}
 ```
 
 Exit code: `0`.

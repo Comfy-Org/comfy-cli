@@ -14,6 +14,8 @@
     "type": {
       "type": "string",
       "enum": [
+        "converted",
+        "prompt_preview",
         "queued",
         "executing",
         "execution_cached",
@@ -21,8 +23,11 @@
         "executed",
         "execution_error",
         "output",
+        "state",
+        "login_url",
         "cancelled"
-      ]
+      ],
+      "description": "`comfy run` emits converted?/prompt_preview/queued on both targets; its per-node types (executing, execution_cached, progress, executed, output, execution_error) are --where local only, because the cloud run path polls for a terminal record instead of streaming a session. `state` is emitted by `comfy jobs watch --where cloud` for each coarse status transition. Agents must ignore types they do not recognise."
     },
     "node": {"type": ["string", "null"]},
     "title": {"type": ["string", "null"]},
@@ -30,6 +35,20 @@
     "completed": {"type": ["integer", "null"]},
     "total": {"type": ["integer", "null"]},
     "prompt_id": {"type": ["string", "null"]},
+    "client_id": {"type": ["string", "null"]},
+    "node_count": {"type": ["integer", "null"], "description": "converted: node count of the client-side converted graph."},
+    "prompt": {"type": ["object", "null"], "description": "prompt_preview: the API-format graph about to be submitted."},
+    "validation_warnings": {
+      "type": ["array", "null"],
+      "items": {"type": "object"},
+      "description": "queued: per-node issues the server reported alongside a successful queue. Always empty on --where cloud, which rejects such a submit outright."
+    },
+    "nodes": {
+      "type": ["array", "null"],
+      "items": {"type": ["object", "string"]},
+      "description": "queued: manifest of every node in the submitted graph, as objects (node_id, class_type, title). Also carried by `comfy jobs watch`'s execution_cached event, there as a plain array of node-id strings."
+    },
+    "base_url": {"type": ["string", "null"], "description": "queued, --where cloud only: the cloud endpoint the prompt was submitted to."},
     "url": {"type": ["string", "null"]}
   }
 }

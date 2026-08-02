@@ -7,7 +7,7 @@
   "additionalProperties": true,
   "properties": {
     "workflow": {"type": "string", "description": "Absolute path to the workflow file."},
-    "status": {"type": "string", "enum": ["queued", "completed", "cancelled"]},
+    "status": {"type": "string", "enum": ["queued", "completed", "cancelled", "preview"]},
     "prompt_id": {"type": ["string", "null"]},
     "client_id": {"type": ["string", "null"]},
     "outputs": {
@@ -17,17 +17,17 @@
     },
     "outputs_by_node": {
       "type": "object",
-      "description": "Cloud --wait only: the same artifact URLs grouped by the node id that produced them.",
+      "description": "--wait only (both targets): the same artifact URLs grouped by the node id that produced them.",
       "additionalProperties": {"type": "array", "items": {"type": "string"}}
     },
     "outputs_by_item": {
       "type": "object",
-      "description": "Cloud --wait only: artifact URLs grouped by blueprint foreach item (via the compose item_map). Empty object when no item_map exists.",
+      "description": "--wait only (both targets): artifact URLs grouped by blueprint foreach item (via the compose item_map). Empty object when no item_map exists.",
       "additionalProperties": {"type": "array", "items": {"type": "string"}}
     },
     "warnings": {
       "type": "array",
-      "description": "Non-fatal diagnostics about the run (e.g. partial_execution when the cloud pruned an output branch). Empty when none.",
+      "description": "Cloud --wait only: non-fatal diagnostics about the run (e.g. partial_execution when the cloud pruned an output branch). Empty when none.",
       "items": {
         "type": "object",
         "required": ["code", "message"],
@@ -38,8 +38,24 @@
         }
       }
     },
+    "cached_node_ids": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "Local --wait only: node ids the server reported as cached. Derived from the per-node event stream, which --where cloud does not have."
+    },
+    "executed_node_ids": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "Local --wait only: node ids the executor ran. Derived from the per-node event stream, which --where cloud does not have."
+    },
     "elapsed_seconds": {"type": ["number", "null"]},
-    "host": {"type": "string"},
-    "port": {"type": "integer"}
+    "host": {"type": "string", "description": "--where local only: target server host."},
+    "port": {"type": "integer", "description": "--where local only: target server port."},
+    "base_url": {"type": "string", "description": "--where cloud only: target cloud endpoint."},
+    "state_file": {"type": ["string", "null"], "description": "Path of the job state file (poll with `comfy jobs status`)."},
+    "watcher_spawned": {
+      "type": "boolean",
+      "description": "Async (no --wait) only, both targets: whether the detached state-file watcher started. Poll `comfy jobs status` yourself when false."
+    }
   }
 }
