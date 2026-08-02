@@ -7,6 +7,8 @@ changes; easy to teach an agent ("✓ means completed everywhere").
 
 from __future__ import annotations
 
+from comfy_cli.output.sanitize import sanitize_markup
+
 # (glyph, rich-style) per terminal status. Mirrors the JobStatus enum from
 # the architecture doc; new statuses must be added here.
 STATUS_STYLE: dict[str, tuple[str, str]] = {
@@ -48,4 +50,8 @@ def status_glyph(status: str | None) -> str:
     """
     canonical = _canonical(status)
     glyph, style = STATUS_STYLE.get(canonical, DEFAULT_STYLE)
-    return f"[{style}]{glyph} {canonical or 'unknown'}[/{style}]"
+    # An unrecognized status is echoed verbatim, and the return value is markup
+    # bound for `Table.add_row` / `Text.from_markup`. Escaping the interpolated
+    # half keeps the tags we author live while a server's `[red]` or `[/]` stays
+    # inert text — a no-op for every status in `STATUS_STYLE`, all plain words.
+    return f"[{style}]{glyph} {sanitize_markup(canonical) if canonical else 'unknown'}[/{style}]"

@@ -35,6 +35,7 @@ from comfy_cli import tracking
 # ``urllib.request`` in at import time, so the precedent exists.
 from comfy_cli.http import ResponseTooLarge as _ResponseTooLarge
 from comfy_cli.output import get_renderer, rprint
+from comfy_cli.output.sanitize import sanitize_markup
 
 app = typer.Typer(no_args_is_help=True, help="Slot-based editing of frontend-format ComfyUI workflows.")
 
@@ -959,7 +960,12 @@ def _local_list(renderer, target, *, name: str | None, limit: int, sort: str, or
         tbl.add_column("id")
         tbl.add_column("size", justify="right", style="dim")
         for r in workflows[:50]:
-            tbl.add_row(r["id"], str(r["size"]) if r["size"] is not None else "")
+            # Both cells are fields of the `/userdata` listing the server
+            # returned, and `Table.add_row` parses markup in a `str` cell.
+            tbl.add_row(
+                sanitize_markup(r["id"]),
+                sanitize_markup(r["size"]) if r["size"] is not None else "",
+            )
         renderer.console().print(tbl)
         rprint(f"[dim]{len(workflows)} workflow(s) (local)[/dim]")
     renderer.emit(payload, command="workflow list", where="local")
@@ -1241,11 +1247,13 @@ def list_cmd(
         tbl.add_column("ver", justify="right", style="dim")
         tbl.add_column("updated", style="dim")
         for r in payload["workflows"][:50]:
+            # The cloud workflow catalog is server-supplied end to end, same as
+            # the local `/userdata` listing `_local_list` renders.
             tbl.add_row(
-                (r["id"] or "")[:8] + "…" if r["id"] else "",
-                r["name"] or "(untitled)",
-                str(r["latest_version"] or ""),
-                (r["updated_at"] or "")[:10],
+                sanitize_markup((r["id"] or "")[:8] + "…" if r["id"] else ""),
+                sanitize_markup(r["name"] or "(untitled)"),
+                sanitize_markup(r["latest_version"] or ""),
+                sanitize_markup((r["updated_at"] or "")[:10]),
             )
         renderer.console().print(tbl)
         rprint(f"[dim]{len(rows)} workflow(s)[/dim]")

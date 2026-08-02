@@ -29,6 +29,7 @@ import pytest
 import typer
 
 from comfy_cli.command.run.execution import WorkflowExecution
+from comfy_cli.output import get_renderer
 from comfy_cli.output.renderer import OutputMode, Renderer, reset_renderer_for_testing, set_renderer
 
 # A payload carrying every hazard at once: CSI 2J clears the screen, OSC 0
@@ -483,3 +484,204 @@ def test_download_status_row_error_with_unbalanced_markup_does_not_crash(pretty)
         ]
     )
     assert "oops" in assert_inert(pretty)
+
+
+# ---------------------------------------------------------------------------
+# jobs.py / system.py / workflow.py — `Table.add_row` cells (BE-6037)
+# ---------------------------------------------------------------------------
+#
+# `sanitize.py` names `Table.add_row` as a markup-interpreting sink, and the
+# `models`/`nodes` tables above already honor that. These four command modules
+# did not import `sanitize_markup` at all, so a hostile host's `prompt_id`,
+# `error_message`, device name or workflow id reached the sink raw — a live
+# OSC 8 hyperlink, a repaint of earlier output, or a `MarkupError` crash while
+# the CLI is merely rendering a status table.
+
+
+def test_local_job_status_table_is_inert(pretty):
+    """`comfy jobs status` against a hostile `--host/--port`: prompt_id, the
+    joined output list and the execution error all come off `/history`."""
+    from comfy_cli.command.jobs import _render_status_pretty
+
+    _render_status_pretty(
+        {
+            "prompt_id": EVIL,
+            "status": "completed",
+            "outputs": [EVIL, UNBALANCED],
+            "error": UNBALANCED,
+        },
+        host="127.0.0.1",
+        port=8188,
+    )
+    assert "boom" in assert_inert(pretty)
+
+
+def test_local_job_status_unknown_status_does_not_crash(pretty):
+    """An unrecognized `status` falls through to `Text(status)`, which never
+    parses markup — the docstring's carve-out, asserted so a later "sanitize
+    everything" pass cannot quietly start printing backslashes here."""
+    from comfy_cli.command.jobs import _render_status_pretty
+
+    _render_status_pretty(
+        {"prompt_id": "p1", "status": UNBALANCED, "outputs": [], "error": None},
+        host="127.0.0.1",
+        port=8188,
+    )
+    out = assert_inert(pretty)
+    assert "server said [/] oops" in out, f"Text cell was escaped or mangled: {out!r}"
+
+
+def _cloud_status_against(snap: dict) -> None:
+    """Run `_cloud_status` with the cloud snapshot replaced by `snap`."""
+    from comfy_cli.command import jobs
+
+    with (
+        patch.object(jobs, "cloud_preflight_or_exit"),
+        patch.object(jobs, "_cloud_status_snapshot", return_value=snap),
+    ):
+        jobs._cloud_status("p" * 12)
+
+
+def _cloud_snap(**overrides) -> dict:
+    snap = {
+        "prompt_id": "p" * 12,
+        "status": "completed",
+        "outputs": [],
+        "outputs_by_node": {},
+        "outputs_by_item": {},
+        "assigned_inference": None,
+        "error_message": None,
+        "created_at": None,
+        "updated_at": None,
+        "base_url": "https://cloud.example",
+    }
+    snap.update(overrides)
+    return snap
+
+
+def test_cloud_job_status_table_is_inert(pretty):
+    """`comfy jobs status --where cloud`: every cell is a field of the
+    `/api/jobs/<id>` response."""
+    _cloud_status_against(
+        _cloud_snap(
+            status=EVIL,
+            assigned_inference=EVIL,
+            created_at=EVIL,
+            updated_at=UNBALANCED,
+            error_message=EVIL,
+            outputs=[EVIL, UNBALANCED],
+        )
+    )
+    assert "boom" in assert_inert(pretty)
+
+
+def test_cloud_error_message_with_markup_renders_literally(pretty):
+    """The ticket's headline case: a markup-bearing `error_message` must render
+    as text and must not raise `MarkupError` mid-table."""
+    _cloud_status_against(_cloud_snap(status="error", error_message=UNBALANCED))
+    out = assert_inert(pretty)
+    assert "server said [/] oops" in out, f"error_message did not render literally: {out!r}"
+
+
+def test_cloud_output_url_with_markup_renders_literally(pretty):
+    """An output URL is the other realistic carrier — one row per URL."""
+    _cloud_status_against(_cloud_snap(outputs=["https://cdn.example/a.png[/]"]))
+    out = assert_inert(pretty)
+    assert "https://cdn.example/a.png[/]" in out, f"output URL did not render literally: {out!r}"
+
+
+def test_jobs_ls_table_is_inert(pretty):
+    """`comfy jobs ls` — prompt_id comes off `/queue` + `/history`, and the
+    workflow column is a filename, which can carry `[...]` just as easily.
+
+    The status cell goes through `status_glyph`, which *is* markup by design:
+    an unrecognized status is echoed into it, so only the echoed half is
+    escaped. Driving `EVIL` through it here is what proves that split holds.
+    """
+    from comfy_cli.command.jobs import JobRow, _render_jobs_pretty
+
+    _render_jobs_pretty(
+        [
+            JobRow(
+                prompt_id=EVIL,
+                status=EVIL,
+                queue_position=None,
+                elapsed_seconds=None,
+                workflow_size=3,
+                outputs=1,
+                workflow_path=f"/tmp/{UNBALANCED}.json",
+            )
+        ],
+        host="127.0.0.1",
+        port=8188,
+    )
+    assert_inert(pretty)
+
+
+def test_status_glyph_keeps_its_own_tags_live(pretty):
+    """The escaping must not neuter the tags `status_glyph` itself authors —
+    a known status still renders styled, with no stray backslashes."""
+    from rich.console import Console
+
+    from comfy_cli.output.glyphs import status_glyph
+
+    console = Console(file=pretty, force_terminal=True, width=80)
+    console.print(status_glyph("success"))
+    out = pretty.getvalue()
+
+    assert "✓ completed" in out, f"styled label was mangled: {out!r}"
+    assert "\\" not in out, f"escaping leaked backslashes into a benign status: {out!r}"
+    assert _RICH_SGR_RE.search(out), "the bold-green style we author was dropped"
+
+
+def test_system_stats_table_is_inert(pretty):
+    """`comfy system-stats` — device name/type/index and the ComfyUI version
+    line are all `/system_stats` fields."""
+    from comfy_cli.command.system import _render_stats_pretty
+
+    _render_stats_pretty(
+        get_renderer(),
+        {
+            "devices": [{"name": EVIL, "type": UNBALANCED, "index": EVIL, "vram_free": 1, "vram_total": 2}],
+            "system": {"ram_free": 1, "ram_total": 2, "comfyui_version": UNBALANCED},
+        },
+    )
+    assert "boom" in assert_inert(pretty)
+
+
+def test_local_workflow_list_table_is_inert(pretty):
+    """`comfy workflow list --where local` — the rows are the `/userdata`
+    listing verbatim, including a `size` the server chose."""
+    from comfy_cli.command import workflow
+
+    listing = json.dumps([{"path": EVIL, "size": UNBALANCED, "modified": 0, "created": 0}]).encode()
+    target = MagicMock()
+    target.url.return_value = "http://127.0.0.1:8188/userdata"
+    with patch.object(workflow, "_userdata_request", return_value=(200, listing)):
+        workflow._local_list(get_renderer(), target, name=None, limit=50, sort="created", order="desc")
+    assert "boom" in assert_inert(pretty)
+
+
+def test_cloud_workflow_list_table_is_inert(pretty):
+    """The cloud saved-workflow catalog reaches the same sink."""
+    from comfy_cli.command import workflow
+
+    body = {
+        "data": [
+            {
+                "id": EVIL,
+                "name": UNBALANCED,
+                "latest_version": EVIL,
+                "updated_at": UNBALANCED,
+            }
+        ]
+    }
+    target = MagicMock()
+    target.is_cloud = True
+    target.url.return_value = "https://cloud.example/api/workflows"
+    with (
+        patch.object(workflow, "_resolve_where_target", return_value=target),
+        patch.object(workflow, "_http_request", return_value=(200, body)),
+    ):
+        workflow.list_cmd(name=None, limit=20, sort="create_time", order="desc", where=None)
+    assert_inert(pretty)

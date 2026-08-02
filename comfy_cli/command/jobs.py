@@ -38,6 +38,7 @@ from comfy_cli.env_checker import check_comfy_server_running
 from comfy_cli.host_port import resolve_host_port as _resolve_host_port
 from comfy_cli.http import authed_urlopen, plain_urlopen
 from comfy_cli.output import get_renderer
+from comfy_cli.output.sanitize import sanitize_markup
 from comfy_cli.where import cloud_preflight_or_exit
 
 app = typer.Typer(no_args_is_help=True, help="List, inspect, and live-watch ComfyUI prompts.")
@@ -556,11 +557,11 @@ def _watch_ls(*, host, port, limit, where, local_only, state_where=None, orphane
 
                 wf_display = Path(r.workflow_path).name
             tbl.add_row(
-                r.prompt_id[:8] + "…" if len(r.prompt_id) > 8 else r.prompt_id,
+                sanitize_markup(r.prompt_id[:8] + "…" if len(r.prompt_id) > 8 else r.prompt_id),
                 status_glyph(r.status),
                 r.where,
                 str(r.outputs) if r.outputs else "—",
-                wf_display,
+                sanitize_markup(wf_display),
             )
         if not rows:
             tbl.add_row("[dim]no jobs[/dim]", "", "", "", "")
@@ -628,7 +629,7 @@ def _render_jobs_pretty(rows: list[JobRow], *, host: str, port: int) -> None:
     tbl.add_column("outputs", no_wrap=True, justify="right")
     for r in rows:
         tbl.add_row(
-            r.prompt_id[:8] + "…" if len(r.prompt_id) > 8 else r.prompt_id,
+            sanitize_markup(r.prompt_id[:8] + "…" if len(r.prompt_id) > 8 else r.prompt_id),
             status_glyph(r.status),
             str(r.queue_position) if r.queue_position is not None else "—",
             str(r.workflow_size) if r.workflow_size is not None else "—",
@@ -842,12 +843,18 @@ def _render_status_pretty(snap: dict, *, host: str, port: int) -> None:
     tbl = Table.grid(padding=(0, 2), expand=False)
     tbl.add_column(justify="right", style="dim", no_wrap=True)
     tbl.add_column(overflow="fold")
-    tbl.add_row("prompt_id", snap["prompt_id"])
+    # `Table.add_row` parses markup in a `str` cell; every value below is
+    # chosen by the host answering `/queue` and `/history`. `badge` is a
+    # `Text`, which never parses markup — escaping it would print backslashes.
+    tbl.add_row("prompt_id", sanitize_markup(snap["prompt_id"]))
     tbl.add_row("status", badge)
     if snap.get("outputs"):
-        tbl.add_row("outputs", "\n".join(snap["outputs"]))
+        tbl.add_row("outputs", "\n".join(sanitize_markup(o) for o in snap["outputs"]))
     if snap.get("error"):
-        tbl.add_row("error", str(snap["error"])[:600])
+        # Truncate first, escape second: the 600-char budget stays a budget on
+        # the server's text rather than on the backslashes we add to it, and
+        # escaping last is what guarantees no half-written tag survives the cut.
+        tbl.add_row("error", sanitize_markup(str(snap["error"])[:600]))
 
     renderer.console().print(
         Panel(
@@ -963,7 +970,9 @@ def _render_wait_pretty(summary: dict) -> None:
     tbl.add_column("status")
     for r in summary["jobs"]:
         glyph, style = badge.get(r["status"], ("•", "white"))
-        tbl.add_row(r["prompt_id"], Text(f"{glyph} {r['status']}", style=style))
+        # The status cell is a `Text`, which never parses markup — only the
+        # bare-`str` prompt_id cell needs escaping here.
+        tbl.add_row(sanitize_markup(r["prompt_id"]), Text(f"{glyph} {r['status']}", style=style))
     get_renderer().console().print(tbl)
 
 
@@ -1708,17 +1717,20 @@ def _cloud_status(prompt_id: str) -> None:
         tbl = Table(title=f"Cloud prompt {prompt_id[:8]}…", border_style="cyan", show_header=False)
         tbl.add_column(style="bold cyan")
         tbl.add_column()
-        tbl.add_row("status", snap["status"])
+        # Every cell below comes straight off `/api/jobs/<id>` — including
+        # `status`, which falls through to the server's own vocabulary when it
+        # is not one of the aliases `_cloud_status_snapshot` knows.
+        tbl.add_row("status", sanitize_markup(snap["status"]))
         if snap.get("assigned_inference"):
-            tbl.add_row("inference", snap["assigned_inference"])
+            tbl.add_row("inference", sanitize_markup(snap["assigned_inference"]))
         if snap.get("created_at"):
-            tbl.add_row("created", snap["created_at"])
+            tbl.add_row("created", sanitize_markup(snap["created_at"]))
         if snap.get("updated_at"):
-            tbl.add_row("updated", snap["updated_at"])
+            tbl.add_row("updated", sanitize_markup(snap["updated_at"]))
         if snap.get("error_message"):
-            tbl.add_row("error", snap["error_message"])
+            tbl.add_row("error", sanitize_markup(snap["error_message"]))
         for u in snap.get("outputs") or []:
-            tbl.add_row("output", u)
+            tbl.add_row("output", sanitize_markup(u))
         renderer.console().print(tbl)
     renderer.emit(snap, command="jobs status", where="cloud")
 
