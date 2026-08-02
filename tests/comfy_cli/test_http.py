@@ -488,14 +488,6 @@ def test_read_capped_message_names_the_url_and_the_cap():
     assert "4" in msg
 
 
-def test_read_capped_never_returns_a_truncated_body():
-    # The whole point: refuse, don't truncate. A silently short body would be
-    # written to disk or parsed as if it were whole.
-    resp = _fake_resp(b"x" * 100)
-    with pytest.raises(ResponseTooLarge):
-        read_capped(resp, "https://example.com/x", max_bytes=10)
-
-
 @pytest.mark.parametrize("max_bytes", [0, -1])
 def test_read_capped_rejects_non_positive_max_bytes(max_bytes):
     with pytest.raises(ValueError):

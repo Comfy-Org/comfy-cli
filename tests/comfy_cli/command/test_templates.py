@@ -673,7 +673,7 @@ def test_oversize_gallery_under_templates_refresh_is_a_clean_envelope(cache_file
     assert json.loads(cache_file.read_bytes()) == FIXTURE
 
 
-def test_oversize_template_workflow_is_a_clean_envelope(gallery_file, monkeypatch, capsys):
+def test_oversize_template_workflow_is_a_clean_envelope(gallery_file, monkeypatch):
     # The workflow fetch happens after the gallery lookup, so point the opener
     # at an oversize body and resolve the name from the local fixture index.
     monkeypatch.setattr(templates_cmd, "plain_urlopen", lambda req, timeout=None: _RecordingResponse(b"x" * 4096))

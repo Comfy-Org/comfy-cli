@@ -967,3 +967,30 @@ class TestBoundedResponseReads:
             with pytest.raises(comfy_client.HTTPError) as exc_info:
                 comfy_client.Client(target).submit_prompt({"1": {}}, "cid")
         assert "too large" in str(exc_info.value)
+
+    def test_error_body_is_read_with_a_cap_too(self):
+        # The 4xx/5xx body comes from the same server as the success body, so
+        # it needs the same ceiling — the fake refuses an unbounded read().
+        err = _http_error(400, b"bad workflow")
+        with patch.object(comfy_client._OPENER, "open", side_effect=err):
+            with pytest.raises(comfy_client.HTTPError) as exc_info:
+                comfy_client.Client(LOCAL).submit_prompt({"1": {}}, "cid")
+        # Still capped-but-generous, so a real error body reaches the caller.
+        assert exc_info.value.body == "bad workflow"
+
+    def test_oversize_error_body_degrades_to_an_empty_body_not_a_crash(self, monkeypatch):
+        # Over the cap the read raises; the status and reason must still make it
+        # out, with the body simply dropped rather than the request blowing up.
+        import comfy_cli.http as http_mod
+
+        monkeypatch.setattr(
+            comfy_client,
+            "read_capped",
+            lambda r, url, max_bytes=4: http_mod.read_capped(r, url, max_bytes=max_bytes),
+        )
+        err = _http_error(500, b"x" * 4096)
+        with patch.object(comfy_client._OPENER, "open", side_effect=err):
+            with pytest.raises(comfy_client.HTTPError) as exc_info:
+                comfy_client.Client(LOCAL).submit_prompt({"1": {}}, "cid")
+        assert exc_info.value.status == 500
+        assert exc_info.value.body == ""

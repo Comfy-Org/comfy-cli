@@ -269,7 +269,12 @@ class Client:
         except urllib.error.HTTPError as e:
             body_text = ""
             try:
-                body_text = e.read().decode("utf-8", errors="replace")
+                # An error body arrives from the same server as the success
+                # body, so it needs the same ceiling. Over-cap it raises, and
+                # the swallow below leaves body_text empty — the status and
+                # reason still reach the caller, which is the part that matters
+                # for a body too large to be a real error message.
+                body_text = read_capped(e, url).decode("utf-8", errors="replace")
             except Exception:  # noqa: BLE001
                 pass
             # Auto-refresh on 401 for OAuth cloud targets, retry once.

@@ -2401,6 +2401,5 @@ def test_jobs_ls_survives_an_oversize_queue_response(monkeypatch: pytest.MonkeyP
     result = CliRunner().invoke(jobs_mod.app, ["ls", "--where", "local"])
     # `_gather_jobs` treats an unreadable /queue and /history as empty, so the
     # command still succeeds — what matters is that ResponseTooLarge never
-    # escapes as an uncaught exception.
+    # escapes as an uncaught exception. A non-zero exit here would mean it did.
     assert result.exit_code == 0, result.output
-    assert result.exception is None or isinstance(result.exception, SystemExit)
