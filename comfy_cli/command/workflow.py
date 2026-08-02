@@ -104,7 +104,10 @@ def _get_graph(input_path: str | None, host: str | None, port: int | None, on_st
         # Live fetch: resolve mode from global routing chain, then use resilient loader.
         from comfy_cli import where as where_module
 
-        decision = where_module.resolve_default()
+        # ``_or_exit``: this command has no per-command --where flag to fall
+        # back to, so a bad COMFY_WHERE / project / persisted where_default
+        # becomes a clean `where_invalid` envelope rather than a traceback.
+        decision = where_module.resolve_default_or_exit()
         mode = "cloud" if decision.target is where_module.WhereTarget.CLOUD else "local"
         from comfy_cli.cql.loader import resilient_load_object_info
 
