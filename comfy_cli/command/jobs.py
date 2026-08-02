@@ -20,7 +20,6 @@ Three subcommands:
 from __future__ import annotations
 
 import json
-import os
 import time
 import urllib.error
 import urllib.parse
@@ -44,17 +43,18 @@ app = typer.Typer(no_args_is_help=True, help="List, inspect, and live-watch Comf
 
 
 def _is_pid_alive(pid: int) -> bool:
-    """Check if a process with the given PID is still running."""
+    """Check if a process with the given PID is still running.
+
+    Uses ``psutil.pid_exists`` — never ``os.kill(pid, 0)``, which on Windows
+    routes through ``GenerateConsoleCtrlEvent`` (0 == CTRL_C_EVENT) and, on
+    Python <= 3.13.1, can fall through to ``TerminateProcess`` and kill the
+    probed process (python/cpython gh-58689).
+    """
     if pid <= 0:
         return False
-    try:
-        os.kill(pid, 0)  # signal 0 = existence check, no actual signal sent
-        return True
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        # Process exists but we can't signal it — still alive.
-        return True
+    import psutil
+
+    return psutil.pid_exists(pid)
 
 
 # Host/port resolution (`resolve_host_port`) is shared with `comfy run` via
