@@ -398,6 +398,41 @@ class TestSearch:
         assert "LoadImage" in names
         assert "loadimage" in names
 
+    def test_pretty_empty_state_agrees_with_the_json_total(self, patched_loader):
+        """The two sinks must not contradict each other.
+
+        Keying the empty state on the post-slice list made `--limit 0` print
+        "No nodes match" while the envelope reported `total > 0`; and the
+        fallback's finds are guesses, so the limit-dropped-everything line must
+        not call them matches either.
+        """
+        import io
+
+        from comfy_cli.command.nodes import search_cmd
+
+        def pretty_run(**kwargs) -> str:
+            stream = io.StringIO()
+            r = Renderer.resolve(is_stdout_tty=True, env={}, caller=None)
+            r.mode = OutputMode.PRETTY
+            r.pretty_stream = stream
+            set_renderer(r)
+            search_cmd(input_path=None, host=None, port=None, where=None, **kwargs)
+            return stream.getvalue()
+
+        hit = pretty_run(query="KSampler", limit=0)
+        assert "No nodes match" not in hit
+        assert "--limit 0 returned none" in hit
+
+        guess = pretty_run(query="KSampeler", limit=0)
+        assert "No nodes match" in guess, "a fallback find is not a match"
+        assert "close name match" in guess
+
+        # The ordinary fallback still renders its rows rather than falling into
+        # the limit-dropped-everything branch.
+        shown = pretty_run(query="KSampeler", limit=20)
+        assert "showing close name matches" in shown
+        assert "KSampler" in shown
+
     def test_non_string_category_does_not_crash(self, monkeypatch, capsys):
         """/object_info is server-supplied; a custom node can declare a category
         that isn't a string, and `.lower()` on it used to raise a raw

@@ -537,6 +537,13 @@ def search_cmd(
         # printing "no nodes match" there contradicts the JSON's `total`.
         if not total_matched:
             rprint(f"[dim]No nodes match {query_safe}.[/dim]")
+        elif not matched and close_match:
+            # Guesses, not matches — say so, or --limit 0 would report the
+            # fallback's finds as real hits and undo the distinction above.
+            rprint(
+                f"[dim]No nodes match {query_safe}; {total_matched} close name match(es) "
+                f"found but --limit {limit} returned none.[/dim]"
+            )
         elif not matched:
             rprint(f"[dim]{total_matched} node(s) match {query_safe}; --limit {limit} returned none.[/dim]")
         else:
