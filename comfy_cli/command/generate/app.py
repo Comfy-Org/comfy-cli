@@ -23,6 +23,7 @@ possible (``--json`` or no TTY).
 
 from __future__ import annotations
 
+import logging
 import sys
 import uuid
 from collections.abc import Callable, Mapping
@@ -171,7 +172,10 @@ def _bail(
     code: str,
     message: str,
     kind: str,
-    **fail_kwargs: Any,
+    hint: str | None = None,
+    details: Mapping[str, Any] | None = None,
+    legacy_json: bool = False,
+    pretty: str | None = None,
 ) -> NoReturn:
     """Report a failure, record its `generate:error`, and exit 1 — in that order.
 
@@ -190,16 +194,30 @@ def _bail(
     ``tests/comfy_cli/output/test_error_code_registry.py`` scans call sites for
     literal ``code="…"`` kwargs to pin every raised code against
     :mod:`comfy_cli.error_codes`, and a positional first argument would be
-    invisible to it. `**fail_kwargs` forwards `_fail`'s remaining keyword-only
-    options (`hint`, `details`, `legacy_json`, `pretty`) untouched.
+    invisible to it. `_fail`'s remaining keyword-only options (`hint`, `details`,
+    `legacy_json`, `pretty`) are re-declared here rather than forwarded through a
+    `**kwargs`, so a misspelled option is a type error at the call site instead of
+    a `TypeError` raised inside `_fail` on an error-only path — which would
+    replace the intended exit-1 envelope with a traceback.
 
-    The exit is chained (`from exc`) because every caller raises from inside an
-    `except` block: four of the collapsed sites chained explicitly and the rest
-    chained implicitly via `__context__`, so this keeps the original exception
-    reachable everywhere.
+    Tracking is best-effort, so it runs guarded: a telemetry failure (a malformed
+    `enable_tracking` making `config_manager.get_bool` raise, say) must not cost
+    the caller the exit this helper's `NoReturn` promises. Without the guard the
+    exception escapes into `_generate`'s outer `except Exception`, which tracks
+    again and re-raises — an unhandled traceback with no envelope on stdout.
+
+    The exit is chained (`from exc`) so the original failure stays reachable at
+    every site. Three of the collapsed sites chained explicitly; the rest raised
+    from inside an `except` block, where `__context__` carried the cause
+    implicitly. The explicit `from` earns its keep at the poll site, which reports
+    from `if poll_error is not None:` after the spinner's `with` has exited — no
+    exception is in flight there, so nothing would chain without it.
     """
-    _fail(code=code, message=message, **fail_kwargs)
-    track_error(kind, exc)
+    _fail(code=code, message=message, hint=hint, details=details, legacy_json=legacy_json, pretty=pretty)
+    try:
+        track_error(kind, exc)
+    except Exception as track_exc:
+        logging.warning(f"Failed to record generate:error: {track_exc}")
     raise typer.Exit(code=1) from exc
 
 

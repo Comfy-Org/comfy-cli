@@ -388,7 +388,16 @@ class TestBailHelper:
         # The reporting call comes first so the user-facing error is already out
         # when the (best-effort, network-bound) tracking call runs.
         assert [c[0] for c in calls] == ["fail", "track"]
-        assert calls[0][1] == {"code": "generate_bad_args", "message": "bad"}
+        # `_fail`'s four optional keywords are named parameters on `_bail`, so they
+        # reach `_fail` at their defaults even when the call site omits them.
+        assert calls[0][1] == {
+            "code": "generate_bad_args",
+            "message": "bad",
+            "hint": None,
+            "details": None,
+            "legacy_json": False,
+            "pretty": None,
+        }
         assert calls[1][1:] == ("schema", exc)
         # Chained, so the originating exception stays reachable for debugging.
         assert exit_info.value.__cause__ is exc
@@ -419,3 +428,36 @@ class TestBailHelper:
             "hint": "check your key",
             "legacy_json": True,
         }
+
+    def test_unknown_fail_kwarg_is_rejected_at_the_call_site(self, monkeypatch):
+        """Named parameters, not `**kwargs`: a misspelled option can't reach `_fail`
+        and blow up mid-report, after the envelope decision but before the exit."""
+        monkeypatch.setattr(gen_app, "_fail", lambda **kw: None)
+
+        with pytest.raises(TypeError, match="detials"):
+            gen_app._bail(
+                lambda kind, e: None,
+                RuntimeError("x"),
+                code="generate_api_error",
+                message="boom",
+                kind="api",
+                detials={"status": 401},
+            )
+
+    def test_exits_even_when_tracking_raises(self, monkeypatch):
+        """Tracking is best-effort and network-bound; the exit is not. A telemetry
+        failure must not escape as a traceback in place of the exit-1 envelope."""
+        reported: list[dict] = []
+        monkeypatch.setattr(gen_app, "_fail", lambda **kw: reported.append(kw))
+        exc = ValueError("boom")
+
+        def _explode(kind, e):
+            raise RuntimeError("mixpanel is down")
+
+        with pytest.raises(typer.Exit) as exit_info:
+            gen_app._bail(_explode, exc, code="generate_bad_args", message="bad", kind="schema")
+
+        assert exit_info.value.exit_code == 1
+        # Still chained to the *original* failure, not to the telemetry error.
+        assert exit_info.value.__cause__ is exc
+        assert len(reported) == 1
