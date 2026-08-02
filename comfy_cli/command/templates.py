@@ -30,7 +30,7 @@ from typing import Annotated, Any
 import typer
 
 from comfy_cli import tracking
-from comfy_cli.http import plain_urlopen
+from comfy_cli.http import ResponseTooLarge, plain_urlopen, read_capped
 from comfy_cli.output import get_renderer, rprint
 
 app = typer.Typer(no_args_is_help=True, help="Browse the Comfy workflow-template gallery.")
@@ -46,11 +46,17 @@ GALLERY_TTL_SECONDS = 24 * 60 * 60
 
 # Everything a gallery load can throw. ``_fetch_gallery`` raises ``RuntimeError``
 # on a non-200 status (which ``urlopen`` doesn't already turn into an
-# ``HTTPError``), the fetch itself raises ``URLError``/``OSError``, and decoding a
-# 200-with-garbage body raises ``JSONDecodeError`` — all of which must route
-# through the same stale-cache fallback / command-level error, never an uncaught
-# traceback.
-_GALLERY_LOAD_ERRORS = (urllib.error.URLError, OSError, RuntimeError, json.JSONDecodeError)
+# ``HTTPError``), the fetch itself raises ``URLError``/``OSError``, decoding a
+# 200-with-garbage body raises ``JSONDecodeError``, and an over-cap body raises
+# ``ResponseTooLarge`` — all of which must route through the same stale-cache
+# fallback / command-level error, never an uncaught traceback.
+_GALLERY_LOAD_ERRORS = (
+    urllib.error.URLError,
+    OSError,
+    RuntimeError,
+    json.JSONDecodeError,
+    ResponseTooLarge,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -65,11 +71,14 @@ def _cache_path() -> Path:
 
 
 def _fetch_gallery(url: str = GALLERY_URL, timeout: float = 15.0) -> bytes:
+    """Pull the gallery index from GitHub raw. Bounded read — this is a body
+    from a host we don't control, so it goes through the shared cap rather than
+    letting the remote decide how much memory we buffer."""
     req = urllib.request.Request(url, headers={"User-Agent": "comfy-cli"})
     with plain_urlopen(req, timeout=timeout) as resp:
         if resp.status != 200:
             raise RuntimeError(f"gallery fetch failed: HTTP {resp.status}")
-        return resp.read()
+        return read_capped(resp, url)
 
 
 def _load_gallery(
@@ -495,7 +504,10 @@ def refresh_cmd():
     renderer = get_renderer()
     try:
         data = _fetch_gallery()
-    except (urllib.error.URLError, OSError) as e:
+    except _GALLERY_LOAD_ERRORS as e:
+        # Same family `_load_gallery` routes: a non-200 (`RuntimeError`) and an
+        # over-cap body (`ResponseTooLarge`) must surface as this envelope too,
+        # not as an uncaught traceback.
         renderer.error(code="gallery_fetch_failed", message=str(e))
         raise typer.Exit(code=1) from e
     cache = _cache_path()
@@ -520,7 +532,7 @@ def _fetch_template_workflow(name: str, *, timeout: float = 15.0) -> bytes:
     with plain_urlopen(req, timeout=timeout) as resp:
         if resp.status != 200:
             raise RuntimeError(f"template workflow fetch failed: HTTP {resp.status}")
-        return resp.read()
+        return read_capped(resp, url)
 
 
 @app.command(
@@ -574,7 +586,10 @@ def fetch_cmd(
 
     try:
         body = _fetch_template_workflow(name)
-    except (urllib.error.HTTPError, urllib.error.URLError, OSError) as e:
+    # ``RuntimeError`` (a 2xx-but-not-200 status) and ``ResponseTooLarge`` (an
+    # over-cap body) are the same class of upstream misbehaviour as a URLError
+    # and belong in the same envelope, not in an uncaught traceback.
+    except (urllib.error.HTTPError, urllib.error.URLError, OSError, RuntimeError, ResponseTooLarge) as e:
         status = getattr(e, "code", None)
         renderer.error(
             code="template_fetch_failed",
@@ -934,7 +949,9 @@ def run_template_cmd(
     # -- Resolve the template against the gallery index (close-matches on miss).
     try:
         cats = _load_gallery(gallery_path, refresh=refresh)
-    except (urllib.error.URLError, OSError, json.JSONDecodeError) as e:
+    # The full `_GALLERY_LOAD_ERRORS` family, matching every other `_load_gallery`
+    # call site — a non-200 or an over-cap body escapes here just as a URLError does.
+    except _GALLERY_LOAD_ERRORS as e:
         renderer.error(code="gallery_load_failed", message=str(e))
         raise typer.Exit(code=1) from e
 
@@ -954,7 +971,10 @@ def run_template_cmd(
     # -- Fetch + parse the template's workflow JSON.
     try:
         body = _fetch_template_workflow(name)
-    except (urllib.error.HTTPError, urllib.error.URLError, OSError) as e:
+    # ``RuntimeError`` (a 2xx-but-not-200 status) and ``ResponseTooLarge`` (an
+    # over-cap body) are the same class of upstream misbehaviour as a URLError
+    # and belong in the same envelope, not in an uncaught traceback.
+    except (urllib.error.HTTPError, urllib.error.URLError, OSError, RuntimeError, ResponseTooLarge) as e:
         status = getattr(e, "code", None)
         renderer.error(
             code="template_fetch_failed",

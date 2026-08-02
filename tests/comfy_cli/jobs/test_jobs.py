@@ -691,8 +691,11 @@ def _capture_urlopen(monkeypatch: pytest.MonkeyPatch, routes: dict):
         def __exit__(self, *a):
             return False
 
-        def read(self):
-            return self.body
+        def read(self, n=None):
+            # Mirror http.client.HTTPResponse.read(amt) — `_http_get_json`
+            # reads with a byte cap, so a no-arg-only fake would not match the
+            # real API.
+            return self.body if n is None else self.body[:n]
 
     def _fake(req, timeout=None):
         url = req.full_url
@@ -2318,3 +2321,86 @@ def test_watcher_does_not_clobber_a_concurrent_cancel_with_server_died(monkeypat
     assert on_disk.error["code"] == "cancelled"
     # The notification reports the verdict that actually stands.
     assert notified[0].status == "cancelled"
+
+
+# ---------------------------------------------------------------------------
+# Bounded reads — a ComfyUI server must not be able to OOM the CLI
+# ---------------------------------------------------------------------------
+
+
+class _CapRecordingResp:
+    """A urlopen response that records the byte cap it was read with.
+
+    ``read(None)`` fails outright: an unbounded read is the bug being guarded
+    against, and a lenient fake would let it back in.
+    """
+
+    def __init__(self, body: bytes):
+        self._body = body
+        self.status = 200
+        self.requested: list[int] = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def read(self, n=None):
+        if n is None:
+            raise AssertionError("unbounded read() — the body must be read with a cap")
+        self.requested.append(n)
+        return self._body[:n]
+
+
+def test_http_get_json_reads_with_a_cap_not_unbounded(monkeypatch: pytest.MonkeyPatch):
+    import comfy_cli.http as http_mod
+
+    resp = _CapRecordingResp(b'{"queue_running": []}')
+    monkeypatch.setattr(http_mod._PLAIN_OPENER, "open", lambda req, timeout=None: resp)
+
+    assert jobs_mod._http_get_json("http://127.0.0.1:8188/queue") == {"queue_running": []}
+    # One byte past the cap, so a body that exactly fills it is still complete.
+    assert resp.requested == [http_mod.MAX_RESPONSE_BYTES + 1]
+
+
+def test_http_get_json_oversize_body_is_a_runtime_error_not_a_truncated_parse(monkeypatch: pytest.MonkeyPatch):
+    # RuntimeError is the single failure family every `_http_get_json` call site
+    # already catches; an oversize body must join it rather than escaping as a
+    # new exception type or degrading into a confusing JSON parse error.
+    import comfy_cli.http as http_mod
+
+    resp = _CapRecordingResp(b"x" * 4096)
+    monkeypatch.setattr(http_mod._PLAIN_OPENER, "open", lambda req, timeout=None: resp)
+    monkeypatch.setattr(
+        jobs_mod,
+        "read_capped",
+        lambda r, url, max_bytes=8: http_mod.read_capped(r, url, max_bytes=max_bytes),
+    )
+
+    with pytest.raises(RuntimeError) as exc_info:
+        jobs_mod._http_get_json("http://127.0.0.1:8188/history")
+    assert "http://127.0.0.1:8188/history" in str(exc_info.value)
+
+
+def test_jobs_ls_survives_an_oversize_queue_response(monkeypatch: pytest.MonkeyPatch):
+    # End to end: `jobs ls` catches RuntimeError from `_http_get_json`, so an
+    # oversize /queue degrades to the on-disk fallback instead of a traceback.
+    import comfy_cli.http as http_mod
+
+    monkeypatch.setattr(jobs_mod, "_server_or_error", lambda h, p, **kw: True)
+    monkeypatch.setattr(http_mod._PLAIN_OPENER, "open", lambda req, timeout=None: _CapRecordingResp(b"x" * 4096))
+    monkeypatch.setattr(
+        jobs_mod,
+        "read_capped",
+        lambda r, url, max_bytes=8: http_mod.read_capped(r, url, max_bytes=max_bytes),
+    )
+
+    from typer.testing import CliRunner
+
+    result = CliRunner().invoke(jobs_mod.app, ["ls", "--where", "local"])
+    # `_gather_jobs` treats an unreadable /queue and /history as empty, so the
+    # command still succeeds — what matters is that ResponseTooLarge never
+    # escapes as an uncaught exception.
+    assert result.exit_code == 0, result.output
+    assert result.exception is None or isinstance(result.exception, SystemExit)

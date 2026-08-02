@@ -22,8 +22,10 @@ def _mock_response(payload):
         def __init__(self, body):
             self.body = body if isinstance(body, bytes) else json.dumps(body).encode()
 
-        def read(self):
-            return self.body
+        def read(self, n=None):
+            # Mirror http.client.HTTPResponse.read(amt) — the client reads with
+            # a byte cap, so a no-arg-only fake would not match the real API.
+            return self.body if n is None else self.body[:n]
 
         def __enter__(self):
             return self
@@ -905,3 +907,63 @@ class TestTokenRedaction:
     def test_target_repr_omits_token(self):
         # Bearer should never show in logger.debug("%r", target).
         assert "tok-abc" not in repr(CLOUD)
+
+
+# ---------------------------------------------------------------------------
+# Bounded response reads
+# ---------------------------------------------------------------------------
+
+
+class _CapRecordingResp:
+    """A urlopen response that records the byte cap it was read with.
+
+    ``read(None)`` fails outright — an unbounded read is the bug being guarded
+    against, and a lenient fake would let it back in.
+    """
+
+    def __init__(self, body: bytes, status: int = 200):
+        self._body = body
+        self.status = status
+        self.requested: list[int] = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+    def read(self, n=None):
+        if n is None:
+            raise AssertionError("unbounded read() — the body must be read with a cap")
+        self.requested.append(n)
+        return self._body[:n]
+
+
+class TestBoundedResponseReads:
+    def test_response_is_read_with_a_cap_not_unbounded(self):
+        import comfy_cli.http as http_mod
+
+        resp = _CapRecordingResp(json.dumps({"prompt_id": "pid", "number": 1, "node_errors": {}}).encode())
+        target = Target(kind="local", base_url="http://127.0.0.1:8188", path_prefix="")
+        with patch.object(comfy_client._OPENER, "open", return_value=resp):
+            comfy_client.Client(target).submit_prompt({"1": {}}, "cid")
+        # One byte past the cap, so a body that exactly fills it is still complete.
+        assert resp.requested == [http_mod.MAX_RESPONSE_BYTES + 1]
+
+    def test_oversize_response_raises_http_error_not_a_truncated_parse(self, monkeypatch):
+        # A truncated body would surface as a misleading JSON decode error (or,
+        # worse, parse into something plausible). Surface it as the same
+        # HTTPError family every caller already handles instead.
+        import comfy_cli.http as http_mod
+
+        resp = _CapRecordingResp(b"x" * 4096)
+        monkeypatch.setattr(
+            comfy_client,
+            "read_capped",
+            lambda r, url, max_bytes=8: http_mod.read_capped(r, url, max_bytes=max_bytes),
+        )
+        target = Target(kind="local", base_url="http://127.0.0.1:8188", path_prefix="")
+        with patch.object(comfy_client._OPENER, "open", return_value=resp):
+            with pytest.raises(comfy_client.HTTPError) as exc_info:
+                comfy_client.Client(target).submit_prompt({"1": {}}, "cid")
+        assert "too large" in str(exc_info.value)
