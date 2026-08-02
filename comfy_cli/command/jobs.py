@@ -170,7 +170,7 @@ class JobRow:
     updated_at: str | None = None  # ISO timestamp, set for state-file rows
 
 
-def _gather_local_state_files(*, limit: int, orphaned_only: bool = False) -> list[JobRow]:
+def _gather_local_state_files(*, limit: int, orphaned_only: bool = False, where: str | None = None) -> list[JobRow]:
     """Read every state file in the jobs state dir → JobRow.
 
     This is the canonical "what did *I* submit via this CLI" view —
@@ -180,6 +180,12 @@ def _gather_local_state_files(*, limit: int, orphaned_only: bool = False) -> lis
     When ``orphaned_only`` is True, return only rows whose state file
     has ``error.code == "watcher_crashed"`` — jobs where the
     background watcher died and was reaped. Useful for cleanup.
+
+    ``where`` scopes the rows to one routing target (``"local"`` /
+    ``"cloud"``) so a ``--where local`` listing can't surface cloud jobs
+    submitted in an earlier run. A state file whose ``where`` is missing or
+    empty counts as ``"local"``. ``None`` (the default) keeps the unfiltered
+    union view — used by ``jobs ls --all`` and ``--orphaned``.
     """
     import re as _re
 
@@ -214,6 +220,11 @@ def _gather_local_state_files(*, limit: int, orphaned_only: bool = False) -> lis
             }
             state.watcher_pid = None
             jobs_state.write(state)
+        # Scope to the resolved --where target. Done *after* the stale-watcher
+        # reap above so cleanup stays where-agnostic no matter which view the
+        # caller asked for.
+        if where is not None and (state.where or "local") != where:
+            continue
         if orphaned_only:
             err = state.error or {}
             if not (isinstance(err, dict) and err.get("code") == "watcher_crashed"):
@@ -226,7 +237,10 @@ def _gather_local_state_files(*, limit: int, orphaned_only: bool = False) -> lis
                 elapsed_seconds=None,
                 workflow_size=None,
                 outputs=len(state.outputs or []),
-                where=state.where,
+                # Same missing/empty -> "local" reading the filter above uses,
+                # so a row can never be scoped as local yet report `where: null`
+                # (JobRow.where is typed `str` and defaults to "local").
+                where=state.where or "local",
                 workflow_path=state.workflow,
                 updated_at=state.updated_at,
             )
@@ -354,7 +368,13 @@ def _safe_queue_entry(entry: Any) -> tuple[str, Any]:
     return ("?", None)
 
 
-@app.command("ls", help="List jobs: locally-tracked async submits + server queue/history.")
+@app.command(
+    "ls",
+    help=(
+        "List jobs: locally-tracked async submits + server queue/history, "
+        "scoped to the resolved --where target (use --all for every target)."
+    ),
+)
 @tracking.track_command("jobs")
 def ls_cmd(
     host: Annotated[str | None, typer.Option(help="Server host (defaults to background or 127.0.0.1).")] = None,
@@ -384,6 +404,14 @@ def ls_cmd(
             ),
         ),
     ] = False,
+    all_wheres: Annotated[
+        bool,
+        typer.Option(
+            "--all",
+            show_default=False,
+            help="Show state-file rows for every target, not just the resolved --where.",
+        ),
+    ] = False,
     watch: Annotated[
         bool,
         typer.Option(
@@ -395,6 +423,26 @@ def ls_cmd(
 ):
     renderer = get_renderer()
 
+    # Resolve the routing target once: per-command --where flag > COMFY_WHERE
+    # env (how the top-level `comfy --where` arrives) > config default. Both
+    # the server query and the state-file scope key off this single decision.
+    target_where = "cloud" if _is_cloud(where) else "local"
+
+    # --orphaned only makes sense for state files (the server doesn't know
+    # whether a watcher crashed), so skip the server query in that mode.
+    if orphaned:
+        local_only = True
+
+    # State-file rows are scoped to the resolved target, so a `--where local`
+    # listing can't surface cloud jobs from an earlier run; `--all` restores
+    # the union view. `--orphaned` stays unfiltered — watcher cleanup is
+    # where-agnostic. `server_rows` are never filtered: they are already
+    # scoped by which backend we queried.
+    #
+    # Both decisions are made *before* the --watch branch so the live table
+    # applies exactly the same filters as the one-shot listing.
+    state_where = None if (all_wheres or orphaned) else target_where
+
     if watch:
         if not renderer.is_pretty():
             renderer.error(
@@ -403,20 +451,23 @@ def ls_cmd(
                 hint="drop --json, or run `while true; do comfy --json jobs ls; sleep 2; done`",
             )
             raise typer.Exit(code=1)
-        _watch_ls(host=host, port=port, limit=limit, where=where, local_only=local_only)
+        _watch_ls(
+            host=host,
+            port=port,
+            limit=limit,
+            where=where,
+            local_only=local_only,
+            state_where=state_where,
+            orphaned_only=orphaned,
+        )
         return
 
-    state_rows = _gather_local_state_files(limit=limit, orphaned_only=orphaned)
-
-    # --orphaned only makes sense for state files (the server doesn't know
-    # whether a watcher crashed), so skip the server query in that mode.
-    if orphaned:
-        local_only = True
+    state_rows = _gather_local_state_files(limit=limit, orphaned_only=orphaned, where=state_where)
 
     server_rows: list[JobRow] = []
     h, p = _resolve_host_port(host, port)
     if not local_only:
-        if _is_cloud(where):
+        if target_where == "cloud":
             try:
                 cloud_preflight_or_exit()
                 client = _cloud_client()
@@ -436,12 +487,15 @@ def ls_cmd(
     rows = _merge_jobs(state_rows, server_rows)[:limit]
 
     if renderer.is_pretty():
-        _render_jobs_pretty(rows, host=h if not _is_cloud(where) else "cloud.comfy.org", port=p)
+        _render_jobs_pretty(rows, host=h if target_where != "cloud" else "cloud.comfy.org", port=p)
     renderer.emit(
         {
             "host": h,
             "port": p,
-            "where": "cloud" if _is_cloud(where) else "local",
+            "where": target_where,
+            # Which state-file view the caller got: the resolved target, or
+            # "all" when the union view was requested (--all/--orphaned).
+            "scope": state_where or "all",
             "count": len(rows),
             "jobs": [_row_to_dict(r) for r in rows],
         },
@@ -449,8 +503,14 @@ def ls_cmd(
     )
 
 
-def _watch_ls(*, host, port, limit, where, local_only):
-    """Rich Live refresh of the jobs table every 2s until Ctrl-C."""
+def _watch_ls(*, host, port, limit, where, local_only, state_where=None, orphaned_only=False):
+    """Rich Live refresh of the jobs table every 2s until Ctrl-C.
+
+    ``state_where`` scopes the state-file rows exactly as the one-shot path
+    does (``None`` = the unfiltered union view, i.e. ``--all``), and
+    ``orphaned_only`` mirrors ``--orphaned``, so the live table shows the same
+    jobs as ``jobs ls``.
+    """
     import time
 
     from rich.live import Live
@@ -463,7 +523,7 @@ def _watch_ls(*, host, port, limit, where, local_only):
     h, p = _resolve_host_port(host, port)
 
     def build_table() -> Table:
-        state_rows = _gather_local_state_files(limit=limit)
+        state_rows = _gather_local_state_files(limit=limit, where=state_where, orphaned_only=orphaned_only)
         server_rows: list[JobRow] = []
         if not local_only:
             try:

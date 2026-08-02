@@ -1025,12 +1025,40 @@ def deps(
             autocompletion=installed_pack_completer,
         ),
     ] = None,
+    registry: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--registry",
+            show_default=False,
+            help=(
+                "Registry node id of a NOT-yet-installed pack to include, so its declared dependencies can be "
+                "checked for conflicts before installing. Repeatable, and additive with the pack names above. "
+                "Always reports the pack's LATEST published version: the registry exposes no read-only endpoint "
+                "for a pinned version's dependencies. Installs nothing."
+            ),
+            autocompletion=node_completer,
+        ),
+    ] = None,
+    refresh: Annotated[
+        bool,
+        typer.Option(
+            "--refresh",
+            help="Bypass the 1h cache of registry lookups (only affects --registry).",
+        ),
+    ] = False,
 ):
-    # Native + read-only on purpose: no cm-cli, no pip install, no network, so
-    # it works on a workspace that never installed ComfyUI-Manager.
+    # Native + read-only on purpose: no cm-cli, no pip install, and no network
+    # at all unless --registry is passed (a side-effect-free GET /nodes/{id}) —
+    # so it works on a workspace that never installed ComfyUI-Manager.
     from comfy_cli.command import node_deps
 
-    node_deps.execute(get_renderer(), workspace_manager.workspace_path, pack_names)
+    node_deps.execute(
+        get_renderer(),
+        workspace_manager.workspace_path,
+        pack_names,
+        registry_ids=registry,
+        refresh=refresh,
+    )
 
 
 def validate_node_for_publishing():

@@ -38,6 +38,17 @@ def _renderer_isolation():
     reset_renderer_for_testing()
 
 
+@pytest.fixture(autouse=True)
+def _isolated_registry_cache(tmp_path, monkeypatch):
+    """Point the shared ``outdated.json`` registry cache at a throwaway dir.
+
+    ``--registry`` reuses ``comfy outdated``'s cache file, which is resolved
+    from ``XDG_CACHE_HOME`` at call time — without this, a test run would read
+    and rewrite the developer's real cache.
+    """
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+
+
 class _FakePipList:
     """Stand-in for ``subprocess.run``; records every invocation."""
 
@@ -314,6 +325,583 @@ def test_no_names_reports_every_pack(workspace, fake_pip):
     assert sorted(p["pack"] for p in report["packs"]) == ["Registry-Pack", "comfyui-impact-pack"]
 
 
+# ---------------------------------------------------------------------------
+# --registry (not-yet-installed candidates)
+# ---------------------------------------------------------------------------
+
+
+def _node(node_id: str, version: str | None = "1.2.3", dependencies=None):
+    """A registry ``Node`` as ``RegistryAPI.get_node`` would return one."""
+    from comfy_cli.registry.types import Node, NodeVersion
+
+    latest = None
+    if version is not None:
+        latest = NodeVersion(
+            changelog="",
+            # ``map_node_version`` defaults a missing key to [], so [] is what
+            # "the registry published no dependency metadata" looks like here.
+            dependencies=[] if dependencies is None else dependencies,
+            deprecated=False,
+            id=f"{node_id}@{version}",
+            version=version,
+            download_url="https://example.invalid/pack.zip",
+        )
+    return Node(id=node_id, name=node_id, description="", latest_version=latest)
+
+
+class _FakeRegistry:
+    """Records every ``get_node`` call; ``install_node`` must never be reached."""
+
+    def __init__(self, node=None, error: Exception | None = None):
+        self.calls: list[str] = []
+        self._node = node
+        self._error = error
+
+    def get_node(self, node_id):
+        self.calls.append(node_id)
+        if self._error is not None:
+            raise self._error
+        return self._node
+
+    def install_node(self, node_id, version=None):  # pragma: no cover - a failure, not a path
+        raise AssertionError("install_node must never be called: it records an install + analytics event")
+
+
+def _registry_row(report: dict) -> dict:
+    rows = [p for p in report["packs"] if p.get("registry")]
+    assert len(rows) == 1, f"expected exactly one registry row, got {[p['pack'] for p in report['packs']]}"
+    return rows[0]
+
+
+def test_registry_candidate_is_diffed_against_the_same_pip_list(workspace, fake_pip):
+    api = _FakeRegistry(
+        _node(
+            "comfyui-impact-pack",
+            "8.28.3",
+            # satisfied / mismatch / missing / unparseable, in that order.
+            ["numpy>=1.20", "opencv-python<4.0", "segment-anything", "-r extra.txt"],
+        )
+    )
+    report, warnings = node_deps_cmd.build_report(
+        str(workspace), registry_ids=["comfyui-impact-pack"], python="/fake/python", registry_api=api
+    )
+
+    row = _registry_row(report)
+    assert api.calls == ["comfyui-impact-pack"]
+    assert row["pack"] == "comfyui-impact-pack"
+    assert row["status"] == "registry"
+    assert row["path"] is None
+    assert row["version"] == "8.28.3"
+    assert row["declared"] == ["numpy>=1.20", "opencv-python<4.0", "segment-anything", "-r extra.txt"]
+    assert row["requirement_files"] == ["registry"]
+    assert "warning" not in row
+    assert warnings == []
+
+    reqs = _reqs_by_raw(row)
+    assert reqs["numpy>=1.20"]["status"] == "satisfied"
+    assert reqs["numpy>=1.20"]["installed"] == "1.26.4"
+    assert reqs["opencv-python<4.0"]["status"] == "mismatch"
+    assert reqs["opencv-python<4.0"]["installed"] == "4.9.0.80"
+    assert reqs["segment-anything"]["status"] == "missing"
+    assert reqs["-r extra.txt"]["status"] == "unparseable"
+    assert all(r["source"] == "registry" for r in row["requirements"])
+    assert row["summary"] == {"satisfied": 1, "mismatch": 1, "missing": 1, "unparseable": 1, "unknown": 0}
+
+    # A single `pip list`, shared with the installed packs — not one per entry.
+    assert len(fake_pip.calls) == 1
+
+
+def test_registry_without_dependency_metadata_warns_honestly(workspace, fake_pip):
+    api = _FakeRegistry(_node("bare-pack", "1.0.0", []))
+    report, warnings = node_deps_cmd.build_report(
+        str(workspace), registry_ids=["bare-pack"], python="/fake/python", registry_api=api
+    )
+
+    row = _registry_row(report)
+    # `declared: null`, NOT `[]`: the API cannot distinguish "declares nothing"
+    # from "field absent", so we must not claim the former.
+    assert row["declared"] is None
+    assert row["registry"] is True
+    assert row["requirements"] == []
+    assert row["requirement_files"] == []
+    assert row["warning"] == "registry did not return dependency metadata for this pack"
+    assert [w["code"] for w in warnings] == ["registry_no_dependency_metadata"]
+
+
+def test_registry_node_without_latest_version_warns_honestly(workspace, fake_pip):
+    api = _FakeRegistry(_node("unpublished-pack", version=None))
+    report, warnings = node_deps_cmd.build_report(
+        str(workspace), registry_ids=["unpublished-pack"], python="/fake/python", registry_api=api
+    )
+
+    row = _registry_row(report)
+    assert row["version"] is None
+    assert row["declared"] is None
+    assert row["warning"] == "registry did not return dependency metadata for this pack"
+    assert [w["code"] for w in warnings] == ["registry_no_dependency_metadata"]
+
+
+def test_registry_non_list_dependencies_do_not_become_one_row_per_character(workspace, fake_pip):
+    """A malformed payload must degrade to the honest warning, not to garbage."""
+    api = _FakeRegistry(_node("odd-pack", "1.0.0", "numpy"))
+    report, warnings = node_deps_cmd.build_report(
+        str(workspace), registry_ids=["odd-pack"], python="/fake/python", registry_api=api
+    )
+
+    row = _registry_row(report)
+    assert row["declared"] is None
+    assert row["requirements"] == []
+    assert row["warning"] == "registry did not return dependency metadata for this pack"
+    assert [w["code"] for w in warnings] == ["registry_no_dependency_metadata"]
+
+
+def test_registry_blank_only_dependencies_degrade_to_the_warning(workspace, fake_pip):
+    api = _FakeRegistry(_node("blank-pack", "1.0.0", ["", "   "]))
+    report, warnings = node_deps_cmd.build_report(
+        str(workspace), registry_ids=["blank-pack"], python="/fake/python", registry_api=api
+    )
+
+    row = _registry_row(report)
+    assert row["declared"] is None
+    assert [w["code"] for w in warnings] == ["registry_no_dependency_metadata"]
+
+
+def test_registry_network_failure_is_a_per_entry_warning_not_a_failed_command(workspace, fake_pip):
+    import requests
+
+    api = _FakeRegistry(error=requests.exceptions.RequestException("connection timed out"))
+    report, warnings = node_deps_cmd.build_report(
+        str(workspace),
+        ["comfyui-impact-pack"],
+        registry_ids=["some-pack"],
+        python="/fake/python",
+        registry_api=api,
+    )
+
+    row = _registry_row(report)
+    assert row["declared"] is None
+    assert row["version"] is None
+    assert "connection timed out" in row["warning"]
+    assert [w["code"] for w in warnings] == ["registry_unavailable"]
+
+    # The installed pack's section is untouched by the registry failure.
+    installed = _packs_by_name(report)["comfyui-impact-pack"]
+    assert installed["status"] == "installed"
+    assert _reqs_by_raw(installed)["numpy<1.20"]["status"] == "mismatch"
+
+
+def test_registry_never_calls_install_node(workspace, fake_pip, monkeypatch):
+    """The install endpoint records an install + analytics event server-side."""
+    from unittest import mock
+
+    from comfy_cli.registry import RegistryAPI
+
+    with (
+        mock.patch.object(RegistryAPI, "install_node", autospec=True) as install,
+        mock.patch.object(RegistryAPI, "get_node", autospec=True) as get_node,
+    ):
+        get_node.return_value = _node("some-pack", "2.0.0", ["numpy"])
+        # No injected api: build_report must construct the real RegistryAPI and
+        # still only reach for the read-only endpoint.
+        report, warnings = node_deps_cmd.build_report(str(workspace), registry_ids=["some-pack"], python="/fake/python")
+
+    install.assert_not_called()
+    assert get_node.call_count == 1
+    assert _registry_row(report)["declared"] == ["numpy"]
+    assert warnings == []
+
+
+def test_registry_lookup_is_cached_and_refresh_bypasses_it(workspace, fake_pip):
+    api = _FakeRegistry(_node("cached-pack", "3.0.0", ["numpy"]))
+
+    for _ in range(2):
+        report, _ = node_deps_cmd.build_report(
+            str(workspace), registry_ids=["cached-pack"], python="/fake/python", registry_api=api
+        )
+        assert _registry_row(report)["version"] == "3.0.0"
+    assert api.calls == ["cached-pack"], "second lookup must be served from the 1h cache"
+
+    node_deps_cmd.build_report(
+        str(workspace), registry_ids=["cached-pack"], python="/fake/python", registry_api=api, refresh=True
+    )
+    assert api.calls == ["cached-pack", "cached-pack"], "--refresh must bypass the cache"
+
+
+def test_registry_failure_is_not_cached(workspace, fake_pip):
+    """A transient outage must not poison the next hour of lookups."""
+    import requests
+
+    api = _FakeRegistry(error=requests.exceptions.RequestException("boom"))
+    for _ in range(2):
+        node_deps_cmd.build_report(str(workspace), registry_ids=["flaky-pack"], python="/fake/python", registry_api=api)
+    assert api.calls == ["flaky-pack", "flaky-pack"]
+
+
+def test_registry_only_invocation_does_not_dump_every_installed_pack(workspace, fake_pip):
+    api = _FakeRegistry(_node("some-pack", "1.0.0", ["numpy"]))
+    report, _ = node_deps_cmd.build_report(
+        str(workspace), registry_ids=["some-pack"], python="/fake/python", registry_api=api
+    )
+
+    assert [p["pack"] for p in report["packs"]] == ["some-pack"]
+
+
+def test_registry_is_additive_with_positional_pack_names(workspace, fake_pip):
+    api = _FakeRegistry(_node("some-pack", "1.0.0", ["numpy"]))
+    report, _ = node_deps_cmd.build_report(
+        str(workspace),
+        ["Registry-Pack"],
+        registry_ids=["some-pack"],
+        python="/fake/python",
+        registry_api=api,
+    )
+
+    assert [p["pack"] for p in report["packs"]] == ["Registry-Pack", "some-pack"]
+    assert report["packs"][0]["status"] == "installed"
+
+
+def test_registry_ids_are_deduped_and_blanks_dropped(workspace, fake_pip):
+    api = _FakeRegistry(_node("some-pack", "1.0.0", ["numpy"]))
+    report, warnings = node_deps_cmd.build_report(
+        str(workspace),
+        registry_ids=["some-pack", "  some-pack ", "", "   "],
+        python="/fake/python",
+        registry_api=api,
+    )
+
+    assert [p["pack"] for p in report["packs"]] == ["some-pack"]
+    assert api.calls == ["some-pack"]
+    # The blanks are reported, not silently swallowed.
+    assert [w["code"] for w in warnings] == ["registry_invalid_node_id"] * 2
+
+
+def test_registry_ids_dedupe_case_insensitively(workspace, fake_pip):
+    """The registry resolves ids case-insensitively (`GET /nodes/comfyui-lcm`
+    302s to `/nodes/ComfyUI-LCM`), so two spellings are one pack — not two
+    network calls, two cache entries and two rows.
+    """
+    api = _FakeRegistry(_node("Some-Pack", "1.0.0", ["numpy"]))
+    report, warnings = node_deps_cmd.build_report(
+        str(workspace),
+        registry_ids=["Some-Pack", "some-pack", "SOME-PACK"],
+        python="/fake/python",
+        registry_api=api,
+    )
+
+    assert [p["pack"] for p in report["packs"]] == ["Some-Pack"], "first spelling seen wins"
+    assert api.calls == ["Some-Pack"]
+    assert warnings == []
+
+
+@pytest.mark.parametrize(
+    "bad_id",
+    [
+        "some-pack/install",  # the side-effecting install endpoint's own URL
+        "../nodes/other",
+        "some-pack?version=1",
+        "some-pack#frag",
+        "some pack",
+        "https://api.comfy.org/nodes/some-pack",
+    ],
+)
+def test_registry_id_outside_the_safe_charset_is_rejected_without_a_request(workspace, fake_pip, bad_id):
+    """`get_node` interpolates the id straight into `GET {base}/nodes/{id}`, so a
+    `/` retargets the request — `<pack>/install` builds exactly `install_node`'s
+    URL, the endpoint this feature promises never to touch. Reject before the call.
+    """
+    api = _FakeRegistry(_node("some-pack", "1.0.0", ["numpy"]))
+    report, warnings = node_deps_cmd.build_report(
+        str(workspace), registry_ids=[bad_id], python="/fake/python", registry_api=api
+    )
+
+    assert api.calls == [], "an invalid id must never reach the network"
+    assert report["packs"] == []
+    assert [w["code"] for w in warnings] == ["registry_invalid_node_id"]
+
+
+def test_all_registry_ids_rejected_does_not_dump_every_installed_pack(workspace, fake_pip):
+    """A targeted pre-install question whose ids were all rejected must answer
+    with the warning, not silently fall back to the whole-workspace report.
+    """
+    api = _FakeRegistry(_node("some-pack", "1.0.0", ["numpy"]))
+    report, warnings = node_deps_cmd.build_report(
+        str(workspace), registry_ids=["", "bad/id"], python="/fake/python", registry_api=api
+    )
+
+    assert report["packs"] == []
+    assert [w["code"] for w in warnings] == ["registry_invalid_node_id"] * 2
+
+
+def test_registry_404_is_distinct_from_a_transient_outage(workspace, fake_pip):
+    """`registry_unavailable`'s hint says "check the network, retry with
+    --refresh" — an agent following that against a 404 retries forever.
+    """
+    from comfy_cli.registry import NodeFetchError
+
+    api = _FakeRegistry(error=NodeFetchError("Failed to retrieve node: 404 - Node not found", status_code=404))
+    report, warnings = node_deps_cmd.build_report(
+        str(workspace), registry_ids=["no-such-pack"], python="/fake/python", registry_api=api
+    )
+
+    assert [w["code"] for w in warnings] == ["registry_node_not_found"]
+    assert "404" in _registry_row(report)["warning"]
+
+
+def test_registry_5xx_stays_registry_unavailable(workspace, fake_pip):
+    from comfy_cli.registry import NodeFetchError
+
+    api = _FakeRegistry(error=NodeFetchError("Failed to retrieve node: 503 - upstream down", status_code=503))
+    _, warnings = node_deps_cmd.build_report(
+        str(workspace), registry_ids=["some-pack"], python="/fake/python", registry_api=api
+    )
+
+    assert [w["code"] for w in warnings] == ["registry_unavailable"]
+
+
+def test_registry_error_text_is_truncated_before_entering_the_envelope(workspace, fake_pip):
+    """A captive portal answers with a whole HTML page; it must not be copied
+    verbatim into the single-line JSON envelope consumers parse.
+    """
+    api = _FakeRegistry(error=Exception("Failed to retrieve node: 502 - " + ("<html>padding</html>" * 500)))
+    report, warnings = node_deps_cmd.build_report(
+        str(workspace), registry_ids=["some-pack"], python="/fake/python", registry_api=api
+    )
+
+    message = _registry_row(report)["warning"]
+    assert len(message) < node_deps_cmd.MAX_REGISTRY_ERROR_CHARS + 120
+    assert message.endswith("… (truncated)")
+    assert warnings[0]["message"] == message
+
+
+def test_registry_partial_dependency_list_is_flagged_not_silently_shortened(workspace, fake_pip):
+    """`["numpy", null]` must not render as complete metadata containing only
+    numpy — the dropped entry could have been the conflicting one.
+    """
+    api = _FakeRegistry(_node("mixed-pack", "1.0.0", ["numpy>=1.20", None, 123]))
+    report, warnings = node_deps_cmd.build_report(
+        str(workspace), registry_ids=["mixed-pack"], python="/fake/python", registry_api=api
+    )
+
+    row = _registry_row(report)
+    assert row["declared"] == ["numpy>=1.20"]
+    assert [w["code"] for w in warnings] == ["registry_partial_dependency_metadata"]
+    assert "incomplete" in row["warning"]
+
+
+def test_malformed_cache_entry_does_not_abort_the_report(workspace, fake_pip):
+    """A cache entry written by another comfy-cli version (or hand-edited) can
+    hold `[null]`; reaching `_classify` it would raise AttributeError and kill
+    the whole report — the opposite of this module's degrade-to-a-warning design.
+    """
+    from comfy_cli.command import outdated as outdated_cmd
+
+    api = _FakeRegistry(_node("cached-pack", "1.0.0", ["numpy"]))
+    cache = outdated_cmd._load_cache()
+    key = node_deps_cmd._registry_cache_key(api, "cached-pack")
+    outdated_cmd._cache_set(cache, key, {"version": "1.0.0", "dependencies": [None, 123, "numpy>=1.20"]})
+    outdated_cmd._save_cache(cache)
+
+    report, warnings = node_deps_cmd.build_report(
+        str(workspace), registry_ids=["cached-pack"], python="/fake/python", registry_api=api
+    )
+
+    assert api.calls == [], "served from cache"
+    assert _registry_row(report)["declared"] == ["numpy>=1.20"]
+    assert warnings == []
+
+
+def test_registry_cache_key_is_scoped_to_the_registry_base_url(workspace, fake_pip):
+    """Staging metadata must not be served to a later production run, where it
+    could hide a real dependency conflict.
+    """
+
+    class _Scoped(_FakeRegistry):
+        def __init__(self, base_url, node):
+            super().__init__(node)
+            self.base_url = base_url
+
+    staging = _Scoped("https://stagingapi.comfy.org", _node("some-pack", "9.9.9-staging", ["numpy"]))
+    production = _Scoped("https://api.comfy.org", _node("some-pack", "1.0.0", ["numpy"]))
+
+    node_deps_cmd.build_report(str(workspace), registry_ids=["some-pack"], python="/fake/python", registry_api=staging)
+    report, _ = node_deps_cmd.build_report(
+        str(workspace), registry_ids=["some-pack"], python="/fake/python", registry_api=production
+    )
+
+    assert production.calls == ["some-pack"], "the staging entry must not satisfy a production lookup"
+    assert _registry_row(report)["version"] == "1.0.0"
+
+
+def test_saving_the_cache_preserves_a_concurrent_writers_keys(workspace, fake_pip):
+    """`node deps` is a second writer of the file `comfy outdated` owns: it must
+    merge into a freshly re-read dict, not blind-write the one it loaded.
+    """
+    from comfy_cli.command import outdated as outdated_cmd
+
+    class _RacingRegistry(_FakeRegistry):
+        """Writes a rival key *after* build_report has loaded the cache."""
+
+        def get_node(self, node_id):
+            rival = outdated_cmd._load_cache()
+            outdated_cmd._cache_set(rival, "pack:written-by-outdated", "2.0.0")
+            outdated_cmd._save_cache(rival)
+            return super().get_node(node_id)
+
+    api = _RacingRegistry(_node("some-pack", "1.0.0", ["numpy"]))
+    node_deps_cmd.build_report(str(workspace), registry_ids=["some-pack"], python="/fake/python", registry_api=api)
+
+    saved = outdated_cmd._load_cache()
+    assert outdated_cmd._cache_get(saved, "pack:written-by-outdated") == "2.0.0"
+    assert node_deps_cmd._registry_cache_key(api, "some-pack") in saved
+
+
+def test_expired_registry_cache_entries_are_pruned_on_save(workspace, fake_pip):
+    """The key space is arbitrary caller-supplied ids holding whole dependency
+    lists, and `_save_cache` rewrites every key — without pruning it grows without bound.
+    """
+    import time
+
+    from comfy_cli.command import outdated as outdated_cmd
+
+    api = _FakeRegistry(_node("some-pack", "1.0.0", ["numpy"]))
+    cache = outdated_cmd._load_cache()
+    stale_key = f"{node_deps_cmd.REGISTRY_CACHE_PREFIX}https://api.comfy.org:long-gone-pack"
+    cache[stale_key] = {"value": {"version": "1", "dependencies": ["numpy"]}, "ts": time.time() - 999_999}
+    # A *fresh* registry entry and `outdated`'s own expired keys are both left alone.
+    fresh_key = f"{node_deps_cmd.REGISTRY_CACHE_PREFIX}https://api.comfy.org:still-fresh"
+    outdated_cmd._cache_set(cache, fresh_key, {"version": "1", "dependencies": ["numpy"]})
+    cache["pack:someone-elses-expired"] = {"value": "1.0.0", "ts": time.time() - 999_999}
+    outdated_cmd._save_cache(cache)
+
+    node_deps_cmd.build_report(str(workspace), registry_ids=["some-pack"], python="/fake/python", registry_api=api)
+
+    saved = outdated_cmd._load_cache()
+    assert stale_key not in saved
+    assert fresh_key in saved
+    assert "pack:someone-elses-expired" in saved, "pruning is scoped to this command's own key space"
+
+
+def test_cache_round_trips_a_non_ascii_registry_id(workspace, fake_pip):
+    """`--registry` takes arbitrary caller-supplied ids, so a non-ASCII one can
+    reach a cache key. `_load_cache` decodes bytes as JSON (UTF-8/16/32 only),
+    so the writer must not emit anything a non-UTF-8 locale would mangle — the
+    whole cache silently resets to `{}` on the next read if it does. This is the
+    end-to-end guard; it passes on any host today because `json.dumps` escapes
+    the payload to pure ASCII. The `encoding="utf-8"` pin that holds once that
+    is no longer true is asserted separately, below.
+    """
+    from comfy_cli.command import outdated as outdated_cmd
+
+    key = f"{node_deps_cmd.REGISTRY_CACHE_PREFIX}https://api.comfy.org:café-pack"
+    cache = outdated_cmd._load_cache()
+    outdated_cmd._cache_set(cache, key, {"version": "1.0.0", "dependencies": ["numpé>=1.20"]})
+    outdated_cmd._save_cache(cache)
+
+    assert outdated_cmd._cache_get(outdated_cmd._load_cache(), key) == {
+        "version": "1.0.0",
+        "dependencies": ["numpé>=1.20"],
+    }
+
+
+def test_save_cache_pins_the_write_encoding(monkeypatch):
+    """The round-trip above cannot catch a dropped `encoding="utf-8"`: the bytes
+    it writes are pure ASCII, which every locale encodes identically, so the
+    pin only matters the day `json.dumps` stops escaping. Nor can the ambient
+    encoding be faked — CPython resolves `write_text`'s default below the Python
+    `locale` module. So assert the writer's contract directly: `_save_cache`
+    names its encoding rather than inheriting the host's, and what lands on disk
+    is the UTF-8 that `_load_cache`'s `json.loads(bytes)` can decode.
+    """
+    import time
+
+    from comfy_cli.command import outdated as outdated_cmd
+
+    seen: dict[str, object] = {}
+    real_write_text = Path.write_text
+
+    def spy(self, data, encoding=None, **kwargs):
+        seen["encoding"] = encoding
+        return real_write_text(self, data, encoding=encoding, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", spy)
+    key = f"{node_deps_cmd.REGISTRY_CACHE_PREFIX}https://api.comfy.org:café-pack"
+    outdated_cmd._save_cache({key: {"value": "1.0.0", "ts": time.time()}})
+
+    assert seen["encoding"] == "utf-8", "the host locale must not pick the cache encoding"
+    assert json.loads(outdated_cmd._cache_path().read_bytes())[key]["value"] == "1.0.0"
+
+
+def test_registry_rows_validate_against_the_shipped_schema(workspace, fake_pip):
+    import jsonschema
+
+    from comfy_cli import discovery
+
+    schema = discovery._read_schema("node_deps")
+
+    api = _FakeRegistry(_node("some-pack", "1.0.0", ["numpy>=1.20", "-r extra.txt"]))
+    report, _ = node_deps_cmd.build_report(
+        str(workspace), ["Registry-Pack"], registry_ids=["some-pack"], python="/fake/python", registry_api=api
+    )
+    report["warnings"] = []
+    jsonschema.validate(report, schema)
+
+    # the no-metadata / unreachable shapes must validate too
+    bare, _ = node_deps_cmd.build_report(
+        str(workspace), registry_ids=["bare"], python="/fake/python", registry_api=_FakeRegistry(_node("bare", "1.0"))
+    )
+    bare["warnings"] = []
+    jsonschema.validate(bare, schema)
+
+
+def test_registry_pretty_mode_renders_version_and_status(workspace, fake_pip, capsys):
+    from unittest import mock
+
+    from comfy_cli.registry import RegistryAPI
+
+    reset_renderer_for_testing()
+    r = Renderer(mode=OutputMode.PRETTY)
+    set_renderer(r)
+
+    with mock.patch.object(RegistryAPI, "get_node", autospec=True) as get_node:
+        get_node.return_value = _node("some-pack", "9.9.9", ["numpy>=1.20"])
+        node_deps_cmd.execute(r, str(workspace), registry_ids=["some-pack"])
+
+    out = capsys.readouterr().out
+    assert "some-pack" in out
+    assert "9.9.9" in out
+    assert "satisfied" in out
+
+
+def test_registry_pretty_mode_renders_the_warning_row(workspace, fake_pip, capsys):
+    from unittest import mock
+
+    from comfy_cli.registry import RegistryAPI
+
+    reset_renderer_for_testing()
+    r = Renderer(mode=OutputMode.PRETTY)
+    set_renderer(r)
+
+    with mock.patch.object(RegistryAPI, "get_node", autospec=True) as get_node:
+        get_node.return_value = _node("bare-pack", "1.0.0", [])
+        node_deps_cmd.execute(r, str(workspace), registry_ids=["bare-pack"])
+
+    out = capsys.readouterr().out
+    assert "bare-pack" in out
+    assert "did not return dependency metadata" in out
+    assert r.exit_code == 0  # a report, not a check
+
+
+def test_registry_flags_are_registered_on_the_deps_command():
+    import click
+    import typer
+
+    from comfy_cli.command.custom_nodes.command import app
+
+    click_command = typer.main.get_command(app).commands["deps"]
+    opts = {opt for p in click_command.params if isinstance(p, click.Option) for opt in p.opts}
+    assert {"--registry", "--refresh"} <= opts
+
+
 def test_unreadable_requirements_file_warns_instead_of_crashing(tmp_path, fake_pip, monkeypatch):
     ws = tmp_path / "ComfyUI"
     (ws / "custom_nodes").mkdir(parents=True)
@@ -474,3 +1062,27 @@ def test_deps_command_is_registered_on_the_node_app():
     names = {c.name for c in app.registered_commands}
     assert "deps" in names
     assert {"deps-in-workflow", "install-deps"} <= names, "must not shadow the existing deps-* commands"
+
+
+def test_a_failed_refresh_does_not_resurrect_an_expired_cache_entry(workspace, fake_pip):
+    """The failed lookup writes nothing, so the stale entry it could not replace
+    must still be pruned rather than carried forward as a fresh write.
+    """
+    import time
+
+    import requests
+
+    from comfy_cli.command import outdated as outdated_cmd
+
+    api = _FakeRegistry(error=requests.exceptions.RequestException("boom"))
+    key = node_deps_cmd._registry_cache_key(api, "some-pack")
+    cache = outdated_cmd._load_cache()
+    cache[key] = {"value": {"version": "1", "dependencies": ["numpy"]}, "ts": time.time() - 999_999}
+    outdated_cmd._save_cache(cache)
+
+    _, warnings = node_deps_cmd.build_report(
+        str(workspace), registry_ids=["some-pack"], python="/fake/python", registry_api=api
+    )
+
+    assert [w["code"] for w in warnings] == ["registry_unavailable"]
+    assert key not in outdated_cmd._load_cache()

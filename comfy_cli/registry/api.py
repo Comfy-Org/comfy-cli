@@ -14,6 +14,20 @@ from comfy_cli.registry.types import (
 )
 
 
+class NodeFetchError(Exception):
+    """``get_node`` got a non-200 from the registry.
+
+    Carries ``status_code`` so callers can tell a permanent 404 ("no such node")
+    apart from a transient 5xx/proxy failure — the two need different remediation
+    and only one is worth retrying. Subclasses ``Exception`` and keeps the
+    original message, so pre-existing ``except Exception`` callers are unaffected.
+    """
+
+    def __init__(self, message: str, status_code: int | None = None):
+        super().__init__(message)
+        self.status_code = status_code
+
+
 class RegistryAPI:
     def __init__(self):
         self.base_url = self.determine_base_url()
@@ -152,7 +166,10 @@ class RegistryAPI:
             logging.debug(f"RegistryAPI get_node response: {response.json()}")
             return map_node_to_node_class(response.json())
         else:
-            raise Exception(f"Failed to retrieve node: {response.status_code} - {response.text}")
+            raise NodeFetchError(
+                f"Failed to retrieve node: {response.status_code} - {response.text}",
+                status_code=response.status_code,
+            )
 
 
 def map_node_version(api_node_version):
