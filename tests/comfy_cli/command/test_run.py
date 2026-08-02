@@ -10,6 +10,7 @@ import typer
 from websocket import WebSocketException, WebSocketTimeoutException
 
 from comfy_cli.command.run import (
+    _TELEMETRY_NODE_NAME_MAX_LEN,
     WorkflowExecution,
     _count_output_nodes,
     _detect_partner_nodes,
@@ -1420,6 +1421,67 @@ class TestPartnerNodesDetectedTelemetry:
         assert len(events) == 1
         assert events[0]["partner_node_count"] == 30
         assert events[0]["partner_nodes"] == [f"PartnerNode{i:02d}" for i in range(20)]
+
+    def test_each_node_name_is_truncated_not_just_the_list(self, tmp_path, monkeypatch):
+        """The element cap alone doesn't bound the payload: class_type strings
+        come verbatim from untrusted workflow JSON, so a single multi-megabyte
+        name would still ship whole. Each name is capped too."""
+        huge = "A" * 5000
+        workflow = {"1": {"class_type": huge, "inputs": {}}}
+        object_info = {huge: {"category": "image", "api_node": True}}
+        wf_file = self._wf_file(tmp_path, workflow)
+        self._no_credentials(monkeypatch)
+
+        with (
+            patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),
+            patch("comfy_cli.command.run._fetch_object_info", return_value=object_info),
+            patch("comfy_cli.command.run.WorkflowExecution"),
+            patch("comfy_cli.tracking.track_event") as mock_track,
+        ):
+            with pytest.raises(typer.Exit):
+                execute(wf_file, host="127.0.0.1", port=8188, wait=True, timeout=30, allow_spend=True)
+
+        events = self._partner_events(mock_track)
+        assert len(events) == 1
+        (shipped,) = events[0]["partner_nodes"]
+        assert shipped == "A" * _TELEMETRY_NODE_NAME_MAX_LEN
+        assert events[0]["partner_node_count"] == 1
+
+    def test_missing_credential_error_truncates_a_huge_node_list(self, tmp_path, monkeypatch):
+        """The prose error echoes the node names; a graph with hundreds of
+        partner nodes must not render an unbounded wall of text. `details` stays
+        complete — it's the machine-readable field JSON consumers read."""
+        workflow = {str(i): {"class_type": f"PartnerNode{i:02d}", "inputs": {}} for i in range(30)}
+        object_info = {f"PartnerNode{i:02d}": {"category": "image", "api_node": True} for i in range(30)}
+        wf_file = self._wf_file(tmp_path, workflow)
+        self._no_credentials(monkeypatch)
+
+        errors = []
+        from comfy_cli.output.renderer import Renderer
+
+        original_error = Renderer.error
+
+        def capture_error(self, *, code, message, hint=None, details=None, exit_code=1):
+            errors.append({"code": code, "message": message, "details": details})
+            return original_error(self, code=code, message=message, hint=hint, details=details, exit_code=exit_code)
+
+        monkeypatch.setattr(Renderer, "error", capture_error)
+
+        with (
+            patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),
+            patch("comfy_cli.command.run._fetch_object_info", return_value=object_info),
+            patch("comfy_cli.command.run.WorkflowExecution"),
+            patch("comfy_cli.tracking.track_event"),
+        ):
+            with pytest.raises(typer.Exit):
+                execute(wf_file, host="127.0.0.1", port=8188, wait=True, timeout=30, allow_spend=True)
+
+        err = next(e for e in errors if e["code"] == "partner_node_requires_credential")
+        assert "PartnerNode00" in err["message"]
+        assert "and 10 more" in err["message"]
+        assert "PartnerNode29" not in err["message"]
+        # The structured field keeps every name.
+        assert len(err["details"]["partner_nodes"]) == 30
 
 
 class TestExecuteSpendGate:

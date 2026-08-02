@@ -133,6 +133,40 @@ class TestCallerKindEnrichment:
         assert properties["caller_kind"] == "my-harness"
 
 
+class TestSanitizeCallerKind:
+    """``COMFY_USER_AGENT`` is arbitrary user-supplied text that detect_caller
+    only lowercases, and the resulting label now rides EVERY event — including
+    feedback, which dispatches even when passive-telemetry consent is off. So it
+    gets the same cap-and-scrub treatment command kwargs get before it ships."""
+
+    def test_intrinsic_kinds_pass_through_unchanged(self, tracking_module):
+        for kind in ("user", "pipe", "agent", "claude-code"):
+            assert tracking_module._sanitize_caller_kind(kind) == kind
+
+    def test_long_label_is_truncated(self, tracking_module):
+        sanitized = tracking_module._sanitize_caller_kind("x" * 5000)
+        assert len(sanitized) == tracking_module._CALLER_KIND_MAX_LEN
+
+    def test_url_label_loses_its_query_string(self, tracking_module):
+        """A label shaped like a URL can carry a token in the query string."""
+        assert (
+            tracking_module._sanitize_caller_kind("https://harness.example/agent?token=s3cret")
+            == "https://harness.example/agent"
+        )
+
+    def test_module_scope_value_is_sanitized(self, tracking_module):
+        """The value actually stamped on events is bounded, whatever the env
+        said — this is the property that matters, not the helper in isolation."""
+        assert len(tracking_module._caller_kind) <= tracking_module._CALLER_KIND_MAX_LEN
+
+    def test_oversized_label_is_capped_on_the_wire(self, tracking_module):
+        tracking_module.config_manager.set(constants.CONFIG_KEY_ENABLE_TRACKING, "True")
+        with patch.object(tracking_module, "_caller_kind", tracking_module._sanitize_caller_kind("z" * 900)):
+            tracking_module.track_event("some_event")
+        _, _, properties = _last_track_call(tracking_module.provider)
+        assert len(properties["caller_kind"]) == tracking_module._CALLER_KIND_MAX_LEN
+
+
 class TestSubmitFeedback:
     def test_sends_even_when_passive_consent_disabled(self, tracking_module):
         # Feedback is explicit/user-initiated: it ignores the passive-telemetry

@@ -52,6 +52,12 @@ from comfy_cli.workspace_manager import WorkspaceManager
 
 workspace_manager = WorkspaceManager()
 
+# Bounds on the `partner_nodes` telemetry property and on the partner-node names
+# echoed in the missing-credential error. class_type strings are attacker- (or
+# just accident-) controlled workflow JSON, so cap the list length and each name.
+_TELEMETRY_NODE_LIST_CAP = 20
+_TELEMETRY_NODE_NAME_MAX_LEN = 64
+
 
 def _stdin_is_interactive() -> bool:
     """True only when stdin is a live TTY.
@@ -311,8 +317,12 @@ def execute(
         tracking.track_event(
             "partner_nodes_detected",
             {
-                # Cap defends against pathological graphs; the count stays exact.
-                "partner_nodes": partner_nodes[:20],
+                # Cap defends against pathological graphs in BOTH dimensions —
+                # element count and each name's length, since class_type strings
+                # come verbatim from untrusted workflow JSON and one
+                # multi-megabyte name would otherwise ship whole. The count
+                # below stays exact, so neither cap distorts the metric.
+                "partner_nodes": [n[:_TELEMETRY_NODE_NAME_MAX_LEN] for n in partner_nodes[:_TELEMETRY_NODE_LIST_CAP]],
                 "partner_node_count": len(partner_nodes),
                 "where": "local",
                 "credential_present": bool(api_key) or cred is not None,
@@ -320,9 +330,17 @@ def execute(
         )
         if not extra_data:
             if cred is None:
+                # Cap the names echoed in the prose the same way the telemetry
+                # property is capped — a graph with hundreds of partner nodes
+                # would otherwise render an unreadable wall of text. `details`
+                # below stays complete: it is the machine-readable field a JSON
+                # consumer reads to learn exactly which nodes need a credential.
+                shown = [n[:_TELEMETRY_NODE_NAME_MAX_LEN] for n in partner_nodes[:_TELEMETRY_NODE_LIST_CAP]]
+                overflow = len(partner_nodes) - len(shown)
+                listed = ", ".join(shown) + (f", and {overflow} more" if overflow > 0 else "")
                 msg = (
                     "Workflow uses partner-API node(s) that need an `api_key_comfy_org` "
-                    "credential the local server doesn't have: " + ", ".join(partner_nodes) + "."
+                    "credential the local server doesn't have: " + listed + "."
                 )
                 renderer.error(
                     code="partner_node_requires_credential",

@@ -5,6 +5,10 @@ All agentic callers flip the same three defaults (JSON, skip prompts,
 no banner). The ``kind`` field is for analytics/logging only.
 """
 
+import sys
+
+import pytest
+
 from comfy_cli.caller import detect_caller
 
 
@@ -70,3 +74,44 @@ def test_user_agent_override_wins_over_everything():
     c = detect_caller(env={"COMFY_USER_AGENT": "harness", "AI_AGENT": "1", "CLAUDECODE": "1"}, is_tty=True)
     assert c.kind == "harness"
     assert c.source_env == "COMFY_USER_AGENT"
+
+
+class TestStdoutProbeIsFailSafe:
+    """``detect_caller`` runs during CLI startup — renderer construction and the
+    module-scope caller kind in ``comfy_cli.tracking``, which is imported for
+    every command. Probing stdout must therefore never raise: in detached /
+    ``pythonw`` contexts ``sys.stdout`` is ``None`` or already closed, and an
+    exception here would break even ``comfy --help`` with tracking disabled.
+    """
+
+    def test_missing_stdout_is_pipe_not_attribute_error(self, monkeypatch):
+        monkeypatch.setattr(sys, "stdout", None)
+        c = detect_caller(env={})
+        assert c.kind == "pipe"
+        assert c.agentic is True
+
+    def test_closed_stdout_is_pipe_not_value_error(self, monkeypatch, tmp_path):
+        handle = open(tmp_path / "out.txt", "w")
+        handle.close()
+        monkeypatch.setattr(sys, "stdout", handle)
+        # Sanity: the raw probe really does raise on this object.
+        with pytest.raises(ValueError):
+            handle.isatty()
+        c = detect_caller(env={})
+        assert c.kind == "pipe"
+
+    def test_stdout_without_isatty_is_pipe(self, monkeypatch):
+        """A replacement stream that doesn't implement isatty at all."""
+
+        class Bare:
+            pass
+
+        monkeypatch.setattr(sys, "stdout", Bare())
+        assert detect_caller(env={}).kind == "pipe"
+
+    def test_explicit_env_signals_never_probe_stdout(self, monkeypatch):
+        """The env-var branches return before stdout is touched, so an
+        unusable stdout can't affect an explicitly-attributed caller."""
+        monkeypatch.setattr(sys, "stdout", None)
+        assert detect_caller(env={"AI_AGENT": "1"}).kind == "agent"
+        assert detect_caller(env={"COMFY_USER_AGENT": "my-bot"}).kind == "my-bot"

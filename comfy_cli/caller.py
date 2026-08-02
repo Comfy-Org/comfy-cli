@@ -9,7 +9,7 @@ Signals (in priority order — most specific first):
     1. ``COMFY_USER_AGENT=<label>`` → explicit override, agentic, label preserved.
     2. ``AI_AGENT`` truthy → agentic, kind="agent".
     3. ``CLAUDECODE`` truthy → Claude Code session, kind="claude-code".
-    4. stdout is not a TTY → agentic, kind="pipe".
+    4. stdout is not a TTY (or is missing/closed) → agentic, kind="pipe".
     5. otherwise → kind="user".
 
 Claude Code is checked after AI_AGENT because AI_AGENT is the generic
@@ -42,13 +42,37 @@ def _truthy(value: str | None) -> bool:
     return value.strip().lower() not in {"", "0", "false", "no", "off"}
 
 
+def _stdout_is_tty() -> bool:
+    """True only when stdout is a live TTY.
+
+    ``sys.stdout.isatty()`` assumes stdout is a live stream, but in detached /
+    ``pythonw`` contexts ``sys.stdout`` can be ``None`` (AttributeError on
+    ``.isatty``) or an already-closed file (ValueError). A process with no
+    usable stdout is by definition not a human at a terminal, so treat both as
+    non-TTY and fall through to ``kind="pipe"`` rather than raising. Mirrors
+    ``_stdin_is_interactive`` in ``comfy_cli/command/run/__init__.py``.
+
+    This has to be fail-safe: ``detect_caller`` is called during CLI startup
+    (renderer construction, and the module-scope caller kind in
+    ``comfy_cli.tracking``), so an exception here would take down every
+    command — including ``--help`` and runs with tracking disabled.
+    """
+    stdout = getattr(sys, "stdout", None)
+    if stdout is None:
+        return False
+    try:
+        return bool(stdout.isatty())
+    except (AttributeError, ValueError):
+        return False
+
+
 def detect_caller(
     env: Mapping[str, str] | None = None,
     *,
     is_tty: bool | None = None,
 ) -> Caller:
     e = env if env is not None else os.environ
-    tty = is_tty if is_tty is not None else sys.stdout.isatty()
+    tty = is_tty if is_tty is not None else _stdout_is_tty()
 
     # 1. Explicit override — custom agent frameworks self-attribute here.
     explicit = e.get("COMFY_USER_AGENT")

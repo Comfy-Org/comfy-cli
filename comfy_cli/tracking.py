@@ -117,6 +117,27 @@ def _scrub_value(value: object) -> object:
     return value
 
 
+# The four intrinsic caller kinds are short and fixed, but COMFY_USER_AGENT lets
+# a caller name itself anything and detect_caller only lowercases it. 64 chars is
+# ample for a self-attribution label ("claude-code", "my-harness/1.2").
+_CALLER_KIND_MAX_LEN = 64
+
+
+def _sanitize_caller_kind(kind: str) -> str:
+    """Make the caller label safe to ship as a telemetry property.
+
+    ``caller_kind`` rides EVERY event — including ``feedback_submitted``, which
+    is dispatched even when passive-telemetry consent is off — and a custom
+    ``COMFY_USER_AGENT`` is arbitrary user-supplied text that could hold a path,
+    a URL, or unbounded junk. Give it the same treatment command kwargs get:
+    strip credentials embedded in a URL value, then cap the length so a
+    pathological label can't ship an unbounded string to both providers.
+    """
+    scrubbed = _scrub_value(kind)
+    text = scrubbed if isinstance(scrubbed, str) else str(scrubbed)
+    return text[:_CALLER_KIND_MAX_LEN]
+
+
 # Generate a unique tracing ID per command.
 config_manager = ConfigManager()
 cli_version = config_manager.get_cli_version()
@@ -128,7 +149,7 @@ tracing_id = str(uuid.uuid4())
 # Who is driving this process: "user" | "pipe" | "agent" | "claude-code" | a
 # lowercased custom COMFY_USER_AGENT label. Computed once at import, matching
 # the cli_version/tracing_id pattern above, so we don't re-run isatty per event.
-_caller_kind = detect_caller().kind
+_caller_kind = _sanitize_caller_kind(detect_caller().kind)
 workspace_manager = WorkspaceManager()
 
 # Process-scoped opt-in used when running non-interactively before the
