@@ -25,9 +25,9 @@ from __future__ import annotations
 
 import sys
 import uuid
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, NoReturn
 
 import httpx
 import typer
@@ -162,6 +162,45 @@ def _track_kind(exc: BaseException) -> str:
     """Tracking bucket matching `_transport_code` — an HTTP-status failure is an
     API error, not a network one."""
     return "network" if _transport_code(exc) == "generate_network_error" else "api"
+
+
+def _bail(
+    track_error: Callable[[str, BaseException], None],
+    exc: BaseException,
+    *,
+    code: str,
+    message: str,
+    kind: str,
+    **fail_kwargs: Any,
+) -> NoReturn:
+    """Report a failure, record its `generate:error`, and exit 1 — in that order.
+
+    Every error branch in `_generate` owes the same three steps, and each one is
+    load-bearing: skipping the tracking call orphans the `generate:start` fired
+    at entry, and returning instead of raising falls through into the success
+    path. Ten branches spelled that out identically; owning the order here makes
+    it a property of the helper rather than of ten copies.
+
+    `track_error` is a parameter rather than a module-level function because the
+    tracker closes over `_generate`'s mutable `gen_props` — `model_alias`,
+    `partner`, `async` and `has_download` are filled in as they become known, so
+    the payload has to be read at raise time.
+
+    `code` is keyword-only for the same reason `_fail`'s is:
+    ``tests/comfy_cli/output/test_error_code_registry.py`` scans call sites for
+    literal ``code="…"`` kwargs to pin every raised code against
+    :mod:`comfy_cli.error_codes`, and a positional first argument would be
+    invisible to it. `**fail_kwargs` forwards `_fail`'s remaining keyword-only
+    options (`hint`, `details`, `legacy_json`, `pretty`) untouched.
+
+    The exit is chained (`from exc`) because every caller raises from inside an
+    `except` block: four of the collapsed sites chained explicitly and the rest
+    chained implicitly via `__context__`, so this keeps the original exception
+    reachable everywhere.
+    """
+    _fail(code=code, message=message, **fail_kwargs)
+    track_error(kind, exc)
+    raise typer.Exit(code=1) from exc
 
 
 def register_with(parent: typer.Typer) -> None:
@@ -455,9 +494,9 @@ def _generate(model: str, extra_args: list[str]) -> None:
         try:
             ep = spec.get_endpoint(model)
         except spec.SpecError as e:
-            _fail(code="generate_unknown_model", message=str(e), details={"model": model})
-            _track_error("schema", e)
-            raise typer.Exit(code=1)
+            _bail(
+                _track_error, e, code="generate_unknown_model", message=str(e), kind="schema", details={"model": model}
+            )
 
         gen_props["model_alias"] = spec.preferred_alias(ep.id)
         gen_props["partner"] = getattr(ep, "partner", None)
@@ -465,9 +504,7 @@ def _generate(model: str, extra_args: list[str]) -> None:
         try:
             remaining, meta = _separate_meta_flags(extra_args)
         except schema.SchemaError as e:
-            _fail(code="generate_bad_args", message=str(e))
-            _track_error("schema", e)
-            raise typer.Exit(code=1)
+            _bail(_track_error, e, code="generate_bad_args", message=str(e), kind="schema")
 
         do_async = bool(meta.get("async", False))
         download = meta.get("download") if isinstance(meta.get("download"), str) else None
@@ -484,13 +521,14 @@ def _generate(model: str, extra_args: list[str]) -> None:
             values = schema.parse_args(flags, remaining, require_all=not emit_path)
         except schema.SchemaError as e:
             name = gen_props["model_alias"] or ep.id
-            _fail(
+            _bail(
+                _track_error,
+                e,
                 code="generate_bad_args",
                 message=str(e),
+                kind="schema",
                 hint=f"Run `comfy generate schema {name}` for the full parameter list.",
             )
-            _track_error("schema", e)
-            raise typer.Exit(code=1)
 
         if emit_path:
             # Emit a runnable workflow that drives the partner *node* and return
@@ -540,44 +578,49 @@ def _generate(model: str, extra_args: list[str]) -> None:
         try:
             api_key = client.resolve_api_key(meta.get("api-key") if isinstance(meta.get("api-key"), str) else None)
         except client.ApiError as e:
-            _fail(code="generate_api_error", message=str(e))
-            _track_error("api", e)
-            raise typer.Exit(code=1)
+            _bail(_track_error, e, code="generate_api_error", message=str(e), kind="api")
 
         timeout_raw = meta.get("timeout", "300")
         try:
             timeout = float(timeout_raw) if isinstance(timeout_raw, str) else 300.0
         except ValueError as e:
-            _fail(code="generate_timeout_invalid", message=f"--timeout: expected number, got {timeout_raw!r}")
-            _track_error("schema", e)
-            raise typer.Exit(code=1)
+            _bail(
+                _track_error,
+                e,
+                code="generate_timeout_invalid",
+                message=f"--timeout: expected number, got {timeout_raw!r}",
+                kind="schema",
+            )
 
         try:
             _apply_upload_transforms(values, flags, ep, api_key)
         except (client.ApiError, httpx.HTTPError) as e:
-            _fail(code=_transport_code(e), message=f"Upload failed: {e}")
-            _track_error("upload", e)
-            raise typer.Exit(code=1)
+            _bail(_track_error, e, code=_transport_code(e), message=f"Upload failed: {e}", kind="upload")
 
         request_id = str(uuid.uuid4())[:8]
         try:
             resp = client.send_request(ep, values, flags, api_key, timeout=timeout)
         except httpx.HTTPError as e:
-            _fail(code="generate_network_error", message=f"Network error contacting {spec.base_url()}: {e}")
-            _track_error("network", e)
-            raise typer.Exit(code=1) from e
+            _bail(
+                _track_error,
+                e,
+                code="generate_network_error",
+                message=f"Network error contacting {spec.base_url()}: {e}",
+                kind="network",
+            )
 
         try:
             client.raise_for_status(resp)
         except client.ApiError as e:
-            _fail(
+            _bail(
+                _track_error,
+                e,
                 code="generate_api_error",
                 message=f"API error {e.status}",
+                kind="api",
                 details={"status": e.status, "body": e.body},
                 pretty=f"[bold red]API error {e.status}[/bold red]\n{sanitize_markup(e.body)}",
             )
-            _track_error("api", e)
-            raise typer.Exit(code=1) from e
 
         if resp.headers.get("content-type", "").startswith("image/"):
             if download:
@@ -594,14 +637,15 @@ def _generate(model: str, extra_args: list[str]) -> None:
             body = resp.json()
         except ValueError as e:
             preview = resp.text[:500]
-            _fail(
+            _bail(
+                _track_error,
+                e,
                 code="generate_api_error",
                 message="Unexpected non-JSON response.",
+                kind="non_json_response",
                 details={"body_preview": preview},
                 pretty=f"[bold red]Unexpected non-JSON response.[/bold red]\n{sanitize_markup(preview)}",
             )
-            _track_error("non_json_response", e)
-            raise typer.Exit(code=1)
 
         if ep.polling:
             job_id = poll.extract_job_id(ep.polling, body) or request_id
@@ -650,12 +694,13 @@ def _generate(model: str, extra_args: list[str]) -> None:
                 # the `with` exits: inside it a transient Progress is still
                 # auto-refreshing on stdout, so on a TTY the envelope would come
                 # out interleaved with spinner control codes.
-                _fail(
+                _bail(
+                    _track_error,
+                    poll_error,
                     code=_transport_code(poll_error),
                     message=f"Job {job_id} failed while polling: {poll_error}",
+                    kind=_track_kind(poll_error),
                 )
-                _track_error(_track_kind(poll_error), poll_error)
-                raise typer.Exit(code=1) from poll_error
             try:
                 _emit_result(result, request_id=job_id, download=download, as_json=as_json)
                 tracking.track_event("generate:success", gen_props)

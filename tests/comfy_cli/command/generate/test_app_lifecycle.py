@@ -2,6 +2,7 @@
 
 import httpx
 import pytest
+import typer
 from typer.testing import CliRunner
 
 from comfy_cli.cmdline import app as cli_app
@@ -362,3 +363,59 @@ class TestGenerateHelp:
         assert "generate:start" not in names
         assert "generate:success" not in names
         assert "generate:error" not in names
+
+
+class TestBailHelper:
+    """`_bail` owns the fail → track → exit order that ten `_generate` branches
+    used to spell out inline. These pin that contract directly, so a future edit
+    to the helper can't quietly reorder or drop a step for all ten at once."""
+
+    def test_reports_then_tracks_then_exits(self, monkeypatch):
+        calls: list[tuple] = []
+        monkeypatch.setattr(gen_app, "_fail", lambda **kw: calls.append(("fail", kw)))
+        exc = ValueError("boom")
+
+        with pytest.raises(typer.Exit) as exit_info:
+            gen_app._bail(
+                lambda kind, e: calls.append(("track", kind, e)),
+                exc,
+                code="generate_bad_args",
+                message="bad",
+                kind="schema",
+            )
+
+        assert exit_info.value.exit_code == 1
+        # The reporting call comes first so the user-facing error is already out
+        # when the (best-effort, network-bound) tracking call runs.
+        assert [c[0] for c in calls] == ["fail", "track"]
+        assert calls[0][1] == {"code": "generate_bad_args", "message": "bad"}
+        assert calls[1][1:] == ("schema", exc)
+        # Chained, so the originating exception stays reachable for debugging.
+        assert exit_info.value.__cause__ is exc
+
+    def test_forwards_fail_only_kwargs(self, monkeypatch):
+        seen: dict = {}
+        monkeypatch.setattr(gen_app, "_fail", lambda **kw: seen.update(kw))
+
+        with pytest.raises(typer.Exit):
+            gen_app._bail(
+                lambda kind, e: None,
+                RuntimeError("x"),
+                code="generate_api_error",
+                message="API error 401",
+                kind="api",
+                details={"status": 401},
+                pretty="[bold red]API error 401[/bold red]",
+                hint="check your key",
+                legacy_json=True,
+            )
+
+        # `kind`/`exc` are the helper's own; everything else reaches `_fail` as-is.
+        assert seen == {
+            "code": "generate_api_error",
+            "message": "API error 401",
+            "details": {"status": 401},
+            "pretty": "[bold red]API error 401[/bold red]",
+            "hint": "check your key",
+            "legacy_json": True,
+        }
