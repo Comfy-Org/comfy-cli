@@ -881,14 +881,27 @@ def execute_cloud(
         raise typer.Exit(code=1) from e
 
     if submit.node_errors:
-        # Parse per-node errors into readable hint lines
+        # Parse per-node errors into readable hint lines. Every field here is
+        # server-supplied and only documented by convention, so each level is
+        # shape-checked rather than duck-typed: an AttributeError escaping this
+        # loop would abort the process with a traceback and no envelope at all,
+        # breaking the "exactly one terminal envelope" guarantee this contract
+        # rests on. A record that isn't the documented dict still gets a line,
+        # since it is preserved in `details.node_errors` too.
         hint_lines = []
         for nid, record in submit.node_errors.items():
             if not isinstance(record, dict):
+                hint_lines.append(f"node {nid}: {record}")
                 continue
             ct = record.get("class_type", "unknown")
-            for err in record.get("errors") or []:
-                detail = err.get("details", "") or err.get("message", "")
+            errors = record.get("errors") or []
+            if not isinstance(errors, list):
+                errors = [errors]
+            for err in errors:
+                if isinstance(err, dict):
+                    detail = err.get("details", "") or err.get("message", "")
+                else:
+                    detail = err
                 hint_lines.append(f"node {nid} ({ct}): {detail}")
         renderer.error(
             code="prompt_rejected",

@@ -1941,3 +1941,97 @@ class TestCloudStreamContract:
         for event in _events(lines):
             jsonschema.Draft202012Validator(event_schema).validate(event)
         jsonschema.Draft202012Validator(data_schema).validate(_envelope(lines)["data"])
+
+
+class TestNodeErrorsRecordShape:
+    """`_node_errors_to_list` is the single transform behind both
+    `prompt_rejected.details.node_errors` and `queued.validation_warnings`, and
+    since this PR it also carries less-trusted cloud payloads."""
+
+    def test_non_dict_records_survive_instead_of_vanishing(self):
+        """A server reporting a bare value (`{"1": "missing input"}`) must not
+        yield an empty array under a "rejected 1 node(s)" message — that leaves
+        the user with a hint pointing at nothing."""
+        from comfy_cli.command.run.loader import _node_errors_to_list
+
+        assert _node_errors_to_list({"1": "missing input"}) == [{"node_id": "1", "errors": ["missing input"]}]
+        assert _node_errors_to_list({"2": ["a", "b"]}) == [{"node_id": "2", "errors": ["a", "b"]}]
+        # The count in the message always matches the array length.
+        payload = {"1": "bare", "2": {"errors": [{"message": "structured"}]}}
+        assert len(_node_errors_to_list(payload)) == len(payload)
+
+    def test_map_key_wins_over_a_server_supplied_node_id(self):
+        """A record carrying its own `node_id` must not shadow the authoritative
+        map key — agents correlate this id against the per-node events."""
+        from comfy_cli.command.run.loader import _node_errors_to_list
+
+        out = _node_errors_to_list({"7": {"node_id": "999", "errors": [{"message": "x"}]}})
+        assert out == [{"node_id": "7", "errors": [{"message": "x"}]}]
+
+    def test_well_formed_records_are_unchanged(self):
+        from comfy_cli.command.run.loader import _node_errors_to_list
+
+        assert _node_errors_to_list({"1": {"class_type": "X", "errors": [{"message": "bad"}]}}) == [
+            {"node_id": "1", "class_type": "X", "errors": [{"message": "bad"}]}
+        ]
+        assert _node_errors_to_list({}) == []
+        assert _node_errors_to_list(None) == []
+
+
+class TestEventSchemaDiscriminatesNodesShape:
+    """`nodes` serves two events with different item shapes. Typing it as
+    `["object", "string"]` would let a `queued` that regressed to bare node-id
+    strings validate — precisely the drift these schema tests exist to catch."""
+
+    @staticmethod
+    def _validator():
+        import jsonschema
+
+        schemas = os.path.join(os.path.dirname(comfy_cli.__file__), "schemas")
+        with open(os.path.join(schemas, "run_event.json")) as f:
+            return jsonschema.Draft202012Validator(json.load(f))
+
+    def test_queued_requires_object_node_records(self):
+        import jsonschema
+
+        good = {
+            "schema": "event/1",
+            "type": "queued",
+            "nodes": [{"node_id": "1", "class_type": "X", "title": "X"}],
+        }
+        self._validator().validate(good)
+
+        regressed = {"schema": "event/1", "type": "queued", "nodes": ["1", "2"]}
+        with pytest.raises(jsonschema.ValidationError):
+            self._validator().validate(regressed)
+
+    def test_execution_cached_still_accepts_bare_node_ids(self):
+        """`comfy jobs watch --where cloud` emits plain id strings here."""
+        self._validator().validate({"schema": "event/1", "type": "execution_cached", "nodes": ["1", "2"]})
+
+
+class TestMalformedRejectionPayloadStillYieldsAnEnvelope:
+    """Every field of the cloud's `node_errors` is server-supplied and only
+    documented by convention. A shape the CLI did not expect must still produce
+    exactly one terminal envelope — a traceback would emit none at all."""
+
+    def test_bare_string_record_keeps_the_diagnostic(self, monkeypatch, workflow_file, capsys):
+        rejected = _FakeSubmit(node_errors={"1": "missing input"})
+        _install_cloud_stubs(monkeypatch, client_cls=_fake_client(submit=rejected))
+        lines, exit_code = _cloud_capture(capsys, workflow_file, wait=False, timeout=5)
+
+        assert exit_code == 1
+        err = _envelope(lines)["error"]
+        assert err["code"] == "prompt_rejected"
+        # Not an empty array under a "rejected 1 node(s)" message.
+        assert err["details"]["node_errors"] == [{"node_id": "1", "errors": ["missing input"]}]
+        assert "missing input" in err["hint"]
+
+    def test_non_dict_error_items_do_not_crash_the_hint_builder(self, monkeypatch, workflow_file, capsys):
+        rejected = _FakeSubmit(node_errors={"1": {"class_type": "X", "errors": ["bad"]}})
+        _install_cloud_stubs(monkeypatch, client_cls=_fake_client(submit=rejected))
+        lines, exit_code = _cloud_capture(capsys, workflow_file, wait=False, timeout=5)
+
+        assert exit_code == 1
+        assert _envelope(lines)["error"]["code"] == "prompt_rejected"
+        assert "node 1 (X): bad" in _envelope(lines)["error"]["hint"]

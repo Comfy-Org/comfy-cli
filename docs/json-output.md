@@ -89,13 +89,37 @@ The stream always ends with exactly one line of `type: "envelope"`:
 | `--no-wait` queued (default) | `[converted]? + prompt_preview + queued + envelope(ok, data.status="queued")` |
 | `--print-prompt`          | `[converted]? + prompt_preview + envelope(ok, data.status="preview")`        |
 | Failure mid-execution     | `[converted]? + prompt_preview + queued + [node events]* + envelope(error)`  |
-| Failure during submission | `[converted]? + prompt_preview + envelope(error)`                            |
-| Failure pre-flight        | `envelope(error)`                                                            |
+| Failure at validation, consent, or submission | `[converted]? + prompt_preview + envelope(error)`         |
+| Failure before the graph is parsed | `[converted]? + envelope(error)`                                    |
 
 Where `[node events]*` is zero or more interleaved `execution_cached`,
 `executing`, `progress`, `executed`, and `output` events. `[X]?` means X
 may or may not appear. An error envelope can replace any non-terminal
 line, ending the stream early.
+
+The last two rows split on **whether the CLI has a parsed graph in hand
+yet**, because `prompt_preview` is emitted as soon as it does — before any
+check that could still refuse the run:
+
+- **Before the graph is parsed** — the workflow file is missing, unreadable,
+  or not JSON; a UI→API conversion failed (`conversion_error`,
+  `conversion_crash`, `cql_no_graph`); the graph is empty
+  (`workflow_empty`) or not in API format (`workflow_not_api_format`); no
+  local server is running (`server_not_running`). These emit a bare error
+  envelope. `converted` can precede it in exactly one case: conversion
+  succeeded but its output still failed API-format classification.
+- **After it is parsed** — the CQL pre-flight (`workflow_unknown_nodes` and
+  friends), the `spend_consent_required` consent gate, cloud authentication
+  (`cloud_unauthorized`), and the submit call itself all run *after*
+  `prompt_preview`. A run refused by any of them therefore emits
+  `prompt_preview` first and *then* the error envelope — the previewed graph
+  is what the CLI *would* have submitted, not a promise that it did.
+
+This ordering is identical on both targets. Note that `prompt_preview`
+carries the full workflow graph, so `--json-stream` output should be treated
+as sensitive if custom nodes embed local paths or credential-like widget
+values in it. Events are emitted in `--json-stream` mode only — neither
+pretty nor plain `--json` mode ever writes a `prompt_preview` line.
 
 These archetypes hold for **both** `--where local` and `--where cloud`, with
 one exception: `comfy run --where cloud` produces no `[node events]*` — use
@@ -509,6 +533,14 @@ The inner per-node fields are defined by ComfyUI's `validate_prompt()`
 and may evolve with ComfyUI versions — agents should ignore unknown
 fields. The CLI guarantees only that the outer value is an array of
 dicts, each carrying a `node_id` (str).
+
+If a server reports a bare value instead of the per-node dict above (e.g.
+`{"1": "missing input"}`), the CLI does not drop the record — it wraps the
+value as `{"node_id": "1", "errors": ["missing input"]}` so the count in the
+message always matches the array and the diagnostic survives. `errors` items
+are objects in the normal case; treat a non-object item as an opaque message.
+`node_id` is always taken from the payload's own map key, so a server-supplied
+`node_id` field inside a record cannot override it.
 
 ## Output object
 
