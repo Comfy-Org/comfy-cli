@@ -27,7 +27,7 @@ import urllib.request
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Annotated, Any
+from typing import TYPE_CHECKING, Annotated, Any
 
 import typer
 from websocket import WebSocket, WebSocketException, WebSocketTimeoutException
@@ -38,6 +38,9 @@ from comfy_cli.host_port import resolve_host_port as _resolve_host_port
 from comfy_cli.http import authed_urlopen, plain_urlopen
 from comfy_cli.output import get_renderer
 from comfy_cli.where import cloud_preflight_or_exit
+
+if TYPE_CHECKING:
+    from comfy_cli.jobs_state import JobState
 
 app = typer.Typer(no_args_is_help=True, help="List, inspect, and live-watch ComfyUI prompts.")
 
@@ -54,7 +57,49 @@ def _is_pid_alive(pid: int) -> bool:
         return False
     import psutil
 
-    return psutil.pid_exists(pid)
+    try:
+        return psutil.pid_exists(pid)
+    except (OverflowError, ValueError, OSError):
+        # `watcher_pid` comes off a deliberately tolerant JSON load with no
+        # range check, so a corrupt or hand-edited state file can carry a pid
+        # psutil can't even look up (out-of-range -> OverflowError; Windows
+        # OpenProcess -> OSError). One bad record must read as dead, not abort
+        # the scan and take `comfy jobs ls` down with it.
+        return False
+
+
+# Same discriminator (and tolerance) the download-worker liveness check uses.
+_PID_CREATE_TIME_TOLERANCE_S = 1.0
+
+
+def _is_watcher_alive(state: JobState) -> bool:
+    """True while ``state``'s watcher pid is live *and still that watcher*.
+
+    Liveness alone is not proof of identity: pids get recycled (aggressively on
+    Windows) and job state files outlive the runs that wrote them by days, so a
+    bare existence check eventually pins a dead job at ``running`` behind a
+    stranger's process — never reaped, never visible under ``--orphaned``. The
+    watcher records its own start time next to its pid, so the pair either
+    matches a live process or it doesn't; this mirrors
+    ``download_state.is_worker_process``.
+
+    Records written before that field existed carry ``None`` and fall back to
+    liveness alone — exactly what they got before.
+    """
+    pid = state.watcher_pid
+    if pid is None or pid <= 0:
+        return False
+    if not _is_pid_alive(pid):
+        return False
+    if state.watcher_pid_create_time is None:
+        return True
+    try:
+        import psutil
+
+        started = psutil.Process(pid).create_time()
+    except Exception:  # noqa: BLE001 — gone, or not ours to inspect
+        return False
+    return abs(started - state.watcher_pid_create_time) <= _PID_CREATE_TIME_TOLERANCE_S
 
 
 # Host/port resolution (`resolve_host_port`) is shared with `comfy run` via
@@ -210,7 +255,7 @@ def _gather_local_state_files(*, limit: int, orphaned_only: bool = False, where:
             not state.is_terminal
             and state.watcher_pid is not None
             and state.watcher_pid > 0
-            and not _is_pid_alive(state.watcher_pid)
+            and not _is_watcher_alive(state)
         ):
             state.status = "error"
             state.error = {
@@ -219,6 +264,7 @@ def _gather_local_state_files(*, limit: int, orphaned_only: bool = False, where:
                 "hint": "re-submit the workflow, or check `comfy jobs status <id>` against the server",
             }
             state.watcher_pid = None
+            state.watcher_pid_create_time = None
             jobs_state.write(state)
         # Scope to the resolved --where target. Done *after* the stale-watcher
         # reap above so cleanup stays where-agnostic no matter which view the
