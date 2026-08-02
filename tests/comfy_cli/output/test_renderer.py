@@ -445,3 +445,82 @@ class TestResolveSurvivesAnUnusableStdout:
 
         monkeypatch.setattr(renderer_mod.sys, "stdout", Tty())
         assert Renderer.resolve(env={}).mode is OutputMode.PRETTY
+
+
+class TestWritesTolerateADeadMachineStream:
+    """Resolving to JSON mode against an unusable stdout must not merely DEFER
+    the crash to the first emit.
+
+    `machine_stream` falls back to `sys.stdout`, so surviving `resolve` only to
+    die inside `_write_json_line` is strictly worse than dying at startup: by
+    then the command has run and its side effects have landed. A stream that
+    cannot be written to cannot receive output, so the write is a no-op and the
+    process still exits with the right code.
+    """
+
+    def _dead_stdout_renderer(self, monkeypatch, stream):
+        import comfy_cli.output.renderer as renderer_mod
+
+        monkeypatch.setattr(renderer_mod.sys, "stdout", stream)
+        r = Renderer.resolve(env={})
+        assert r.mode is OutputMode.JSON
+        return r
+
+    def test_missing_stdout_emit_is_a_noop(self, monkeypatch):
+        r = self._dead_stdout_renderer(monkeypatch, None)
+        r.emit({"hello": "world"})  # must not raise
+        assert r.exit_code == 0
+
+    def test_missing_stdout_error_still_sets_the_exit_code(self, monkeypatch):
+        r = self._dead_stdout_renderer(monkeypatch, None)
+        r.error(code="server_not_running", message="nope", exit_code=1)
+        assert r.exit_code == 1
+
+    def test_closed_stdout_emit_is_a_noop(self, monkeypatch, tmp_path):
+        handle = open(tmp_path / "out.txt", "w")
+        handle.close()
+        r = self._dead_stdout_renderer(monkeypatch, handle)
+        r.error(code="server_not_running", message="nope", exit_code=1)
+        assert r.exit_code == 1
+
+    def test_broken_pipe_still_propagates(self, monkeypatch):
+        """`OSError` is deliberately excluded from the guard. A BrokenPipeError
+        means the stream was real and the reader hung up, and that has to keep
+        propagating: `comfy cloud login` depends on it escaping the `login_url`
+        emit to fail fast instead of blocking 300s on a browser callback nobody
+        will read (test_json_login_fails_fast_when_login_url_write_breaks).
+        Guarding "no usable stream" must not quietly become "ignore all I/O
+        errors"."""
+
+        class BrokenPipe:
+            def isatty(self):
+                return False
+
+            def write(self, _):
+                raise BrokenPipeError(32, "Broken pipe")
+
+            def flush(self):
+                pass
+
+        r = self._dead_stdout_renderer(monkeypatch, BrokenPipe())
+        with pytest.raises(BrokenPipeError):
+            r.emit({"hello": "world"})
+
+    def test_a_malformed_payload_still_surfaces(self, monkeypatch):
+        """The handler is deliberately narrower than `stream_is_tty`'s: a
+        TypeError from the write means our payload is wrong, which is a bug and
+        must stay visible rather than being silently swallowed."""
+
+        class Fussy:
+            def isatty(self):
+                return False
+
+            def write(self, _):
+                raise TypeError("not a string")
+
+            def flush(self):
+                pass
+
+        r = self._dead_stdout_renderer(monkeypatch, Fussy())
+        with pytest.raises(TypeError):
+            r.emit({"hello": "world"})

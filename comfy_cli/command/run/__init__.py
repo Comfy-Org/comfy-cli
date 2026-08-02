@@ -60,32 +60,41 @@ _TELEMETRY_NODE_LIST_CAP = 20
 _TELEMETRY_NODE_NAME_MAX_LEN = 64
 
 
-def _bounded_node_names(names: list[str]) -> list[str]:
+def _bounded_node_names(names: list[str]) -> tuple[list[str], int]:
     """Cap a partner-node name list in BOTH dimensions — element count and each
-    name's length — for every payload that leaves this process or reaches a
-    terminal.
+    name's length. Returns ``(shown, omitted)``.
 
-    Applies to the structured ``details`` of the credential error as well as to
-    the telemetry property and the prose message. Capping only the prose would
-    not actually bound anything: ``error_panel`` renders ``details`` as
-    ``key=value`` rows directly beneath the message in pretty mode, and JSON
-    mode serialises them, so an uncapped list there re-floods exactly the
-    output the caps exist to protect. The exact total is reported alongside as
-    ``partner_node_count``, so nothing is lost — a consumer still learns how
-    many nodes need a credential, and the remedy (log in) is identical whichever
-    ones they are.
+    Applies to every payload built from these names: the telemetry property,
+    the prose message, and the structured ``details`` of both the credential
+    error and the spend gate. Capping only the prose would bound nothing —
+    ``error_panel`` renders ``details`` as ``key=value`` rows directly beneath
+    the message in pretty mode, and JSON mode serialises them. The exact total
+    travels alongside as ``partner_node_count``, so nothing is lost: a consumer
+    still learns how many nodes are involved, and the remedy is identical
+    whichever ones they are.
 
     De-duplicates AFTER truncation, not before: ``_detect_partner_nodes``
-    returns distinct class_types, but two that share a 64-char prefix collapse
-    to the same string once truncated, which would list one name twice. The
-    list is meant to map one-to-one onto node classes.
+    returns distinct class_types, but two sharing a 64-char prefix collapse to
+    the same string once truncated, which would list one name twice.
+
+    Consumes input until the cap is filled with DISTINCT truncated names rather
+    than slicing the first 20 up front — otherwise a run of prefix-colliding
+    names burns output slots and silently drops later, genuinely distinct ones.
+
+    ``omitted`` counts only what the cap actually left behind, never what
+    de-duplication collapsed: a caller appending "and N more" must not claim
+    unlisted nodes that don't exist.
     """
-    out: list[str] = []
-    for name in names[:_TELEMETRY_NODE_LIST_CAP]:
+    shown: list[str] = []
+    consumed = 0
+    for name in names:
+        if len(shown) >= _TELEMETRY_NODE_LIST_CAP:
+            break
+        consumed += 1
         truncated = name[:_TELEMETRY_NODE_NAME_MAX_LEN]
-        if truncated not in out:
-            out.append(truncated)
-    return out
+        if truncated not in shown:
+            shown.append(truncated)
+    return shown, len(names) - consumed
 
 
 def _stdin_is_interactive() -> bool:
@@ -116,11 +125,18 @@ def _spend_gate(renderer, partner_nodes: list[str], allow_spend: bool, *, detail
     """
     if not partner_nodes or allow_spend:
         return
+    # Bound the names here rather than at each call site, so both `execute` and
+    # `execute_cloud` are covered: this gate runs on the same untrusted
+    # class_type strings and is the MORE commonly hit branch (it fires before
+    # any credential resolution), so leaving it unbounded would let a
+    # pathological graph flood the terminal and the JSON envelope anyway.
+    shown, omitted = _bounded_node_names(partner_nodes)
+    details = {**details, "partner_nodes": shown, "partner_node_count": len(partner_nodes)}
     if renderer.is_pretty() and _stdin_is_interactive():
         # Escape class_type names before interpolating into Rich markup: a name
         # containing markup like ``[bold]`` would otherwise be parsed as a tag
         # (MarkupError/StyleSyntaxError, or injected formatting).
-        names = ", ".join(_rich_escape(n) for n in partner_nodes)
+        names = ", ".join(_rich_escape(n) for n in shown) + (f", and {omitted} more" if omitted > 0 else "")
         pprint(f"[yellow]⚠ This workflow uses partner-API nodes that spend Comfy credits: {names}.[/yellow]")
         if not typer.confirm("Run anyway and spend credits?", default=False):
             renderer.error(
@@ -341,7 +357,7 @@ def execute(
         # class_type strings come verbatim from untrusted workflow JSON, so the
         # names are bounded before they ship. The count stays exact, so the cap
         # never distorts the metric.
-        bounded_nodes = _bounded_node_names(partner_nodes)
+        bounded_nodes, omitted_nodes = _bounded_node_names(partner_nodes)
         tracking.track_event(
             "partner_nodes_detected",
             {
@@ -358,8 +374,10 @@ def execute(
                 # wall of text, and `details` is rendered right below the message
                 # in pretty mode, so capping only one of them bounds nothing.
                 # `partner_node_count` carries the exact total for consumers.
-                overflow = len(partner_nodes) - len(bounded_nodes)
-                listed = ", ".join(bounded_nodes) + (f", and {overflow} more" if overflow > 0 else "")
+                # The suffix counts only what the CAP omitted — names collapsed
+                # by de-duplication are still listed, so counting them would
+                # promise unlisted nodes that don't exist.
+                listed = ", ".join(bounded_nodes) + (f", and {omitted_nodes} more" if omitted_nodes > 0 else "")
                 msg = (
                     "Workflow uses partner-API node(s) that need an `api_key_comfy_org` "
                     "credential the local server doesn't have: " + listed + "."

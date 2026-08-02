@@ -177,26 +177,58 @@ class TestFeedbackCallerKindIsNarrowed:
     there. The four intrinsic kinds still answer "human or agent?" exactly.
     """
 
+    @staticmethod
+    def _as_caller(tracking_module, env):
+        """Patch the module-scope caller state as `detect_caller` would derive it
+        for *env*. Both values are computed once at import, so a test that sets
+        only one of them proves nothing about the real pairing."""
+        from comfy_cli.caller import detect_caller
+
+        caller = detect_caller(env=env, is_tty=True)
+        return (
+            patch.object(tracking_module, "_caller_kind", tracking_module._sanitize_caller_kind(caller.kind)),
+            patch.object(tracking_module, "_caller_kind_is_custom", caller.source_env == "COMFY_USER_AGENT"),
+        )
+
     def test_custom_label_becomes_custom_on_the_feedback_path(self, tracking_module):
-        with patch.object(tracking_module, "_caller_kind", "acme-harness/2.1"):
+        kind_patch, custom_patch = self._as_caller(tracking_module, {"COMFY_USER_AGENT": "Acme-Harness/2.1"})
+        with kind_patch, custom_patch:
             tracking_module.submit_feedback("nice tool")
         _, _, properties = _last_track_call(tracking_module.provider)
         assert properties["caller_kind"] == "custom"
         assert "acme-harness" not in str(properties)
 
     def test_intrinsic_kinds_survive_on_the_feedback_path(self, tracking_module):
-        for kind in ("user", "pipe", "agent", "claude-code"):
-            with patch.object(tracking_module, "_caller_kind", kind):
+        for env, expected in (
+            ({}, "user"),
+            ({"AI_AGENT": "1"}, "agent"),
+            ({"CLAUDECODE": "1"}, "claude-code"),
+        ):
+            kind_patch, custom_patch = self._as_caller(tracking_module, env)
+            with kind_patch, custom_patch:
                 tracking_module.submit_feedback("nice tool")
             _, _, properties = _last_track_call(tracking_module.provider)
-            assert properties["caller_kind"] == kind
+            assert properties["caller_kind"] == expected
+
+    def test_a_label_spelling_an_intrinsic_kind_is_still_narrowed(self, tracking_module):
+        """`COMFY_USER_AGENT=user` produces the literal string "user" while being
+        exactly the self-attributed case. Deciding by membership in the intrinsic
+        set would let an agent pass itself off as a human here, so the decision
+        is made on `source_env`, which is authoritative."""
+        for label in ("user", "pipe", "agent", "claude-code"):
+            kind_patch, custom_patch = self._as_caller(tracking_module, {"COMFY_USER_AGENT": label})
+            with kind_patch, custom_patch:
+                tracking_module.submit_feedback("nice tool")
+            _, _, properties = _last_track_call(tracking_module.provider)
+            assert properties["caller_kind"] == "custom", f"COMFY_USER_AGENT={label} bypassed the narrowing"
 
     def test_consent_gated_paths_keep_the_full_label(self, tracking_module):
         """The narrowing is scoped to the unconsented path: passive telemetry
         (which the user opted into) keeps the self-attribution label, which is
         the whole point of COMFY_USER_AGENT."""
         tracking_module.config_manager.set(constants.CONFIG_KEY_ENABLE_TRACKING, "True")
-        with patch.object(tracking_module, "_caller_kind", "acme-harness/2.1"):
+        kind_patch, custom_patch = self._as_caller(tracking_module, {"COMFY_USER_AGENT": "Acme-Harness/2.1"})
+        with kind_patch, custom_patch:
             tracking_module.track_event("some_event")
             _, _, properties = _last_track_call(tracking_module.provider)
             assert properties["caller_kind"] == "acme-harness/2.1"
@@ -232,6 +264,23 @@ class TestScrubValueStripsUrlCredentials:
 
     def test_at_inside_userinfo_uses_the_last_delimiter(self, tracking_module):
         assert tracking_module._scrub_value("https://a@b:c@host.example/p") == "https://host.example/p"
+
+    def test_credential_containing_url_punctuation_is_still_stripped(self, tracking_module):
+        """The ordering trap: if the query/fragment split ran first, or the
+        authority were bounded at the first `/`, a credential containing `?`,
+        `#` or `/` would move the cut point and strand part of the secret in the
+        result. base64-ish tokens routinely contain `/` and `+`."""
+        cases = [
+            "https://svc:s3cr?et@harness.example/agent",
+            "https://svc:ab/cd@harness.example/agent",
+            "https://svc:x#y@harness.example/agent",
+            "https://svc:a/b?c#d@harness.example/agent",
+        ]
+        for value in cases:
+            scrubbed = tracking_module._scrub_value(value)
+            assert scrubbed == "https://harness.example/agent", value
+            for secret in ("s3cr", "ab/cd", "x#y", "a/b"):
+                assert secret not in scrubbed, f"{secret!r} survived in {scrubbed!r} from {value!r}"
 
     def test_a_custom_user_agent_url_ships_no_secret(self, tracking_module):
         """The end-to-end property: a harness that self-attributes with a

@@ -160,3 +160,27 @@ class TestStdoutProbeIsFailSafe:
         # Sanity: the probe IS reached once no env signal matches.
         assert detect_caller(env={}).kind == "pipe"
         assert probes == [1]
+
+    def test_a_raising_attribute_lookup_is_pipe(self, monkeypatch):
+        """The attribute LOOKUP can raise too, not just the call: on a proxy or
+        lazy wrapper `isatty` may be a property or come from `__getattr__`.
+        `getattr(..., None)` only swallows AttributeError, so the lookup has to
+        sit inside the try — otherwise a ValueError/OSError there escapes a
+        function whose entire contract is "never raises", and because
+        `comfy_cli.tracking` evaluates `detect_caller()` at import, that is an
+        import-time crash for every command."""
+
+        class RaisingProperty:
+            @property
+            def isatty(self):
+                raise ValueError("I/O operation on closed file")
+
+        monkeypatch.setattr(sys, "stdout", RaisingProperty())
+        assert detect_caller(env={}).kind == "pipe"
+
+        class RaisingGetattr:
+            def __getattr__(self, name):
+                raise OSError(9, "Bad file descriptor")
+
+        monkeypatch.setattr(sys, "stdout", RaisingGetattr())
+        assert detect_caller(env={}).kind == "pipe"

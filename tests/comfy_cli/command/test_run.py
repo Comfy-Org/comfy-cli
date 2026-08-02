@@ -1515,6 +1515,70 @@ class TestPartnerNodesDetectedTelemetry:
         # The count is over the real class_types, so it still says two.
         assert events[0]["partner_node_count"] == 2
 
+    def test_prefix_collisions_do_not_burn_output_slots(self, tmp_path, monkeypatch):
+        """Slicing the first 20 names up front would let a run of prefix-colliding
+        names consume the cap and silently drop later, genuinely distinct ones.
+        The cap is on DISTINCT truncated names, so all 20 slots carry signal."""
+        prefix = "C" * _TELEMETRY_NODE_NAME_MAX_LEN
+        # 25 names collapsing to one, then 20 distinct short ones.
+        names = [f"{prefix}{i:02d}" for i in range(25)] + [f"Distinct{i:02d}" for i in range(20)]
+        workflow = {str(i): {"class_type": n, "inputs": {}} for i, n in enumerate(names)}
+        object_info = {n: {"category": "image", "api_node": True} for n in names}
+        wf_file = self._wf_file(tmp_path, workflow)
+        self._no_credentials(monkeypatch)
+
+        with (
+            patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),
+            patch("comfy_cli.command.run._fetch_object_info", return_value=object_info),
+            patch("comfy_cli.command.run.WorkflowExecution"),
+            patch("comfy_cli.tracking.track_event") as mock_track,
+        ):
+            with pytest.raises(typer.Exit):
+                execute(wf_file, host="127.0.0.1", port=8188, wait=True, timeout=30, allow_spend=True)
+
+        shipped = self._partner_events(mock_track)[0]["partner_nodes"]
+        assert len(shipped) == 20
+        assert len(set(shipped)) == 20
+        # The collapsed prefix takes exactly one slot; the other 19 are distinct
+        # names that a naive `names[:20]` slice would have thrown away.
+        assert shipped.count(prefix) == 1
+
+    def test_overflow_suffix_counts_only_what_the_cap_omitted(self, tmp_path, monkeypatch):
+        """`and N more` must not conflate entries dropped by the 20-item cap with
+        entries collapsed by de-duplication — with 20 or fewer nodes sharing a
+        prefix, nothing was omitted, so promising more nodes would be a lie."""
+        prefix = "D" * _TELEMETRY_NODE_NAME_MAX_LEN
+        names = [f"{prefix}{i:02d}" for i in range(5)]
+        workflow = {str(i): {"class_type": n, "inputs": {}} for i, n in enumerate(names)}
+        object_info = {n: {"category": "image", "api_node": True} for n in names}
+        wf_file = self._wf_file(tmp_path, workflow)
+        self._no_credentials(monkeypatch)
+
+        errors = []
+        from comfy_cli.output.renderer import Renderer
+
+        original_error = Renderer.error
+
+        def capture_error(self, *, code, message, hint=None, details=None, exit_code=1):
+            errors.append({"code": code, "message": message, "details": details})
+            return original_error(self, code=code, message=message, hint=hint, details=details, exit_code=exit_code)
+
+        monkeypatch.setattr(Renderer, "error", capture_error)
+
+        with (
+            patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),
+            patch("comfy_cli.command.run._fetch_object_info", return_value=object_info),
+            patch("comfy_cli.command.run.WorkflowExecution"),
+            patch("comfy_cli.tracking.track_event"),
+        ):
+            with pytest.raises(typer.Exit):
+                execute(wf_file, host="127.0.0.1", port=8188, wait=True, timeout=30, allow_spend=True)
+
+        err = next(e for e in errors if e["code"] == "partner_node_requires_credential")
+        assert "more" not in err["message"]
+        assert err["details"]["partner_nodes"] == [prefix]
+        assert err["details"]["partner_node_count"] == 5
+
 
 class TestExecuteSpendGate:
     """`comfy run` gates partner-API (paid) workflows on `--allow-spend`

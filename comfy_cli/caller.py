@@ -67,10 +67,15 @@ def stream_is_tty(stream: object) -> bool:
     """
     if stream is None:
         return False
-    isatty = getattr(stream, "isatty", None)
-    if isatty is None:
-        return False
     try:
+        # The attribute LOOKUP is inside the try, not just the call: on a proxy
+        # or lazy wrapper stream, `isatty` can be a property or come from a
+        # `__getattr__`, either of which can raise. `getattr(..., None)` only
+        # swallows AttributeError, so a lookup that raised ValueError/OSError
+        # would escape a function whose whole contract is "never raises".
+        isatty = getattr(stream, "isatty", None)
+        if isatty is None:
+            return False
         return bool(isatty())
     except Exception:
         return False

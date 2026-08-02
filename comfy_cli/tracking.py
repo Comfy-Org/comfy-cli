@@ -137,24 +137,30 @@ def _scrub_value(value: object) -> object:
     """
     if not isinstance(value, str) or not _URL_SCHEME_RE.match(value):
         return value
-    stripped = value.partition("?")[0].partition("#")[0]
-    scheme, sep, rest = stripped.partition("://")
-    authority, slash, path = rest.partition("/")
-    if "@" in authority:
-        # rpartition: an `@` may legally appear inside the userinfo itself, so
-        # the LAST one is the true delimiter before the host.
-        authority = authority.rpartition("@")[2]
-    return f"{scheme}{sep}{authority}{slash}{path}"
+    scheme, sep, rest = value.partition("://")
+    # ORDER MATTERS: userinfo comes off FIRST, and on the last `@` in the whole
+    # remainder — before any path/query/fragment split.
+    #
+    # Splitting the query off first (or bounding the authority at the first
+    # `/`) assumes a well-formed URL, and the values that worry us are exactly
+    # the malformed ones. `https://svc:s3cr?et@host/agent` would strand the
+    # first half of the password in the result, and `https://svc:ab/cd@host/p`
+    # would return verbatim with the password intact — base64-ish tokens
+    # routinely contain `/` and `?`. Cutting at the last `@` first makes the
+    # credential's own contents irrelevant to where the cut lands.
+    #
+    # This errs toward removing too much: a legal-but-unusual path containing
+    # an unencoded `@` loses its leading segments. That is the correct bias for
+    # a scrub — the cost is analytics detail, the alternative is a leak.
+    rest = rest.rpartition("@")[2]
+    rest = rest.partition("?")[0].partition("#")[0]
+    return f"{scheme}{sep}{rest}"
 
 
 # The four intrinsic caller kinds are short and fixed, but COMFY_USER_AGENT lets
 # a caller name itself anything and detect_caller only lowercases it. 64 chars is
 # ample for a self-attribution label ("claude-code", "my-harness/1.2").
 _CALLER_KIND_MAX_LEN = 64
-
-# The kinds detect_caller derives on its own, with no free text from the
-# environment. Anything else came from a COMFY_USER_AGENT label.
-_INTRINSIC_CALLER_KINDS = frozenset({"user", "pipe", "agent", "claude-code"})
 
 
 def _sanitize_caller_kind(kind: str) -> str:
@@ -183,11 +189,18 @@ tracing_id = str(uuid.uuid4())
 # Who is driving this process: "user" | "pipe" | "agent" | "claude-code" | a
 # lowercased custom COMFY_USER_AGENT label. Computed once at import, matching
 # the cli_version/tracing_id pattern above, so we don't re-run isatty per event.
-_caller_kind = _sanitize_caller_kind(detect_caller().kind)
+_caller = detect_caller()
+_caller_kind = _sanitize_caller_kind(_caller.kind)
+# Whether that label is self-attributed free text rather than a kind the CLI
+# derived itself. Taken from `source_env`, which is authoritative, NOT from
+# membership in _INTRINSIC_CALLER_KINDS: `COMFY_USER_AGENT=user` produces the
+# string "user" while being exactly the self-attributed case, so a set-membership
+# test would let an agentic caller pass itself off as a human.
+_caller_kind_is_custom = _caller.source_env == "COMFY_USER_AGENT"
 
 
 def _intrinsic_caller_kind() -> str:
-    """``_caller_kind`` collapsed to one of the four kinds the CLI derives itself.
+    """``_caller_kind``, or ``"custom"`` when it is a self-attributed label.
 
     For the one send path the user has NOT consented to passively — feedback,
     which ships on an explicit user action and is suppressed only by the hard
@@ -196,7 +209,7 @@ def _intrinsic_caller_kind() -> str:
     as well by the closed set, so a custom ``COMFY_USER_AGENT`` collapses to
     the literal ``"custom"`` there rather than riding along verbatim.
     """
-    return _caller_kind if _caller_kind in _INTRINSIC_CALLER_KINDS else "custom"
+    return "custom" if _caller_kind_is_custom else _caller_kind
 
 
 workspace_manager = WorkspaceManager()
