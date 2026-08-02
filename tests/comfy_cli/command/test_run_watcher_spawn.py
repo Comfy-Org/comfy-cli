@@ -61,3 +61,13 @@ class TestWatcherSpawnFlags:
         popen.side_effect = OSError("no fork for you")
 
         assert watcher._spawn_watcher("abc123", where="cloud") is False
+
+    def test_argument_rejection_is_reported_not_raised(self, monkeypatch):
+        # Popen rejects bad *arguments* with ValueError, not OSError — an
+        # embedded NUL in host/prompt_id, or creationflags off Windows. The
+        # workflow is already submitted by the time we spawn, so neither may
+        # escape and abort `comfy run`.
+        popen = self._capture_popen(monkeypatch)
+        popen.side_effect = ValueError("embedded null byte")
+
+        assert watcher._spawn_watcher("abc123", where="local", host="127.0.0.1\x00") is False

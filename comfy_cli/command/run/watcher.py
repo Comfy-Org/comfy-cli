@@ -116,7 +116,11 @@ def _spawn_watcher(
             **kwargs,
         )
         return True
-    except OSError:
+    except (OSError, ValueError):
         # Watcher spawn failed — the job still ran; the user just won't get
-        # a state-file update without manual polling. Don't bail the submit.
+        # a state-file update without manual polling. Don't bail the submit:
+        # we're past the point of no return, the workflow is already queued.
+        # ValueError covers Popen's argument-level rejections (an embedded NUL
+        # in host/prompt_id, creationflags on a non-Windows platform), which
+        # aren't OSError.
         return False
