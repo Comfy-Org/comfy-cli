@@ -17,6 +17,7 @@ from pathlib import Path
 import pytest
 import typer
 
+from comfy_cli.cmdline import app
 from comfy_cli.command import transfer
 from comfy_cli.target import Target
 
@@ -134,7 +135,7 @@ class TestUploadMachineModeStdoutPurity:
 
         opener = _FakeOpener()
         monkeypatch.setattr(transfer, "_TRANSFER_OPENER", opener)
-        monkeypatch.setattr(transfer, "resolve_target", lambda where=None: _local_target())
+        monkeypatch.setattr(transfer, "resolve_target", lambda **kw: _local_target())
         set_renderer(Renderer(mode=OutputMode.JSON, command="upload"))
 
         transfer.execute_upload([str(asset)], where="local")
@@ -168,7 +169,7 @@ class TestUploadConnectionError:
 
         err = urllib.error.URLError(ConnectionRefusedError(111, "Connection refused"))
         monkeypatch.setattr(transfer, "_TRANSFER_OPENER", _FakeOpener(error=err))
-        monkeypatch.setattr(transfer, "resolve_target", lambda where=None: _local_target())
+        monkeypatch.setattr(transfer, "resolve_target", lambda **kw: _local_target())
         set_renderer(Renderer(mode=OutputMode.JSON, command="upload"))
 
         with pytest.raises(typer.Exit) as excinfo:
@@ -188,7 +189,7 @@ class TestUploadConnectionError:
         # A truncated response body raises http.client.IncompleteRead — an
         # HTTPException, not a URLError.
         monkeypatch.setattr(transfer, "_TRANSFER_OPENER", _FakeOpener(error=http.client.IncompleteRead(b"x", 100)))
-        monkeypatch.setattr(transfer, "resolve_target", lambda where=None: _local_target())
+        monkeypatch.setattr(transfer, "resolve_target", lambda **kw: _local_target())
         set_renderer(Renderer(mode=OutputMode.JSON, command="upload"))
 
         with pytest.raises(typer.Exit) as excinfo:
@@ -197,3 +198,207 @@ class TestUploadConnectionError:
         assert excinfo.value.exit_code == 1
         env = json.loads([ln for ln in capsys.readouterr().out.splitlines() if ln.strip()][-1])
         assert env["error"]["code"] == "upload_failed"
+
+
+class TestUploadHostPortRouting:
+    """``comfy upload --host/--port`` aims a LOCAL upload at a specific ComfyUI
+    (BE-5662).
+
+    Before this the only lever was the process-wide ``COMFY_LOCAL_URL`` env
+    var, so a caller wrapping the CLI (comfy-mcp's ``_with_target``) could not
+    route a single invocation. ``execute_upload`` now forwards the pair to
+    ``resolve_target``, which applies the documented local precedence:
+    explicit value > ``COMFY_LOCAL_URL`` > ``127.0.0.1:8188``.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _no_ambient_local_url(self, monkeypatch):
+        # The resolver honors COMFY_LOCAL_URL, so drop any ambient value and
+        # let each test state its own precedence inputs.
+        monkeypatch.delenv("COMFY_LOCAL_URL", raising=False)
+
+    def test_host_and_port_reach_resolve_target(self, asset, monkeypatch):
+        seen: dict = {}
+
+        def fake_resolve_target(**kwargs):
+            seen.update(kwargs)
+            return _local_target()
+
+        monkeypatch.setattr(transfer, "_TRANSFER_OPENER", _FakeOpener())
+        monkeypatch.setattr(transfer, "resolve_target", fake_resolve_target)
+
+        transfer.execute_upload([str(asset)], where="local", host="10.0.0.5", port=9999)
+
+        assert seen == {"where": "local", "host": "10.0.0.5", "port": 9999}
+
+    def test_post_url_targets_the_given_host_and_port(self, asset, monkeypatch):
+        opener = _FakeOpener()
+        monkeypatch.setattr(transfer, "_TRANSFER_OPENER", opener)
+
+        transfer.execute_upload([str(asset)], where="local", host="10.0.0.5", port=9999)
+
+        assert opener.requests[0].full_url == "http://10.0.0.5:9999/upload/image"
+
+    def test_no_flags_keeps_the_loopback_default(self, asset, monkeypatch):
+        opener = _FakeOpener()
+        monkeypatch.setattr(transfer, "_TRANSFER_OPENER", opener)
+
+        transfer.execute_upload([str(asset)], where="local")
+
+        assert opener.requests[0].full_url == "http://127.0.0.1:8188/upload/image"
+
+    def test_no_flags_still_honors_comfy_local_url(self, asset, monkeypatch):
+        monkeypatch.setenv("COMFY_LOCAL_URL", "http://192.168.1.9:8189")
+        opener = _FakeOpener()
+        monkeypatch.setattr(transfer, "_TRANSFER_OPENER", opener)
+
+        transfer.execute_upload([str(asset)], where="local")
+
+        assert opener.requests[0].full_url == "http://192.168.1.9:8189/upload/image"
+
+    def test_flags_beat_comfy_local_url(self, asset, monkeypatch):
+        monkeypatch.setenv("COMFY_LOCAL_URL", "http://192.168.1.9:8189")
+        opener = _FakeOpener()
+        monkeypatch.setattr(transfer, "_TRANSFER_OPENER", opener)
+
+        transfer.execute_upload([str(asset)], where="local", host="10.0.0.5", port=9999)
+
+        assert opener.requests[0].full_url == "http://10.0.0.5:9999/upload/image"
+
+    def test_host_only_flag_keeps_the_env_port(self, asset, monkeypatch):
+        # host and port resolve independently, so --host alone must not drop
+        # the env var's port back to the 8188 default.
+        monkeypatch.setenv("COMFY_LOCAL_URL", "http://192.168.1.9:8189")
+        opener = _FakeOpener()
+        monkeypatch.setattr(transfer, "_TRANSFER_OPENER", opener)
+
+        transfer.execute_upload([str(asset)], where="local", host="10.0.0.5")
+
+        assert opener.requests[0].full_url == "http://10.0.0.5:8189/upload/image"
+
+    def test_ipv6_host_is_bracketed_in_the_url(self, asset, monkeypatch):
+        opener = _FakeOpener()
+        monkeypatch.setattr(transfer, "_TRANSFER_OPENER", opener)
+
+        transfer.execute_upload([str(asset)], where="local", host="::1", port=8189)
+
+        assert opener.requests[0].full_url == "http://[::1]:8189/upload/image"
+
+    def test_cloud_target_ignores_host_and_port(self, asset, monkeypatch):
+        # Belt-and-braces behind the CLI guard below: even if the pair reached a
+        # cloud resolve, the cloud address comes from the account, not the flags.
+        opener = _FakeOpener()
+        monkeypatch.setattr(transfer, "_TRANSFER_OPENER", opener)
+        monkeypatch.setattr(transfer, "resolve_target", lambda **kw: _cloud_target())
+
+        transfer.execute_upload([str(asset)], where="cloud", host="10.0.0.5", port=9999)
+
+        assert opener.requests[0].full_url == "https://cloud.example.com/api/upload/image"
+
+
+class TestUploadCliHostPortFlags:
+    """CLI surface of the same feature: `comfy upload --host/--port` mirrors the
+    separate options `comfy jobs` takes (not `comfy run`'s combined
+    ``host[:port]`` positional), validates the host, and refuses to pair with a
+    cloud target."""
+
+    @pytest.fixture
+    def runner(self):
+        from typer.testing import CliRunner
+
+        return CliRunner()
+
+    @staticmethod
+    def _envelope(result) -> dict:
+        return json.loads(result.stdout.strip().splitlines()[-1])
+
+    def test_flags_are_forwarded_to_execute_upload(self, asset, runner, monkeypatch):
+        from comfy_cli import cmdline
+
+        seen: dict = {}
+
+        def fake_execute_upload(files, **kwargs):
+            seen["files"] = files
+            seen.update(kwargs)
+            return ["ab12.png"]
+
+        monkeypatch.setattr(cmdline.transfer_inner, "execute_upload", fake_execute_upload)
+
+        result = runner.invoke(
+            app,
+            ["upload", str(asset), "--host", "10.0.0.5", "--port", "9999"],
+            env={"COMFY_WHERE": "local"},
+        )
+
+        assert result.exit_code == 0, result.output
+        assert seen["files"] == [str(asset)]
+        assert seen["host"] == "10.0.0.5"
+        assert seen["port"] == 9999
+        assert seen["where"] == "local"
+
+    def test_no_flags_forwards_none(self, asset, runner, monkeypatch):
+        from comfy_cli import cmdline
+
+        seen: dict = {}
+        monkeypatch.setattr(
+            cmdline.transfer_inner,
+            "execute_upload",
+            lambda files, **kwargs: seen.update(kwargs) or ["ab12.png"],
+        )
+
+        result = runner.invoke(app, ["upload", str(asset)], env={"COMFY_WHERE": "local"})
+
+        assert result.exit_code == 0, result.output
+        assert seen["host"] is None
+        assert seen["port"] is None
+
+    @pytest.mark.parametrize("flags", [["--host", "10.0.0.5"], ["--port", "9999"], ["--host", "h", "--port", "1"]])
+    def test_host_or_port_with_cloud_where_flag_is_rejected(self, asset, runner, flags):
+        result = runner.invoke(app, ["--json", "upload", str(asset), "--where", "cloud", *flags])
+
+        assert result.exit_code == 1, result.output
+        env = self._envelope(result)
+        assert env["ok"] is False
+        assert env["error"]["code"] == "host_flag_cloud"
+
+    def test_host_with_cloud_where_env_is_rejected(self, asset, runner):
+        # COMFY_WHERE is how the top-level `comfy --where cloud` arrives, so the
+        # guard has to key off the RESOLVED target, not the flag.
+        result = runner.invoke(
+            app,
+            ["--json", "upload", str(asset), "--host", "10.0.0.5"],
+            env={"COMFY_WHERE": "cloud"},
+        )
+
+        assert result.exit_code == 1, result.output
+        assert self._envelope(result)["error"]["code"] == "host_flag_cloud"
+
+    def test_cloud_without_the_flags_is_untouched(self, asset, runner, monkeypatch):
+        from comfy_cli import cmdline
+
+        seen: dict = {}
+        monkeypatch.setattr(cmdline.where_module, "cloud_preflight_or_exit", lambda: None)
+        monkeypatch.setattr(
+            cmdline.transfer_inner,
+            "execute_upload",
+            lambda files, **kwargs: seen.update(kwargs) or ["ab12.png"],
+        )
+
+        result = runner.invoke(app, ["upload", str(asset), "--where", "cloud"])
+
+        assert result.exit_code == 0, result.output
+        assert seen["where"] == "cloud"
+        assert seen["host"] is None and seen["port"] is None
+
+    @pytest.mark.parametrize("bad", ["evil/host", "user@evil", "host?x", "host#x", "host\rname", "host\nname"])
+    def test_invalid_host_is_a_usage_error(self, asset, runner, bad):
+        result = runner.invoke(app, ["upload", str(asset), "--host", bad], env={"COMFY_WHERE": "local"})
+
+        # typer.BadParameter -> click UsageError -> exit code 2.
+        assert result.exit_code == 2, result.output
+
+    @pytest.mark.parametrize("bad", ["0", "65536", "-1"])
+    def test_out_of_range_port_is_a_usage_error(self, asset, runner, bad):
+        result = runner.invoke(app, ["upload", str(asset), "--port", bad], env={"COMFY_WHERE": "local"})
+
+        assert result.exit_code == 2, result.output

@@ -394,14 +394,22 @@ def execute_upload(
     *,
     where: str | None = None,
     overwrite: bool = False,
+    host: str | None = None,
+    port: int | None = None,
 ) -> list[str]:
     """Upload one or more local files to the ComfyUI server's input directory.
+
+    ``host``/``port`` route a **local** upload at a specific ComfyUI (the
+    ``comfy upload --host/--port`` flags); they are ignored for a cloud target,
+    whose address comes from the signed-in account. ``resolve_target`` applies
+    the usual local precedence: explicit value > ``COMFY_LOCAL_URL`` >
+    ``127.0.0.1:8188``.
 
     Returns the list of server-side filenames (the ``name`` field from each
     upload response).
     """
     renderer = get_renderer()
-    target = resolve_target(where=where)
+    target = resolve_target(where=where, host=host, port=port)
 
     uploads: list[dict[str, Any]] = []
     cloud_names: list[str] = []
