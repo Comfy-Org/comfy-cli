@@ -23,6 +23,7 @@ from websocket import (  # noqa: F401 — patch target for tests (run.WebSocket)
 )
 
 from comfy_cli import cancellation, execution_errors, jobs_state, tracking
+from comfy_cli.caller import stream_is_tty
 
 # Re-exports — names patched by tests live at this namespace.
 from comfy_cli.command.run.credentials import _resolve_partner_credential as _resolve_partner_credential
@@ -59,22 +60,45 @@ _TELEMETRY_NODE_LIST_CAP = 20
 _TELEMETRY_NODE_NAME_MAX_LEN = 64
 
 
+def _bounded_node_names(names: list[str]) -> list[str]:
+    """Cap a partner-node name list in BOTH dimensions — element count and each
+    name's length — for every payload that leaves this process or reaches a
+    terminal.
+
+    Applies to the structured ``details`` of the credential error as well as to
+    the telemetry property and the prose message. Capping only the prose would
+    not actually bound anything: ``error_panel`` renders ``details`` as
+    ``key=value`` rows directly beneath the message in pretty mode, and JSON
+    mode serialises them, so an uncapped list there re-floods exactly the
+    output the caps exist to protect. The exact total is reported alongside as
+    ``partner_node_count``, so nothing is lost — a consumer still learns how
+    many nodes need a credential, and the remedy (log in) is identical whichever
+    ones they are.
+
+    De-duplicates AFTER truncation, not before: ``_detect_partner_nodes``
+    returns distinct class_types, but two that share a 64-char prefix collapse
+    to the same string once truncated, which would list one name twice. The
+    list is meant to map one-to-one onto node classes.
+    """
+    out: list[str] = []
+    for name in names[:_TELEMETRY_NODE_LIST_CAP]:
+        truncated = name[:_TELEMETRY_NODE_NAME_MAX_LEN]
+        if truncated not in out:
+            out.append(truncated)
+    return out
+
+
 def _stdin_is_interactive() -> bool:
     """True only when stdin is a live TTY.
 
     ``sys.stdin.isatty()`` assumes stdin is a live stream, but in detached /
-    ``pythonw`` contexts ``sys.stdin`` can be ``None`` (AttributeError on
-    ``.isatty``) or a closed file (ValueError). Treat both as non-interactive so
-    the spend gate falls through to the fail-closed machine-mode error instead
-    of raising an uncontrolled exception (BE-4326).
+    ``pythonw`` contexts ``sys.stdin`` can be ``None``, closed, or backed by a
+    revoked file descriptor. Treat every such case as non-interactive so the
+    spend gate falls through to the fail-closed machine-mode error instead of
+    raising an uncontrolled exception (BE-4326). Delegates to the shared
+    fail-safe probe so stdin and stdout are guarded identically.
     """
-    stdin = getattr(sys, "stdin", None)
-    if stdin is None:
-        return False
-    try:
-        return bool(stdin.isatty())
-    except (AttributeError, ValueError):
-        return False
+    return stream_is_tty(getattr(sys, "stdin", None))
 
 
 def _spend_gate(renderer, partner_nodes: list[str], allow_spend: bool, *, details: dict) -> None:
@@ -314,15 +338,14 @@ def execute(
         # refresh), and `credential_present` needs that resolution. The
         # spend-declined funnel wants its own event rather than an early
         # resolve here.
+        # class_type strings come verbatim from untrusted workflow JSON, so the
+        # names are bounded before they ship. The count stays exact, so the cap
+        # never distorts the metric.
+        bounded_nodes = _bounded_node_names(partner_nodes)
         tracking.track_event(
             "partner_nodes_detected",
             {
-                # Cap defends against pathological graphs in BOTH dimensions —
-                # element count and each name's length, since class_type strings
-                # come verbatim from untrusted workflow JSON and one
-                # multi-megabyte name would otherwise ship whole. The count
-                # below stays exact, so neither cap distorts the metric.
-                "partner_nodes": [n[:_TELEMETRY_NODE_NAME_MAX_LEN] for n in partner_nodes[:_TELEMETRY_NODE_LIST_CAP]],
+                "partner_nodes": bounded_nodes,
                 "partner_node_count": len(partner_nodes),
                 "where": "local",
                 "credential_present": bool(api_key) or cred is not None,
@@ -330,14 +353,13 @@ def execute(
         )
         if not extra_data:
             if cred is None:
-                # Cap the names echoed in the prose the same way the telemetry
-                # property is capped — a graph with hundreds of partner nodes
-                # would otherwise render an unreadable wall of text. `details`
-                # below stays complete: it is the machine-readable field a JSON
-                # consumer reads to learn exactly which nodes need a credential.
-                shown = [n[:_TELEMETRY_NODE_NAME_MAX_LEN] for n in partner_nodes[:_TELEMETRY_NODE_LIST_CAP]]
-                overflow = len(partner_nodes) - len(shown)
-                listed = ", ".join(shown) + (f", and {overflow} more" if overflow > 0 else "")
+                # Same bounded list in the prose and in `details` — a graph with
+                # hundreds of partner nodes would otherwise render an unreadable
+                # wall of text, and `details` is rendered right below the message
+                # in pretty mode, so capping only one of them bounds nothing.
+                # `partner_node_count` carries the exact total for consumers.
+                overflow = len(partner_nodes) - len(bounded_nodes)
+                listed = ", ".join(bounded_nodes) + (f", and {overflow} more" if overflow > 0 else "")
                 msg = (
                     "Workflow uses partner-API node(s) that need an `api_key_comfy_org` "
                     "credential the local server doesn't have: " + listed + "."
@@ -351,7 +373,8 @@ def execute(
                         "cloud runs auto-inject via --where cloud)"
                     ),
                     details={
-                        "partner_nodes": partner_nodes,
+                        "partner_nodes": bounded_nodes,
+                        "partner_node_count": len(partner_nodes),
                         "host": host,
                         "port": port,
                     },

@@ -42,28 +42,44 @@ def _truthy(value: str | None) -> bool:
     return value.strip().lower() not in {"", "0", "false", "no", "off"}
 
 
-def _stdout_is_tty() -> bool:
-    """True only when stdout is a live TTY.
+def stream_is_tty(stream: object) -> bool:
+    """True only when *stream* is a live TTY. Never raises — that is the point.
 
-    ``sys.stdout.isatty()`` assumes stdout is a live stream, but in detached /
-    ``pythonw`` contexts ``sys.stdout`` can be ``None`` (AttributeError on
-    ``.isatty``) or an already-closed file (ValueError). A process with no
-    usable stdout is by definition not a human at a terminal, so treat both as
-    non-TTY and fall through to ``kind="pipe"`` rather than raising. Mirrors
-    ``_stdin_is_interactive`` in ``comfy_cli/command/run/__init__.py``.
+    ``sys.stdout.isatty()`` assumes stdout is a live stream, but a process's
+    standard streams are not guaranteed to be one. Under ``pythonw``, a Windows
+    service, or a detached/daemonised parent they can be ``None``; after a
+    wrapper closes or replaces them they can be an already-closed file, an
+    object with no ``isatty`` at all, or one backed by a revoked file
+    descriptor. Those raise ``AttributeError``, ``ValueError``, ``OSError``
+    (``EBADF`` / ``WinError 6``) and ``TypeError`` respectively — and a
+    non-conforming replacement stream can raise anything at all, since
+    ``isatty`` is just an arbitrary attribute on an arbitrary object.
 
-    This has to be fail-safe: ``detect_caller`` is called during CLI startup
-    (renderer construction, and the module-scope caller kind in
-    ``comfy_cli.tracking``), so an exception here would take down every
-    command — including ``--help`` and runs with tracking disabled.
+    So the handler is deliberately broad rather than a list of the failures we
+    happened to think of. A process with no usable stream is by definition not
+    a human at a terminal, so every failure means the same thing: not a TTY.
+
+    This is the shared, fail-safe probe for every standard-stream TTY check on
+    the startup path — ``detect_caller`` below, ``Renderer.resolve``, and
+    ``tracking.prompt_tracking_consent``. All three run before argument
+    parsing, so an escaping exception would take down every command, including
+    ``--help`` and runs with tracking disabled.
     """
-    stdout = getattr(sys, "stdout", None)
-    if stdout is None:
+    if stream is None:
+        return False
+    isatty = getattr(stream, "isatty", None)
+    if isatty is None:
         return False
     try:
-        return bool(stdout.isatty())
-    except (AttributeError, ValueError):
+        return bool(isatty())
+    except Exception:
         return False
+
+
+def _stdout_is_tty() -> bool:
+    """``stream_is_tty`` against the live ``sys.stdout``, re-read on each call
+    so a test or wrapper that swaps the stream is honoured."""
+    return stream_is_tty(getattr(sys, "stdout", None))
 
 
 def detect_caller(
@@ -72,7 +88,6 @@ def detect_caller(
     is_tty: bool | None = None,
 ) -> Caller:
     e = env if env is not None else os.environ
-    tty = is_tty if is_tty is not None else _stdout_is_tty()
 
     # 1. Explicit override — custom agent frameworks self-attribute here.
     explicit = e.get("COMFY_USER_AGENT")
@@ -87,7 +102,10 @@ def detect_caller(
     if _truthy(e.get("CLAUDECODE")):
         return Caller(kind="claude-code", agentic=True, source_env="CLAUDECODE")
 
-    # 4. Non-TTY — piped, backgrounded, or CI.
+    # 4. Non-TTY — piped, backgrounded, or CI. Probed lazily, only once the
+    #    env-var branches above have all declined: an explicitly-attributed
+    #    caller is answered without ever touching stdout.
+    tty = is_tty if is_tty is not None else _stdout_is_tty()
     if not tty:
         return Caller(kind="pipe", agentic=True, source_env=None)
 

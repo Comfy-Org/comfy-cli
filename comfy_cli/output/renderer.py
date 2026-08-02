@@ -22,7 +22,7 @@ from typing import Any, TextIO
 
 from rich.console import Console
 
-from comfy_cli.caller import Caller, detect_caller
+from comfy_cli.caller import Caller, detect_caller, stream_is_tty
 from comfy_cli.output.sanitize import sanitize_markup
 
 # Machine-output contract versions, surfaced in every envelope/event line and
@@ -111,7 +111,11 @@ class Renderer:
         env_map = env if env is not None else os.environ
         caller = caller if caller is not None else detect_caller(env_map)
         if is_stdout_tty is None:
-            is_stdout_tty = sys.stdout.isatty()
+            # Guarded probe, not a bare `sys.stdout.isatty()`: this runs from
+            # the main Typer callback before any command dispatch, so under a
+            # detached / `pythonw` stdout a raising probe would kill every
+            # invocation — `comfy --help` included. See `caller.stream_is_tty`.
+            is_stdout_tty = stream_is_tty(getattr(sys, "stdout", None))
 
         mode: OutputMode
         if json_stream_flag:

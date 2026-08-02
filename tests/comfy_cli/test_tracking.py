@@ -112,10 +112,11 @@ class TestCallerKindEnrichment:
         assert tracking_module._caller_kind in {"user", "pipe", "agent", "claude-code"}
 
     def test_feedback_carries_caller_kind(self, tracking_module):
-        # Feedback rides the same _dispatch path, so it is enriched too.
+        # Feedback rides the same _dispatch path, so it is enriched too — but
+        # with the narrowed label (see TestFeedbackCallerKindIsNarrowed).
         tracking_module.submit_feedback("nice tool")
         _, _, properties = _last_track_call(tracking_module.provider)
-        assert properties["caller_kind"] == tracking_module._caller_kind
+        assert properties["caller_kind"] == tracking_module._intrinsic_caller_kind()
 
     def test_explicit_user_agent_label_flows_through(self, tracking_module):
         """An explicit ``COMFY_USER_AGENT`` label reaches the provider verbatim
@@ -165,6 +166,88 @@ class TestSanitizeCallerKind:
             tracking_module.track_event("some_event")
         _, _, properties = _last_track_call(tracking_module.provider)
         assert len(properties["caller_kind"]) == tracking_module._CALLER_KIND_MAX_LEN
+
+
+class TestFeedbackCallerKindIsNarrowed:
+    """``feedback_submitted`` is the one send path that is NOT gated on passive
+    consent — an explicit user action, suppressed only by the hard env opt-out.
+    Attaching an arbitrary, environment-derived free-text label to the very path
+    where a user has declined passive telemetry is more than the analytics
+    question needs, so a custom ``COMFY_USER_AGENT`` collapses to ``"custom"``
+    there. The four intrinsic kinds still answer "human or agent?" exactly.
+    """
+
+    def test_custom_label_becomes_custom_on_the_feedback_path(self, tracking_module):
+        with patch.object(tracking_module, "_caller_kind", "acme-harness/2.1"):
+            tracking_module.submit_feedback("nice tool")
+        _, _, properties = _last_track_call(tracking_module.provider)
+        assert properties["caller_kind"] == "custom"
+        assert "acme-harness" not in str(properties)
+
+    def test_intrinsic_kinds_survive_on_the_feedback_path(self, tracking_module):
+        for kind in ("user", "pipe", "agent", "claude-code"):
+            with patch.object(tracking_module, "_caller_kind", kind):
+                tracking_module.submit_feedback("nice tool")
+            _, _, properties = _last_track_call(tracking_module.provider)
+            assert properties["caller_kind"] == kind
+
+    def test_consent_gated_paths_keep_the_full_label(self, tracking_module):
+        """The narrowing is scoped to the unconsented path: passive telemetry
+        (which the user opted into) keeps the self-attribution label, which is
+        the whole point of COMFY_USER_AGENT."""
+        tracking_module.config_manager.set(constants.CONFIG_KEY_ENABLE_TRACKING, "True")
+        with patch.object(tracking_module, "_caller_kind", "acme-harness/2.1"):
+            tracking_module.track_event("some_event")
+            _, _, properties = _last_track_call(tracking_module.provider)
+            assert properties["caller_kind"] == "acme-harness/2.1"
+
+            tracking_module.submit_agent_review("went fine")
+            _, _, properties = _last_track_call(tracking_module.provider)
+            assert properties["caller_kind"] == "acme-harness/2.1"
+
+
+class TestScrubValueStripsUrlCredentials:
+    """``_scrub_value`` is the shared credential strip for anything shipped as a
+    telemetry property — command kwargs and, via ``_sanitize_caller_kind``, the
+    ``caller_kind`` on every event."""
+
+    def test_query_string_and_fragment_go(self, tracking_module):
+        assert tracking_module._scrub_value("https://civitai.com/api/x?token=s3cret") == "https://civitai.com/api/x"
+        assert tracking_module._scrub_value("https://h.example/a#tok") == "https://h.example/a"
+
+    def test_userinfo_goes(self, tracking_module):
+        """`scheme://user:pass@host` puts a basic-auth password in the
+        authority, which stripping the query alone leaves entirely intact."""
+        assert (
+            tracking_module._scrub_value("https://svc:s3cret@harness.example/agent") == "https://harness.example/agent"
+        )
+        assert tracking_module._scrub_value("http://tok@h.example") == "http://h.example"
+
+    def test_userinfo_goes_for_non_http_schemes_too(self, tracking_module):
+        """A credential rides the userinfo slot of ftp/ssh/redis just as easily
+        as http's; the strip only ever removes those components, so it is safe
+        to apply to any `<scheme>://` value."""
+        assert tracking_module._scrub_value("ssh://git:key@github.com/o/r") == "ssh://github.com/o/r"
+        assert tracking_module._scrub_value("redis://u:p@localhost:6379/0") == "redis://localhost:6379/0"
+
+    def test_at_inside_userinfo_uses_the_last_delimiter(self, tracking_module):
+        assert tracking_module._scrub_value("https://a@b:c@host.example/p") == "https://host.example/p"
+
+    def test_a_custom_user_agent_url_ships_no_secret(self, tracking_module):
+        """The end-to-end property: a harness that self-attributes with a
+        service URL must not ship its own basic-auth password to the providers
+        on every single event."""
+        sanitized = tracking_module._sanitize_caller_kind("https://svc:s3cret@harness.example/agent")
+        assert "s3cret" not in sanitized
+        assert sanitized == "https://harness.example/agent"
+
+    def test_non_url_values_are_untouched(self, tracking_module):
+        for value in ("claude-code", "my-harness/1.2", "/home/alice/wf.json", "C:\\Users\\alice", "", "a?b#c"):
+            assert tracking_module._scrub_value(value) == value
+
+    def test_non_string_values_are_untouched(self, tracking_module):
+        for value in (None, 7, True, ["https://a?b"], {"k": "v"}):
+            assert tracking_module._scrub_value(value) == value
 
 
 class TestSubmitFeedback:
@@ -269,7 +352,7 @@ def test_feedback_does_not_persist_user_id_without_consent(monkeypatch):
 
     sent = {}
     monkeypatch.setattr(tracking, "_telemetry_disabled_by_env", lambda: False)
-    monkeypatch.setattr(tracking, "_dispatch", lambda name, props, *, distinct_id: sent.update(id=distinct_id))
+    monkeypatch.setattr(tracking, "_dispatch", lambda name, props, *, distinct_id, **kw: sent.update(id=distinct_id))
     # Consent declined; no persisted user_id; in-memory user_id empty.
     monkeypatch.setattr(tracking.config_manager, "get_bool", lambda k: False)
     persisted = {}
@@ -287,7 +370,7 @@ def test_feedback_persists_user_id_with_consent(monkeypatch):
 
     sent = {}
     monkeypatch.setattr(tracking, "_telemetry_disabled_by_env", lambda: False)
-    monkeypatch.setattr(tracking, "_dispatch", lambda name, props, *, distinct_id: sent.update(id=distinct_id))
+    monkeypatch.setattr(tracking, "_dispatch", lambda name, props, *, distinct_id, **kw: sent.update(id=distinct_id))
     monkeypatch.setattr(tracking.config_manager, "get_bool", lambda k: True)  # consent ON
     persisted = {}
     monkeypatch.setattr(tracking.config_manager, "set", lambda k, v: persisted.update({k: v}))
@@ -827,3 +910,44 @@ class TestTelemetryDisabledByEnvHelper:
         monkeypatch.delenv("COMFY_NO_TELEMETRY")
         monkeypatch.setenv("DO_NOT_TRACK", "1")
         assert tm._telemetry_disabled_by_env() is True
+
+
+class TestConsentPromptSurvivesUnusableStdio:
+    """``prompt_tracking_consent`` runs from the main Typer callback
+    (``cmdline.py``) on every invocation. Under ``pythonw`` / a detached parent,
+    ``sys.stdin`` or ``sys.stdout`` is ``None`` or closed, and a bare
+    ``.isatty()`` there raises before argument parsing — killing every command,
+    including ``--help``. Both probes go through ``caller.stream_is_tty``, so an
+    unusable stream reads as "non-interactive" (the correct answer: nobody is
+    there to consent) instead of raising.
+    """
+
+    def test_missing_stdout_does_not_raise(self, tracking_module):
+        with (
+            patch.object(tracking_module.sys, "stdout", None),
+            patch.object(tracking_module.ui, "prompt_confirm_action") as mock_prompt,
+        ):
+            tracking_module.prompt_tracking_consent()
+        mock_prompt.assert_not_called()
+        assert tracking_module.config_manager.get_bool(constants.CONFIG_KEY_ENABLE_TRACKING) is None
+
+    def test_missing_stdin_does_not_raise(self, tracking_module):
+        with (
+            patch.object(tracking_module.sys, "stdin", None),
+            patch.object(tracking_module.ui, "prompt_confirm_action") as mock_prompt,
+        ):
+            tracking_module.prompt_tracking_consent()
+        mock_prompt.assert_not_called()
+
+    def test_revoked_fd_stdio_does_not_raise(self, tracking_module):
+        class Revoked:
+            def isatty(self):
+                raise OSError(9, "Bad file descriptor")
+
+        with (
+            patch.object(tracking_module.sys, "stdin", Revoked()),
+            patch.object(tracking_module.sys, "stdout", Revoked()),
+            patch.object(tracking_module.ui, "prompt_confirm_action") as mock_prompt,
+        ):
+            tracking_module.prompt_tracking_consent()
+        mock_prompt.assert_not_called()

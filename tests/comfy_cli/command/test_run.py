@@ -1449,8 +1449,10 @@ class TestPartnerNodesDetectedTelemetry:
 
     def test_missing_credential_error_truncates_a_huge_node_list(self, tmp_path, monkeypatch):
         """The prose error echoes the node names; a graph with hundreds of
-        partner nodes must not render an unbounded wall of text. `details` stays
-        complete — it's the machine-readable field JSON consumers read."""
+        partner nodes must not render an unbounded wall of text. `details` is
+        bounded the same way — `error_panel` prints it as key=value rows right
+        under the message in pretty mode, so capping only the prose would bound
+        nothing. `partner_node_count` carries the exact total instead."""
         workflow = {str(i): {"class_type": f"PartnerNode{i:02d}", "inputs": {}} for i in range(30)}
         object_info = {f"PartnerNode{i:02d}": {"category": "image", "api_node": True} for i in range(30)}
         wf_file = self._wf_file(tmp_path, workflow)
@@ -1480,8 +1482,38 @@ class TestPartnerNodesDetectedTelemetry:
         assert "PartnerNode00" in err["message"]
         assert "and 10 more" in err["message"]
         assert "PartnerNode29" not in err["message"]
-        # The structured field keeps every name.
-        assert len(err["details"]["partner_nodes"]) == 30
+        # The structured field is bounded identically, with the exact total
+        # alongside it so no information is actually lost.
+        assert err["details"]["partner_nodes"] == [f"PartnerNode{i:02d}" for i in range(20)]
+        assert err["details"]["partner_node_count"] == 30
+
+    def test_names_are_deduplicated_after_truncation_not_before(self, tmp_path, monkeypatch):
+        """Truncating to 64 chars can collapse two distinct class_types that
+        share a prefix into the same string. De-duplicating before the cap (the
+        order `_detect_partner_nodes` gives us) would then list one name twice
+        while the count called them distinct."""
+        prefix = "P" * _TELEMETRY_NODE_NAME_MAX_LEN
+        names = [prefix + "alpha", prefix + "beta"]
+        workflow = {str(i): {"class_type": n, "inputs": {}} for i, n in enumerate(names)}
+        object_info = {n: {"category": "image", "api_node": True} for n in names}
+        wf_file = self._wf_file(tmp_path, workflow)
+        self._no_credentials(monkeypatch)
+
+        with (
+            patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),
+            patch("comfy_cli.command.run._fetch_object_info", return_value=object_info),
+            patch("comfy_cli.command.run.WorkflowExecution"),
+            patch("comfy_cli.tracking.track_event") as mock_track,
+        ):
+            with pytest.raises(typer.Exit):
+                execute(wf_file, host="127.0.0.1", port=8188, wait=True, timeout=30, allow_spend=True)
+
+        events = self._partner_events(mock_track)
+        assert len(events) == 1
+        # Both truncate to the same string — it appears once, not twice.
+        assert events[0]["partner_nodes"] == [prefix]
+        # The count is over the real class_types, so it still says two.
+        assert events[0]["partner_node_count"] == 2
 
 
 class TestExecuteSpendGate:

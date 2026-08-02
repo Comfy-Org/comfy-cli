@@ -5,6 +5,7 @@ import functools
 import json
 import logging as logginglib
 import os
+import re
 import sys
 import threading
 import time
@@ -14,7 +15,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 import typer
 
 from comfy_cli import constants, logging, ui
-from comfy_cli.caller import detect_caller
+from comfy_cli.caller import detect_caller, stream_is_tty
 from comfy_cli.config_manager import ConfigManager
 from comfy_cli.workspace_manager import WorkspaceManager
 
@@ -109,18 +110,51 @@ def _is_trackable(name: str, value: object) -> bool:
     return True
 
 
+# Any `<scheme>://` prefix, not just http(s): a credential can ride the userinfo
+# slot of ftp/ssh/redis/etc. just as easily, and the scrub below is safe for all
+# of them (it only ever removes the query, fragment, and userinfo components).
+_URL_SCHEME_RE = re.compile(r"^[a-z][a-z0-9+.\-]*://", re.IGNORECASE)
+
+
 def _scrub_value(value: object) -> object:
-    """Strip the query string and fragment from URL values; CivitAI download
-    links carry the token as ?token=. Only top-level http(s) strings are touched."""
-    if isinstance(value, str) and value.startswith(("http://", "https://")):
-        return value.partition("?")[0].partition("#")[0]
-    return value
+    """Strip the credential-bearing components out of a top-level URL string.
+
+    Two of them, both observed in the wild:
+
+    - **query string and fragment** — CivitAI download links carry the API
+      token as ``?token=``.
+    - **userinfo** — ``scheme://user:secret@host/path`` puts a basic-auth
+      password in the authority. Reachable through ``COMFY_USER_AGENT``, whose
+      value becomes the ``caller_kind`` stamped on every event, so a harness
+      that self-attributes with a service URL would otherwise ship its own
+      credential to both providers on every command.
+
+    Non-URL strings are returned verbatim. That leaves a bare filesystem path
+    (or a ``file://`` one) carrying a username untouched — deliberately: there
+    is no general way to tell a private path segment from a public one, and
+    such a value is not a credential. Redacting the whole value is the job of
+    ``_is_sensitive``, keyed on the property name.
+    """
+    if not isinstance(value, str) or not _URL_SCHEME_RE.match(value):
+        return value
+    stripped = value.partition("?")[0].partition("#")[0]
+    scheme, sep, rest = stripped.partition("://")
+    authority, slash, path = rest.partition("/")
+    if "@" in authority:
+        # rpartition: an `@` may legally appear inside the userinfo itself, so
+        # the LAST one is the true delimiter before the host.
+        authority = authority.rpartition("@")[2]
+    return f"{scheme}{sep}{authority}{slash}{path}"
 
 
 # The four intrinsic caller kinds are short and fixed, but COMFY_USER_AGENT lets
 # a caller name itself anything and detect_caller only lowercases it. 64 chars is
 # ample for a self-attribution label ("claude-code", "my-harness/1.2").
 _CALLER_KIND_MAX_LEN = 64
+
+# The kinds detect_caller derives on its own, with no free text from the
+# environment. Anything else came from a COMFY_USER_AGENT label.
+_INTRINSIC_CALLER_KINDS = frozenset({"user", "pipe", "agent", "claude-code"})
 
 
 def _sanitize_caller_kind(kind: str) -> str:
@@ -150,6 +184,21 @@ tracing_id = str(uuid.uuid4())
 # lowercased custom COMFY_USER_AGENT label. Computed once at import, matching
 # the cli_version/tracing_id pattern above, so we don't re-run isatty per event.
 _caller_kind = _sanitize_caller_kind(detect_caller().kind)
+
+
+def _intrinsic_caller_kind() -> str:
+    """``_caller_kind`` collapsed to one of the four kinds the CLI derives itself.
+
+    For the one send path the user has NOT consented to passively — feedback,
+    which ships on an explicit user action and is suppressed only by the hard
+    env opt-out — a free-text, environment-derived label is more than the
+    analytics question needs. "Was this a human or an agent?" is answered just
+    as well by the closed set, so a custom ``COMFY_USER_AGENT`` collapses to
+    the literal ``"custom"`` there rather than riding along verbatim.
+    """
+    return _caller_kind if _caller_kind in _INTRINSIC_CALLER_KINDS else "custom"
+
+
 workspace_manager = WorkspaceManager()
 
 # Process-scoped opt-in used when running non-interactively before the
@@ -374,7 +423,12 @@ def disable():
 
 
 def _dispatch(
-    event_name: str, properties: dict[str, Any], *, distinct_id: str | None, mixpanel_name: str | None = None
+    event_name: str,
+    properties: dict[str, Any],
+    *,
+    distinct_id: str | None,
+    mixpanel_name: str | None = None,
+    caller_kind: str | None = None,
 ):
     """Fan an event out to every provider. Enriches with cli_version/tracing_id/caller_kind.
 
@@ -384,8 +438,15 @@ def _dispatch(
     ``caller_kind`` lands on EVERY event (execution_*, partner_nodes_detected,
     feedback, …) — that is the point: it makes agent-vs-human analytics possible
     across the whole stream. Purely additive, so no existing dashboard breaks.
+    Defaults to the full label; a caller that ships on a weaker consent basis
+    passes the narrowed one (see ``_intrinsic_caller_kind``).
     """
-    properties = {**properties, "cli_version": cli_version, "tracing_id": tracing_id, "caller_kind": _caller_kind}
+    properties = {
+        **properties,
+        "cli_version": cli_version,
+        "tracing_id": tracing_id,
+        "caller_kind": caller_kind if caller_kind is not None else _caller_kind,
+    }
     for provider in _get_providers():
         provider_event_name = (
             mixpanel_name if (mixpanel_name is not None and isinstance(provider, MixpanelProvider)) else event_name
@@ -456,7 +517,15 @@ def submit_feedback(message: str = "", *, scores: dict[str, str | None] | None =
     if not properties:
         return False
     consented = config_manager.get_bool(constants.CONFIG_KEY_ENABLE_TRACKING)
-    _dispatch("feedback_submitted", properties, distinct_id=_ensure_user_id(persist=bool(consented)))
+    # Narrowed caller_kind: this is the one path that sends without passive
+    # consent, so it carries the closed set of intrinsic kinds rather than a
+    # free-text COMFY_USER_AGENT label.
+    _dispatch(
+        "feedback_submitted",
+        properties,
+        distinct_id=_ensure_user_id(persist=bool(consented)),
+        caller_kind=_intrinsic_caller_kind(),
+    )
     return True
 
 
@@ -538,7 +607,10 @@ def prompt_tracking_consent(skip_prompt: bool = False, default_value: bool = Fal
     # Persist a stable anonymous user_id so a later interactive consent
     # prompt can reuse it, but do NOT auto-enable telemetry — that would
     # violate the DO_NOT_TRACK convention spirit for OSS tooling.
-    if not sys.stdin.isatty() or not sys.stdout.isatty():
+    # Guarded probes: this runs from the main Typer callback, so a detached /
+    # `pythonw` stdio pair must degrade to "non-interactive" rather than raise
+    # and take the command down. See `caller.stream_is_tty`.
+    if not stream_is_tty(getattr(sys, "stdin", None)) or not stream_is_tty(getattr(sys, "stdout", None)):
         if user_id is None:
             user_id = str(uuid.uuid4())
             try:

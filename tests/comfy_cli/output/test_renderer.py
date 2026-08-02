@@ -395,3 +395,53 @@ def test_pretty_helpers_tolerate_non_string_messages():
     assert "42" in _pretty_output(lambda r: r.warn(42))
     assert "42" in _pretty_output(lambda r: r.info(42))
     assert "42" in _pretty_output(lambda r: r.success(42))
+
+
+class TestResolveSurvivesAnUnusableStdout:
+    """``Renderer.resolve`` runs from the main Typer callback (``cmdline.py``)
+    before any command dispatch, and every call site there omits
+    ``is_stdout_tty``, so it probes ``sys.stdout`` itself.
+
+    Under ``pythonw``, a Windows service, or a detached parent, ``sys.stdout``
+    is ``None`` or an already-closed file. A bare ``sys.stdout.isatty()`` there
+    raises before argument parsing, which takes down EVERY command — including
+    ``comfy --help`` and runs with tracking disabled. The probe is routed
+    through ``caller.stream_is_tty``, so it degrades to "not a TTY" (→ JSON
+    mode, the correct read of a process with no terminal) instead.
+    """
+
+    def test_missing_stdout_resolves_to_json_not_attribute_error(self, monkeypatch):
+        import comfy_cli.output.renderer as renderer_mod
+
+        monkeypatch.setattr(renderer_mod.sys, "stdout", None)
+        r = Renderer.resolve(env={})
+        assert r.mode is OutputMode.JSON
+
+    def test_closed_stdout_resolves_to_json_not_value_error(self, monkeypatch, tmp_path):
+        import comfy_cli.output.renderer as renderer_mod
+
+        handle = open(tmp_path / "out.txt", "w")
+        handle.close()
+        monkeypatch.setattr(renderer_mod.sys, "stdout", handle)
+        assert Renderer.resolve(env={}).mode is OutputMode.JSON
+
+    def test_revoked_fd_stdout_resolves_to_json_not_os_error(self, monkeypatch):
+        import comfy_cli.output.renderer as renderer_mod
+
+        class Revoked:
+            def isatty(self):
+                raise OSError(9, "Bad file descriptor")
+
+        monkeypatch.setattr(renderer_mod.sys, "stdout", Revoked())
+        assert Renderer.resolve(env={}).mode is OutputMode.JSON
+
+    def test_a_live_tty_still_resolves_to_pretty(self, monkeypatch):
+        """The guard must not flip healthy terminals to JSON."""
+        import comfy_cli.output.renderer as renderer_mod
+
+        class Tty:
+            def isatty(self):
+                return True
+
+        monkeypatch.setattr(renderer_mod.sys, "stdout", Tty())
+        assert Renderer.resolve(env={}).mode is OutputMode.PRETTY
