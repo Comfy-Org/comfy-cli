@@ -238,7 +238,8 @@ final envelope and exits 0 without queuing.
 ### `queued`
 
 Emitted after the submit request returns success — `POST /prompt` returning
-200 locally, the equivalent cloud submit under `--where cloud`.
+200 locally, the equivalent cloud submit under `--where cloud` — **and** after
+the job's state file has been persisted.
 
 ```json
 {
@@ -262,8 +263,12 @@ Emitted after the submit request returns success — `POST /prompt` returning
 | `nodes`               | array of dict | Manifest of every node in the submitted (post-conversion) workflow: `node_id` (str), `class_type` (str), `title` (str). Lets piped consumers render a per-node UI without the workflow file. |
 | `base_url`            | str           | **Cloud only.** The cloud endpoint the prompt was submitted to. Absent on `--where local`. |
 
-`queued` is emitted **after** the submit call returns successfully, on both
-targets — it means the server has the prompt. A run whose submit fails emits
+`queued` is emitted **after** the submit call returns successfully **and after
+the job's state file has been persisted** — on the async (`--no-wait`) paths,
+after the background watcher spawn attempt too. On both targets it therefore
+means more than "the server has the prompt": the durable record exists, so a
+consumer may run `comfy jobs status <prompt_id>` — or expect the job in
+`comfy jobs ls` — the moment it reads this line. A run whose submit fails emits
 its error envelope with no `queued` line at all.
 
 ### `executing`

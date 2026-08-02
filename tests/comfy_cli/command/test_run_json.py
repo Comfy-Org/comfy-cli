@@ -22,6 +22,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import sys
 import tempfile
 import urllib.error
 from unittest.mock import MagicMock, patch
@@ -2035,3 +2036,240 @@ class TestMalformedRejectionPayloadStillYieldsAnEnvelope:
         assert exit_code == 1
         assert _envelope(lines)["error"]["code"] == "prompt_rejected"
         assert "node 1 (X): bad" in _envelope(lines)["error"]["hint"]
+
+
+# --------------------------------------------------------------------------
+# `queued` is emitted only after the job's durable state exists (BE-6072)
+#
+# The event used to precede `jobs_state.write` on every path. That made
+# state-file-backed follow-ups (`jobs ls`, `jobs wait`, compose's item_map)
+# raceable against a just-queued job, and — worse — let a `BrokenPipeError` at
+# the emit (`comfy run … --json-stream | head -n1`) abort setup before the
+# record was ever written, while `__main__`'s broken-pipe handling still exited
+# 0: a billable cloud job with no journal entry, no state file and no watcher.
+# These tests pin the ordering and the propagation on all four paths.
+# --------------------------------------------------------------------------
+
+
+class _TapStream:
+    """Stand-in for the renderer's machine stream.
+
+    `on_line` sees every NDJSON line before it is written and may raise to
+    simulate a closed stdout. Writes delegate to ``sys.stdout`` at call time so
+    `capsys` still captures the stream.
+    """
+
+    def __init__(self, on_line):
+        self.on_line = on_line
+
+    def write(self, s: str) -> int:
+        self.on_line(s)
+        return sys.stdout.write(s)
+
+    def flush(self) -> None:
+        sys.stdout.flush()
+
+
+def _tap_queued(renderer, callback):
+    """Invoke `callback` just before each `queued` line reaches the stream."""
+
+    def on_line(s: str) -> None:
+        try:
+            payload = json.loads(s)
+        except (json.JSONDecodeError, ValueError):
+            return
+        if isinstance(payload, dict) and payload.get("type") == "queued":
+            callback()
+
+    renderer.machine_stream = _TapStream(on_line)
+
+
+def _raise_broken_pipe() -> None:
+    """What writing an NDJSON line to a closed stdout (`… | head -n1`) does."""
+    raise BrokenPipeError(32, "Broken pipe")
+
+
+def _recording_write(writes: list):
+    """A ``jobs_state.write`` stand-in that records each persisted prompt_id."""
+
+    def fake_write(state):
+        writes.append(state.prompt_id)
+        return "/tmp/s.json"
+
+    return fake_write
+
+
+def _recording_spawn(spawned: list):
+    """A ``_spawn_watcher`` stand-in that records each spawn attempt."""
+
+    def fake_spawn(prompt_id, **_kw):
+        spawned.append(prompt_id)
+        return True
+
+    return fake_spawn
+
+
+def _log_state_writes(monkeypatch, log):
+    """Record every ``jobs_state.write`` (which ``_write_state`` delegates to)
+    in `log`, keeping the real return contract (a path)."""
+    from comfy_cli import jobs_state as jobs_state_mod
+
+    def fake_write(state):
+        log.append(("state_write",))
+        return "/tmp/state.json"
+
+    monkeypatch.setattr(jobs_state_mod, "write", fake_write)
+
+
+def _local_ws_that_finishes(MockWs):
+    ws_instance = MagicMock()
+    MockWs.return_value = ws_instance
+    ws_instance.recv.side_effect = [
+        json.dumps({"type": "executing", "data": {"prompt_id": "p", "node": None}}),
+    ]
+    return ws_instance
+
+
+class TestQueuedFollowsStatePersistence:
+    """Ordering spies: `state_write` must precede `queued_emit` on all four
+    target × wait-mode combinations."""
+
+    def test_local_async(self, monkeypatch, workflow_file, capsys, ndjson_renderer):
+        log: list[tuple] = []
+        _log_state_writes(monkeypatch, log)
+        _tap_queued(ndjson_renderer, lambda: log.append(("queued_emit",)))
+        with (
+            patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),
+            patch("comfy_cli.http._AUTHED_OPENER.open") as mock_open,
+            patch("comfy_cli.command.run._spawn_watcher", return_value=True),
+        ):
+            mock_open.return_value.__enter__.return_value.read.return_value = json.dumps({"prompt_id": "p"}).encode()
+            _lines, exit_code = _run_execute_capture(workflow_file, capsys, wait=False)
+        assert exit_code == 0
+        assert ("queued_emit",) in log
+        assert log.index(("state_write",)) < log.index(("queued_emit",))
+
+    def test_local_wait(self, monkeypatch, workflow_file, capsys, ndjson_renderer):
+        log: list[tuple] = []
+        _log_state_writes(monkeypatch, log)
+        _tap_queued(ndjson_renderer, lambda: log.append(("queued_emit",)))
+        with (
+            patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),
+            patch("comfy_cli.http._AUTHED_OPENER.open") as mock_open,
+            patch("comfy_cli.command.run.WebSocket") as MockWs,
+        ):
+            mock_open.return_value.__enter__.return_value.read.return_value = json.dumps({"prompt_id": "p"}).encode()
+            _local_ws_that_finishes(MockWs)
+            _lines, exit_code = _run_execute_capture(workflow_file, capsys, wait=True)
+        assert exit_code == 0
+        assert ("queued_emit",) in log
+        assert log.index(("state_write",)) < log.index(("queued_emit",))
+
+    @pytest.mark.parametrize("wait", [False, True])
+    def test_cloud(self, monkeypatch, workflow_file, capsys, ndjson_renderer, wait):
+        log: list[tuple] = []
+        _install_cloud_stubs(monkeypatch, client_cls=_fake_client())
+        # After the stubs, so this write spy wins over their no-op one.
+        _log_state_writes(monkeypatch, log)
+        _tap_queued(ndjson_renderer, lambda: log.append(("queued_emit",)))
+        _lines, exit_code = _cloud_capture(capsys, workflow_file, wait=wait, timeout=5)
+        assert exit_code == 0
+        assert ("queued_emit",) in log
+        assert log.index(("state_write",)) < log.index(("queued_emit",))
+
+
+class TestBrokenPipeAtTheQueuedEmit:
+    """A closed stdout at the `queued` line is the consumer leaving. It must
+    propagate as itself — `__main__` turns that into the documented silent exit
+    0 — and only ever after the durable record (and the watcher) exist."""
+
+    def test_local_async_persists_before_it_raises(self, monkeypatch, workflow_file, capsys, ndjson_renderer):
+        writes: list[str] = []
+        spawned: list[str] = []
+        from comfy_cli import jobs_state as jobs_state_mod
+
+        monkeypatch.setattr(jobs_state_mod, "write", _recording_write(writes))
+        _tap_queued(ndjson_renderer, _raise_broken_pipe)
+
+        with (
+            patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),
+            patch("comfy_cli.http._AUTHED_OPENER.open") as mock_open,
+            patch("comfy_cli.command.run._spawn_watcher", side_effect=_recording_spawn(spawned)),
+        ):
+            mock_open.return_value.__enter__.return_value.read.return_value = json.dumps({"prompt_id": "p"}).encode()
+            with pytest.raises(BrokenPipeError):
+                execute(workflow_file, host="127.0.0.1", port=8188, wait=False, verbose=False, timeout=30)
+        capsys.readouterr()
+        assert writes == ["p"]
+        assert spawned == ["p"]
+
+    def test_cloud_async_persists_before_it_raises(self, monkeypatch, workflow_file, capsys, ndjson_renderer):
+        from comfy_cli.command.run import execute_cloud
+
+        writes: list[str] = []
+        spawned: list[str] = []
+        _install_cloud_stubs(monkeypatch, client_cls=_fake_client())
+        from comfy_cli import jobs_state as jobs_state_mod
+        from comfy_cli.command import run as run_pkg
+
+        monkeypatch.setattr(jobs_state_mod, "write", _recording_write(writes))
+        monkeypatch.setattr(run_pkg, "_spawn_watcher", _recording_spawn(spawned))
+        _tap_queued(ndjson_renderer, _raise_broken_pipe)
+
+        with pytest.raises(BrokenPipeError):
+            execute_cloud(workflow_file, wait=False, timeout=5)
+        capsys.readouterr()
+        assert writes == ["cloud-pid"]
+        assert spawned == ["cloud-pid"]
+
+    def test_local_wait_leaves_the_running_record_intact(self, monkeypatch, workflow_file, capsys, ndjson_renderer):
+        """The relocated emit sits inside the `except (WebSocketException,
+        ConnectionError, OSError)` block's try. Without the handler's
+        BrokenPipeError guard a closed stdout would be misreported as
+        `ws_disconnected` *and* rewrite this healthy record to error/server_died."""
+        from comfy_cli import jobs_state as jobs_state_mod
+
+        _tap_queued(ndjson_renderer, _raise_broken_pipe)
+        with (
+            patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),
+            patch("comfy_cli.http._AUTHED_OPENER.open") as mock_open,
+            patch("comfy_cli.command.run.WebSocket") as MockWs,
+        ):
+            mock_open.return_value.__enter__.return_value.read.return_value = json.dumps({"prompt_id": "p"}).encode()
+            _local_ws_that_finishes(MockWs)
+            with pytest.raises(BrokenPipeError):
+                execute(workflow_file, host="127.0.0.1", port=8188, wait=True, verbose=False, timeout=30)
+        capsys.readouterr()
+        record = jobs_state_mod.read("p")
+        assert record is not None, "the submit-time state file must exist"
+        assert record.status == "running"
+        assert record.error is None
+
+
+class TestQueueStashesWarningsWithoutEmitting:
+    """`WorkflowExecution.queue()` no longer emits — it stashes the warnings so
+    the caller can emit the identical event after persisting state."""
+
+    def test_queue_emits_nothing_and_stashes_the_warnings(self, simple_workflow, capsys):
+        ex = _make_workflow_execution(simple_workflow)
+        body = json.dumps(
+            {
+                "prompt_id": "p",
+                "node_errors": {"3": {"errors": [{"type": "x", "message": "skipped"}], "class_type": "X"}},
+            }
+        ).encode()
+        with patch("comfy_cli.http._AUTHED_OPENER.open") as mock_open:
+            mock_open.return_value.__enter__.return_value.read.return_value = body
+            ex.queue()
+        out, _err = capsys.readouterr()
+        assert "queued" not in out, f"queue() must not emit the event itself: {out!r}"
+        assert ex.prompt_id == "p"
+        assert ex.validation_warnings[0]["node_id"] == "3"
+
+    def test_no_node_errors_leaves_the_warnings_empty(self, simple_workflow, capsys):
+        ex = _make_workflow_execution(simple_workflow)
+        with patch("comfy_cli.http._AUTHED_OPENER.open") as mock_open:
+            mock_open.return_value.__enter__.return_value.read.return_value = json.dumps({"prompt_id": "p"}).encode()
+            ex.queue()
+        capsys.readouterr()
+        assert ex.validation_warnings == []

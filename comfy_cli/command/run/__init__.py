@@ -385,6 +385,12 @@ def execute(
             wait_state.status = "running"
             _write_state(wait_state)
 
+            # Only now, with the durable record on disk, announce the queue.
+            # The event-order contract (docs/json-output.md) is
+            # `prompt_preview → queued → node events`, so this must also
+            # precede `watch_execution`'s WebSocket stream.
+            _emit_queued(renderer, execution)
+
             # `watch_execution` reports a terminal server event by rendering
             # the error and raising `typer.Exit` (1 for `execution_error`, 130
             # for `execution_interrupted`) — the ordinary failure path, not an
@@ -460,6 +466,10 @@ def execute(
             state_file = jobs_state.write(state)
             watcher_spawned = _spawn_watcher(execution.prompt_id, where="local", host=host, port=port, notify=notify)
 
+            # Emitted after the state file and the watcher spawn attempt, so a
+            # consumer reading this line can already `comfy jobs status` it.
+            _emit_queued(renderer, execution)
+
             if renderer.is_pretty():
                 from comfy_cli.output.glyphs import status_glyph
 
@@ -527,6 +537,12 @@ def execute(
         )
         raise typer.Exit(code=1)
     except (WebSocketException, ConnectionError, OSError) as e:
+        if isinstance(e, BrokenPipeError):
+            # A closed stdout is the consumer leaving, not the server dying —
+            # let click/__main__ turn it into the documented silent exit 0 and
+            # leave the just-written state record untouched. Same principle as
+            # `completed_payload` being emitted outside this try.
+            raise
         # If we closed the WebSocket ourselves in response to Ctrl-C, the recv
         # loop exits with a WebSocketException that *looks* like the server
         # vanished. Check the cancellation token first so we emit the right
@@ -592,6 +608,24 @@ def execute(
             elapsed = timedelta(seconds=completed_payload["elapsed_seconds"])
             pprint(f"[bold green]\nWorkflow execution completed ({elapsed})[/bold green]")
         renderer.emit(completed_payload, command="run", where="local")
+
+
+def _emit_queued(renderer, execution) -> None:
+    """Emit the contractual local `queued` event (docs/json-output.md#queued).
+
+    Lives in the caller rather than ``WorkflowExecution.queue()`` so it can be
+    emitted *after* the job's state file is persisted — a consumer that sees
+    this line can immediately `comfy jobs status <prompt_id>` / see the job in
+    `jobs ls`, and a `BrokenPipeError` here can no longer abort setup before
+    the durable record exists. The field set is unchanged.
+    """
+    renderer.event(
+        "queued",
+        prompt_id=execution.prompt_id,
+        client_id=execution.client_id,
+        validation_warnings=execution.validation_warnings,
+        nodes=execution.workflow_manifest(),
+    )
 
 
 def _write_state(state):
@@ -860,7 +894,8 @@ def execute_cloud(
     # with `queued` (async) / `executing` (--wait) carrying {workflow, base_url}
     # — both wrong per docs/json-output.md: `queued` means "the server accepted
     # the prompt" (so it cannot precede the POST), and `executing` is a per-node
-    # event. The contractual `queued` is emitted after submit, below.
+    # event. The contractual `queued` is emitted after submit *and* after the
+    # job state file is written, below.
 
     try:
         if not wait and renderer.is_pretty():
@@ -915,19 +950,27 @@ def execute_cloud(
         raise typer.Exit(code=1)
 
     # The contractual `queued`: the server has the prompt. Same shape the local
-    # path emits from `WorkflowExecution.queue()` (docs/json-output.md#queued),
-    # plus `base_url` so a cloud consumer still learns the target.
-    # `validation_warnings` is always empty here — unlike local, the cloud
-    # treats any `node_errors` on an accepted submit as a hard `prompt_rejected`
-    # above, so a partially-valid graph never reaches this line.
-    renderer.event(
-        "queued",
-        prompt_id=submit.prompt_id,
-        client_id=client_id,
-        validation_warnings=[],
-        nodes=workflow_manifest(parsed_workflow),
-        base_url=target.base_url,
-    )
+    # path emits (docs/json-output.md#queued), plus `base_url` so a cloud
+    # consumer still learns the target. `validation_warnings` is always empty
+    # here — unlike local, the cloud treats any `node_errors` on an accepted
+    # submit as a hard `prompt_rejected` above, so a partially-valid graph
+    # never reaches this line.
+    #
+    # Deliberately NOT emitted at this point: both branches below emit it only
+    # once the job's state file (and, on the async branch, the watcher) exist.
+    # A `BrokenPipeError` here — `comfy run --where cloud --json-stream … |
+    # head -n1`, where the NDJSON renderer flushes every line — used to abort
+    # setup before `jobs_state.write` ran while `__main__` still exited 0,
+    # leaving a billable cloud job with no journal entry, state file or watcher.
+    def _emit_queued_cloud() -> None:
+        renderer.event(
+            "queued",
+            prompt_id=submit.prompt_id,
+            client_id=client_id,
+            validation_warnings=[],
+            nodes=workflow_manifest(parsed_workflow),
+            base_url=target.base_url,
+        )
 
     if not wait:
         state = jobs_state.new(
@@ -941,6 +984,9 @@ def execute_cloud(
         state_file = jobs_state.write(state)
         _journal_run(workflow_name, submit.prompt_id, "cloud")
         watcher_spawned = _spawn_watcher(submit.prompt_id, where="cloud", notify=notify)
+
+        # Durable record + watcher exist: safe to announce.
+        _emit_queued_cloud()
 
         if renderer.is_pretty():
             from comfy_cli.output.glyphs import status_glyph
@@ -990,6 +1036,12 @@ def execute_cloud(
     state.item_map = (compose_meta or {}).get("items")
     state_file = jobs_state.write(state)
     _journal_run(workflow_name, submit.prompt_id, "cloud")
+
+    # Announced once the record is durable, and *outside* the polling try below
+    # — none of its handlers should ever see (and rewrite state for) a
+    # BrokenPipeError raised by this emit. It propagates to click/`__main__`,
+    # which exits 0 silently, with the job already recorded.
+    _emit_queued_cloud()
 
     try:
 
