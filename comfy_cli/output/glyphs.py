@@ -54,4 +54,8 @@ def status_glyph(status: str | None) -> str:
     # bound for `Table.add_row` / `Text.from_markup`. Escaping the interpolated
     # half keeps the tags we author live while a server's `[red]` or `[/]` stays
     # inert text — a no-op for every status in `STATUS_STYLE`, all plain words.
-    return f"[{style}]{glyph} {sanitize_markup(canonical) if canonical else 'unknown'}[/{style}]"
+    # The `or "unknown"` tests the *sanitized* label, not the raw one: a status
+    # made only of control bytes is truthy but sanitizes to empty, and falling
+    # back there beats rendering a glyph with a dangling space and no word.
+    label = sanitize_markup(canonical) if canonical else ""
+    return f"[{style}]{glyph} {label or 'unknown'}[/{style}]"

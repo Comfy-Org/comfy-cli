@@ -1248,12 +1248,15 @@ def list_cmd(
         tbl.add_column("updated", style="dim")
         for r in payload["workflows"][:50]:
             # The cloud workflow catalog is server-supplied end to end, same as
-            # the local `/userdata` listing `_local_list` renders.
+            # the local `/userdata` listing `_local_list` renders. `str()` before
+            # the slices: `sanitize_markup` coerces, but the truncation runs
+            # first, and a numeric `id`/`updated_at` in the JSON would raise
+            # `TypeError: 'int' object is not subscriptable` before it got there.
             tbl.add_row(
-                sanitize_markup((r["id"] or "")[:8] + "…" if r["id"] else ""),
+                sanitize_markup(str(r["id"])[:8] + "…" if r["id"] else ""),
                 sanitize_markup(r["name"] or "(untitled)"),
                 sanitize_markup(r["latest_version"] or ""),
-                sanitize_markup((r["updated_at"] or "")[:10]),
+                sanitize_markup(str(r["updated_at"] or "")[:10]),
             )
         renderer.console().print(tbl)
         rprint(f"[dim]{len(rows)} workflow(s)[/dim]")

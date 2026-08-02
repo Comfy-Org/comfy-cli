@@ -38,7 +38,7 @@ from comfy_cli.env_checker import check_comfy_server_running
 from comfy_cli.host_port import resolve_host_port as _resolve_host_port
 from comfy_cli.http import authed_urlopen, plain_urlopen
 from comfy_cli.output import get_renderer
-from comfy_cli.output.sanitize import sanitize_markup
+from comfy_cli.output.sanitize import sanitize, sanitize_markup
 from comfy_cli.where import cloud_preflight_or_exit
 
 app = typer.Typer(no_args_is_help=True, help="List, inspect, and live-watch ComfyUI prompts.")
@@ -559,7 +559,7 @@ def _watch_ls(*, host, port, limit, where, local_only, state_where=None, orphane
             tbl.add_row(
                 sanitize_markup(r.prompt_id[:8] + "…" if len(r.prompt_id) > 8 else r.prompt_id),
                 status_glyph(r.status),
-                r.where,
+                sanitize_markup(r.where),
                 str(r.outputs) if r.outputs else "—",
                 sanitize_markup(wf_display),
             )
@@ -832,20 +832,26 @@ def _render_status_pretty(snap: dict, *, host: str, port: int) -> None:
 
     renderer = get_renderer()
     status = snap["status"]
+    # An unrecognized status falls through to the server's own string. `Text`
+    # declines to *parse* markup, but it still forwards `\x1b` — rich's
+    # `strip_control_codes` covers only BEL/BS/VT/FF/CR — so the escape bytes
+    # need the plain `sanitize`. Not `sanitize_markup`: a `Text` would print its
+    # backslashes verbatim, which is why the cell is control-stripped, not
+    # markup-escaped.
     badge = {
         "running": Text.assemble(("● ", "bold green"), ("running", "bold green")),
         "pending": Text.assemble(("◌ ", "bold yellow"), ("pending", "bold yellow")),
         "completed": Text.assemble(("✓ ", "bold green"), ("completed", "bold green")),
         "queued": Text.assemble(("◌ ", "dim"), ("queued", "dim")),
         "error": Text.assemble(("✗ ", "bold red"), ("error", "bold red")),
-    }.get(status, Text(status))
+    }.get(status, Text(sanitize(str(status))))
 
     tbl = Table.grid(padding=(0, 2), expand=False)
     tbl.add_column(justify="right", style="dim", no_wrap=True)
     tbl.add_column(overflow="fold")
     # `Table.add_row` parses markup in a `str` cell; every value below is
-    # chosen by the host answering `/queue` and `/history`. `badge` is a
-    # `Text`, which never parses markup — escaping it would print backslashes.
+    # chosen by the host answering `/queue` and `/history`. `badge` is the one
+    # exception — a `Text`, already control-stripped above.
     tbl.add_row("prompt_id", sanitize_markup(snap["prompt_id"]))
     tbl.add_row("status", badge)
     if snap.get("outputs"):
@@ -970,9 +976,13 @@ def _render_wait_pretty(summary: dict) -> None:
     tbl.add_column("status")
     for r in summary["jobs"]:
         glyph, style = badge.get(r["status"], ("•", "white"))
-        # The status cell is a `Text`, which never parses markup — only the
-        # bare-`str` prompt_id cell needs escaping here.
-        tbl.add_row(sanitize_markup(r["prompt_id"]), Text(f"{glyph} {r['status']}", style=style))
+        # The status cell is a `Text`, which never parses markup — so it takes
+        # the plain `sanitize` (escape bytes still pass through `Text`) rather
+        # than `sanitize_markup`, whose backslashes it would print verbatim.
+        tbl.add_row(
+            sanitize_markup(r["prompt_id"]),
+            Text(f"{glyph} {sanitize(str(r['status']))}", style=style),
+        )
     get_renderer().console().print(tbl)
 
 
@@ -1714,7 +1724,10 @@ def _cloud_status(prompt_id: str) -> None:
     if renderer.is_pretty():
         from rich.table import Table
 
-        tbl = Table(title=f"Cloud prompt {prompt_id[:8]}…", border_style="cyan", show_header=False)
+        # Rich parses a `str` table title as markup too, so the id belongs in
+        # the same escaping regime as the cells — an unbalanced `[/]` there
+        # raises `MarkupError` before a single row is added.
+        tbl = Table(title=f"Cloud prompt {sanitize_markup(prompt_id[:8])}…", border_style="cyan", show_header=False)
         tbl.add_column(style="bold cyan")
         tbl.add_column()
         # Every cell below comes straight off `/api/jobs/<id>` — including
@@ -1728,7 +1741,10 @@ def _cloud_status(prompt_id: str) -> None:
         if snap.get("updated_at"):
             tbl.add_row("updated", sanitize_markup(snap["updated_at"]))
         if snap.get("error_message"):
-            tbl.add_row("error", sanitize_markup(snap["error_message"]))
+            # Same 600-char budget the local `/history` error cell uses, and for
+            # the same reason: an unbounded API string becomes an unbounded Rich
+            # cell. Truncate first, escape second (see `_render_status_pretty`).
+            tbl.add_row("error", sanitize_markup(str(snap["error_message"])[:600]))
         for u in snap.get("outputs") or []:
             tbl.add_row("output", sanitize_markup(u))
         renderer.console().print(tbl)
@@ -1748,7 +1764,8 @@ def _cloud_watch(prompt_id: str, *, poll_interval: float, max_wait: float) -> No
 
     if renderer.is_pretty():
         renderer.console().print(
-            f"[bold]Watching cloud prompt[/bold] {prompt_id}   [dim]({base_url}, Ctrl-C to stop)[/dim]"
+            f"[bold]Watching cloud prompt[/bold] {sanitize_markup(prompt_id)}   "
+            f"[dim]({sanitize_markup(base_url)}, Ctrl-C to stop)[/dim]"
         )
 
     final_snap: dict | None = None
@@ -1769,14 +1786,19 @@ def _cloud_watch(prompt_id: str, *, poll_interval: float, max_wait: float) -> No
         if snap["status"] != last_state:
             last_state = snap["status"]
             if renderer.is_pretty():
-                renderer.console().print(f"[dim]→[/dim] state [bold]{last_state}[/bold]")
+                # `_cloud_status` hardens the one-shot view of this same
+                # snapshot; the streaming sibling prints the same server-chosen
+                # `status` into markup on every transition, and a `[/]` in it
+                # would raise `MarkupError` mid-poll. The `renderer.event` line
+                # below stays raw on purpose — JSON escapes it already.
+                renderer.console().print(f"[dim]→[/dim] state [bold]{sanitize_markup(last_state)}[/bold]")
             renderer.event("state", prompt_id=prompt_id, status=last_state)
 
         if snap["status"] in {"completed", "error", "cancelled"}:
             for u in snap.get("outputs") or []:
                 renderer.event("output", url=u, prompt_id=prompt_id)
                 if renderer.is_pretty():
-                    renderer.console().print(f"[bold green]✓[/bold green] output: [cyan]{u}[/cyan]")
+                    renderer.console().print(f"[bold green]✓[/bold green] output: [cyan]{sanitize_markup(u)}[/cyan]")
             final_snap = snap
             break
 

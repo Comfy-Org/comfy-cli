@@ -531,6 +531,67 @@ def test_local_job_status_unknown_status_does_not_crash(pretty):
     assert "server said [/] oops" in out, f"Text cell was escaped or mangled: {out!r}"
 
 
+def test_local_job_status_unknown_status_strips_escape_bytes(pretty):
+    """The other half of that carve-out: `Text` declines to parse markup but
+    still forwards `\\x1b` (rich strips only BEL/BS/VT/FF/CR), so the fallback
+    cell needs the plain control-stripping sanitizer. `UNBALANCED` alone cannot
+    catch this — it carries markup and no escape bytes."""
+    from comfy_cli.command.jobs import _render_status_pretty
+
+    _render_status_pretty(
+        {"prompt_id": "p1", "status": EVIL, "outputs": [], "error": None},
+        host="127.0.0.1",
+        port=8188,
+    )
+    out = assert_inert(pretty)
+    # Still literal, still un-escaped: control bytes gone, brackets intact.
+    assert "[link=https://attacker.example]" in out, f"Text cell was markup-escaped: {out!r}"
+
+
+def test_wait_summary_status_strips_escape_bytes(pretty):
+    """`comfy jobs wait` renders the same server status through a second `Text`
+    cell, with the same escape-byte gap."""
+    from comfy_cli.command.jobs import _render_wait_pretty
+
+    _render_wait_pretty(
+        {
+            "total": 1,
+            "elapsed_seconds": 1.0,
+            "jobs": [{"prompt_id": UNBALANCED, "status": EVIL}],
+        }
+    )
+    out = assert_inert(pretty)
+    assert "[link=https://attacker.example]" in out, f"Text status cell was markup-escaped: {out!r}"
+
+
+def _cloud_watch_against(snap: dict, *, max_wait: float):
+    """Run `_cloud_watch` with the cloud snapshot replaced by `snap`."""
+    from comfy_cli.command import jobs
+
+    client = MagicMock()
+    client.target.base_url = "https://cloud.example"
+    with (
+        patch.object(jobs, "cloud_preflight_or_exit"),
+        patch.object(jobs, "_cloud_client", return_value=client),
+        patch.object(jobs, "_cloud_status_snapshot", return_value=snap),
+    ):
+        return jobs._cloud_watch("p" * 12, poll_interval=0.0, max_wait=max_wait)
+
+
+def test_cloud_watch_state_line_is_inert(pretty):
+    """`comfy jobs watch --where cloud` prints the same `/api/jobs/<id>` status
+    `_cloud_status` hardens — once per transition, straight into markup."""
+    with pytest.raises(typer.Exit):
+        _cloud_watch_against(_cloud_snap(status=EVIL), max_wait=0.0)
+    assert "boom" in assert_inert(pretty)
+
+
+def test_cloud_watch_output_urls_are_inert(pretty):
+    """The terminal-state branch echoes each output URL into a `[cyan]` wrapper."""
+    _cloud_watch_against(_cloud_snap(status="completed", outputs=[EVIL, UNBALANCED]), max_wait=30.0)
+    assert "boom" in assert_inert(pretty)
+
+
 def _cloud_status_against(snap: dict) -> None:
     """Run `_cloud_status` with the cloud snapshot replaced by `snap`."""
     from comfy_cli.command import jobs
@@ -618,6 +679,15 @@ def test_jobs_ls_table_is_inert(pretty):
     assert_inert(pretty)
 
 
+def test_status_glyph_control_only_status_falls_back_to_unknown():
+    """A status made entirely of control bytes is truthy but sanitizes to the
+    empty string; the `unknown` fallback must test the sanitized label, or the
+    glyph renders with a dangling space and no word at all."""
+    from comfy_cli.output.glyphs import status_glyph
+
+    assert status_glyph("\x1b[2J\x07") == "[dim]· unknown[/dim]"
+
+
 def test_status_glyph_keeps_its_own_tags_live(pretty):
     """The escaping must not neuter the tags `status_glyph` itself authors —
     a known status still renders styled, with no stray backslashes."""
@@ -647,6 +717,25 @@ def test_system_stats_table_is_inert(pretty):
         },
     )
     assert "boom" in assert_inert(pretty)
+
+
+def test_system_stats_non_string_fields_do_not_crash(pretty):
+    """`index` is normally an *integer* off `/system_stats`, and wrapping it
+    dropped an explicit `str()`. `sanitize_markup` coerces via `sanitize_value`,
+    but every other test here feeds strings — this is the case that would catch
+    a future sanitizer that stopped coercing."""
+    from comfy_cli.command.system import _render_stats_pretty
+
+    _render_stats_pretty(
+        get_renderer(),
+        {
+            "devices": [{"name": "cuda:0", "type": "cuda", "index": 0, "vram_free": 1, "vram_total": 2}],
+            "system": {"ram_free": 1, "ram_total": 2, "comfyui_version": 3},
+        },
+    )
+    out = assert_inert(pretty)
+    assert "cuda:0" in out
+    assert "ComfyUI 3" in out
 
 
 def test_local_workflow_list_table_is_inert(pretty):
@@ -685,3 +774,22 @@ def test_cloud_workflow_list_table_is_inert(pretty):
     ):
         workflow.list_cmd(name=None, limit=20, sort="create_time", order="desc", where=None)
     assert_inert(pretty)
+
+
+def test_cloud_workflow_list_numeric_fields_do_not_crash(pretty):
+    """`id` and `updated_at` are *sliced* before they are sanitized, so the
+    coercion `sanitize_markup` does internally comes too late: a numeric field
+    would raise `TypeError: 'int' object is not subscriptable` first."""
+    from comfy_cli.command import workflow
+
+    body = {"data": [{"id": 1234567890, "name": "wf", "latest_version": 2, "updated_at": 20260802}]}
+    target = MagicMock()
+    target.is_cloud = True
+    target.url.return_value = "https://cloud.example/api/workflows"
+    with (
+        patch.object(workflow, "_resolve_where_target", return_value=target),
+        patch.object(workflow, "_http_request", return_value=(200, body)),
+    ):
+        workflow.list_cmd(name=None, limit=20, sort="create_time", order="desc", where=None)
+    out = assert_inert(pretty)
+    assert "12345678…" in out, f"numeric id was not truncated as text: {out!r}"
