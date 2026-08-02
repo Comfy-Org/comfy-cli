@@ -242,7 +242,9 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "host_flag_cloud",
         "`--host`/`--port` were combined with an effective `cloud` target. They address a local "
         "ComfyUI only; the cloud address comes from the signed-in account. `details` carries the "
-        "offending host/port and the resolved `where`.",
+        "offending host/port, the resolved `where`, and the `where_source` that produced it "
+        "(`flag`, `env`, `project`, `config`, or `auto`) — the target may never have been "
+        "explicitly requested.",
         "pass `--where local` to aim at a local server; to reach a different cloud address set "
         "`COMFY_CLOUD_BASE_URL` or run `comfy cloud set-base-url`",
     ),

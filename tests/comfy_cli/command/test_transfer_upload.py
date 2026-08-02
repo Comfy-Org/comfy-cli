@@ -37,9 +37,11 @@ class _FakeOpener:
         self.payload = payload or {"name": "ab12.png", "subfolder": "", "type": "input"}
         self.error = error
         self.requests: list = []
+        self.timeouts: list = []
 
-    def open(self, req):
+    def open(self, req, timeout=None):
         self.requests.append(req)
+        self.timeouts.append(timeout)
         if self.error is not None:
             raise self.error
         return _FakeResponse(json.dumps(self.payload).encode())
@@ -198,6 +200,46 @@ class TestUploadConnectionError:
         assert excinfo.value.exit_code == 1
         env = json.loads([ln for ln in capsys.readouterr().out.splitlines() if ln.strip()][-1])
         assert env["error"]["code"] == "upload_failed"
+
+    def test_unicode_error_emits_upload_failed_envelope(self, asset, monkeypatch, capsys):
+        from comfy_cli.output import Renderer, set_renderer
+        from comfy_cli.output.renderer import OutputMode
+
+        # A non-ASCII host reaches http.client's ``host.encode("idna")``
+        # fallback, which raises UnicodeError on a pathological label.
+        # UnicodeError is a ValueError, so it is caught by none of the
+        # connection-error classes above and used to escape as a traceback.
+        err = UnicodeError("encoding with 'idna' codec failed: label too long")
+        monkeypatch.setattr(transfer, "_TRANSFER_OPENER", _FakeOpener(error=err))
+        monkeypatch.setattr(transfer, "resolve_target", lambda **kw: _local_target())
+        set_renderer(Renderer(mode=OutputMode.JSON, command="upload"))
+
+        with pytest.raises(typer.Exit) as excinfo:
+            transfer.execute_upload([str(asset)], where="local")
+
+        assert excinfo.value.exit_code == 1
+        env = json.loads([ln for ln in capsys.readouterr().out.splitlines() if ln.strip()][-1])
+        assert env["ok"] is False
+        assert env["error"]["code"] == "upload_failed"
+
+
+class TestUploadTimeout:
+    """The upload POST must carry an explicit socket timeout.
+
+    ``--host``/``--port`` can now aim the POST at an arbitrary address, so a
+    peer that completes the handshake and then stalls would hang the CLI
+    forever on urllib's no-timeout default (BE-5662).
+    """
+
+    def test_upload_passes_an_explicit_timeout(self, asset, monkeypatch):
+        opener = _FakeOpener()
+        monkeypatch.setattr(transfer, "_TRANSFER_OPENER", opener)
+        monkeypatch.setattr(transfer, "resolve_target", lambda **kw: _local_target())
+
+        transfer.execute_upload([str(asset)], where="local")
+
+        assert opener.timeouts == [transfer._UPLOAD_TIMEOUT_S]
+        assert transfer._UPLOAD_TIMEOUT_S is not None
 
 
 class TestUploadHostPortRouting:
@@ -390,15 +432,84 @@ class TestUploadCliHostPortFlags:
         assert seen["where"] == "cloud"
         assert seen["host"] is None and seen["port"] is None
 
-    @pytest.mark.parametrize("bad", ["evil/host", "user@evil", "host?x", "host#x", "host\rname", "host\nname"])
+    @pytest.mark.parametrize(
+        "bad",
+        [
+            "evil/host",
+            "user@evil",
+            "host?x",
+            "host#x",
+            "host\rname",
+            "host\nname",
+            # Empty/blank: resolved as *absent* downstream, so without this
+            # guard `--host "$UNSET_VAR"` silently retargets the upload at
+            # COMFY_LOCAL_URL or the 127.0.0.1:8188 default.
+            "",
+            "   ",
+            # Percent-encoded URL-special/control chars: urllib unquotes the
+            # host it parses out of the URL, so these decode downstream.
+            "a%0d%0aX-Injected:%201",
+            "host%2fpath",
+            # A combined host:port would be bracketed as an IPv6 literal
+            # (`http://[127.0.0.1:8188]:8188`), silently dropping the port.
+            "127.0.0.1:8188",
+            "localhost:8188",
+        ],
+    )
     def test_invalid_host_is_a_usage_error(self, asset, runner, bad):
         result = runner.invoke(app, ["upload", str(asset), "--host", bad], env={"COMFY_WHERE": "local"})
 
         # typer.BadParameter -> click UsageError -> exit code 2.
         assert result.exit_code == 2, result.output
 
+    @pytest.mark.parametrize("good", ["::1", "[::1]", "fe80::1"])
+    def test_ipv6_literal_host_is_accepted(self, asset, runner, good, monkeypatch):
+        from comfy_cli import cmdline
+
+        seen: dict = {}
+        monkeypatch.setattr(
+            cmdline.transfer_inner,
+            "execute_upload",
+            lambda files, **kwargs: seen.update(kwargs) or ["ab12.png"],
+        )
+
+        result = runner.invoke(app, ["upload", str(asset), "--host", good], env={"COMFY_WHERE": "local"})
+
+        assert result.exit_code == 0, result.output
+        assert seen["host"] == good
+
     @pytest.mark.parametrize("bad", ["0", "65536", "-1"])
     def test_out_of_range_port_is_a_usage_error(self, asset, runner, bad):
         result = runner.invoke(app, ["upload", str(asset), "--port", bad], env={"COMFY_WHERE": "local"})
 
         assert result.exit_code == 2, result.output
+
+
+class TestExecuteUploadValidatesItsOwnArgs:
+    """``execute_upload`` must not rely on its caller for host/port validation.
+
+    The CLI validates the flags, but comfy-mcp's ``_with_target`` calls
+    ``execute_upload`` directly and ``resolve_target`` drops the host verbatim
+    into ``http://{host}:{port}`` — so without this the guarantee would belong
+    to the caller, not the function (BE-5662).
+    """
+
+    @pytest.mark.parametrize("bad", ["attacker.tld/x?", "", "   ", "a%0d%0aX:%201", "127.0.0.1:8188"])
+    def test_bad_host_raises_before_any_request(self, asset, monkeypatch, bad):
+        opener = _FakeOpener()
+        monkeypatch.setattr(transfer, "_TRANSFER_OPENER", opener)
+
+        with pytest.raises(typer.BadParameter):
+            transfer.execute_upload([str(asset)], where="local", host=bad)
+
+        assert opener.requests == []
+
+    @pytest.mark.parametrize("bad", [0, 65536, -1])
+    def test_bad_port_raises_before_any_request(self, asset, monkeypatch, bad):
+        opener = _FakeOpener()
+        monkeypatch.setattr(transfer, "_TRANSFER_OPENER", opener)
+
+        with pytest.raises(typer.BadParameter):
+            transfer.execute_upload([str(asset)], where="local", port=bad)
+
+        assert opener.requests == []

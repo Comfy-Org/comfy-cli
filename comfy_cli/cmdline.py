@@ -1216,6 +1216,17 @@ def validate(
         raise typer.Exit(code=1)
 
 
+# How a `cloud` routing decision was reached, in words, for the --host/--port
+# rejection message. Keys are `where.WhereResolution.source` values.
+_WHERE_SOURCE_PHRASES = {
+    "flag": "targeting cloud via --where cloud",
+    "env": "targeting cloud via the COMFY_WHERE environment variable",
+    "project": "targeting cloud via this project's configured default",
+    "config": "targeting cloud via your saved `where_default` setting",
+    "auto": "targeting cloud because you're signed in (no explicit --where)",
+}
+
+
 @app.command(help="Upload files to the ComfyUI server's input directory.")
 @tracking.track_command()
 def upload(
@@ -1262,14 +1273,19 @@ def upload(
     # Checked before the preflight so the flag error isn't masked by a
     # "not signed in" error.
     if effective_where == "cloud" and (host is not None or port is not None):
+        # The cloud target can come from an explicit --where, but equally from
+        # COMFY_WHERE, a project/config default, or credential auto-detection —
+        # so name the source rather than accusing the user of passing a flag
+        # they may never have typed.
+        source = _WHERE_SOURCE_PHRASES.get(decision.source, f"resolved to cloud by {decision.source}")
         renderer.error(
             code="host_flag_cloud",
-            message="--host/--port target a local ComfyUI server and cannot be combined with --where cloud",
+            message=f"--host/--port target a local ComfyUI server, but this run is {source}",
             hint=(
                 "pass --where local to aim at a local server; to reach a different cloud address "
                 "set COMFY_CLOUD_BASE_URL or run `comfy cloud set-base-url`"
             ),
-            details={"host": host, "port": port, "where": effective_where},
+            details={"host": host, "port": port, "where": effective_where, "where_source": decision.source},
         )
         raise typer.Exit(code=1)
     if effective_where == "cloud":
