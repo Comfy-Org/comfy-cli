@@ -15,6 +15,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
+from comfy_cli import file_utils
 from comfy_cli.caller import Caller
 from comfy_cli.command import templates as templates_cmd
 from comfy_cli.output.renderer import (
@@ -542,7 +543,9 @@ def test_readonly_cache_dir_still_serves_fetched_data(cache_file, monkeypatch):
     monkeypatch.setattr(templates_cmd, "_fetch_gallery", _fake_fetch)
     # Make the real _persist_cache's write fail (read-only dir / disk full);
     # it must swallow the error and let the command proceed on in-hand data.
-    monkeypatch.setattr(templates_cmd.tempfile, "mkstemp", _boom_mkstemp)
+    # Patched at the shared helper's own tmp-file seam so the real
+    # `_persist_cache` -> `atomic_write_bytes` path is still exercised.
+    monkeypatch.setattr(file_utils.tempfile, "mkstemp", _boom_mkstemp)
     _force_json_renderer()
 
     runner = CliRunner()

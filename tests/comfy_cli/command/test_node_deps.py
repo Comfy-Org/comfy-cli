@@ -807,27 +807,31 @@ def test_save_cache_pins_the_write_encoding(monkeypatch):
     """The round-trip above cannot catch a dropped `encoding="utf-8"`: the bytes
     it writes are pure ASCII, which every locale encodes identically, so the
     pin only matters the day `json.dumps` stops escaping. Nor can the ambient
-    encoding be faked — CPython resolves `write_text`'s default below the Python
-    `locale` module. So assert the writer's contract directly: `_save_cache`
-    names its encoding rather than inheriting the host's, and what lands on disk
-    is the UTF-8 that `_load_cache`'s `json.loads(bytes)` can decode.
+    encoding be faked — CPython resolves the text-mode default below the Python
+    `locale` module. So assert the writer's contract directly, at the seam where
+    text becomes bytes: `_save_cache` hands `atomic_write_text` a string, and the
+    bytes that reach the filesystem are that string encoded UTF-8 by us — never a
+    text-mode write whose codec the host locale gets to pick. What lands on disk
+    is therefore the UTF-8 that `_load_cache`'s `json.loads(bytes)` can decode.
     """
     import time
 
+    from comfy_cli import file_utils
     from comfy_cli.command import outdated as outdated_cmd
 
     seen: dict[str, object] = {}
-    real_write_text = Path.write_text
+    real_atomic_write = file_utils._atomic_write
 
-    def spy(self, data, encoding=None, **kwargs):
-        seen["encoding"] = encoding
-        return real_write_text(self, data, encoding=encoding, **kwargs)
+    def spy(path, data, **kwargs):
+        seen["data"] = data
+        return real_atomic_write(path, data, **kwargs)
 
-    monkeypatch.setattr(Path, "write_text", spy)
+    monkeypatch.setattr(file_utils, "_atomic_write", spy)
     key = f"{node_deps_cmd.REGISTRY_CACHE_PREFIX}https://api.comfy.org:café-pack"
-    outdated_cmd._save_cache({key: {"value": "1.0.0", "ts": time.time()}})
+    payload = {key: {"value": "1.0.0", "ts": time.time()}}
+    outdated_cmd._save_cache(payload)
 
-    assert seen["encoding"] == "utf-8", "the host locale must not pick the cache encoding"
+    assert seen["data"] == json.dumps(payload).encode("utf-8"), "the host locale must not pick the cache encoding"
     assert json.loads(outdated_cmd._cache_path().read_bytes())[key]["value"] == "1.0.0"
 
 
