@@ -173,6 +173,23 @@ def test_resolve_target_local_honors_env(monkeypatch):
     assert target.port == 8189
 
 
+def test_resolve_target_local_brackets_ipv6_in_url_only(monkeypatch):
+    """``base_url`` gets the bracketed literal; ``Target.host`` stays bare.
+
+    The two are deliberately different representations: the URL needs RFC 3986
+    §3.2.2 brackets, while ``host`` is the bracket-stripped value the address
+    resolver validated. Pins that distinction across the shared
+    ``_bracket_host`` choke point.
+    """
+    from comfy_cli.target import resolve_target
+
+    monkeypatch.setenv(ENV_LOCAL_URL, "http://[::1]:8189")
+    target = resolve_target(where="local")
+    assert target.base_url == "http://[::1]:8189"
+    assert target.host == "::1"
+    assert target.port == 8189
+
+
 def test_resolve_target_local_flag_beats_env(monkeypatch):
     from comfy_cli.target import resolve_target
 

@@ -38,26 +38,6 @@ def show_progress(iterable, total, description="Downloading..."):
 ChoiceType = str | Choice | dict[str, Any]
 
 
-def prompt_autocomplete(
-    question: str, choices: list[ChoiceType], default: ChoiceType = "", force_prompting: bool = False
-) -> ChoiceType | None:
-    """
-    Asks a single select question using questionary and returns the selected response.
-
-    Args:
-        question (str): The question to display to the user.
-        choices (List[ChoiceType]): A list of choices the user can autocomplete from.
-        default (ChoiceType): Default choice.
-        force_prompting (bool): Whether to force prompting even if skip_prompting is set.
-
-    Returns:
-        Optional[ChoiceType]: The selected choice from the user, or None if skipping prompts.
-    """
-    if workspace_manager.skip_prompting and not force_prompting:
-        return None
-    return questionary.autocomplete(question, choices=choices, default=default).ask()
-
-
 def prompt_select(
     question: str, choices: list[ChoiceType], default: ChoiceType = "", force_prompting: bool = False
 ) -> ChoiceType | None:

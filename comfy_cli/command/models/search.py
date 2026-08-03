@@ -4,7 +4,7 @@ Four subcommands, all routed by ``--where`` (cloud auto-detect by default):
 
     comfy models list-folders           # GET /api/experiment/models  | /models
     comfy models list-folder <folder>   # GET /api/experiment/models/<folder> | /models/<folder>
-    comfy models search [--text] [--type] [--limit]  # cloud: /api/assets; local: /models/<folder>
+    comfy models search [--text] [--type] [--limit]  # cloud: /api/assets; local: /models/<folder>, all folders w/o --type
     comfy models show <name>            # exact-match name across the catalog
 
 The search surface mirrors the asset→model extraction used by Comfy-Org's
@@ -16,8 +16,10 @@ ride along when present.
 
 Local-mode caveats:
   * ``/models/<folder>`` returns ``[{name, pathIndex}, ...]`` — filenames only,
-    no enrichment. ``search`` on local degrades to substring on the listing
-    of the resolved folder.
+    no enrichment. ``search`` on local degrades to a filename substring match:
+    without ``--type`` it walks *every* folder reported by ``/models`` (so a
+    diffusion_models/vae/lora file is findable by name), and ``--type`` scopes
+    the walk to that single folder.
   * The cloud asset catalog (``/api/assets``) has no local equivalent —
     local search is intentionally simpler.
 """
@@ -25,16 +27,16 @@ Local-mode caveats:
 from __future__ import annotations
 
 import json
-import re
 import urllib.error
 import urllib.parse
-import urllib.request
 from typing import Annotated, Any, NoReturn
 
 import typer
 
 from comfy_cli import tracking
+from comfy_cli.http import ResponseTooLarge
 from comfy_cli.output import get_renderer, rprint
+from comfy_cli.output.sanitize import sanitize_markup
 
 app = typer.Typer(no_args_is_help=True, help="Discover models — folders, files, and the cloud asset catalog.")
 
@@ -44,22 +46,61 @@ app = typer.Typer(no_args_is_help=True, help="Discover models — folders, files
 # a misconfigured backend or hostile and would only serve to OOM the CLI.
 _MAX_RESPONSE_BYTES = 64 * 1024 * 1024
 
-# Folder + asset-name arguments are interpolated into URL paths or query
-# strings. We disallow path-traversal sequences and control characters so a
-# crafted argument can't escape the intended endpoint. The set of legitimate
-# folder names (loras, checkpoints, …) is alphanumeric + ``_``/`-`/`.`; the
-# regex below is permissive enough for real-world filenames while rejecting
-# the obvious attack shapes.
-_PATH_SAFE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.\-]*$")
+# Folder names are interpolated into URL paths, so they must stay a *single*
+# path segment. Only genuine traversal shapes are refused; everything else is
+# percent-encoded before it reaches the URL (see `_is_walkable_folder_name`).
+
+
+def _is_walkable_folder_name(value: str) -> bool:
+    """True if ``value`` is usable as a single URL path segment.
+
+    Applies to both server-advertised folder names (the ``models search
+    --where local`` walk) and user-supplied ones (``models list-folder <folder>``,
+    ``models search --type``). Real installs configure folders like ``my loras``,
+    ``SDXL (base)``, or non-ASCII names; holding those to a strict-ASCII regex
+    silently skipped them on the walk and rejected them outright on user input,
+    leaving every model inside them unreachable even though ComfyUI serves the
+    folder fine. Only genuine traversal shapes are refused here; every call site
+    percent-encodes the segment with ``quote(..., safe="")`` before it reaches
+    the URL, so spaces, ``?``/``#``, and control characters can't alter the
+    request.
+    """
+    if not value or "/" in value or "\\" in value:
+        return False
+    # Only the *exact* segments `.` and `..` are rewritten by a URL resolver
+    # (RFC 3986 remove_dot_segments); `..` merely *inside* a name (`model..v2`)
+    # is an ordinary run of characters and must stay usable. `quote` leaves `.`
+    # unencoded, so a bare `.` would otherwise reach the server as `/models/.`
+    # and normalize back to the `/models` collection.
+    if value in (".", ".."):
+        return False
+    try:
+        # argv can carry undecodable bytes as lone surrogates (PEP 383
+        # `surrogateescape`), and a JSON `"\udcff"` escape does the same for
+        # server-advertised names. `quote(..., safe="")` raises
+        # `UnicodeEncodeError` on those — a `ValueError` that no call site's
+        # handler catches, so it would surface as an uncaught traceback.
+        # Rejecting costs no reachable capability: `quote(..., errors=
+        # "surrogateescape")` would encode the raw bytes instead, but a backend's
+        # folder names are config-defined `str` keys (`folder_names_and_paths`,
+        # `extra_model_paths.yaml`) that are always valid UTF-8, so such a segment
+        # can never match one — it would only turn this clear error into a 404.
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
 
 
 def _reject_unsafe_path_segment(value: str, *, kind: str, renderer) -> None:
     """Exit with an `invalid_argument` error if ``value`` isn't safe as a path segment."""
-    if not value or ".." in value or "/" in value or "\\" in value or not _PATH_SAFE.match(value):
+    if not _is_walkable_folder_name(value):
         renderer.error(
             code="invalid_argument",
-            message=f"{kind} {value!r} contains characters that aren't allowed in a path segment",
-            hint=f"valid {kind} names are alphanumeric with `_`, `-`, or `.`",
+            message=f"{kind} {value!r} is not usable as a single path segment",
+            hint=(
+                f"a {kind} name must be non-empty, must not be `.` or `..`, must not contain "
+                "`/` or `\\`, and must be valid UTF-8"
+            ),
         )
         raise typer.Exit(code=1)
 
@@ -98,30 +139,21 @@ def _models_path_parts(target) -> tuple[str, ...]:
     return ("experiment", "models") if target.is_cloud else ("models",)
 
 
-def _authed_request(url: str, target) -> urllib.request.Request:
-    req = urllib.request.Request(url)
-    if target.api_key:
-        req.add_header("X-API-Key", target.api_key)
-    elif target.auth_token:
-        req.add_header("Authorization", f"Bearer {target.auth_token}")
-    return req
-
-
 def _http_get_json(url: str, target, timeout: float = 30.0) -> Any:
     """Issue an authenticated GET and decode JSON. Raises urllib/JSON errors verbatim.
 
     Response body is capped at ``_MAX_RESPONSE_BYTES`` to bound memory use on a
-    misbehaving server. A ``ValueError`` is raised if the cap is exceeded.
+    misbehaving server; exceeding it raises ``ResponseTooLarge``, which every
+    caller routes to an envelope error alongside the urllib/JSON families.
     """
-    req = _authed_request(url, target)
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        # ``read(N)`` returns up to N bytes; reading N+1 lets us distinguish
-        # "fits exactly" from "exceeds cap" without buffering the whole stream
-        # twice on the happy path.
-        body = resp.read(_MAX_RESPONSE_BYTES + 1)
-        if len(body) > _MAX_RESPONSE_BYTES:
-            raise ValueError(f"response from {url} exceeds {_MAX_RESPONSE_BYTES} byte cap")
-        return json.loads(body)
+    from comfy_cli.http import request_json
+
+    _, body = request_json(url, target, timeout=timeout, max_bytes=_MAX_RESPONSE_BYTES)
+    if body is None:
+        # Callers route JSONDecodeError to an envelope error; an empty or
+        # unparseable body must surface the same way, not crash on body.get().
+        raise json.JSONDecodeError("empty or unparseable response body", "", 0)
+    return body
 
 
 def _emit_http_error(e: urllib.error.HTTPError, *, renderer, target, message: str, hint: str) -> NoReturn:
@@ -173,11 +205,11 @@ def list_folders_cmd(
             renderer=renderer,
             target=target,
             message=f"HTTP {e.code} from {url}",
-            hint="run `comfy auth whoami` to verify auth"
+            hint="run `comfy cloud whoami` to verify auth"
             if target.is_cloud
             else "run `comfy launch` to start a local server",
         )
-    except (urllib.error.URLError, OSError, json.JSONDecodeError) as e:
+    except (urllib.error.URLError, OSError, json.JSONDecodeError, ResponseTooLarge) as e:
         renderer.error(
             code="server_not_running" if not target.is_cloud else "cloud_http_error",
             message=f"failed to fetch {url}: {e}",
@@ -208,7 +240,11 @@ def list_folders_cmd(
         tbl.add_column("folder")
         tbl.add_column("subfolders", style="dim")
         for r in rows[:200]:
-            tbl.add_row(r["name"], ", ".join(r["subfolders"]) if r["subfolders"] else "")
+            # ``add_row`` parses markup in ``str`` cells; these are server names.
+            tbl.add_row(
+                sanitize_markup(r["name"]),
+                sanitize_markup(", ".join(r["subfolders"])) if r["subfolders"] else "",
+            )
         renderer.console().print(tbl)
         rprint(f"[dim]{len(rows)} folders ({payload['mode']})[/dim]")
     renderer.emit(payload, command="models list-folders")
@@ -235,7 +271,11 @@ def list_folder_cmd(
     renderer = get_renderer()
     _reject_unsafe_path_segment(folder, kind="folder", renderer=renderer)
     target = resolve_target(where=where)
-    url = target.url(*_models_path_parts(target), folder)
+    # Percent-encoded for the same reason `_local_folder_matches` does it: the
+    # relaxed validation above admits spaces, `?`/`#`, and non-ASCII, none of
+    # which may be allowed to alter the request. Error payloads below carry the
+    # decoded `folder` so the user sees what they typed.
+    url = target.url(*_models_path_parts(target), urllib.parse.quote(folder, safe=""))
 
     try:
         data = _http_get_json(url, target)
@@ -262,7 +302,7 @@ def list_folder_cmd(
                 details={"status": e.code, "folder": folder},
             )
         raise typer.Exit(code=1) from e
-    except (urllib.error.URLError, OSError, json.JSONDecodeError) as e:
+    except (urllib.error.URLError, OSError, json.JSONDecodeError, ResponseTooLarge) as e:
         renderer.error(
             code="cloud_http_error" if target.is_cloud else "server_not_running",
             message=f"failed to fetch {url}: {e}",
@@ -296,7 +336,7 @@ def list_folder_cmd(
         tbl.add_column("name")
         tbl.add_column("pathIndex", style="dim", justify="right")
         for f in files:
-            tbl.add_row(f["name"], str(f["pathIndex"]))
+            tbl.add_row(sanitize_markup(f["name"]), sanitize_markup(f["pathIndex"]))
         renderer.console().print(tbl)
         tail = f" (of {total})" if total != len(files) else ""
         rprint(f"[dim]{len(files)} files in {folder!r}{tail} ({payload['mode']})[/dim]")
@@ -386,36 +426,60 @@ def _cloud_search(
     qs = urllib.parse.urlencode(params)
     url = target.url("assets") + "?" + qs
     body = _http_get_json(url, target)
+    if not isinstance(body, dict):
+        # Callers route JSONDecodeError to an envelope error; a non-object
+        # top-level body (list/scalar) must surface the same way, not crash
+        # on body.get().
+        raise json.JSONDecodeError(f"unexpected response shape (not an object) from {url}", "", 0)
     assets = body.get("assets") or []
     rows = [_asset_to_row(a) for a in assets if isinstance(a, dict)]
     return rows, int(body.get("total") or len(rows))
 
 
-def _local_search(
-    target,
-    *,
-    text: str | None,
-    type_: str | None,
-    limit: int,
-) -> tuple[list[dict[str, Any]], int]:
-    """Filename listing from /models/<folder>. No enrichment available on local."""
-    if not type_:
-        # No tag-based filtering on local — pick a default that's almost always
-        # populated rather than scanning every folder (which would be slow).
-        folder = "checkpoints"
-    else:
-        folder = _TYPE_TO_FOLDER.get(type_, type_)
-    url = target.url(*_models_path_parts(target), folder)
-    data = _http_get_json(url, target)
-    items = []
+def _local_folder_names(target) -> list[str]:
+    """Fetch the backend's model-folder list, normalized to plain folder names.
+
+    Same endpoint (and same tolerant normalizer) as ``list_folders_cmd``: local
+    serves a flat list of folder-name strings, but the dict-entry shape is
+    accepted too so both server generations work.
+    """
+    data = _http_get_json(target.url(*_models_path_parts(target)), target)
+    names: list[str] = []
+    if isinstance(data, list):
+        for entry in data:
+            if isinstance(entry, dict):
+                name = entry.get("name", "")
+            elif isinstance(entry, str):
+                name = entry
+            else:
+                continue
+            if isinstance(name, str) and name:
+                names.append(name)
+    return names
+
+
+def _local_folder_matches(target, folder: str, *, text: str | None) -> list[dict[str, Any]]:
+    """Rows for one ``/models/<folder>`` listing, client-side filtered by ``text``.
+
+    ``folder`` is percent-encoded into the path so folder names with spaces or
+    non-ASCII characters resolve correctly; the emitted rows carry the decoded
+    name so ``type``/``tags`` stay human-readable.
+    """
+    segment = urllib.parse.quote(folder, safe="")
+    data = _http_get_json(target.url(*_models_path_parts(target), segment), target)
+    rows: list[dict[str, Any]] = []
     if isinstance(data, list):
         for entry in data:
             name = entry.get("name", "") if isinstance(entry, dict) else (entry if isinstance(entry, str) else "")
-            if not name:
+            # A dict entry's `name` is server-controlled and may not be a string;
+            # `name.lower()` below (and the cross-folder sort in `_local_search`)
+            # would blow up on a non-str, so drop those the way the folder-name
+            # normalizer does.
+            if not isinstance(name, str) or not name:
                 continue
             if text and text.lower() not in name.lower():
                 continue
-            items.append(
+            rows.append(
                 {
                     "name": name,
                     "type": folder,
@@ -429,13 +493,61 @@ def _local_search(
                     "id": None,
                 }
             )
-    total = len(items)
-    return items[:limit], total
+    return rows
+
+
+def _local_search(
+    target,
+    *,
+    text: str | None,
+    type_: str | None,
+    limit: int,
+) -> tuple[list[dict[str, Any]], int]:
+    """Filename listing from /models/<folder>. No enrichment available on local.
+
+    With ``--type`` this is a single-folder fetch. Without it we walk every
+    folder ``/models`` reports: local has no tag-based filtering, so a
+    single-folder default (historically ``checkpoints``) made every model
+    outside it invisible to text search. Walking is cheap — filename-only
+    listings against a localhost server, ~20 small GETs.
+    """
+    # `--limit -1` would otherwise become a negative slice that silently drops
+    # the last N rows while `total` still reports the full count. Clamp like
+    # `_cloud_search` and `list_folder_cmd` already do.
+    limit = max(0, limit)
+
+    if type_:
+        scoped = _local_folder_matches(target, _TYPE_TO_FOLDER.get(type_, type_), text=text)
+        return scoped[:limit], len(scoped)
+
+    all_matches: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for folder in _local_folder_names(target):
+        # Folder names are server-provided, so they can't be trusted into a URL
+        # path. Skip traversal shapes silently — it isn't user input to reject.
+        if not _is_walkable_folder_name(folder) or folder in seen:
+            continue
+        seen.add(folder)
+        try:
+            all_matches.extend(_local_folder_matches(target, folder, text=text))
+        except (OSError, ValueError):
+            # One misbehaving folder must not sink the whole walk: a folder the
+            # listing advertises but doesn't serve (HTTPError 404), a hung or
+            # refused fetch (URLError/OSError — HTTPError and URLError are both
+            # OSError subclasses), a proxy serving HTML instead of JSON
+            # (json.JSONDecodeError, a ValueError), or a body over the 64 MiB
+            # cap (ValueError).
+            continue
+    all_matches.sort(key=lambda r: (r["type"], r["name"]))
+    return all_matches[:limit], len(all_matches)
 
 
 @app.command(
     "search",
-    help="Search models. Cloud: enriched via /api/assets. Local: filename substring on /models/<folder>.",
+    help=(
+        "Search models. Cloud: enriched via /api/assets. "
+        "Local: filename substring across every /models folder (--type scopes it to one)."
+    ),
 )
 @tracking.track_command("models")
 def search_cmd(
@@ -483,9 +595,9 @@ def search_cmd(
             renderer=renderer,
             target=target,
             message=f"HTTP {e.code} during models search",
-            hint="check auth (`comfy auth whoami`) or network",
+            hint="check auth (`comfy cloud whoami`) or network",
         )
-    except (urllib.error.URLError, OSError, json.JSONDecodeError) as e:
+    except (urllib.error.URLError, OSError, json.JSONDecodeError, ResponseTooLarge) as e:
         renderer.error(
             code="cloud_http_error" if target.is_cloud else "server_not_running",
             message=f"models search failed: {e}",
@@ -509,11 +621,14 @@ def search_cmd(
         tbl.add_column("base_model", style="dim")
         tbl.add_column("source", style="dim")
         for r in rows:
+            # Truncate first, then sanitize: escaping last keeps the markup
+            # escapes balanced, and a sequence cut in half by the slice is
+            # cleaned up rather than left dangling.
             tbl.add_row(
-                r["name"][:60],
-                r["type"] or "",
-                r["base_model"] or "",
-                (r["source_url"] or "")[:48],
+                sanitize_markup(r["name"][:60]),
+                sanitize_markup(r["type"] or ""),
+                sanitize_markup(r["base_model"] or ""),
+                sanitize_markup((r["source_url"] or "")[:48]),
             )
         renderer.console().print(tbl)
         tail = f" (of {total} total)" if total != len(rows) else ""
@@ -565,6 +680,8 @@ def show_cmd(
         url = target.url("assets") + "?" + qs
         try:
             body = _http_get_json(url, target)
+            if not isinstance(body, dict):
+                raise json.JSONDecodeError(f"unexpected response shape (not an object) from {url}", "", 0)
         except urllib.error.HTTPError as e:
             renderer.error(
                 code="cloud_http_error",
@@ -573,7 +690,7 @@ def show_cmd(
                 details={"status": e.code},
             )
             raise typer.Exit(code=1) from e
-        except (urllib.error.URLError, OSError, json.JSONDecodeError) as e:
+        except (urllib.error.URLError, OSError, json.JSONDecodeError, ResponseTooLarge) as e:
             renderer.error(code="cloud_http_error", message=f"models show failed: {e}")
             raise typer.Exit(code=1) from e
 
@@ -603,19 +720,21 @@ def show_cmd(
     }
     if renderer.is_pretty():
         row = payload["row"]
-        rprint(f"[bold]{row['name']}[/bold]")
-        rprint(f"  type:        {row['type']}")
+        # Every field below is catalog text the server chose, interpolated into
+        # a markup-parsing sink — sanitize each one (see comfy_cli.output.sanitize).
+        rprint(f"[bold]{sanitize_markup(row['name'])}[/bold]")
+        rprint(f"  type:        {sanitize_markup(row['type'])}")
         if row.get("base_model"):
-            rprint(f"  base_model:  {row['base_model']}")
+            rprint(f"  base_model:  {sanitize_markup(row['base_model'])}")
         if row.get("tags"):
-            rprint(f"  tags:        {', '.join(row['tags'])}")
+            rprint(f"  tags:        {sanitize_markup(', '.join(row['tags']))}")
         if row.get("source_url"):
-            rprint(f"  source:      {row['source_url']}")
+            rprint(f"  source:      {sanitize_markup(row['source_url'])}")
         if row.get("preview_url"):
-            rprint(f"  preview:     {row['preview_url']}")
+            rprint(f"  preview:     {sanitize_markup(row['preview_url'])}")
         if row.get("size"):
             rprint(f"  size:        {row['size']:,} bytes")
         trained = row.get("trained_words")
         if trained:
-            rprint(f"  trained:     {', '.join(trained)}")
+            rprint(f"  trained:     {sanitize_markup(', '.join(trained))}")
     renderer.emit(payload, command="models show")

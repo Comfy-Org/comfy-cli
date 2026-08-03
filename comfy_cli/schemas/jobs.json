@@ -27,6 +27,11 @@
       "description": "Cloud status/watch terminal: artifact URLs grouped by blueprint foreach item (via the compose item_map on the job state file). Empty object when no item_map exists.",
       "additionalProperties": {"type": "array", "items": {"type": "string"}}
     },
+    "scope": {
+      "type": "string",
+      "enum": ["local", "cloud", "all"],
+      "description": "`jobs ls`: which state-file rows the listing includes — only those matching the resolved --where target, or \"all\" targets when `--all` (or `--orphaned`) was passed."
+    },
     "elapsed_seconds": {"type": ["number", "null"]},
     "completed_nodes": {"type": "array", "items": {"type": "string"}},
     "count": {"type": "integer"},

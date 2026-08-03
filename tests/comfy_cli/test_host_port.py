@@ -94,6 +94,38 @@ def test_validate_host_rejects_whitespace_and_control_chars(host):
         validate_host(host)
 
 
+@pytest.mark.parametrize("host", ["", "   ", "\t"])
+def test_validate_host_rejects_empty(host):
+    # An empty host is resolved as *absent* downstream (`host or env or
+    # DEFAULT_HOST`), so accepting it silently retargets the request at a
+    # server the caller never named — e.g. `--host "$UNSET_VAR"`.
+    with pytest.raises(typer.BadParameter):
+        validate_host(host)
+
+
+@pytest.mark.parametrize("host", ["a%0d%0aX-Injected:%201", "host%2fpath", "h%40ost", "host%23x"])
+def test_validate_host_rejects_percent_encoded_specials(host):
+    # urllib.request.Request._parse unquotes the host it splits out of the
+    # URL, so a percent-encoded payload decodes downstream of this guard.
+    with pytest.raises(typer.BadParameter):
+        validate_host(host)
+
+
+@pytest.mark.parametrize("host", ["127.0.0.1:8188", "localhost:8188", "example.com:80"])
+def test_validate_host_rejects_embedded_port(host):
+    # Colon-bearing hosts get bracketed as IPv6 literals by callers, so a
+    # combined host:port would become `http://[127.0.0.1:8188]:8188` with the
+    # embedded port silently dropped. Only `comfy run` takes the combined
+    # form, and it splits it via parse_host_port_arg first.
+    with pytest.raises(typer.BadParameter):
+        validate_host(host)
+
+
+@pytest.mark.parametrize("host", ["::1", "[::1]", "fe80::1", "2001:db8::8a2e:370:7334"])
+def test_validate_host_allows_ipv6_literals(host):
+    assert validate_host(host) == host
+
+
 # ---------------------------------------------------------------------------
 # resolve_host_port
 # ---------------------------------------------------------------------------

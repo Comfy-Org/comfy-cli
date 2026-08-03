@@ -4,6 +4,7 @@ from unittest.mock import Mock, patch
 
 import pytest
 import requests
+import typer
 from typer.testing import CliRunner
 
 from comfy_cli.cmdline import app, g_exclusivity, g_gpu_exclusivity
@@ -238,12 +239,8 @@ class TestGitOperations:
     """Test Git operations for PR checkout"""
 
     @patch("subprocess.run")
-    @patch("os.chdir")
-    @patch("os.getcwd")
-    def test_checkout_pr_fork_success(self, mock_getcwd, mock_chdir, mock_subprocess, sample_pr_info):
+    def test_checkout_pr_fork_success(self, mock_subprocess, sample_pr_info):
         """Test successful checkout of PR from fork"""
-        mock_getcwd.return_value = "/original/dir"
-
         mock_subprocess.side_effect = [
             subprocess.CompletedProcess([], 1),
             subprocess.CompletedProcess([], 0),
@@ -261,14 +258,15 @@ class TestGitOperations:
         assert "remote" in calls[1][0][0]
         assert "fetch" in calls[2][0][0]
         assert "checkout" in calls[3][0][0]
+        # ``--`` separates options from the fork-controlled branch refspec (argument-injection guard).
+        fetch_argv = calls[2][0][0]
+        assert fetch_argv[-2:] == ["--", "load-3d-nodes"]
+        # Every git command runs against repo_path via cwd= (no process chdir).
+        assert all(call.kwargs.get("cwd") == "/repo/path" for call in calls)
 
     @patch("subprocess.run")
-    @patch("os.chdir")
-    @patch("os.getcwd")
-    def test_checkout_pr_non_fork_success(self, mock_getcwd, mock_chdir, mock_subprocess):
+    def test_checkout_pr_non_fork_success(self, mock_subprocess):
         """Test successful checkout of PR from same repo"""
-        mock_getcwd.return_value = "/original/dir"
-
         pr_info = PRInfo(
             number=123,
             head_repo_url="https://github.com/comfyanonymous/ComfyUI.git",
@@ -289,14 +287,14 @@ class TestGitOperations:
 
         assert result is True
         assert mock_subprocess.call_count == 2
+        # ``--`` separates options from the branch refspec (argument-injection guard).
+        fetch_argv = mock_subprocess.call_args_list[0][0][0]
+        assert fetch_argv[-2:] == ["--", "feature-branch"]
+        assert all(call.kwargs.get("cwd") == "/repo/path" for call in mock_subprocess.call_args_list)
 
     @patch("subprocess.run")
-    @patch("os.chdir")
-    @patch("os.getcwd")
-    def test_checkout_pr_git_failure(self, mock_getcwd, mock_chdir, mock_subprocess, sample_pr_info):
+    def test_checkout_pr_git_failure(self, mock_subprocess, sample_pr_info):
         """Test Git operation failure"""
-        mock_getcwd.return_value = "/original/dir"
-
         error = subprocess.CalledProcessError(1, "git", stderr="Permission denied")
         mock_subprocess.side_effect = error
 
@@ -553,12 +551,8 @@ class TestEdgeCases:
             assert headers["Authorization"] == "Bearer test-token"
 
     @patch("subprocess.run")
-    @patch("os.chdir")
-    @patch("os.getcwd")
-    def test_checkout_pr_remote_already_exists(self, mock_getcwd, mock_chdir, mock_subprocess, sample_pr_info):
+    def test_checkout_pr_remote_already_exists(self, mock_subprocess, sample_pr_info):
         """Test checkout when remote already exists"""
-        mock_getcwd.return_value = "/dir"
-
         mock_subprocess.side_effect = [
             subprocess.CompletedProcess([], 0),
             subprocess.CompletedProcess([], 0),
@@ -569,6 +563,7 @@ class TestEdgeCases:
 
         assert result is True
         assert mock_subprocess.call_count == 3
+        assert all(call.kwargs.get("cwd") == "/repo" for call in mock_subprocess.call_args_list)
 
 
 class TestGetLatestRelease:
@@ -946,7 +941,7 @@ class TestCheckoutStableComfyUI:
     @patch("comfy_cli.command.install.get_latest_release", return_value=None)
     @patch("comfy_cli.command.install._resolve_latest_tag_from_local", return_value=(None, True))
     def test_latest_exits_when_both_local_and_api_fail(self, mock_local, mock_api, mock_co):
-        with pytest.raises(SystemExit):
+        with pytest.raises(typer.Exit):
             checkout_stable_comfyui("latest", "/repo")
         mock_co.assert_not_called()
 

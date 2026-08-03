@@ -354,7 +354,7 @@ def _registry() -> dict[str, Endpoint]:
         path = PROXY_PREFIX + endpoint_id
         node = paths.get(path)
         if not node:
-            continue  # spec drift — skip silently, surfaced via `comfy api models`
+            continue  # spec drift — skip silently, surfaced via `comfy generate list`
         # All image endpoints are POST; pick the first defined method anyway.
         method = "post" if "post" in node else next(iter(node.keys()))
         op = node[method]

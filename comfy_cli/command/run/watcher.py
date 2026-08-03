@@ -13,6 +13,7 @@ import sys
 
 from comfy_cli.output import get_renderer
 from comfy_cli.output import rprint as pprint
+from comfy_cli.output.sanitize import sanitize_markup
 
 
 def _tail_state_file(prompt_id: str, *, seconds: float = 8.0) -> None:
@@ -63,7 +64,7 @@ def _tail_state_file(prompt_id: str, *, seconds: float = 8.0) -> None:
     if final_state.is_terminal:
         pprint(f"  {glyph} [dim]· finished in {elapsed:.1f}s[/dim]")
         for u in (final_state.outputs or [])[:3]:
-            pprint(f"  [dim]→[/dim] [cyan]{u}[/cyan]")
+            pprint(f"  [dim]→[/dim] [cyan]{sanitize_markup(u)}[/cyan]")
     else:
         pprint(f"  {glyph} [dim]· still in flight — track:[/dim] [cyan]comfy jobs ls --watch[/cyan]")
 
@@ -78,8 +79,11 @@ def _spawn_watcher(
 ) -> bool:
     """Detach a watcher subprocess that polls + updates the state file.
 
-    Fully decoupled from the parent: stdio redirected to /dev/null, a new
-    session so a controlling terminal closing doesn't kill it. We don't
+    Fully decoupled from the parent: stdio redirected to /dev/null, and a
+    detached process group so a controlling terminal closing doesn't kill it.
+    POSIX gets its own session; Windows gets
+    DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP for the equivalent, because
+    ``start_new_session`` is POSIX-only and CPython ignores it there. We don't
     track the PID — the watcher writes its own PID into the state file so
     callers can find it there if needed.
 
@@ -92,17 +96,31 @@ def _spawn_watcher(
     if port:
         argv += ["--port", str(port)]
     argv += ["--notify"] if notify else ["--no-notify"]
+
+    kwargs: dict = {}
+    if sys.platform == "win32":
+        # Not module-level attributes on POSIX, hence the getattr lookups.
+        detached = getattr(subprocess, "DETACHED_PROCESS", 0)
+        new_group = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        kwargs["creationflags"] = detached | new_group
+    else:
+        kwargs["start_new_session"] = True
+
     try:
         subprocess.Popen(
             argv,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             stdin=subprocess.DEVNULL,
-            start_new_session=True,
             close_fds=True,
+            **kwargs,
         )
         return True
-    except OSError:
+    except (OSError, ValueError):
         # Watcher spawn failed — the job still ran; the user just won't get
-        # a state-file update without manual polling. Don't bail the submit.
+        # a state-file update without manual polling. Don't bail the submit:
+        # we're past the point of no return, the workflow is already queued.
+        # ValueError covers Popen's argument-level rejections (an embedded NUL
+        # in host/prompt_id, creationflags on a non-Windows platform), which
+        # aren't OSError.
         return False

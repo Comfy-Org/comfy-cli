@@ -23,6 +23,7 @@ State-file contract (the same shape across local and cloud):
       "outputs": [<url>, ...],
       "error": {"code": "...", "message": "...", "details": {...}} | null,
       "watcher_pid": <int> | null,
+      "watcher_pid_create_time": <float epoch seconds> | null,
       "record": {<full final cloud history record>} | null,
       "item_map": {<item>: {"nodes": [...], "save_node": "...", "prefix": "..."}} | null
     }
@@ -39,15 +40,14 @@ won't change further; agents can stop polling.
 from __future__ import annotations
 
 import json
-import os
 import re
-import secrets as _secrets
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from comfy_cli import constants, locking
+from comfy_cli.file_utils import atomic_write_text
 from comfy_cli.utils import get_os
 
 TERMINAL_STATUSES = frozenset({"completed", "error", "cancelled"})
@@ -87,6 +87,10 @@ class JobState:
     outputs: list[Any] = field(default_factory=list)
     error: dict[str, Any] | None = None
     watcher_pid: int | None = None
+    # Watcher process start time, recorded next to its pid so a recycled pid
+    # can't pass for the original watcher. Null on files written before this
+    # field existed (and when psutil couldn't read it).
+    watcher_pid_create_time: float | None = None
     # Full final cloud history record (node-keyed outputs), stashed at terminal.
     record: dict[str, Any] | None = None
     # foreach item -> {"nodes": [...], "save_node": ..., "prefix": ...} map,
@@ -123,18 +127,8 @@ def write(state: JobState) -> Path | None:
     # Lock per-file so a watcher and a foreground update can't tear each
     # other's writes.
     with locking.file_lock(path.with_suffix(".lock")):
-        tmp = path.with_suffix(f".{os.getpid()}.{_secrets.token_hex(4)}.tmp")
-        tmp.write_text(json.dumps(state.to_dict(), indent=2, default=str), encoding="utf-8")
-        # fsync for durability before atomic rename
-        try:
-            fd = os.open(str(tmp), os.O_RDONLY)
-            try:
-                os.fsync(fd)
-            finally:
-                os.close(fd)
-        except OSError:
-            pass
-        os.replace(tmp, path)
+        # fsync=True: durability against power loss before the atomic rename.
+        atomic_write_text(path, json.dumps(state.to_dict(), indent=2, default=str), fsync=True)
     return path
 
 

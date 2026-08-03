@@ -27,7 +27,9 @@ import typer
 
 from comfy_cli import jobs_state
 from comfy_cli.comfy_client import Client, Unauthenticated, extract_output_entries
-from comfy_cli.http import NoRedirectHandler
+from comfy_cli.host_port import validate_host
+from comfy_cli.http import NoRedirectHandler, build_http_only_opener
+from comfy_cli.http import target_auth_headers as _auth_headers
 from comfy_cli.output import get_renderer
 from comfy_cli.output import rprint as pprint
 from comfy_cli.target import resolve_target
@@ -67,17 +69,6 @@ def _default_out_dir() -> str:
 # ---------------------------------------------------------------------------
 
 
-def _auth_headers(target: Any) -> dict[str, str]:
-    """Build auth headers for a target (cloud only)."""
-    headers: dict[str, str] = {}
-    if target.is_cloud:
-        if target.api_key:
-            headers["X-API-Key"] = target.api_key
-        elif target.auth_token:
-            headers["Authorization"] = f"Bearer {target.auth_token}"
-    return headers
-
-
 # Stripped on every download redirect so auth never crosses origins.
 _AUTH_HEADERS_TO_STRIP = frozenset({"authorization", "x-api-key", "x-comfy-api-key", "cookie"})
 _MAX_REDIRECTS = 5
@@ -105,8 +96,8 @@ class _DownloadRedirectHandler(urllib.request.HTTPRedirectHandler):
         return new_req
 
 
-_TRANSFER_OPENER = urllib.request.build_opener(NoRedirectHandler("redirect refused (auth leak prevention)"))
-_DOWNLOAD_OPENER = urllib.request.build_opener(_DownloadRedirectHandler())
+_TRANSFER_OPENER = build_http_only_opener(NoRedirectHandler("redirect refused (auth leak prevention)"))
+_DOWNLOAD_OPENER = build_http_only_opener(_DownloadRedirectHandler())
 
 # Per-output safety cap, shared by the HTTP download stream and local-output copies.
 _MAX_DOWNLOAD_BYTES = 10 * 1024 * 1024 * 1024  # 10 GB
@@ -115,6 +106,14 @@ _MAX_DOWNLOAD_BYTES = 10 * 1024 * 1024 * 1024  # 10 GB
 # transfer aborts instead of hanging forever, while a steadily-flowing body of
 # any size is unaffected.
 _DOWNLOAD_TIMEOUT_S = 30
+
+# Same per-socket-op timeout for uploads. Now that ``--host``/``--port`` can
+# aim the POST at an arbitrary address, a peer that completes the TCP handshake
+# and then stalls would otherwise wedge the CLI forever (urllib defaults to
+# ``socket._GLOBAL_DEFAULT_TIMEOUT``, i.e. no timeout) and hang any automation
+# driving it. This bounds each socket operation, not the whole transfer, so a
+# steadily-flowing multi-GB body is unaffected.
+_UPLOAD_TIMEOUT_S = 30
 
 # Stream/copy chunk size. 1 MiB keeps syscall volume low on multi-GB outputs
 # while still bounding memory and letting the size cap trip promptly.
@@ -395,7 +394,7 @@ def _upload_file(path: Path, target: Any, *, overwrite: bool) -> dict:
     for hdr, val in _auth_headers(target).items():
         req.add_header(hdr, val)
 
-    with _TRANSFER_OPENER.open(req) as resp:
+    with _TRANSFER_OPENER.open(req, timeout=_UPLOAD_TIMEOUT_S) as resp:
         return json.loads(resp.read().decode("utf-8", errors="replace"))
 
 
@@ -404,14 +403,32 @@ def execute_upload(
     *,
     where: str | None = None,
     overwrite: bool = False,
+    host: str | None = None,
+    port: int | None = None,
 ) -> list[str]:
     """Upload one or more local files to the ComfyUI server's input directory.
+
+    ``host``/``port`` route a **local** upload at a specific ComfyUI (the
+    ``comfy upload --host/--port`` flags); they are ignored for a cloud target,
+    whose address comes from the signed-in account. ``resolve_target`` applies
+    the usual local precedence: explicit value > ``COMFY_LOCAL_URL`` >
+    ``127.0.0.1:8188``.
 
     Returns the list of server-side filenames (the ``name`` field from each
     upload response).
     """
     renderer = get_renderer()
-    target = resolve_target(where=where)
+    # Defence in depth. ``cmdline.upload`` validates the flags, but this
+    # function is also called directly (comfy-mcp's ``_with_target`` is the
+    # motivating consumer) and ``resolve_target`` drops the host verbatim into
+    # ``http://{host}:{port}`` with no checks of its own. Validating here makes
+    # the no-URL-injection guarantee a property of ``execute_upload`` rather
+    # than of whoever happens to call it.
+    if host is not None:
+        host = validate_host(host)
+    if port is not None and not (1 <= port <= 65535):
+        raise typer.BadParameter(f"invalid port: {port} is out of range (1-65535)")
+    target = resolve_target(where=where, host=host, port=port)
 
     uploads: list[dict[str, Any]] = []
     cloud_names: list[str] = []
@@ -449,14 +466,23 @@ def execute_upload(
                 details={"status": status, "filename": filename},
             )
             raise typer.Exit(code=1)
-        except (urllib.error.URLError, TimeoutError, ConnectionError, http.client.HTTPException) as e:
+        except (
+            urllib.error.URLError,
+            TimeoutError,
+            ConnectionError,
+            http.client.HTTPException,
+            UnicodeError,
+        ) as e:
             # A connection- or transfer-level failure — not HTTPError. A
             # refused/DNS/timeout/TLS failure at connect raises URLError; a read
             # timeout raises a bare TimeoutError; a reset raises ConnectionError;
             # a truncated (e.g. chunked) response body raises
-            # http.client.IncompleteRead (an HTTPException). Surface it as a
-            # structured envelope instead of an unhandled traceback that breaks
-            # machine/NDJSON consumers.
+            # http.client.IncompleteRead (an HTTPException). A non-ASCII host
+            # reaches http.client's ``host.encode("idna")`` fallback, which
+            # raises UnicodeError (a ValueError, so none of the above catch it)
+            # on a pathological label. Surface each as a structured envelope
+            # instead of an unhandled traceback that breaks machine/NDJSON
+            # consumers.
             reason = getattr(e, "reason", None) or e
             renderer.error(
                 code="upload_failed",
