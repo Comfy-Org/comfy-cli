@@ -324,6 +324,13 @@ def _slug_name(text: str) -> str:
 
 def _load_object_info(renderer, *, input_path: str | None, host: str | None, port: int | None) -> dict:
     """Fetch raw object_info for frontend→API conversion (offline dump or live server)."""
+    # ``LoadError`` is how ``resilient_load_object_info`` reports an unreachable
+    # server / bad dump — the handler below predates that loader (it was written
+    # when the fetch raised a bare OSError), so an unreachable local server used
+    # to escape as a traceback even though the hint here is written for exactly
+    # that case. ``workflow.py``'s sibling ``_get_graph`` already catches it.
+    from comfy_cli.cql.engine import LoadError
+
     try:
         if input_path is not None:
             p = Path(input_path).expanduser()
@@ -331,10 +338,14 @@ def _load_object_info(renderer, *, input_path: str | None, host: str | None, por
         from comfy_cli import where as where_module
         from comfy_cli.cql.loader import resilient_load_object_info
 
-        decision = where_module.resolve_default()
+        # ``_or_exit``: no per-command --where flag here either, so a bad
+        # COMFY_WHERE / project / persisted where_default emits a clean
+        # `where_invalid` envelope instead of escaping as a traceback (the
+        # handler below is for object_info failures, not routing ones).
+        decision = where_module.resolve_default_or_exit()
         mode = "cloud" if decision.target is where_module.WhereTarget.CLOUD else "local"
         return resilient_load_object_info(mode=mode, host=host, port=port)
-    except (OSError, json.JSONDecodeError) as e:
+    except (OSError, json.JSONDecodeError, LoadError) as e:
         renderer.error(
             code="object_info_unavailable",
             message=f"Could not load object_info: {e}",
