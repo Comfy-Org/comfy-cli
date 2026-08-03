@@ -10,6 +10,10 @@
     "status": {"type": "string", "enum": ["queued", "completed", "cancelled", "preview"]},
     "prompt_id": {"type": ["string", "null"]},
     "client_id": {"type": ["string", "null"]},
+    "prompt": {
+      "type": "object",
+      "description": "--print-prompt only (both targets, status \"preview\"): the API-format workflow graph that WOULD be submitted, keyed by node id. Present only on the preview dry-run; a real submit omits it. Deliberately unconstrained beyond \"object\" — node shapes are the server's contract, not this CLI's, and over-tightening here is what made these schemas reject real output in the first place."
+    },
     "outputs": {
       "type": "array",
       "items": {"type": "string"},
