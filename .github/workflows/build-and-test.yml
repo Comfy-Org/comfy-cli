@@ -6,6 +6,7 @@ on:
     paths:
       - "comfy_cli/**"
       - "tests/e2e/**"
+      - "tests/comfy_cli/command/test_jobs_pid_alive.py"
       - "!.github/**"
       - "!.coveragerc"
       - "!.gitignore"
@@ -15,6 +16,7 @@ on:
     paths:
       - "comfy_cli/**"
       - "tests/e2e/**"
+      - "tests/comfy_cli/command/test_jobs_pid_alive.py"
       - "!.github/**"
       - "!.coveragerc"
       - "!.gitignore"
@@ -53,6 +55,12 @@ jobs:
       - name: Test CUDA auto-detection (skips if no GPU)
         run: |
           uv run --locked --extra dev pytest tests/comfy_cli/test_cuda_detect_real.py -v
+
+      - name: Test PID liveness probe
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+        run: |
+          uv run --locked --extra dev pytest tests/comfy_cli/command/test_jobs_pid_alive.py -v
 
       - name: Test e2e
         env:

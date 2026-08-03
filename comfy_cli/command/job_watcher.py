@@ -79,6 +79,14 @@ def watch_job(
         return
 
     state.watcher_pid = os.getpid()
+    # Recorded together with the pid so the reaper can tell *this* watcher from
+    # whatever inherits its pid later (see `_is_watcher_alive` in jobs.py).
+    try:
+        import psutil
+
+        state.watcher_pid_create_time = psutil.Process().create_time()
+    except Exception:  # noqa: BLE001 — best effort; None just means liveness-only
+        state.watcher_pid_create_time = None
     jobs_state.write(state)
 
     cloud_client = None
