@@ -35,7 +35,7 @@ from websocket import WebSocket, WebSocketException, WebSocketTimeoutException
 from comfy_cli import cancellation, execution_errors, tracking
 from comfy_cli.env_checker import check_comfy_server_running
 from comfy_cli.host_port import resolve_host_port as _resolve_host_port
-from comfy_cli.http import authed_urlopen, plain_urlopen
+from comfy_cli.http import ResponseTooLarge, authed_urlopen, plain_urlopen, read_capped
 from comfy_cli.output import get_renderer
 from comfy_cli.output.sanitize import sanitize, sanitize_markup
 from comfy_cli.where import cloud_preflight_or_exit
@@ -128,12 +128,21 @@ def _server_or_error(host: str, port: int, *, raise_on_missing: bool = True) -> 
 
 
 def _http_get_json(url: str, *, timeout: float = 10.0) -> Any:
+    """GET a JSON body from the local ComfyUI server.
+
+    The read is capped (``read_capped``) so a server streaming an endless
+    ``/history`` can't OOM the CLI. Every failure — unreachable, oversize,
+    non-JSON — leaves as a ``RuntimeError``, which is the single family every
+    call site below already catches.
+    """
     req = urllib.request.Request(url)
     try:
         with plain_urlopen(req, timeout=timeout) as resp:
-            return json.loads(resp.read())
+            return json.loads(read_capped(resp, url))
     except urllib.error.URLError as e:
         raise RuntimeError(f"failed to GET {url}: {e}") from e
+    except ResponseTooLarge as e:
+        raise RuntimeError(str(e)) from e
     except ValueError as e:
         # json.JSONDecodeError is a ValueError — a non-JSON 200 (captive
         # portal, proxy error page) must look like any other GET failure to

@@ -15,8 +15,10 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
+import comfy_cli.http as http_mod
 from comfy_cli.caller import Caller
 from comfy_cli.command import templates as templates_cmd
+from comfy_cli.http import ResponseTooLarge
 from comfy_cli.output.renderer import (
     OutputMode,
     Renderer,
@@ -551,3 +553,135 @@ def test_readonly_cache_dir_still_serves_fetched_data(cache_file, monkeypatch):
     env = _envelope(result.output)
     names = [r["name"] for r in env["data"]["rows"]]
     assert names == ["brand_new_template"]
+
+
+# ---------------------------------------------------------------------------
+# Bounded gallery reads — a remote host must not decide how much memory we use
+# ---------------------------------------------------------------------------
+
+
+class _RecordingResponse:
+    """Stands in for a urlopen response, recording how the body was read.
+
+    ``read(None)`` — the unbounded form — is an outright failure here: that is
+    the bug being guarded against, and a fake that quietly tolerated it would
+    let the regression back in.
+    """
+
+    def __init__(self, body: bytes = b"[]", status: int = 200):
+        self._body = body
+        self.status = status
+        self.requested: list[int] = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+    def read(self, n=None):
+        if n is None:
+            raise AssertionError("unbounded read() — the body must be read with a cap")
+        self.requested.append(n)
+        return self._body[:n]
+
+
+def _small_cap(monkeypatch, cap: int = 8) -> None:
+    """Run the real ``read_capped`` at a tiny cap so a few bytes trip it.
+
+    Patches the name the module under test resolves, not the primitive itself,
+    so the production call path (including which exception it raises and where
+    that lands) is exercised end to end without allocating 64 MiB.
+    """
+    monkeypatch.setattr(
+        templates_cmd,
+        "read_capped",
+        lambda resp, url, max_bytes=cap: http_mod.read_capped(resp, url, max_bytes=max_bytes),
+    )
+
+
+def test_fetch_gallery_reads_with_a_cap_not_unbounded(monkeypatch):
+    resp = _RecordingResponse(json.dumps(FIXTURE).encode())
+    monkeypatch.setattr(templates_cmd, "plain_urlopen", lambda req, timeout=None: resp)
+
+    assert json.loads(templates_cmd._fetch_gallery()) == FIXTURE
+    # One byte past the cap, so a body that exactly fills it is still complete.
+    assert resp.requested == [http_mod.MAX_RESPONSE_BYTES + 1]
+
+
+def test_fetch_template_workflow_reads_with_a_cap_not_unbounded(monkeypatch):
+    resp = _RecordingResponse(b'{"nodes": []}')
+    monkeypatch.setattr(templates_cmd, "plain_urlopen", lambda req, timeout=None: resp)
+
+    assert templates_cmd._fetch_template_workflow("image_flux2") == b'{"nodes": []}'
+    assert resp.requested == [http_mod.MAX_RESPONSE_BYTES + 1]
+
+
+def test_oversize_gallery_raises_rather_than_truncating(monkeypatch):
+    # Refuse, don't truncate: a short body would be cached and parsed as if it
+    # were the whole index.
+    monkeypatch.setattr(templates_cmd, "plain_urlopen", lambda req, timeout=None: _RecordingResponse(b"x" * 4096))
+    _small_cap(monkeypatch)
+
+    with pytest.raises(ResponseTooLarge):
+        templates_cmd._fetch_gallery()
+
+
+def test_oversize_gallery_under_refresh_is_a_clean_envelope(cache_file, monkeypatch):
+    # An over-cap body is upstream misbehaviour like any other — it must land in
+    # gallery_load_failed, not as an uncaught traceback.
+    monkeypatch.setattr(templates_cmd, "plain_urlopen", lambda req, timeout=None: _RecordingResponse(b"x" * 4096))
+    _small_cap(monkeypatch)
+    _force_json_renderer()
+
+    runner = CliRunner()
+    result = runner.invoke(templates_cmd.app, ["ls", "--refresh"])
+    assert result.exit_code != 0
+    env = _envelope(result.output)
+    assert env["error"]["code"] == "gallery_load_failed"
+    # The good cache is left intact — an oversize response must not clobber it.
+    assert json.loads(cache_file.read_bytes()) == FIXTURE
+
+
+def test_oversize_gallery_during_ttl_refresh_falls_back_to_stale(cache_file, monkeypatch):
+    # Same failure on an automatic (TTL-expired) refresh degrades to the stale
+    # cache, matching every other fetch failure.
+    _set_mtime(cache_file, templates_cmd.GALLERY_TTL_SECONDS + 3600)
+    monkeypatch.setattr(templates_cmd, "plain_urlopen", lambda req, timeout=None: _RecordingResponse(b"x" * 4096))
+    _small_cap(monkeypatch)
+    _force_json_renderer()
+
+    runner = CliRunner()
+    result = runner.invoke(templates_cmd.app, ["ls"])
+    assert result.exit_code == 0, result.output
+    assert _envelope(result.output)["data"]["total_in_gallery"] == 3
+
+
+def test_oversize_gallery_under_templates_refresh_is_a_clean_envelope(cache_file, monkeypatch):
+    # `templates refresh` calls `_fetch_gallery` directly, so it needs the same
+    # error family as `_load_gallery` — this is the call site that used to catch
+    # only URLError/OSError.
+    monkeypatch.setattr(templates_cmd, "plain_urlopen", lambda req, timeout=None: _RecordingResponse(b"x" * 4096))
+    _small_cap(monkeypatch)
+    _force_json_renderer()
+
+    runner = CliRunner()
+    result = runner.invoke(templates_cmd.app, ["refresh"])
+    assert result.exit_code != 0
+    env = _envelope(result.output)
+    assert env["error"]["code"] == "gallery_fetch_failed"
+    assert json.loads(cache_file.read_bytes()) == FIXTURE
+
+
+def test_oversize_template_workflow_is_a_clean_envelope(gallery_file, monkeypatch):
+    # The workflow fetch happens after the gallery lookup, so point the opener
+    # at an oversize body and resolve the name from the local fixture index.
+    monkeypatch.setattr(templates_cmd, "plain_urlopen", lambda req, timeout=None: _RecordingResponse(b"x" * 4096))
+    _small_cap(monkeypatch)
+    _force_json_renderer()
+
+    runner = CliRunner()
+    result = runner.invoke(templates_cmd.app, ["fetch", "image_flux2", "--gallery", gallery_file])
+    assert result.exit_code != 0
+    env = _envelope(result.output)
+    assert env["error"]["code"] == "template_fetch_failed"
