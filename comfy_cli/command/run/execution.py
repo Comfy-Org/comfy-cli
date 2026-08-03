@@ -163,6 +163,12 @@ class WorkflowExecution:
         # compute nodes that never fire a server-side `executed` event.
         self.cached_node_ids: list[str] = []
         self.executed_node_ids: list[str] = []
+        # Per-node issues the server reported alongside a successful (HTTP 200)
+        # queue, stashed by ``queue()`` for the caller's `queued` event. The
+        # event itself is emitted by ``comfy_cli.command.run.execute`` — only
+        # *after* the job's state file is persisted — so a consumer sees it and
+        # can immediately rely on `comfy jobs status` / `jobs ls` finding it.
+        self.validation_warnings: list[dict] = []
         # Classified verdict of a terminal server-side `execution_error`,
         # stashed by `on_error` before it raises `typer.Exit`. The `--wait`
         # caller only sees the exit, so this is how the real cause reaches
@@ -289,16 +295,11 @@ class WorkflowExecution:
 
         # 200 may still carry node_errors if some output chains failed
         # validation but others passed — surface as warnings, not a failure.
+        # Stored rather than emitted here: the contractual `queued` event is
+        # emitted by the caller once the job state file exists (see
+        # ``validation_warnings`` above and ``run._emit_queued``).
         node_errors = body.get("node_errors") if isinstance(body, dict) else None
-        validation_warnings = _node_errors_to_list(node_errors)
-
-        self.renderer.event(
-            "queued",
-            prompt_id=prompt_id,
-            client_id=self.client_id,
-            validation_warnings=validation_warnings,
-            nodes=self.workflow_manifest(),
-        )
+        self.validation_warnings = _node_errors_to_list(node_errors)
 
     def watch_execution(self):
         if self.ws is None:
