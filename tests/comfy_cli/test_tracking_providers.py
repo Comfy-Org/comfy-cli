@@ -387,10 +387,12 @@ class TestMixpanelNonBlockingDispatch:
         provider.client.track.assert_called_once()
 
     def test_exit_stays_bounded_when_a_send_hangs(self):
-        """End to end against a blackholed endpoint: ``flush()`` is deliberately
-        unbounded (it joins the queue), and ``_flush_all_providers`` is what
-        bounds it — a daemon thread joined against the shared 5s deadline, same
-        as PostHog's internally-unbounded ``client.flush()`` (BE-3403)."""
+        """End to end against a blackholed endpoint: ``_flush_all_providers`` runs
+        each provider's ``flush()`` in a daemon thread joined against the shared
+        5s deadline, so a hung send costs the exit path that much and no more —
+        same treatment as PostHog's internally-unbounded ``client.flush()``
+        (BE-3403). (Mixpanel's ``flush()`` also self-bounds; this covers the
+        caller-side guarantee, which is what holds for every provider.)"""
         import comfy_cli.tracking as tracking_mod
 
         provider = _mixpanel_provider_with_mock_client()
@@ -430,6 +432,163 @@ class TestMixpanelNonBlockingDispatch:
         assert not hasattr(provider, "_queue")
         provider.track("any_event", "test-distinct-id", {})
         provider.flush()
+
+
+class TestMixpanelWorkerSurvivability:
+    """A single worker drains the whole queue and nothing restarts it, so any
+    escape from the loop wedges telemetry for the rest of the process: every
+    later event is dropped and every ``flush()`` burns its full deadline."""
+
+    def test_a_baseexception_from_the_sdk_does_not_kill_the_worker(self):
+        class _Boom(BaseException):
+            """Not an ``Exception`` — e.g. a ``MemoryError``/``SystemExit`` escape."""
+
+        provider = _mixpanel_provider_with_mock_client()
+        provider.client.track.side_effect = [_Boom("kaboom"), None]
+
+        provider.track("first", "test-distinct-id", {})
+        provider.track("second", "test-distinct-id", {})
+        provider.flush()
+
+        assert provider._worker.is_alive(), "worker died on a non-Exception failure"
+        assert _sent_event_names(provider) == ["first", "second"]
+
+    def test_flush_gives_up_promptly_when_the_worker_is_gone(self):
+        """``queue.join()`` would block forever here, and ``flush()`` is public —
+        a direct caller has no deadline of its own to fall back on."""
+        provider = _mixpanel_provider_with_mock_client()
+        provider.track("stranded", "test-distinct-id", {})
+        # Impersonate a dead worker with the event still outstanding.
+        dead = threading.Thread(target=lambda: None)
+        dead.start()
+        dead.join()
+        provider._worker = dead
+        provider._pending = 1
+
+        start = time.monotonic()
+        provider.flush()
+        elapsed = time.monotonic() - start
+        assert elapsed < 2.0, f"flush() waited on a dead worker ({elapsed:.1f}s)"
+
+    def test_flush_is_bounded_when_the_worker_never_finishes(self, monkeypatch):
+        import comfy_cli.tracking as tracking_mod
+
+        monkeypatch.setattr(tracking_mod, "_FLUSH_DEADLINE_SECONDS", 0.5)
+        provider = _mixpanel_provider_with_mock_client()
+        release = threading.Event()
+        provider.client.track.side_effect = lambda **_kwargs: release.wait(timeout=60)
+        try:
+            provider.track("hangs", "test-distinct-id", {})
+
+            start = time.monotonic()
+            provider.flush()
+            elapsed = time.monotonic() - start
+            assert elapsed < 5.0, f"flush() ignored its deadline (took {elapsed:.1f}s)"
+        finally:
+            release.set()
+
+    def test_worker_start_failure_degrades_to_an_inert_provider(self):
+        """``Thread.start`` raises ``RuntimeError: can't start new thread`` under
+        thread/FD/memory pressure. ``_get_providers`` reports a construction
+        failure with ``logging.warning`` — i.e. on the user's stderr — so a
+        telemetry-side resource problem must not escape as one."""
+        with patch.object(threading.Thread, "start", side_effect=RuntimeError("can't start new thread")):
+            provider = MixpanelProvider("token-mp")
+
+        assert provider.enabled is False
+        assert provider.client is None
+        # Still inert rather than raising, even though the queue exists.
+        provider.track("any_event", "test-distinct-id", {})
+        provider.flush()
+
+
+class TestMixpanelPropertySnapshot:
+    """``@track_command`` fires its event *before* running the wrapped body, and
+    serialization now happens on the worker instead of inline, so the payload has
+    to be snapshotted at enqueue time or the body can mutate it out from under
+    the send."""
+
+    def test_nested_values_are_snapshotted_at_track_time(self):
+        provider = _mixpanel_provider_with_mock_client()
+        started, release = threading.Event(), threading.Event()
+
+        def _blocking_send(**kwargs):
+            if kwargs["event_name"] == "blocker":
+                started.set()
+                release.wait(timeout=30)
+
+        provider.client.track.side_effect = _blocking_send
+        try:
+            # Hold the worker so the mutation below provably lands before the send.
+            provider.track("blocker", "test-distinct-id", {})
+            assert started.wait(timeout=5), "worker never picked up the queued event"
+
+            nested = {"flags": ["--fast-deps"]}
+            provider.track("payload", "test-distinct-id", {"nested": nested})
+            nested["flags"].append("--no-deps")
+        finally:
+            release.set()
+
+        provider.flush()
+        sent = provider.client.track.call_args_list[1].kwargs["properties"]
+        assert sent == {"nested": {"flags": ["--fast-deps"]}}
+
+    def test_an_uncopyable_value_falls_back_to_a_shallow_copy(self):
+        provider = _mixpanel_provider_with_mock_client()
+
+        class _NoDeepCopy:
+            def __deepcopy__(self, memo):
+                raise TypeError("cannot deepcopy this")
+
+        sentinel = _NoDeepCopy()
+        provider.track("payload", "test-distinct-id", {"obj": sentinel})
+        provider.flush()
+
+        assert provider.client.track.call_args.kwargs["properties"]["obj"] is sentinel
+
+
+class TestHardExitDrain:
+    """``comfy launch`` leaves through ``os._exit``, which skips atexit handlers.
+    That was free while Mixpanel sent inline from ``track()`` (the ``launch``
+    event was delivered before the command body ran); with queue-and-drain
+    dispatch those paths have to drain explicitly or drop the event every time."""
+
+    def test_flush_for_hard_exit_drains_and_swallows(self):
+        import comfy_cli.tracking as tracking_mod
+
+        provider = MagicMock()
+        with patch.object(tracking_mod, "PROVIDERS", [provider]):
+            tracking_mod.flush_for_hard_exit()
+        provider.flush.assert_called_once()
+
+        with patch.object(tracking_mod, "_flush_all_providers", side_effect=RuntimeError("drain blew up")):
+            tracking_mod.flush_for_hard_exit()  # must not propagate into the exit path
+
+    def test_launch_hard_exit_drains_before_os_exit(self):
+        import comfy_cli.tracking as tracking_mod
+        from comfy_cli.command import launch as launch_mod
+
+        calls = []
+        with (
+            patch.object(tracking_mod, "flush_for_hard_exit", side_effect=lambda: calls.append("drain")),
+            patch.object(launch_mod.os, "_exit", side_effect=lambda code: calls.append(("exit", code))),
+        ):
+            launch_mod._hard_exit(3)
+
+        assert calls == ["drain", ("exit", 3)], "telemetry must be drained before the process is torn down"
+
+    def test_launch_exits_even_if_the_drain_raises(self):
+        import comfy_cli.tracking as tracking_mod
+        from comfy_cli.command import launch as launch_mod
+
+        exits = []
+        with (
+            patch.object(tracking_mod, "flush_for_hard_exit", side_effect=RuntimeError("drain blew up")),
+            patch.object(launch_mod.os, "_exit", side_effect=lambda code: exits.append(code)),
+        ):
+            launch_mod._hard_exit(1)
+
+        assert exits == [1]
 
 
 class TestRedactionThroughFanOut:
