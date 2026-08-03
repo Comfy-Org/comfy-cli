@@ -50,6 +50,7 @@ from comfy_cli.cuda_detect import DEFAULT_CUDA_TAG, detect_cuda_driver_version, 
 from comfy_cli.discovery import build_discovery
 from comfy_cli.env_checker import EnvChecker
 from comfy_cli.help_json import build_help_json
+from comfy_cli.host_port import validate_host
 from comfy_cli.output import Renderer, get_renderer, rprint, set_renderer
 from comfy_cli.resolve_python import resolve_workspace_python
 from comfy_cli.skills import command as skill_command
@@ -1215,6 +1216,17 @@ def validate(
         raise typer.Exit(code=1)
 
 
+# How a `cloud` routing decision was reached, in words, for the --host/--port
+# rejection message. Keys are `where.WhereResolution.source` values.
+_WHERE_SOURCE_PHRASES = {
+    "flag": "targeting cloud via --where cloud",
+    "env": "targeting cloud via the COMFY_WHERE environment variable",
+    "project": "targeting cloud via this project's configured default",
+    "config": "targeting cloud via your saved `where_default` setting",
+    "auto": "targeting cloud because you're signed in (no explicit --where)",
+}
+
+
 @app.command(help="Upload files to the ComfyUI server's input directory.")
 @tracking.track_command()
 def upload(
@@ -1227,9 +1239,26 @@ def upload(
         bool,
         typer.Option("--overwrite/--no-overwrite", help="Overwrite existing files on the server."),
     ] = True,
+    host: Annotated[
+        str | None,
+        typer.Option(help="Server host (defaults to COMFY_LOCAL_URL or 127.0.0.1). Local targets only."),
+    ] = None,
+    port: Annotated[
+        int | None,
+        typer.Option(help="Server port (defaults to COMFY_LOCAL_URL or 8188). Local targets only."),
+    ] = None,
 ):
     config = ConfigManager()
     renderer = get_renderer()
+
+    # Validate the flags before resolving anything: the host lands verbatim in
+    # ``http://{host}:{port}/upload/image``, so a URL-special or control
+    # character is a usage error (BadParameter, exit 2) regardless of target.
+    if host is not None:
+        host = validate_host(host)
+    if port is not None and not (1 <= port <= 65535):
+        raise typer.BadParameter(f"invalid port: {port} is out of range (1-65535)")
+
     try:
         decision = where_module.resolve(flag=where, config_value=config.get(where_module.CONFIG_KEY_WHERE_DEFAULT))
     except ValueError as e:
@@ -1237,10 +1266,32 @@ def upload(
         raise typer.Exit(code=1)
 
     effective_where = "cloud" if decision.target is where_module.WhereTarget.CLOUD else "local"
+    # --host/--port address a local ComfyUI; the cloud target's address comes
+    # from the signed-in account's base URL and ignores them entirely
+    # (``Target.host``/``Target.port`` are documented local-only). Rejecting
+    # the combination beats silently uploading somewhere the user didn't name.
+    # Checked before the preflight so the flag error isn't masked by a
+    # "not signed in" error.
+    if effective_where == "cloud" and (host is not None or port is not None):
+        # The cloud target can come from an explicit --where, but equally from
+        # COMFY_WHERE, a project/config default, or credential auto-detection —
+        # so name the source rather than accusing the user of passing a flag
+        # they may never have typed.
+        source = _WHERE_SOURCE_PHRASES.get(decision.source, f"resolved to cloud by {decision.source}")
+        renderer.error(
+            code="host_flag_cloud",
+            message=f"--host/--port target a local ComfyUI server, but this run is {source}",
+            hint=(
+                "pass --where local to aim at a local server; to reach a different cloud address "
+                "set COMFY_CLOUD_BASE_URL or run `comfy cloud set-base-url`"
+            ),
+            details={"host": host, "port": port, "where": effective_where, "where_source": decision.source},
+        )
+        raise typer.Exit(code=1)
     if effective_where == "cloud":
         where_module.cloud_preflight_or_exit()
 
-    transfer_inner.execute_upload(files, where=effective_where, overwrite=overwrite)
+    transfer_inner.execute_upload(files, where=effective_where, overwrite=overwrite, host=host, port=port)
 
 
 @app.command(help="Download outputs from a completed job. Reads prompt_id from argument or piped stdin.")
