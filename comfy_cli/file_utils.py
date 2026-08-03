@@ -1,7 +1,9 @@
 import json
 import os
 import pathlib
+import stat
 import subprocess
+import tempfile
 import time
 import zipfile
 from collections.abc import Callable
@@ -13,6 +15,81 @@ from pathspec import PathSpec
 
 from comfy_cli import constants, ui
 from comfy_cli.output.sanitize import sanitize_value
+
+
+def atomic_write_text(path: pathlib.Path, content: str, *, fsync: bool = False) -> None:
+    """Atomically write ``content`` to ``path`` via a sibling tmp file + ``os.replace``.
+
+    The write goes to a uniquely-named tmp file in the same directory (so the rename
+    stays on one filesystem and is atomic), which is then renamed over ``path``.
+    A SIGINT or crash mid-write therefore never leaves a half-written or empty
+    file at the destination — readers see either the old contents or the new.
+    On any failure the tmp file is cleaned up and the exception re-raised.
+
+    The tmp file is created with ``tempfile.mkstemp`` (``O_CREAT | O_EXCL``, no
+    symlink following) in the destination directory, so concurrent writers never
+    collide on a shared name and a pre-planted symlink can't redirect the write
+    (CWE-377).
+
+    Args:
+        path: destination file. Parent directories are created if missing.
+        content: text to write (UTF-8).
+        fsync: if True, flush the tmp file's contents to disk before the rename
+            and fsync the destination directory afterwards so both the data and
+            the rename survive power loss, at the cost of a sync. Best-effort:
+            a failing fsync is ignored, matching the prior per-site behavior.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # mkstemp gives a unique, O_EXCL, non-symlink-following fd opened O_RDWR in the
+    # destination directory — same filesystem, so the os.replace below is atomic.
+    fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=path.name + ".", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(content)
+            if fsync:
+                f.flush()
+                try:
+                    os.fsync(f.fileno())  # O_RDWR fd, so fsync works on Windows too
+                except OSError:
+                    pass
+        # mkstemp hardcodes the tmp file to 0600, and os.replace carries that mode
+        # onto the destination — so without this a first atomic write would quietly
+        # strip the group/other read access a shared output is meant to have. Restore
+        # the intended mode before the rename: reuse the existing destination's bits,
+        # else fall back to the umask-derived default (0666 & ~umask) for a new file.
+        try:
+            dest_mode = stat.S_IMODE(os.stat(path).st_mode)
+        except OSError:
+            umask = os.umask(0)
+            os.umask(umask)
+            dest_mode = 0o666 & ~umask
+        try:
+            os.chmod(tmp_name, dest_mode)
+        except OSError:
+            # Windows / filesystems without POSIX perms: best-effort, matching fsync.
+            pass
+        os.replace(tmp_name, path)
+        if fsync:
+            # Also fsync the parent directory so the rename itself is durable.
+            try:
+                dir_fd = os.open(str(path.parent), os.O_RDONLY)
+                try:
+                    os.fsync(dir_fd)
+                except OSError:
+                    pass
+                finally:
+                    os.close(dir_fd)
+            except OSError:
+                # e.g. Windows can't open a directory for fsync; best-effort.
+                pass
+    except BaseException:
+        # BaseException (not just Exception) so a KeyboardInterrupt mid-write
+        # still cleans up the tmp file, per the docstring.
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
 
 
 class DownloadException(Exception):

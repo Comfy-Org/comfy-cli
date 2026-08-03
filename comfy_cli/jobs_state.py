@@ -40,15 +40,14 @@ won't change further; agents can stop polling.
 from __future__ import annotations
 
 import json
-import os
 import re
-import secrets as _secrets
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from comfy_cli import constants, locking
+from comfy_cli.file_utils import atomic_write_text
 from comfy_cli.utils import get_os
 
 TERMINAL_STATUSES = frozenset({"completed", "error", "cancelled"})
@@ -128,18 +127,8 @@ def write(state: JobState) -> Path | None:
     # Lock per-file so a watcher and a foreground update can't tear each
     # other's writes.
     with locking.file_lock(path.with_suffix(".lock")):
-        tmp = path.with_suffix(f".{os.getpid()}.{_secrets.token_hex(4)}.tmp")
-        tmp.write_text(json.dumps(state.to_dict(), indent=2, default=str), encoding="utf-8")
-        # fsync for durability before atomic rename
-        try:
-            fd = os.open(str(tmp), os.O_RDONLY)
-            try:
-                os.fsync(fd)
-            finally:
-                os.close(fd)
-        except OSError:
-            pass
-        os.replace(tmp, path)
+        # fsync=True: durability against power loss before the atomic rename.
+        atomic_write_text(path, json.dumps(state.to_dict(), indent=2, default=str), fsync=True)
     return path
 
 
