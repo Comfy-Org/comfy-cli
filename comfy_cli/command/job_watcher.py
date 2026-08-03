@@ -250,6 +250,7 @@ def _resolve_watch_target(state: jobs_state.JobState, host: str | None, port: in
     Shared by the liveness probe and the poll so the two can never disagree
     about which server they are talking about.
     """
+    from comfy_cli.env_checker import _bracket_host
     from comfy_cli.local_address import resolve_local_host_port
 
     # Per-job recorded state (state.host/port, captured when the job was
@@ -257,10 +258,9 @@ def _resolve_watch_target(state: jobs_state.JobState, host: str | None, port: in
     # server it was launched against: flag > state > COMFY_LOCAL_URL > default.
     h, p = resolve_local_host_port(host or state.host, port or state.port)
     # Bracket IPv6 literals so ``_snapshot`` builds a well-formed URL (it takes
-    # an already-bracketed host, like the `jobs` resolver produces).
-    if ":" in h and not h.startswith("["):
-        h = f"[{h}]"
-    return h, p
+    # an already-bracketed host, like the `jobs` resolver produces). Delegates
+    # to the shared ``_bracket_host`` choke point.
+    return _bracket_host(h), p
 
 
 def _probe_local_server(host: str, port: int) -> str:

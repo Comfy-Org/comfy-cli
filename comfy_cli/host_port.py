@@ -85,11 +85,13 @@ def resolve_host_port(host: str | None, port: int | None) -> tuple[str, int]:
     env > ``config.background`` > defaults — then validate and bracket IPv6
     literals so callers building ``'http://{host}:{port}'`` get a well-formed
     URL (e.g. ``'::1'`` -> ``'[::1]'``)."""
+    from comfy_cli.env_checker import _bracket_host
     from comfy_cli.local_address import resolve_local_host_port
 
     cfg = ConfigManager()
     host, port = resolve_local_host_port(host, port, background=cfg.background)
+    # Validate BEFORE bracketing: ``validate_host``'s unsafe-char set does not
+    # include ``[``/``]``, so it must see the unbracketed value.
     h = validate_host(host)
-    if ":" in h and not h.startswith("["):
-        h = f"[{h}]"
-    return (h, int(port))
+    # Bracketing is delegated to the shared ``_bracket_host`` choke point.
+    return (_bracket_host(h), int(port))
