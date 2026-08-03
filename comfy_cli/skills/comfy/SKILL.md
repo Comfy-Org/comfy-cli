@@ -326,7 +326,7 @@ comfy --json auth list       # all credentials (redacted)
 Use flag-based filters on `nodes ls` to find nodes by capability:
 
 ```bash
-comfy --json nodes search "checkpoint"           # fuzzy by name/desc
+comfy --json nodes search "checkpoint loader"    # name/display/category/desc, any word order
 comfy --json nodes show KSampler                 # full schema
 comfy --json nodes ls --produces MODEL --limit 5 # filter by output type
 comfy --json nodes ls --accepts CONDITIONING     # nodes that take this input
@@ -495,6 +495,11 @@ comfy --json templates ls --limit 1              # template count
 
 The `total` field in `nodes ls`, `nodes search`, and `models search`
 gives the full count even when `--limit` caps the returned rows.
+(One exception: when `nodes search` finds nothing it falls back to the
+closest node names and sets `data.close_match: true` — check that flag, not
+just `count`, because those rows are name-similarity guesses rather than
+matches, and `total` is only how many guesses it found. Each row carries
+`close_match: true` as well.)
 
 ## Workflows — what can I tweak?
 

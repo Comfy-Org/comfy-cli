@@ -397,10 +397,21 @@ def show_cmd(
 # ---------------------------------------------------------------------------
 
 
-@app.command("search", help="Fuzzy-search node classes by name, display name, or description.")
+@app.command(
+    "search",
+    help=(
+        "Search node classes by name, display name, category, or description "
+        "(case-insensitive, word-order-independent; falls back to close-name matches)."
+    ),
+)
 @tracking.track_command("nodes")
 def search_cmd(
-    query: Annotated[str, typer.Argument(help="Text to search for (case-insensitive substring).")],
+    query: Annotated[
+        str,
+        typer.Argument(
+            help=("Text to search for (case-insensitive, word-order-independent; falls back to close-name matches).")
+        ),
+    ],
     limit: Annotated[int, typer.Option(help="Cap output to N rows.")] = 20,
     input_path: Annotated[
         str | None,
@@ -429,35 +440,72 @@ def search_cmd(
         on_stale=lambda key, err: _stale.update(stale=True, source=key, reason=err),
     )
 
+    # Token-AND matching: every whitespace-separated token must be present, in
+    # any order. `q_joined` additionally lets a spaced query hit a CamelCase
+    # class name ('ksampler advanced' -> 'ksampleradvanced' == KSamplerAdvanced).
+    # A query with no tokens (empty or all-whitespace) has nothing to match on.
+    # Don't fall back to the raw string: `" "` would then be a substring of every
+    # blob and match the entire catalog, and `all(...)` over an empty token list
+    # is vacuously true, which does the same. Both mean "no match".
     q = query.lower()
+    tokens = q.split()
+    q_joined = "".join(tokens)
     scored: list[tuple[int, Any]] = []
-    for m in graph.all_nodes():
+    for m in graph.all_nodes() if tokens else ():
         name_l = m.id.lower()
         display_l = m.display_name.lower()
         desc_l = m.description.lower()
-        # Simple scoring: exact name hit > prefix > substring in name > display > description.
-        if name_l == q:
+        cat_l = (m.category or "").lower()
+        blob = " ".join((name_l, display_l, desc_l, cat_l))
+        # Tiered: exact name > name prefix > all tokens in name > display > category > anywhere.
+        if name_l == q or name_l == q_joined:
             score = 0
-        elif name_l.startswith(q):
+        elif name_l.startswith(q) or name_l.startswith(q_joined):
             score = 1
-        elif q in name_l:
+        elif all(t in name_l for t in tokens):
             score = 2
-        elif q in display_l:
+        elif all(t in display_l for t in tokens):
             score = 3
-        elif q in desc_l:
+        elif all(t in cat_l for t in tokens):
             score = 4
+        elif all(t in blob for t in tokens):
+            score = 5
         else:
             continue
         scored.append((score, m))
 
     scored.sort(key=lambda x: (x[0], x[1].id))
-    total_matched = len(scored)
-    matched = [m for _, m in scored[: max(0, limit)]]
+    close_match = False
+    if scored:
+        total_matched = len(scored)
+        matched = [m for _, m in scored[: max(0, limit)]]
+    else:
+        # Zero hits: fall back to the closest node names, so a typo
+        # ('KSampeler') still points the caller at 'KSampler'. Ids are bucketed
+        # by their lowered form (difflib needs unique candidates) but every node
+        # in a colliding bucket is surfaced — a pack may register both
+        # 'LoadImage' and 'loadimage', and dropping one hides a real suggestion.
+        by_lower: dict[str, list[Any]] = {}
+        for m in graph.all_nodes():
+            by_lower.setdefault(m.id.lower(), []).append(m)
+        close = difflib.get_close_matches(q_joined, list(by_lower), n=max(1, limit), cutoff=0.6) if q_joined else []
+        candidates = [m for name_l in close for m in by_lower[name_l]]
+        # Count before truncating, like every other path here (`ls`, `upstream`,
+        # and the scored branch above) — otherwise `--limit 0` reports total 0
+        # and silently erases the fact that a close match exists.
+        total_matched = len(candidates)
+        matched = candidates[: max(0, limit)]
+        close_match = bool(candidates)
 
     payload = {
         "query": query,
         "total": total_matched,
         "count": len(matched),
+        # Top-level too, not just per-row: a caller that gates on `count == 0` to
+        # mean "no such node" would otherwise have to inspect every row to notice
+        # the search actually found nothing and is guessing. Always present, so
+        # `data["close_match"]` is a stable check rather than a key-exists probe.
+        "close_match": close_match,
         "rows": [
             {
                 "name": m.id,
@@ -465,6 +513,7 @@ def search_cmd(
                 "display_name": m.display_name,
                 "description": m.description,
                 "output_types": m.output_types(),
+                **({"close_match": True} if close_match else {}),
             }
             for m in matched
         ],
@@ -480,9 +529,26 @@ def search_cmd(
         ]
 
     if renderer.is_pretty():
-        if not matched:
-            rprint(f"[dim]No nodes match {query!r}.[/dim]")
+        # The query is echoed back into a markup-interpreting sink, so escape it
+        # for the same reason the table cells below do.
+        query_safe = sanitize_markup(repr(query))
+        # Key the empty-state on the pre-slice count, not on `matched`: with
+        # `--limit 0` the slice is empty even though the search found hits, and
+        # printing "no nodes match" there contradicts the JSON's `total`.
+        if not total_matched:
+            rprint(f"[dim]No nodes match {query_safe}.[/dim]")
+        elif not matched and close_match:
+            # Guesses, not matches — say so, or --limit 0 would report the
+            # fallback's finds as real hits and undo the distinction above.
+            rprint(
+                f"[dim]No nodes match {query_safe}; {total_matched} close name match(es) "
+                f"found but --limit {limit} returned none.[/dim]"
+            )
+        elif not matched:
+            rprint(f"[dim]{total_matched} node(s) match {query_safe}; --limit {limit} returned none.[/dim]")
         else:
+            if close_match:
+                rprint(f"[dim]No nodes match {query_safe} — showing close name matches.[/dim]")
             from rich.table import Table
 
             tbl = Table(show_header=True, header_style="bold")

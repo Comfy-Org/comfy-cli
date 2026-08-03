@@ -59,7 +59,7 @@ The server validated the workflow and rejected nodes. The full per-node error ma
   ```
   comfy --json nodes search MissingNodeName
   ```
-  If `data.count` is 0, the node is genuinely absent. Then either install via `comfy node install <pkg>` (local) or pick a different workflow (cloud).
+  If `data.count` is 0 — or `data.close_match` is true, meaning the search found nothing and fell back to similarly-named classes — the node is genuinely absent. Then either install via `comfy node install <pkg>` (local) or pick a different workflow (cloud).
 
 - **Missing model file** (`ckpt_name`, `lora_name`, `vae_name` not found) → confirm the loader node exists and see its choices:
   ```

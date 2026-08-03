@@ -276,6 +276,19 @@ def test_nodes_search_is_inert(pretty, hostile_object_info):
     assert_inert(pretty)
 
 
+def test_nodes_search_echoed_query_is_inert(pretty, hostile_object_info):
+    """The no-match line echoes the query back into a markup-interpreting sink.
+
+    The query is caller-supplied rather than server-supplied, but an agent
+    frontend can relay attacker text into it, and `[/]` alone would raise
+    MarkupError while merely printing "no nodes match".
+    """
+    from comfy_cli.command.nodes import search_cmd
+
+    search_cmd(query=EVIL + UNBALANCED, limit=20, input_path=None, host=None, port=None, where=None)
+    assert_inert(pretty)
+
+
 def test_nodes_types_is_inert(pretty, hostile_object_info):
     from comfy_cli.command.nodes import types_cmd
 
