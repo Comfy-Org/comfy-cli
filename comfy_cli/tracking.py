@@ -5,6 +5,7 @@ import functools
 import json
 import logging as logginglib
 import os
+import queue
 import sys
 import threading
 import time
@@ -204,6 +205,12 @@ class TelemetryProvider(Protocol):
 
 
 class MixpanelProvider:
+    # A CLI invocation emits ~1-3 events, so this cap is effectively unreachable
+    # outside pathological cases. It exists so a wedged worker (blackholed
+    # endpoint) can't let an unbounded backlog accumulate — dropping is the
+    # correct trade for best-effort telemetry.
+    _QUEUE_MAX = 256
+
     def __init__(self, token: str):
         self.client = None
         if token:
@@ -212,24 +219,69 @@ class MixpanelProvider:
             from mixpanel import Mixpanel
 
             # mixpanel-python's default Consumer uses request_timeout=None → an
-            # unbounded, synchronous requests.post on the main thread, so a
-            # blackholed telemetry endpoint (accepts TCP, never responds) hangs the
-            # CLI indefinitely (BE-3354/BE-3403). track() sends inline on the calling
-            # thread and flush() is a no-op, so this bound is the ONLY thing guarding
-            # the hot event path — it isn't covered by the atexit daemon deadline.
-            # retry_limit=1 (default is 4 with backoff) keeps a blackholed send to a
-            # single ~10s attempt instead of ~40s+ across retries.
+            # unbounded, synchronous requests.post, so a blackholed telemetry
+            # endpoint (accepts TCP, never responds) hangs whichever thread sends
+            # (BE-3354/BE-3403). Sends now happen on the worker below rather than
+            # the caller's thread, so this bound caps how long ONE send can occupy
+            # the queue — and with it, how much of the atexit drain's shared 5s
+            # deadline a single in-flight event can consume. retry_limit=1
+            # (default is 4 with backoff) keeps a blackholed send to a single ~10s
+            # attempt instead of ~40s+ across retries.
             self.client = Mixpanel(token, consumer=MixpanelConsumer(request_timeout=10, retry_limit=1))
+            # Dispatch is queue-and-drain so track() never blocks the caller
+            # (BE-5868): @track_command fires its event *before* running the
+            # wrapped command body, and `run` fires execution_start before
+            # submitting the workflow, so an inline send put a synchronous HTTP
+            # round-trip on the hot path of every consented invocation.
+            self._queue: queue.Queue = queue.Queue(maxsize=self._QUEUE_MAX)
+            # daemon=True with NO atexit hook of our own, and no shutdown
+            # sentinel: `_flush_all_providers` is the single bounded shutdown
+            # drain path (BE-3403), and the worker just dies with the process.
+            # Constructed lazily on the first dispatched event (`_get_providers`
+            # is only reached from `_dispatch`), so a run that sends nothing —
+            # `comfy --help`, shell completion, no consent — never starts it.
+            self._worker = threading.Thread(target=self._run, daemon=True, name="mixpanel-telemetry")
+            self._worker.start()
         self.enabled = self.client is not None
+
+    def _run(self) -> None:
+        """Drain the queue forever, one send at a time.
+
+        A single worker over a single FIFO preserves per-process event ordering.
+        Accepted semantic shift: mixpanel-python stamps an event's `time` when
+        `client.track()` runs, which moves from call time to dequeue time —
+        sub-second skew in practice, no dashboard impact.
+        """
+        while True:
+            event_name, distinct_id, properties = self._queue.get()
+            try:
+                self.client.track(distinct_id=distinct_id, event_name=event_name, properties=properties)
+            except Exception as e:  # noqa: BLE001
+                # debug, not warning: a telemetry failure must never surface on
+                # the user's stderr (cf. the urllib3/posthog silencing above).
+                logging.debug(f"Failed to send mixpanel event {event_name}: {e}")
+            finally:
+                # In `finally` so a raising send can't leave flush()'s
+                # queue.join() waiting on a task that is never marked done.
+                self._queue.task_done()
 
     def track(self, event_name: str, distinct_id: str | None, properties: dict[str, Any]) -> None:
         if self.client is None or distinct_id is None:
             return
-        self.client.track(distinct_id=distinct_id, event_name=event_name, properties=properties)
+        try:
+            self._queue.put_nowait((event_name, distinct_id, dict(properties)))
+        except queue.Full:
+            logging.debug(f"mixpanel queue full; dropping event {event_name}")
 
     def flush(self) -> None:
-        # mixpanel-python ships per-call over sync HTTP; nothing to drain.
-        return
+        if self.client is None:
+            return
+        # Waits for the queue to drain completely, including the send already in
+        # flight. Unbounded here by design, exactly like PostHog's client.flush():
+        # boundedness comes from the caller — `_flush_all_providers` runs this in
+        # a daemon thread and joins it against the shared `_FLUSH_DEADLINE_SECONDS`
+        # deadline, logging and abandoning it on timeout.
+        self._queue.join()
 
 
 class PostHogProvider:
