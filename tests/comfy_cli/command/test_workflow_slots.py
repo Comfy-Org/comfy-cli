@@ -167,6 +167,18 @@ def _subgraph_workflow() -> dict:
     return json.loads((_FIXTURES / "subgraph_template_ui.json").read_text(encoding="utf-8"))
 
 
+def _seedream_graph():
+    """Graph built from the vendored ByteDance Seedream object_info (the node's
+    ``model`` input is a COMFY_DYNAMICCOMBO_V3 whose options carry sub-inputs)."""
+    oi = json.loads((_FIXTURES / "object_info_bytedance_seedream_v2.json").read_text(encoding="utf-8"))
+    return Graph.from_object_info(oi)
+
+
+def _seedream_workflow() -> dict:
+    """The pristine Seedream 5.0 Pro t2i template exactly as the frontend ships it."""
+    return json.loads((_FIXTURES / "seedream_5_0_pro_t2i_ui.json").read_text(encoding="utf-8"))
+
+
 @pytest.fixture
 def patched_graph(monkeypatch):
     monkeypatch.setattr(workflow_cmd, "_get_graph", lambda *a, **kw: _fake_graph())
@@ -175,6 +187,11 @@ def patched_graph(monkeypatch):
 @pytest.fixture
 def patched_subgraph_graph(monkeypatch):
     monkeypatch.setattr(workflow_cmd, "_get_graph", lambda *a, **kw: _subgraph_graph())
+
+
+@pytest.fixture
+def patched_seedream_graph(monkeypatch):
+    monkeypatch.setattr(workflow_cmd, "_get_graph", lambda *a, **kw: _seedream_graph())
 
 
 # ---------------------------------------------------------------------------
@@ -736,6 +753,145 @@ class TestVaryNestedSubgraph:
             wf = json.loads(f.read_text())
             prompts.append(_interior_node(wf, D33, 9)["widgets_values"][0])
         assert prompts == ["cat", "dog", "fox"]
+
+
+# ---------------------------------------------------------------------------
+# Dynamic combos (COMFY_DYNAMICCOMBO_V3) — pristine ByteDance Seedream template
+# ---------------------------------------------------------------------------
+#
+# The frontend inlines the selected option's widget sub-values into the flat
+# positional widgets_values right after the selector, so slot extraction and
+# the set-slot/vary write path must expand the dynamic combo or every widget
+# after it mislabels/miswrites (1.seed reading the model name, 1.seed=42
+# silently clobbering the model selector).
+#
+# Pristine template widgets_values layout (index → slot):
+#   0 prompt · 1 model selector · 2 model.size_preset · 3 model.width
+#   4 model.height · 5 seed · 6 control_after_generate · 7 watermark
+#   (thinking is optional and unserialized → index 8, absent)
+
+
+class TestSlotsDynamicCombo:
+    def test_slots_expand_dynamic_combo_sub_inputs(self, patched_seedream_graph, tmp_path, capsys):
+        path = _write_workflow(tmp_path, _seedream_workflow())
+        env = _run(["slots", str(path)], capsys)
+        assert env["ok"] is True
+        by_addr = {s["address"]: s for s in env["data"]["slots"]}
+        assert "1.prompt" in by_addr
+
+        model = by_addr["1.model"]
+        assert model["type"] == "COMFY_DYNAMICCOMBO_V3"
+        assert model["current_value"] == "seedream 5.0 pro"
+        assert "seedream 5.0 pro" in model["enum"]
+
+        preset = by_addr["1.model.size_preset"]
+        assert "(1K) 1024x1024 (1:1)" in preset["enum"]
+        assert preset["current_value"] == "(1K) 1024x1024 (1:1)"
+
+        assert by_addr["1.model.width"]["type"] == "INT"
+        assert by_addr["1.model.width"]["current_value"] == 2048
+        assert by_addr["1.model.height"]["type"] == "INT"
+        assert by_addr["1.model.height"]["current_value"] == 2048
+
+        seed = by_addr["1.seed"]
+        assert seed["type"] == "INT"
+        assert seed["current_value"] == 0, "1.seed must read its own slot, not the model selector"
+
+        assert by_addr["1.watermark"]["type"] == "BOOLEAN"
+        assert by_addr["1.watermark"]["current_value"] is False
+        assert "1.thinking" in by_addr
+
+    def test_slots_connection_sub_inputs_not_exposed(self, patched_seedream_graph, tmp_path, capsys):
+        """Autogrow/connection sub-inputs consume no widgets_values slot and
+        must not surface as slots."""
+        path = _write_workflow(tmp_path, _seedream_workflow())
+        env = _run(["slots", str(path)], capsys)
+        addrs = {s["address"] for s in env["data"]["slots"]}
+        assert "1.model.images" not in addrs
+
+
+class TestSetSlotDynamicCombo:
+    def test_set_seed_does_not_clobber_model_selector(self, patched_seedream_graph, tmp_path, capsys):
+        path = _write_workflow(tmp_path, _seedream_workflow())
+        env = _run(["set-slot", str(path), "1.seed=42"], capsys)
+        assert env["ok"] is True, env
+        wv = json.loads(path.read_text())["nodes"][0]["widgets_values"]
+        assert wv[5] == 42
+        assert wv[1] == "seedream 5.0 pro", "selector must be untouched by a seed write"
+
+    def test_set_sub_input_writes_its_own_slot(self, patched_seedream_graph, tmp_path, capsys):
+        path = _write_workflow(tmp_path, _seedream_workflow())
+        env = _run(["set-slot", str(path), '1.model.size_preset="Custom"'], capsys)
+        assert env["ok"] is True, env
+        wv = json.loads(path.read_text())["nodes"][0]["widgets_values"]
+        assert wv[2] == "Custom"
+        assert wv[1] == "seedream 5.0 pro"
+
+    def test_selector_change_rebuilds_roster(self, patched_seedream_graph, tmp_path, capsys):
+        original = _seedream_workflow()["nodes"][0]["widgets_values"]
+        path = _write_workflow(tmp_path, _seedream_workflow())
+        env = _run(["set-slot", str(path), '1.model="seedream 5.0 lite"'], capsys)
+        assert env["ok"] is True, env
+        warnings = env["data"]["warnings"]
+        assert any(w.get("code") == "dynamic_combo_roster_rebuilt" for w in warnings), warnings
+
+        wv = json.loads(path.read_text())["nodes"][0]["widgets_values"]
+        # lite adds max_images + fail_on_partial → roster grows by 2.
+        assert len(wv) == len(original) + 2
+        assert wv[0] == original[0], "prompt preserved"
+        assert wv[1] == "seedream 5.0 lite"
+        # lite defaults: size_preset (first enum), width, height, max_images, fail_on_partial.
+        assert wv[2:7] == ["(1K) 1024x1024 (1:1)", 2048, 2048, 1, False]
+        # trailing values (seed / control marker / watermark) preserved + realigned.
+        assert wv[7:] == [0, "randomize", False]
+
+        # The rebuilt roster is addressable: the lite-only sub-slots now exist.
+        env = _run(["slots", str(path)], capsys)
+        addrs = {s["address"]: s["current_value"] for s in env["data"]["slots"]}
+        assert addrs["1.model.max_images"] == 1
+        assert addrs["1.model.fail_on_partial"] is False
+        assert addrs["1.seed"] == 0
+
+    def test_unknown_sub_address_warns_without_writing(self, patched_seedream_graph, tmp_path, capsys):
+        original = _seedream_workflow()["nodes"][0]["widgets_values"]
+        path = _write_workflow(tmp_path, _seedream_workflow())
+        # max_images only exists under the lite/4.5 selectors, not the current pro one.
+        env = _run(["set-slot", str(path), "1.model.max_images=5"], capsys)
+        assert env["ok"] is True, env
+        warnings = env["data"]["warnings"]
+        w = next((w for w in warnings if w.get("code") == "unknown_dynamic_sub_input"), None)
+        assert w is not None, warnings
+        assert "model.size_preset" in (w.get("valid_addresses") or [])
+        wv = json.loads(path.read_text())["nodes"][0]["widgets_values"]
+        assert wv == original, "an unknown sub-address must not mutate widgets_values"
+
+    def test_unknown_selector_option_rejected(self, patched_seedream_graph, tmp_path, capsys):
+        path = _write_workflow(tmp_path, _seedream_workflow())
+        env = _run(["set-slot", str(path), '1.model="no-such-model"'], capsys)
+        assert env["ok"] is False
+        assert "valid options" in env["error"]["message"]
+
+
+class TestVaryDynamicCombo:
+    def test_vary_over_sub_input(self, patched_seedream_graph, tmp_path, capsys):
+        path = _write_workflow(tmp_path, _seedream_workflow())
+        out_dir = tmp_path / "out"
+        env = _run(
+            [
+                "vary",
+                str(path),
+                "--slot",
+                '1.model.size_preset=["Custom","(2K) 2048x2048 (1:1)"]',
+                "--out-dir",
+                str(out_dir),
+            ],
+            capsys,
+        )
+        assert env["ok"] is True
+        presets = []
+        for f in sorted(out_dir.glob("*.json")):
+            presets.append(json.loads(f.read_text())["nodes"][0]["widgets_values"][2])
+        assert presets == ["Custom", "(2K) 2048x2048 (1:1)"]
 
 
 # ---------------------------------------------------------------------------
