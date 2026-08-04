@@ -7,6 +7,7 @@ No I/O, no CLI invocation — just the engine in isolation.
 from __future__ import annotations
 
 import copy
+import json
 from typing import Any
 
 import pytest
@@ -1670,3 +1671,39 @@ def test_load_from_target_refuses_non_loopback_local_host():
 
     with pytest.raises(LoadError, match="non-loopback"):
         _load_from_target(mode="local", host="example.com", port=8188)
+
+
+# ===========================================================================
+# `--input <dump>` is an offline path — annotation lookup must not reach out
+# ===========================================================================
+
+
+def test_input_path_load_does_not_touch_the_network(tmp_path, monkeypatch):
+    """``comfy nodes ls --input dump.json`` reads a local file by the caller's
+    explicit choice. Resolving annotations is incidental to that and must not be
+    the thing that turns an offline command into a network round-trip."""
+    from comfy_cli.cql import annotations_source
+    from comfy_cli.cql.engine import Graph
+
+    dump = tmp_path / "object_info.json"
+    dump.write_text(json.dumps(_object_info()))
+
+    monkeypatch.setattr(
+        annotations_source,
+        "fetch_pair",
+        lambda **kw: pytest.fail("annotation fetch attempted on the --input path"),
+    )
+    monkeypatch.setenv("COMFY_CLI_NO_REMOTE_REFRESH", "0")  # network would otherwise be allowed
+
+    seen: dict = {}
+    real_load = annotations_source.load_annotation_bytes
+
+    def spy(**kwargs):
+        seen.update(kwargs)
+        return real_load(**kwargs)
+
+    monkeypatch.setattr(annotations_source, "load_annotation_bytes", spy)
+
+    g = Graph.load(input_path=str(dump))
+    assert g.node_count() > 0
+    assert seen == {"allow_network": False}

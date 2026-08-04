@@ -951,3 +951,66 @@ def categories_cmd(
             renderer.console().print(tbl)
             rprint(f"[dim]{len(flat)} categories[/dim]")
     renderer.emit(payload, command="nodes categories")
+
+
+# ---------------------------------------------------------------------------
+# refresh — object_info is fetched live; the annotation data is what's cached
+# ---------------------------------------------------------------------------
+
+
+@app.command(
+    "refresh",
+    help=(
+        "Re-fetch node annotation data (pack/labels/cloud_disabled) from Comfy-Org/comfy-complete. "
+        "Set COMFY_CLI_NO_REMOTE_REFRESH=1 to keep every `nodes` command off the network."
+    ),
+)
+@tracking.track_command("nodes")
+def refresh_cmd(
+    where: Annotated[
+        str | None,
+        typer.Option(
+            "--where",
+            show_default=False,
+            hidden=True,
+            help="Deprecated and ignored — annotation data is the same for local and cloud.",
+        ),
+    ] = None,
+):
+    """Force-refresh the node annotation cache from the public comfy-complete repo.
+
+    ``object_info`` itself is fetched live from the server on every command, so
+    there is nothing to refresh there. The *annotations* (which custom-node pack
+    a node belongs to, its behavioral labels, and whether it's disabled on
+    cloud) come from Comfy-Org/comfy-complete and are cached locally with a TTL;
+    this command pulls the latest copy immediately.
+
+    ``--where`` is accepted and ignored. It steered nothing even when this
+    command was a no-op, and the annotation files are routing-independent — but
+    it was in the CLI's own error hints and in two shipped skill docs, so
+    rejecting it would turn "you followed the hint" into ``No such option``
+    (exit 2) for anyone on an older doc. Hidden from ``--help`` so nothing new
+    learns it.
+    """
+    renderer = get_renderer()
+    from comfy_cli.cql import annotations_source
+
+    results = annotations_source.refresh_annotations()
+    ok = all(r["source"] == "remote" for r in results)
+    if renderer.is_pretty():
+        for r in results:
+            if r["source"] == "remote":
+                # A remote fetch that couldn't be persisted still refreshed this
+                # run's data; say so, and say why it won't survive to the next.
+                dest = r["path"] or f"not cached ({r.get('cache_error', 'cache unavailable')})"
+                rprint(f"[green]✓[/green] {r['name']} ({r['bytes']:,} bytes) → {dest}")
+            elif r["source"] == "bundled":
+                # Not necessarily a failure: COMFY_CLI_NO_REMOTE_REFRESH lands
+                # here by design, so let the reason carry the why.
+                rprint(
+                    f"[yellow]![/yellow] {r['name']}: using bundled snapshot "
+                    f"([dim]{r.get('error') or 'remote unavailable'}[/dim])"
+                )
+            else:
+                rprint(f"[red]✗[/red] {r['name']}: unavailable ([dim]{r.get('error') or 'no source'}[/dim])")
+    renderer.emit({"refreshed": ok, "files": results}, command="nodes refresh")

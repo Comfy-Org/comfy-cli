@@ -207,6 +207,165 @@ class TestQueryFlagRemoved:
 
 
 # ---------------------------------------------------------------------------
+# nodes refresh — re-fetch annotation data from comfy-complete
+# ---------------------------------------------------------------------------
+
+
+class TestNodesRefresh:
+    def test_refresh_reports_remote_success(self, monkeypatch, capsys):
+        from comfy_cli.cql import annotations_source
+
+        fake = [
+            {"name": "supported_nodes.yaml", "source": "remote", "bytes": 100, "path": "/c/supported_nodes.yaml"},
+            {
+                "name": "cloud_disable_config.yaml",
+                "source": "remote",
+                "bytes": 50,
+                "path": "/c/cloud_disable_config.yaml",
+            },
+        ]
+        monkeypatch.setattr(annotations_source, "refresh_annotations", lambda: fake)
+        env = _run(["refresh"], capsys)
+        assert env["data"]["refreshed"] is True
+        assert env["data"]["files"] == fake
+
+    def test_refresh_reports_bundled_fallback(self, monkeypatch, capsys):
+        from comfy_cli.cql import annotations_source
+
+        fake = [
+            {"name": "supported_nodes.yaml", "source": "bundled", "bytes": 100, "path": None, "error": "offline"},
+            {"name": "cloud_disable_config.yaml", "source": "bundled", "bytes": 50, "path": None, "error": "offline"},
+        ]
+        monkeypatch.setattr(annotations_source, "refresh_annotations", lambda: fake)
+        env = _run(["refresh"], capsys)
+        assert env["data"]["refreshed"] is False
+
+    def test_refresh_still_accepts_the_legacy_where_flag(self, monkeypatch, capsys):
+        """``--where`` steers nothing now, but the CLI's own error hints and two
+        shipped SKILL.md files told people to type it. Rejecting it would turn
+        "you followed the hint" into ``No such option`` (exit 2)."""
+        from comfy_cli.cql import annotations_source
+
+        fake = [
+            {"name": "supported_nodes.yaml", "source": "remote", "bytes": 100, "path": "/c/supported_nodes.yaml"},
+            {
+                "name": "cloud_disable_config.yaml",
+                "source": "remote",
+                "bytes": 50,
+                "path": "/c/cloud_disable_config.yaml",
+            },
+        ]
+        monkeypatch.setattr(annotations_source, "refresh_annotations", lambda: fake)
+        env = _run(["refresh", "--where", "cloud"], capsys)
+        assert env["data"]["refreshed"] is True
+
+    def test_refresh_reports_unavailable_when_no_source_at_all(self, monkeypatch, capsys):
+        """Package data missing *and* the fetch failed — neither remote nor bundled."""
+        from comfy_cli.cql import annotations_source
+
+        fake = [
+            {"name": n, "source": "unavailable", "bytes": 0, "path": None, "error": "dns failure"}
+            for n in ("supported_nodes.yaml", "cloud_disable_config.yaml")
+        ]
+        monkeypatch.setattr(annotations_source, "refresh_annotations", lambda: fake)
+        env = _run(["refresh"], capsys)
+        assert env["data"]["refreshed"] is False
+        assert all(f["source"] == "unavailable" for f in env["data"]["files"])
+
+    def test_refresh_reports_remote_with_cache_error(self, monkeypatch, capsys):
+        """Downloaded fine, couldn't save it — still a successful refresh."""
+        from comfy_cli.cql import annotations_source
+
+        fake = [
+            {"name": n, "source": "remote", "bytes": 100, "path": None, "cache_error": "disk full"}
+            for n in ("supported_nodes.yaml", "cloud_disable_config.yaml")
+        ]
+        monkeypatch.setattr(annotations_source, "refresh_annotations", lambda: fake)
+        env = _run(["refresh"], capsys)
+        assert env["data"]["refreshed"] is True
+        assert all(f["cache_error"] == "disk full" for f in env["data"]["files"])
+
+    @pytest.mark.parametrize(
+        ("entry", "expected"),
+        [
+            # `_run` pins the JSON renderer, so the pretty branch — where the
+            # unavailable/cache_error wording actually lives — needs its own pass.
+            ({"source": "unavailable", "bytes": 0, "path": None, "error": "dns failure"}, "dns failure"),
+            ({"source": "remote", "bytes": 100, "path": None, "cache_error": "disk full"}, "disk full"),
+            ({"source": "bundled", "bytes": 100, "path": None}, "remote unavailable"),
+            ({"source": "unavailable", "bytes": 0, "path": None}, "no source"),
+        ],
+    )
+    def test_refresh_pretty_output_explains_every_source(self, monkeypatch, entry, expected):
+        """Each source renders a reason; a missing `error` never prints as blank."""
+        from comfy_cli.cql import annotations_source
+
+        fake = [{"name": "supported_nodes.yaml", **entry}]
+        monkeypatch.setattr(annotations_source, "refresh_annotations", lambda: fake)
+        reset_renderer_for_testing()  # pretty is the default renderer
+        result = CliRunner().invoke(nodes_cmd.app, ["refresh"])
+        assert result.exit_code == 0, result.output
+        assert expected in result.output
+
+
+class TestNodesRefreshPublishedContract:
+    """`nodes refresh`'s payload is a published contract (`comfy --json discover`).
+
+    Nothing validated the `nodes` payloads against `schemas/nodes.json`, so this
+    command's new `refreshed`/`files` fields shipped undocumented — an agent
+    reading `discover` would not have known they existed. Pin both directions:
+    the schema describes the fields, and the command emits what it describes.
+    """
+
+    @staticmethod
+    def _schema():
+        from comfy_cli import discovery
+
+        # `load_all_schemas` returns {name, title, schema} — the JSON Schema is
+        # the inner value. Validating the wrapper instead would assert nothing:
+        # `name`/`schema` are not validation keywords, so it accepts any input.
+        return discovery.load_all_schemas()["nodes"]["schema"]
+
+    def test_schema_documents_the_refresh_fields(self):
+        props = self._schema()["properties"]
+        assert "refreshed" in props, "schemas/nodes.json does not describe `refreshed`"
+        assert "files" in props, "schemas/nodes.json does not describe `files`"
+        assert set(props["files"]["items"]["properties"]["source"]["enum"]) == {
+            "remote",
+            "bundled",
+            "unavailable",
+        }
+
+    @pytest.mark.parametrize(
+        "entry",
+        [
+            {"source": "remote", "bytes": 100, "path": "/c/annotations.json"},
+            {"source": "remote", "bytes": 100, "path": None, "cache_error": "disk full"},
+            {"source": "bundled", "bytes": 100, "path": None, "error": "offline"},
+            {"source": "unavailable", "bytes": 0, "path": None, "error": "dns failure"},
+        ],
+    )
+    def test_emitted_payload_validates_against_the_schema(self, monkeypatch, capsys, entry):
+        import jsonschema
+
+        from comfy_cli.cql import annotations_source
+
+        fake = [{"name": n, **entry} for n in ("supported_nodes.yaml", "cloud_disable_config.yaml")]
+        monkeypatch.setattr(annotations_source, "refresh_annotations", lambda: fake)
+        env = _run(["refresh"], capsys)
+        jsonschema.Draft202012Validator(self._schema()).validate(env["data"])
+
+    def test_real_refresh_output_validates_offline(self, monkeypatch, capsys):
+        """Not just the fakes — the genuine offline code path emits valid shape."""
+        import jsonschema
+
+        monkeypatch.setenv("COMFY_CLI_NO_REMOTE_REFRESH", "1")
+        env = _run(["refresh"], capsys)
+        jsonschema.Draft202012Validator(self._schema()).validate(env["data"])
+        assert env["data"]["refreshed"] is False
+        assert {f["source"] for f in env["data"]["files"]} == {"bundled"}
+
+
 # local target resolution — config.background parity with `comfy run` (BE-6306)
 # ---------------------------------------------------------------------------
 #

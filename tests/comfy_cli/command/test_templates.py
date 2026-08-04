@@ -281,6 +281,102 @@ def test_fetch_non_json_upstream_surfaces_workflow_invalid(gallery_file, monkeyp
 
 
 # ---------------------------------------------------------------------------
+# templates fetch — node_count across both workflow serializations, and the
+# envelope ride-along when no file was written.
+# ---------------------------------------------------------------------------
+
+
+UI_WORKFLOW = {
+    "id": "abc-123",
+    "revision": 0,
+    "last_node_id": 6,
+    "last_link_id": 5,
+    "nodes": [{"id": i, "type": "KSampler"} for i in range(6)],
+    "links": [],
+    "groups": [],
+    "config": {},
+    "extra": {},
+    "version": 0.4,
+}
+
+
+def test_fetch_node_count_counts_nodes_not_top_level_keys(gallery_file, tmp_path: Path, monkeypatch):
+    """UI-format templates are ``{id, revision, nodes, links, …}`` — ``len(wf)``
+    counted those wrapper keys and reported ~10 for every template."""
+    _force_json_renderer()
+    _stub_template_workflow_fetch(monkeypatch, json.dumps(UI_WORKFLOW).encode())
+
+    out_path = tmp_path / "wf.json"
+    runner = CliRunner()
+    result = runner.invoke(
+        templates_cmd.app, ["fetch", "--gallery", gallery_file, "image_flux2", "--out", str(out_path)]
+    )
+    assert result.exit_code == 0, result.output
+    env = _envelope(result.output)
+    assert len(UI_WORKFLOW) == 10  # the number the old `len(wf)` would have reported
+    assert env["data"]["node_count"] == 6
+
+
+def test_fetch_node_count_still_correct_for_api_format(gallery_file, tmp_path: Path, monkeypatch):
+    """API format is a bare node map, where the key count *is* the node count."""
+    _force_json_renderer()
+    api_workflow = {str(i): {"class_type": "KSampler", "inputs": {}} for i in range(3)}
+    _stub_template_workflow_fetch(monkeypatch, json.dumps(api_workflow).encode())
+
+    out_path = tmp_path / "wf.json"
+    runner = CliRunner()
+    result = runner.invoke(
+        templates_cmd.app, ["fetch", "--gallery", gallery_file, "image_flux2", "--out", str(out_path)]
+    )
+    assert result.exit_code == 0, result.output
+    assert _envelope(result.output)["data"]["node_count"] == 3
+
+
+def test_fetch_rides_the_workflow_in_the_envelope_when_no_out(gallery_file, monkeypatch):
+    """In JSON mode emit() owns stdout, so without the ride-along a `fetch`
+    with no --out returns metadata and loses the workflow entirely."""
+    _force_json_renderer()
+    _stub_template_workflow_fetch(monkeypatch, json.dumps(UI_WORKFLOW).encode())
+
+    runner = CliRunner()
+    result = runner.invoke(templates_cmd.app, ["fetch", "--gallery", gallery_file, "image_flux2"])
+    assert result.exit_code == 0, result.output
+    env = _envelope(result.output)
+    assert env["data"]["out"] == "stdout"
+    assert env["data"]["workflow"] == UI_WORKFLOW
+
+
+def test_fetch_with_out_omits_the_workflow_ride_along(gallery_file, tmp_path: Path, monkeypatch):
+    """The file is the artifact; duplicating it into every envelope is bloat."""
+    _force_json_renderer()
+    _stub_template_workflow_fetch(monkeypatch, json.dumps(UI_WORKFLOW).encode())
+
+    out_path = tmp_path / "wf.json"
+    runner = CliRunner()
+    result = runner.invoke(
+        templates_cmd.app, ["fetch", "--gallery", gallery_file, "image_flux2", "--out", str(out_path)]
+    )
+    assert result.exit_code == 0, result.output
+    assert "workflow" not in _envelope(result.output)["data"]
+
+
+def test_fetch_empty_out_falls_back_to_stdout_not_a_black_hole(gallery_file, monkeypatch):
+    """``--out ""`` writes no file; the workflow must still reach the caller.
+
+    The two guards used to disagree — ``if out:`` (falsy → no file) versus
+    ``out is None`` (False → no ride-along) — so the workflow landed nowhere.
+    """
+    _force_json_renderer()
+    _stub_template_workflow_fetch(monkeypatch, json.dumps(UI_WORKFLOW).encode())
+
+    runner = CliRunner()
+    result = runner.invoke(templates_cmd.app, ["fetch", "--gallery", gallery_file, "image_flux2", "--out", ""])
+    assert result.exit_code == 0, result.output
+    env = _envelope(result.output)
+    assert env["data"]["out"] == "stdout"
+    assert env["data"]["workflow"] == UI_WORKFLOW
+
+
 # templates check — workflow-walker unit tests
 # ---------------------------------------------------------------------------
 
@@ -1102,3 +1198,77 @@ def test_oversize_template_workflow_is_a_clean_envelope(gallery_file, monkeypatc
     assert result.exit_code != 0
     env = _envelope(result.output)
     assert env["error"]["code"] == "template_fetch_failed"
+
+
+# ---------------------------------------------------------------------------
+# `templates refresh` — the standalone command persists like `_load_gallery`
+# does, not with a bare write_bytes.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("label", "body"),
+    [
+        ("non-JSON body", b"<html>429 Too Many Requests</html>"),
+        ("valid JSON, wrong shape", b'{"error": "not a category list"}'),
+        ("JSON scalar", b"7"),
+    ],
+)
+def test_refresh_command_never_caches_an_unusable_body(cache_file, monkeypatch, label, body):
+    """A 200 carrying garbage must not clobber a good cache.
+
+    `refresh` used to `write_bytes` whatever came back, report success, and then
+    break every later `templates ls` for the whole TTL — with the stale-cache
+    fallback unable to help, because the cache *was* the garbage.
+    """
+    monkeypatch.setattr(templates_cmd, "_fetch_gallery", lambda *a, **k: body)
+    _force_json_renderer()
+
+    result = CliRunner().invoke(templates_cmd.app, ["refresh"])
+    assert result.exit_code != 0, f"{label} was accepted"
+    assert _envelope(result.output)["error"]["code"] == "gallery_fetch_failed"
+    assert json.loads(cache_file.read_bytes()) == FIXTURE  # untouched
+
+
+def test_refresh_command_reports_a_cache_write_failure(cache_file, monkeypatch):
+    """Caching is the whole job of `refresh`, so a failed write is a failed run.
+
+    (`templates ls` takes the opposite view: it already holds valid data, so a
+    write failure there is deliberately non-fatal.)
+    """
+    monkeypatch.setattr(templates_cmd, "_fetch_gallery", lambda *a, **k: json.dumps(FIXTURE).encode())
+    monkeypatch.setattr(templates_cmd, "_persist_cache", lambda cache, data: "Read-only file system")
+    _force_json_renderer()
+
+    result = CliRunner().invoke(templates_cmd.app, ["refresh"])
+    assert result.exit_code != 0
+    env = _envelope(result.output)
+    assert env["error"]["code"] == "gallery_cache_write_failed"
+    assert "Read-only file system" in env["error"]["message"]
+
+
+def test_refresh_command_success_reports_category_count(cache_file, monkeypatch):
+    monkeypatch.setattr(templates_cmd, "_fetch_gallery", lambda *a, **k: json.dumps(FIXTURE).encode())
+    _force_json_renderer()
+
+    result = CliRunner().invoke(templates_cmd.app, ["refresh"])
+    assert result.exit_code == 0, result.output
+    data = _envelope(result.output)["data"]
+    assert data["categories"] == len(FIXTURE)
+    assert json.loads(cache_file.read_bytes()) == FIXTURE
+
+
+def test_ls_self_heals_from_a_cache_poisoned_by_an_older_build(cache_file, monkeypatch):
+    """A fresh-but-unparseable cache is re-fetched, not raised on for the TTL.
+
+    Older builds wrote before validating, so an upgraded CLI can inherit a
+    poisoned index whose mtime still reads fresh.
+    """
+    cache_file.write_bytes(b"<html>left over from an older build</html>")
+    monkeypatch.setattr(templates_cmd, "_fetch_gallery", lambda *a, **k: json.dumps(FIXTURE).encode())
+    _force_json_renderer()
+
+    result = CliRunner().invoke(templates_cmd.app, ["ls"])
+    assert result.exit_code == 0, result.output
+    assert _envelope(result.output)["data"]["total_in_gallery"] > 0
+    assert json.loads(cache_file.read_bytes()) == FIXTURE  # healed on disk too

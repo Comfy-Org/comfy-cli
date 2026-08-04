@@ -513,6 +513,9 @@ works with no local server. If the live fetch fails, the command still succeeds
 from cache and the envelope carries `data.stale: true` +
 `warnings[] {code: "object_info_stale"}` — treat results as possibly outdated
 re-run the command once the live fetch recovers to pick up fresh object_info.
+`comfy nodes refresh` is a different cache — it re-pulls node
+*annotations* (pack/labels/cloud_disabled) from Comfy-Org/comfy-complete, not
+object_info.
 
 Slot addresses are `<instance_id>.<input_name>`. Feed them to
 `workflow set-slot` / `workflow vary` in the Execution half. Works on
