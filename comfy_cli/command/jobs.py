@@ -707,6 +707,168 @@ def _render_jobs_pretty(rows: list[JobRow], *, host: str, port: int) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _state_file_snapshot(st: JobState, *, prompt_id: str, host: str, port: int, server_running: bool) -> dict:
+    """Shape a `jobs status` payload out of the on-disk state file.
+
+    Used by both fallback paths — the server being down, and a live server
+    that has no record of the prompt — so the two agree on field names.
+    ``server_running`` is the one thing that differs between them, and it is
+    what tells the caller which fallback it is looking at.
+    """
+    return {
+        "prompt_id": prompt_id,
+        "status": st.status,
+        # `jobs_state.read` drops unknown keys but does not type-check the ones
+        # it keeps, so a hand-edited or truncated file can carry a non-list
+        # `outputs`. `list()` would shred a str into characters and raise on a
+        # scalar — only trust an actual list.
+        "outputs": list(st.outputs) if isinstance(st.outputs, list) else [],
+        # Every live `_snapshot()` result carries these three, so a consumer
+        # that indexes them on a `jobs status` success payload would hit a
+        # `KeyError` on this source alone. The state file records output URLs
+        # flat, with no node or item association, so the grouped views cannot
+        # be reconstructed from it — they are present but empty, which is the
+        # same thing the live queue-hit payload emits.
+        "outputs_by_node": {},
+        "outputs_by_item": {},
+        "workflow_size": None,
+        "error": st.error,
+        "host": host,
+        "port": port,
+        "server_running": server_running,
+        "source": "state_file",
+        "submitted_at": st.submitted_at,
+        "updated_at": st.updated_at,
+        "workflow": st.workflow,
+    }
+
+
+# Spellings that all name "the local machine". Folded together before a
+# state file's recorded host is compared with the queried one, because the two
+# are written by different code paths that do NOT agree on spelling:
+#
+#   * `comfy run`'s `execute()` substitutes the wildcard bind `0.0.0.0` with
+#     `127.0.0.1` before it writes the state file, while `resolve_host_port`
+#     canonicalizes a wildcard only when it came from `config.background` — an
+#     explicit `--host 0.0.0.0`, or a `COMFY_LOCAL_URL` naming it, reaches
+#     `jobs status` verbatim. Same env var, same server, two spellings.
+#   * `localhost` vs `127.0.0.1` is just which flag the caller happened to type;
+#     `resolve_host_port` passes both through unchanged.
+#
+# A missed match here is a silent FALSE NEGATIVE — the record is discarded and
+# the command falls back to the bare `prompt_not_found` envelope, throwing away
+# the very `server_died` attribution this fallback exists to preserve.
+_LOOPBACK_HOST_SPELLINGS = frozenset({"127.0.0.1", "localhost", "::1", "0.0.0.0", "::"})
+
+
+def _canonical_local_host(host: str) -> str:
+    """Fold one host spelling into a form comparable for same-server checks.
+
+    Unbrackets IPv6 literals (``[::1]`` and ``::1`` are the same address —
+    brackets are a URL encoding, and `Target.host` stores the raw literal while
+    `resolve_host_port` returns the bracketed one), lowercases (hostnames are
+    case-insensitive), and collapses every loopback/wildcard spelling onto one.
+    Anything else is returned as-is, so a genuinely different host still fails
+    the comparison.
+    """
+    from comfy_cli.env_checker import _unbracket_host
+
+    h = _unbracket_host(str(host).strip()).lower()
+    return "127.0.0.1" if h in _LOOPBACK_HOST_SPELLINGS else h
+
+
+def _state_file_for_local_target(prompt_id: str, *, host: str, port: int) -> JobState | None:
+    """Read `prompt_id`'s state file, but only if it answers for THIS local target.
+
+    The file is keyed by prompt_id alone, so an unscoped read will happily
+    return a cloud run, or a job from a second local instance on another port,
+    and `_state_file_snapshot` would then stamp the *queried* host/port onto
+    output URLs belonging to a different server. Everything below is a reason
+    the record is not an answer about ``host:port``.
+    """
+    from comfy_cli import jobs_state
+
+    try:
+        st = jobs_state.read(prompt_id)
+    except ValueError:  # unsafe prompt_id — no state file to read
+        return None
+    except OSError:
+        # `read` goes through `state_path` -> `state_dir`, which mkdirs the
+        # config root and can fail (read-only or permission-denied home). A
+        # traceback here would replace a clean envelope, so treat it as absent
+        # — the same guard `_gather_waitable_ids` puts on this call.
+        return None
+    if st is None:
+        return None
+    # `state_path` maps "/" and "\" to "_" *before* validating, so read("a/b")
+    # resolves to the file for the distinct prompt "a_b". Require the record to
+    # name the id we actually asked about.
+    if st.prompt_id != prompt_id:
+        return None
+    if st.where != "local":
+        return None
+    # host/port are None on files written before they were recorded, so only a
+    # positive mismatch disqualifies a record. Compare canonicalized spellings:
+    # a literal `!=` rejects `localhost` against `127.0.0.1` (see
+    # `_canonical_local_host`), which would silently break this whole fallback.
+    if st.host is not None and _canonical_local_host(st.host) != _canonical_local_host(host):
+        return None
+    if st.port is not None and str(st.port) != str(port):
+        return None
+    return st
+
+
+def _hint_for_missing_local(prompt_id: str, default: str) -> str:
+    """Redirect to `--where cloud` when that is why the local lookup came up empty.
+
+    ``_state_file_for_local_target`` rejects a cloud record silently, which
+    leaves the commonest mistake — a cloud job asked about without
+    ``--where cloud`` — indistinguishable from a job that never existed. The
+    default hints both point at ``comfy jobs ls``, whose scope follows the same
+    resolved target, so it would not list that job either. Name the query that
+    does work instead.
+    """
+    from comfy_cli import jobs_state
+
+    try:
+        st = jobs_state.read(prompt_id)
+    except (ValueError, OSError):
+        return default
+    if st is None or st.prompt_id != prompt_id or st.where != "cloud":
+        return default
+    return f"this prompt_id is tracked as a cloud job — try: comfy jobs status {prompt_id} --where cloud"
+
+
+def _server_confirms_no_record(host: str, port: int, prompt_id: str) -> bool:
+    """True only if both `/queue` and `/history` answered and neither knows `prompt_id`.
+
+    `_snapshot` returns None for two very different things: the server has no
+    record, or the fetch failed (every `_http_get_json` failure is a
+    `RuntimeError`, and `_snapshot` swallows it). Only the first licenses the
+    "this job died with an earlier process" inference — reading a stale verdict
+    out of a busy or briefly unreachable server would manufacture a
+    `server_died` report for a job that is still running fine. The watcher is
+    equally careful here (it keeps a grace window before drawing the same
+    conclusion), so this demands a positive confirmation rather than trusting
+    an absence of evidence.
+    """
+    try:
+        q = _http_get_json(f"http://{host}:{port}/queue")
+        hist = _http_get_json(f"http://{host}:{port}/history/{prompt_id}")
+    except RuntimeError:
+        return False
+    if not isinstance(q, dict) or not isinstance(hist, dict):
+        return False
+    if prompt_id in hist:
+        return False
+    for key in ("queue_running", "queue_pending"):
+        for entry in q.get(key) or []:
+            pid, _wf = _safe_queue_entry(entry)
+            if pid == prompt_id:
+                return False
+    return True
+
+
 @app.command("status", help="Show the status of a single prompt_id (local or --where cloud).")
 @tracking.track_command("jobs")
 def status_cmd(
@@ -728,19 +890,14 @@ def status_cmd(
         # maintained by the async watcher) still knows what this prompt was
         # doing when the server was last seen — a bare `server_not_running`
         # throws that attribution away.
-        from comfy_cli import jobs_state
-
-        try:
-            st = jobs_state.read(prompt_id)
-        except ValueError:  # unsafe prompt_id — no state file to read
-            st = None
+        st = _state_file_for_local_target(prompt_id, host=h, port=p)
 
         if st is None:
             # Untracked prompt: same envelope as before, byte for byte.
             renderer.error(
                 code="server_not_running",
                 message=f"ComfyUI not running on {h}:{p}",
-                hint="run: comfy launch",
+                hint=_hint_for_missing_local(prompt_id, "run: comfy launch"),
                 details={"host": h, "port": p},
             )
             raise typer.Exit(code=1)
@@ -749,19 +906,7 @@ def status_cmd(
             # The job finished before the server stopped — the state file is
             # the authoritative record, so this is a normal result, not an
             # error. Callers branch on `status`/`error`.
-            snapshot = {
-                "prompt_id": prompt_id,
-                "status": st.status,
-                "outputs": list(st.outputs or []),
-                "error": st.error,
-                "host": h,
-                "port": p,
-                "server_running": False,
-                "source": "state_file",
-                "submitted_at": st.submitted_at,
-                "updated_at": st.updated_at,
-                "workflow": st.workflow,
-            }
+            snapshot = _state_file_snapshot(st, prompt_id=prompt_id, host=h, port=p, server_running=False)
             if renderer.is_pretty():
                 _render_status_pretty(snapshot, host=h, port=p)
             renderer.emit(snapshot, command="jobs status")
@@ -792,10 +937,78 @@ def status_cmd(
 
     snapshot = _snapshot(h, p, prompt_id)
     if snapshot is None:
+        # The server answered, but neither /queue nor /history knows this
+        # prompt. That is *not* only "pruned from /history": the documented
+        # recovery from a server death is `comfy launch` and then check, and a
+        # relaunched ComfyUI is a FRESH process — its empty /queue and /history
+        # are precisely what a job that died with the old process looks like.
+        # So the state file, which still holds the verdict the watcher wrote
+        # (e.g. error.code == "server_died"), is the better answer here.
+        #
+        # This is the same inference the async watcher already makes: see
+        # `_LOST_AFTER_RESTART_S` in `comfy_cli/command/job_watcher.py`, where a
+        # prompt missing from a server that came back is finalized as
+        # `server_died`. `jobs status` reading the file it wrote keeps the two
+        # in agreement rather than having them contradict each other.
+        st = _state_file_for_local_target(prompt_id, host=h, port=p)
+
+        # `_snapshot` returning None is not by itself proof the server has no
+        # record — it swallows fetch failures too. Confirm before inferring.
+        confirmed_absent = _server_confirms_no_record(h, p, prompt_id) if st is not None else False
+
+        if st is not None and st.is_terminal and confirmed_absent:
+            # The state file holds a final verdict and the server has positively
+            # disowned the prompt — emit the verdict as a normal result, exactly
+            # as the server-down path does. The one difference is
+            # `server_running: True`, so a caller can tell it is looking at a
+            # live server with no record rather than a dead one.
+            snapshot = _state_file_snapshot(st, prompt_id=prompt_id, host=h, port=p, server_running=True)
+            if renderer.is_pretty():
+                _render_status_pretty(snapshot, host=h, port=p)
+            renderer.emit(snapshot, command="jobs status")
+            return
+
+        if st is not None:
+            # Either the record is non-terminal (the watcher never got to write
+            # a verdict — it may still be inside its grace window, or it died
+            # too), or the server would not confirm the absence. Keep the
+            # `prompt_not_found` code — callers key on it — and attach what the
+            # file does know, mirroring the server-down non-terminal branch.
+            if confirmed_absent:
+                tail = "The server may have been restarted since, in which case the job died with the previous process."
+            else:
+                # Don't assert a death the code has not established.
+                tail = (
+                    "The server did not answer /queue and /history reliably, so whether it still has a "
+                    "record of this job is unknown — retry before treating this as the job's outcome."
+                )
+            renderer.error(
+                code="prompt_not_found",
+                message=(
+                    f"No prompt with id {prompt_id!r} on {h}:{p} — the local state file last recorded it as "
+                    f"{st.status!r} (submitted {st.submitted_at}, last update {st.updated_at}). {tail}"
+                ),
+                hint="check `comfy jobs ls`; very old prompts may have been pruned from /history",
+                details={
+                    "prompt_id": prompt_id,
+                    "host": h,
+                    "port": p,
+                    "last_known_status": st.status,
+                    "submitted_at": st.submitted_at,
+                    "updated_at": st.updated_at,
+                    "workflow": st.workflow,
+                    "server_confirmed_no_record": confirmed_absent,
+                },
+            )
+            raise typer.Exit(code=1)
+
+        # Untracked prompt: same envelope as before, byte for byte.
         renderer.error(
             code="prompt_not_found",
             message=f"No prompt with id {prompt_id!r} on {h}:{p}.",
-            hint="check `comfy jobs ls`; very old prompts may have been pruned from /history",
+            hint=_hint_for_missing_local(
+                prompt_id, "check `comfy jobs ls`; very old prompts may have been pruned from /history"
+            ),
             details={"prompt_id": prompt_id, "host": h, "port": p},
         )
         raise typer.Exit(code=1)

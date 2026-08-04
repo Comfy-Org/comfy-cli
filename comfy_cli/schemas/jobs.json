@@ -12,7 +12,8 @@
     "prompt_id": {"type": "string"},
     "status": {
       "type": "string",
-      "enum": ["running", "pending", "queued", "completed", "error", "unknown", "watching"]
+      "description": "`cancelled` is one of `jobs_state.TERMINAL_STATUSES` and is copied verbatim out of a job's state file into a `jobs status` payload, so it belongs in this enum alongside the statuses the live `/queue` + `/history` snapshot produces.",
+      "enum": ["running", "pending", "queued", "completed", "error", "cancelled", "unknown", "watching"]
     },
     "queue_position": {"type": ["integer", "null"]},
     "workflow_size": {"type": ["integer", "null"]},
