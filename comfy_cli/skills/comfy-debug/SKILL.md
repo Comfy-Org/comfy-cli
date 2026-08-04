@@ -47,7 +47,7 @@ comfy --json run --workflow same_workflow.json --where cloud   # just resubmit �
 If several jobs from one batch died together with this code, resubmit them all; one retry each is normally enough.
 
 ### `workflow_not_api_format`
-UI-format workflows are converted to API format **client-side** using object_info (no server conversion endpoint exists). If conversion fails with `conversion_error`, re-export via `File > Export (API)` in ComfyUI; if object_info can't be fetched (`cql_no_graph`), run `comfy nodes refresh --where cloud` or start a local server.
+UI-format workflows are converted to API format **client-side** using object_info (no server conversion endpoint exists). If conversion fails with `conversion_error`, re-export via `File > Export (API)` in ComfyUI; if object_info can't be fetched (`cql_no_graph`), it is fetched live rather than cached — check `comfy cloud whoami` and your network, or start a local server, then retry.
 
 ### `workflow_invalid_json`
 The file isn't valid JSON. Inspect the first/last 100 bytes — often it's an HTML error page that was saved with `.json`.
@@ -59,7 +59,7 @@ The server validated the workflow and rejected nodes. The full per-node error ma
   ```
   comfy --json nodes search MissingNodeName
   ```
-  If `data.count` is 0, the node is genuinely absent. Then either install via `comfy node install <pkg>` (local) or pick a different workflow (cloud).
+  If `data.count` is 0 — or `data.close_match` is true, meaning the search found nothing and fell back to similarly-named classes — the node is genuinely absent. Then either install via `comfy node install <pkg>` (local) or pick a different workflow (cloud).
 
 - **Missing model file** (`ckpt_name`, `lora_name`, `vae_name` not found) → confirm the loader node exists and see its choices:
   ```
@@ -89,6 +89,9 @@ comfy jobs status <prompt_id>      # one-shot snapshot
 comfy --json-stream jobs watch <prompt_id>   # re-attach
 ```
 The local server keeps the job; the CLI just lost its tail.
+
+### `cql_query_invalid`
+`cql_query_invalid` — raised when a legacy `--query` string is passed to `comfy templates ls`. There is no query grammar; use flag-based filtering instead: `--type image|video|audio`, `--tag <t>`, `--model <m>` (templates) and `--produces/--accepts/--category/--pack` (`comfy nodes ls`).
 
 ### `cql_no_graph`
 The CLI needs an `object_info.json` to query against. Two options:

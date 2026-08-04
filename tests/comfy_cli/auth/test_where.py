@@ -45,6 +45,120 @@ def test_resolve_invalid_raises():
 
 
 # ---------------------------------------------------------------------------
+# resolve_default: reads the persisted where_default config key for the caller
+# ---------------------------------------------------------------------------
+
+
+class _FakeConfigManager:
+    """Stand-in for ConfigManager whose ``get`` behaviour is programmable."""
+
+    _value: str | None = None
+    _raise: bool = False
+
+    def get(self, key):
+        assert key == where_module.CONFIG_KEY_WHERE_DEFAULT
+        if self._raise:
+            raise RuntimeError("corrupt config")
+        return self._value
+
+
+@pytest.fixture
+def fake_config(monkeypatch):
+    import comfy_cli.config_manager as cm
+
+    monkeypatch.setattr(cm, "ConfigManager", _FakeConfigManager)
+    return _FakeConfigManager
+
+
+def test_resolve_default_uses_config_value(fake_config, monkeypatch):
+    monkeypatch.setattr(fake_config, "_value", "cloud")
+    r = where_module.resolve_default(env={}, project_value=None)
+    assert r.target is where_module.WhereTarget.CLOUD
+    assert r.source == "config"
+
+
+def test_resolve_default_flag_beats_config(fake_config, monkeypatch):
+    monkeypatch.setattr(fake_config, "_value", "cloud")
+    r = where_module.resolve_default(flag="local", env={}, project_value=None)
+    assert r.target is where_module.WhereTarget.LOCAL
+    assert r.source == "flag"
+
+
+def test_resolve_default_broken_config_falls_through(fake_config, monkeypatch):
+    """A config read that raises never breaks routing — it drops to None."""
+    monkeypatch.setattr(fake_config, "_raise", True)
+    r = where_module.resolve_default(env={}, project_value=None)
+    assert r.target is where_module.WhereTarget.LOCAL
+    assert r.source == "default"
+
+
+def test_resolve_default_forwards_project_value(fake_config, monkeypatch):
+    monkeypatch.setattr(fake_config, "_value", "local")
+    r = where_module.resolve_default(env={}, project_value="cloud")
+    assert r.target is where_module.WhereTarget.CLOUD
+    assert r.source == "project"
+
+
+# ---------------------------------------------------------------------------
+# resolve_default_or_exit: the emit-and-exit wrapper for call sites with no
+# per-command --where flag to fall back to
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def captured_renderer(monkeypatch):
+    """Replace the process renderer so ``error()`` calls are inspectable."""
+    captured: dict = {}
+
+    class _Renderer:
+        def error(self, **kw):
+            captured.update(kw)
+
+    monkeypatch.setattr("comfy_cli.output.get_renderer", lambda: _Renderer())
+    return captured
+
+
+def test_resolve_default_or_exit_returns_resolution(fake_config, captured_renderer, monkeypatch):
+    monkeypatch.setattr(fake_config, "_value", "cloud")
+    r = where_module.resolve_default_or_exit(env={}, project_value=None)
+    assert r.target is where_module.WhereTarget.CLOUD
+    assert captured_renderer == {}, "valid routing must not emit an error"
+
+
+def test_resolve_default_or_exit_emits_envelope_for_typoed_env(fake_config, captured_renderer):
+    """A typo'd COMFY_WHERE is a `where_invalid` envelope, never a traceback."""
+    import typer
+
+    with pytest.raises(typer.Exit) as excinfo:
+        where_module.resolve_default_or_exit(env={"COMFY_WHERE": "clod"}, project_value=None)
+    assert excinfo.value.exit_code == 1
+    assert captured_renderer["code"] == "where_invalid"
+    assert "clod" in captured_renderer["message"]
+    assert captured_renderer["hint"]
+
+
+def test_resolve_default_or_exit_emits_envelope_for_bad_persisted_config(fake_config, captured_renderer, monkeypatch):
+    """Same for a bad persisted ``where_default`` — the value parses, not the read."""
+    import typer
+
+    monkeypatch.setattr(fake_config, "_value", "clould")
+    with pytest.raises(typer.Exit) as excinfo:
+        where_module.resolve_default_or_exit(env={}, project_value=None)
+    assert excinfo.value.exit_code == 1
+    assert captured_renderer["code"] == "where_invalid"
+    assert "clould" in captured_renderer["message"]
+
+
+def test_resolve_default_or_exit_forwards_flag(fake_config, captured_renderer, monkeypatch):
+    """The wrapper mirrors ``resolve_default``'s signature — a valid flag wins."""
+    monkeypatch.setattr(fake_config, "_value", "clould")
+    r = where_module.resolve_default_or_exit(flag="local", env={}, project_value=None)
+    assert r.target is where_module.WhereTarget.LOCAL
+    assert r.source == "flag"
+    assert captured_renderer == {}
+
+
+# ---------------------------------------------------------------------------
 # project/1 precedence: flag → env → project → config → auto
 # ---------------------------------------------------------------------------
 
@@ -187,3 +301,35 @@ def test_cloud_preflight_refreshes_expired_session(isolated_secrets, monkeypatch
     assert where_module.cloud_preflight() is None
     # The refreshed token was persisted, so subsequent commands use it.
     assert auth_store.get_cloud_session().access_token == "fresh-access-token"
+
+
+def test_cloud_preflight_or_exit_passes_when_configured(isolated_secrets):
+    """The emit-and-exit wrapper returns quietly when preflight clears."""
+    auth_store.save_cloud_session(
+        base_url="https://testcloud.comfy.org",
+        resource="https://testcloud.comfy.org/mcp",
+        client_id="mcp-dyn-test-id",
+        scope="mcp:tools:read mcp:tools:call",
+        access_token="fake-access-token",
+        refresh_token="fake-refresh-token",
+        token_type="Bearer",
+        expires_at=9999999999,
+    )
+    assert where_module.cloud_preflight_or_exit() is None
+
+
+def test_cloud_preflight_or_exit_emits_and_exits_when_not_configured(isolated_secrets, monkeypatch):
+    """No session → the wrapper emits the error envelope and raises Exit(1)."""
+    import typer
+
+    captured = {}
+
+    class _Renderer:
+        def error(self, **kw):
+            captured.update(kw)
+
+    monkeypatch.setattr("comfy_cli.output.get_renderer", lambda: _Renderer())
+    with pytest.raises(typer.Exit) as excinfo:
+        where_module.cloud_preflight_or_exit()
+    assert excinfo.value.exit_code == 1
+    assert captured["code"] == "cloud_not_configured"

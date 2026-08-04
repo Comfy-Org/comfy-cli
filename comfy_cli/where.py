@@ -77,6 +77,64 @@ def resolve(
     return WhereResolution(target=WhereTarget.LOCAL, source="default")
 
 
+def resolve_default(
+    flag: str | None = None,
+    *,
+    env: Mapping[str, str] | None = None,
+    project_value: str | None = _UNSET,
+) -> WhereResolution:
+    """``resolve()`` with the persisted ``where_default`` config read for you.
+
+    Convenience for the common call site that just wants routing resolved
+    against the config file: it looks up ``CONFIG_KEY_WHERE_DEFAULT`` internally
+    (defensively — a broken config never breaks routing, it just drops to the
+    next precedence source) and forwards everything to :func:`resolve`. Callers
+    keep their own error handling for the ``ValueError`` a bad ``flag``/env/
+    project/config value raises, and their own shaping of the result.
+    """
+    from comfy_cli.config_manager import ConfigManager
+
+    try:
+        config_value = ConfigManager().get(CONFIG_KEY_WHERE_DEFAULT)
+    except Exception:  # noqa: BLE001 — never let a bad config break routing
+        config_value = None
+    return resolve(flag=flag, env=env, config_value=config_value, project_value=project_value)
+
+
+def resolve_default_or_exit(
+    flag: str | None = None,
+    *,
+    env: Mapping[str, str] | None = None,
+    project_value: str | None = _UNSET,
+) -> WhereResolution:
+    """:func:`resolve_default` that emits a ``where_invalid`` envelope and exits.
+
+    The shared "emit-and-exit" wrapper for command call sites that have no
+    sensible fallback for a bad routing value — a typo'd ``COMFY_WHERE``, a
+    stale ``defaults.where`` in the project ``comfy.yaml``, or a corrupt
+    persisted ``where_default`` would otherwise escape as a raw ``ValueError``
+    traceback, which is the worst possible shape for a machine consumer of a
+    JSON-envelope command.
+
+    Commands that *can* recover (``nodes``, ``jobs``) keep their own
+    ``except ValueError`` fallback instead of calling this.
+    """
+    import typer
+
+    from comfy_cli.output import get_renderer
+
+    try:
+        return resolve_default(flag=flag, env=env, project_value=project_value)
+    except ValueError as e:
+        get_renderer().error(
+            code="where_invalid",
+            message=str(e),
+            hint="use --where local or --where cloud, and check COMFY_WHERE, "
+            "`defaults.where` in comfy.yaml, and `comfy set-default --where`",
+        )
+        raise typer.Exit(code=1) from e
+
+
 def _project_where_default() -> str | None:
     """``defaults.where`` from the project/1 ``comfy.yaml`` governing cwd, if
     any. Discovery itself never raises (see :mod:`comfy_cli.project`); a
@@ -166,3 +224,23 @@ def cloud_preflight() -> CloudError | None:
             },
         )
     return None
+
+
+def cloud_preflight_or_exit() -> None:
+    """Run :func:`cloud_preflight`; emit a clean error envelope and exit if the
+    cloud path can't proceed (not signed in / expired session).
+
+    The shared "emit-and-exit" wrapper for every command that routes to cloud —
+    keeps the envelope shape identical across ``jobs``, ``run``, ``upload``, and
+    ``download`` instead of re-inlining the same block at each call site.
+    """
+    import typer
+
+    from comfy_cli.output import get_renderer
+
+    err = cloud_preflight()
+    if err is None:
+        return
+    renderer = get_renderer()
+    renderer.error(code=err.code, message=err.message, hint=err.hint, details=err.details)
+    raise typer.Exit(code=1)

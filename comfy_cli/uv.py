@@ -23,7 +23,7 @@ def _check_call(cmd: list[str], cwd: PathLike | None = None):
         subprocess.check_call(cmd, cwd=cwd)
     except subprocess.CalledProcessError:
         if len(cmd) >= 5 and cmd[1:4] == ["-m", "uv", "pip"] and cmd[4] in ("install", "sync"):
-            from rich import print as rprint
+            from comfy_cli.output import rprint
 
             rprint(
                 "\n[bold yellow]Hint:[/bold yellow] If you are on a network filesystem "
@@ -122,11 +122,11 @@ def parse_req_file(rf: PathLike, skips: list[str] | None = None):
 
 class DependencyCompiler:
     cpuPytorchUrl = "https://download.pytorch.org/whl/cpu"
-    rocmPytorchUrl = "https://download.pytorch.org/whl/rocm6.3"
+    rocmPytorchUrl = "https://download.pytorch.org/whl/rocm7.2"
     nvidiaPytorchUrl = "https://download.pytorch.org/whl/cu126"
 
     cpuTorchBackend = "cpu"
-    rocmTorchBackend = "rocm6.3"
+    rocmTorchBackend = "rocm7.2"
     nvidiaTorchBackend = "cu126"
 
     overrideGpu = dedent(
@@ -321,42 +321,6 @@ class DependencyCompiler:
 
         if dry:
             cmd.append("--dry-run")
-
-        return _check_call(cmd, cwd)
-
-    @staticmethod
-    def Download(
-        cwd: PathLike,
-        executable: PathLike = sys.executable,
-        extraUrl: str | None = None,
-        noDeps: bool = False,
-        out: PathLike | None = None,
-        reqs: list[str] | None = None,
-        reqFile: list[PathLike] | None = None,
-    ) -> None:
-        """For now, the `download` cmd has no uv support, so use pip"""
-        cmd = [
-            str(executable),
-            "-m",
-            "pip",
-            "download",
-        ]
-
-        if extraUrl is not None:
-            cmd.extend(["--extra-index-url", extraUrl])
-
-        if noDeps:
-            cmd.append("--no-deps")
-
-        if out is not None:
-            cmd.extend(["-d", str(out)])
-
-        if reqs is not None:
-            cmd.extend(reqs)
-
-        if reqFile is not None:
-            for rf in reqFile:
-                cmd.extend(["--requirement", rf])
 
         return _check_call(cmd, cwd)
 
@@ -577,26 +541,6 @@ class DependencyCompiler:
             reqFile=[self.out],
         )
 
-    def install_dists(self):
-        DependencyCompiler.Install(
-            cwd=self.cwd,
-            executable=self.executable,
-            find_links=[self.outDir / "dists"],
-            no_deps=True,
-            no_index=True,
-            reqFile=[self.out],
-        )
-
-    def install_wheels(self):
-        DependencyCompiler.Install(
-            cwd=self.cwd,
-            executable=self.executable,
-            find_links=[self.outDir / "wheels"],
-            no_deps=True,
-            no_index=True,
-            reqFile=[self.out],
-        )
-
     def install_wheels_directly(self):
         DependencyCompiler.Install(
             cwd=self.cwd,
@@ -604,29 +548,6 @@ class DependencyCompiler:
             no_deps=True,
             no_index=True,
             reqs=(self.outDir / "wheels").glob("*.whl"),
-        )
-
-    def sync_core_plus_ext(self):
-        DependencyCompiler.Sync(
-            cwd=self.cwd,
-            reqFile=[self.out],
-            executable=self.executable,
-            extraUrl=self.gpuUrl,
-        )
-
-    def fetch_dep_dists(self, skip_uv: bool = False):
-        skips = ["uv"] if skip_uv else None
-        reqs = parse_req_file(self.out, skips=skips)
-
-        extraUrl = None if "--extra-index-url" in reqs else self.gpuUrl
-
-        DependencyCompiler.Download(
-            cwd=self.cwd,
-            executable=self.executable,
-            extraUrl=extraUrl,
-            noDeps=True,
-            out=self.outDir / "dists",
-            reqs=reqs,
         )
 
     def fetch_dep_wheels(self, skip_uv: bool = False):

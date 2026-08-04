@@ -14,6 +14,20 @@ from comfy_cli.registry.types import (
 )
 
 
+class NodeFetchError(Exception):
+    """``get_node`` got a non-200 from the registry.
+
+    Carries ``status_code`` so callers can tell a permanent 404 ("no such node")
+    apart from a transient 5xx/proxy failure — the two need different remediation
+    and only one is worth retrying. Subclasses ``Exception`` and keeps the
+    original message, so pre-existing ``except Exception`` callers are unaffected.
+    """
+
+    def __init__(self, message: str, status_code: int | None = None):
+        super().__init__(message)
+        self.status_code = status_code
+
+
 class RegistryAPI:
     def __init__(self):
         self.base_url = self.determine_base_url()
@@ -121,13 +135,41 @@ class RegistryAPI:
         else:
             url = f"{self.base_url}/nodes/{node_id}/install?version={version}"
 
-        response = requests.get(url)
+        # A stalled/blackholed registry must not hang callers indefinitely.
+        # A Timeout surfaces as a RequestException for callers to catch.
+        response = requests.get(url, timeout=30)
         if response.status_code == 200:
             # Convert the API response to a NodeVersion object
             logging.debug(f"RegistryAPI install_node response: {response.json()}")
             return map_node_version(response.json())
         else:
             raise Exception(f"Failed to install node: {response.status_code} - {response.text}")
+
+    def get_node(self, node_id):
+        """
+        Retrieves a node's public metadata, read-only.
+
+        Unlike ``install_node`` (whose backend records an installation and fires
+        an analytics event on every call), this endpoint has no side effects, so
+        it's safe for pure version checks like ``comfy outdated``.
+
+        Args:
+          node_id (str): The unique identifier of the node.
+
+        Returns:
+          Node: Node data, including ``latest_version`` when the registry has one.
+        """
+        url = f"{self.base_url}/nodes/{node_id}"
+        # Same rationale as install_node: a stalled registry must not hang callers.
+        response = requests.get(url, timeout=30)
+        if response.status_code == 200:
+            logging.debug(f"RegistryAPI get_node response: {response.json()}")
+            return map_node_to_node_class(response.json())
+        else:
+            raise NodeFetchError(
+                f"Failed to retrieve node: {response.status_code} - {response.text}",
+                status_code=response.status_code,
+            )
 
 
 def map_node_version(api_node_version):

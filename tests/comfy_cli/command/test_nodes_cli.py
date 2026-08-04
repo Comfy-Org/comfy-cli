@@ -239,3 +239,22 @@ class TestNodesRefresh:
         monkeypatch.setattr(annotations_source, "refresh_annotations", lambda: fake)
         env = _run(["refresh"], capsys)
         assert env["data"]["refreshed"] is False
+
+    def test_refresh_still_accepts_the_legacy_where_flag(self, monkeypatch, capsys):
+        """``--where`` steers nothing now, but the CLI's own error hints and two
+        shipped SKILL.md files told people to type it. Rejecting it would turn
+        "you followed the hint" into ``No such option`` (exit 2)."""
+        from comfy_cli.cql import annotations_source
+
+        fake = [
+            {"name": "supported_nodes.yaml", "source": "remote", "bytes": 100, "path": "/c/supported_nodes.yaml"},
+            {
+                "name": "cloud_disable_config.yaml",
+                "source": "remote",
+                "bytes": 50,
+                "path": "/c/cloud_disable_config.yaml",
+            },
+        ]
+        monkeypatch.setattr(annotations_source, "refresh_annotations", lambda: fake)
+        env = _run(["refresh", "--where", "cloud"], capsys)
+        assert env["data"]["refreshed"] is True

@@ -270,6 +270,23 @@ class TestTrackCommandRedaction:
         assert "pat-supersecret" not in str(properties)
         assert "fix things" not in str(properties)
 
+    def test_run_prompt_and_overrides_are_redacted(self, tracking_module):
+        # `comfy run --prompt`/`--set` carry verbatim user content that must not
+        # be shipped to analytics, only the fact that the option was supplied.
+        tracking_module.config_manager.set(constants.CONFIG_KEY_ENABLE_TRACKING, "True")
+
+        @tracking_module.track_command("run")
+        def run(prompt=None, set_overrides=None):
+            return None
+
+        run(prompt="a red fox in snow", set_overrides=["negative=blurry", "cfg=7.5"])
+
+        _, _, properties = _last_track_call(tracking_module.provider)
+        assert properties["prompt"] == "<redacted>"
+        assert properties["set_overrides"] == "<redacted>"
+        assert "red fox" not in str(properties)
+        assert "blurry" not in str(properties)
+
     def test_set_civitai_api_token_is_redacted(self, tracking_module):
         tracking_module.config_manager.set(constants.CONFIG_KEY_ENABLE_TRACKING, "True")
 
@@ -379,6 +396,8 @@ class TestSensitiveNameMatcher:
             "password",
             "secret",
             "changelog",
+            "prompt",
+            "set_overrides",
             "set_civitai_api_token",
             "set_hf_api_token",
             "access_token",

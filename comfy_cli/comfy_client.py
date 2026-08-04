@@ -23,9 +23,15 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+from comfy_cli.http import (
+    NoRedirectHandler,
+    ResponseTooLarge,
+    build_http_only_opener,
+    read_capped,
+    target_auth_headers,
+)
+from comfy_cli.http import assert_safe_url as _assert_safe_url
 from comfy_cli.target import Target
-
-_LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1", "[::1]"}
 
 # Transient HTTP failures during polling should back off and retry, not abort.
 # 429 (rate limit) is retried for any method — the request was rejected, not
@@ -94,40 +100,7 @@ class Unauthenticated(Exception):
     """Target needs auth but no valid session is present."""
 
 
-class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
-    """Refuse to follow redirects.
-
-    Following redirects with `Authorization: Bearer …` in flight risks
-    replaying the token at the redirect target. ComfyUI gateways don't issue
-    redirects under normal operation; if we ever see one it's almost certainly
-    a misconfiguration or attack. Surface as a clear HTTPError instead.
-    """
-
-    def http_error_301(self, req, fp, code, msg, headers):
-        raise urllib.error.HTTPError(req.full_url, code, "redirect refused", headers, fp)
-
-    http_error_302 = http_error_303 = http_error_307 = http_error_308 = http_error_301
-
-
-_OPENER = urllib.request.build_opener(_NoRedirectHandler())
-
-
-def _assert_safe_url(url: str) -> None:
-    """Reject plaintext HTTP for non-loopback hosts.
-
-    Anything carrying a Bearer token over the wire must be HTTPS unless the
-    host is a loopback address (where there's no network to sniff).
-    """
-    parsed = urllib.parse.urlsplit(url)
-    if parsed.scheme == "https":
-        return
-    host = (parsed.hostname or "").lower()
-    if host in _LOOPBACK_HOSTS:
-        return
-    raise ValueError(
-        f"refusing to send request to non-https, non-loopback URL: {url} "
-        "(set COMFY_CLOUD_BASE_URL to an https:// endpoint)"
-    )
+_OPENER = build_http_only_opener(NoRedirectHandler())
 
 
 @dataclass
@@ -270,26 +243,38 @@ class Client:
         req.add_header("Comfy-Usage-Source", "comfy-cli")
         if data is not None:
             req.add_header("Content-Type", "application/json")
-        # Cloud auth: the policy layer (`resolve_target`) is OAuth-first and
-        # populates at most one of api_key / auth_token, so this is just the
-        # mechanic — send whichever field is set. Only attached on cloud
-        # targets so a stray auth_token on a local target can't leak
-        # credentials to a plaintext server.
-        if self.target.is_cloud:
-            if self.target.auth_token:
-                req.add_header("Authorization", f"Bearer {self.target.auth_token}")
-            elif self.target.api_key:
-                req.add_header("X-API-Key", self.target.api_key)
+        # Cloud auth: `target_auth_headers` owns the header selection for
+        # every authed call site. It is OAuth-first, matching both the policy
+        # layer (`resolve_target`, which populates at most one of api_key /
+        # auth_token anyway) and the `extra_data` credential `submit_prompt`
+        # injects below — header and body can never name different identities.
+        # It also carries the `is_cloud` gate, so a stray auth_token on a
+        # local target can't leak credentials to a plaintext server.
+        for header, value in target_auth_headers(self.target).items():
+            req.add_header(header, value)
         try:
             with _OPENER.open(req, timeout=timeout or self.timeout) as resp:
-                text = resp.read().decode("utf-8", errors="replace")
+                # Bounded read: without a ceiling the server on the other end
+                # decides how much of our memory to consume. An over-cap body
+                # is reported as a response error rather than truncated —
+                # truncated JSON would surface as a misleading parse failure.
+                try:
+                    raw = read_capped(resp, url)
+                except ResponseTooLarge as e:
+                    raise HTTPError(resp.status, "response too large", str(e)) from e
+                text = raw.decode("utf-8", errors="replace")
                 if not text:
                     return None
                 return json.loads(text)
         except urllib.error.HTTPError as e:
             body_text = ""
             try:
-                body_text = e.read().decode("utf-8", errors="replace")
+                # An error body arrives from the same server as the success
+                # body, so it needs the same ceiling. Over-cap it raises, and
+                # the swallow below leaves body_text empty — the status and
+                # reason still reach the caller, which is the part that matters
+                # for a body too large to be a real error message.
+                body_text = read_capped(e, url).decode("utf-8", errors="replace")
             except Exception:  # noqa: BLE001
                 pass
             # Auto-refresh on 401 for OAuth cloud targets, retry once.
@@ -418,13 +403,60 @@ class Client:
         raise NotImplementedError("local list_jobs uses /queue + /history merge — call jobs._gather_jobs")
 
     def get_job_status(self, prompt_id: str, *, timeout: float | None = None) -> dict | None:
-        """Cloud-only: GET {prefix}/job/<id>/status."""
+        """Cloud-only: GET {prefix}/jobs/<id>.
+
+        Hits the canonical plural jobs-detail endpoint (``JobDetailResponse``,
+        a superset of the deprecated ``/api/job/<id>/status``). Mirrors
+        ``list_jobs`` by routing through ``self.target.jobs_path`` so cloud vs
+        local prefixing stays correct.
+        """
+        # Guard like ``list_jobs``: a local target has no ``jobs_path``, and
+        # ``Target.url`` would drop the ``None`` segment and silently issue
+        # ``GET {base}/<id>`` instead of failing loudly.
+        if not self.target.jobs_path:
+            raise NotImplementedError("get_job_status requires a cloud target with a jobs endpoint")
+        # Validate + encode the id so it stays a single terminal path segment.
+        # An empty id would collapse to the plural LIST endpoint (200 with a
+        # ``{"jobs": [...]}`` payload); an id with ``/``, ``?``, ``#`` or ``..``
+        # would inject extra segments / query params (``Target.url`` only
+        # ``strip('/')``s each part, it does not percent-encode).
+        prompt_id = (prompt_id or "").strip()
+        if not prompt_id:
+            raise ValueError("prompt_id must be a non-empty string")
+        encoded_id = urllib.parse.quote(prompt_id, safe="")
         try:
-            return self._request("GET", ("job", prompt_id, "status"), timeout=timeout)
+            return self._request("GET", (self.target.jobs_path, encoded_id), timeout=timeout)
         except HTTPError as e:
             if e.status == 404:
                 return None
             raise
+
+    # ----- resource management -----
+
+    def get_system_stats(self, *, timeout: float | None = None) -> dict | None:
+        """GET {prefix}/system_stats.
+
+        Per-device VRAM (``vram_total``/``vram_free``/``torch_vram_total``/
+        ``torch_vram_free``) plus system RAM and version info. Same shape on
+        local and cloud — passed through unmodified so the schema tracks
+        whatever ComfyUI itself reports.
+        """
+        return self._request("GET", ("system_stats",), timeout=timeout)
+
+    def post_free(self, *, unload_models: bool = True, free_memory: bool = False, timeout: float | None = None) -> None:
+        """POST {prefix}/free — ask the queue worker to unload models / free the cache.
+
+        ``free_memory=True`` implies unloading models on the server side even
+        when ``unload_models`` is False. The flags apply the next time the
+        worker iterates: immediately if it's idle, after the current job if
+        one is running — this never interrupts an in-flight job.
+        """
+        self._request(
+            "POST",
+            ("free",),
+            body={"unload_models": unload_models, "free_memory": free_memory},
+            timeout=timeout,
+        )
 
     # ----- polling helpers -----
 
@@ -527,29 +559,49 @@ def extract_output_entries(record: dict) -> list[dict]:
     (e.g. ``comfy download`` reading a state file) can join them back to
     producing nodes on the (filename, subfolder, type) triple — the same one
     :meth:`Client.view_url` encodes as query params. Ordering is stable:
-    record ``outputs`` insertion order, then media-key order, then item order.
+    record ``outputs`` insertion order, then node-output key insertion order,
+    then item order.
+
+    Detection is shape-based, mirroring ComfyUI core's ``normalize_outputs``
+    and the cloud worker's ``isFileOutputArray``: any node-output key whose
+    value is a list of dicts carrying a ``filename`` is treated as file
+    outputs. This deliberately covers keys beyond the classic
+    ``images/gifs/videos/audio/files`` — notably SaveGLB's ``"3d"`` key and
+    the cloud worker's singular ``"video"`` key — so 3D/mesh jobs resolve
+    instead of returning ``download_no_outputs`` (BE-4417). The ``"animated"``
+    key is skipped explicitly to match core semantics (it emits ``(True,)``
+    boolean flags, not file entries).
+
+    Entries are de-duplicated on the full ``(node_id, filename, subfolder,
+    type)`` tuple, first occurrence wins. A node that surfaces the same
+    artifact under two keys — e.g. the cloud worker's singular ``"video"``
+    alongside the classic plural ``"videos"`` — would otherwise yield two
+    identical ``/view`` URLs and download the same file twice.
     """
     results: list[dict] = []
+    seen: set[tuple[str, str, str, str]] = set()
     outputs = record.get("outputs") or {}
     if not isinstance(outputs, dict):
         return results
     for node_id, node_output in outputs.items():
         if not isinstance(node_output, dict):
             continue
-        for key in ("images", "gifs", "videos", "audio", "files"):
-            items = node_output.get(key) or []
-            if not isinstance(items, list):
+        for key, items in node_output.items():
+            if key == "animated" or not isinstance(items, list):
                 continue
             for item in items:
                 if isinstance(item, dict) and "filename" in item:
-                    results.append(
-                        {
-                            "node_id": str(node_id),
-                            "filename": str(item.get("filename", "")),
-                            "subfolder": str(item.get("subfolder", "")),
-                            "type": str(item.get("type", "output")),
-                        }
-                    )
+                    entry = {
+                        "node_id": str(node_id),
+                        "filename": str(item.get("filename", "")),
+                        "subfolder": str(item.get("subfolder", "")),
+                        "type": str(item.get("type", "output")),
+                    }
+                    dedup_key = (entry["node_id"], entry["filename"], entry["subfolder"], entry["type"])
+                    if dedup_key in seen:
+                        continue
+                    seen.add(dedup_key)
+                    results.append(entry)
     return results
 
 

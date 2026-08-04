@@ -41,15 +41,22 @@ CONFIG_KEY_ENABLE_TRACKING = "enable_tracking"
 CONFIG_KEY_USER_ID = "user_id"
 CONFIG_KEY_INSTALL_EVENT_TRIGGERED = "install_event_triggered"
 CONFIG_KEY_BACKGROUND = "background"
+CONFIG_KEY_BACKGROUND_LOG = "background_log"  # workspace logfile path for the background server
 CONFIG_KEY_MANAGER_GUI_ENABLED = "manager_gui_enabled"  # Legacy, kept for backward compatibility
 CONFIG_KEY_MANAGER_GUI_MODE = "manager_gui_mode"  # Valid: "disable", "enable-gui", "disable-gui", "enable-legacy-gui"
 CONFIG_KEY_UV_COMPILE_DEFAULT = "uv_compile_default"
+# Persistent "always proceed" for credit-spending `comfy generate` calls
+# (the spend gate). Set via `comfy generate consent always|ask`.
+CONFIG_KEY_SPEND_AUTO_CONFIRM = "spend.auto_confirm"
 
 CIVITAI_API_TOKEN_KEY = "civitai_api_token"
 CIVITAI_API_TOKEN_ENV_KEY = "CIVITAI_API_TOKEN"
 CIVITAI_ALLOWED_HOSTS: tuple[str, ...] = ("civitai.com", "civitai.red")
 HF_API_TOKEN_KEY = "hf_api_token"
 HF_API_TOKEN_ENV_KEY = "HF_API_TOKEN"
+# Hosts the HF bearer token may be sent to. `check_huggingface_url` accepts the
+# first two; `hf.co` is the official short form Hugging Face redirects from.
+HF_ALLOWED_HOSTS: tuple[str, ...] = ("huggingface.co", "huggingface.com", "hf.co")
 
 ARIA2_SERVER_ENV_KEY = "COMFYUI_MANAGER_ARIA2_SERVER"
 ARIA2_SECRET_ENV_KEY = "COMFYUI_MANAGER_ARIA2_SECRET"
@@ -89,6 +96,7 @@ class CUDAVersion(str, Enum):
 
 
 class ROCmVersion(str, Enum):
+    v7_2 = "7.2"
     v7_1 = "7.1"
     v7_0 = "7.0"
     v6_3 = "6.3"

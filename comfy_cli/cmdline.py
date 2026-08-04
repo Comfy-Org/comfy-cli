@@ -39,8 +39,9 @@ from comfy_cli.command import transfer as transfer_inner
 from comfy_cli.command import (
     workflow as workflow_command,
 )
-from comfy_cli.command.install import validate_version
+from comfy_cli.command.install import validate_optional_version, validate_version
 from comfy_cli.command.launch import launch as launch_command
+from comfy_cli.command.launch import logs as logs_command
 from comfy_cli.command.models import models as models_command
 from comfy_cli.command.models import search as models_search_command
 from comfy_cli.config_manager import ConfigManager
@@ -49,6 +50,7 @@ from comfy_cli.cuda_detect import DEFAULT_CUDA_TAG, detect_cuda_driver_version, 
 from comfy_cli.discovery import build_discovery
 from comfy_cli.env_checker import EnvChecker
 from comfy_cli.help_json import build_help_json
+from comfy_cli.host_port import validate_host
 from comfy_cli.output import Renderer, get_renderer, rprint, set_renderer
 from comfy_cli.resolve_python import resolve_workspace_python
 from comfy_cli.skills import command as skill_command
@@ -350,13 +352,6 @@ def entry(
             )
         ctx.exit()
 
-    # TODO: Move this to proper place
-    # start_time = time.time()
-    # workspace_manager.scan_dir()
-    # end_time = time.time()
-    #
-    # logging.info(f"scan_dir took {end_time - start_time:.2f} seconds to run")
-
 
 def validate_commit_and_version(commit: str | None, ctx: typer.Context) -> str | None:
     """
@@ -450,7 +445,7 @@ def install(
         ),
     ] = None,
     cuda_version: Annotated[CUDAVersion | None, typer.Option(show_default=False)] = None,
-    rocm_version: Annotated[ROCmVersion, typer.Option(show_default=True)] = ROCmVersion.v6_3,
+    rocm_version: Annotated[ROCmVersion, typer.Option(show_default=True)] = ROCmVersion.v7_2,
     amd: Annotated[
         bool | None,
         typer.Option(
@@ -550,11 +545,19 @@ def install(
         return None
 
     if nvidia and platform == constants.OS.MACOS:
-        rprint("[bold red]Nvidia GPU is never on MacOS. What are you smoking? 🤔[/bold red]")
+        rprint("[bold red]--nvidia is not available on macOS. Use --m-series (Apple Silicon) or --cpu.[/bold red]")
         raise typer.Exit(code=1)
 
-    if platform != constants.OS.MACOS and m_series:
-        rprint(f"[bold red]You are on {platform} bruh [/bold red]")
+    if m_series and platform != constants.OS.MACOS:
+        # Warning-only here used to fall through to `elif m_series:` below and
+        # set GPU_OPTION.MAC_M_SERIES, which installs the nightly CPU torch
+        # wheels — silently giving a Linux/Windows user a CPU-only nightly and
+        # no GPU support. Exit like the symmetric --nvidia-on-macOS check.
+        rprint(
+            f"[bold red]--m-series is a macOS (Apple Silicon) option; detected platform is {platform}.[/bold red]\n"
+            "[bold red]Use --nvidia, --amd or --intel-arc for a GPU install, or --cpu for CPU-only.[/bold red]"
+        )
+        raise typer.Exit(code=1)
 
     gpu = None
 
@@ -607,19 +610,104 @@ def install(
     rprint(f"ComfyUI is installed at: {comfy_path}")
 
 
+def _switch_comfy_version(comfy_path: str, version: str, *, stash: bool) -> None:
+    """`comfy update comfy --version X` — move the workspace, then reinstall its deps.
+
+    Torch is deliberately left alone: a version switch is ComfyUI-version-specific
+    while the torch build is machine-specific, so re-resolving it would need the
+    GPU input this headless path exists to avoid.
+    """
+    renderer = get_renderer()
+
+    try:
+        result = install_inner.switch_comfyui_version(comfy_path, version, stash=stash)
+    except install_inner.VersionSwitchError as e:
+        renderer.error(code=e.code, message=e.message, hint=e.hint)
+        raise typer.Exit(code=1)
+
+    python = resolve_workspace_python(comfy_path)
+    # A uv-managed venv may have no pip — bootstrap it first so the install
+    # below doesn't crash with `No module named pip` (no-op if pip exists).
+    ensure_pip(python, cwd=comfy_path)
+    deps = subprocess.run(
+        [python, "-m", "pip", "install", "-r", "requirements.txt"],
+        cwd=comfy_path,
+        check=False,
+    )
+    if deps.returncode != 0:
+        renderer.error(
+            code="version_switch_deps_failed",
+            message=(
+                f"ComfyUI is now on {result['current']}, but installing its requirements.txt failed — "
+                "dependencies may be incomplete."
+            ),
+            hint="re-run the same command once the cause is fixed; it is idempotent and safe to repeat",
+        )
+        raise typer.Exit(code=1)
+
+    if renderer.is_pretty():
+        rprint(f"Switched ComfyUI: [bold]{result['previous']}[/bold] -> [bold]{result['current']}[/bold]")
+        if result["stashed"]:
+            rprint(
+                f"[yellow]Uncommitted changes were stashed as {result['stash_ref']} and left there — "
+                "restore them with `git stash pop`.[/yellow]"
+            )
+        if version != "nightly":
+            rprint(
+                "[dim]This is a tag checkout, so the workspace is on a detached HEAD. "
+                "Roll forward with `comfy update comfy --version nightly` (or `--version latest`).[/dim]"
+            )
+    renderer.emit(result, command="update")
+
+
 @app.command(help="Update ComfyUI Environment [all|comfy|cli]")
 @tracking.track_command()
 def update(
     target: str = typer.Argument(
         "comfy",
-        help="[all|comfy|cli]",
+        help="\\[all|comfy|cli]",
         autocompletion=utils.create_choice_completer(["all", "comfy", "cli"]),
     ),
+    version: Annotated[
+        str | None,
+        typer.Option(
+            "--version",
+            show_default=False,
+            callback=validate_optional_version,
+            help=(
+                "Switch the existing ComfyUI workspace to a specific version instead of pulling the current "
+                "branch. Accepts 'nightly' (the default branch), 'latest' (newest stable release), or a version "
+                "number such as 0.3.0. Only valid for target 'comfy'. Uncommitted changes are stashed first and "
+                "never popped automatically; a version number checks out a tag, leaving a detached HEAD — roll "
+                "forward again with --version nightly. Dependencies are reinstalled from requirements.txt; torch "
+                "is left untouched."
+            ),
+        ),
+    ] = None,
+    no_stash: Annotated[
+        bool,
+        typer.Option(
+            "--no-stash",
+            show_default=False,
+            help=(
+                "With --version, refuse to switch when the ComfyUI workspace has uncommitted changes "
+                "instead of stashing them."
+            ),
+        ),
+    ] = False,
 ):
     if target not in ["all", "comfy", "cli"]:
         typer.echo(
             f"Invalid target: {target}. Allowed targets are 'all', 'comfy', 'cli'.",
             err=True,
+        )
+        raise typer.Exit(code=1)
+
+    if version is not None and target != "comfy":
+        get_renderer().error(
+            code="update_version_target_invalid",
+            message=f"--version is only supported for target 'comfy', not '{target}'.",
+            hint="run `comfy update comfy --version <version>`",
         )
         raise typer.Exit(code=1)
 
@@ -639,16 +727,19 @@ def update(
         if comfy_path is None:
             rprint("ComfyUI path is not found.")
             raise typer.Exit(code=1)
-        os.chdir(comfy_path)
-        subprocess.run(["git", "pull"], check=True)
-        python = resolve_workspace_python(comfy_path)
-        # A uv-managed venv may have no pip — bootstrap it first so the install
-        # below doesn't crash with `No module named pip` (no-op if pip exists).
-        ensure_pip(python, cwd=comfy_path)
-        subprocess.run(
-            [python, "-m", "pip", "install", "-r", "requirements.txt"],
-            check=True,
-        )
+        if version is not None:
+            _switch_comfy_version(comfy_path, version, stash=not no_stash)
+        else:
+            os.chdir(comfy_path)
+            subprocess.run(["git", "pull"], check=True)
+            python = resolve_workspace_python(comfy_path)
+            # A uv-managed venv may have no pip — bootstrap it first so the install
+            # below doesn't crash with `No module named pip` (no-op if pip exists).
+            ensure_pip(python, cwd=comfy_path)
+            subprocess.run(
+                [python, "-m", "pip", "install", "-r", "requirements.txt"],
+                check=True,
+            )
 
     try:
         custom_nodes.command.update_node_id_cache()
@@ -656,18 +747,59 @@ def update(
         rprint(f"[yellow]Failed to update node id cache: {e}[/yellow]")
 
 
+@app.command(help="Report installed-vs-latest versions for ComfyUI core and custom node packs (read-only).")
+@tracking.track_command()
+def outdated(
+    refresh: Annotated[
+        bool,
+        typer.Option("--refresh", help="Bypass the 1h latest-version cache and re-query the network."),
+    ] = False,
+):
+    from comfy_cli.command import outdated as outdated_command
+
+    outdated_command.execute(get_renderer(), workspace_manager.workspace_path, refresh=refresh)
+
+
 @app.command(help="Run an API workflow. Submits and returns immediately by default; pass --wait to block.")
 def run(
     workflow: Annotated[
-        str,
+        str | None,
         typer.Option(
             help=(
                 "Path to the workflow JSON file. Both ComfyUI API format and "
                 "exported UI format are accepted; UI workflows are converted "
-                "to API format client-side."
+                "to API format client-side. Optional: omit it and pass --prompt "
+                "to run the bundled default text2img workflow."
             )
         ),
-    ],
+    ] = None,
+    prompt: Annotated[
+        str | None,
+        typer.Option(
+            "--prompt",
+            show_default=False,
+            help=(
+                "Positive text prompt for the bundled default text2img workflow "
+                "(used when --workflow is omitted). Cannot be combined with --workflow. "
+                "The bundled graph loads an SD1.5 checkpoint (v1-5-pruned-emaonly.ckpt) "
+                "that is NOT downloaded for you — install it, or point elsewhere with "
+                "--set checkpoint=<name>."
+            ),
+        ),
+    ] = None,
+    set_overrides: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--set",
+            show_default=False,
+            help=(
+                "Override a field in the bundled default workflow, repeatable. "
+                "Form: alias=VALUE (checkpoint/negative/seed/steps/cfg/width/height/…) "
+                "or NODE_ID.field=VALUE (e.g. 4.ckpt_name=model.safetensors). "
+                "Cannot be combined with --workflow."
+            ),
+        ),
+    ] = None,
     wait: Annotated[
         bool,
         typer.Option(
@@ -761,6 +893,16 @@ def run(
             ),
         ),
     ] = False,
+    allow_spend: Annotated[
+        bool,
+        typer.Option(
+            "--allow-spend",
+            help=(
+                "Consent to running partner-API (paid) nodes that spend Comfy credits. "
+                "Required for workflows embedding partner nodes when not confirming interactively."
+            ),
+        ),
+    ] = False,
 ):
     # Snapshot kwargs before the body mutates api_key/host/port — analytics should record what user actually supplied.
     _track_props = tracking.filter_command_kwargs(dict(locals()))
@@ -791,16 +933,64 @@ def run(
         # ask for). The user can override either way with --notify/--no-notify.
         effective_notify = notify if notify is not None else (renderer.is_pretty() and not wait)
 
-        if decision.target is where_module.WhereTarget.CLOUD:
-            err = where_module.cloud_preflight()
-            if err is not None:
+        # --prompt/--set build an in-memory API-format graph from the bundled
+        # default text2img workflow (no --workflow file). The aliases resolve
+        # against OUR pinned node ids, so mixing them with a user --workflow —
+        # whose node ids are arbitrary — is rejected rather than silently
+        # misapplied. `preloaded` is handed straight to run's execute path.
+        preloaded: tuple[dict, str, bool] | None = None
+        if prompt is not None or set_overrides:
+            if workflow is not None:
                 renderer.error(
-                    code=err.code,
-                    message=err.message,
-                    hint=err.hint,
-                    details=err.details,
+                    code="prompt_rejected",
+                    message="--prompt/--set apply to the bundled default workflow and cannot be combined with --workflow",
+                    hint="drop --workflow to use the bundled default, or edit the workflow file directly",
                 )
                 raise typer.Exit(code=1)
+            from comfy_cli.cql.default_workflow import (
+                PromptInjectionError,
+                build_default_workflow,
+                default_checkpoint,
+            )
+
+            try:
+                injected = build_default_workflow(prompt=prompt, overrides=set_overrides)
+            except PromptInjectionError as e:
+                renderer.error(code=e.code, message=str(e), hint=e.hint)
+                raise typer.Exit(code=1) from e
+            preloaded = (injected, "default_text2img", False)
+            # The bundled graph pins an SD1.5 checkpoint that comfy-cli neither
+            # ships nor auto-downloads. Without it the run dies server-side on a
+            # bare validation error, so state the dependency up front. Pretty
+            # output only — the JSON dialects carry a fixed event contract.
+            ckpt = default_checkpoint(injected)
+            if ckpt and renderer.is_pretty():
+                from rich.markup import escape as _escape
+
+                # The checkpoint has to exist wherever the run is routed, so
+                # name that environment: pointing a `--where cloud` run at the
+                # local models/checkpoints sends the user to fix the wrong box.
+                if decision.target is where_module.WhereTarget.CLOUD:
+                    where_ckpt = "in your cloud assets (`comfy models search --where cloud`)"
+                else:
+                    where_ckpt = "in models/checkpoints"
+                # `--set checkpoint=…` puts a user string here; escape it so a
+                # value containing [brackets] can't be read as rich markup.
+                rprint(
+                    f"[dim]Using the bundled default text2img workflow — it needs the[/dim] "
+                    f"[bold]{_escape(ckpt)}[/bold] [dim]checkpoint {where_ckpt}. "
+                    f"Override it with --set checkpoint=<name>.[/dim]"
+                )
+        elif workflow is None:
+            renderer.error(
+                code="prompt_rejected",
+                message="run requires --workflow, or --prompt (with optional --set) to use the bundled default workflow",
+                hint="e.g. comfy run --prompt 'a red fox in snow' --wait",
+            )
+            raise typer.Exit(code=1)
+
+        if decision.target is where_module.WhereTarget.CLOUD:
+            where_module.cloud_preflight_or_exit()
             # Cloud path uses HTTPS + Bearer auth; host/port aren't applicable.
             run_inner.execute_cloud(
                 workflow,
@@ -809,26 +999,19 @@ def run(
                 timeout=timeout,
                 notify=effective_notify,
                 print_prompt=print_prompt,
+                preloaded=preloaded,
+                allow_spend=allow_spend,
             )
             return
 
+        from comfy_cli.host_port import parse_host_port_arg, resolve_host_port
+
         if host:
-            s = host.split(":")
-            host = s[0]
-            if not port and len(s) == 2:
-                port = int(s[1])
+            host, parsed_port = parse_host_port_arg(host)
+            if not port and parsed_port is not None:
+                port = parsed_port
 
-        if config.background:
-            bg_host, bg_port = config.background[0], config.background[1]
-            if not host:
-                host = bg_host
-            if not port:
-                port = bg_port
-
-        if not host:
-            host = "127.0.0.1"
-        if not port:
-            port = 8188
+        host, port = resolve_host_port(host, port)
 
         run_inner.execute(
             workflow,
@@ -840,6 +1023,8 @@ def run(
             notify=effective_notify,
             api_key=api_key,
             print_prompt=print_prompt,
+            preloaded=preloaded,
+            allow_spend=allow_spend,
         )
     except typer.Exit as e:
         if (e.exit_code or 0) == 0:
@@ -861,7 +1046,11 @@ def run(
 
 
 @app.command(
-    help="Validate an API-format workflow without submitting. Checks class_types, input shapes, enum values, and edge wiring."
+    help=(
+        "Validate a workflow without submitting (UI exports are converted to API format first). "
+        "Checks class_types, input shapes, enum values, edge wiring, and the dotted sub-inputs a "
+        "dynamic combo's selected option requires."
+    )
 )
 @tracking.track_command()
 def validate(
@@ -888,7 +1077,10 @@ def validate(
 ):
     from pathlib import Path
 
+    from comfy_cli.command.run import is_ui_workflow
+    from comfy_cli.command.run.preflight import _detect_partner_nodes
     from comfy_cli.cql.engine import Graph, LoadError
+    from comfy_cli.workflow_to_api import WorkflowConversionError, convert_ui_to_api
 
     renderer = get_renderer()
 
@@ -921,7 +1113,7 @@ def validate(
             pass
 
     try:
-        graph = Graph.load(mode=mode, input_path=input_path, host=host or "127.0.0.1", port=port or 8188)
+        graph = Graph.load(mode=mode, input_path=input_path, host=host, port=port)
     except LoadError as e:
         renderer.error(
             code="cql_no_graph",
@@ -931,7 +1123,52 @@ def validate(
         )
         raise typer.Exit(code=1) from e
 
+    # Detect a UI-export (frontend/canvas) workflow and lower it to API format
+    # before validating — exactly as `comfy run` does. Without this the wrapper
+    # keys (`nodes`, `links`, `groups`, `config`, …) each emit a `non_node_key`
+    # warning, zero nodes are checked, and the result is a vacuous `valid:true`.
+    # The converter reuses the object_info the graph was already built from
+    # (`graph.object_info`), so offline `--input` works and no second fetch happens.
+    converted_from_ui = False
+    if is_ui_workflow(wf_data):
+        if renderer.is_pretty():
+            rprint("[yellow]Detected UI-format workflow, converting to API format...[/yellow]")
+        try:
+            converted = convert_ui_to_api(wf_data, graph.object_info)
+        except WorkflowConversionError as e:
+            renderer.error(
+                code="workflow_not_api_format",
+                message=f"Workflow is a UI export that could not be converted to API format: {e}",
+                hint="use ComfyUI's 'File > Export (API)' to save as API format",
+            )
+            raise typer.Exit(code=1) from e
+        except Exception as e:  # noqa: BLE001 — never leak a raw traceback to the agent flow
+            renderer.error(
+                code="conversion_crash",
+                message=f"Workflow conversion crashed unexpectedly: {type(e).__name__}: {e}",
+                hint="report this at https://github.com/Comfy-Org/comfy-cli/issues",
+                details={"exception_type": type(e).__name__},
+            )
+            raise typer.Exit(code=1) from e
+        if not converted:
+            renderer.error(
+                code="workflow_not_api_format",
+                message="Workflow is a UI export that converted to no executable nodes",
+                hint="use ComfyUI's 'File > Export (API)' to save as API format",
+            )
+            raise typer.Exit(code=1)
+        wf_data = converted
+        converted_from_ui = True
+
     result = graph.validate_workflow(wf_data)
+
+    # Preview credit spend: partner-API (paid) nodes spend Comfy credits when the
+    # workflow is run. This is the same detection `comfy run` uses (authoritative
+    # `api_node: true`, `partner/...` category fallback), surfaced here read-only
+    # so agents can answer "will this spend credits?" without running. `wf_data`
+    # is API format at this point (any UI export already converted above), which
+    # is the format the detector reads. Purely informational — no exit-code gate.
+    partner_nodes = _detect_partner_nodes(wf_data, graph.object_info)
 
     payload = {
         "workflow": str(wf_path),
@@ -940,7 +1177,14 @@ def validate(
         "warning_count": len(result["warnings"]),
         "errors": result["errors"],
         "warnings": result["warnings"],
+        "partner_nodes": partner_nodes,
+        "spends_credits": bool(partner_nodes),
     }
+    if converted_from_ui:
+        # Signal that validation ran against the converted graph, not the file's
+        # literal bytes, and report how many nodes the conversion produced.
+        payload["converted_from_ui"] = True
+        payload["converted_node_count"] = len(wf_data)
 
     if renderer.is_pretty():
         if result["valid"]:
@@ -954,13 +1198,33 @@ def validate(
                 suggestions = e.get("suggestions", [])
                 if suggestions:
                     msg += f" (did you mean: {', '.join(suggestions[:3])}?)"
-                rprint(f"  [red]•[/red] node {e.get('node_id', '?')}: {msg}")
+                rprint(f"  [red]•[/red] node {e.get('node_id') or '?'}: {msg}")
             for w in result["warnings"]:
                 rprint(f"  [yellow]⚠[/yellow] {w.get('message', '')}")
+        if partner_nodes:
+            # class_type strings come from the workflow / object_info and can
+            # contain Rich-markup metacharacters (e.g. `[/yellow]`); escape each
+            # so an odd node name can't raise MarkupError and crash the command.
+            from rich.markup import escape as _escape
+
+            rprint(
+                f"[yellow]⚠ uses partner-API (paid) nodes that spend Comfy credits: {', '.join(_escape(n) for n in partner_nodes)}[/yellow]"
+            )
     renderer.emit(payload, command="validate", ok=result["valid"])
 
     if not result["valid"]:
         raise typer.Exit(code=1)
+
+
+# How a `cloud` routing decision was reached, in words, for the --host/--port
+# rejection message. Keys are `where.WhereResolution.source` values.
+_WHERE_SOURCE_PHRASES = {
+    "flag": "targeting cloud via --where cloud",
+    "env": "targeting cloud via the COMFY_WHERE environment variable",
+    "project": "targeting cloud via this project's configured default",
+    "config": "targeting cloud via your saved `where_default` setting",
+    "auto": "targeting cloud because you're signed in (no explicit --where)",
+}
 
 
 @app.command(help="Upload files to the ComfyUI server's input directory.")
@@ -975,9 +1239,26 @@ def upload(
         bool,
         typer.Option("--overwrite/--no-overwrite", help="Overwrite existing files on the server."),
     ] = True,
+    host: Annotated[
+        str | None,
+        typer.Option(help="Server host (defaults to COMFY_LOCAL_URL or 127.0.0.1). Local targets only."),
+    ] = None,
+    port: Annotated[
+        int | None,
+        typer.Option(help="Server port (defaults to COMFY_LOCAL_URL or 8188). Local targets only."),
+    ] = None,
 ):
     config = ConfigManager()
     renderer = get_renderer()
+
+    # Validate the flags before resolving anything: the host lands verbatim in
+    # ``http://{host}:{port}/upload/image``, so a URL-special or control
+    # character is a usage error (BadParameter, exit 2) regardless of target.
+    if host is not None:
+        host = validate_host(host)
+    if port is not None and not (1 <= port <= 65535):
+        raise typer.BadParameter(f"invalid port: {port} is out of range (1-65535)")
+
     try:
         decision = where_module.resolve(flag=where, config_value=config.get(where_module.CONFIG_KEY_WHERE_DEFAULT))
     except ValueError as e:
@@ -985,13 +1266,32 @@ def upload(
         raise typer.Exit(code=1)
 
     effective_where = "cloud" if decision.target is where_module.WhereTarget.CLOUD else "local"
+    # --host/--port address a local ComfyUI; the cloud target's address comes
+    # from the signed-in account's base URL and ignores them entirely
+    # (``Target.host``/``Target.port`` are documented local-only). Rejecting
+    # the combination beats silently uploading somewhere the user didn't name.
+    # Checked before the preflight so the flag error isn't masked by a
+    # "not signed in" error.
+    if effective_where == "cloud" and (host is not None or port is not None):
+        # The cloud target can come from an explicit --where, but equally from
+        # COMFY_WHERE, a project/config default, or credential auto-detection —
+        # so name the source rather than accusing the user of passing a flag
+        # they may never have typed.
+        source = _WHERE_SOURCE_PHRASES.get(decision.source, f"resolved to cloud by {decision.source}")
+        renderer.error(
+            code="host_flag_cloud",
+            message=f"--host/--port target a local ComfyUI server, but this run is {source}",
+            hint=(
+                "pass --where local to aim at a local server; to reach a different cloud address "
+                "set COMFY_CLOUD_BASE_URL or run `comfy cloud set-base-url`"
+            ),
+            details={"host": host, "port": port, "where": effective_where, "where_source": decision.source},
+        )
+        raise typer.Exit(code=1)
     if effective_where == "cloud":
-        err = where_module.cloud_preflight()
-        if err is not None:
-            renderer.error(code=err.code, message=err.message, hint=err.hint, details=err.details)
-            raise typer.Exit(code=1)
+        where_module.cloud_preflight_or_exit()
 
-    transfer_inner.execute_upload(files, where=effective_where, overwrite=overwrite)
+    transfer_inner.execute_upload(files, where=effective_where, overwrite=overwrite, host=host, port=port)
 
 
 @app.command(help="Download outputs from a completed job. Reads prompt_id from argument or piped stdin.")
@@ -1028,10 +1328,7 @@ def download(
 
     effective_where = "cloud" if decision.target is where_module.WhereTarget.CLOUD else "local"
     if effective_where == "cloud":
-        err = where_module.cloud_preflight()
-        if err is not None:
-            renderer.error(code=err.code, message=err.message, hint=err.hint, details=err.details)
-            raise typer.Exit(code=1)
+        where_module.cloud_preflight_or_exit()
 
     transfer_inner.execute_download(prompt_id, out_dir=out_dir, where=effective_where, url_only=url_only)
 
@@ -1068,31 +1365,93 @@ def run_cli(
     )
 
 
-def validate_comfyui(_env_checker):
-    if _env_checker.comfy_repo is None:
-        rprint("[bold red]If ComfyUI is not installed, this feature cannot be used.[/bold red]")
-        raise typer.Exit(code=1)
+@app.command(
+    "system-stats",
+    help="Show ComfyUI system stats: per-device VRAM + system RAM/version (GET /system_stats).",
+)
+@tracking.track_command()
+def system_stats(
+    where: Annotated[
+        str | None,
+        typer.Option("--where", show_default=False, help="Routing target: 'local' (default) or 'cloud'."),
+    ] = None,
+):
+    from comfy_cli.command import system as system_command
+
+    system_command.system_stats_execute(get_renderer(), where=where)
+
+
+@app.command(
+    help="Ask ComfyUI to unload models / free the executor cache (POST /free). "
+    "Applies on the worker's next iteration — never interrupts a running job."
+)
+@tracking.track_command()
+def free(
+    unload_models: Annotated[
+        bool,
+        typer.Option("--unload-models/--no-unload-models", help="Unload all models from VRAM."),
+    ] = True,
+    free_memory: Annotated[
+        bool,
+        typer.Option(
+            "--free-memory",
+            help="Also reset the executor cache; implies --unload-models on the server side.",
+        ),
+    ] = False,
+    where: Annotated[
+        str | None,
+        typer.Option("--where", show_default=False, help="Routing target: 'local' (default) or 'cloud'."),
+    ] = None,
+):
+    from comfy_cli.command import system as system_command
+
+    system_command.free_execute(get_renderer(), where=where, unload_models=unload_models, free_memory=free_memory)
 
 
 @app.command(help="Stop background ComfyUI")
 @tracking.track_command()
 def stop():
-    if constants.CONFIG_KEY_BACKGROUND not in ConfigManager().config["DEFAULT"]:
-        rprint("[bold red]No ComfyUI is running in the background.[/bold red]\n")
-        raise typer.Exit(code=1)
-
-    bg_info = ConfigManager().background
+    renderer = get_renderer()
+    config = ConfigManager()
+    bg_info = config.background if constants.CONFIG_KEY_BACKGROUND in config.config["DEFAULT"] else None
     if not bg_info:
         rprint("[bold red]No ComfyUI is running in the background.[/bold red]\n")
+        if renderer.is_json():
+            renderer.error(
+                code="no_background_server",
+                message="No ComfyUI is running in the background.",
+                command="stop",
+            )
         raise typer.Exit(code=1)
+
     is_killed = utils.kill_all(bg_info[2])
 
     if not is_killed:
+        # The kill failed (permissions, a race, or the process is still alive).
+        # Do NOT remove the background record — it is the only handle a retried
+        # `comfy stop` has to target this PID/host/port; dropping it here would
+        # orphan a live server. Surface a non-zero exit in BOTH pretty and JSON
+        # mode so `$?`-checking scripts see the failure (pretty mode otherwise
+        # printed the error yet returned 0).
         rprint("[bold red]Failed to stop ComfyUI in the background.[/bold red]\n")
-    else:
-        rprint(f"[bold yellow]Background ComfyUI is stopped.[/bold yellow] ({bg_info[0]}:{bg_info[1]})")
+        if renderer.is_json():
+            renderer.error(
+                code="stop_failed",
+                message="Failed to stop ComfyUI in the background.",
+                command="stop",
+                details={"pid": bg_info[2]},
+            )
+        raise typer.Exit(code=1)
 
-    ConfigManager().remove_background()
+    rprint(f"[bold yellow]Background ComfyUI is stopped.[/bold yellow] ({bg_info[0]}:{bg_info[1]})")
+    config.remove_background()
+
+    if renderer.is_json():
+        renderer.emit(
+            {"stopped": True, "host": bg_info[0], "port": bg_info[1], "pid": bg_info[2]},
+            command="stop",
+            changed=True,
+        )
 
 
 @app.command(help="Launch ComfyUI: ?[--background] ?[-- <extra args ...>]")
@@ -1110,6 +1469,31 @@ def launch(
     ] = None,
 ):
     launch_command(background, extra, frontend_pr)
+
+
+@app.command(help="Show a captured ComfyUI log (from `comfy launch --background`, or ComfyUI-Manager's own logfile).")
+@tracking.track_command()
+def logs(
+    tail: Annotated[
+        int,
+        typer.Option("--tail", help="Number of trailing log lines to show (capped for JSON payloads)."),
+    ] = 200,
+    where: Annotated[
+        str | None,
+        typer.Option("--where", show_default=False, help="Routing target. Only 'local' is supported."),
+    ] = None,
+    port: Annotated[
+        int | None,
+        typer.Option(
+            "--port",
+            show_default=False,
+            help="Show the log for this port instead of auto-resolving "
+            "(falls back to user/comfyui.log, which is where a server started "
+            "without an explicit --port logs).",
+        ),
+    ] = None,
+):
+    logs_command(tail=tail, where=where, port=port)
 
 
 @app.command("setup", help="Interactive setup wizard — routing, auth, and agent skills in one step.")
@@ -1277,13 +1661,11 @@ def which():
     if renderer.is_pretty():
         import sys as _sys
 
+        from comfy_cli.env_checker import _display_url
+        from comfy_cli.local_address import resolve_local_host_port
         from comfy_cli.output.panels import which_panel
 
-        cfg_bg = ConfigManager().background
-        if cfg_bg is not None:
-            host, port = cfg_bg[0], cfg_bg[1]
-        else:
-            host, port = "127.0.0.1", 8188
+        host, port = resolve_local_host_port(None, None, background=ConfigManager().background)
         try:
             server_running = env_checker.check_comfy_server_running(host=host, port=port, timeout=0.5)
         except Exception:  # noqa: BLE001
@@ -1295,7 +1677,7 @@ def which():
                 python_executable=_sys.executable,
                 python_version=f"{_sys.version_info.major}.{_sys.version_info.minor}.{_sys.version_info.micro}",
                 server_running=server_running,
-                server_url=f"http://{host}:{port}",
+                server_url=_display_url(host, port),
                 version=ConfigManager().get_cli_version(),
             )
         )
@@ -1494,7 +1876,6 @@ def agent_review(
     )
 
 
-@app.command(hidden=True)
 @app.command(
     help="Given an existing installation of comfy core and any custom nodes, installs any needed python dependencies"
 )
@@ -1562,7 +1943,11 @@ def standalone(
 
 
 generate_command.register_with(app)
-app.add_typer(models_command.app, name="model", help="Manage models.")
+app.add_typer(
+    models_command.app,
+    name="model",
+    help="Manage the model files in this workspace — download, list, remove. (Search/discovery lives under `comfy models`.)",
+)
 app.add_typer(
     models_search_command.app,
     name="models",
@@ -1571,6 +1956,13 @@ app.add_typer(
 app.add_typer(custom_nodes.app, name="node", help="Manage custom nodes.")
 app.add_typer(nodes_command.app, name="nodes", help="Introspect ComfyUI node classes (inputs, outputs, categories).")
 app.add_typer(templates_command.app, name="templates", help="Browse the Comfy workflow-template gallery.")
+app.command(
+    "run-template",
+    help=(
+        "Fetch a gallery template, fill its parameterized inputs (--param KEY=VALUE), "
+        "and run it to completion on local ComfyUI. Paid partner-API templates require --allow-spend."
+    ),
+)(templates_command.run_template_cmd)
 app.add_typer(workflow_command.app, name="workflow", help="Slot-based editing of frontend-format ComfyUI workflows.")
 app.command(
     "preview",

@@ -26,8 +26,12 @@ HELP_EXAMPLES: dict[str, list[str]] = {
         "comfy --json discover",
         "comfy --json discover --schemas-only",
     ],
+    "comfy nodes ls": [
+        "comfy --json nodes ls --produces MODEL",
+        "comfy nodes ls --input object_info.json --category 'loaders*'",
+    ],
     "comfy auth": ["comfy auth list", "comfy auth set civitai --key ..."],
-    "comfy auth set": ["comfy auth set comfy-cloud --key sk-…"],
+    "comfy auth set": ["comfy auth set civitai --key sk-…"],
     "comfy auth list": ["comfy auth list", "comfy --json auth list"],
     "comfy auth remove": ["comfy auth remove civitai"],
     "comfy install": [
@@ -43,6 +47,7 @@ HELP_EXAMPLES: dict[str, list[str]] = {
         "comfy --json-stream run --workflow path/to/workflow_api.json",
     ],
     "comfy stop": ["comfy stop"],
+    "comfy logs": ["comfy logs", "comfy --json logs --tail 50"],
     "comfy set-default": ["comfy set-default /path/to/ComfyUI"],
     "comfy update": ["comfy update", "comfy update all"],
     "comfy standalone": ["comfy standalone"],

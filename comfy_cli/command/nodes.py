@@ -25,6 +25,7 @@ import typer
 from comfy_cli import tracking
 from comfy_cli.cql.engine import Graph, LoadError
 from comfy_cli.output import get_renderer, rprint
+from comfy_cli.output.sanitize import sanitize_markup
 
 app = typer.Typer(no_args_is_help=True, help="Introspect ComfyUI node classes (inputs, outputs, categories).")
 
@@ -40,17 +41,10 @@ def _resolved_where(where: str | None) -> str:
 
     # Mirror comfy_cli.target.resolve_target()'s defensive fallback: a corrupt
     # config must not take the whole `comfy nodes *` surface down with a
-    # traceback before the structured renderer ever runs.
-    config_value: str | None = None
+    # traceback before the structured renderer ever runs (resolve_default reads
+    # the persisted where_default defensively for the same reason).
     try:
-        from comfy_cli.config_manager import ConfigManager
-
-        config_value = ConfigManager().get(where_module.CONFIG_KEY_WHERE_DEFAULT)
-    except Exception:  # noqa: BLE001 — never break routing on a bad config
-        config_value = None
-
-    try:
-        decision = where_module.resolve(flag=where, config_value=config_value)
+        decision = where_module.resolve_default(flag=where)
     except ValueError:
         # An invalid persisted where_default shouldn't be fatal; fall back to
         # the flag (if valid) or auto-detect with the bad config value dropped.
@@ -81,8 +75,8 @@ def _get_graph(
             return Graph.load(
                 mode=mode,
                 input_path=input_path,
-                host=host or "127.0.0.1",
-                port=port or 8188,
+                host=host,
+                port=port,
             )
         # Live fetch goes through the resilient loader: auto-cache on success,
         # refresh-and-retry once, then fall back to the last cached dump (with
@@ -91,8 +85,8 @@ def _get_graph(
 
         raw = resilient_load_object_info(
             mode=mode,
-            host=host or "127.0.0.1",
-            port=port or 8188,
+            host=host,
+            port=port,
             on_stale=on_stale,
         )
         graph = Graph.from_object_info(raw)
@@ -288,8 +282,10 @@ def ls_cmd(
             tbl.add_column("category", style="dim")
             tbl.add_column("outputs")
             for m in nodes:
-                outs = ", ".join(m.output_types()) or "[dim]—[/dim]"
-                tbl.add_row(m.id, m.category or "", outs)
+                # object_info text into a markup sink; the em-dash fallback is
+                # ours, so only the joined server values are escaped.
+                outs = sanitize_markup(", ".join(m.output_types())) or "[dim]—[/dim]"
+                tbl.add_row(sanitize_markup(m.id), sanitize_markup(m.category or ""), outs)
             renderer.console().print(tbl)
             rprint(f"[dim]{len(nodes)} node(s)[/dim]")
     renderer.emit(payload, command="nodes ls")
@@ -363,18 +359,18 @@ def show_cmd(
         from rich.table import Table
 
         rprint(
-            f"[bold]{payload['name']}[/bold]"
+            f"[bold]{sanitize_markup(payload['name'])}[/bold]"
             + (
-                f"  [dim]({payload['display_name']})[/dim]"
+                f"  [dim]({sanitize_markup(payload['display_name'])})[/dim]"
                 if payload["display_name"] and payload["display_name"] != payload["name"]
                 else ""
             )
         )
         if payload["category"]:
-            rprint(f"[dim]category[/dim]  {payload['category']}")
+            rprint(f"[dim]category[/dim]  {sanitize_markup(payload['category'])}")
         if payload["description"]:
-            rprint(f"[dim]{payload['description']}[/dim]")
-        outs = ", ".join(payload["output_types"]) or "(none)"
+            rprint(f"[dim]{sanitize_markup(payload['description'])}[/dim]")
+        outs = sanitize_markup(", ".join(payload["output_types"])) or "(none)"
         rprint(f"[dim]outputs[/dim]   {outs}")
         rprint("")
         if payload["inputs"]:
@@ -387,10 +383,10 @@ def show_cmd(
                 opts = i.get("options") or {}
                 default = opts.get("default")
                 tbl.add_row(
-                    str(i.get("name") or ""),
-                    str(i.get("type") or ""),
-                    str(i.get("section") or ""),
-                    "" if default is None else str(default),
+                    sanitize_markup(i.get("name") or ""),
+                    sanitize_markup(i.get("type") or ""),
+                    sanitize_markup(i.get("section") or ""),
+                    "" if default is None else sanitize_markup(default),
                 )
             renderer.console().print(tbl)
     renderer.emit(payload, command="nodes show")
@@ -401,10 +397,21 @@ def show_cmd(
 # ---------------------------------------------------------------------------
 
 
-@app.command("search", help="Fuzzy-search node classes by name, display name, or description.")
+@app.command(
+    "search",
+    help=(
+        "Search node classes by name, display name, category, or description "
+        "(case-insensitive, word-order-independent; falls back to close-name matches)."
+    ),
+)
 @tracking.track_command("nodes")
 def search_cmd(
-    query: Annotated[str, typer.Argument(help="Text to search for (case-insensitive substring).")],
+    query: Annotated[
+        str,
+        typer.Argument(
+            help=("Text to search for (case-insensitive, word-order-independent; falls back to close-name matches).")
+        ),
+    ],
     limit: Annotated[int, typer.Option(help="Cap output to N rows.")] = 20,
     input_path: Annotated[
         str | None,
@@ -433,35 +440,72 @@ def search_cmd(
         on_stale=lambda key, err: _stale.update(stale=True, source=key, reason=err),
     )
 
+    # Token-AND matching: every whitespace-separated token must be present, in
+    # any order. `q_joined` additionally lets a spaced query hit a CamelCase
+    # class name ('ksampler advanced' -> 'ksampleradvanced' == KSamplerAdvanced).
+    # A query with no tokens (empty or all-whitespace) has nothing to match on.
+    # Don't fall back to the raw string: `" "` would then be a substring of every
+    # blob and match the entire catalog, and `all(...)` over an empty token list
+    # is vacuously true, which does the same. Both mean "no match".
     q = query.lower()
+    tokens = q.split()
+    q_joined = "".join(tokens)
     scored: list[tuple[int, Any]] = []
-    for m in graph.all_nodes():
+    for m in graph.all_nodes() if tokens else ():
         name_l = m.id.lower()
         display_l = m.display_name.lower()
         desc_l = m.description.lower()
-        # Simple scoring: exact name hit > prefix > substring in name > display > description.
-        if name_l == q:
+        cat_l = (m.category or "").lower()
+        blob = " ".join((name_l, display_l, desc_l, cat_l))
+        # Tiered: exact name > name prefix > all tokens in name > display > category > anywhere.
+        if name_l == q or name_l == q_joined:
             score = 0
-        elif name_l.startswith(q):
+        elif name_l.startswith(q) or name_l.startswith(q_joined):
             score = 1
-        elif q in name_l:
+        elif all(t in name_l for t in tokens):
             score = 2
-        elif q in display_l:
+        elif all(t in display_l for t in tokens):
             score = 3
-        elif q in desc_l:
+        elif all(t in cat_l for t in tokens):
             score = 4
+        elif all(t in blob for t in tokens):
+            score = 5
         else:
             continue
         scored.append((score, m))
 
     scored.sort(key=lambda x: (x[0], x[1].id))
-    total_matched = len(scored)
-    matched = [m for _, m in scored[: max(0, limit)]]
+    close_match = False
+    if scored:
+        total_matched = len(scored)
+        matched = [m for _, m in scored[: max(0, limit)]]
+    else:
+        # Zero hits: fall back to the closest node names, so a typo
+        # ('KSampeler') still points the caller at 'KSampler'. Ids are bucketed
+        # by their lowered form (difflib needs unique candidates) but every node
+        # in a colliding bucket is surfaced — a pack may register both
+        # 'LoadImage' and 'loadimage', and dropping one hides a real suggestion.
+        by_lower: dict[str, list[Any]] = {}
+        for m in graph.all_nodes():
+            by_lower.setdefault(m.id.lower(), []).append(m)
+        close = difflib.get_close_matches(q_joined, list(by_lower), n=max(1, limit), cutoff=0.6) if q_joined else []
+        candidates = [m for name_l in close for m in by_lower[name_l]]
+        # Count before truncating, like every other path here (`ls`, `upstream`,
+        # and the scored branch above) — otherwise `--limit 0` reports total 0
+        # and silently erases the fact that a close match exists.
+        total_matched = len(candidates)
+        matched = candidates[: max(0, limit)]
+        close_match = bool(candidates)
 
     payload = {
         "query": query,
         "total": total_matched,
         "count": len(matched),
+        # Top-level too, not just per-row: a caller that gates on `count == 0` to
+        # mean "no such node" would otherwise have to inspect every row to notice
+        # the search actually found nothing and is guessing. Always present, so
+        # `data["close_match"]` is a stable check rather than a key-exists probe.
+        "close_match": close_match,
         "rows": [
             {
                 "name": m.id,
@@ -469,6 +513,7 @@ def search_cmd(
                 "display_name": m.display_name,
                 "description": m.description,
                 "output_types": m.output_types(),
+                **({"close_match": True} if close_match else {}),
             }
             for m in matched
         ],
@@ -484,9 +529,26 @@ def search_cmd(
         ]
 
     if renderer.is_pretty():
-        if not matched:
-            rprint(f"[dim]No nodes match {query!r}.[/dim]")
+        # The query is echoed back into a markup-interpreting sink, so escape it
+        # for the same reason the table cells below do.
+        query_safe = sanitize_markup(repr(query))
+        # Key the empty-state on the pre-slice count, not on `matched`: with
+        # `--limit 0` the slice is empty even though the search found hits, and
+        # printing "no nodes match" there contradicts the JSON's `total`.
+        if not total_matched:
+            rprint(f"[dim]No nodes match {query_safe}.[/dim]")
+        elif not matched and close_match:
+            # Guesses, not matches — say so, or --limit 0 would report the
+            # fallback's finds as real hits and undo the distinction above.
+            rprint(
+                f"[dim]No nodes match {query_safe}; {total_matched} close name match(es) "
+                f"found but --limit {limit} returned none.[/dim]"
+            )
+        elif not matched:
+            rprint(f"[dim]{total_matched} node(s) match {query_safe}; --limit {limit} returned none.[/dim]")
         else:
+            if close_match:
+                rprint(f"[dim]No nodes match {query_safe} — showing close name matches.[/dim]")
             from rich.table import Table
 
             tbl = Table(show_header=True, header_style="bold")
@@ -494,8 +556,9 @@ def search_cmd(
             tbl.add_column("category", style="dim")
             tbl.add_column("description", style="dim")
             for m in matched:
-                desc = m.description[:60]
-                tbl.add_row(m.id, m.category or "", desc)
+                # Truncate first, then escape, so the escapes stay balanced.
+                desc = sanitize_markup(m.description[:60])
+                tbl.add_row(sanitize_markup(m.id), sanitize_markup(m.category or ""), desc)
             renderer.console().print(tbl)
             rprint(f"[dim]{len(matched)} node(s)[/dim]")
     renderer.emit(payload, command="nodes search")
@@ -566,8 +629,8 @@ def upstream_cmd(
             tbl.add_column("category", style="dim")
             tbl.add_column("outputs")
             for r in rows:
-                outs = ", ".join(r["output_types"]) or "[dim]—[/dim]"
-                tbl.add_row(r["name"] or "", r["category"] or "", outs)
+                outs = sanitize_markup(", ".join(r["output_types"])) or "[dim]—[/dim]"
+                tbl.add_row(sanitize_markup(r["name"] or ""), sanitize_markup(r["category"] or ""), outs)
             renderer.console().print(tbl)
             tail = f" of {total_upstream}" if total_upstream != len(rows) else ""
             rprint(f"[dim]{len(rows)} upstream node(s){tail}[/dim]")
@@ -624,8 +687,8 @@ def downstream_cmd(
             tbl.add_column("category", style="dim")
             tbl.add_column("outputs")
             for r in rows:
-                outs = ", ".join(r["output_types"]) or "[dim]—[/dim]"
-                tbl.add_row(r["name"] or "", r["category"] or "", outs)
+                outs = sanitize_markup(", ".join(r["output_types"])) or "[dim]—[/dim]"
+                tbl.add_row(sanitize_markup(r["name"] or ""), sanitize_markup(r["category"] or ""), outs)
             renderer.console().print(tbl)
             tail = f" of {total_downstream}" if total_downstream != len(rows) else ""
             rprint(f"[dim]{len(rows)} downstream node(s){tail}[/dim]")
@@ -707,8 +770,13 @@ def path_cmd(
             )
         else:
             for p in paths:
-                chain = " [dim]→[/dim] ".join(f"[bold]{s.get('node')}[/bold]" for s in (p.get("steps") or []))
-                rprint(f"[cyan]{p.get('from')}[/cyan]  {chain}  [cyan]{p.get('to')}[/cyan]")
+                chain = " [dim]→[/dim] ".join(
+                    f"[bold]{sanitize_markup(s.get('node'))}[/bold]" for s in (p.get("steps") or [])
+                )
+                rprint(
+                    f"[cyan]{sanitize_markup(p.get('from'))}[/cyan]  {chain}  "
+                    f"[cyan]{sanitize_markup(p.get('to'))}[/cyan]"
+                )
             rprint(f"[dim]{len(paths)} path(s)[/dim]")
     renderer.emit(payload, command="nodes path")
 
@@ -757,7 +825,7 @@ def types_cmd(
     if renderer.is_pretty():
         from rich.columns import Columns
 
-        renderer.console().print(Columns([f"[cyan]{t}[/cyan]" for t in types], expand=True))
+        renderer.console().print(Columns([f"[cyan]{sanitize_markup(t)}[/cyan]" for t in types], expand=True))
         rprint(f"[dim]{len(types)} type(s)[/dim]")
     renderer.emit(payload, command="nodes types")
 
@@ -851,23 +919,36 @@ def categories_cmd(
             tbl.add_column("category")
             tbl.add_column("nodes", justify="right", style="dim")
             for p, c in flat:
-                tbl.add_row(p, str(c))
+                tbl.add_row(sanitize_markup(p), sanitize_markup(c))
             renderer.console().print(tbl)
             rprint(f"[dim]{len(flat)} categories[/dim]")
     renderer.emit(payload, command="nodes categories")
 
 
 # ---------------------------------------------------------------------------
-# refresh — object_info is fetched live; nothing to cache
+# refresh — object_info is fetched live; the annotation data is what's cached
 # ---------------------------------------------------------------------------
 
 
 @app.command(
     "refresh",
-    help="Re-fetch node annotation data (pack/labels/cloud_disabled) from Comfy-Org/comfy-complete.",
+    help=(
+        "Re-fetch node annotation data (pack/labels/cloud_disabled) from Comfy-Org/comfy-complete. "
+        "Set COMFY_CLI_NO_REMOTE_REFRESH=1 to keep every `nodes` command off the network."
+    ),
 )
 @tracking.track_command("nodes")
-def refresh_cmd():
+def refresh_cmd(
+    where: Annotated[
+        str | None,
+        typer.Option(
+            "--where",
+            show_default=False,
+            hidden=True,
+            help="Deprecated and ignored — annotation data is the same for local and cloud.",
+        ),
+    ] = None,
+):
     """Force-refresh the node annotation cache from the public comfy-complete repo.
 
     ``object_info`` itself is fetched live from the server on every command, so
@@ -875,6 +956,13 @@ def refresh_cmd():
     a node belongs to, its behavioral labels, and whether it's disabled on
     cloud) come from Comfy-Org/comfy-complete and are cached locally with a TTL;
     this command pulls the latest copy immediately.
+
+    ``--where`` is accepted and ignored. It steered nothing even when this
+    command was a no-op, and the annotation files are routing-independent — but
+    it was in the CLI's own error hints and in two shipped skill docs, so
+    rejecting it would turn "you followed the hint" into ``No such option``
+    (exit 2) for anyone on an older doc. Hidden from ``--help`` so nothing new
+    learns it.
     """
     renderer = get_renderer()
     from comfy_cli.cql import annotations_source
@@ -884,12 +972,17 @@ def refresh_cmd():
     if renderer.is_pretty():
         for r in results:
             if r["source"] == "remote":
-                rprint(f"[green]✓[/green] {r['name']} ({r['bytes']:,} bytes) → {r['path']}")
+                # A remote fetch that couldn't be persisted still refreshed this
+                # run's data; say so, and say why it won't survive to the next.
+                dest = r["path"] or f"not cached ({r.get('cache_error', 'cache unavailable')})"
+                rprint(f"[green]✓[/green] {r['name']} ({r['bytes']:,} bytes) → {dest}")
             elif r["source"] == "bundled":
+                # Not necessarily a failure: COMFY_CLI_NO_REMOTE_REFRESH lands
+                # here by design, so let the reason carry the why.
                 rprint(
-                    f"[yellow]![/yellow] {r['name']}: remote fetch failed, using bundled snapshot "
-                    f"([dim]{r.get('error', '')}[/dim])"
+                    f"[yellow]![/yellow] {r['name']}: using bundled snapshot "
+                    f"([dim]{r.get('error') or 'remote unavailable'}[/dim])"
                 )
             else:
-                rprint(f"[red]✗[/red] {r['name']}: unavailable ([dim]{r.get('error', '')}[/dim])")
+                rprint(f"[red]✗[/red] {r['name']}: unavailable ([dim]{r.get('error') or 'no source'}[/dim])")
     renderer.emit({"refreshed": ok, "files": results}, command="nodes refresh")

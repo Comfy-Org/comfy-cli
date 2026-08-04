@@ -91,7 +91,10 @@ class ConfigManager:
             self.background = bg_info[0], int(bg_info[1]), int(bg_info[2])
 
             if not is_running(self.background[2]):
-                self.remove_background()
+                # The recorded pid is gone — but the logfile it points at is the
+                # ONLY pointer to a crash log, so clear the process record and
+                # keep CONFIG_KEY_BACKGROUND_LOG.
+                self.clear_background_process()
 
     def get_env_data(self):
         """
@@ -176,10 +179,27 @@ class ConfigManager:
             ),
         }
 
-    def remove_background(self):
-        del self.config["DEFAULT"][constants.CONFIG_KEY_BACKGROUND]
+    def clear_background_process(self):
+        """Forget the recorded background server, PRESERVING its logfile path.
+
+        ``CONFIG_KEY_BACKGROUND_LOG`` is deliberately kept: once the pid is dead
+        that key is the only pointer to the log the dead server wrote, which is
+        exactly what a post-mortem `comfy logs` needs. Dropping it used to send
+        resolution back to the hard-coded default port, serving the wrong file
+        (or none) while the crash output sat elsewhere. Staleness is now reported
+        as `comfy logs` metadata (``source`` / ``mtime`` / ``port_mismatch``)
+        instead of enforced by deleting the pointer.
+        """
+        self.config["DEFAULT"].pop(constants.CONFIG_KEY_BACKGROUND, None)
         self.write_config()
         self.background = None
+
+    def remove_background(self):
+        """Clear the background server record (`comfy stop`, dead-pid cleanup).
+
+        Preserves the logfile pointer — see :meth:`clear_background_process`.
+        """
+        self.clear_background_process()
 
     def get_cli_version(self):
         # Note: this approach should work for users installing the CLI via

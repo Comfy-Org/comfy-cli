@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://comfy.org/schemas/logs.json",
+  "title": "comfy logs --json data payload",
+  "description": "Tail of a captured ComfyUI log — the one recorded by `comfy launch --background`, or ComfyUI-Manager's own `user/comfyui*.log` for a server started outside it.",
+  "type": "object",
+  "required": ["lines", "path", "truncated", "source", "port_mismatch"],
+  "additionalProperties": true,
+  "properties": {
+    "lines": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "The last N log lines (newline-terminated except possibly the final one)."
+    },
+    "path": {
+      "type": "string",
+      "description": "Absolute path of the logfile that was read."
+    },
+    "truncated": {
+      "type": "boolean",
+      "description": "True when the line/byte cap dropped lines the caller would otherwise have received."
+    },
+    "source": {
+      "type": "string",
+      "enum": ["recorded", "derived_port", "default_port", "explicit_port", "fallback_unsuffixed", "fallback_glob"],
+      "description": "Which candidate resolved: the path recorded at launch (`recorded`), the logfile derived from the live background port (`derived_port`) or from the 8188 default (`default_port`), the port passed to `--port` (`explicit_port`), ComfyUI-Manager's unsuffixed `user/comfyui.log` (`fallback_unsuffixed`), or the newest-mtime `user/comfyui_*.log` (`fallback_glob`). Anything other than `recorded`/`derived_port`/`explicit_port` means the file was inferred — check `mtime` before trusting it as the current run. `recorded` outranks the workspace-local candidates only while its background server is live or it points inside the current workspace; a leftover pointer into another workspace is tried last.",
+      "examples": ["recorded", "fallback_unsuffixed"]
+    },
+    "mtime": {
+      "type": ["string", "null"],
+      "description": "ISO 8601 (UTC) last-modified time of the served file, or null when it could not be stat'd. A stale mtime means the log predates the run being debugged."
+    },
+    "size": {
+      "type": ["integer", "null"],
+      "description": "Size of the served file in bytes, or null when it could not be stat'd. Zero bytes alongside a live server usually means the wrong file was served — see `port_mismatch`."
+    },
+    "port_mismatch": {
+      "type": "boolean",
+      "description": "True when a background server is recorded as running and the served file's `comfyui_<port>.log` suffix names a DIFFERENT port (e.g. a failed launch attempt left a wrong-port log recorded). Retry with `comfy logs --port <the running port>`. Always false when `--port` was passed, since the served file is then the port that was explicitly asked for."
+    }
+  }
+}

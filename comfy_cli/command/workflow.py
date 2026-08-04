@@ -6,6 +6,10 @@ Three primitives:
     comfy workflow set-slot <file> ADDR=VALUE [...]    # tweak one or more
     comfy workflow vary <file> --slot ADDR='[v1,v2]'   # produce N variants
 
+Plus one read-only reader that needs no object_info at all:
+
+    comfy workflow notes <file>                        # what did the author write?
+
 Workflows must be **frontend-format** (the regular ComfyUI save — has
 ``nodes[]`` / ``links[]``, may contain subgraphs). API-format (the export
 that ``comfy run`` consumes) is rejected with a clean envelope and a hint.
@@ -17,13 +21,22 @@ Slot addresses follow CQL's format: ``<instance_id>.<input_name>``. Run
 from __future__ import annotations
 
 import json
+import unicodedata
 from pathlib import Path
 from typing import Annotated, Any
 
 import typer
 
 from comfy_cli import tracking
+from comfy_cli.file_utils import atomic_write_text
+
+# Aliased at module scope rather than lazy-imported: a class used in ``except``
+# clauses at module scope cannot be resolved lazily. ``comfy_cli.http`` is
+# stdlib-only and tiny, and ``search.py``/``jobs.py`` already pull
+# ``urllib.request`` in at import time, so the precedent exists.
+from comfy_cli.http import ResponseTooLarge as _ResponseTooLarge
 from comfy_cli.output import get_renderer, rprint
+from comfy_cli.output.sanitize import sanitize_markup
 
 app = typer.Typer(no_args_is_help=True, help="Slot-based editing of frontend-format ComfyUI workflows.")
 
@@ -89,22 +102,21 @@ def _get_graph(input_path: str | None, host: str | None, port: int | None, on_st
     try:
         if input_path is not None:
             # Explicit offline dump — Graph.load reads + annotates it.
-            return Graph.load(input_path=input_path, host=host or "127.0.0.1", port=port or 8188)
+            return Graph.load(input_path=input_path, host=host, port=port)
         # Live fetch: resolve mode from global routing chain, then use resilient loader.
         from comfy_cli import where as where_module
-        from comfy_cli.config_manager import ConfigManager
 
-        decision = where_module.resolve(
-            flag=None,
-            config_value=ConfigManager().get(where_module.CONFIG_KEY_WHERE_DEFAULT),
-        )
+        # ``_or_exit``: this command has no per-command --where flag to fall
+        # back to, so a bad COMFY_WHERE / project / persisted where_default
+        # becomes a clean `where_invalid` envelope rather than a traceback.
+        decision = where_module.resolve_default_or_exit()
         mode = "cloud" if decision.target is where_module.WhereTarget.CLOUD else "local"
         from comfy_cli.cql.loader import resilient_load_object_info
 
         raw = resilient_load_object_info(
             mode=mode,
-            host=host or "127.0.0.1",
-            port=port or 8188,
+            host=host,
+            port=port,
             on_stale=on_stale,
         )
         graph = Graph.from_object_info(raw)
@@ -117,22 +129,6 @@ def _get_graph(input_path: str | None, host: str | None, port: int | None, on_st
             hint=e.details.get("hint", "pass --input <path>, or start the server with `comfy launch`"),
         )
         raise typer.Exit(code=1) from e
-
-
-def _atomic_write_text(path: Path, content: str) -> None:
-    """Write via tmp + rename so SIGINT mid-write can't leave a half-written file."""
-    import os
-
-    tmp = path.with_suffix(path.suffix + f".{os.getpid()}.tmp")
-    try:
-        tmp.write_text(content, encoding="utf-8")
-        os.replace(tmp, path)
-    except Exception:
-        try:
-            tmp.unlink()
-        except OSError:
-            pass
-        raise
 
 
 def _parse_value(raw: str) -> Any:
@@ -241,7 +237,9 @@ def set_slot_cmd(
         typer.Option(
             "--stdout/--in-place",
             show_default=False,
-            help="Print the result to stdout instead of writing back to <file>.",
+            help="Return the result instead of writing back to <file>: `data.workflow_json` in the "
+            "envelope under --json, or the raw workflow on stdout with --no-json. Redirecting "
+            "stdout selects JSON mode, so `--stdout > new.json` needs --no-json to get a raw workflow.",
         ),
     ] = False,
     input_path: Annotated[str | None, typer.Option("--input", show_default=False)] = None,
@@ -270,35 +268,53 @@ def set_slot_cmd(
         )
         raise typer.Exit(code=1) from e
 
-    serialized = json.dumps(new_workflow, indent=2)
+    # Fold the stale-cache note into `warnings` up front so every exit path —
+    # including the `--stdout` early return below — reports it.
+    if _stale:
+        warnings = list(warnings) + [
+            {"code": "object_info_stale", "message": f"served from cache ({_stale['source']}): {_stale['reason']}"}
+        ]
 
-    if stdout:
+    # `--stdout` in human mode is a pipe target: print the raw workflow so
+    # `comfy workflow set-slot ... --stdout --no-json > new.json` keeps working.
+    # `--no-json` is required there: a redirect makes stdout a non-TTY, which
+    # `Renderer.resolve` reads as JSON mode. In JSON mode stdout is reserved
+    # for the envelope (see docs/json-output.md), so the modified workflow
+    # rides in `data.workflow_json` instead — a bare workflow object is not an
+    # `envelope/1` and machine callers reject it.
+    if stdout and renderer.is_pretty():
         import sys
 
-        sys.stdout.write(serialized)
+        sys.stdout.write(json.dumps(new_workflow, indent=2))
         sys.stdout.write("\n")
+        sys.stdout.flush()
+        # stdout now holds exactly the workflow; warnings would corrupt it, so
+        # they go to stderr rather than being dropped.
+        for w in warnings:
+            renderer.stderr_console().print(f"[yellow]warning:[/yellow] {w}")
         return
 
-    _atomic_write_text(p, serialized)
+    if not stdout:
+        atomic_write_text(p, json.dumps(new_workflow, indent=2))
 
-    payload = {
+    payload: dict[str, Any] = {
         "workflow": str(p),
         "applied": list(overrides_dict.keys()),
         "warnings": warnings,
-        "wrote": str(p),
+        "wrote": None if stdout else str(p),
     }
+    if stdout:
+        payload["out"] = "stdout"
+        payload["workflow_json"] = new_workflow
     if _stale:
         payload["stale"] = True
-        payload["warnings"] = list(warnings) + [
-            {"code": "object_info_stale", "message": f"served from cache ({_stale['source']}): {_stale['reason']}"}
-        ]
     if renderer.is_pretty():
         rprint(f"[bold green]✓[/bold green] applied {len(overrides_dict)} slot(s) → [dim]{p}[/dim]")
         for addr in overrides_dict:
             rprint(f"  [dim]·[/dim] {addr}")
         for w in warnings:
             rprint(f"  [yellow]warning:[/yellow] {w}")
-    renderer.emit(payload, command="workflow set-slot", changed=True)
+    renderer.emit(payload, command="workflow set-slot", changed=not stdout)
 
 
 # ---------------------------------------------------------------------------
@@ -306,7 +322,10 @@ def set_slot_cmd(
 # ---------------------------------------------------------------------------
 
 
-@app.command("vary", help="Produce N workflow variants from a per-slot value list. Emits NDJSON.")
+@app.command(
+    "vary",
+    help="Produce N workflow variants from a per-slot value list. Emits NDJSON (or `data.variants` under --json).",
+)
 @tracking.track_command("workflow")
 def vary_cmd(
     file: Annotated[str, typer.Argument(help="Frontend-format workflow JSON.")],
@@ -325,7 +344,9 @@ def vary_cmd(
         typer.Option(
             "--out-dir",
             show_default=False,
-            help="If set, write each variation to <out-dir>/<stem>_<N>.json. Otherwise emit NDJSON to stdout.",
+            help="If set, write each variation to <out-dir>/<stem>_<N>.json. Otherwise return the "
+            "variants: `data.variants` in the envelope under --json, or NDJSON on stdout with "
+            "--no-json. Redirecting stdout selects JSON mode, so `> out.ndjson` needs --no-json.",
         ),
     ] = None,
 ):
@@ -370,116 +391,478 @@ def vary_cmd(
         renderer.error(code="workflow_slot_invalid", message=str(e))
         raise typer.Exit(code=1) from e
 
+    if _stale:
+        warnings = list(warnings) + [
+            {"code": "object_info_stale", "message": f"served from cache ({_stale['source']}): {_stale['reason']}"}
+        ]
+
     written: list[str] = []
+    # Same envelope contract as set-slot --stdout: raw NDJSON on stdout is the
+    # human/pipe form; in JSON mode stdout belongs to the envelope, so the
+    # variants ride in `data.variants` instead.
+    variants: list[dict[str, Any]] | None = None
+    # True once stdout carries the NDJSON stream — the human summary below must
+    # then go to stderr, or `comfy workflow vary ... --no-json > out.ndjson`
+    # ends with a non-JSON line and breaks strict line-delimited consumers.
+    piped_ndjson = False
     if out_dir:
         out = Path(out_dir).expanduser()
         out.mkdir(parents=True, exist_ok=True)
         for i, wf in enumerate(workflows):
             target = out / f"{p.stem}_{i:03d}.json"
-            _atomic_write_text(target, json.dumps(wf, indent=2))
+            atomic_write_text(target, json.dumps(wf, indent=2))
             written.append(str(target))
-    else:
+    elif renderer.is_pretty():
         import sys
 
         for wf in workflows:
             sys.stdout.write(json.dumps(wf))
             sys.stdout.write("\n")
         sys.stdout.flush()
+        piped_ndjson = True
+    else:
+        variants = list(workflows)
 
-    payload = {
+    payload: dict[str, Any] = {
         "workflow": str(p),
         "count": len(workflows),
         "warnings": warnings,
         "out_dir": str(Path(out_dir).expanduser()) if out_dir else None,
         "written": written,
+        "variants": variants,
     }
     if _stale:
         payload["stale"] = True
-        payload["warnings"] = list(warnings) + [
-            {"code": "object_info_stale", "message": f"served from cache ({_stale['source']}): {_stale['reason']}"}
-        ]
     if renderer.is_pretty():
-        rprint(f"[bold green]✓[/bold green] produced {len(workflows)} variation(s)")
+        say = renderer.stderr_console().print if piped_ndjson else rprint
+        say(f"[bold green]✓[/bold green] produced {len(workflows)} variation(s)")
         if written:
             for path in written[:5]:
-                rprint(f"  [dim]→[/dim] {path}")
+                say(f"  [dim]→[/dim] {path}")
             if len(written) > 5:
-                rprint(f"  [dim]… and {len(written) - 5} more[/dim]")
+                say(f"  [dim]… and {len(written) - 5} more[/dim]")
         for w in warnings:
-            rprint(f"  [yellow]warning:[/yellow] {w}")
+            say(f"  [yellow]warning:[/yellow] {w}")
     renderer.emit(payload, command="workflow vary", changed=bool(written))
 
 
 # ---------------------------------------------------------------------------
-# Cloud-saved workflows — list, get, save, delete via /api/workflows
+# notes
+# ---------------------------------------------------------------------------
+
+# The two documentation-note types the ComfyUI frontend registers
+# (``src/extensions/core/noteNode.ts``). Both are UI-only virtual nodes — they
+# carry no schema and are stripped by API conversion (see
+# ``workflow_to_api._UI_ONLY_NODE_TYPES``), so reading them is pure JSON
+# parsing: no object_info, no running server.
+_NOTE_NODE_TYPES = frozenset({"Note", "MarkdownNote"})
+
+
+def _str_or_none(value: Any) -> str | None:
+    """Coerce an untrusted workflow value to the schema's ``string | null``.
+
+    ``notes[].title`` and ``notes[].subgraph.name`` are declared ``string|null``
+    in ``schemas/workflow.json``, but a hand-edited file can carry any JSON type
+    there. Stringify rather than drop, so the value still reaches the caller.
+    """
+    if value is None or isinstance(value, str):
+        return value
+    return str(value)
+
+
+def _extract_notes(workflow: dict) -> list[dict]:
+    """Collect Note/MarkdownNote nodes from the top-level graph and subgraph defs.
+
+    Note text is serialized at ``widgets_values[0]`` (the sole widget both note
+    types register — see ComfyUI_frontend ``src/extensions/core/noteNode.ts``).
+
+    Every container is type-checked before it is walked: ``_is_frontend_format``
+    only vouches for the top-level ``nodes`` list, so ``definitions.subgraphs``,
+    a subgraph's own ``nodes``, and each node's ``type`` are all attacker-shaped
+    for a malformed-but-parseable file. A wrong type there must degrade to "no
+    notes found", never to an uncaught ``TypeError``.
+    """
+    out: list[dict] = []
+
+    def _scan(nodes, subgraph):
+        if not isinstance(nodes, list):
+            return
+        for n in nodes:
+            if not isinstance(n, dict):
+                continue
+            # Guard the type before the frozenset membership test: an unhashable
+            # value (list/dict) would raise TypeError rather than miss the set.
+            node_type = n.get("type")
+            if not isinstance(node_type, str) or node_type not in _NOTE_NODE_TYPES:
+                continue
+            wv = n.get("widgets_values")
+            text = wv[0] if isinstance(wv, list) and wv and isinstance(wv[0], str) else ""
+            out.append(
+                {
+                    "id": n.get("id"),
+                    "type": node_type,
+                    "title": _str_or_none(n.get("title")),
+                    "text": text,
+                    "pos": n.get("pos"),
+                    "size": n.get("size"),
+                    "subgraph": subgraph,
+                }
+            )
+
+    _scan(workflow.get("nodes"), None)
+    definitions = workflow.get("definitions")
+    subgraphs = definitions.get("subgraphs") if isinstance(definitions, dict) else None
+    if isinstance(subgraphs, list):
+        for sg in subgraphs:
+            if isinstance(sg, dict):
+                _scan(sg.get("nodes"), {"id": sg.get("id"), "name": _str_or_none(sg.get("name"))})
+    return out
+
+
+def _safe_console_text(value: Any) -> str:
+    """Render an untrusted workflow-file value safely for the pretty console.
+
+    Strips terminal control sequences (so note text can't emit ANSI/OSC escapes)
+    and then neutralizes rich markup (so a literal ``[/]`` in a note renders as
+    itself instead of raising ``MarkupError`` or spoofing styled output).
+    """
+    from rich.markup import escape
+
+    return escape(_strip_terminal_controls(str(value)))
+
+
+@app.command("notes", help="List the documentation notes (Note/MarkdownNote nodes) a workflow carries.")
+@tracking.track_command("workflow")
+def notes_cmd(
+    file: Annotated[str, typer.Argument(help="Frontend-format workflow JSON.")],
+):
+    """Read the authored notes out of a workflow — offline, read-only.
+
+    Notes are where template authors put the human-facing documentation an
+    agent otherwise has to ``grep`` the raw JSON for (LoRA trigger words, model
+    download links, usage caveats). API-format files are rejected: the
+    conversion drops note nodes entirely, so there is nothing to read there.
+    """
+    renderer = get_renderer()
+    p, workflow = _load_workflow_or_fail(renderer, file)
+    notes = _extract_notes(workflow)
+    payload = {"workflow": str(p), "count": len(notes), "notes": notes}
+    if renderer.is_pretty():
+        if not notes:
+            rprint("[dim]No notes in this workflow.[/dim]")
+        else:
+            # Every field interpolated below is untrusted file content, so it
+            # goes through _safe_console_text().
+            for n in notes:
+                sg = n["subgraph"]
+                # A note may carry no id, and a subgraph def no name/id — omit the
+                # fragment rather than printing a literal "#None" / "(subgraph None)".
+                sg_label = (sg.get("name") or sg.get("id")) if sg else None
+                where = f" (subgraph {_safe_console_text(sg_label)})" if sg_label is not None else ""
+                id_frag = f"#{_safe_console_text(n['id'])}" if n["id"] is not None else ""
+                heading = _safe_console_text(n["title"] or n["type"] or "Note")
+                meta = f" [dim]{id_frag}{where}[/dim]" if (id_frag or where) else ""
+                rprint(f"[bold]{heading}[/bold]{meta}")
+                rprint(_safe_console_text(n["text"]))
+                rprint()
+    renderer.emit(payload, command="workflow notes")
+
+
+# ---------------------------------------------------------------------------
+# Saved workflows — list, get, save, delete.
 # ---------------------------------------------------------------------------
 #
-# These four subcommands are cloud-only. ComfyUI's local server has no
-# /api/workflows surface; users on local manage workflows as JSON files
-# on disk via the slot-editing commands above. With ``--where local`` or
-# no cloud session configured, we surface ``workflow_saved_local_unsupported``
-# with a hint pointing at the local file-based flow.
+# These four subcommands route through ``--where``:
+#
+#   cloud  → Comfy Cloud's ``/api/workflows`` store (UUID-keyed, versioned).
+#   local  → the running ComfyUI's ``/userdata`` file store, under the same
+#            ``workflows/`` dir the ComfyUI frontend uses. A workflow's id on
+#            the local path is its path *relative to* ``workflows/`` (e.g.
+#            ``flux.json`` or ``sub/dir/flux.json``) — that same string is what
+#            ``get``/``delete`` take and what ``save`` returns.
+#
+# The two paths share the ``--json`` envelope shape as far as feasible; the
+# per-verb docstrings + PR note the deltas (local has no versioning, no
+# server-side description, and reports raw file ``size``/``modified``/``created``
+# epoch-ms timestamps instead of cloud's ISO ``created_at``/``updated_at``).
 
 
-def _cloud_target_or_local_error(where: str | None, renderer):
-    """Resolve a cloud Target or emit ``workflow_saved_local_unsupported``."""
+# The userdata subdirectory the ComfyUI frontend stores saved workflows in.
+_WORKFLOWS_DIR = "workflows"
+
+# Cap on a single ``/userdata`` response we buffer into memory. We read one byte
+# past the cap so we can *detect* truncation and fail loudly, rather than
+# silently writing a partial workflow and reporting success.
+_USERDATA_MAX_BYTES = 64 * 1024 * 1024
+
+# Same cap for a single cloud API response. Kept separate from
+# ``_USERDATA_MAX_BYTES`` so the two surfaces can diverge without surprise.
+_HTTP_MAX_BYTES = 64 * 1024 * 1024
+
+
+# Per-operation guidance for an oversize cloud response. ``save``/``delete``
+# have already sent their request by the time the response is read, so the
+# server-side write may well have landed — say so rather than implying it did not.
+_TOO_LARGE_HINTS = {
+    "list": "narrow the result set with `--limit` or `--name`",
+    "get": "the saved workflow is unexpectedly large; inspect it directly in the cloud UI",
+    "save": "the workflow may still have been saved; confirm with `comfy --json workflow list`",
+    "delete": "the workflow may still have been deleted; confirm with `comfy --json workflow list`",
+}
+
+
+class _ResponseUnparseable(Exception):
+    """A non-empty 200 body could not be decoded as JSON — surface it as a loud
+    error instead of a misleading empty/success result (an empty body is still a
+    legitimate ``None`` and is *not* this)."""
+
+
+# What an oversize ``/userdata`` response means depends on the verb, so the hint
+# has to as well. ``list`` fetches the whole ``workflows/`` listing, so oversize
+# means *too many* workflows — not one big one. ``save``/``delete`` have already
+# sent their request by the time the body is read, so the write may well have
+# landed: their hints must not imply a clean failure the user should retry.
+_LOCAL_TOO_LARGE_HINTS = {
+    "list": "too many saved workflows on the server; prune the ComfyUI `workflows/` userdata directory "
+    "(`--limit`/`--name` filter client-side, so they cannot shrink the response)",
+    "get": "the saved workflow is unexpectedly large; inspect it directly on the server",
+    "save": "the workflow may still have been saved; confirm with `comfy --json --where local workflow list`",
+    "delete": "the workflow may still have been deleted; confirm with `comfy --json --where local workflow list`",
+}
+
+
+# Map the cloud ``--sort`` fields onto local FileInfo keys (client-side sort;
+# ComfyUI's /userdata listing has no server-side sort/limit/filter).
+_LOCAL_SORT_KEYS = {"create_time": "created", "update_time": "modified", "name": "path"}
+
+
+def _resolve_where_target(where: str | None):
+    """Resolve the routing Target for a saved-workflow verb (cloud or local)."""
     from comfy_cli.target import resolve_target
 
-    target = resolve_target(where=where)
-    if not target.is_cloud:
+    return resolve_target(where=where)
+
+
+# Unicode categories that survive the C0/C1 filter but still let untrusted text
+# lie about what it says on a terminal. Matching by category rather than by a
+# hand-rolled codepoint list keeps this exhaustive as Unicode grows:
+#   Cf  format characters — zero-width space/non-joiner/joiner, LRM/RLM/ALM,
+#       bidi embeddings + overrides + isolates (Trojan Source reordering), word
+#       joiner, BOM, soft hyphen, the invisible math operators, and the
+#       U+E0020–U+E007F tag block
+#   Zl  U+2028 line separator, and Zp U+2029 paragraph separator — not newlines,
+#       but some terminals honour them as line breaks
+_SPOOFING_CATEGORIES = frozenset({"Cf", "Zl", "Zp"})
+
+
+def _strip_terminal_controls(text: str) -> str:
+    """Drop everything untrusted workflow content could use to spoof a terminal.
+
+    Removes C0/C1 control chars (keeping only tab and newline) so the text can't
+    emit ANSI/OSC escape sequences, and drops every invisible Unicode codepoint
+    in ``_SPOOFING_CATEGORIES``.
+
+    Carriage return is dropped too, not kept: a lone ``\\r`` returns the cursor to
+    column 0, letting a note overwrite text this command already printed —
+    the same output-spoofing the escape stripping exists to prevent. Dropping it
+    is lossless for CRLF content, which keeps its ``\\n``.
+    """
+    # ASCII is settled by range alone — no Cf/Zl/Zp lives below U+00A0 — so the
+    # category lookup only runs for non-ASCII, keeping large payloads cheap.
+    return "".join(
+        ch
+        for ch in text
+        if (ch in "\t\n" or 0x20 <= ord(ch) < 0x7F)
+        or (ord(ch) >= 0xA0 and unicodedata.category(ch) not in _SPOOFING_CATEGORIES)
+    )
+
+
+def _reject_unsafe_workflow_key(renderer, key: str) -> str:
+    """Validate a local workflow id/name as a safe relative path under ``workflows/``.
+
+    Subdirectories are allowed (``sub/flux.json``), but traversal
+    (``..``), absolute paths, home refs, and backslashes are rejected so a
+    hostile id can't escape the userdata dir. Returns the cleaned key.
+
+    Components are checked after stripping trailing dots and spaces, because a
+    Windows ComfyUI server strips those from filenames — so ``.. `` or ``...``
+    would collapse to ``..`` and escape ``workflows/`` if we only matched the
+    literal ``..``.
+    """
+    cleaned = key.strip()
+    parts = cleaned.split("/")
+    if (
+        not cleaned
+        or cleaned.startswith("/")
+        or cleaned.startswith("~")
+        or "\\" in cleaned
+        # Catches "" (leading/trailing/double slash), ".", "..", "...", ".. ", etc.
+        or any(p.rstrip(" .") in ("", "..") for p in parts)
+    ):
         renderer.error(
-            code="workflow_saved_local_unsupported",
-            message="Saved-workflow management requires Comfy Cloud; local ComfyUI has no /api/workflows surface.",
-            hint="for local workflows, manage JSON files on disk via `comfy workflow slots/set-slot/vary`",
+            code="invalid_argument",
+            message=f"workflow id {key!r} is not a valid path under the local workflows/ dir",
+            hint="use a relative name like `flux.json` or `sub/flux.json` (no `..`, no leading `/`)",
         )
         raise typer.Exit(code=1)
-    return target
+    return cleaned
 
 
-def _authed_request(
-    url: str, target, *, method: str = "GET", data: bytes | None = None, content_type: str | None = None
-):
-    """Build an authenticated urllib Request. The return type is annotated
-    loosely to keep urllib out of the module's top-level imports."""
-    import urllib.request
+def _userdata_request(
+    url: str,
+    target,
+    *,
+    method: str = "GET",
+    data: bytes | None = None,
+    content_type: str | None = None,
+    timeout: float = 30.0,
+) -> tuple[int, bytes]:
+    """Authed HTTP call to a ComfyUI ``/userdata`` endpoint returning (status, raw_bytes).
 
-    req = urllib.request.Request(url, data=data, method=method)
-    if target.api_key:
-        req.add_header("X-API-Key", target.api_key)
-    elif target.auth_token:
-        req.add_header("Authorization", f"Bearer {target.auth_token}")
-    if content_type:
-        req.add_header("Content-Type", content_type)
-    return req
+    Raises urllib errors verbatim so callers can map them to envelope codes.
+    Local ComfyUI needs no auth; ``authed_urlopen`` attaches no header when the
+    Target carries no credential.
+    """
+    from comfy_cli.http import authed_urlopen
+
+    with authed_urlopen(url, target, method=method, data=data, content_type=content_type, timeout=timeout) as resp:
+        status = resp.status
+        # Read one byte past the cap so we can tell a full body from a truncated one.
+        raw = resp.read(_USERDATA_MAX_BYTES + 1)
+    if len(raw) > _USERDATA_MAX_BYTES:
+        raise _ResponseTooLarge()
+    return status, raw
+
+
+def _handle_local_http_error(renderer, e, *, operation: str, workflow_id: str | None = None) -> typer.Exit:
+    """Map local ``/userdata`` failures to envelope codes. Returns an Exit to ``raise from``.
+
+    A *reachable* server that answers with an HTTP error or an unparseable body
+    gets a distinct code (``server_error`` / ``client_error`` / ``invalid_response``)
+    so the user isn't wrongly told to `comfy launch` — that hint is reserved for a
+    genuinely unreachable server (URLError / OSError).
+    """
+    import urllib.error
+
+    if isinstance(e, _ResponseTooLarge):
+        renderer.error(
+            code="workflow_too_large",
+            message=f"local ComfyUI /userdata response during {operation} exceeded the "
+            f"{_USERDATA_MAX_BYTES // (1024 * 1024)} MiB cap",
+            hint=_LOCAL_TOO_LARGE_HINTS.get(operation, "the local response was unexpectedly large"),
+            details={"operation": operation, "limit_bytes": _USERDATA_MAX_BYTES},
+        )
+    elif isinstance(e, urllib.error.HTTPError) and e.code == 404:
+        renderer.error(
+            code="workflow_not_found",
+            message=f"no saved workflow with id {workflow_id!r}"
+            if workflow_id
+            else f"workflow not found ({operation})",
+            hint="list available workflows via `comfy --json --where local workflow list`",
+            details={"workflow_id": workflow_id, "operation": operation},
+        )
+    elif isinstance(e, urllib.error.HTTPError) and 500 <= e.code < 600:
+        renderer.error(
+            code="server_error",
+            message=f"HTTP {e.code} during {operation} against local ComfyUI /userdata",
+            hint="check the ComfyUI server logs",
+            details={"status": e.code, "operation": operation},
+        )
+    elif isinstance(e, urllib.error.HTTPError):
+        renderer.error(
+            code="client_error",
+            message=f"HTTP {e.code} during {operation} against local ComfyUI /userdata",
+            hint="the server rejected the request; check the workflow id and the server version",
+            details={"status": e.code, "operation": operation},
+        )
+    elif isinstance(e, json.JSONDecodeError):
+        renderer.error(
+            code="invalid_response",
+            message=f"local ComfyUI returned an unparseable body during {operation}",
+            hint="check that the host:port really is a ComfyUI server",
+            details={"operation": operation},
+        )
+    else:
+        renderer.error(
+            code="server_not_running",
+            message=f"could not reach local ComfyUI during {operation}: {e}",
+            hint="run `comfy launch` to start a local server",
+        )
+    return typer.Exit(code=1)
+
+
+def _userdata_file_url(target, key: str, query: dict | None = None) -> str:
+    """Build the ``/userdata/<encoded workflows/key>`` URL. The whole relative
+    path is percent-encoded into a single segment (``/`` → ``%2F``), exactly as
+    the ComfyUI frontend does, so subdir keys survive aiohttp's ``{file}`` route."""
+    import urllib.parse
+
+    encoded = urllib.parse.quote(f"{_WORKFLOWS_DIR}/{key}", safe="")
+    url = target.url("userdata", encoded)
+    if query:
+        url += "?" + urllib.parse.urlencode(query)
+    return url
 
 
 def _http_request(
     url: str, target, *, method: str = "GET", body: dict | None = None, timeout: float = 30.0
-) -> tuple[int, dict | None]:
+) -> tuple[int, dict | list | None]:
     """Authed HTTP call returning (status, parsed_json_or_none). Raises
-    urllib errors verbatim so callers can surface the right error code."""
-    import urllib.request
+    urllib errors verbatim so callers can surface the right error code, and
+    ``_ResponseTooLarge`` when the body exceeds ``_HTTP_MAX_BYTES`` — an
+    oversize body must not masquerade as an unparseable one."""
+    from comfy_cli.http import authed_urlopen
 
     data = json.dumps(body).encode("utf-8") if body is not None else None
     ct = "application/json" if data is not None else None
-    req = _authed_request(url, target, method=method, data=data, content_type=ct)
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
+    with authed_urlopen(url, target, method=method, data=data, content_type=ct, timeout=timeout) as resp:
         status = resp.status
-        raw = resp.read(64 * 1024 * 1024)  # 64 MiB cap
+        # Read one byte past the cap so we can tell a full body from a truncated one.
+        raw = resp.read(_HTTP_MAX_BYTES + 1)
+    if len(raw) > _HTTP_MAX_BYTES:
+        raise _ResponseTooLarge()
     if not raw:
         return status, None
     try:
-        return status, json.loads(raw)
-    except json.JSONDecodeError:
-        return status, None
+        return status, json.loads(raw.decode("utf-8"))
+    except (ValueError, RecursionError) as e:
+        # A non-empty body that won't decode as JSON is a *malformed* response, not
+        # "no data": returning ``None`` here would let callers report an empty list
+        # or a null id as success. Raise instead so it surfaces as a loud, mapped
+        # error. Decode as UTF-8 *explicitly* first: handed raw bytes, ``json.loads``
+        # auto-detects UTF-16/32 (RFC 4627) and would silently accept a non-UTF-8 body
+        # the contract treats as malformed. Non-UTF-8 bytes -> ``UnicodeDecodeError``;
+        # valid-UTF-8 non-JSON text -> ``JSONDecodeError``; both subclass ``ValueError``.
+        # Catch the ``ValueError`` base to also map the parser's *other* rejections that
+        # aren't ``JSONDecodeError`` — e.g. a JSON integer past CPython's 4300-digit
+        # int/str limit raises a bare ``ValueError`` — plus ``RecursionError`` from
+        # pathologically nested input (the 64 MiB cap permits deep nesting). Otherwise
+        # those escape the mapping and crash the CLI with a raw traceback.
+        raise _ResponseUnparseable() from e
 
 
 def _handle_cloud_http_error(renderer, e, *, operation: str, workflow_id: str | None = None) -> typer.Exit:
     """Map HTTP failures to envelope codes. Returns an Exit to ``raise from``."""
     import urllib.error
 
-    if isinstance(e, urllib.error.HTTPError):
-        body = (e.read() or b"")[:1000].decode("utf-8", "replace")
+    if isinstance(e, _ResponseUnparseable):
+        renderer.error(
+            code="workflow_unparseable",
+            message=f"cloud returned a non-empty but unparseable (non-JSON) response during {operation}",
+            hint="the server sent a malformed body; retry, and report it if it persists",
+            details={"operation": operation, "workflow_id": workflow_id},
+        )
+    elif isinstance(e, _ResponseTooLarge):
+        renderer.error(
+            code="workflow_too_large",
+            message=f"cloud API response during {operation} exceeded the {_HTTP_MAX_BYTES // (1024 * 1024)} MiB cap",
+            hint=_TOO_LARGE_HINTS.get(operation, "the cloud response was unexpectedly large"),
+            details={"operation": operation, "workflow_id": workflow_id, "limit_bytes": _HTTP_MAX_BYTES},
+        )
+    elif isinstance(e, urllib.error.HTTPError):
+        # Cap the read itself — ``[:1000]`` after a full ``read()`` would still pull an
+        # arbitrarily large (or malicious) error page into memory before slicing.
+        body = (e.read(1000) or b"").decode("utf-8", "replace")
         if e.code == 404:
             renderer.error(
                 code="workflow_not_found",
@@ -507,12 +890,239 @@ def _handle_cloud_http_error(renderer, e, *, operation: str, workflow_id: str | 
         renderer.error(
             code="cloud_http_error",
             message=f"{operation} failed: {e}",
-            hint="check network / `comfy auth whoami`",
+            hint="check network / `comfy cloud whoami`",
         )
     return typer.Exit(code=1)
 
 
-@app.command("list", help="List your saved workflows on Comfy Cloud.")
+# ---------------------------------------------------------------------------
+# Local ``/userdata`` implementations of the four saved-workflow verbs.
+# ---------------------------------------------------------------------------
+
+
+def _local_list(renderer, target, *, name: str | None, limit: int, sort: str, order: str) -> None:
+    import urllib.error
+    import urllib.parse
+
+    params = {"dir": _WORKFLOWS_DIR, "recurse": "true", "split": "false", "full_info": "true"}
+    url = target.url("userdata") + "?" + urllib.parse.urlencode(params)
+    try:
+        _, raw = _userdata_request(url, target)
+        rows = json.loads(raw) if raw else []
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            rows = []  # the workflows/ dir doesn't exist yet → no saved workflows
+        else:
+            raise _handle_local_http_error(renderer, e, operation="list") from e
+    except (urllib.error.URLError, OSError, json.JSONDecodeError, _ResponseTooLarge) as e:
+        raise _handle_local_http_error(renderer, e, operation="list") from e
+
+    rows = [r for r in rows if isinstance(r, dict) and isinstance(r.get("path"), str)]
+    if name:
+        needle = name.lower()
+        rows = [r for r in rows if needle in r["path"].lower()]
+
+    sort_key = _LOCAL_SORT_KEYS.get(sort, "created")
+    reverse = order != "asc"
+    if sort_key == "path":
+        rows.sort(key=lambda r: r["path"].lower(), reverse=reverse)
+    else:
+        rows.sort(key=lambda r: r.get(sort_key) or 0, reverse=reverse)
+    rows = rows[: min(max(limit, 1), 100)]
+
+    workflows = [
+        {
+            "id": r["path"],
+            "name": r["path"],
+            "size": r.get("size"),
+            "modified": r.get("modified"),
+            "created": r.get("created"),
+        }
+        for r in rows
+    ]
+    payload = {"count": len(workflows), "workflows": workflows}
+    if renderer.is_pretty():
+        from rich.table import Table
+
+        tbl = Table(show_header=True, header_style="bold")
+        tbl.add_column("id")
+        tbl.add_column("size", justify="right", style="dim")
+        for r in workflows[:50]:
+            # Both cells are fields of the `/userdata` listing the server
+            # returned, and `Table.add_row` parses markup in a `str` cell.
+            tbl.add_row(
+                sanitize_markup(r["id"]),
+                sanitize_markup(r["size"]) if r["size"] is not None else "",
+            )
+        renderer.console().print(tbl)
+        rprint(f"[dim]{len(workflows)} workflow(s) (local)[/dim]")
+    renderer.emit(payload, command="workflow list", where="local")
+
+
+def _local_get(renderer, target, workflow_id: str, out: str | None) -> None:
+    import urllib.error
+
+    key = _reject_unsafe_workflow_key(renderer, workflow_id)
+    url = _userdata_file_url(target, key)
+    try:
+        _, raw = _userdata_request(url, target)
+    except (urllib.error.HTTPError, urllib.error.URLError, OSError, _ResponseTooLarge) as e:
+        raise _handle_local_http_error(renderer, e, operation="get", workflow_id=workflow_id) from e
+
+    try:
+        # ``json.loads`` decodes bytes itself and raises ``UnicodeDecodeError`` (not a
+        # ``JSONDecodeError``) on non-UTF-8 input, so catch both.
+        data = json.loads(raw)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        data = None
+    if _is_frontend_format(data):
+        node_count = len(data["nodes"])
+    elif isinstance(data, dict):
+        node_count = len(data)
+    else:
+        node_count = None
+
+    # A valid-UTF-8-but-not-JSON body (e.g. an HTML proxy/error page returned 200) or
+    # non-UTF-8 bytes still get written verbatim; warn so a corrupt fetch isn't silent.
+    warnings: list[dict[str, str]] = []
+    if data is None:
+        warnings.append(
+            {
+                "code": "workflow_content_not_json",
+                "message": "fetched content is not parseable JSON; wrote the raw bytes unchanged",
+            }
+        )
+
+    if out:
+        out_path = Path(out).expanduser()
+        try:
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            out_path.write_bytes(raw)
+        except OSError as e:
+            renderer.error(
+                code="workflow_write_error",
+                message=f"could not write workflow to {out_path}: {e}",
+                hint="check the --out path is writable and the disk has space",
+            )
+            raise typer.Exit(code=1) from e
+        target_repr = str(out_path)
+    else:
+        if renderer.is_pretty():
+            import sys
+
+            # Strip control chars so untrusted content can't emit ANSI/OSC escapes
+            # that spoof or manipulate the terminal.
+            sys.stdout.write(_strip_terminal_controls(raw.decode("utf-8", "replace")))
+            sys.stdout.write("\n")
+        target_repr = "stdout"
+
+    payload: dict[str, Any] = {
+        "workflow_id": key,
+        "out": target_repr,
+        "bytes": len(raw),
+        "node_count": node_count,
+    }
+    if warnings:
+        payload["warnings"] = warnings
+    if renderer.is_pretty() and out:
+        rprint(f"[green]✓[/green] wrote {len(raw):,} bytes to {target_repr}")
+    renderer.emit(payload, command="workflow get", where="local")
+
+
+def _local_save(renderer, target, workflow_file: str, name: str, description: str | None) -> None:
+    import urllib.error
+
+    path = Path(workflow_file).expanduser()
+    if not path.is_file():
+        renderer.error(
+            code="workflow_not_found",
+            message=f"local workflow file not found: {path}",
+            hint="check the path",
+        )
+        raise typer.Exit(code=1)
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as e:
+        renderer.error(
+            code="workflow_read_error",
+            message=f"could not read {path}: {e}",
+            hint="check file permissions and encoding",
+        )
+        raise typer.Exit(code=1) from e
+    try:
+        workflow_json = json.loads(text)
+    except json.JSONDecodeError as e:
+        renderer.error(
+            code="workflow_invalid_json",
+            message=f"{path} is not valid JSON: {e}",
+            hint="re-export the workflow from ComfyUI",
+        )
+        raise typer.Exit(code=1) from e
+    if not isinstance(workflow_json, dict):
+        renderer.error(
+            code="workflow_not_api_format",
+            message="workflow_json must be a JSON object",
+            hint="use ComfyUI's `File > Save` to export",
+        )
+        raise typer.Exit(code=1)
+
+    key = name if name.lower().endswith(".json") else f"{name}.json"
+    key = _reject_unsafe_workflow_key(renderer, key)
+    url = _userdata_file_url(target, key, query={"overwrite": "true", "full_info": "true"})
+    try:
+        _, raw = _userdata_request(
+            url, target, method="POST", data=text.encode("utf-8"), content_type="application/json"
+        )
+    except (urllib.error.HTTPError, urllib.error.URLError, OSError, _ResponseTooLarge) as e:
+        raise _handle_local_http_error(renderer, e, operation="save", workflow_id=key) from e
+
+    info = None
+    try:
+        info = json.loads(raw)
+    except json.JSONDecodeError:
+        pass
+    # ComfyUI returns FileInfo.path as "workflows/<key>"; strip the prefix back
+    # to the id the other verbs use. Fall back to the key we sent.
+    stored_id = key
+    if isinstance(info, dict) and isinstance(info.get("path"), str):
+        stored = info["path"]
+        prefix = f"{_WORKFLOWS_DIR}/"
+        stored_id = stored[len(prefix) :] if stored.startswith(prefix) else stored
+
+    payload: dict[str, Any] = {
+        "workflow_id": stored_id,
+        "name": stored_id,
+        "source": str(path),
+        "size": info.get("size") if isinstance(info, dict) else None,
+        "modified": info.get("modified") if isinstance(info, dict) else None,
+    }
+    if description:
+        # Local file-backed userdata has no metadata store for a description.
+        payload["warnings"] = [
+            {"code": "description_ignored", "message": "--description is ignored on the local path (no metadata store)"}
+        ]
+    if renderer.is_pretty():
+        rprint(f"[green]✓[/green] saved [dim]{stored_id}[/dim]")
+    renderer.emit(payload, command="workflow save", where="local", changed=True)
+
+
+def _local_delete(renderer, target, workflow_id: str) -> None:
+    import urllib.error
+
+    key = _reject_unsafe_workflow_key(renderer, workflow_id)
+    url = _userdata_file_url(target, key)
+    try:
+        _userdata_request(url, target, method="DELETE")
+    except (urllib.error.HTTPError, urllib.error.URLError, OSError, _ResponseTooLarge) as e:
+        raise _handle_local_http_error(renderer, e, operation="delete", workflow_id=workflow_id) from e
+
+    payload = {"workflow_id": key, "deleted": True}
+    if renderer.is_pretty():
+        rprint(f"[green]✓[/green] deleted [dim]{key}[/dim]")
+    renderer.emit(payload, command="workflow delete", where="local", changed=True)
+
+
+@app.command("list", help="List saved workflows (cloud store, or local ComfyUI /userdata with --where local).")
 @tracking.track_command("workflow")
 def list_cmd(
     name: Annotated[
@@ -534,19 +1144,72 @@ def list_cmd(
     import urllib.parse
 
     renderer = get_renderer()
-    target = _cloud_target_or_local_error(where, renderer)
 
-    params: dict[str, Any] = {"limit": min(max(limit, 1), 100), "sort": sort, "order": order}
+    # Validate the free-form sort/order options up front (both routes) so a typo like
+    # `--order ASC` errors loudly instead of silently sorting the wrong way.
+    order_norm = order.lower()
+    if order_norm not in ("asc", "desc"):
+        renderer.error(
+            code="invalid_argument",
+            message=f"--order must be 'asc' or 'desc', got {order!r}",
+            hint="pass `--order asc` or `--order desc`",
+        )
+        raise typer.Exit(code=1)
+    if sort not in _LOCAL_SORT_KEYS:
+        renderer.error(
+            code="invalid_argument",
+            message=f"--sort must be one of {', '.join(_LOCAL_SORT_KEYS)}, got {sort!r}",
+            hint="pass `--sort create_time|update_time|name`",
+        )
+        raise typer.Exit(code=1)
+
+    target = _resolve_where_target(where)
+    if not target.is_cloud:
+        return _local_list(renderer, target, name=name, limit=limit, sort=sort, order=order_norm)
+
+    params: dict[str, Any] = {"limit": min(max(limit, 1), 100), "sort": sort, "order": order_norm}
     if name:
         params["name"] = name
     url = target.url("workflows") + "?" + urllib.parse.urlencode(params)
 
     try:
         _, body = _http_request(url, target)
-    except (urllib.error.HTTPError, urllib.error.URLError, OSError) as e:
+    except (
+        urllib.error.HTTPError,
+        urllib.error.URLError,
+        OSError,
+        _ResponseUnparseable,
+        _ResponseTooLarge,
+    ) as e:
         raise _handle_cloud_http_error(renderer, e, operation="list") from e
 
-    rows = (body or {}).get("data") or []
+    # A non-empty body decodes here only if it was valid JSON; guard the shape the
+    # way ``get``/``save`` do. An empty body is a legitimate ``None`` (→ no rows), but
+    # a valid-JSON *non-dict* 200 (an array like ``[1, 2, 3]`` or a scalar) is malformed:
+    # ``(body).get("data")`` would raise a raw ``AttributeError``, and coercing it to an
+    # empty list would masquerade the malformed shape as a genuinely-empty listing.
+    if body is not None and not isinstance(body, dict):
+        renderer.error(
+            code="cloud_http_error",
+            message="unexpected response shape from /api/workflows (expected a JSON object)",
+            details={"got_type": type(body).__name__},
+        )
+        raise typer.Exit(code=1)
+
+    # A missing/empty ``data`` is a legitimately-empty listing, but a present non-list
+    # ``data`` is malformed the same way a non-dict body is: a scalar (``{"data": 42}``)
+    # would raise a raw ``TypeError`` in the comprehension below, and a str/dict would
+    # iterate silently and masquerade as an empty listing. Reject it with the same envelope.
+    rows = (body or {}).get("data")
+    if rows is None:
+        rows = []
+    elif not isinstance(rows, list):
+        renderer.error(
+            code="cloud_http_error",
+            message="unexpected response shape from /api/workflows (data must be a JSON array)",
+            details={"got_type": type(rows).__name__},
+        )
+        raise typer.Exit(code=1)
     payload = {
         "count": len(rows),
         "workflows": [
@@ -572,21 +1235,32 @@ def list_cmd(
         tbl.add_column("ver", justify="right", style="dim")
         tbl.add_column("updated", style="dim")
         for r in payload["workflows"][:50]:
+            # The cloud workflow catalog is server-supplied end to end, same as
+            # the local `/userdata` listing `_local_list` renders. `str()` before
+            # the slices: `sanitize_markup` coerces, but the truncation runs
+            # first, and a numeric `id`/`updated_at` in the JSON would raise
+            # `TypeError: 'int' object is not subscriptable` before it got there.
             tbl.add_row(
-                (r["id"] or "")[:8] + "…" if r["id"] else "",
-                r["name"] or "(untitled)",
-                str(r["latest_version"] or ""),
-                (r["updated_at"] or "")[:10],
+                sanitize_markup(str(r["id"])[:8] + "…" if r["id"] else ""),
+                sanitize_markup(r["name"] or "(untitled)"),
+                sanitize_markup(r["latest_version"] or ""),
+                sanitize_markup(str(r["updated_at"] or "")[:10]),
             )
         renderer.console().print(tbl)
         rprint(f"[dim]{len(rows)} workflow(s)[/dim]")
     renderer.emit(payload, command="workflow list", where="cloud")
 
 
-@app.command("get", help="Fetch a saved workflow's content from Comfy Cloud (writes JSON to --out or stdout).")
+@app.command(
+    "get",
+    help="Fetch a saved workflow's content (cloud, or local with --where local); writes JSON to --out or stdout.",
+)
 @tracking.track_command("workflow")
 def get_cmd(
-    workflow_id: Annotated[str, typer.Argument(help="The workflow UUID.")],
+    workflow_id: Annotated[
+        str,
+        typer.Argument(help="Workflow id: cloud UUID, or local path under workflows/ (e.g. flux.json)."),
+    ],
     out: Annotated[
         str | None,
         typer.Option("--out", "-o", show_default=False, help="Write JSON to this file instead of stdout."),
@@ -596,7 +1270,9 @@ def get_cmd(
     import urllib.error
 
     renderer = get_renderer()
-    target = _cloud_target_or_local_error(where, renderer)
+    target = _resolve_where_target(where)
+    if not target.is_cloud:
+        return _local_get(renderer, target, workflow_id, out)
 
     import urllib.parse as _up
 
@@ -606,7 +1282,13 @@ def get_cmd(
     url = target.url("workflows", _up.quote(workflow_id, safe=""), "content")
     try:
         _, body = _http_request(url, target)
-    except (urllib.error.HTTPError, urllib.error.URLError, OSError) as e:
+    except (
+        urllib.error.HTTPError,
+        urllib.error.URLError,
+        OSError,
+        _ResponseUnparseable,
+        _ResponseTooLarge,
+    ) as e:
         raise _handle_cloud_http_error(renderer, e, operation="get", workflow_id=workflow_id) from e
 
     if not isinstance(body, dict) or "workflow_json" not in body:
@@ -644,21 +1326,31 @@ def get_cmd(
     renderer.emit(payload, command="workflow get", where="cloud")
 
 
-@app.command("save", help="Save a local workflow JSON to Comfy Cloud as a new saved workflow.")
+@app.command(
+    "save",
+    help="Save a workflow JSON to the saved-workflow store (cloud, or local ComfyUI /userdata with --where local).",
+)
 @tracking.track_command("workflow")
 def save_cmd(
     workflow_file: Annotated[str, typer.Argument(help="Path to a workflow JSON file.")],
-    name: Annotated[str, typer.Option("--name", help="Display name for the workflow.")],
+    name: Annotated[
+        str,
+        typer.Option(
+            "--name", help="Cloud: display name. Local: filename under workflows/ ('.json' appended if absent)."
+        ),
+    ],
     description: Annotated[
         str | None,
-        typer.Option("--description", show_default=False, help="Optional description."),
+        typer.Option("--description", show_default=False, help="Optional description (cloud only; ignored on local)."),
     ] = None,
     where: Annotated[str | None, typer.Option("--where", show_default=False)] = None,
 ):
     import urllib.error
 
     renderer = get_renderer()
-    target = _cloud_target_or_local_error(where, renderer)
+    target = _resolve_where_target(where)
+    if not target.is_cloud:
+        return _local_save(renderer, target, workflow_file, name, description)
 
     path = Path(workflow_file).expanduser()
     if not path.is_file():
@@ -691,7 +1383,13 @@ def save_cmd(
     url = target.url("workflows")
     try:
         _, resp = _http_request(url, target, method="POST", body=body)
-    except (urllib.error.HTTPError, urllib.error.URLError, OSError) as e:
+    except (
+        urllib.error.HTTPError,
+        urllib.error.URLError,
+        OSError,
+        _ResponseUnparseable,
+        _ResponseTooLarge,
+    ) as e:
         raise _handle_cloud_http_error(renderer, e, operation="save") from e
 
     workflow_id = (resp or {}).get("id") if isinstance(resp, dict) else None
@@ -706,23 +1404,34 @@ def save_cmd(
     renderer.emit(payload, command="workflow save", where="cloud", changed=True)
 
 
-@app.command("delete", help="Delete a saved workflow from Comfy Cloud.")
+@app.command("delete", help="Delete a saved workflow (cloud, or local ComfyUI /userdata with --where local).")
 @tracking.track_command("workflow")
 def delete_cmd(
-    workflow_id: Annotated[str, typer.Argument(help="The workflow UUID to delete.")],
+    workflow_id: Annotated[
+        str,
+        typer.Argument(help="Workflow id to delete: cloud UUID, or local path under workflows/ (e.g. flux.json)."),
+    ],
     where: Annotated[str | None, typer.Option("--where", show_default=False)] = None,
 ):
     import urllib.error
 
     renderer = get_renderer()
-    target = _cloud_target_or_local_error(where, renderer)
+    target = _resolve_where_target(where)
+    if not target.is_cloud:
+        return _local_delete(renderer, target, workflow_id)
 
     import urllib.parse as _up
 
     url = target.url("workflows", _up.quote(workflow_id, safe=""))
     try:
         _, _body = _http_request(url, target, method="DELETE")
-    except (urllib.error.HTTPError, urllib.error.URLError, OSError) as e:
+    except (
+        urllib.error.HTTPError,
+        urllib.error.URLError,
+        OSError,
+        _ResponseUnparseable,
+        _ResponseTooLarge,
+    ) as e:
         raise _handle_cloud_http_error(renderer, e, operation="delete", workflow_id=workflow_id) from e
 
     payload = {"workflow_id": workflow_id, "deleted": True}

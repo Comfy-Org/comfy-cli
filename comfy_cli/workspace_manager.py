@@ -1,9 +1,7 @@
-import concurrent.futures
 import os
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from pathlib import Path
 
 import git
 import typer
@@ -121,31 +119,6 @@ def check_comfy_repo(path) -> tuple[bool, str | None]:
 
 
 # Generate and update this following method using chatGPT
-# def load_yaml(file_path: str) -> ComfyLockYAMLStruct:
-#     with open(file_path, "r", encoding="utf-8") as file:
-#         data = yaml.safe_load(file)
-#         basics = Basics(
-#             name=data.get("basics", {}).get("name"),
-#             updated_at=(
-#                 datetime.fromisoformat(data.get("basics", {}).get("updated_at"))
-#                 if data.get("basics", {}).get("updated_at")
-#                 else None
-#             ),
-#         )
-#         models = [
-#             Model(
-#                 name=m.get("model"),
-#                 url=m.get("url"),
-#                 paths=[ModelPath(path=p.get("path")) for p in m.get("paths", [])],
-#                 hash=m.get("hash"),
-#                 type=m.get("type"),
-#             )
-#             for m in data.get("models", [])
-#         ]
-#         custom_nodes = []
-
-
-# Generate and update this following method using chatGPT
 def save_yaml(file_path: str, metadata: ComfyLockYAMLStruct):
     data = {
         "basics": {
@@ -166,12 +139,6 @@ def save_yaml(file_path: str, metadata: ComfyLockYAMLStruct):
     }
     with open(file_path, "w", encoding="utf-8") as file:
         yaml.safe_dump(data, file, default_flow_style=False, allow_unicode=True)
-
-
-# Function to check if the file is config.json
-def check_file_is_model(path):
-    if path.name.endswith(constants.SUPPORTED_PT_EXTENSIONS):
-        return str(path)
 
 
 class WorkspaceType(Enum):
@@ -318,19 +285,6 @@ class WorkspaceManager:
                     model_files.append(os.path.join(root, file))
         return model_files
 
-    def scan_dir_concur(self):
-        base_path = Path(".")
-        model_files = []
-
-        # Use ThreadPoolExecutor to manage concurrency
-        with concurrent.futures.ThreadPoolExecutor() as executor:
-            futures = [executor.submit(check_file_is_model, p) for p in base_path.rglob("*")]
-            for future in concurrent.futures.as_completed(futures):
-                if future.result():
-                    model_files.append(future.result())
-
-        return model_files
-
     def load_metadata(self):
         file_path = os.path.join(self.workspace_path, constants.COMFY_LOCK_YAML_FILE)
         if os.path.exists(file_path):
@@ -343,18 +297,54 @@ class WorkspaceManager:
         file_path = os.path.join(self.workspace_path, constants.COMFY_LOCK_YAML_FILE)
         save_yaml(file_path, self.metadata)
 
-    def fill_print_table(self):
-        # Lazy import to avoid circular dependency
-        from comfy_cli.command.custom_nodes.cm_cli_util import resolve_manager_gui_mode
+    def _reported_manager_state(self) -> tuple[str, str]:
+        """Reconcile the configured manager mode against what is actually installed.
 
-        config_manager = ConfigManager()
+        Reporting-only: this never feeds ``comfy launch`` flag injection, which
+        keeps reading :func:`resolve_manager_gui_mode` directly (user intent).
+
+        The global per-user ``manager_gui_mode`` config key can drift out of sync
+        with a given workspace, so ``comfy env`` reconciles the two:
+
+        Every mode that expects a working Manager — the enabling modes
+        (``enable-gui`` / ``disable-gui`` / ``enable-legacy-gui``; ``disable-gui``
+        still enables the Manager, it only hides its UI) and ``"not-installed"``
+        — is reconciled against what is actually on disk:
+
+        * no Manager anywhere → report ``"not-installed"``;
+        * an on-disk legacy clone → report ``"legacy"`` (the Manager is present,
+          but cm-cli venv integration is unavailable, so an ``enable-*`` config
+          overstates what works).
+
+        ``"disable"`` is user intent and is always left untouched, as is any
+        unrecognised mode string.
+
+        Returns ``(manager_mode, manager_detected)``.
+        """
+        # Lazy import to avoid circular dependency
+        from comfy_cli.command.custom_nodes.cm_cli_util import detect_manager_installation, resolve_manager_gui_mode
+
+        detected = detect_manager_installation()
         mode = resolve_manager_gui_mode(not_installed_value="not-installed")
+
+        if mode in ("enable-gui", "disable-gui", "enable-legacy-gui", "not-installed"):
+            if detected == "none":
+                mode = "not-installed"
+            elif detected == "legacy-clone":
+                mode = "legacy"
+
+        return mode, detected
+
+    def fill_print_table(self):
+        config_manager = ConfigManager()
+        mode, _detected = self._reported_manager_state()
 
         status_map = {
             "disable": "[bold red]Disabled[/bold red]",
             "enable-gui": "[bold green]GUI Enabled[/bold green]",
             "disable-gui": "[bold yellow]GUI Disabled[/bold yellow]",
             "enable-legacy-gui": "[bold cyan]Legacy GUI[/bold cyan]",
+            "legacy": "[bold yellow]Legacy clone (cm-cli unavailable)[/bold yellow]",
             "not-installed": "[dim]Not Installed[/dim]",
         }
         manager_status = status_map.get(mode, "[bold green]GUI Enabled[/bold green]")
@@ -373,13 +363,13 @@ class WorkspaceManager:
 
     def fill_data(self) -> dict:
         """Structured workspace info for ``comfy env --json``."""
-        from comfy_cli.command.custom_nodes.cm_cli_util import resolve_manager_gui_mode
-
         config_manager = ConfigManager()
         uv_compile_value = config_manager.get(constants.CONFIG_KEY_UV_COMPILE_DEFAULT)
+        mode, detected = self._reported_manager_state()
         return {
             "path": str(self.workspace_path) if self.workspace_path else None,
             "type": self.workspace_type.value if self.workspace_type is not None else None,
-            "manager_mode": resolve_manager_gui_mode(not_installed_value="not-installed"),
+            "manager_mode": mode,
+            "manager_detected": detected,
             "uv_compile_default": (str(uv_compile_value).lower() == "true" if uv_compile_value is not None else False),
         }

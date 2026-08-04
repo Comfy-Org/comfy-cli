@@ -6,8 +6,9 @@ import json
 
 import pytest
 
+from comfy_cli.cql import loader
 from comfy_cli.cql.errors import CQLRuntimeError
-from comfy_cli.cql.loader import load_graph, normalize
+from comfy_cli.cql.loader import _load_from_server, load_graph, normalize
 
 OBJECT_INFO = {
     "KSampler": {
@@ -118,3 +119,31 @@ def test_load_graph_bad_json(tmp_path):
 def test_normalize_rejects_garbage():
     with pytest.raises(CQLRuntimeError):
         normalize({"foo": 1, "bar": "baz"})
+
+
+class _FakeResp:
+    def __init__(self, payload: bytes):
+        self._payload = payload
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def read(self, _n=None):
+        return self._payload
+
+
+def test_load_from_server_refuses_non_loopback_host():
+    # SSRF guard: a public host must never be fetched by the local loader.
+    with pytest.raises(CQLRuntimeError, match="non-loopback"):
+        _load_from_server("example.com", 8188, timeout=0.1)
+
+
+def test_load_from_server_accepts_loopback(monkeypatch):
+    # 127.0.0.1 passes the guard and proceeds to the fetch (mocked here).
+    payload = json.dumps(OBJECT_INFO).encode("utf-8")
+    monkeypatch.setattr(loader._LOADER_OPENER, "open", lambda *a, **k: _FakeResp(payload))
+    g = _load_from_server("127.0.0.1", 8188, timeout=0.1)
+    assert {n["name"] for n in g["nodes"]} == {"KSampler", "CheckpointLoaderSimple"}

@@ -20,73 +20,92 @@ Three subcommands:
 from __future__ import annotations
 
 import json
-import os
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Annotated, Any
+from typing import TYPE_CHECKING, Annotated, Any
 
 import typer
 from websocket import WebSocket, WebSocketException, WebSocketTimeoutException
 
 from comfy_cli import cancellation, execution_errors, tracking
-from comfy_cli.config_manager import ConfigManager
 from comfy_cli.env_checker import check_comfy_server_running
+from comfy_cli.host_port import resolve_host_port as _resolve_host_port
+from comfy_cli.http import ResponseTooLarge, authed_urlopen, plain_urlopen, read_capped
 from comfy_cli.output import get_renderer
+from comfy_cli.output.sanitize import sanitize, sanitize_markup
+from comfy_cli.where import cloud_preflight_or_exit
+
+if TYPE_CHECKING:
+    from comfy_cli.jobs_state import JobState
 
 app = typer.Typer(no_args_is_help=True, help="List, inspect, and live-watch ComfyUI prompts.")
 
 
-DEFAULT_HOST = "127.0.0.1"
-DEFAULT_PORT = 8188
-
-
 def _is_pid_alive(pid: int) -> bool:
-    """Check if a process with the given PID is still running."""
+    """Check if a process with the given PID is still running.
+
+    Uses ``psutil.pid_exists`` — never ``os.kill(pid, 0)``, which on Windows
+    routes through ``GenerateConsoleCtrlEvent`` (0 == CTRL_C_EVENT) and, on
+    Python <= 3.13.1, can fall through to ``TerminateProcess`` and kill the
+    probed process (python/cpython gh-58689).
+    """
     if pid <= 0:
         return False
+    import psutil
+
     try:
-        os.kill(pid, 0)  # signal 0 = existence check, no actual signal sent
-        return True
-    except ProcessLookupError:
+        return psutil.pid_exists(pid)
+    except (OverflowError, ValueError, OSError):
+        # `watcher_pid` comes off a deliberately tolerant JSON load with no
+        # range check, so a corrupt or hand-edited state file can carry a pid
+        # psutil can't even look up (out-of-range -> OverflowError; Windows
+        # OpenProcess -> OSError). One bad record must read as dead, not abort
+        # the scan and take `comfy jobs ls` down with it.
         return False
-    except PermissionError:
-        # Process exists but we can't signal it — still alive.
+
+
+# Same discriminator (and tolerance) the download-worker liveness check uses.
+_PID_CREATE_TIME_TOLERANCE_S = 1.0
+
+
+def _is_watcher_alive(state: JobState) -> bool:
+    """True while ``state``'s watcher pid is live *and still that watcher*.
+
+    Liveness alone is not proof of identity: pids get recycled (aggressively on
+    Windows) and job state files outlive the runs that wrote them by days, so a
+    bare existence check eventually pins a dead job at ``running`` behind a
+    stranger's process — never reaped, never visible under ``--orphaned``. The
+    watcher records its own start time next to its pid, so the pair either
+    matches a live process or it doesn't; this mirrors
+    ``download_state.is_worker_process``.
+
+    Records written before that field existed carry ``None`` and fall back to
+    liveness alone — exactly what they got before.
+    """
+    pid = state.watcher_pid
+    if pid is None or pid <= 0:
+        return False
+    if not _is_pid_alive(pid):
+        return False
+    if state.watcher_pid_create_time is None:
         return True
+    try:
+        import psutil
+
+        started = psutil.Process(pid).create_time()
+    except Exception:  # noqa: BLE001 — gone, or not ours to inspect
+        return False
+    return abs(started - state.watcher_pid_create_time) <= _PID_CREATE_TIME_TOLERANCE_S
 
 
-# ---------------------------------------------------------------------------
-# Host/port resolution (reuse the same precedence as `comfy run`)
-# ---------------------------------------------------------------------------
-
-
-_UNSAFE_HOST_CHARS = frozenset("/@?#")
-
-
-def _validate_host(host: str) -> str:
-    """Reject host values that could cause URL injection."""
-    if any(c in host for c in _UNSAFE_HOST_CHARS):
-        raise typer.BadParameter(f"invalid host: {host!r} (contains URL-special characters)")
-    return host
-
-
-def _resolve_host_port(host: str | None, port: int | None) -> tuple[str, int]:
-    cfg = ConfigManager()
-    bg = cfg.background
-    if not host and bg is not None:
-        host = bg[0]
-    if not port and bg is not None:
-        port = bg[1]
-    h = _validate_host(host or DEFAULT_HOST)
-    # Bracket IPv6 literals so callers building "http://{host}:{port}" /
-    # "ws://{host}:{port}" produce valid URLs (e.g. "::1" -> "[::1]").
-    if ":" in h and not h.startswith("["):
-        h = f"[{h}]"
-    return (h, int(port or DEFAULT_PORT))
+# Host/port resolution (`resolve_host_port`) is shared with `comfy run` via
+# `comfy_cli.host_port`; imported above as `_resolve_host_port` to preserve the
+# call sites in this module unchanged.
 
 
 def _server_or_error(host: str, port: int, *, raise_on_missing: bool = True) -> bool:
@@ -109,12 +128,26 @@ def _server_or_error(host: str, port: int, *, raise_on_missing: bool = True) -> 
 
 
 def _http_get_json(url: str, *, timeout: float = 10.0) -> Any:
+    """GET a JSON body from the local ComfyUI server.
+
+    The read is capped (``read_capped``) so a server streaming an endless
+    ``/history`` can't OOM the CLI. Every failure — unreachable, oversize,
+    non-JSON — leaves as a ``RuntimeError``, which is the single family every
+    call site below already catches.
+    """
     req = urllib.request.Request(url)
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return json.loads(resp.read())
+        with plain_urlopen(req, timeout=timeout) as resp:
+            return json.loads(read_capped(resp, url))
     except urllib.error.URLError as e:
         raise RuntimeError(f"failed to GET {url}: {e}") from e
+    except ResponseTooLarge as e:
+        raise RuntimeError(str(e)) from e
+    except ValueError as e:
+        # json.JSONDecodeError is a ValueError — a non-JSON 200 (captive
+        # portal, proxy error page) must look like any other GET failure to
+        # callers, not crash them with an uncaught decode error.
+        raise RuntimeError(f"failed to parse JSON from {url}: {e}") from e
 
 
 # ---------------------------------------------------------------------------
@@ -192,7 +225,7 @@ class JobRow:
     updated_at: str | None = None  # ISO timestamp, set for state-file rows
 
 
-def _gather_local_state_files(*, limit: int, orphaned_only: bool = False) -> list[JobRow]:
+def _gather_local_state_files(*, limit: int, orphaned_only: bool = False, where: str | None = None) -> list[JobRow]:
     """Read every state file in the jobs state dir → JobRow.
 
     This is the canonical "what did *I* submit via this CLI" view —
@@ -202,6 +235,12 @@ def _gather_local_state_files(*, limit: int, orphaned_only: bool = False) -> lis
     When ``orphaned_only`` is True, return only rows whose state file
     has ``error.code == "watcher_crashed"`` — jobs where the
     background watcher died and was reaped. Useful for cleanup.
+
+    ``where`` scopes the rows to one routing target (``"local"`` /
+    ``"cloud"``) so a ``--where local`` listing can't surface cloud jobs
+    submitted in an earlier run. A state file whose ``where`` is missing or
+    empty counts as ``"local"``. ``None`` (the default) keeps the unfiltered
+    union view — used by ``jobs ls --all`` and ``--orphaned``.
     """
     import re as _re
 
@@ -226,7 +265,7 @@ def _gather_local_state_files(*, limit: int, orphaned_only: bool = False) -> lis
             not state.is_terminal
             and state.watcher_pid is not None
             and state.watcher_pid > 0
-            and not _is_pid_alive(state.watcher_pid)
+            and not _is_watcher_alive(state)
         ):
             state.status = "error"
             state.error = {
@@ -235,7 +274,13 @@ def _gather_local_state_files(*, limit: int, orphaned_only: bool = False) -> lis
                 "hint": "re-submit the workflow, or check `comfy jobs status <id>` against the server",
             }
             state.watcher_pid = None
+            state.watcher_pid_create_time = None
             jobs_state.write(state)
+        # Scope to the resolved --where target. Done *after* the stale-watcher
+        # reap above so cleanup stays where-agnostic no matter which view the
+        # caller asked for.
+        if where is not None and (state.where or "local") != where:
+            continue
         if orphaned_only:
             err = state.error or {}
             if not (isinstance(err, dict) and err.get("code") == "watcher_crashed"):
@@ -248,7 +293,10 @@ def _gather_local_state_files(*, limit: int, orphaned_only: bool = False) -> lis
                 elapsed_seconds=None,
                 workflow_size=None,
                 outputs=len(state.outputs or []),
-                where=state.where,
+                # Same missing/empty -> "local" reading the filter above uses,
+                # so a row can never be scoped as local yet report `where: null`
+                # (JobRow.where is typed `str` and defaults to "local").
+                where=state.where or "local",
                 workflow_path=state.workflow,
                 updated_at=state.updated_at,
             )
@@ -376,7 +424,13 @@ def _safe_queue_entry(entry: Any) -> tuple[str, Any]:
     return ("?", None)
 
 
-@app.command("ls", help="List jobs: locally-tracked async submits + server queue/history.")
+@app.command(
+    "ls",
+    help=(
+        "List jobs: locally-tracked async submits + server queue/history, "
+        "scoped to the resolved --where target (use --all for every target)."
+    ),
+)
 @tracking.track_command("jobs")
 def ls_cmd(
     host: Annotated[str | None, typer.Option(help="Server host (defaults to background or 127.0.0.1).")] = None,
@@ -384,7 +438,7 @@ def ls_cmd(
     limit: Annotated[int, typer.Option(help="How many history entries to include.")] = 10,
     where: Annotated[
         str | None,
-        typer.Option("--where", help="'local' (default) or 'cloud'. Cloud requires `comfy auth login`."),
+        typer.Option("--where", help="'local' (default) or 'cloud'. Cloud requires `comfy cloud login`."),
     ] = None,
     local_only: Annotated[
         bool,
@@ -406,6 +460,14 @@ def ls_cmd(
             ),
         ),
     ] = False,
+    all_wheres: Annotated[
+        bool,
+        typer.Option(
+            "--all",
+            show_default=False,
+            help="Show state-file rows for every target, not just the resolved --where.",
+        ),
+    ] = False,
     watch: Annotated[
         bool,
         typer.Option(
@@ -417,6 +479,26 @@ def ls_cmd(
 ):
     renderer = get_renderer()
 
+    # Resolve the routing target once: per-command --where flag > COMFY_WHERE
+    # env (how the top-level `comfy --where` arrives) > config default. Both
+    # the server query and the state-file scope key off this single decision.
+    target_where = "cloud" if _is_cloud(where) else "local"
+
+    # --orphaned only makes sense for state files (the server doesn't know
+    # whether a watcher crashed), so skip the server query in that mode.
+    if orphaned:
+        local_only = True
+
+    # State-file rows are scoped to the resolved target, so a `--where local`
+    # listing can't surface cloud jobs from an earlier run; `--all` restores
+    # the union view. `--orphaned` stays unfiltered — watcher cleanup is
+    # where-agnostic. `server_rows` are never filtered: they are already
+    # scoped by which backend we queried.
+    #
+    # Both decisions are made *before* the --watch branch so the live table
+    # applies exactly the same filters as the one-shot listing.
+    state_where = None if (all_wheres or orphaned) else target_where
+
     if watch:
         if not renderer.is_pretty():
             renderer.error(
@@ -425,22 +507,25 @@ def ls_cmd(
                 hint="drop --json, or run `while true; do comfy --json jobs ls; sleep 2; done`",
             )
             raise typer.Exit(code=1)
-        _watch_ls(host=host, port=port, limit=limit, where=where, local_only=local_only)
+        _watch_ls(
+            host=host,
+            port=port,
+            limit=limit,
+            where=where,
+            local_only=local_only,
+            state_where=state_where,
+            orphaned_only=orphaned,
+        )
         return
 
-    state_rows = _gather_local_state_files(limit=limit, orphaned_only=orphaned)
-
-    # --orphaned only makes sense for state files (the server doesn't know
-    # whether a watcher crashed), so skip the server query in that mode.
-    if orphaned:
-        local_only = True
+    state_rows = _gather_local_state_files(limit=limit, orphaned_only=orphaned, where=state_where)
 
     server_rows: list[JobRow] = []
     h, p = _resolve_host_port(host, port)
     if not local_only:
-        if _is_cloud(where):
+        if target_where == "cloud":
             try:
-                _cloud_preflight_or_exit()
+                cloud_preflight_or_exit()
                 client = _cloud_client()
                 server_rows = [_cloud_job_to_row(j) for j in client.list_jobs(limit=limit)]
             except typer.Exit:
@@ -458,12 +543,15 @@ def ls_cmd(
     rows = _merge_jobs(state_rows, server_rows)[:limit]
 
     if renderer.is_pretty():
-        _render_jobs_pretty(rows, host=h if not _is_cloud(where) else "cloud.comfy.org", port=p)
+        _render_jobs_pretty(rows, host=h if target_where != "cloud" else "cloud.comfy.org", port=p)
     renderer.emit(
         {
             "host": h,
             "port": p,
-            "where": "cloud" if _is_cloud(where) else "local",
+            "where": target_where,
+            # Which state-file view the caller got: the resolved target, or
+            # "all" when the union view was requested (--all/--orphaned).
+            "scope": state_where or "all",
             "count": len(rows),
             "jobs": [_row_to_dict(r) for r in rows],
         },
@@ -471,8 +559,14 @@ def ls_cmd(
     )
 
 
-def _watch_ls(*, host, port, limit, where, local_only):
-    """Rich Live refresh of the jobs table every 2s until Ctrl-C."""
+def _watch_ls(*, host, port, limit, where, local_only, state_where=None, orphaned_only=False):
+    """Rich Live refresh of the jobs table every 2s until Ctrl-C.
+
+    ``state_where`` scopes the state-file rows exactly as the one-shot path
+    does (``None`` = the unfiltered union view, i.e. ``--all``), and
+    ``orphaned_only`` mirrors ``--orphaned``, so the live table shows the same
+    jobs as ``jobs ls``.
+    """
     import time
 
     from rich.live import Live
@@ -485,7 +579,7 @@ def _watch_ls(*, host, port, limit, where, local_only):
     h, p = _resolve_host_port(host, port)
 
     def build_table() -> Table:
-        state_rows = _gather_local_state_files(limit=limit)
+        state_rows = _gather_local_state_files(limit=limit, where=state_where, orphaned_only=orphaned_only)
         server_rows: list[JobRow] = []
         if not local_only:
             try:
@@ -518,11 +612,11 @@ def _watch_ls(*, host, port, limit, where, local_only):
 
                 wf_display = Path(r.workflow_path).name
             tbl.add_row(
-                r.prompt_id[:8] + "…" if len(r.prompt_id) > 8 else r.prompt_id,
+                sanitize_markup(r.prompt_id[:8] + "…" if len(r.prompt_id) > 8 else r.prompt_id),
                 status_glyph(r.status),
-                r.where,
+                sanitize_markup(r.where),
                 str(r.outputs) if r.outputs else "—",
-                wf_display,
+                sanitize_markup(wf_display),
             )
         if not rows:
             tbl.add_row("[dim]no jobs[/dim]", "", "", "", "")
@@ -590,7 +684,7 @@ def _render_jobs_pretty(rows: list[JobRow], *, host: str, port: int) -> None:
     tbl.add_column("outputs", no_wrap=True, justify="right")
     for r in rows:
         tbl.add_row(
-            r.prompt_id[:8] + "…" if len(r.prompt_id) > 8 else r.prompt_id,
+            sanitize_markup(r.prompt_id[:8] + "…" if len(r.prompt_id) > 8 else r.prompt_id),
             status_glyph(r.status),
             str(r.queue_position) if r.queue_position is not None else "—",
             str(r.workflow_size) if r.workflow_size is not None else "—",
@@ -629,7 +723,72 @@ def status_cmd(
         return _cloud_status(prompt_id)
 
     h, p = _resolve_host_port(host, port)
-    _server_or_error(h, p)
+    if not _server_or_error(h, p, raise_on_missing=False):
+        # Server is down. The on-disk state file (written by `comfy run` and
+        # maintained by the async watcher) still knows what this prompt was
+        # doing when the server was last seen — a bare `server_not_running`
+        # throws that attribution away.
+        from comfy_cli import jobs_state
+
+        try:
+            st = jobs_state.read(prompt_id)
+        except ValueError:  # unsafe prompt_id — no state file to read
+            st = None
+
+        if st is None:
+            # Untracked prompt: same envelope as before, byte for byte.
+            renderer.error(
+                code="server_not_running",
+                message=f"ComfyUI not running on {h}:{p}",
+                hint="run: comfy launch",
+                details={"host": h, "port": p},
+            )
+            raise typer.Exit(code=1)
+
+        if st.is_terminal:
+            # The job finished before the server stopped — the state file is
+            # the authoritative record, so this is a normal result, not an
+            # error. Callers branch on `status`/`error`.
+            snapshot = {
+                "prompt_id": prompt_id,
+                "status": st.status,
+                "outputs": list(st.outputs or []),
+                "error": st.error,
+                "host": h,
+                "port": p,
+                "server_running": False,
+                "source": "state_file",
+                "submitted_at": st.submitted_at,
+                "updated_at": st.updated_at,
+                "workflow": st.workflow,
+            }
+            if renderer.is_pretty():
+                _render_status_pretty(snapshot, host=h, port=p)
+            renderer.emit(snapshot, command="jobs status")
+            return
+
+        # Non-terminal: the job was queued/running when the server was last
+        # seen, so the server most likely died underneath it. Keep the
+        # `server_not_running` code (callers key on it) and attribute.
+        renderer.error(
+            code="server_not_running",
+            message=(
+                f"ComfyUI not running on {h}:{p} — job {prompt_id} was {st.status!r} when the server "
+                f"was last seen (submitted {st.submitted_at}, last update {st.updated_at}). The server "
+                f"may have died while executing it (e.g. killed by the OS on an out-of-memory allocation)."
+            ),
+            hint="run: comfy launch — then check `comfy jobs ls` for the job's last recorded state",
+            details={
+                "host": h,
+                "port": p,
+                "prompt_id": prompt_id,
+                "last_known_status": st.status,
+                "submitted_at": st.submitted_at,
+                "updated_at": st.updated_at,
+                "workflow": st.workflow,
+            },
+        )
+        raise typer.Exit(code=1)
 
     snapshot = _snapshot(h, p, prompt_id)
     if snapshot is None:
@@ -728,23 +887,35 @@ def _render_status_pretty(snap: dict, *, host: str, port: int) -> None:
 
     renderer = get_renderer()
     status = snap["status"]
+    # An unrecognized status falls through to the server's own string. `Text`
+    # declines to *parse* markup, but it still forwards `\x1b` — rich's
+    # `strip_control_codes` covers only BEL/BS/VT/FF/CR — so the escape bytes
+    # need the plain `sanitize`. Not `sanitize_markup`: a `Text` would print its
+    # backslashes verbatim, which is why the cell is control-stripped, not
+    # markup-escaped.
     badge = {
         "running": Text.assemble(("● ", "bold green"), ("running", "bold green")),
         "pending": Text.assemble(("◌ ", "bold yellow"), ("pending", "bold yellow")),
         "completed": Text.assemble(("✓ ", "bold green"), ("completed", "bold green")),
         "queued": Text.assemble(("◌ ", "dim"), ("queued", "dim")),
         "error": Text.assemble(("✗ ", "bold red"), ("error", "bold red")),
-    }.get(status, Text(status))
+    }.get(status, Text(sanitize(str(status))))
 
     tbl = Table.grid(padding=(0, 2), expand=False)
     tbl.add_column(justify="right", style="dim", no_wrap=True)
     tbl.add_column(overflow="fold")
-    tbl.add_row("prompt_id", snap["prompt_id"])
+    # `Table.add_row` parses markup in a `str` cell; every value below is
+    # chosen by the host answering `/queue` and `/history`. `badge` is the one
+    # exception — a `Text`, already control-stripped above.
+    tbl.add_row("prompt_id", sanitize_markup(snap["prompt_id"]))
     tbl.add_row("status", badge)
     if snap.get("outputs"):
-        tbl.add_row("outputs", "\n".join(snap["outputs"]))
+        tbl.add_row("outputs", "\n".join(sanitize_markup(o) for o in snap["outputs"]))
     if snap.get("error"):
-        tbl.add_row("error", str(snap["error"])[:600])
+        # Truncate first, escape second: the 600-char budget stays a budget on
+        # the server's text rather than on the backslashes we add to it, and
+        # escaping last is what guarantees no half-written tag survives the cut.
+        tbl.add_row("error", sanitize_markup(str(snap["error"])[:600]))
 
     renderer.console().print(
         Panel(
@@ -767,7 +938,7 @@ def _wait_fetch_snapshot(
 ) -> dict | None:
     """Best-effort single-job status snapshot for the wait loop.
 
-    cloud -> /api/job status; local -> live /history when the server is up,
+    cloud -> /api/jobs/<id>; local -> live /history when the server is up,
     else fall back to the on-disk state file the async watcher maintains.
     """
     if cloud:
@@ -860,7 +1031,13 @@ def _render_wait_pretty(summary: dict) -> None:
     tbl.add_column("status")
     for r in summary["jobs"]:
         glyph, style = badge.get(r["status"], ("•", "white"))
-        tbl.add_row(r["prompt_id"], Text(f"{glyph} {r['status']}", style=style))
+        # The status cell is a `Text`, which never parses markup — so it takes
+        # the plain `sanitize` (escape bytes still pass through `Text`) rather
+        # than `sanitize_markup`, whose backslashes it would print verbatim.
+        tbl.add_row(
+            sanitize_markup(r["prompt_id"]),
+            Text(f"{glyph} {sanitize(str(r['status']))}", style=style),
+        )
     get_renderer().console().print(tbl)
 
 
@@ -900,7 +1077,7 @@ def wait_cmd(
     p: int | None = None
     server_up = False
     if cloud:
-        _cloud_preflight_or_exit()
+        cloud_preflight_or_exit()
     else:
         h, p = _resolve_host_port(host, port)
         server_up = _server_or_error(h, p, raise_on_missing=False)
@@ -982,7 +1159,7 @@ def wait_cmd(
 
 @app.command(
     "cancel",
-    help="Cancel a job. Idempotent — calling on an already-terminal prompt returns ok.",
+    help="Cancel a job. Idempotent for known jobs; unknown ids error with prompt_not_found.",
 )
 @tracking.track_command("jobs")
 def cancel_cmd(
@@ -1006,44 +1183,111 @@ def _local_cancel(prompt_id: str, host: str, port: int) -> None:
     interrupting any in-flight execution. ComfyUI splits these into two
     endpoints; we hit both so the call works regardless of phase.
 
-    Returns 200 (ok) regardless of whether the prompt was actually
-    queued/running — mirrors cloud's idempotent behavior.
+    Idempotent for prompts we can prove exist — running, pending, in the
+    server's history, or in the local state store — including already-terminal
+    ones, which return ok. An id that is nowhere is a `prompt_not_found` error
+    (exit 1), matching what the cloud path does with a 404: ``POST /queue
+    {"delete": [id]}`` 200s for unknown ids, so without the probe below a
+    typo'd id is indistinguishable from a real cancel.
     """
     renderer = get_renderer()
     base = f"http://{host}:{port}"
+    from comfy_cli import jobs_state
 
-    # 1. Remove from the pending queue (no-op if not pending).
+    # 0. An empty/whitespace id can never name a real prompt, and it would turn
+    #    the /history/<id> probe below into `GET /history/` — the list-ALL
+    #    endpoint, whose non-empty body would read as "found". Reject it up
+    #    front, before any probe or mutation.
+    if not prompt_id.strip():
+        renderer.error(
+            code="prompt_not_found",
+            message="prompt id must be a non-empty string",
+            hint="check `comfy jobs ls`",
+            details={"prompt_id": prompt_id, "host": host, "port": port},
+        )
+        raise typer.Exit(code=1)
+
+    # 1. Existence probe, BEFORE mutating anything — the queue delete in step 2
+    #    would erase the only evidence that a pending prompt ever existed.
+    try:
+        queue = _http_get_json(f"{base}/queue")
+        queue_reachable_pre = True
+    except RuntimeError:
+        queue = {}
+        queue_reachable_pre = False
+    if not isinstance(queue, dict):
+        queue = {}
+    running_ids = {str(_safe_queue_entry(entry)[0]) for entry in (queue.get("queue_running") or [])}
+    pending_ids = {str(_safe_queue_entry(entry)[0]) for entry in (queue.get("queue_pending") or [])}
+
+    # A state file means WE submitted it, so it existed even if the server has
+    # since forgotten it (restart, history trimmed). Read for existence only —
+    # the status write at the end re-reads, so a concurrent `jobs watch` update
+    # in the meantime isn't clobbered.
+    found = prompt_id in running_ids or prompt_id in pending_ids or jobs_state.read(prompt_id) is not None
+    probes_reachable = queue_reachable_pre
+    if not found and queue_reachable_pre:
+        # /history/<id> is `{}` for an unknown id, and a dict keyed by the id
+        # for a known one (running, completed, errored, or cancelled). Quote the
+        # id into the path so a hostile value can't escape the segment — same
+        # defense in depth as the cloud path.
+        try:
+            history = _http_get_json(f"{base}/history/{urllib.parse.quote(prompt_id, safe='')}")
+            found = isinstance(history, dict) and bool(history)
+        except RuntimeError:
+            # Unreachable is not "absent" — absence of evidence isn't evidence
+            # of absence, so fall through to the idempotent path instead.
+            probes_reachable = False
+
+    if not found and probes_reachable:
+        renderer.error(
+            code="prompt_not_found",
+            message=f"no local job with id {prompt_id!r}",
+            hint="check `comfy jobs ls`",
+            details={"prompt_id": prompt_id, "host": host, "port": port},
+        )
+        raise typer.Exit(code=1)
+
+    # 2. Remove from the pending queue (no-op if not pending).
     queue_body = json.dumps({"delete": [prompt_id]}).encode("utf-8")
     queue_req = urllib.request.Request(
         f"{base}/queue", data=queue_body, method="POST", headers={"Content-Type": "application/json"}
     )
     queue_ok = True
     try:
-        with urllib.request.urlopen(queue_req, timeout=10) as resp:
+        with plain_urlopen(queue_req, timeout=10) as resp:
             _ = resp.read()
     except (urllib.error.HTTPError, urllib.error.URLError, OSError):
         # Server refused the delete; common when the prompt isn't in queue.
         # Don't fail the whole command — try the interrupt next.
         queue_ok = False
 
-    # 2. Interrupt only if THIS prompt is the one currently executing.
+    # 3. Interrupt only if THIS prompt is the one currently executing.
     #    /interrupt takes NO prompt_id — it kills whatever is running — so
     #    blindly posting it after a pending-job delete would also abort an
-    #    unrelated running job ("cancel B" silently cancelling A). Gate on
-    #    /queue's queue_running list; the queue delete above already covers
-    #    pending jobs.
-    interrupt_ok = True
+    #    unrelated running job ("cancel B" silently cancelling A). Gate on a
+    #    FRESH read of /queue's queue_running: the step-1 snapshot predates the
+    #    delete round-trip, and in that window our prompt can go pending→running
+    #    (missing it = silent cancel failure) or a different prompt can take
+    #    over the running slot (interrupting it = cancelling A instead of B).
     try:
-        queue = _http_get_json(f"{base}/queue")
+        queue_now = _http_get_json(f"{base}/queue")
         queue_reachable = True
+        if not isinstance(queue_now, dict):
+            queue_now = {}
+        is_running = prompt_id in {str(_safe_queue_entry(entry)[0]) for entry in (queue_now.get("queue_running") or [])}
     except RuntimeError:
-        queue = {}
+        # Can't confirm; fall back to the step-1 snapshot. The server is very
+        # likely down, in which case /interrupt fails harmlessly too — better
+        # a best-effort interrupt than a silently skipped cancel.
         queue_reachable = False
-    running_ids = {str(_safe_queue_entry(entry)[0]) for entry in (queue.get("queue_running") or [])}
-    if prompt_id in running_ids:
+        is_running = prompt_id in running_ids
+
+    interrupt_ok = True
+    if is_running:
         interrupt_req = urllib.request.Request(f"{base}/interrupt", method="POST")
         try:
-            with urllib.request.urlopen(interrupt_req, timeout=10) as resp:
+            with plain_urlopen(interrupt_req, timeout=10) as resp:
                 _ = resp.read()
         except (urllib.error.HTTPError, urllib.error.URLError, OSError):
             interrupt_ok = False
@@ -1062,13 +1306,19 @@ def _local_cancel(prompt_id: str, host: str, port: int) -> None:
         "where": "local",
         "host": host,
         "port": port,
+        "found": found,
         "queue_delete_ok": queue_ok,
         "interrupt_ok": interrupt_ok,
     }
-    from comfy_cli import jobs_state
 
+    # Re-read right before the write: the step-1 read predates three network
+    # round-trips, and a concurrent `jobs watch` may have recorded newer
+    # status/outputs in the meantime (the per-file lock stops torn writes, not
+    # stale overwrites). Already-terminal jobs keep their recorded outcome —
+    # cancelling a finished job is an idempotent ok, not a re-labelling of a
+    # 'completed' run as 'cancelled'.
     existing = jobs_state.read(prompt_id)
-    if existing is not None:
+    if existing is not None and not existing.is_terminal:
         existing.status = "cancelled"
         jobs_state.write(existing)
 
@@ -1082,7 +1332,7 @@ def _local_cancel(prompt_id: str, host: str, port: int) -> None:
 
 def _cloud_cancel(prompt_id: str) -> None:
     """Cancel a cloud job via ``POST /api/jobs/<id>/cancel`` — idempotent."""
-    _cloud_preflight_or_exit()
+    cloud_preflight_or_exit()
     renderer = get_renderer()
 
     from comfy_cli.target import resolve_target
@@ -1092,14 +1342,9 @@ def _cloud_cancel(prompt_id: str) -> None:
     # escape (e.g. ``../foo`` → ``%2E%2E%2Ffoo``). Cloud rejects bad UUIDs
     # upstream too; encoding here is defense in depth.
     url = target.url("jobs", urllib.parse.quote(prompt_id, safe=""), "cancel")
-    req = urllib.request.Request(url, data=b"", method="POST")
-    if target.api_key:
-        req.add_header("X-API-Key", target.api_key)
-    elif target.auth_token:
-        req.add_header("Authorization", f"Bearer {target.auth_token}")
 
     try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
+        with authed_urlopen(url, target, method="POST", data=b"", timeout=15) as resp:
             body = resp.read()
     except urllib.error.HTTPError as e:
         body_text = (e.read() or b"")[:1000].decode("utf-8", "replace")
@@ -1122,7 +1367,7 @@ def _cloud_cancel(prompt_id: str) -> None:
         renderer.error(
             code="cloud_http_error",
             message=f"cancel failed: {e}",
-            hint="check network / `comfy auth whoami`",
+            hint="check network / `comfy cloud whoami`",
         )
         raise typer.Exit(code=1) from e
 
@@ -1149,6 +1394,104 @@ def _cloud_cancel(prompt_id: str) -> None:
 # ---------------------------------------------------------------------------
 # `jobs watch` — tail WS events live, filtered on prompt_id
 # ---------------------------------------------------------------------------
+
+
+@dataclass
+class _WatchState:
+    """Loop-local state shared across the `jobs watch` WS recv loop.
+
+    Holds both the immutable per-watch context (renderer, prompt_id, host,
+    port) and the mutable accumulators the per-type handlers and the
+    connect/timeout/cancel state machine both write to (completed_nodes,
+    outputs, end_reason, end_details). ``terminal`` is the handlers' way of
+    signalling the recv loop to break.
+    """
+
+    renderer: Any
+    prompt_id: str
+    host: str
+    port: int
+    completed_nodes: set[str] = field(default_factory=set)
+    outputs: list[str] = field(default_factory=list)
+    end_reason: str | None = None
+    end_details: Any = None
+    terminal: bool = False
+
+
+def _watch_executing(state: _WatchState, data: dict[str, Any]) -> None:
+    node = data.get("node")
+    if node is None:
+        # A null node marks the end of execution for the prompt.
+        state.end_reason = "completed"
+        state.terminal = True
+        return
+    renderer = state.renderer
+    if renderer.is_pretty():
+        # ``node`` is server-controlled; escape so it can't inject Rich markup.
+        from rich.markup import escape
+
+        renderer.console().print(f"[dim]→[/dim] executing node [bold]{escape(str(node))}[/bold]")
+    renderer.event("executing", node=str(node), prompt_id=state.prompt_id)
+
+
+def _watch_execution_cached(state: _WatchState, data: dict[str, Any]) -> None:
+    nodes = data.get("nodes") or []
+    for n in nodes:
+        state.completed_nodes.add(str(n))
+    renderer = state.renderer
+    if renderer.is_pretty():
+        renderer.console().print(f"[dim]✓[/dim] cached: {len(nodes)} node(s)")
+    renderer.event(
+        "execution_cached",
+        nodes=[str(n) for n in nodes],
+        prompt_id=state.prompt_id,
+    )
+
+
+def _watch_progress(state: _WatchState, data: dict[str, Any]) -> None:
+    state.renderer.throttled_event(
+        f"progress:{data.get('node')}",
+        "progress",
+        max_hz=10,
+        node=str(data.get("node")),
+        completed=data.get("value"),
+        total=data.get("max"),
+        prompt_id=state.prompt_id,
+    )
+
+
+def _watch_executed(state: _WatchState, data: dict[str, Any]) -> None:
+    renderer = state.renderer
+    node = str(data.get("node"))
+    state.completed_nodes.add(node)
+    output = data.get("output") or {}
+    for key in ("images", "gifs", "videos", "audio", "files"):
+        for item in output.get(key) or []:
+            if isinstance(item, dict) and "filename" in item:
+                q = urllib.parse.urlencode({k: item[k] for k in ("filename", "subfolder", "type") if k in item})
+                url = f"http://{state.host}:{state.port}/view?{q}"
+                state.outputs.append(url)
+                if renderer.is_pretty():
+                    renderer.console().print(f"[bold green]✓[/bold green] output: [cyan]{url}[/cyan]")
+                renderer.event("output", url=url, prompt_id=state.prompt_id)
+    renderer.event("executed", node=node, prompt_id=state.prompt_id)
+
+
+def _watch_execution_error(state: _WatchState, data: dict[str, Any]) -> None:
+    state.end_reason = "error"
+    state.end_details = data
+    state.terminal = True
+
+
+# type → pure per-message handler. Each mutates ``state`` (and sets
+# ``state.terminal`` for the two terminal events); the recv loop owns the break.
+_WATCH_HANDLERS = {
+    "executing": _watch_executing,
+    "execution_cached": _watch_execution_cached,
+    "progress": _watch_progress,
+    "executed": _watch_executed,
+    "execution_error": _watch_execution_error,
+}
 
 
 @app.command("watch", help="Tail live execution events for a prompt_id (WS local / polling cloud).")
@@ -1205,12 +1548,9 @@ def watch_cmd(
 
     ws.settimeout(timeout)
 
-    completed_nodes: set[str] = set()
-    outputs: list[str] = []
+    state = _WatchState(renderer=renderer, prompt_id=prompt_id, host=h, port=p)
     saw_any_event = False
     missing_deadline: float | None = None
-    end_reason: str | None = None
-    end_details: Any = None
     start = time.time()
 
     if renderer.is_pretty():
@@ -1224,9 +1564,9 @@ def watch_cmd(
                 # If the job moved to completed between recvs, exit cleanly.
                 snap = _snapshot(h, p, prompt_id)
                 if snap and snap["status"] in {"completed", "error", "cancelled"}:
-                    end_reason = snap["status"]
-                    end_details = snap
-                    outputs.extend(snap.get("outputs") or [])
+                    state.end_reason = snap["status"]
+                    state.end_details = snap
+                    state.outputs.extend(snap.get("outputs") or [])
                     break
                 # Bounded wait for an unknown prompt: if the server has never
                 # heard of this prompt_id (no snapshot) and no events have
@@ -1251,7 +1591,7 @@ def watch_cmd(
                 # Cancellation closes the socket out from under recv(). Check
                 # the token before classifying as "server disconnected".
                 if token.is_set():
-                    end_reason = "cancelled"
+                    state.end_reason = "cancelled"
                     break
                 renderer.error(
                     code="ws_disconnected",
@@ -1269,61 +1609,20 @@ def watch_cmd(
             if data.get("prompt_id") != prompt_id:
                 continue
             saw_any_event = True
-            t = msg.get("type")
-            if t == "executing":
-                node = data.get("node")
-                if node is None:
-                    end_reason = "completed"
+            # ``type`` is server-controlled: a JSON array/object is unhashable
+            # and would make dict.get() raise TypeError, so only dispatch on a
+            # str key (unknown types fall through to be ignored, as before).
+            mtype = msg.get("type")
+            handler = _WATCH_HANDLERS.get(mtype) if isinstance(mtype, str) else None
+            if handler is not None:
+                handler(state, data)
+                if state.terminal:
                     break
-                if renderer.is_pretty():
-                    renderer.console().print(f"[dim]→[/dim] executing node [bold]{node}[/bold]")
-                renderer.event("executing", node=str(node), prompt_id=prompt_id)
-            elif t == "execution_cached":
-                nodes = data.get("nodes") or []
-                for n in nodes:
-                    completed_nodes.add(str(n))
-                if renderer.is_pretty():
-                    renderer.console().print(f"[dim]✓[/dim] cached: {len(nodes)} node(s)")
-                renderer.event(
-                    "execution_cached",
-                    nodes=[str(n) for n in nodes],
-                    prompt_id=prompt_id,
-                )
-            elif t == "progress":
-                renderer.throttled_event(
-                    f"progress:{data.get('node')}",
-                    "progress",
-                    max_hz=10,
-                    node=str(data.get("node")),
-                    completed=data.get("value"),
-                    total=data.get("max"),
-                    prompt_id=prompt_id,
-                )
-            elif t == "executed":
-                node = str(data.get("node"))
-                completed_nodes.add(node)
-                output = data.get("output") or {}
-                for key in ("images", "gifs", "videos", "audio", "files"):
-                    for item in output.get(key) or []:
-                        if isinstance(item, dict) and "filename" in item:
-                            q = urllib.parse.urlencode(
-                                {k: item[k] for k in ("filename", "subfolder", "type") if k in item}
-                            )
-                            url = f"http://{h}:{p}/view?{q}"
-                            outputs.append(url)
-                            if renderer.is_pretty():
-                                renderer.console().print(f"[bold green]✓[/bold green] output: [cyan]{url}[/cyan]")
-                            renderer.event("output", url=url, prompt_id=prompt_id)
-                renderer.event("executed", node=node, prompt_id=prompt_id)
-            elif t == "execution_error":
-                end_reason = "error"
-                end_details = data
-                break
     finally:
         _safe_close_ws(ws)
 
     elapsed = time.time() - start
-    final_status = end_reason or ("completed" if completed_nodes else "unknown")
+    final_status = state.end_reason or ("completed" if state.completed_nodes else "unknown")
     if renderer.is_pretty():
         from rich.text import Text
 
@@ -1339,14 +1638,14 @@ def watch_cmd(
     payload = {
         "prompt_id": prompt_id,
         "status": final_status,
-        "outputs": outputs,
-        "completed_nodes": sorted(completed_nodes),
+        "outputs": state.outputs,
+        "completed_nodes": sorted(state.completed_nodes),
         "elapsed_seconds": elapsed,
         "host": h,
         "port": p,
     }
-    if end_details is not None:
-        payload["details"] = end_details if isinstance(end_details, dict) else {"raw": end_details}
+    if state.end_details is not None:
+        payload["details"] = state.end_details if isinstance(state.end_details, dict) else {"raw": state.end_details}
     if not saw_any_event and final_status == "unknown":
         payload["hint"] = "watch returned without events; the prompt may already have completed"
     _emit_terminal(renderer, payload, command="jobs watch")
@@ -1370,31 +1669,14 @@ def _is_cloud(where: str | None) -> bool:
     for ``jobs ls/status/watch``.
     """
     from comfy_cli import where as where_module
-    from comfy_cli.config_manager import ConfigManager
 
     try:
-        config_value = ConfigManager().get(where_module.CONFIG_KEY_WHERE_DEFAULT)
-    except Exception:  # noqa: BLE001 — never let a bad config break routing
-        config_value = None
-    try:
-        decision = where_module.resolve(flag=where, config_value=config_value)
+        decision = where_module.resolve_default(flag=where)
     except ValueError:
         # Invalid value — fall back to local; the validating command
         # (cmdline.py top-level option) will surface ``where_invalid``.
         return False
     return decision.target is where_module.WhereTarget.CLOUD
-
-
-def _cloud_preflight_or_exit() -> None:
-    """Surface a clean envelope if the user isn't signed in / is expired."""
-    from comfy_cli.where import cloud_preflight
-
-    err = cloud_preflight()
-    if err is None:
-        return
-    renderer = get_renderer()
-    renderer.error(code=err.code, message=err.message, hint=err.hint, details=err.details)
-    raise typer.Exit(code=1)
 
 
 def _cloud_job_to_row(j: dict) -> JobRow:
@@ -1430,42 +1712,12 @@ def _cloud_client():
         return Client(target, clear_session_on_auth_failure=False)
     except Unauthenticated as e:
         renderer = get_renderer()
-        renderer.error(code="cloud_unauthorized", message=str(e), hint="run: comfy auth login")
+        renderer.error(code="cloud_unauthorized", message=str(e), hint="run: comfy cloud login")
         raise typer.Exit(code=1) from e
 
 
-def _cloud_ls(*, limit: int) -> None:
-    from comfy_cli.comfy_client import HTTPError
-
-    _cloud_preflight_or_exit()
-    renderer = get_renderer()
-    client = _cloud_client()
-    try:
-        jobs = client.list_jobs(limit=limit)
-    except HTTPError as e:
-        renderer.error(
-            code="cloud_http_error",
-            message=f"Cloud /api/jobs failed (HTTP {e.status}): {e.message}",
-            details={"status": e.status, "body": e.body[:1000]},
-        )
-        raise typer.Exit(code=1)
-
-    rows = [_cloud_job_to_row(j) for j in jobs[:limit]]
-    if renderer.is_pretty():
-        _render_jobs_pretty(rows, host=client.target.base_url, port=0)
-    renderer.emit(
-        {
-            "base_url": client.target.base_url,
-            "count": len(rows),
-            "jobs": [_row_to_dict(r) for r in rows],
-        },
-        command="jobs ls",
-        where="cloud",
-    )
-
-
 def _cloud_status_snapshot(prompt_id: str) -> dict | None:
-    """Compose a cloud snapshot from /api/job/<id>/status + /api/history_v2/<id>."""
+    """Compose a cloud snapshot from /api/jobs/<id> + /api/history_v2/<id>."""
     from comfy_cli import jobs_state
     from comfy_cli.comfy_client import _group_outputs
 
@@ -1512,7 +1764,7 @@ def _cloud_status_snapshot(prompt_id: str) -> dict | None:
 
 
 def _cloud_status(prompt_id: str) -> None:
-    _cloud_preflight_or_exit()
+    cloud_preflight_or_exit()
     renderer = get_renderer()
     snap = _cloud_status_snapshot(prompt_id)
     if snap is None:
@@ -1527,27 +1779,36 @@ def _cloud_status(prompt_id: str) -> None:
     if renderer.is_pretty():
         from rich.table import Table
 
-        tbl = Table(title=f"Cloud prompt {prompt_id[:8]}…", border_style="cyan", show_header=False)
+        # Rich parses a `str` table title as markup too, so the id belongs in
+        # the same escaping regime as the cells — an unbalanced `[/]` there
+        # raises `MarkupError` before a single row is added.
+        tbl = Table(title=f"Cloud prompt {sanitize_markup(prompt_id[:8])}…", border_style="cyan", show_header=False)
         tbl.add_column(style="bold cyan")
         tbl.add_column()
-        tbl.add_row("status", snap["status"])
+        # Every cell below comes straight off `/api/jobs/<id>` — including
+        # `status`, which falls through to the server's own vocabulary when it
+        # is not one of the aliases `_cloud_status_snapshot` knows.
+        tbl.add_row("status", sanitize_markup(snap["status"]))
         if snap.get("assigned_inference"):
-            tbl.add_row("inference", snap["assigned_inference"])
+            tbl.add_row("inference", sanitize_markup(snap["assigned_inference"]))
         if snap.get("created_at"):
-            tbl.add_row("created", snap["created_at"])
+            tbl.add_row("created", sanitize_markup(snap["created_at"]))
         if snap.get("updated_at"):
-            tbl.add_row("updated", snap["updated_at"])
+            tbl.add_row("updated", sanitize_markup(snap["updated_at"]))
         if snap.get("error_message"):
-            tbl.add_row("error", snap["error_message"])
+            # Same 600-char budget the local `/history` error cell uses, and for
+            # the same reason: an unbounded API string becomes an unbounded Rich
+            # cell. Truncate first, escape second (see `_render_status_pretty`).
+            tbl.add_row("error", sanitize_markup(str(snap["error_message"])[:600]))
         for u in snap.get("outputs") or []:
-            tbl.add_row("output", u)
+            tbl.add_row("output", sanitize_markup(u))
         renderer.console().print(tbl)
     renderer.emit(snap, command="jobs status", where="cloud")
 
 
 def _cloud_watch(prompt_id: str, *, poll_interval: float, max_wait: float) -> None:
     """Poll cloud's job status, emit NDJSON events on each transition."""
-    _cloud_preflight_or_exit()
+    cloud_preflight_or_exit()
     renderer = get_renderer()
     base_url = _cloud_client().target.base_url
 
@@ -1558,7 +1819,8 @@ def _cloud_watch(prompt_id: str, *, poll_interval: float, max_wait: float) -> No
 
     if renderer.is_pretty():
         renderer.console().print(
-            f"[bold]Watching cloud prompt[/bold] {prompt_id}   [dim]({base_url}, Ctrl-C to stop)[/dim]"
+            f"[bold]Watching cloud prompt[/bold] {sanitize_markup(prompt_id)}   "
+            f"[dim]({sanitize_markup(base_url)}, Ctrl-C to stop)[/dim]"
         )
 
     final_snap: dict | None = None
@@ -1579,14 +1841,19 @@ def _cloud_watch(prompt_id: str, *, poll_interval: float, max_wait: float) -> No
         if snap["status"] != last_state:
             last_state = snap["status"]
             if renderer.is_pretty():
-                renderer.console().print(f"[dim]→[/dim] state [bold]{last_state}[/bold]")
+                # `_cloud_status` hardens the one-shot view of this same
+                # snapshot; the streaming sibling prints the same server-chosen
+                # `status` into markup on every transition, and a `[/]` in it
+                # would raise `MarkupError` mid-poll. The `renderer.event` line
+                # below stays raw on purpose — JSON escapes it already.
+                renderer.console().print(f"[dim]→[/dim] state [bold]{sanitize_markup(last_state)}[/bold]")
             renderer.event("state", prompt_id=prompt_id, status=last_state)
 
         if snap["status"] in {"completed", "error", "cancelled"}:
             for u in snap.get("outputs") or []:
                 renderer.event("output", url=u, prompt_id=prompt_id)
                 if renderer.is_pretty():
-                    renderer.console().print(f"[bold green]✓[/bold green] output: [cyan]{u}[/cyan]")
+                    renderer.console().print(f"[bold green]✓[/bold green] output: [cyan]{sanitize_markup(u)}[/cyan]")
             final_snap = snap
             break
 

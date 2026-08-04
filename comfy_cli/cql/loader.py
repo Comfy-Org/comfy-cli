@@ -19,7 +19,6 @@ and are short-circuited when no host is provided.
 from __future__ import annotations
 
 import hashlib
-import ipaddress
 import json
 import os
 import sys
@@ -29,7 +28,10 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
+from comfy_cli.cql._net import is_loopback_host
 from comfy_cli.cql.errors import CQLRuntimeError
+from comfy_cli.file_utils import atomic_write_text
+from comfy_cli.http import NoRedirectHandler, build_http_only_opener
 
 # Cap raw bytes read from disk or the network. Real `object_info` dumps are a
 # few MB; anything past 256 MiB is almost certainly a wrong path or a hostile
@@ -37,17 +39,7 @@ from comfy_cli.cql.errors import CQLRuntimeError
 MAX_INPUT_BYTES = 256 * 1024 * 1024
 
 
-class _NoRedirect(urllib.request.HTTPRedirectHandler):
-    """Refuse redirects — a 302 from /object_info to elsewhere is suspicious
-    and would expose us to a different server than the user asked to query."""
-
-    def http_error_301(self, req, fp, code, msg, headers):
-        raise urllib.error.HTTPError(req.full_url, code, "redirect refused", headers, fp)
-
-    http_error_302 = http_error_303 = http_error_307 = http_error_308 = http_error_301
-
-
-_LOADER_OPENER = urllib.request.build_opener(_NoRedirect())
+_LOADER_OPENER = build_http_only_opener(NoRedirectHandler())
 
 
 def load_graph(
@@ -96,13 +88,7 @@ def _load_from_server(host: str, port: int, *, timeout: float) -> dict[str, Any]
     # own path; this loader is local-only by design.)
     parsed = urllib.parse.urlsplit(url)
     hostname = (parsed.hostname or "").strip().lower()
-    is_loopback = hostname == "localhost"
-    if not is_loopback:
-        try:
-            is_loopback = ipaddress.ip_address(hostname).is_loopback
-        except ValueError:
-            is_loopback = False
-    if not is_loopback:
+    if not is_loopback_host(hostname):
         raise CQLRuntimeError(
             f"refusing non-loopback CQL server target: {host}",
             details={"hint": "pass --input <path> for remote object_info dumps"},
@@ -325,16 +311,11 @@ def write_object_info_cache(host_key: str, data: dict[str, Any]) -> None:
     """
     path = object_info_cache_path(host_key)
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(path.suffix + f".{os.getpid()}.tmp")
-        tmp.write_text(json.dumps(data), encoding="utf-8")
-        os.replace(tmp, path)
+        atomic_write_text(path, json.dumps(data))
     except OSError:
         # A cache we can't write is not worth failing the command over.
-        try:
-            tmp.unlink()  # type: ignore[possibly-undefined]
-        except (OSError, NameError, UnboundLocalError):
-            pass
+        # atomic_write_text already cleaned up its own tmp file on failure.
+        pass
 
 
 def read_object_info_cache(host_key: str) -> dict[str, Any] | None:
@@ -355,7 +336,7 @@ def read_object_info_cache(host_key: str) -> dict[str, Any] | None:
     return data if isinstance(data, dict) else None
 
 
-def _resolve_host_key(mode: str, host: str, port: int) -> str:
+def _resolve_host_key(mode: str, host: str | None, port: int | None) -> str:
     """Resolve the cache key (the target base URL) without doing any I/O.
 
     Mirrors how the engine resolves its fetch target so the cache key matches
@@ -374,8 +355,8 @@ def _resolve_host_key(mode: str, host: str, port: int) -> str:
 def resilient_load_object_info(
     *,
     mode: str = "local",
-    host: str = "127.0.0.1",
-    port: int = 8188,
+    host: str | None = None,
+    port: int | None = None,
     input_path: str | None = None,
     _warn=None,
     on_stale=None,

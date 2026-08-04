@@ -63,6 +63,20 @@ class TestLoad:
         assert mgr.background is None
         assert constants.CONFIG_KEY_BACKGROUND not in mgr.config["DEFAULT"]
 
+    def test_keeps_background_log_path_when_stale_pid(self, tmp_path):
+        # A dead pid usually means a CRASH — the recorded logfile is the pointer
+        # to the crash log, so init must not throw it away with the pid record.
+        config_dir = tmp_path / "comfy-cli"
+        config_dir.mkdir()
+        (config_dir / "config.ini").write_text(
+            f"[DEFAULT]\n"
+            f"{constants.CONFIG_KEY_BACKGROUND} = ('localhost', 8188, 99999)\n"
+            f"{constants.CONFIG_KEY_BACKGROUND_LOG} = /ws/user/comfyui_8188.log\n"
+        )
+        mgr = _make_config_manager(config_dir, is_running_val=False)
+        assert mgr.background is None
+        assert mgr.get(constants.CONFIG_KEY_BACKGROUND_LOG) == "/ws/user/comfyui_8188.log"
+
 
 class TestWriteConfig:
     def test_creates_directory_if_missing(self, tmp_path):
@@ -159,3 +173,19 @@ class TestRemoveBackground:
         config_mgr.remove_background()
         assert config_mgr.background is None
         assert constants.CONFIG_KEY_BACKGROUND not in config_mgr.config["DEFAULT"]
+
+    def test_preserves_background_log_path(self, config_mgr):
+        # The recorded logfile path must SURVIVE — after a stop or a crash it is
+        # the only pointer to the log that server wrote, and `comfy logs` reports
+        # staleness as metadata rather than by dropping the pointer.
+        config_mgr.config["DEFAULT"][constants.CONFIG_KEY_BACKGROUND] = "('h', 1, 2)"
+        config_mgr.config["DEFAULT"][constants.CONFIG_KEY_BACKGROUND_LOG] = "/ws/user/comfyui_8188.log"
+        config_mgr.background = ("h", 1, 2)
+        config_mgr.remove_background()
+        assert config_mgr.config["DEFAULT"][constants.CONFIG_KEY_BACKGROUND_LOG] == "/ws/user/comfyui_8188.log"
+
+    def test_is_idempotent_when_no_background_recorded(self, config_mgr):
+        # `comfy stop` races and the dead-pid cleanup can both reach this with
+        # the key already gone; it must not raise.
+        config_mgr.clear_background_process()
+        assert config_mgr.background is None

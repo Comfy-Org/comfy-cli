@@ -78,17 +78,6 @@ def branded_panel(
     )
 
 
-def cli_footer(*, version: str, where: str | None = None) -> Text:
-    """Right-aligned, dim subtitle used as the pretty-mode brand signature.
-
-    Every pretty rendering that *isn't* already a Panel should print this
-    after its primary output so the human always knows which tool / version /
-    routing target produced what they're looking at.
-    """
-    suffix = f"  ·  {where}" if where else ""
-    return Text(f"comfy CLI v{version}{suffix}", style="dim", justify="right")
-
-
 # ---------------------------------------------------------------------------
 # Wordmark — handcrafted 5-row block art, kept narrow enough for an 80-col tty
 # ---------------------------------------------------------------------------
@@ -203,6 +192,20 @@ def _humanize_seconds(s: int) -> str:
     return f"{h}h {rem // 60}m"
 
 
+def _access_token_line(expires_at: int | None) -> Text:
+    """The "Access token" value cell shared by welcome_banner and whoami_banner.
+
+    Pairs the humanized relative expiry (accented) with the absolute ISO
+    timestamp (dim). Kept as one helper so the two banners never drift in how
+    the token line is formatted.
+    """
+    return Text.assemble(
+        (_humanize_relative(expires_at), f"bold {BRAND_ACCENT}"),
+        ("   ", ""),
+        (_iso(expires_at), "dim"),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Welcome banner — the big one, shown after auth login success
 # ---------------------------------------------------------------------------
@@ -241,14 +244,7 @@ def welcome_banner(
     info_tbl.add_column(justify="right", style="dim", no_wrap=True)
     info_tbl.add_column(overflow="fold")
     info_tbl.add_row("Scope", Text(scope, style="white"))
-    info_tbl.add_row(
-        "Access token",
-        Text.assemble(
-            (_humanize_relative(expires_at), f"bold {BRAND_ACCENT}"),
-            ("   ", ""),
-            (_iso(expires_at), "dim"),
-        ),
-    )
+    info_tbl.add_row("Access token", _access_token_line(expires_at))
     info_tbl.add_row("", Text("renews automatically while you keep using the CLI", style="dim"))
     info_tbl.add_row("Client", Text(client_id, style="white"))
 
@@ -311,14 +307,7 @@ def whoami_banner(
     info_tbl.add_column(justify="right", style="dim", no_wrap=True)
     info_tbl.add_column(overflow="fold")
     info_tbl.add_row("Scope", Text(scope, style="white"))
-    info_tbl.add_row(
-        "Access token",
-        Text.assemble(
-            (_humanize_relative(expires_at), f"bold {BRAND_ACCENT}"),
-            ("   ", ""),
-            (_iso(expires_at), "dim"),
-        ),
-    )
+    info_tbl.add_row("Access token", _access_token_line(expires_at))
     if not expired:
         info_tbl.add_row("", Text("renews automatically while you keep using the CLI", style="dim"))
     info_tbl.add_row("Client", Text(client_id, style="white"))

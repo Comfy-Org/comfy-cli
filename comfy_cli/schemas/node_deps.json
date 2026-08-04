@@ -1,0 +1,124 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "comfy node deps",
+  "description": "Per-pack Python dependency report: each installed custom node pack's declared requirements (requirements.txt and/or pyproject.toml [project] dependencies) against the versions installed in the workspace venv. `--registry <node-id>` adds a row for a NOT-yet-installed registry pack, diffing its published latest-version dependencies against the same venv so conflict risk can be assessed before installing. Read-only: no installs, no cm-cli, and no network except the registry's side-effect-free GET /nodes/{id} for --registry ids. Exit code is 0 even when requirements are missing or mismatched — this is a report, not a check.",
+  "type": "object",
+  "properties": {
+    "workspace": { "type": "string", "description": "Resolved ComfyUI workspace path." },
+    "python": {
+      "type": "string",
+      "description": "Interpreter whose site-packages were probed (`pip list --format=json`, run once for the whole report)."
+    },
+    "compiled_lock": {
+      "type": "object",
+      "description": "Presence + path of the workspace `requirements.compiled` written by the uv-compile install path. Never parsed or diffed in v1.",
+      "properties": {
+        "present": { "type": "boolean" },
+        "path": { "type": ["string", "null"] }
+      },
+      "required": ["present", "path"]
+    },
+    "packs": {
+      "type": "array",
+      "description": "One row per reported pack, in directory-name order (or in the order requested on the command line); `--registry` candidates follow, in the order given. `pack` is NOT a unique key: naming the same id both positionally and via `--registry` deliberately yields two rows for it — an installed one and a `registry` one. Key on (`pack`, `registry`) if you need uniqueness.",
+      "items": {
+        "type": "object",
+        "properties": {
+          "pack": {
+            "type": "string",
+            "description": "Pack directory name, or the registry node id on a `registry` row."
+          },
+          "path": {
+            "type": ["string", "null"],
+            "description": "Pack path relative to the workspace; null when the named pack is not installed, and always null on a `registry` row."
+          },
+          "status": {
+            "type": "string",
+            "enum": ["installed", "not_installed", "registry"],
+            "description": "`not_installed` when a name given on the command line matched no pack directory. `registry` marks a `--registry <node-id>` candidate: a pack that is NOT installed, whose requirements come from the registry's published metadata."
+          },
+          "registry": {
+            "type": "boolean",
+            "description": "Present and true only on a `--registry` candidate row. Absent on rows sourced from the local workspace."
+          },
+          "version": {
+            "type": ["string", "null"],
+            "description": "Registry rows only: the LATEST published version whose dependencies this row describes (null when the registry returned none). The registry exposes no read-only endpoint for a pinned version's dependencies, so this is always the latest — not necessarily what an install would resolve to."
+          },
+          "declared": {
+            "type": ["array", "null"],
+            "description": "Registry rows only: the dependency strings the registry published for `version`, verbatim. Null (with `warning` set) when the registry returned no usable dependency metadata — distinct from an empty list, which is never emitted because the API cannot distinguish 'declares nothing' from 'field absent'.",
+            "items": { "type": "string" }
+          },
+          "warning": {
+            "type": "string",
+            "description": "Registry rows only: why this row carries no requirements (registry unreachable, no such node, or no dependency metadata published) — or, when requirements ARE present, that they are incomplete because the registry returned malformed entries. Never fails the command — other rows still render."
+          },
+          "requirement_files": {
+            "type": "array",
+            "description": "Which declaration sources contributed requirements. `registry` is not a file — it is the registry's published metadata for a `--registry` candidate.",
+            "items": { "type": "string", "enum": ["requirements.txt", "pyproject.toml", "registry"] }
+          },
+          "requirements": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "raw": { "type": "string", "description": "The declared line, verbatim (comments stripped)." },
+                "name": {
+                  "type": ["string", "null"],
+                  "description": "Requirement name, or null when the line is unparseable."
+                },
+                "specifier": {
+                  "type": ["string", "null"],
+                  "description": "PEP 440 specifier (empty string for a bare name), or null when unparseable."
+                },
+                "marker": {
+                  "type": "string",
+                  "description": "PEP 508 environment marker, when declared. NOT evaluated — the relevant environment is the workspace venv's, not the CLI's."
+                },
+                "source": { "type": "string", "enum": ["requirements.txt", "pyproject.toml", "registry"] },
+                "installed": {
+                  "type": ["string", "null"],
+                  "description": "Version found in the workspace venv, or null when missing/unparseable/unknown."
+                },
+                "status": {
+                  "type": "string",
+                  "enum": ["satisfied", "mismatch", "missing", "unparseable", "unknown"],
+                  "description": "`unparseable` covers pip options (-r, --extra-index-url) and bare VCS/URL lines; `unknown` means the comparison could not be made (the pip probe failed, or the installed dist records a non-PEP-440 version)."
+                }
+              },
+              "required": ["raw", "name", "specifier", "source", "installed", "status"]
+            }
+          },
+          "summary": {
+            "type": "object",
+            "description": "Per-status counts for this pack. Every status key is always present.",
+            "properties": {
+              "satisfied": { "type": "integer" },
+              "mismatch": { "type": "integer" },
+              "missing": { "type": "integer" },
+              "unparseable": { "type": "integer" },
+              "unknown": { "type": "integer" }
+            },
+            "required": ["satisfied", "mismatch", "missing", "unparseable", "unknown"]
+          }
+        },
+        "required": ["pack", "path", "status", "requirement_files", "requirements", "summary"]
+      }
+    },
+    "warnings": {
+      "type": "array",
+      "description": "Non-fatal problems. `installed_versions_unavailable` means the pip probe failed, so every requirement is `unknown`. `registry_unavailable` (transient — retry) / `registry_node_not_found` (permanent 404 — do NOT retry) / `registry_no_dependency_metadata` mean a `--registry` candidate could not be diffed; `registry_partial_dependency_metadata` means its `declared` list lost malformed entries and is incomplete; `registry_invalid_node_id` means a `--registry` value was blank or outside `[A-Za-z0-9._-]` and was rejected without a request. Every other row is unaffected.",
+      "items": {
+        "type": "object",
+        "properties": {
+          "code": { "type": "string" },
+          "message": { "type": "string" }
+        },
+        "required": ["code", "message"]
+      }
+    }
+  },
+  "required": ["workspace", "python", "compiled_lock", "packs"]
+}
