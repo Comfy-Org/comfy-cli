@@ -32,9 +32,13 @@ bundled fallback never got a chance. Bodies are parsed and shape-checked
 
 **Never mix generations.** ``cloud_disabled`` is computed by matching labels
 from ``supported_nodes.yaml`` against disable rules in
-``cloud_disable_config.yaml``, so a fresh file paired with a stale one can
-mis-classify a node. The pair is fetched, validated, and committed atomically:
-either both files land or neither does.
+``cloud_disable_config.yaml``, so a fresh document paired with a stale one can
+mis-classify a node. The pair is fetched and validated as a unit, and cached in
+a *single* file published by a *single* ``os.replace`` — two files would mean
+two renames, and two renames are not one transaction however tightly staged: a
+reader can land between them, a second write can fail after the first
+committed, and two concurrent refreshes can interleave into a lasting A/B mix.
+One file makes all of that unrepresentable.
 
 Set ``COMFY_CLI_NO_REMOTE_REFRESH=1`` to skip the network entirely (cache →
 bundled only) for airgapped or CI use.
@@ -42,6 +46,7 @@ bundled only) for airgapped or CI use.
 
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 import threading
@@ -77,6 +82,10 @@ _FETCH_DEADLINE = 6.0
 _FAILURE_BACKOFF = 60 * 60
 _FAILURE_STAMP = ".refresh-failed"
 
+# Bumped when the cache file's layout changes. A mismatch is treated as a cache
+# miss, so an old-format file is re-fetched rather than misread.
+_CACHE_SCHEMA = 1
+
 # These are two small YAML documents (~32 KB bundled). The shared 64 MiB default
 # is a ceiling for ``/object_info``-sized payloads; a much tighter cap here means
 # a misbehaving or hostile upstream can't stream unbounded data into the memory
@@ -98,6 +107,12 @@ def network_disabled() -> bool:
 def _cache_dir() -> Path:
     base = os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache")
     return Path(base) / "comfy-cli" / "comfy-complete"
+
+
+def _cache_file() -> Path:
+    """The single file holding both annotation documents. See ``_persist_pair``
+    for why the pair shares one file rather than one file each."""
+    return _cache_dir() / "annotations.json"
 
 
 def bundled_bytes(filename: str) -> bytes | None:
@@ -253,38 +268,57 @@ def _stage_atomic(path: Path, data: bytes) -> Path:
 def _persist_pair(fetched: dict[str, bytes]) -> tuple[bool, str | None]:
     """Commit a validated pair to the cache. Returns ``(persisted, error)``.
 
-    **Both files are staged before either is renamed into place.** Writing them
-    one at a time makes each file atomic but not the pair: if the second write
-    fails on a full disk, the first is already committed and the second keeps
-    its old contents *and* its old mtime. ``_read_cached_pair(require_fresh=
-    False)`` would then hand back a fresh ``supported_nodes.yaml`` beside an
-    older ``cloud_disable_config.yaml`` — the generation mixing this module
-    promises never happens, and ``cloud_disabled`` computed from it can be
-    wrong. Staging first shrinks the window to two renames, which on one
-    filesystem don't fail for the reasons a write does.
+    The pair lives in **one** cache file, published with **one** ``os.replace``.
+    Two files meant two renames, and two renames are not one transaction no
+    matter how tightly they're staged: a reader between them sees a mixed pair,
+    a failure on the second leaves the first committed, and two concurrent
+    ``comfy nodes`` refreshes can interleave into a permanent A/B mix. Since
+    ``cloud_disabled`` is computed by cross-referencing the two documents, any
+    of those yields a wrong answer that persists for a whole TTL window.
+
+    One file makes the whole class unrepresentable — no manifest, no generation
+    directories, and less code than the two-file version it replaces. It also
+    subsumes the "half-present cache" case: there is no half.
 
     Best-effort: a read-only cache dir or a full disk must not discard data we
     already hold, so a write failure is reported rather than raised. Reported
     separately from a fetch failure, because "downloaded fine, couldn't save it"
     and "couldn't download it" call for different user action.
     """
-    cache_dir = _cache_dir()
-    staged: list[tuple[Path, Path]] = []
     try:
-        for filename, data in fetched.items():
-            dest = cache_dir / filename
-            staged.append((_stage_atomic(dest, data), dest))
-        for tmp, dest in staged:
-            os.replace(tmp, dest)
+        # These are UTF-8 YAML documents (PyYAML would not have parsed them in
+        # ``_VALIDATORS`` otherwise), so they ride as text rather than base64 —
+        # the cache file stays greppable when someone is debugging annotations.
+        payload = {
+            "schema": _CACHE_SCHEMA,
+            "files": {name: data.decode("utf-8") for name, data in fetched.items()},
+        }
+        blob = json.dumps(payload).encode("utf-8")
+    except (UnicodeDecodeError, ValueError) as e:
+        return False, f"annotation body is not UTF-8 text: {e}"
+
+    cache = _cache_file()
+    try:
+        os.replace(_stage_atomic(cache, blob), cache)
     except OSError as e:
-        for tmp, _ in staged:
-            try:
-                tmp.unlink()
-            except OSError:
-                pass  # already renamed, or never landed
         return False, str(e)
+    _drop_legacy_cache()
     _clear_failure_stamp()
     return True, None
+
+
+def _drop_legacy_cache() -> None:
+    """Remove the per-file cache written by earlier builds. Best-effort.
+
+    Harmless if left behind — nothing reads it any more — but it's dead bytes in
+    the user's cache dir, so clean it up the first time we write the new one.
+    """
+    cache_dir = _cache_dir()
+    for filename in _FILES:
+        try:
+            (cache_dir / filename).unlink()
+        except OSError:
+            pass
 
 
 def _is_fresh(path: Path) -> bool:
@@ -299,20 +333,34 @@ def _is_fresh(path: Path) -> bool:
 
 
 def _read_cached_pair(*, require_fresh: bool) -> dict[str, bytes] | None:
-    """Both cached files if both are present, valid, and (optionally) fresh."""
-    cache_dir = _cache_dir()
+    """The cached pair, if it is complete, valid, and (optionally) fresh.
+
+    Returns ``None`` on anything short of that — missing file, unreadable,
+    non-JSON, wrong schema, an absent entry, or a body that fails its validator.
+    A cache written by an older comfy-cli (per-file, pre-validation) lands in
+    that bucket too, so it is simply re-fetched rather than trusted. Every
+    ``None`` hands the decision back to the caller's next fallback, which
+    eventually reaches the bundled snapshot — never a silent blank annotation.
+    """
+    cache = _cache_file()
+    if require_fresh and not _is_fresh(cache):
+        return None
+    try:
+        payload = json.loads(cache.read_bytes())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(payload, dict) or payload.get("schema") != _CACHE_SCHEMA:
+        return None
+    files = payload.get("files")
+    if not isinstance(files, dict):
+        return None
+
     out: dict[str, bytes] = {}
     for filename in _FILES:
-        path = cache_dir / filename
-        if require_fresh and not _is_fresh(path):
+        text = files.get(filename)
+        if not isinstance(text, str):
             return None
-        try:
-            data = path.read_bytes()
-        except OSError:
-            return None
-        # A cache entry written by an older comfy-cli (before validation
-        # existed) or corrupted on disk is treated as absent, so the bundled
-        # snapshot can take over instead of silently blanking every annotation.
+        data = text.encode("utf-8")
         if not _VALIDATORS[filename](data):
             return None
         out[filename] = data
@@ -397,7 +445,6 @@ def refresh_annotations() -> list[dict]:
     ``"remote"``, ``path`` is ``None``, and ``cache_error`` explains why — a
     caching problem is not a network problem and shouldn't be reported as one.
     """
-    cache_dir = _cache_dir()
     error: str | None = None
     fetched: dict[str, bytes] | None = None
 
@@ -422,7 +469,8 @@ def refresh_annotations() -> list[dict]:
             entry.update(
                 source="remote",
                 bytes=len(fetched[filename]),
-                path=str(cache_dir / filename) if persisted else None,
+                # Both documents share one cache file, so both report it.
+                path=str(_cache_file()) if persisted else None,
             )
             if cache_error:
                 entry["cache_error"] = cache_error

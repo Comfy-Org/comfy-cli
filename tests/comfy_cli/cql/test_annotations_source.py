@@ -8,6 +8,7 @@ the implicit hot path must never stall or repeat a doomed fetch, and the
 
 from __future__ import annotations
 
+import json
 import os
 import threading
 import time
@@ -41,12 +42,19 @@ def cache_dir(tmp_path):
 
 
 def _write_pair(cache_dir, sup=VALID_SUP, dis=VALID_DIS, *, age: float = 0.0):
-    for name, data in ((src._SUPPORTED_NODES, sup), (src._CLOUD_DISABLE, dis)):
-        path = cache_dir / name
-        path.write_bytes(data)
-        if age:
-            stamp = time.time() - age
-            os.utime(path, (stamp, stamp))
+    """Seed the single-file cache the way `_persist_pair` would."""
+    path = cache_dir / "annotations.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schema": src._CACHE_SCHEMA,
+                "files": {src._SUPPORTED_NODES: sup.decode(), src._CLOUD_DISABLE: dis.decode()},
+            }
+        )
+    )
+    if age:
+        stamp = time.time() - age
+        os.utime(path, (stamp, stamp))
 
 
 def _allow_network(monkeypatch):
@@ -144,14 +152,6 @@ def test_allow_network_false_never_fetches(cache_dir, monkeypatch):
     assert sup == VALID_SUP  # served straight from the stale cache
 
 
-def test_half_present_cache_is_not_used(cache_dir, monkeypatch):
-    """One file alone can't be paired with the other generation — go bundled."""
-    (cache_dir / src._SUPPORTED_NODES).write_bytes(VALID_SUP)
-    sup, _ = src.load_annotation_bytes()
-    assert sup == src.bundled_bytes(src._SUPPORTED_NODES)
-    assert sup != VALID_SUP
-
-
 def test_poisoned_cache_is_ignored_in_favour_of_bundled(cache_dir):
     """A cache entry that doesn't validate is treated as absent, not served.
 
@@ -164,7 +164,7 @@ def test_poisoned_cache_is_ignored_in_favour_of_bundled(cache_dir):
     assert sup == src.bundled_bytes(src._SUPPORTED_NODES)
 
 
-def test_fetch_success_writes_both_files(cache_dir, monkeypatch):
+def test_fetch_success_caches_the_pair(cache_dir, monkeypatch):
     _allow_network(monkeypatch)
     monkeypatch.setattr(
         src, "fetch_pair", lambda **kw: {src._SUPPORTED_NODES: VALID_SUP, src._CLOUD_DISABLE: VALID_DIS}
@@ -172,8 +172,8 @@ def test_fetch_success_writes_both_files(cache_dir, monkeypatch):
 
     sup, dis = src.load_annotation_bytes()
     assert (sup, dis) == (VALID_SUP, VALID_DIS)
-    assert (cache_dir / src._SUPPORTED_NODES).read_bytes() == VALID_SUP
-    assert (cache_dir / src._CLOUD_DISABLE).read_bytes() == VALID_DIS
+    cached = src._read_cached_pair(require_fresh=True)
+    assert cached == {src._SUPPORTED_NODES: VALID_SUP, src._CLOUD_DISABLE: VALID_DIS}
 
 
 def test_stale_cache_used_when_fetch_fails(cache_dir, monkeypatch):
@@ -215,52 +215,128 @@ def test_successful_fetch_clears_the_failure_stamp(cache_dir, monkeypatch):
     )
     # The backoff is honoured, so this load serves bundled without fetching...
     src.load_annotation_bytes()
-    assert not (cache_dir / src._SUPPORTED_NODES).exists()
+    assert not src._cache_file().exists()
 
     # ...until the stamp ages out.
     stamp = src._failure_stamp()
     old = time.time() - src._FAILURE_BACKOFF - 10
     os.utime(stamp, (old, old))
     src.load_annotation_bytes()
-    assert (cache_dir / src._SUPPORTED_NODES).read_bytes() == VALID_SUP
+    assert src._read_cached_pair(require_fresh=True) is not None
     assert not stamp.exists()
 
 
-def test_second_write_failing_leaves_the_old_pair_intact(cache_dir, monkeypatch):
-    """A disk-full on the *second* file must not commit the first.
+def test_failed_write_leaves_the_old_generation_intact(cache_dir, monkeypatch):
+    """A disk-full mid-refresh must not leave a partly-updated cache.
 
-    Writing one at a time makes each file atomic but not the pair: file one
-    lands fresh, file two keeps its old bytes *and* its old mtime, and the
-    stale-cache fallback then serves that mixed generation — which is exactly
-    how ``cloud_disabled`` gets computed from mismatched inputs.
+    The pair rides in one file published by one `os.replace`, so there is no
+    "first file committed, second didn't" state to land in — the old generation
+    survives whole, and this run still uses the pair it fetched.
     """
     old_sup = b"node_packs:\n  - name: old-pack\n    node_labels: {}\n"
     old_dis = b"disable_nodes:\n  or:\n    - Stateful: true\n"
     _write_pair(cache_dir, sup=old_sup, dis=old_dis, age=src._CACHE_TTL_SECONDS + 100)
     _allow_network(monkeypatch)
 
-    real_stage = src._stage_atomic
-    calls = []
-
-    def fail_on_second(path, data):
-        calls.append(path)
-        if len(calls) > 1:
-            raise OSError("No space left on device")
-        return real_stage(path, data)
-
-    monkeypatch.setattr(src, "_stage_atomic", fail_on_second)
+    monkeypatch.setattr(src, "_stage_atomic", lambda *a, **k: (_ for _ in ()).throw(OSError("No space left")))
     monkeypatch.setattr(
         src, "fetch_pair", lambda **kw: {src._SUPPORTED_NODES: VALID_SUP, src._CLOUD_DISABLE: VALID_DIS}
     )
 
     sup, dis = src.load_annotation_bytes()
-    # This run still gets the fresh pair it fetched — caching is best-effort.
-    assert (sup, dis) == (VALID_SUP, VALID_DIS)
-    # But nothing was half-committed: both files on disk are the old generation.
-    assert (cache_dir / src._SUPPORTED_NODES).read_bytes() == old_sup
-    assert (cache_dir / src._CLOUD_DISABLE).read_bytes() == old_dis
-    # And no temp files were orphaned behind.
+    assert (sup, dis) == (VALID_SUP, VALID_DIS)  # caching is best-effort
+    assert src._read_cached_pair(require_fresh=False) == {
+        src._SUPPORTED_NODES: old_sup,
+        src._CLOUD_DISABLE: old_dis,
+    }
     assert [p.name for p in cache_dir.iterdir() if p.name.endswith(".tmp")] == []
+
+
+def test_interleaved_refreshes_cannot_mix_generations(cache_dir, monkeypatch):
+    """Concurrent refreshes each publish a whole pair; last writer wins wholly.
+
+    With one file per document this was a real race: process A renames its
+    `supported_nodes.yaml`, B renames both of its own, then A renames its
+    `cloud_disable_config.yaml` — leaving A's labels beside B's disable rules
+    for a full TTL. One file, one rename, so a reader sees exactly one
+    generation whichever order they land in.
+    """
+    gens = {
+        "A": (b"node_packs:\n  - name: A\n    node_labels: {}\n", b"disable_nodes:\n  or:\n    - A: true\n"),
+        "B": (b"node_packs:\n  - name: B\n    node_labels: {}\n", b"disable_nodes:\n  or:\n    - B: true\n"),
+    }
+    whole = [{src._SUPPORTED_NODES: sup, src._CLOUD_DISABLE: dis} for sup, dis in gens.values()]
+
+    # Seed so readers always find something, then hammer it from both sides.
+    src._persist_pair(whole[0])
+    stop = threading.Event()
+    observed: list[dict | None] = []
+    errors: list[BaseException] = []
+
+    def writer(tag):
+        try:
+            while not stop.is_set():
+                src._persist_pair({src._SUPPORTED_NODES: gens[tag][0], src._CLOUD_DISABLE: gens[tag][1]})
+        except BaseException as e:  # noqa: BLE001 — surfaced via `errors` below
+            errors.append(e)
+
+    def reader():
+        try:
+            while not stop.is_set():
+                observed.append(src._read_cached_pair(require_fresh=False))
+        except BaseException as e:  # noqa: BLE001
+            errors.append(e)
+
+    threads = [threading.Thread(target=writer, args=("A",)), threading.Thread(target=writer, args=("B",))]
+    threads += [threading.Thread(target=reader) for _ in range(2)]
+    for t in threads:
+        t.start()
+    time.sleep(0.4)
+    stop.set()
+    for t in threads:
+        t.join(timeout=10.0)
+
+    assert not errors, errors
+    assert len(observed) > 50, f"reader barely ran ({len(observed)} samples) — test proves little"
+    # Every sample is one whole generation. `None` is acceptable (a reader may
+    # catch the file mid-replace on some platforms) — a *mixed* pair is not.
+    mixed = [o for o in observed if o is not None and o not in whole]
+    assert not mixed, f"observed {len(mixed)} mixed generation(s), e.g. {mixed[0]}"
+
+
+def test_legacy_per_file_cache_is_ignored_and_cleaned_up(cache_dir, monkeypatch):
+    """A cache written by an older build is re-fetched, not misread."""
+    (cache_dir / src._SUPPORTED_NODES).write_bytes(VALID_SUP)
+    (cache_dir / src._CLOUD_DISABLE).write_bytes(VALID_DIS)
+
+    # Nothing reads the old layout, so offline resolution goes to bundled.
+    sup, _ = src.load_annotation_bytes()
+    assert sup == src.bundled_bytes(src._SUPPORTED_NODES)
+
+    # And the first successful write sweeps the dead files away.
+    src._persist_pair({src._SUPPORTED_NODES: VALID_SUP, src._CLOUD_DISABLE: VALID_DIS})
+    assert not (cache_dir / src._SUPPORTED_NODES).exists()
+    assert not (cache_dir / src._CLOUD_DISABLE).exists()
+    assert src._read_cached_pair(require_fresh=True) is not None
+
+
+@pytest.mark.parametrize(
+    "blob",
+    [
+        b"not json at all",
+        b'{"schema": 999, "files": {}}',
+        b'{"schema": 1, "files": {"supported_nodes.yaml": "node_packs: [{name: x}]"}}',  # missing the pair
+        b'{"schema": 1, "files": []}',
+        b'{"schema": 1}',
+        b"[]",
+    ],
+)
+def test_malformed_cache_file_reads_as_a_miss(cache_dir, blob):
+    """Any shape we don't recognise falls through to bundled, never to blank."""
+    src._cache_file().write_bytes(blob)
+    assert src._read_cached_pair(require_fresh=True) is None
+    sup, _ = src.load_annotation_bytes()
+    assert sup == src.bundled_bytes(src._SUPPORTED_NODES)
 
 
 def test_cache_write_failure_still_returns_fetched_data(cache_dir, monkeypatch):
@@ -295,8 +371,7 @@ def test_fetch_pair_rejects_garbage_body_without_caching(cache_dir, monkeypatch)
         src.fetch_pair()
 
     src.load_annotation_bytes()
-    assert not (cache_dir / src._SUPPORTED_NODES).exists()
-    assert not (cache_dir / src._CLOUD_DISABLE).exists()
+    assert not src._cache_file().exists()
 
 
 def test_fetch_pair_is_all_or_nothing(cache_dir, monkeypatch):
@@ -312,7 +387,7 @@ def test_fetch_pair_is_all_or_nothing(cache_dir, monkeypatch):
     monkeypatch.setattr(src, "_fetch_one", half_broken)
     with pytest.raises(src.AnnotationFetchError, match="500"):
         src.fetch_pair()
-    assert not (cache_dir / src._SUPPORTED_NODES).exists()
+    assert not src._cache_file().exists()
 
 
 def test_fetch_pair_bounded_by_deadline(monkeypatch):
@@ -369,7 +444,7 @@ def test_refresh_annotations_reports_remote_on_success(cache_dir, monkeypatch):
     results = src.refresh_annotations()
     assert all(r["source"] == "remote" for r in results)
     assert all(r["path"] for r in results)
-    assert (cache_dir / src._SUPPORTED_NODES).read_bytes() == VALID_SUP
+    assert src._read_cached_pair(require_fresh=True) is not None
 
 
 def test_refresh_annotations_ignores_the_backoff_stamp(monkeypatch):
