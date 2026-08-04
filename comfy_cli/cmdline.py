@@ -154,7 +154,17 @@ def _maybe_nudge_setup(ctx: typer.Context, renderer) -> None:
         pass
 
 
-@app.callback(invoke_without_command=True)
+@app.callback(
+    invoke_without_command=True,
+    epilog=(
+        "Cloud quickstart (no local GPU required):\n\n"
+        "comfy cloud login  →  comfy run --workflow wf.json --where cloud  "
+        "(prints a prompt_id)  →  comfy jobs wait <prompt_id> --where cloud  →  "
+        "comfy download <prompt_id> --where cloud\n\n"
+        "Cloud generation consumes Comfy Cloud credits (needs an active subscription); "
+        "discovery commands (jobs status, templates ls, generate list) don't. See the README."
+    ),
+)
 def entry(
     ctx: typer.Context,
     workspace: Annotated[
