@@ -1118,6 +1118,38 @@ class TestCancellationReachesTheWorker:
         assert dest.exists()
         assert json_renderer()["data"]["status"] == "completed"
 
+    def test_cancel_reclaims_the_part_file_a_killed_worker_left(self, workspace, json_renderer, monkeypatch, tmp_path):
+        """The httpx downloader streams into a `.part` sibling, so a SIGKILLed
+        worker's gigabytes are *there*, not at `dest`. Cancel has to sweep them or
+        it reports success while reclaiming nothing — the by-hand cleanup this
+        command exists to spare the user.
+        """
+        dest = tmp_path / "m.safetensors"
+        part = tmp_path / "m.safetensors.a1b2c3d4.part"
+        part.write_bytes(b"y" * 3600)
+        state = _state(dest=str(dest), status="downloading", pid=None, total_bytes=13000, completed_bytes=3600)
+        download_state.write(workspace, state)
+
+        monkeypatch.setattr(download_state, "stop_worker", lambda *_a, **_k: True)
+        models.download_cancel(None, download_id=state.id)
+
+        assert not part.exists(), "the killed worker's partial must be reclaimed"
+        assert not dest.exists()
+        payload = json_renderer()["data"]
+        assert (payload["status"], payload["completed_bytes"]) == ("cancelled", 0)
+
+    def test_cancel_leaves_an_unrelated_neighbour_alone(self, workspace, json_renderer, monkeypatch, tmp_path):
+        dest = tmp_path / "m.safetensors"
+        neighbour = tmp_path / "m.safetensors.notes.part"
+        neighbour.write_bytes(b"a user's own file")
+        state = _state(dest=str(dest), status="downloading", pid=None, total_bytes=13000)
+        download_state.write(workspace, state)
+
+        monkeypatch.setattr(download_state, "stop_worker", lambda *_a, **_k: True)
+        models.download_cancel(None, download_id=state.id)
+
+        assert neighbour.read_bytes() == b"a user's own file"
+
     def test_cancel_does_not_delete_a_finished_file_when_the_total_was_unknown(
         self, workspace, json_renderer, monkeypatch, tmp_path
     ):

@@ -17,6 +17,31 @@ from comfy_cli import constants, ui
 from comfy_cli.output.sanitize import sanitize_value
 
 
+def _apply_destination_mode(tmp_name: str, path: pathlib.Path) -> None:
+    """Give a mkstemp tmp file the permissions its destination should end up with.
+
+    ``tempfile.mkstemp`` hardcodes the tmp file to 0600, and ``os.replace`` carries
+    that mode onto the destination — so without this, writing through a tmp sibling
+    would quietly strip the group/other read access a plain ``open(path, "w")``
+    would have granted, turning a shared model file owner-only. Reuse the existing
+    destination's bits when there is one, else fall back to the umask-derived
+    default a fresh ``open()`` would have produced (0666 & ~umask).
+
+    Best-effort: a filesystem without POSIX permissions (Windows) is left alone,
+    matching the surrounding fsync handling.
+    """
+    try:
+        dest_mode = stat.S_IMODE(os.stat(path).st_mode)
+    except OSError:
+        umask = os.umask(0)
+        os.umask(umask)
+        dest_mode = 0o666 & ~umask
+    try:
+        os.chmod(tmp_name, dest_mode)
+    except OSError:
+        pass
+
+
 def atomic_write_text(path: pathlib.Path, content: str, *, fsync: bool = False) -> None:
     """Atomically write ``content`` to ``path`` via a sibling tmp file + ``os.replace``.
 
@@ -52,22 +77,7 @@ def atomic_write_text(path: pathlib.Path, content: str, *, fsync: bool = False) 
                     os.fsync(f.fileno())  # O_RDWR fd, so fsync works on Windows too
                 except OSError:
                     pass
-        # mkstemp hardcodes the tmp file to 0600, and os.replace carries that mode
-        # onto the destination — so without this a first atomic write would quietly
-        # strip the group/other read access a shared output is meant to have. Restore
-        # the intended mode before the rename: reuse the existing destination's bits,
-        # else fall back to the umask-derived default (0666 & ~umask) for a new file.
-        try:
-            dest_mode = stat.S_IMODE(os.stat(path).st_mode)
-        except OSError:
-            umask = os.umask(0)
-            os.umask(umask)
-            dest_mode = 0o666 & ~umask
-        try:
-            os.chmod(tmp_name, dest_mode)
-        except OSError:
-            # Windows / filesystems without POSIX perms: best-effort, matching fsync.
-            pass
+        _apply_destination_mode(tmp_name, path)
         os.replace(tmp_name, path)
         if fsync:
             # Also fsync the parent directory so the rename itself is durable.
@@ -357,6 +367,61 @@ def _cleanup_partial(filepath: pathlib.Path) -> None:
         pass
 
 
+# The httpx downloader streams into a sibling of the destination named
+# ``<dest name>.<mkstemp token>.part`` and renames it onto the destination only
+# once the last byte has landed. The suffix is public in the sense that a killed
+# transfer leaves one on disk, so `download-cancel` has to be able to find it —
+# hence `partial_paths_for` below rather than an ad-hoc glob at the call site.
+_PART_SUFFIX = ".part"
+# ``tempfile.mkstemp`` fills the middle with exactly 8 characters from this
+# alphabet (``tempfile._RandomNameSequence``). Matching its shape — not just the
+# prefix and suffix — is what stops `partial_paths_for` from claiming an
+# unrelated user file that happens to sit beside the model and end in ".part".
+_MKSTEMP_TOKEN_LEN = 8
+_MKSTEMP_TOKEN_CHARS = frozenset("abcdefghijklmnopqrstuvwxyz0123456789_")
+
+
+def partial_paths_for(local_filepath: pathlib.Path) -> list[pathlib.Path]:
+    """Every ``.part`` sibling this module would have created for ``local_filepath``.
+
+    A transfer killed uncleanly (SIGKILL, OOM, power loss) never gets to run its
+    own cleanup, so its ``.part`` file outlives it. This is how the cancel path
+    finds those bytes; nothing else on disk is ever matched.
+    """
+    prefix = local_filepath.name + "."
+    try:
+        entries = list(local_filepath.parent.iterdir())
+    except OSError:
+        return []
+
+    matches = []
+    for entry in entries:
+        name = entry.name
+        if not name.startswith(prefix) or not name.endswith(_PART_SUFFIX):
+            continue
+        token = name[len(prefix) : -len(_PART_SUFFIX)]
+        if len(token) != _MKSTEMP_TOKEN_LEN or not set(token) <= _MKSTEMP_TOKEN_CHARS:
+            continue
+        matches.append(entry)
+    return sorted(matches)
+
+
+def cleanup_partials(local_filepath: pathlib.Path) -> int:
+    """Best-effort removal of every ``.part`` sibling; returns how many went away.
+
+    Used by `download-cancel`, which promises to reclaim the disk a dead worker
+    was using. The destination itself is never touched here.
+    """
+    removed = 0
+    for partial in partial_paths_for(local_filepath):
+        try:
+            partial.unlink()
+        except OSError:
+            continue
+        removed += 1
+    return removed
+
+
 def _friendly_network_error(exc: Exception) -> str:
     """Return a user-friendly description of a network error."""
     if isinstance(exc, _TransientHTTPStatusError):
@@ -392,16 +457,29 @@ def _download_file_httpx(
 ) -> None:
     """Download a file using httpx streaming. Raises on HTTP or network errors.
 
+    The bytes stream into a uniquely-named ``.part`` sibling of ``local_filepath``
+    and are renamed onto it with ``os.replace`` only after the last chunk lands, so
+    the destination only ever transitions absent→complete (or old-complete→
+    new-complete). A transfer killed uncleanly — SIGKILL, OOM, power loss, none of
+    which run any Python cleanup — therefore leaves a ``.part`` file rather than a
+    truncated model at the path ComfyUI is about to load from. Same-directory
+    sibling keeps the rename on one filesystem, and therefore atomic, exactly as
+    :func:`atomic_write_text` documents for text.
+
     ``progress_callback`` (optional) receives ``(completed_bytes, total_bytes)``
     as chunks land — ``total_bytes`` comes from Content-Length and is None when
     the server doesn't send one. It fires once with ``(0, total)`` before the
     first chunk so a caller learns the size as soon as the headers are read.
 
     If ``state`` is provided, ``state["file_opened"]`` is set to True immediately
-    after the output file is opened for writing. Callers use this to distinguish
-    failures raised *before* the destination was touched (HTTP errors, ConnectError,
-    etc.) from failures raised *after* writing started (mid-stream ReadTimeout),
-    so they can avoid deleting an unrelated pre-existing file at the destination.
+    after the output file is opened for writing, and ``state["part_path"]`` holds
+    that file's path. Callers use the flag to distinguish failures raised *before*
+    any bytes were written (HTTP errors, ConnectError, etc.) from failures raised
+    *after* writing started (mid-stream ReadTimeout) — it now guards the temp file
+    rather than the destination, since the destination is no longer written
+    through. Every failure path unlinks the temp before re-raising, with one
+    deliberate exception: a :class:`KeyboardInterrupt` leaves it in place so
+    :func:`download_file` can ask the user whether to keep the partial.
     """
     with httpx.stream("GET", url, follow_redirects=True, headers=headers, timeout=_DOWNLOAD_TIMEOUT) as response:
         if response.status_code != 200:
@@ -430,22 +508,44 @@ def _download_file_httpx(
         else:
             description = "Downloading..."
 
-        with open(local_filepath, "wb") as f:
-            if state is not None:
-                state["file_opened"] = True
-            # Announce the size (and the zeroed counter) before the first chunk
-            # so a background observer stops reporting `total_bytes: null` as
-            # soon as the headers are in.
-            _report_progress(progress_callback, 0, total)
-            completed = 0
-            for data in ui.show_progress(
-                response.iter_bytes(),
-                total,
-                description=description,
-            ):
-                f.write(data)
-                completed += len(data)
-                _report_progress(progress_callback, completed, total)
+        # O_CREAT | O_EXCL and no symlink following, in the destination's own
+        # directory: concurrent transfers never collide on a shared name, and a
+        # pre-planted symlink can't redirect the write (CWE-377).
+        fd, tmp_name = tempfile.mkstemp(
+            dir=str(local_filepath.parent),
+            prefix=local_filepath.name + ".",
+            suffix=_PART_SUFFIX,
+        )
+        if state is not None:
+            state["file_opened"] = True
+            state["part_path"] = tmp_name
+        try:
+            with os.fdopen(fd, "wb") as f:
+                # Announce the size (and the zeroed counter) before the first chunk
+                # so a background observer stops reporting `total_bytes: null` as
+                # soon as the headers are in.
+                _report_progress(progress_callback, 0, total)
+                completed = 0
+                for data in ui.show_progress(
+                    response.iter_bytes(),
+                    total,
+                    description=description,
+                ):
+                    f.write(data)
+                    completed += len(data)
+                    _report_progress(progress_callback, completed, total)
+            _apply_destination_mode(tmp_name, local_filepath)
+            os.replace(tmp_name, local_filepath)
+        except KeyboardInterrupt:
+            # The one failure that leaves the partial behind: download_file prompts
+            # the user about it, and deleting it here would make "no" unanswerable.
+            raise
+        except BaseException:
+            # BaseException, not Exception, so a DownloadCancelled (or anything
+            # else a progress callback throws through the transfer loop) still
+            # reclaims the temp file's disk.
+            _cleanup_partial(pathlib.Path(tmp_name))
+            raise
 
 
 def download_file(
@@ -462,6 +562,17 @@ def download_file(
     size is known. When a retry discards a partial file the callback is reset to
     ``(0, None)`` first, so an observer never sees a counter run backwards from
     a stale high-water mark.
+
+    **The two downloaders differ in how the destination is written, deliberately.**
+    The httpx path is atomic: it streams into a ``.part`` sibling and renames onto
+    ``local_filepath`` only once the transfer completes, so no kill can strand a
+    truncated file where a complete model belongs, and each retry attempt gets its
+    own temp rather than reusing a half-written destination. ``aria2`` is left
+    writing straight to the destination on purpose — it owns its own ``.aria2``
+    control file next to the output and resumes from it, and renaming the output
+    from under aria2 would break that resume. So a killed aria2 transfer can still
+    leave a partial at the destination; that is aria2's resume state, not corruption
+    this module introduced, and `download-cancel` cleans up both shapes.
     """
     if downloader not in _VALID_DOWNLOADERS:
         raise DownloadException(
@@ -474,19 +585,21 @@ def download_file(
         return _download_file_aria2(url, local_filepath, headers, progress_callback)
 
     last_exc: Exception | None = None
-    state: dict = {"file_opened": False}
+    state: dict = {"file_opened": False, "part_path": None}
 
     for attempt in range(_DOWNLOAD_MAX_RETRIES):
         state["file_opened"] = False
+        state["part_path"] = None
         try:
             _download_file_httpx(url, local_filepath, headers, state=state, progress_callback=progress_callback)
             return
         except _RETRIABLE_EXCEPTIONS as exc:
             last_exc = exc
-            # Only clean up if _download_file_httpx actually opened the destination —
-            # otherwise we'd delete an unrelated pre-existing file at the same path.
+            # The temp file this attempt was writing is already gone (the helper
+            # unlinks it on the way out) and the destination was never touched, so
+            # there is nothing here to delete — only an observer to correct: it
+            # last heard a byte count for bytes that no longer exist anywhere.
             if state["file_opened"]:
-                _cleanup_partial(local_filepath)
                 _report_progress(progress_callback, 0, None)
             if attempt < _DOWNLOAD_MAX_RETRIES - 1:
                 wait = _DOWNLOAD_RETRY_BACKOFF * (attempt + 1)
@@ -499,17 +612,20 @@ def download_file(
             # so callers only need to handle one error type.
             # InvalidURL inherits directly from Exception (not HTTPError), hence the
             # explicit inclusion.
-            if state["file_opened"]:
-                _cleanup_partial(local_filepath)
+            # No cleanup needed: the helper already removed its temp file, and the
+            # destination is never written through.
             raise DownloadException(f"Download failed: {_friendly_network_error(exc)}") from exc
         except KeyboardInterrupt:
-            # Only prompt/cleanup if we actually opened the destination this attempt.
-            # If the interrupt arrived during connection setup, there is no partial
-            # file and the destination may hold an unrelated pre-existing file.
+            # Only prompt if we actually started writing this attempt. If the
+            # interrupt arrived during connection setup there is no partial file to
+            # ask about. The helper deliberately leaves the interrupted `.part` on
+            # disk for exactly this question; whichever way it is answered, the
+            # destination is untouched — a pre-existing file there survives either
+            # way, which is why only the temp is ever a candidate for deletion.
             if state["file_opened"]:
                 delete_eh = ui.prompt_confirm_action("Download interrupted, cleanup files?", True)
-                if delete_eh:
-                    _cleanup_partial(local_filepath)
+                if delete_eh and state["part_path"]:
+                    _cleanup_partial(pathlib.Path(state["part_path"]))
             raise
 
     raise DownloadException(

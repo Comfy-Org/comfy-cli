@@ -21,6 +21,7 @@ from comfy_cli.file_utils import (
     DownloadException,
     _friendly_network_error,
     check_unauthorized,
+    cleanup_partials,
     download_file,
 )
 from comfy_cli.output import get_renderer
@@ -929,10 +930,11 @@ def _render_download_rows(rows: list[dict]) -> None:
 def _reconciled(state: download_state.DownloadState) -> tuple[download_state.DownloadState, bool]:
     """Reconcile ``state`` against reality, persisting a *status* correction.
 
-    Only a status change is written back. Byte counts are re-derived from
-    ``stat(dest)`` on every poll anyway, so persisting them buys nothing — and
-    would let a poll racing a live worker rewind the file to whatever this
-    reader happened to load a moment earlier.
+    Only a status change is written back. Persisting the byte counts a reader
+    derived would let a poll racing a live worker rewind the file to whatever
+    this reader happened to load a moment earlier — the worker is the only
+    writer of progress, and mid-flight its state file is the sole source of
+    truth (the destination doesn't exist yet; see :func:`download_state.reconcile`).
     """
     fresh = download_state.reconcile(state)
     changed = fresh.status != state.status
@@ -1056,9 +1058,20 @@ def download_cancel(
         if size is not None:
             state.completed_bytes = size
     else:
-        if stopped and size is not None:
-            with contextlib.suppress(OSError):
-                partial.unlink()
+        if stopped:
+            if size is not None:
+                # aria2 writes straight to the destination (it resumes from its own
+                # control file), so an unfinished aria2 transfer still leaves its
+                # bytes here.
+                with contextlib.suppress(OSError):
+                    partial.unlink()
+                    removed = True
+            # The httpx downloader streams into a `.part` sibling and only renames
+            # onto the destination once the transfer completes, so a worker killed
+            # mid-flight leaves its gigabytes *there*, not at `dest`. Without this
+            # sweep the cancel would report success and reclaim nothing — the exact
+            # hand-cleanup this command exists to spare the user.
+            if cleanup_partials(partial):
                 removed = True
         state.status = "cancelled"
         state.error = None if stopped else "worker may still be running; partial file left in place"
