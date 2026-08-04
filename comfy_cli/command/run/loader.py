@@ -22,10 +22,19 @@ def _node_errors_to_list(node_errors) -> list[dict]:
         return []
     result = []
     for node_id, record in node_errors.items():
-        if not isinstance(record, dict):
-            continue
-        entry = {"node_id": str(node_id)}
-        entry.update(record)
+        if isinstance(record, dict):
+            # Spread the server's record FIRST so the authoritative map key
+            # below wins if a (less-trusted, cloud-supplied) record carries a
+            # `node_id` of its own.
+            entry = dict(record)
+        else:
+            # A server reporting a bare value instead of the documented per-node
+            # dict (e.g. `{"1": "missing input"}`) must not vanish: an empty
+            # array under a "rejected N node(s)" message would strand the caller
+            # with no diagnostic at all. Wrap it so the outer shape stays
+            # uniform — one record per node, each carrying `node_id`.
+            entry = {"errors": list(record) if isinstance(record, list) else [record]}
+        entry["node_id"] = str(node_id)
         result.append(entry)
     return result
 

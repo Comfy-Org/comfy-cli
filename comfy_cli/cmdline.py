@@ -1002,30 +1002,34 @@ def run(
                 preloaded=preloaded,
                 allow_spend=allow_spend,
             )
-            return
+        else:
+            # Both targets must fall off the END of this try suite: Python skips
+            # a try's `else:` clause when the suite leaves via `return`, so an
+            # early return here would silently drop the `execution_success`
+            # tracking below (it only ever fired on the cloud branch by way of
+            # the `except typer.Exit` handler).
+            from comfy_cli.host_port import parse_host_port_arg, resolve_host_port
 
-        from comfy_cli.host_port import parse_host_port_arg, resolve_host_port
+            if host:
+                host, parsed_port = parse_host_port_arg(host)
+                if not port and parsed_port is not None:
+                    port = parsed_port
 
-        if host:
-            host, parsed_port = parse_host_port_arg(host)
-            if not port and parsed_port is not None:
-                port = parsed_port
+            host, port = resolve_host_port(host, port)
 
-        host, port = resolve_host_port(host, port)
-
-        run_inner.execute(
-            workflow,
-            host,
-            port,
-            wait=wait,
-            verbose=verbose,
-            timeout=timeout,
-            notify=effective_notify,
-            api_key=api_key,
-            print_prompt=print_prompt,
-            preloaded=preloaded,
-            allow_spend=allow_spend,
-        )
+            run_inner.execute(
+                workflow,
+                host,
+                port,
+                wait=wait,
+                verbose=verbose,
+                timeout=timeout,
+                notify=effective_notify,
+                api_key=api_key,
+                print_prompt=print_prompt,
+                preloaded=preloaded,
+                allow_spend=allow_spend,
+            )
     except typer.Exit as e:
         if (e.exit_code or 0) == 0:
             tracking.track_event("execution_success", _track_props)
