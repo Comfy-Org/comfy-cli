@@ -7,7 +7,28 @@
     "stopped": { "type": "boolean" },
     "host": { "type": "string" },
     "port": { "type": ["integer", "string"] },
-    "pid": { "type": "integer" }
+    "pid": { "type": "integer" },
+    "dry_run": {
+      "type": "boolean",
+      "description": "True when --dry-run was passed: nothing was stopped and `stopped` is false."
+    },
+    "untracked": {
+      "type": "boolean",
+      "description": "True when the target was found by --port rather than read from this CLI's background record."
+    },
+    "verified": {
+      "type": "boolean",
+      "description": "--port only: the listener was positively identified as ComfyUI before being reported."
+    },
+    "cmdline": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "--port --dry-run only: the identified listener's command line."
+    },
+    "cwd": {
+      "type": "string",
+      "description": "--port --dry-run only: the identified listener's working directory, when readable."
+    }
   },
   "required": ["stopped"]
 }

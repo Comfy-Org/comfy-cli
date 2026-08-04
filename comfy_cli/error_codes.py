@@ -79,6 +79,17 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "`comfy stop` could not kill the recorded background ComfyUI process. `details.pid` carries the process id.",
         "kill the process manually if it is still running",
     ),
+    ErrorCode(
+        "port_not_listening",
+        "`comfy stop --port <p>` found no process LISTENing on that port. `details.port` carries the port.",
+        "check the port, or run `comfy stop` to stop the server this CLI started",
+    ),
+    ErrorCode(
+        "unverified_process",
+        "`comfy stop --port <p>` found a listener it could not positively identify as ComfyUI, so it "
+        "refused to stop it. `details` carries the pid, whatever cmdline was readable, and the reason.",
+        "confirm what is on that port and stop it yourself if it really is ComfyUI",
+    ),
     # --- workflow loading ----------------------------------------------------
     ErrorCode(
         "workflow_not_found",
