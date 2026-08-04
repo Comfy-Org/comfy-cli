@@ -843,12 +843,18 @@ class TestTempFileNaming:
         mock_stream.return_value = _make_ok_response(content=b"v2")
         dest = tmp_path / "model.bin"
         dest.write_bytes(b"v1")
-        os.chmod(dest, 0o4755)
+        # Owner-only under the set-ID bits: the group/other bits are what a
+        # real 4755 binary carries, but they play no part in what this asserts
+        # (that the 0o777 mask drops set-ID), and granting them here is an
+        # overly-permissive chmod in its own right. Group/other preservation is
+        # covered by test_replacing_a_file_keeps_its_permissions.
+        os.chmod(dest, stat.S_ISUID | stat.S_ISGID | stat.S_IRWXU)
+        assert dest.stat().st_mode & stat.S_ISUID, "the fixture must really carry a set-ID bit"
 
         download_file("http://example.com/model.bin", dest)
 
         mode = dest.stat().st_mode
-        assert stat.S_IMODE(mode) == 0o755
+        assert stat.S_IMODE(mode) == 0o700
         assert not mode & (stat.S_ISUID | stat.S_ISGID)
 
     @pytest.mark.skipif(sys.platform == "win32", reason="POSIX mode bits")
