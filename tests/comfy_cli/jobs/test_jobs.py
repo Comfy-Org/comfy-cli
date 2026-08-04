@@ -1156,6 +1156,40 @@ def test_jobs_cancel_cloud_404_surfaces_prompt_not_found(monkeypatch: pytest.Mon
     assert "prompt_not_found" in result.output
 
 
+@pytest.mark.parametrize("code", [401, 403])
+def test_jobs_cancel_cloud_auth_failure_surfaces_cloud_unauthorized(monkeypatch: pytest.MonkeyPatch, code: int):
+    """An expired/insufficient session cancelling a cloud job surfaces the
+    actionable ``cloud_unauthorized`` code (shared envelope handler, BE-3266) —
+    not the generic ``cloud_http_error`` it produced before the two call sites
+    were unified."""
+    import io
+    import urllib.error
+
+    from typer.testing import CliRunner
+
+    from comfy_cli.target import Target
+
+    fake_target = Target(
+        kind="cloud",
+        base_url="https://cloud.example.com",
+        path_prefix="/api",
+        history_path="history_v2",
+        jobs_path="jobs",
+        api_key="test-key",
+    )
+    monkeypatch.setattr("comfy_cli.target.resolve_target", lambda **kw: fake_target)
+    monkeypatch.setattr(jobs_mod, "_is_cloud", lambda w: True)
+    monkeypatch.setattr(jobs_mod, "cloud_preflight_or_exit", lambda: None)
+
+    err = urllib.error.HTTPError("https://x/cancel", code, "Unauthorized", {}, io.BytesIO(b'{"error":"expired"}'))
+    _capture_urlopen(monkeypatch, {"/api/jobs/prompt-abc/cancel": err})
+
+    runner = CliRunner()
+    result = runner.invoke(jobs_mod.app, ["cancel", "prompt-abc", "--where", "cloud"])
+    assert result.exit_code == 1
+    assert "cloud_unauthorized" in result.output
+
+
 def test_is_cloud_honors_env_var(monkeypatch: pytest.MonkeyPatch):
     """``comfy --where cloud jobs status X`` sets COMFY_WHERE in the env.
     ``_is_cloud(None)`` must return True so the cloud path is taken.
