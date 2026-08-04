@@ -647,6 +647,114 @@ class TestStatusServerUpNoRecord:
         data = _last_json(result.stdout)["data"]
         assert data["outputs"] == []
 
+    @pytest.mark.parametrize(
+        ("recorded_host", "queried_host"),
+        [
+            ("127.0.0.1", "localhost"),  # `run --host localhost`, status with defaults
+            ("localhost", "127.0.0.1"),  # and the reverse
+            ("127.0.0.1", "0.0.0.0"),  # COMFY_LOCAL_URL=http://0.0.0.0:8188 — see below
+            ("127.0.0.1", "LOCALHOST"),  # hostnames are case-insensitive
+            ("[::1]", "::1"),  # brackets are a URL encoding, not the address
+        ],
+    )
+    def test_a_loopback_alias_is_not_treated_as_a_different_server(
+        self, monkeypatch: pytest.MonkeyPatch, recorded_host: str, queried_host: str
+    ):
+        """Scoping the read to the queried target must not reject the SAME
+        server spelled differently — that is a silent false negative that
+        discards the `server_died` attribution this fallback exists to keep.
+
+        These spellings genuinely diverge in practice: `comfy run`'s `execute()`
+        rewrites the wildcard bind `0.0.0.0` to `127.0.0.1` before writing the
+        state file, while `resolve_host_port` only canonicalizes a wildcard that
+        came from `config.background` — so one `COMFY_LOCAL_URL=http://0.0.0.0:8188`
+        makes `run` store `127.0.0.1` and `jobs status` ask about `0.0.0.0`.
+        """
+        from comfy_cli import jobs_state
+
+        self._server_up_with_no_record(monkeypatch)
+        st = jobs_state.new(
+            prompt_id="alias-run",
+            client_id="c",
+            workflow="/tmp/wf.json",
+            where="local",
+            host=recorded_host,
+            port=8188,
+        )
+        st.status = "error"
+        st.error = {"code": "server_died", "message": "died", "details": {}}
+        jobs_state.write(st)
+
+        result = _invoke_status("alias-run", "--host", queried_host, "--port", "8188")
+        assert result.exit_code == 0, result.output
+        data = _last_json(result.stdout)["data"]
+        assert data["error"]["code"] == "server_died"
+        assert data["source"] == "state_file"
+
+    def test_a_genuinely_different_host_is_still_rejected(self, monkeypatch: pytest.MonkeyPatch):
+        """The alias folding must not over-reach: a non-loopback host is a
+        different server and its record is still not this query's answer."""
+        from comfy_cli import jobs_state
+
+        self._server_up_with_no_record(monkeypatch)
+        st = jobs_state.new(
+            prompt_id="remote-run",
+            client_id="c",
+            workflow="/tmp/wf.json",
+            where="local",
+            host="192.168.1.50",
+            port=8188,
+        )
+        st.status = "completed"
+        st.outputs = ["http://192.168.1.50:8188/view?filename=remote.png"]
+        jobs_state.write(st)
+
+        result = _invoke_status("remote-run", "--host", "127.0.0.1", "--port", "8188")
+        assert result.exit_code == 1, result.output
+        env = _last_json(result.stdout)
+        assert env["error"]["code"] == "prompt_not_found"
+        assert env["error"]["details"] == {"prompt_id": "remote-run", "host": "127.0.0.1", "port": 8188}
+        # The other server's artifact URLs must not leak into this answer.
+        assert "remote.png" not in json.dumps(env)
+
+    def test_a_cancelled_state_file_payload_is_schema_valid(self, monkeypatch: pytest.MonkeyPatch):
+        """`cancelled` is terminal in `jobs_state` and is copied verbatim into
+        the payload, so this path can emit it — `schemas/jobs.json` must accept
+        it. Without the enum entry the published contract rejects a payload the
+        command legitimately produces."""
+        import jsonschema
+
+        from comfy_cli import jobs_state
+
+        self._server_up_with_no_record(monkeypatch)
+        st = jobs_state.new(
+            prompt_id="cancelled-run",
+            client_id="c",
+            workflow="/tmp/wf.json",
+            where="local",
+            host="127.0.0.1",
+            port=8188,
+        )
+        st.status = "cancelled"
+        jobs_state.write(st)
+
+        result = _invoke_status("cancelled-run", "--host", "127.0.0.1", "--port", "8188")
+        assert result.exit_code == 0, result.output
+        data = _last_json(result.stdout)["data"]
+        assert data["status"] == "cancelled"
+
+        schema_path = Path(__file__).parents[3] / "comfy_cli" / "schemas" / "jobs.json"
+        jsonschema.Draft202012Validator(json.loads(schema_path.read_text())).validate(data)
+
+    def test_jobs_schema_status_enum_covers_every_terminal_state(self):
+        """Every `jobs_state.TERMINAL_STATUSES` value reaches a `jobs status`
+        payload verbatim, so each must be a legal `status` in the schema."""
+        from comfy_cli import jobs_state
+
+        schema_path = Path(__file__).parents[3] / "comfy_cli" / "schemas" / "jobs.json"
+        enum = set(json.loads(schema_path.read_text())["properties"]["status"]["enum"])
+        assert jobs_state.TERMINAL_STATUSES <= enum, sorted(jobs_state.TERMINAL_STATUSES - enum)
+
 
 # ---------------------------------------------------------------------------
 # `jobs ls --orphaned` — surface watcher_crashed jobs for cleanup

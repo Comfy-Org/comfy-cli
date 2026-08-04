@@ -734,6 +734,40 @@ def _state_file_snapshot(st: JobState, *, prompt_id: str, host: str, port: int, 
     }
 
 
+# Spellings that all name "the local machine". Folded together before a
+# state file's recorded host is compared with the queried one, because the two
+# are written by different code paths that do NOT agree on spelling:
+#
+#   * `comfy run`'s `execute()` substitutes the wildcard bind `0.0.0.0` with
+#     `127.0.0.1` before it writes the state file, while `resolve_host_port`
+#     canonicalizes a wildcard only when it came from `config.background` — an
+#     explicit `--host 0.0.0.0`, or a `COMFY_LOCAL_URL` naming it, reaches
+#     `jobs status` verbatim. Same env var, same server, two spellings.
+#   * `localhost` vs `127.0.0.1` is just which flag the caller happened to type;
+#     `resolve_host_port` passes both through unchanged.
+#
+# A missed match here is a silent FALSE NEGATIVE — the record is discarded and
+# the command falls back to the bare `prompt_not_found` envelope, throwing away
+# the very `server_died` attribution this fallback exists to preserve.
+_LOOPBACK_HOST_SPELLINGS = frozenset({"127.0.0.1", "localhost", "::1", "0.0.0.0", "::"})
+
+
+def _canonical_local_host(host: str) -> str:
+    """Fold one host spelling into a form comparable for same-server checks.
+
+    Unbrackets IPv6 literals (``[::1]`` and ``::1`` are the same address —
+    brackets are a URL encoding, and `Target.host` stores the raw literal while
+    `resolve_host_port` returns the bracketed one), lowercases (hostnames are
+    case-insensitive), and collapses every loopback/wildcard spelling onto one.
+    Anything else is returned as-is, so a genuinely different host still fails
+    the comparison.
+    """
+    from comfy_cli.env_checker import _unbracket_host
+
+    h = _unbracket_host(str(host).strip()).lower()
+    return "127.0.0.1" if h in _LOOPBACK_HOST_SPELLINGS else h
+
+
 def _state_file_for_local_target(prompt_id: str, *, host: str, port: int) -> JobState | None:
     """Read `prompt_id`'s state file, but only if it answers for THIS local target.
 
@@ -765,8 +799,10 @@ def _state_file_for_local_target(prompt_id: str, *, host: str, port: int) -> Job
     if st.where != "local":
         return None
     # host/port are None on files written before they were recorded, so only a
-    # positive mismatch disqualifies a record.
-    if st.host is not None and st.host != host:
+    # positive mismatch disqualifies a record. Compare canonicalized spellings:
+    # a literal `!=` rejects `localhost` against `127.0.0.1` (see
+    # `_canonical_local_host`), which would silently break this whole fallback.
+    if st.host is not None and _canonical_local_host(st.host) != _canonical_local_host(host):
         return None
     if st.port is not None and str(st.port) != str(port):
         return None
