@@ -192,6 +192,18 @@ def _cache_age_str(cache: Path) -> str:
     return f"{age / 60:.0f}m"
 
 
+def _as_str_list(value: Any) -> list[str]:
+    """Coerce a gallery field to a list of strings, tolerating the scalar-or-junk
+    variance in real data. A bare string is treated as a single-element list (not
+    split into characters); a non-list/non-string scalar becomes an empty list.
+    """
+    if isinstance(value, str):
+        return [value] if value else []
+    if isinstance(value, list):
+        return [str(v) for v in value if v]
+    return []
+
+
 def _flatten_templates(categories: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Walk the nested (category → templates) shape and flatten to a list.
 
@@ -219,6 +231,7 @@ def _flatten_templates(categories: list[dict[str, Any]]) -> list[dict[str, Any]]
                     "group_category": cat.get("category") or "",
                     "tags": list(t.get("tags") or []),
                     "models": list(t.get("models") or []),
+                    "requires_custom_nodes": _as_str_list(t.get("requiresCustomNodes")),
                     "providers": _flatten_providers(t.get("logos") or []),
                     "date": t.get("date") or "",
                     "open_source": bool(t.get("openSource", False)),
@@ -609,7 +622,7 @@ def fetch_cmd(
     # node count in the envelope without re-reading.
     try:
         wf = json.loads(body)
-    except json.JSONDecodeError as e:
+    except (json.JSONDecodeError, UnicodeDecodeError) as e:
         renderer.error(
             code="template_workflow_invalid_json",
             message=f"upstream returned non-JSON for {name!r}: {e}",
@@ -646,6 +659,390 @@ def fetch_cmd(
     if renderer.is_pretty() and out:
         rprint(f"[green]✓[/green] wrote {len(body):,} bytes ({payload['node_count']} nodes) to {target_repr}")
     renderer.emit(payload, command="templates fetch")
+
+
+# ---------------------------------------------------------------------------
+# templates check — per-template runnable/missing/api-required/unknown verdict
+# ---------------------------------------------------------------------------
+
+
+def _template_workflow_cache_path(name: str) -> Path:
+    """Where a fetched per-template workflow JSON is cached. Same base-dir logic
+    as :func:`_cache_path`, one file per template under ``gallery/templates``.
+
+    ``name`` comes from the (untrusted) gallery index, so it's URL-encoded the
+    same way :func:`_fetch_template_workflow` encodes it for the fetch URL —
+    ``quote(..., safe="")`` turns any ``/`` or ``..`` segment into ``%2F``/``..``
+    with no path separators, keeping the file strictly inside ``gallery/templates``.
+    """
+    base = os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache")
+    safe_name = urllib.parse.quote(name, safe="")
+    return Path(base) / "comfy-cli" / "gallery" / "templates" / f"{safe_name}.json"
+
+
+def _iter_workflow_nodes(wf: dict[str, Any]):
+    """Yield every node dict in a UI-format workflow: top-level ``nodes`` first,
+    then the nodes inside each subgraph *definition*.
+
+    The subgraph walk is mandatory — modern templates (e.g. ``image_z_image_turbo``)
+    carry their model references only inside subgraph definitions, so a top-level
+    walk alone would report them as having zero model requirements.
+    """
+    if not isinstance(wf, dict):
+        return
+    top = wf.get("nodes")
+    if isinstance(top, list):
+        for node in top:
+            if isinstance(node, dict):
+                yield node
+    definitions = wf.get("definitions")
+    subgraphs = definitions.get("subgraphs") if isinstance(definitions, dict) else None
+    if isinstance(subgraphs, list):
+        for sg in subgraphs:
+            if not isinstance(sg, dict):
+                continue
+            sg_nodes = sg.get("nodes")
+            if isinstance(sg_nodes, list):
+                for node in sg_nodes:
+                    if isinstance(node, dict):
+                        yield node
+
+
+def _collect_model_requirements(wf: dict[str, Any]) -> list[dict[str, str]]:
+    """Gather every ``node["properties"]["models"]`` entry across top-level and
+    subgraph nodes. Each entry is normalized to ``{name, directory, url}`` and
+    deduped by ``(directory, name)`` preserving first-seen order.
+    """
+    seen: set[tuple[str, str]] = set()
+    out: list[dict[str, str]] = []
+    for node in _iter_workflow_nodes(wf):
+        props = node.get("properties")
+        if not isinstance(props, dict):
+            continue
+        models = props.get("models")
+        if not isinstance(models, list):
+            continue
+        for m in models:
+            if not isinstance(m, dict):
+                continue
+            name = str(m.get("name") or "")
+            directory = str(m.get("directory") or "")
+            if not name:
+                # A model ref with no filename isn't matchable against a folder
+                # listing — keeping it would always report a phantom empty-name
+                # "missing" model and wrongly flip the verdict to missing-models.
+                continue
+            key = (directory, name)
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append({"name": name, "directory": directory, "url": str(m.get("url") or "")})
+    return out
+
+
+def _collect_node_class_types(wf: dict[str, Any]) -> list[str]:
+    """Distinct ``node["type"]`` values across top-level + subgraph nodes.
+
+    For a regular node this is the ComfyUI class name (``CheckpointLoaderSimple``);
+    for a subgraph *instance* it's the definition UUID (never loader-ish, never in
+    object_info), which is why the loader/api heuristics simply skip those.
+    """
+    seen: set[str] = set()
+    out: list[str] = []
+    for node in _iter_workflow_nodes(wf):
+        t = node.get("type")
+        if isinstance(t, str) and t and t not in seen:
+            seen.add(t)
+            out.append(t)
+    return out
+
+
+def _basename(path: str) -> str:
+    """Last path segment of a folder-relative listing entry. Model folder
+    listings return paths that may include subdirectories (``sdxl/model.safetensors``)
+    and always use ``/`` on the wire; also tolerate a stray backslash defensively.
+    """
+    return path.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1]
+
+
+def _list_local_folder(target, folder: str) -> list[str] | None:
+    """List file paths in ``/models/<folder>`` on the local server.
+
+    Returns the folder-relative names, or ``None`` if the folder 404s (a
+    custom-node folder like ``SEEDVR2`` that ComfyUI doesn't register). Connection
+    errors (server not running) and other HTTP errors propagate to the caller.
+    """
+    # Reuse the exact target/URL plumbing `comfy models list-folder` uses.
+    from comfy_cli.command.models.search import _http_get_json, _models_path_parts
+
+    url = target.url(*_models_path_parts(target), folder)
+    try:
+        data = _http_get_json(url, target)
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return None
+        raise
+    names: list[str] = []
+    if isinstance(data, list):
+        for entry in data:
+            if isinstance(entry, dict):
+                n = entry.get("name", "")
+            elif isinstance(entry, str):
+                n = entry
+            else:
+                n = ""
+            if n:
+                names.append(n)
+    return names
+
+
+def _template_is_api_by_index(name: str, tags: list[str]) -> bool:
+    """Index-only API heuristic: an ``api_*`` template name, or an ``API`` tag."""
+    if name.startswith("api_"):
+        return True
+    return any(str(t).strip().lower() == "api" for t in tags)
+
+
+def _compute_verdict(*, api_dependent: bool, missing: list, required_count: int, node_types: list[str]) -> str:
+    """Verdict precedence: api-required > missing-models > runnable > unknown."""
+    if api_dependent:
+        return "api-required"
+    if missing:
+        return "missing-models"
+    if required_count > 0:
+        # Every referenced model resolved on disk.
+        return "runnable"
+    # Zero model references: runnable only if nothing looks like it *should* load
+    # a model; otherwise we genuinely can't tell (loader with no declared models).
+    loaderish = any("loader" in (t or "").lower() for t in node_types)
+    return "unknown" if loaderish else "runnable"
+
+
+@app.command(
+    "check",
+    help=(
+        "Report whether a gallery template is runnable on THIS install: which of "
+        "its models are present vs missing locally, whether it needs partner-API "
+        "access, and any custom nodes it declares. Resolves the name against the "
+        "gallery, fetches the workflow, and intersects its model refs with the "
+        "local server's model folders."
+    ),
+)
+@tracking.track_command("templates")
+def check_cmd(
+    name: Annotated[str, typer.Argument(help="Template name (matches `comfy templates ls` rows).")],
+    gallery_path: Annotated[
+        str | None,
+        typer.Option("--gallery", show_default=False, help="Path to a local index.json (skips the cache + fetch)."),
+    ] = None,
+    refresh: Annotated[
+        bool,
+        typer.Option("--refresh", help="Re-fetch the gallery index AND the template workflow before checking."),
+    ] = False,
+):
+    from comfy_cli.target import resolve_target
+
+    renderer = get_renderer()
+
+    # 1. Resolve the name against the gallery index (same affordance as `fetch`).
+    try:
+        cats = _load_gallery(gallery_path, refresh=refresh)
+    except (urllib.error.URLError, OSError, json.JSONDecodeError) as e:
+        renderer.error(code="gallery_load_failed", message=str(e))
+        raise typer.Exit(code=1) from e
+
+    rows = _flatten_templates(cats)
+    match = next((r for r in rows if r["name"] == name), None)
+    if match is None:
+        lower = name.lower()
+        close = [r["name"] for r in rows if lower in r["name"].lower()][:5]
+        renderer.error(
+            code="template_not_found",
+            message=f"no template named {name!r} in the gallery",
+            hint="try `comfy templates ls --name <substring>` to search",
+            details={"close_matches": close},
+        )
+        raise typer.Exit(code=1)
+
+    # 2. Fetch (or read from cache) the per-template workflow JSON.
+    cache_path = _template_workflow_cache_path(name)
+    body: bytes | None = None
+    if not refresh and cache_path.exists():
+        try:
+            body = cache_path.read_bytes()
+        except OSError:
+            body = None
+    if body is None:
+        try:
+            body = _fetch_template_workflow(name)
+        except (urllib.error.HTTPError, urllib.error.URLError, OSError) as e:
+            status = getattr(e, "code", None)
+            renderer.error(
+                code="template_fetch_failed",
+                message=f"failed to fetch workflow for {name!r}: {e}",
+                hint=(
+                    "the gallery index references a template whose workflow JSON "
+                    "is missing upstream — report at "
+                    "https://github.com/Comfy-Org/workflow_templates/issues"
+                    if status == 404
+                    else "check network connectivity"
+                ),
+                details={"status": status} if status else None,
+            )
+            raise typer.Exit(code=1) from e
+        # Write atomically: a truncated file (interrupted write / full disk) would
+        # otherwise be trusted by the read path above on the next non-refresh run
+        # and fail `template_workflow_invalid_json` until the user passed --refresh.
+        try:
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp_path = cache_path.parent / f"{cache_path.name}.{os.getpid()}.tmp"
+            try:
+                tmp_path.write_bytes(body)
+                os.replace(tmp_path, cache_path)
+            except OSError:
+                tmp_path.unlink(missing_ok=True)
+                raise
+        except OSError:
+            pass  # a non-writable cache dir must not fail the check
+
+    try:
+        wf = json.loads(body)
+    except (json.JSONDecodeError, UnicodeDecodeError) as e:
+        renderer.error(
+            code="template_workflow_invalid_json",
+            message=f"template workflow for {name!r} is not valid JSON: {e}",
+            hint="re-run with --refresh to re-fetch, or report upstream",
+        )
+        raise typer.Exit(code=1) from e
+    if not isinstance(wf, dict):
+        renderer.error(
+            code="template_workflow_invalid_json",
+            message=f"template workflow for {name!r} is not a JSON object",
+            hint="re-run with --refresh to re-fetch, or report upstream",
+        )
+        raise typer.Exit(code=1)
+
+    # 3. Model requirements (top-level + subgraph walk) and node class types.
+    required = _collect_model_requirements(wf)
+    node_types = _collect_node_class_types(wf)
+
+    # 4. API dependence. Tier (a) is the index heuristic; tier (b) upgrades it with
+    #    object_info when a local server is reachable (best-effort — a down server
+    #    just leaves the index answer in place).
+    api_dependent = _template_is_api_by_index(name, match.get("tags") or [])
+    api_source = "index"
+    api_nodes: list[str] = []
+    try:
+        from comfy_cli.cql.engine import Graph
+
+        graph = Graph.load(mode="local")
+        api_nodes = [cls for cls in node_types if (m := graph.node(cls)) is not None and m.is_api_node]
+        # Only attribute the signal to object_info when it actually found API nodes;
+        # an empty scan must leave `source` reflecting the index heuristic, not claim
+        # object_info as the source of an api-required verdict it didn't produce.
+        if api_nodes:
+            api_source = "object_info"
+            api_dependent = True
+    except Exception:
+        # Server down / object_info unavailable → index heuristic alone decides.
+        # Discard any partial object_info result so `source` and `api_nodes` agree.
+        api_nodes = []
+        api_source = "index"
+
+    # 5. Installed intersection: list each distinct folder once on the local server
+    #    and match required files by basename.
+    warnings: list[str] = []
+    present: list[str] = []
+    missing: list[dict[str, str]] = []
+    distinct_dirs = list(dict.fromkeys(req["directory"] for req in required))
+    if required:
+        target = resolve_target(where="local")
+        listings: dict[str, list[str] | None] = {}
+        try:
+            for directory in distinct_dirs:
+                if not directory or ".." in directory or "/" in directory or "\\" in directory:
+                    # Not addressable as a `/models/<folder>` segment — treat as absent.
+                    listings[directory] = None
+                    warnings.append(
+                        f"model directory {directory!r} isn't a valid model folder — its files are reported missing"
+                    )
+                    continue
+                folder_files = _list_local_folder(target, directory)
+                listings[directory] = folder_files
+                if folder_files is None:
+                    warnings.append(
+                        f"model folder {directory!r} not found on the local server "
+                        f"(custom-node folder?) — its files are reported missing"
+                    )
+        except (urllib.error.URLError, OSError, ValueError, json.JSONDecodeError) as e:
+            renderer.error(
+                code="server_not_running",
+                message=f"local ComfyUI server is unreachable, cannot check installed models: {e}",
+                hint="run `comfy launch` to start a local server",
+            )
+            raise typer.Exit(code=1) from e
+
+        for req in required:
+            listing = listings.get(req["directory"])
+            # Normalize BOTH sides: a model ref may itself carry a subfolder
+            # (e.g. ``SDXL/model.safetensors``, as ComfyUI loader widgets emit),
+            # so compare basenames on the required side too.
+            req_base = _basename(req["name"])
+            if listing and any(_basename(entry) == req_base for entry in listing):
+                present.append(req["name"])
+            else:
+                missing.append(dict(req))
+
+    # 6. Custom nodes are report-only in v1 (surfaced verbatim, not verified).
+    custom_nodes_required = list(match.get("requires_custom_nodes") or [])
+
+    # 7. Verdict.
+    verdict = _compute_verdict(
+        api_dependent=api_dependent,
+        missing=missing,
+        required_count=len(required),
+        node_types=node_types,
+    )
+
+    # 8. Emit.
+    payload = {
+        "name": name,
+        "title": match["title"],
+        "verdict": verdict,
+        "models": {"required": len(required), "present": present, "missing": missing},
+        "api": {"dependent": api_dependent, "source": api_source, "api_nodes": api_nodes},
+        "custom_nodes_required": custom_nodes_required,
+        "warnings": warnings,
+    }
+
+    if renderer.is_pretty():
+        # `name`, node-class names, model names/urls and warnings are all untrusted
+        # (they come from the gallery index / workflow JSON), so escape them before
+        # Rich interprets them — a stray `[foo]` would otherwise raise MarkupError.
+        from rich.markup import escape
+
+        mark = "[bold green]✓[/bold green]" if verdict == "runnable" else "[bold red]✗[/bold red]"
+        rprint(f"{mark} {escape(name)} — [bold]{verdict}[/bold]")
+        if api_dependent:
+            extra = f": {escape(', '.join(api_nodes))}" if api_nodes else ""
+            rprint(f"  [yellow]needs partner-API access[/yellow] (via {api_source}){extra}")
+        if custom_nodes_required:
+            rprint(f"  custom nodes: {escape(', '.join(custom_nodes_required))} [dim](not verified)[/dim]")
+        if missing:
+            from rich.table import Table
+
+            tbl = Table(show_header=True, header_style="bold")
+            tbl.add_column("missing model")
+            tbl.add_column("directory", style="dim")
+            tbl.add_column("download url")
+            for m in missing:
+                tbl.add_row(escape(m["name"]), escape(m["directory"]), escape(m["url"]) or "[dim](none)[/dim]")
+            renderer.console().print(tbl)
+        elif required:
+            rprint(f"  [dim]{len(present)}/{len(required)} model(s) present[/dim]")
+        for w in warnings:
+            rprint(f"  [yellow]⚠[/yellow] {escape(w)}")
+    renderer.emit(payload, command="templates check")
 
 
 # ---------------------------------------------------------------------------
