@@ -9,6 +9,7 @@ the implicit hot path must never stall or repeat a doomed fetch, and the
 from __future__ import annotations
 
 import os
+import threading
 import time
 
 import pytest
@@ -225,13 +226,50 @@ def test_successful_fetch_clears_the_failure_stamp(cache_dir, monkeypatch):
     assert not stamp.exists()
 
 
+def test_second_write_failing_leaves_the_old_pair_intact(cache_dir, monkeypatch):
+    """A disk-full on the *second* file must not commit the first.
+
+    Writing one at a time makes each file atomic but not the pair: file one
+    lands fresh, file two keeps its old bytes *and* its old mtime, and the
+    stale-cache fallback then serves that mixed generation — which is exactly
+    how ``cloud_disabled`` gets computed from mismatched inputs.
+    """
+    old_sup = b"node_packs:\n  - name: old-pack\n    node_labels: {}\n"
+    old_dis = b"disable_nodes:\n  or:\n    - Stateful: true\n"
+    _write_pair(cache_dir, sup=old_sup, dis=old_dis, age=src._CACHE_TTL_SECONDS + 100)
+    _allow_network(monkeypatch)
+
+    real_stage = src._stage_atomic
+    calls = []
+
+    def fail_on_second(path, data):
+        calls.append(path)
+        if len(calls) > 1:
+            raise OSError("No space left on device")
+        return real_stage(path, data)
+
+    monkeypatch.setattr(src, "_stage_atomic", fail_on_second)
+    monkeypatch.setattr(
+        src, "fetch_pair", lambda **kw: {src._SUPPORTED_NODES: VALID_SUP, src._CLOUD_DISABLE: VALID_DIS}
+    )
+
+    sup, dis = src.load_annotation_bytes()
+    # This run still gets the fresh pair it fetched — caching is best-effort.
+    assert (sup, dis) == (VALID_SUP, VALID_DIS)
+    # But nothing was half-committed: both files on disk are the old generation.
+    assert (cache_dir / src._SUPPORTED_NODES).read_bytes() == old_sup
+    assert (cache_dir / src._CLOUD_DISABLE).read_bytes() == old_dis
+    # And no temp files were orphaned behind.
+    assert [p.name for p in cache_dir.iterdir() if p.name.endswith(".tmp")] == []
+
+
 def test_cache_write_failure_still_returns_fetched_data(cache_dir, monkeypatch):
     """A read-only cache dir must not discard data we already hold."""
     _allow_network(monkeypatch)
     monkeypatch.setattr(
         src, "fetch_pair", lambda **kw: {src._SUPPORTED_NODES: VALID_SUP, src._CLOUD_DISABLE: VALID_DIS}
     )
-    monkeypatch.setattr(src, "_write_atomic", lambda *a, **k: (_ for _ in ()).throw(OSError("read-only fs")))
+    monkeypatch.setattr(src, "_stage_atomic", lambda *a, **k: (_ for _ in ()).throw(OSError("read-only fs")))
 
     sup, dis = src.load_annotation_bytes()
     assert (sup, dis) == (VALID_SUP, VALID_DIS)
@@ -292,18 +330,22 @@ def test_fetch_pair_bounded_by_deadline(monkeypatch):
 
 
 def test_fetch_pair_runs_concurrently(monkeypatch):
-    """Both files are in flight at once, so the wait is one timeout, not two."""
+    """Both files are in flight at once, so the wait is one timeout, not two.
 
-    def slow(filename):
-        time.sleep(0.3)
+    Proved with a barrier rather than a stopwatch: each worker blocks until the
+    other arrives, so the pair can only complete if both are running at the same
+    time. A sequential implementation deadlocks and trips the barrier timeout,
+    with no wall-clock threshold to flake under CI scheduling noise.
+    """
+    barrier = threading.Barrier(len(src._FILES), timeout=10.0)
+
+    def rendezvous(filename):
+        barrier.wait()
         return VALID_SUP if filename == src._SUPPORTED_NODES else VALID_DIS
 
-    monkeypatch.setattr(src, "_fetch_one", slow)
-    started = time.monotonic()
-    result = src.fetch_pair(deadline=5.0)
-    elapsed = time.monotonic() - started
+    monkeypatch.setattr(src, "_fetch_one", rendezvous)
+    result = src.fetch_pair(deadline=20.0)
     assert set(result) == set(src._FILES)
-    assert elapsed < 0.55, f"sequential fetch would take ~0.6s, took {elapsed:.2f}s"
 
 
 # ---------------------------------------------------------------------------
@@ -348,7 +390,7 @@ def test_refresh_annotations_separates_cache_errors_from_fetch_errors(monkeypatc
     monkeypatch.setattr(
         src, "fetch_pair", lambda **kw: {src._SUPPORTED_NODES: VALID_SUP, src._CLOUD_DISABLE: VALID_DIS}
     )
-    monkeypatch.setattr(src, "_write_atomic", lambda *a, **k: (_ for _ in ()).throw(OSError("disk full")))
+    monkeypatch.setattr(src, "_stage_atomic", lambda *a, **k: (_ for _ in ()).throw(OSError("disk full")))
 
     results = src.refresh_annotations()
     assert all(r["source"] == "remote" for r in results)

@@ -223,30 +223,45 @@ def fetch_pair(*, deadline: float = _FETCH_DEADLINE) -> dict[str, bytes]:
 # ---------------------------------------------------------------------------
 
 
-def _write_atomic(path: Path, data: bytes) -> None:
-    """Write via a same-directory temp file + ``os.replace``.
+def _stage_atomic(path: Path, data: bytes) -> Path:
+    """Write ``data`` to a temp file beside ``path``; return the temp path.
 
-    A concurrent reader must never observe a half-written annotation file:
-    a truncated YAML document parses to *something*, and
+    Staging and committing are split so a *pair* can be committed together —
+    see ``_persist_pair``. Same-directory so the later ``os.replace`` is a
+    rename within one filesystem, which is the part that's actually atomic:
+    a concurrent reader must never observe a half-written annotation file,
+    because a truncated YAML document parses to *something* and
     ``engine.parse_supported_nodes`` would quietly annotate half the graph.
-    Raises ``OSError`` — callers decide whether persisting is best-effort.
+
+    Raises ``OSError`` (cleaning up its temp file first) — callers decide
+    whether persisting is best-effort.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}-", suffix=".tmp")
     try:
         with os.fdopen(fd, "wb") as f:
             f.write(data)
-        os.replace(tmp, path)
     except OSError:
         try:
             os.unlink(tmp)
         except OSError:
             pass
         raise
+    return Path(tmp)
 
 
 def _persist_pair(fetched: dict[str, bytes]) -> tuple[bool, str | None]:
     """Commit a validated pair to the cache. Returns ``(persisted, error)``.
+
+    **Both files are staged before either is renamed into place.** Writing them
+    one at a time makes each file atomic but not the pair: if the second write
+    fails on a full disk, the first is already committed and the second keeps
+    its old contents *and* its old mtime. ``_read_cached_pair(require_fresh=
+    False)`` would then hand back a fresh ``supported_nodes.yaml`` beside an
+    older ``cloud_disable_config.yaml`` — the generation mixing this module
+    promises never happens, and ``cloud_disabled`` computed from it can be
+    wrong. Staging first shrinks the window to two renames, which on one
+    filesystem don't fail for the reasons a write does.
 
     Best-effort: a read-only cache dir or a full disk must not discard data we
     already hold, so a write failure is reported rather than raised. Reported
@@ -254,10 +269,19 @@ def _persist_pair(fetched: dict[str, bytes]) -> tuple[bool, str | None]:
     and "couldn't download it" call for different user action.
     """
     cache_dir = _cache_dir()
+    staged: list[tuple[Path, Path]] = []
     try:
         for filename, data in fetched.items():
-            _write_atomic(cache_dir / filename, data)
+            dest = cache_dir / filename
+            staged.append((_stage_atomic(dest, data), dest))
+        for tmp, dest in staged:
+            os.replace(tmp, dest)
     except OSError as e:
+        for tmp, _ in staged:
+            try:
+                tmp.unlink()
+            except OSError:
+                pass  # already renamed, or never landed
         return False, str(e)
     _clear_failure_stamp()
     return True, None

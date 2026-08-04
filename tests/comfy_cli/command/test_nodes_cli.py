@@ -258,3 +258,51 @@ class TestNodesRefresh:
         monkeypatch.setattr(annotations_source, "refresh_annotations", lambda: fake)
         env = _run(["refresh", "--where", "cloud"], capsys)
         assert env["data"]["refreshed"] is True
+
+    def test_refresh_reports_unavailable_when_no_source_at_all(self, monkeypatch, capsys):
+        """Package data missing *and* the fetch failed — neither remote nor bundled."""
+        from comfy_cli.cql import annotations_source
+
+        fake = [
+            {"name": n, "source": "unavailable", "bytes": 0, "path": None, "error": "dns failure"}
+            for n in ("supported_nodes.yaml", "cloud_disable_config.yaml")
+        ]
+        monkeypatch.setattr(annotations_source, "refresh_annotations", lambda: fake)
+        env = _run(["refresh"], capsys)
+        assert env["data"]["refreshed"] is False
+        assert all(f["source"] == "unavailable" for f in env["data"]["files"])
+
+    def test_refresh_reports_remote_with_cache_error(self, monkeypatch, capsys):
+        """Downloaded fine, couldn't save it — still a successful refresh."""
+        from comfy_cli.cql import annotations_source
+
+        fake = [
+            {"name": n, "source": "remote", "bytes": 100, "path": None, "cache_error": "disk full"}
+            for n in ("supported_nodes.yaml", "cloud_disable_config.yaml")
+        ]
+        monkeypatch.setattr(annotations_source, "refresh_annotations", lambda: fake)
+        env = _run(["refresh"], capsys)
+        assert env["data"]["refreshed"] is True
+        assert all(f["cache_error"] == "disk full" for f in env["data"]["files"])
+
+    @pytest.mark.parametrize(
+        ("entry", "expected"),
+        [
+            # `_run` pins the JSON renderer, so the pretty branch — where the
+            # unavailable/cache_error wording actually lives — needs its own pass.
+            ({"source": "unavailable", "bytes": 0, "path": None, "error": "dns failure"}, "dns failure"),
+            ({"source": "remote", "bytes": 100, "path": None, "cache_error": "disk full"}, "disk full"),
+            ({"source": "bundled", "bytes": 100, "path": None}, "remote unavailable"),
+            ({"source": "unavailable", "bytes": 0, "path": None}, "no source"),
+        ],
+    )
+    def test_refresh_pretty_output_explains_every_source(self, monkeypatch, entry, expected):
+        """Each source renders a reason; a missing `error` never prints as blank."""
+        from comfy_cli.cql import annotations_source
+
+        fake = [{"name": "supported_nodes.yaml", **entry}]
+        monkeypatch.setattr(annotations_source, "refresh_annotations", lambda: fake)
+        reset_renderer_for_testing()  # pretty is the default renderer
+        result = CliRunner().invoke(nodes_cmd.app, ["refresh"])
+        assert result.exit_code == 0, result.output
+        assert expected in result.output
