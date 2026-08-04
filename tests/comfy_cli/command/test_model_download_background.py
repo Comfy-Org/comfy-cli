@@ -851,10 +851,18 @@ class TestPollVerbs:
         assert env["data"] == {"total": 0, "downloads": []}
 
     def test_cancel_kills_the_worker_and_removes_the_partial(self, workspace, json_renderer, tmp_path):
+        # aria2 is the downloader that writes straight to the destination, so it
+        # is the one whose unfinished bytes are found *at* `dest`.
         dest = tmp_path / "m.safetensors"
         dest.write_bytes(b"x" * 10)
         state = _state(
-            dest=str(dest), status="downloading", pid=5150, pid_create_time=1.0, total_bytes=100, completed_bytes=10
+            dest=str(dest),
+            status="downloading",
+            downloader="aria2",
+            pid=5150,
+            pid_create_time=1.0,
+            total_bytes=100,
+            completed_bytes=10,
         )
         download_state.write(workspace, state)
 
@@ -903,7 +911,9 @@ class TestPollVerbs:
     def test_cancel_of_a_dead_worker_still_clears_the_partial(self, workspace, json_renderer, tmp_path):
         dest = tmp_path / "m.safetensors"
         dest.write_bytes(b"x" * 10)
-        state = _state(dest=str(dest), status="downloading", pid=5150, total_bytes=100, completed_bytes=10)
+        state = _state(
+            dest=str(dest), status="downloading", downloader="aria2", pid=5150, total_bytes=100, completed_bytes=10
+        )
         download_state.write(workspace, state)
 
         with patch.object(download_state, "is_worker_process", return_value=False):
@@ -911,6 +921,39 @@ class TestPollVerbs:
 
         assert not dest.exists()
         assert json_renderer()["data"]["status"] == "cancelled"
+
+    def test_cancel_of_an_httpx_download_never_deletes_the_destination(self, workspace, json_renderer, tmp_path):
+        """The httpx downloader only ever writes `dest` via the final rename, so
+        a file sitting there mid-transfer is one this download did not create —
+        `download_file` promises such a file survives either way — or a rename
+        that just landed. Deleting it is data loss for a file we never wrote."""
+        dest = tmp_path / "m.safetensors"
+        dest.write_bytes(b"someone else's model")
+        state = _state(dest=str(dest), status="downloading", pid=5150, total_bytes=100, completed_bytes=10)
+        download_state.write(workspace, state)
+
+        with patch.object(download_state, "is_worker_process", return_value=False):
+            models.download_cancel(None, download_id=state.id)
+
+        assert dest.read_bytes() == b"someone else's model"
+        assert json_renderer()["data"]["status"] == "cancelled"
+
+    def test_cancel_keeps_an_unknown_length_file_that_the_rename_just_landed(
+        self, workspace, json_renderer, monkeypatch, tmp_path
+    ):
+        """With no Content-Length there is no `total_bytes`, so the `finished`
+        check cannot recognise a complete download — and an httpx worker killed
+        between its rename and persisting `completed` leaves exactly that. The
+        file at `dest` is the finished model; deleting it is silent data loss."""
+        dest = tmp_path / "m.safetensors"
+        dest.write_bytes(b"the whole model")
+        state = _state(dest=str(dest), status="downloading", pid=None, total_bytes=None)
+        download_state.write(workspace, state)
+
+        monkeypatch.setattr(download_state, "stop_worker", lambda *_a, **_k: True)
+        models.download_cancel(None, download_id=state.id)
+
+        assert dest.read_bytes() == b"the whole model"
 
     def test_cancel_of_a_terminal_download_is_a_no_op(self, workspace, json_renderer, tmp_path):
         dest = tmp_path / "m.safetensors"
@@ -1076,8 +1119,10 @@ class TestCancellationReachesTheWorker:
         assert not dest.exists()
 
     def test_worker_aborts_mid_transfer_and_clears_the_partial(self, workspace, monkeypatch, tmp_path):
+        # aria2 writes through the destination, so that is where its abandoned
+        # bytes are; see the httpx counterpart below.
         dest = tmp_path / "m.safetensors"
-        state = _state(dest=str(dest), status="starting", pid=None)
+        state = _state(dest=str(dest), status="starting", downloader="aria2", pid=None)
         path = download_state.write(workspace, state)
 
         def transfer(url, filepath, headers, downloader, progress_callback):
@@ -1096,6 +1141,30 @@ class TestCancellationReachesTheWorker:
         final = download_state.read(workspace, state.id)
         assert (final.status, final.completed_bytes) == ("cancelled", 0)
         assert not dest.exists(), "the partial file must not survive the cancel"
+
+    def test_worker_cancel_on_httpx_leaves_the_destination_alone(self, workspace, monkeypatch, tmp_path):
+        """`DownloadCancelled` unwinds out of the httpx transfer *before* the
+        rename, and `_download_file_httpx` reclaims its own `.part` on the way —
+        so the worker has nothing at `dest` to delete, and whatever is there
+        belongs to someone else."""
+        dest = tmp_path / "m.safetensors"
+        dest.write_bytes(b"a neighbour's file")
+        state = _state(dest=str(dest), status="starting", pid=None)
+        path = download_state.write(workspace, state)
+
+        def transfer(url, filepath, headers, downloader, progress_callback):
+            download_state.request_cancel(download_state.cancel_path(workspace, state.id))
+            progress_callback(7, 4096)
+
+        monkeypatch.setattr(models, "download_file", transfer)
+        monkeypatch.setattr(download_state, "PROGRESS_THROTTLE_S", 0.0)
+
+        with pytest.raises(typer.Exit) as exc:
+            models._download_worker(state_file=str(path))
+
+        assert exc.value.exit_code == 0
+        assert download_state.read(workspace, state.id).status == "cancelled"
+        assert dest.read_bytes() == b"a neighbour's file"
 
     def test_a_transfer_that_beat_the_cancel_keeps_its_file(self, workspace, json_renderer, monkeypatch, tmp_path):
         """Both sides have to agree on this one, or cancel deletes a model that
@@ -1137,6 +1206,49 @@ class TestCancellationReachesTheWorker:
         assert not dest.exists()
         payload = json_renderer()["data"]
         assert (payload["status"], payload["completed_bytes"]) == ("cancelled", 0)
+
+    def test_cancel_reclaims_the_part_of_an_already_failed_record(self, workspace, json_renderer, tmp_path):
+        """The realistic ordering: the SIGKILLed worker's *first* `download-status`
+        poll persists reconcile's `failed` verdict, so by the time the user runs
+        `download-cancel` the record is already terminal. If that short-circuits
+        without sweeping, the multi-GB `.part` is unreclaimable — it is invisible
+        to `model list` and `model remove`, which only know about `dest`."""
+        dest = tmp_path / "m.safetensors"
+        part = tmp_path / "m.safetensors.a1b2c3d4.part"
+        part.write_bytes(b"y" * 3600)
+        state = _state(
+            dest=str(dest),
+            status="failed",
+            error="worker died before the download finished",
+            pid=5150,
+            total_bytes=13000,
+            completed_bytes=3600,
+        )
+        download_state.write(workspace, state)
+
+        with patch.object(download_state, "is_worker_process", return_value=False):
+            models.download_cancel(None, download_id=state.id)
+
+        assert not part.exists(), "a terminal record's orphaned partial is still the user's disk"
+        env = json_renderer()
+        assert env["changed"] is True
+        assert env["data"]["completed_bytes"] == 0
+        assert download_state.read(workspace, state.id).completed_bytes == 0
+
+    def test_cancel_of_a_failed_record_whose_worker_is_alive_sweeps_nothing(self, workspace, json_renderer, tmp_path):
+        """A `.part` under an live worker's pen is not ours to delete."""
+        dest = tmp_path / "m.safetensors"
+        part = tmp_path / "m.safetensors.a1b2c3d4.part"
+        part.write_bytes(b"y" * 3600)
+        state = _state(dest=str(dest), status="failed", pid=5150, pid_create_time=1.0, total_bytes=13000)
+        download_state.write(workspace, state)
+
+        with patch.object(download_state, "is_worker_process", return_value=True):
+            with patch("comfy_cli.utils.is_running", return_value=True):
+                models.download_cancel(None, download_id=state.id)
+
+        assert part.exists()
+        assert json_renderer()["changed"] is False
 
     def test_cancel_leaves_an_unrelated_neighbour_alone(self, workspace, json_renderer, monkeypatch, tmp_path):
         dest = tmp_path / "m.safetensors"

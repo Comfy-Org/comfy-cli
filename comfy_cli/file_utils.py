@@ -16,28 +16,47 @@ from pathspec import PathSpec
 from comfy_cli import constants, ui
 from comfy_cli.output.sanitize import sanitize_value
 
+# The process umask, captured once at import. os has no getter, so reading it
+# means the classic set-and-restore dance; doing it here (single-threaded under
+# the import lock) avoids re-running that dance per write, where it would leave
+# a window in which any *other* thread's file lands at 0666/0777 — and where two
+# overlapping probes can restore each other's zero and strand the umask at 0.
+# Same reasoning, same idiom as `comfy_cli.command.transfer`.
+_UMASK = os.umask(0)
+os.umask(_UMASK)
 
-def _apply_destination_mode(tmp_name: str, path: pathlib.Path) -> None:
+
+def _apply_destination_mode(fd: int, path: pathlib.Path) -> None:
     """Give a mkstemp tmp file the permissions its destination should end up with.
 
     ``tempfile.mkstemp`` hardcodes the tmp file to 0600, and ``os.replace`` carries
     that mode onto the destination — so without this, writing through a tmp sibling
     would quietly strip the group/other read access a plain ``open(path, "w")``
     would have granted, turning a shared model file owner-only. Reuse the existing
-    destination's bits when there is one, else fall back to the umask-derived
-    default a fresh ``open()`` would have produced (0666 & ~umask).
+    destination's permission bits when there is one, else fall back to the
+    umask-derived default a fresh ``open()`` would have produced (0666 & ~umask).
 
-    Best-effort: a filesystem without POSIX permissions (Windows) is left alone,
-    matching the surrounding fsync handling.
+    Only the 0o777 bits are copied: ``os.replace`` would otherwise carry a set-ID
+    (or sticky) destination's bits onto freshly downloaded, network-controlled
+    bytes, where an in-place write would have cleared them.
+
+    Applied to the open descriptor rather than the tmp file's *name*: ``os.chmod``
+    resolves a path and follows symlinks, so a name swap between ``mkstemp`` and
+    the chmod would retarget the mode change at an arbitrary file (CWE-59) —
+    reopening the exact race ``mkstemp``'s ``O_EXCL`` was chosen to close.
+
+    Best-effort: a platform without POSIX permissions (Windows has no ``fchmod``)
+    is left alone, matching the surrounding fsync handling.
     """
+    fchmod = getattr(os, "fchmod", None)
+    if fchmod is None:
+        return
     try:
-        dest_mode = stat.S_IMODE(os.stat(path).st_mode)
+        dest_mode = stat.S_IMODE(os.stat(path).st_mode) & 0o777
     except OSError:
-        umask = os.umask(0)
-        os.umask(umask)
-        dest_mode = 0o666 & ~umask
+        dest_mode = 0o666 & ~_UMASK
     try:
-        os.chmod(tmp_name, dest_mode)
+        fchmod(fd, dest_mode)
     except OSError:
         pass
 
@@ -77,7 +96,9 @@ def atomic_write_text(path: pathlib.Path, content: str, *, fsync: bool = False) 
                     os.fsync(f.fileno())  # O_RDWR fd, so fsync works on Windows too
                 except OSError:
                     pass
-        _apply_destination_mode(tmp_name, path)
+            # Inside the `with`: the mode is applied through this descriptor, so
+            # it has to happen before the file object closes it.
+            _apply_destination_mode(f.fileno(), path)
         os.replace(tmp_name, path)
         if fsync:
             # Also fsync the parent directory so the rename itself is durable.
@@ -379,6 +400,36 @@ _PART_SUFFIX = ".part"
 # unrelated user file that happens to sit beside the model and end in ".part".
 _MKSTEMP_TOKEN_LEN = 8
 _MKSTEMP_TOKEN_CHARS = frozenset("abcdefghijklmnopqrstuvwxyz0123456789_")
+# A filesystem caps one path *component* (NAME_MAX: 255 bytes on Linux/ext4,
+# APFS and NTFS the same in practice), and mkstemp builds `<prefix><8><suffix>`
+# — so the prefix has to leave 8 + len(".part") bytes free or the create fails
+# with ENAMETOOLONG where the old `open(dest, "wb")` succeeded. Destination
+# names come from remote metadata (CivitAI `file["name"]`, HF path) and from
+# `--filename`, none of which cap length, so this is reachable input rather
+# than a hypothetical.
+_NAME_MAX = 255
+# What is left for the destination name once the separating ".", mkstemp's token
+# and the ".part" suffix have taken their share.
+_PART_STEM_MAX = _NAME_MAX - len(".") - _MKSTEMP_TOKEN_LEN - len(_PART_SUFFIX)
+
+
+def _part_prefix(name: str) -> str:
+    """The mkstemp ``prefix`` used for ``name``'s ``.part`` siblings.
+
+    Normally just ``name + "."``. A destination name too long to also carry the
+    token and suffix is truncated to fit — on a *byte* basis, since NAME_MAX
+    counts bytes, but on a character boundary so the result stays valid UTF-8.
+    The trailing ``"."`` is appended after the cut, so the prefix always ends in
+    the separator :func:`partial_paths_for` slices on.
+
+    Two destination names agreeing for that many bytes then share a temp
+    namespace, which only affects which temps :func:`cleanup_partials` claims —
+    a far smaller problem than being unable to name a temp at all.
+    """
+    encoded = name.encode("utf-8", "surrogatepass")
+    if len(encoded) > _PART_STEM_MAX:
+        name = encoded[:_PART_STEM_MAX].decode("utf-8", "ignore")
+    return name + "."
 
 
 def partial_paths_for(local_filepath: pathlib.Path) -> list[pathlib.Path]:
@@ -388,7 +439,7 @@ def partial_paths_for(local_filepath: pathlib.Path) -> list[pathlib.Path]:
     own cleanup, so its ``.part`` file outlives it. This is how the cancel path
     finds those bytes; nothing else on disk is ever matched.
     """
-    prefix = local_filepath.name + "."
+    prefix = _part_prefix(local_filepath.name)
     try:
         entries = list(local_filepath.parent.iterdir())
     except OSError:
@@ -513,14 +564,26 @@ def _download_file_httpx(
         # pre-planted symlink can't redirect the write (CWE-377).
         fd, tmp_name = tempfile.mkstemp(
             dir=str(local_filepath.parent),
-            prefix=local_filepath.name + ".",
+            prefix=_part_prefix(local_filepath.name),
             suffix=_PART_SUFFIX,
         )
-        if state is not None:
-            state["file_opened"] = True
-            state["part_path"] = tmp_name
         try:
-            with os.fdopen(fd, "wb") as f:
+            try:
+                part_file = os.fdopen(fd, "wb")
+            except BaseException:
+                # fdopen only fails *before* taking ownership of the descriptor,
+                # so this is the one place the raw fd still has to be closed by
+                # hand; everywhere below, closing is the file object's job.
+                os.close(fd)
+                raise
+            if state is not None:
+                # Path first, flag second. `download_file`'s interrupt prompt is
+                # gated on the flag but deletes via the path, so the reverse order
+                # lets a KeyboardInterrupt landing in between ask the user about a
+                # partial it then silently declines to remove.
+                state["part_path"] = tmp_name
+                state["file_opened"] = True
+            with part_file as f:
                 # Announce the size (and the zeroed counter) before the first chunk
                 # so a background observer stops reporting `total_bytes: null` as
                 # soon as the headers are in.
@@ -534,7 +597,7 @@ def _download_file_httpx(
                     f.write(data)
                     completed += len(data)
                     _report_progress(progress_callback, completed, total)
-            _apply_destination_mode(tmp_name, local_filepath)
+                _apply_destination_mode(f.fileno(), local_filepath)
             os.replace(tmp_name, local_filepath)
         except KeyboardInterrupt:
             # The one failure that leaves the partial behind: download_file prompts

@@ -9,6 +9,7 @@ import httpx
 import pytest
 import requests
 
+from comfy_cli import file_utils
 from comfy_cli.file_utils import (
     DownloadException,
     _cleanup_partial,
@@ -771,6 +772,117 @@ class TestAtomicDestination:
         download_file("http://example.com/model.bin", dest)
 
         assert stat.S_IMODE(dest.stat().st_mode) == 0o640
+
+
+class TestTempFileNaming:
+    """The temp name is derived from the destination name, so the destination's
+    own length and the destination's mode both have to survive the round trip."""
+
+    @patch("httpx.stream")
+    def test_a_maximum_length_destination_name_still_downloads(self, mock_stream, tmp_path):
+        """mkstemp appends 13 bytes to the prefix, so an un-truncated prefix makes
+        any name over NAME_MAX-14 fail with ENAMETOOLONG — where the old
+        `open(dest, "wb")` succeeded. Names come from remote metadata (CivitAI
+        `file["name"]`, the HF path) and `--filename`, none of which cap length.
+        """
+        mock_stream.return_value = _make_ok_response(content=b"data")
+        # 250 bytes: a name the filesystem itself accepts (NAME_MAX is 255), but
+        # 9 bytes too long to also carry mkstemp's token and suffix.
+        dest = tmp_path / ("m" * 238 + ".safetensors")
+        assert 241 < len(dest.name.encode()) <= 255
+
+        download_file("http://example.com/model.safetensors", dest)
+
+        assert dest.read_bytes() == b"data"
+        assert partial_paths_for(dest) == []
+
+    @patch("httpx.stream")
+    def test_a_long_name_partial_is_still_reclaimable(self, mock_stream, tmp_path):
+        """Truncating the prefix is only safe if the matcher truncates identically
+        — otherwise `download-cancel` silently stops finding these."""
+        dest = tmp_path / ("m" * 238 + ".safetensors")
+
+        def killed_iter():
+            yield b"partial"
+            raise KeyboardInterrupt()
+
+        resp = Mock()
+        resp.status_code = 200
+        resp.headers = {}
+        resp.iter_bytes = Mock(side_effect=killed_iter)
+        resp.__enter__ = Mock(return_value=resp)
+        resp.__exit__ = Mock(return_value=None)
+        mock_stream.return_value = resp
+
+        with (
+            patch("comfy_cli.file_utils.ui.prompt_confirm_action", return_value=False),
+            pytest.raises(KeyboardInterrupt),
+        ):
+            download_file("http://example.com/model.safetensors", dest)
+
+        assert [p.read_bytes() for p in partial_paths_for(dest)] == [b"partial"]
+        assert cleanup_partials(dest) == 1
+
+    def test_a_non_ascii_name_is_truncated_on_a_character_boundary(self, tmp_path):
+        """NAME_MAX counts bytes, so the cut is a byte cut — but it must not
+        produce an invalid-UTF-8 name that no filesystem call can round-trip."""
+        dest = tmp_path / ("é" * 200 + ".safetensors")
+        prefix = file_utils._part_prefix(dest.name)
+
+        assert len(prefix.encode()) <= file_utils._PART_STEM_MAX + 1
+        assert prefix.encode().decode() == prefix  # valid UTF-8, no split codepoint
+        assert prefix.endswith("."), "the matcher slices on this separator"
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX mode bits")
+    @patch("httpx.stream")
+    def test_a_setuid_destination_does_not_pass_its_set_id_bits_on(self, mock_stream, tmp_path):
+        """`os.replace` carries the temp's mode onto the destination, so copying
+        the old file's full 12-bit mode would stamp setuid/setgid onto freshly
+        downloaded, network-controlled bytes — which an in-place write would have
+        cleared."""
+        mock_stream.return_value = _make_ok_response(content=b"v2")
+        dest = tmp_path / "model.bin"
+        dest.write_bytes(b"v1")
+        os.chmod(dest, 0o4755)
+
+        download_file("http://example.com/model.bin", dest)
+
+        mode = dest.stat().st_mode
+        assert stat.S_IMODE(mode) == 0o755
+        assert not mode & (stat.S_ISUID | stat.S_ISGID)
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX mode bits")
+    @patch("httpx.stream")
+    def test_the_mode_is_applied_through_the_descriptor_not_the_name(self, mock_stream, tmp_path):
+        """chmod-by-path follows symlinks, so a name swap between mkstemp and the
+        chmod would retarget it at an arbitrary file (CWE-59) — reopening the race
+        mkstemp's O_EXCL closed. fchmod on the open fd cannot be redirected."""
+        mock_stream.return_value = _make_ok_response(content=b"data")
+        dest = tmp_path / "model.bin"
+
+        def refuse(*args, **kwargs):
+            raise AssertionError("the temp file must never be chmod'ed by path")
+
+        with patch("comfy_cli.file_utils.os.chmod", side_effect=refuse):
+            download_file("http://example.com/model.bin", dest)
+
+        assert dest.read_bytes() == b"data"
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX umask")
+    @patch("httpx.stream")
+    def test_a_download_never_touches_the_process_umask(self, mock_stream, tmp_path):
+        """Probing the umask means setting it to 0 and restoring it — a window in
+        which any *other* thread's new file lands world-writable, and which two
+        overlapping probes can leave stranded at 0. It belongs at import, once."""
+        mock_stream.return_value = _make_ok_response(content=b"data")
+
+        def refuse(*args, **kwargs):
+            raise AssertionError("the umask must not be probed per download")
+
+        with patch("comfy_cli.file_utils.os.umask", side_effect=refuse):
+            download_file("http://example.com/model.bin", tmp_path / "model.bin")
+
+        assert (tmp_path / "model.bin").read_bytes() == b"data"
 
 
 class TestPartialPaths:

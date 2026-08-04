@@ -422,14 +422,18 @@ def reconcile(state: DownloadState, *, pid_alive=None) -> DownloadState:
     stranger who inherited its pid (see :func:`worker_alive`). Corrections:
 
     * ``completed_bytes`` prefers a live ``stat(dest)`` over the last value the
-      worker managed to persist — when there *is* a file at ``dest``, it is the
-      ground truth. The httpx downloader writes atomically (into a ``.part``
-      sibling, renamed on completion), so mid-flight that stat finds nothing and
-      the worker's own progress writes stand unmodified — which is what we want:
-      a truncated file's length was never a meaningful progress reading, and the
-      state file is the contract `download-status` reports from. Keep the stat:
-      it is what turns "worker SIGKILLed after the rename but before it could
-      write ``completed``" into ``completed`` rather than ``failed``.
+      worker managed to persist — when there *is* a file at ``dest``, it is taken
+      as ground truth. The httpx downloader writes atomically (into a ``.part``
+      sibling, renamed on completion), so for the case the submit path guarantees
+      — a destination that was absent when the download started — that stat finds
+      nothing mid-flight and the worker's own progress writes stand unmodified,
+      which is what we want: a truncated file's length was never a meaningful
+      progress reading, and the state file is the contract `download-status`
+      reports from. Keep the stat: it is what turns "worker SIGKILLed after the
+      rename but before it could write ``completed``" into ``completed`` rather
+      than ``failed``. The stat cannot, however, tell a landed rename apart from
+      a file something *else* dropped at ``dest`` after submission; such a file's
+      size is then adopted as this download's progress.
     * a ``starting`` record that hasn't claimed a pid yet is left alone for
       :data:`STARTUP_GRACE_S`; that window is the worker's interpreter startup.
     * an active status whose worker is gone becomes ``completed`` when the file
