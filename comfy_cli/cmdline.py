@@ -48,9 +48,9 @@ from comfy_cli.config_manager import ConfigManager
 from comfy_cli.constants import GPU_OPTION, CUDAVersion, ROCmVersion
 from comfy_cli.cuda_detect import DEFAULT_CUDA_TAG, detect_cuda_driver_version, resolve_cuda_wheel
 from comfy_cli.discovery import build_discovery
-from comfy_cli.env_checker import EnvChecker
+from comfy_cli.env_checker import EnvChecker, _bracket_host, _unbracket_host
 from comfy_cli.help_json import build_help_json
-from comfy_cli.host_port import DEFAULT_HOST, DEFAULT_PORT, validate_host
+from comfy_cli.host_port import validate_host
 from comfy_cli.output import Renderer, get_renderer, rprint, set_renderer
 from comfy_cli.resolve_python import resolve_workspace_python
 from comfy_cli.skills import command as skill_command
@@ -1104,17 +1104,14 @@ def validate(
         )
         raise typer.Exit(code=1)
 
-    # Load graph
-    mode = "local"
-    if where:
-        mode = where
-    else:
-        config = ConfigManager()
-        try:
-            decision = where_module.resolve(flag=None, config_value=config.get(where_module.CONFIG_KEY_WHERE_DEFAULT))
-            mode = decision.target.value
-        except Exception:
-            pass
+    # Load graph. Route through the shared resolver rather than trusting the raw
+    # `--where` string: it normalizes case/whitespace (`--where LOCAL` is the
+    # same target as `local`) and emits a `where_invalid` envelope instead of
+    # letting an unknown value escape as a bare ValueError traceback. Everything
+    # below then branches on the resolved enum, so no routing decision is ever
+    # made by string-comparing user input.
+    decision = where_module.resolve_default_or_exit(flag=where)
+    mode = decision.target.value
 
     # Resolve the local object_info server the same way `comfy run` does —
     # flag > COMFY_LOCAL_URL > config.background > 127.0.0.1:8188. Without the
@@ -1125,12 +1122,18 @@ def validate(
     # not consult `config.background` on purpose (other callers, e.g. transfer
     # and system, must not), so — as its docstring says — the callers that do
     # honor it resolve upstream, here.
-    if input_path is None and mode == "local":
+    is_local_fetch = input_path is None and decision.target is where_module.WhereTarget.LOCAL
+    if is_local_fetch:
         from comfy_cli.host_port import parse_host_port_arg, resolve_host_port
 
-        if host:
+        # `host is not None` (not `if host:`): `--host ""` must reach the parser
+        # and be rejected, not be read as "no --host given". Likewise the port
+        # merge tests `is None`, so an explicit `--port 0` isn't silently
+        # overridden by a port embedded in the combined `--host h:p` form —
+        # `resolve_host_port` rejects it as out of range instead.
+        if host is not None:
             host, parsed_port = parse_host_port_arg(host)
-            if not port and parsed_port is not None:
+            if port is None and parsed_port is not None:
                 port = parsed_port
         host, port = resolve_host_port(host, port)
 
@@ -1204,12 +1207,14 @@ def validate(
         # Name the server (or file) the verdict was computed against, so an
         # agent comparing `validate` with `run` can see whether they consulted
         # the same object_info. Populated from the values resolved above, so a
-        # local run reports the concrete host/port actually queried.
+        # local run reports the concrete host/port actually queried. `host` is
+        # reported unbracketed, matching `Target.host` — brackets belong to the
+        # URL composed for display, not to the address itself.
         "object_info_source": (
             {"mode": "file", "path": str(input_path)}
             if input_path is not None
-            else {"mode": mode, "host": host or DEFAULT_HOST, "port": port or DEFAULT_PORT}
-            if mode == "local"
+            else {"mode": mode, "host": _unbracket_host(host), "port": port}
+            if is_local_fetch
             else {"mode": mode}
         ),
     }
@@ -1225,11 +1230,15 @@ def validate(
         # escape it — same reason the partner-node line below does.
         from rich.markup import escape as _escape
 
+        # Branch on the same flags that built the payload, not on its "mode"
+        # string: "file" is an offline sentinel that shares a key with the
+        # routing targets, so a mode-string branch couples display to a value
+        # the routing layer also owns.
         source = payload["object_info_source"]
-        if source["mode"] == "file":
+        if input_path is not None:
             where_oi = _escape(source["path"])
-        elif source["mode"] == "local":
-            where_oi = _escape(f"http://{source['host']}:{source['port']}")
+        elif is_local_fetch:
+            where_oi = _escape(f"http://{_bracket_host(source['host'])}:{source['port']}")
         else:
             where_oi = _escape(source["mode"])
         rprint(f"[dim]object_info from {where_oi}[/dim]")

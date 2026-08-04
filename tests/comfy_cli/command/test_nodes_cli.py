@@ -286,14 +286,49 @@ class TestLocalTargetResolution:
 
         assert captured_target["port"] == BACKGROUND_PORT
 
-    def test_input_path_skips_host_resolution(self, monkeypatch, tmp_path, capsys):
+    def test_input_path_skips_host_resolution(self, monkeypatch, tmp_path, capsys, captured_target):
         """`--input` is offline mode: no live fetch, and the recorded background
         server is never consulted."""
         _set_background(monkeypatch, ("127.0.0.1", BACKGROUND_PORT, 4242))
-        monkeypatch.setattr(nodes_cmd, "_resolved_where", lambda where: "local")
         dump = tmp_path / "oi.json"
         dump.write_text(json.dumps(_fake_object_info()), encoding="utf-8")
 
         env = _run(["ls", "--limit", "1", "--input", str(dump)], capsys)
 
         assert env["ok"] is True
+        # The live loader is stubbed by `captured_target`; asserting it stayed
+        # untouched is what actually pins the `input_path is None` guard. Without
+        # it a regression would fall through to a real request and could still
+        # pass off a stale on-disk cache.
+        assert captured_target == {}
+
+    def test_wildcard_background_host_is_canonicalized(self, monkeypatch, capsys, captured_target):
+        """`comfy launch -- --listen 0.0.0.0` records the wildcard BIND address.
+        Used as a destination it trips the object_info loopback guard, and here
+        the resulting LoadError is swallowed by `resilient_load_object_info` — so
+        `nodes ls/show/search` would serve the last cached dump while claiming to
+        read the live server. It is canonicalized to loopback instead."""
+        _set_background(monkeypatch, ("0.0.0.0", BACKGROUND_PORT, 4242))
+
+        _run(["ls", "--limit", "1"], capsys)
+
+        assert (captured_target["host"], captured_target["port"]) == ("127.0.0.1", BACKGROUND_PORT)
+
+    def test_empty_host_flag_is_rejected(self, monkeypatch, captured_target):
+        """`--host ""` must error rather than falling through to the background
+        server — the same guard `comfy run` gets from `resolve_host_port`."""
+        _set_background(monkeypatch, ("127.0.0.1", BACKGROUND_PORT, 4242))
+
+        result = CliRunner().invoke(nodes_cmd.app, ["ls", "--limit", "1", "--host", ""])
+
+        assert result.exit_code == 2
+        assert captured_target == {}
+
+    @pytest.mark.parametrize("bad_port", ["0", "99999"])
+    def test_out_of_range_port_flag_is_rejected(self, monkeypatch, captured_target, bad_port):
+        _set_background(monkeypatch, ("127.0.0.1", BACKGROUND_PORT, 4242))
+
+        result = CliRunner().invoke(nodes_cmd.app, ["ls", "--limit", "1", "--port", bad_port])
+
+        assert result.exit_code == 2
+        assert captured_target == {}

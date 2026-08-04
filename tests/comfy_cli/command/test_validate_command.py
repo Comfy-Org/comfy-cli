@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 from typer.testing import CliRunner
@@ -495,3 +496,89 @@ def test_pretty_mode_prints_resolved_source(runner, tmp_path, monkeypatch, captu
 
     assert result.exit_code == 0, result.stdout
     assert f"object_info from http://127.0.0.1:{BACKGROUND_PORT}" in result.stdout
+
+
+# --- review follow-ups on the BE-6306 resolution block ---------------------------
+
+
+def test_wildcard_background_host_is_canonicalized(runner, tmp_path, monkeypatch, captured_target):
+    """`comfy launch -- --listen 0.0.0.0` records the wildcard BIND address in
+    `config.background`. Passing it through as a destination trips the
+    object_info loopback guard, so validate hard-failed with "Refusing to fetch
+    object_info from non-loopback host" where it previously succeeded — the exact
+    opposite of the `comfy run` parity this block is for (`run`'s own object_info
+    fetch fails open). It is canonicalized to loopback instead."""
+    _set_background(monkeypatch, ("0.0.0.0", BACKGROUND_PORT, 4242))
+
+    result = _validate_live(runner, _valid_workflow(tmp_path))
+
+    assert result.exit_code == 0, result.stdout
+    assert (captured_target["host"], captured_target["port"]) == ("127.0.0.1", BACKGROUND_PORT)
+
+
+def test_where_flag_is_normalized_before_routing(runner, tmp_path, monkeypatch, captured_target):
+    """`--where` is normalized through the shared resolver, not string-compared
+    raw: `--where LOCAL` must take the local path (splitting a combined `--host`,
+    consulting the background server) rather than skipping the whole block and
+    building `http://[127.0.0.1:9100]:8188`."""
+    _set_background(monkeypatch, ("127.0.0.1", BACKGROUND_PORT, 4242))
+
+    result = _validate_live(runner, _valid_workflow(tmp_path), "--where", "LOCAL", "--host", "127.0.0.1:9100")
+
+    assert result.exit_code == 0, result.stdout
+    assert (captured_target["host"], captured_target["port"]) == ("127.0.0.1", 9100)
+    assert _envelope(result)["data"]["object_info_source"]["mode"] == "local"
+
+
+@pytest.mark.parametrize("bad_where", ["bogus", "file"])
+def test_invalid_where_emits_envelope_not_traceback(runner, tmp_path, no_background, bad_where):
+    """An unknown `--where` used to escape as a bare ValueError traceback with no
+    envelope at all. (`file` is doubly interesting: it is the offline sentinel
+    `object_info_source.mode` also uses.)"""
+    result = _validate_live(runner, _valid_workflow(tmp_path), "--where", bad_where)
+
+    assert result.exit_code == 1
+    assert _envelope(result)["error"]["code"] == "where_invalid"
+
+
+def test_empty_host_flag_is_rejected(runner, tmp_path, no_background, captured_target):
+    """`--host ""` is not "no host" — it must be rejected rather than silently
+    resolving to COMFY_LOCAL_URL / the background server / 127.0.0.1."""
+    result = _validate_live(runner, _valid_workflow(tmp_path), "--host", "")
+
+    assert result.exit_code == 2
+    assert captured_target == {}
+
+
+@pytest.mark.parametrize("bad_port", ["0", "99999"])
+def test_out_of_range_port_flag_is_rejected(runner, tmp_path, no_background, captured_target, bad_port):
+    """An out-of-range `--port` is a usage error. `0` in particular used to read
+    as "not passed" and silently resolve to some other server."""
+    result = _validate_live(runner, _valid_workflow(tmp_path), "--port", bad_port)
+
+    assert result.exit_code == 2
+    assert captured_target == {}
+
+
+def test_explicit_port_zero_is_not_overridden_by_combined_host(runner, tmp_path, no_background, captured_target):
+    """The combined-host port merge tests `is None`, so an explicit (invalid)
+    `--port 0` is reported as such instead of being quietly replaced by the port
+    embedded in `--host h:p`."""
+    result = _validate_live(runner, _valid_workflow(tmp_path), "--host", "127.0.0.1:9100", "--port", "0")
+
+    assert result.exit_code == 2
+    assert captured_target == {}
+
+
+def test_ipv6_source_is_unbracketed_in_payload_and_bracketed_for_display(runner, tmp_path, no_background):
+    """Brackets are a URL encoding, not part of the address: the payload carries
+    the raw literal (matching `Target.host`) and only the display URL brackets it."""
+    with patch("comfy_cli.cql.engine._load_from_target", return_value={"PlainSave": _node_info(category="image")}):
+        result = _validate_live(runner, _valid_workflow(tmp_path), "--host", "::1", "--port", "9000")
+        assert result.exit_code == 0, result.stdout
+        assert _envelope(result)["data"]["object_info_source"] == {"mode": "local", "host": "::1", "port": 9000}
+
+        pretty = _validate_live(
+            runner, _valid_workflow(tmp_path), "--host", "::1", "--port", "9000", json_mode="--no-json"
+        )
+    assert "object_info from http://[::1]:9000" in pretty.stdout

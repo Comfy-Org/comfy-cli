@@ -211,3 +211,47 @@ def test_run_unsafe_host_exits_before_execute(tmp_path):
         )
     assert result.exit_code != 0
     mock_execute.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# explicit-flag validation at the shared choke point (BE-6306 review)
+# ---------------------------------------------------------------------------
+#
+# `resolve_local_host_port` resolves each half as `value or env or bg or
+# DEFAULT`, so every FALSY explicit flag reads as "not passed" and silently
+# retargets the request at a different server. `resolve_host_port` therefore
+# validates an explicitly-passed host/port BEFORE that chain runs.
+
+
+def test_empty_host_flag_is_rejected():
+    """`--host ""` (a wrapper interpolating an unset variable) must error, not
+    fall through to the env/background/default server."""
+    with pytest.raises(typer.BadParameter, match="empty host"):
+        resolve_host_port("", None)
+
+
+def test_blank_host_flag_is_rejected():
+    with pytest.raises(typer.BadParameter, match="empty host"):
+        resolve_host_port("   ", None)
+
+
+@pytest.mark.parametrize("bad_port", [0, -1, 65536, 99999])
+def test_out_of_range_port_flag_is_rejected(bad_port):
+    with pytest.raises(typer.BadParameter, match="out of range"):
+        resolve_host_port(None, bad_port)
+
+
+def test_none_host_and_port_still_resolve(monkeypatch):
+    """The guards fire only on an EXPLICIT value — `None` still means absent."""
+    monkeypatch.delenv("COMFY_LOCAL_URL", raising=False)
+    with patch("comfy_cli.host_port.ConfigManager") as cm:
+        cm.return_value.background = None
+        assert resolve_host_port(None, None) == (DEFAULT_HOST, DEFAULT_PORT)
+
+
+def test_boundary_ports_are_accepted(monkeypatch):
+    monkeypatch.delenv("COMFY_LOCAL_URL", raising=False)
+    with patch("comfy_cli.host_port.ConfigManager") as cm:
+        cm.return_value.background = None
+        assert resolve_host_port(None, 1)[1] == 1
+        assert resolve_host_port(None, 65535)[1] == 65535

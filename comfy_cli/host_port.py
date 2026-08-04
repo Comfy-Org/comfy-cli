@@ -120,14 +120,43 @@ def _to_port(s: str, original: str) -> int:
     return port
 
 
+def validate_port(port: int) -> int:
+    """Reject a ``--port`` outside the TCP range.
+
+    ``resolve_local_host_port`` resolves the port as ``port or env or bg or
+    DEFAULT``, so a falsy ``--port 0`` is indistinguishable from "not passed"
+    and silently resolves to some *other* server; an out-of-range ``--port
+    99999`` is worse, flowing straight into ``http://{host}:99999`` to fail at
+    connect time with no hint that the flag was the problem. Reject both here,
+    matching the range check :func:`_to_port` already applies to the port half
+    of a combined ``host:port`` string.
+    """
+    if not (1 <= port <= 65535):
+        raise typer.BadParameter(f"invalid port: {port} is out of range (1-65535)")
+    return port
+
+
 def resolve_host_port(host: str | None, port: int | None) -> tuple[str, int]:
     """Resolve host/port by precedence — explicit flag > ``COMFY_LOCAL_URL``
     env > ``config.background`` > defaults — then validate and bracket IPv6
     literals so callers building ``'http://{host}:{port}'`` get a well-formed
-    URL (e.g. ``'::1'`` -> ``'[::1]'``)."""
+    URL (e.g. ``'::1'`` -> ``'[::1]'``).
+
+    An explicitly-passed ``host``/``port`` is validated *before* the precedence
+    chain runs, because that chain treats every falsy value as "not passed" and
+    would otherwise swallow the bad input and resolve to a different server.
+    """
     from comfy_cli.env_checker import _bracket_host
     from comfy_cli.local_address import resolve_local_host_port
 
+    # ``--host ""`` is not "no host": a wrapper interpolating an unset variable
+    # would silently retarget the request at the env/background/default server.
+    # ``validate_host`` already rejects a blank host (see its comment) — it just
+    # never sees one, because the ``host or …`` fallback below drops it first.
+    if host is not None and not host.strip():
+        validate_host(host)
+    if port is not None:
+        validate_port(port)
     cfg = ConfigManager()
     host, port = resolve_local_host_port(host, port, background=cfg.background)
     # Validate BEFORE bracketing: ``validate_host``'s unsafe-char set does not
