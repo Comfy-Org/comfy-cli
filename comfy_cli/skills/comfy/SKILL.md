@@ -512,7 +512,7 @@ object_info through the routing chain with a cached fallback — cloud-signed-in
 works with no local server. If the live fetch fails, the command still succeeds
 from cache and the envelope carries `data.stale: true` +
 `warnings[] {code: "object_info_stale"}` — treat results as possibly outdated
-and run `comfy nodes refresh --where cloud` to refresh.
+re-run the command once the live fetch recovers to pick up fresh object_info.
 
 Slot addresses are `<instance_id>.<input_name>`. Feed them to
 `workflow set-slot` / `workflow vary` in the Execution half. Works on
