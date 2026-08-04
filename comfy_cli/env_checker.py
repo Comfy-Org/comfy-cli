@@ -81,6 +81,20 @@ def _bracket_host(host: str) -> str:
     return host
 
 
+def _unbracket_host(host: str) -> str:
+    """Inverse of :func:`_bracket_host` — ``[::1]`` -> ``::1``.
+
+    Brackets are a *URL* encoding of an IPv6 literal, not part of the address.
+    Structured output reports the raw literal (matching ``Target.host``, which
+    is unbracketed) and re-brackets only where a URL is composed, so the same
+    server isn't named two different ways across a payload and its display line.
+    Idempotent for unbracketed input.
+    """
+    if host.startswith("[") and host.endswith("]"):
+        return host[1:-1]
+    return host
+
+
 def check_comfy_server_running(port=8188, host="localhost", timeout: float = 5.0):
     """
     Checks if the Comfy server is running by making a GET request to the /history endpoint.
