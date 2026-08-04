@@ -319,7 +319,7 @@ def execute(
         extra_data = {cred[0]: cred[1]}
 
     # Pre-submit validation via pure-Python CQL engine (checks class_types + input shapes).
-    _preflight_validate(renderer, workflow, object_info, target_label="server")
+    _preflight_validate(renderer, workflow, object_info, target_label="server", where="local")
 
     progress = None
     start = time.time()
@@ -816,7 +816,7 @@ def execute_cloud(
     except Exception:  # noqa: BLE001
         cloud_object_info = {}
 
-    _preflight_validate(renderer, parsed_workflow, cloud_object_info, target_label="cloud")
+    _preflight_validate(renderer, parsed_workflow, cloud_object_info, target_label="cloud", where="cloud")
 
     # Spend gate (BE-4326): the cloud also bills partner-API nodes, so apply the
     # same consent interlock as the local path before authenticating/submitting.
