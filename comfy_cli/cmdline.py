@@ -555,7 +555,10 @@ def install(
         return None
 
     if nvidia and platform == constants.OS.MACOS:
-        rprint("[bold red]--nvidia is not available on macOS. Use --m-series (Apple Silicon) or --cpu.[/bold red]")
+        rprint(
+            "[bold red]--nvidia was passed but this is macOS, which has no NVIDIA GPU. "
+            "Re-run with --m-series (Apple silicon) or --cpu, or omit the GPU flag to select interactively.[/bold red]"
+        )
         raise typer.Exit(code=1)
 
     if m_series and platform != constants.OS.MACOS:
@@ -1998,7 +2001,7 @@ app.add_typer(
 app.add_typer(
     skill_command.app,
     name="skills",
-    help="Install the bundled comfy agent skills into Claude Code, Cursor, and AGENTS.md.",
+    help="Install the bundled comfy agent skills into Claude Code, Cursor, Aider, and any AGENTS.md-aware tool.",
 )
 # Keep the singular alias for backward compat
 app.add_typer(skill_command.app, name="skill", hidden=True)

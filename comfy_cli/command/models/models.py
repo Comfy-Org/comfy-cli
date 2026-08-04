@@ -1076,7 +1076,7 @@ def download_cancel(
     renderer.emit(payload, command="model download-cancel", changed=True)
 
 
-@app.command(help="Remove downloaded model files, by name or through an interactive picker.")
+@app.command(help="Remove one or more downloaded models by name or via interactive selection.")
 @tracking.track_command("model")
 def remove(
     ctx: typer.Context,
