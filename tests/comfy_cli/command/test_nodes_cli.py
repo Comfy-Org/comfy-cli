@@ -306,3 +306,61 @@ class TestNodesRefresh:
         result = CliRunner().invoke(nodes_cmd.app, ["refresh"])
         assert result.exit_code == 0, result.output
         assert expected in result.output
+
+
+class TestNodesRefreshPublishedContract:
+    """`nodes refresh`'s payload is a published contract (`comfy --json discover`).
+
+    Nothing validated the `nodes` payloads against `schemas/nodes.json`, so this
+    command's new `refreshed`/`files` fields shipped undocumented — an agent
+    reading `discover` would not have known they existed. Pin both directions:
+    the schema describes the fields, and the command emits what it describes.
+    """
+
+    @staticmethod
+    def _schema():
+        from comfy_cli import discovery
+
+        # `load_all_schemas` returns {name, title, schema} — the JSON Schema is
+        # the inner value. Validating the wrapper instead would assert nothing:
+        # `name`/`schema` are not validation keywords, so it accepts any input.
+        return discovery.load_all_schemas()["nodes"]["schema"]
+
+    def test_schema_documents_the_refresh_fields(self):
+        props = self._schema()["properties"]
+        assert "refreshed" in props, "schemas/nodes.json does not describe `refreshed`"
+        assert "files" in props, "schemas/nodes.json does not describe `files`"
+        assert set(props["files"]["items"]["properties"]["source"]["enum"]) == {
+            "remote",
+            "bundled",
+            "unavailable",
+        }
+
+    @pytest.mark.parametrize(
+        "entry",
+        [
+            {"source": "remote", "bytes": 100, "path": "/c/annotations.json"},
+            {"source": "remote", "bytes": 100, "path": None, "cache_error": "disk full"},
+            {"source": "bundled", "bytes": 100, "path": None, "error": "offline"},
+            {"source": "unavailable", "bytes": 0, "path": None, "error": "dns failure"},
+        ],
+    )
+    def test_emitted_payload_validates_against_the_schema(self, monkeypatch, capsys, entry):
+        import jsonschema
+
+        from comfy_cli.cql import annotations_source
+
+        fake = [{"name": n, **entry} for n in ("supported_nodes.yaml", "cloud_disable_config.yaml")]
+        monkeypatch.setattr(annotations_source, "refresh_annotations", lambda: fake)
+        env = _run(["refresh"], capsys)
+        jsonschema.Draft202012Validator(self._schema()).validate(env["data"])
+
+    def test_real_refresh_output_validates_offline(self, monkeypatch, capsys):
+        """Not just the fakes — the genuine offline code path emits valid shape."""
+        import jsonschema
+
+        monkeypatch.setenv("COMFY_CLI_NO_REMOTE_REFRESH", "1")
+        env = _run(["refresh"], capsys)
+        jsonschema.Draft202012Validator(self._schema()).validate(env["data"])
+        assert env["data"]["refreshed"] is False
+        assert {f["source"] for f in env["data"]["files"]} == {"bundled"}
