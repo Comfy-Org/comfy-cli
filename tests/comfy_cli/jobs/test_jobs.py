@@ -414,8 +414,29 @@ class TestStatusServerUpNoRecord:
 
     @staticmethod
     def _server_up_with_no_record(monkeypatch: pytest.MonkeyPatch) -> None:
+        """Server answers, empty `/queue` and `/history` — a fresh relaunch."""
         monkeypatch.setattr(jobs_mod, "check_comfy_server_running", lambda port, host: True)
         monkeypatch.setattr(jobs_mod, "_snapshot", lambda h, p, pid: None)
+
+        # `_server_confirms_no_record` re-queries to prove the absence is real
+        # rather than a swallowed fetch error, so it needs a live-looking server.
+        def fake_get(url, timeout=10.0):
+            if url.endswith("/queue"):
+                return {"queue_running": [], "queue_pending": []}
+            return {}
+
+        monkeypatch.setattr(jobs_mod, "_http_get_json", fake_get)
+
+    @staticmethod
+    def _server_up_but_flaky(monkeypatch: pytest.MonkeyPatch) -> None:
+        """Port answers the health probe, but `/queue` and `/history` fail."""
+        monkeypatch.setattr(jobs_mod, "check_comfy_server_running", lambda port, host: True)
+        monkeypatch.setattr(jobs_mod, "_snapshot", lambda h, p, pid: None)
+
+        def boom(url, timeout=10.0):
+            raise RuntimeError("connection reset")
+
+        monkeypatch.setattr(jobs_mod, "_http_get_json", boom)
 
     def test_terminal_state_file_wins_over_prompt_not_found(self, monkeypatch: pytest.MonkeyPatch):
         """Terminal record -> emit it as a normal result, exit 0. This is the
@@ -501,6 +522,130 @@ class TestStatusServerUpNoRecord:
         assert err["message"] == "No prompt with id 'never-existed' on 127.0.0.1:8188."
         assert err["hint"] == "check `comfy jobs ls`; very old prompts may have been pruned from /history"
         assert err["details"] == {"prompt_id": "never-existed", "host": "127.0.0.1", "port": 8188}
+
+    def test_unconfirmed_absence_does_not_manufacture_a_death_verdict(self, monkeypatch: pytest.MonkeyPatch):
+        """A busy server whose `/queue` and `/history` fetches fail must NOT be
+        read as 'the job died'. `_snapshot` returns None for a swallowed fetch
+        error too, so the terminal state file stays unpublished and the message
+        claims no death."""
+        from comfy_cli import jobs_state
+
+        self._server_up_but_flaky(monkeypatch)
+        st = jobs_state.new(prompt_id="flaky-run", client_id="c", workflow="/tmp/wf.json", where="local")
+        st.status = "error"
+        st.error = {"code": "server_died", "message": "died", "details": {}}
+        jobs_state.write(st)
+
+        result = _invoke_status("flaky-run", "--host", "127.0.0.1", "--port", "8188")
+        assert result.exit_code == 1, result.output
+        env = _last_json(result.stdout)
+        assert env["ok"] is False
+        err = env["error"]
+        assert err["code"] == "prompt_not_found"
+        # The honest phrasing: unknown, not dead.
+        assert "unknown" in err["message"]
+        assert "died with the previous process" not in err["message"]
+        assert err["details"]["server_confirmed_no_record"] is False
+
+    def test_a_cloud_state_file_is_not_an_answer_about_a_local_target(self, monkeypatch: pytest.MonkeyPatch):
+        """State files are keyed by prompt_id alone. A cloud run must not be
+        returned as an authoritative local result with local output URLs."""
+        from comfy_cli import jobs_state
+
+        self._server_up_with_no_record(monkeypatch)
+        st = jobs_state.new(
+            prompt_id="cloud-run", client_id="c", workflow="/tmp/wf.json", where="cloud", base_url="https://example"
+        )
+        st.status = "completed"
+        st.outputs = ["https://cloud.example/out.png"]
+        jobs_state.write(st)
+
+        result = _invoke_status("cloud-run", "--host", "127.0.0.1", "--port", "8188")
+        assert result.exit_code == 1, result.output
+        err = _last_json(result.stdout)["error"]
+        assert err["code"] == "prompt_not_found"
+        # Falls all the way through to the bare envelope — no cloud data leaks.
+        assert err["details"] == {"prompt_id": "cloud-run", "host": "127.0.0.1", "port": 8188}
+
+    def test_a_job_from_another_local_port_is_ignored(self, monkeypatch: pytest.MonkeyPatch):
+        """Two local ComfyUI instances: port 8189's job is not port 8188's
+        answer, and its output URLs must not be restamped with 8188."""
+        from comfy_cli import jobs_state
+
+        self._server_up_with_no_record(monkeypatch)
+        st = jobs_state.new(
+            prompt_id="other-port", client_id="c", workflow="/tmp/wf.json", where="local", host="127.0.0.1", port=8189
+        )
+        st.status = "completed"
+        jobs_state.write(st)
+
+        result = _invoke_status("other-port", "--host", "127.0.0.1", "--port", "8188")
+        assert result.exit_code == 1, result.output
+        err = _last_json(result.stdout)["error"]
+        assert err["code"] == "prompt_not_found"
+        assert err["details"] == {"prompt_id": "other-port", "host": "127.0.0.1", "port": 8188}
+
+    def test_a_record_whose_host_and_port_match_is_still_used(self, monkeypatch: pytest.MonkeyPatch):
+        """The scoping must not break the case it exists to protect: a record
+        naming this exact host:port is still the answer."""
+        from comfy_cli import jobs_state
+
+        self._server_up_with_no_record(monkeypatch)
+        st = jobs_state.new(
+            prompt_id="same-port", client_id="c", workflow="/tmp/wf.json", where="local", host="127.0.0.1", port=8188
+        )
+        st.status = "error"
+        st.error = {"code": "server_died", "message": "died", "details": {}}
+        jobs_state.write(st)
+
+        result = _invoke_status("same-port", "--host", "127.0.0.1", "--port", "8188")
+        assert result.exit_code == 0, result.output
+        data = _last_json(result.stdout)["data"]
+        assert data["error"]["code"] == "server_died"
+        assert data["source"] == "state_file"
+        assert data["server_running"] is True
+
+    def test_a_slash_bearing_id_does_not_borrow_another_jobs_record(self, monkeypatch: pytest.MonkeyPatch):
+        """`state_path` maps "/" to "_" before validating, so read("a/b") lands
+        on the file for the distinct prompt "a_b". That record must not be
+        reported under the queried id."""
+        from comfy_cli import jobs_state
+
+        self._server_up_with_no_record(monkeypatch)
+        st = jobs_state.new(prompt_id="a_b", client_id="c", workflow="/tmp/wf.json", where="local")
+        st.status = "completed"
+        st.outputs = ["http://127.0.0.1:8188/view?filename=ab.png"]
+        jobs_state.write(st)
+
+        result = _invoke_status("a/b", "--host", "127.0.0.1", "--port", "8188")
+        assert result.exit_code == 1, result.output
+        env = _last_json(result.stdout)
+        assert env["ok"] is False
+        err = env["error"]
+        assert err["code"] == "prompt_not_found"
+        # Crucially: not a'b's outputs reported as a/b's.
+        assert "ab.png" not in json.dumps(env)
+
+    def test_a_non_list_outputs_field_does_not_crash(self, monkeypatch: pytest.MonkeyPatch):
+        """`jobs_state.read` type-checks nothing it keeps, so a mangled
+        `outputs` must degrade to [] rather than shred a string into characters
+        or raise inside the envelope builder."""
+        from comfy_cli import jobs_state
+
+        self._server_up_with_no_record(monkeypatch)
+        st = jobs_state.new(prompt_id="bad-outputs", client_id="c", workflow="/tmp/wf.json", where="local")
+        st.status = "completed"
+        jobs_state.write(st)
+        # Corrupt the file the way a hand-edit would.
+        path = jobs_state.state_path("bad-outputs")
+        blob = json.loads(path.read_text())
+        blob["outputs"] = "not-a-list"
+        path.write_text(json.dumps(blob))
+
+        result = _invoke_status("bad-outputs", "--host", "127.0.0.1", "--port", "8188")
+        assert result.exit_code == 0, result.output
+        data = _last_json(result.stdout)["data"]
+        assert data["outputs"] == []
 
 
 # ---------------------------------------------------------------------------
