@@ -566,6 +566,11 @@ class TestStatusServerUpNoRecord:
         assert err["code"] == "prompt_not_found"
         # Falls all the way through to the bare envelope — no cloud data leaks.
         assert err["details"] == {"prompt_id": "cloud-run", "host": "127.0.0.1", "port": 8188}
+        # ...but not into a dead end: `comfy jobs ls` follows the same resolved
+        # target and would not list this job either, so name the query that works.
+        assert (
+            err["hint"] == "this prompt_id is tracked as a cloud job — try: comfy jobs status cloud-run --where cloud"
+        )
 
     def test_a_job_from_another_local_port_is_ignored(self, monkeypatch: pytest.MonkeyPatch):
         """Two local ComfyUI instances: port 8189's job is not port 8188's
@@ -2841,3 +2846,54 @@ def test_jobs_ls_survives_an_oversize_queue_response(monkeypatch: pytest.MonkeyP
     # command still succeeds — what matters is that ResponseTooLarge never
     # escapes as an uncaught exception. A non-zero exit here would mean it did.
     assert result.exit_code == 0, result.output
+
+
+def test_state_file_payload_carries_the_grouped_output_keys(monkeypatch: pytest.MonkeyPatch):
+    """Shape parity with the live snapshot. `_snapshot` always emits
+    `outputs_by_node`, `outputs_by_item` and `workflow_size`; a consumer that
+    indexes them on a `jobs status` success payload would hit a `KeyError` on
+    the state-file source alone. They are present but empty — the file records
+    output URLs flat, so the grouping genuinely cannot be reconstructed."""
+    from comfy_cli import jobs_state
+
+    monkeypatch.setattr(jobs_mod, "check_comfy_server_running", lambda port, host: False)
+    st = jobs_state.new(prompt_id="shape-run", client_id="c", workflow="/tmp/wf.json", where="local")
+    st.status = "completed"
+    st.outputs = ["http://127.0.0.1:8188/view?filename=out.png"]
+    jobs_state.write(st)
+
+    result = _invoke_status("shape-run", "--host", "127.0.0.1", "--port", "65431")
+    assert result.exit_code == 0, result.output
+    data = _last_json(result.stdout)["data"]
+    assert data["outputs"] == ["http://127.0.0.1:8188/view?filename=out.png"]
+    assert data["outputs_by_node"] == {}
+    assert data["outputs_by_item"] == {}
+    assert data["workflow_size"] is None
+
+
+def test_server_down_cloud_job_hint_points_at_the_cloud_query(monkeypatch: pytest.MonkeyPatch):
+    """Server-down twin of the same redirect: a cloud-tracked prompt asked
+    about locally is told to use `--where cloud`, not "run: comfy launch"."""
+    from comfy_cli import jobs_state
+
+    monkeypatch.setattr(jobs_mod, "check_comfy_server_running", lambda port, host: False)
+    st = jobs_state.new(
+        prompt_id="cloud-down", client_id="c", workflow="/tmp/wf.json", where="cloud", base_url="https://example"
+    )
+    st.status = "completed"
+    jobs_state.write(st)
+
+    result = _invoke_status("cloud-down", "--host", "127.0.0.1", "--port", "65431")
+    assert result.exit_code == 1, result.output
+    err = _last_json(result.stdout)["error"]
+    assert err["code"] == "server_not_running"
+    assert "--where cloud" in err["hint"]
+
+
+def test_untracked_prompt_keeps_the_default_hints(monkeypatch: pytest.MonkeyPatch):
+    """The redirect is conditional: with no state file at all, both bare
+    envelopes keep the hint they have always carried."""
+    monkeypatch.setattr(jobs_mod, "check_comfy_server_running", lambda port, host: False)
+    result = _invoke_status("no-such-id", "--host", "127.0.0.1", "--port", "65431")
+    assert result.exit_code == 1, result.output
+    assert _last_json(result.stdout)["error"]["hint"] == "run: comfy launch"

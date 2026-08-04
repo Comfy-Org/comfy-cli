@@ -723,6 +723,15 @@ def _state_file_snapshot(st: JobState, *, prompt_id: str, host: str, port: int, 
         # `outputs`. `list()` would shred a str into characters and raise on a
         # scalar — only trust an actual list.
         "outputs": list(st.outputs) if isinstance(st.outputs, list) else [],
+        # Every live `_snapshot()` result carries these three, so a consumer
+        # that indexes them on a `jobs status` success payload would hit a
+        # `KeyError` on this source alone. The state file records output URLs
+        # flat, with no node or item association, so the grouped views cannot
+        # be reconstructed from it — they are present but empty, which is the
+        # same thing the live queue-hit payload emits.
+        "outputs_by_node": {},
+        "outputs_by_item": {},
+        "workflow_size": None,
         "error": st.error,
         "host": host,
         "port": port,
@@ -809,6 +818,27 @@ def _state_file_for_local_target(prompt_id: str, *, host: str, port: int) -> Job
     return st
 
 
+def _hint_for_missing_local(prompt_id: str, default: str) -> str:
+    """Redirect to `--where cloud` when that is why the local lookup came up empty.
+
+    ``_state_file_for_local_target`` rejects a cloud record silently, which
+    leaves the commonest mistake — a cloud job asked about without
+    ``--where cloud`` — indistinguishable from a job that never existed. The
+    default hints both point at ``comfy jobs ls``, whose scope follows the same
+    resolved target, so it would not list that job either. Name the query that
+    does work instead.
+    """
+    from comfy_cli import jobs_state
+
+    try:
+        st = jobs_state.read(prompt_id)
+    except (ValueError, OSError):
+        return default
+    if st is None or st.prompt_id != prompt_id or st.where != "cloud":
+        return default
+    return f"this prompt_id is tracked as a cloud job — try: comfy jobs status {prompt_id} --where cloud"
+
+
 def _server_confirms_no_record(host: str, port: int, prompt_id: str) -> bool:
     """True only if both `/queue` and `/history` answered and neither knows `prompt_id`.
 
@@ -867,7 +897,7 @@ def status_cmd(
             renderer.error(
                 code="server_not_running",
                 message=f"ComfyUI not running on {h}:{p}",
-                hint="run: comfy launch",
+                hint=_hint_for_missing_local(prompt_id, "run: comfy launch"),
                 details={"host": h, "port": p},
             )
             raise typer.Exit(code=1)
@@ -976,7 +1006,9 @@ def status_cmd(
         renderer.error(
             code="prompt_not_found",
             message=f"No prompt with id {prompt_id!r} on {h}:{p}.",
-            hint="check `comfy jobs ls`; very old prompts may have been pruned from /history",
+            hint=_hint_for_missing_local(
+                prompt_id, "check `comfy jobs ls`; very old prompts may have been pruned from /history"
+            ),
             details={"prompt_id": prompt_id, "host": h, "port": p},
         )
         raise typer.Exit(code=1)
