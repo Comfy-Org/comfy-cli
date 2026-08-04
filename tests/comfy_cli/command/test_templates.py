@@ -782,3 +782,77 @@ def test_oversize_template_workflow_is_a_clean_envelope(gallery_file, monkeypatc
     assert result.exit_code != 0
     env = _envelope(result.output)
     assert env["error"]["code"] == "template_fetch_failed"
+
+
+# ---------------------------------------------------------------------------
+# `templates refresh` — the standalone command persists like `_load_gallery`
+# does, not with a bare write_bytes.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("label", "body"),
+    [
+        ("non-JSON body", b"<html>429 Too Many Requests</html>"),
+        ("valid JSON, wrong shape", b'{"error": "not a category list"}'),
+        ("JSON scalar", b"7"),
+    ],
+)
+def test_refresh_command_never_caches_an_unusable_body(cache_file, monkeypatch, label, body):
+    """A 200 carrying garbage must not clobber a good cache.
+
+    `refresh` used to `write_bytes` whatever came back, report success, and then
+    break every later `templates ls` for the whole TTL — with the stale-cache
+    fallback unable to help, because the cache *was* the garbage.
+    """
+    monkeypatch.setattr(templates_cmd, "_fetch_gallery", lambda *a, **k: body)
+    _force_json_renderer()
+
+    result = CliRunner().invoke(templates_cmd.app, ["refresh"])
+    assert result.exit_code != 0, f"{label} was accepted"
+    assert _envelope(result.output)["error"]["code"] == "gallery_fetch_failed"
+    assert json.loads(cache_file.read_bytes()) == FIXTURE  # untouched
+
+
+def test_refresh_command_reports_a_cache_write_failure(cache_file, monkeypatch):
+    """Caching is the whole job of `refresh`, so a failed write is a failed run.
+
+    (`templates ls` takes the opposite view: it already holds valid data, so a
+    write failure there is deliberately non-fatal.)
+    """
+    monkeypatch.setattr(templates_cmd, "_fetch_gallery", lambda *a, **k: json.dumps(FIXTURE).encode())
+    monkeypatch.setattr(templates_cmd, "_persist_cache", lambda cache, data: "Read-only file system")
+    _force_json_renderer()
+
+    result = CliRunner().invoke(templates_cmd.app, ["refresh"])
+    assert result.exit_code != 0
+    env = _envelope(result.output)
+    assert env["error"]["code"] == "gallery_cache_write_failed"
+    assert "Read-only file system" in env["error"]["message"]
+
+
+def test_refresh_command_success_reports_category_count(cache_file, monkeypatch):
+    monkeypatch.setattr(templates_cmd, "_fetch_gallery", lambda *a, **k: json.dumps(FIXTURE).encode())
+    _force_json_renderer()
+
+    result = CliRunner().invoke(templates_cmd.app, ["refresh"])
+    assert result.exit_code == 0, result.output
+    data = _envelope(result.output)["data"]
+    assert data["categories"] == len(FIXTURE)
+    assert json.loads(cache_file.read_bytes()) == FIXTURE
+
+
+def test_ls_self_heals_from_a_cache_poisoned_by_an_older_build(cache_file, monkeypatch):
+    """A fresh-but-unparseable cache is re-fetched, not raised on for the TTL.
+
+    Older builds wrote before validating, so an upgraded CLI can inherit a
+    poisoned index whose mtime still reads fresh.
+    """
+    cache_file.write_bytes(b"<html>left over from an older build</html>")
+    monkeypatch.setattr(templates_cmd, "_fetch_gallery", lambda *a, **k: json.dumps(FIXTURE).encode())
+    _force_json_renderer()
+
+    result = CliRunner().invoke(templates_cmd.app, ["ls"])
+    assert result.exit_code == 0, result.output
+    assert _envelope(result.output)["data"]["total_in_gallery"] > 0
+    assert json.loads(cache_file.read_bytes()) == FIXTURE  # healed on disk too

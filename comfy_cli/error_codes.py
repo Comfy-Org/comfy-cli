@@ -227,6 +227,13 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "check your network connection and try again",
     ),
     ErrorCode(
+        "gallery_cache_write_failed",
+        "The gallery index was fetched but could not be written to the local cache. "
+        "Only `comfy templates refresh` raises this — for `templates ls/show/fetch` "
+        "a cache-write failure is non-fatal, since the data is already in hand.",
+        "check permissions and free space on the cache directory",
+    ),
+    ErrorCode(
         "workflow_unknown_nodes",
         "Workflow references class_type(s) not present in the server's object_info. "
         "`details.unknown_nodes` lists each with close_matches.",

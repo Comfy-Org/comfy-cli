@@ -42,6 +42,21 @@ One file makes all of that unrepresentable.
 
 Set ``COMFY_CLI_NO_REMOTE_REFRESH=1`` to skip the network entirely (cache →
 bundled only) for airgapped or CI use.
+
+**Known limitation — no upstream pinning.** These files are read from
+``comfy-complete``'s mutable ``main``, so an upstream force-push lands on user
+machines without a release gate. Review raised pinning to a tag or verifying a
+checksum; neither is available today (the repo publishes no tags, no releases
+and no digest), and pinning to a commit would defeat the live refresh this
+module exists for. The exposure is bounded: ``labels`` / ``cloud_disabled`` are
+*advisory* metadata that tell an agent which nodes won't run on cloud — the
+cloud server does its own filtering, so nothing here is an enforcement boundary
+— and the bundled snapshot ships from the same repo, so the trust root is
+unchanged. What the live path gives up is the human review between an upstream
+commit and a user's machine. The validators below are the compensating control:
+a body that isn't a well-shaped document of the right kind is refused, so the
+failure mode is "keeps the previous data", not "silently adopts anything".
+If ``comfy-complete`` starts publishing tags or digests, pin to one here.
 """
 
 from __future__ import annotations

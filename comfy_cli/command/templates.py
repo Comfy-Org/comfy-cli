@@ -81,6 +81,22 @@ def _fetch_gallery(url: str = GALLERY_URL, timeout: float = 15.0) -> bytes:
         return read_capped(resp, url)
 
 
+def _parse_gallery(data: bytes) -> list[Any]:
+    """Decode a gallery index body, rejecting anything that isn't a category list.
+
+    ``json.loads`` alone accepts ``"null"``, ``"7"`` and ``{"error": …}`` — all
+    valid JSON, none of them a gallery. ``_flatten_templates`` would then walk a
+    non-list and raise something unrelated to the actual problem, or silently
+    produce zero rows. Checking the shape here means every caller's
+    ``_GALLERY_LOAD_ERRORS`` handler catches it as the load failure it is;
+    ``RuntimeError`` is used because that tuple already routes it.
+    """
+    parsed = json.loads(data)
+    if not isinstance(parsed, list):
+        raise RuntimeError(f"gallery index is not a list of categories (got {type(parsed).__name__})")
+    return parsed
+
+
 def _load_gallery(
     explicit_path: str | None,
     *,
@@ -97,13 +113,19 @@ def _load_gallery(
     non-fatal renderer warning rather than erroring out.
     """
     if explicit_path:
-        return json.loads(Path(explicit_path).read_bytes())
+        return _parse_gallery(Path(explicit_path).read_bytes())
 
     cache = _cache_path()
     have_cache = cache.exists()
 
     if not refresh and have_cache and not _cache_is_stale(cache):
-        return json.loads(cache.read_bytes())
+        try:
+            return _parse_gallery(cache.read_bytes())
+        except _GALLERY_LOAD_ERRORS:
+            # A cache poisoned by an older build (which wrote before validating)
+            # is treated as a miss rather than raising for the rest of the TTL —
+            # fall through and re-fetch so the CLI self-heals.
+            have_cache = False
 
     # A TTL-expired cache is refreshed transparently, so a fetch failure here
     # must NOT break `templates ls` — fall back to the stale cache with a
@@ -115,15 +137,15 @@ def _load_gallery(
         # Validate BEFORE we touch the cache: a 200 with a non-JSON body
         # (rate-limit HTML, captive portal, truncated response) must never
         # clobber the last-known-good cache with garbage.
-        parsed = json.loads(data)
+        parsed = _parse_gallery(data)
     except _GALLERY_LOAD_ERRORS as e:
         if ttl_auto_refresh:
             # The stale cache is our fallback — but a concurrent `refresh` may
             # have removed it or left it corrupt mid-write. If reading it back
             # also fails, surface the original fetch error, not the read error.
             try:
-                stale = json.loads(cache.read_bytes())
-            except (OSError, json.JSONDecodeError):
+                stale = _parse_gallery(cache.read_bytes())
+            except _GALLERY_LOAD_ERRORS:
                 raise e
             get_renderer().warn(
                 f"gallery refresh failed ({e}); using cached index (last updated {_cache_age_str(cache)} ago)",
@@ -135,7 +157,7 @@ def _load_gallery(
     return parsed
 
 
-def _persist_cache(cache: Path, data: bytes) -> None:
+def _persist_cache(cache: Path, data: bytes) -> str | None:
     """Persist a freshly fetched index to the cache, atomically and best-effort.
 
     * Atomic — write to a temp file in the same directory then ``os.replace``
@@ -143,8 +165,11 @@ def _persist_cache(cache: Path, data: bytes) -> None:
       half-written index (which would parse-fail as ``gallery_load_failed``).
     * Best-effort — a read-only cache dir (e.g. a gallery baked into a
       container image) or a full disk must not break the command once we
-      already hold valid data, so a write failure is swallowed rather than
-      propagated.
+      already hold valid data, so a write failure is returned rather than
+      raised. ``_load_gallery`` ignores it (it has the data); ``templates
+      refresh`` reports it, because caching is the whole job of that command.
+
+    Returns ``None`` on success, or the error text when the write failed.
     """
     try:
         cache.parent.mkdir(parents=True, exist_ok=True)
@@ -159,10 +184,11 @@ def _persist_cache(cache: Path, data: bytes) -> None:
             except OSError:
                 pass
             raise
-    except OSError:
+    except OSError as e:
         # Couldn't persist (read-only dir, disk full, …). We still have valid
         # data in hand, so proceed without caching rather than failing the run.
-        pass
+        return str(e)
+    return None
 
 
 def _cache_is_stale(cache: Path) -> bool:
@@ -505,18 +531,34 @@ def refresh_cmd():
     renderer = get_renderer()
     try:
         data = _fetch_gallery()
+        # Validate BEFORE the cache is touched, same rule as `_load_gallery`.
+        parsed = _parse_gallery(data)
     except _GALLERY_LOAD_ERRORS as e:
-        # Same family `_load_gallery` routes: a non-200 (`RuntimeError`) and an
-        # over-cap body (`ResponseTooLarge`) must surface as this envelope too,
-        # not as an uncaught traceback.
+        # Same family `_load_gallery` routes: a non-200 (`RuntimeError`), a
+        # non-JSON or wrong-shaped body, and an over-cap body
+        # (`ResponseTooLarge`) all surface as this envelope, never a traceback.
         renderer.error(code="gallery_fetch_failed", message=str(e))
         raise typer.Exit(code=1) from e
     cache = _cache_path()
-    cache.parent.mkdir(parents=True, exist_ok=True)
-    cache.write_bytes(data)
-    payload = {"path": str(cache), "bytes": len(data)}
+    # Persist exactly the way `_load_gallery` does — validated above, written
+    # atomically, and never a bare `write_bytes`. This command used to clobber
+    # the cache with whatever came back: a 200 carrying rate-limit HTML was
+    # written verbatim, reported success, and then failed every subsequent
+    # `templates ls` for the full TTL, with the stale-cache fallback unable to
+    # help because the cache *was* the garbage.
+    cache_error = _persist_cache(cache, data)
+    if cache_error is not None:
+        # Unlike the implicit TTL refresh, caching is the entire job here, so a
+        # write failure is the command failing — not a detail to swallow.
+        renderer.error(
+            code="gallery_cache_write_failed",
+            message=f"fetched the gallery but could not cache it: {cache_error}",
+            hint=f"check permissions and free space on {cache.parent}",
+        )
+        raise typer.Exit(code=1)
+    payload = {"path": str(cache), "bytes": len(data), "categories": len(parsed)}
     if renderer.is_pretty():
-        rprint(f"[green]✓[/green] cached gallery to {cache} ({len(data)} bytes)")
+        rprint(f"[green]✓[/green] cached gallery to {cache} ({len(data)} bytes, {len(parsed)} categories)")
     renderer.emit(payload, command="templates refresh")
 
 
