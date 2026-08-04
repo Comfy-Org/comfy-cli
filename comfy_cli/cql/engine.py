@@ -769,7 +769,24 @@ class Graph:
             # case surfaces here instead of as a cryptic server reject.
             autogrow_ports = {p.name: p for p in m.inputs if p.is_autogrow}
             autogrow_seen: set[str] = set()
+            # Dynamic combos are checked up front so the generic loop below can
+            # exempt STALE dynamic sub-keys (left over from a previous
+            # selection): the server ignores unknown sub-keys, so a hard edge
+            # check on one would false-error; the unknown_input warning from
+            # _check_dynamic_combos already covers it. Sub-keys under an
+            # unresolved selection keep the old generic checks.
+            dyn_port_names = {p.name for p in m.inputs if p.is_dynamic_combo}
+            dyn_errors, dyn_warnings, dyn_valid_keys, dyn_unresolved = _check_dynamic_combos(
+                node_id, class_type, m, node_data
+            )
             for input_name, value in (node_data.get("inputs") or {}).items():
+                if (
+                    "." in input_name
+                    and input_name.split(".", 1)[0] in dyn_port_names
+                    and input_name not in dyn_valid_keys
+                    and not any(input_name.startswith(prefix) for prefix in dyn_unresolved)
+                ):
+                    continue
                 if autogrow_ports and "." in input_name:
                     base = input_name.split(".", 1)[0]
                     if base in autogrow_ports:
@@ -886,7 +903,6 @@ class Graph:
 
             errors.extend(_check_autogrow_required(node_id, autogrow_ports, autogrow_seen, node_data))
             errors.extend(_check_required_present(node_id, m, node_data))
-            dyn_errors, dyn_warnings = _check_dynamic_combos(node_id, class_type, m, node_data)
             errors.extend(dyn_errors)
             warnings.extend(dyn_warnings)
 
@@ -1042,6 +1058,18 @@ class Graph:
                     # Autogrow inputs wire as one slot key per connection;
                     # surface that here so `nodes show` is self-documenting.
                     **({"autogrow": True, "wire_as": p.autogrow_slot_example()} if p.is_autogrow else {}),
+                    # Dynamic combos: expose the valid selection keys so agents
+                    # can discover them. `choices` stays [] — selection keys are
+                    # not flat-value enum choices (see _is_scalar_choice).
+                    **(
+                        {
+                            "selection_keys": [
+                                k for o in _dynamic_combo_options(p.raw_spec) if isinstance(k := o.get("key"), str)
+                            ]
+                        }
+                        if p.is_dynamic_combo
+                        else {}
+                    ),
                 }
                 for p in m.inputs
             ],
@@ -1180,7 +1208,9 @@ def _dynamic_combo_options(spec: Any) -> list[dict]:
     return [o for o in (options_meta.get("options") or []) if isinstance(o, dict)]
 
 
-def _check_dynamic_combos(node_id: str, class_type: str, m: Morphism, node_data: dict) -> tuple[list[dict], list[dict]]:
+def _check_dynamic_combos(
+    node_id: str, class_type: str, m: Morphism, node_data: dict
+) -> tuple[list[dict], list[dict], set[str], set[str]]:
     """Validate every dynamic-combo input against the option its selector names.
 
     Mirrors the server: ``DynamicCombo._expand_schema_for_dynamic``
@@ -1196,17 +1226,65 @@ def _check_dynamic_combos(node_id: str, class_type: str, m: Morphism, node_data:
     selector. Without this walk a workflow that omits or mistypes a sub-input
     validates clean and is then rejected at ``/prompt`` — validation giving
     false confidence right before a paid run.
+
+    Also flags present dotted keys that match no sub-input of the resolved
+    selection — a warning, not an error, because the server ignores extra
+    keys. Returns ``(errors, warnings, valid_keys, unresolved)`` — the caller
+    uses ``valid_keys``/``unresolved`` to exempt stale (server-ignored)
+    dynamic sub-keys from the generic edge checks, which would otherwise
+    hard-error on e.g. a dangling link left over from a previous selection.
     """
     errors: list[dict] = []
     warnings: list[dict] = []
     present = node_data.get("inputs") or {}
-    for port in m.inputs:
-        if not port.is_dynamic_combo:
-            continue
-        e, w = _check_dynamic_combo_input(node_id, class_type, port.name, port.raw_spec, port.required, present)
+    dynamic_ports = [p for p in m.inputs if p.is_dynamic_combo]
+    if not dynamic_ports:
+        return errors, warnings, set(), set()
+
+    valid_keys: set[str] = set()
+    unresolved: set[str] = set()
+    resolved: dict[str, Any] = {}
+    for port in dynamic_ports:
+        e, w, v, u = _check_dynamic_combo_input(
+            node_id, class_type, port.name, port.raw_spec, port.required, present, resolved
+        )
         errors.extend(e)
         warnings.extend(w)
-    return errors, warnings
+        valid_keys |= v
+        unresolved |= u
+
+    # Unknown dotted keys under a RESOLVED selection → warning. Under an
+    # unresolved prefix (selection absent/invalid/link-valued) the sub-keys
+    # can't be judged — the primary error already covers it, so don't pile on.
+    dyn_port_names = {p.name for p in dynamic_ports}
+    for key in present:
+        if "." not in key or key in valid_keys:
+            continue
+        base = key.split(".", 1)[0]
+        if base not in dyn_port_names:
+            continue
+        if any(key.startswith(prefix) for prefix in unresolved):
+            continue
+        # Attribute the stray key to the DEEPEST resolved combo prefix, so a
+        # stray `model.mode.bogus` under a resolved `model.mode` names
+        # `model.mode`'s selection (and lists ITS sub-keys), not `model`'s.
+        anchor = max((n for n in resolved if key.startswith(f"{n}.")), key=len, default=base)
+        selection = resolved.get(anchor, present.get(anchor))
+        known = sorted(k for k in valid_keys if k.startswith(f"{anchor}."))
+        warnings.append(
+            {
+                "node_id": node_id,
+                "field": key,
+                "code": "unknown_input",
+                "message": (
+                    f"input {key!r} matches no sub-input of {anchor}={selection!r} — the server will ignore it"
+                ),
+                "hint": f"valid sub-keys for this selection: {', '.join(known)}"
+                if known
+                else f"selection {selection!r} takes no sub-inputs",
+            }
+        )
+    return errors, warnings, valid_keys, unresolved
 
 
 def _check_dynamic_combo_input(
@@ -1216,9 +1294,19 @@ def _check_dynamic_combo_input(
     spec: Any,
     required: bool,
     present: dict,
+    resolved: dict[str, Any],
     depth: int = 0,
-) -> tuple[list[dict], list[dict]]:
-    """One dynamic-combo input: resolve its selected option, check its sub-inputs."""
+) -> tuple[list[dict], list[dict], set[str], set[str]]:
+    """One dynamic-combo input: resolve its selected option, check its sub-inputs.
+
+    Returns ``(errors, warnings, valid_keys, unresolved)`` — ``valid_keys`` is
+    every dotted key this (and any nested, resolved) selection accepts;
+    ``unresolved`` is the set of ``"<name>."`` prefixes whose sub-keys can't
+    be judged, so the caller skips unknown-key warnings there. ``resolved``
+    (mutated) records ``name -> selected key`` for every combo level that DID
+    resolve, so the caller can attribute a stray key to the deepest resolved
+    prefix.
+    """
     errors: list[dict] = []
     warnings: list[dict] = []
     options = _dynamic_combo_options(spec)
@@ -1253,14 +1341,14 @@ def _check_dynamic_combo_input(
                     "valid_options": keys,
                 }
             )
-        return errors, warnings
+        return errors, warnings, set(), {f"{name}."}
 
     selected = present[name]
     if isinstance(selected, list) and len(selected) == 2:
         # Wired as a link: which option expands is only known at execution time,
         # so there is no static sub-input set to check. The edge itself is
         # already validated by the driver loop.
-        return errors, warnings
+        return errors, warnings, set(), {f"{name}."}
 
     option = next((o for o in options if o.get("key") == selected), None)
     if option is None:
@@ -1288,25 +1376,32 @@ def _check_dynamic_combo_input(
                 "valid_options": keys,
             }
         )
-        return errors, warnings
+        return errors, warnings, set(), {f"{name}."}
 
+    resolved[name] = selected
     if depth >= _MAX_DYNAMIC_COMBO_DEPTH:
-        return errors, warnings  # pathological nesting — the converter stops here too
+        return errors, warnings, set(), set()  # pathological nesting — the converter stops here too
 
+    valid_keys: set[str] = set()
+    nested_unresolved: set[str] = set()
     sub_def = option.get("inputs")
     if not isinstance(sub_def, dict):
-        return errors, warnings
+        return errors, warnings, valid_keys, nested_unresolved
     for section, sub_required in (("required", True), ("optional", False)):
         section_def = sub_def.get(section)
         if not isinstance(section_def, dict):
             continue
         for sub_name, sub_spec in section_def.items():
-            e, w = _check_dynamic_combo_sub(
-                node_id, class_type, f"{name}.{sub_name}", sub_spec, sub_required, present, depth
+            dotted = f"{name}.{sub_name}"
+            valid_keys.add(dotted)
+            e, w, v, u = _check_dynamic_combo_sub(
+                node_id, class_type, dotted, sub_spec, sub_required, present, resolved, depth
             )
             errors.extend(e)
             warnings.extend(w)
-    return errors, warnings
+            valid_keys |= v
+            nested_unresolved |= u
+    return errors, warnings, valid_keys, nested_unresolved
 
 
 def _check_dynamic_combo_sub(
@@ -1316,8 +1411,9 @@ def _check_dynamic_combo_sub(
     sub_spec: Any,
     sub_required: bool,
     present: dict,
+    resolved: dict[str, Any],
     depth: int,
-) -> tuple[list[dict], list[dict]]:
+) -> tuple[list[dict], list[dict], set[str], set[str]]:
     """Presence + shape + catalog checks for one expanded sub-input.
 
     The sub-input spec is a plain ``INPUT_TYPES`` entry, so it goes through the
@@ -1337,55 +1433,72 @@ def _check_dynamic_combo_sub(
 
     if port.is_dynamic_combo:
         # Nested dynamic combo: its own selector/presence rules apply one level down.
-        return _check_dynamic_combo_input(node_id, class_type, dotted, sub_spec, sub_required, present, depth + 1)
+        return _check_dynamic_combo_input(
+            node_id, class_type, dotted, sub_spec, sub_required, present, resolved, depth + 1
+        )
 
     if port.is_autogrow:
         # An autogrow sub-input wires as `<dotted>.<slot>` keys and routinely
         # declares `min: 0` even inside the `required` section (Seedream's
         # `model.images`), so absence is NOT a server reject — the converter
         # emits no key at all for a zero-slot autogrow. Nothing to presence- or
-        # shape-check here.
-        return [], []
+        # shape-check here. Any slot keys actually present are accepted
+        # wholesale (not counted, not edge-checked here) so they don't
+        # surface as unknown_input noise; the generic driver loop still
+        # edge-checks whichever slot keys ARE present.
+        slot_prefix = f"{dotted}."
+        return [], [], {k for k in present if k.startswith(slot_prefix)}, set()
 
     if dotted not in present:
         if not sub_required:
-            return [], []
-        return [
-            {
-                "node_id": node_id,
-                "field": dotted,
-                "code": "required_input_missing",
-                "message": (
-                    f"required input {dotted!r} is missing — the server will reject this node (required_input_missing)"
-                ),
-                "hint": f"add {dotted!r} to inputs"
-                + (
-                    f" (e.g. a {port.type} value)"
-                    if not port.is_link
-                    else f" (wire a {port.type} link: [<node_id>, <output_index>])"
-                ),
-            }
-        ], []
+            return [], [], set(), set()
+        return (
+            [
+                {
+                    "node_id": node_id,
+                    "field": dotted,
+                    "code": "required_input_missing",
+                    "message": (
+                        f"required input {dotted!r} is missing — the server will reject this node (required_input_missing)"
+                    ),
+                    "hint": f"add {dotted!r} to inputs"
+                    + (
+                        f" (e.g. a {port.type} value)"
+                        if not port.is_link
+                        else f" (wire a {port.type} link: [<node_id>, <output_index>])"
+                    ),
+                }
+            ],
+            [],
+            set(),
+            set(),
+        )
 
     value = present[dotted]
     if isinstance(value, list) and len(value) == 2:
         # A wired sub-input — the driver loop already ran the dangling-edge and
         # output-index checks on this same key.
-        return [], []
+        return [], [], set(), set()
 
     shape_err = port.validate_shape(value)
     if shape_err:
-        return [
-            {
-                "node_id": node_id,
-                "field": dotted,
-                "code": "shape_mismatch",
-                "message": shape_err,
-                "hint": f"expected {port.type}; check the value type",
-            }
-        ], []
+        return (
+            [
+                {
+                    "node_id": node_id,
+                    "field": dotted,
+                    "code": "shape_mismatch",
+                    "message": shape_err,
+                    "hint": f"expected {port.type}; check the value type",
+                }
+            ],
+            [],
+            set(),
+            set(),
+        )
 
-    return _validate_catalog_value(node_id, class_type, dotted, port, value)
+    errs, warns = _validate_catalog_value(node_id, class_type, dotted, port, value)
+    return errs, warns, set(), set()
 
 
 def _check_autogrow_required(
