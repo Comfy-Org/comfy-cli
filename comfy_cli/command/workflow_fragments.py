@@ -464,7 +464,7 @@ def fragment_show_cmd(
     renderer.emit(payload, command="workflow fragment show")
 
 
-@fragment_app.command("validate", help="Validate that a fragment file is well-formed.")
+@fragment_app.command("validate", help="Validate that a workflow-fragment file is well-formed")
 @tracking.track_command("workflow")
 def fragment_validate_cmd(
     fragment: Annotated[str, typer.Argument(help="Fragment name (looked up in --lib) or path to .json.")],

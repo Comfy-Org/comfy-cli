@@ -1107,7 +1107,7 @@ def validate_node_for_publishing():
     return config
 
 
-@app.command("validate", help="Run validation checks for publishing")
+@app.command("validate", help="Validate this custom node for registry publishing")
 @tracking.track_command("publish")
 def validate():
     """

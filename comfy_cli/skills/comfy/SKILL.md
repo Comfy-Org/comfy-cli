@@ -731,7 +731,7 @@ Before `comfy run`, verify the workflow will succeed:
 comfy run --workflow wf.json --print-prompt
 
 # Full pre-flight: checks class_types, input shapes, enum values, edge wiring
-comfy --json validate --workflow api.json
+comfy --json workflow validate --workflow api.json
 
 # Spot-check a single node class exists on the target
 comfy --json nodes show <ClassName>
@@ -923,7 +923,7 @@ Hard-won lessons per domain. Not a tutorial — a reference card.
 - Assembly: GetVideoComponents → BatchImagesNode → CreateVideo → SaveVideo (ImageBatch is deprecated)
 - Autogrow inputs (type COMFY_AUTOGROW_*, e.g. BatchImagesNode `images`): wire ONE slot key per
   connection — `"images.image0": [..], "images.image1": [..]` — never a single `images` link.
-  `nodes show` prints the `wire_as` form; `comfy validate` rejects the bare form before submit.
+  `nodes show` prints the `wire_as` form; `comfy workflow validate` rejects the bare form before submit.
 - I2V pattern: LoadImage → I2VNode → SaveVideo (check `nodes show` for the I2V node)
 - **Model enums mix t2v and i2v variants** — a node's `model` choices may include
   image-to-video-only models (e.g. `grok-imagine-video-1.5`) that fail at runtime
