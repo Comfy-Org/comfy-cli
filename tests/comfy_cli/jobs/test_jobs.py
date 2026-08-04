@@ -507,6 +507,12 @@ class TestStatusServerUpNoRecord:
         assert details["workflow"] == "/tmp/wf.json"
         assert details["submitted_at"] == st.submitted_at
         assert details["updated_at"] == st.updated_at
+        # The confirmed side of the fork: the server *did* disown the prompt —
+        # only the record is non-terminal — so the message may say the job died
+        # with the previous process. The unconfirmed twin below asserts the
+        # opposite flag and the hedged tail.
+        assert details["server_confirmed_no_record"] is True
+        assert "died with the previous process" in err["message"]
 
     def test_no_state_file_keeps_the_bare_envelope(self, monkeypatch: pytest.MonkeyPatch):
         """No record anywhere -> today's envelope, byte for byte. An untracked

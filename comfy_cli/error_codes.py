@@ -179,9 +179,14 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ErrorCode(
         "prompt_not_found",
         "Asked about a prompt_id the server doesn't know. `comfy jobs status` only reports this once the "
-        "local state file has been checked too: if that file holds a terminal verdict (e.g. the job died "
-        "with an earlier server), the verdict is returned as a normal result instead. When a non-terminal "
-        "state file exists, `details` carries `last_known_status`, `submitted_at`, `updated_at`, `workflow`.",
+        "local state file has been checked too — and only a file that names this same prompt on this same "
+        "target counts, so a cloud job or another local instance's job is never the answer here (when it "
+        "is a cloud one, `hint` redirects to `--where cloud`). If that file holds a terminal verdict (e.g. "
+        "the job died with an earlier server) AND the live server confirmed it has no record, the verdict "
+        "is returned as a normal result instead. When a matching file exists but that pair does not hold — "
+        "the record is non-terminal, or `/queue` and `/history` did not answer — `details` carries "
+        "`last_known_status`, `submitted_at`, `updated_at`, `workflow`, and `server_confirmed_no_record` "
+        "(false means the absence is unverified, so it is not the job's outcome).",
         "`comfy jobs ls` to find a valid prompt_id",
     ),
     ErrorCode(
