@@ -192,6 +192,7 @@ def test_intro_banner_signed_out_includes_wordmark_and_login_hint():
     assert "comfy install" in out
     assert "comfy launch" in out
     assert "comfy cloud login" in out
+    assert "comfy auth login" not in out  # `comfy auth ...` is the model-host token group, not Cloud sign-in
     assert "comfy discover" in out
     assert "comfy --help" in out
     assert "not signed in" in out
@@ -230,4 +231,5 @@ def test_signed_out_banner_points_at_login():
     out = _render(signed_out_banner(base_url="https://testcloud.comfy.org"))
     assert "not signed in" in out
     assert "comfy cloud login" in out
+    assert "comfy auth login" not in out  # `comfy auth ...` is the model-host token group, not Cloud sign-in
     assert "testcloud.comfy.org" in out

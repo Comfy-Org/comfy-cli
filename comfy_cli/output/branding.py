@@ -207,7 +207,7 @@ def _access_token_line(expires_at: int | None) -> Text:
 
 
 # ---------------------------------------------------------------------------
-# Welcome banner — the big one, shown after auth login success
+# Welcome banner — the big one, shown after cloud login success
 # ---------------------------------------------------------------------------
 
 
