@@ -154,7 +154,17 @@ def _maybe_nudge_setup(ctx: typer.Context, renderer) -> None:
         pass
 
 
-@app.callback(invoke_without_command=True)
+@app.callback(
+    invoke_without_command=True,
+    epilog=(
+        "Cloud quickstart (no local GPU required):\n\n"
+        "comfy cloud login  →  comfy run --workflow wf.json --where cloud  "
+        "(prints a prompt_id)  →  comfy jobs wait <prompt_id> --where cloud  →  "
+        "comfy download <prompt_id> --where cloud\n\n"
+        "Cloud generation consumes Comfy Cloud credits (needs an active subscription); "
+        "discovery commands (jobs status, templates ls, generate list) don't. See the README."
+    ),
+)
 def entry(
     ctx: typer.Context,
     workspace: Annotated[
@@ -545,7 +555,10 @@ def install(
         return None
 
     if nvidia and platform == constants.OS.MACOS:
-        rprint("[bold red]--nvidia is not available on macOS. Use --m-series (Apple Silicon) or --cpu.[/bold red]")
+        rprint(
+            "[bold red]--nvidia was passed but this is macOS, which has no NVIDIA GPU. "
+            "Re-run with --m-series (Apple silicon) or --cpu, or omit the GPU flag to select interactively.[/bold red]"
+        )
         raise typer.Exit(code=1)
 
     if m_series and platform != constants.OS.MACOS:
@@ -1767,12 +1780,6 @@ def env():
     renderer.emit(data, command="env")
 
 
-@app.command(hidden=True)
-@tracking.track_command()
-def models():
-    rprint("\n[bold red] No such command, did you mean 'comfy model' instead?[/bold red]\n")
-
-
 _FEEDBACK_DISABLED_NOTICE = (
     "[yellow]Feedback not sent — telemetry is opted out via DO_NOT_TRACK / COMFY_NO_TELEMETRY.[/yellow]\n"
     "Unset that to send, or open an issue: https://github.com/Comfy-Org/comfy-cli/issues/new/choose"
@@ -1877,7 +1884,8 @@ def agent_review(
 
 
 @app.command(
-    help="Given an existing installation of comfy core and any custom nodes, installs any needed python dependencies"
+    hidden=True,
+    help="Given an existing installation of comfy core and any custom nodes, installs any needed python dependencies",
 )
 @tracking.track_command()
 def dependency():
@@ -1988,7 +1996,7 @@ app.add_typer(
 app.add_typer(
     skill_command.app,
     name="skills",
-    help="Install the bundled comfy agent skills into Claude Code, Cursor, and AGENTS.md.",
+    help="Install the bundled comfy agent skills into Claude Code, Cursor, Aider, and any AGENTS.md-aware tool.",
 )
 # Keep the singular alias for backward compat
 app.add_typer(skill_command.app, name="skill", hidden=True)

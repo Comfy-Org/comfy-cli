@@ -47,7 +47,7 @@ comfy --json run --workflow same_workflow.json --where cloud   # just resubmit �
 If several jobs from one batch died together with this code, resubmit them all; one retry each is normally enough.
 
 ### `workflow_not_api_format`
-UI-format workflows are converted to API format **client-side** using object_info (no server conversion endpoint exists). If conversion fails with `conversion_error`, re-export via `File > Export (API)` in ComfyUI; if object_info can't be fetched (`cql_no_graph`), it is fetched live rather than cached — check `comfy cloud whoami` and your network, or start a local server, then retry.
+UI-format workflows are converted to API format **client-side** using object_info (no server conversion endpoint exists). If conversion fails with `conversion_error`, re-export via `File > Export (API)` in ComfyUI; if object_info can't be fetched (`cql_no_graph`), retry (it's fetched live — check cloud sign-in/connection) or start a local server.
 
 ### `workflow_invalid_json`
 The file isn't valid JSON. Inspect the first/last 100 bytes — often it's an HTML error page that was saved with `.json`.

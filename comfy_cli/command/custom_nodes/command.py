@@ -304,7 +304,7 @@ def enable_gui():
 @manager_app.command("disable-gui", help="Disable the ComfyUI-Manager GUI (Manager stays enabled, headless)")
 @tracking.track_command("node")
 def disable_gui():
-    """Enable ComfyUI-Manager but disable its GUI."""
+    """Disable the ComfyUI-Manager GUI. Manager stays enabled, headless."""
     config_manager = ConfigManager()
     config_manager.set(constants.CONFIG_KEY_MANAGER_GUI_MODE, "disable-gui")
     print("[bold green]ComfyUI-Manager enabled with GUI disabled.[/bold green]")
