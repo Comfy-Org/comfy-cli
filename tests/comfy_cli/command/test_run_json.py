@@ -1775,3 +1775,32 @@ class TestErrorEnvelopeCarriesRoutedTarget:
         assert result.exit_code == 1
         assert env["error"]["code"] == "where_invalid"
         assert env["where"] is None
+
+    def test_routed_target_does_not_leak_to_a_later_invocation(self, workflow_file, monkeypatch):
+        """`Renderer` is a process-wide singleton, so `run` must scope its
+        stamped target to one invocation. Without that, a second in-process run
+        that fails *before* routing would inherit the first run's target and
+        mislabel its envelope."""
+        monkeypatch.delenv("COMFY_WHERE", raising=False)
+        from comfy_cli import where as where_module
+
+        err = where_module.CloudError(
+            code="cloud_not_configured",
+            message="not signed in",
+            hint="run: comfy cloud login",
+            details={},
+        )
+        with patch("comfy_cli.where.cloud_preflight", return_value=err):
+            first, _ = self._invoke(["run", "--json", "--where", "cloud", "--workflow", workflow_file])
+        assert first["where"] == "cloud"
+
+        # ...and the stamp is gone once the invocation is over, so anything
+        # emitting later in this process (atexit/tracking) isn't mislabelled.
+        from comfy_cli.output.renderer import get_renderer
+
+        assert get_renderer().where is None
+
+        second, result = self._invoke(["run", "--json", "--where", "nowhere", "--workflow", workflow_file])
+        assert result.exit_code == 1
+        assert second["error"]["code"] == "where_invalid"
+        assert second["where"] is None

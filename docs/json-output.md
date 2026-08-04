@@ -77,7 +77,7 @@ The stream always ends with exactly one line of `type: "envelope"`:
 | `ok`      | bool         | `true` on success, `false` on failure                           |
 | `command` | str          | The subcommand (`"run"`)                                        |
 | `version` | str          | comfy-cli version                                               |
-| `where`   | str \| null  | `"local"` or `"cloud"`                                          |
+| `where`   | str \| null  | Target this invocation was routed to: `"local"` or `"cloud"`. Set as soon as routing resolves, so client-side failures that never reach that backend still carry it (e.g. `workflow_not_found`). `null` for commands that don't route, and for errors raised *before* routing resolves (e.g. `where_invalid`). |
 | `data`    | dict \| null | Result payload on success (see [Success envelope](#success-envelope)) |
 | `error`   | dict \| null | Error object on failure (see [Error object](#error-object))     |
 
