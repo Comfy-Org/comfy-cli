@@ -17,7 +17,6 @@ import json
 import os
 import re
 import secrets
-from collections.abc import Iterable
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -209,10 +208,6 @@ def remove(provider: str) -> bool:
         del data["providers"][provider]
         _write_all(path, data)
     return True
-
-
-def known_providers() -> Iterable[str]:
-    return SUPPORTED_PROVIDERS
 
 
 # ---------------------------------------------------------------------------
