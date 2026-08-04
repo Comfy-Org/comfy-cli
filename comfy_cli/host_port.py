@@ -1,12 +1,14 @@
 """Shared host/port parsing + resolution for local ComfyUI commands.
 
-``comfy run``, every ``comfy jobs`` subcommand, and ``comfy upload`` accept a
-``--host`` / ``--port`` pair. ``run``/``jobs`` resolve it here — falling back
-to the persisted ``config.background`` server, then to ``DEFAULT_HOST`` /
-``DEFAULT_PORT``; ``comfy upload`` only borrows :func:`validate_host` and hands
-the pair to ``target.resolve_target``, which skips the background server (env
-override, then the defaults). In addition, ``comfy run`` accepts a combined
-``host[:port]`` string (parsed via ``parse_host_port_arg``); the ``comfy jobs``
+``comfy run``, every ``comfy jobs`` subcommand, ``comfy validate``, the
+``comfy nodes`` subcommands, and ``comfy upload`` accept a ``--host`` /
+``--port`` pair. ``run``/``jobs``/``validate``/``nodes`` resolve it here —
+falling back to the persisted ``config.background`` server, then to
+``DEFAULT_HOST`` / ``DEFAULT_PORT``; ``comfy upload`` only borrows
+:func:`validate_host` and hands the pair to ``target.resolve_target``, which
+skips the background server (env override, then the defaults). In addition,
+``comfy run`` and ``comfy validate`` accept a combined ``host[:port]`` string
+(parsed via ``parse_host_port_arg``); the ``comfy jobs`` / ``comfy nodes``
 subcommands and ``comfy upload`` only take the separate ``--host`` / ``--port``
 options. All of them feed the resolved host straight into URLs like
 ``http://{host}:{port}/prompt`` / ``ws://{host}:{port}/ws``, so the value must

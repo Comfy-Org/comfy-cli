@@ -50,7 +50,7 @@ from comfy_cli.cuda_detect import DEFAULT_CUDA_TAG, detect_cuda_driver_version, 
 from comfy_cli.discovery import build_discovery
 from comfy_cli.env_checker import EnvChecker
 from comfy_cli.help_json import build_help_json
-from comfy_cli.host_port import validate_host
+from comfy_cli.host_port import DEFAULT_HOST, DEFAULT_PORT, validate_host
 from comfy_cli.output import Renderer, get_renderer, rprint, set_renderer
 from comfy_cli.resolve_python import resolve_workspace_python
 from comfy_cli.skills import command as skill_command
@@ -1064,11 +1064,15 @@ def validate(
     ] = None,
     host: Annotated[
         str | None,
-        typer.Option(show_default=False, help="ComfyUI host (default 127.0.0.1)."),
+        typer.Option(
+            show_default=False, help="ComfyUI host (defaults to COMFY_LOCAL_URL, the background server, or 127.0.0.1)."
+        ),
     ] = None,
     port: Annotated[
         int | None,
-        typer.Option(show_default=False, help="ComfyUI port (default 8188)."),
+        typer.Option(
+            show_default=False, help="ComfyUI port (defaults to COMFY_LOCAL_URL, the background server, or 8188)."
+        ),
     ] = None,
     input_path: Annotated[
         str | None,
@@ -1111,6 +1115,24 @@ def validate(
             mode = decision.target.value
         except Exception:
             pass
+
+    # Resolve the local object_info server the same way `comfy run` does —
+    # flag > COMFY_LOCAL_URL > config.background > 127.0.0.1:8188. Without the
+    # `config.background` step validate would consult whatever answers on the
+    # default port while `run` submits to the background server comfy-cli
+    # launched on another one, making the verdict meaningless for the server
+    # that will actually execute the workflow (BE-6299). `resolve_target` does
+    # not consult `config.background` on purpose (other callers, e.g. transfer
+    # and system, must not), so — as its docstring says — the callers that do
+    # honor it resolve upstream, here.
+    if input_path is None and mode == "local":
+        from comfy_cli.host_port import parse_host_port_arg, resolve_host_port
+
+        if host:
+            host, parsed_port = parse_host_port_arg(host)
+            if not port and parsed_port is not None:
+                port = parsed_port
+        host, port = resolve_host_port(host, port)
 
     try:
         graph = Graph.load(mode=mode, input_path=input_path, host=host, port=port)
@@ -1179,6 +1201,17 @@ def validate(
         "warnings": result["warnings"],
         "partner_nodes": partner_nodes,
         "spends_credits": bool(partner_nodes),
+        # Name the server (or file) the verdict was computed against, so an
+        # agent comparing `validate` with `run` can see whether they consulted
+        # the same object_info. Populated from the values resolved above, so a
+        # local run reports the concrete host/port actually queried.
+        "object_info_source": (
+            {"mode": "file", "path": str(input_path)}
+            if input_path is not None
+            else {"mode": mode, "host": host or DEFAULT_HOST, "port": port or DEFAULT_PORT}
+            if mode == "local"
+            else {"mode": mode}
+        ),
     }
     if converted_from_ui:
         # Signal that validation ran against the converted graph, not the file's
@@ -1187,6 +1220,19 @@ def validate(
         payload["converted_node_count"] = len(wf_data)
 
     if renderer.is_pretty():
+        # Name the object_info source in one dim line. A file path (and, in
+        # principle, a hostname) can contain Rich-markup metacharacters, so
+        # escape it — same reason the partner-node line below does.
+        from rich.markup import escape as _escape
+
+        source = payload["object_info_source"]
+        if source["mode"] == "file":
+            where_oi = _escape(source["path"])
+        elif source["mode"] == "local":
+            where_oi = _escape(f"http://{source['host']}:{source['port']}")
+        else:
+            where_oi = _escape(source["mode"])
+        rprint(f"[dim]object_info from {where_oi}[/dim]")
         if result["valid"]:
             rprint(f"[bold green]✓[/bold green] workflow is valid ({len(wf_data)} nodes)")
             for w in result["warnings"]:

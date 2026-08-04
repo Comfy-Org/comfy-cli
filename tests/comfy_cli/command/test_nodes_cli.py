@@ -204,3 +204,96 @@ class TestQueryFlagRemoved:
         runner = CliRunner()
         result = runner.invoke(nodes_cmd.app, ["ls", "--query", "produces IMAGE"])
         assert result.exit_code != 0
+
+
+# ---------------------------------------------------------------------------
+# local target resolution — config.background parity with `comfy run` (BE-6306)
+# ---------------------------------------------------------------------------
+#
+# `comfy nodes` is the agent's node-discovery surface, so it must read the same
+# server `comfy run` submits to. It used to resolve `--host`/`--port` >
+# COMFY_LOCAL_URL > 127.0.0.1:8188, skipping the persisted `config.background`
+# step that `run`/`jobs` honor via `host_port.resolve_host_port` — so with
+# ComfyUI launched in the background on a non-default port, discovery listed a
+# different server's nodes than the one the workflow would execute on (BE-6299).
+
+
+BACKGROUND_PORT = 8388
+
+
+def _set_background(monkeypatch, background):
+    """Point `host_port.resolve_host_port` at a synthetic `config.background`.
+
+    ConfigManager already drops a record whose pid is dead, so a tuple here
+    stands for a LIVE background server.
+    """
+
+    class _FakeConfigManager:
+        def __init__(self):
+            self.background = background
+
+    monkeypatch.setattr("comfy_cli.host_port.ConfigManager", _FakeConfigManager)
+    monkeypatch.delenv("COMFY_LOCAL_URL", raising=False)
+
+
+@pytest.fixture
+def captured_target(monkeypatch):
+    """Stub the resilient live loader, recording the host/port it was handed."""
+    seen: dict[str, Any] = {}
+
+    def _fake_resilient_load(*, mode="local", host=None, port=None, input_path=None, on_stale=None):
+        seen.update(mode=mode, host=host, port=port)
+        return _fake_object_info()
+
+    monkeypatch.setattr("comfy_cli.cql.loader.resilient_load_object_info", _fake_resilient_load)
+    monkeypatch.setattr(nodes_cmd, "_resolved_where", lambda where: "local")
+    return seen
+
+
+class TestLocalTargetResolution:
+    def test_ls_honors_background_server(self, monkeypatch, capsys, captured_target):
+        """No flags + a live background server on a non-default port → discovery
+        queries THAT server, not 127.0.0.1:8188."""
+        _set_background(monkeypatch, ("127.0.0.1", BACKGROUND_PORT, 4242))
+
+        env = _run(["ls", "--limit", "1"], capsys)
+
+        assert env["ok"] is True
+        assert (captured_target["host"], captured_target["port"]) == ("127.0.0.1", BACKGROUND_PORT)
+
+    def test_ls_explicit_flags_beat_background(self, monkeypatch, capsys, captured_target):
+        """Precedence unchanged: explicit `--host`/`--port` still win."""
+        _set_background(monkeypatch, ("127.0.0.1", BACKGROUND_PORT, 4242))
+
+        _run(["ls", "--limit", "1", "--host", "127.0.0.1", "--port", "9000"], capsys)
+
+        assert (captured_target["host"], captured_target["port"]) == ("127.0.0.1", 9000)
+
+    def test_ls_without_background_defaults_to_8188(self, monkeypatch, capsys, captured_target):
+        """With nothing recorded, the default target is unchanged."""
+        _set_background(monkeypatch, None)
+
+        _run(["ls", "--limit", "1"], capsys)
+
+        assert (captured_target["host"], captured_target["port"]) == ("127.0.0.1", 8188)
+
+    def test_show_honors_background_server(self, monkeypatch, capsys, captured_target):
+        """The same resolution applies to every `comfy nodes` subcommand — they
+        all share `_get_graph`."""
+        _set_background(monkeypatch, ("127.0.0.1", BACKGROUND_PORT, 4242))
+
+        _run(["show", "KSampler"], capsys)
+
+        assert captured_target["port"] == BACKGROUND_PORT
+
+    def test_input_path_skips_host_resolution(self, monkeypatch, tmp_path, capsys):
+        """`--input` is offline mode: no live fetch, and the recorded background
+        server is never consulted."""
+        _set_background(monkeypatch, ("127.0.0.1", BACKGROUND_PORT, 4242))
+        monkeypatch.setattr(nodes_cmd, "_resolved_where", lambda where: "local")
+        dump = tmp_path / "oi.json"
+        dump.write_text(json.dumps(_fake_object_info()), encoding="utf-8")
+
+        env = _run(["ls", "--limit", "1", "--input", str(dump)], capsys)
+
+        assert env["ok"] is True

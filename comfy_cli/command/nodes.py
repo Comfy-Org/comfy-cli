@@ -10,7 +10,9 @@ grammar. Three primitives:
 
 All three resolve the graph in this order:
     1. ``--input <path>`` to an object_info dump (offline mode)
-    2. ``--host:--port`` live ComfyUI server (default 127.0.0.1:8188)
+    2. a live ComfyUI server, addressed exactly as ``comfy run`` addresses it:
+       ``--host``/``--port`` > ``COMFY_LOCAL_URL`` > the persisted
+       ``config.background`` server > 127.0.0.1:8188
 
 Backed by the pure-Python CQL engine (``comfy_cli.cql.engine.Graph``).
 """
@@ -63,12 +65,26 @@ def _get_graph(
 
     Routing follows the standard precedence: explicit ``--where`` > env
     (``COMFY_WHERE``) > config (``where_default``) > local default. The
-    ``--input <path>`` flag short-circuits everything (offline mode).
+    ``--input <path>`` flag short-circuits everything (offline mode). For a
+    live local target the address is resolved with ``resolve_host_port`` —
+    ``--host``/``--port`` > ``COMFY_LOCAL_URL`` > ``config.background`` >
+    127.0.0.1:8188 — so discovery reads the same server ``comfy run`` submits to.
 
     ``on_stale``, if provided, is forwarded to ``resilient_load_object_info``
     and fired when a stale-cache fallback occurs (see loader for signature).
     """
     mode = _resolved_where(where)
+    # Resolve the local server the same way `comfy run` / `comfy jobs` do —
+    # flag > COMFY_LOCAL_URL > config.background > 127.0.0.1:8188. `resolve_target`
+    # deliberately skips the `config.background` step (other callers must not
+    # honor it), so callers that do resolve it upstream. Without this, an agent
+    # discovering nodes here would read a different server's object_info than the
+    # one `comfy run` submits to whenever ComfyUI was launched in the background
+    # on a non-default port (BE-6299).
+    if input_path is None and mode == "local":
+        from comfy_cli.host_port import resolve_host_port
+
+        host, port = resolve_host_port(host, port)
     try:
         if input_path is not None:
             # Explicit offline dump — let Graph.load read + annotate it.
@@ -171,11 +187,15 @@ def ls_cmd(
     ] = None,
     host: Annotated[
         str | None,
-        typer.Option(show_default=False, help="ComfyUI host (default 127.0.0.1)."),
+        typer.Option(
+            show_default=False, help="ComfyUI host (defaults to COMFY_LOCAL_URL, the background server, or 127.0.0.1)."
+        ),
     ] = None,
     port: Annotated[
         int | None,
-        typer.Option(show_default=False, help="ComfyUI port (default 8188)."),
+        typer.Option(
+            show_default=False, help="ComfyUI port (defaults to COMFY_LOCAL_URL, the background server, or 8188)."
+        ),
     ] = None,
     where: Annotated[
         str | None,
@@ -310,11 +330,15 @@ def show_cmd(
     ] = None,
     host: Annotated[
         str | None,
-        typer.Option(show_default=False, help="ComfyUI host (default 127.0.0.1)."),
+        typer.Option(
+            show_default=False, help="ComfyUI host (defaults to COMFY_LOCAL_URL, the background server, or 127.0.0.1)."
+        ),
     ] = None,
     port: Annotated[
         int | None,
-        typer.Option(show_default=False, help="ComfyUI port (default 8188)."),
+        typer.Option(
+            show_default=False, help="ComfyUI port (defaults to COMFY_LOCAL_URL, the background server, or 8188)."
+        ),
     ] = None,
 ):
     renderer = get_renderer()
@@ -419,11 +443,15 @@ def search_cmd(
     ] = None,
     host: Annotated[
         str | None,
-        typer.Option(show_default=False, help="ComfyUI host (default 127.0.0.1)."),
+        typer.Option(
+            show_default=False, help="ComfyUI host (defaults to COMFY_LOCAL_URL, the background server, or 127.0.0.1)."
+        ),
     ] = None,
     port: Annotated[
         int | None,
-        typer.Option(show_default=False, help="ComfyUI port (default 8188)."),
+        typer.Option(
+            show_default=False, help="ComfyUI port (defaults to COMFY_LOCAL_URL, the background server, or 8188)."
+        ),
     ] = None,
     where: Annotated[
         str | None,
