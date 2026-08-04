@@ -329,8 +329,14 @@ def test_jobs_status_server_down_terminal_state_emits_ok_envelope(monkeypatch: p
 
 
 def test_jobs_status_server_up_still_uses_live_snapshot(monkeypatch: pytest.MonkeyPatch):
-    """Server up: the live `/history` snapshot wins — the state file is never
-    consulted and the payload carries no state-file markers."""
+    """Server up *and it has a record for the prompt*: the live `/queue`
+    `/history` snapshot wins — the state file is not consulted and the payload
+    carries no state-file markers.
+
+    The state file is only a fallback, never an override: it is read when the
+    live server has nothing to say about the prompt (see the
+    `TestStatusServerUpNoRecord` cases below), not when it does.
+    """
     from comfy_cli import jobs_state
 
     monkeypatch.setattr(jobs_mod, "check_comfy_server_running", lambda port, host: True)
@@ -344,12 +350,157 @@ def test_jobs_status_server_up_still_uses_live_snapshot(monkeypatch: pytest.Monk
     st.status = "completed"
     jobs_state.write(st)
 
+    reads: list[str] = []
+    real_read = jobs_state.read
+
+    def spy_read(pid):
+        reads.append(pid)
+        return real_read(pid)
+
+    monkeypatch.setattr(jobs_state, "read", spy_read)
+
     result = _invoke_status("live-run", "--host", "127.0.0.1", "--port", "8188")
     assert result.exit_code == 0, result.output
     data = _last_json(result.stdout)["data"]
     assert data["status"] == "running"
     assert "source" not in data
     assert "server_running" not in data
+    # The live snapshot answered, so the fallback never ran.
+    assert reads == []
+
+
+def test_jobs_status_server_down_surfaces_server_died_verdict(monkeypatch: pytest.MonkeyPatch):
+    """The composite the epic exists for: the watcher recorded `server_died`,
+    the server is still down, and `jobs status` hands that verdict back.
+
+    The two halves — a terminal state file being emitted, and `server_died`
+    being written — are each covered elsewhere; this pins the seam between
+    them, which is the only thing a caller actually sees.
+    """
+    from comfy_cli import jobs_state
+
+    monkeypatch.setattr(jobs_mod, "check_comfy_server_running", lambda port, host: False)
+    st = jobs_state.new(prompt_id="oom-run", client_id="c", workflow="/tmp/oom.json", where="local")
+    st.status = "error"
+    st.error = {
+        "code": "server_died",
+        "message": "ComfyUI server 127.0.0.1:8188 stopped answering while job oom-run was 'running'.",
+        "details": {"host": "127.0.0.1", "port": 8188, "last_status": "running"},
+    }
+    jobs_state.write(st)
+
+    result = _invoke_status("oom-run", "--host", "127.0.0.1", "--port", "8188")
+    assert result.exit_code == 0, result.output
+    env = _last_json(result.stdout)
+    assert env["ok"] is True
+    data = env["data"]
+    assert data["status"] == "error"
+    assert data["error"]["code"] == "server_died"
+    assert data["source"] == "state_file"
+    assert data["server_running"] is False
+    assert data["prompt_id"] == "oom-run"
+    assert data["workflow"] == "/tmp/oom.json"
+
+
+class TestStatusServerUpNoRecord:
+    """Server UP but neither `/queue` nor `/history` knows the prompt.
+
+    This is what the documented crash recovery ("relaunch, then check")
+    produces: a fresh ComfyUI answers the port with an empty history, so the
+    live snapshot comes back None. Before BE-4749 that unconditionally emitted
+    `prompt_not_found` and discarded the `server_died` verdict already sitting
+    on disk.
+    """
+
+    @staticmethod
+    def _server_up_with_no_record(monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(jobs_mod, "check_comfy_server_running", lambda port, host: True)
+        monkeypatch.setattr(jobs_mod, "_snapshot", lambda h, p, pid: None)
+
+    def test_terminal_state_file_wins_over_prompt_not_found(self, monkeypatch: pytest.MonkeyPatch):
+        """Terminal record -> emit it as a normal result, exit 0. This is the
+        relaunch-then-check path that used to throw the attribution away."""
+        from comfy_cli import jobs_state
+
+        self._server_up_with_no_record(monkeypatch)
+        st = jobs_state.new(prompt_id="relaunched-run", client_id="c", workflow="/tmp/oom.json", where="local")
+        st.status = "error"
+        st.error = {"code": "server_died", "message": "the server died under this job", "details": {}}
+        jobs_state.write(st)
+
+        result = _invoke_status("relaunched-run", "--host", "127.0.0.1", "--port", "8188")
+        assert result.exit_code == 0, result.output
+        env = _last_json(result.stdout)
+        assert env["ok"] is True
+        data = env["data"]
+        assert data["status"] == "error"
+        assert data["error"]["code"] == "server_died"
+        assert data["source"] == "state_file"
+        # The distinguishing field: the port answers, it just has no record.
+        assert data["server_running"] is True
+        assert data["prompt_id"] == "relaunched-run"
+        assert data["workflow"] == "/tmp/oom.json"
+        assert data["submitted_at"] == st.submitted_at
+
+    def test_terminal_completed_state_file_is_also_returned(self, monkeypatch: pytest.MonkeyPatch):
+        """Not just failures: a completed job pruned from `/history` still has
+        its outputs on disk, and they are worth more than `prompt_not_found`."""
+        from comfy_cli import jobs_state
+
+        self._server_up_with_no_record(monkeypatch)
+        st = jobs_state.new(prompt_id="pruned-run", client_id="c", workflow="/tmp/wf.json", where="local")
+        st.status = "completed"
+        st.outputs = ["http://127.0.0.1:8188/view?filename=out.png"]
+        jobs_state.write(st)
+
+        result = _invoke_status("pruned-run", "--host", "127.0.0.1", "--port", "8188")
+        assert result.exit_code == 0, result.output
+        data = _last_json(result.stdout)["data"]
+        assert data["status"] == "completed"
+        assert data["outputs"] == ["http://127.0.0.1:8188/view?filename=out.png"]
+        assert data["error"] is None
+        assert data["source"] == "state_file"
+        assert data["server_running"] is True
+
+    def test_non_terminal_state_file_keeps_the_code_but_enriches_details(self, monkeypatch: pytest.MonkeyPatch):
+        """Non-terminal record -> still `prompt_not_found` (callers key on the
+        code) but carrying the last-known state, like the server-down twin."""
+        from comfy_cli import jobs_state
+
+        self._server_up_with_no_record(monkeypatch)
+        st = jobs_state.new(prompt_id="inflight-run", client_id="c", workflow="/tmp/wf.json", where="local")
+        st.status = "running"
+        jobs_state.write(st)
+
+        result = _invoke_status("inflight-run", "--host", "127.0.0.1", "--port", "8188")
+        assert result.exit_code == 1, result.output
+        env = _last_json(result.stdout)
+        assert env["ok"] is False
+        err = env["error"]
+        assert err["code"] == "prompt_not_found"
+        assert "inflight-run" in err["message"]
+        assert "'running'" in err["message"]
+        details = err["details"]
+        assert details["prompt_id"] == "inflight-run"
+        assert details["last_known_status"] == "running"
+        assert details["workflow"] == "/tmp/wf.json"
+        assert details["submitted_at"] == st.submitted_at
+        assert details["updated_at"] == st.updated_at
+
+    def test_no_state_file_keeps_the_bare_envelope(self, monkeypatch: pytest.MonkeyPatch):
+        """No record anywhere -> today's envelope, byte for byte. An untracked
+        prompt id must not start reporting on jobs that never existed."""
+        self._server_up_with_no_record(monkeypatch)
+
+        result = _invoke_status("never-existed", "--host", "127.0.0.1", "--port", "8188")
+        assert result.exit_code == 1, result.output
+        env = _last_json(result.stdout)
+        assert env["ok"] is False
+        err = env["error"]
+        assert err["code"] == "prompt_not_found"
+        assert err["message"] == "No prompt with id 'never-existed' on 127.0.0.1:8188."
+        assert err["hint"] == "check `comfy jobs ls`; very old prompts may have been pruned from /history"
+        assert err["details"] == {"prompt_id": "never-existed", "host": "127.0.0.1", "port": 8188}
 
 
 # ---------------------------------------------------------------------------

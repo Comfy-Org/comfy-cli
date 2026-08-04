@@ -178,7 +178,10 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ),
     ErrorCode(
         "prompt_not_found",
-        "Asked about a prompt_id the server doesn't know.",
+        "Asked about a prompt_id the server doesn't know. `comfy jobs status` only reports this once the "
+        "local state file has been checked too: if that file holds a terminal verdict (e.g. the job died "
+        "with an earlier server), the verdict is returned as a normal result instead. When a non-terminal "
+        "state file exists, `details` carries `last_known_status`, `submitted_at`, `updated_at`, `workflow`.",
         "`comfy jobs ls` to find a valid prompt_id",
     ),
     ErrorCode(

@@ -707,6 +707,29 @@ def _render_jobs_pretty(rows: list[JobRow], *, host: str, port: int) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _state_file_snapshot(st: JobState, *, prompt_id: str, host: str, port: int, server_running: bool) -> dict:
+    """Shape a `jobs status` payload out of the on-disk state file.
+
+    Used by both fallback paths — the server being down, and a live server
+    that has no record of the prompt — so the two agree on field names.
+    ``server_running`` is the one thing that differs between them, and it is
+    what tells the caller which fallback it is looking at.
+    """
+    return {
+        "prompt_id": prompt_id,
+        "status": st.status,
+        "outputs": list(st.outputs or []),
+        "error": st.error,
+        "host": host,
+        "port": port,
+        "server_running": server_running,
+        "source": "state_file",
+        "submitted_at": st.submitted_at,
+        "updated_at": st.updated_at,
+        "workflow": st.workflow,
+    }
+
+
 @app.command("status", help="Show the status of a single prompt_id (local or --where cloud).")
 @tracking.track_command("jobs")
 def status_cmd(
@@ -749,19 +772,7 @@ def status_cmd(
             # The job finished before the server stopped — the state file is
             # the authoritative record, so this is a normal result, not an
             # error. Callers branch on `status`/`error`.
-            snapshot = {
-                "prompt_id": prompt_id,
-                "status": st.status,
-                "outputs": list(st.outputs or []),
-                "error": st.error,
-                "host": h,
-                "port": p,
-                "server_running": False,
-                "source": "state_file",
-                "submitted_at": st.submitted_at,
-                "updated_at": st.updated_at,
-                "workflow": st.workflow,
-            }
+            snapshot = _state_file_snapshot(st, prompt_id=prompt_id, host=h, port=p, server_running=False)
             if renderer.is_pretty():
                 _render_status_pretty(snapshot, host=h, port=p)
             renderer.emit(snapshot, command="jobs status")
@@ -792,6 +803,64 @@ def status_cmd(
 
     snapshot = _snapshot(h, p, prompt_id)
     if snapshot is None:
+        # The server answered, but neither /queue nor /history knows this
+        # prompt. That is *not* only "pruned from /history": the documented
+        # recovery from a server death is `comfy launch` and then check, and a
+        # relaunched ComfyUI is a FRESH process — its empty /queue and /history
+        # are precisely what a job that died with the old process looks like.
+        # So the state file, which still holds the verdict the watcher wrote
+        # (e.g. error.code == "server_died"), is the better answer here.
+        #
+        # This is the same inference the async watcher already makes: see
+        # `_LOST_AFTER_RESTART_S` in `comfy_cli/command/job_watcher.py`, where a
+        # prompt missing from a server that came back is finalized as
+        # `server_died`. `jobs status` reading the file it wrote keeps the two
+        # in agreement rather than having them contradict each other.
+        from comfy_cli import jobs_state
+
+        try:
+            st = jobs_state.read(prompt_id)
+        except ValueError:  # unsafe prompt_id — no state file to read
+            st = None
+
+        if st is not None and st.is_terminal:
+            # The state file holds a final verdict for this prompt — emit it as
+            # a normal result, exactly as the server-down path does. The one
+            # difference is `server_running: True`, so a caller can tell it is
+            # looking at a live server with no record rather than a dead one.
+            snapshot = _state_file_snapshot(st, prompt_id=prompt_id, host=h, port=p, server_running=True)
+            if renderer.is_pretty():
+                _render_status_pretty(snapshot, host=h, port=p)
+            renderer.emit(snapshot, command="jobs status")
+            return
+
+        if st is not None:
+            # Tracked but non-terminal: the watcher never got to write a
+            # verdict (it may still be inside its grace window, or it died
+            # too). Keep the `prompt_not_found` code — callers key on it — and
+            # attach what the file does know, mirroring the server-down
+            # non-terminal branch above.
+            renderer.error(
+                code="prompt_not_found",
+                message=(
+                    f"No prompt with id {prompt_id!r} on {h}:{p} — the local state file last recorded it as "
+                    f"{st.status!r} (submitted {st.submitted_at}, last update {st.updated_at}). The server may "
+                    f"have been restarted since, in which case the job died with the previous process."
+                ),
+                hint="check `comfy jobs ls`; very old prompts may have been pruned from /history",
+                details={
+                    "prompt_id": prompt_id,
+                    "host": h,
+                    "port": p,
+                    "last_known_status": st.status,
+                    "submitted_at": st.submitted_at,
+                    "updated_at": st.updated_at,
+                    "workflow": st.workflow,
+                },
+            )
+            raise typer.Exit(code=1)
+
+        # Untracked prompt: same envelope as before, byte for byte.
         renderer.error(
             code="prompt_not_found",
             message=f"No prompt with id {prompt_id!r} on {h}:{p}.",
