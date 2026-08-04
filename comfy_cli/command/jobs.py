@@ -1346,30 +1346,19 @@ def _cloud_cancel(prompt_id: str) -> None:
     try:
         with authed_urlopen(url, target, method="POST", data=b"", timeout=15) as resp:
             body = resp.read()
-    except urllib.error.HTTPError as e:
-        body_text = (e.read() or b"")[:1000].decode("utf-8", "replace")
-        if e.code == 404:
-            renderer.error(
-                code="prompt_not_found",
-                message=f"no cloud job with id {prompt_id!r}",
-                hint="check `comfy jobs ls --where cloud`",
-                details={"prompt_id": prompt_id},
-            )
-        else:
-            renderer.error(
-                code="cloud_http_error",
-                message=f"HTTP {e.code} cancelling {prompt_id}",
-                hint="check auth and that the job exists",
-                details={"status": e.code, "body": body_text, "prompt_id": prompt_id},
-            )
-        raise typer.Exit(code=1) from e
-    except (urllib.error.URLError, OSError) as e:
-        renderer.error(
-            code="cloud_http_error",
-            message=f"cancel failed: {e}",
-            hint="check network / `comfy cloud whoami`",
-        )
-        raise typer.Exit(code=1) from e
+    except (urllib.error.HTTPError, urllib.error.URLError, OSError) as e:
+        from comfy_cli.command._cloud_errors import handle_cloud_http_error
+
+        raise handle_cloud_http_error(
+            renderer,
+            e,
+            operation="cancel",
+            not_found_code="prompt_not_found",
+            not_found_message=f"no cloud job with id {prompt_id!r}",
+            not_found_hint="check `comfy jobs ls --where cloud`",
+            id_label="prompt_id",
+            resource_id=prompt_id,
+        ) from e
 
     parsed: dict | None
     try:

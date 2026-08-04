@@ -794,8 +794,9 @@ def run(
             help=(
                 "Positive text prompt for the bundled default text2img workflow "
                 "(used when --workflow is omitted). Cannot be combined with --workflow. "
-                "The bundled graph loads an SD1.5 checkpoint (v1-5-pruned-emaonly.ckpt) "
-                "that is NOT downloaded for you — install it, or point elsewhere with "
+                "The bundled graph prefers an SD1.5 checkpoint "
+                "(v1-5-pruned-emaonly-fp16.safetensors); if the target doesn't have it, "
+                "an installed checkpoint is substituted and reported. Pin your own with "
                 "--set checkpoint=<name>."
             ),
         ),
@@ -951,7 +952,7 @@ def run(
         # against OUR pinned node ids, so mixing them with a user --workflow —
         # whose node ids are arbitrary — is rejected rather than silently
         # misapplied. `preloaded` is handed straight to run's execute path.
-        preloaded: tuple[dict, str, bool] | None = None
+        preloaded: tuple[dict, str, bool, bool] | None = None
         if prompt is not None or set_overrides:
             if workflow is not None:
                 renderer.error(
@@ -963,7 +964,7 @@ def run(
             from comfy_cli.cql.default_workflow import (
                 PromptInjectionError,
                 build_default_workflow,
-                default_checkpoint,
+                overrides_set_checkpoint,
             )
 
             try:
@@ -971,29 +972,10 @@ def run(
             except PromptInjectionError as e:
                 renderer.error(code=e.code, message=str(e), hint=e.hint)
                 raise typer.Exit(code=1) from e
-            preloaded = (injected, "default_text2img", False)
-            # The bundled graph pins an SD1.5 checkpoint that comfy-cli neither
-            # ships nor auto-downloads. Without it the run dies server-side on a
-            # bare validation error, so state the dependency up front. Pretty
-            # output only — the JSON dialects carry a fixed event contract.
-            ckpt = default_checkpoint(injected)
-            if ckpt and renderer.is_pretty():
-                from rich.markup import escape as _escape
-
-                # The checkpoint has to exist wherever the run is routed, so
-                # name that environment: pointing a `--where cloud` run at the
-                # local models/checkpoints sends the user to fix the wrong box.
-                if decision.target is where_module.WhereTarget.CLOUD:
-                    where_ckpt = "in your cloud assets (`comfy models search --where cloud`)"
-                else:
-                    where_ckpt = "in models/checkpoints"
-                # `--set checkpoint=…` puts a user string here; escape it so a
-                # value containing [brackets] can't be read as rich markup.
-                rprint(
-                    f"[dim]Using the bundled default text2img workflow — it needs the[/dim] "
-                    f"[bold]{_escape(ckpt)}[/bold] [dim]checkpoint {where_ckpt}. "
-                    f"Override it with --set checkpoint=<name>.[/dim]"
-                )
+            # If the user pinned the checkpoint (--set checkpoint=… / 4.ckpt_name=…),
+            # honor it verbatim: runtime resolution is skipped downstream.
+            checkpoint_user_set = overrides_set_checkpoint(set_overrides, injected)
+            preloaded = (injected, "default_text2img", False, checkpoint_user_set)
         elif workflow is None:
             renderer.error(
                 code="prompt_rejected",

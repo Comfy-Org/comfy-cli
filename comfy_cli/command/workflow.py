@@ -842,9 +842,12 @@ def _http_request(
 
 
 def _handle_cloud_http_error(renderer, e, *, operation: str, workflow_id: str | None = None) -> typer.Exit:
-    """Map HTTP failures to envelope codes. Returns an Exit to ``raise from``."""
-    import urllib.error
+    """Map HTTP failures to envelope codes. Returns an Exit to ``raise from``.
 
+    Thin wrapper over the shared cloud-error mapper (BE-3266) that supplies the
+    ``workflow``-specific 404 envelope and the oversize/unparseable-response
+    checks; everything else is shared with ``jobs``.
+    """
     if isinstance(e, _ResponseUnparseable):
         renderer.error(
             code="workflow_unparseable",
@@ -852,47 +855,31 @@ def _handle_cloud_http_error(renderer, e, *, operation: str, workflow_id: str | 
             hint="the server sent a malformed body; retry, and report it if it persists",
             details={"operation": operation, "workflow_id": workflow_id},
         )
-    elif isinstance(e, _ResponseTooLarge):
+        return typer.Exit(code=1)
+    if isinstance(e, _ResponseTooLarge):
         renderer.error(
             code="workflow_too_large",
             message=f"cloud API response during {operation} exceeded the {_HTTP_MAX_BYTES // (1024 * 1024)} MiB cap",
             hint=_TOO_LARGE_HINTS.get(operation, "the cloud response was unexpectedly large"),
             details={"operation": operation, "workflow_id": workflow_id, "limit_bytes": _HTTP_MAX_BYTES},
         )
-    elif isinstance(e, urllib.error.HTTPError):
-        # Cap the read itself — ``[:1000]`` after a full ``read()`` would still pull an
-        # arbitrarily large (or malicious) error page into memory before slicing.
-        body = (e.read(1000) or b"").decode("utf-8", "replace")
-        if e.code == 404:
-            renderer.error(
-                code="workflow_not_found",
-                message=f"no saved workflow with id {workflow_id!r}"
-                if workflow_id
-                else f"workflow not found ({operation})",
-                hint="list available workflows via `comfy --json workflow list`",
-                details={"workflow_id": workflow_id, "operation": operation},
-            )
-        elif e.code in (401, 403):
-            renderer.error(
-                code="cloud_unauthorized",
-                message=f"HTTP {e.code} during {operation}",
-                hint="re-run `comfy cloud login`",
-                details={"status": e.code},
-            )
-        else:
-            renderer.error(
-                code="cloud_http_error",
-                message=f"HTTP {e.code} during {operation}",
-                hint="check `details.body` for the server's message",
-                details={"status": e.code, "body": body, "operation": operation},
-            )
-    else:
-        renderer.error(
-            code="cloud_http_error",
-            message=f"{operation} failed: {e}",
-            hint="check network / `comfy cloud whoami`",
-        )
-    return typer.Exit(code=1)
+        return typer.Exit(code=1)
+
+    from comfy_cli.command._cloud_errors import handle_cloud_http_error
+
+    not_found_message = (
+        f"no saved workflow with id {workflow_id!r}" if workflow_id else f"workflow not found ({operation})"
+    )
+    return handle_cloud_http_error(
+        renderer,
+        e,
+        operation=operation,
+        not_found_code="workflow_not_found",
+        not_found_message=not_found_message,
+        not_found_hint="list available workflows via `comfy --json workflow list`",
+        id_label="workflow_id",
+        resource_id=workflow_id,
+    )
 
 
 # ---------------------------------------------------------------------------
