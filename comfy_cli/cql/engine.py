@@ -555,6 +555,11 @@ class Graph:
     # -- Lookup --
 
     def node(self, name: str) -> Morphism | None:
+        # A malformed workflow can supply an unhashable class_type (list/dict);
+        # dict.get on an unhashable key raises TypeError, so screen it out here
+        # rather than crash the reachability walk / lookups (BE-3406 hardening).
+        if not isinstance(name, str):
+            return None
         return self._nodes.get(name)
 
     def all_nodes(self) -> list[Morphism]:
@@ -741,6 +746,15 @@ class Graph:
         # (execution.py:1155-1162, prompt_no_outputs). Track whether any
         # recognized node is an output node.
         has_output_node = False
+        # Server parity: ComfyUI's validate_prompt only validates output nodes
+        # and their transitive input ancestors — any node not reachable from an
+        # output is pruned and never validated (execution.py). Restrict the
+        # promoted hard checks (required-input presence, autogrow-required, and
+        # below_min/above_max ranges) to that reachable set, so a
+        # disconnected/incomplete node the server would silently drop isn't
+        # hard-rejected here. Edge/shape/enum checks are left as-is (pre-existing
+        # behavior, out of scope for this change).
+        reachable = _output_reachable_node_ids(workflow, self)
 
         for node_id, node_data in workflow.items():
             # `_meta` is the compose/run provenance block (schema/blueprint/items),
@@ -759,6 +773,11 @@ class Graph:
                 )
                 continue
             class_type = node_data.get("class_type", "")
+            # A non-string class_type (list/dict from malformed JSON) is unhashable
+            # and would crash the self._nodes.get(class_type) lookup below; treat it
+            # as absent so it flows to the structured non_node_key path instead.
+            if not isinstance(class_type, str):
+                class_type = ""
             if not class_type:
                 warnings.append(
                     {
@@ -796,7 +815,13 @@ class Graph:
             # case surfaces here instead of as a cryptic server reject.
             autogrow_ports = {p.name: p for p in m.inputs if p.is_autogrow}
             autogrow_seen: set[str] = set()
-            for input_name, value in (node_data.get("inputs") or {}).items():
+            node_inputs = node_data.get("inputs")
+            # A truthy non-dict `inputs` (e.g. a string/list from malformed JSON)
+            # sails through `or {}` and crashes `.items()`; treat it as empty so
+            # required-input checks flag the absence instead of raising.
+            if not isinstance(node_inputs, dict):
+                node_inputs = {}
+            for input_name, value in node_inputs.items():
                 if autogrow_ports and "." in input_name:
                     base = input_name.split(".", 1)[0]
                     if base in autogrow_ports:
@@ -839,7 +864,10 @@ class Graph:
                         continue
 
                     src_class = src_data["class_type"]
-                    src_m = self._nodes.get(src_class)
+                    # Route through the guarded lookup: a referenced node with an
+                    # unhashable class_type (malformed JSON) would otherwise crash
+                    # the dict.get here.
+                    src_m = self.node(src_class)
                     if src_m is None:
                         # Source class_type already flagged by the outer loop
                         continue
@@ -906,16 +934,25 @@ class Graph:
                         }
                     )
                     continue
-                # Catalog checks (enum membership, etc.)
-                cat_errors, cat_warnings = _validate_catalog_value(node_id, class_type, input_name, port, value)
+                # Catalog checks (enum membership, etc.). Range violations are a
+                # hard reject only on a node the server will actually run; on a
+                # pruned (output-unreachable) node they stay advisory warnings.
+                cat_errors, cat_warnings = _validate_catalog_value(
+                    node_id, class_type, input_name, port, value, range_is_error=node_id in reachable
+                )
                 errors.extend(cat_errors)
                 warnings.extend(cat_warnings)
 
-            errors.extend(_check_autogrow_required(node_id, autogrow_ports, autogrow_seen, node_data))
-            errors.extend(_check_required_present(node_id, m, node_data))
-            dyn_errors, dyn_warnings = _check_dynamic_combos(node_id, class_type, m, node_data)
-            errors.extend(dyn_errors)
-            warnings.extend(dyn_warnings)
+            # Required-presence checks apply only to output-reachable nodes: the
+            # server prunes unreachable nodes without validating them, so
+            # enforcing required inputs on a disconnected node over-rejects a
+            # prompt the server would run (BE-3406).
+            if node_id in reachable:
+                errors.extend(_check_autogrow_required(node_id, autogrow_ports, autogrow_seen, node_data))
+                errors.extend(_check_required_present(node_id, m, node_data))
+                dyn_errors, dyn_warnings = _check_dynamic_combos(node_id, class_type, m, node_data)
+                errors.extend(dyn_errors)
+                warnings.extend(dyn_warnings)
 
         # No-outputs check: the server rejects any prompt with zero output
         # nodes (execution.py:1155-1162, prompt_no_outputs) — including an
@@ -1089,14 +1126,61 @@ class Graph:
 # error/warning dicts for the caller to append — no shared state is threaded.
 
 
+def _output_reachable_node_ids(workflow: dict[str, Any], graph: Graph) -> set[str]:
+    """Node ids the server would actually validate: output nodes and their
+    transitive input ancestors.
+
+    Mirrors ComfyUI's execution.py::validate_prompt, which validates only the
+    output nodes (``OUTPUT_NODE``) and everything reachable by walking their
+    input links backward — any node not reachable from an output is pruned and
+    never validated. We reproduce that reachable set so the promoted hard checks
+    (required_input_missing, autogrow_no_slots, below_min/above_max) don't
+    reject a disconnected node the server would silently drop.
+
+    An input value shaped ``[source_node_id, output_index]`` is a link edge (the
+    same predicate the per-input link walk uses); we follow those edges backward
+    from every output node. A reference to a node absent from the workflow (a
+    dangling edge, flagged separately) simply isn't traversed.
+    """
+    reachable: set[str] = set()
+    stack: list[str] = []
+    for node_id, node_data in workflow.items():
+        if node_id == "_meta" or not isinstance(node_data, dict):
+            continue
+        m = graph.node(node_data.get("class_type", ""))
+        if m is not None and m.is_output_node and node_id not in reachable:
+            reachable.add(node_id)
+            stack.append(node_id)
+    while stack:
+        node_data = workflow.get(stack.pop())
+        if not isinstance(node_data, dict):
+            continue
+        node_inputs = node_data.get("inputs")
+        # Guard against a truthy non-dict `inputs` from malformed JSON, which
+        # would slip past `or {}` and raise AttributeError on `.values()`.
+        if not isinstance(node_inputs, dict):
+            continue
+        for value in node_inputs.values():
+            if isinstance(value, list) and len(value) == 2:
+                src_id = str(value[0])
+                if src_id in workflow and src_id not in reachable:
+                    reachable.add(src_id)
+                    stack.append(src_id)
+    return reachable
+
+
 def _validate_catalog_value(
-    node_id: str, class_type: str, input_name: str, port: Port, value: Any
+    node_id: str, class_type: str, input_name: str, port: Port, value: Any, *, range_is_error: bool = True
 ) -> tuple[list[dict], list[dict]]:
     """Enum-membership and other catalog checks for one scalar input value.
 
     Returns (errors, warnings): unknown-enum and out-of-range values are hard
     errors (the server rejects them); every other catalog finding is a
     namespaced warning.
+
+    ``range_is_error`` gates the below_min/above_max promotion (BE-3406): the
+    server only range-checks nodes it actually runs, so on a pruned
+    (output-unreachable) node these are demoted back to advisory warnings.
     """
     errors: list[dict] = []
     warnings: list[dict] = []
@@ -1155,15 +1239,23 @@ def _validate_catalog_value(
             # unknown_enum_value hard error does.
             bound = port.options.min if w["code"] == "below_min" else port.options.max
             op = ">=" if w["code"] == "below_min" else "<="
-            errors.append(
-                {
-                    "node_id": node_id,
-                    "field": input_name,
-                    "code": w["code"],
-                    "message": w["message"],
-                    "hint": f"use a value {op} {bound}",
-                }
-            )
+            entry = {
+                "node_id": node_id,
+                "field": input_name,
+                "code": w["code"],
+                "message": w["message"],
+                "hint": f"use a value {op} {bound}",
+            }
+            # Only a hard reject on a node the server will run; on a pruned node
+            # it stays advisory (matching pre-promotion behavior for that node).
+            if range_is_error:
+                errors.append(entry)
+            else:
+                # Demoted to an advisory warning: match the fully-qualified
+                # `field` schema every other warning uses (preflight renders
+                # w["field"]), rather than leaking the bare input_name.
+                entry["field"] = f"{node_id}.{class_type}.{input_name}"
+                warnings.append(entry)
         else:
             w["field"] = f"{node_id}.{class_type}.{w['field']}"
             warnings.append(w)
