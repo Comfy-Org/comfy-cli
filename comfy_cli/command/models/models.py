@@ -484,6 +484,24 @@ def download(
             details={"path": str(local_filepath)},
         )
 
+    # The exists() check above cannot see a transfer that is still in flight: a
+    # background download streams into a `.part` sibling and only renames onto
+    # `dest` at the end, so the destination stays absent for the whole transfer
+    # and two submissions for the same model would both pass, both stream a full
+    # copy, and the later rename would silently overwrite the earlier. Checked
+    # before the `--background` split so a foreground transfer is refused too.
+    in_flight = _active_download_for(local_filepath)
+    if in_flight is not None:
+        raise _download_failure(
+            code="model_download_in_flight",
+            message=f"A background download ({in_flight.id}) is already writing to {local_filepath}.",
+            hint=(
+                f"track it with `comfy model download-status {in_flight.id}`, "
+                f"or cancel it with `comfy model download-cancel {in_flight.id}`"
+            ),
+            details={"path": str(local_filepath), "download_id": in_flight.id, "status": in_flight.status},
+        )
+
     start_time = time.monotonic()
 
     # Every resolution step above (metadata requests, token config, filename,
@@ -949,6 +967,46 @@ def _reconciled(state: download_state.DownloadState) -> tuple[download_state.Dow
         with contextlib.suppress(OSError, ValueError):
             download_state.write(get_workspace(), fresh)
     return fresh, changed
+
+
+def _active_download_for(dest: pathlib.Path) -> download_state.DownloadState | None:
+    """The live background download already targeting ``dest``, if any.
+
+    Reconciles each record first (persisting the correction), so a SIGKILLed
+    worker's stale record demotes to ``failed`` here and never wedges the path.
+
+    The predicate is deliberately "reconciled status is active", *not*
+    :func:`download_state.worker_alive`: a just-submitted download sits in
+    ``starting`` with no pid for up to :data:`download_state.STARTUP_GRACE_S`
+    while its worker's interpreter boots, and ``worker_alive`` reports False for
+    a pidless record — so gating on it would pass during exactly the
+    near-simultaneous double-submit this guard exists to catch. Reconcile keeps
+    both a within-grace ``starting`` record and a live worker blocking, while
+    demoting a dead worker's record so it self-clears.
+    """
+    # `abspath` on BOTH sides, not `Path.absolute()` on one: `absolute()` does not
+    # normalize, so a `--relative-path` carrying `..` (it is only `expanduser`-ed,
+    # never passed through `_reject_unsafe_component`) would leave one side
+    # un-normalized and the comparison would miss the very collision it is for.
+    # `normcase` folds case on Windows; on POSIX it is identity, so a
+    # case-insensitive macOS volume can still alias two spellings past this — the
+    # same residual `local_filepath.exists()` above would have.
+    wanted = os.path.normcase(os.path.abspath(dest))
+    try:
+        records = download_state.list_all(get_workspace())
+    except OSError:
+        # The scan is advisory, so an unreadable state directory must degrade to
+        # the pre-guard behavior rather than turn a working download into a
+        # traceback — this read is on the foreground path too, which never
+        # touched the state directory before.
+        return None
+    for state in records:
+        fresh, _ = _reconciled(state)
+        if fresh.status not in download_state.ACTIVE_STATUSES:
+            continue
+        if os.path.normcase(os.path.abspath(fresh.dest)) == wanted:
+            return fresh
+    return None
 
 
 @app.command("download-status")

@@ -562,6 +562,143 @@ class TestSubmitFailsFast:
         assert "Hugging Face API token" in capsys.readouterr().out
 
 
+class TestSubmitRefusesAClaimedDestination:
+    """A destination already claimed by a *live* background download is refused.
+
+    `local_filepath.exists()` cannot catch this: a background transfer streams
+    into a `.part` sibling and only renames onto `dest` at the very end, so the
+    destination is absent for the whole transfer and a second submission would
+    otherwise sail through, stream a full second copy, and silently overwrite the
+    first at rename time.
+    """
+
+    DEST = ("models/loras", "m.safetensors")
+
+    def _dest(self, workspace) -> Path:
+        return workspace / self.DEST[0] / self.DEST[1]
+
+    def _download(self, **kwargs):
+        models.download(
+            None,
+            url="https://example.com/m.safetensors",
+            relative_path=self.DEST[0],
+            filename=self.DEST[1],
+            **kwargs,
+        )
+
+    def test_a_second_submission_is_refused(self, workspace, no_spawn, json_renderer):
+        """The classic double-submit: a live worker owns the destination."""
+        live = _state(dest=str(self._dest(workspace)), status="downloading", pid=1234, total_bytes=4096)
+        download_state.write(workspace, live)
+
+        with patch("comfy_cli.utils.is_running", return_value=True):
+            with pytest.raises(typer.Exit) as exc:
+                self._download(background=True)
+
+        assert exc.value.exit_code == 1
+        env = json_renderer()
+        assert env["ok"] is False
+        assert env["error"]["code"] == "model_download_in_flight"
+        assert env["error"]["details"]["download_id"] == live.id
+        assert env["error"]["details"]["status"] == "downloading"
+        assert env["error"]["details"]["path"] == str(self._dest(workspace))
+        # The refusal is read-only: the in-flight record is left exactly as it was.
+        assert download_state.read(workspace, live.id).status == "downloading"
+        assert len(download_state.list_all(workspace)) == 1
+
+    def test_a_pidless_starting_record_still_blocks(self, workspace, no_spawn, json_renderer):
+        """The regression test for reconcile-vs-`worker_alive`.
+
+        A just-submitted download sits in `starting` with no pid for up to
+        STARTUP_GRACE_S while its worker's interpreter boots, and `worker_alive`
+        reports False for a pidless record — so a `worker_alive` predicate would
+        wave through exactly the near-simultaneous double-submit this guard is
+        for. `_state()` stamps `started_at` now, i.e. inside the grace window.
+        """
+        live = _state(dest=str(self._dest(workspace)), status="starting", pid=None)
+        download_state.write(workspace, live)
+
+        with pytest.raises(typer.Exit) as exc:
+            self._download(background=True)
+
+        assert exc.value.exit_code == 1
+        assert json_renderer()["error"]["code"] == "model_download_in_flight"
+
+    def test_a_dead_workers_record_self_clears(self, workspace, monkeypatch, json_renderer):
+        """A SIGKILLed worker's stale record must never wedge the path: the scan
+        reconciles first, so the record demotes to `failed` and the submit runs."""
+        stale = _state(dest=str(self._dest(workspace)), status="downloading", pid=4242, total_bytes=4096)
+        download_state.write(workspace, stale)
+        monkeypatch.setattr(models, "_spawn_download_worker", lambda state_file, log_file: 31337)
+
+        with patch("comfy_cli.utils.is_running", return_value=False):
+            self._download(background=True)
+
+        env = json_renderer()
+        assert env["ok"] is True
+        assert env["data"]["download_id"] != stale.id
+        # ...and the demotion was persisted, not merely computed in memory.
+        assert download_state.read(workspace, stale.id).status == "failed"
+
+    def test_a_live_download_to_another_destination_does_not_block(self, workspace, monkeypatch, json_renderer):
+        other = _state(dest=str(workspace / "models" / "loras" / "other.safetensors"), status="downloading", pid=1234)
+        download_state.write(workspace, other)
+        monkeypatch.setattr(models, "_spawn_download_worker", lambda state_file, log_file: 31337)
+
+        with patch("comfy_cli.utils.is_running", return_value=True):
+            self._download(background=True)
+
+        env = json_renderer()
+        assert env["ok"] is True
+        assert env["data"]["dest"] == str(self._dest(workspace))
+
+    def test_an_unnormalized_relative_path_does_not_slip_past(self, workspace, no_spawn, json_renderer):
+        """`--relative-path` is only `expanduser`-ed, never rejected for `..`, so
+        both sides of the comparison have to be normalized or a caller could
+        spell the same destination differently and defeat the guard."""
+        live = _state(dest=str(self._dest(workspace)), status="downloading", pid=1234)
+        download_state.write(workspace, live)
+
+        with patch("comfy_cli.utils.is_running", return_value=True):
+            with pytest.raises(typer.Exit):
+                models.download(
+                    None,
+                    url="https://example.com/m.safetensors",
+                    relative_path="models/loras/../loras",
+                    filename=self.DEST[1],
+                    background=True,
+                )
+
+        assert json_renderer()["error"]["details"]["download_id"] == live.id
+
+    def test_an_unreadable_state_directory_does_not_break_the_download(self, workspace, monkeypatch, json_renderer):
+        """The scan is advisory. It is now on the foreground path too, which never
+        read the state directory before, so a failure there must degrade to the
+        pre-guard behavior rather than become a traceback."""
+        monkeypatch.setattr(download_state, "list_all", MagicMock(side_effect=OSError("state dir is not readable")))
+        monkeypatch.setattr(models, "_spawn_download_worker", lambda state_file, log_file: 31337)
+
+        self._download(background=True)
+
+        assert json_renderer()["ok"] is True
+
+    def test_a_foreground_download_is_refused_too(self, workspace, monkeypatch, json_renderer):
+        """The guard sits before the `--background` split, so a foreground
+        transfer into a claimed destination is refused before any bytes move."""
+        live = _state(dest=str(self._dest(workspace)), status="downloading", pid=1234)
+        download_state.write(workspace, live)
+        monkeypatch.setattr(models, "download_file", MagicMock(side_effect=AssertionError("a transfer started")))
+
+        with patch("comfy_cli.utils.is_running", return_value=True):
+            with pytest.raises(typer.Exit) as exc:
+                self._download()
+
+        assert exc.value.exit_code == 1
+        env = json_renderer()
+        assert env["error"]["code"] == "model_download_in_flight"
+        assert env["error"]["details"]["download_id"] == live.id
+
+
 class TestSubmitEnvelope:
     def _submit(self, workspace, monkeypatch, **kwargs):
         monkeypatch.setattr(models, "_spawn_download_worker", lambda state_file, log_file: 31337)
