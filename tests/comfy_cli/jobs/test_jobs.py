@@ -2913,13 +2913,59 @@ def test_untracked_prompt_keeps_the_default_hints(monkeypatch: pytest.MonkeyPatc
 def test_state_error_code_extraction_is_defensive():
     """Only a non-empty string `error.code` survives — a state file is
     hand-editable, and `error_code` is typed `string | null` in the schema."""
-    assert jobs_mod._state_error_code({"code": "server_died"}) == "server_died"
-    assert jobs_mod._state_error_code(None) is None
-    assert jobs_mod._state_error_code({}) is None
-    assert jobs_mod._state_error_code({"code": ""}) is None
-    assert jobs_mod._state_error_code({"code": 500}) is None
-    assert jobs_mod._state_error_code("server_died") is None
-    assert jobs_mod._state_error_code(["server_died"]) is None
+    assert jobs_mod._state_error_code({"code": "server_died"}, "error") == "server_died"
+    assert jobs_mod._state_error_code(None, "error") is None
+    assert jobs_mod._state_error_code({}, "error") is None
+    assert jobs_mod._state_error_code({"code": ""}, "error") is None
+    assert jobs_mod._state_error_code({"code": 500}, "error") is None
+    assert jobs_mod._state_error_code("server_died", "error") is None
+    assert jobs_mod._state_error_code(["server_died"], "error") is None
+
+
+@pytest.mark.parametrize("status", ["queued", "running", "pending", "executing", "completed"])
+def test_state_error_code_ignores_a_code_on_a_job_that_has_not_failed(status):
+    """`job_watcher._poll_local_once`/`_poll_cloud_once` park a transient
+    `watcher_poll_error` on the state file *without* moving the status off
+    `queued`/`running`, and only clear it on a later poll that returns a
+    snapshot — so a healthy in-flight job holds that code for many cycles.
+    Surfacing it would advertise a failure cause for a job that hasn't failed
+    (and contradict the schema, which promises null on every non-failed row)."""
+    assert jobs_mod._state_error_code({"code": "watcher_poll_error"}, status) is None
+
+
+def test_gather_local_state_files_ignores_a_poll_error_on_a_running_job():
+    """End to end through the gather, not just the helper: a running job whose
+    last poll blipped must still list as running with no cause attached."""
+    from comfy_cli import jobs_state
+
+    _write_state(
+        jobs_state.state_dir(),
+        "blipped",
+        status="running",
+        error={"code": "watcher_poll_error", "message": "Connection reset by peer"},
+    )
+
+    (row,) = jobs_mod._gather_local_state_files(limit=100)
+    assert row.status == "running"
+    assert row.error_code is None
+
+
+def test_state_scalar_narrowing_keeps_a_bad_state_file_from_breaking_the_listing():
+    """`jobs_state.read` type-checks nothing it keeps, so `where`,
+    `workflow_path`, and `updated_at` — all published with strict types — need
+    the same defensiveness `error_code` gets. A numeric `updated_at` is the
+    sharp case: it reaches `_merge_jobs`'s `sort_key` and raises `TypeError`
+    comparing int against str, aborting the whole listing rather than one row."""
+    assert jobs_mod._state_str("2026-08-04T00:00:00+00:00") == "2026-08-04T00:00:00+00:00"
+    assert jobs_mod._state_str(None) is None
+    assert jobs_mod._state_str("") is None
+    assert jobs_mod._state_str(1754265600) is None
+    assert jobs_mod._state_where("cloud") == "cloud"
+    assert jobs_mod._state_where("local") == "local"
+    # Missing, empty, or a legacy/hand-edited value outside the published enum.
+    assert jobs_mod._state_where(None) == "local"
+    assert jobs_mod._state_where("") == "local"
+    assert jobs_mod._state_where("remote") == "local"
 
 
 def test_gather_local_state_files_carries_error_code():
@@ -3005,6 +3051,111 @@ def test_merge_prefers_the_server_rows_own_error_code():
     assert merged["job-3"].error_code == "execution_error"
 
 
+def test_merge_reads_the_prior_row_from_the_state_snapshot_not_the_running_map():
+    """`/queue` and `/history` are fetched separately, so one gather can yield
+    two rows for a prompt caught mid-transition. Looking the prior code up from
+    the accumulating map lets the `running` row clobber the state row first,
+    and the `error` row that follows then finds nothing to inherit."""
+    merged = {
+        r.prompt_id: r
+        for r in jobs_mod._merge_jobs(
+            [_row("job-4", "error", error_code="execution_error")],
+            [_row("job-4", "running"), _row("job-4", "error")],
+        )
+    }
+    assert merged["job-4"].status == "error"
+    assert merged["job-4"].error_code == "execution_error"
+
+
+def test_merge_ignores_a_code_recorded_next_to_a_healthy_state_status():
+    """The gate is on both sides: a code sitting next to a non-failure state
+    status is a watcher poll blip, not this job's cause, so a server row that
+    genuinely failed must not be attributed to it."""
+    merged = {
+        r.prompt_id: r
+        for r in jobs_mod._merge_jobs(
+            [_row("job-5", "running", error_code="watcher_poll_error")],
+            [_row("job-5", "error")],
+        )
+    }
+    assert merged["job-5"].status == "error"
+    assert merged["job-5"].error_code is None
+
+
+def test_merge_carries_the_other_state_only_fields_onto_a_server_row():
+    """`workflow_path` and `updated_at` are state-file-only too. Blanking the
+    first drops the only field that says which workflow a prompt_id was;
+    blanking the second sorts a terminal row to epoch 0, below every dated row,
+    where the caller's `[:limit]` slice can drop a fresh completion."""
+    merged = {
+        r.prompt_id: r
+        for r in jobs_mod._merge_jobs(
+            [
+                _row(
+                    "job-6",
+                    "completed",
+                    workflow_path="/tmp/wf.json",
+                    updated_at="2026-08-04T00:00:00+00:00",
+                )
+            ],
+            [_row("job-6", "completed")],
+        )
+    }
+    assert merged["job-6"].workflow_path == "/tmp/wf.json"
+    assert merged["job-6"].updated_at == "2026-08-04T00:00:00+00:00"
+
+
+def test_merge_keeps_fresh_server_side_completions_within_the_limit():
+    """The consequence the carry-over above prevents, end to end: without an
+    `updated_at`, the freshly completed job the server knows about sorts below
+    a week-old one and falls outside a caller's `[:1]` slice."""
+    fresh = _row("fresh", "completed", updated_at="2026-08-04T00:00:00+00:00")
+    stale = _row("stale", "completed", updated_at="2026-07-28T00:00:00+00:00")
+    merged = jobs_mod._merge_jobs([fresh, stale], [_row("fresh", "completed")])
+    assert [r.prompt_id for r in merged][:1] == ["fresh"]
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("non_retryable_error", "error"),
+        ("lost", "error"),
+        ("canceled", "cancelled"),
+        ("cancelled", "cancelled"),
+        ("failed", "error"),
+        ("success", "completed"),
+    ],
+)
+def test_cloud_row_normalizes_the_failure_spellings(raw, expected):
+    """Cloud's other failure spellings used to pass through raw, missing
+    `_ERROR_STATUSES` — so the merge dropped the state file's `error_code` for
+    exactly the jobs that had failed."""
+    assert jobs_mod._cloud_job_to_row({"id": "j", "status": raw}).status == expected
+
+
+def test_cloud_row_is_marked_as_a_cloud_row():
+    """`where` is published with an enum as a per-row discriminator for a
+    follow-up `jobs status`/`jobs cancel`. Taking JobRow's "local" default here
+    made every row under `jobs ls --where cloud` claim `local` while the
+    envelope said `cloud`, superseding the state row that had it right."""
+    assert jobs_mod._cloud_job_to_row({"id": "j", "status": "running"}).where == "cloud"
+
+
+def test_merge_keeps_the_state_error_code_for_a_cloud_failure_spelling():
+    """The two fixes above together: a cloud `non_retryable_error` row now
+    normalizes to `error`, so it clears the gate and keeps the cause."""
+    merged = {
+        r.prompt_id: r
+        for r in jobs_mod._merge_jobs(
+            [_row("cj", "error", where="cloud", error_code="server_died")],
+            [jobs_mod._cloud_job_to_row({"id": "cj", "status": "non_retryable_error"})],
+        )
+    }
+    assert merged["cj"].status == "error"
+    assert merged["cj"].where == "cloud"
+    assert merged["cj"].error_code == "server_died"
+
+
 def test_ls_payload_names_the_server_death(capsys, monkeypatch):
     """Acceptance: after a server death, `comfy jobs ls` — the escape hatch
     `jobs status` points at — reports both the failure and its cause."""
@@ -3048,7 +3199,13 @@ def test_ls_payload_validates_against_the_jobs_schema(capsys, monkeypatch):
     schema_path = Path(jobs_mod.__file__).parent.parent / "schemas" / "jobs.json"
     schema = json.loads(schema_path.read_text())
     jsonschema.Draft202012Validator(schema).validate(data)
-    # `cancelled` reaches the payload from the state file, so it has to be in
-    # the published status enum too.
-    assert "cancelled" in schema["properties"]["status"]["enum"]
     assert data["jobs"][0]["error_code"] == "cancelled"
+    # The row `status` this asserts on is validated by `jobs.items`, whose
+    # `status` is a bare string — not by the top-level `status` enum, which
+    # describes the single-job `jobs status` envelope. Row statuses are
+    # deliberately unconstrained (an unrecognized cloud status passes through
+    # raw rather than being dropped), so validate the field that *is* the
+    # contract here — `error_code` alongside a `cancelled` row — rather than
+    # asserting against an enum that never sees this value.
+    assert data["jobs"][0]["status"] == "cancelled"
+    assert schema["properties"]["jobs"]["items"]["properties"]["error_code"]["type"] == ["string", "null"]

@@ -216,6 +216,23 @@ def _emit_terminal(renderer, payload: dict, *, command: str, where: str | None =
 # meaningful alongside. `completed` is terminal but deliberately absent.
 _ERROR_STATUSES = frozenset({"error", "cancelled"})
 
+# Cloud's raw job statuses → the row vocabulary above. Mirrors
+# ``job_watcher._CLOUD_STATUS_MAP`` (kept as a local copy rather than imported:
+# ``job_watcher`` imports this module, so the dependency only runs one way).
+# The failure spellings matter here — an unmapped `non_retryable_error` /
+# `lost` / `canceled` misses `_ERROR_STATUSES` and silently drops the state
+# file's `error_code` for exactly the jobs that failed.
+_CLOUD_ROW_STATUS_MAP = {
+    "success": "completed",
+    "completed": "completed",
+    "failed": "error",
+    "error": "error",
+    "non_retryable_error": "error",
+    "lost": "error",
+    "cancelled": "cancelled",
+    "canceled": "cancelled",
+}
+
 
 @dataclass(frozen=True)
 class JobRow:
@@ -231,23 +248,57 @@ class JobRow:
     # `error.code` off the state file (e.g. "server_died", "execution_error",
     # "watcher_crashed"). Without it a listing can say a job is in `error` and
     # name its workflow, but never say *why* — which is the whole point of the
-    # state file surviving a server death. None for rows the server produced
-    # (/queue and /history carry no code) and for every non-error row.
+    # state file surviving a server death. Only ever set alongside a status in
+    # `_ERROR_STATUSES`: the watcher parks a transient `watcher_poll_error` on
+    # the state file of a job that is still healthily `running`, and that is a
+    # poll blip, not this row's failure cause.
     error_code: str | None = None
 
 
-def _state_error_code(err: Any) -> str | None:
+def _state_error_code(err: Any, status: Any) -> str | None:
     """Pull ``error.code`` out of a state file's ``error`` blob, or None.
 
-    ``jobs_state.read`` keeps unknown keys' values untouched, so a hand-edited
-    or truncated file can carry a non-dict ``error`` (or a non-string ``code``)
-    — neither may reach the emitted envelope, where ``error_code`` is typed
+    Returns None unless ``status`` is one of ``_ERROR_STATUSES``. A non-failed
+    job can carry an ``error`` blob: ``job_watcher._poll_local_once`` /
+    ``_poll_cloud_once`` record ``watcher_poll_error`` when a single poll
+    raises, leave the status at ``queued``/``running``, and only clear it on a
+    later poll that actually returns a snapshot — so an in-flight job can hold
+    that code for many cycles. Surfacing it as ``error_code`` would advertise a
+    failure cause for a job that has not failed.
+
+    ``jobs_state.read`` keeps known keys' values untouched, so a hand-edited or
+    truncated file can carry a non-dict ``error`` (or a non-string ``code``) —
+    neither may reach the emitted envelope, where ``error_code`` is typed
     ``string | null``.
     """
+    if status not in _ERROR_STATUSES:
+        return None
     if not isinstance(err, dict):
         return None
     code = err.get("code")
     return code if isinstance(code, str) and code else None
+
+
+def _state_str(value: Any) -> str | None:
+    """Narrow a state-file value to ``str | None`` for the emitted envelope.
+
+    Same defensiveness as ``_state_error_code``, for the fields published as
+    ``string | null``: ``jobs_state.read`` type-checks nothing it keeps, and a
+    numeric ``updated_at`` from a hand-edited or legacy file would otherwise
+    reach ``_merge_jobs``'s ``sort_key`` and raise ``TypeError`` comparing int
+    against str — aborting the whole listing, not just one row.
+    """
+    return value if isinstance(value, str) and value else None
+
+
+def _state_where(value: Any) -> str:
+    """Narrow a state file's ``where`` to the published ``local``/``cloud`` enum.
+
+    Missing, empty, or unrecognized (a legacy ``"remote"``) reads as ``local``,
+    matching the filter in ``_gather_local_state_files`` — so a row can never be
+    scoped as local yet report a ``where`` the schema rejects.
+    """
+    return value if value in ("local", "cloud") else "local"
 
 
 def _gather_local_state_files(*, limit: int, orphaned_only: bool = False, where: str | None = None) -> list[JobRow]:
@@ -304,7 +355,7 @@ def _gather_local_state_files(*, limit: int, orphaned_only: bool = False, where:
         # Scope to the resolved --where target. Done *after* the stale-watcher
         # reap above so cleanup stays where-agnostic no matter which view the
         # caller asked for.
-        if where is not None and (state.where or "local") != where:
+        if where is not None and _state_where(state.where) != where:
             continue
         if orphaned_only:
             err = state.error or {}
@@ -318,13 +369,13 @@ def _gather_local_state_files(*, limit: int, orphaned_only: bool = False, where:
                 elapsed_seconds=None,
                 workflow_size=None,
                 outputs=len(state.outputs or []),
-                # Same missing/empty -> "local" reading the filter above uses,
-                # so a row can never be scoped as local yet report `where: null`
-                # (JobRow.where is typed `str` and defaults to "local").
-                where=state.where or "local",
-                workflow_path=state.workflow,
-                updated_at=state.updated_at,
-                error_code=_state_error_code(state.error),
+                # Same narrowing the filter above uses, so a row can never be
+                # scoped as local yet report a `where` outside the published
+                # enum (JobRow.where is typed `str` and defaults to "local").
+                where=_state_where(state.where),
+                workflow_path=_state_str(state.workflow),
+                updated_at=_state_str(state.updated_at),
+                error_code=_state_error_code(state.error, state.status),
             )
         )
         if len(rows) >= limit:
@@ -347,18 +398,51 @@ def _merge_jobs(state_rows: list[JobRow], server_rows: list[JobRow]) -> list[Job
     files fill in everything else (jobs the server doesn't see, e.g. cloud
     jobs viewed from a local-only `jobs ls`).
 
-    The one thing the server's row cannot supply is ``error_code``: neither
-    ``/queue``/``/history`` nor the cloud job list carries one, so a server row
-    that supersedes a state-file row would otherwise *lose* the cause the state
-    file recorded. Carry it across when the server also calls the job failed —
-    and only then, so a state file left holding a stale ``server_died`` can't
-    contradict a server that now reports the prompt as completed.
+    "Wins" is per-row, not per-field: several fields exist only on the state
+    file, and a server row that supersedes one would otherwise blank them.
+
+    - ``error_code``: neither ``/queue``/``/history`` nor the cloud job list
+      carries one, so the cause the state file recorded would be lost. Carried
+      across only when *both* views call the job failed — the state file's,
+      because a code recorded next to a healthy status is a watcher poll blip
+      rather than this job's cause; the server's, so a state file left holding
+      a stale ``server_died`` can't contradict a server that now reports the
+      prompt as completed.
+    - ``workflow_path`` / ``updated_at``: also state-file-only. Blanking
+      ``workflow_path`` drops the one field that says *which workflow* a
+      prompt_id was, and blanking ``updated_at`` sorts a terminal row to epoch
+      0 below every dated one, where the caller's ``[:limit]`` slice can drop a
+      fresh completion. Carried whenever the server row has nothing to say.
+
+    ``where`` is deliberately *not* carried: server rows now set it themselves
+    (``_cloud_job_to_row`` marks cloud, ``_gather_jobs`` is local by
+    construction), so the server row is authoritative.
+
+    The prior row is looked up from a snapshot of ``state_rows`` rather than
+    from the accumulating map: ``/queue`` and ``/history`` are fetched
+    separately, so one gather can yield two rows for a transitioning prompt
+    (``running``, then ``error``), and reading the map would let the first one
+    clobber the state row before the second one gets to inherit from it.
     """
-    by_id: dict[str, JobRow] = {r.prompt_id: r for r in state_rows}
+    state_by_id: dict[str, JobRow] = {r.prompt_id: r for r in state_rows}
+    by_id: dict[str, JobRow] = dict(state_by_id)
     for r in server_rows:
-        prior = by_id.get(r.prompt_id)
-        if r.error_code is None and prior is not None and prior.error_code is not None and r.status in _ERROR_STATUSES:
-            r = replace(r, error_code=prior.error_code)
+        prior = state_by_id.get(r.prompt_id)
+        if prior is not None:
+            carried: dict[str, Any] = {}
+            if (
+                r.error_code is None
+                and prior.error_code is not None
+                and prior.status in _ERROR_STATUSES
+                and r.status in _ERROR_STATUSES
+            ):
+                carried["error_code"] = prior.error_code
+            if r.workflow_path is None and prior.workflow_path is not None:
+                carried["workflow_path"] = prior.workflow_path
+            if r.updated_at is None and prior.updated_at is not None:
+                carried["updated_at"] = prior.updated_at
+            if carried:
+                r = replace(r, **carried)
         by_id[r.prompt_id] = r
 
     # Sort: non-terminal first (running/pending/allocated/executing), then
@@ -1922,10 +2006,17 @@ def _is_cloud(where: str | None) -> bool:
 
 
 def _cloud_job_to_row(j: dict) -> JobRow:
-    """Map a /api/jobs entry to our JobRow shape."""
-    status_map = {"completed": "completed", "success": "completed", "failed": "error", "error": "error"}
+    """Map a /api/jobs entry to our JobRow shape.
+
+    Statuses go through the same map the watcher uses, so cloud's other failure
+    spellings (``non_retryable_error``, ``lost``, ``canceled``) normalize to the
+    row vocabulary instead of passing through raw. Beyond keeping the rendered
+    status consistent with `jobs status`/`jobs watch`, it is what lets
+    ``_merge_jobs`` recognize those rows as failures and keep the state file's
+    ``error_code`` — the failures that most need a named cause.
+    """
     raw_status = (j.get("status") or "").lower()
-    status = status_map.get(raw_status, raw_status or "pending")
+    status = _CLOUD_ROW_STATUS_MAP.get(raw_status, raw_status or "pending")
     outputs = int(j.get("outputs_count") or 0)
     return JobRow(
         prompt_id=str(j.get("id") or ""),
@@ -1934,6 +2025,11 @@ def _cloud_job_to_row(j: dict) -> JobRow:
         elapsed_seconds=None,
         workflow_size=None,
         outputs=outputs,
+        # These rows come from the cloud job list; without this they'd take
+        # JobRow's "local" default and supersede the state row that correctly
+        # said "cloud", so `jobs ls --where cloud` would emit an envelope
+        # saying cloud with every row inside claiming local.
+        where="cloud",
     )
 
 
@@ -1968,14 +2064,10 @@ def _cloud_status_snapshot(prompt_id: str) -> dict | None:
     if status is None:
         return None
     raw = (status.get("status") or "").lower()
-    state = {
-        "success": "completed",
-        "completed": "completed",
-        "failed": "error",
-        "error": "error",
-        "non_retryable_error": "error",
-        "lost": "error",
-    }.get(raw, raw or "pending")
+    # Shared with `jobs ls` (and the watcher) so the same cloud job can't be
+    # `cancelled` in one command and `canceled` in another — the latter isn't
+    # in the published `status` enum this file's schema declares.
+    state = _CLOUD_ROW_STATUS_MAP.get(raw, raw or "pending")
 
     outputs: list[str] = []
     outputs_by_node: dict[str, list[str]] = {}
