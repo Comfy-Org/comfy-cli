@@ -629,6 +629,32 @@ class TestWaitStateFile:
         assert final.completed_at is not None
         assert final.submitted_at == mid_run["state"].submitted_at
 
+    def test_submit_time_record_carries_watcher_identity(self, workflow_file):
+        """The foreground --wait process IS the watcher, and the submit-time
+        record says so (BE-6641): pid + create_time stamped exactly like the
+        detached watcher's, so a --wait process killed from outside leaves a
+        record the stale-watcher reap can finalize instead of a permanent
+        phantom `running`."""
+        import psutil
+
+        from comfy_cli import jobs_state
+
+        mock_exec = self._mock_exec("wait-stamped")
+        mid_run = {}
+
+        def _observe_mid_run():
+            mid_run["state"] = jobs_state.read("wait-stamped")
+
+        mock_exec.watch_execution.side_effect = _observe_mid_run
+
+        self._run(workflow_file, mock_exec)
+
+        state = mid_run["state"]
+        assert state is not None
+        assert state.watcher_pid == os.getpid()
+        assert state.watcher_pid_create_time is not None
+        assert abs(state.watcher_pid_create_time - psutil.Process().create_time()) <= 1.0
+
     def test_disconnect_mid_run_records_server_died(self, workflow_file, monkeypatch):
         from comfy_cli import jobs_state
 
@@ -684,11 +710,48 @@ class TestWaitStateFile:
         assert err["details"] == {"timeout": 30, "prompt_id": "wait-slow"}
 
         # A timed-out watch says nothing about the job — it may still be
-        # running server-side, so the record stays non-terminal.
+        # running server-side, so the record stays non-terminal. The watcher
+        # stamp must be CLEARED on this one exit: this process is gone after
+        # the raise, and a recorded-but-dead pid on a non-terminal record is
+        # exactly what the stale-watcher reap flips to `watcher_crashed` —
+        # which would mark a healthy long-running job as errored.
         state = jobs_state.read("wait-slow")
         assert state is not None
         assert state.status == "running"
         assert state.completed_at is None
+        assert state.watcher_pid is None
+        assert state.watcher_pid_create_time is None
+
+        # And the reap agrees: the record survives `jobs ls` untouched and is
+        # never surfaced as an orphan.
+        from comfy_cli.command import jobs as jobs_mod
+
+        rows = jobs_mod._gather_local_state_files(limit=100)
+        row = next(r for r in rows if r.prompt_id == "wait-slow")
+        assert row.status == "running"
+        assert row.error_code is None
+        orphans = jobs_mod._gather_local_state_files(limit=100, orphaned_only=True)
+        assert "wait-slow" not in {r.prompt_id for r in orphans}
+        assert jobs_state.read("wait-slow").status == "running"
+
+    def test_timeout_before_submit_writes_no_state(self, workflow_file, monkeypatch):
+        """`connect()` can raise WebSocketTimeoutException before `queue()`
+        ever returns a prompt_id — `wait_state` is still None there, so the
+        handler's stamp-clearing must not blow up, and no state file exists
+        to rewrite."""
+        from comfy_cli import jobs_state
+
+        errors = self._capture_errors(monkeypatch)
+        mock_exec = self._mock_exec(None)
+        mock_exec.connect.side_effect = WebSocketTimeoutException("connect timed out")
+
+        with pytest.raises(typer.Exit) as exc_info:
+            self._run(workflow_file, mock_exec)
+        assert exc_info.value.exit_code == 1
+
+        err = next(e for e in errors if e["code"] == "ws_timeout")
+        assert err["details"] == {"timeout": 30}
+        assert list(jobs_state.state_dir().glob("*.json")) == []
 
     def test_token_cancel_records_cancelled_state(self, workflow_file, fresh_token):
         from comfy_cli import jobs_state
@@ -742,10 +805,10 @@ class TestWaitStateFile:
         """`watch_execution` signals a failed node by raising `typer.Exit(1)`
         after rendering the error — the ordinary failure path, not an
         exception the disconnect handlers see. The submit-time `running`
-        record must still be moved to a terminal status, or the job is
-        stranded as a phantom nothing ever reaps (`jobs ls` only reaps
-        non-terminal records with a dead watcher_pid, which --wait never
-        sets)."""
+        record must still be moved to a terminal status here: the stale-
+        watcher reap would eventually flip it to a generic `watcher_crashed`
+        once this process exits, but the real classified verdict is known
+        right now and must not be lost to that fallback."""
         from comfy_cli import jobs_state
 
         mock_exec = self._mock_exec("wait-exec-error")
@@ -871,6 +934,112 @@ class TestWaitStateFile:
 
         assert emitted and emitted[-1]["status"] == "completed"
         assert emitted[-1]["state_file"] is None
+
+
+class TestCloudWaitWatcherStamp:
+    """Cloud `--wait` polls from the foreground with no watcher subprocess, so
+    the submit-time record stamps THIS process as the watcher (BE-6641) — an
+    external kill then leaves a non-terminal record with a dead pid, which
+    `jobs ls`'s stale-watcher reap finalizes as `watcher_crashed`. Every
+    in-process exit writes a terminal record the reap ignores."""
+
+    @pytest.fixture
+    def fake_target(self):
+        from comfy_cli.target import Target
+
+        return Target(
+            kind="cloud",
+            base_url="https://cloud.example.com",
+            path_prefix="/api",
+            history_path="history_v2",
+            jobs_path="jobs",
+            api_key="test-api-key",
+        )
+
+    def _run_cloud(self, workflow_file, fake_target, mock_client):
+        from comfy_cli.command.run import execute_cloud
+
+        with (
+            patch("comfy_cli.target.resolve_target", return_value=fake_target),
+            # Empty cloud object_info: preflight and partner detection both
+            # fail open, keeping the test on the submit/poll path under test.
+            patch("comfy_cli.cql.engine._load_from_target", return_value={}),
+            patch("comfy_cli.comfy_client.Client", return_value=mock_client),
+        ):
+            execute_cloud(workflow_file, wait=True, timeout=30)
+
+    def _mock_client(self, prompt_id):
+        from comfy_cli.comfy_client import SubmitResult
+
+        mock_client = MagicMock()
+        mock_client.submit_prompt.return_value = SubmitResult(prompt_id=prompt_id, number=1, node_errors={})
+        mock_client.extract_outputs.return_value = []
+        return mock_client
+
+    def test_submit_time_record_carries_watcher_identity(self, workflow_file, fake_target):
+        import psutil
+
+        from comfy_cli import jobs_state
+
+        mock_client = self._mock_client("cloud-wait-stamped")
+        mid_run = {}
+
+        def _observe_then_succeed(*args, **kwargs):
+            mid_run["state"] = jobs_state.read("cloud-wait-stamped")
+            return {"status": {"status_str": "success"}, "outputs": {}}
+
+        mock_client.wait_for_completion.side_effect = _observe_then_succeed
+
+        self._run_cloud(workflow_file, fake_target, mock_client)
+
+        state = mid_run["state"]
+        assert state is not None
+        assert state.watcher_pid == os.getpid()
+        assert state.watcher_pid_create_time is not None
+        assert abs(state.watcher_pid_create_time - psutil.Process().create_time()) <= 1.0
+
+    def test_success_writes_terminal_record_reap_is_noop(self, workflow_file, fake_target):
+        from comfy_cli import jobs_state
+        from comfy_cli.command import jobs as jobs_mod
+
+        mock_client = self._mock_client("cloud-wait-done")
+        mock_client.wait_for_completion.return_value = {"status": {"status_str": "success"}, "outputs": {}}
+
+        self._run_cloud(workflow_file, fake_target, mock_client)
+
+        state = jobs_state.read("cloud-wait-done")
+        assert state is not None
+        assert state.status == "completed"
+
+        rows = jobs_mod._gather_local_state_files(limit=100)
+        row = next(r for r in rows if r.prompt_id == "cloud-wait-done")
+        assert row.status == "completed"
+        assert row.error_code is None
+        assert jobs_state.read("cloud-wait-done").status == "completed"
+
+    def test_cloud_timeout_writes_terminal_record_reap_is_noop(self, workflow_file, fake_target):
+        """The cloud-side `--timeout` exit is TERMINAL (`cloud_timeout`) by
+        long-standing design — unlike the local ws_timeout, nothing needs to
+        clear the stamp, because the reap never touches terminal records."""
+        from comfy_cli import jobs_state
+        from comfy_cli.command import jobs as jobs_mod
+
+        mock_client = self._mock_client("cloud-wait-slow")
+        mock_client.wait_for_completion.side_effect = TimeoutError("job went silent for 30s")
+
+        with pytest.raises(typer.Exit) as exc_info:
+            self._run_cloud(workflow_file, fake_target, mock_client)
+        assert exc_info.value.exit_code == 1
+
+        state = jobs_state.read("cloud-wait-slow")
+        assert state is not None
+        assert state.status == "error"
+        assert state.error["code"] == "cloud_timeout"
+
+        rows = jobs_mod._gather_local_state_files(limit=100)
+        row = next(r for r in rows if r.prompt_id == "cloud-wait-slow")
+        assert row.status == "error"
+        assert row.error_code == "cloud_timeout", "the reap must not overwrite a terminal record's cause"
 
 
 class TestDetectPartnerNodes:

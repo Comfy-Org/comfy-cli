@@ -40,6 +40,7 @@ won't change further; agents can stop polling.
 from __future__ import annotations
 
 import json
+import os
 import re
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
@@ -151,6 +152,24 @@ def read(prompt_id: str) -> JobState | None:
     except TypeError:
         # Required fields missing (e.g. truncated/legacy file) — treat as absent.
         return None
+
+
+def stamp_watcher_identity(state: JobState) -> None:
+    """Record the calling process as this record's watcher: pid + create_time
+    (both, or pid reuse defeats ``_is_watcher_alive``'s identity check).
+
+    Used by the detached watcher subprocess and by foreground ``--wait`` runs
+    alike — whichever process is actively finalizing the record stamps itself,
+    so the stale-watcher reap in ``jobs ls`` can finalize the record if that
+    process dies without running its handlers (killed from outside).
+    """
+    state.watcher_pid = os.getpid()
+    try:
+        import psutil
+
+        state.watcher_pid_create_time = psutil.Process().create_time()
+    except Exception:  # noqa: BLE001 — best effort; None just means liveness-only
+        state.watcher_pid_create_time = None
 
 
 def new(
