@@ -28,6 +28,10 @@
     "cwd": {
       "type": "string",
       "description": "--port --dry-run only: the identified listener's working directory, when readable."
+    },
+    "children_unknown": {
+      "type": "boolean",
+      "description": "--port only: present and true when the target's child processes could not be enumerated, so the stop is confirmed for the listener and the port but not for its whole tree."
     }
   },
   "required": ["stopped"]
