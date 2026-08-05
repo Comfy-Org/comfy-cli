@@ -884,6 +884,65 @@ def test_orphaned_flag_filters_to_watcher_crashed(monkeypatch):
     assert orphan_ids == {"orphan-crashed"}, f"--orphaned should select only watcher_crashed rows; got {orphan_ids}"
 
 
+def test_reap_finalizes_nonterminal_record_with_dead_watcher_pid(monkeypatch):
+    """A `running` record carrying a dead pid + that pid's REAL create_time —
+    what a `comfy run --wait` killed from outside now leaves behind (BE-6641)
+    — is flipped by the reap to `error`/`watcher_crashed`, surfaces under
+    `--orphaned`, and the pid pair is cleared in the rewritten file."""
+    import psutil
+
+    from comfy_cli import jobs_state
+
+    # A real process that is provably gone: spawn, capture its create_time
+    # while alive, then terminate and reap it.
+    p = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    create_time = psutil.Process(p.pid).create_time()
+    p.terminate()
+    p.wait()
+
+    state_dir = jobs_state.state_dir()
+    _write_state(
+        state_dir,
+        "wait-killed",
+        status="running",
+        watcher_pid=p.pid,
+        watcher_pid_create_time=create_time,
+    )
+
+    rows = jobs_mod._gather_local_state_files(limit=100)
+    row = next(r for r in rows if r.prompt_id == "wait-killed")
+    assert row.status == "error"
+    assert row.error_code == "watcher_crashed"
+
+    orphans = jobs_mod._gather_local_state_files(limit=100, orphaned_only=True)
+    assert "wait-killed" in {r.prompt_id for r in orphans}
+
+    rewritten = jobs_state.read("wait-killed")
+    assert rewritten.status == "error"
+    assert rewritten.error["code"] == "watcher_crashed"
+    assert rewritten.watcher_pid is None
+    assert rewritten.watcher_pid_create_time is None
+
+
+def test_reap_leaves_nonterminal_record_without_pid_alone(monkeypatch):
+    """A `running` record with NO recorded pid — what a local `--wait` that
+    hit its own `--timeout` deliberately leaves (the job may still be running
+    server-side) — must never be reaped or listed as an orphan."""
+    from comfy_cli import jobs_state
+
+    state_dir = jobs_state.state_dir()
+    _write_state(state_dir, "wait-timed-out", status="running", watcher_pid=None)
+
+    rows = jobs_mod._gather_local_state_files(limit=100)
+    row = next(r for r in rows if r.prompt_id == "wait-timed-out")
+    assert row.status == "running"
+    assert row.error_code is None
+
+    orphans = jobs_mod._gather_local_state_files(limit=100, orphaned_only=True)
+    assert "wait-timed-out" not in {r.prompt_id for r in orphans}
+    assert jobs_state.read("wait-timed-out").status == "running"
+
+
 def _command_flags(*path: str) -> list[str]:
     """Flags exposed for a command path via the machine-readable help contract.
 

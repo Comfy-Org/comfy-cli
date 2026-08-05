@@ -13,7 +13,6 @@ command is purely the worker that the foreground ``run`` detaches.
 
 from __future__ import annotations
 
-import os
 import shutil
 import subprocess
 import sys
@@ -78,15 +77,9 @@ def watch_job(
         # practice; exit quietly.
         return
 
-    state.watcher_pid = os.getpid()
-    # Recorded together with the pid so the reaper can tell *this* watcher from
-    # whatever inherits its pid later (see `_is_watcher_alive` in jobs.py).
-    try:
-        import psutil
-
-        state.watcher_pid_create_time = psutil.Process().create_time()
-    except Exception:  # noqa: BLE001 — best effort; None just means liveness-only
-        state.watcher_pid_create_time = None
+    # Pid + create_time recorded together so the reaper can tell *this* watcher
+    # from whatever inherits its pid later (see `_is_watcher_alive` in jobs.py).
+    jobs_state.stamp_watcher_identity(state)
     jobs_state.write(state)
 
     cloud_client = None
