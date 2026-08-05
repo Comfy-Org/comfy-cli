@@ -625,6 +625,15 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "pass `--filename` to save under a different name, or remove the existing file",
     ),
     ErrorCode(
+        "model_download_in_flight",
+        "`comfy model download` refused to start because a live background download is already "
+        "writing to the same destination (`details.path`). `details.download_id` names that "
+        "download and `details.status` is its current status. A background transfer streams into "
+        "a `.part` sibling, so the destination is absent until it completes — without this check "
+        "two submissions would both run and the later one would silently overwrite the earlier.",
+        "track it with `comfy model download-status <id>`, or cancel it with `comfy model download-cancel <id>`",
+    ),
+    ErrorCode(
         "hf_unauthorized",
         "Hugging Face returned 401 for the model URL and no Hugging Face API token is configured "
         "(gated or private repo).",
