@@ -799,3 +799,40 @@ class TestStaleEnvelope:
         assert any(w.get("code") == "object_info_stale" for w in warnings), (
             f"expected a warning with code='object_info_stale', got {warnings}"
         )
+
+
+class TestRoutingErrorEnvelope:
+    """A bad routing value must degrade to the JSON failure envelope.
+
+    ``_get_graph`` here has no per-command ``--where`` flag to fall back to, so
+    a typo'd ``COMFY_WHERE`` (or a stale project/persisted ``where_default``)
+    used to escape ``resolve_default`` as a raw ``ValueError`` — the try block
+    around it only handles ``LoadError``. Regression: it is a ``where_invalid``
+    envelope now, and nothing reaches the network.
+    """
+
+    def test_slots_typoed_comfy_where_emits_envelope(self, monkeypatch, tmp_path, capsys):
+        monkeypatch.setenv("COMFY_WHERE", "clod")
+        path = _write_workflow(tmp_path, _direct_workflow())
+        captured, _err, result = _invoke(["slots", str(path)], capsys)
+        assert result.exception is None, f"routing error escaped as a traceback: {result.exception!r}"
+        env = json.loads([ln for ln in captured.strip().splitlines() if ln.strip()][-1])
+        assert env["ok"] is False
+        assert env["error"]["code"] == "where_invalid"
+        assert "clod" in env["error"]["message"]
+
+    def test_set_slot_typoed_comfy_where_emits_envelope(self, monkeypatch, tmp_path, capsys):
+        monkeypatch.setenv("COMFY_WHERE", "clod")
+        path = _write_workflow(tmp_path, _direct_workflow())
+        env = _run(["set-slot", str(path), '6.text="a dog"'], capsys)
+        assert env["ok"] is False
+        assert env["error"]["code"] == "where_invalid"
+
+    def test_input_path_short_circuits_routing(self, tmp_path, monkeypatch, capsys):
+        """``--input`` never resolves routing, so a bad value stays harmless."""
+        monkeypatch.setenv("COMFY_WHERE", "clod")
+        oi = tmp_path / "object_info.json"
+        oi.write_text(json.dumps(_object_info()), encoding="utf-8")
+        path = _write_workflow(tmp_path, _direct_workflow())
+        env = _run(["slots", str(path), "--input", str(oi)], capsys)
+        assert env["ok"] is True, env

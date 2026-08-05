@@ -12,7 +12,8 @@
     "prompt_id": {"type": "string"},
     "status": {
       "type": "string",
-      "enum": ["running", "pending", "queued", "completed", "error", "unknown", "watching"]
+      "description": "`cancelled` is one of `jobs_state.TERMINAL_STATUSES` and is copied verbatim out of a job's state file into a `jobs status` payload, so it belongs in this enum alongside the statuses the live `/queue` + `/history` snapshot produces.",
+      "enum": ["running", "pending", "queued", "completed", "error", "cancelled", "unknown", "watching"]
     },
     "queue_position": {"type": ["integer", "null"]},
     "workflow_size": {"type": ["integer", "null"]},
@@ -42,10 +43,24 @@
         "required": ["prompt_id", "status"],
         "properties": {
           "prompt_id": {"type": "string"},
-          "status": {"type": "string"},
+          "status": {
+            "type": "string",
+            "description": "Deliberately unconstrained, unlike the top-level `status`: a cloud status this CLI does not yet know is passed through raw rather than dropped, so a new server-side spelling widens this field instead of breaking the listing."
+          },
           "queue_position": {"type": ["integer", "null"]},
           "workflow_size": {"type": ["integer", "null"]},
-          "outputs": {"type": "integer"}
+          "outputs": {"type": "integer"},
+          "where": {
+            "type": "string",
+            "enum": ["local", "cloud"],
+            "description": "Which target this row's job was submitted to — the per-row discriminator for dispatching a follow-up `jobs status`/`jobs cancel`. Always matches the envelope's `where` for rows the server produced."
+          },
+          "workflow_path": {"type": ["string", "null"]},
+          "updated_at": {"type": ["string", "null"]},
+          "error_code": {
+            "type": ["string", "null"],
+            "description": "Why an `error`/`cancelled` row failed, from the job's state file (`error.code` — e.g. `server_died`, `execution_error`, `watcher_crashed`). Null on every non-failed row, and on failed rows with no state file (the server's `/queue`/`/history` and the cloud job list carry no code of their own, so a row only the server knows about has nothing to attribute). This is what lets `comfy jobs ls` — the escape hatch `jobs status` points at after a server death — name the cause rather than just report `status: \"error\"`."
+          }
         }
       }
     }

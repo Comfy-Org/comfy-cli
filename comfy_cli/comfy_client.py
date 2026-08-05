@@ -23,7 +23,13 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from comfy_cli.http import NoRedirectHandler, build_http_only_opener, target_auth_headers
+from comfy_cli.http import (
+    NoRedirectHandler,
+    ResponseTooLarge,
+    build_http_only_opener,
+    read_capped,
+    target_auth_headers,
+)
 from comfy_cli.http import assert_safe_url as _assert_safe_url
 from comfy_cli.target import Target
 
@@ -248,14 +254,27 @@ class Client:
             req.add_header(header, value)
         try:
             with _OPENER.open(req, timeout=timeout or self.timeout) as resp:
-                text = resp.read().decode("utf-8", errors="replace")
+                # Bounded read: without a ceiling the server on the other end
+                # decides how much of our memory to consume. An over-cap body
+                # is reported as a response error rather than truncated —
+                # truncated JSON would surface as a misleading parse failure.
+                try:
+                    raw = read_capped(resp, url)
+                except ResponseTooLarge as e:
+                    raise HTTPError(resp.status, "response too large", str(e)) from e
+                text = raw.decode("utf-8", errors="replace")
                 if not text:
                     return None
                 return json.loads(text)
         except urllib.error.HTTPError as e:
             body_text = ""
             try:
-                body_text = e.read().decode("utf-8", errors="replace")
+                # An error body arrives from the same server as the success
+                # body, so it needs the same ceiling. Over-cap it raises, and
+                # the swallow below leaves body_text empty — the status and
+                # reason still reach the caller, which is the part that matters
+                # for a body too large to be a real error message.
+                body_text = read_capped(e, url).decode("utf-8", errors="replace")
             except Exception:  # noqa: BLE001
                 pass
             # Auto-refresh on 401 for OAuth cloud targets, retry once.

@@ -79,6 +79,17 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "`comfy stop` could not kill the recorded background ComfyUI process. `details.pid` carries the process id.",
         "kill the process manually if it is still running",
     ),
+    ErrorCode(
+        "port_not_listening",
+        "`comfy stop --port <p>` found no process LISTENing on that port. `details.port` carries the port.",
+        "check the port, or run `comfy stop` to stop the server this CLI started",
+    ),
+    ErrorCode(
+        "unverified_process",
+        "`comfy stop --port <p>` found a listener it could not positively identify as ComfyUI, so it "
+        "refused to stop it. `details` carries the pid, whatever cmdline was readable, and the reason.",
+        "confirm what is on that port and stop it yourself if it really is ComfyUI",
+    ),
     # --- workflow loading ----------------------------------------------------
     ErrorCode(
         "workflow_not_found",
@@ -178,7 +189,15 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ),
     ErrorCode(
         "prompt_not_found",
-        "Asked about a prompt_id the server doesn't know.",
+        "Asked about a prompt_id the server doesn't know. `comfy jobs status` only reports this once the "
+        "local state file has been checked too — and only a file that names this same prompt on this same "
+        "target counts, so a cloud job or another local instance's job is never the answer here (when it "
+        "is a cloud one, `hint` redirects to `--where cloud`). If that file holds a terminal verdict (e.g. "
+        "the job died with an earlier server) AND the live server confirmed it has no record, the verdict "
+        "is returned as a normal result instead. When a matching file exists but that pair does not hold — "
+        "the record is non-terminal, or `/queue` and `/history` did not answer — `details` carries "
+        "`last_known_status`, `submitted_at`, `updated_at`, `workflow`, and `server_confirmed_no_record` "
+        "(false means the absence is unverified, so it is not the job's outcome).",
         "`comfy jobs ls` to find a valid prompt_id",
     ),
     ErrorCode(
@@ -200,6 +219,16 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "`comfy run --prompt`/`--set` could not load the bundled default text2img graph "
         "(missing or corrupt package data). A packaging fault, not user input.",
         "reinstall comfy-cli",
+    ),
+    ErrorCode(
+        "no_checkpoint_available",
+        "`comfy run --prompt`/`--set` (bundled default text2img) needs a checkpoint, but the "
+        "target positively enumerated ZERO installed checkpoints. Only raised when object_info "
+        "was fetched and its checkpoint list is empty — never when object_info couldn't be fetched "
+        "(that path fails open and submits).",
+        "install a checkpoint (local: `comfy model download --url <checkpoint-url>`; cloud: run a "
+        "published gallery template, which provisions models), then re-run — or `--set "
+        "checkpoint=<name>` once one is available",
     ),
     ErrorCode(
         "conversion_error",
@@ -227,6 +256,13 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "check your network connection and try again",
     ),
     ErrorCode(
+        "gallery_cache_write_failed",
+        "The gallery index was fetched but could not be written to the local cache. "
+        "Only `comfy templates refresh` raises this — for `templates ls/show/fetch` "
+        "a cache-write failure is non-fatal, since the data is already in hand.",
+        "check permissions and free space on the cache directory",
+    ),
+    ErrorCode(
         "workflow_unknown_nodes",
         "Workflow references class_type(s) not present in the server's object_info. "
         "`details.unknown_nodes` lists each with close_matches.",
@@ -237,6 +273,16 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "where_invalid",
         "`--where` value was neither `local` nor `cloud`.",
         "use `--where local` or `--where cloud`",
+    ),
+    ErrorCode(
+        "host_flag_cloud",
+        "`--host`/`--port` were combined with an effective `cloud` target. They address a local "
+        "ComfyUI only; the cloud address comes from the signed-in account. `details` carries the "
+        "offending host/port, the resolved `where`, and the `where_source` that produced it "
+        "(`flag`, `env`, `project`, `config`, or `auto`) — the target may never have been "
+        "explicitly requested.",
+        "pass `--where local` to aim at a local server; to reach a different cloud address set "
+        "`COMFY_CLOUD_BASE_URL` or run `comfy cloud set-base-url`",
     ),
     ErrorCode(
         "cloud_not_configured",
@@ -353,11 +399,6 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "oauth_refresh_failed",
         "OAuth token refresh failed.",
         "run `comfy cloud login` to sign in again",
-    ),
-    ErrorCode(
-        "oauth_cancelled",
-        "OAuth flow was cancelled by the user.",
-        "re-run `comfy cloud login` to retry sign-in",
     ),
     ErrorCode(
         "oauth_timeout",
@@ -731,6 +772,15 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "update_version_target_invalid",
         "`comfy update --version` was combined with a target other than `comfy`.",
         "run `comfy update comfy --version <version>`",
+    ),
+    ErrorCode(
+        "update_custom_nodes_failed",
+        "`comfy update all --exit-on-fail` ran `cm-cli update all` and it exited non-zero. "
+        "The update is not atomic, so some packs may have updated before the failure; "
+        "`details.cm_cli_returncode` carries cm-cli's raw status (the process exit code is "
+        "normalized — signals become 128+N, and 2 becomes 1 so it can't be confused with a "
+        "CLI usage error).",
+        "read the cm-cli output above for the failing pack, then re-run `comfy update all`",
     ),
     ErrorCode(
         "version_switch_unknown_version",

@@ -329,8 +329,14 @@ def test_jobs_status_server_down_terminal_state_emits_ok_envelope(monkeypatch: p
 
 
 def test_jobs_status_server_up_still_uses_live_snapshot(monkeypatch: pytest.MonkeyPatch):
-    """Server up: the live `/history` snapshot wins — the state file is never
-    consulted and the payload carries no state-file markers."""
+    """Server up *and it has a record for the prompt*: the live `/queue`
+    `/history` snapshot wins — the state file is not consulted and the payload
+    carries no state-file markers.
+
+    The state file is only a fallback, never an override: it is read when the
+    live server has nothing to say about the prompt (see the
+    `TestStatusServerUpNoRecord` cases below), not when it does.
+    """
     from comfy_cli import jobs_state
 
     monkeypatch.setattr(jobs_mod, "check_comfy_server_running", lambda port, host: True)
@@ -344,12 +350,421 @@ def test_jobs_status_server_up_still_uses_live_snapshot(monkeypatch: pytest.Monk
     st.status = "completed"
     jobs_state.write(st)
 
+    reads: list[str] = []
+    real_read = jobs_state.read
+
+    def spy_read(pid):
+        reads.append(pid)
+        return real_read(pid)
+
+    monkeypatch.setattr(jobs_state, "read", spy_read)
+
     result = _invoke_status("live-run", "--host", "127.0.0.1", "--port", "8188")
     assert result.exit_code == 0, result.output
     data = _last_json(result.stdout)["data"]
     assert data["status"] == "running"
     assert "source" not in data
     assert "server_running" not in data
+    # The live snapshot answered, so the fallback never ran.
+    assert reads == []
+
+
+def test_jobs_status_server_down_surfaces_server_died_verdict(monkeypatch: pytest.MonkeyPatch):
+    """The composite the epic exists for: the watcher recorded `server_died`,
+    the server is still down, and `jobs status` hands that verdict back.
+
+    The two halves — a terminal state file being emitted, and `server_died`
+    being written — are each covered elsewhere; this pins the seam between
+    them, which is the only thing a caller actually sees.
+    """
+    from comfy_cli import jobs_state
+
+    monkeypatch.setattr(jobs_mod, "check_comfy_server_running", lambda port, host: False)
+    st = jobs_state.new(prompt_id="oom-run", client_id="c", workflow="/tmp/oom.json", where="local")
+    st.status = "error"
+    st.error = {
+        "code": "server_died",
+        "message": "ComfyUI server 127.0.0.1:8188 stopped answering while job oom-run was 'running'.",
+        "details": {"host": "127.0.0.1", "port": 8188, "last_status": "running"},
+    }
+    jobs_state.write(st)
+
+    result = _invoke_status("oom-run", "--host", "127.0.0.1", "--port", "8188")
+    assert result.exit_code == 0, result.output
+    env = _last_json(result.stdout)
+    assert env["ok"] is True
+    data = env["data"]
+    assert data["status"] == "error"
+    assert data["error"]["code"] == "server_died"
+    assert data["source"] == "state_file"
+    assert data["server_running"] is False
+    assert data["prompt_id"] == "oom-run"
+    assert data["workflow"] == "/tmp/oom.json"
+
+
+class TestStatusServerUpNoRecord:
+    """Server UP but neither `/queue` nor `/history` knows the prompt.
+
+    This is what the documented crash recovery ("relaunch, then check")
+    produces: a fresh ComfyUI answers the port with an empty history, so the
+    live snapshot comes back None. Before BE-4749 that unconditionally emitted
+    `prompt_not_found` and discarded the `server_died` verdict already sitting
+    on disk.
+    """
+
+    @staticmethod
+    def _server_up_with_no_record(monkeypatch: pytest.MonkeyPatch) -> None:
+        """Server answers, empty `/queue` and `/history` — a fresh relaunch."""
+        monkeypatch.setattr(jobs_mod, "check_comfy_server_running", lambda port, host: True)
+        monkeypatch.setattr(jobs_mod, "_snapshot", lambda h, p, pid: None)
+
+        # `_server_confirms_no_record` re-queries to prove the absence is real
+        # rather than a swallowed fetch error, so it needs a live-looking server.
+        def fake_get(url, timeout=10.0):
+            if url.endswith("/queue"):
+                return {"queue_running": [], "queue_pending": []}
+            return {}
+
+        monkeypatch.setattr(jobs_mod, "_http_get_json", fake_get)
+
+    @staticmethod
+    def _server_up_but_flaky(monkeypatch: pytest.MonkeyPatch) -> None:
+        """Port answers the health probe, but `/queue` and `/history` fail."""
+        monkeypatch.setattr(jobs_mod, "check_comfy_server_running", lambda port, host: True)
+        monkeypatch.setattr(jobs_mod, "_snapshot", lambda h, p, pid: None)
+
+        def boom(url, timeout=10.0):
+            raise RuntimeError("connection reset")
+
+        monkeypatch.setattr(jobs_mod, "_http_get_json", boom)
+
+    def test_terminal_state_file_wins_over_prompt_not_found(self, monkeypatch: pytest.MonkeyPatch):
+        """Terminal record -> emit it as a normal result, exit 0. This is the
+        relaunch-then-check path that used to throw the attribution away."""
+        from comfy_cli import jobs_state
+
+        self._server_up_with_no_record(monkeypatch)
+        st = jobs_state.new(prompt_id="relaunched-run", client_id="c", workflow="/tmp/oom.json", where="local")
+        st.status = "error"
+        st.error = {"code": "server_died", "message": "the server died under this job", "details": {}}
+        jobs_state.write(st)
+
+        result = _invoke_status("relaunched-run", "--host", "127.0.0.1", "--port", "8188")
+        assert result.exit_code == 0, result.output
+        env = _last_json(result.stdout)
+        assert env["ok"] is True
+        data = env["data"]
+        assert data["status"] == "error"
+        assert data["error"]["code"] == "server_died"
+        assert data["source"] == "state_file"
+        # The distinguishing field: the port answers, it just has no record.
+        assert data["server_running"] is True
+        assert data["prompt_id"] == "relaunched-run"
+        assert data["workflow"] == "/tmp/oom.json"
+        assert data["submitted_at"] == st.submitted_at
+
+    def test_terminal_completed_state_file_is_also_returned(self, monkeypatch: pytest.MonkeyPatch):
+        """Not just failures: a completed job pruned from `/history` still has
+        its outputs on disk, and they are worth more than `prompt_not_found`."""
+        from comfy_cli import jobs_state
+
+        self._server_up_with_no_record(monkeypatch)
+        st = jobs_state.new(prompt_id="pruned-run", client_id="c", workflow="/tmp/wf.json", where="local")
+        st.status = "completed"
+        st.outputs = ["http://127.0.0.1:8188/view?filename=out.png"]
+        jobs_state.write(st)
+
+        result = _invoke_status("pruned-run", "--host", "127.0.0.1", "--port", "8188")
+        assert result.exit_code == 0, result.output
+        data = _last_json(result.stdout)["data"]
+        assert data["status"] == "completed"
+        assert data["outputs"] == ["http://127.0.0.1:8188/view?filename=out.png"]
+        assert data["error"] is None
+        assert data["source"] == "state_file"
+        assert data["server_running"] is True
+
+    def test_non_terminal_state_file_keeps_the_code_but_enriches_details(self, monkeypatch: pytest.MonkeyPatch):
+        """Non-terminal record -> still `prompt_not_found` (callers key on the
+        code) but carrying the last-known state, like the server-down twin."""
+        from comfy_cli import jobs_state
+
+        self._server_up_with_no_record(monkeypatch)
+        st = jobs_state.new(prompt_id="inflight-run", client_id="c", workflow="/tmp/wf.json", where="local")
+        st.status = "running"
+        jobs_state.write(st)
+
+        result = _invoke_status("inflight-run", "--host", "127.0.0.1", "--port", "8188")
+        assert result.exit_code == 1, result.output
+        env = _last_json(result.stdout)
+        assert env["ok"] is False
+        err = env["error"]
+        assert err["code"] == "prompt_not_found"
+        assert "inflight-run" in err["message"]
+        assert "'running'" in err["message"]
+        details = err["details"]
+        assert details["prompt_id"] == "inflight-run"
+        assert details["last_known_status"] == "running"
+        assert details["workflow"] == "/tmp/wf.json"
+        assert details["submitted_at"] == st.submitted_at
+        assert details["updated_at"] == st.updated_at
+        # The confirmed side of the fork: the server *did* disown the prompt —
+        # only the record is non-terminal — so the message may say the job died
+        # with the previous process. The unconfirmed twin below asserts the
+        # opposite flag and the hedged tail.
+        assert details["server_confirmed_no_record"] is True
+        assert "died with the previous process" in err["message"]
+
+    def test_no_state_file_keeps_the_bare_envelope(self, monkeypatch: pytest.MonkeyPatch):
+        """No record anywhere -> today's envelope, byte for byte. An untracked
+        prompt id must not start reporting on jobs that never existed."""
+        self._server_up_with_no_record(monkeypatch)
+
+        result = _invoke_status("never-existed", "--host", "127.0.0.1", "--port", "8188")
+        assert result.exit_code == 1, result.output
+        env = _last_json(result.stdout)
+        assert env["ok"] is False
+        err = env["error"]
+        assert err["code"] == "prompt_not_found"
+        assert err["message"] == "No prompt with id 'never-existed' on 127.0.0.1:8188."
+        assert err["hint"] == "check `comfy jobs ls`; very old prompts may have been pruned from /history"
+        assert err["details"] == {"prompt_id": "never-existed", "host": "127.0.0.1", "port": 8188}
+
+    def test_unconfirmed_absence_does_not_manufacture_a_death_verdict(self, monkeypatch: pytest.MonkeyPatch):
+        """A busy server whose `/queue` and `/history` fetches fail must NOT be
+        read as 'the job died'. `_snapshot` returns None for a swallowed fetch
+        error too, so the terminal state file stays unpublished and the message
+        claims no death."""
+        from comfy_cli import jobs_state
+
+        self._server_up_but_flaky(monkeypatch)
+        st = jobs_state.new(prompt_id="flaky-run", client_id="c", workflow="/tmp/wf.json", where="local")
+        st.status = "error"
+        st.error = {"code": "server_died", "message": "died", "details": {}}
+        jobs_state.write(st)
+
+        result = _invoke_status("flaky-run", "--host", "127.0.0.1", "--port", "8188")
+        assert result.exit_code == 1, result.output
+        env = _last_json(result.stdout)
+        assert env["ok"] is False
+        err = env["error"]
+        assert err["code"] == "prompt_not_found"
+        # The honest phrasing: unknown, not dead.
+        assert "unknown" in err["message"]
+        assert "died with the previous process" not in err["message"]
+        assert err["details"]["server_confirmed_no_record"] is False
+
+    def test_a_cloud_state_file_is_not_an_answer_about_a_local_target(self, monkeypatch: pytest.MonkeyPatch):
+        """State files are keyed by prompt_id alone. A cloud run must not be
+        returned as an authoritative local result with local output URLs."""
+        from comfy_cli import jobs_state
+
+        self._server_up_with_no_record(monkeypatch)
+        st = jobs_state.new(
+            prompt_id="cloud-run", client_id="c", workflow="/tmp/wf.json", where="cloud", base_url="https://example"
+        )
+        st.status = "completed"
+        st.outputs = ["https://cloud.example/out.png"]
+        jobs_state.write(st)
+
+        result = _invoke_status("cloud-run", "--host", "127.0.0.1", "--port", "8188")
+        assert result.exit_code == 1, result.output
+        err = _last_json(result.stdout)["error"]
+        assert err["code"] == "prompt_not_found"
+        # Falls all the way through to the bare envelope — no cloud data leaks.
+        assert err["details"] == {"prompt_id": "cloud-run", "host": "127.0.0.1", "port": 8188}
+        # ...but not into a dead end: `comfy jobs ls` follows the same resolved
+        # target and would not list this job either, so name the query that works.
+        assert (
+            err["hint"] == "this prompt_id is tracked as a cloud job — try: comfy jobs status cloud-run --where cloud"
+        )
+
+    def test_a_job_from_another_local_port_is_ignored(self, monkeypatch: pytest.MonkeyPatch):
+        """Two local ComfyUI instances: port 8189's job is not port 8188's
+        answer, and its output URLs must not be restamped with 8188."""
+        from comfy_cli import jobs_state
+
+        self._server_up_with_no_record(monkeypatch)
+        st = jobs_state.new(
+            prompt_id="other-port", client_id="c", workflow="/tmp/wf.json", where="local", host="127.0.0.1", port=8189
+        )
+        st.status = "completed"
+        jobs_state.write(st)
+
+        result = _invoke_status("other-port", "--host", "127.0.0.1", "--port", "8188")
+        assert result.exit_code == 1, result.output
+        err = _last_json(result.stdout)["error"]
+        assert err["code"] == "prompt_not_found"
+        assert err["details"] == {"prompt_id": "other-port", "host": "127.0.0.1", "port": 8188}
+
+    def test_a_record_whose_host_and_port_match_is_still_used(self, monkeypatch: pytest.MonkeyPatch):
+        """The scoping must not break the case it exists to protect: a record
+        naming this exact host:port is still the answer."""
+        from comfy_cli import jobs_state
+
+        self._server_up_with_no_record(monkeypatch)
+        st = jobs_state.new(
+            prompt_id="same-port", client_id="c", workflow="/tmp/wf.json", where="local", host="127.0.0.1", port=8188
+        )
+        st.status = "error"
+        st.error = {"code": "server_died", "message": "died", "details": {}}
+        jobs_state.write(st)
+
+        result = _invoke_status("same-port", "--host", "127.0.0.1", "--port", "8188")
+        assert result.exit_code == 0, result.output
+        data = _last_json(result.stdout)["data"]
+        assert data["error"]["code"] == "server_died"
+        assert data["source"] == "state_file"
+        assert data["server_running"] is True
+
+    def test_a_slash_bearing_id_does_not_borrow_another_jobs_record(self, monkeypatch: pytest.MonkeyPatch):
+        """`state_path` maps "/" to "_" before validating, so read("a/b") lands
+        on the file for the distinct prompt "a_b". That record must not be
+        reported under the queried id."""
+        from comfy_cli import jobs_state
+
+        self._server_up_with_no_record(monkeypatch)
+        st = jobs_state.new(prompt_id="a_b", client_id="c", workflow="/tmp/wf.json", where="local")
+        st.status = "completed"
+        st.outputs = ["http://127.0.0.1:8188/view?filename=ab.png"]
+        jobs_state.write(st)
+
+        result = _invoke_status("a/b", "--host", "127.0.0.1", "--port", "8188")
+        assert result.exit_code == 1, result.output
+        env = _last_json(result.stdout)
+        assert env["ok"] is False
+        err = env["error"]
+        assert err["code"] == "prompt_not_found"
+        # Crucially: not a'b's outputs reported as a/b's.
+        assert "ab.png" not in json.dumps(env)
+
+    def test_a_non_list_outputs_field_does_not_crash(self, monkeypatch: pytest.MonkeyPatch):
+        """`jobs_state.read` type-checks nothing it keeps, so a mangled
+        `outputs` must degrade to [] rather than shred a string into characters
+        or raise inside the envelope builder."""
+        from comfy_cli import jobs_state
+
+        self._server_up_with_no_record(monkeypatch)
+        st = jobs_state.new(prompt_id="bad-outputs", client_id="c", workflow="/tmp/wf.json", where="local")
+        st.status = "completed"
+        jobs_state.write(st)
+        # Corrupt the file the way a hand-edit would.
+        path = jobs_state.state_path("bad-outputs")
+        blob = json.loads(path.read_text())
+        blob["outputs"] = "not-a-list"
+        path.write_text(json.dumps(blob))
+
+        result = _invoke_status("bad-outputs", "--host", "127.0.0.1", "--port", "8188")
+        assert result.exit_code == 0, result.output
+        data = _last_json(result.stdout)["data"]
+        assert data["outputs"] == []
+
+    @pytest.mark.parametrize(
+        ("recorded_host", "queried_host"),
+        [
+            ("127.0.0.1", "localhost"),  # `run --host localhost`, status with defaults
+            ("localhost", "127.0.0.1"),  # and the reverse
+            ("127.0.0.1", "0.0.0.0"),  # COMFY_LOCAL_URL=http://0.0.0.0:8188 — see below
+            ("127.0.0.1", "LOCALHOST"),  # hostnames are case-insensitive
+            ("[::1]", "::1"),  # brackets are a URL encoding, not the address
+        ],
+    )
+    def test_a_loopback_alias_is_not_treated_as_a_different_server(
+        self, monkeypatch: pytest.MonkeyPatch, recorded_host: str, queried_host: str
+    ):
+        """Scoping the read to the queried target must not reject the SAME
+        server spelled differently — that is a silent false negative that
+        discards the `server_died` attribution this fallback exists to keep.
+
+        These spellings genuinely diverge in practice: `comfy run`'s `execute()`
+        rewrites the wildcard bind `0.0.0.0` to `127.0.0.1` before writing the
+        state file, while `resolve_host_port` only canonicalizes a wildcard that
+        came from `config.background` — so one `COMFY_LOCAL_URL=http://0.0.0.0:8188`
+        makes `run` store `127.0.0.1` and `jobs status` ask about `0.0.0.0`.
+        """
+        from comfy_cli import jobs_state
+
+        self._server_up_with_no_record(monkeypatch)
+        st = jobs_state.new(
+            prompt_id="alias-run",
+            client_id="c",
+            workflow="/tmp/wf.json",
+            where="local",
+            host=recorded_host,
+            port=8188,
+        )
+        st.status = "error"
+        st.error = {"code": "server_died", "message": "died", "details": {}}
+        jobs_state.write(st)
+
+        result = _invoke_status("alias-run", "--host", queried_host, "--port", "8188")
+        assert result.exit_code == 0, result.output
+        data = _last_json(result.stdout)["data"]
+        assert data["error"]["code"] == "server_died"
+        assert data["source"] == "state_file"
+
+    def test_a_genuinely_different_host_is_still_rejected(self, monkeypatch: pytest.MonkeyPatch):
+        """The alias folding must not over-reach: a non-loopback host is a
+        different server and its record is still not this query's answer."""
+        from comfy_cli import jobs_state
+
+        self._server_up_with_no_record(monkeypatch)
+        st = jobs_state.new(
+            prompt_id="remote-run",
+            client_id="c",
+            workflow="/tmp/wf.json",
+            where="local",
+            host="192.168.1.50",
+            port=8188,
+        )
+        st.status = "completed"
+        st.outputs = ["http://192.168.1.50:8188/view?filename=remote.png"]
+        jobs_state.write(st)
+
+        result = _invoke_status("remote-run", "--host", "127.0.0.1", "--port", "8188")
+        assert result.exit_code == 1, result.output
+        env = _last_json(result.stdout)
+        assert env["error"]["code"] == "prompt_not_found"
+        assert env["error"]["details"] == {"prompt_id": "remote-run", "host": "127.0.0.1", "port": 8188}
+        # The other server's artifact URLs must not leak into this answer.
+        assert "remote.png" not in json.dumps(env)
+
+    def test_a_cancelled_state_file_payload_is_schema_valid(self, monkeypatch: pytest.MonkeyPatch):
+        """`cancelled` is terminal in `jobs_state` and is copied verbatim into
+        the payload, so this path can emit it — `schemas/jobs.json` must accept
+        it. Without the enum entry the published contract rejects a payload the
+        command legitimately produces."""
+        import jsonschema
+
+        from comfy_cli import jobs_state
+
+        self._server_up_with_no_record(monkeypatch)
+        st = jobs_state.new(
+            prompt_id="cancelled-run",
+            client_id="c",
+            workflow="/tmp/wf.json",
+            where="local",
+            host="127.0.0.1",
+            port=8188,
+        )
+        st.status = "cancelled"
+        jobs_state.write(st)
+
+        result = _invoke_status("cancelled-run", "--host", "127.0.0.1", "--port", "8188")
+        assert result.exit_code == 0, result.output
+        data = _last_json(result.stdout)["data"]
+        assert data["status"] == "cancelled"
+
+        schema_path = Path(__file__).parents[3] / "comfy_cli" / "schemas" / "jobs.json"
+        jsonschema.Draft202012Validator(json.loads(schema_path.read_text())).validate(data)
+
+    def test_jobs_schema_status_enum_covers_every_terminal_state(self):
+        """Every `jobs_state.TERMINAL_STATUSES` value reaches a `jobs status`
+        payload verbatim, so each must be a legal `status` in the schema."""
+        from comfy_cli import jobs_state
+
+        schema_path = Path(__file__).parents[3] / "comfy_cli" / "schemas" / "jobs.json"
+        enum = set(json.loads(schema_path.read_text())["properties"]["status"]["enum"])
+        assert jobs_state.TERMINAL_STATUSES <= enum, sorted(jobs_state.TERMINAL_STATUSES - enum)
 
 
 # ---------------------------------------------------------------------------
@@ -691,8 +1106,11 @@ def _capture_urlopen(monkeypatch: pytest.MonkeyPatch, routes: dict):
         def __exit__(self, *a):
             return False
 
-        def read(self):
-            return self.body
+        def read(self, n=None):
+            # Mirror http.client.HTTPResponse.read(amt) — `_http_get_json`
+            # reads with a byte cap, so a no-arg-only fake would not match the
+            # real API.
+            return self.body if n is None else self.body[:n]
 
     def _fake(req, timeout=None):
         url = req.full_url
@@ -1151,6 +1569,40 @@ def test_jobs_cancel_cloud_404_surfaces_prompt_not_found(monkeypatch: pytest.Mon
     assert result.exit_code == 1
     # Output contains the error code marker.
     assert "prompt_not_found" in result.output
+
+
+@pytest.mark.parametrize("code", [401, 403])
+def test_jobs_cancel_cloud_auth_failure_surfaces_cloud_unauthorized(monkeypatch: pytest.MonkeyPatch, code: int):
+    """An expired/insufficient session cancelling a cloud job surfaces the
+    actionable ``cloud_unauthorized`` code (shared envelope handler, BE-3266) —
+    not the generic ``cloud_http_error`` it produced before the two call sites
+    were unified."""
+    import io
+    import urllib.error
+
+    from typer.testing import CliRunner
+
+    from comfy_cli.target import Target
+
+    fake_target = Target(
+        kind="cloud",
+        base_url="https://cloud.example.com",
+        path_prefix="/api",
+        history_path="history_v2",
+        jobs_path="jobs",
+        api_key="test-key",
+    )
+    monkeypatch.setattr("comfy_cli.target.resolve_target", lambda **kw: fake_target)
+    monkeypatch.setattr(jobs_mod, "_is_cloud", lambda w: True)
+    monkeypatch.setattr(jobs_mod, "cloud_preflight_or_exit", lambda: None)
+
+    err = urllib.error.HTTPError("https://x/cancel", code, "Unauthorized", {}, io.BytesIO(b'{"error":"expired"}'))
+    _capture_urlopen(monkeypatch, {"/api/jobs/prompt-abc/cancel": err})
+
+    runner = CliRunner()
+    result = runner.invoke(jobs_mod.app, ["cancel", "prompt-abc", "--where", "cloud"])
+    assert result.exit_code == 1
+    assert "cloud_unauthorized" in result.output
 
 
 def test_is_cloud_honors_env_var(monkeypatch: pytest.MonkeyPatch):
@@ -2318,3 +2770,442 @@ def test_watcher_does_not_clobber_a_concurrent_cancel_with_server_died(monkeypat
     assert on_disk.error["code"] == "cancelled"
     # The notification reports the verdict that actually stands.
     assert notified[0].status == "cancelled"
+
+
+# ---------------------------------------------------------------------------
+# Bounded reads — a ComfyUI server must not be able to OOM the CLI
+# ---------------------------------------------------------------------------
+
+
+class _CapRecordingResp:
+    """A urlopen response that records the byte cap it was read with.
+
+    ``read(None)`` fails outright: an unbounded read is the bug being guarded
+    against, and a lenient fake would let it back in.
+    """
+
+    def __init__(self, body: bytes):
+        self._body = body
+        self.status = 200
+        self.requested: list[int] = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def read(self, n=None):
+        if n is None:
+            raise AssertionError("unbounded read() — the body must be read with a cap")
+        self.requested.append(n)
+        return self._body[:n]
+
+
+def test_http_get_json_reads_with_a_cap_not_unbounded(monkeypatch: pytest.MonkeyPatch):
+    import comfy_cli.http as http_mod
+
+    resp = _CapRecordingResp(b'{"queue_running": []}')
+    monkeypatch.setattr(http_mod._PLAIN_OPENER, "open", lambda req, timeout=None: resp)
+
+    assert jobs_mod._http_get_json("http://127.0.0.1:8188/queue") == {"queue_running": []}
+    # One byte past the cap, so a body that exactly fills it is still complete.
+    assert resp.requested == [http_mod.MAX_RESPONSE_BYTES + 1]
+
+
+def test_http_get_json_oversize_body_is_a_runtime_error_not_a_truncated_parse(monkeypatch: pytest.MonkeyPatch):
+    # RuntimeError is the single failure family every `_http_get_json` call site
+    # already catches; an oversize body must join it rather than escaping as a
+    # new exception type or degrading into a confusing JSON parse error.
+    import comfy_cli.http as http_mod
+
+    resp = _CapRecordingResp(b"x" * 4096)
+    monkeypatch.setattr(http_mod._PLAIN_OPENER, "open", lambda req, timeout=None: resp)
+    monkeypatch.setattr(
+        jobs_mod,
+        "read_capped",
+        lambda r, url, max_bytes=8: http_mod.read_capped(r, url, max_bytes=max_bytes),
+    )
+
+    with pytest.raises(RuntimeError) as exc_info:
+        jobs_mod._http_get_json("http://127.0.0.1:8188/history")
+    assert "http://127.0.0.1:8188/history" in str(exc_info.value)
+
+
+def test_jobs_ls_survives_an_oversize_queue_response(monkeypatch: pytest.MonkeyPatch):
+    # End to end: `jobs ls` catches RuntimeError from `_http_get_json`, so an
+    # oversize /queue degrades to the on-disk fallback instead of a traceback.
+    import comfy_cli.http as http_mod
+
+    monkeypatch.setattr(jobs_mod, "_server_or_error", lambda h, p, **kw: True)
+    monkeypatch.setattr(http_mod._PLAIN_OPENER, "open", lambda req, timeout=None: _CapRecordingResp(b"x" * 4096))
+    monkeypatch.setattr(
+        jobs_mod,
+        "read_capped",
+        lambda r, url, max_bytes=8: http_mod.read_capped(r, url, max_bytes=max_bytes),
+    )
+
+    from typer.testing import CliRunner
+
+    result = CliRunner().invoke(jobs_mod.app, ["ls", "--where", "local"])
+    # `_gather_jobs` treats an unreadable /queue and /history as empty, so the
+    # command still succeeds — what matters is that ResponseTooLarge never
+    # escapes as an uncaught exception. A non-zero exit here would mean it did.
+    assert result.exit_code == 0, result.output
+
+
+def test_state_file_payload_carries_the_grouped_output_keys(monkeypatch: pytest.MonkeyPatch):
+    """Shape parity with the live snapshot. `_snapshot` always emits
+    `outputs_by_node`, `outputs_by_item` and `workflow_size`; a consumer that
+    indexes them on a `jobs status` success payload would hit a `KeyError` on
+    the state-file source alone. They are present but empty — the file records
+    output URLs flat, so the grouping genuinely cannot be reconstructed."""
+    from comfy_cli import jobs_state
+
+    monkeypatch.setattr(jobs_mod, "check_comfy_server_running", lambda port, host: False)
+    st = jobs_state.new(prompt_id="shape-run", client_id="c", workflow="/tmp/wf.json", where="local")
+    st.status = "completed"
+    st.outputs = ["http://127.0.0.1:8188/view?filename=out.png"]
+    jobs_state.write(st)
+
+    result = _invoke_status("shape-run", "--host", "127.0.0.1", "--port", "65431")
+    assert result.exit_code == 0, result.output
+    data = _last_json(result.stdout)["data"]
+    assert data["outputs"] == ["http://127.0.0.1:8188/view?filename=out.png"]
+    assert data["outputs_by_node"] == {}
+    assert data["outputs_by_item"] == {}
+    assert data["workflow_size"] is None
+
+
+def test_server_down_cloud_job_hint_points_at_the_cloud_query(monkeypatch: pytest.MonkeyPatch):
+    """Server-down twin of the same redirect: a cloud-tracked prompt asked
+    about locally is told to use `--where cloud`, not "run: comfy launch"."""
+    from comfy_cli import jobs_state
+
+    monkeypatch.setattr(jobs_mod, "check_comfy_server_running", lambda port, host: False)
+    st = jobs_state.new(
+        prompt_id="cloud-down", client_id="c", workflow="/tmp/wf.json", where="cloud", base_url="https://example"
+    )
+    st.status = "completed"
+    jobs_state.write(st)
+
+    result = _invoke_status("cloud-down", "--host", "127.0.0.1", "--port", "65431")
+    assert result.exit_code == 1, result.output
+    err = _last_json(result.stdout)["error"]
+    assert err["code"] == "server_not_running"
+    assert "--where cloud" in err["hint"]
+
+
+def test_untracked_prompt_keeps_the_default_hints(monkeypatch: pytest.MonkeyPatch):
+    """The redirect is conditional: with no state file at all, both bare
+    envelopes keep the hint they have always carried."""
+    monkeypatch.setattr(jobs_mod, "check_comfy_server_running", lambda port, host: False)
+    result = _invoke_status("no-such-id", "--host", "127.0.0.1", "--port", "65431")
+    assert result.exit_code == 1, result.output
+    assert _last_json(result.stdout)["error"]["hint"] == "run: comfy launch"
+
+
+# ---------------------------------------------------------------------------
+# `jobs ls` rows carry the server-death attribution (`error_code`)
+# ---------------------------------------------------------------------------
+
+
+def test_state_error_code_extraction_is_defensive():
+    """Only a non-empty string `error.code` survives — a state file is
+    hand-editable, and `error_code` is typed `string | null` in the schema."""
+    assert jobs_mod._state_error_code({"code": "server_died"}, "error") == "server_died"
+    assert jobs_mod._state_error_code(None, "error") is None
+    assert jobs_mod._state_error_code({}, "error") is None
+    assert jobs_mod._state_error_code({"code": ""}, "error") is None
+    assert jobs_mod._state_error_code({"code": 500}, "error") is None
+    assert jobs_mod._state_error_code("server_died", "error") is None
+    assert jobs_mod._state_error_code(["server_died"], "error") is None
+
+
+@pytest.mark.parametrize("status", ["queued", "running", "pending", "executing", "completed"])
+def test_state_error_code_ignores_a_code_on_a_job_that_has_not_failed(status):
+    """`job_watcher._poll_local_once`/`_poll_cloud_once` park a transient
+    `watcher_poll_error` on the state file *without* moving the status off
+    `queued`/`running`, and only clear it on a later poll that returns a
+    snapshot — so a healthy in-flight job holds that code for many cycles.
+    Surfacing it would advertise a failure cause for a job that hasn't failed
+    (and contradict the schema, which promises null on every non-failed row)."""
+    assert jobs_mod._state_error_code({"code": "watcher_poll_error"}, status) is None
+
+
+def test_gather_local_state_files_ignores_a_poll_error_on_a_running_job():
+    """End to end through the gather, not just the helper: a running job whose
+    last poll blipped must still list as running with no cause attached."""
+    from comfy_cli import jobs_state
+
+    _write_state(
+        jobs_state.state_dir(),
+        "blipped",
+        status="running",
+        error={"code": "watcher_poll_error", "message": "Connection reset by peer"},
+    )
+
+    (row,) = jobs_mod._gather_local_state_files(limit=100)
+    assert row.status == "running"
+    assert row.error_code is None
+
+
+def test_state_scalar_narrowing_keeps_a_bad_state_file_from_breaking_the_listing():
+    """`jobs_state.read` type-checks nothing it keeps, so `where`,
+    `workflow_path`, and `updated_at` — all published with strict types — need
+    the same defensiveness `error_code` gets. A numeric `updated_at` is the
+    sharp case: it reaches `_merge_jobs`'s `sort_key` and raises `TypeError`
+    comparing int against str, aborting the whole listing rather than one row."""
+    assert jobs_mod._state_str("2026-08-04T00:00:00+00:00") == "2026-08-04T00:00:00+00:00"
+    assert jobs_mod._state_str(None) is None
+    assert jobs_mod._state_str("") is None
+    assert jobs_mod._state_str(1754265600) is None
+    assert jobs_mod._state_where("cloud") == "cloud"
+    assert jobs_mod._state_where("local") == "local"
+    # Missing, empty, or a legacy/hand-edited value outside the published enum.
+    assert jobs_mod._state_where(None) == "local"
+    assert jobs_mod._state_where("") == "local"
+    assert jobs_mod._state_where("remote") == "local"
+
+
+def test_gather_local_state_files_carries_error_code():
+    """A state-file row reports why the job failed, not just that it did."""
+    from comfy_cli import jobs_state
+
+    state_dir = jobs_state.state_dir()
+    _write_state(
+        state_dir,
+        "died-job",
+        status="error",
+        error={"code": "server_died", "message": "Lost connection while job died-job was running"},
+    )
+    _write_state(state_dir, "ok-job", status="completed")
+
+    rows = {r.prompt_id: r for r in jobs_mod._gather_local_state_files(limit=100)}
+    assert rows["died-job"].error_code == "server_died"
+    assert rows["ok-job"].error_code is None, "a healthy row must not invent an error code"
+
+
+def test_gather_local_state_files_reports_the_reaped_watcher_code(monkeypatch):
+    """The stale-watcher reap rewrites the file to `watcher_crashed`; the row it
+    then builds must carry that code, or `--orphaned` still can't say why."""
+    from comfy_cli import jobs_state
+
+    monkeypatch.setattr(jobs_mod, "_is_watcher_alive", lambda state: False)
+    _write_state(jobs_state.state_dir(), "reaped", status="running", watcher_pid=999999)
+
+    (row,) = jobs_mod._gather_local_state_files(limit=100)
+    assert row.status == "error"
+    assert row.error_code == "watcher_crashed"
+
+
+def _row(prompt_id: str, status: str, **kw) -> jobs_mod.JobRow:
+    return jobs_mod.JobRow(
+        prompt_id=prompt_id,
+        status=status,
+        queue_position=None,
+        elapsed_seconds=None,
+        workflow_size=None,
+        outputs=0,
+        **kw,
+    )
+
+
+def test_merge_carries_error_code_onto_a_superseding_server_row():
+    """`/queue` and `/history` carry no error code, so a server row that wins
+    the merge would otherwise drop the cause the state file recorded."""
+    merged = {
+        r.prompt_id: r
+        for r in jobs_mod._merge_jobs(
+            [_row("job-1", "error", error_code="execution_error", updated_at="2026-08-04T00:00:00+00:00")],
+            [_row("job-1", "error")],
+        )
+    }
+    assert merged["job-1"].error_code == "execution_error"
+
+
+def test_merge_drops_a_stale_error_code_when_the_server_says_completed():
+    """The carry-over is scoped to failure statuses: a server that reports the
+    prompt as completed must not be annotated with a stale `server_died`."""
+    merged = {
+        r.prompt_id: r
+        for r in jobs_mod._merge_jobs(
+            [_row("job-2", "error", error_code="server_died")],
+            [_row("job-2", "completed")],
+        )
+    }
+    assert merged["job-2"].status == "completed"
+    assert merged["job-2"].error_code is None
+
+
+def test_merge_prefers_the_server_rows_own_error_code():
+    """Carry-over only fills a gap — it never overwrites a code the server row
+    already has."""
+    merged = {
+        r.prompt_id: r
+        for r in jobs_mod._merge_jobs(
+            [_row("job-3", "error", error_code="server_died")],
+            [_row("job-3", "error", error_code="execution_error")],
+        )
+    }
+    assert merged["job-3"].error_code == "execution_error"
+
+
+def test_merge_reads_the_prior_row_from_the_state_snapshot_not_the_running_map():
+    """`/queue` and `/history` are fetched separately, so one gather can yield
+    two rows for a prompt caught mid-transition. Looking the prior code up from
+    the accumulating map lets the `running` row clobber the state row first,
+    and the `error` row that follows then finds nothing to inherit."""
+    merged = {
+        r.prompt_id: r
+        for r in jobs_mod._merge_jobs(
+            [_row("job-4", "error", error_code="execution_error")],
+            [_row("job-4", "running"), _row("job-4", "error")],
+        )
+    }
+    assert merged["job-4"].status == "error"
+    assert merged["job-4"].error_code == "execution_error"
+
+
+def test_merge_ignores_a_code_recorded_next_to_a_healthy_state_status():
+    """The gate is on both sides: a code sitting next to a non-failure state
+    status is a watcher poll blip, not this job's cause, so a server row that
+    genuinely failed must not be attributed to it."""
+    merged = {
+        r.prompt_id: r
+        for r in jobs_mod._merge_jobs(
+            [_row("job-5", "running", error_code="watcher_poll_error")],
+            [_row("job-5", "error")],
+        )
+    }
+    assert merged["job-5"].status == "error"
+    assert merged["job-5"].error_code is None
+
+
+def test_merge_carries_the_other_state_only_fields_onto_a_server_row():
+    """`workflow_path` and `updated_at` are state-file-only too. Blanking the
+    first drops the only field that says which workflow a prompt_id was;
+    blanking the second sorts a terminal row to epoch 0, below every dated row,
+    where the caller's `[:limit]` slice can drop a fresh completion."""
+    merged = {
+        r.prompt_id: r
+        for r in jobs_mod._merge_jobs(
+            [
+                _row(
+                    "job-6",
+                    "completed",
+                    workflow_path="/tmp/wf.json",
+                    updated_at="2026-08-04T00:00:00+00:00",
+                )
+            ],
+            [_row("job-6", "completed")],
+        )
+    }
+    assert merged["job-6"].workflow_path == "/tmp/wf.json"
+    assert merged["job-6"].updated_at == "2026-08-04T00:00:00+00:00"
+
+
+def test_merge_keeps_fresh_server_side_completions_within_the_limit():
+    """The consequence the carry-over above prevents, end to end: without an
+    `updated_at`, the freshly completed job the server knows about sorts below
+    a week-old one and falls outside a caller's `[:1]` slice."""
+    fresh = _row("fresh", "completed", updated_at="2026-08-04T00:00:00+00:00")
+    stale = _row("stale", "completed", updated_at="2026-07-28T00:00:00+00:00")
+    merged = jobs_mod._merge_jobs([fresh, stale], [_row("fresh", "completed")])
+    assert [r.prompt_id for r in merged][:1] == ["fresh"]
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("non_retryable_error", "error"),
+        ("lost", "error"),
+        ("canceled", "cancelled"),
+        ("cancelled", "cancelled"),
+        ("failed", "error"),
+        ("success", "completed"),
+    ],
+)
+def test_cloud_row_normalizes_the_failure_spellings(raw, expected):
+    """Cloud's other failure spellings used to pass through raw, missing
+    `_ERROR_STATUSES` — so the merge dropped the state file's `error_code` for
+    exactly the jobs that had failed."""
+    assert jobs_mod._cloud_job_to_row({"id": "j", "status": raw}).status == expected
+
+
+def test_cloud_row_is_marked_as_a_cloud_row():
+    """`where` is published with an enum as a per-row discriminator for a
+    follow-up `jobs status`/`jobs cancel`. Taking JobRow's "local" default here
+    made every row under `jobs ls --where cloud` claim `local` while the
+    envelope said `cloud`, superseding the state row that had it right."""
+    assert jobs_mod._cloud_job_to_row({"id": "j", "status": "running"}).where == "cloud"
+
+
+def test_merge_keeps_the_state_error_code_for_a_cloud_failure_spelling():
+    """The two fixes above together: a cloud `non_retryable_error` row now
+    normalizes to `error`, so it clears the gate and keeps the cause."""
+    merged = {
+        r.prompt_id: r
+        for r in jobs_mod._merge_jobs(
+            [_row("cj", "error", where="cloud", error_code="server_died")],
+            [jobs_mod._cloud_job_to_row({"id": "cj", "status": "non_retryable_error"})],
+        )
+    }
+    assert merged["cj"].status == "error"
+    assert merged["cj"].where == "cloud"
+    assert merged["cj"].error_code == "server_died"
+
+
+def test_ls_payload_names_the_server_death(capsys, monkeypatch):
+    """Acceptance: after a server death, `comfy jobs ls` — the escape hatch
+    `jobs status` points at — reports both the failure and its cause."""
+    from comfy_cli import jobs_state
+
+    state_dir = jobs_state.state_dir()
+    _write_state(
+        state_dir,
+        "oom-job",
+        status="error",
+        error={"code": "server_died", "message": "Lost connection to ComfyUI while job oom-job was running"},
+    )
+    _write_state(state_dir, "fine-job", status="completed")
+    monkeypatch.delenv("COMFY_WHERE", raising=False)
+
+    data = _ls_payload(capsys, limit=100)
+    by_id = {j["prompt_id"]: j for j in data["jobs"]}
+    assert by_id["oom-job"]["status"] == "error"
+    assert by_id["oom-job"]["error_code"] == "server_died"
+    assert by_id["oom-job"]["workflow_path"] == "/tmp/oom-job.json"
+    # Present on every row (agents can index it unconditionally), null when
+    # there is nothing to attribute.
+    assert by_id["fine-job"]["error_code"] is None
+
+
+def test_ls_payload_validates_against_the_jobs_schema(capsys, monkeypatch):
+    """`error_code` is a published contract field, not just an emitted one."""
+    import jsonschema
+
+    from comfy_cli import jobs_state
+
+    _write_state(
+        jobs_state.state_dir(),
+        "sch-job",
+        status="cancelled",
+        error={"code": "cancelled", "message": "Cancelled by user"},
+    )
+    monkeypatch.delenv("COMFY_WHERE", raising=False)
+    data = _ls_payload(capsys, limit=100)
+
+    schema_path = Path(jobs_mod.__file__).parent.parent / "schemas" / "jobs.json"
+    schema = json.loads(schema_path.read_text())
+    jsonschema.Draft202012Validator(schema).validate(data)
+    assert data["jobs"][0]["error_code"] == "cancelled"
+    # The row `status` this asserts on is validated by `jobs.items`, whose
+    # `status` is a bare string — not by the top-level `status` enum, which
+    # describes the single-job `jobs status` envelope. Row statuses are
+    # deliberately unconstrained (an unrecognized cloud status passes through
+    # raw rather than being dropped), so validate the field that *is* the
+    # contract here — `error_code` alongside a `cancelled` row — rather than
+    # asserting against an enum that never sees this value.
+    assert data["jobs"][0]["status"] == "cancelled"
+    assert schema["properties"]["jobs"]["items"]["properties"]["error_code"]["type"] == ["string", "null"]

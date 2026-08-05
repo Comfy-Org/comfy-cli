@@ -23,6 +23,7 @@ State-file contract (the same shape across local and cloud):
       "outputs": [<url>, ...],
       "error": {"code": "...", "message": "...", "details": {...}} | null,
       "watcher_pid": <int> | null,
+      "watcher_pid_create_time": <float epoch seconds> | null,
       "record": {<full final cloud history record>} | null,
       "item_map": {<item>: {"nodes": [...], "save_node": "...", "prefix": "..."}} | null
     }
@@ -86,6 +87,10 @@ class JobState:
     outputs: list[Any] = field(default_factory=list)
     error: dict[str, Any] | None = None
     watcher_pid: int | None = None
+    # Watcher process start time, recorded next to its pid so a recycled pid
+    # can't pass for the original watcher. Null on files written before this
+    # field existed (and when psutil couldn't read it).
+    watcher_pid_create_time: float | None = None
     # Full final cloud history record (node-keyed outputs), stashed at terminal.
     record: dict[str, Any] | None = None
     # foreach item -> {"nodes": [...], "save_node": ..., "prefix": ...} map,
