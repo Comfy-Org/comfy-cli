@@ -14,6 +14,7 @@ existing callers see no change.
 
 from __future__ import annotations
 
+import json
 import re
 import subprocess
 from unittest.mock import patch
@@ -62,10 +63,16 @@ class TestExitOnFailFlag:
 
         assert result.exit_code == 1
         args, kwargs = mock_execute.call_args
+        # Exact argv, deliberately: the flag must NOT be forwarded to cm-cli. Its
+        # `update` subcommand takes only (nodes, channel, mode, user_directory) --
+        # only `cm-cli install` has --exit-on-fail -- so forwarding it would be a
+        # Typer usage error that fails every run. Don't "fix" this to a membership
+        # check without first adding the option upstream in ComfyUI-Manager.
         assert args[0] == ["update", "all"]
         assert kwargs.get("raise_on_error") is True
-        # A failed update must not go on to refresh the node id cache.
-        mock_cache.assert_not_called()
+        # The update is non-atomic, so packs that did update are real: refresh the
+        # completion cache before bailing out, exactly as the no-flag path does.
+        mock_cache.assert_called_once()
 
     def test_the_cm_cli_exit_code_is_propagated(self):
         with (
@@ -75,6 +82,70 @@ class TestExitOnFailFlag:
             result = runner.invoke(cmdline.app, ["update", "all", "--exit-on-fail"])
 
         assert result.exit_code == 7
+
+    def test_a_signal_death_becomes_a_shell_convention_code(self):
+        """`Popen.wait()` returns -9 when the OOM killer reaps cm-cli. Exiting with
+        that raw value would truncate to a fabricated 247, so map it to 128+N."""
+        with (
+            patch(EXECUTE_CM_CLI, side_effect=_cm_cli_exiting(-9)),
+            patch(UPDATE_NODE_ID_CACHE),
+        ):
+            result = runner.invoke(cmdline.app, ["update", "all", "--exit-on-fail"])
+
+        assert result.exit_code == 137
+
+    def test_an_exit_code_that_would_truncate_to_zero_stays_nonzero(self):
+        """Windows can return codes above 255; a multiple of 256 would otherwise
+        truncate to 0 and report a failed update as a success."""
+        with (
+            patch(EXECUTE_CM_CLI, side_effect=_cm_cli_exiting(256)),
+            patch(UPDATE_NODE_ID_CACHE),
+        ):
+            result = runner.invoke(cmdline.app, ["update", "all", "--exit-on-fail"])
+
+        assert result.exit_code == 1
+
+    def test_cm_cli_exit_2_fails_but_does_not_masquerade_as_a_usage_error(self):
+        """cm-cli never returns 2 deliberately (it only ever exits 1), so a 2 is a
+        real failure and must not be swallowed under the flag. Click reserves 2 for
+        its own usage errors, though, so remap it rather than let a wrapper confuse
+        "you invoked comfy wrong" with "cm-cli exited 2"."""
+        with (
+            patch(EXECUTE_CM_CLI, side_effect=_cm_cli_exiting(2)),
+            patch(UPDATE_NODE_ID_CACHE),
+        ):
+            result = runner.invoke(cmdline.app, ["update", "all", "--exit-on-fail"])
+
+        assert result.exit_code == 1
+
+    def test_the_failure_is_reported_as_a_structured_error_in_json_mode(self):
+        """The flag exists so machines can detect the failure; exiting non-zero with
+        an empty stdout would leave a --json consumer nothing to parse."""
+        with (
+            patch(EXECUTE_CM_CLI, side_effect=_cm_cli_exiting(1)),
+            patch(UPDATE_NODE_ID_CACHE),
+        ):
+            result = runner.invoke(cmdline.app, ["--json", "update", "all", "--exit-on-fail"])
+
+        assert result.exit_code == 1
+        envelope = json.loads(result.stdout.strip().splitlines()[-1])
+        assert envelope["ok"] is False
+        assert envelope["error"]["code"] == "update_custom_nodes_failed"
+        assert envelope["error"]["details"]["cm_cli_returncode"] == 1
+
+    def test_the_failure_is_explained_in_pretty_mode(self):
+        """CliRunner has no TTY, so every other test here resolves to JSON mode.
+        Pin the human path too: --no-json must render the error panel, not traceback
+        on the panel import, and must keep the exit code."""
+        with (
+            patch(EXECUTE_CM_CLI, side_effect=_cm_cli_exiting(1)),
+            patch(UPDATE_NODE_ID_CACHE),
+        ):
+            result = runner.invoke(cmdline.app, ["--no-json", "update", "all", "--exit-on-fail"])
+
+        assert result.exit_code == 1
+        assert result.exception is None or isinstance(result.exception, SystemExit)
+        assert "update_custom_nodes_failed" in _strip_ansi(result.stdout)
 
     def test_success_still_exits_zero_with_the_flag(self):
         with (

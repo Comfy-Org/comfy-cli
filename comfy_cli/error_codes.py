@@ -763,6 +763,15 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "run `comfy update comfy --version <version>`",
     ),
     ErrorCode(
+        "update_custom_nodes_failed",
+        "`comfy update all --exit-on-fail` ran `cm-cli update all` and it exited non-zero. "
+        "The update is not atomic, so some packs may have updated before the failure; "
+        "`details.cm_cli_returncode` carries cm-cli's raw status (the process exit code is "
+        "normalized — signals become 128+N, and 2 becomes 1 so it can't be confused with a "
+        "CLI usage error).",
+        "read the cm-cli output above for the failing pack, then re-run `comfy update all`",
+    ),
+    ErrorCode(
         "version_switch_unknown_version",
         "`comfy update comfy --version X` could not resolve X to a ComfyUI tag; the workspace was left untouched.",
         "run `git tag --list 'v*'` in your ComfyUI workspace to see every available version",
