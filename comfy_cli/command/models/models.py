@@ -1201,7 +1201,11 @@ def list_models(path: pathlib.Path) -> list[pathlib.Path]:
     return sorted(f for f in path.rglob("*") if f.is_file())
 
 
-@app.command("list", help="List the models downloaded into this workspace, as a table.")
+@app.command(
+    "list",
+    help="List local models on disk (files already downloaded into the current workspace). "
+    "For backend/cloud discovery use `comfy model list-folders` / `list-folder`.",
+)
 @tracking.track_command("model")
 def list_command(
     ctx: typer.Context,
