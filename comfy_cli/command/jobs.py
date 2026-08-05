@@ -25,7 +25,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import TYPE_CHECKING, Annotated, Any
 
@@ -212,6 +212,11 @@ def _emit_terminal(renderer, payload: dict, *, command: str, where: str | None =
 # ---------------------------------------------------------------------------
 
 
+# Row statuses that mean "this job failed" — the ones an `error_code` is
+# meaningful alongside. `completed` is terminal but deliberately absent.
+_ERROR_STATUSES = frozenset({"error", "cancelled"})
+
+
 @dataclass(frozen=True)
 class JobRow:
     prompt_id: str
@@ -223,6 +228,26 @@ class JobRow:
     where: str = "local"  # "local" | "cloud"
     workflow_path: str | None = None  # set when sourced from a state file
     updated_at: str | None = None  # ISO timestamp, set for state-file rows
+    # `error.code` off the state file (e.g. "server_died", "execution_error",
+    # "watcher_crashed"). Without it a listing can say a job is in `error` and
+    # name its workflow, but never say *why* — which is the whole point of the
+    # state file surviving a server death. None for rows the server produced
+    # (/queue and /history carry no code) and for every non-error row.
+    error_code: str | None = None
+
+
+def _state_error_code(err: Any) -> str | None:
+    """Pull ``error.code`` out of a state file's ``error`` blob, or None.
+
+    ``jobs_state.read`` keeps unknown keys' values untouched, so a hand-edited
+    or truncated file can carry a non-dict ``error`` (or a non-string ``code``)
+    — neither may reach the emitted envelope, where ``error_code`` is typed
+    ``string | null``.
+    """
+    if not isinstance(err, dict):
+        return None
+    code = err.get("code")
+    return code if isinstance(code, str) and code else None
 
 
 def _gather_local_state_files(*, limit: int, orphaned_only: bool = False, where: str | None = None) -> list[JobRow]:
@@ -299,6 +324,7 @@ def _gather_local_state_files(*, limit: int, orphaned_only: bool = False, where:
                 where=state.where or "local",
                 workflow_path=state.workflow,
                 updated_at=state.updated_at,
+                error_code=_state_error_code(state.error),
             )
         )
         if len(rows) >= limit:
@@ -320,9 +346,19 @@ def _merge_jobs(state_rows: list[JobRow], server_rows: list[JobRow]) -> list[Job
     """Server's view wins for prompts it knows about (fresher status); state
     files fill in everything else (jobs the server doesn't see, e.g. cloud
     jobs viewed from a local-only `jobs ls`).
+
+    The one thing the server's row cannot supply is ``error_code``: neither
+    ``/queue``/``/history`` nor the cloud job list carries one, so a server row
+    that supersedes a state-file row would otherwise *lose* the cause the state
+    file recorded. Carry it across when the server also calls the job failed —
+    and only then, so a state file left holding a stale ``server_died`` can't
+    contradict a server that now reports the prompt as completed.
     """
     by_id: dict[str, JobRow] = {r.prompt_id: r for r in state_rows}
     for r in server_rows:
+        prior = by_id.get(r.prompt_id)
+        if r.error_code is None and prior is not None and prior.error_code is not None and r.status in _ERROR_STATUSES:
+            r = replace(r, error_code=prior.error_code)
         by_id[r.prompt_id] = r
 
     # Sort: non-terminal first (running/pending/allocated/executing), then
@@ -642,6 +678,10 @@ def _row_to_dict(r: JobRow) -> dict:
         "where": r.where,
         "workflow_path": r.workflow_path,
         "updated_at": r.updated_at,
+        # Why an `error` row failed, when the state file knows. `jobs status`
+        # points callers at `comfy jobs ls` as the escape hatch after a server
+        # death, so the hatch has to be able to name the cause.
+        "error_code": r.error_code,
     }
 
 

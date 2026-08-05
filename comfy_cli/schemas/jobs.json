@@ -46,7 +46,14 @@
           "status": {"type": "string"},
           "queue_position": {"type": ["integer", "null"]},
           "workflow_size": {"type": ["integer", "null"]},
-          "outputs": {"type": "integer"}
+          "outputs": {"type": "integer"},
+          "where": {"type": "string", "enum": ["local", "cloud"]},
+          "workflow_path": {"type": ["string", "null"]},
+          "updated_at": {"type": ["string", "null"]},
+          "error_code": {
+            "type": ["string", "null"],
+            "description": "Why an `error`/`cancelled` row failed, copied from the job's state file (`error.code` — e.g. `server_died`, `execution_error`, `watcher_crashed`). Null on rows the server produced, since neither `/queue`/`/history` nor the cloud job list carries a code, and on every non-error row. This is what lets `comfy jobs ls` — the escape hatch `jobs status` points at after a server death — name the cause rather than just report `status: \"error\"`."
+          }
         }
       }
     }

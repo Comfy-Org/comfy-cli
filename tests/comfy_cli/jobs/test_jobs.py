@@ -2903,3 +2903,152 @@ def test_untracked_prompt_keeps_the_default_hints(monkeypatch: pytest.MonkeyPatc
     result = _invoke_status("no-such-id", "--host", "127.0.0.1", "--port", "65431")
     assert result.exit_code == 1, result.output
     assert _last_json(result.stdout)["error"]["hint"] == "run: comfy launch"
+
+
+# ---------------------------------------------------------------------------
+# `jobs ls` rows carry the server-death attribution (`error_code`)
+# ---------------------------------------------------------------------------
+
+
+def test_state_error_code_extraction_is_defensive():
+    """Only a non-empty string `error.code` survives — a state file is
+    hand-editable, and `error_code` is typed `string | null` in the schema."""
+    assert jobs_mod._state_error_code({"code": "server_died"}) == "server_died"
+    assert jobs_mod._state_error_code(None) is None
+    assert jobs_mod._state_error_code({}) is None
+    assert jobs_mod._state_error_code({"code": ""}) is None
+    assert jobs_mod._state_error_code({"code": 500}) is None
+    assert jobs_mod._state_error_code("server_died") is None
+    assert jobs_mod._state_error_code(["server_died"]) is None
+
+
+def test_gather_local_state_files_carries_error_code():
+    """A state-file row reports why the job failed, not just that it did."""
+    from comfy_cli import jobs_state
+
+    state_dir = jobs_state.state_dir()
+    _write_state(
+        state_dir,
+        "died-job",
+        status="error",
+        error={"code": "server_died", "message": "Lost connection while job died-job was running"},
+    )
+    _write_state(state_dir, "ok-job", status="completed")
+
+    rows = {r.prompt_id: r for r in jobs_mod._gather_local_state_files(limit=100)}
+    assert rows["died-job"].error_code == "server_died"
+    assert rows["ok-job"].error_code is None, "a healthy row must not invent an error code"
+
+
+def test_gather_local_state_files_reports_the_reaped_watcher_code(monkeypatch):
+    """The stale-watcher reap rewrites the file to `watcher_crashed`; the row it
+    then builds must carry that code, or `--orphaned` still can't say why."""
+    from comfy_cli import jobs_state
+
+    monkeypatch.setattr(jobs_mod, "_is_watcher_alive", lambda state: False)
+    _write_state(jobs_state.state_dir(), "reaped", status="running", watcher_pid=999999)
+
+    (row,) = jobs_mod._gather_local_state_files(limit=100)
+    assert row.status == "error"
+    assert row.error_code == "watcher_crashed"
+
+
+def _row(prompt_id: str, status: str, **kw) -> jobs_mod.JobRow:
+    return jobs_mod.JobRow(
+        prompt_id=prompt_id,
+        status=status,
+        queue_position=None,
+        elapsed_seconds=None,
+        workflow_size=None,
+        outputs=0,
+        **kw,
+    )
+
+
+def test_merge_carries_error_code_onto_a_superseding_server_row():
+    """`/queue` and `/history` carry no error code, so a server row that wins
+    the merge would otherwise drop the cause the state file recorded."""
+    merged = {
+        r.prompt_id: r
+        for r in jobs_mod._merge_jobs(
+            [_row("job-1", "error", error_code="execution_error", updated_at="2026-08-04T00:00:00+00:00")],
+            [_row("job-1", "error")],
+        )
+    }
+    assert merged["job-1"].error_code == "execution_error"
+
+
+def test_merge_drops_a_stale_error_code_when_the_server_says_completed():
+    """The carry-over is scoped to failure statuses: a server that reports the
+    prompt as completed must not be annotated with a stale `server_died`."""
+    merged = {
+        r.prompt_id: r
+        for r in jobs_mod._merge_jobs(
+            [_row("job-2", "error", error_code="server_died")],
+            [_row("job-2", "completed")],
+        )
+    }
+    assert merged["job-2"].status == "completed"
+    assert merged["job-2"].error_code is None
+
+
+def test_merge_prefers_the_server_rows_own_error_code():
+    """Carry-over only fills a gap — it never overwrites a code the server row
+    already has."""
+    merged = {
+        r.prompt_id: r
+        for r in jobs_mod._merge_jobs(
+            [_row("job-3", "error", error_code="server_died")],
+            [_row("job-3", "error", error_code="execution_error")],
+        )
+    }
+    assert merged["job-3"].error_code == "execution_error"
+
+
+def test_ls_payload_names_the_server_death(capsys, monkeypatch):
+    """Acceptance: after a server death, `comfy jobs ls` — the escape hatch
+    `jobs status` points at — reports both the failure and its cause."""
+    from comfy_cli import jobs_state
+
+    state_dir = jobs_state.state_dir()
+    _write_state(
+        state_dir,
+        "oom-job",
+        status="error",
+        error={"code": "server_died", "message": "Lost connection to ComfyUI while job oom-job was running"},
+    )
+    _write_state(state_dir, "fine-job", status="completed")
+    monkeypatch.delenv("COMFY_WHERE", raising=False)
+
+    data = _ls_payload(capsys, limit=100)
+    by_id = {j["prompt_id"]: j for j in data["jobs"]}
+    assert by_id["oom-job"]["status"] == "error"
+    assert by_id["oom-job"]["error_code"] == "server_died"
+    assert by_id["oom-job"]["workflow_path"] == "/tmp/oom-job.json"
+    # Present on every row (agents can index it unconditionally), null when
+    # there is nothing to attribute.
+    assert by_id["fine-job"]["error_code"] is None
+
+
+def test_ls_payload_validates_against_the_jobs_schema(capsys, monkeypatch):
+    """`error_code` is a published contract field, not just an emitted one."""
+    import jsonschema
+
+    from comfy_cli import jobs_state
+
+    _write_state(
+        jobs_state.state_dir(),
+        "sch-job",
+        status="cancelled",
+        error={"code": "cancelled", "message": "Cancelled by user"},
+    )
+    monkeypatch.delenv("COMFY_WHERE", raising=False)
+    data = _ls_payload(capsys, limit=100)
+
+    schema_path = Path(jobs_mod.__file__).parent.parent / "schemas" / "jobs.json"
+    schema = json.loads(schema_path.read_text())
+    jsonschema.Draft202012Validator(schema).validate(data)
+    # `cancelled` reaches the payload from the state file, so it has to be in
+    # the published status enum too.
+    assert "cancelled" in schema["properties"]["status"]["enum"]
+    assert data["jobs"][0]["error_code"] == "cancelled"
