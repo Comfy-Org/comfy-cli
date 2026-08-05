@@ -1508,10 +1508,36 @@ def free(
     system_command.free_execute(get_renderer(), where=where, unload_models=unload_models, free_memory=free_memory)
 
 
-@app.command(help="Stop background ComfyUI")
+@app.command(help="Stop background ComfyUI. Use --port to stop an untracked local ComfyUI this CLI didn't start.")
 @tracking.track_command()
-def stop():
+def stop(
+    port: Annotated[
+        int | None,
+        typer.Option(
+            "--port",
+            show_default=False,
+            min=1,
+            max=65535,
+            help="Stop whatever local ComfyUI is listening on this port, even if this CLI didn't start it. "
+            "Refuses anything it cannot positively identify as ComfyUI.",
+        ),
+    ] = None,
+    dry_run: Annotated[
+        bool,
+        typer.Option(
+            "--dry-run",
+            help="Report the process that would be stopped and exit 0 without stopping it.",
+        ),
+    ] = False,
+):
     renderer = get_renderer()
+
+    if port is not None:
+        from comfy_cli.command import stop_port
+
+        stop_port.stop_port_execute(renderer, port=port, dry_run=dry_run)
+        return
+
     config = ConfigManager()
     bg_info = config.background if constants.CONFIG_KEY_BACKGROUND in config.config["DEFAULT"] else None
     if not bg_info:
@@ -1523,6 +1549,24 @@ def stop():
                 command="stop",
             )
         raise typer.Exit(code=1)
+
+    if dry_run:
+        rprint(
+            f"[bold yellow]Would stop background ComfyUI.[/bold yellow] ({bg_info[0]}:{bg_info[1]}, pid={bg_info[2]})"
+        )
+        renderer.emit(
+            {
+                "stopped": False,
+                "dry_run": True,
+                "untracked": False,
+                "host": bg_info[0],
+                "port": bg_info[1],
+                "pid": bg_info[2],
+            },
+            command="stop",
+            changed=False,
+        )
+        return
 
     is_killed = utils.kill_all(bg_info[2])
 

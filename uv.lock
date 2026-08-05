@@ -224,7 +224,7 @@ requires-dist = [
     { name = "pathspec" },
     { name = "posthog", specifier = ">=6,<8" },
     { name = "pre-commit", marker = "extra == 'dev'" },
-    { name = "psutil" },
+    { name = "psutil", specifier = ">=6" },
     { name = "pytest", marker = "extra == 'dev'" },
     { name = "pytest-cov", marker = "extra == 'dev'" },
     { name = "pyyaml" },
