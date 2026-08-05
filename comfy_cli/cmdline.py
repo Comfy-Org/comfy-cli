@@ -708,6 +708,16 @@ def update(
             ),
         ),
     ] = False,
+    exit_on_fail: Annotated[
+        bool,
+        typer.Option(
+            "--exit-on-fail",
+            help=(
+                "Exit on failure. Only affects target 'all': without it a failing custom-node update is "
+                "printed but still exits 0. Targets 'comfy' and 'cli' already exit non-zero on failure."
+            ),
+        ),
+    ] = False,
 ):
     if target not in ["all", "comfy", "cli"]:
         typer.echo(
@@ -734,7 +744,17 @@ def update(
     comfy_path = workspace_manager.workspace_path
 
     if "all" == target:
-        custom_nodes.command.execute_cm_cli(["update", "all"])
+        # Without raise_on_error, execute_cm_cli swallows a cm-cli exit 1 and returns None,
+        # so `comfy update all` would report success for a failed pack update. Mirrors the
+        # --exit-on-fail plumbing in `comfy node install`.
+        try:
+            custom_nodes.command.execute_cm_cli(["update", "all"], raise_on_error=exit_on_fail)
+        except subprocess.CalledProcessError as e:
+            if not exit_on_fail:
+                # execute_cm_cli re-raises unexpected exit codes even with raise_on_error off;
+                # keep surfacing those instead of swallowing them here.
+                raise
+            raise typer.Exit(code=e.returncode) from e
     else:
         rprint(f"Updating ComfyUI in {comfy_path}...")
         if comfy_path is None:

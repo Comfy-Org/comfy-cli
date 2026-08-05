@@ -122,6 +122,10 @@ dependencies using the following precedence:
 - `comfy update all`: also update every installed custom node.
 - `comfy update cli`: upgrade comfy-cli itself.
 
+By default `comfy update all` exits 0 even when the custom-node update step fails — the error is printed, but the exit code says success, so scripts and wrappers can't tell. Pass `--exit-on-fail` (the same flag name and default as `comfy node install --exit-on-fail`) to have that failure exit non-zero instead. The flag only changes the `all` target; `comfy update comfy` and `comfy update cli` already exit non-zero when they fail, and accept the flag as a no-op so it can be forwarded unconditionally.
+
+One limit worth knowing: `--exit-on-fail` surfaces whatever exit code ComfyUI-Manager's `cm-cli update` returns. `cm-cli` currently reports a *single* pack failing to update by printing `ERROR: ...` while still exiting 0, so that particular case stays invisible until ComfyUI-Manager propagates it.
+
 #### Switching to a specific version
 
 `comfy update comfy --version <X>` moves an existing workspace to a specific ComfyUI version — a downgrade (rollback) or an upgrade — without prompting for anything, so it is safe to run headlessly or from a script. `<X>` is `nightly` (the repo's default branch), `latest` (the newest stable release), or a version number such as `0.3.0` (a leading `v` is optional).
