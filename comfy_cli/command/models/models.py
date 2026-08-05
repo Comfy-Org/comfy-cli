@@ -476,20 +476,23 @@ def download(
 
     local_filepath = get_workspace() / relative_path / local_filename
 
-    if local_filepath.exists():
-        raise _download_failure(
-            code="model_file_exists",
-            message=f"File already exists: {local_filepath}",
-            hint="pass `--filename` to save under a different name, or remove the existing file",
-            details={"path": str(local_filepath)},
-        )
-
-    # The exists() check above cannot see a transfer that is still in flight: a
-    # background download streams into a `.part` sibling and only renames onto
-    # `dest` at the end, so the destination stays absent for the whole transfer
-    # and two submissions for the same model would both pass, both stream a full
-    # copy, and the later rename would silently overwrite the earlier. Checked
-    # before the `--background` split so a foreground transfer is refused too.
+    # A destination-exists check cannot see a transfer that is still in flight: on
+    # the httpx path a background download streams into a `.part` sibling and only
+    # renames onto `dest` at the end, so the destination stays absent for the whole
+    # transfer and two submissions for the same model would both pass, both stream
+    # a full copy, and the later rename would silently overwrite the earlier.
+    #
+    # Ordered *before* `exists()` on purpose: `--downloader aria2` writes straight
+    # to the destination (it owns its own `.aria2` resume control file), so a live
+    # aria2 transfer makes `exists()` true and the caller would get
+    # `model_file_exists` with the hint "remove the existing file" — advice that
+    # deletes the output a running worker is still writing. The accurate refusal
+    # has to win.
+    #
+    # Scope, precisely: this refuses a submission — foreground or `--background` —
+    # into a destination that a *background* download has claimed. It cannot refuse
+    # against an in-flight *foreground* transfer, which writes no state record and
+    # so is invisible both here and to `exists()`.
     in_flight = _active_download_for(local_filepath)
     if in_flight is not None:
         raise _download_failure(
@@ -500,6 +503,14 @@ def download(
                 f"or cancel it with `comfy model download-cancel {in_flight.id}`"
             ),
             details={"path": str(local_filepath), "download_id": in_flight.id, "status": in_flight.status},
+        )
+
+    if local_filepath.exists():
+        raise _download_failure(
+            code="model_file_exists",
+            message=f"File already exists: {local_filepath}",
+            hint="pass `--filename` to save under a different name, or remove the existing file",
+            details={"path": str(local_filepath)},
         )
 
     start_time = time.monotonic()
@@ -771,6 +782,31 @@ def _submit_background_download(
         )
         raise typer.Exit(code=1) from e
 
+    # Claim, then re-check. The pre-flight scan in `download()` is check-then-act:
+    # between it and the `write` above sit the `--background` split and, for a
+    # Hugging Face url, a whole `check_unauthorized` network round trip — wide
+    # enough for two near-simultaneous submissions to both pass it, both stream a
+    # full copy, and the later `os.replace` to silently overwrite the earlier. The
+    # state record just written *is* the claim, so re-scanning now sees any
+    # competitor that also claimed `dest`; `_claim_order` picks the same winner
+    # from both sides, and the loser withdraws its claim before any bytes move.
+    #
+    # This closes the background-vs-background race the guard documents. It cannot
+    # close one against a foreground transfer, which never writes a claim.
+    competitor = _active_download_for(dest, exclude_id=state.id)
+    if competitor is not None and _claim_order(competitor) < _claim_order(state):
+        with contextlib.suppress(OSError):
+            state_file.unlink(missing_ok=True)
+        raise _download_failure(
+            code="model_download_in_flight",
+            message=f"A background download ({competitor.id}) is already writing to {dest}.",
+            hint=(
+                f"track it with `comfy model download-status {competitor.id}`, "
+                f"or cancel it with `comfy model download-cancel {competitor.id}`"
+            ),
+            details={"path": str(dest), "download_id": competitor.id, "status": competitor.status},
+        )
+
     try:
         pid = _spawn_download_worker(state_file, log_file)
     except OSError as e:
@@ -969,11 +1005,50 @@ def _reconciled(state: download_state.DownloadState) -> tuple[download_state.Dow
     return fresh, changed
 
 
-def _active_download_for(dest: pathlib.Path) -> download_state.DownloadState | None:
+def _dest_key(path: pathlib.Path | str) -> str:
+    """The comparison key for "the same destination".
+
+    ``realpath``, not ``abspath``: ComfyUI model directories are routinely
+    symlinks (``models/loras`` pointing at ``/data/loras``) and get addressed
+    both ways, and a lexical normalization leaves those two spellings unequal —
+    so both submissions would pass and their transfers would land on the same
+    inode. ``realpath`` resolves the symlinks that exist and normalizes the rest,
+    which also covers a ``--relative-path`` carrying ``..`` (it is only
+    ``expanduser``-ed, never passed through :func:`_reject_unsafe_component`).
+
+    ``normcase`` folds case on Windows; on POSIX it is identity, so a
+    case-insensitive macOS volume can still alias two spellings past this — the
+    same residual ``local_filepath.exists()`` has.
+    """
+    return os.path.normcase(os.path.realpath(path))
+
+
+def _claim_order(state: download_state.DownloadState) -> tuple[str, str]:
+    """Total order over competing claims on one destination: first writer wins.
+
+    ``started_at`` is second-resolution so ties are common; ``id`` (12 random hex
+    chars) breaks them, and because both racers compute the same order over the
+    same two records they always agree on who won.
+    """
+    return (state.started_at or "", state.id)
+
+
+def _active_download_for(
+    dest: pathlib.Path,
+    *,
+    exclude_id: str | None = None,
+) -> download_state.DownloadState | None:
     """The live background download already targeting ``dest``, if any.
 
-    Reconciles each record first (persisting the correction), so a SIGKILLed
+    Reconciles the *matching* records (persisting the correction), so a SIGKILLed
     worker's stale record demotes to ``failed`` here and never wedges the path.
+    Records for other destinations are filtered out by ``dest`` first and never
+    reconciled: :func:`_reconciled` persists a status correction, and running it
+    over every record would make a plain ``comfy model download`` rewrite
+    bookkeeping for unrelated downloads — off a stale ``list_all`` snapshot, so a
+    worker that completed during the scan could have its ``completed`` record
+    overwritten with ``failed``. Reconcile never rewrites ``dest``, so the
+    unreconciled value is the right key to filter on.
 
     The predicate is deliberately "reconciled status is active", *not*
     :func:`download_state.worker_alive`: a just-submitted download sits in
@@ -983,30 +1058,39 @@ def _active_download_for(dest: pathlib.Path) -> download_state.DownloadState | N
     near-simultaneous double-submit this guard exists to catch. Reconcile keeps
     both a within-grace ``starting`` record and a live worker blocking, while
     demoting a dead worker's record so it self-clears.
+
+    ``exclude_id`` skips one record: :func:`_submit_background_download` re-runs
+    this scan *after* writing its own claim and must not find itself.
+
+    The scan is scoped to ``get_workspace()``'s state directory. A destination can
+    sit outside the workspace (``--relative-path`` accepts ``..`` and absolute
+    paths), so two invocations from different workspaces consult disjoint state
+    directories and do not see each other — inherent to per-workspace state, not
+    something this scan can close.
     """
-    # `abspath` on BOTH sides, not `Path.absolute()` on one: `absolute()` does not
-    # normalize, so a `--relative-path` carrying `..` (it is only `expanduser`-ed,
-    # never passed through `_reject_unsafe_component`) would leave one side
-    # un-normalized and the comparison would miss the very collision it is for.
-    # `normcase` folds case on Windows; on POSIX it is identity, so a
-    # case-insensitive macOS volume can still alias two spellings past this — the
-    # same residual `local_filepath.exists()` above would have.
-    wanted = os.path.normcase(os.path.abspath(dest))
+    wanted = _dest_key(dest)
+    winner: download_state.DownloadState | None = None
     try:
-        records = download_state.list_all(get_workspace())
-    except OSError:
-        # The scan is advisory, so an unreadable state directory must degrade to
-        # the pre-guard behavior rather than turn a working download into a
-        # traceback — this read is on the foreground path too, which never
-        # touched the state directory before.
+        for state in download_state.list_all(get_workspace()):
+            if state.id == exclude_id:
+                continue
+            if _dest_key(state.dest) != wanted:
+                continue
+            fresh, _ = _reconciled(state)
+            if fresh.status not in download_state.ACTIVE_STATUSES:
+                continue
+            if winner is None or _claim_order(fresh) < _claim_order(winner):
+                winner = fresh
+    except (OSError, ValueError):
+        # The scan is advisory, so an unreadable state directory — or a corrupt
+        # record that trips a lookup mid-loop — must degrade to the pre-guard
+        # behavior rather than turn a working download into a traceback. This
+        # runs on the foreground path too, which never read the state directory
+        # before, so a single bad file must not break every download in the
+        # workspace. Whole scan, not just `list_all`: the reconcile of a matching
+        # record is just as much part of the advisory read.
         return None
-    for state in records:
-        fresh, _ = _reconciled(state)
-        if fresh.status not in download_state.ACTIVE_STATUSES:
-            continue
-        if os.path.normcase(os.path.abspath(fresh.dest)) == wanted:
-            return fresh
-    return None
+    return winner
 
 
 @app.command("download-status")

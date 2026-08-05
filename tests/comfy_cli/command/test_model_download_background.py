@@ -698,6 +698,155 @@ class TestSubmitRefusesAClaimedDestination:
         assert env["error"]["code"] == "model_download_in_flight"
         assert env["error"]["details"]["download_id"] == live.id
 
+    def test_a_live_transfer_beats_the_exists_check(self, workspace, no_spawn, json_renderer):
+        """`--downloader aria2` writes straight to the destination (it owns its
+        own `.aria2` resume file), so a live aria2 transfer makes `exists()` true.
+        Ordered the other way the caller would get `model_file_exists` and its
+        hint to "remove the existing file" — advice that deletes the output a
+        running worker is still writing."""
+        dest = self._dest(workspace)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(b"partial aria2 output")
+        live = _state(dest=str(dest), status="downloading", pid=1234, downloader="aria2", total_bytes=4096)
+        download_state.write(workspace, live)
+
+        with patch("comfy_cli.utils.is_running", return_value=True):
+            with pytest.raises(typer.Exit) as exc:
+                self._download(background=True)
+
+        assert exc.value.exit_code == 1
+        env = json_renderer()
+        assert env["error"]["code"] == "model_download_in_flight"
+        assert env["error"]["details"]["download_id"] == live.id
+        # ...and the bytes the live worker is still writing were not implicated.
+        assert dest.exists()
+
+    def test_a_record_for_another_destination_is_not_reconciled(self, workspace, monkeypatch, json_renderer):
+        """The scan filters by destination *before* reconciling.
+
+        `_reconciled` persists a status correction, so reconciling every record
+        would make a plain `comfy model download` rewrite bookkeeping for
+        unrelated downloads — off `list_all`'s stale snapshot, so a worker that
+        completes during the scan window could have its `completed` record
+        overwritten with `failed`.
+        """
+        other = _state(dest=str(workspace / "models" / "loras" / "other.safetensors"), status="downloading", pid=4242)
+        download_state.write(workspace, other)
+        monkeypatch.setattr(models, "_spawn_download_worker", lambda state_file, log_file: 31337)
+
+        # A dead worker: reconcile *would* demote this record to `failed`. It is
+        # not this command's record to touch.
+        with patch("comfy_cli.utils.is_running", return_value=False):
+            self._download(background=True)
+
+        assert json_renderer()["ok"] is True
+        assert download_state.read(workspace, other.id).status == "downloading"
+
+    def test_a_corrupt_record_does_not_break_the_download(self, workspace, monkeypatch, json_renderer):
+        """The advisory scan has to degrade on a bad record, not traceback.
+
+        Only `list_all` used to sit inside the `try`, so a record that tripped a
+        lookup *inside* the loop — a tampered negative pid reaching
+        `psutil.Process`, say — turned every `comfy model download` in the
+        workspace, foreground included, into a bare traceback.
+        """
+        corrupt = _state(dest=str(self._dest(workspace)), status="downloading", pid=-1)
+        download_state.write(workspace, corrupt)
+        monkeypatch.setattr(models, "_spawn_download_worker", lambda state_file, log_file: 31337)
+
+        self._download(background=True)
+
+        assert json_renderer()["ok"] is True
+        # No live worker can be behind a pid that cannot exist, so it demotes.
+        assert download_state.read(workspace, corrupt.id).status == "failed"
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="symlink creation needs privileges on Windows")
+    def test_a_symlinked_model_directory_is_the_same_destination(self, workspace, no_spawn, json_renderer):
+        """ComfyUI model directories are routinely symlinks (`models/loras` at
+        `/data/loras`) and get addressed both ways. A lexical normalization
+        leaves the two spellings unequal, so both submissions would pass and
+        their transfers would rename onto the same inode."""
+        real_dir = workspace.parent / "data" / "loras"
+        real_dir.mkdir(parents=True)
+        link_dir = workspace / "models" / "loras"
+        link_dir.parent.mkdir(parents=True, exist_ok=True)
+        link_dir.symlink_to(real_dir, target_is_directory=True)
+
+        # The live record names the resolved path; the submission names the link.
+        live = _state(dest=str(real_dir / self.DEST[1]), status="downloading", pid=1234)
+        download_state.write(workspace, live)
+
+        with patch("comfy_cli.utils.is_running", return_value=True):
+            with pytest.raises(typer.Exit):
+                self._download(background=True)
+
+        assert json_renderer()["error"]["details"]["download_id"] == live.id
+
+    def test_a_claim_that_landed_first_wins_the_post_write_recheck(
+        self, workspace, no_spawn, monkeypatch, json_renderer
+    ):
+        """The pre-flight scan is check-then-act: filename resolution and, for a
+        Hugging Face url, a whole `check_unauthorized` round trip sit between it
+        and the state write, so two near-simultaneous submissions can both pass
+        it, both stream a full copy, and the later `os.replace` can silently
+        overwrite the earlier. The record each one writes is its claim; the
+        re-scan after that write is what turns two winners into one.
+        """
+        dest = self._dest(workspace)
+        competitor = _state(dest=str(dest), status="downloading", pid=1234)
+        competitor.started_at = "2000-01-01T00:00:00+00:00"  # claimed first
+
+        real_write = download_state.write
+        planted: list = []
+
+        def write_then_race(ws, state):
+            path = real_write(ws, state)
+            if not planted:
+                # The competitor's claim lands in exactly the window between our
+                # own claim and the re-check — the race this exists to lose.
+                planted.append(real_write(ws, competitor))
+            return path
+
+        monkeypatch.setattr(download_state, "write", write_then_race)
+
+        with patch("comfy_cli.utils.is_running", return_value=True):
+            with pytest.raises(typer.Exit) as exc:
+                self._download(background=True)
+
+        assert exc.value.exit_code == 1
+        env = json_renderer()
+        assert env["error"]["code"] == "model_download_in_flight"
+        assert env["error"]["details"]["download_id"] == competitor.id
+        # The loser withdrew its own claim, so the destination is left owned by
+        # exactly one record — a phantom would refuse every later submission.
+        assert [s.id for s in download_state.list_all(workspace)] == [competitor.id]
+
+    def test_a_claim_that_landed_second_does_not_take_the_destination(self, workspace, monkeypatch, json_renderer):
+        """The other side of the same race: both racers compute `_claim_order`
+        over the same two records, so the one that claimed first proceeds rather
+        than both backing off and neither download happening."""
+        dest = self._dest(workspace)
+        latecomer = _state(dest=str(dest), status="starting", pid=None)
+        latecomer.started_at = "2999-01-01T00:00:00+00:00"  # claimed second
+
+        real_write = download_state.write
+        planted: list = []
+
+        def write_then_race(ws, state):
+            path = real_write(ws, state)
+            if not planted:
+                planted.append(real_write(ws, latecomer))
+            return path
+
+        monkeypatch.setattr(download_state, "write", write_then_race)
+        monkeypatch.setattr(models, "_spawn_download_worker", lambda state_file, log_file: 31337)
+
+        self._download(background=True)
+
+        env = json_renderer()
+        assert env["ok"] is True
+        assert env["data"]["download_id"] != latecomer.id
+
 
 class TestSubmitEnvelope:
     def _submit(self, workspace, monkeypatch, **kwargs):
@@ -1476,6 +1625,18 @@ class TestCorruptStateFiles:
         (download_state.state_dir(workspace) / "bad.json").write_text('{"pid": "nope"}', encoding="utf-8")
 
         assert [s.id for s in download_state.list_all(workspace)] == [good.id]
+
+    @pytest.mark.parametrize("pid", [-1, 0])
+    def test_a_nonpositive_pid_is_screened_before_psutil(self, pid):
+        """The field validator only rejects non-ints, so a tampered record can
+        carry a negative pid — and `psutil.Process(-1)` raises ValueError, which
+        `utils.is_running` does not catch (it catches only NoSuchProcess). Every
+        command that reconciles would traceback on one bad file, so screen it
+        here the way `is_worker_process`/`kill_worker` already do."""
+        state = _state(status="downloading", pid=pid)
+
+        # No `pid_alive` injection: the real liveness helper must never be reached.
+        assert download_state.worker_alive(state) is False
 
 
 class TestWorkerIdentity:
