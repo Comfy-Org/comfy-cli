@@ -157,7 +157,15 @@ def _atomic_write(path: pathlib.Path, data: bytes, *, fsync: bool) -> None:
     # destination directory — same filesystem, so the os.replace below is atomic.
     fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=path.name + ".", suffix=".tmp")
     try:
-        with os.fdopen(fd, "wb") as f:
+        try:
+            file_obj = os.fdopen(fd, "wb")
+        except BaseException:
+            # fdopen only fails *before* taking ownership of the descriptor, so
+            # this is the one place the raw fd still has to be closed by hand;
+            # everywhere below, closing is the file object's job.
+            os.close(fd)
+            raise
+        with file_obj as f:
             f.write(data)
             if fsync:
                 f.flush()

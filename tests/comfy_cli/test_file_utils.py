@@ -224,7 +224,9 @@ def test_atomic_write_text_does_not_follow_symlinked_tmp(tmp_path):
 # --- atomic_write_bytes -----------------------------------------------------
 # The bytes twin shares one private implementation with atomic_write_text, so
 # these mirror the text-variant cases over the seam that differs: the payload is
-# handed through verbatim, with no encode and no newline translation.
+# handed through verbatim, with no UTF-8 encode. (Both variants write through the
+# same binary-mode fd, so neither does platform newline translation — that isn't
+# what distinguishes them.)
 
 
 def test_atomic_write_bytes_creates_file_and_parents(tmp_path):
@@ -246,8 +248,9 @@ def test_atomic_write_bytes_overwrites_existing(tmp_path):
 
 
 def test_atomic_write_bytes_writes_payload_verbatim(tmp_path):
-    # No UTF-8 encode and no platform newline translation: non-UTF-8 bytes and
-    # bare LFs survive byte-for-byte, which is the reason this variant exists.
+    # No UTF-8 encode: non-UTF-8 bytes survive byte-for-byte, which is the
+    # reason this variant exists (both variants already skip newline
+    # translation — the shared implementation writes through a binary-mode fd).
     target = tmp_path / "raw.bin"
     payload = b"\xff\xfe\r\n\x00line\n"
 

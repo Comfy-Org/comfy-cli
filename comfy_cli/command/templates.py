@@ -176,9 +176,10 @@ def _persist_cache(cache: Path, data: bytes) -> str | None:
         # comfy_cli/file_utils.py — fsync=False, wrapped best-effort below.
         # The previous inline `tempfile.mkstemp` left the cache at mode 0600
         # (mkstemp hardcodes that and `os.replace` carries it onto the
-        # destination); the helper restores the umask-derived mode instead, and
-        # that relaxation is intended: the payload is the public
-        # template-gallery index, not user data.
+        # destination); the helper instead reuses the existing cache file's
+        # mode when there is one, else falls back to the umask-derived default
+        # for a fresh file — either way intentionally relaxed from 0600: the
+        # payload is the public template-gallery index, not user data.
         atomic_write_bytes(cache, data, fsync=False)
     except OSError as e:
         # Couldn't persist (read-only dir, disk full, …). We still have valid
