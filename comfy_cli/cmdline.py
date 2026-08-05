@@ -12,6 +12,7 @@ from rich.console import Console
 from comfy_cli import cancellation, constants, env_checker, logging, tracking, ui, utils
 from comfy_cli import where as where_module
 from comfy_cli.auth import command as auth_command
+from comfy_cli.caller import stream_is_tty
 from comfy_cli.cloud import command as cloud_command
 from comfy_cli.command import (
     code_search,
@@ -140,7 +141,11 @@ def _maybe_nudge_setup(ctx: typer.Context, renderer) -> None:
     install. Onboarding must never break a command — failures are swallowed.
     """
     sub = ctx.invoked_subcommand
-    if sub in (None, "setup") or not renderer.is_pretty() or not sys.stderr.isatty():
+    # Guarded stderr probe: this runs from the main Typer callback, and stderr
+    # can be closed independently of stdout (`comfy install 2>&-`, where CPython
+    # sets `sys.stderr = None`). A bare `.isatty()` there would kill the command
+    # from the onboarding nudge of all places. See `caller.stream_is_tty`.
+    if sub in (None, "setup") or not renderer.is_pretty() or not stream_is_tty(getattr(sys, "stderr", None)):
         return
     try:
         from comfy_cli.credentials import get_session
