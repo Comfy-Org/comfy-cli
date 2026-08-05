@@ -811,11 +811,13 @@ REGISTRY: tuple[ErrorCode, ...] = (
     # --- custom node install (`comfy node install`) ---------------------------
     ErrorCode(
         "node_install_failed",
-        "`comfy node install --exit-on-fail` ran `cm-cli install` and it exited non-zero. "
-        "`details.cm_cli_returncode` carries cm-cli's raw status (the process exit code is "
-        "normalized — signals become 128+N, and 2 becomes 1 so it can't be confused with a "
-        "CLI usage error).",
-        "read the cm-cli output above for the failing pack, then re-run `comfy node install --exit-on-fail`",
+        "`comfy node install --exit-on-fail` failed: `cm-cli install` exited non-zero "
+        '(`details.failed_stage` == "cm-cli", raw status in `details.cm_cli_returncode`) or, '
+        "with --fast-deps, the follow-up dependency install failed after the packs installed "
+        '(`details.failed_stage` == "dependency-install", raw status in `details.returncode`). '
+        "The process exit code is normalized — signals become 128+N, and any status whose low "
+        "byte is 0 or 2 becomes 1 so it can't read as success or a CLI usage error.",
+        "read the output above for the failing pack or dependency, then re-run `comfy node install --exit-on-fail`",
     ),
     # --- custom node dependency report (`comfy node deps`) --------------------
     ErrorCode(

@@ -1,13 +1,36 @@
+import json
 import re
 import subprocess
+import sys
 from unittest.mock import MagicMock, patch
 
+import pytest
 from typer.testing import CliRunner
 
+from comfy_cli import cmdline
 from comfy_cli.command.custom_nodes.command import app
 from comfy_cli.file_utils import DownloadException
 
 runner = CliRunner()
+
+
+def _split_stream_runner() -> CliRunner:
+    """A runner that keeps stdout and stderr separate, so tests can assert the
+    JSON-mode contract that stdout carries ONLY the envelope."""
+    try:
+        return CliRunner(mix_stderr=False)  # click < 8.2
+    except TypeError:
+        return CliRunner()  # click >= 8.2 always separates
+
+
+@pytest.fixture
+def _reset_renderer():
+    """Invoking the root app installs a process-wide JSON renderer; drop it so
+    later tests that invoke the sub-app get the default pretty renderer back."""
+    yield
+    from comfy_cli.output.renderer import reset_renderer_for_testing
+
+    reset_renderer_for_testing()
 
 
 def strip_ansi(text):
@@ -172,6 +195,74 @@ def test_install_exit_on_fail_code_2_does_not_masquerade_as_usage_error():
         mock_execute.side_effect = subprocess.CalledProcessError(2, "cm-cli")
         result = runner.invoke(app, ["install", "bad-node", "--exit-on-fail"])
         assert result.exit_code == 1
+
+
+def test_install_exit_on_fail_wide_status_with_low_byte_2_is_remapped():
+    """A wide status like 258 truncates to 2 in `sys.exit` — the exact Click
+    usage-error collision the remap exists to prevent — so the normalization
+    keys on the low byte, not the literal value 2."""
+    with patch("comfy_cli.command.custom_nodes.command.execute_cm_cli") as mock_execute:
+        mock_execute.side_effect = subprocess.CalledProcessError(258, "cm-cli")
+        result = runner.invoke(app, ["install", "bad-node", "--exit-on-fail"])
+        assert result.exit_code == 1
+
+
+def test_install_without_exit_on_fail_surfaces_unexpected_exit_codes():
+    """execute_cm_cli itself swallows cm-cli exits 1/2 when raise_on_error is
+    off; anything else (e.g. a signal death) it re-raises, and install must not
+    turn that into a silent exit 0 (mirrors the `comfy update all` handler)."""
+    with patch("comfy_cli.command.custom_nodes.command.execute_cm_cli") as mock_execute:
+        mock_execute.side_effect = subprocess.CalledProcessError(-9, "cm-cli")
+        result = runner.invoke(app, ["install", "bad-node"])
+        assert result.exit_code != 0
+        assert isinstance(result.exception, subprocess.CalledProcessError)
+
+
+def test_install_exit_on_fail_json_stdout_carries_only_the_envelope(_reset_renderer):
+    """execute_cm_cli streams cm-cli's raw output to sys.stdout; in JSON mode
+    install routes that stream to stderr so stdout stays a single parseable
+    envelope, labeled with the actual subcommand."""
+
+    def _stream_then_fail(args, **kwargs):
+        sys.stdout.write("raw cm-cli progress line\n")
+        raise subprocess.CalledProcessError(7, ["python", "-m", "cm_cli", "install"])
+
+    with patch("comfy_cli.command.custom_nodes.command.execute_cm_cli", side_effect=_stream_then_fail):
+        result = _split_stream_runner().invoke(cmdline.app, ["--json", "node", "install", "bad-node", "--exit-on-fail"])
+
+    assert result.exit_code == 7
+    envelope = json.loads(result.stdout.strip())
+    assert envelope["ok"] is False
+    assert envelope["command"] == "node install"
+    assert envelope["error"]["code"] == "node_install_failed"
+    assert envelope["error"]["details"] == {"cm_cli_returncode": 7, "failed_stage": "cm-cli"}
+
+
+def test_install_exit_on_fail_signal_death_is_reported_as_a_signal(_reset_renderer):
+    """No process exits with -9 — cm-cli was killed by signal 9. The message
+    says so instead of leaking Popen's negative-signal encoding."""
+    with patch("comfy_cli.command.custom_nodes.command.execute_cm_cli") as mock_execute:
+        mock_execute.side_effect = subprocess.CalledProcessError(-9, ["python", "-m", "cm_cli", "install"])
+        result = runner.invoke(cmdline.app, ["--json", "node", "install", "bad-node", "--exit-on-fail"])
+
+    assert result.exit_code == 137
+    envelope = json.loads(result.stdout.strip().splitlines()[-1])
+    assert "killed by signal 9" in envelope["error"]["message"]
+    assert envelope["error"]["details"]["cm_cli_returncode"] == -9
+
+
+def test_install_fast_deps_dep_failure_is_not_blamed_on_cm_cli(_reset_renderer):
+    """With --fast-deps, execute_cm_cli runs the dependency compiler after
+    cm-cli succeeds; a pip/uv failure there is a dependency failure — the packs
+    themselves installed — and must not be attributed to cm-cli."""
+    with patch("comfy_cli.command.custom_nodes.command.execute_cm_cli") as mock_execute:
+        mock_execute.side_effect = subprocess.CalledProcessError(1, ["uv", "pip", "install", "-r", "requirements.txt"])
+        result = runner.invoke(cmdline.app, ["--json", "node", "install", "bad-node", "--fast-deps", "--exit-on-fail"])
+
+    assert result.exit_code == 1
+    envelope = json.loads(result.stdout.strip().splitlines()[-1])
+    assert "dependency installation" in envelope["error"]["message"]
+    assert envelope["error"]["details"] == {"returncode": 1, "failed_stage": "dependency-install"}
 
 
 def test_save_snapshot_no_output():
