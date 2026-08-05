@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "comfy launch",
+  "description": "Output shape for the launch command's success envelope. Background launches carry the server address; a foreground launch reports the subprocess return code on exit.",
+  "type": "object",
+  "properties": {
+    "background": { "type": "boolean" },
+    "listen": { "type": "string" },
+    "port": { "type": ["integer", "string"] },
+    "url": { "type": "string" },
+    "pid": { "type": "integer" },
+    "returncode": { "type": "integer" }
+  },
+  "required": ["background"]
+}

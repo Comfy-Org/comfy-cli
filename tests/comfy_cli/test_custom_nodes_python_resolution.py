@@ -145,6 +145,12 @@ class TestUpdateNodeIdCache:
                 "comfy_cli.command.custom_nodes.command.resolve_workspace_python",
                 return_value="/resolved/python",
             ),
+            # update_node_id_cache() hard-fails on `not find_cm_cli()`. That guard is
+            # incidental to what this test asserts (that the resolved workspace Python
+            # is the interpreter invoked), and the on-disk cm-cli.py above never
+            # satisfies it — find_cm_cli() probes for the importable `cm_cli` module,
+            # not a clone's script. Stub the guard so the test stands on its own.
+            patch("comfy_cli.command.custom_nodes.command.find_cm_cli", return_value=True),
             patch.object(command.workspace_manager, "workspace_path", str(tmp_path)),
             patch("comfy_cli.command.custom_nodes.command.ConfigManager") as MockConfig,
             patch("comfy_cli.command.custom_nodes.command.subprocess.run") as mock_run,

@@ -36,6 +36,8 @@ COMMAND_SCHEMAS: dict[str, str] = {
     "comfy jobs status": "jobs",
     "comfy jobs watch": "jobs",
     "comfy jobs wait": "jobs_wait",
+    # workspace lifecycle
+    "comfy update": "update",
     # help / validation
     "comfy help": "help",
     "comfy validate": "workflow",
@@ -53,6 +55,7 @@ COMMAND_SCHEMAS: dict[str, str] = {
     "comfy workflow slots": "workflow",
     "comfy workflow set-slot": "workflow",
     "comfy workflow vary": "workflow",
+    "comfy workflow notes": "workflow",
     # workflow cloud CRUD + fragment composition
     "comfy workflow list": "workflow",
     "comfy workflow get": "workflow",
@@ -82,11 +85,25 @@ COMMAND_SCHEMAS: dict[str, str] = {
     "comfy models show": "models",
     "comfy models list-folders": "models",
     "comfy models list-folder": "models",
+    # background model downloads (`comfy model download --background`)
+    "comfy model download": "download",
+    "comfy model download-status": "download_status",
+    "comfy model download-cancel": "download_status",
+    "comfy model downloads": "downloads",
+    # partner-model discovery (`comfy generate`'s two read-only sub-actions —
+    # they are argv-tail actions, not Typer subcommands, so they have no node in
+    # the help tree; agents resolve them through `command_schemas`).
+    "comfy generate list": "generate_list",
+    "comfy generate schema": "generate_schema",
     # template gallery
     "comfy templates ls": "templates",
     "comfy templates show": "templates",
     "comfy templates fetch": "templates",
     "comfy templates refresh": "templates",
+    "comfy templates check": "templates",
+    # lifecycle
+    "comfy launch": "launch",
+    "comfy stop": "stop",
     # file transfer
     "comfy upload": "transfer",
     "comfy download": "transfer",
@@ -96,11 +113,19 @@ COMMAND_SCHEMAS: dict[str, str] = {
     "comfy assets push": "assets",
     # config
     "comfy set-default": "set_default",
+    # Not a subcommand: the root `--version` flag emits `command="version"`,
+    # and this map is keyed by "comfy <emit name>". Verified by
+    # tests/comfy_cli/output/test_discovery.py.
     "comfy version": "version",
     # installed-vs-latest report
     "comfy outdated": "outdated",
+    # per-pack declared-vs-installed Python dependency report
+    "comfy node deps": "node_deps",
     # background server logs
     "comfy logs": "logs",
+    # resource management (ComfyUI /system_stats + /free passthrough)
+    "comfy system-stats": "system_stats",
+    "comfy free": "free",
 }
 
 

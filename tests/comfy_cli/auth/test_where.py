@@ -100,6 +100,65 @@ def test_resolve_default_forwards_project_value(fake_config, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# resolve_default_or_exit: the emit-and-exit wrapper for call sites with no
+# per-command --where flag to fall back to
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def captured_renderer(monkeypatch):
+    """Replace the process renderer so ``error()`` calls are inspectable."""
+    captured: dict = {}
+
+    class _Renderer:
+        def error(self, **kw):
+            captured.update(kw)
+
+    monkeypatch.setattr("comfy_cli.output.get_renderer", lambda: _Renderer())
+    return captured
+
+
+def test_resolve_default_or_exit_returns_resolution(fake_config, captured_renderer, monkeypatch):
+    monkeypatch.setattr(fake_config, "_value", "cloud")
+    r = where_module.resolve_default_or_exit(env={}, project_value=None)
+    assert r.target is where_module.WhereTarget.CLOUD
+    assert captured_renderer == {}, "valid routing must not emit an error"
+
+
+def test_resolve_default_or_exit_emits_envelope_for_typoed_env(fake_config, captured_renderer):
+    """A typo'd COMFY_WHERE is a `where_invalid` envelope, never a traceback."""
+    import typer
+
+    with pytest.raises(typer.Exit) as excinfo:
+        where_module.resolve_default_or_exit(env={"COMFY_WHERE": "clod"}, project_value=None)
+    assert excinfo.value.exit_code == 1
+    assert captured_renderer["code"] == "where_invalid"
+    assert "clod" in captured_renderer["message"]
+    assert captured_renderer["hint"]
+
+
+def test_resolve_default_or_exit_emits_envelope_for_bad_persisted_config(fake_config, captured_renderer, monkeypatch):
+    """Same for a bad persisted ``where_default`` — the value parses, not the read."""
+    import typer
+
+    monkeypatch.setattr(fake_config, "_value", "clould")
+    with pytest.raises(typer.Exit) as excinfo:
+        where_module.resolve_default_or_exit(env={}, project_value=None)
+    assert excinfo.value.exit_code == 1
+    assert captured_renderer["code"] == "where_invalid"
+    assert "clould" in captured_renderer["message"]
+
+
+def test_resolve_default_or_exit_forwards_flag(fake_config, captured_renderer, monkeypatch):
+    """The wrapper mirrors ``resolve_default``'s signature — a valid flag wins."""
+    monkeypatch.setattr(fake_config, "_value", "clould")
+    r = where_module.resolve_default_or_exit(flag="local", env={}, project_value=None)
+    assert r.target is where_module.WhereTarget.LOCAL
+    assert r.source == "flag"
+    assert captured_renderer == {}
+
+
+# ---------------------------------------------------------------------------
 # project/1 precedence: flag → env → project → config → auto
 # ---------------------------------------------------------------------------
 

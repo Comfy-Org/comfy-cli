@@ -41,6 +41,17 @@ _YamlLoader.add_implicit_resolver(
     _re.compile(r"^(?:true|True|TRUE|false|False|FALSE)$"),
     list("tTfF"),
 )
+# PyYAML's YAML 1.1 float resolver only recognizes scientific notation when a
+# decimal point is present (e.g. ``1.0e6``). The remote spec is served as JSON,
+# and ``json.dumps`` emits exponent literals WITHOUT a point for very large/small
+# floats (e.g. ``1e+16``, ``1e-07``); without this those numeric defaults/bounds
+# would silently parse as strings and leak that way into flag schemas. Add a
+# resolver for the point-less exponent form so JSON floats round-trip correctly.
+_YamlLoader.add_implicit_resolver(
+    "tag:yaml.org,2002:float",
+    _re.compile(r"^[-+]?[0-9][0-9_]*[eE][-+]?[0-9]+$"),
+    list("-+0123456789"),
+)
 
 PROXY_PREFIX = "/proxy/"
 DEFAULT_BASE_URL = "https://api.comfy.org"
@@ -334,7 +345,7 @@ def _registry() -> dict[str, Endpoint]:
         path = PROXY_PREFIX + endpoint_id
         node = paths.get(path)
         if not node:
-            continue  # spec drift — skip silently, surfaced via `comfy api models`
+            continue  # spec drift — skip silently, surfaced via `comfy generate list`
         # All image endpoints are POST; pick the first defined method anyway.
         method = "post" if "post" in node else next(iter(node.keys()))
         op = node[method]

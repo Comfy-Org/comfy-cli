@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from comfy_cli.cql._net import is_loopback_host
-from comfy_cli.http import NoRedirectHandler
+from comfy_cli.http import NoRedirectHandler, build_http_only_opener
 
 # ---------------------------------------------------------------------------
 # Types — mirrors nodegraph/types.go
@@ -50,6 +50,11 @@ class Port:
     is_link: bool = False
     enum_values: list[Any] = field(default_factory=list)  # preserves the option's real type (int combos stay int)
     options: PortOptions = field(default_factory=PortOptions)
+    # The verbatim ``INPUT_TYPES`` spec this port was parsed from. Retained
+    # (by reference — no copy) because a dynamic combo's sub-input schema lives
+    # in the spec's ``options`` blocks and is NOT recoverable from the parsed
+    # fields above. Output ports carry ``None``.
+    raw_spec: Any = None
 
     @property
     def is_autogrow(self) -> bool:
@@ -57,6 +62,18 @@ class Port:
         ONE input, but the server expects autogrown slot keys —
         ``images.image0``, ``images.image1``, … one per connection."""
         return self.type.startswith("COMFY_AUTOGROW")
+
+    @property
+    def is_dynamic_combo(self) -> bool:
+        """V3 dynamic combo (e.g. ``COMFY_DYNAMICCOMBO_V3``): the schema declares
+        ONE selector input, but the option the selector names carries its own
+        ``INPUT_TYPES`` block, which the frontend — and ``convert_ui_to_api`` —
+        lower into dotted slot keys (``model.size_preset``, ``model.width``, …).
+
+        Deliberately the same test the converter applies
+        (``workflow_to_api._is_widget_input``), so validation expands exactly the
+        tree the converter lowered."""
+        return self.type.startswith("COMFY_") and "COMBO" in self.type
 
     def autogrow_slot_example(self) -> str:
         """Best-effort slot-key example for hints. The element name comes from
@@ -151,7 +168,6 @@ class Morphism:
     pack: str = ""
     labels: list[str] = field(default_factory=list)
     cloud_disabled: bool = False
-    needs_gpu: bool = True  # default True per Go
 
     def output_types(self) -> list[str]:
         seen: set[str] = set()
@@ -310,6 +326,7 @@ def _parse_inputs(raw: dict, order: list[str] | None, required: bool) -> list[Po
                 is_link=_is_link(type_id, is_enum, opts.force_input),
                 enum_values=enum_values,
                 options=opts,
+                raw_spec=spec,
             )
         )
     return ports
@@ -342,11 +359,16 @@ def _parse_morphism(node_id: str, raw: dict) -> Morphism:
         t = out if isinstance(out, str) else "COMBO"
         outputs.append(Port(name=name, type=t, required=True, is_link=True))
 
+    # These are declared `str` and every consumer treats them as one (`.lower()`,
+    # `.startswith()`, markup escaping). /object_info is server-supplied and a
+    # custom node can put any JSON type here, so coerce rather than trust the
+    # annotation — an int category used to crash `nodes search` with a raw
+    # AttributeError instead of the structured error the command otherwise emits.
     return Morphism(
         id=node_id,
-        display_name=raw.get("display_name") or node_id,
-        description=raw.get("description") or "",
-        category=raw.get("category") or "",
+        display_name=str(raw.get("display_name") or node_id),
+        description=str(raw.get("description") or ""),
+        category=str(raw.get("category") or ""),
         inputs=inputs,
         outputs=outputs,
         is_output_node=bool(raw.get("output_node", False)),
@@ -354,7 +376,7 @@ def _parse_morphism(node_id: str, raw: dict) -> Morphism:
         deprecated=bool(raw.get("deprecated", False)),
         experimental=bool(raw.get("experimental", False)),
         search_aliases=_unmarshal_string_list(raw.get("search_aliases")),
-        pack=_derive_pack(raw.get("python_module") or ""),
+        pack=_derive_pack(str(raw.get("python_module") or "")),
     )
 
 
@@ -403,17 +425,6 @@ def parse_disable_config(data: bytes) -> set[str]:
                 if enabled:
                     labels.add(label)
     return labels
-
-
-def parse_no_gpu_nodes(data: bytes) -> set[str]:
-    """Parse no_gpu_nodes.json → set of CPU-only node IDs."""
-    try:
-        cfg = json.loads(data)
-    except Exception:
-        return set()
-    if not isinstance(cfg, dict) or cfg.get("schema_version") != 1:
-        return set()
-    return set(cfg.get("no_gpu_nodes") or [])
 
 
 # ---------------------------------------------------------------------------
@@ -479,19 +490,15 @@ class Graph:
         self,
         supported_nodes_yaml: bytes | None = None,
         cloud_disable_yaml: bytes | None = None,
-        no_gpu_json: bytes | None = None,
     ) -> None:
         node_pack: dict[str, str] = {}
         node_labels: dict[str, list[str]] = {}
         disable_labels: set[str] = set()
-        no_gpu: set[str] = set()
 
         if supported_nodes_yaml:
             node_pack, node_labels = parse_supported_nodes(supported_nodes_yaml)
         if cloud_disable_yaml:
             disable_labels = parse_disable_config(cloud_disable_yaml)
-        if no_gpu_json:
-            no_gpu = parse_no_gpu_nodes(no_gpu_json)
 
         for nid, m in self._nodes.items():
             if nid in node_pack:
@@ -499,7 +506,6 @@ class Graph:
             if nid in node_labels:
                 m.labels = node_labels[nid]
             m.cloud_disabled = any(label in disable_labels for label in m.labels)
-            m.needs_gpu = nid not in no_gpu
         self._annotated = True
 
     # -- Lookup --
@@ -543,41 +549,13 @@ class Graph:
         result.sort(key=lambda m: m.id)
         return result
 
-    def pack_nodes(self, pack: str) -> list[Morphism]:
-        """All nodes belonging to a custom-node pack (case-insensitive)."""
-        p = pack.lower()
-        return sorted([m for m in self._nodes.values() if m.pack.lower() == p], key=lambda m: m.id)
-
-    def label_nodes(self, label: str) -> list[Morphism]:
-        """All nodes carrying a specific behavioral label."""
-        return sorted([m for m in self._nodes.values() if label in m.labels], key=lambda m: m.id)
-
-    def cloud_disabled_nodes(self) -> list[Morphism]:
-        """All nodes that are disabled on Comfy Cloud."""
-        return sorted([m for m in self._nodes.values() if m.cloud_disabled], key=lambda m: m.id)
-
     def cloud_enabled_nodes(self) -> list[Morphism]:
         """All nodes that are enabled on Comfy Cloud."""
         return sorted([m for m in self._nodes.values() if not m.cloud_disabled], key=lambda m: m.id)
 
-    def api_nodes(self) -> list[Morphism]:
-        """All partner API nodes."""
-        return sorted([m for m in self._nodes.values() if m.is_api_node], key=lambda m: m.id)
-
-    def output_nodes(self) -> list[Morphism]:
-        """All terminal output nodes (SaveImage, etc.)."""
-        return sorted([m for m in self._nodes.values() if m.is_output_node], key=lambda m: m.id)
-
     def packs(self) -> list[str]:
         """All known pack names, sorted."""
         return sorted(set(m.pack for m in self._nodes.values() if m.pack))
-
-    def known_labels(self) -> list[str]:
-        """All known labels, sorted."""
-        labels: set[str] = set()
-        for m in self._nodes.values():
-            labels.update(m.labels)
-        return sorted(labels)
 
     def find_paths(
         self,
@@ -722,7 +700,7 @@ class Graph:
 
         for node_id, node_data in workflow.items():
             # `_meta` is the compose/run provenance block (schema/blueprint/items),
-            # stripped before submit — not a node and not a mistake. `comfy compose`
+            # stripped before submit — not a node and not a mistake. `comfy workflow compose`
             # adds it itself, so warning here is self-inflicted noise.
             if node_id == "_meta":
                 continue
@@ -891,6 +869,9 @@ class Graph:
 
             errors.extend(_check_autogrow_required(node_id, autogrow_ports, autogrow_seen, node_data))
             errors.extend(_check_required_present(node_id, m, node_data))
+            dyn_errors, dyn_warnings = _check_dynamic_combos(node_id, class_type, m, node_data)
+            errors.extend(dyn_errors)
+            warnings.extend(dyn_warnings)
 
         # No-outputs check: the server rejects any prompt with zero output
         # nodes (execution.py:1155-1162, prompt_no_outputs) — including an
@@ -957,7 +938,6 @@ class Graph:
         port: int | None = None,
         supported_nodes_yaml: bytes | None = None,
         cloud_disable_yaml: bytes | None = None,
-        no_gpu_json: bytes | None = None,
     ) -> Graph:
         """Unified entry point: resolve object_info, build graph, annotate.
 
@@ -979,17 +959,25 @@ class Graph:
             raw = _load_from_target(mode=mode, host=host, port=port)
 
         g = cls.from_object_info(raw)
-        if supported_nodes_yaml or cloud_disable_yaml or no_gpu_json:
-            g.annotate(supported_nodes_yaml, cloud_disable_yaml, no_gpu_json)
+        if supported_nodes_yaml or cloud_disable_yaml:
+            g.annotate(supported_nodes_yaml, cloud_disable_yaml)
         else:
-            g._try_default_annotations()
+            # ``--input <dump>`` is the offline path: the caller handed us a
+            # local file precisely so nothing goes over the wire. An incidental
+            # annotation lookup must not be the one thing that reaches out.
+            g._try_default_annotations(allow_network=input_path is None)
         return g
 
-    def _try_default_annotations(self) -> None:
-        """Load bundled annotation files from ``comfy_cli.cql.data``.
+    def _try_default_annotations(self, *, allow_network: bool = True) -> None:
+        """Load node annotation data from Comfy-Org/comfy-complete.
 
-        These ship as package data (40 KB total) from Comfy-Org/comfy-complete.
-        They enrich every node with:
+        Resolves via :mod:`comfy_cli.cql.annotations_source`, which prefers a
+        TTL-fresh local cache, falls back to a live fetch from the public repo
+        (bounded, negative-cached, and skipped entirely when ``allow_network``
+        is false), and finally to the package-bundled snapshot — so the data
+        stays fresh without a ``pip install -U`` while remaining offline-safe.
+
+        The annotations enrich every node with:
           - pack membership (which custom-node pack it belongs to)
           - behavioral labels (ReadsArbitraryFile, NetworkAccess, etc.)
           - cloud_disabled (whether this node is disabled on cloud)
@@ -1000,15 +988,13 @@ class Graph:
         and cloud_disabled=False (safe default).
         """
         try:
-            from importlib import resources
+            from comfy_cli.cql import annotations_source
 
-            data_pkg = resources.files("comfy_cli.cql.data")
-            sup = (data_pkg / "supported_nodes.yaml").read_bytes()
-            dis = (data_pkg / "cloud_disable_config.yaml").read_bytes()
-            nogpu = (data_pkg / "no_gpu_nodes.json").read_bytes()
-            self.annotate(sup, dis, nogpu)
+            sup, dis = annotations_source.load_annotation_bytes(allow_network=allow_network)
+            if sup or dis:
+                self.annotate(sup, dis)
         except Exception:
-            pass  # missing package data is non-fatal
+            pass  # missing data / network is non-fatal
 
     # -- Serialization helpers for CLI compat --
 
@@ -1026,7 +1012,6 @@ class Graph:
             "pack": m.pack,
             "labels": m.labels,
             "cloud_disabled": m.cloud_disabled,
-            "needs_gpu": m.needs_gpu,
             "inputs": [
                 {
                     "name": p.name,
@@ -1124,8 +1109,9 @@ def _check_required_present(node_id: str, m: Morphism, node_data: dict) -> list[
     didn't serialize is a hard reject (required_input_missing). The per-input
     loop only inspects keys that ARE present, so this catches the absent ones.
     Skipped, because each is handled by its own path (and would otherwise
-    double-error): autogrow ports (``_check_autogrow_required``) and the dynamic
-    types COMFY_DYNAMICCOMBO / COMFY_DYNAMICSLOT (DynamicSlot is always optional
+    double-error): autogrow ports (``_check_autogrow_required``), dynamic combos
+    (``_check_dynamic_combos``, which reports the absent selector itself so it can
+    also name the valid options), and COMFY_DYNAMICSLOT (always optional
     server-side anyway). The server has NO exemption for required inputs that
     carry a default — the frontend always serializes widget values, so absence
     is a genuine authoring error; we do not skip ports with defaults.
@@ -1135,7 +1121,7 @@ def _check_required_present(node_id: str, m: Morphism, node_data: dict) -> list[
     for port in m.inputs:
         if not port.required or port.is_autogrow:
             continue
-        if port.type.startswith("COMFY_DYNAMICCOMBO") or port.type.startswith("COMFY_DYNAMICSLOT"):
+        if port.is_dynamic_combo or port.type.startswith("COMFY_DYNAMICSLOT"):
             continue
         if port.name in present:
             continue
@@ -1157,6 +1143,236 @@ def _check_required_present(node_id: str, m: Morphism, node_data: dict) -> list[
             }
         )
     return errors
+
+
+# A dynamic combo's option may declare another dynamic combo among its
+# sub-inputs. Mirrors ``workflow_to_api._MAX_DYNAMIC_COMBO_DEPTH`` so validation
+# walks the same bounded tree the converter expanded.
+_MAX_DYNAMIC_COMBO_DEPTH = 16
+
+
+def _dynamic_combo_options(spec: Any) -> list[dict]:
+    """Every option block a dynamic-combo spec declares, in schema order.
+
+    Shape: ``["COMFY_DYNAMICCOMBO_V3", {"options": [{"key": …, "inputs":
+    {"required": {…}, "optional": {…}}}, …]}]``. Non-dict entries are dropped
+    rather than raising — object_info is server-supplied and we never want a
+    malformed option block to take down validation of the whole workflow.
+    (Counterpart of ``workflow_to_api._dynamic_combo_selected_subs``, which
+    resolves the same structure for the conversion side.)
+    """
+    if not isinstance(spec, (list, tuple)) or len(spec) < 2:
+        return []
+    options_meta = spec[1] if isinstance(spec[1], dict) else {}
+    return [o for o in (options_meta.get("options") or []) if isinstance(o, dict)]
+
+
+def _check_dynamic_combos(node_id: str, class_type: str, m: Morphism, node_data: dict) -> tuple[list[dict], list[dict]]:
+    """Validate every dynamic-combo input against the option its selector names.
+
+    Mirrors the server: ``DynamicCombo._expand_schema_for_dynamic``
+    (comfy_api/latest/_io.py) reads the submitted selector, finds the option
+    whose ``key`` equals it, and folds THAT option's inputs — and only that
+    one's — into the node's finalized required/optional sets under dotted names
+    (``model.width``). ``validate_inputs`` (execution.py:886-900) then walks
+    those finalized names, so a missing one is a real ``required_input_missing``
+    and a present one gets the same type/range/enum checks as any input.
+
+    object_info never declares those dotted keys, so the driver loop skips them
+    (``port_by_name`` misses) and ``_check_required_present`` exempts the parent
+    selector. Without this walk a workflow that omits or mistypes a sub-input
+    validates clean and is then rejected at ``/prompt`` — validation giving
+    false confidence right before a paid run.
+    """
+    errors: list[dict] = []
+    warnings: list[dict] = []
+    present = node_data.get("inputs") or {}
+    for port in m.inputs:
+        if not port.is_dynamic_combo:
+            continue
+        e, w = _check_dynamic_combo_input(node_id, class_type, port.name, port.raw_spec, port.required, present)
+        errors.extend(e)
+        warnings.extend(w)
+    return errors, warnings
+
+
+def _check_dynamic_combo_input(
+    node_id: str,
+    class_type: str,
+    name: str,
+    spec: Any,
+    required: bool,
+    present: dict,
+    depth: int = 0,
+) -> tuple[list[dict], list[dict]]:
+    """One dynamic-combo input: resolve its selected option, check its sub-inputs."""
+    errors: list[dict] = []
+    warnings: list[dict] = []
+    options = _dynamic_combo_options(spec)
+    keys = [o.get("key") for o in options]
+
+    if name not in present:
+        # ``_check_required_present`` deliberately exempts the dynamic types
+        # ("handled by its own path") — this is that path, so the absent
+        # selector is reported here and nowhere else (no double-error).
+        #
+        # NOTE the failure is *later* than a plain missing input. With no
+        # selector the server's schema expansion is a no-op
+        # (``DynamicCombo._expand_schema_for_dynamic`` returns early), so the
+        # selector never enters ``valid_inputs`` and ``/prompt`` does NOT emit
+        # ``required_input_missing`` for it — the node's inputs are dropped and
+        # it fails at EXECUTION instead, i.e. after a paid node has been
+        # entered. Still a hard error here: the workflow cannot run.
+        if required:
+            errors.append(
+                {
+                    "node_id": node_id,
+                    "field": name,
+                    "code": "required_input_missing",
+                    "message": (
+                        f"required dynamic-combo input {name!r} is missing — the server cannot resolve "
+                        f"which option's sub-inputs apply, so this node fails at execution"
+                    ),
+                    "hint": f"set {name!r} to one of its options: "
+                    + ", ".join(str(k) for k in keys[:8])
+                    + (f" (and {len(keys) - 8} more — see valid_options)" if len(keys) > 8 else ""),
+                    "suggestions": keys[:20],
+                    "valid_options": keys,
+                }
+            )
+        return errors, warnings
+
+    selected = present[name]
+    if isinstance(selected, list) and len(selected) == 2:
+        # Wired as a link: which option expands is only known at execution time,
+        # so there is no static sub-input set to check. The edge itself is
+        # already validated by the driver loop.
+        return errors, warnings
+
+    option = next((o for o in options if o.get("key") == selected), None)
+    if option is None:
+        # Strict ``==`` on the key — the same test the server
+        # (``DynamicCombo._expand_schema_for_dynamic``) and the converter both
+        # apply, so all three agree on which option expands.
+        #
+        # Same late failure as the absent selector above: an unmatched key
+        # expands to nothing, so the server drops this node's inputs rather
+        # than rejecting the prompt, and the run dies at execution. The
+        # converter ALSO failed to expand it, silently misaligning every
+        # following widget value — surfacing that is the whole point.
+        errors.append(
+            {
+                "node_id": node_id,
+                "field": name,
+                "code": "unknown_enum_value",
+                "message": (
+                    f"{selected!r} not in {len(keys)} known options for {name} — its sub-inputs "
+                    f"cannot be resolved, so this node fails at execution"
+                ),
+                "hint": f"valid options: {', '.join(str(k) for k in keys[:8])}"
+                + (f" (and {len(keys) - 8} more — see valid_options)" if len(keys) > 8 else ""),
+                "suggestions": keys[:20],
+                "valid_options": keys,
+            }
+        )
+        return errors, warnings
+
+    if depth >= _MAX_DYNAMIC_COMBO_DEPTH:
+        return errors, warnings  # pathological nesting — the converter stops here too
+
+    sub_def = option.get("inputs")
+    if not isinstance(sub_def, dict):
+        return errors, warnings
+    for section, sub_required in (("required", True), ("optional", False)):
+        section_def = sub_def.get(section)
+        if not isinstance(section_def, dict):
+            continue
+        for sub_name, sub_spec in section_def.items():
+            e, w = _check_dynamic_combo_sub(
+                node_id, class_type, f"{name}.{sub_name}", sub_spec, sub_required, present, depth
+            )
+            errors.extend(e)
+            warnings.extend(w)
+    return errors, warnings
+
+
+def _check_dynamic_combo_sub(
+    node_id: str,
+    class_type: str,
+    dotted: str,
+    sub_spec: Any,
+    sub_required: bool,
+    present: dict,
+    depth: int,
+) -> tuple[list[dict], list[dict]]:
+    """Presence + shape + catalog checks for one expanded sub-input.
+
+    The sub-input spec is a plain ``INPUT_TYPES`` entry, so it goes through the
+    same ``_parse_input_spec`` / :class:`Port` machinery as a top-level input and
+    inherits identical shape and enum/range semantics.
+    """
+    type_id, is_enum, enum_values, opts = _parse_input_spec(sub_spec)
+    port = Port(
+        name=dotted,
+        type=type_id,
+        required=sub_required,
+        is_link=_is_link(type_id, is_enum, opts.force_input),
+        enum_values=enum_values,
+        options=opts,
+        raw_spec=sub_spec,
+    )
+
+    if port.is_dynamic_combo:
+        # Nested dynamic combo: its own selector/presence rules apply one level down.
+        return _check_dynamic_combo_input(node_id, class_type, dotted, sub_spec, sub_required, present, depth + 1)
+
+    if port.is_autogrow:
+        # An autogrow sub-input wires as `<dotted>.<slot>` keys and routinely
+        # declares `min: 0` even inside the `required` section (Seedream's
+        # `model.images`), so absence is NOT a server reject — the converter
+        # emits no key at all for a zero-slot autogrow. Nothing to presence- or
+        # shape-check here.
+        return [], []
+
+    if dotted not in present:
+        if not sub_required:
+            return [], []
+        return [
+            {
+                "node_id": node_id,
+                "field": dotted,
+                "code": "required_input_missing",
+                "message": (
+                    f"required input {dotted!r} is missing — the server will reject this node (required_input_missing)"
+                ),
+                "hint": f"add {dotted!r} to inputs"
+                + (
+                    f" (e.g. a {port.type} value)"
+                    if not port.is_link
+                    else f" (wire a {port.type} link: [<node_id>, <output_index>])"
+                ),
+            }
+        ], []
+
+    value = present[dotted]
+    if isinstance(value, list) and len(value) == 2:
+        # A wired sub-input — the driver loop already ran the dangling-edge and
+        # output-index checks on this same key.
+        return [], []
+
+    shape_err = port.validate_shape(value)
+    if shape_err:
+        return [
+            {
+                "node_id": node_id,
+                "field": dotted,
+                "code": "shape_mismatch",
+                "message": shape_err,
+                "hint": f"expected {port.type}; check the value type",
+            }
+        ], []
+
+    return _validate_catalog_value(node_id, class_type, dotted, port, value)
 
 
 def _check_autogrow_required(
@@ -1194,7 +1410,7 @@ _logger = logging.getLogger(__name__)
 _MAX_OBJECT_INFO_BYTES = 64 * 1024 * 1024
 
 
-_opener = urllib.request.build_opener(NoRedirectHandler())
+_opener = build_http_only_opener(NoRedirectHandler())
 
 
 class LoadError(Exception):
@@ -1249,11 +1465,10 @@ def _load_from_target(*, mode: str = "local", host: str | None = None, port: int
     req.add_header("Accept", "application/json")
 
     # Auth headers (cloud only — local has no auth)
-    if target.is_cloud:
-        if target.api_key:
-            req.add_header("X-API-Key", target.api_key)
-        elif target.auth_token:
-            req.add_header("Authorization", f"Bearer {target.auth_token}")
+    from comfy_cli.http import target_auth_headers
+
+    for k, v in target_auth_headers(target).items():
+        req.add_header(k, v)
 
     try:
         with _opener.open(req, timeout=30.0) as resp:

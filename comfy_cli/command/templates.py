@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -28,11 +30,33 @@ from typing import Annotated, Any
 import typer
 
 from comfy_cli import tracking
+from comfy_cli.http import ResponseTooLarge, plain_urlopen, read_capped
 from comfy_cli.output import get_renderer, rprint
 
 app = typer.Typer(no_args_is_help=True, help="Browse the Comfy workflow-template gallery.")
 
 GALLERY_URL = "https://raw.githubusercontent.com/Comfy-Org/workflow_templates/main/templates/index.json"
+
+# How long a cached gallery index stays fresh before ``_load_gallery`` transparently
+# re-fetches it. 24h (not the spec's 7 days): the gallery updates weekly-ish and the
+# fetch is one small JSON file, so a tighter TTL keeps agents off a frozen catalog
+# cheaply. A network-down machine still lists from the stale cache (fetch failure
+# falls back), and ``comfy templates refresh`` remains the manual force-refresh.
+GALLERY_TTL_SECONDS = 24 * 60 * 60
+
+# Everything a gallery load can throw. ``_fetch_gallery`` raises ``RuntimeError``
+# on a non-200 status (which ``urlopen`` doesn't already turn into an
+# ``HTTPError``), the fetch itself raises ``URLError``/``OSError``, decoding a
+# 200-with-garbage body raises ``JSONDecodeError``, and an over-cap body raises
+# ``ResponseTooLarge`` — all of which must route through the same stale-cache
+# fallback / command-level error, never an uncaught traceback.
+_GALLERY_LOAD_ERRORS = (
+    urllib.error.URLError,
+    OSError,
+    RuntimeError,
+    json.JSONDecodeError,
+    ResponseTooLarge,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -47,11 +71,30 @@ def _cache_path() -> Path:
 
 
 def _fetch_gallery(url: str = GALLERY_URL, timeout: float = 15.0) -> bytes:
+    """Pull the gallery index from GitHub raw. Bounded read — this is a body
+    from a host we don't control, so it goes through the shared cap rather than
+    letting the remote decide how much memory we buffer."""
     req = urllib.request.Request(url, headers={"User-Agent": "comfy-cli"})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
+    with plain_urlopen(req, timeout=timeout) as resp:
         if resp.status != 200:
             raise RuntimeError(f"gallery fetch failed: HTTP {resp.status}")
-        return resp.read()
+        return read_capped(resp, url)
+
+
+def _parse_gallery(data: bytes) -> list[Any]:
+    """Decode a gallery index body, rejecting anything that isn't a category list.
+
+    ``json.loads`` alone accepts ``"null"``, ``"7"`` and ``{"error": …}`` — all
+    valid JSON, none of them a gallery. ``_flatten_templates`` would then walk a
+    non-list and raise something unrelated to the actual problem, or silently
+    produce zero rows. Checking the shape here means every caller's
+    ``_GALLERY_LOAD_ERRORS`` handler catches it as the load failure it is;
+    ``RuntimeError`` is used because that tuple already routes it.
+    """
+    parsed = json.loads(data)
+    if not isinstance(parsed, list):
+        raise RuntimeError(f"gallery index is not a list of categories (got {type(parsed).__name__})")
+    return parsed
 
 
 def _load_gallery(
@@ -63,17 +106,128 @@ def _load_gallery(
 
     Returns the raw decoded JSON (a list of category dicts). The CLI does
     its own filtering on top.
+
+    A cache older than ``GALLERY_TTL_SECONDS`` is transparently re-fetched so
+    ``templates ls/show`` never serves a frozen catalog forever. If that refresh
+    fails (offline / GitHub down), we fall back to the stale cache with a
+    non-fatal renderer warning rather than erroring out.
     """
     if explicit_path:
-        return json.loads(Path(explicit_path).read_bytes())
+        return _parse_gallery(Path(explicit_path).read_bytes())
 
     cache = _cache_path()
-    if refresh or not cache.exists():
+    have_cache = cache.exists()
+
+    if not refresh and have_cache and not _cache_is_stale(cache):
+        try:
+            return _parse_gallery(cache.read_bytes())
+        except _GALLERY_LOAD_ERRORS:
+            # A cache poisoned by an older build (which wrote before validating)
+            # is treated as a miss rather than raising for the rest of the TTL —
+            # fall through and re-fetch so the CLI self-heals.
+            have_cache = False
+
+    # A TTL-expired cache is refreshed transparently, so a fetch failure here
+    # must NOT break `templates ls` — fall back to the stale cache with a
+    # non-fatal warning. An explicit `--refresh` (or a genuinely absent cache),
+    # by contrast, surfaces the fetch error so the user learns it failed.
+    ttl_auto_refresh = have_cache and not refresh
+    try:
         data = _fetch_gallery()
+        # Validate BEFORE we touch the cache: a 200 with a non-JSON body
+        # (rate-limit HTML, captive portal, truncated response) must never
+        # clobber the last-known-good cache with garbage.
+        parsed = _parse_gallery(data)
+    except _GALLERY_LOAD_ERRORS as e:
+        if ttl_auto_refresh:
+            # The stale cache is our fallback — but a concurrent `refresh` may
+            # have removed it or left it corrupt mid-write. If reading it back
+            # also fails, surface the original fetch error, not the read error.
+            try:
+                stale = _parse_gallery(cache.read_bytes())
+            except _GALLERY_LOAD_ERRORS:
+                raise e
+            get_renderer().warn(
+                f"gallery refresh failed ({e}); using cached index (last updated {_cache_age_str(cache)} ago)",
+                hint="run `comfy templates refresh` once back online to update it",
+            )
+            return stale
+        raise
+    _persist_cache(cache, data)
+    return parsed
+
+
+def _persist_cache(cache: Path, data: bytes) -> str | None:
+    """Persist a freshly fetched index to the cache, atomically and best-effort.
+
+    * Atomic — write to a temp file in the same directory then ``os.replace``
+      it into place, so a concurrent ``templates`` reader never observes a
+      half-written index (which would parse-fail as ``gallery_load_failed``).
+    * Best-effort — a read-only cache dir (e.g. a gallery baked into a
+      container image) or a full disk must not break the command once we
+      already hold valid data, so a write failure is returned rather than
+      raised. ``_load_gallery`` ignores it (it has the data); ``templates
+      refresh`` reports it, because caching is the whole job of that command.
+
+    Returns ``None`` on success, or the error text when the write failed.
+    """
+    try:
         cache.parent.mkdir(parents=True, exist_ok=True)
-        cache.write_bytes(data)
-        return json.loads(data)
-    return json.loads(cache.read_bytes())
+        fd, tmp = tempfile.mkstemp(dir=str(cache.parent), prefix=".index-", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "wb") as f:
+                f.write(data)
+            os.replace(tmp, cache)
+        except OSError:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+    except OSError as e:
+        # Couldn't persist (read-only dir, disk full, …). We still have valid
+        # data in hand, so proceed without caching rather than failing the run.
+        return str(e)
+    return None
+
+
+def _cache_is_stale(cache: Path) -> bool:
+    """True when the cache file is older than ``GALLERY_TTL_SECONDS``."""
+    try:
+        age = time.time() - cache.stat().st_mtime
+    except OSError:
+        # Can't stat it → treat as stale so we attempt a refresh.
+        return True
+    # A future mtime (clock skew, or a restored/tampered file) yields a
+    # negative age; treat it as stale so the cache can't be pinned "fresh"
+    # indefinitely until wall-clock time catches up.
+    return age < 0 or age > GALLERY_TTL_SECONDS
+
+
+def _cache_age_str(cache: Path) -> str:
+    """Human-friendly age of the cache file for the stale-fallback warning."""
+    try:
+        age = max(0.0, time.time() - cache.stat().st_mtime)
+    except OSError:
+        return "unknown time"
+    hours = age / 3600.0
+    if hours >= 24:
+        return f"{hours / 24:.1f}d"
+    if hours >= 1:
+        return f"{hours:.1f}h"
+    return f"{age / 60:.0f}m"
+
+
+def _as_str_list(value: Any) -> list[str]:
+    """Coerce a gallery field to a list of strings, tolerating the scalar-or-junk
+    variance in real data. A bare string is treated as a single-element list (not
+    split into characters); a non-list/non-string scalar becomes an empty list.
+    """
+    if isinstance(value, str):
+        return [value] if value else []
+    if isinstance(value, list):
+        return [str(v) for v in value if v]
+    return []
 
 
 def _flatten_templates(categories: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -103,6 +257,7 @@ def _flatten_templates(categories: list[dict[str, Any]]) -> list[dict[str, Any]]
                     "group_category": cat.get("category") or "",
                     "tags": list(t.get("tags") or []),
                     "models": list(t.get("models") or []),
+                    "requires_custom_nodes": _as_str_list(t.get("requiresCustomNodes")),
                     "providers": _flatten_providers(t.get("logos") or []),
                     "date": t.get("date") or "",
                     "open_source": bool(t.get("openSource", False)),
@@ -189,7 +344,7 @@ def _ls_via_query(
 
 @app.command(
     "ls",
-    help="List gallery templates. Filter by type/category/tag/model/provider/name, or pass --query for the full CQL grammar.",
+    help="List gallery templates. Filter by type/category/tag/model/provider/name.",
 )
 @tracking.track_command("templates")
 def ls_cmd(
@@ -223,7 +378,8 @@ def ls_cmd(
             "--query",
             "-q",
             show_default=False,
-            help="A CQL grammar query (e.g. 'templates type video | sort name | limit 5'). Bypasses the flag filters.",
+            hidden=True,
+            help="Removed — there is no CQL grammar over templates. Use the flag filters above.",
         ),
     ] = None,
     limit: Annotated[
@@ -251,7 +407,7 @@ def ls_cmd(
 
     try:
         cats = _load_gallery(gallery_path, refresh=refresh)
-    except (urllib.error.URLError, OSError, json.JSONDecodeError) as e:
+    except _GALLERY_LOAD_ERRORS as e:
         renderer.error(
             code="gallery_load_failed",
             message=str(e),
@@ -348,7 +504,7 @@ def show_cmd(
     renderer = get_renderer()
     try:
         cats = _load_gallery(gallery_path, refresh=refresh)
-    except (urllib.error.URLError, OSError, json.JSONDecodeError) as e:
+    except _GALLERY_LOAD_ERRORS as e:
         renderer.error(code="gallery_load_failed", message=str(e))
         raise typer.Exit(code=1) from e
 
@@ -388,15 +544,34 @@ def refresh_cmd():
     renderer = get_renderer()
     try:
         data = _fetch_gallery()
-    except (urllib.error.URLError, OSError) as e:
+        # Validate BEFORE the cache is touched, same rule as `_load_gallery`.
+        parsed = _parse_gallery(data)
+    except _GALLERY_LOAD_ERRORS as e:
+        # Same family `_load_gallery` routes: a non-200 (`RuntimeError`), a
+        # non-JSON or wrong-shaped body, and an over-cap body
+        # (`ResponseTooLarge`) all surface as this envelope, never a traceback.
         renderer.error(code="gallery_fetch_failed", message=str(e))
         raise typer.Exit(code=1) from e
     cache = _cache_path()
-    cache.parent.mkdir(parents=True, exist_ok=True)
-    cache.write_bytes(data)
-    payload = {"path": str(cache), "bytes": len(data)}
+    # Persist exactly the way `_load_gallery` does — validated above, written
+    # atomically, and never a bare `write_bytes`. This command used to clobber
+    # the cache with whatever came back: a 200 carrying rate-limit HTML was
+    # written verbatim, reported success, and then failed every subsequent
+    # `templates ls` for the full TTL, with the stale-cache fallback unable to
+    # help because the cache *was* the garbage.
+    cache_error = _persist_cache(cache, data)
+    if cache_error is not None:
+        # Unlike the implicit TTL refresh, caching is the entire job here, so a
+        # write failure is the command failing — not a detail to swallow.
+        renderer.error(
+            code="gallery_cache_write_failed",
+            message=f"fetched the gallery but could not cache it: {cache_error}",
+            hint=f"check permissions and free space on {cache.parent}",
+        )
+        raise typer.Exit(code=1)
+    payload = {"path": str(cache), "bytes": len(data), "categories": len(parsed)}
     if renderer.is_pretty():
-        rprint(f"[green]✓[/green] cached gallery to {cache} ({len(data)} bytes)")
+        rprint(f"[green]✓[/green] cached gallery to {cache} ({len(data)} bytes, {len(parsed)} categories)")
     renderer.emit(payload, command="templates refresh")
 
 
@@ -406,14 +581,36 @@ def refresh_cmd():
 _TEMPLATE_WORKFLOW_URL = "https://raw.githubusercontent.com/Comfy-Org/workflow_templates/main/templates/{name}.json"
 
 
+def _workflow_node_count(workflow: Any) -> int | None:
+    """Count the nodes in a workflow, in either serialization format.
+
+    Gallery templates ship in the *frontend* shape — ``{id, revision, nodes,
+    links, …}`` — so a plain ``len(workflow)`` counts those wrapper keys and
+    reports ~10 for every template regardless of its real size
+    (``api_seedance2_0_r2v``, a 3-node workflow, read as 10). The frontend shape
+    is identified by its ``nodes`` list; the API shape is a bare
+    ``{node_id: {class_type, …}}`` map, where the key count *is* the node count.
+
+    Subgraph interiors are deliberately not counted: this number exists so a
+    caller can confirm the workflow it just fetched looks like the workflow it
+    asked for, and that's the canvas-level count.
+    """
+    if not isinstance(workflow, dict):
+        return None
+    nodes = workflow.get("nodes")
+    if isinstance(nodes, list):
+        return len(nodes)
+    return len(workflow)
+
+
 def _fetch_template_workflow(name: str, *, timeout: float = 15.0) -> bytes:
     """Pull a single template's workflow JSON from the canonical GitHub raw URL."""
     url = _TEMPLATE_WORKFLOW_URL.format(name=urllib.parse.quote(name, safe=""))
     req = urllib.request.Request(url, headers={"User-Agent": "comfy-cli"})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
+    with plain_urlopen(req, timeout=timeout) as resp:
         if resp.status != 200:
             raise RuntimeError(f"template workflow fetch failed: HTTP {resp.status}")
-        return resp.read()
+        return read_capped(resp, url)
 
 
 @app.command(
@@ -442,12 +639,18 @@ def fetch_cmd(
 ):
     renderer = get_renderer()
 
+    # `--out ""` is not a writable path — treat it as "no file requested" so the
+    # write branch and the envelope ride-along agree. Left divergent, an empty
+    # string is falsy (nothing written to disk) yet not None (workflow omitted
+    # from the envelope), and the fetched workflow vanishes entirely.
+    out = out or None
+
     # Resolve against the gallery index first so we surface "no such template"
     # with the same close_matches affordance the rest of the CLI uses, instead
     # of letting the user hit a raw GitHub 404.
     try:
         cats = _load_gallery(gallery_path, refresh=refresh)
-    except (urllib.error.URLError, OSError, json.JSONDecodeError) as e:
+    except _GALLERY_LOAD_ERRORS as e:
         renderer.error(code="gallery_load_failed", message=str(e))
         raise typer.Exit(code=1) from e
 
@@ -467,7 +670,10 @@ def fetch_cmd(
 
     try:
         body = _fetch_template_workflow(name)
-    except (urllib.error.HTTPError, urllib.error.URLError, OSError) as e:
+    # ``RuntimeError`` (a 2xx-but-not-200 status) and ``ResponseTooLarge`` (an
+    # over-cap body) are the same class of upstream misbehaviour as a URLError
+    # and belong in the same envelope, not in an uncaught traceback.
+    except (urllib.error.HTTPError, urllib.error.URLError, OSError, RuntimeError, ResponseTooLarge) as e:
         status = getattr(e, "code", None)
         renderer.error(
             code="template_fetch_failed",
@@ -487,7 +693,7 @@ def fetch_cmd(
     # node count in the envelope without re-reading.
     try:
         wf = json.loads(body)
-    except json.JSONDecodeError as e:
+    except (json.JSONDecodeError, UnicodeDecodeError) as e:
         renderer.error(
             code="template_workflow_invalid_json",
             message=f"upstream returned non-JSON for {name!r}: {e}",
@@ -509,7 +715,7 @@ def fetch_cmd(
 
             sys.stdout.write(body.decode("utf-8"))
             sys.stdout.write("\n")
-        target_repr = "stdout" if out is None else str(Path(out).expanduser())
+        target_repr = "stdout"
 
     payload = {
         "name": name,
@@ -517,13 +723,400 @@ def fetch_cmd(
         "output_type": match["output_type"],
         "out": target_repr,
         "bytes": len(body),
-        # `nodes` count is the only field the agent needs to confirm the
-        # workflow loaded; the full JSON ride-along bloats every envelope.
-        "node_count": len(wf) if isinstance(wf, dict) else None,
+        "node_count": _workflow_node_count(wf),
     }
+    if not out:
+        # No file was written, so the JSON envelope is the only place the caller
+        # can get the workflow — emit() owns stdout in JSON mode, so without this
+        # the fetch would produce nothing but metadata.
+        payload["workflow"] = wf
     if renderer.is_pretty() and out:
         rprint(f"[green]✓[/green] wrote {len(body):,} bytes ({payload['node_count']} nodes) to {target_repr}")
     renderer.emit(payload, command="templates fetch")
+
+
+# ---------------------------------------------------------------------------
+# templates check — per-template runnable/missing/api-required/unknown verdict
+# ---------------------------------------------------------------------------
+
+
+def _template_workflow_cache_path(name: str) -> Path:
+    """Where a fetched per-template workflow JSON is cached. Same base-dir logic
+    as :func:`_cache_path`, one file per template under ``gallery/templates``.
+
+    ``name`` comes from the (untrusted) gallery index, so it's URL-encoded the
+    same way :func:`_fetch_template_workflow` encodes it for the fetch URL —
+    ``quote(..., safe="")`` turns any ``/`` or ``..`` segment into ``%2F``/``..``
+    with no path separators, keeping the file strictly inside ``gallery/templates``.
+    """
+    base = os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache")
+    safe_name = urllib.parse.quote(name, safe="")
+    return Path(base) / "comfy-cli" / "gallery" / "templates" / f"{safe_name}.json"
+
+
+def _iter_workflow_nodes(wf: dict[str, Any]):
+    """Yield every node dict in a UI-format workflow: top-level ``nodes`` first,
+    then the nodes inside each subgraph *definition*.
+
+    The subgraph walk is mandatory — modern templates (e.g. ``image_z_image_turbo``)
+    carry their model references only inside subgraph definitions, so a top-level
+    walk alone would report them as having zero model requirements.
+    """
+    if not isinstance(wf, dict):
+        return
+    top = wf.get("nodes")
+    if isinstance(top, list):
+        for node in top:
+            if isinstance(node, dict):
+                yield node
+    definitions = wf.get("definitions")
+    subgraphs = definitions.get("subgraphs") if isinstance(definitions, dict) else None
+    if isinstance(subgraphs, list):
+        for sg in subgraphs:
+            if not isinstance(sg, dict):
+                continue
+            sg_nodes = sg.get("nodes")
+            if isinstance(sg_nodes, list):
+                for node in sg_nodes:
+                    if isinstance(node, dict):
+                        yield node
+
+
+def _collect_model_requirements(wf: dict[str, Any]) -> list[dict[str, str]]:
+    """Gather every ``node["properties"]["models"]`` entry across top-level and
+    subgraph nodes. Each entry is normalized to ``{name, directory, url}`` and
+    deduped by ``(directory, name)`` preserving first-seen order.
+    """
+    seen: set[tuple[str, str]] = set()
+    out: list[dict[str, str]] = []
+    for node in _iter_workflow_nodes(wf):
+        props = node.get("properties")
+        if not isinstance(props, dict):
+            continue
+        models = props.get("models")
+        if not isinstance(models, list):
+            continue
+        for m in models:
+            if not isinstance(m, dict):
+                continue
+            name = str(m.get("name") or "")
+            directory = str(m.get("directory") or "")
+            if not name:
+                # A model ref with no filename isn't matchable against a folder
+                # listing — keeping it would always report a phantom empty-name
+                # "missing" model and wrongly flip the verdict to missing-models.
+                continue
+            key = (directory, name)
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append({"name": name, "directory": directory, "url": str(m.get("url") or "")})
+    return out
+
+
+def _collect_node_class_types(wf: dict[str, Any]) -> list[str]:
+    """Distinct ``node["type"]`` values across top-level + subgraph nodes.
+
+    For a regular node this is the ComfyUI class name (``CheckpointLoaderSimple``);
+    for a subgraph *instance* it's the definition UUID (never loader-ish, never in
+    object_info), which is why the loader/api heuristics simply skip those.
+    """
+    seen: set[str] = set()
+    out: list[str] = []
+    for node in _iter_workflow_nodes(wf):
+        t = node.get("type")
+        if isinstance(t, str) and t and t not in seen:
+            seen.add(t)
+            out.append(t)
+    return out
+
+
+def _basename(path: str) -> str:
+    """Last path segment of a folder-relative listing entry. Model folder
+    listings return paths that may include subdirectories (``sdxl/model.safetensors``)
+    and always use ``/`` on the wire; also tolerate a stray backslash defensively.
+    """
+    return path.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1]
+
+
+def _list_local_folder(target, folder: str) -> list[str] | None:
+    """List file paths in ``/models/<folder>`` on the local server.
+
+    Returns the folder-relative names, or ``None`` if the folder 404s (a
+    custom-node folder like ``SEEDVR2`` that ComfyUI doesn't register). Connection
+    errors (server not running) and other HTTP errors propagate to the caller.
+    """
+    # Reuse the exact target/URL plumbing `comfy models list-folder` uses.
+    from comfy_cli.command.models.search import _http_get_json, _models_path_parts
+
+    url = target.url(*_models_path_parts(target), folder)
+    try:
+        data = _http_get_json(url, target)
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return None
+        raise
+    names: list[str] = []
+    if isinstance(data, list):
+        for entry in data:
+            if isinstance(entry, dict):
+                n = entry.get("name", "")
+            elif isinstance(entry, str):
+                n = entry
+            else:
+                n = ""
+            if n:
+                names.append(n)
+    return names
+
+
+def _template_is_api_by_index(name: str, tags: list[str]) -> bool:
+    """Index-only API heuristic: an ``api_*`` template name, or an ``API`` tag."""
+    if name.startswith("api_"):
+        return True
+    return any(str(t).strip().lower() == "api" for t in tags)
+
+
+def _compute_verdict(*, api_dependent: bool, missing: list, required_count: int, node_types: list[str]) -> str:
+    """Verdict precedence: api-required > missing-models > runnable > unknown."""
+    if api_dependent:
+        return "api-required"
+    if missing:
+        return "missing-models"
+    if required_count > 0:
+        # Every referenced model resolved on disk.
+        return "runnable"
+    # Zero model references: runnable only if nothing looks like it *should* load
+    # a model; otherwise we genuinely can't tell (loader with no declared models).
+    loaderish = any("loader" in (t or "").lower() for t in node_types)
+    return "unknown" if loaderish else "runnable"
+
+
+@app.command(
+    "check",
+    help=(
+        "Report whether a gallery template is runnable on THIS install: which of "
+        "its models are present vs missing locally, whether it needs partner-API "
+        "access, and any custom nodes it declares. Resolves the name against the "
+        "gallery, fetches the workflow, and intersects its model refs with the "
+        "local server's model folders."
+    ),
+)
+@tracking.track_command("templates")
+def check_cmd(
+    name: Annotated[str, typer.Argument(help="Template name (matches `comfy templates ls` rows).")],
+    gallery_path: Annotated[
+        str | None,
+        typer.Option("--gallery", show_default=False, help="Path to a local index.json (skips the cache + fetch)."),
+    ] = None,
+    refresh: Annotated[
+        bool,
+        typer.Option("--refresh", help="Re-fetch the gallery index AND the template workflow before checking."),
+    ] = False,
+):
+    from comfy_cli.target import resolve_target
+
+    renderer = get_renderer()
+
+    # 1. Resolve the name against the gallery index (same affordance as `fetch`).
+    try:
+        cats = _load_gallery(gallery_path, refresh=refresh)
+    except (urllib.error.URLError, OSError, json.JSONDecodeError) as e:
+        renderer.error(code="gallery_load_failed", message=str(e))
+        raise typer.Exit(code=1) from e
+
+    rows = _flatten_templates(cats)
+    match = next((r for r in rows if r["name"] == name), None)
+    if match is None:
+        lower = name.lower()
+        close = [r["name"] for r in rows if lower in r["name"].lower()][:5]
+        renderer.error(
+            code="template_not_found",
+            message=f"no template named {name!r} in the gallery",
+            hint="try `comfy templates ls --name <substring>` to search",
+            details={"close_matches": close},
+        )
+        raise typer.Exit(code=1)
+
+    # 2. Fetch (or read from cache) the per-template workflow JSON.
+    cache_path = _template_workflow_cache_path(name)
+    body: bytes | None = None
+    if not refresh and cache_path.exists():
+        try:
+            body = cache_path.read_bytes()
+        except OSError:
+            body = None
+    if body is None:
+        try:
+            body = _fetch_template_workflow(name)
+        except (urllib.error.HTTPError, urllib.error.URLError, OSError) as e:
+            status = getattr(e, "code", None)
+            renderer.error(
+                code="template_fetch_failed",
+                message=f"failed to fetch workflow for {name!r}: {e}",
+                hint=(
+                    "the gallery index references a template whose workflow JSON "
+                    "is missing upstream — report at "
+                    "https://github.com/Comfy-Org/workflow_templates/issues"
+                    if status == 404
+                    else "check network connectivity"
+                ),
+                details={"status": status} if status else None,
+            )
+            raise typer.Exit(code=1) from e
+        # Write atomically: a truncated file (interrupted write / full disk) would
+        # otherwise be trusted by the read path above on the next non-refresh run
+        # and fail `template_workflow_invalid_json` until the user passed --refresh.
+        try:
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp_path = cache_path.parent / f"{cache_path.name}.{os.getpid()}.tmp"
+            try:
+                tmp_path.write_bytes(body)
+                os.replace(tmp_path, cache_path)
+            except OSError:
+                tmp_path.unlink(missing_ok=True)
+                raise
+        except OSError:
+            pass  # a non-writable cache dir must not fail the check
+
+    try:
+        wf = json.loads(body)
+    except (json.JSONDecodeError, UnicodeDecodeError) as e:
+        renderer.error(
+            code="template_workflow_invalid_json",
+            message=f"template workflow for {name!r} is not valid JSON: {e}",
+            hint="re-run with --refresh to re-fetch, or report upstream",
+        )
+        raise typer.Exit(code=1) from e
+    if not isinstance(wf, dict):
+        renderer.error(
+            code="template_workflow_invalid_json",
+            message=f"template workflow for {name!r} is not a JSON object",
+            hint="re-run with --refresh to re-fetch, or report upstream",
+        )
+        raise typer.Exit(code=1)
+
+    # 3. Model requirements (top-level + subgraph walk) and node class types.
+    required = _collect_model_requirements(wf)
+    node_types = _collect_node_class_types(wf)
+
+    # 4. API dependence. Tier (a) is the index heuristic; tier (b) upgrades it with
+    #    object_info when a local server is reachable (best-effort — a down server
+    #    just leaves the index answer in place).
+    api_dependent = _template_is_api_by_index(name, match.get("tags") or [])
+    api_source = "index"
+    api_nodes: list[str] = []
+    try:
+        from comfy_cli.cql.engine import Graph
+
+        graph = Graph.load(mode="local")
+        api_nodes = [cls for cls in node_types if (m := graph.node(cls)) is not None and m.is_api_node]
+        # Only attribute the signal to object_info when it actually found API nodes;
+        # an empty scan must leave `source` reflecting the index heuristic, not claim
+        # object_info as the source of an api-required verdict it didn't produce.
+        if api_nodes:
+            api_source = "object_info"
+            api_dependent = True
+    except Exception:
+        # Server down / object_info unavailable → index heuristic alone decides.
+        # Discard any partial object_info result so `source` and `api_nodes` agree.
+        api_nodes = []
+        api_source = "index"
+
+    # 5. Installed intersection: list each distinct folder once on the local server
+    #    and match required files by basename.
+    warnings: list[str] = []
+    present: list[str] = []
+    missing: list[dict[str, str]] = []
+    distinct_dirs = list(dict.fromkeys(req["directory"] for req in required))
+    if required:
+        target = resolve_target(where="local")
+        listings: dict[str, list[str] | None] = {}
+        try:
+            for directory in distinct_dirs:
+                if not directory or ".." in directory or "/" in directory or "\\" in directory:
+                    # Not addressable as a `/models/<folder>` segment — treat as absent.
+                    listings[directory] = None
+                    warnings.append(
+                        f"model directory {directory!r} isn't a valid model folder — its files are reported missing"
+                    )
+                    continue
+                folder_files = _list_local_folder(target, directory)
+                listings[directory] = folder_files
+                if folder_files is None:
+                    warnings.append(
+                        f"model folder {directory!r} not found on the local server "
+                        f"(custom-node folder?) — its files are reported missing"
+                    )
+        except (urllib.error.URLError, OSError, ValueError, json.JSONDecodeError) as e:
+            renderer.error(
+                code="server_not_running",
+                message=f"local ComfyUI server is unreachable, cannot check installed models: {e}",
+                hint="run `comfy launch` to start a local server",
+            )
+            raise typer.Exit(code=1) from e
+
+        for req in required:
+            listing = listings.get(req["directory"])
+            # Normalize BOTH sides: a model ref may itself carry a subfolder
+            # (e.g. ``SDXL/model.safetensors``, as ComfyUI loader widgets emit),
+            # so compare basenames on the required side too.
+            req_base = _basename(req["name"])
+            if listing and any(_basename(entry) == req_base for entry in listing):
+                present.append(req["name"])
+            else:
+                missing.append(dict(req))
+
+    # 6. Custom nodes are report-only in v1 (surfaced verbatim, not verified).
+    custom_nodes_required = list(match.get("requires_custom_nodes") or [])
+
+    # 7. Verdict.
+    verdict = _compute_verdict(
+        api_dependent=api_dependent,
+        missing=missing,
+        required_count=len(required),
+        node_types=node_types,
+    )
+
+    # 8. Emit.
+    payload = {
+        "name": name,
+        "title": match["title"],
+        "verdict": verdict,
+        "models": {"required": len(required), "present": present, "missing": missing},
+        "api": {"dependent": api_dependent, "source": api_source, "api_nodes": api_nodes},
+        "custom_nodes_required": custom_nodes_required,
+        "warnings": warnings,
+    }
+
+    if renderer.is_pretty():
+        # `name`, node-class names, model names/urls and warnings are all untrusted
+        # (they come from the gallery index / workflow JSON), so escape them before
+        # Rich interprets them — a stray `[foo]` would otherwise raise MarkupError.
+        from rich.markup import escape
+
+        mark = "[bold green]✓[/bold green]" if verdict == "runnable" else "[bold red]✗[/bold red]"
+        rprint(f"{mark} {escape(name)} — [bold]{verdict}[/bold]")
+        if api_dependent:
+            extra = f": {escape(', '.join(api_nodes))}" if api_nodes else ""
+            rprint(f"  [yellow]needs partner-API access[/yellow] (via {api_source}){extra}")
+        if custom_nodes_required:
+            rprint(f"  custom nodes: {escape(', '.join(custom_nodes_required))} [dim](not verified)[/dim]")
+        if missing:
+            from rich.table import Table
+
+            tbl = Table(show_header=True, header_style="bold")
+            tbl.add_column("missing model")
+            tbl.add_column("directory", style="dim")
+            tbl.add_column("download url")
+            for m in missing:
+                tbl.add_row(escape(m["name"]), escape(m["directory"]), escape(m["url"]) or "[dim](none)[/dim]")
+            renderer.console().print(tbl)
+        elif required:
+            rprint(f"  [dim]{len(present)}/{len(required)} model(s) present[/dim]")
+        for w in warnings:
+            rprint(f"  [yellow]⚠[/yellow] {escape(w)}")
+    renderer.emit(payload, command="templates check")
 
 
 # ---------------------------------------------------------------------------
@@ -610,6 +1203,61 @@ def _gallery_paid_signals(row: dict[str, Any]) -> list[str]:
         if isinstance(prov, str) and prov:
             signals.append(f"provider:{prov}")
     return signals
+
+
+def _enforce_spend_gate(
+    renderer,
+    *,
+    name: str,
+    workflow: Any,
+    row: dict[str, Any],
+    object_info: dict,
+    allow_spend: bool,
+) -> None:
+    """Consent interlock before submitting a template that spends Comfy credits.
+
+    Returns None when the run may proceed (no paid signals, --allow-spend, or
+    an interactive yes); raises typer.Exit(1) otherwise. Behavior is the
+    BE-4113 gate moved verbatim out of run_template_cmd.
+    """
+    import sys
+
+    from rich.markup import escape
+
+    paid_nodes = _detect_paid_nodes(workflow, object_info)
+    gallery_signals = _gallery_paid_signals(row)
+    if (paid_nodes or gallery_signals) and not allow_spend:
+        evidence = {
+            "template": name,
+            "partner_nodes": paid_nodes,
+            "gallery_signals": gallery_signals,
+        }
+        if renderer.is_pretty() and sys.stdin and sys.stdin.isatty():
+            rprint(
+                f"[yellow]⚠ Template [bold]{escape(name)}[/bold] uses partner-API nodes that spend Comfy credits.[/yellow]"
+            )
+            if paid_nodes:
+                rprint(f"  [dim]nodes:[/dim] {escape(', '.join(paid_nodes))}")
+            if gallery_signals:
+                rprint(f"  [dim]gallery:[/dim] {escape(', '.join(gallery_signals))}")
+            if not typer.confirm("Run anyway and spend credits?", default=False):
+                renderer.error(
+                    code="spend_consent_required",
+                    message="declined — template not submitted, no credits spent",
+                    details=evidence,
+                )
+                raise typer.Exit(code=1)
+        else:
+            renderer.error(
+                code="spend_consent_required",
+                message=(
+                    f"template {name!r} uses partner-API (paid) nodes; "
+                    "re-run with --allow-spend to consent to spending Comfy credits"
+                ),
+                hint="paid nodes only run with explicit consent; OSS templates run without this flag",
+                details=evidence,
+            )
+            raise typer.Exit(code=1)
 
 
 def _resolve_param_addresses(
@@ -747,7 +1395,6 @@ def run_template_cmd(
     validation errors. Templates that embed partner-API nodes spend Comfy
     credits and are gated behind --allow-spend / an interactive confirmation.
     """
-    import sys
     import tempfile
 
     from comfy_cli.command import run as run_module
@@ -773,7 +1420,9 @@ def run_template_cmd(
     # -- Resolve the template against the gallery index (close-matches on miss).
     try:
         cats = _load_gallery(gallery_path, refresh=refresh)
-    except (urllib.error.URLError, OSError, json.JSONDecodeError) as e:
+    # The full `_GALLERY_LOAD_ERRORS` family, matching every other `_load_gallery`
+    # call site — a non-200 or an over-cap body escapes here just as a URLError does.
+    except _GALLERY_LOAD_ERRORS as e:
         renderer.error(code="gallery_load_failed", message=str(e))
         raise typer.Exit(code=1) from e
 
@@ -793,7 +1442,10 @@ def run_template_cmd(
     # -- Fetch + parse the template's workflow JSON.
     try:
         body = _fetch_template_workflow(name)
-    except (urllib.error.HTTPError, urllib.error.URLError, OSError) as e:
+    # ``RuntimeError`` (a 2xx-but-not-200 status) and ``ResponseTooLarge`` (an
+    # over-cap body) are the same class of upstream misbehaviour as a URLError
+    # and belong in the same envelope, not in an uncaught traceback.
+    except (urllib.error.HTTPError, urllib.error.URLError, OSError, RuntimeError, ResponseTooLarge) as e:
         status = getattr(e, "code", None)
         renderer.error(
             code="template_fetch_failed",
@@ -888,38 +1540,14 @@ def run_template_cmd(
 
     # -- Spend gate (BE-4113): partner-API nodes spend Comfy credits. Require
     # explicit consent before submitting anything that would burn them.
-    paid_nodes = _detect_paid_nodes(workflow, object_info)
-    gallery_signals = _gallery_paid_signals(row)
-    if (paid_nodes or gallery_signals) and not allow_spend:
-        evidence = {
-            "template": name,
-            "partner_nodes": paid_nodes,
-            "gallery_signals": gallery_signals,
-        }
-        if renderer.is_pretty() and sys.stdin.isatty():
-            rprint(f"[yellow]⚠ Template [bold]{name}[/bold] uses partner-API nodes that spend Comfy credits.[/yellow]")
-            if paid_nodes:
-                rprint(f"  [dim]nodes:[/dim] {', '.join(paid_nodes)}")
-            if gallery_signals:
-                rprint(f"  [dim]gallery:[/dim] {', '.join(gallery_signals)}")
-            if not typer.confirm("Run anyway and spend credits?", default=False):
-                renderer.error(
-                    code="spend_consent_required",
-                    message="declined — template not submitted, no credits spent",
-                    details=evidence,
-                )
-                raise typer.Exit(code=1)
-        else:
-            renderer.error(
-                code="spend_consent_required",
-                message=(
-                    f"template {name!r} uses partner-API (paid) nodes; "
-                    "re-run with --allow-spend to consent to spending Comfy credits"
-                ),
-                hint="paid nodes only run with explicit consent; OSS templates run without this flag",
-                details=evidence,
-            )
-            raise typer.Exit(code=1)
+    _enforce_spend_gate(
+        renderer,
+        name=name,
+        workflow=workflow,
+        row=row,
+        object_info=object_info,
+        allow_spend=allow_spend,
+    )
 
     # -- Hand off to the existing run path (UI→API conversion, partner
     # credential injection, preflight validation, execution, jobs state).
@@ -936,6 +1564,11 @@ def run_template_cmd(
             verbose=verbose,
             timeout=timeout,
             api_key=api_key,
+            # run-template's own spend gate (above) has already consented (or
+            # found no paid nodes), so forward consent to avoid a second gate in
+            # execute() (BE-4326). run-template's gate is strictly stronger — it
+            # also inspects gallery signals — and has already run.
+            allow_spend=True,
         )
     finally:
         try:

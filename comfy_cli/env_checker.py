@@ -7,8 +7,10 @@ import sys
 
 import requests
 from rich.console import Console
+from rich.markup import escape
 
 from comfy_cli.config_manager import ConfigManager
+from comfy_cli.hardware import detect_hardware
 from comfy_cli.utils import singleton
 
 console = Console()
@@ -32,6 +34,40 @@ def format_python_version(version_info):
     return f"[bold red]{version_info.major}.{version_info.minor}.{version_info.micro}[/bold red]"
 
 
+def _bytes_to_gb(value) -> str:
+    """Render a byte count as a whole-number GB string, or ``?`` if unknown."""
+    if not isinstance(value, (int | float)):
+        return "?"
+    return f"{round(value / (1024**3))} GB"
+
+
+def format_hardware_summary(hw: dict) -> str:
+    """One-line ``cpu / RAM GB / GPU model (VRAM GB or 'unified')`` summary.
+
+    Used by ``fill_print_table`` (pretty mode). Tolerates missing/None fields so
+    it never raises on a partial (failed-probe) hardware block.
+    """
+    # cpu/model come from untrusted probe output (/proc/cpuinfo, nvidia-smi,
+    # rocm-smi, libcuda). This summary is rendered by fill_print_table via Rich
+    # (markup enabled), so escape those strings — a stray "[" (plausible on
+    # VMs/hypervisors) would otherwise raise MarkupError and crash `comfy env`.
+    cpu = escape(hw.get("cpu") or "unknown CPU")
+    ram = _bytes_to_gb(hw.get("ram_bytes"))
+
+    gpu = hw.get("gpu")
+    if not gpu:
+        gpu_part = "no GPU"
+    else:
+        model = escape(str(gpu.get("model") or gpu.get("vendor") or "unknown GPU"))
+        if gpu.get("unified_memory"):
+            gpu_part = f"{model} (unified)"
+        elif gpu.get("vram_bytes") is not None:
+            gpu_part = f"{model} ({_bytes_to_gb(gpu.get('vram_bytes'))} VRAM)"
+        else:
+            gpu_part = model
+    return f"{cpu} / {ram} RAM / {gpu_part}"
+
+
 def _bracket_host(host: str) -> str:
     """Bracket a bare IPv6 literal (``::1`` -> ``[::1]``) for use in a URL.
 
@@ -42,6 +78,20 @@ def _bracket_host(host: str) -> str:
     """
     if ":" in host and not host.startswith("["):
         return f"[{host}]"
+    return host
+
+
+def _unbracket_host(host: str) -> str:
+    """Inverse of :func:`_bracket_host` — ``[::1]`` -> ``::1``.
+
+    Brackets are a *URL* encoding of an IPv6 literal, not part of the address.
+    Structured output reports the raw literal (matching ``Target.host``, which
+    is unbracketed) and re-brackets only where a URL is composed, so the same
+    server isn't named two different ways across a payload and its display line.
+    Idempotent for unbracketed input.
+    """
+    if host.startswith("[") and host.endswith("]"):
+        return host[1:-1]
     return host
 
 
@@ -105,9 +155,6 @@ class EnvChecker:
         self.python_version = sys.version_info
         self.check()
 
-    def is_isolated_env(self):
-        return self.virtualenv_path or self.conda_env
-
     def get_isolated_env(self):
         if self.virtualenv_path:
             return self.virtualenv_path
@@ -135,6 +182,8 @@ class EnvChecker:
 
         config_data = ConfigManager().get_env_data()
         data.extend(config_data)
+
+        data.append(("Hardware", format_hardware_summary(detect_hardware())))
 
         host, port = _resolved_local_address()
         if check_comfy_server_running(port=port, host=host):
@@ -171,4 +220,5 @@ class EnvChecker:
                 "running": server_running,
                 "url": _display_url(host, port) if server_running else None,
             },
+            "hardware": detect_hardware(),
         }

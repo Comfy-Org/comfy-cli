@@ -38,8 +38,10 @@ from rich.table import Column, Table
 
 from comfy_cli import execution_errors
 from comfy_cli.command.run.loader import _MAX_BODY_PREVIEW, _node_errors_to_list
+from comfy_cli.http import no_redirect_urlopen
 from comfy_cli.output import get_renderer
 from comfy_cli.output import rprint as pprint
+from comfy_cli.output.sanitize import sanitize_markup
 from comfy_cli.workspace_manager import WorkspaceManager
 
 workspace_manager = WorkspaceManager()
@@ -120,6 +122,11 @@ class WorkflowExecution:
         # compute nodes that never fire a server-side `executed` event.
         self.cached_node_ids: list[str] = []
         self.executed_node_ids: list[str] = []
+        # Classified verdict of a terminal server-side `execution_error`,
+        # stashed by `on_error` before it raises `typer.Exit`. The `--wait`
+        # caller only sees the exit, so this is how the real cause reaches
+        # the job state file.
+        self.last_error: dict | None = None
 
     def connect(self):
         # Resolve via the package namespace so tests can patch
@@ -167,8 +174,12 @@ class WorkflowExecution:
         req = request.Request(f"http://{self.host}:{self.port}/prompt", json.dumps(data).encode("utf-8"))
         req.add_header("Comfy-Usage-Source", "comfy-cli")
         try:
-            resp = request.urlopen(req, timeout=self.timeout)
-            raw_body = resp.read()
+            # No-redirect, not ``plain_urlopen``: ``extra_data`` can carry a
+            # Comfy Org credential, so this submit gets the same refuse-a-30x
+            # policy as every other credentialed call rather than leaning on
+            # urllib happening to drop the body when it follows a redirect.
+            with no_redirect_urlopen(req, timeout=self.timeout) as resp:
+                raw_body = resp.read()
         except urllib.error.HTTPError as e:
             body_bytes = e.read()
             body_text = body_bytes.decode("utf-8", errors="replace").strip() if body_bytes else ""
@@ -185,7 +196,10 @@ class WorkflowExecution:
                 if isinstance(node_errors_raw, dict) and node_errors_raw:
                     node_errors = _node_errors_to_list(node_errors_raw)
                     if self.renderer.is_pretty():
-                        pprint(f"[bold red]Error running workflow\n{json.dumps(node_errors_raw, indent=2)}[/bold red]")
+                        pprint(
+                            "[bold red]Error running workflow\n"
+                            f"{sanitize_markup(json.dumps(node_errors_raw, indent=2))}[/bold red]"
+                        )
                     self.renderer.error(
                         code="prompt_rejected",
                         message=f"Workflow has {len(node_errors_raw)} validation error(s)",
@@ -195,7 +209,7 @@ class WorkflowExecution:
                     raise typer.Exit(code=1)
 
             if self.renderer.is_pretty():
-                pprint(f"[bold red]Error running workflow (HTTP {e.status})\n{body_text}[/bold red]")
+                pprint(f"[bold red]Error running workflow (HTTP {e.status})\n{sanitize_markup(body_text)}[/bold red]")
             if e.status < 500:
                 self.renderer.error(
                     code="client_error",
@@ -216,7 +230,7 @@ class WorkflowExecution:
                 self.progress.stop()
             reason = str(e.reason) if isinstance(e, urllib.error.URLError) else str(e)
             if self.renderer.is_pretty():
-                pprint(f"[bold red]Error: Failed to submit workflow: {reason}[/bold red]")
+                pprint(f"[bold red]Error: Failed to submit workflow: {sanitize_markup(reason)}[/bold red]")
             self.renderer.error(
                 code="connection_error",
                 message=f"Failed to submit workflow: {reason}",
@@ -318,15 +332,20 @@ class WorkflowExecution:
             return
 
         node = self.workflow.get(node_id)
+        # ``node_id`` arrives on the wire and ``class_type``/``_meta.title`` come
+        # from a workflow the server may have echoed back, so each leaf is
+        # sanitized before it is interpolated into this markup string. ``type``
+        # is a caller-side literal ("Executing"/"Cached").
+        safe_node_id = sanitize_markup(node_id)
         if node is None:
-            pprint(f"{type} : [bright_black]({node_id})[/]")
+            pprint(f"{type} : [bright_black]({safe_node_id})[/]")
             return
-        class_type = node["class_type"]
-        title = self.get_node_title(node_id)
+        class_type = sanitize_markup(node["class_type"])
+        title = sanitize_markup(self.get_node_title(node_id))
 
         if title != class_type:
             title += f"[bright_black] - {class_type}[/]"
-        title += f"[bright_black] ({node_id})[/]"
+        title += f"[bright_black] ({safe_node_id})[/]"
 
         pprint(f"{type} : {title}")
 
@@ -536,11 +555,16 @@ class WorkflowExecution:
         data = data if isinstance(data, dict) else {}
         node_id = str(data.get("node_id", ""))
         if self.renderer.is_pretty():
-            pprint(f"[bold red]Error running workflow\n{json.dumps(data, indent=2)}[/bold red]")
+            pprint(f"[bold red]Error running workflow\n{sanitize_markup(json.dumps(data, indent=2))}[/bold red]")
         # The event keeps the full server payload (incl. complete traceback);
         # the error envelope carries the classified one-line verdict.
         self.renderer.event("execution_error", prompt_id=self.prompt_id, details=data)
         verdict = execution_errors.classify(data)
+        self.last_error = {
+            "code": verdict["code"],
+            "message": verdict["message"],
+            "details": dict(verdict["details"]),
+        }
         self.renderer.error(
             code=verdict["code"],
             message=verdict["message"],

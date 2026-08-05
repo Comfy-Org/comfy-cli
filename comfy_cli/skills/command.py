@@ -139,7 +139,7 @@ def install_cmd(
         list[str] | None,
         typer.Option(
             "--skill",
-            help="Install only the named skill(s). Repeatable. Default: all 4 bundled skills (see `comfy skills list`).",
+            help=f"Install only the named skill(s). Repeatable. Default: all {len(BUNDLED_SKILLS)} bundled skills (see `comfy skills list`).",
         ),
     ] = None,
     dry_run: Annotated[
@@ -311,7 +311,7 @@ def list_cmd():
 def show_cmd(
     name: Annotated[
         str,
-        typer.Argument(help="Which bundled skill to print (see `comfy skills list` for all 4)."),
+        typer.Argument(help=f"Which bundled skill to print (see `comfy skills list` for all {len(BUNDLED_SKILLS)})."),
     ] = "comfy",
 ):
     renderer = get_renderer()

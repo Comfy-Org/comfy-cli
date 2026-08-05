@@ -1,3 +1,4 @@
+import bisect
 import os
 import platform
 import re
@@ -27,12 +28,6 @@ from comfy_cli.workspace_manager import WorkspaceManager, check_comfy_repo
 
 workspace_manager = WorkspaceManager()
 console = Console()
-
-
-def get_os_details():
-    os_name = platform.system()  # e.g., Linux, Darwin (macOS), Windows
-    os_version = platform.release()
-    return os_name, os_version
 
 
 def _pip_install_torch(python: str, index_args: list[str]) -> subprocess.CompletedProcess:
@@ -81,7 +76,7 @@ def pip_install_comfyui_dependencies(
 
         if result and result.returncode != 0:
             rprint("Failed to install PyTorch dependencies. Please check your environment (`comfy env`) and try again")
-            sys.exit(1)
+            raise typer.Exit(code=1)
 
         # install directml for AMD windows
         if gpu == GPU_OPTION.AMD and plat == constants.OS.WINDOWS:
@@ -111,12 +106,12 @@ def pip_install_comfyui_dependencies(
     result = subprocess.run([python, "-m", "pip", "install", "-r", "requirements.txt"], check=False)
     if result.returncode != 0:
         rprint("Failed to install ComfyUI dependencies. Please check your environment (`comfy env`) and try again.")
-        sys.exit(1)
+        raise typer.Exit(code=1)
 
 
 def pip_install_manager(repo_dir, python=sys.executable):
     """Install ComfyUI-Manager via manager_requirements.txt."""
-    from comfy_cli.command.custom_nodes.cm_cli_util import find_cm_cli
+    from comfy_cli.command.custom_nodes.cm_cli_util import find_cm_cli, find_legacy_manager_clone
 
     manager_req_path = os.path.join(repo_dir, constants.MANAGER_REQUIREMENTS_FILE)
     if not os.path.exists(manager_req_path):
@@ -138,9 +133,30 @@ def pip_install_manager(repo_dir, python=sys.executable):
             rprint(f"[dim]{result.stderr.strip()}[/dim]")
         return False
 
-    # Clear cache so find_cm_cli() picks up the newly installed module
+    # Clear caches so manager detection picks up the newly installed module
     find_cm_cli.cache_clear()
+    find_legacy_manager_clone.cache_clear()
     return True
+
+
+def _install_manager_with_fallback(repo_dir, python, *, bootstrap_pip: bool):
+    """Install ComfyUI-Manager, degrading gracefully when it fails.
+
+    On failure, disable the manager GUI mode so a later ``comfy launch`` doesn't
+    inject manager flags for a manager that isn't actually installed.
+
+    ``bootstrap_pip`` bootstraps pip first (no-op if already present): the
+    fast_deps path leaves a uv-managed venv that may ship no pip, whereas the
+    pip path has already bootstrapped it earlier in ``execute``.
+    """
+    if bootstrap_pip:
+        ensure_pip(python)
+    if not pip_install_manager(repo_dir, python=python):
+        # Manager installation failed - disable to prevent launch issues
+        from comfy_cli.config_manager import ConfigManager
+
+        ConfigManager().set(constants.CONFIG_KEY_MANAGER_GUI_MODE, "disable")
+        rprint("[yellow]Manager not installed. Launch will run without manager flags.[/yellow]")
 
 
 def execute(
@@ -189,7 +205,7 @@ def execute(
             checkout_stable_comfyui(version=version, repo_dir=repo_dir, url=url)
         except GitHubRateLimitError as e:
             rprint(f"[bold red]Error checking out ComfyUI version: {e}[/bold red]")
-            sys.exit(1)
+            raise typer.Exit(code=1) from e
 
     elif not check_comfy_repo(repo_dir)[0]:
         # Get actual remote URL for better error message
@@ -208,7 +224,7 @@ def execute(
             rprint(
                 f"[bold red]'{repo_dir}' already exists. But it is an invalid ComfyUI repository. Remove it and retry.[/bold red]"
             )
-        sys.exit(-1)
+        raise typer.Exit(code=1)
 
     # checkout specified commit
     if commit is not None:
@@ -249,12 +265,8 @@ def execute(
     else:
         rprint("\nInstalling ComfyUI-Manager..")
         if not fast_deps:
-            if not pip_install_manager(repo_dir, python=python):
-                # Manager installation failed - disable to prevent launch issues
-                from comfy_cli.config_manager import ConfigManager
-
-                ConfigManager().set(constants.CONFIG_KEY_MANAGER_GUI_MODE, "disable")
-                rprint("[yellow]Manager not installed. Launch will run without manager flags.[/yellow]")
+            # pip was already bootstrapped above for the pip path.
+            _install_manager_with_fallback(repo_dir, python, bootstrap_pip=False)
 
     if fast_deps:
         if python != sys.executable:
@@ -281,14 +293,9 @@ def execute(
         depComp.install_deps()
         # Install manager separately (not included in DependencyCompiler).
         # fast_deps leaves a uv-managed venv that may have no pip, but the
-        # manager install uses pip — bootstrap it first (no-op if present).
+        # manager install uses pip — the helper bootstraps it first.
         if not skip_manager:
-            ensure_pip(python)
-            if not pip_install_manager(repo_dir, python=python):
-                from comfy_cli.config_manager import ConfigManager
-
-                ConfigManager().set(constants.CONFIG_KEY_MANAGER_GUI_MODE, "disable")
-                rprint("[yellow]Manager not installed. Launch will run without manager flags.[/yellow]")
+            _install_manager_with_fallback(repo_dir, python, bootstrap_pip=True)
 
     if not skip_manager:
         try:
@@ -389,6 +396,23 @@ def validate_version(version: str) -> str | None:
             f"Invalid version format: {version}. "
             "Please use 'nightly', 'latest', or a valid semantic version (e.g., '1.2.3')."
         ) from exc
+
+
+def validate_optional_version(version: str | None) -> str | None:
+    """Typer callback for an *optional* ``--version`` flag.
+
+    ``validate_version`` is written for a flag that always has a value (``comfy
+    install --version`` defaults to ``nightly``). ``comfy update`` treats the
+    flag as opt-in, so ``None`` must pass through untouched. Invalid input is
+    re-raised as ``typer.BadParameter`` so a headless caller gets the standard
+    CLI usage error instead of a traceback.
+    """
+    if version is None:
+        return None
+    try:
+        return validate_version(version)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
 
 
 class GitHubRateLimitError(Exception):
@@ -582,7 +606,7 @@ def checkout_stable_comfyui(version: str, repo_dir: str, url: str | None = None)
             selected_release = get_latest_release(owner, repo)
             if selected_release is None:
                 rprint(f"Error: No release found for version '{version}'.")
-                sys.exit(1)
+                raise typer.Exit(code=1)
             tag = str(selected_release["tag"])
         elif not fetch_ok:
             # Tag list comes from a cached state — flag it so the user knows
@@ -609,7 +633,269 @@ def checkout_stable_comfyui(version: str, repo_dir: str, url: str | None = None)
         if not success:
             console.print(f"\n[bold red]Failed to checkout tag '{tag}'![/bold red]")
             console.print("[yellow]The version may not exist. Please check available versions.[/yellow]")
-            sys.exit(1)
+            raise typer.Exit(code=1)
+
+
+class VersionSwitchError(Exception):
+    """A failure while moving an existing workspace to another ComfyUI version.
+
+    Carries the stable envelope ``code`` and its ``hint`` so the command layer
+    can hand it straight to ``renderer.error`` without re-deriving them.
+    ``stash_ref`` is set when a stash was already created — the caller must tell
+    the user their work is still recoverable.
+    """
+
+    def __init__(self, code: str, message: str, hint: str | None = None, *, stash_ref: str | None = None):
+        super().__init__(message)
+        self.code = code
+        self.message = message
+        self.hint = hint
+        self.stash_ref = stash_ref
+
+
+class VersionSwitchResult(TypedDict):
+    """What ``switch_comfyui_version`` did, in envelope-ready form."""
+
+    previous: str
+    current: str
+    stashed: bool
+    stash_ref: str | None
+
+
+def _git_capture(repo_dir: str, *args: str, timeout: int = 30) -> subprocess.CompletedProcess:
+    """Run a git command in ``repo_dir`` and capture it, never raising.
+
+    Uses ``git -C`` rather than ``os.chdir`` so a failure part-way through a
+    switch can't leave the process in someone else's directory.
+    """
+    argv = ["git", "-C", repo_dir, *args]
+    try:
+        return subprocess.run(argv, capture_output=True, text=True, check=False, timeout=timeout)
+    except (subprocess.SubprocessError, FileNotFoundError, OSError) as exc:
+        return subprocess.CompletedProcess(args=argv, returncode=1, stdout="", stderr=str(exc))
+
+
+def _git_error_detail(result: subprocess.CompletedProcess) -> str:
+    """Best-effort one-line reason from a failed git invocation."""
+    for stream in (result.stderr, result.stdout):
+        if stream and stream.strip():
+            return stream.strip().splitlines()[-1]
+    return f"git exited with code {result.returncode}"
+
+
+def _describe_head(repo_dir: str) -> str:
+    """Human-readable name for the current checkout, e.g. ``a1b2c3d (v0.3.0)``."""
+    sha_result = _git_capture(repo_dir, "rev-parse", "--short", "HEAD")
+    describe_result = _git_capture(repo_dir, "describe", "--tags", "--always")
+    sha = sha_result.stdout.strip() if sha_result.returncode == 0 else ""
+    described = describe_result.stdout.strip() if describe_result.returncode == 0 else ""
+    if sha and described and described != sha:
+        return f"{sha} ({described})"
+    return sha or described or "unknown"
+
+
+def _fetch_tags(repo_dir: str) -> bool:
+    """Refresh tags from the remote. Returns whether it succeeded.
+
+    Failure is tolerated by callers: a tag that already exists locally is still
+    checkout-able offline (mirrors ``git_utils.git_checkout_tag``).
+    """
+    return _git_capture(repo_dir, "fetch", "--tags", "--quiet", timeout=60).returncode == 0
+
+
+def _resolve_default_branch(repo_dir: str) -> str:
+    """The remote's default branch, falling back to ComfyUI's historical ``master``."""
+    result = _git_capture(repo_dir, "symbolic-ref", "refs/remotes/origin/HEAD")
+    if result.returncode == 0:
+        ref = result.stdout.strip()
+        prefix = "refs/remotes/origin/"
+        if ref.startswith(prefix):
+            branch = ref[len(prefix) :].strip()
+            if branch:
+                return branch
+    return "master"
+
+
+def _nearby_version_tags(repo_dir: str, version: str, limit: int = 5) -> list[str]:
+    """Up to ``limit`` local ``v*`` tags closest (by semver order) to ``version``.
+
+    Used to turn "that version doesn't exist" into something actionable. Tags
+    that don't parse as semver are skipped; if the requested version itself
+    doesn't parse we just return the newest tags.
+    """
+    result = _git_capture(repo_dir, "tag", "--list", "v*", timeout=10)
+    if result.returncode != 0:
+        return []
+
+    parsed: list[tuple[semver.VersionInfo, str]] = []
+    for line in result.stdout.splitlines():
+        tag = line.strip()
+        if not tag:
+            continue
+        try:
+            parsed.append((semver.VersionInfo.parse(tag.lstrip("v")), tag))
+        except ValueError:
+            continue
+    if not parsed:
+        return []
+
+    parsed.sort(key=lambda item: item[0])
+    try:
+        requested = semver.VersionInfo.parse(version.lstrip("v"))
+    except ValueError:
+        requested = None
+
+    if requested is None:
+        window = parsed[-limit:]
+    else:
+        index = bisect.bisect_left([item[0] for item in parsed], requested)
+        start = max(0, min(index - limit // 2, len(parsed) - limit))
+        window = parsed[start : start + limit]
+
+    # Newest first — that's the order a user scanning for "what can I pick?" wants.
+    return [tag for _, tag in reversed(window)]
+
+
+def _stash_note(stash_ref: str | None) -> str:
+    if not stash_ref:
+        return ""
+    return (
+        f" Your uncommitted changes are still stashed as {stash_ref} "
+        "(recover with `git stash list` then `git stash pop`)."
+    )
+
+
+def switch_comfyui_version(
+    comfy_path: str,
+    version: str,
+    *,
+    stash: bool = True,
+    url: str | None = None,
+) -> VersionSwitchResult:
+    """Move an existing ComfyUI workspace to ``version``, headlessly.
+
+    ``version`` is the output of ``validate_version``: ``nightly``, ``latest``,
+    or a semver string with or without a ``v`` prefix.
+
+    The target is resolved and validated *before* the working tree is touched,
+    so an unknown version leaves the workspace exactly as it was. A dirty tree
+    is stashed by default (never auto-popped — the stash ref is reported back);
+    ``stash=False`` refuses to proceed instead.
+
+    Checking out a tag leaves a detached HEAD, which is expected; ``nightly``
+    checks out the remote's default branch and pulls, which is also how a
+    previously rolled-back (detached) workspace rolls forward again.
+
+    Installing dependencies for the new version is the caller's job — this
+    function only moves the git tree.
+
+    :raises VersionSwitchError: on any resolution, stash, or checkout failure.
+    """
+    previous = _describe_head(comfy_path)
+
+    # --- 1. Resolve + validate the target before touching anything -----------
+    target_tag: str | None = None
+    target_branch: str | None = None
+
+    if version == "nightly":
+        target_branch = _resolve_default_branch(comfy_path)
+        target_label = target_branch
+    elif version == "latest":
+        # `_resolve_latest_tag_from_local` runs its own `git fetch --tags`.
+        target_tag, fetch_ok = _resolve_latest_tag_from_local(comfy_path)
+        if target_tag is None:
+            owner, repo = _parse_github_owner_repo(url) or ("comfyanonymous", "ComfyUI")
+            try:
+                release = get_latest_release(owner, repo)
+            except GitHubRateLimitError as exc:
+                raise VersionSwitchError(
+                    code="version_switch_unknown_version",
+                    message=f"Could not resolve the latest ComfyUI release: {exc}",
+                    hint="retry later, or pin an exact version with `--version <X.Y.Z>`",
+                ) from exc
+            if release is None:
+                detail = (
+                    "no local release tags and the remote could not be reached" if not fetch_ok else "no release found"
+                )
+                raise VersionSwitchError(
+                    code="version_switch_unknown_version",
+                    message=f"Could not resolve the latest ComfyUI release ({detail}).",
+                    hint="check your network, or pin an exact version with `--version <X.Y.Z>`",
+                )
+            target_tag = str(release["tag"])
+        target_label = target_tag
+    else:
+        fetch_ok = _fetch_tags(comfy_path)
+        target_tag = version if version.startswith("v") else f"v{version}"
+        if _git_capture(comfy_path, "rev-parse", "--verify", f"refs/tags/{target_tag}").returncode != 0:
+            nearby = _nearby_version_tags(comfy_path, version)
+            available = f" Nearest available versions: {', '.join(nearby)}." if nearby else ""
+            offline = "" if fetch_ok else " (tags could not be refreshed from the remote — you may be offline)"
+            raise VersionSwitchError(
+                code="version_switch_unknown_version",
+                message=f"ComfyUI version '{version}' not found: no tag '{target_tag}' in {comfy_path}{offline}.{available}",
+                hint="run `git tag --list 'v*'` in your ComfyUI workspace to see every available version",
+            )
+        target_label = target_tag
+
+    # --- 2. Stash by default -------------------------------------------------
+    status = _git_capture(comfy_path, "status", "--porcelain")
+    if status.returncode != 0:
+        raise VersionSwitchError(
+            code="version_switch_failed",
+            message=f"Could not read the git status of {comfy_path}: {_git_error_detail(status)}",
+            hint="make sure the workspace is a healthy git repository",
+        )
+
+    stash_ref: str | None = None
+    if status.stdout.strip():
+        if not stash:
+            raise VersionSwitchError(
+                code="version_switch_dirty_tree",
+                message=f"{comfy_path} has uncommitted changes and --no-stash was passed, so nothing was changed.",
+                hint="commit or stash your changes, or re-run without --no-stash to stash them automatically",
+            )
+        stash_result = _git_capture(
+            comfy_path, "stash", "push", "-u", "-m", f"comfy-cli: before switch to {target_label}"
+        )
+        if stash_result.returncode != 0:
+            raise VersionSwitchError(
+                code="version_switch_failed",
+                message=f"Could not stash uncommitted changes in {comfy_path}: {_git_error_detail(stash_result)}",
+                hint="commit or discard your changes manually, then re-run",
+            )
+        ref_result = _git_capture(comfy_path, "rev-parse", "--short", "refs/stash")
+        stash_ref = ref_result.stdout.strip() if ref_result.returncode == 0 else None
+        stash_ref = f"stash@{{0}} ({stash_ref})" if stash_ref else "stash@{0}"
+
+    # --- 3. Checkout ---------------------------------------------------------
+    checkout_target = target_tag if target_tag is not None else target_branch
+    checkout = _git_capture(comfy_path, "checkout", checkout_target)
+    if checkout.returncode != 0:
+        raise VersionSwitchError(
+            code="version_switch_failed",
+            message=f"Failed to check out '{checkout_target}': {_git_error_detail(checkout)}.{_stash_note(stash_ref)}",
+            hint="resolve the git error in your ComfyUI workspace, then re-run",
+            stash_ref=stash_ref,
+        )
+
+    if target_branch is not None:
+        pull = _git_capture(comfy_path, "pull", timeout=300)
+        if pull.returncode != 0:
+            raise VersionSwitchError(
+                code="version_switch_failed",
+                message=f"Checked out '{target_branch}' but `git pull` failed: {_git_error_detail(pull)}. "
+                f"The workspace is on '{target_branch}' but not up to date.{_stash_note(stash_ref)}",
+                hint="fix the git error (network, conflicts) and re-run — the command is safe to repeat",
+                stash_ref=stash_ref,
+            )
+
+    return VersionSwitchResult(
+        previous=previous,
+        current=_describe_head(comfy_path),
+        stashed=stash_ref is not None,
+        stash_ref=stash_ref,
+    )
 
 
 def get_latest_release(repo_owner: str, repo_name: str) -> GithubRelease | None:

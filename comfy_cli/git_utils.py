@@ -1,4 +1,3 @@
-import os
 import subprocess
 
 from rich.console import Console
@@ -24,6 +23,40 @@ def sanitize_for_local_branch(branch_name: str) -> str:
     return sanitized or "unknown"
 
 
+def _print_git_error(
+    title: str,
+    panel_title: str,
+    context: str,
+    details: list[str],
+    exc: subprocess.CalledProcessError,
+) -> None:
+    """Render a git ``CalledProcessError`` as a rich error panel.
+
+    Shared by ``git_checkout_tag`` and ``checkout_pr`` so the two failure
+    displays stay in lock-step. ``context`` is the bold headline line, each
+    ``details`` entry is an italic follow-up line, and the command's stderr
+    (when present) is appended verbatim.
+    """
+    error_message = Text()
+    error_message.append(title, style="bold red on white")
+    error_message.append(f"\n\n{context}", style="bold yellow")
+    for detail in details:
+        error_message.append(f"\n{detail}", style="italic")
+
+    if exc.stderr:
+        error_message.append("\n\nError output:", style="bold red")
+        error_message.append(f"\n{exc.stderr}", style="italic yellow")
+
+    console.print(
+        Panel(
+            error_message,
+            title=f"[bold white on red]{panel_title}[/bold white on red]",
+            border_style="red",
+            expand=False,
+        )
+    )
+
+
 def git_checkout_tag(repo_path: str, tag: str) -> bool:
     """
     Checkout a specific Git tag in the given repository.
@@ -39,16 +72,12 @@ def git_checkout_tag(repo_path: str, tag: str) -> bool:
     :param tag: The tag to checkout
     :return: True if the checkout succeeds, False if any git command failed.
     """
-    original_dir = os.getcwd()
     try:
-        # Change to the repository directory
-
-        os.chdir(repo_path)
-
         # Skip the network fetch when the tag is already present locally.
         tag_present_locally = (
             subprocess.run(
                 ["git", "rev-parse", "--verify", f"refs/tags/{tag}"],
+                cwd=repo_path,
                 capture_output=True,
                 text=True,
                 check=False,
@@ -56,62 +85,51 @@ def git_checkout_tag(repo_path: str, tag: str) -> bool:
             == 0
         )
         if not tag_present_locally:
-            subprocess.run(["git", "fetch", "--tags"], check=True, capture_output=True, text=True)
+            subprocess.run(["git", "fetch", "--tags"], cwd=repo_path, check=True, capture_output=True, text=True)
 
         # Checkout the specified tag
-        subprocess.run(["git", "checkout", tag], check=True, capture_output=True, text=True)
+        subprocess.run(["git", "checkout", tag], cwd=repo_path, check=True, capture_output=True, text=True)
 
         console.print(f"[bold green]Successfully checked out tag: [cyan]{tag}[/cyan][/bold green]")
 
         return True
     except subprocess.CalledProcessError as e:
-        error_message = Text()
-        error_message.append("Git Checkout Error", style="bold red on white")
-        error_message.append("\n\nFailed to checkout tag: ", style="bold yellow")
-        error_message.append(f"[cyan]{tag}[/cyan]")
-        error_message.append("\n\nError details:", style="bold red")
-        error_message.append(f"\n{str(e)}", style="italic")
-
-        if e.stderr:
-            error_message.append("\n\nError output:", style="bold red")
-            error_message.append(f"\n{e.stderr}", style="italic yellow")
-
-        console.print(
-            Panel(
-                error_message,
-                title="[bold white on red]Git Checkout Failed[/bold white on red]",
-                border_style="red",
-                expand=False,
-            )
+        _print_git_error(
+            title="Git Checkout Error",
+            panel_title="Git Checkout Failed",
+            context=f"Failed to checkout tag: {tag}",
+            details=[f"Error details:\n{e}"],
+            exc=e,
         )
-
         return False
-    finally:
-        # Ensure we always return to the original directory
-        os.chdir(original_dir)
 
 
 def checkout_pr(repo_path: str, pr_info: PRInfo) -> bool:
-    original_dir = os.getcwd()
-
     try:
-        os.chdir(repo_path)
-
         if pr_info.is_fork:
             remote_name = f"pr-{pr_info.number}-{pr_info.user}"
 
-            result = subprocess.run(["git", "remote", "get-url", remote_name], capture_output=True, text=True)
+            result = subprocess.run(
+                ["git", "remote", "get-url", remote_name], cwd=repo_path, capture_output=True, text=True
+            )
 
             if result.returncode != 0:
                 subprocess.run(
                     ["git", "remote", "add", remote_name, pr_info.head_repo_url],
+                    cwd=repo_path,
                     check=True,
                     capture_output=True,
                     text=True,
                 )
 
             subprocess.run(
-                ["git", "fetch", remote_name, pr_info.head_branch], check=True, capture_output=True, text=True
+                # ``--`` guards against a fork-controlled branch name beginning with ``-`` being
+                # parsed as a git option (argument injection); ``comfy install --pr`` runs against forks.
+                ["git", "fetch", remote_name, "--", pr_info.head_branch],
+                cwd=repo_path,
+                check=True,
+                capture_output=True,
+                text=True,
             )
 
             # fix: "feature/add-support" -> "pr-123-feature-add-support"
@@ -120,19 +138,28 @@ def checkout_pr(repo_path: str, pr_info: PRInfo) -> bool:
 
             subprocess.run(
                 ["git", "checkout", "-B", local_branch, f"{remote_name}/{pr_info.head_branch}"],
+                cwd=repo_path,
                 check=True,
                 capture_output=True,
                 text=True,
             )
 
         else:
-            subprocess.run(["git", "fetch", "origin", pr_info.head_branch], check=True, capture_output=True, text=True)
+            subprocess.run(
+                # ``--`` guards against a branch name beginning with ``-`` being parsed as a git option.
+                ["git", "fetch", "origin", "--", pr_info.head_branch],
+                cwd=repo_path,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
 
             sanitized_branch = sanitize_for_local_branch(pr_info.head_branch)
             local_branch = f"pr-{pr_info.number}-{sanitized_branch}"
 
             subprocess.run(
                 ["git", "checkout", "-B", local_branch, f"origin/{pr_info.head_branch}"],
+                cwd=repo_path,
                 check=True,
                 capture_output=True,
                 text=True,
@@ -143,25 +170,11 @@ def checkout_pr(repo_path: str, pr_info: PRInfo) -> bool:
         return True
 
     except subprocess.CalledProcessError as e:
-        error_message = Text()
-        error_message.append("Git PR Checkout Error", style="bold red on white")
-        error_message.append(f"\n\nFailed to checkout PR #{pr_info.number}", style="bold yellow")
-        error_message.append(f"\nTitle: {pr_info.title}", style="italic")
-        error_message.append(f"\nBranch: {pr_info.head_branch}", style="italic")
-
-        if e.stderr:
-            error_message.append("\n\nError output:", style="bold red")
-            error_message.append(f"\n{e.stderr}", style="italic yellow")
-
-        console.print(
-            Panel(
-                error_message,
-                title="[bold white on red]PR Checkout Failed[/bold white on red]",
-                border_style="red",
-                expand=False,
-            )
+        _print_git_error(
+            title="Git PR Checkout Error",
+            panel_title="PR Checkout Failed",
+            context=f"Failed to checkout PR #{pr_info.number}",
+            details=[f"Title: {pr_info.title}", f"Branch: {pr_info.head_branch}"],
+            exc=e,
         )
         return False
-
-    finally:
-        os.chdir(original_dir)
