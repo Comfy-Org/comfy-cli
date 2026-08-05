@@ -13,7 +13,11 @@ from rich.console import Console
 
 from comfy_cli import constants, logging, tracking, ui, utils
 from comfy_cli.command.custom_nodes.bisect_custom_nodes import bisect_app
-from comfy_cli.command.custom_nodes.cm_cli_util import execute_cm_cli, find_cm_cli
+from comfy_cli.command.custom_nodes.cm_cli_util import (
+    execute_cm_cli,
+    find_cm_cli,
+    normalize_cm_cli_exit_code,
+)
 from comfy_cli.config_manager import ConfigManager
 from comfy_cli.constants import NODE_ZIP_FILENAME
 from comfy_cli.file_utils import (
@@ -675,7 +679,15 @@ def install(
         )
     except subprocess.CalledProcessError as e:
         if exit_on_fail:
-            raise typer.Exit(code=e.returncode)
+            code = normalize_cm_cli_exit_code(e.returncode)
+            get_renderer().error(
+                code="node_install_failed",
+                message=f"`cm-cli install` failed with exit code {e.returncode}.",
+                hint="see the cm-cli output above for the failing pack; re-run `comfy node install --exit-on-fail ...` to retry",
+                details={"cm_cli_returncode": e.returncode},
+                exit_code=code,
+            )
+            raise typer.Exit(code=code) from e
 
 
 @app.command(help="Reinstall custom nodes")

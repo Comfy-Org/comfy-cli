@@ -808,6 +808,15 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "`comfy feedback` was run in JSON/non-interactive mode without an inline message.",
         'comfy feedback "your feedback here"',
     ),
+    # --- custom node install (`comfy node install`) ---------------------------
+    ErrorCode(
+        "node_install_failed",
+        "`comfy node install --exit-on-fail` ran `cm-cli install` and it exited non-zero. "
+        "`details.cm_cli_returncode` carries cm-cli's raw status (the process exit code is "
+        "normalized — signals become 128+N, and 2 becomes 1 so it can't be confused with a "
+        "CLI usage error).",
+        "read the cm-cli output above for the failing pack, then re-run `comfy node install --exit-on-fail`",
+    ),
     # --- custom node dependency report (`comfy node deps`) --------------------
     ErrorCode(
         "installed_versions_unavailable",

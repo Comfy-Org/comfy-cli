@@ -145,6 +145,35 @@ def test_install_exit_on_fail_reraises_and_propagates_code():
         assert args[0][0] == "install" and "--exit-on-fail" in args[0] and "bad-node" in args[0]
 
 
+def test_install_exit_on_fail_signal_death_becomes_shell_convention_code():
+    """`Popen.wait()` returns -9 when the OOM killer reaps cm-cli mid dependency
+    build. Exiting with that raw value would truncate to a fabricated 247, so map
+    it to the shell's 128+N convention."""
+    with patch("comfy_cli.command.custom_nodes.command.execute_cm_cli") as mock_execute:
+        mock_execute.side_effect = subprocess.CalledProcessError(-9, "cm-cli")
+        result = runner.invoke(app, ["install", "bad-node", "--exit-on-fail"])
+        assert result.exit_code == 137
+
+
+def test_install_exit_on_fail_code_that_would_truncate_to_zero_stays_nonzero():
+    """Windows can return codes above 255; a multiple of 256 would otherwise
+    truncate to 0 and report a failed install as a success."""
+    with patch("comfy_cli.command.custom_nodes.command.execute_cm_cli") as mock_execute:
+        mock_execute.side_effect = subprocess.CalledProcessError(256, "cm-cli")
+        result = runner.invoke(app, ["install", "bad-node", "--exit-on-fail"])
+        assert result.exit_code == 1
+
+
+def test_install_exit_on_fail_code_2_does_not_masquerade_as_usage_error():
+    """Click reserves exit code 2 for its own usage errors, so a cm-cli exit 2 is
+    remapped rather than letting a wrapper confuse "you invoked comfy wrong" with
+    "cm-cli exited 2"."""
+    with patch("comfy_cli.command.custom_nodes.command.execute_cm_cli") as mock_execute:
+        mock_execute.side_effect = subprocess.CalledProcessError(2, "cm-cli")
+        result = runner.invoke(app, ["install", "bad-node", "--exit-on-fail"])
+        assert result.exit_code == 1
+
+
 def test_save_snapshot_no_output():
     with patch("comfy_cli.command.custom_nodes.command.execute_cm_cli") as mock_execute:
         result = runner.invoke(app, ["save-snapshot"])
