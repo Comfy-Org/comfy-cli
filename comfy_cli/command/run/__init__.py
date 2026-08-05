@@ -389,6 +389,29 @@ def execute(
             # the only place the in-flight prompt_id survives. Status is
             # "running" rather than "queued": this foreground process is
             # actively watching it, not leaving it detached in the queue.
+            #
+            # DOCUMENTED LIMIT — `--wait` spawns no background watcher, by
+            # design; this process *is* the watcher. Every ordinary outcome is
+            # still recorded, because the handlers below run: a node failure and
+            # a cancel via `_mark_watch_exit`/`_mark_cancelled`, and a server
+            # that dies mid-run via the `server_died` write in the
+            # WebSocketException/OSError handler. What is NOT covered is this
+            # process being killed from OUTSIDE (a caller-imposed timeout
+            # SIGKILLing the process group, the terminal going away): no handler
+            # runs, the record stays at the submit-time `running`, and since no
+            # `watcher_pid` is recorded, `jobs ls`'s stale-watcher reap — which
+            # only fires on a recorded *and* dead pid — won't finalize it
+            # either. `comfy jobs status` still names the job and its
+            # last-known status, so attribution is degraded rather than lost;
+            # callers that expect to outlive their patience should submit
+            # WITHOUT `--wait`, whose detached watcher gets its own session and
+            # survives the parent. Spawning one here too was considered and
+            # rejected: it would put a second, independent writer on the state
+            # file this branch already finalizes, add a second server
+            # connection per foreground run, and leave a background process
+            # behind after a synchronous command returns. See
+            # docs/json-output.md, "Known limit: `--wait` has no background
+            # watcher".
             wait_state = jobs_state.new(
                 prompt_id=execution.prompt_id,
                 client_id=execution.client_id,
@@ -531,6 +554,12 @@ def execute(
             )
         # The job may genuinely still be running server-side, so the
         # submit-time "running" record is left as-is — not marked terminal.
+        # Consequence of the no-watcher limit documented at the submit-time
+        # write above: nothing is left watching the prompt after this returns,
+        # so if the server dies later no `server_died` is ever written. The
+        # record stays `running` until the caller asks
+        # `comfy jobs status <prompt_id>`, which infers the death from a
+        # server that is down (or came back with no record of the prompt).
         details = {"timeout": timeout}
         prompt_id = _submitted_prompt_id(execution)
         if prompt_id is not None:

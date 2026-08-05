@@ -309,6 +309,38 @@ Without `--wait` (the default), the stream ends at the `queued` envelope
 watcher keeps the state file updated; follow up with
 `comfy jobs watch <prompt_id>` or `comfy jobs status <prompt_id>`.
 
+### Known limit: `--wait` has no background watcher
+
+`--wait` writes the job's state file at submit and finalizes it in the
+foreground — it does **not** spawn the detached watcher the async path does
+(`data.watcher_spawned` is an async-path field only). Every ordinary outcome is
+still recorded: a node failure, a cancel, and a lost connection to a dying
+server all run through the foreground handlers, which write `error.code`
+(the classified execution verdict or `execution_error`; `cancelled`;
+`server_died`) before exiting.
+
+The gap is a `--wait` process that is **killed from outside** — a caller-imposed
+timeout (`SIGKILL`/`SIGTERM` on the process group), a terminal going away, the
+OS reaping the CLI alongside the server. No handler runs, so the state file is
+left at its submit-time `running`, and because `--wait` records no
+`watcher_pid`, `jobs ls`'s stale-watcher reap — which only fires on a recorded
+*and* dead pid — will not finalize it either. If the server then dies, nothing
+writes `server_died`.
+
+Attribution is degraded there, not lost: `comfy jobs status <prompt_id>` still
+names the job, its last-known status, and its workflow via `server_not_running`
+/ `prompt_not_found`. **For runs that may outlive the caller's patience, submit
+without `--wait`** — the async path spawns a watcher that survives the parent
+(its own session/process group), and it is the watcher that writes `server_died`
+when the server disappears mid-job. `comfy jobs ls` then reports both the status
+and the `error_code`.
+
+A watcher is deliberately *not* spawned on `--wait`: it would put a second,
+independent writer on the state file the foreground already finalizes, add a
+second server connection per foreground run, and leave a background process
+behind after a synchronous command returns — a real regression on the common
+path in exchange for a case the async path already covers.
+
 ## `comfy validate --json` envelope
 
 `comfy validate --workflow <file> --json` checks a workflow without submitting
