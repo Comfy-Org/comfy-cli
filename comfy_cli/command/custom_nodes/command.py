@@ -702,14 +702,20 @@ def install(
                 f"dependency installation after `cm-cli install` failed with exit code {raw} "
                 "(the packs installed; their dependencies did not)."
             )
-            hint = "see the pip/uv output above for the failing dependency; re-run `comfy node install --fast-deps --exit-on-fail ...` to retry"
+            hint = (
+                "see the pip/uv output above for the failing dependency; "
+                "re-run `comfy node install --fast-deps --exit-on-fail ...` to retry"
+            )
             details = {"returncode": raw, "failed_stage": "dependency-install"}
         else:
             if raw < 0:
                 message = f"`cm-cli install` was killed by signal {-raw}."
             else:
                 message = f"`cm-cli install` failed with exit code {raw}."
-            hint = "see the cm-cli output above for the failing pack; re-run `comfy node install --exit-on-fail ...` to retry"
+            hint = (
+                "see the cm-cli output above for the failing pack; "
+                "re-run `comfy node install --exit-on-fail ...` to retry"
+            )
             details = {"cm_cli_returncode": raw, "failed_stage": "cm-cli"}
         renderer.error(
             code="node_install_failed",

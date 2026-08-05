@@ -225,6 +225,9 @@ def test_install_exit_on_fail_json_stdout_carries_only_the_envelope(_reset_rende
 
     def _stream_then_fail(args, **kwargs):
         sys.stdout.write("raw cm-cli progress line\n")
+        # click's CliRunner only flushes stdout at invoke exit, so the redirected
+        # stderr wrapper would otherwise hold this line in its buffer forever.
+        sys.stdout.flush()
         raise subprocess.CalledProcessError(7, ["python", "-m", "cm_cli", "install"])
 
     with patch("comfy_cli.command.custom_nodes.command.execute_cm_cli", side_effect=_stream_then_fail):
@@ -232,6 +235,7 @@ def test_install_exit_on_fail_json_stdout_carries_only_the_envelope(_reset_rende
 
     assert result.exit_code == 7
     envelope = json.loads(result.stdout.strip())
+    assert "raw cm-cli progress line\n" in result.stderr
     assert envelope["ok"] is False
     assert envelope["command"] == "node install"
     assert envelope["error"]["code"] == "node_install_failed"
