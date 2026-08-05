@@ -145,6 +145,11 @@ def resolve_host_port(host: str | None, port: int | None) -> tuple[str, int]:
     An explicitly-passed ``host``/``port`` is validated *before* the precedence
     chain runs, because that chain treats every falsy value as "not passed" and
     would otherwise swallow the bad input and resolve to a different server.
+    This function owns the range check for the separate ``--port`` flag on
+    behalf of every caller (``run``, ``templates run``, ``jobs``, ``validate``,
+    ``nodes``), so call sites must not re-implement it — they only need to keep
+    an explicit ``--port`` distinguishable from an absent one (``port is None``,
+    never ``not port``) so a ``--port 0`` reaches this guard.
     """
     from comfy_cli.env_checker import _bracket_host
     from comfy_cli.local_address import resolve_local_host_port

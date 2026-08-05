@@ -1003,7 +1003,11 @@ def run(
 
         if host:
             host, parsed_port = parse_host_port_arg(host)
-            if not port and parsed_port is not None:
+            # ``port is None``, not ``not port``: a typed ``--port`` always wins
+            # over one embedded in ``--host h:p``, including ``--port 0``, which
+            # ``resolve_host_port`` then rejects as out of range instead of
+            # silently running against the embedded port.
+            if port is None and parsed_port is not None:
                 port = parsed_port
 
         host, port = resolve_host_port(host, port)
