@@ -2064,10 +2064,21 @@ def _cloud_status_snapshot(prompt_id: str) -> dict | None:
     if status is None:
         return None
     raw = (status.get("status") or "").lower()
-    # Shared with `jobs ls` (and the watcher) so the same cloud job can't be
-    # `cancelled` in one command and `canceled` in another — the latter isn't
-    # in the published `status` enum this file's schema declares.
-    state = _CLOUD_ROW_STATUS_MAP.get(raw, raw or "pending")
+    # Deliberately NOT _CLOUD_ROW_STATUS_MAP: this map lacks cloud's two cancel
+    # spellings, so a cancelled cloud job snapshots as the raw `canceled` — not
+    # in the published `status` enum, not in `_cloud_watch`'s terminal set (so
+    # `jobs watch --where cloud` spins to `cloud_timeout`), and not in
+    # `_TERMINAL_VERDICT` (so `jobs status` reports it ok:true/exit 0 instead of
+    # the documented 130). Real bugs, but adding the aliases here changes an
+    # exit code on a path this PR does not otherwise touch — see BE-6612.
+    state = {
+        "success": "completed",
+        "completed": "completed",
+        "failed": "error",
+        "error": "error",
+        "non_retryable_error": "error",
+        "lost": "error",
+    }.get(raw, raw or "pending")
 
     outputs: list[str] = []
     outputs_by_node: dict[str, list[str]] = {}
