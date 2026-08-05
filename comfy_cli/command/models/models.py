@@ -791,8 +791,18 @@ def _submit_background_download(
     # competitor that also claimed `dest`; `_claim_order` picks the same winner
     # from both sides, and the loser withdraws its claim before any bytes move.
     #
-    # This closes the background-vs-background race the guard documents. It cannot
-    # close one against a foreground transfer, which never writes a claim.
+    # This *narrows* the background-vs-background race; it does not close it. A
+    # re-scan cannot see a claim that has not been written yet, and nothing orders
+    # a competitor's `write` before our scan — so a competitor whose record lands
+    # after we look is still missed and both submissions proceed (reproduced at 12
+    # simultaneous submits; 4 and 8 came out clean). What changed is the width of
+    # the window: from `[pre-flight scan -> write]`, which spans the `--background`
+    # split and an HF round trip, down to `[write -> re-scan]`. Closing it needs an
+    # atomic claim — an `O_EXCL` sibling or an `flock` — which is a design call
+    # this guard does not make.
+    #
+    # It does nothing at all against a foreground transfer, which never writes a
+    # claim.
     competitor = _active_download_for(dest, exclude_id=state.id)
     if competitor is not None and _claim_order(competitor) < _claim_order(state):
         with contextlib.suppress(OSError):
@@ -1029,6 +1039,11 @@ def _claim_order(state: download_state.DownloadState) -> tuple[str, str]:
     ``started_at`` is second-resolution so ties are common; ``id`` (12 random hex
     chars) breaks them, and because both racers compute the same order over the
     same two records they always agree on who won.
+
+    Agreeing on the winner requires both records to be *visible* to both racers,
+    which the re-scan in :func:`_submit_background_download` cannot guarantee — a
+    racer that scans before the other's record lands sees no competitor at all, so
+    this order is never consulted and both proceed. See that call site.
     """
     return (state.started_at or "", state.id)
 

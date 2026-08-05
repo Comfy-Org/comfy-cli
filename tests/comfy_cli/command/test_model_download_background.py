@@ -791,6 +791,12 @@ class TestSubmitRefusesAClaimedDestination:
         it, both stream a full copy, and the later `os.replace` can silently
         overwrite the earlier. The record each one writes is its claim; the
         re-scan after that write is what turns two winners into one.
+
+        Scope: this plants the competitor's claim *before* the re-scan, so the
+        re-scan can see it. The interleaving where a competitor's write lands
+        after our scan is not covered here because it is not covered by the code
+        either — see `_submit_background_download`, which narrows that race
+        rather than closing it.
         """
         dest = self._dest(workspace)
         competitor = _state(dest=str(dest), status="downloading", pid=1234)
