@@ -999,6 +999,199 @@ class TestValidateServerParity:
         assert [e for e in result["errors"] if e.get("node_id") == "_meta"] == []
 
 
+class TestValidateEmptyCombo:
+    """A COMBO whose option list is declared but EMPTY means the server has zero
+    files installed for that field — it rejects every value against it — so it
+    must be reported, not skipped (BE-6585).
+
+    Before this, the membership check was gated on ``self.enum_values`` being
+    truthy, so detection got *worse* the emptier the install: ``VAELoader``
+    ships one built-in option and its missing model was caught, while
+    ``UNETLoader``/``CLIPLoader`` (no built-ins, and the two largest downloads)
+    were silent on a fresh install — the exact user this check exists to serve.
+    """
+
+    def _object_info(self, **extra) -> dict[str, Any]:
+        oi = {
+            "UNETLoader": {
+                # Bare install: `folder_paths.get_filename_list("diffusion_models")`
+                # is empty and the node ships no built-in option.
+                "input": {"required": {"unet_name": [[]], "weight_dtype": [["default", "fp8_e4m3fn"]]}},
+                "input_order": {"required": ["unet_name", "weight_dtype"]},
+                "output": ["MODEL"],
+                "output_name": ["MODEL"],
+                "python_module": "nodes",
+            },
+            "VAELoader": {
+                # One built-in option (`pixel_space`) — the loader that was
+                # already caught, kept here as the contrast case.
+                "input": {"required": {"vae_name": [["pixel_space"]]}},
+                "input_order": {"required": ["vae_name"]},
+                "output": ["VAE"],
+                "output_name": ["VAE"],
+                "python_module": "nodes",
+            },
+            "SaveImage": {
+                "input": {"required": {"images": "IMAGE"}},
+                "output": [],
+                "output_name": [],
+                "output_node": True,
+                "python_module": "nodes",
+            },
+        }
+        oi.update(extra)
+        return oi
+
+    def _graph(self, **extra) -> Graph:
+        return Graph.from_object_info(self._object_info(**extra))
+
+    def test_empty_combo_flags_the_missing_model(self):
+        """The regression: a value against a zero-option loader is an error, not
+        silence."""
+        g = self._graph()
+        result = g.validate_workflow(
+            {
+                "1": {
+                    "class_type": "UNETLoader",
+                    "inputs": {"unet_name": "flux1-dev.safetensors", "weight_dtype": "default"},
+                },
+                "2": {"class_type": "SaveImage", "inputs": {"images": ["1", 0]}},
+            }
+        )
+        assert result["valid"] is False
+        errs = [e for e in result["errors"] if e["code"] == "no_options_available"]
+        assert len(errs) == 1
+        assert errs[0]["field"] == "unet_name"
+        assert errs[0]["node_id"] == "1"
+        assert "flux1-dev.safetensors" in errs[0]["message"]
+        assert errs[0]["valid_options"] == []
+        assert "UNETLoader" in errs[0]["hint"]
+
+    def test_populated_and_empty_loaders_are_both_reported(self):
+        """The ticket's count bug: with one loader populated and one empty, only
+        the populated one used to be reported. Both are now."""
+        g = self._graph()
+        result = g.validate_workflow(
+            {
+                "1": {
+                    "class_type": "UNETLoader",
+                    "inputs": {"unet_name": "flux1-dev.safetensors", "weight_dtype": "default"},
+                },
+                "2": {"class_type": "VAELoader", "inputs": {"vae_name": "ae.safetensors"}},
+                "3": {"class_type": "SaveImage", "inputs": {"images": ["1", 0]}},
+            }
+        )
+        codes = {(e["field"], e["code"]) for e in result["errors"]}
+        assert ("unet_name", "no_options_available") in codes
+        assert ("vae_name", "unknown_enum_value") in codes
+
+    def test_same_loader_with_one_option_installed_flags_membership(self):
+        """The ticket's counter-experiment, at the unit level: drop one file into
+        the folder and the SAME missing model is caught by the membership check.
+        Proves the mechanism was the empty list, not the loader."""
+        oi = self._object_info()
+        oi["UNETLoader"]["input"]["required"]["unet_name"] = [["some-other-model.safetensors"]]
+        g = Graph.from_object_info(oi)
+        result = g.validate_workflow(
+            {
+                "1": {
+                    "class_type": "UNETLoader",
+                    "inputs": {"unet_name": "flux1-dev.safetensors", "weight_dtype": "default"},
+                },
+                "2": {"class_type": "SaveImage", "inputs": {"images": ["1", 0]}},
+            }
+        )
+        errs = [e for e in result["errors"] if e["field"] == "unet_name"]
+        assert len(errs) == 1
+        assert errs[0]["code"] == "unknown_enum_value"
+
+    def test_installed_value_on_populated_loader_still_passes(self):
+        """No false positive on the field that IS populated."""
+        g = self._graph()
+        result = g.validate_workflow(
+            {
+                "1": {"class_type": "VAELoader", "inputs": {"vae_name": "pixel_space"}},
+                "2": {"class_type": "SaveImage", "inputs": {"images": ["1", 0]}},
+            }
+        )
+        assert result["valid"] is True, result["errors"]
+
+    def test_dict_form_empty_options_is_flagged(self):
+        """The partner-node dialect (``["COMBO", {"options": [...]}]``) declares
+        its choices in the options dict — an empty list there is the same
+        statement as an empty list-form combo."""
+        g = self._graph(
+            PartnerNode={
+                "input": {"required": {"model_name": ["COMBO", {"options": []}]}},
+                "output": ["MODEL"],
+                "output_name": ["MODEL"],
+                "python_module": "nodes",
+            }
+        )
+        result = g.validate_workflow(
+            {
+                "1": {"class_type": "PartnerNode", "inputs": {"model_name": "seedream-5"}},
+                "2": {"class_type": "SaveImage", "inputs": {"images": ["1", 0]}},
+            }
+        )
+        errs = [e for e in result["errors"] if e["code"] == "no_options_available"]
+        assert [e["field"] for e in errs] == ["model_name"]
+
+    def test_remote_combo_stays_unconstrained(self):
+        """A combo whose options the frontend fetches at runtime ships NO
+        ``options`` key (``prune_dict`` drops it). That is "unknown", not "zero
+        installed" — validating against it would false-positive on every
+        remote-backed field, so it stays silent."""
+        g = self._graph(
+            RemoteNode={
+                "input": {"required": {"model": ["COMBO", {"remote": {"route": "/api/models"}}]}},
+                "output": ["MODEL"],
+                "output_name": ["MODEL"],
+                "python_module": "nodes",
+            }
+        )
+        port = next(p for p in g.node("RemoteNode").inputs if p.name == "model")
+        assert port.enum_declared is False
+        result = g.validate_workflow(
+            {
+                "1": {"class_type": "RemoteNode", "inputs": {"model": "whatever-the-route-returns"}},
+                "2": {"class_type": "SaveImage", "inputs": {"images": ["1", 0]}},
+            }
+        )
+        assert result["valid"] is True, result["errors"]
+
+    def test_empty_combo_is_still_a_widget_not_a_link(self):
+        """``enum_declared`` is deliberately separate from ``is_enum`` so the
+        empty case cannot move a port between widget and link wiring."""
+        g = self._graph(
+            PartnerNode={
+                "input": {"required": {"model_name": ["COMBO", {"options": []}]}},
+                "output": ["MODEL"],
+                "output_name": ["MODEL"],
+                "python_module": "nodes",
+            }
+        )
+        list_form = next(p for p in g.node("UNETLoader").inputs if p.name == "unet_name")
+        dict_form = next(p for p in g.node("PartnerNode").inputs if p.name == "model_name")
+        assert (list_form.is_link, list_form.enum_declared, list_form.enum_values) == (False, True, [])
+        assert (dict_form.is_link, dict_form.enum_declared, dict_form.enum_values) == (False, True, [])
+
+    def test_absent_input_is_not_reported_as_unavailable(self):
+        """The check only fires on a value the workflow actually supplies — an
+        input that is missing entirely stays the existing required_input_missing
+        error, so the two never double-report the same field."""
+        g = self._graph()
+        result = g.validate_workflow(
+            {
+                "1": {"class_type": "UNETLoader", "inputs": {"weight_dtype": "default"}},
+                "2": {"class_type": "SaveImage", "inputs": {"images": ["1", 0]}},
+            }
+        )
+        by_field = {(e["field"], e["code"]) for e in result["errors"]}
+        assert ("unet_name", "required_input_missing") in by_field
+        assert ("unet_name", "no_options_available") not in by_field
+
+
 class TestValidateDynamicCombo:
     """Validate expands a ``COMFY_DYNAMICCOMBO_V3`` selector's chosen option and
     checks the dotted sub-inputs the server will actually require (BE-3777).

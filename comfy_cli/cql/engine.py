@@ -49,6 +49,13 @@ class Port:
     required: bool = False
     is_link: bool = False
     enum_values: list[Any] = field(default_factory=list)  # preserves the option's real type (int combos stay int)
+    # True when object_info shipped an explicit choice list for this input —
+    # *including an empty one*. An empty declared list means "the server has
+    # zero options here" (a model folder with no files installed), which is a
+    # different statement from "the choices aren't in object_info at all"
+    # (remote/dynamic combos, whose options the frontend fetches at runtime).
+    # Only the former is safe to validate against.
+    enum_declared: bool = False
     options: PortOptions = field(default_factory=PortOptions)
     # The verbatim ``INPUT_TYPES`` spec this port was parsed from. Retained
     # (by reference — no copy) because a dynamic combo's sub-input schema lives
@@ -132,6 +139,26 @@ class Port:
                         "valid_options": list(self.enum_values),
                     }
                 )
+        elif self.type == "COMBO" and self.enum_declared:
+            # The server declared this field's choices and shipped NONE of them:
+            # the folder backing it is empty — no models (or inputs) installed.
+            # An empty option list is STRONGER evidence the value is unavailable
+            # than a populated one, not weaker: the server rejects every value
+            # against an empty list (`execution.validate_inputs` →
+            # "Value not in list"), so skipping the check here just defers the
+            # failure to run time — and it fails hardest on the fresh install
+            # this check exists to serve, where the big downloads (UNETLoader,
+            # CLIPLoader) have no built-in options to compare against.
+            # Ports whose options are not in object_info at all keep
+            # `enum_declared=False` and stay unconstrained (see the field).
+            warnings.append(
+                {
+                    "code": "no_options_available",
+                    "field": self.name,
+                    "message": f"{value!r} is unavailable: the server reports 0 installed options for {self.name}",
+                    "valid_options": [],
+                }
+            )
         if self.type in ("INT", "FLOAT", "NUMBER") and isinstance(value, int | float):
             if self.options.min is not None and value < self.options.min:
                 warnings.append(
@@ -258,13 +285,21 @@ def _control_after_generate_set(val: Any) -> bool:
     return True
 
 
-def _parse_input_spec(spec: Any) -> tuple[str, bool, list[Any], PortOptions]:
-    """Returns (type_id, is_enum, enum_values, options)."""
+def _parse_input_spec(spec: Any) -> tuple[str, bool, list[Any], PortOptions, bool]:
+    """Returns (type_id, is_enum, enum_values, options, enum_declared).
+
+    ``enum_declared`` is True when the spec shipped an explicit choice list —
+    *including an empty one* — so validation can tell "this server has zero
+    options for the field" from "this field's options aren't in object_info".
+    It is deliberately separate from ``is_enum`` (which stays truthiness-based)
+    because ``is_enum`` also decides link-vs-widget, and an empty option list
+    must not move a port between those.
+    """
     if isinstance(spec, str):
-        return spec, False, [], PortOptions()
+        return spec, False, [], PortOptions(), False
 
     if not isinstance(spec, list) or len(spec) == 0:
-        return "UNKNOWN", False, [], PortOptions()
+        return "UNKNOWN", False, [], PortOptions(), False
 
     opts_raw = spec[1] if len(spec) > 1 and isinstance(spec[1], dict) else {}
     port_opts = _parse_port_options(opts_raw)
@@ -278,18 +313,26 @@ def _parse_input_spec(spec: Any) -> tuple[str, bool, list[Any], PortOptions]:
         # enum-check them — exactly the partner nodes (ByteDance, BFL, …)
         # where the choices array is the precision check.
         options = opts_raw.get("options")
-        if isinstance(options, list) and options and all(_is_scalar_choice(v) for v in options):
+        if isinstance(options, list) and all(_is_scalar_choice(v) for v in options):
             # Keep each option's real type: an int-valued combo (Sora-2/LTXV
             # `duration`) must stay [4, 8, 12], not ["4","8","12"], so `nodes
             # show` is truthful and agents pass the type the cloud accepts.
-            return first, True, list(options), port_opts
-        return first, False, [], port_opts
+            # An EMPTY list is a declared-but-unpopulated combo — still not an
+            # enum for wiring purposes (`is_enum` stays False, exactly as
+            # before), but flagged as declared so validate can say "0 options
+            # installed" instead of silently skipping the check.
+            return first, bool(options), list(options), port_opts, True
+        # No usable `options` key at all: a remote/dynamic combo whose choices
+        # the frontend fetches at runtime. Unknowable here — stay unconstrained.
+        return first, False, [], port_opts, False
 
     if isinstance(first, list):
-        # Same: preserve the option types for the classic list-form combo.
-        return "COMBO", True, list(first), port_opts
+        # Same: preserve the option types for the classic list-form combo. The
+        # list IS the declaration, so an empty one (a model folder with nothing
+        # installed) is declared-but-empty, not unconstrained.
+        return "COMBO", True, list(first), port_opts, True
 
-    return "UNKNOWN", False, [], port_opts
+    return "UNKNOWN", False, [], port_opts, False
 
 
 def _is_scalar_choice(v: Any) -> bool:
@@ -317,7 +360,7 @@ def _parse_inputs(raw: dict, order: list[str] | None, required: bool) -> list[Po
     ports: list[Port] = []
     for name in _ordered_names(raw, order):
         spec = raw[name]
-        type_id, is_enum, enum_values, opts = _parse_input_spec(spec)
+        type_id, is_enum, enum_values, opts, enum_declared = _parse_input_spec(spec)
         ports.append(
             Port(
                 name=name,
@@ -325,6 +368,7 @@ def _parse_inputs(raw: dict, order: list[str] | None, required: bool) -> list[Po
                 required=required,
                 is_link=_is_link(type_id, is_enum, opts.force_input),
                 enum_values=enum_values,
+                enum_declared=enum_declared,
                 options=opts,
                 raw_spec=spec,
             )
@@ -1077,6 +1121,30 @@ def _validate_catalog_value(
                     "valid_options": list(port.enum_values),
                 }
             )
+        elif w["code"] == "no_options_available":
+            # Declared-but-empty option list: the server has nothing installed
+            # for this field, so it rejects EVERY value (value_not_in_list
+            # against an empty list — execution.py:1035-1067). Same hard-error
+            # tier as unknown_enum_value, and for the same reason; the only
+            # difference is that there is no option to suggest. This is the
+            # fresh-install case the membership check used to skip in silence:
+            # UNETLoader/CLIPLoader ship no built-in options, so on a bare
+            # install the two largest missing downloads went unreported while a
+            # half-populated install got warned.
+            errors.append(
+                {
+                    "node_id": node_id,
+                    "field": input_name,
+                    "code": "no_options_available",
+                    "message": w["message"],
+                    "hint": (
+                        f"the server has no files installed for {input_name!r} on {class_type} — "
+                        f"install it (e.g. `comfy model download`) or point this input at an installed file"
+                    ),
+                    "suggestions": [],
+                    "valid_options": [],
+                }
+            )
         elif w["code"] in ("below_min", "above_max"):
             # The server hard-rejects out-of-range values
             # (value_smaller_than_min / value_bigger_than_max, execution.py:1008-1033),
@@ -1311,13 +1379,14 @@ def _check_dynamic_combo_sub(
     same ``_parse_input_spec`` / :class:`Port` machinery as a top-level input and
     inherits identical shape and enum/range semantics.
     """
-    type_id, is_enum, enum_values, opts = _parse_input_spec(sub_spec)
+    type_id, is_enum, enum_values, opts, enum_declared = _parse_input_spec(sub_spec)
     port = Port(
         name=dotted,
         type=type_id,
         required=sub_required,
         is_link=_is_link(type_id, is_enum, opts.force_input),
         enum_values=enum_values,
+        enum_declared=enum_declared,
         options=opts,
         raw_spec=sub_spec,
     )
