@@ -48,8 +48,9 @@ from comfy_cli.config_manager import ConfigManager
 from comfy_cli.constants import GPU_OPTION, CUDAVersion, ROCmVersion
 from comfy_cli.cuda_detect import DEFAULT_CUDA_TAG, detect_cuda_driver_version, resolve_cuda_wheel
 from comfy_cli.discovery import build_discovery
-from comfy_cli.env_checker import EnvChecker
+from comfy_cli.env_checker import EnvChecker, _bracket_host, _unbracket_host
 from comfy_cli.help_json import build_help_json
+from comfy_cli.host_port import validate_host
 from comfy_cli.output import Renderer, get_renderer, rprint, set_renderer
 from comfy_cli.resolve_python import resolve_workspace_python
 from comfy_cli.skills import command as skill_command
@@ -153,7 +154,17 @@ def _maybe_nudge_setup(ctx: typer.Context, renderer) -> None:
         pass
 
 
-@app.callback(invoke_without_command=True)
+@app.callback(
+    invoke_without_command=True,
+    epilog=(
+        "Cloud quickstart (no local GPU required):\n\n"
+        "comfy cloud login  →  comfy run --workflow wf.json --where cloud  "
+        "(prints a prompt_id)  →  comfy jobs wait <prompt_id> --where cloud  →  "
+        "comfy download <prompt_id> --where cloud\n\n"
+        "Cloud generation consumes Comfy Cloud credits (needs an active subscription); "
+        "discovery commands (jobs status, templates ls, generate list) don't. See the README."
+    ),
+)
 def entry(
     ctx: typer.Context,
     workspace: Annotated[
@@ -351,13 +362,6 @@ def entry(
             )
         ctx.exit()
 
-    # TODO: Move this to proper place
-    # start_time = time.time()
-    # workspace_manager.scan_dir()
-    # end_time = time.time()
-    #
-    # logging.info(f"scan_dir took {end_time - start_time:.2f} seconds to run")
-
 
 def validate_commit_and_version(commit: str | None, ctx: typer.Context) -> str | None:
     """
@@ -551,7 +555,10 @@ def install(
         return None
 
     if nvidia and platform == constants.OS.MACOS:
-        rprint("[bold red]--nvidia is not available on macOS. Use --m-series (Apple Silicon) or --cpu.[/bold red]")
+        rprint(
+            "[bold red]--nvidia was passed but this is macOS, which has no NVIDIA GPU. "
+            "Re-run with --m-series (Apple silicon) or --cpu, or omit the GPU flag to select interactively.[/bold red]"
+        )
         raise typer.Exit(code=1)
 
     if m_series and platform != constants.OS.MACOS:
@@ -787,8 +794,9 @@ def run(
             help=(
                 "Positive text prompt for the bundled default text2img workflow "
                 "(used when --workflow is omitted). Cannot be combined with --workflow. "
-                "The bundled graph loads an SD1.5 checkpoint (v1-5-pruned-emaonly.ckpt) "
-                "that is NOT downloaded for you — install it, or point elsewhere with "
+                "The bundled graph prefers an SD1.5 checkpoint "
+                "(v1-5-pruned-emaonly-fp16.safetensors); if the target doesn't have it, "
+                "an installed checkpoint is substituted and reported. Pin your own with "
                 "--set checkpoint=<name>."
             ),
         ),
@@ -944,7 +952,7 @@ def run(
         # against OUR pinned node ids, so mixing them with a user --workflow —
         # whose node ids are arbitrary — is rejected rather than silently
         # misapplied. `preloaded` is handed straight to run's execute path.
-        preloaded: tuple[dict, str, bool] | None = None
+        preloaded: tuple[dict, str, bool, bool] | None = None
         if prompt is not None or set_overrides:
             if workflow is not None:
                 renderer.error(
@@ -956,7 +964,7 @@ def run(
             from comfy_cli.cql.default_workflow import (
                 PromptInjectionError,
                 build_default_workflow,
-                default_checkpoint,
+                overrides_set_checkpoint,
             )
 
             try:
@@ -964,29 +972,10 @@ def run(
             except PromptInjectionError as e:
                 renderer.error(code=e.code, message=str(e), hint=e.hint)
                 raise typer.Exit(code=1) from e
-            preloaded = (injected, "default_text2img", False)
-            # The bundled graph pins an SD1.5 checkpoint that comfy-cli neither
-            # ships nor auto-downloads. Without it the run dies server-side on a
-            # bare validation error, so state the dependency up front. Pretty
-            # output only — the JSON dialects carry a fixed event contract.
-            ckpt = default_checkpoint(injected)
-            if ckpt and renderer.is_pretty():
-                from rich.markup import escape as _escape
-
-                # The checkpoint has to exist wherever the run is routed, so
-                # name that environment: pointing a `--where cloud` run at the
-                # local models/checkpoints sends the user to fix the wrong box.
-                if decision.target is where_module.WhereTarget.CLOUD:
-                    where_ckpt = "in your cloud assets (`comfy models search --where cloud`)"
-                else:
-                    where_ckpt = "in models/checkpoints"
-                # `--set checkpoint=…` puts a user string here; escape it so a
-                # value containing [brackets] can't be read as rich markup.
-                rprint(
-                    f"[dim]Using the bundled default text2img workflow — it needs the[/dim] "
-                    f"[bold]{_escape(ckpt)}[/bold] [dim]checkpoint {where_ckpt}. "
-                    f"Override it with --set checkpoint=<name>.[/dim]"
-                )
+            # If the user pinned the checkpoint (--set checkpoint=… / 4.ckpt_name=…),
+            # honor it verbatim: runtime resolution is skipped downstream.
+            checkpoint_user_set = overrides_set_checkpoint(set_overrides, injected)
+            preloaded = (injected, "default_text2img", False, checkpoint_user_set)
         elif workflow is None:
             renderer.error(
                 code="prompt_rejected",
@@ -1070,11 +1059,15 @@ def validate(
     ] = None,
     host: Annotated[
         str | None,
-        typer.Option(show_default=False, help="ComfyUI host (default 127.0.0.1)."),
+        typer.Option(
+            show_default=False, help="ComfyUI host (defaults to COMFY_LOCAL_URL, the background server, or 127.0.0.1)."
+        ),
     ] = None,
     port: Annotated[
         int | None,
-        typer.Option(show_default=False, help="ComfyUI port (default 8188)."),
+        typer.Option(
+            show_default=False, help="ComfyUI port (defaults to COMFY_LOCAL_URL, the background server, or 8188)."
+        ),
     ] = None,
     input_path: Annotated[
         str | None,
@@ -1106,17 +1099,38 @@ def validate(
         )
         raise typer.Exit(code=1)
 
-    # Load graph
-    mode = "local"
-    if where:
-        mode = where
-    else:
-        config = ConfigManager()
-        try:
-            decision = where_module.resolve(flag=None, config_value=config.get(where_module.CONFIG_KEY_WHERE_DEFAULT))
-            mode = decision.target.value
-        except Exception:
-            pass
+    # Load graph. Route through the shared resolver rather than trusting the raw
+    # `--where` string: it normalizes case/whitespace (`--where LOCAL` is the
+    # same target as `local`) and emits a `where_invalid` envelope instead of
+    # letting an unknown value escape as a bare ValueError traceback. Everything
+    # below then branches on the resolved enum, so no routing decision is ever
+    # made by string-comparing user input.
+    decision = where_module.resolve_default_or_exit(flag=where)
+    mode = decision.target.value
+
+    # Resolve the local object_info server the same way `comfy run` does —
+    # flag > COMFY_LOCAL_URL > config.background > 127.0.0.1:8188. Without the
+    # `config.background` step validate would consult whatever answers on the
+    # default port while `run` submits to the background server comfy-cli
+    # launched on another one, making the verdict meaningless for the server
+    # that will actually execute the workflow (BE-6299). `resolve_target` does
+    # not consult `config.background` on purpose (other callers, e.g. transfer
+    # and system, must not), so — as its docstring says — the callers that do
+    # honor it resolve upstream, here.
+    is_local_fetch = input_path is None and decision.target is where_module.WhereTarget.LOCAL
+    if is_local_fetch:
+        from comfy_cli.host_port import parse_host_port_arg, resolve_host_port
+
+        # `host is not None` (not `if host:`): `--host ""` must reach the parser
+        # and be rejected, not be read as "no --host given". Likewise the port
+        # merge tests `is None`, so an explicit `--port 0` isn't silently
+        # overridden by a port embedded in the combined `--host h:p` form —
+        # `resolve_host_port` rejects it as out of range instead.
+        if host is not None:
+            host, parsed_port = parse_host_port_arg(host)
+            if port is None and parsed_port is not None:
+                port = parsed_port
+        host, port = resolve_host_port(host, port)
 
     try:
         graph = Graph.load(mode=mode, input_path=input_path, host=host, port=port)
@@ -1185,6 +1199,19 @@ def validate(
         "warnings": result["warnings"],
         "partner_nodes": partner_nodes,
         "spends_credits": bool(partner_nodes),
+        # Name the server (or file) the verdict was computed against, so an
+        # agent comparing `validate` with `run` can see whether they consulted
+        # the same object_info. Populated from the values resolved above, so a
+        # local run reports the concrete host/port actually queried. `host` is
+        # reported unbracketed, matching `Target.host` — brackets belong to the
+        # URL composed for display, not to the address itself.
+        "object_info_source": (
+            {"mode": "file", "path": str(input_path)}
+            if input_path is not None
+            else {"mode": mode, "host": _unbracket_host(host), "port": port}
+            if is_local_fetch
+            else {"mode": mode}
+        ),
     }
     if converted_from_ui:
         # Signal that validation ran against the converted graph, not the file's
@@ -1193,6 +1220,23 @@ def validate(
         payload["converted_node_count"] = len(wf_data)
 
     if renderer.is_pretty():
+        # Name the object_info source in one dim line. A file path (and, in
+        # principle, a hostname) can contain Rich-markup metacharacters, so
+        # escape it — same reason the partner-node line below does.
+        from rich.markup import escape as _escape
+
+        # Branch on the same flags that built the payload, not on its "mode"
+        # string: "file" is an offline sentinel that shares a key with the
+        # routing targets, so a mode-string branch couples display to a value
+        # the routing layer also owns.
+        source = payload["object_info_source"]
+        if input_path is not None:
+            where_oi = _escape(source["path"])
+        elif is_local_fetch:
+            where_oi = _escape(f"http://{_bracket_host(source['host'])}:{source['port']}")
+        else:
+            where_oi = _escape(source["mode"])
+        rprint(f"[dim]object_info from {where_oi}[/dim]")
         if result["valid"]:
             rprint(f"[bold green]✓[/bold green] workflow is valid ({len(wf_data)} nodes)")
             for w in result["warnings"]:
@@ -1222,6 +1266,17 @@ def validate(
         raise typer.Exit(code=1)
 
 
+# How a `cloud` routing decision was reached, in words, for the --host/--port
+# rejection message. Keys are `where.WhereResolution.source` values.
+_WHERE_SOURCE_PHRASES = {
+    "flag": "targeting cloud via --where cloud",
+    "env": "targeting cloud via the COMFY_WHERE environment variable",
+    "project": "targeting cloud via this project's configured default",
+    "config": "targeting cloud via your saved `where_default` setting",
+    "auto": "targeting cloud because you're signed in (no explicit --where)",
+}
+
+
 @app.command(help="Upload files to the ComfyUI server's input directory.")
 @tracking.track_command()
 def upload(
@@ -1234,9 +1289,26 @@ def upload(
         bool,
         typer.Option("--overwrite/--no-overwrite", help="Overwrite existing files on the server."),
     ] = True,
+    host: Annotated[
+        str | None,
+        typer.Option(help="Server host (defaults to COMFY_LOCAL_URL or 127.0.0.1). Local targets only."),
+    ] = None,
+    port: Annotated[
+        int | None,
+        typer.Option(help="Server port (defaults to COMFY_LOCAL_URL or 8188). Local targets only."),
+    ] = None,
 ):
     config = ConfigManager()
     renderer = get_renderer()
+
+    # Validate the flags before resolving anything: the host lands verbatim in
+    # ``http://{host}:{port}/upload/image``, so a URL-special or control
+    # character is a usage error (BadParameter, exit 2) regardless of target.
+    if host is not None:
+        host = validate_host(host)
+    if port is not None and not (1 <= port <= 65535):
+        raise typer.BadParameter(f"invalid port: {port} is out of range (1-65535)")
+
     try:
         decision = where_module.resolve(flag=where, config_value=config.get(where_module.CONFIG_KEY_WHERE_DEFAULT))
     except ValueError as e:
@@ -1244,10 +1316,32 @@ def upload(
         raise typer.Exit(code=1)
 
     effective_where = "cloud" if decision.target is where_module.WhereTarget.CLOUD else "local"
+    # --host/--port address a local ComfyUI; the cloud target's address comes
+    # from the signed-in account's base URL and ignores them entirely
+    # (``Target.host``/``Target.port`` are documented local-only). Rejecting
+    # the combination beats silently uploading somewhere the user didn't name.
+    # Checked before the preflight so the flag error isn't masked by a
+    # "not signed in" error.
+    if effective_where == "cloud" and (host is not None or port is not None):
+        # The cloud target can come from an explicit --where, but equally from
+        # COMFY_WHERE, a project/config default, or credential auto-detection —
+        # so name the source rather than accusing the user of passing a flag
+        # they may never have typed.
+        source = _WHERE_SOURCE_PHRASES.get(decision.source, f"resolved to cloud by {decision.source}")
+        renderer.error(
+            code="host_flag_cloud",
+            message=f"--host/--port target a local ComfyUI server, but this run is {source}",
+            hint=(
+                "pass --where local to aim at a local server; to reach a different cloud address "
+                "set COMFY_CLOUD_BASE_URL or run `comfy cloud set-base-url`"
+            ),
+            details={"host": host, "port": port, "where": effective_where, "where_source": decision.source},
+        )
+        raise typer.Exit(code=1)
     if effective_where == "cloud":
         where_module.cloud_preflight_or_exit()
 
-    transfer_inner.execute_upload(files, where=effective_where, overwrite=overwrite)
+    transfer_inner.execute_upload(files, where=effective_where, overwrite=overwrite, host=host, port=port)
 
 
 @app.command(help="Download outputs from a completed job. Reads prompt_id from argument or piped stdin.")
@@ -1319,12 +1413,6 @@ def run_cli(
     raise typer.Exit(
         code=run_cli_inner.execute(pause_seconds=effective_pause, no_cleanup=no_cleanup, show_agent=show_agent)
     )
-
-
-def validate_comfyui(_env_checker):
-    if _env_checker.comfy_repo is None:
-        rprint("[bold red]If ComfyUI is not installed, this feature cannot be used.[/bold red]")
-        raise typer.Exit(code=1)
 
 
 @app.command(
@@ -1729,12 +1817,6 @@ def env():
     renderer.emit(data, command="env")
 
 
-@app.command(hidden=True)
-@tracking.track_command()
-def models():
-    rprint("\n[bold red] No such command, did you mean 'comfy model' instead?[/bold red]\n")
-
-
 _FEEDBACK_DISABLED_NOTICE = (
     "[yellow]Feedback not sent — telemetry is opted out via DO_NOT_TRACK / COMFY_NO_TELEMETRY.[/yellow]\n"
     "Unset that to send, or open an issue: https://github.com/Comfy-Org/comfy-cli/issues/new/choose"
@@ -1839,7 +1921,8 @@ def agent_review(
 
 
 @app.command(
-    help="Given an existing installation of comfy core and any custom nodes, installs any needed python dependencies"
+    hidden=True,
+    help="Given an existing installation of comfy core and any custom nodes, installs any needed python dependencies",
 )
 @tracking.track_command()
 def dependency():
@@ -1950,7 +2033,7 @@ app.add_typer(
 app.add_typer(
     skill_command.app,
     name="skills",
-    help="Install the bundled comfy agent skills into Claude Code, Cursor, and AGENTS.md.",
+    help="Install the bundled comfy agent skills into Claude Code, Cursor, Aider, and any AGENTS.md-aware tool.",
 )
 # Keep the singular alias for backward compat
 app.add_typer(skill_command.app, name="skill", hidden=True)

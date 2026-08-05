@@ -12,7 +12,8 @@
     "prompt_id": {"type": "string"},
     "status": {
       "type": "string",
-      "enum": ["running", "pending", "queued", "completed", "error", "unknown", "watching"]
+      "description": "`cancelled` is one of `jobs_state.TERMINAL_STATUSES` and is copied verbatim out of a job's state file into a `jobs status` payload, so it belongs in this enum alongside the statuses the live `/queue` + `/history` snapshot produces.",
+      "enum": ["running", "pending", "queued", "completed", "error", "cancelled", "unknown", "watching"]
     },
     "queue_position": {"type": ["integer", "null"]},
     "workflow_size": {"type": ["integer", "null"]},
@@ -26,6 +27,11 @@
       "type": "object",
       "description": "Cloud status/watch terminal: artifact URLs grouped by blueprint foreach item (via the compose item_map on the job state file). Empty object when no item_map exists.",
       "additionalProperties": {"type": "array", "items": {"type": "string"}}
+    },
+    "scope": {
+      "type": "string",
+      "enum": ["local", "cloud", "all"],
+      "description": "`jobs ls`: which state-file rows the listing includes — only those matching the resolved --where target, or \"all\" targets when `--all` (or `--orphaned`) was passed."
     },
     "elapsed_seconds": {"type": ["number", "null"]},
     "completed_nodes": {"type": "array", "items": {"type": "string"}},

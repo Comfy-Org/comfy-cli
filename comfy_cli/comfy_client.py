@@ -23,10 +23,15 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from comfy_cli.http import NoRedirectHandler, build_http_only_opener, target_auth_headers
+from comfy_cli.http import (
+    NoRedirectHandler,
+    ResponseTooLarge,
+    build_http_only_opener,
+    read_capped,
+    target_auth_headers,
+)
+from comfy_cli.http import assert_safe_url as _assert_safe_url
 from comfy_cli.target import Target
-
-_LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1", "[::1]"}
 
 # Transient HTTP failures during polling should back off and retry, not abort.
 # 429 (rate limit) is retried for any method — the request was rejected, not
@@ -96,24 +101,6 @@ class Unauthenticated(Exception):
 
 
 _OPENER = build_http_only_opener(NoRedirectHandler())
-
-
-def _assert_safe_url(url: str) -> None:
-    """Reject plaintext HTTP for non-loopback hosts.
-
-    Anything carrying a Bearer token over the wire must be HTTPS unless the
-    host is a loopback address (where there's no network to sniff).
-    """
-    parsed = urllib.parse.urlsplit(url)
-    if parsed.scheme == "https":
-        return
-    host = (parsed.hostname or "").lower()
-    if host in _LOOPBACK_HOSTS:
-        return
-    raise ValueError(
-        f"refusing to send request to non-https, non-loopback URL: {url} "
-        "(set COMFY_CLOUD_BASE_URL to an https:// endpoint)"
-    )
 
 
 @dataclass
@@ -267,14 +254,27 @@ class Client:
             req.add_header(header, value)
         try:
             with _OPENER.open(req, timeout=timeout or self.timeout) as resp:
-                text = resp.read().decode("utf-8", errors="replace")
+                # Bounded read: without a ceiling the server on the other end
+                # decides how much of our memory to consume. An over-cap body
+                # is reported as a response error rather than truncated —
+                # truncated JSON would surface as a misleading parse failure.
+                try:
+                    raw = read_capped(resp, url)
+                except ResponseTooLarge as e:
+                    raise HTTPError(resp.status, "response too large", str(e)) from e
+                text = raw.decode("utf-8", errors="replace")
                 if not text:
                     return None
                 return json.loads(text)
         except urllib.error.HTTPError as e:
             body_text = ""
             try:
-                body_text = e.read().decode("utf-8", errors="replace")
+                # An error body arrives from the same server as the success
+                # body, so it needs the same ceiling. Over-cap it raises, and
+                # the swallow below leaves body_text empty — the status and
+                # reason still reach the caller, which is the part that matters
+                # for a body too large to be a real error message.
+                body_text = read_capped(e, url).decode("utf-8", errors="replace")
             except Exception:  # noqa: BLE001
                 pass
             # Auto-refresh on 401 for OAuth cloud targets, retry once.

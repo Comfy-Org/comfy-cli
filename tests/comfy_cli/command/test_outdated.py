@@ -437,3 +437,34 @@ def test_cli_json_envelope_shape(workspace, monkeypatch, capsys):
     assert envelope["command"] == "outdated"
     assert envelope["data"]["core"]["outdated"] is True
     assert isinstance(envelope["data"]["packs"], list)
+
+
+# ---------------------------------------------------------------------------
+# cache durability
+# ---------------------------------------------------------------------------
+
+
+def test_save_cache_is_atomic_and_leaves_no_temp_residue():
+    """The cache is written by more than one command (`outdated` and `node
+    deps`). A write interrupted midway must not leave a truncated file that
+    `_load_cache` silently resets to `{}` — so it renames into place rather
+    than truncating the live file.
+    """
+    payload = {"pack:one": {"value": "1.0.0", "ts": 1}, "core": {"value": "v0.3.40", "ts": 1}}
+    outdated_cmd._save_cache(payload)
+
+    path = outdated_cmd._cache_path()
+    assert outdated_cmd._load_cache() == payload
+    assert list(path.parent.iterdir()) == [path], "temp file must not survive the write"
+
+
+def test_save_cache_survives_an_unwritable_cache_dir(monkeypatch, tmp_path):
+    """A read-only cache dir must never break a read-only report."""
+    unwritable = tmp_path / "nope"
+    unwritable.mkdir()
+    unwritable.chmod(0o500)
+    monkeypatch.setenv("XDG_CACHE_HOME", str(unwritable))
+    try:
+        outdated_cmd._save_cache({"pack:one": {"value": "1.0.0", "ts": 1}})
+    finally:
+        unwritable.chmod(0o700)

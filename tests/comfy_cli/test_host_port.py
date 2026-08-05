@@ -94,6 +94,38 @@ def test_validate_host_rejects_whitespace_and_control_chars(host):
         validate_host(host)
 
 
+@pytest.mark.parametrize("host", ["", "   ", "\t"])
+def test_validate_host_rejects_empty(host):
+    # An empty host is resolved as *absent* downstream (`host or env or
+    # DEFAULT_HOST`), so accepting it silently retargets the request at a
+    # server the caller never named — e.g. `--host "$UNSET_VAR"`.
+    with pytest.raises(typer.BadParameter):
+        validate_host(host)
+
+
+@pytest.mark.parametrize("host", ["a%0d%0aX-Injected:%201", "host%2fpath", "h%40ost", "host%23x"])
+def test_validate_host_rejects_percent_encoded_specials(host):
+    # urllib.request.Request._parse unquotes the host it splits out of the
+    # URL, so a percent-encoded payload decodes downstream of this guard.
+    with pytest.raises(typer.BadParameter):
+        validate_host(host)
+
+
+@pytest.mark.parametrize("host", ["127.0.0.1:8188", "localhost:8188", "example.com:80"])
+def test_validate_host_rejects_embedded_port(host):
+    # Colon-bearing hosts get bracketed as IPv6 literals by callers, so a
+    # combined host:port would become `http://[127.0.0.1:8188]:8188` with the
+    # embedded port silently dropped. Only `comfy run` takes the combined
+    # form, and it splits it via parse_host_port_arg first.
+    with pytest.raises(typer.BadParameter):
+        validate_host(host)
+
+
+@pytest.mark.parametrize("host", ["::1", "[::1]", "fe80::1", "2001:db8::8a2e:370:7334"])
+def test_validate_host_allows_ipv6_literals(host):
+    assert validate_host(host) == host
+
+
 # ---------------------------------------------------------------------------
 # resolve_host_port
 # ---------------------------------------------------------------------------
@@ -179,3 +211,47 @@ def test_run_unsafe_host_exits_before_execute(tmp_path):
         )
     assert result.exit_code != 0
     mock_execute.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# explicit-flag validation at the shared choke point (BE-6306 review)
+# ---------------------------------------------------------------------------
+#
+# `resolve_local_host_port` resolves each half as `value or env or bg or
+# DEFAULT`, so every FALSY explicit flag reads as "not passed" and silently
+# retargets the request at a different server. `resolve_host_port` therefore
+# validates an explicitly-passed host/port BEFORE that chain runs.
+
+
+def test_empty_host_flag_is_rejected():
+    """`--host ""` (a wrapper interpolating an unset variable) must error, not
+    fall through to the env/background/default server."""
+    with pytest.raises(typer.BadParameter, match="empty host"):
+        resolve_host_port("", None)
+
+
+def test_blank_host_flag_is_rejected():
+    with pytest.raises(typer.BadParameter, match="empty host"):
+        resolve_host_port("   ", None)
+
+
+@pytest.mark.parametrize("bad_port", [0, -1, 65536, 99999])
+def test_out_of_range_port_flag_is_rejected(bad_port):
+    with pytest.raises(typer.BadParameter, match="out of range"):
+        resolve_host_port(None, bad_port)
+
+
+def test_none_host_and_port_still_resolve(monkeypatch):
+    """The guards fire only on an EXPLICIT value — `None` still means absent."""
+    monkeypatch.delenv("COMFY_LOCAL_URL", raising=False)
+    with patch("comfy_cli.host_port.ConfigManager") as cm:
+        cm.return_value.background = None
+        assert resolve_host_port(None, None) == (DEFAULT_HOST, DEFAULT_PORT)
+
+
+def test_boundary_ports_are_accepted(monkeypatch):
+    monkeypatch.delenv("COMFY_LOCAL_URL", raising=False)
+    with patch("comfy_cli.host_port.ConfigManager") as cm:
+        cm.return_value.background = None
+        assert resolve_host_port(None, 1)[1] == 1
+        assert resolve_host_port(None, 65535)[1] == 65535

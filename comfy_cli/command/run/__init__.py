@@ -40,6 +40,7 @@ from comfy_cli.command.run.preflight import PARTNER_NODE_CATEGORY_PREFIXES as PA
 from comfy_cli.command.run.preflight import _detect_partner_nodes as _detect_partner_nodes
 from comfy_cli.command.run.preflight import _fetch_object_info as _fetch_object_info
 from comfy_cli.command.run.preflight import _preflight_validate as _preflight_validate
+from comfy_cli.command.run.preflight import _resolve_default_checkpoint_or_exit as _resolve_default_checkpoint_or_exit
 from comfy_cli.command.run.preflight import fetch_object_info as fetch_object_info
 from comfy_cli.command.run.watcher import _spawn_watcher as _spawn_watcher
 from comfy_cli.command.run.watcher import _tail_state_file as _tail_state_file
@@ -165,7 +166,7 @@ def execute(
     notify: bool = False,
     api_key: str | None = None,
     print_prompt: bool = False,
-    preloaded: tuple[dict, str, bool] | None = None,
+    preloaded: tuple[dict, str, bool, bool] | None = None,
     allow_spend: bool = False,
 ):
     # `0.0.0.0` is a wildcard bind, not a connect address. macOS / Windows
@@ -185,10 +186,13 @@ def execute(
 
     # `preloaded` short-circuits file loading: an in-memory API-format graph
     # (e.g. the `comfy run --prompt` injected default) is handed straight in as
-    # (workflow_dict, display_name, is_ui). Everything downstream is unchanged.
+    # (workflow_dict, display_name, is_ui, checkpoint_user_set). Everything
+    # downstream is unchanged; `checkpoint_user_set` gates runtime checkpoint
+    # resolution for the bundled default (skip it when the user pinned one).
     if preloaded is not None:
-        raw_workflow, workflow_name, is_ui = preloaded
+        raw_workflow, workflow_name, is_ui, checkpoint_user_set = preloaded
     else:
+        checkpoint_user_set = False
         try:
             raw_workflow, workflow_name, is_ui = _load_workflow_file(workflow)
         except WorkflowLoadError as e:
@@ -254,11 +258,30 @@ def execute(
         # foreach item map to stash on the job state at submit time.
         compose_meta = pop_compose_meta(workflow)
 
+    # Partner-API node preflight (below) and runtime checkpoint resolution both
+    # need the server's object_info. `--print-prompt` is a documented
+    # no-server-hit dry-run, so skip the fetch + resolution there and print the
+    # graph as-is; the real submit flow resolves BEFORE the prompt_preview event
+    # so the streamed audit trail advertises the graph we actually submit.
+    object_info: dict = {}
+    if not print_prompt:
+        object_info = _fetch_object_info(host, port)
+
+        # Runtime checkpoint resolution for the bundled `--prompt` default: swap
+        # the pinned checkpoint for one the local server actually has (or
+        # hard-error if it has none). Guarded to the bundled default graph and
+        # skipped when the user pinned the checkpoint explicitly (honor it; let
+        # preflight reject it).
+        if preloaded is not None and workflow_name == "default_text2img" and not checkpoint_user_set:
+            _resolve_default_checkpoint_or_exit(renderer, workflow, object_info, where="local")
+
     # Stream mode: emit the workflow graph so agents have a complete audit
     # trail of what the CLI is about to submit (no-op otherwise).
     renderer.event("prompt_preview", prompt=workflow)
 
-    # --print-prompt: emit/print the workflow and exit without submitting.
+    # --print-prompt: emit/print the workflow and exit without submitting. No
+    # server hit (documented) — the graph is shown as-is, before any
+    # server-dependent checkpoint resolution.
     if print_prompt:
         if renderer.is_pretty():
             print(json.dumps(workflow, indent=2, ensure_ascii=False))
@@ -270,12 +293,6 @@ def execute(
             )
         return
 
-    # Partner-API node preflight. Reject up-front when the workflow
-    # depends on a partner node (Veo/Kling/BFL/Gemini/…) and we have no
-    # credential to inject. If we DO have a credential, plumb it into
-    # extra_data so the partner node finds it server-side — same shape
-    # the cloud submit path uses.
-    object_info = _fetch_object_info(host, port)
     partner_nodes = _detect_partner_nodes(workflow, object_info)
     # Spend gate (BE-4326): partner-API nodes spend Comfy credits. Require
     # explicit consent before resolving a credential or submitting. Fires
@@ -715,7 +732,7 @@ def execute_cloud(
     timeout: int = 600,
     notify: bool = False,
     print_prompt: bool = False,
-    preloaded: tuple[dict, str, bool] | None = None,
+    preloaded: tuple[dict, str, bool, bool] | None = None,
     allow_spend: bool = False,
 ):
     """Run a workflow against Comfy Cloud via the stored OAuth session.
@@ -731,13 +748,21 @@ def execute_cloud(
 
     renderer = get_renderer()
     if preloaded is not None:
-        raw_workflow, workflow_name, is_ui = preloaded
+        raw_workflow, workflow_name, is_ui, checkpoint_user_set = preloaded
     else:
+        checkpoint_user_set = False
         try:
             raw_workflow, workflow_name, is_ui = _load_workflow_file(workflow)
         except WorkflowLoadError as e:
             renderer.error(code=e.code, message=str(e), hint=e.hint)
             raise typer.Exit(code=1) from e
+
+    # The cloud object_info snapshot is used twice below (UI→API conversion and
+    # checkpoint resolution/preflight). `_load_from_target` is a live, uncached
+    # HTTPS fetch, so load it at most once and share it across both. `None`
+    # means "not fetched yet" — distinct from a fetched-but-empty snapshot,
+    # which must NOT trigger a second round-trip.
+    cloud_object_info: dict | None = None
 
     if is_ui:
         # Frontend-format workflows (the `nodes`+`links` shape from the canvas
@@ -749,12 +774,12 @@ def execute_cloud(
         if renderer.is_pretty():
             pprint("[yellow]Detected UI-format workflow, converting to API format…[/yellow]")
         try:
-            object_info = _load_from_target(mode="cloud")
+            object_info = cloud_object_info = _load_from_target(mode="cloud")
         except Exception as e:  # noqa: BLE001
             renderer.error(
                 code="cql_no_graph",
                 message=f"could not load cloud object_info for conversion: {e}",
-                hint="run `comfy nodes refresh --where cloud` to populate the cache",
+                hint="object_info is fetched live — check your cloud sign-in and connection then retry, or run against a local server",
             )
             raise typer.Exit(code=1) from e
         try:
@@ -793,6 +818,25 @@ def execute_cloud(
     # its foreach item map to stash on the job state at submit time.
     compose_meta = pop_compose_meta(parsed_workflow)
 
+    # Cloud path uses cached/bundled object_info (no live server needed). Load
+    # it up front so checkpoint resolution can run BEFORE the preview/print
+    # below — the audit trail must advertise the graph we actually submit.
+    # Already fetched above when the workflow arrived in UI format.
+    if cloud_object_info is None:
+        try:
+            from comfy_cli.cql.engine import _load_from_target
+
+            cloud_object_info = _load_from_target(mode="cloud")
+        except Exception:  # noqa: BLE001
+            cloud_object_info = {}
+
+    # Runtime checkpoint resolution for the bundled `--prompt` default (mirrors
+    # the local path): swap the pinned checkpoint for one Comfy Cloud actually
+    # has. Guarded to the bundled default and skipped when the user pinned the
+    # checkpoint explicitly. Cloud fails open on an empty enum (per-job models).
+    if preloaded is not None and workflow_name == "default_text2img" and not checkpoint_user_set:
+        _resolve_default_checkpoint_or_exit(renderer, parsed_workflow, cloud_object_info, where="cloud")
+
     if print_prompt:
         # Documented dry-run: show the API-format graph that WOULD be sent and
         # exit WITHOUT POSTing. Mirrors local execute()'s print_prompt branch.
@@ -808,14 +852,6 @@ def execute_cloud(
         raise typer.Exit(code=0)
 
     # Pre-submit validation via pure-Python CQL engine.
-    # Cloud path uses cached/bundled object_info (no live server needed).
-    try:
-        from comfy_cli.cql.engine import _load_from_target
-
-        cloud_object_info = _load_from_target(mode="cloud")
-    except Exception:  # noqa: BLE001
-        cloud_object_info = {}
-
     _preflight_validate(renderer, parsed_workflow, cloud_object_info, target_label="cloud")
 
     # Spend gate (BE-4326): the cloud also bills partner-API nodes, so apply the

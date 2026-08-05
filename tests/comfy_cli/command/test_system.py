@@ -44,8 +44,10 @@ class _FakeResp:
     def __init__(self, body: bytes):
         self._body = body
 
-    def read(self) -> bytes:
-        return self._body
+    def read(self, n: int | None = None) -> bytes:
+        # Mirror http.client.HTTPResponse.read(amt) — bodies are read with a
+        # byte cap, so a no-arg-only fake would not match the real API.
+        return self._body if n is None else self._body[:n]
 
     def __enter__(self):
         return self
