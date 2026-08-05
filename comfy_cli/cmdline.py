@@ -39,6 +39,7 @@ from comfy_cli.command import transfer as transfer_inner
 from comfy_cli.command import (
     workflow as workflow_command,
 )
+from comfy_cli.command.custom_nodes.cm_cli_util import normalize_cm_cli_exit_code
 from comfy_cli.command.install import validate_optional_version, validate_version
 from comfy_cli.command.launch import launch as launch_command
 from comfy_cli.command.launch import logs as logs_command
@@ -673,6 +674,18 @@ def _switch_comfy_version(comfy_path: str, version: str, *, stash: bool) -> None
     renderer.emit(result, command="update")
 
 
+def _refresh_node_id_cache() -> None:
+    """Re-export the custom-node id cache that backs shell tab-completion.
+
+    Best-effort: a stale cache only degrades completion, so a failure here is a
+    warning, never the command's outcome.
+    """
+    try:
+        custom_nodes.command.update_node_id_cache()
+    except (FileNotFoundError, subprocess.CalledProcessError) as e:
+        rprint(f"[yellow]Failed to update node id cache: {e}[/yellow]")
+
+
 @app.command(help="Update ComfyUI Environment [all|comfy|cli]")
 @tracking.track_command()
 def update(
@@ -708,6 +721,16 @@ def update(
             ),
         ),
     ] = False,
+    exit_on_fail: Annotated[
+        bool,
+        typer.Option(
+            "--exit-on-fail",
+            help=(
+                "Exit on failure. Only affects target 'all': without it a failing custom-node update is "
+                "printed but still exits 0. Targets 'comfy' and 'cli' already exit non-zero on failure."
+            ),
+        ),
+    ] = False,
 ):
     if target not in ["all", "comfy", "cli"]:
         typer.echo(
@@ -734,7 +757,33 @@ def update(
     comfy_path = workspace_manager.workspace_path
 
     if "all" == target:
-        custom_nodes.command.execute_cm_cli(["update", "all"])
+        # Without raise_on_error, execute_cm_cli swallows a cm-cli exit 1 and returns None,
+        # so `comfy update all` would report success for a failed pack update. Mirrors the
+        # --exit-on-fail plumbing in `comfy node install`.
+        #
+        # Unlike `node install`, the flag is deliberately NOT forwarded to cm-cli: its
+        # `update` subcommand takes only (nodes, channel, mode, user_directory) — no
+        # --exit-on-fail — so passing it would be a Typer usage error and make the flag
+        # fail every invocation. Only `cm-cli install` has one.
+        try:
+            custom_nodes.command.execute_cm_cli(["update", "all"], raise_on_error=exit_on_fail)
+        except subprocess.CalledProcessError as e:
+            if not exit_on_fail:
+                # execute_cm_cli re-raises unexpected exit codes even with raise_on_error off;
+                # keep surfacing those instead of swallowing them here.
+                raise
+            # `cm-cli update all` is non-atomic — packs that did update stayed updated — so
+            # refresh the id cache exactly as the no-flag path below does before bailing out.
+            _refresh_node_id_cache()
+            code = normalize_cm_cli_exit_code(e.returncode)
+            get_renderer().error(
+                code="update_custom_nodes_failed",
+                message=f"`cm-cli update all` failed with exit code {e.returncode}.",
+                hint="re-run `comfy update all` to retry; it is safe to repeat",
+                details={"cm_cli_returncode": e.returncode},
+                exit_code=code,
+            )
+            raise typer.Exit(code=code) from e
     else:
         rprint(f"Updating ComfyUI in {comfy_path}...")
         if comfy_path is None:
@@ -754,10 +803,7 @@ def update(
                 check=True,
             )
 
-    try:
-        custom_nodes.command.update_node_id_cache()
-    except (FileNotFoundError, subprocess.CalledProcessError) as e:
-        rprint(f"[yellow]Failed to update node id cache: {e}[/yellow]")
+    _refresh_node_id_cache()
 
 
 @app.command(help="Report installed-vs-latest versions for ComfyUI core and custom node packs (read-only).")
