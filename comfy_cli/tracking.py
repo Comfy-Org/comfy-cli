@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import atexit
+import copy
 import functools
 import json
 import logging as logginglib
 import os
+import queue
 import re
 import sys
 import threading
@@ -291,7 +293,28 @@ class TelemetryProvider(Protocol):
     def flush(self) -> None: ...
 
 
+def _log_telemetry_debug(message: str) -> None:
+    """Best-effort debug log that can never propagate out of telemetry code.
+
+    Used on the Mixpanel worker's failure paths. The worker is a daemon thread
+    that can outlive `_flush_all_providers`' deadline and so log *after* the
+    stdlib's own `logging.shutdown` atexit hook has closed the handlers; on top
+    of that, a raise from inside an `except` handler would kill the worker for
+    the rest of the process. Neither is worth a user-visible traceback.
+    """
+    try:
+        logging.debug(message)
+    except BaseException:  # noqa: BLE001  # pragma: no cover - defensive
+        pass
+
+
 class MixpanelProvider:
+    # A CLI invocation emits ~1-3 events, so this cap is effectively unreachable
+    # outside pathological cases. It exists so a wedged worker (blackholed
+    # endpoint) can't let an unbounded backlog accumulate — dropping is the
+    # correct trade for best-effort telemetry.
+    _QUEUE_MAX = 256
+
     def __init__(self, token: str):
         self.client = None
         if token:
@@ -300,24 +323,132 @@ class MixpanelProvider:
             from mixpanel import Mixpanel
 
             # mixpanel-python's default Consumer uses request_timeout=None → an
-            # unbounded, synchronous requests.post on the main thread, so a
-            # blackholed telemetry endpoint (accepts TCP, never responds) hangs the
-            # CLI indefinitely (BE-3354/BE-3403). track() sends inline on the calling
-            # thread and flush() is a no-op, so this bound is the ONLY thing guarding
-            # the hot event path — it isn't covered by the atexit daemon deadline.
-            # retry_limit=1 (default is 4 with backoff) keeps a blackholed send to a
-            # single ~10s attempt instead of ~40s+ across retries.
+            # unbounded, synchronous requests.post, so a blackholed telemetry
+            # endpoint (accepts TCP, never responds) hangs whichever thread sends
+            # (BE-3354/BE-3403). Sends now happen on the worker below rather than
+            # the caller's thread, so this bound caps how long ONE send can occupy
+            # the queue — and with it, how much of the atexit drain's shared 5s
+            # deadline a single in-flight event can consume. retry_limit=1
+            # (default is 4 with backoff) keeps a blackholed send to a single ~10s
+            # attempt instead of ~40s+ across retries.
             self.client = Mixpanel(token, consumer=MixpanelConsumer(request_timeout=10, retry_limit=1))
+            # Dispatch is queue-and-drain so track() never blocks the caller
+            # (BE-5868): @track_command fires its event *before* running the
+            # wrapped command body, and `run` fires execution_start before
+            # submitting the workflow, so an inline send put a synchronous HTTP
+            # round-trip on the hot path of every consented invocation.
+            self._queue: queue.Queue = queue.Queue(maxsize=self._QUEUE_MAX)
+            # flush() waits on this counter rather than `queue.join()`:
+            # `join()` is unconditional and unbounded, so a worker that never
+            # comes back would block every later flush() forever — including
+            # direct callers of the public method, who have no deadline of their
+            # own. A counter plus a condition lets flush() wake the moment the
+            # queue drains, and give up on a deadline or a dead worker.
+            self._pending = 0
+            self._drained = threading.Condition()
+            # daemon=True with NO atexit hook of our own, and no shutdown
+            # sentinel: `_flush_all_providers` is the single bounded shutdown
+            # drain path (BE-3403), and the worker just dies with the process.
+            # Constructed lazily on the first dispatched event (`_get_providers`
+            # is only reached from `_dispatch`), so a run that sends nothing —
+            # `comfy --help`, shell completion, no consent — never starts it.
+            self._worker = threading.Thread(target=self._run, daemon=True, name="mixpanel-telemetry")
+            try:
+                self._worker.start()
+            except RuntimeError as e:
+                # "can't start new thread" under thread/FD/memory pressure. A
+                # telemetry-side resource problem must not become a user-visible
+                # provider-construction failure (`_get_providers` reports those
+                # with logging.warning, i.e. on the user's stderr), so degrade to
+                # an inert provider instead of letting it escape.
+                _log_telemetry_debug(f"could not start the mixpanel worker; disabling mixpanel telemetry: {e}")
+                self.client = None
         self.enabled = self.client is not None
+
+    def _mark_done(self) -> None:
+        """Retire one dequeued event and wake `flush()` once nothing is left."""
+        try:
+            with self._drained:
+                self._pending -= 1
+                if self._pending <= 0:
+                    self._drained.notify_all()
+        except BaseException:  # noqa: BLE001  # pragma: no cover - defensive
+            pass
+
+    def _run(self) -> None:
+        """Drain the queue forever, one send at a time.
+
+        A single worker over a single FIFO preserves per-process event ordering.
+        Accepted semantic shift: mixpanel-python stamps an event's `time` when
+        `client.track()` runs, which moves from call time to dequeue time —
+        sub-second skew in practice, no dashboard impact.
+        """
+        while True:
+            # The WHOLE body is guarded, not just the send: nothing detects or
+            # restarts this thread, so anything that escapes wedges telemetry for
+            # the rest of the process — every later event silently dropped and
+            # every flush() burning its full deadline. BaseException rather than
+            # Exception because a MemoryError or SystemExit out of the SDK would
+            # do exactly that.
+            item = None
+            event_name = "<unknown>"
+            try:
+                item = self._queue.get()
+                event_name, distinct_id, properties = item
+                self.client.track(distinct_id=distinct_id, event_name=event_name, properties=properties)
+            except BaseException as e:  # noqa: BLE001
+                # debug, not warning: a telemetry failure must never surface on
+                # the user's stderr (cf. the urllib3/posthog silencing above).
+                _log_telemetry_debug(f"Failed to send mixpanel event {event_name}: {e}")
+            finally:
+                # In `finally`, and keyed on having actually dequeued something,
+                # so a raising send can't leave flush() waiting on an event that
+                # is never retired — nor retire one that was never taken.
+                if item is not None:
+                    self._mark_done()
 
     def track(self, event_name: str, distinct_id: str | None, properties: dict[str, Any]) -> None:
         if self.client is None or distinct_id is None:
             return
-        self.client.track(distinct_id=distinct_id, event_name=event_name, properties=properties)
+        # deepcopy, not dict(): `@track_command` fires its event *before* running
+        # the wrapped body, and serialization now happens on the worker instead of
+        # inline, so a shallow copy leaves nested values (Typer multi-value
+        # options, feedback score dicts) aliased to objects the body can still
+        # mutate — shipping post-mutation contents, or racing mixpanel's
+        # json.dumps into "dictionary changed size during iteration" and dropping
+        # the event. Copying here restores the old snapshot-at-call-time
+        # semantics; a value deepcopy can't handle falls back to the shallow copy.
+        try:
+            payload = copy.deepcopy(properties)
+        except Exception:  # noqa: BLE001
+            payload = dict(properties)
+        with self._drained:
+            try:
+                self._queue.put_nowait((event_name, distinct_id, payload))
+            except queue.Full:
+                _log_telemetry_debug(f"mixpanel queue full; dropping event {event_name}")
+                return
+            # Counted under the same lock the worker takes to retire an event, so
+            # a send that completes before we return here can't decrement first.
+            self._pending += 1
 
     def flush(self) -> None:
-        # mixpanel-python ships per-call over sync HTTP; nothing to drain.
-        return
+        if self.client is None:
+            return
+        # Waits for the queue to drain completely, including the send already in
+        # flight — but bounded, and abandoned outright if the worker is gone.
+        # `_flush_all_providers` supplies its own deadline at exit; this one is
+        # for every other caller of what is, after all, a public method.
+        deadline = time.monotonic() + _FLUSH_DEADLINE_SECONDS
+        with self._drained:
+            while self._pending > 0:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0 or not self._worker.is_alive():
+                    _log_telemetry_debug(f"mixpanel flush gave up with {self._pending} event(s) still queued")
+                    return
+                # Short waits so a worker that dies mid-drain is noticed promptly
+                # rather than at the deadline.
+                self._drained.wait(timeout=min(remaining, 0.1))
 
 
 class PostHogProvider:
@@ -711,7 +842,32 @@ def _flush_all_providers() -> None:
             logging.warning(f"telemetry flush join failed for {type(provider).__name__}: {e}")
             continue
         if t.is_alive():
-            logging.warning(f"telemetry flush timed out for {type(provider).__name__}; dropping in-flight events")
+            # debug, not warning: this fires purely because a telemetry endpoint
+            # is slow or blackholed, and it fires at exit — i.e. it would print
+            # to the user's stderr *after* the terminal envelope. That is the one
+            # thing this module refuses to do for a telemetry failure. It was
+            # unreachable for Mixpanel while flush() was a no-op; it isn't now
+            # that flush() actually drains a queue (BE-5868).
+            logging.debug(f"telemetry flush timed out for {type(provider).__name__}; dropping in-flight events")
+
+
+def flush_for_hard_exit() -> None:
+    """Drain telemetry before an `os._exit`, which skips atexit handlers.
+
+    `comfy launch` terminates through `os._exit` on both its background-success
+    and failure paths, so `_flush_all_providers` never runs there. That was
+    harmless while MixpanelProvider sent inline from `track()` — the `launch`
+    event was already delivered before the command body ran. Now that dispatch is
+    queue-and-drain (BE-5868) the event is still sitting in the queue at that
+    point, so those paths have to drain explicitly or drop it every time.
+
+    Bounded by the same `_FLUSH_DEADLINE_SECONDS` budget as the atexit hook, and
+    best-effort: nothing it does may keep the caller from exiting.
+    """
+    try:
+        _flush_all_providers()
+    except BaseException:  # noqa: BLE001  # pragma: no cover - defensive
+        pass
 
 
 atexit.register(_flush_all_providers)

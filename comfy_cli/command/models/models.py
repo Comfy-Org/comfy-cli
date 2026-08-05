@@ -21,6 +21,7 @@ from comfy_cli.file_utils import (
     DownloadException,
     _friendly_network_error,
     check_unauthorized,
+    cleanup_partials,
     download_file,
 )
 from comfy_cli.output import get_renderer
@@ -861,8 +862,14 @@ def _download_worker(
     except DownloadCancelled:
         state.status = "cancelled"
         state.error = None
-        with contextlib.suppress(OSError):
-            pathlib.Path(state.dest).unlink(missing_ok=True)
+        # Same split as `download_cancel`: only aria2 wrote to the destination, so
+        # only aria2's leftovers are ours to delete. The httpx path raises this
+        # from inside the transfer loop, before the rename, and unwinds through
+        # `_download_file_httpx`'s own cleanup — the `.part` is already gone and
+        # anything at `dest` predates this download.
+        if state.downloader == "aria2":
+            with contextlib.suppress(OSError):
+                pathlib.Path(state.dest).unlink(missing_ok=True)
         state.completed_bytes = 0
         with contextlib.suppress(OSError):
             download_state.write_path(path, state)
@@ -929,10 +936,12 @@ def _render_download_rows(rows: list[dict]) -> None:
 def _reconciled(state: download_state.DownloadState) -> tuple[download_state.DownloadState, bool]:
     """Reconcile ``state`` against reality, persisting a *status* correction.
 
-    Only a status change is written back. Byte counts are re-derived from
-    ``stat(dest)`` on every poll anyway, so persisting them buys nothing — and
-    would let a poll racing a live worker rewind the file to whatever this
-    reader happened to load a moment earlier.
+    Only a status change is written back. Persisting the byte counts a reader
+    derived would let a poll racing a live worker rewind the file to whatever
+    this reader happened to load a moment earlier — the worker is the only
+    writer of progress, and mid-flight its state file is normally the sole source
+    of truth (the destination isn't written until the transfer completes; see
+    :func:`download_state.reconcile` for the caveat).
     """
     fresh = download_state.reconcile(state)
     changed = fresh.status != state.status
@@ -1012,9 +1021,30 @@ def download_cancel(
                 download_state.write(workspace, state)
 
     if state.status in download_state.TERMINAL_STATUSES:
+        # Reaching a terminal status is not the same as having reclaimed the disk.
+        # A SIGKILLed worker's *first* `download-status` poll persists reconcile's
+        # `failed` verdict, and from then on this command short-circuits here — so
+        # the only path that sweeps the `.part` file would never run, and multi-GB
+        # of it would sit there with no command able to reclaim it (unlike the old
+        # truncated file at `dest`, a `.part` is invisible to `model list` and
+        # `model remove`). Sweep here too, but only once the worker is confirmed
+        # gone: a `cancelled` record can have been written while its worker was
+        # still running (that is what the "worker may still be running" error
+        # says), and that worker would re-create whatever we removed — or worse,
+        # find the temp it is streaming into deleted underneath it.
+        reclaimed = 0
+        if state.status != "completed" and not download_state.worker_alive(state):
+            reclaimed = cleanup_partials(pathlib.Path(state.dest))
+            if reclaimed:
+                state.completed_bytes = 0
+                with contextlib.suppress(OSError, ValueError):
+                    download_state.write(workspace, state)
         payload = download_state.status_payload(state)
-        print(f"Download {download_id} is already {state.status}; nothing to cancel.")
-        renderer.emit(payload, command="model download-cancel", changed=False)
+        if reclaimed:
+            print(f"Download {download_id} is already {state.status}; reclaimed its partial file.")
+        else:
+            print(f"Download {download_id} is already {state.status}; nothing to cancel.")
+        renderer.emit(payload, command="model download-cancel", changed=bool(reclaimed))
         return
 
     # Sentinel first, then the signal. The sentinel is what a worker that is
@@ -1056,9 +1086,27 @@ def download_cancel(
         if size is not None:
             state.completed_bytes = size
     else:
-        if stopped and size is not None:
-            with contextlib.suppress(OSError):
-                partial.unlink()
+        if stopped:
+            # Only aria2 writes straight to the destination (it resumes from its
+            # own control file), so only an unfinished *aria2* transfer leaves its
+            # bytes here. The httpx path never writes through the destination, so
+            # a file sitting at `dest` after an httpx cancel is either one that
+            # predates this download — which `download_file` promises survives
+            # either way — or a rename that just landed, e.g. an unknown-length
+            # transfer (`total_bytes` is None, so the `finished` check above can't
+            # see it) whose worker was killed between the rename and persisting
+            # `completed`. Deleting it would destroy a complete model this command
+            # never wrote.
+            if size is not None and state.downloader == "aria2":
+                with contextlib.suppress(OSError):
+                    partial.unlink()
+                    removed = True
+            # The httpx downloader streams into a `.part` sibling and only renames
+            # onto the destination once the transfer completes, so a worker killed
+            # mid-flight leaves its gigabytes *there*, not at `dest`. Without this
+            # sweep the cancel would report success and reclaim nothing — the exact
+            # hand-cleanup this command exists to spare the user.
+            if cleanup_partials(partial):
                 removed = True
         state.status = "cancelled"
         state.error = None if stopped else "worker may still be running; partial file left in place"
@@ -1076,7 +1124,7 @@ def download_cancel(
     renderer.emit(payload, command="model download-cancel", changed=True)
 
 
-@app.command(help="Remove downloaded model files, by name or through an interactive picker.")
+@app.command(help="Remove one or more downloaded models by name or via interactive selection.")
 @tracking.track_command("model")
 def remove(
     ctx: typer.Context,

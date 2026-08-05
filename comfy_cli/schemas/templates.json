@@ -67,6 +67,10 @@
         { "type": "null" }
       ],
       "description": "Number of nodes in the fetched workflow (fetch)."
+    },
+    "workflow": {
+      "type": "object",
+      "description": "The full fetched workflow JSON, included only when no --out file was given (fetch)."
     }
   }
 }
