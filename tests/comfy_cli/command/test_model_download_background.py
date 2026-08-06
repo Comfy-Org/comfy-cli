@@ -854,6 +854,275 @@ class TestSubmitRefusesAClaimedDestination:
         assert env["data"]["download_id"] != latecomer.id
 
 
+class TestForegroundClaimsItsDestination:
+    """A foreground `comfy model download` writes a claim record too.
+
+    Before it did, the foreground path was a blind spot: it wrote no state at all,
+    so a second foreground run — or a `--background` submit started during one —
+    passed both the destination scan (which only saw background records) and
+    `exists()` (the httpx downloader streams into a `.part` sibling, so nothing is
+    at `dest` until the rename), and the two transfers landed on the same file.
+    With `--downloader aria2`, which writes straight to the destination, they
+    interleave into it byte by byte.
+    """
+
+    DEST = ("models/loras", "m.safetensors")
+
+    def _dest(self, workspace) -> Path:
+        return workspace / self.DEST[0] / self.DEST[1]
+
+    def _download(self, **kwargs):
+        models.download(
+            None,
+            url="https://example.com/m.safetensors",
+            relative_path=self.DEST[0],
+            filename=self.DEST[1],
+            **kwargs,
+        )
+
+    def _transfer(self, monkeypatch, fn=None):
+        """Patch the byte transfer; returns the list of calls it recorded."""
+        calls: list = []
+
+        def download_file(*args, **kwargs):
+            calls.append((args, kwargs))
+            if fn is not None:
+                return fn(*args, **kwargs)
+            return None
+
+        monkeypatch.setattr(models, "download_file", download_file)
+        return calls
+
+    # -- the hole this closes -------------------------------------------------
+
+    def test_a_second_foreground_run_is_refused(self, workspace, monkeypatch, json_renderer):
+        """Ticket case 1: a live *foreground* record now blocks the next run."""
+        live = _state(dest=str(self._dest(workspace)), status="downloading", pid=1234, kind="foreground")
+        download_state.write(workspace, live)
+        monkeypatch.setattr(models, "download_file", MagicMock(side_effect=AssertionError("a transfer started")))
+
+        with patch("comfy_cli.utils.is_running", return_value=True):
+            with pytest.raises(typer.Exit) as exc:
+                self._download()
+
+        assert exc.value.exit_code == 1
+        env = json_renderer()
+        assert env["error"]["code"] == "model_download_in_flight"
+        assert env["error"]["details"]["download_id"] == live.id
+        assert env["error"]["details"]["kind"] == "foreground"
+        # The refusal names Ctrl-C, not `download-cancel` — which would itself
+        # refuse a live foreground record, so pointing at it would be dead advice.
+        assert "Ctrl-C" in env["error"]["hint"]
+        assert "download-cancel" not in env["error"]["hint"]
+
+    def test_a_background_submit_during_a_foreground_run_is_refused(self, workspace, no_spawn, json_renderer):
+        """The cross-kind direction: `--background` must see the foreground claim."""
+        live = _state(dest=str(self._dest(workspace)), status="downloading", pid=1234, kind="foreground")
+        download_state.write(workspace, live)
+
+        with patch("comfy_cli.utils.is_running", return_value=True):
+            with pytest.raises(typer.Exit) as exc:
+                self._download(background=True)
+
+        assert exc.value.exit_code == 1
+        assert json_renderer()["error"]["details"]["download_id"] == live.id
+
+    def test_the_record_is_written_before_any_bytes_move(self, workspace, monkeypatch, capsys):
+        """Ticket case 6. Order is the whole point: `--downloader aria2` writes
+        straight to the destination, so a claim published *after* the transfer
+        starts leaves the window it exists to close wide open."""
+        seen: list = []
+
+        def download_file(*args, **kwargs):
+            seen.append([(s.kind, s.status) for s in download_state.list_all(workspace)])
+
+        monkeypatch.setattr(models, "download_file", download_file)
+
+        self._download(downloader="aria2")
+
+        assert seen == [[("foreground", "downloading")]]
+
+    # -- terminal bookkeeping -------------------------------------------------
+
+    def test_success_marks_the_record_completed(self, workspace, monkeypatch, capsys):
+        """Ticket case 7a."""
+
+        def land_the_file(url, dest, headers, **kwargs):
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(b"x" * 17)
+
+        self._transfer(monkeypatch, land_the_file)
+
+        self._download()
+
+        (record,) = download_state.list_all(workspace)
+        assert record.kind == "foreground"
+        assert record.status == "completed"
+        # The size comes off the finished file, so `download-status` reports 100%
+        # rather than a bare `completed` with no bytes.
+        assert record.completed_bytes == 17
+        assert download_state.percent(record) == 100.0
+
+    def test_a_failed_transfer_marks_the_record_failed(self, workspace, monkeypatch, json_renderer):
+        """Ticket case 7b: the failure text is persisted, not just rendered."""
+        self._transfer(monkeypatch, MagicMock(side_effect=DownloadException("connection reset by peer")))
+
+        with pytest.raises(typer.Exit):
+            self._download()
+
+        assert json_renderer()["error"]["code"] == "download_failed"
+        (record,) = download_state.list_all(workspace)
+        assert record.status == "failed"
+        assert "connection reset by peer" in record.error
+
+    def test_a_keyboard_interrupt_marks_the_record_failed(self, workspace, monkeypatch, capsys):
+        """Ctrl-C is a `BaseException`, and it is precisely what the foreground
+        cancel hint tells users to send — so an `except Exception` here would
+        leave the record pinned at `downloading` after the documented way out."""
+        self._transfer(monkeypatch, MagicMock(side_effect=KeyboardInterrupt))
+
+        with pytest.raises(KeyboardInterrupt):
+            self._download()
+
+        (record,) = download_state.list_all(workspace)
+        assert record.status == "failed"
+
+    def test_a_completed_record_does_not_block_the_next_download(self, workspace, monkeypatch, capsys):
+        """The records accumulate, so they must be inert once terminal."""
+        self._transfer(monkeypatch)
+        self._download()
+        self._download()
+
+        assert [s.status for s in download_state.list_all(workspace)] == ["completed", "completed"]
+
+    def test_a_dead_foreground_record_self_clears(self, workspace, monkeypatch, capsys):
+        """Ticket case 5, the mirror of `test_a_dead_workers_record_self_clears`.
+
+        A SIGKILLed foreground run never reaches its `finally`, so its record is
+        left claiming `downloading` forever. Nothing else would ever clear it —
+        reconcile has to, off the pid it recorded.
+        """
+        stale = _state(
+            dest=str(self._dest(workspace)), status="downloading", pid=4242, kind="foreground", total_bytes=4096
+        )
+        download_state.write(workspace, stale)
+        self._transfer(monkeypatch)
+
+        with patch("comfy_cli.utils.is_running", return_value=False):
+            self._download()
+
+        assert download_state.read(workspace, stale.id).status == "failed"
+        assert len(download_state.list_all(workspace)) == 2
+
+    # -- claim-then-check, foreground side ------------------------------------
+
+    def _race(self, monkeypatch, rival):
+        """Plant `rival`'s claim in the window between our write and the re-scan."""
+        real_write = download_state.write
+        planted: list = []
+
+        def write_then_race(ws, state):
+            path = real_write(ws, state)
+            if not planted:
+                planted.append(real_write(ws, rival))
+            return path
+
+        monkeypatch.setattr(download_state, "write", write_then_race)
+
+    def test_an_earlier_rival_takes_the_destination(self, workspace, monkeypatch, json_renderer):
+        """Ticket case 2: we lose, and we take our own claim back off disk."""
+        rival = _state(dest=str(self._dest(workspace)), status="downloading", pid=1234)
+        rival.started_at = "2000-01-01T00:00:00+00:00"
+        self._race(monkeypatch, rival)
+        monkeypatch.setattr(models, "download_file", MagicMock(side_effect=AssertionError("a transfer started")))
+
+        with patch("comfy_cli.utils.is_running", return_value=True):
+            with pytest.raises(typer.Exit) as exc:
+                self._download()
+
+        assert exc.value.exit_code == 1
+        assert json_renderer()["error"]["details"]["download_id"] == rival.id
+        # Our record is gone and the rival's is untouched. A withdrawn claim left
+        # behind would refuse every later submission to this destination.
+        assert [s.id for s in download_state.list_all(workspace)] == [rival.id]
+        assert download_state.read(workspace, rival.id).status == "downloading"
+
+    def test_a_later_rival_does_not_take_the_destination(self, workspace, monkeypatch, capsys):
+        """Ticket case 3: we win and the transfer proceeds."""
+        rival = _state(dest=str(self._dest(workspace)), status="starting", pid=None)
+        rival.started_at = "2999-01-01T00:00:00+00:00"
+        self._race(monkeypatch, rival)
+        calls = self._transfer(monkeypatch)
+
+        self._download()
+
+        assert len(calls) == 1
+
+    @pytest.mark.parametrize(
+        ("rival_id", "we_win"),
+        [("zzzzzzzzzzzz", True), ("000000000000", False)],
+        ids=["our-id-sorts-first", "rival-id-sorts-first"],
+    )
+    def test_identical_timestamps_produce_exactly_one_winner(
+        self, workspace, monkeypatch, json_renderer, capsys, rival_id, we_win
+    ):
+        """Ticket case 4, the mutual-refusal regression.
+
+        `started_at` is second-resolution, so two racers colliding inside the same
+        second is the *common* tie, not an exotic one. Without the `id` term in
+        `_claim_order` each would see the other as an equally-ranked live claim,
+        both would back off, and the destination would be wedged for the user with
+        no download running at all — a worse outcome than the race itself. The
+        order is total, so the tie resolves the same way from both sides: exactly
+        one proceeds, and it is the lower id.
+        """
+        rival = _state(dest=str(self._dest(workspace)), status="downloading", pid=1234)
+        rival.id = rival_id
+        monkeypatch.setattr(download_state, "new_id", lambda: "mmmmmmmmmmmm")
+
+        real_write = download_state.write
+        planted: list = []
+
+        def write_then_race(ws, state):
+            path = real_write(ws, state)
+            if not planted:
+                # Same second, differing id — the tie the `id` term breaks.
+                rival.started_at = state.started_at
+                planted.append(real_write(ws, rival))
+            return path
+
+        monkeypatch.setattr(download_state, "write", write_then_race)
+        calls = self._transfer(monkeypatch)
+
+        with patch("comfy_cli.utils.is_running", return_value=True):
+            if we_win:
+                self._download()
+            else:
+                with pytest.raises(typer.Exit) as exc:
+                    self._download()
+
+        if we_win:
+            assert len(calls) == 1
+            assert download_state.read(workspace, "mmmmmmmmmmmm").status == "completed"
+        else:
+            assert calls == []
+            assert exc.value.exit_code == 1
+            assert json_renderer()["error"]["details"]["download_id"] == rival.id
+            assert download_state.read(workspace, "mmmmmmmmmmmm") is None
+
+    def test_an_unwritable_state_directory_still_downloads(self, workspace, monkeypatch, capsys):
+        """The claim is bookkeeping. An unwritable workspace must degrade to the
+        old behavior — no claim, transfer still runs — not turn a download that
+        used to work into an error. (`--background` *does* fail there, because a
+        detached worker has nowhere else to report from.)"""
+        monkeypatch.setattr(download_state, "write", MagicMock(side_effect=OSError("read-only file system")))
+        calls = self._transfer(monkeypatch)
+
+        self._download()
+
+        assert len(calls) == 1
+
+
 class TestSubmitEnvelope:
     def _submit(self, workspace, monkeypatch, **kwargs):
         monkeypatch.setattr(models, "_spawn_download_worker", lambda state_file, log_file: 31337)
@@ -979,7 +1248,12 @@ class TestSubmitEnvelope:
         assert len(calls) == 1
         # The foreground call site does not pass a progress callback.
         assert "progress_callback" not in calls[0][1]
-        assert download_state.list_all(workspace) == []
+        # It *does* now leave a record — a foreground transfer that claims nothing
+        # is invisible to every other invocation, which is how two of them ended up
+        # writing the same file. The record is a foreground one and it is terminal,
+        # so it blocks nothing once this run is over.
+        records = download_state.list_all(workspace)
+        assert [(r.kind, r.status) for r in records] == [("foreground", "completed")]
 
 
 class TestSpawnFlags:
@@ -1059,6 +1333,7 @@ class TestPollVerbs:
         assert env["data"] == {
             "id": state.id,
             "status": "downloading",
+            "kind": "background",
             "completed_bytes": 50,
             "total_bytes": 200,
             "percent": 25.0,
@@ -1129,6 +1404,7 @@ class TestPollVerbs:
         assert set(env["data"]["downloads"][0]) == {
             "id",
             "status",
+            "kind",
             "completed_bytes",
             "total_bytes",
             "percent",
@@ -1173,6 +1449,90 @@ class TestPollVerbs:
         assert env["data"]["status"] == "cancelled"
         assert env["data"]["completed_bytes"] == 0
         assert download_state.read(workspace, state.id).status == "cancelled"
+
+    def test_cancel_refuses_a_live_foreground_download(self, workspace, json_renderer, tmp_path):
+        """Ticket case 8, and the hazard this whole guard exists for.
+
+        `kill_worker` does `os.killpg(os.getpgid(pid), ...)`. That is safe for a
+        background worker because `_spawn_download_worker` gives it its own
+        session, so the group holds only it and its children. A *foreground*
+        record's pid is the user's own CLI process, sharing the terminal's
+        foreground process group — the same killpg would SIGTERM the surrounding
+        shell job. So nothing may be signalled, and no sentinel written either.
+        """
+        state = _state(
+            dest=str(tmp_path / "m.safetensors"),
+            status="downloading",
+            kind="foreground",
+            pid=os.getpid(),
+            pid_create_time=download_state.process_create_time(os.getpid()),
+        )
+        download_state.write(workspace, state)
+
+        with patch.object(download_state, "kill_worker") as kill:
+            with patch("os.killpg") as killpg:
+                with pytest.raises(typer.Exit) as exc:
+                    models.download_cancel(None, download_id=state.id)
+
+        assert exc.value.exit_code == 1
+        kill.assert_not_called()
+        killpg.assert_not_called()
+        assert not download_state.cancel_path(workspace, state.id).exists()
+
+        env = json_renderer()
+        assert env["ok"] is False
+        assert env["error"]["code"] == "model_download_foreground_cancel"
+        assert env["error"]["details"]["kind"] == "foreground"
+        assert env["error"]["details"]["pid"] == os.getpid()
+        assert "Ctrl-C" in env["error"]["hint"]
+        # The refusal changed nothing.
+        assert download_state.read(workspace, state.id).status == "downloading"
+
+    def test_cancel_of_a_dead_foreground_record_still_sweeps(self, workspace, json_renderer, tmp_path):
+        """The other half: once the foreground process is gone there is no group
+        left to signal, and its partial file is exactly what the user is trying to
+        reclaim — so a dead foreground record takes the normal path.
+
+        Under `--downloader aria2`, which writes straight to the destination, that
+        partial *is* the destination — the interleaving hazard that made the
+        foreground claim necessary in the first place.
+        """
+        dest = tmp_path / "m.safetensors"
+        dest.write_bytes(b"x" * 10)
+        state = _state(
+            dest=str(dest),
+            status="downloading",
+            kind="foreground",
+            downloader="aria2",
+            pid=5150,
+            pid_create_time=1.0,
+            total_bytes=100,
+        )
+        download_state.write(workspace, state)
+
+        with patch.object(download_state, "is_worker_process", return_value=False):
+            with patch("comfy_cli.utils.is_running", return_value=False):
+                models.download_cancel(None, download_id=state.id)
+
+        env = json_renderer()
+        assert env["ok"] is True
+        assert env["data"]["status"] == "cancelled"
+        assert not dest.exists()
+
+    def test_cancel_still_signals_a_live_background_worker(self, workspace, json_renderer, tmp_path):
+        """The guard must key on `kind`, not merely on liveness — an unconditional
+        refusal would take `download-cancel` away from the workers it is for."""
+        state = _state(dest=str(tmp_path / "m.safetensors"), status="downloading", pid=5150, pid_create_time=1.0)
+        download_state.write(workspace, state)
+        assert state.kind == "background"
+
+        alive = [True, True, False]
+        with patch.object(download_state, "is_worker_process", side_effect=lambda *a: alive.pop(0) if alive else False):
+            with patch.object(download_state, "kill_worker", return_value=True) as kill:
+                models.download_cancel(None, download_id=state.id)
+
+        kill.assert_called_once_with(5150, 1.0)
+        assert json_renderer()["data"]["status"] == "cancelled"
 
     def test_cancel_writes_the_sentinel_before_signalling(self, workspace, json_renderer, tmp_path):
         """A worker still in interpreter startup has no pid to signal; the
@@ -1293,7 +1653,7 @@ class TestHumanRendering:
 
     def test_empty_downloads_renders_a_message(self, workspace, capsys):
         models.downloads(None)
-        assert "No background downloads" in capsys.readouterr().out
+        assert "No downloads found" in capsys.readouterr().out
 
     def test_unknown_total_renders_without_crashing(self, workspace, capsys, tmp_path):
         state = _state(dest=str(tmp_path / "m"), status="starting", total_bytes=None)
@@ -1624,6 +1984,50 @@ class TestCorruptStateFiles:
         path.write_text(json.dumps(payload), encoding="utf-8")
 
         assert download_state.read_path(path) is None
+
+    def test_a_record_without_kind_reads_as_background(self, workspace, tmp_path):
+        """Ticket case 9. Every record written before `kind` existed was a
+        detached worker, which is what the dataclass default says."""
+        path = tmp_path / "legacy.json"
+        payload = _state().to_dict()
+        del payload["kind"]
+        path.write_text(json.dumps(payload), encoding="utf-8")
+
+        state = download_state.read_path(path)
+        assert state is not None
+        assert state.kind == "background"
+        assert state.is_foreground is False
+
+    @pytest.mark.parametrize("value", ["worker", "", None, 3])
+    def test_an_unrecognized_kind_drops_the_field_not_the_record(self, workspace, tmp_path, value):
+        """`kind` is the one *tolerant* field: a bad value drops the field rather
+        than the whole record.
+
+        Rejecting the record is the far more dangerous outcome. A record that
+        reads as absent is invisible to the destination-claim scan too, so one
+        unrecognized `kind` on a *live* download would un-claim its destination
+        and let a second writer into the same file — the exact corruption the
+        claim exists to prevent.
+        """
+        path = tmp_path / "odd-kind.json"
+        payload = _state().to_dict()
+        payload["kind"] = value
+        path.write_text(json.dumps(payload), encoding="utf-8")
+
+        state = download_state.read_path(path)
+        assert state is not None
+        assert state.kind == "background"
+
+    @pytest.mark.parametrize("kind", ["background", "foreground"])
+    def test_the_status_row_reports_the_kind(self, kind):
+        """`comfy model downloads` is now the only place a foreground download is
+        visible, and the two kinds differ in a way a consumer has to act on: a
+        live foreground row cannot be cancelled. Without this field the only way
+        to find that out is to try `download-cancel` and read the refusal."""
+        state = _state(status="downloading")
+        state.kind = kind
+
+        assert download_state.status_payload(state)["kind"] == kind
 
     def test_list_all_skips_a_corrupt_file_instead_of_crashing(self, workspace):
         good = _state()

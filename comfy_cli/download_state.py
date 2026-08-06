@@ -24,9 +24,21 @@ State-file contract (``download-state/1``)::
       "started_at": "<iso8601>",
       "updated_at": "<iso8601>",
       "downloader": "httpx" | "aria2",
+      "kind": "background" | "foreground",
       "needs_civitai_auth": <bool>,
       "needs_hf_auth": <bool>
     }
+
+``kind`` distinguishes a detached worker from a plain ``comfy model download``
+running in the caller's own terminal. Both write records — a foreground transfer
+that claimed no destination was invisible to every other invocation, so two of
+them raced into the same file — but they are not interchangeable: a background
+worker gets its own session (:func:`kill_worker` may ``killpg`` it), whereas a
+foreground record's pid is the *user's CLI process*, sharing the terminal's
+foreground process group. Signalling that group would kill the user's shell job,
+so ``download-cancel`` refuses a live foreground record instead. The field is
+additive within ``download-state/1``: readers drop unknown keys, and a record
+written before it existed reads back as ``"background"``, which is what it was.
 
 ``pid`` is only ever written by the worker itself, together with
 ``pid_create_time`` — the pair identifies the process, so a recycled pid can
@@ -169,8 +181,19 @@ class DownloadState:
     started_at: str = ""
     updated_at: str = ""
     downloader: str = "httpx"
+    kind: str = "background"
     needs_civitai_auth: bool = False
     needs_hf_auth: bool = False
+
+    @property
+    def is_foreground(self) -> bool:
+        """True when this record's pid is a user CLI process, not a detached worker.
+
+        The distinction is only ever load-bearing in the *refusing* direction
+        (``download-cancel`` must not signal a foreground pid's process group),
+        so an unrecognized value reads as ``background`` — see :data:`_TOLERANT_FIELDS`.
+        """
+        return self.kind == "foreground"
 
     @property
     def is_terminal(self) -> bool:
@@ -284,9 +307,30 @@ _FIELD_VALIDATORS: dict[str, Any] = {
     "started_at": lambda v: isinstance(v, str),
     "updated_at": lambda v: isinstance(v, str),
     "downloader": lambda v: isinstance(v, str),
+    "kind": lambda v: v in ("background", "foreground"),
     "needs_civitai_auth": lambda v: isinstance(v, bool),
     "needs_hf_auth": lambda v: isinstance(v, bool),
 }
+
+# Fields whose validator failure drops *the field* (falling back to the dataclass
+# default) rather than the whole record.
+#
+# `kind` is in here because rejecting the record is the more dangerous outcome by
+# far. A record reads as absent to every caller, including the destination-claim
+# scan — so one unrecognized `kind` on a *live* download would make its claim
+# invisible and let a second writer into the same file, which is the exact
+# corruption the claim exists to prevent. Dropping one advisory field is the
+# smaller loss.
+#
+# The fallback is the dataclass default, `"background"`, which is exactly right
+# for the case that actually occurs — a record written before this field existed,
+# which *was* a background worker. It is the less conservative choice for the
+# case that does not occur today: a *live foreground* record whose `kind` got
+# rewritten to something unrecognized would read as cancellable, and
+# `download-cancel` would then `killpg` the user's shell job. Nothing writes a
+# third value, so that population is empty; a future version that adds one must
+# revisit this line rather than assume tolerance covers it.
+_TOLERANT_FIELDS = frozenset({"kind"})
 
 
 def read_path(path: Path) -> DownloadState | None:
@@ -298,15 +342,39 @@ def read_path(path: Path) -> DownloadState | None:
         return None
     known = set(DownloadState.__dataclass_fields__)
     filtered = {k: v for k, v in data.items() if k in known}
-    for key, value in filtered.items():
+    for key, value in list(filtered.items()):
         validator = _FIELD_VALIDATORS.get(key)
         if validator is not None and not validator(value):
+            if key in _TOLERANT_FIELDS:
+                del filtered[key]
+                continue
             return None
     try:
         return DownloadState(**filtered)
     except TypeError:
         # Truncated/legacy file missing a required field — treat as absent.
         return None
+
+
+def delete(workspace: Path, download_id: str) -> bool:
+    """Remove one state file. Returns False if it could not be removed.
+
+    Used to *withdraw a claim*: both the background and the foreground submit
+    paths write their record and then re-scan for a competitor, and the racer
+    that loses that comparison has to take its record back off disk before it
+    exits. Leaving it behind would be worse than never having written it — an
+    abandoned ``downloading`` record with a pid that is about to disappear reads
+    as a live claim until something reconciles it, so it would refuse every later
+    submission to that destination for no reason.
+
+    Absent is success: the caller's goal is "this claim is gone", and a record
+    that was never written (or already swept) satisfies it.
+    """
+    try:
+        state_path(workspace, download_id).unlink(missing_ok=True)
+        return True
+    except (OSError, ValueError):
+        return False
 
 
 def list_all(workspace: Path) -> list[DownloadState]:
@@ -482,10 +550,19 @@ def percent(state: DownloadState) -> float | None:
 
 
 def status_payload(state: DownloadState) -> dict[str, Any]:
-    """The ``download-status`` / ``downloads`` envelope row for one download."""
+    """The ``download-status`` / ``downloads`` envelope row for one download.
+
+    ``kind`` is reported because these rows are now the only place a foreground
+    download is visible, and the two kinds are not interchangeable to a consumer:
+    ``download-cancel`` refuses a live ``foreground`` row (its pid is a user CLI
+    process sharing a terminal's process group, so signalling it would kill the
+    surrounding shell job). Without the field the only way to learn that is to
+    try the cancel and read the refusal.
+    """
     return {
         "id": state.id,
         "status": state.status,
+        "kind": state.kind,
         "completed_bytes": state.completed_bytes,
         "total_bytes": state.total_bytes,
         "percent": percent(state),
