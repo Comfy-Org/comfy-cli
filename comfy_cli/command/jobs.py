@@ -32,7 +32,7 @@ from typing import TYPE_CHECKING, Annotated, Any
 import typer
 from websocket import WebSocket, WebSocketException, WebSocketTimeoutException
 
-from comfy_cli import cancellation, execution_errors, tracking
+from comfy_cli import cancellation, execution_errors, jobs_state, tracking
 from comfy_cli.env_checker import check_comfy_server_running
 from comfy_cli.host_port import resolve_host_port as _resolve_host_port
 from comfy_cli.http import ResponseTooLarge, authed_urlopen, plain_urlopen, read_capped
@@ -216,22 +216,12 @@ def _emit_terminal(renderer, payload: dict, *, command: str, where: str | None =
 # meaningful alongside. `completed` is terminal but deliberately absent.
 _ERROR_STATUSES = frozenset({"error", "cancelled"})
 
-# Cloud's raw job statuses → the row vocabulary above. Mirrors
-# ``job_watcher._CLOUD_STATUS_MAP`` (kept as a local copy rather than imported:
-# ``job_watcher`` imports this module, so the dependency only runs one way).
-# The failure spellings matter here — an unmapped `non_retryable_error` /
-# `lost` / `canceled` misses `_ERROR_STATUSES` and silently drops the state
-# file's `error_code` for exactly the jobs that failed.
-_CLOUD_ROW_STATUS_MAP = {
-    "success": "completed",
-    "completed": "completed",
-    "failed": "error",
-    "error": "error",
-    "non_retryable_error": "error",
-    "lost": "error",
-    "cancelled": "cancelled",
-    "canceled": "cancelled",
-}
+# Cloud's raw job statuses → the row vocabulary above. One shared map, owned by
+# ``jobs_state`` so ``job_watcher`` (which imports this module) can use the same
+# copy without an import cycle. The failure spellings matter here — an unmapped
+# `non_retryable_error` / `lost` / `canceled` misses `_ERROR_STATUSES` and
+# silently drops the state file's `error_code` for exactly the jobs that failed.
+_CLOUD_ROW_STATUS_MAP = jobs_state.CLOUD_STATUS_ALIASES
 
 
 @dataclass(frozen=True)
@@ -2096,21 +2086,12 @@ def _cloud_status_snapshot(prompt_id: str) -> dict | None:
     if status is None:
         return None
     raw = (status.get("status") or "").lower()
-    # Deliberately NOT _CLOUD_ROW_STATUS_MAP: this map lacks cloud's two cancel
-    # spellings, so a cancelled cloud job snapshots as the raw `canceled` — not
-    # in the published `status` enum, not in `_cloud_watch`'s terminal set (so
-    # `jobs watch --where cloud` spins to `cloud_timeout`), and not in
-    # `_TERMINAL_VERDICT` (so `jobs status` reports it ok:true/exit 0 instead of
-    # the documented 130). Real bugs, but adding the aliases here changes an
-    # exit code on a path this PR does not otherwise touch — see BE-6612.
-    state = {
-        "success": "completed",
-        "completed": "completed",
-        "failed": "error",
-        "error": "error",
-        "non_retryable_error": "error",
-        "lost": "error",
-    }.get(raw, raw or "pending")
+    # The shared alias map: /api/jobs serves ingest's filter enum, whose
+    # `in_progress` is not in the published `status` enum and whose `cancelled`
+    # only landed correctly by fall-through. Mapping here keeps the snapshot —
+    # and everything downstream of it (`jobs status`, `jobs watch` state events,
+    # `_TERMINAL_VERDICT`) — inside the vocabulary `schemas/jobs.json` declares.
+    state = jobs_state.CLOUD_STATUS_ALIASES.get(raw, raw or "pending")
 
     outputs: list[str] = []
     outputs_by_node: dict[str, list[str]] = {}

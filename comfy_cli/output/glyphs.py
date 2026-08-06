@@ -29,6 +29,9 @@ DEFAULT_STYLE: tuple[str, str] = ("·", "dim")
 # regardless of whether the prompt ran on a local server or Comfy Cloud.
 _CLOUD_ALIASES = {
     "executing": "running",
+    # /api/jobs (ingest's filter enum) spells an executing job `in_progress`;
+    # without this it renders as the unknown-status fallback dot.
+    "in_progress": "running",
     "success": "completed",
     "failed": "error",
     "non_retryable_error": "error",

@@ -52,6 +52,32 @@ from comfy_cli.utils import get_os
 
 TERMINAL_STATUSES = frozenset({"completed", "error", "cancelled"})
 
+# Cloud's /api/jobs status enum (ingest ``toFilterStatus``: pending,
+# in_progress, completed, failed, cancelled) -> the CLI's published jobs
+# vocabulary (``comfy_cli/schemas/jobs.json``). Legacy raw-jobstate spellings
+# from the deprecated /api/job/<id>/status endpoint are kept as cheap defense;
+# `canceled` has never been observed from ingest but is one typo-of-vocabulary
+# away.
+#
+# Lives here rather than in ``command/jobs.py`` so both ``command/jobs.py`` and
+# ``command/job_watcher.py`` can share one copy — ``job_watcher`` imports
+# ``command.jobs``, so a map owned by ``jobs`` could only be shared by importing
+# it the wrong way round.
+CLOUD_STATUS_ALIASES = {
+    "pending": "pending",
+    "in_progress": "running",
+    "completed": "completed",
+    "failed": "error",
+    "cancelled": "cancelled",
+    "canceled": "cancelled",
+    # legacy raw jobstate vocabulary (deprecated endpoint), kept defensively:
+    "success": "completed",
+    "error": "error",
+    "non_retryable_error": "error",
+    "lost": "error",
+    "executing": "running",
+}
+
 
 def state_dir() -> Path:
     """Return ``<config-root>/jobs`` and ensure it exists with safe mode."""

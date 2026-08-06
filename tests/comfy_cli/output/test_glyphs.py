@@ -17,6 +17,15 @@ def test_cloud_executing_renders_as_running():
     assert "running" in status_glyph("executing")  # canonical label
 
 
+def test_cloud_in_progress_renders_as_running():
+    """`/api/jobs` spells an executing job `in_progress`; without the alias it
+    renders as the unknown-status fallback dot."""
+    out = status_glyph("in_progress")
+    assert "◐" in out
+    assert "running" in out
+    assert "·" not in out
+
+
 def test_cloud_failed_renders_as_error():
     assert "✗" in status_glyph("failed")
     assert "error" in status_glyph("failed")
