@@ -1264,7 +1264,7 @@ def _filter_control_values(
             # A V3 dynamic combo (``COMFY_*COMBO*``) occupies its selector
             # slot plus a variable number of sub-input slots chosen by the
             # selected option. Copy the whole span through untouched and
-            # advance ``vidx`` in lockstep with ``_get_widget_name_order``
+            # advance ``vidx`` in lockstep with ``_schema_widget_pairs``
             # (which expands the same sub-inputs). Otherwise the walk
             # treats the combo as a single slot, reaches a later seed input
             # too early, checks the wrong slot for its control_after_generate
@@ -1277,7 +1277,7 @@ def _filter_control_values(
             # ``_dynamic_combo_selected_subs`` returns connection-only ones too
             # (it leaves that call to the caller, as its docstring notes), and
             # counting those would over-report the span and shift every later
-            # widget. Same ``_is_widget_input`` test ``_get_widget_name_order``
+            # widget. Same ``_is_widget_input`` test ``_schema_widget_pairs``
             # applies, so the two walks stay in lockstep.
             subs = [
                 sub
