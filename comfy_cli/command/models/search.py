@@ -16,10 +16,11 @@ ride along when present.
 
 Local-mode caveats:
   * ``/models/<folder>`` returns ``[{name, pathIndex}, ...]`` — filenames only,
-    no enrichment. ``search`` on local degrades to a filename substring match:
-    without ``--type`` it walks *every* folder reported by ``/models`` (so a
+    no enrichment. ``search`` on local degrades to a filename match: without
+    ``--type`` it walks *every* folder reported by ``/models`` (so a
     diffusion_models/vae/lora file is findable by name), and ``--type`` scopes
-    the walk to that single folder.
+    the walk to that single folder. ``--text`` is token-AND and
+    separator-insensitive there (see ``_name_matches``).
   * The cloud asset catalog (``/api/assets``) has no local equivalent —
     local search is intentionally simpler.
 """
@@ -27,6 +28,7 @@ Local-mode caveats:
 from __future__ import annotations
 
 import json
+import re
 import urllib.error
 import urllib.parse
 from typing import Annotated, Any, NoReturn
@@ -458,6 +460,47 @@ def _local_folder_names(target) -> list[str]:
     return names
 
 
+# Characters that separate the "words" of a model filename. Model files are
+# named with any of them, inconsistently, in the same catalog:
+# `sd_xl_base_1.0.safetensors`, `flux1-dev.safetensors`, `ltx-video-2b-v0.9`.
+_NAME_SEPARATORS = re.compile(r"[-_. ]+")
+
+
+def _search_tokens(text: str | None) -> list[tuple[str, str]]:
+    """Split ``--text`` into ``(token, separator-squashed token)`` pairs.
+
+    Empty or whitespace-only ``--text`` yields no tokens, which
+    ``_name_matches`` treats as "no filter" — the same list-everything result
+    the local walk gives when ``--text`` is omitted entirely.
+    """
+    if not text:
+        return []
+    return [(t, _NAME_SEPARATORS.sub("", t)) for t in text.lower().split()]
+
+
+def _name_matches(name: str, tokens: list[tuple[str, str]]) -> bool:
+    """Token-AND, separator-insensitive filename match.
+
+    Every whitespace-separated token of the query must be present, in any
+    order, either in the raw lowercased filename or in the filename with
+    ``- _ . space`` runs squashed out. The squashed pass is what lets
+    ``--text "sdxl base"`` find ``sd_xl_base_1.0.safetensors``: real model
+    filenames put separators wherever the uploader felt like it, so a
+    whole-string contiguous substring test (what this used to be) could not
+    match a multi-word query at all.
+
+    The token is squashed too, so the match is symmetric — ``sd-xl``,
+    ``sd_xl`` and ``sdxl`` all find the same file. A token that is *only*
+    separators squashes to ``""``, which would be a substring of every name;
+    it falls back to the raw test so ``--text "---"`` still matches nothing.
+    """
+    if not tokens:
+        return True
+    name_l = name.lower()
+    name_squashed = _NAME_SEPARATORS.sub("", name_l)
+    return all(t in name_l or (t_squashed and t_squashed in name_squashed) for t, t_squashed in tokens)
+
+
 def _local_folder_matches(target, folder: str, *, text: str | None) -> list[dict[str, Any]]:
     """Rows for one ``/models/<folder>`` listing, client-side filtered by ``text``.
 
@@ -465,6 +508,7 @@ def _local_folder_matches(target, folder: str, *, text: str | None) -> list[dict
     non-ASCII characters resolve correctly; the emitted rows carry the decoded
     name so ``type``/``tags`` stay human-readable.
     """
+    tokens = _search_tokens(text)
     segment = urllib.parse.quote(folder, safe="")
     data = _http_get_json(target.url(*_models_path_parts(target), segment), target)
     rows: list[dict[str, Any]] = []
@@ -477,7 +521,7 @@ def _local_folder_matches(target, folder: str, *, text: str | None) -> list[dict
             # normalizer does.
             if not isinstance(name, str) or not name:
                 continue
-            if text and text.lower() not in name.lower():
+            if not _name_matches(name, tokens):
                 continue
             rows.append(
                 {
@@ -546,7 +590,7 @@ def _local_search(
     "search",
     help=(
         "Search models. Cloud: enriched via /api/assets. "
-        "Local: filename substring across every /models folder (--type scopes it to one)."
+        "Local: filename match across every /models folder (--type scopes it to one)."
     ),
 )
 @tracking.track_command("models")
@@ -554,7 +598,13 @@ def search_cmd(
     text: Annotated[
         str | None,
         typer.Option(
-            "--text", "-t", show_default=False, help="Substring on the model name (case-insensitive on cloud)."
+            "--text",
+            "-t",
+            show_default=False,
+            help=(
+                "Match the model name (case-insensitive). Cloud: substring. "
+                "Local: every word must appear, in any order, ignoring - _ . separators."
+            ),
         ),
     ] = None,
     type_: Annotated[
