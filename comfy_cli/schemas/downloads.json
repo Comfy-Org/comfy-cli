@@ -11,6 +11,10 @@
     "downloads": {
       "type": "array",
       "items": { "$ref": "download_status.json#/$defs/row" }
+    },
+    "pruned": {
+      "type": "integer",
+      "description": "Number of old terminal records deleted by this call. Present only when `--prune` was passed."
     }
   }
 }

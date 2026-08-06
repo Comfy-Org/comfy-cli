@@ -753,6 +753,13 @@ def _submit_background_download(
         )
         raise typer.Exit(code=1) from e
 
+    # Every submit adds two files here and nothing else ever removes them, so the
+    # sweep rides along with the one command that grows the directory. Belt and
+    # braces: `prune` is already best-effort per file, and this covers the
+    # directory scan it starts with — a submit must never fail over bookkeeping.
+    with contextlib.suppress(OSError):
+        download_state.prune(workspace)
+
     try:
         pid = _spawn_download_worker(state_file, log_file)
     except OSError as e:
@@ -977,15 +984,39 @@ def download_status(
 
 @app.command("downloads")
 @tracking.track_command("model")
-def downloads(_ctx: typer.Context):
+def downloads(
+    _ctx: typer.Context,
+    prune: Annotated[
+        bool,
+        typer.Option(
+            "--prune",
+            help="Remove terminal download records older than 7 days (always keeps the 50 most recent).",
+        ),
+    ] = False,
+):
     """List every background download this workspace knows about, newest first."""
     renderer = get_renderer()
+
+    pruned = 0
+    if prune:
+        # Before the rows are built, so the listing shows exactly the survivors.
+        with contextlib.suppress(OSError):
+            pruned = download_state.prune(get_workspace())
+        if pruned:
+            print(f"Pruned {pruned} old download record(s).")
+
     rows = [download_state.status_payload(_reconciled(s)[0]) for s in download_state.list_all(get_workspace())]
     if not rows:
         print("No background downloads found.")
     else:
         _render_download_rows(rows)
-    renderer.emit({"total": len(rows), "downloads": rows}, command="model downloads")
+
+    payload = {"total": len(rows), "downloads": rows}
+    if prune:
+        payload["pruned"] = pruned
+    # A plain listing changes nothing and keeps emitting no `changed` at all —
+    # only the pruning form has a mutation to report.
+    renderer.emit(payload, command="model downloads", changed=(pruned > 0) if prune else None)
 
 
 @app.command("download-cancel")

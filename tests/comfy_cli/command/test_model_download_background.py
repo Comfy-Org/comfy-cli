@@ -13,6 +13,7 @@ import json
 import os
 import subprocess
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -120,6 +121,195 @@ class TestStatePersistence:
 
     def test_list_all_on_missing_dir(self, tmp_path):
         assert download_state.list_all(tmp_path / "nope") == []
+
+
+# ---------------------------------------------------------------------------
+# 1.5 pruning: nothing else ever removes a record, so the state dir would grow
+#     without bound in a long-lived workspace.
+# ---------------------------------------------------------------------------
+
+
+def _persist_aged(
+    workspace,
+    *,
+    status: str = "completed",
+    days_ago: float = 8.0,
+    started_days_ago: float | None = None,
+) -> download_state.DownloadState:
+    """Persist one record whose timestamps are backdated on disk.
+
+    A plain ``write`` always stamps ``updated_at`` with *now*, so the ages this
+    module's prune window keys off have to be rewritten into the JSON directly.
+    """
+    state = _state(dest=str(Path(workspace) / "m.safetensors"), status=status)
+    path = download_state.write(workspace, state)
+
+    now = datetime.now(timezone.utc)
+    state.updated_at = (now - timedelta(days=days_ago)).isoformat(timespec="seconds")
+    started = days_ago if started_days_ago is None else started_days_ago
+    state.started_at = (now - timedelta(days=started)).isoformat(timespec="seconds")
+
+    data = json.loads(path.read_text())
+    data["updated_at"] = state.updated_at
+    data["started_at"] = state.started_at
+    path.write_text(json.dumps(data))
+    return state
+
+
+class TestPrune:
+    def test_removes_an_old_terminal_record_and_its_sidecars(self, workspace):
+        state = _persist_aged(workspace, status="completed", days_ago=8)
+        log = download_state.log_path(workspace, state.id)
+        cancel = download_state.cancel_path(workspace, state.id)
+        log.write_text("worker output\n")
+        cancel.touch()
+
+        assert download_state.prune(workspace, keep=0) == 1
+
+        assert not download_state.state_path(workspace, state.id).exists()
+        assert not log.exists()
+        assert not cancel.exists()
+        assert download_state.list_all(workspace) == []
+
+    @pytest.mark.parametrize("status", ["starting", "downloading"])
+    def test_active_records_are_never_pruned_however_old(self, workspace, status):
+        """An in-flight record has no business being deleted, and prune reads the
+        on-disk status rather than reconciling — a worker that died mid-transfer
+        is collected on a later sweep, once a poll verb has marked it failed."""
+        state = _persist_aged(workspace, status=status, days_ago=30)
+
+        assert download_state.prune(workspace, keep=0) == 0
+        assert download_state.state_path(workspace, state.id).exists()
+
+    def test_keep_floor_wins_over_age(self, workspace):
+        # started_at descending, so "newest" is unambiguous.
+        states = [_persist_aged(workspace, days_ago=30 + i, started_days_ago=30 + i) for i in range(5)]
+
+        assert download_state.prune(workspace, keep=3) == 2
+
+        survivors = {s.id for s in download_state.list_all(workspace)}
+        assert survivors == {s.id for s in states[:3]}
+
+    def test_a_young_terminal_record_survives_the_default_window(self, workspace):
+        state = _persist_aged(workspace, status="completed", days_ago=1)
+
+        assert download_state.prune(workspace, keep=0) == 0
+        assert download_state.state_path(workspace, state.id).exists()
+
+    def test_unparsable_timestamps_are_treated_as_old(self, workspace):
+        """A terminal record that carries no usable age is junk once it is past
+        the keep floor — there is nothing left that could make it recent."""
+        state = _persist_aged(workspace, status="failed")
+        path = download_state.state_path(workspace, state.id)
+        data = json.loads(path.read_text())
+        data["updated_at"] = data["started_at"] = ""
+        path.write_text(json.dumps(data))
+
+        assert download_state.prune(workspace, keep=0) == 1
+        assert not path.exists()
+
+    def test_an_unlink_failure_is_not_fatal(self, workspace, monkeypatch):
+        state = _persist_aged(workspace, days_ago=30)
+
+        def boom(self, missing_ok=False):
+            raise OSError("read-only file system")
+
+        monkeypatch.setattr(Path, "unlink", boom)
+
+        # Best effort: the sweep neither raises nor claims a record it failed to
+        # remove.
+        assert download_state.prune(workspace, keep=0) == 0
+        assert download_state.state_path(workspace, state.id).exists()
+
+    def test_prune_leaves_a_workspace_under_the_floor_alone(self, workspace):
+        states = [_persist_aged(workspace, days_ago=30 + i, started_days_ago=30 + i) for i in range(3)]
+
+        assert download_state.prune(workspace, keep=len(states)) == 0
+        assert len(download_state.list_all(workspace)) == len(states)
+
+
+class TestPruneOnSubmit:
+    """`--background` is the one command that grows the state dir, so it sweeps."""
+
+    def _submit(self, workspace, monkeypatch):
+        monkeypatch.setattr(models, "_spawn_download_worker", lambda state_file, log_file: 31337)
+        models.download(
+            None,
+            url="https://example.com/m.safetensors",
+            relative_path="models/loras",
+            filename="m.safetensors",
+            background=True,
+        )
+
+    def test_submit_prunes_records_past_the_keep_floor(self, workspace, monkeypatch, json_renderer):
+        # One more than the floor, so exactly the oldest falls outside it once
+        # the submit's own record is written.
+        seeded = [
+            _persist_aged(workspace, days_ago=30 + i, started_days_ago=30 + i)
+            for i in range(download_state.PRUNE_KEEP + 1)
+        ]
+
+        self._submit(workspace, monkeypatch)
+        env = json_renderer()
+        assert env["ok"] is True
+
+        survivors = {s.id for s in download_state.list_all(workspace)}
+        assert seeded[-1].id not in survivors  # the oldest went
+        assert seeded[0].id in survivors  # recent history is untouched
+        assert len(survivors) == download_state.PRUNE_KEEP
+
+    def test_a_pruning_failure_never_fails_the_submit(self, workspace, monkeypatch, json_renderer):
+        def boom(*args, **kwargs):
+            raise OSError("state dir is unreadable")
+
+        monkeypatch.setattr(download_state, "prune", boom)
+        self._submit(workspace, monkeypatch)
+
+        env = json_renderer()
+        assert env["ok"] is True
+        assert env["data"]["status"] == "starting"
+
+
+class TestDownloadsPruneFlag:
+    def _seed(self, workspace) -> list[download_state.DownloadState]:
+        """One over the keep floor plus a fresh record — so exactly the two
+        oldest are prunable, and everything else is recent history to retain."""
+        old = [
+            _persist_aged(workspace, days_ago=30 + i, started_days_ago=30 + i)
+            for i in range(download_state.PRUNE_KEEP + 1)
+        ]
+        fresh = _persist_aged(workspace, days_ago=1, started_days_ago=1)
+        return [fresh, *old]
+
+    def test_prune_flag_removes_and_reports(self, workspace, json_renderer):
+        records = self._seed(workspace)
+
+        models.downloads(None, prune=True)
+        env = json_renderer()
+
+        assert env["command"] == "model downloads"
+        assert env["changed"] is True
+        assert env["data"]["pruned"] == 2
+        assert env["data"]["total"] == download_state.PRUNE_KEEP
+        listed = {row["id"] for row in env["data"]["downloads"]}
+        assert listed == {r.id for r in records[:-2]}
+
+    def test_without_the_flag_nothing_is_removed(self, workspace, json_renderer):
+        records = self._seed(workspace)
+
+        models.downloads(None)
+        env = json_renderer()
+
+        assert env["data"]["total"] == len(records)
+        # The envelope shape agents already parse is unchanged without the flag.
+        assert "pruned" not in env["data"]
+        assert "changed" not in env
+
+    def test_prune_flag_on_an_empty_workspace(self, workspace, json_renderer):
+        models.downloads(None, prune=True)
+        env = json_renderer()
+        assert env["data"] == {"total": 0, "downloads": [], "pruned": 0}
+        assert env["changed"] is False
 
 
 # ---------------------------------------------------------------------------
