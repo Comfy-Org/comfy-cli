@@ -3135,6 +3135,26 @@ def test_gather_local_state_files_reports_the_reaped_watcher_code(monkeypatch):
     assert row.error_code == "watcher_crashed"
 
 
+def test_gather_local_state_files_sweeps_stranded_atomic_write_temps():
+    """The scan that reaps crashed watchers also sweeps the temps those same
+    unclean deaths strand — without disturbing the state files it lists."""
+    import time as _time
+
+    from comfy_cli import jobs_state
+
+    state_dir = jobs_state.state_dir()
+    _write_state(state_dir, "job-1", status="completed")
+    corpse = state_dir / "job-1.json.abcd1234.tmp"
+    corpse.write_text("half a write")
+    old = _time.time() - 7200
+    os.utime(corpse, (old, old))
+
+    (row,) = jobs_mod._gather_local_state_files(limit=10)
+    assert row.prompt_id == "job-1"
+    assert not corpse.exists(), "the stranded atomic-write temp should have been swept"
+    assert (state_dir / "job-1.json").exists()
+
+
 def _row(prompt_id: str, status: str, **kw) -> jobs_mod.JobRow:
     return jobs_mod.JobRow(
         prompt_id=prompt_id,
