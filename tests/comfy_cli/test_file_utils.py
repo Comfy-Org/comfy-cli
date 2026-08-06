@@ -1,6 +1,8 @@
 import os
+import pathlib
 import stat
 import sys
+import time
 import zipfile
 
 import pytest
@@ -312,3 +314,144 @@ def test_atomic_write_bytes_new_file_uses_umask_default(tmp_path):
         assert stat.S_IMODE(os.stat(target).st_mode) == (0o666 & ~0o022)
     finally:
         os.umask(old_umask)
+
+
+# ---------------------------------------------------------------------------
+# cleanup_stale_tmp_files — sweeping stranded atomic-write temps
+# ---------------------------------------------------------------------------
+
+
+def _backdate(path, seconds: float) -> None:
+    """Push ``path``'s mtime ``seconds`` into the past."""
+    when = time.time() - seconds
+    os.utime(path, (when, when))
+
+
+def test_cleanup_stale_tmp_files_removes_old_stranded_temp(tmp_path):
+    """A SIGKILLed writer's ``<dest>.<token>.tmp`` corpse is swept once it ages out."""
+    corpse = tmp_path / "job-1.json.abcd1234.tmp"
+    corpse.write_text("half a write")
+    _backdate(corpse, 7200)
+
+    assert file_utils.cleanup_stale_tmp_files(tmp_path) == 1
+    assert not corpse.exists()
+
+
+def test_cleanup_stale_tmp_files_keeps_in_flight_temp(tmp_path):
+    """A temp written moments ago may belong to a live write — never race it."""
+    live = tmp_path / "job-1.json.abcd1234.tmp"
+    live.write_text("in flight")
+
+    assert file_utils.cleanup_stale_tmp_files(tmp_path) == 0
+    assert live.exists()
+
+
+def test_cleanup_stale_tmp_files_age_threshold_is_configurable(tmp_path):
+    """``older_than_seconds`` moves the cutoff; the same file falls either side."""
+    corpse = tmp_path / "job-1.json.abcd1234.tmp"
+    corpse.write_text("x")
+    _backdate(corpse, 120)
+
+    assert file_utils.cleanup_stale_tmp_files(tmp_path, older_than_seconds=3600) == 0
+    assert corpse.exists()
+    assert file_utils.cleanup_stale_tmp_files(tmp_path, older_than_seconds=60) == 1
+    assert not corpse.exists()
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "notes.tmp",  # no token segment at all — a user's own scratch file
+        "job-1.json.abc123.tmp",  # token too short
+        "job-1.json.abcd12345.tmp",  # token too long
+        "job-1.json.ABCD1234.tmp",  # mkstemp never emits uppercase
+        "job-1.json.abcd-234.tmp",  # '-' is not in mkstemp's alphabet
+        ".abcd1234.tmp",  # token shape, but no destination stem
+    ],
+)
+def test_cleanup_stale_tmp_files_ignores_wrong_shapes(tmp_path, name):
+    """Only mkstemp's exact ``<stem>.<8 chars>.tmp`` shape is ever claimed."""
+    survivor = tmp_path / name
+    survivor.write_text("mine, not yours")
+    _backdate(survivor, 7200)
+
+    assert file_utils.cleanup_stale_tmp_files(tmp_path) == 0
+    assert survivor.exists()
+
+
+def test_cleanup_stale_tmp_files_leaves_lock_and_part_siblings(tmp_path):
+    """``.lock`` (never safe to unlink) and ``.part`` (download-owned) are untouched."""
+    lock = tmp_path / "job-1.lock"
+    part = tmp_path / "model.safetensors.abcd1234.part"
+    state = tmp_path / "job-1.json"
+    corpse = tmp_path / "job-1.json.abcd1234.tmp"
+    for p in (lock, part, state, corpse):
+        p.write_text("x")
+        _backdate(p, 7200)
+
+    assert file_utils.cleanup_stale_tmp_files(tmp_path) == 1
+    assert lock.exists()
+    assert part.exists()
+    assert state.exists()
+    assert not corpse.exists()
+
+
+def test_cleanup_stale_tmp_files_survives_unreadable_directory(tmp_path):
+    """An unlistable directory returns 0 rather than propagating the OSError."""
+    assert file_utils.cleanup_stale_tmp_files(tmp_path / "does-not-exist") == 0
+
+
+def test_cleanup_stale_tmp_files_survives_unlink_failure(tmp_path, monkeypatch):
+    """A temp that can't be removed is skipped, not fatal — and isn't counted."""
+    corpse = tmp_path / "job-1.json.abcd1234.tmp"
+    corpse.write_text("x")
+    _backdate(corpse, 7200)
+
+    def boom(self):
+        raise PermissionError("nope")
+
+    monkeypatch.setattr(pathlib.Path, "unlink", boom)
+    assert file_utils.cleanup_stale_tmp_files(tmp_path) == 0
+    assert corpse.exists()
+
+
+def test_cleanup_stale_tmp_files_sweeps_every_token_a_crash_loop_left(tmp_path):
+    """mkstemp mints a fresh token per attempt, so corpses accumulate — sweep them all."""
+    corpses = [tmp_path / f"job-1.json.tok0000{i}.tmp" for i in range(5)]
+    for p in corpses:
+        p.write_text("x")
+        _backdate(p, 7200)
+
+    assert file_utils.cleanup_stale_tmp_files(tmp_path) == 5
+    assert not any(p.exists() for p in corpses)
+
+
+def test_cleanup_stale_tmp_files_matches_a_real_atomic_write_temp(tmp_path, monkeypatch):
+    """End-to-end on a name ``atomic_write_text`` actually produced.
+
+    The sweeper hardcodes the temp shape rather than sharing a constant with
+    ``_atomic_write``, so this is the guard against the two drifting apart: the
+    temp here is minted by the real writer, and a SIGKILL is simulated by
+    suppressing the unlink-on-exception cleanup — which is precisely what a
+    killed process never gets to run.
+    """
+    # Autouse conftest fixtures seed tmp_path, so give the writer its own dir.
+    workdir = tmp_path / "state"
+    workdir.mkdir()
+    target = workdir / "job-1.json"
+
+    def fail_replace(src, dst):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(os, "replace", fail_replace)
+    monkeypatch.setattr(os, "unlink", lambda path: None)  # the cleanup a SIGKILL skips
+    with pytest.raises(OSError):
+        atomic_write_text(target, "content")
+    monkeypatch.undo()
+
+    (leftover,) = list(workdir.iterdir())
+    assert leftover.name.startswith("job-1.json."), f"unexpected temp name {leftover.name}"
+    _backdate(leftover, 7200)
+
+    assert file_utils.cleanup_stale_tmp_files(workdir) == 1
+    assert not leftover.exists()

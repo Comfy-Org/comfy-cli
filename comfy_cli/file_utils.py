@@ -550,6 +550,63 @@ def cleanup_partials(local_filepath: pathlib.Path) -> int:
     return removed
 
 
+# The atomic-write helpers above stream through a sibling named
+# ``<dest name>.<mkstemp token>.tmp``. Unlike ``.part``, nothing ever *asks* for
+# one by name — they are pure in-flight scaffolding — so the only reason to name
+# the suffix here is to sweep up the corpses a killed writer leaves behind.
+_TMP_SUFFIX = ".tmp"
+# An in-flight atomic write lives for milliseconds; an hour is conservative
+# enough that no live write is ever a candidate, while still bounding how long a
+# corpse survives in a long-running agent/CI environment.
+_TMP_STALE_SECONDS = 3600
+
+
+def cleanup_stale_tmp_files(directory: pathlib.Path, *, older_than_seconds: float = _TMP_STALE_SECONDS) -> int:
+    """Best-effort removal of stranded ``atomic_write_*`` temps in ``directory``.
+
+    A writer killed uncleanly (SIGKILL, OOM, power loss) never runs its
+    unlink-on-exception cleanup, so its ``<dest>.<mkstemp token>.tmp`` sibling
+    outlives it — and mkstemp mints a fresh token per attempt, so nothing bounds
+    how many a crash-prone process leaves. Matches the exact mkstemp token shape
+    (like :func:`partial_paths_for` does for ``.part``) so an unrelated user file
+    ending in ``.tmp`` is never claimed, and only removes files whose mtime is
+    older than ``older_than_seconds`` so an in-flight write can't be raced.
+    Returns how many files were removed. Never raises.
+    """
+    try:
+        entries = list(directory.iterdir())
+    except OSError:
+        return 0
+
+    now = time.time()
+    removed = 0
+    for entry in entries:
+        name = entry.name
+        if not name.endswith(_TMP_SUFFIX):
+            continue
+        # ``<stem>.<token>`` — the stem is the destination file name, so it must
+        # be non-empty, and the token must have mkstemp's exact shape. That pair
+        # of checks is what keeps a hand-made ``notes.tmp`` (no token segment) or
+        # a ``.lock``/``.part`` sibling (wrong suffix entirely) off the list.
+        stem, sep, token = name[: -len(_TMP_SUFFIX)].rpartition(".")
+        if not sep or not stem:
+            continue
+        if len(token) != _MKSTEMP_TOKEN_LEN or not set(token) <= _MKSTEMP_TOKEN_CHARS:
+            continue
+        try:
+            mtime = entry.stat().st_mtime
+        except OSError:
+            continue
+        if now - mtime <= older_than_seconds:
+            continue
+        try:
+            entry.unlink()
+        except OSError:
+            continue
+        removed += 1
+    return removed
+
+
 def _friendly_network_error(exc: Exception) -> str:
     """Return a user-friendly description of a network error."""
     if isinstance(exc, _TransientHTTPStatusError):

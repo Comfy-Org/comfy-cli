@@ -320,7 +320,7 @@ def _gather_local_state_files(*, limit: int, orphaned_only: bool = False, where:
     """
     import re as _re
 
-    from comfy_cli import jobs_state
+    from comfy_cli import file_utils, jobs_state
 
     # Reasonable prompt_ids are alphanumeric + dashes + underscores (UUIDs,
     # short hex IDs). Anything wilder (e.g. legacy MagicMock leak from tests)
@@ -328,6 +328,11 @@ def _gather_local_state_files(*, limit: int, orphaned_only: bool = False, where:
     _SANE_ID = _re.compile(r"^[A-Za-z0-9_-]{1,128}$")
     rows: list[JobRow] = []
     state_dir = jobs_state.state_dir()
+    # Sweep atomic-write temps stranded by a watcher that died mid-write — the
+    # same unclean deaths the ``watcher_crashed`` reap below exists for. Purely
+    # hygiene, so it rides this scan rather than a command of its own and its
+    # count is never surfaced.
+    file_utils.cleanup_stale_tmp_files(state_dir)
     for path in sorted(state_dir.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
         if not _SANE_ID.match(path.stem):
             continue
