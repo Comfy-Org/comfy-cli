@@ -327,6 +327,28 @@ def _autogrow_elem_name(base: str, n: int, template: dict | None) -> str:
     return f"{stem}{n}"
 
 
+def _first_free_autogrow_index(taken: set, base: str, template: dict | None) -> int:
+    """The lowest N whose ``{base}.{elem(N)}`` name is not already present.
+
+    Both autogrow namers used to seed N from ``len(inputs starting with base.)``,
+    which is only correct when the existing slots are a complete, gapless,
+    schema-conforming run. Legacy workflows routinely aren't:
+
+    * a gap (``images.image0`` + ``images.image2``) counts 2 and mints a SECOND
+      ``images.image2``, clobbering a wired slot;
+    * a non-conforming sibling (``images.foo``) counts 1 and skips
+      ``images.image0`` entirely.
+
+    Counting names we'd actually mint — rather than inputs that merely share the
+    prefix — is immune to both, and keeps the server's sequential convention by
+    filling the lowest free slot.
+    """
+    n = 0
+    while f"{base}.{_autogrow_elem_name(base, n, template)}" in taken:
+        n += 1
+    return n
+
+
 def _next_autogrow_name(ins: list, requested: str, template: dict | None = None) -> str:
     """A free autogrow slot name. Prefer the op's requested name; if a concurrent
     connect already took it, grow the next sequential schema-derived slot (see
@@ -336,12 +358,8 @@ def _next_autogrow_name(ins: list, requested: str, template: dict | None = None)
     if requested not in taken:
         return requested
     base = requested.split(".", 1)[0]
-    n = len([i for i in ins if str(i.get("name", "")).startswith(base + ".")])
-    name = f"{base}.{_autogrow_elem_name(base, n, template)}"
-    while name in taken:
-        n += 1
-        name = f"{base}.{_autogrow_elem_name(base, n, template)}"
-    return name
+    n = _first_free_autogrow_index(taken, base, template)
+    return f"{base}.{_autogrow_elem_name(base, n, template)}"
 
 
 def _next_inputcount_name(ins: list, requested: str) -> str:
@@ -1694,6 +1712,6 @@ def _plan_autogrow(ins: list, base: str, elem_type: str | None, template: dict |
     ``{base}.{base[:-1]}{N}`` heuristic only when ``template`` is unavailable
     (schema unavailable: offline edit, catalog miss). Callers validate any
     explicitly requested key against this name before growing."""
-    existing = [i for i in ins if str(i.get("name", "")).startswith(base + ".")]
-    elem = _autogrow_elem_name(base, len(existing), template)
+    taken = {str(i.get("name", "")) for i in ins}
+    elem = _autogrow_elem_name(base, _first_free_autogrow_index(taken, base, template), template)
     return {"name": f"{base}.{elem}", "type": elem_type or "*"}

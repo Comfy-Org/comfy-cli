@@ -1717,6 +1717,43 @@ class TestOpModel:
         ]
         assert grown == ["images.image0"]
 
+    def test_autogrow_fills_a_gap_instead_of_colliding(self):
+        """A gapped legacy run (``image0`` + ``image2``) must not mint a SECOND
+        ``image2``. Both namers used to seed N from the count of ``images.``-
+        prefixed inputs, so a gap made the count land on an occupied slot and
+        the grow clobbered a wired input."""
+        from comfy_cli.workflow_ops import _next_autogrow_name, _plan_autogrow
+
+        ins = [{"name": "images.image0"}, {"name": "images.image2"}]
+        assert _plan_autogrow(ins, "images", "IMAGE")["name"] == "images.image1"
+        assert _next_autogrow_name(ins, "images.image0") == "images.image1"
+
+    def test_autogrow_ignores_non_conforming_siblings(self):
+        """A sibling that isn't a mintable slot name (``images.foo``) must not
+        advance the counter — counting prefix matches skipped ``image0``."""
+        from comfy_cli.workflow_ops import _next_autogrow_name, _plan_autogrow
+
+        ins = [{"name": "images.foo"}]
+        assert _plan_autogrow(ins, "images", "IMAGE")["name"] == "images.image0"
+        assert _next_autogrow_name(ins, "images.foo") == "images.image0"
+
+    def test_autogrow_gap_fill_respects_a_names_template(self):
+        """Gap-filling is computed from the names we'd actually mint, so a
+        ``names`` template fills its own vocabulary rather than a guessed stem."""
+        from comfy_cli.workflow_ops import _plan_autogrow
+
+        tpl = {"names": ["first", "second", "third"]}
+        ins = [{"name": "images.first"}, {"name": "images.third"}]
+        assert _plan_autogrow(ins, "images", "IMAGE", tpl)["name"] == "images.second"
+
+    def test_autogrow_still_appends_on_a_clean_run(self):
+        """The common case is unchanged: a gapless run grows at the end."""
+        from comfy_cli.workflow_ops import _plan_autogrow
+
+        ins = [{"name": "images.image0"}, {"name": "images.image1"}]
+        assert _plan_autogrow(ins, "images", "IMAGE")["name"] == "images.image2"
+        assert _plan_autogrow([], "images", "IMAGE")["name"] == "images.image0"
+
     def test_p9_autogrow_names_template_converges(self):
         """Two concurrent autogrow connects onto a ``names``-templated base still
         converge to the schema's two literal element names in either apply
