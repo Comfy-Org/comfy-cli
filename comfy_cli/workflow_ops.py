@@ -612,6 +612,95 @@ def _navigate_subgraph_path(workflow: dict, segments: list[str]) -> dict:
     return node
 
 
+def _subgraph_boundary_error(workflow: dict, node_id: Any) -> ValueError | None:
+    """Explain a connect endpoint that addresses a subgraph interior.
+
+    ``comfy workflow slots`` deliberately advertises interior addresses
+    (``57/27.text``) so agents can slot-edit inside opaque template subgraphs,
+    and set-widget accepts them — but a LINK cannot cross a subgraph boundary,
+    so connect never can. Before this guard, such an endpoint fell through to
+    the generic "node 57/27 not found in workflow" + the top-level node
+    inventory + "use an id from `comfy workflow slots`" — an instruction to
+    consult the exact tool that advertised the address. Measured on prod
+    comfy-agent traces (2026-08-05): one session burned SEVEN identical
+    connects on ``129/93.text`` and the turn died. Say what the boundary means
+    and which verb works instead.
+
+    Returns ``None`` when the endpoint is not an interior address (including
+    when its head segment doesn't exist — the canonical not-found error is
+    right for that).
+    """
+    from comfy_cli.cql import engine as _engine
+
+    node_str = str(node_id)
+    if _find_by_str(workflow, node_str) is not None:
+        return None  # a literal node really has this id
+    if _engine._SUBGRAPH_PATH_SEP in node_str:
+        segments = node_str.split(_engine._SUBGRAPH_PATH_SEP)
+    elif ":" in node_str:
+        # The flattened namespace UI→API lowering mints (`<outer>:<inner>`),
+        # accepted everywhere set-widget accepts the `/` form.
+        segments = node_str.split(":")
+    else:
+        return None
+    head = _find_by_str(workflow, segments[0])
+    if head is None:
+        return None
+    sg = _engine._subgraph_defs_by_id(workflow).get(str(head.get("type", "")))
+    if sg is None:
+        return ValueError(
+            f"node {segments[0]} is not a subgraph, so {node_str} does not address a node — "
+            f"connect to node {segments[0]}'s own slots instead (see `comfy workflow slots`)"
+        )
+    canonical = "/".join(segments)
+    try:
+        _navigate_subgraph_path(workflow, segments)
+    except ValueError:
+        interior = ", ".join(
+            f"{n.get('id')} ({n.get('type', '?')})" for n in sg.get("nodes") or [] if isinstance(n, dict)
+        )
+        return ValueError(
+            f"no node {segments[-1]} inside subgraph {segments[0]} — its interior nodes: {interior or '(none)'}"
+        )
+    return ValueError(
+        f"node {canonical} is inside subgraph {segments[0]} ({str(sg.get('name') or '?')!r}) — a link cannot cross "
+        f"the subgraph boundary, so connect cannot reach it. Interior widgets ARE settable: "
+        f"`comfy workflow set-widget <file> {canonical}.<widget> <value>`. To wire a live link, connect to one of "
+        f"the instance's own slots (see `comfy workflow slots`), or promote the input in the ComfyUI editor first."
+    )
+
+
+def _promoted_widget_error(workflow: dict, node: dict, slot: Any) -> ValueError | None:
+    """Explain a connect target that names a subgraph instance's promoted widget.
+
+    ``slots`` advertises a curated instance's promoted inputs flat
+    (``57.text``), and set-widget accepts exactly that address — but a promoted
+    WIDGET is a value routed through ``proxyWidgets``, not a link input on the
+    instance. The old error ("input 'text' not found on node 57; inputs: []"
+    plus the node inventory) reads as *wrong id, try another*, when the truth
+    is *right id, wrong verb*. Returns ``None`` unless the node is a subgraph
+    instance and ``slot`` is one of its promoted widgets.
+    """
+    from comfy_cli.cql import engine as _engine
+
+    if not isinstance(slot, str):
+        return None
+    if _engine._subgraph_defs_by_id(workflow).get(str(node.get("type", ""))) is None:
+        return None
+    try:
+        target = _subgraph_write_target(workflow, node.get("id"), slot)
+    except ValueError:
+        return None  # not a promoted widget either — the input-not-found error stands
+    if target is None:
+        return None
+    nid = node.get("id")
+    return ValueError(
+        f"input {slot!r} on subgraph instance {nid} is a promoted widget (a value), not a link input — set it with "
+        f"`comfy workflow set-widget <file> {nid}.{slot} <value>`. Wiring a live link into the subgraph requires "
+        f"promoting a link input in the ComfyUI editor."
+    )
+
+
 def connect(
     workflow: dict,
     graph,
@@ -644,10 +733,20 @@ def _connect_impl(
     actor: str = "cli",
     base_version: int = 0,
 ) -> tuple[dict, dict]:
+    for endpoint in (from_node, to_node):
+        boundary = _subgraph_boundary_error(workflow, endpoint)
+        if boundary is not None:
+            raise boundary
     src = _require(workflow, from_node)
     dst = _require(workflow, to_node)
     out_idx, link_type = _resolve_output_slot(src, graph, from_slot)
-    in_idx, grow = _resolve_input_target(dst, graph, to_slot, link_type)
+    try:
+        in_idx, grow = _resolve_input_target(dst, graph, to_slot, link_type)
+    except ValueError as e:
+        promoted = _promoted_widget_error(workflow, dst, to_slot)
+        if promoted is not None:
+            raise promoted from e
+        raise
     # Type-check concrete slots: an output only connects to an input that accepts
     # its type (or a wildcard "*"). Autogrow slots are minted with the source
     # type, so they need no check. Without this, a mis-wire silently clobbers a
