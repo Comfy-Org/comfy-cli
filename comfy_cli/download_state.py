@@ -47,7 +47,10 @@ so a worker that comes up (or ticks) after ``download-cancel`` always observes
 the request; see :func:`request_cancel`.
 
 Terminal statuses (``completed``, ``failed``, ``cancelled``) mean the file won't
-change further; agents can stop polling.
+change further; agents can stop polling. Such records are also the only ones
+:func:`prune` may delete — it keeps the :data:`PRUNE_KEEP` most recent records
+whatever their age, so the directory stays bounded without losing the recent
+history ``comfy model downloads`` renders.
 """
 
 from __future__ import annotations
@@ -61,7 +64,7 @@ import sys
 import time
 import uuid
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -75,6 +78,14 @@ ACTIVE_STATUSES = frozenset({"starting", "downloading"})
 # The worker rewrites the state file at most this often while bytes stream in.
 # Terminal transitions always write, regardless of the throttle.
 PROGRESS_THROTTLE_S = 1.0
+
+# Nothing else ever removes a record, so the state directory grows by two files
+# per submit forever. `prune` bounds it: terminal records older than
+# PRUNE_MAX_AGE_S are removable, but the PRUNE_KEEP most recent are kept
+# regardless of age so `comfy model downloads` still renders recent history in a
+# long-lived workspace.
+PRUNE_MAX_AGE_S = 7 * 24 * 3600.0
+PRUNE_KEEP = 50
 
 # The state dir can hold presigned urls; keep it owner-only.
 STATE_DIR_MODE = 0o700
@@ -320,6 +331,62 @@ def list_all(workspace: Path) -> list[DownloadState]:
     states = [s for s in (read_path(p) for p in sorted(base.glob("*.json"))) if s is not None]
     states.sort(key=lambda s: (s.started_at or "", s.id), reverse=True)
     return states
+
+
+def prune(workspace: Path, *, max_age_s: float = PRUNE_MAX_AGE_S, keep: int = PRUNE_KEEP) -> int:
+    """Delete terminal records older than ``max_age_s``, keeping the ``keep`` most recent.
+
+    Age is measured from ``updated_at`` (the terminal transition time — every
+    :func:`write_path` refreshes it), falling back to ``started_at`` when
+    unparsable; a record with neither parsable is junk and prunes. Records in
+    :data:`ACTIVE_STATUSES` are never touched, regardless of age — the on-disk
+    status is read as-is rather than :func:`reconcile`d, so a record whose worker
+    died while ``downloading`` is left alone until the next
+    ``downloads``/``download-status`` reconciles it to a terminal status, and a
+    later sweep collects it. That keeps prune off psutil, which is what lets it
+    be called opportunistically from the submit path.
+
+    The keep floor counts ALL records, active and terminal alike, so it matches
+    what ``comfy model downloads`` renders. Each pruned record's ``<id>.log`` and
+    ``<id>.cancel`` go with it. Best effort per file: an :class:`OSError` on one
+    unlink never aborts the sweep or propagates. Returns the number of records
+    removed.
+    """
+    workspace = Path(workspace)
+    keep = max(0, keep)
+    states = list_all(workspace)
+    if len(states) <= keep:
+        return 0
+
+    cutoff = datetime.now(timezone.utc) - timedelta(seconds=max_age_s)
+    removed = 0
+    for state in states[keep:]:
+        if state.status not in TERMINAL_STATUSES:
+            continue
+        stamp = _parse_iso(state.updated_at) or _parse_iso(state.started_at)
+        if stamp is not None and stamp > cutoff:
+            continue
+        try:
+            # Route through the path helpers so the id re-validates: it comes
+            # out of a file this process did not necessarily write.
+            targets = (
+                state_path(workspace, state.id),
+                log_path(workspace, state.id),
+                cancel_path(workspace, state.id),
+            )
+        except ValueError:
+            continue
+        state_file, *side_files = targets
+        gone = False
+        with contextlib.suppress(OSError):
+            state_file.unlink(missing_ok=True)
+            gone = True
+        for path in side_files:
+            with contextlib.suppress(OSError):
+                path.unlink(missing_ok=True)
+        if gone:
+            removed += 1
+    return removed
 
 
 # ---------------------------------------------------------------------------
