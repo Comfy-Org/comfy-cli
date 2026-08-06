@@ -382,6 +382,24 @@ _CLOUD_STATUS_MAP = {
 }
 
 
+def _cloud_record_meta(record: dict) -> dict[str, Any]:
+    """The metadata fields a cloud terminal verdict attaches to ``details``.
+
+    ``/api/jobs/<id>`` (``JobDetailResponse``) serves the timestamps as Unix
+    millisecond ints; the deprecated ``/api/job/<id>/status`` served ready-made
+    ``created_at``/``updated_at`` strings, and is the only dialect that ever
+    served ``assigned_inference``. Read both, old names first, so the state
+    file keeps the string shape it has always carried.
+    """
+    from comfy_cli.command.jobs import _ms_to_iso
+
+    return {
+        "assigned_inference": record.get("assigned_inference"),
+        "created_at": record.get("created_at") or _ms_to_iso(record.get("create_time")),
+        "updated_at": record.get("updated_at") or _ms_to_iso(record.get("update_time")),
+    }
+
+
 def _poll_cloud_once(state: jobs_state.JobState, *, client: Any = None) -> bool:
     """Update ``state`` in-place from Comfy Cloud. Return True if terminal."""
     try:
@@ -424,22 +442,26 @@ def _poll_cloud_once(state: jobs_state.JobState, *, client: Any = None) -> bool:
                 pass
         return True
     if state.status == "error":
-        verdict = execution_errors.classify(record.get("error_message"))
+        # Same endpoint move as `jobs._cloud_status_snapshot`: `/api/jobs/<id>`
+        # serves the cause as a structured `execution_error` object, while the
+        # deprecated `/api/job/<id>/status` served a JSON-encoded
+        # `error_message` string. `classify` parses either shape, so hand it
+        # whichever the deployment actually sent — without this the watcher
+        # classifies `None` and writes the generic "ComfyUI reported an
+        # execution error." into every failed cloud job's state file.
+        verdict = execution_errors.classify(record.get("error_message") or record.get("execution_error"))
         state.error = {
             "code": verdict["code"],
             "message": verdict["message"],
             "hint": verdict["hint"],
-            "details": {
-                **verdict["details"],
-                **{k: record.get(k) for k in ("assigned_inference", "created_at", "updated_at")},
-            },
+            "details": {**verdict["details"], **_cloud_record_meta(record)},
         }
         return True
     if state.status == "cancelled":
         state.error = {
             "code": "cancelled",
             "message": record.get("error_message") or "Cloud job was cancelled.",
-            "details": {k: record.get(k) for k in ("assigned_inference", "created_at", "updated_at")},
+            "details": _cloud_record_meta(record),
         }
         return True
     return False
