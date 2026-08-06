@@ -34,6 +34,7 @@ from websocket import WebSocket, WebSocketException, WebSocketTimeoutException
 
 from comfy_cli import cancellation, execution_errors, tracking
 from comfy_cli.env_checker import check_comfy_server_running
+from comfy_cli.host_port import report_usage_error
 from comfy_cli.host_port import resolve_host_port as _resolve_host_port
 from comfy_cli.http import ResponseTooLarge, authed_urlopen, plain_urlopen, read_capped
 from comfy_cli.output import get_renderer
@@ -106,6 +107,14 @@ def _is_watcher_alive(state: JobState) -> bool:
 # Host/port resolution (`resolve_host_port`) is shared with `comfy run` via
 # `comfy_cli.host_port`; imported above as `_resolve_host_port` to preserve the
 # call sites in this module unchanged.
+#
+# Every one of those call sites is wrapped in `report_usage_error(renderer)`. A
+# rejected `--host`/`--port` raises `typer.BadParameter`, which click renders as
+# a human usage panel on stderr and exits 2 — leaving stdout *empty* in
+# JSON/NDJSON mode, while every other failure in this module ends with an
+# `ok:false` envelope. The context manager emits that terminating envelope and
+# re-raises, so the exit-2 usage contract is unchanged and pretty mode is
+# untouched (click still prints the message, exactly once).
 
 
 def _server_or_error(host: str, port: int, *, raise_on_missing: bool = True) -> bool:
@@ -641,7 +650,8 @@ def ls_cmd(
     state_rows = _gather_local_state_files(limit=limit, orphaned_only=orphaned, where=state_where)
 
     server_rows: list[JobRow] = []
-    h, p = _resolve_host_port(host, port)
+    with report_usage_error(renderer):
+        h, p = _resolve_host_port(host, port)
     if not local_only:
         if target_where == "cloud":
             try:
@@ -696,7 +706,8 @@ def _watch_ls(*, host, port, limit, where, local_only, state_where=None, orphane
 
     renderer = get_renderer()
     console = renderer.console()
-    h, p = _resolve_host_port(host, port)
+    with report_usage_error(renderer):
+        h, p = _resolve_host_port(host, port)
 
     def build_table() -> Table:
         state_rows = _gather_local_state_files(limit=limit, where=state_where, orphaned_only=orphaned_only)
@@ -1008,7 +1019,8 @@ def status_cmd(
     if _is_cloud(where):
         return _cloud_status(prompt_id)
 
-    h, p = _resolve_host_port(host, port)
+    with report_usage_error(renderer):
+        h, p = _resolve_host_port(host, port)
     if not _server_or_error(h, p, raise_on_missing=False):
         # Server is down. The on-disk state file (written by `comfy run` and
         # maintained by the async watcher) still knows what this prompt was
@@ -1448,7 +1460,8 @@ def wait_cmd(
     if cloud:
         cloud_preflight_or_exit()
     else:
-        h, p = _resolve_host_port(host, port)
+        with report_usage_error(renderer):
+            h, p = _resolve_host_port(host, port)
         server_up = _server_or_error(h, p, raise_on_missing=False)
 
     start = time.time()
@@ -1542,7 +1555,8 @@ def cancel_cmd(
 ):
     if _is_cloud(where):
         return _cloud_cancel(prompt_id)
-    h, p = _resolve_host_port(host, port)
+    with report_usage_error(get_renderer()):
+        h, p = _resolve_host_port(host, port)
     _server_or_error(h, p)
     return _local_cancel(prompt_id, h, p)
 
@@ -1876,7 +1890,8 @@ def watch_cmd(
     if _is_cloud(where):
         return _cloud_watch(prompt_id, poll_interval=poll_interval, max_wait=max_wait)
 
-    h, p = _resolve_host_port(host, port)
+    with report_usage_error(renderer):
+        h, p = _resolve_host_port(host, port)
     _server_or_error(h, p)
 
     # If the job already finished, just print status and return — there will
