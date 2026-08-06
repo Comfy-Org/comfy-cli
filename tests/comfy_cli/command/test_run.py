@@ -9,6 +9,7 @@ import pytest
 import typer
 from websocket import WebSocketException, WebSocketTimeoutException
 
+from comfy_cli.caller import Caller, usage_source_for
 from comfy_cli.command.run import (
     _TELEMETRY_NODE_NAME_MAX_LEN,
     WorkflowExecution,
@@ -17,10 +18,20 @@ from comfy_cli.command.run import (
     _resolve_partner_credential,
     _returned_output_node_count,
     execute,
+    execution,
     fetch_object_info,
     is_ui_workflow,
     preflight,
 )
+
+
+def _mcp_usage_source() -> str:
+    """What ``usage_source()`` returns under ``COMFY_USER_AGENT=comfy-mcp``.
+
+    Built through the real mapper so these tests pin the wiring, not a
+    hand-copied string; only the environment probe is stubbed out.
+    """
+    return usage_source_for(Caller(kind="comfy-mcp", agentic=True, source_env="COMFY_USER_AGENT"))
 
 
 @pytest.fixture
@@ -172,7 +183,7 @@ class TestFetchObjectInfo:
 class TestWorkflowExecutionAuth:
     """X-API-Key is the credential the ComfyUI server forwards to Partner Nodes."""
 
-    def _make_exec(self, workflow, api_key=None):
+    def _make_exec(self, workflow, api_key=None, extra_data=None):
         progress = MagicMock()
         progress.add_task.return_value = 0
         return WorkflowExecution(
@@ -184,6 +195,7 @@ class TestWorkflowExecutionAuth:
             progress=progress,
             timeout=30,
             api_key=api_key,
+            extra_data=extra_data,
         )
 
     def test_queue_embeds_api_key_in_extra_data(self, workflow):
@@ -215,6 +227,30 @@ class TestWorkflowExecutionAuth:
             "client_id": ex.client_id,
             "extra_data": {"comfy_usage_source": "comfy-cli"},
         }
+
+    def test_queue_derives_usage_source_from_the_caller(self, workflow, monkeypatch):
+        """An agentic caller is attributed as ``comfy-cli/<kind>`` in the
+        ``/prompt`` payload so partner-node billing can tell MCP-driven runs
+        from human ones. (The assertions above pin the human case, via the
+        conftest fixture.)"""
+        monkeypatch.setattr(execution, "usage_source", _mcp_usage_source)
+        ex = self._make_exec(workflow)
+        with patch("comfy_cli.http._AUTHED_OPENER.open") as mock_open:
+            mock_open.return_value.__enter__.return_value.read.return_value = json.dumps({"prompt_id": "abc"}).encode()
+            ex.queue()
+        body = json.loads(mock_open.call_args[0][0].data)
+        assert body["extra_data"] == {"comfy_usage_source": "comfy-cli/comfy-mcp"}
+
+    def test_queue_lets_explicit_extra_data_override_the_usage_source(self, workflow, monkeypatch):
+        """``self.extra_data`` is applied with ``update()`` after the derived
+        default, so an explicit value still wins — ordering unchanged."""
+        monkeypatch.setattr(execution, "usage_source", _mcp_usage_source)
+        ex = self._make_exec(workflow, extra_data={"comfy_usage_source": "some-other-surface"})
+        with patch("comfy_cli.http._AUTHED_OPENER.open") as mock_open:
+            mock_open.return_value.__enter__.return_value.read.return_value = json.dumps({"prompt_id": "abc"}).encode()
+            ex.queue()
+        body = json.loads(mock_open.call_args[0][0].data)
+        assert body["extra_data"] == {"comfy_usage_source": "some-other-surface"}
 
     def test_queue_sends_usage_source_header(self, workflow):
         ex = self._make_exec(workflow)
