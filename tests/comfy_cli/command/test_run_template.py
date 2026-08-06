@@ -605,3 +605,27 @@ class TestEnforceSpendGate:
                 allow_spend=False,
             )
         assert exc.value.exit_code == 1
+
+
+def test_bad_port_terminates_the_stream_with_an_envelope(app, gallery_file, template_body, run_spy, monkeypatch):
+    """A host/port usage error must not leave stdout empty (BE-6660).
+
+    `typer.BadParameter` escapes to click, which prints a usage panel on stderr
+    and exits 2 — so a JSON/NDJSON consumer used to see the stream just stop,
+    while every other failure on this command ends with an `ok:false` envelope.
+    The exit code stays 2; only the missing terminating line is added.
+    """
+    _force_json_renderer()
+    probe = MagicMock(return_value=True)
+    monkeypatch.setattr("comfy_cli.env_checker.check_comfy_server_running", probe)
+    result = CliRunner().invoke(
+        app,
+        ["run-template", "--gallery", gallery_file, "image_local_sd", "--port", "0"],
+    )
+    assert result.exit_code == 2, result.output
+    env = _envelope(result.output)
+    assert env["type"] == "envelope"
+    assert env["ok"] is False
+    assert env["error"]["code"] == "host_port_invalid"
+    probe.assert_not_called()
+    assert run_spy.calls == []

@@ -20,6 +20,8 @@ from __future__ import annotations
 
 import ipaddress
 import urllib.parse
+from collections.abc import Iterator
+from contextlib import contextmanager
 
 import typer
 
@@ -28,6 +30,37 @@ from comfy_cli.config_manager import ConfigManager
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8188
 _UNSAFE_HOST_CHARS = frozenset("/@?#")
+
+
+@contextmanager
+def report_usage_error(renderer) -> Iterator[None]:
+    """Emit a terminating ``ok:false`` envelope before a host/port usage error
+    escapes to click.
+
+    Every other failure on these commands ends with an envelope; a
+    ``typer.BadParameter`` did not — click printed a human usage panel to
+    stderr and exited 2 with *zero bytes* on stdout, so a machine consumer just
+    saw the stream stop. Wrap the guard/resolver block in this and JSON/NDJSON
+    consumers get a parseable final line either way.
+
+    The exception is re-raised: click still converts it to the usage-error
+    ``SystemExit(2)``, so the exit code is unchanged. ``exit_code=2`` is passed
+    through so the renderer's recorded exit code agrees with the real one.
+    Guarded on ``is_json()`` (JSON *and* NDJSON — single-envelope JSON mode has
+    the same gap): click writes its usage error to stderr, so an envelope on
+    stdout never double-prints, and pretty mode is left alone entirely (the
+    message appears exactly once, from click).
+
+    ``renderer`` is a parameter rather than a module-level import so this
+    module keeps depending only on ``typer``; callers already hold a renderer,
+    or can pass ``comfy_cli.output.get_renderer()``.
+    """
+    try:
+        yield
+    except typer.BadParameter as e:
+        if renderer.is_json():
+            renderer.error(code="host_port_invalid", message=str(e), exit_code=2)
+        raise
 
 
 def validate_host(host: str) -> str:

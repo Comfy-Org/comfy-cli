@@ -82,9 +82,14 @@ def _get_graph(
     # one `comfy run` submits to whenever ComfyUI was launched in the background
     # on a non-default port (BE-6299).
     if input_path is None and mode == "local":
-        from comfy_cli.host_port import resolve_host_port
+        from comfy_cli.host_port import report_usage_error, resolve_host_port
 
-        host, port = resolve_host_port(host, port)
+        # A rejected `--host`/`--port` raises `typer.BadParameter`, which click
+        # turns into a stderr usage panel + exit 2 with nothing on stdout.
+        # Emit the terminating envelope first so JSON/NDJSON consumers get a
+        # parseable final line; the exception still escapes, so exit stays 2.
+        with report_usage_error(get_renderer()):
+            host, port = resolve_host_port(host, port)
     try:
         if input_path is not None:
             # Explicit offline dump — let Graph.load read + annotate it.
