@@ -326,6 +326,28 @@ def show_cmd(
 
     m = graph.node(name)
     if m is None:
+        # A subgraph instance's `type` is its definition UUID, and ls-nodes
+        # prints that verbatim — so callers ask show for a "class" the catalog
+        # can never have. `workflow add-node` already names this shape
+        # (UnknownNodeType subgraph_id); show was left behind with the generic
+        # miss, and prod agents retried it verbatim. Say what the UUID is and
+        # which surface CAN inspect it. difflib against a UUID is pure noise.
+        from comfy_cli.workflow_ops import _UUID_RE
+
+        if _UUID_RE.match(name.strip()):
+            renderer.error(
+                code="node_not_found",
+                message=(
+                    f"{name!r} is a subgraph type id, not a node class — `ls-nodes` prints a subgraph instance's "
+                    "definition uuid as its type, and the catalog has no schema for it."
+                ),
+                hint=(
+                    "inspect the instance's editable inputs with `comfy workflow slots <file>` / `ls-nodes`; "
+                    "interior nodes are addressed `<instance>/<interior>` and written with `set-widget`."
+                ),
+                details={"requested": name, "subgraph_id": True},
+            )
+            raise typer.Exit(code=1)
         # Surface near-matches so the agent can self-correct from the error.
         all_names = [n.id for n in graph.all_nodes()]
         close = difflib.get_close_matches(name, all_names, n=5, cutoff=0.6)
