@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+import re
 
 import pytest
 
@@ -250,3 +251,276 @@ def test_get_renderer_default_is_pretty():
     # No prior set; default is pretty so unsuspecting callers don't crash.
     r = get_renderer()
     assert r.is_pretty()
+
+
+# ---------------------------------------------------------------------------
+# Control-sequence sanitizing at the pretty boundary (BE-4794)
+# ---------------------------------------------------------------------------
+
+_EVIL = "job \x1b[2Jevil"
+
+
+def _pretty_output(call) -> str:
+    """Run ``call(renderer)`` in pretty mode and return what hit the stream.
+
+    ``force_terminal`` is left off, so Rich emits no SGR of its own: every ESC
+    in the result would have come from the message itself.
+    """
+    stream = io.StringIO()
+    r = _resolve()
+    r.mode = OutputMode.PRETTY
+    r.pretty_stream = stream
+    call(r)
+    return stream.getvalue()
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda r: r.warn(_EVIL),
+        lambda r: r.warn("ok", hint=_EVIL),
+        lambda r: r.info(_EVIL),
+        lambda r: r.info("ok", hint=_EVIL),
+        lambda r: r.success(_EVIL),
+        lambda r: r.error("ws_disconnected", _EVIL, hint=_EVIL, details={"prompt_id": _EVIL}),
+    ],
+    ids=["warn", "warn-hint", "info", "info-hint", "success", "error-panel"],
+)
+def test_pretty_helpers_strip_escape_sequences(call):
+    out = _pretty_output(call)
+    assert "\x1b" not in out
+    assert "evil" in out  # the text survives; only the escape is gone
+
+
+# Rich re-creates escape sequences from *markup* it finds in the text, so
+# stripping the raw bytes above is only half the boundary. These need a real
+# terminal: Rich only emits OSC 8 hyperlinks when the console is a tty.
+_MARKUP_LINK = "job [link=https://attacker.example]click[/link] done"
+_MARKUP_UNBALANCED = "server said [/] oops"
+_RICH_SGR_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+@pytest.fixture
+def force_terminal(monkeypatch):
+    """Make Rich treat the StringIO stream as a color terminal.
+
+    ``COLUMNS`` is pinned too: these assertions look for an un-wrapped
+    substring, and ``rich.print`` gives no way to pass ``width`` through, so
+    without it the result depends on the runner's default console width.
+    """
+    monkeypatch.setenv("FORCE_COLOR", "1")
+    monkeypatch.setenv("COLUMNS", "200")
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda r: r.warn(_MARKUP_LINK),
+        lambda r: r.warn("ok", hint=_MARKUP_LINK),
+        lambda r: r.info(_MARKUP_LINK),
+        lambda r: r.info("ok", hint=_MARKUP_LINK),
+        lambda r: r.success(_MARKUP_LINK),
+        lambda r: r.error("ws_disconnected", "boom", details={"prompt_id": _MARKUP_LINK}),
+    ],
+    ids=["warn", "warn-hint", "info", "info-hint", "success", "error-panel-details"],
+)
+def test_pretty_helpers_do_not_let_markup_forge_escape_sequences(call, force_terminal):
+    """``[link=...]`` must not become a live OSC 8 hyperlink.
+
+    Only the SGR codes Rich emits for its own styling may remain; once those
+    are stripped, any surviving ESC was manufactured from the payload.
+    """
+    out = _pretty_output(call)
+    assert "\x1b]8;" not in out  # no hyperlink sequence
+    assert "\x1b" not in _RICH_SGR_RE.sub("", out)
+    assert "link=https://attacker.example" in _RICH_SGR_RE.sub("", out)  # shown as inert text
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda r: r.warn(_MARKUP_UNBALANCED),
+        lambda r: r.warn("ok", hint=_MARKUP_UNBALANCED),
+        lambda r: r.info(_MARKUP_UNBALANCED),
+        lambda r: r.info("ok", hint=_MARKUP_UNBALANCED),
+        lambda r: r.success(_MARKUP_UNBALANCED),
+        lambda r: r.error("ws_disconnected", "boom", details={"prompt_id": _MARKUP_UNBALANCED}),
+    ],
+    ids=["warn", "warn-hint", "info", "info-hint", "success", "error-panel-details"],
+)
+def test_pretty_helpers_survive_unbalanced_markup(call):
+    """An unbalanced ``[/]`` used to raise ``MarkupError`` and kill the CLI
+    while it was merely printing a line."""
+    out = _pretty_output(call)
+    assert "oops" in out
+
+
+def test_json_error_envelope_is_unchanged_by_sanitizing():
+    """The machine path must stay byte-identical: ``json.dumps`` already
+    neutralizes ESC as ``\\u001b``, and stripping it would mutate data agents
+    parse."""
+    stream = io.StringIO()
+    r = _resolve()
+    r.mode = OutputMode.JSON
+    r.machine_stream = stream
+    r.command = "run"
+    r.error("ws_disconnected", _EVIL, hint=_EVIL, details={"prompt_id": "\x1b[2Jx"})
+    raw = stream.getvalue()
+
+    # Byte level: escaped, never raw — and never stripped.
+    assert "\x1b" not in raw
+    assert raw.count("\\u001b") == 3
+    # Value level: the payload round-trips exactly as it went in.
+    env = json.loads(raw.strip())
+    assert env["error"]["message"] == _EVIL
+    assert env["error"]["hint"] == _EVIL
+    assert env["error"]["details"] == {"prompt_id": "\x1b[2Jx"}
+
+
+def test_ndjson_event_payload_is_unchanged_by_sanitizing():
+    stream = io.StringIO()
+    r = _resolve()
+    r.mode = OutputMode.NDJSON
+    r.machine_stream = stream
+    r.event("progress", prompt_id="\x1b[2Jx")
+    raw = stream.getvalue()
+    assert "\x1b" not in raw
+    assert "\\u001b" in raw
+    assert json.loads(raw.strip())["prompt_id"] == "\x1b[2Jx"
+
+
+def test_pretty_helpers_tolerate_non_string_messages():
+    """The f-string interpolation these helpers used to do coerced anything to
+    ``str``; sanitizing must not turn a loose caller into a TypeError."""
+    assert "42" in _pretty_output(lambda r: r.warn(42))
+    assert "42" in _pretty_output(lambda r: r.info(42))
+    assert "42" in _pretty_output(lambda r: r.success(42))
+
+
+class TestResolveSurvivesAnUnusableStdout:
+    """``Renderer.resolve`` runs from the main Typer callback (``cmdline.py``)
+    before any command dispatch, and every call site there omits
+    ``is_stdout_tty``, so it probes ``sys.stdout`` itself.
+
+    Under ``pythonw``, a Windows service, or a detached parent, ``sys.stdout``
+    is ``None`` or an already-closed file. A bare ``sys.stdout.isatty()`` there
+    raises before argument parsing, which takes down EVERY command — including
+    ``comfy --help`` and runs with tracking disabled. The probe is routed
+    through ``caller.stream_is_tty``, so it degrades to "not a TTY" (→ JSON
+    mode, the correct read of a process with no terminal) instead.
+    """
+
+    def test_missing_stdout_resolves_to_json_not_attribute_error(self, monkeypatch):
+        import comfy_cli.output.renderer as renderer_mod
+
+        monkeypatch.setattr(renderer_mod.sys, "stdout", None)
+        r = Renderer.resolve(env={})
+        assert r.mode is OutputMode.JSON
+
+    def test_closed_stdout_resolves_to_json_not_value_error(self, monkeypatch, tmp_path):
+        import comfy_cli.output.renderer as renderer_mod
+
+        handle = open(tmp_path / "out.txt", "w")
+        handle.close()
+        monkeypatch.setattr(renderer_mod.sys, "stdout", handle)
+        assert Renderer.resolve(env={}).mode is OutputMode.JSON
+
+    def test_revoked_fd_stdout_resolves_to_json_not_os_error(self, monkeypatch):
+        import comfy_cli.output.renderer as renderer_mod
+
+        class Revoked:
+            def isatty(self):
+                raise OSError(9, "Bad file descriptor")
+
+        monkeypatch.setattr(renderer_mod.sys, "stdout", Revoked())
+        assert Renderer.resolve(env={}).mode is OutputMode.JSON
+
+    def test_a_live_tty_still_resolves_to_pretty(self, monkeypatch):
+        """The guard must not flip healthy terminals to JSON."""
+        import comfy_cli.output.renderer as renderer_mod
+
+        class Tty:
+            def isatty(self):
+                return True
+
+        monkeypatch.setattr(renderer_mod.sys, "stdout", Tty())
+        assert Renderer.resolve(env={}).mode is OutputMode.PRETTY
+
+
+class TestWritesTolerateADeadMachineStream:
+    """Resolving to JSON mode against an unusable stdout must not merely DEFER
+    the crash to the first emit.
+
+    `machine_stream` falls back to `sys.stdout`, so surviving `resolve` only to
+    die inside `_write_json_line` is strictly worse than dying at startup: by
+    then the command has run and its side effects have landed. A stream that
+    cannot be written to cannot receive output, so the write is a no-op and the
+    process still exits with the right code.
+    """
+
+    def _dead_stdout_renderer(self, monkeypatch, stream):
+        import comfy_cli.output.renderer as renderer_mod
+
+        monkeypatch.setattr(renderer_mod.sys, "stdout", stream)
+        r = Renderer.resolve(env={})
+        assert r.mode is OutputMode.JSON
+        return r
+
+    def test_missing_stdout_emit_is_a_noop(self, monkeypatch):
+        r = self._dead_stdout_renderer(monkeypatch, None)
+        r.emit({"hello": "world"})  # must not raise
+        assert r.exit_code == 0
+
+    def test_missing_stdout_error_still_sets_the_exit_code(self, monkeypatch):
+        r = self._dead_stdout_renderer(monkeypatch, None)
+        r.error(code="server_not_running", message="nope", exit_code=1)
+        assert r.exit_code == 1
+
+    def test_closed_stdout_emit_is_a_noop(self, monkeypatch, tmp_path):
+        handle = open(tmp_path / "out.txt", "w")
+        handle.close()
+        r = self._dead_stdout_renderer(monkeypatch, handle)
+        r.error(code="server_not_running", message="nope", exit_code=1)
+        assert r.exit_code == 1
+
+    def test_broken_pipe_still_propagates(self, monkeypatch):
+        """`OSError` is deliberately excluded from the guard. A BrokenPipeError
+        means the stream was real and the reader hung up, and that has to keep
+        propagating: `comfy cloud login` depends on it escaping the `login_url`
+        emit to fail fast instead of blocking 300s on a browser callback nobody
+        will read (test_json_login_fails_fast_when_login_url_write_breaks).
+        Guarding "no usable stream" must not quietly become "ignore all I/O
+        errors"."""
+
+        class BrokenPipe:
+            def isatty(self):
+                return False
+
+            def write(self, _):
+                raise BrokenPipeError(32, "Broken pipe")
+
+            def flush(self):
+                pass
+
+        r = self._dead_stdout_renderer(monkeypatch, BrokenPipe())
+        with pytest.raises(BrokenPipeError):
+            r.emit({"hello": "world"})
+
+    def test_a_malformed_payload_still_surfaces(self, monkeypatch):
+        """The handler is deliberately narrower than `stream_is_tty`'s: a
+        TypeError from the write means our payload is wrong, which is a bug and
+        must stay visible rather than being silently swallowed."""
+
+        class Fussy:
+            def isatty(self):
+                return False
+
+            def write(self, _):
+                raise TypeError("not a string")
+
+            def flush(self):
+                pass
+
+        r = self._dead_stdout_renderer(monkeypatch, Fussy())
+        with pytest.raises(TypeError):
+            r.emit({"hello": "world"})

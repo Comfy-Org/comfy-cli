@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "comfy stop",
+  "description": "Output shape for the stop command's success envelope.",
+  "type": "object",
+  "properties": {
+    "stopped": { "type": "boolean" },
+    "host": { "type": "string" },
+    "port": { "type": ["integer", "string"] },
+    "pid": { "type": "integer" },
+    "dry_run": {
+      "type": "boolean",
+      "description": "True when --dry-run was passed: nothing was stopped and `stopped` is false."
+    },
+    "untracked": {
+      "type": "boolean",
+      "description": "True when the target was found by --port rather than read from this CLI's background record."
+    },
+    "verified": {
+      "type": "boolean",
+      "description": "--port only: the listener was positively identified as ComfyUI before being reported."
+    },
+    "cmdline": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "--port --dry-run only: the identified listener's command line."
+    },
+    "cwd": {
+      "type": "string",
+      "description": "--port --dry-run only: the identified listener's working directory, when readable."
+    },
+    "children_unknown": {
+      "type": "boolean",
+      "description": "--port only: present and true when the target's child processes could not be enumerated, so the stop is confirmed for the listener and the port but not for its whole tree."
+    }
+  },
+  "required": ["stopped"]
+}

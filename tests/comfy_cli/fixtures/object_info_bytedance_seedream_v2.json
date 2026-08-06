@@ -1,0 +1,227 @@
+{
+  "ByteDanceSeedreamNodeV2": {
+    "input": {
+      "required": {
+        "prompt": [
+          "STRING",
+          {
+            "multiline": true,
+            "default": "",
+            "tooltip": "Text prompt for creating or editing an image."
+          }
+        ],
+        "model": [
+          "COMFY_DYNAMICCOMBO_V3",
+          {
+            "options": [
+              {
+                "key": "seedream 5.0 pro",
+                "inputs": {
+                  "required": {
+                    "size_preset": [
+                      "COMBO",
+                      {
+                        "options": [
+                          "(1K) 1024x1024 (1:1)",
+                          "(1K) 864x1152 (3:4)",
+                          "(1K) 1152x864 (4:3)",
+                          "(2K) 2048x2048 (1:1)",
+                          "Custom"
+                        ],
+                        "tooltip": "Pick a recommended size. Select Custom to use the width and height below."
+                      }
+                    ],
+                    "width": [
+                      "INT",
+                      {"default": 2048, "min": 1024, "max": 6240, "step": 2}
+                    ],
+                    "height": [
+                      "INT",
+                      {"default": 2048, "min": 1024, "max": 4992, "step": 2}
+                    ],
+                    "images": [
+                      "COMFY_AUTOGROW_V3",
+                      {
+                        "template": {"image": ["IMAGE", {}]},
+                        "names": ["image_1", "image_2", "image_3", "image_4"],
+                        "min": 0,
+                        "tooltip": "Optional reference image(s) for image-to-image or multi-reference generation."
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "key": "seedream 5.0 lite",
+                "inputs": {
+                  "required": {
+                    "size_preset": [
+                      "COMBO",
+                      {
+                        "options": [
+                          "(1K) 1024x1024 (1:1)",
+                          "(2K) 2048x2048 (1:1)",
+                          "(3K) 3072x3072 (1:1)",
+                          "(4K) 4096x4096 (1:1)",
+                          "Custom"
+                        ],
+                        "tooltip": "Pick a recommended size. Select Custom to use the width and height below."
+                      }
+                    ],
+                    "width": [
+                      "INT",
+                      {"default": 2048, "min": 1024, "max": 6240, "step": 2}
+                    ],
+                    "height": [
+                      "INT",
+                      {"default": 2048, "min": 1024, "max": 4992, "step": 2}
+                    ],
+                    "max_images": [
+                      "INT",
+                      {"default": 1, "min": 1, "max": 14, "step": 1}
+                    ],
+                    "images": [
+                      "COMFY_AUTOGROW_V3",
+                      {
+                        "template": {"image": ["IMAGE", {}]},
+                        "names": ["image_1", "image_2", "image_3", "image_4"],
+                        "min": 0,
+                        "tooltip": "Optional reference image(s) for image-to-image or multi-reference generation."
+                      }
+                    ],
+                    "fail_on_partial": [
+                      "BOOLEAN",
+                      {"default": false, "advanced": true}
+                    ]
+                  }
+                }
+              },
+              {
+                "key": "seedream-4-5-251128",
+                "inputs": {
+                  "required": {
+                    "size_preset": [
+                      "COMBO",
+                      {
+                        "options": [
+                          "(2K) 2048x2048 (1:1)",
+                          "(4K) 4096x4096 (1:1)",
+                          "Custom"
+                        ]
+                      }
+                    ],
+                    "width": [
+                      "INT",
+                      {"default": 2048, "min": 1024, "max": 6240, "step": 2}
+                    ],
+                    "height": [
+                      "INT",
+                      {"default": 2048, "min": 1024, "max": 4992, "step": 2}
+                    ],
+                    "max_images": [
+                      "INT",
+                      {"default": 1, "min": 1, "max": 10, "step": 1}
+                    ],
+                    "images": [
+                      "COMFY_AUTOGROW_V3",
+                      {
+                        "template": {"image": ["IMAGE", {}]},
+                        "names": ["image_1", "image_2", "image_3", "image_4"],
+                        "min": 0
+                      }
+                    ],
+                    "fail_on_partial": [
+                      "BOOLEAN",
+                      {"default": false, "advanced": true}
+                    ]
+                  }
+                }
+              },
+              {
+                "key": "seedream-4-0-250828",
+                "inputs": {
+                  "required": {
+                    "size_preset": [
+                      "COMBO",
+                      {
+                        "options": [
+                          "(1K) 1024x1024 (1:1)",
+                          "(2K) 2048x2048 (1:1)",
+                          "(4K) 4096x4096 (1:1)",
+                          "Custom"
+                        ]
+                      }
+                    ],
+                    "width": [
+                      "INT",
+                      {"default": 2048, "min": 1024, "max": 6240, "step": 2}
+                    ],
+                    "height": [
+                      "INT",
+                      {"default": 2048, "min": 1024, "max": 4992, "step": 2}
+                    ],
+                    "max_images": [
+                      "INT",
+                      {"default": 1, "min": 1, "max": 10, "step": 1}
+                    ],
+                    "images": [
+                      "COMFY_AUTOGROW_V3",
+                      {
+                        "template": {"image": ["IMAGE", {}]},
+                        "names": ["image_1", "image_2", "image_3", "image_4"],
+                        "min": 0
+                      }
+                    ],
+                    "fail_on_partial": [
+                      "BOOLEAN",
+                      {"default": false, "advanced": true}
+                    ]
+                  }
+                }
+              }
+            ],
+            "tooltip": "Model variant to use for generation."
+          }
+        ],
+        "seed": [
+          "INT",
+          {
+            "default": 0,
+            "min": 0,
+            "max": 2147483647,
+            "step": 1,
+            "control_after_generate": true,
+            "tooltip": "Seed to use for generation."
+          }
+        ],
+        "watermark": [
+          "BOOLEAN",
+          {
+            "default": false,
+            "advanced": true,
+            "tooltip": "Whether to add an \"AI generated\" watermark to the image."
+          }
+        ]
+      },
+      "optional": {
+        "thinking": [
+          "BOOLEAN",
+          {"default": true, "advanced": true}
+        ]
+      }
+    },
+    "input_order": {
+      "required": ["prompt", "model", "seed", "watermark"],
+      "optional": ["thinking"]
+    },
+    "output": ["IMAGE"],
+    "output_is_list": [false],
+    "output_name": ["IMAGE"],
+    "output_node": false,
+    "name": "ByteDanceSeedreamNodeV2",
+    "display_name": "ByteDance Seedream 4.5 & 5.0",
+    "description": "Unified text-to-image generation and precise single-sentence editing at up to 4K resolution.",
+    "category": "partner/image/ByteDance",
+    "api_node": true
+  }
+}

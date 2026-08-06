@@ -104,7 +104,14 @@ class UnknownNodeType(ValueError):
     lists CONNECTION types, not class_types.
     """
 
-    def __init__(self, class_type: str, *, close_matches: list[str] | None = None, ui_only: bool = False, subgraph_id: bool = False):
+    def __init__(
+        self,
+        class_type: str,
+        *,
+        close_matches: list[str] | None = None,
+        ui_only: bool = False,
+        subgraph_id: bool = False,
+    ):
         self.class_type = class_type
         self.close_matches = close_matches or []
         self.ui_only = ui_only

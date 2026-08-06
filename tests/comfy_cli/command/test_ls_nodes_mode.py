@@ -34,12 +34,19 @@ def patched_graph(monkeypatch):
 
 def _wf_with_modes() -> dict:
     wf = _base_workflow()
-    wf["nodes"][0]["mode"] = MODE_BYPASS   # KSampler, id 3
-    wf["nodes"][1]["mode"] = MODE_MUTED    # EmptyLatentImage, id 7
-    wf["nodes"].append({
-        "id": 9, "type": "VAEDecode", "pos": [0, 0], "mode": 0,
-        "inputs": [], "outputs": [], "widgets_values": [],
-    })
+    wf["nodes"][0]["mode"] = MODE_BYPASS  # KSampler, id 3
+    wf["nodes"][1]["mode"] = MODE_MUTED  # EmptyLatentImage, id 7
+    wf["nodes"].append(
+        {
+            "id": 9,
+            "type": "VAEDecode",
+            "pos": [0, 0],
+            "mode": 0,
+            "inputs": [],
+            "outputs": [],
+            "widgets_values": [],
+        }
+    )
     return wf
 
 

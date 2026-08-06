@@ -39,6 +39,21 @@ comfy setup
 
 `comfy setup` walks you through everything — local or cloud routing, authentication, and agent skill installation — in one interactive wizard. Pass `-y` for non-interactive (CI/scripted) installs.
 
+## Run a workflow in the cloud
+
+No local GPU? Route any API-format workflow to [Comfy Cloud](https://www.comfy.org/) with `--where cloud`:
+
+```bash
+comfy cloud login                                        # sign in via your browser (OAuth)
+comfy run --workflow ./workflow.json --where cloud       # submits, prints a prompt_id, returns immediately
+comfy jobs wait <prompt_id> --where cloud                # block until the job finishes (or: jobs status for a one-shot check)
+comfy download <prompt_id> --where cloud -o ./outputs    # save the results locally
+```
+
+`comfy run` submits asynchronously and prints the `prompt_id` you feed to `jobs`/`download`; add `--wait` to block inline instead. Check your sign-in anytime with `comfy cloud whoami`. Export the workflow JSON from ComfyUI via **File → Export (API)** (UI-format JSON is auto-converted). Set cloud as your default target so you can drop the flag: `comfy set-default --where cloud`.
+
+**Credits:** cloud generation (`comfy run --where cloud`, `comfy generate`) consumes Comfy Cloud credits and needs an active subscription. Discovery and inspection commands — `comfy cloud whoami`, `comfy jobs status/ls`, `comfy templates ls`, `comfy generate list` — don't.
+
 ## Installation
 
 1. (Recommended) Activate a virtual environment ([venv](https://docs.python.org/3/library/venv.html) or [conda](https://conda.io/projects/conda/en/latest/user-guide/getting-started.html)).
@@ -99,6 +114,38 @@ dependencies using the following precedence:
      tool environment): a `.venv` is created inside the ComfyUI workspace.
      Use `comfy launch` to start ComfyUI with the correct Python.
 
+### Updating ComfyUI
+
+`comfy update` brings an existing workspace up to date:
+
+- `comfy update` (or `comfy update comfy`): pull the branch the workspace is currently on and reinstall `requirements.txt`.
+- `comfy update all`: also update every installed custom node.
+- `comfy update cli`: upgrade comfy-cli itself.
+
+By default `comfy update all` exits 0 even when the custom-node update step fails — the error is printed, but the exit code says success, so scripts and wrappers can't tell. Pass `--exit-on-fail` (the same flag name and default as `comfy node install --exit-on-fail`) to have that failure exit non-zero instead. The flag only changes the `all` target; `comfy update comfy` and `comfy update cli` already exit non-zero when they fail, and accept the flag as a no-op so it can be forwarded unconditionally.
+
+One limit worth knowing: `--exit-on-fail` can only surface what ComfyUI-Manager's `cm-cli update` reports. `cm-cli` currently handles a *single* pack failing to update by printing `ERROR: ...` and carrying on, still exiting 0, so that particular case stays invisible until ComfyUI-Manager propagates it. Unlike `comfy node install`, the flag is not forwarded to `cm-cli` — only its `install` subcommand accepts `--exit-on-fail`; its `update` subcommand has no such option and would reject it.
+
+When the flag does fire, the exit code is `cm-cli`'s own, normalized so it is always usable: a process killed by a signal becomes `128+N` rather than a truncated value, an exit code that would truncate to 0 becomes 1, and 2 becomes 1 so it can't be mistaken for a CLI usage error. In `--json` mode the failure is also reported as an `update_custom_nodes_failed` error envelope carrying `cm-cli`'s raw status in `details.cm_cli_returncode`.
+
+#### Switching to a specific version
+
+`comfy update comfy --version <X>` moves an existing workspace to a specific ComfyUI version — a downgrade (rollback) or an upgrade — without prompting for anything, so it is safe to run headlessly or from a script. `<X>` is `nightly` (the repo's default branch), `latest` (the newest stable release), or a version number such as `0.3.0` (a leading `v` is optional).
+
+```bash
+comfy update comfy --version 0.3.0      # roll back to the v0.3.0 release
+comfy update comfy --version latest     # newest stable release
+comfy update comfy --version nightly    # roll forward to the default branch
+```
+
+Behavior worth knowing:
+
+- **The target is validated before anything is touched.** An unknown version exits non-zero, lists the nearest available versions, and leaves the working tree exactly as it was.
+- **Uncommitted changes are stashed by default** (`git stash push -u`) and are *never* popped or dropped automatically — the stash ref is printed so you can restore them with `git stash pop`. Pass `--no-stash` if you would rather the command refuse to run on a dirty tree.
+- **A version number checks out a tag, which leaves a detached HEAD.** That is expected. Roll forward again with `comfy update comfy --version nightly` (or `--version latest`); a plain `comfy update` cannot advance a detached HEAD.
+- **Dependencies are reinstalled** from the target version's `requirements.txt`. PyTorch is deliberately left alone: the ComfyUI version doesn't determine your torch build, your machine does. If the dependency install fails, the command exits non-zero and says so — the tree is already on the new version, and re-running the same command is safe.
+- `--version` and `--no-stash` apply only to target `comfy`; combining `--version` with `all` or `cli` is an error.
+
 ### Specifying execution path
 
 - You can specify the path of ComfyUI where the command will be applied through path indicators as follows:
@@ -152,8 +199,24 @@ Comfy provides commands that allow you to easily run the installed ComfyUI.
   `comfy --workspace=~/comfy launch --background -- --listen 10.0.0.10 --port 8000`
 
   - Instances launched with `--background` are displayed in the "Background ComfyUI" section of `comfy env`, providing management functionalities for a single background instance only.
-  - Since "Comfy Server Running" in `comfy env` only shows the default port 8188, it doesn't display ComfyUI running on a different port.
   - Background-running ComfyUI can be stopped with `comfy stop`.
+
+- To point **every** command (not just one) at a ComfyUI on a non-default
+  address — e.g. a server you started _outside_ comfy-cli on `:8189` — export
+  the `COMFY_LOCAL_URL` environment variable:
+
+  `export COMFY_LOCAL_URL=http://127.0.0.1:8189`
+
+  - Accepts `http://host:port`, `host:port`, or `http://host` (the port
+    defaults to `8188`; the scheme is optional and, if present, must be
+    `http`). IPv6 literals are bracketed: `COMFY_LOCAL_URL=http://[::1]:8189`.
+  - Honored by `comfy env`, `comfy run`, `comfy jobs`, `comfy upload`/`download`,
+    `comfy nodes`, and every other local-targeting command, so `comfy env`'s
+    "Comfy Server Running" line now probes and reports the resolved address.
+  - Precedence (per command): a per-command `--host`/`--port` flag wins, then
+    `COMFY_LOCAL_URL`, then a comfy-cli-launched background server, then the
+    `127.0.0.1:8188` default. A malformed value is ignored with a one-line
+    stderr warning rather than breaking the command.
 
 - to run ComfyUI with a specific pull request:
 
@@ -190,6 +253,9 @@ Comfy provides commands that allow you to easily run the installed ComfyUI.
   - Maximum of 10 PR builds are kept (oldest are removed automatically)
   - Cache limits help manage disk space while keeping recent builds available
 
+- To check VRAM/RAM usage: `comfy system-stats` (add `--where cloud` to target Comfy Cloud instead of local)
+- To unload models / free the executor cache: `comfy free` (pass `--free-memory` to also reset the executor cache)
+
 ### Managing Custom Nodes
 
 comfy provides a convenient way to manage custom nodes for extending ComfyUI's functionality. Here are some examples:
@@ -210,6 +276,13 @@ comfy node [show|simple-show] [installed|enabled|not-installed|disabled|all|snap
 
   `comfy node install comfyui-impact-pack`
 
+  > **Note:** the argument is the node's **Comfy Registry ID**, which is
+  > lowercase (e.g. `comfyui-impact-pack`), not the GitHub repository name
+  > (`ComfyUI-Impact-Pack`). Passing the repo-name casing fails to resolve with
+  > an error like `Node 'ComfyUI-Impact-Pack@unknown' not found`. Find a node's
+  > ID on its [Comfy Registry](https://registry.comfy.org) page or via
+  > `comfy node show all`.
+
 - Managing snapshot:
 
   `comfy node save-snapshot`
@@ -225,6 +298,38 @@ comfy node [show|simple-show] [installed|enabled|not-installed|disabled|all|snap
 - Generate deps:
 
   `comfy node deps-in-workflow --workflow=<workflow .json/.png file> --output=<output deps .json file>`
+
+#### `install` vs `registry-install`
+
+comfy-cli offers two ways to install a custom node, backed by different
+mechanisms:
+
+- **`comfy node install <id>...`** delegates to
+  [ComfyUI-Manager](https://github.com/Comfy-Org/ComfyUI-Manager)'s `cm-cli`.
+  It accepts one or more node IDs, resolves them through the Manager's channel
+  database (`--channel`, `--mode`), and installs dependencies via the Manager
+  (so it also supports `--fast-deps`, `--no-deps`, and `--uv-compile`). This is
+  the recommended command for day-to-day node management, and it requires
+  ComfyUI-Manager to be present in the workspace.
+
+  `comfy node install comfyui-impact-pack`
+
+- **`comfy node registry-install <id> [--version <v>]`** talks directly to the
+  [Comfy Registry](https://registry.comfy.org) API. It downloads the published
+  archive for a single node (optionally pinned with `--version`), extracts it
+  into `custom_nodes/`, and runs the node's own install script. It does **not**
+  go through ComfyUI-Manager, so it does not require the Manager to be
+  installed — this is the command the Registry's own install instructions use.
+
+  `comfy node registry-install comfyui-impact-pack`
+
+  `comfy node registry-install comfyui-impact-pack --version 1.0.0`  # install a specific version
+
+  Because `registry-install` bypasses the Manager's dependency machinery and
+  simply runs the node's bundled install script, it only accepts
+  `--force-download` — it does **not** accept `--fast-deps`, `--no-deps`, or
+  `--uv-compile`. If you want fast/unified dependency resolution, use
+  `comfy node install` instead.
 
 #### Unified Dependency Resolution (--uv-compile)
 
@@ -244,7 +349,9 @@ it can identify which node packs have incompatible dependencies and why.
 
   `comfy node uv-sync`
 
-- `--uv-compile` is mutually exclusive with `--fast-deps` and `--no-deps`.
+- `--uv-compile` is mutually exclusive with `--fast-deps` and `--no-deps` —
+  except on `restore-snapshot`, where `--fast-deps` selects the `--uv-compile`
+  path instead (see [--fast-deps](#--fast-deps) below).
 
 - To make `--uv-compile` the default for all commands, see
   [uv-compile default](#uv-compile-default) below.
@@ -253,6 +360,41 @@ it can identify which node packs have incompatible dependencies and why.
 
   `comfy node install comfyui-impact-pack --no-uv-compile`
 
+#### --fast-deps
+
+`--fast-deps` swaps comfy-cli's dependency installation from `pip` to comfy-cli's
+built-in `uv`-based resolver (`DependencyCompiler`), which is significantly
+faster and only requires `uv` (no ComfyUI-Manager). On a dependency version
+conflict it prompts you interactively to pick a version.
+
+- Accepted by: `comfy install`, `comfy node install`, `comfy node reinstall`,
+  and `comfy node restore-snapshot`.
+
+  `comfy install --fast-deps`
+
+  `comfy node install comfyui-impact-pack --fast-deps`
+
+- **Not** accepted by `comfy node registry-install`: that command installs a
+  node directly from the Comfy Registry by running the node's own bundled
+  install script, so it never touches comfy-cli's dependency resolver (see
+  [`install` vs `registry-install`](#install-vs-registry-install) above).
+- Mutually exclusive with `--no-deps` and `--uv-compile`, where those flags
+  exist — the exact pairing is per-command:
+
+  | Command | Rejected combination |
+  |---------|----------------------|
+  | `comfy node install` | `--fast-deps --no-deps`, `--fast-deps --uv-compile` |
+  | `comfy node reinstall` | `--fast-deps --uv-compile` (no `--no-deps` on this command) |
+  | `comfy node restore-snapshot` | `--fast-deps --no-uv-compile` (see below) |
+  | `comfy install` | none (neither flag exists on this command) |
+
+- **Exception — `comfy node restore-snapshot`:** here `--fast-deps` *selects*
+  the `--uv-compile` fast path rather than conflicting with it. ComfyUI-Manager's
+  `cm-cli` has no `--no-deps` on `restore-snapshot`, and its `--uv-compile`
+  already implies no-deps internally, so the two are synonyms on this command.
+  Combining `--fast-deps` with `--no-uv-compile` is the contradiction, and it
+  errors: `Cannot use --fast-deps with --no-uv-compile`.
+
 #### --fast-deps vs --uv-compile
 
 Both flags use `uv` for faster dependency resolution, but they work differently:
@@ -260,7 +402,7 @@ Both flags use `uv` for faster dependency resolution, but they work differently:
 |                       | `--fast-deps`                                   | `--uv-compile`                                |
 |-----------------------|-------------------------------------------------|-----------------------------------------------|
 | **Resolver**          | comfy-cli built-in (`DependencyCompiler`)       | ComfyUI-Manager (`UnifiedDepResolver`)        |
-| **Scope**             | `comfy install`, `comfy node install/reinstall` | Custom node commands only                     |
+| **Scope**             | `comfy install`, `comfy node install/reinstall/restore-snapshot` | Custom node commands only    |
 | **Conflict handling** | Interactive prompt to pick a version            | Automatic detection with node attribution     |
 | **Config default**    | No                                              | Yes (`comfy manager uv-compile-default true`) |
 | **Requires**          | Only `uv`                                       | ComfyUI-Manager v4.1+                         |
@@ -297,6 +439,36 @@ the bisect tool can help you pinpoint the custom node that causes the issue.
 - Model list
 
   `comfy model list ?[--relative-path <PATH>]`
+
+### Running on Comfy Cloud (`--where cloud`)
+
+Comfy Cloud runs your workflow on Comfy's GPUs — no local ComfyUI install and no GPU required. The same verbs you use locally take `--where cloud`; the only extra step is signing in once.
+
+Prerequisites — a Comfy account with a credit balance ([add credits](https://docs.comfy.org/interface/credits); cloud runs are metered per GPU-second):
+
+```bash
+comfy cloud login                   # opens your browser (OAuth + PKCE), stores a session
+comfy cloud whoami                  # confirm who you're signed in as
+```
+
+Then submit, watch, and collect:
+
+```bash
+comfy run --workflow my_workflow_api.json --where cloud   # submits, prints a prompt_id, returns
+comfy jobs ls --where cloud                               # queue + history for your account
+comfy jobs status <prompt_id> --where cloud               # one job's state
+comfy jobs watch <prompt_id> --where cloud                # live progress until it finishes
+comfy download <prompt_id> --where cloud                  # fetch the outputs
+```
+
+Notes:
+
+- `--where cloud` is per-invocation. Make it the default with `comfy set-default --where cloud`; every command then honors it without the flag, and `--where local` overrides it for one call. Clear it again with `comfy set-default --clear-where`.
+- Add `--wait` to `comfy run` to block until the job completes instead of returning immediately.
+- `comfy run --prompt "<text>"` (no `--workflow`) runs a bundled default text2img graph. **That graph loads the SD1.5 checkpoint `v1-5-pruned-emaonly.ckpt`, which comfy-cli does not download for you** — install it into `models/checkpoints`, or point the graph at a checkpoint you do have with `comfy run --prompt "…" --set checkpoint=<name>`. The same applies on cloud, where the checkpoint must exist in your cloud assets.
+- `comfy download` also reads a `prompt_id` from piped stdin, so `comfy run ... --where cloud | comfy download --where cloud` works.
+- Models and custom nodes must exist on the cloud side. `comfy models search --where cloud` lists the cloud asset catalog, and `comfy nodes ls --where cloud` lists the node classes cloud can run.
+- Sign out with `comfy cloud logout`. If a run fails with `cloud_unauthorized`, your session expired — re-run `comfy cloud login`.
 
 ### Calling partner nodes (`comfy generate`)
 

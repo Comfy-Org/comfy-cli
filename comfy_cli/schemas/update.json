@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "comfy update",
+  "description": "Output shape for `comfy update comfy --version <X>` — the headless ComfyUI version switch.",
+  "type": "object",
+  "properties": {
+    "previous": {
+      "type": "string",
+      "description": "The ref the workspace was on before the switch (short sha, plus `git describe` when it differs)."
+    },
+    "current": {
+      "type": "string",
+      "description": "The ref the workspace is on after the switch."
+    },
+    "stashed": {
+      "type": "boolean",
+      "description": "Whether uncommitted changes were stashed before the switch. A stash is never popped or dropped automatically."
+    },
+    "stash_ref": {
+      "type": ["string", "null"],
+      "description": "The stash reference to recover from when `stashed` is true, otherwise null."
+    }
+  },
+  "required": ["previous", "current", "stashed", "stash_ref"]
+}

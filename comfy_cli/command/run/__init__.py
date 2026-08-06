@@ -8,19 +8,22 @@ patch surface stays stable.
 """
 
 import json
+import sys
 import time
 import uuid
 from datetime import timedelta
 from urllib import request  # noqa: F401 — patch target for tests (run.request.urlopen)
 
 import typer
+from rich.markup import escape as _rich_escape
 from websocket import (  # noqa: F401 — patch target for tests (run.WebSocket)
     WebSocket,
     WebSocketException,
     WebSocketTimeoutException,
 )
 
-from comfy_cli import cancellation, execution_errors, jobs_state
+from comfy_cli import cancellation, execution_errors, jobs_state, tracking
+from comfy_cli.caller import stream_is_tty
 
 # Re-exports — names patched by tests live at this namespace.
 from comfy_cli.command.run.credentials import _resolve_partner_credential as _resolve_partner_credential
@@ -38,16 +41,121 @@ from comfy_cli.command.run.preflight import PARTNER_NODE_CATEGORY_PREFIXES as PA
 from comfy_cli.command.run.preflight import _detect_partner_nodes as _detect_partner_nodes
 from comfy_cli.command.run.preflight import _fetch_object_info as _fetch_object_info
 from comfy_cli.command.run.preflight import _preflight_validate as _preflight_validate
+from comfy_cli.command.run.preflight import _resolve_default_checkpoint_or_exit as _resolve_default_checkpoint_or_exit
 from comfy_cli.command.run.preflight import fetch_object_info as fetch_object_info
 from comfy_cli.command.run.watcher import _spawn_watcher as _spawn_watcher
 from comfy_cli.command.run.watcher import _tail_state_file as _tail_state_file
 from comfy_cli.env_checker import check_comfy_server_running
 from comfy_cli.output import get_renderer
 from comfy_cli.output import rprint as pprint
+from comfy_cli.output.sanitize import sanitize_markup
 from comfy_cli.workflow_to_api import WorkflowConversionError, convert_ui_to_api
 from comfy_cli.workspace_manager import WorkspaceManager
 
 workspace_manager = WorkspaceManager()
+
+# Bounds on the `partner_nodes` telemetry property and on the partner-node names
+# echoed in the missing-credential error. class_type strings are attacker- (or
+# just accident-) controlled workflow JSON, so cap the list length and each name.
+_TELEMETRY_NODE_LIST_CAP = 20
+_TELEMETRY_NODE_NAME_MAX_LEN = 64
+
+
+def _bounded_node_names(names: list[str]) -> tuple[list[str], int]:
+    """Cap a partner-node name list in BOTH dimensions — element count and each
+    name's length. Returns ``(shown, omitted)``.
+
+    Applies to every payload built from these names: the telemetry property,
+    the prose message, and the structured ``details`` of both the credential
+    error and the spend gate. Capping only the prose would bound nothing —
+    ``error_panel`` renders ``details`` as ``key=value`` rows directly beneath
+    the message in pretty mode, and JSON mode serialises them. The exact total
+    travels alongside as ``partner_node_count``, so nothing is lost: a consumer
+    still learns how many nodes are involved, and the remedy is identical
+    whichever ones they are.
+
+    De-duplicates AFTER truncation, not before: ``_detect_partner_nodes``
+    returns distinct class_types, but two sharing a 64-char prefix collapse to
+    the same string once truncated, which would list one name twice.
+
+    Consumes input until the cap is filled with DISTINCT truncated names rather
+    than slicing the first 20 up front — otherwise a run of prefix-colliding
+    names burns output slots and silently drops later, genuinely distinct ones.
+
+    ``omitted`` counts only what the cap actually left behind, never what
+    de-duplication collapsed: a caller appending "and N more" must not claim
+    unlisted nodes that don't exist.
+    """
+    shown: list[str] = []
+    consumed = 0
+    for name in names:
+        if len(shown) >= _TELEMETRY_NODE_LIST_CAP:
+            break
+        consumed += 1
+        truncated = name[:_TELEMETRY_NODE_NAME_MAX_LEN]
+        if truncated not in shown:
+            shown.append(truncated)
+    return shown, len(names) - consumed
+
+
+def _stdin_is_interactive() -> bool:
+    """True only when stdin is a live TTY.
+
+    ``sys.stdin.isatty()`` assumes stdin is a live stream, but in detached /
+    ``pythonw`` contexts ``sys.stdin`` can be ``None``, closed, or backed by a
+    revoked file descriptor. Treat every such case as non-interactive so the
+    spend gate falls through to the fail-closed machine-mode error instead of
+    raising an uncontrolled exception (BE-4326). Delegates to the shared
+    fail-safe probe so stdin and stdout are guarded identically.
+    """
+    return stream_is_tty(getattr(sys, "stdin", None))
+
+
+def _spend_gate(renderer, partner_nodes: list[str], allow_spend: bool, *, details: dict) -> None:
+    """Consent interlock for partner-API (paid) nodes (BE-4326).
+
+    Mirrors the ``comfy run-template`` gate (BE-4113): a workflow that embeds
+    partner-API nodes (Veo/Kling/BFL/Gemini/…) spends Comfy credits when it
+    runs, so require explicit consent before submitting. A no-op when there are
+    no partner nodes or ``--allow-spend`` was passed, so partner-free runs are
+    byte-identical.
+
+    Fires BEFORE any partner-credential resolution / cloud auth so a refusal
+    never triggers a network OAuth refresh. Raises ``typer.Exit(1)`` when
+    consent is withheld; returns normally when the run may proceed.
+    """
+    if not partner_nodes or allow_spend:
+        return
+    # Bound the names here rather than at each call site, so both `execute` and
+    # `execute_cloud` are covered: this gate runs on the same untrusted
+    # class_type strings and is the MORE commonly hit branch (it fires before
+    # any credential resolution), so leaving it unbounded would let a
+    # pathological graph flood the terminal and the JSON envelope anyway.
+    shown, omitted = _bounded_node_names(partner_nodes)
+    details = {**details, "partner_nodes": shown, "partner_node_count": len(partner_nodes)}
+    if renderer.is_pretty() and _stdin_is_interactive():
+        # Escape class_type names before interpolating into Rich markup: a name
+        # containing markup like ``[bold]`` would otherwise be parsed as a tag
+        # (MarkupError/StyleSyntaxError, or injected formatting).
+        names = ", ".join(_rich_escape(n) for n in shown) + (f", and {omitted} more" if omitted > 0 else "")
+        pprint(f"[yellow]⚠ This workflow uses partner-API nodes that spend Comfy credits: {names}.[/yellow]")
+        if not typer.confirm("Run anyway and spend credits?", default=False):
+            renderer.error(
+                code="spend_consent_required",
+                message="declined — workflow not submitted, no credits spent",
+                details=details,
+            )
+            raise typer.Exit(code=1)
+    else:
+        renderer.error(
+            code="spend_consent_required",
+            message=(
+                "workflow uses partner-API (paid) nodes; re-run with --allow-spend to consent to spending Comfy credits"
+            ),
+            hint="paid nodes only run with explicit consent; free (non-partner) workflows run without this flag",
+            details=details,
+        )
+        raise typer.Exit(code=1)
 
 
 # Mapping from the deleted legacy `comfy run --json` dialect (JsonEmitter,
@@ -104,7 +212,8 @@ def execute(
     notify: bool = False,
     api_key: str | None = None,
     print_prompt: bool = False,
-    preloaded: tuple[dict, str, bool] | None = None,
+    preloaded: tuple[dict, str, bool, bool] | None = None,
+    allow_spend: bool = False,
 ):
     # `0.0.0.0` is a wildcard bind, not a connect address. macOS / Windows
     # clients can't reach it; on Linux it happens to resolve to a loopback.
@@ -123,10 +232,13 @@ def execute(
 
     # `preloaded` short-circuits file loading: an in-memory API-format graph
     # (e.g. the `comfy run --prompt` injected default) is handed straight in as
-    # (workflow_dict, display_name, is_ui). Everything downstream is unchanged.
+    # (workflow_dict, display_name, is_ui, checkpoint_user_set). Everything
+    # downstream is unchanged; `checkpoint_user_set` gates runtime checkpoint
+    # resolution for the bundled default (skip it when the user pinned one).
     if preloaded is not None:
-        raw_workflow, workflow_name, is_ui = preloaded
+        raw_workflow, workflow_name, is_ui, checkpoint_user_set = preloaded
     else:
+        checkpoint_user_set = False
         try:
             raw_workflow, workflow_name, is_ui = _load_workflow_file(workflow)
         except WorkflowLoadError as e:
@@ -192,11 +304,30 @@ def execute(
         # foreach item map to stash on the job state at submit time.
         compose_meta = pop_compose_meta(workflow)
 
+    # Partner-API node preflight (below) and runtime checkpoint resolution both
+    # need the server's object_info. `--print-prompt` is a documented
+    # no-server-hit dry-run, so skip the fetch + resolution there and print the
+    # graph as-is; the real submit flow resolves BEFORE the prompt_preview event
+    # so the streamed audit trail advertises the graph we actually submit.
+    object_info: dict = {}
+    if not print_prompt:
+        object_info = _fetch_object_info(host, port)
+
+        # Runtime checkpoint resolution for the bundled `--prompt` default: swap
+        # the pinned checkpoint for one the local server actually has (or
+        # hard-error if it has none). Guarded to the bundled default graph and
+        # skipped when the user pinned the checkpoint explicitly (honor it; let
+        # preflight reject it).
+        if preloaded is not None and workflow_name == "default_text2img" and not checkpoint_user_set:
+            _resolve_default_checkpoint_or_exit(renderer, workflow, object_info, where="local")
+
     # Stream mode: emit the workflow graph so agents have a complete audit
     # trail of what the CLI is about to submit (no-op otherwise).
     renderer.event("prompt_preview", prompt=workflow)
 
-    # --print-prompt: emit/print the workflow and exit without submitting.
+    # --print-prompt: emit/print the workflow and exit without submitting. No
+    # server hit (documented) — the graph is shown as-is, before any
+    # server-dependent checkpoint resolution.
     if print_prompt:
         if renderer.is_pretty():
             print(json.dumps(workflow, indent=2, ensure_ascii=False))
@@ -208,38 +339,82 @@ def execute(
             )
         return
 
-    # Partner-API node preflight. Reject up-front when the workflow
-    # depends on a partner node (Veo/Kling/BFL/Gemini/…) and we have no
-    # credential to inject. If we DO have a credential, plumb it into
-    # extra_data so the partner node finds it server-side — same shape
-    # the cloud submit path uses.
-    object_info = _fetch_object_info(host, port)
     partner_nodes = _detect_partner_nodes(workflow, object_info)
+    # Spend gate (BE-4326): partner-API nodes spend Comfy credits. Require
+    # explicit consent before resolving a credential or submitting. Fires
+    # BEFORE _resolve_partner_credential() below so a refusal never triggers a
+    # network OAuth refresh. Detection stays fail-open (object_info == {} → no
+    # partner_nodes → no gate), same posture as run-template.
+    _spend_gate(
+        renderer,
+        partner_nodes,
+        allow_spend,
+        details={"partner_nodes": partner_nodes, "host": host, "port": port},
+    )
     extra_data: dict | None = None
     if api_key:
         extra_data = {"api_key_comfy_org": api_key}
     if partner_nodes:
-        cred = _resolve_partner_credential()
-        if cred is None and not extra_data:
-            msg = (
-                "Workflow uses partner-API node(s) that need an `api_key_comfy_org` "
-                "credential the local server doesn't have: " + ", ".join(partner_nodes) + "."
-            )
-            renderer.error(
-                code="partner_node_requires_credential",
-                message=msg,
-                hint=(
-                    "re-submit with `--where cloud` (the CLI auto-injects the key there), "
-                    "or store the key locally with `comfy auth set comfy-cloud-api-key --key …`"
-                ),
-                details={
-                    "partner_nodes": partner_nodes,
-                    "host": host,
-                    "port": port,
-                },
-            )
-            raise typer.Exit(code=1)
-        elif cred is not None and not extra_data:
+        # Only resolve an injected credential when an explicit --api-key hasn't
+        # already satisfied the partner node: the resolver may perform a network
+        # OAuth refresh, so skipping it here keeps an explicit-key run network-free.
+        # Resolved once — the result feeds both the telemetry prop below and the
+        # credential gate that follows.
+        cred = _resolve_partner_credential() if not extra_data else None
+        # Fired BEFORE the reject-for-missing-credential branch so runs that are
+        # turned away are still counted: that funnel is exactly what the metric
+        # is for, and `credential_present: False` marks them. class_types are
+        # node names, not PII — the same data `workflow_unknown_nodes` reports.
+        # It does sit AFTER the BE-4326 spend gate, so a run refused for lack of
+        # `--allow-spend` emits no event: the gate deliberately precedes any
+        # credential resolution (a refusal must not trigger a network OAuth
+        # refresh), and `credential_present` needs that resolution. The
+        # spend-declined funnel wants its own event rather than an early
+        # resolve here.
+        # class_type strings come verbatim from untrusted workflow JSON, so the
+        # names are bounded before they ship. The count stays exact, so the cap
+        # never distorts the metric.
+        bounded_nodes, omitted_nodes = _bounded_node_names(partner_nodes)
+        tracking.track_event(
+            "partner_nodes_detected",
+            {
+                "partner_nodes": bounded_nodes,
+                "partner_node_count": len(partner_nodes),
+                "where": "local",
+                "credential_present": bool(api_key) or cred is not None,
+            },
+        )
+        if not extra_data:
+            if cred is None:
+                # Same bounded list in the prose and in `details` — a graph with
+                # hundreds of partner nodes would otherwise render an unreadable
+                # wall of text, and `details` is rendered right below the message
+                # in pretty mode, so capping only one of them bounds nothing.
+                # `partner_node_count` carries the exact total for consumers.
+                # The suffix counts only what the CAP omitted — names collapsed
+                # by de-duplication are still listed, so counting them would
+                # promise unlisted nodes that don't exist.
+                listed = ", ".join(bounded_nodes) + (f", and {omitted_nodes} more" if omitted_nodes > 0 else "")
+                msg = (
+                    "Workflow uses partner-API node(s) that need an `api_key_comfy_org` "
+                    "credential the local server doesn't have: " + listed + "."
+                )
+                renderer.error(
+                    code="partner_node_requires_credential",
+                    message=msg,
+                    hint=(
+                        "run: comfy cloud login   (or set COMFY_API_KEY in the environment, "
+                        "or persist a key with `comfy cloud set-key --key …`; "
+                        "cloud runs auto-inject via --where cloud)"
+                    ),
+                    details={
+                        "partner_nodes": bounded_nodes,
+                        "partner_node_count": len(partner_nodes),
+                        "host": host,
+                        "port": port,
+                    },
+                )
+                raise typer.Exit(code=1)
             extra_data = {cred[0]: cred[1]}
 
     # Pre-submit validation via pure-Python CQL engine (checks class_types + input shapes).
@@ -266,6 +441,19 @@ def execute(
     token = cancellation.get_token()
     token.on_cancel(lambda: _safe_close(execution))
 
+    # --wait only: the state written right after a successful submit, kept in
+    # scope so the exception handlers below can record what happened to a
+    # prompt that was already in flight (e.g. the server dying mid-run). Stays
+    # None on the async path — that branch writes and owns its own state — and
+    # before ``queue()`` has returned a prompt_id.
+    wait_state: jobs_state.JobState | None = None
+    # --wait success payload, rendered/emitted AFTER the try below rather than
+    # inside it. Writing to a closed stdout (`comfy run --wait … | head`)
+    # raises BrokenPipeError — a ConnectionError/OSError subclass the
+    # disconnect handler would otherwise catch, rewriting the just-persisted
+    # `completed` record to `error` and flipping a successful run's exit to 1.
+    completed_payload: dict | None = None
+
     try:
         if wait:
             execution.connect()
@@ -278,24 +466,35 @@ def execute(
             execution.queue()
         _journal_run(workflow_name, execution.prompt_id, "local")
         if wait:
-            execution.watch_execution()
-            end = time.time()
-            if progress is not None:
-                progress.stop()
-                progress = None
-
-            if token.is_set():
-                renderer.error(
-                    code="cancelled",
-                    message="Cancelled by user",
-                    exit_code=130,
-                )
-                raise typer.Exit(code=130)
-
-            # Foreground (--wait) completion path also writes the state
-            # file so the on-disk record is consistent regardless of which
-            # mode the user ran in.
-            state = jobs_state.new(
+            # Write the state file at SUBMIT time, exactly like the async
+            # branch below — if the server dies mid-run the on-disk record is
+            # the only place the in-flight prompt_id survives. Status is
+            # "running" rather than "queued": this foreground process is
+            # actively watching it, not leaving it detached in the queue.
+            #
+            # DOCUMENTED LIMIT — `--wait` spawns no background watcher, by
+            # design; this process *is* the watcher. Every ordinary outcome is
+            # still recorded, because the handlers below run: a node failure and
+            # a cancel via `_mark_watch_exit`/`_mark_cancelled`, and a server
+            # that dies mid-run via the `server_died` write in the
+            # WebSocketException/OSError handler. What is NOT covered is this
+            # process being killed from OUTSIDE (a caller-imposed timeout
+            # SIGKILLing the process group, the terminal going away): no handler
+            # runs, the record stays at the submit-time `running`, and since no
+            # `watcher_pid` is recorded, `jobs ls`'s stale-watcher reap — which
+            # only fires on a recorded *and* dead pid — won't finalize it
+            # either. `comfy jobs status` still names the job and its
+            # last-known status, so attribution is degraded rather than lost;
+            # callers that expect to outlive their patience should submit
+            # WITHOUT `--wait`, whose detached watcher gets its own session and
+            # survives the parent. Spawning one here too was considered and
+            # rejected: it would put a second, independent writer on the state
+            # file this branch already finalizes, add a second server
+            # connection per foreground run, and leave a background process
+            # behind after a synchronous command returns. See
+            # docs/json-output.md, "Known limit: `--wait` has no background
+            # watcher".
+            wait_state = jobs_state.new(
                 prompt_id=execution.prompt_id,
                 client_id=execution.client_id,
                 workflow=workflow_name,
@@ -303,18 +502,46 @@ def execute(
                 host=host,
                 port=port,
             )
+            wait_state.item_map = (compose_meta or {}).get("items")
+            wait_state.status = "running"
+            _write_state(wait_state)
+
+            # `watch_execution` reports a terminal server event by rendering
+            # the error and raising `typer.Exit` (1 for `execution_error`, 130
+            # for `execution_interrupted`) — the ordinary failure path, not an
+            # exception the handlers below see. Finalize the submit-time
+            # record here, or a failed job is stranded as a phantom `running`
+            # forever: `jobs ls` only reaps non-terminal records whose
+            # `watcher_pid` is dead, and `--wait` never sets one.
+            try:
+                execution.watch_execution()
+            except typer.Exit as exit_exc:
+                _mark_watch_exit(wait_state, exit_exc.exit_code, execution)
+                raise
+            end = time.time()
+            if progress is not None:
+                progress.stop()
+                progress = None
+
+            if token.is_set():
+                _mark_cancelled(wait_state)
+                renderer.error(
+                    code="cancelled",
+                    message="Cancelled by user",
+                    exit_code=130,
+                )
+                raise typer.Exit(code=130)
+
+            # Completion updates the record written at submit — same file,
+            # same final shape (``jobs_state.write`` stamps the timestamps).
+            state = wait_state
             state.status = "completed"
             state.outputs = list(execution.outputs)
-            state.item_map = (compose_meta or {}).get("items")
-            state_file = jobs_state.write(state)
-
-            if renderer.is_pretty():
-                if len(execution.outputs) > 0:
-                    pprint("[bold green]\nOutputs:[/bold green]")
-                    for f in execution.outputs:
-                        pprint(f)
-                elapsed = timedelta(seconds=end - start)
-                pprint(f"[bold green]\nWorkflow execution completed ({elapsed})[/bold green]")
+            # No fallback to the submit-time path: if the terminal write
+            # failed, that file still says `running`, so handing it back as
+            # the `completed` record's `state_file` would point the caller at
+            # contents contradicting what we just reported.
+            state_file = _write_state(state)
 
             # Grouped views of the same artifacts — local parity with the
             # cloud --wait envelope: by producing node always, and by
@@ -323,25 +550,21 @@ def execute(
 
             outputs_by_node, outputs_by_item = _group_outputs(list(execution.output_entries), state.item_map)
 
-            renderer.emit(
-                {
-                    "workflow": workflow_name,
-                    "status": "completed",
-                    "prompt_id": execution.prompt_id,
-                    "client_id": execution.client_id,
-                    "outputs": list(execution.outputs),
-                    "outputs_by_node": outputs_by_node,
-                    "outputs_by_item": outputs_by_item,
-                    "cached_node_ids": list(execution.cached_node_ids),
-                    "executed_node_ids": list(execution.executed_node_ids),
-                    "elapsed_seconds": end - start,
-                    "host": host,
-                    "port": port,
-                    "state_file": str(state_file) if state_file else None,
-                },
-                command="run",
-                where="local",
-            )
+            completed_payload = {
+                "workflow": workflow_name,
+                "status": "completed",
+                "prompt_id": execution.prompt_id,
+                "client_id": execution.client_id,
+                "outputs": list(execution.outputs),
+                "outputs_by_node": outputs_by_node,
+                "outputs_by_item": outputs_by_item,
+                "cached_node_ids": list(execution.cached_node_ids),
+                "executed_node_ids": list(execution.executed_node_ids),
+                "elapsed_seconds": end - start,
+                "host": host,
+                "port": port,
+                "state_file": str(state_file) if state_file else None,
+            }
         else:
             # Async path (the default). Write the initial state file and
             # spawn a detached watcher to keep it updated; the foreground
@@ -396,6 +619,7 @@ def execute(
         if progress is not None:
             progress.stop()
             progress = None
+        _mark_cancelled(wait_state)
         if renderer.is_pretty():
             pprint("[yellow]Workflow execution was interrupted[/yellow]")
         renderer.error(
@@ -410,11 +634,23 @@ def execute(
                 f"[bold red]Error: WebSocket timed out after {timeout}s waiting for server response.[/bold red]\n"
                 "[yellow]For long-running workflows, increase the timeout: comfy run --workflow <file> --timeout 300[/yellow]"
             )
+        # The job may genuinely still be running server-side, so the
+        # submit-time "running" record is left as-is — not marked terminal.
+        # Consequence of the no-watcher limit documented at the submit-time
+        # write above: nothing is left watching the prompt after this returns,
+        # so if the server dies later no `server_died` is ever written. The
+        # record stays `running` until the caller asks
+        # `comfy jobs status <prompt_id>`, which infers the death from a
+        # server that is down (or came back with no record of the prompt).
+        details = {"timeout": timeout}
+        prompt_id = _submitted_prompt_id(execution)
+        if prompt_id is not None:
+            details["prompt_id"] = prompt_id
         renderer.error(
             code="ws_timeout",
             message=f"WebSocket timed out after {timeout}s waiting for server response.",
             hint="re-run with a larger --timeout (e.g. --timeout 300)",
-            details={"timeout": timeout},
+            details=details,
         )
         raise typer.Exit(code=1)
     except (WebSocketException, ConnectionError, OSError) as e:
@@ -426,6 +662,7 @@ def execute(
         if token.is_set():
             if progress is not None:
                 progress.stop()
+            _mark_cancelled(wait_state)
             renderer.error(
                 code="cancelled",
                 message="Cancelled by user",
@@ -433,7 +670,28 @@ def execute(
             )
             raise typer.Exit(code=130) from e
         if renderer.is_pretty():
-            pprint(f"[bold red]Error: Lost connection to ComfyUI server: {e}[/bold red]")
+            pprint(f"[bold red]Error: Lost connection to ComfyUI server: {sanitize_markup(e)}[/bold red]")
+        # The server died with a prompt of ours in flight: record that on the
+        # submit-time state file and name the prompt in the emitted error, so
+        # `comfy jobs status <id>` has something to consult afterwards.
+        prompt_id = _submitted_prompt_id(execution)
+        if prompt_id is not None and wait_state is not None:
+            wait_state.status = "error"
+            wait_state.error = {
+                "code": "server_died",
+                "message": f"Lost connection to ComfyUI while job {prompt_id} was running: {e}",
+                "details": {},
+            }
+            # Same rule as the success path: report a state_file only when
+            # this terminal write actually landed.
+            path = _write_state(wait_state)
+            renderer.error(
+                code="ws_disconnected",
+                message=f"Lost connection to ComfyUI server while job {prompt_id} was running: {e}",
+                hint="check the server is still running; re-run the command",
+                details={"prompt_id": prompt_id, "state_file": str(path) if path else None},
+            )
+            raise typer.Exit(code=1)
         renderer.error(
             code="ws_disconnected",
             message=f"Lost connection to ComfyUI server: {e}",
@@ -443,6 +701,98 @@ def execute(
     finally:
         if progress is not None:
             progress.stop()
+        # Best-effort close of the run WebSocket on every exit path. On the
+        # async (no --wait) path connect() never ran so ws is None and this is
+        # a no-op; it is idempotent with the SIGINT-token close wired above.
+        _safe_close(execution)
+
+    # Deliberately outside the try: the job is done and persisted, so a
+    # BrokenPipeError from a closed stdout must surface as itself rather than
+    # be mistaken for the server disconnecting (see `completed_payload`).
+    if completed_payload is not None:
+        if renderer.is_pretty():
+            if completed_payload["outputs"]:
+                pprint("[bold green]\nOutputs:[/bold green]")
+                for f in completed_payload["outputs"]:
+                    # Output paths are built from server-chosen filenames.
+                    pprint(sanitize_markup(f))
+            elapsed = timedelta(seconds=completed_payload["elapsed_seconds"])
+            pprint(f"[bold green]\nWorkflow execution completed ({elapsed})[/bold green]")
+        renderer.emit(completed_payload, command="run", where="local")
+
+
+def _write_state(state):
+    """Best-effort ``jobs_state.write``. Returns the path, or None if the
+    write was skipped, the state dir was unwritable, or the prompt_id was
+    unusable as a filename.
+
+    A state-file failure must never fail an otherwise-successful run — same
+    tolerance the async path gives a watcher that won't spawn. Swallowing
+    ``ValueError`` matters now that ``--wait`` writes at SUBMIT: a server
+    returning an id ``state_path()`` rejects must not stop us from watching
+    the run it just accepted.
+    """
+    try:
+        return jobs_state.write(state)
+    except (OSError, ValueError):
+        return None
+
+
+def _mark_cancelled(state):
+    """Record a user cancellation on the job state file (best effort).
+
+    Returns the path written, or None when there is nothing to write — a
+    Ctrl-C before ``queue()`` returned leaves ``state`` None, so there is no
+    prompt_id to file it under, and a record that is ALREADY terminal is left
+    alone. That last guard matters because the Ctrl-C handler is shared by the
+    whole run: a Ctrl-C after the completion write has landed must not walk a
+    ``completed`` job backwards to ``cancelled``.
+    """
+    if state is None or state.is_terminal:
+        return None
+    state.status = "cancelled"
+    state.error = {"code": "cancelled", "message": "Cancelled by user", "details": {}}
+    return _write_state(state)
+
+
+def _mark_watch_exit(state, exit_code, execution):
+    """Finalize the submit-time record when ``watch_execution`` ends the run by
+    raising ``typer.Exit``: 130 is a server-side interrupt (``cancelled``),
+    anything else is a node failure (``error``).
+
+    The error envelope has already been rendered by the watcher, so this only
+    moves the on-disk record off ``running``. Prefers the classified verdict
+    ``on_error`` stashed on the execution; falls back to a generic
+    ``execution_error`` when there isn't one (or it isn't a real dict — mocked
+    executions hand back attribute stubs).
+    """
+    if state is None:
+        return None
+    if exit_code == 130:
+        return _mark_cancelled(state)
+    verdict = getattr(execution, "last_error", None)
+    if not isinstance(verdict, dict):
+        verdict = {
+            "code": "execution_error",
+            "message": "Workflow execution failed on the server",
+            "details": {},
+        }
+    state.status = "error"
+    state.error = verdict
+    return _write_state(state)
+
+
+def _submitted_prompt_id(execution) -> str | None:
+    """The prompt id if the server really returned one, else None.
+
+    Mirrors ``jobs_state.write``'s defensiveness about mocked executions: a
+    non-string id means no usable submit happened, so callers fall back to
+    their pre-prompt_id behavior.
+    """
+    prompt_id = getattr(execution, "prompt_id", None)
+    if isinstance(prompt_id, str) and prompt_id.strip():
+        return prompt_id
+    return None
 
 
 def _journal_run(workflow: str, prompt_id, where: str) -> None:
@@ -494,7 +844,8 @@ def execute_cloud(
     notify: bool = False,
     print_prompt: bool = False,
     workflow_id: str | None = None,
-    preloaded: tuple[dict, str, bool] | None = None,
+    preloaded: tuple[dict, str, bool, bool] | None = None,
+    allow_spend: bool = False,
 ):
     """Run a workflow against Comfy Cloud via the stored OAuth session.
 
@@ -509,13 +860,21 @@ def execute_cloud(
 
     renderer = get_renderer()
     if preloaded is not None:
-        raw_workflow, workflow_name, is_ui = preloaded
+        raw_workflow, workflow_name, is_ui, checkpoint_user_set = preloaded
     else:
+        checkpoint_user_set = False
         try:
             raw_workflow, workflow_name, is_ui = _load_workflow_file(workflow)
         except WorkflowLoadError as e:
             renderer.error(code=e.code, message=str(e), hint=e.hint)
             raise typer.Exit(code=1) from e
+
+    # The cloud object_info snapshot is used twice below (UI→API conversion and
+    # checkpoint resolution/preflight). `_load_from_target` is a live, uncached
+    # HTTPS fetch, so load it at most once and share it across both. `None`
+    # means "not fetched yet" — distinct from a fetched-but-empty snapshot,
+    # which must NOT trigger a second round-trip.
+    cloud_object_info: dict | None = None
 
     if is_ui:
         # Frontend-format workflows (the `nodes`+`links` shape from the canvas
@@ -530,12 +889,12 @@ def execute_cloud(
         if renderer.is_pretty():
             pprint("[yellow]Detected UI-format workflow, converting to API format…[/yellow]")
         try:
-            object_info = resilient_load_object_info(mode="cloud")
+            object_info = cloud_object_info = resilient_load_object_info(mode="cloud")
         except Exception as e:  # noqa: BLE001
             renderer.error(
                 code="cql_no_graph",
                 message=f"could not load cloud object_info for conversion: {e}",
-                hint="run `comfy nodes refresh --where cloud` to populate the cache",
+                hint="object_info is fetched live — check your cloud sign-in and connection then retry, or run against a local server",
             )
             raise typer.Exit(code=1) from e
         try:
@@ -574,6 +933,31 @@ def execute_cloud(
     # its foreach item map to stash on the job state at submit time.
     compose_meta = pop_compose_meta(parsed_workflow)
 
+    # Cloud path uses cached/bundled object_info (no live server needed). Load
+    # it up front so checkpoint resolution can run BEFORE the preview/print
+    # below — the audit trail must advertise the graph we actually submit.
+    # Already fetched above when the workflow arrived in UI format.
+    if cloud_object_info is None:
+        try:
+            # Deliberately `_load_from_target`, not `resilient_load_object_info`:
+            # the resilient loader resolves a Target to build its cache key, and
+            # the spend gate below must fire before ANY cloud credential is
+            # resolved (BE-4326) — `test_cloud_partner_node_machine_mode_fails_closed`
+            # pins that. Trade-off: COMFY_OBJECT_INFO_FILE is honored on the
+            # UI-conversion path above but not on this API-format fallback.
+            from comfy_cli.cql.engine import _load_from_target
+
+            cloud_object_info = _load_from_target(mode="cloud")
+        except Exception:  # noqa: BLE001
+            cloud_object_info = {}
+
+    # Runtime checkpoint resolution for the bundled `--prompt` default (mirrors
+    # the local path): swap the pinned checkpoint for one Comfy Cloud actually
+    # has. Guarded to the bundled default and skipped when the user pinned the
+    # checkpoint explicitly. Cloud fails open on an empty enum (per-job models).
+    if preloaded is not None and workflow_name == "default_text2img" and not checkpoint_user_set:
+        _resolve_default_checkpoint_or_exit(renderer, parsed_workflow, cloud_object_info, where="cloud")
+
     if print_prompt:
         # Documented dry-run: show the API-format graph that WOULD be sent and
         # exit WITHOUT POSTing. Mirrors local execute()'s print_prompt branch.
@@ -589,23 +973,25 @@ def execute_cloud(
         raise typer.Exit(code=0)
 
     # Pre-submit validation via pure-Python CQL engine.
-    # Cloud path uses cached/bundled object_info (no live server needed).
-    # resilient_load_object_info honors COMFY_OBJECT_INFO_FILE first (the
-    # baked/offline catalog an agent host provides) before a live fetch.
-    try:
-        from comfy_cli.cql.loader import resilient_load_object_info
-
-        cloud_object_info = resilient_load_object_info(mode="cloud")
-    except Exception:  # noqa: BLE001
-        cloud_object_info = {}
-
     _preflight_validate(renderer, parsed_workflow, cloud_object_info, target_label="cloud")
+
+    # Spend gate (BE-4326): the cloud also bills partner-API nodes, so apply the
+    # same consent interlock as the local path before authenticating/submitting.
+    # Fail-open on detection (empty cloud object_info → no gate), and fire before
+    # Client() so a refusal never triggers cloud auth.
+    partner_nodes = _detect_partner_nodes(parsed_workflow, cloud_object_info)
+    _spend_gate(
+        renderer,
+        partner_nodes,
+        allow_spend,
+        details={"partner_nodes": partner_nodes, "where": "cloud"},
+    )
 
     target = resolve_target(where="cloud")
     try:
         client = Client(target, timeout=float(timeout))
     except Unauthenticated as e:
-        renderer.error(code="cloud_unauthorized", message=str(e), hint="run: comfy auth login")
+        renderer.error(code="cloud_unauthorized", message=str(e), hint="run: comfy cloud login")
         raise typer.Exit(code=1) from e
 
     client_id = str(uuid.uuid4())
@@ -816,9 +1202,9 @@ def execute_cloud(
         if output_urls:
             pprint("[bold green]\nOutputs:[/bold green]")
             for u in output_urls:
-                pprint(u)
+                pprint(sanitize_markup(u))
         for w in warnings:
-            pprint(f"[yellow]⚠ {w['message']}[/yellow]")
+            pprint(f"[yellow]⚠ {sanitize_markup(w['message'])}[/yellow]")
         pprint(f"[bold green]\nCloud workflow completed ({timedelta(seconds=end - start)})[/bold green]")
 
     # Grouped views of the same artifacts: by producing node always, and by

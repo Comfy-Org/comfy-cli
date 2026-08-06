@@ -16,7 +16,13 @@ from __future__ import annotations
 
 import json
 import math
+from dataclasses import dataclass
 from importlib import resources
+
+# The name pinned in ``data/default_text2img.json`` node "4" ``ckpt_name``.
+# Runtime resolution (``resolve_default_checkpoint``) swaps this for a checkpoint
+# the target actually has when it's absent; keep the two in sync.
+DEFAULT_CHECKPOINT_NAME = "v1-5-pruned-emaonly-fp16.safetensors"
 
 # -- Pinned node ids (must match data/default_text2img.json) --
 CHECKPOINT_LOADER_ID = "4"
@@ -86,6 +92,26 @@ def load_default_workflow() -> dict:
             code="default_workflow_unavailable",
             hint="this is a comfy-cli packaging error; try reinstalling comfy-cli",
         ) from e
+
+
+def default_checkpoint(workflow: dict | None = None) -> str:
+    """Return the ``ckpt_name`` the bundled default graph loads (``""`` if absent).
+
+    ``comfy run --prompt`` silently depends on this checkpoint already being
+    present in the target's ``models/checkpoints`` — comfy-cli neither bundles
+    it nor downloads it on demand, so the run fails server-side with a bare
+    validation error when it is missing. Callers surface the requirement up
+    front instead. Pass an already-built graph to avoid re-reading the bundle.
+    """
+    graph = load_default_workflow() if workflow is None else workflow
+    node = graph.get(CHECKPOINT_LOADER_ID)
+    if not isinstance(node, dict):
+        return ""
+    inputs = node.get("inputs")
+    if not isinstance(inputs, dict):
+        return ""
+    name = inputs.get("ckpt_name")
+    return name if isinstance(name, str) else ""
 
 
 def _coerce(value: str, existing):
@@ -219,3 +245,140 @@ def build_default_workflow(*, prompt: str | None = None, overrides: list[str] | 
         _apply_set(workflow, node_id, field, value)
 
     return workflow
+
+
+def overrides_set_checkpoint(overrides: list[str] | None, workflow: dict) -> bool:
+    """True if any ``--set`` override targets the checkpoint (node ``"4"``
+    ``ckpt_name``), via an alias (``checkpoint``/``ckpt``) or the raw
+    ``4.ckpt_name`` form.
+
+    Used by the caller to decide whether the user pinned the checkpoint
+    explicitly — if so, runtime resolution is skipped and the value is honored
+    verbatim. ``workflow`` must be a built default graph so addresses resolve;
+    malformed entries are ignored here (``build_default_workflow`` already
+    validated/rejected them upstream).
+    """
+    for raw in overrides or []:
+        if "=" not in raw:
+            continue
+        address = raw.partition("=")[0].strip()
+        try:
+            node_id, field = _resolve_address(address, workflow)
+        except PromptInjectionError:
+            continue
+        if (node_id, field) == (CHECKPOINT_LOADER_ID, "ckpt_name"):
+            return True
+    return False
+
+
+@dataclass(frozen=True)
+class CheckpointResolution:
+    """Outcome of :func:`resolve_default_checkpoint`.
+
+    - ``note``/``substituted_to`` are set only when the pinned checkpoint was
+      absent and a different one was substituted.
+    - ``no_checkpoint`` is True ONLY when ``object_info`` positively enumerated
+      an EMPTY checkpoint list (the target has zero checkpoints). It stays False
+      when we can't tell (``object_info`` absent/empty, or it didn't enumerate
+      ``CheckpointLoaderSimple.ckpt_name``) so callers fail open there.
+    """
+
+    note: str | None = None
+    substituted_to: str | None = None
+    no_checkpoint: bool = False
+
+
+def _checkpoint_enum(object_info: dict) -> list | None:
+    """Return the ``CheckpointLoaderSimple.ckpt_name`` option list from
+    ``object_info``, or ``None`` when it isn't enumerated at all.
+
+    The raw object_info shape is ``ckpt_name: [[<name>, …], {opts}]`` — the
+    option list is element 0. ``None`` (not an empty list) means "can't tell"
+    so the caller can distinguish a positively-empty enum from an absent one.
+    """
+    if not isinstance(object_info, dict):
+        # A non-object /object_info payload (e.g. a hostile or misbehaving
+        # server returning ``[]``) means "can't tell" — fail open, mirroring
+        # Graph.from_object_info's isinstance guard rather than crashing.
+        return None
+    node = object_info.get("CheckpointLoaderSimple")
+    if not isinstance(node, dict):
+        return None
+    inp = node.get("input")
+    if not isinstance(inp, dict):
+        return None
+    req = inp.get("required")
+    if not isinstance(req, dict):
+        return None
+    spec = req.get("ckpt_name")
+    if isinstance(spec, list) and spec and isinstance(spec[0], list):
+        return spec[0]
+    return None
+
+
+def _basename(name: str) -> str:
+    """Last path segment of a ComfyUI-enumerated model name.
+
+    ``folder_paths`` builds these names with ``os.path.relpath``, so the
+    separator is the SERVER's, not ours: a subfoldered checkpoint arrives as
+    ``SD1.5/name.safetensors`` from a POSIX host and ``SD1.5\\name.safetensors``
+    from a Windows one. Normalize both before comparing basenames — splitting on
+    ``/`` alone would miss the Windows form and trigger a needless substitution.
+    """
+    return name.replace("\\", "/").rsplit("/", 1)[-1]
+
+
+def resolve_default_checkpoint(
+    workflow: dict, object_info: dict, *, target: str = "the server"
+) -> tuple[dict, CheckpointResolution]:
+    """Resolve the bundled default's pinned checkpoint against a live target.
+
+    Pure and offline-testable. Given the bundled default graph and a target's
+    ``object_info``, decide what checkpoint node ``"4"`` should carry:
+
+    - pinned name present in the target's enum → no change;
+    - pinned absent but the enum is non-empty → substitute the first available
+      checkpoint and return a ``note``;
+    - enum positively empty → leave unchanged, flag ``no_checkpoint`` (the
+      caller emits an actionable error);
+    - enum absent / ``object_info`` empty → leave unchanged, no flag (fail open).
+
+    Mutates ``workflow`` in place on substitution and returns it alongside the
+    :class:`CheckpointResolution`. Callers must guard this to the bundled
+    default graph only (``workflow_name == "default_text2img"``).
+    """
+    node = workflow.get(CHECKPOINT_LOADER_ID)
+    inputs = node.get("inputs") if isinstance(node, dict) else None
+    if not isinstance(inputs, dict):
+        return workflow, CheckpointResolution()
+
+    enum = _checkpoint_enum(object_info)
+    if enum is None:
+        # Not enumerated (fresh/unfetched object_info) — fail open.
+        return workflow, CheckpointResolution()
+    if not enum:
+        # Positively empty: the target has zero checkpoints installed.
+        return workflow, CheckpointResolution(no_checkpoint=True)
+
+    pinned = inputs.get("ckpt_name")
+    if pinned in enum:
+        return workflow, CheckpointResolution()
+
+    # ComfyUI enumerates checkpoints by their path relative to the models dir,
+    # so a pinned bare filename won't exact-match the same file living in a
+    # subfolder (e.g. ``SD1.5/v1-5-…safetensors``). Prefer a basename match to
+    # the *intended* checkpoint before falling back to an arbitrary substitute.
+    if isinstance(pinned, str):
+        pinned_base = _basename(pinned)
+        for entry in enum:
+            if isinstance(entry, str) and _basename(entry) == pinned_base:
+                inputs["ckpt_name"] = entry
+                return workflow, CheckpointResolution()
+
+    replacement = enum[0]
+    inputs["ckpt_name"] = replacement
+    note = (
+        f"default checkpoint {pinned} not found on {target}; using {replacement} "
+        f"instead (override with --set checkpoint=<name>)"
+    )
+    return workflow, CheckpointResolution(note=note, substituted_to=replacement)

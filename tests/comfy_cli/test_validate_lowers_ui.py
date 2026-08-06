@@ -148,7 +148,7 @@ def _break_model_link(wf: dict) -> dict:
 
 class TestConvertThenValidate:
     def test_deleted_required_link_becomes_absent_and_is_flagged(self):
-        """A deleted required-input wire → absent input → missing_required_input.
+        """A deleted required-input wire → absent input → required_input_missing.
 
         This is the exact real-world failure the fix targets: the agent's
         canvas graph had a required KSampler input unwired, yet the API-only
@@ -164,7 +164,7 @@ class TestConvertThenValidate:
 
         result = Graph.from_object_info(oi).validate_workflow(api)
         assert result["valid"] is False
-        missing = [e for e in result["errors"] if e["code"] == "missing_required_input"]
+        missing = [e for e in result["errors"] if e["code"] == "required_input_missing"]
         assert any(e["node_id"] == "3" and e["field"] == "model" for e in missing)
 
     def test_valid_frontend_graph_lowers_and_validates_clean(self):
@@ -208,9 +208,13 @@ _SG_UUID = "f2fdebf6-dfaf-43b6-9eb2-7f70613cfdc1"
 
 
 def _subgraph_ui_workflow() -> dict:
-    """A frontend graph whose only real node is a KSampler INSIDE a subgraph
+    """A frontend graph whose only real node is a SaveImage INSIDE a subgraph
     instance (id 57), with none of its link inputs wired — so lowering expands
-    it to the composite id ``57:3`` and validation flags its missing inputs."""
+    it to the composite id ``57:3`` and validation flags its missing inputs.
+
+    An OUTPUT node specifically: BE-3406 prunes output-unreachable nodes before
+    the required-input check, so a non-output interior node would produce no
+    errors for this test to inspect the ids of."""
     return {
         "last_node_id": 60,
         "last_link_id": 0,
@@ -235,9 +239,9 @@ def _subgraph_ui_workflow() -> dict:
                     "nodes": [
                         {
                             "id": 3,
-                            "type": "KSampler",
+                            "type": "SaveImage",
                             "inputs": [],
-                            "widgets_values": [42, "fixed", 20, 8.0, "euler", "normal", 1.0],
+                            "widgets_values": ["ComfyUI"],
                         }
                     ],
                     "links": [],
@@ -258,7 +262,7 @@ class TestValidateSubgraphIdTranslation:
         result = _run_validate(tmp_path, _subgraph_ui_workflow(), _object_info())
         assert result.exit_code == 1
         env = _envelope(result)
-        missing = [e for e in env["data"]["errors"] if e["code"] == "missing_required_input"]
+        missing = [e for e in env["data"]["errors"] if e["code"] == "required_input_missing"]
         assert missing, env["data"]["errors"]
         for e in missing:
             assert e["node_id"] == "57/3", e
@@ -267,11 +271,11 @@ class TestValidateSubgraphIdTranslation:
     def test_api_format_input_keeps_raw_ids(self, tmp_path):
         # A caller that hands us an already-lowered API doc addresses THAT doc;
         # its ids pass through untouched (no api_node_id annotation).
-        api = {"57:3": {"class_type": "KSampler", "inputs": {}}}
+        api = {"57:3": {"class_type": "SaveImage", "inputs": {}}}  # output node: reachable (BE-3406)
         result = _run_validate(tmp_path, api, _object_info())
         assert result.exit_code == 1
         env = _envelope(result)
-        missing = [e for e in env["data"]["errors"] if e["code"] == "missing_required_input"]
+        missing = [e for e in env["data"]["errors"] if e["code"] == "required_input_missing"]
         assert missing
         for e in missing:
             assert e["node_id"] == "57:3", e
@@ -286,7 +290,7 @@ class TestValidateCLI:
         assert env["ok"] is False
         assert env["data"]["valid"] is False
         codes = {(e["code"], e["node_id"], e["field"]) for e in env["data"]["errors"]}
-        assert ("missing_required_input", "3", "model") in codes
+        assert ("required_input_missing", "3", "model") in codes
 
     def test_valid_frontend_graph_passes(self, tmp_path):
         result = _run_validate(tmp_path, _sd15_ui(), _object_info())
@@ -316,6 +320,6 @@ class TestValidateCLI:
         env = _envelope(result)
         assert env["data"]["valid"] is False
         assert any(
-            e["code"] == "missing_required_input" and e["node_id"] == "3" and e["field"] == "model"
+            e["code"] == "required_input_missing" and e["node_id"] == "3" and e["field"] == "model"
             for e in env["data"]["errors"]
         )

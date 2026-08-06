@@ -1,20 +1,26 @@
 import json
+import os
 import pathlib
+import stat
+import sys
 from unittest.mock import Mock, patch
 
 import httpx
 import pytest
 import requests
 
+from comfy_cli import file_utils
 from comfy_cli.file_utils import (
     DownloadException,
     _cleanup_partial,
     _friendly_network_error,
     _TransientHTTPStatusError,
     check_unauthorized,
+    cleanup_partials,
     download_file,
     extract_package_as_zip,
     guess_status_code_reason,
+    partial_paths_for,
     upload_file_to_signed_url,
 )
 
@@ -104,6 +110,25 @@ def test_download_file_success_without_content_length(mock_stream, tmp_path):
     download_file("http://example.com", test_file)
 
     assert test_file.exists()
+    assert test_file.read_bytes() == b"chunk1chunk2"
+
+
+@patch("httpx.stream")
+def test_download_file_success_with_garbage_content_length(mock_stream, tmp_path):
+    """A non-numeric Content-Length (broken server/proxy) must degrade to an
+    indeterminate progress bar, not blow the transfer up with a ValueError out of
+    ``int()`` — which escaped `model download`'s handlers as a bare traceback."""
+    mock_response = Mock()
+    mock_response.status_code = 200
+    mock_response.headers = {"Content-Length": "not-a-number"}
+    mock_response.iter_bytes.return_value = [b"chunk1", b"chunk2"]
+    mock_response.__enter__ = Mock(return_value=mock_response)
+    mock_response.__exit__ = Mock(return_value=None)
+    mock_stream.return_value = mock_response
+
+    test_file = tmp_path / "test.txt"
+    download_file("http://example.com", test_file)
+
     assert test_file.read_bytes() == b"chunk1chunk2"
 
 
@@ -541,11 +566,17 @@ class TestDownloadPartialCleanup:
 
         mock_prompt.assert_called_once()
         assert not dest.exists()
+        assert partial_paths_for(dest) == []
 
     @patch("comfy_cli.file_utils.ui.prompt_confirm_action", return_value=False)
     @patch("httpx.stream")
     def test_keyboard_interrupt_keeps_partial_when_user_declines(self, mock_stream, mock_prompt, tmp_path):
-        """On KeyboardInterrupt the user is prompted; declining keeps the partial file on disk."""
+        """On KeyboardInterrupt the user is prompted; declining keeps the partial bytes.
+
+        They are kept as the `.part` sibling, never at the destination — the whole
+        point of the atomic write is that an interrupted transfer can't leave
+        something that looks like a finished model where ComfyUI will load it.
+        """
         resp = Mock()
         resp.status_code = 200
         resp.headers = {}
@@ -559,8 +590,378 @@ class TestDownloadPartialCleanup:
             download_file("http://example.com/model.bin", dest)
 
         mock_prompt.assert_called_once()
-        assert dest.exists()
-        assert dest.read_bytes() == b"partial data"
+        assert not dest.exists()
+        parts = partial_paths_for(dest)
+        assert len(parts) == 1
+        assert parts[0].read_bytes() == b"partial data"
+
+
+class _HardKill(BaseException):
+    """Stands in for a signal: derives from BaseException, so no `except Exception`
+    anywhere in the download path can quietly turn it into an ordinary failure."""
+
+
+class TestAtomicDestination:
+    """The destination only ever goes absent→complete (or old-complete→new-complete).
+
+    A killed transfer used to leave a truncated file sitting exactly where a
+    finished model belongs, with nothing to mark it — `search_models` and ComfyUI
+    both see a plausible file, and loading it fails far from the download that
+    caused it.
+    """
+
+    @patch("httpx.stream")
+    def test_completed_download_lands_via_rename(self, mock_stream, tmp_path):
+        """The bytes reach the destination through os.replace from a sibling temp,
+        and nothing is left behind."""
+        mock_stream.return_value = _make_ok_response(content=b"full model", content_length=10)
+        dest = tmp_path / "model.safetensors"
+
+        real_replace = os.replace
+        renames = []
+
+        def spy(src, dst, *args, **kwargs):
+            renames.append((str(src), str(dst)))
+            return real_replace(src, dst, *args, **kwargs)
+
+        with patch("comfy_cli.file_utils.os.replace", side_effect=spy):
+            download_file("http://example.com/model.safetensors", dest)
+
+        assert dest.read_bytes() == b"full model"
+        assert len(renames) == 1
+        src, dst = renames[0]
+        assert dst == str(dest)
+        assert src.startswith(str(dest) + ".") and src.endswith(".part")
+        # The temp was consumed by the rename, not left alongside the model.
+        assert partial_paths_for(dest) == []
+        assert sorted(p.name for p in tmp_path.iterdir()) == ["model.safetensors"]
+
+    @patch("comfy_cli.file_utils.time.sleep")
+    @patch("httpx.stream")
+    def test_hard_kill_mid_transfer_leaves_nothing_at_the_destination(self, mock_stream, mock_sleep, tmp_path):
+        """Mid-stream, the destination does not exist yet — the bytes are in a
+        `.part` sibling. That is precisely the on-disk state a SIGKILL freezes,
+        and the assertion is made *from inside the stream* so no cleanup handler
+        can have run first. The stream then raises a BaseException, which no
+        `except Exception` in the download path converts into a tidy failure.
+        """
+        dest = tmp_path / "checkpoint.safetensors"
+        observed = {}
+
+        chunk = b"x" * 65536
+
+        def killed_iter():
+            # Keep streaming until bytes have actually reached the disk (a SIGKILL
+            # loses the writer's buffer too, and the question here is where the
+            # bytes that *did* land ended up), then freeze that instant.
+            for _ in range(32):
+                yield chunk
+                parts = partial_paths_for(dest)
+                if parts and parts[0].stat().st_size:
+                    # What an operator would find on disk at the moment of the kill.
+                    observed["dest_exists"] = dest.exists()
+                    observed["parts"] = [(p.name, p.read_bytes()) for p in parts]
+                    raise _HardKill("SIGKILL")
+            raise AssertionError("no bytes ever reached a .part file")
+
+        resp = Mock()
+        resp.status_code = 200
+        resp.headers = {"Content-Length": "13000000000"}
+        resp.iter_bytes = Mock(side_effect=killed_iter)
+        resp.__enter__ = Mock(return_value=resp)
+        resp.__exit__ = Mock(return_value=None)
+        mock_stream.return_value = resp
+
+        with pytest.raises(_HardKill):
+            download_file("http://example.com/checkpoint.safetensors", dest)
+
+        assert observed["dest_exists"] is False, "a truncated file must never appear at the final path"
+        assert len(observed["parts"]) == 1
+        part_name, part_bytes = observed["parts"][0]
+        assert part_name.endswith(".part")
+        # The landed bytes are a prefix of the stream (the tail may still be in the
+        # writer's buffer) — and they are in the `.part`, not at the destination.
+        assert part_bytes and part_bytes.strip(b"x") == b""
+        # And after the unwind the destination is still absent.
+        assert not dest.exists()
+
+    @patch("comfy_cli.file_utils.time.sleep")
+    @patch("httpx.stream")
+    def test_retries_never_expose_a_truncated_file_at_the_destination(self, mock_stream, mock_sleep, tmp_path):
+        """Between attempts there is nothing at the destination for a reader to
+        mistake for a finished model."""
+        dest = tmp_path / "model.bin"
+        seen_between_attempts = []
+
+        fail_resp = Mock()
+        fail_resp.status_code = 200
+        fail_resp.headers = {}
+        fail_resp.iter_bytes = Mock(side_effect=_make_failing_iter(b"stale bytes"))
+        fail_resp.__enter__ = Mock(return_value=fail_resp)
+        fail_resp.__exit__ = Mock(return_value=None)
+
+        def stream(*args, **kwargs):
+            seen_between_attempts.append((dest.exists(), len(partial_paths_for(dest))))
+            return fail_resp if len(seen_between_attempts) == 1 else _make_ok_response(content=b"fresh data")
+
+        mock_stream.side_effect = stream
+        download_file("http://example.com/model.bin", dest)
+
+        assert seen_between_attempts == [(False, 0), (False, 0)]
+        assert dest.read_bytes() == b"fresh data"
+        assert partial_paths_for(dest) == []
+
+    @patch("comfy_cli.file_utils.time.sleep")
+    @patch("httpx.stream")
+    def test_preexisting_complete_file_survives_a_failed_redownload(self, mock_stream, mock_sleep, tmp_path):
+        """A failure *after* bytes started flowing no longer destroys what was
+        already at the destination — previously the transfer had truncated it on
+        open before it ever knew whether it would succeed."""
+        resp = Mock()
+        resp.status_code = 200
+        resp.headers = {}
+        resp.iter_bytes = Mock(side_effect=_make_failing_iter(b"half a model"))
+        resp.__enter__ = Mock(return_value=resp)
+        resp.__exit__ = Mock(return_value=None)
+        mock_stream.return_value = resp
+
+        dest = tmp_path / "model.bin"
+        dest.write_bytes(b"COMPLETE existing model")
+
+        with pytest.raises(DownloadException, match="Download failed after 3 attempts"):
+            download_file("http://example.com/model.bin", dest)
+
+        assert dest.read_bytes() == b"COMPLETE existing model"
+        assert partial_paths_for(dest) == []
+
+    @patch("httpx.stream")
+    def test_a_successful_download_replaces_an_existing_file(self, mock_stream, tmp_path):
+        """old-complete→new-complete is the other legal transition."""
+        mock_stream.return_value = _make_ok_response(content=b"v2")
+        dest = tmp_path / "model.bin"
+        dest.write_bytes(b"v1")
+
+        download_file("http://example.com/model.bin", dest)
+
+        assert dest.read_bytes() == b"v2"
+        assert partial_paths_for(dest) == []
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX mode bits")
+    @patch("httpx.stream")
+    def test_destination_permissions_match_a_plain_write(self, mock_stream, tmp_path):
+        """mkstemp creates 0600 and os.replace carries the mode across, so without
+        an explicit chmod every downloaded model would silently become owner-only."""
+        mock_stream.return_value = _make_ok_response(content=b"data")
+        dest = tmp_path / "model.bin"
+        download_file("http://example.com/model.bin", dest)
+
+        reference = tmp_path / "reference.bin"
+        with open(reference, "wb") as f:
+            f.write(b"data")
+
+        assert stat.S_IMODE(dest.stat().st_mode) == stat.S_IMODE(reference.stat().st_mode)
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX mode bits")
+    @patch("httpx.stream")
+    def test_replacing_a_file_keeps_its_permissions(self, mock_stream, tmp_path):
+        mock_stream.return_value = _make_ok_response(content=b"v2")
+        dest = tmp_path / "model.bin"
+        dest.write_bytes(b"v1")
+        dest.chmod(0o640)
+
+        download_file("http://example.com/model.bin", dest)
+
+        assert stat.S_IMODE(dest.stat().st_mode) == 0o640
+
+
+class TestTempFileNaming:
+    """The temp name is derived from the destination name, so the destination's
+    own length and the destination's mode both have to survive the round trip."""
+
+    @patch("httpx.stream")
+    def test_a_maximum_length_destination_name_still_downloads(self, mock_stream, tmp_path):
+        """mkstemp appends 13 bytes to the prefix, so an un-truncated prefix makes
+        any name over NAME_MAX-14 fail with ENAMETOOLONG — where the old
+        `open(dest, "wb")` succeeded. Names come from remote metadata (CivitAI
+        `file["name"]`, the HF path) and `--filename`, none of which cap length.
+        """
+        mock_stream.return_value = _make_ok_response(content=b"data")
+        # 250 bytes: a name the filesystem itself accepts (NAME_MAX is 255), but
+        # 9 bytes too long to also carry mkstemp's token and suffix.
+        dest = tmp_path / ("m" * 238 + ".safetensors")
+        assert 241 < len(dest.name.encode()) <= 255
+
+        download_file("http://example.com/model.safetensors", dest)
+
+        assert dest.read_bytes() == b"data"
+        assert partial_paths_for(dest) == []
+
+    @patch("httpx.stream")
+    def test_a_long_name_partial_is_still_reclaimable(self, mock_stream, tmp_path):
+        """Truncating the prefix is only safe if the matcher truncates identically
+        — otherwise `download-cancel` silently stops finding these."""
+        dest = tmp_path / ("m" * 238 + ".safetensors")
+
+        def killed_iter():
+            yield b"partial"
+            raise KeyboardInterrupt()
+
+        resp = Mock()
+        resp.status_code = 200
+        resp.headers = {}
+        resp.iter_bytes = Mock(side_effect=killed_iter)
+        resp.__enter__ = Mock(return_value=resp)
+        resp.__exit__ = Mock(return_value=None)
+        mock_stream.return_value = resp
+
+        with (
+            patch("comfy_cli.file_utils.ui.prompt_confirm_action", return_value=False),
+            pytest.raises(KeyboardInterrupt),
+        ):
+            download_file("http://example.com/model.safetensors", dest)
+
+        assert [p.read_bytes() for p in partial_paths_for(dest)] == [b"partial"]
+        assert cleanup_partials(dest) == 1
+
+    def test_a_non_ascii_name_is_truncated_on_a_character_boundary(self, tmp_path):
+        """NAME_MAX counts bytes, so the cut is a byte cut — but it must not
+        produce an invalid-UTF-8 name that no filesystem call can round-trip."""
+        dest = tmp_path / ("é" * 200 + ".safetensors")
+        prefix = file_utils._part_prefix(dest.name)
+
+        assert len(prefix.encode()) <= file_utils._PART_STEM_MAX + 1
+        assert prefix.encode().decode() == prefix  # valid UTF-8, no split codepoint
+        assert prefix.endswith("."), "the matcher slices on this separator"
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX mode bits")
+    @patch("httpx.stream")
+    def test_a_setuid_destination_does_not_pass_its_set_id_bits_on(self, mock_stream, tmp_path):
+        """`os.replace` carries the temp's mode onto the destination, so copying
+        the old file's full 12-bit mode would stamp setuid/setgid onto freshly
+        downloaded, network-controlled bytes — which an in-place write would have
+        cleared."""
+        mock_stream.return_value = _make_ok_response(content=b"v2")
+        dest = tmp_path / "model.bin"
+        dest.write_bytes(b"v1")
+        # Owner-only under the set-ID bits: the group/other bits are what a
+        # real 4755 binary carries, but they play no part in what this asserts
+        # (that the 0o777 mask drops set-ID), and granting them here is an
+        # overly-permissive chmod in its own right. Group/other preservation is
+        # covered by test_replacing_a_file_keeps_its_permissions.
+        os.chmod(dest, stat.S_ISUID | stat.S_ISGID | stat.S_IRWXU)
+        assert dest.stat().st_mode & stat.S_ISUID, "the fixture must really carry a set-ID bit"
+
+        download_file("http://example.com/model.bin", dest)
+
+        mode = dest.stat().st_mode
+        assert stat.S_IMODE(mode) == 0o700
+        assert not mode & (stat.S_ISUID | stat.S_ISGID)
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX mode bits")
+    @patch("httpx.stream")
+    def test_the_mode_is_applied_through_the_descriptor_not_the_name(self, mock_stream, tmp_path):
+        """chmod-by-path follows symlinks, so a name swap between mkstemp and the
+        chmod would retarget it at an arbitrary file (CWE-59) — reopening the race
+        mkstemp's O_EXCL closed. fchmod on the open fd cannot be redirected."""
+        mock_stream.return_value = _make_ok_response(content=b"data")
+        dest = tmp_path / "model.bin"
+
+        def refuse(*args, **kwargs):
+            raise AssertionError("the temp file must never be chmod'ed by path")
+
+        with patch("comfy_cli.file_utils.os.chmod", side_effect=refuse):
+            download_file("http://example.com/model.bin", dest)
+
+        assert dest.read_bytes() == b"data"
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX umask")
+    @patch("httpx.stream")
+    def test_a_download_never_touches_the_process_umask(self, mock_stream, tmp_path):
+        """Probing the umask means setting it to 0 and restoring it — a window in
+        which any *other* thread's new file lands world-writable, and which two
+        overlapping probes can leave stranded at 0. It belongs at import, once."""
+        mock_stream.return_value = _make_ok_response(content=b"data")
+
+        def refuse(*args, **kwargs):
+            raise AssertionError("the umask must not be probed per download")
+
+        with patch("comfy_cli.file_utils.os.umask", side_effect=refuse):
+            download_file("http://example.com/model.bin", tmp_path / "model.bin")
+
+        assert (tmp_path / "model.bin").read_bytes() == b"data"
+
+
+class TestPartialPaths:
+    """`download-cancel` finds a dead worker's bytes through these, so the match
+    has to be tight: too loose and it deletes a user's unrelated file."""
+
+    def _make_part(self, dest, token=b"a1b2c3d4", data=b"bytes"):
+        p = dest.parent / f"{dest.name}.{token.decode()}.part"
+        p.write_bytes(data)
+        return p
+
+    def test_finds_the_temp_a_download_would_create(self, tmp_path):
+        dest = tmp_path / "model.safetensors"
+        part = self._make_part(dest)
+        assert partial_paths_for(dest) == [part]
+
+    def test_ignores_unrelated_part_files(self, tmp_path):
+        dest = tmp_path / "model.safetensors"
+        keep = [
+            tmp_path / "model.safetensors.part",  # no mkstemp token
+            tmp_path / "model.safetensors.backup.part",  # wrong token shape
+            tmp_path / "model.safetensors.a1b2c3d4.tmp",  # wrong suffix
+            tmp_path / "other.safetensors.a1b2c3d4.part",  # another download
+            tmp_path / "model.safetensors.A1B2C3D4.part",  # mkstemp never uppercases
+        ]
+        for f in keep:
+            f.write_bytes(b"do not touch")
+
+        assert partial_paths_for(dest) == []
+        assert cleanup_partials(dest) == 0
+        assert all(f.exists() for f in keep)
+
+    def test_cleanup_removes_every_match_and_reports_the_count(self, tmp_path):
+        dest = tmp_path / "model.safetensors"
+        self._make_part(dest, token=b"aaaaaaaa")
+        self._make_part(dest, token=b"bbbbbbbb")
+        unrelated = tmp_path / "keep.bin"
+        unrelated.write_bytes(b"keep")
+
+        assert cleanup_partials(dest) == 2
+        assert partial_paths_for(dest) == []
+        assert unrelated.exists()
+
+    def test_missing_directory_is_not_an_error(self, tmp_path):
+        dest = tmp_path / "nope" / "model.safetensors"
+        assert partial_paths_for(dest) == []
+        assert cleanup_partials(dest) == 0
+
+    def test_a_real_download_produces_a_matching_name(self, tmp_path):
+        """Guards the coupling between mkstemp's naming and the matcher above:
+        if either drifts, a cancel silently stops reclaiming anything."""
+        dest = tmp_path / "model.safetensors"
+
+        def killed_iter():
+            yield b"partial"
+            raise KeyboardInterrupt()
+
+        resp = Mock()
+        resp.status_code = 200
+        resp.headers = {}
+        resp.iter_bytes = Mock(side_effect=killed_iter)
+        resp.__enter__ = Mock(return_value=resp)
+        resp.__exit__ = Mock(return_value=None)
+
+        with (
+            patch("httpx.stream", return_value=resp),
+            patch("comfy_cli.file_utils.ui.prompt_confirm_action", return_value=False),
+            pytest.raises(KeyboardInterrupt),
+        ):
+            download_file("http://example.com/model.safetensors", dest)
+
+        assert [p.read_bytes() for p in partial_paths_for(dest)] == [b"partial"]
+        assert cleanup_partials(dest) == 1
 
 
 class TestDownloadHTTPStatusRetry:

@@ -275,9 +275,7 @@ def _inputcount_workflow(existing: int = 2) -> dict:
         )
         links.append([link_id, src_id, 0, 20, i - 1, "IMAGE"])
         link_id += 1
-    batch_inputs = [
-        {"name": f"image_{i}", "type": "IMAGE", "link": i - 1} for i in range(1, existing + 1)
-    ]
+    batch_inputs = [{"name": f"image_{i}", "type": "IMAGE", "link": i - 1} for i in range(1, existing + 1)]
     nodes.append(
         {
             "id": 20,
@@ -1677,7 +1675,11 @@ class TestOpModel:
         wf, op2 = ops.connect(wf, g, 21, "IMAGE", 10, "images", actor="a")
         assert op1["grow"]["name"] == "images.frame0"
         assert op2["grow"]["name"] == "images.frame1"
-        grown = [i["name"] for i in next(n for n in wf["nodes"] if n["id"] == 10)["inputs"] if str(i["name"]).startswith("images.")]
+        grown = [
+            i["name"]
+            for i in next(n for n in wf["nodes"] if n["id"] == 10)["inputs"]
+            if str(i["name"]).startswith("images.")
+        ]
         assert grown == ["images.frame0", "images.frame1"]
 
     def test_autogrow_uses_schema_names_verbatim(self):
@@ -1691,7 +1693,11 @@ class TestOpModel:
         wf, op2 = ops.connect(wf, g, 21, "IMAGE", 10, "images", actor="a")
         assert op1["grow"]["name"] == "images.first"
         assert op2["grow"]["name"] == "images.second"
-        grown = [i["name"] for i in next(n for n in wf["nodes"] if n["id"] == 10)["inputs"] if str(i["name"]).startswith("images.")]
+        grown = [
+            i["name"]
+            for i in next(n for n in wf["nodes"] if n["id"] == 10)["inputs"]
+            if str(i["name"]).startswith("images.")
+        ]
         assert grown == ["images.first", "images.second"]
 
     def test_autogrow_without_template_keeps_heuristic(self):
@@ -1704,7 +1710,11 @@ class TestOpModel:
         wf = _autogrow_workflow()
         wf, op = ops.connect(wf, g, 20, "IMAGE", 10, "images", actor="a")
         assert op["grow"]["name"] == "images.image0"
-        grown = [i["name"] for i in next(n for n in wf["nodes"] if n["id"] == 10)["inputs"] if str(i["name"]).startswith("images.")]
+        grown = [
+            i["name"]
+            for i in next(n for n in wf["nodes"] if n["id"] == 10)["inputs"]
+            if str(i["name"]).startswith("images.")
+        ]
         assert grown == ["images.image0"]
 
     def test_p9_autogrow_names_template_converges(self):

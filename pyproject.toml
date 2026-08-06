@@ -35,11 +35,18 @@ dependencies = [
   "cookiecutter",
   "gitpython>=3.1.50",
   "httpx",
-  "mixpanel",
+  # mixpanel 5.x pulls in pydantic/pydantic-core; the compiled pydantic_core DLL
+  # gets loaded by `comfy install` and then cannot be replaced when ComfyUI's
+  # requirements resolve a different version on Windows (os error 5). 4.x has no
+  # pydantic dependency.
+  "mixpanel<5",
   "packaging",
   "pathspec",
   "posthog>=6,<8",
-  "psutil",
+  # 6.0.0 renamed Process.connections() to Process.net_connections(), which
+  # `comfy stop --port` needs (the system-wide psutil.net_connections() is
+  # root-only on macOS, so per-process is the only usable form).
+  "psutil>=6",
   "pyyaml",
   "questionary",
   "requests",
@@ -58,9 +65,6 @@ dependencies = [
   "imageio-ffmpeg",
 ]
 
-# `bench` — the BE-2302 arm-B micro-edit benchmark runner (comfy_cli/bench). Only a
-# live run needs the Anthropic SDK; the offline `--dry-run` + unit tests are stub-only.
-optional-dependencies.bench = [ "anthropic>=0.40" ]
 optional-dependencies.dev = [ "jsonschema", "pre-commit", "pytest", "pytest-cov", "ruff" ]
 optional-dependencies.preview = [ "term-image>=0.7,<0.8" ]
 urls.Repository = "https://github.com/Comfy-Org/comfy-cli.git"
@@ -81,8 +85,6 @@ include = [ "comfy_cli*" ]
 
 "comfy_cli.cql.data" = [ "*.yaml", "*.json" ]
 "comfy_cli.command.generate" = [ "spec/openapi.yml" ]
-# Bench task matrix + offline object_info / seed-workflow fixtures.
-"comfy_cli.bench" = [ "tasks.json", "fixtures/*.json" ]
 
 [tool.ruff]
 target-version = "py310"

@@ -34,10 +34,10 @@ def g():
 @pytest.mark.parametrize(
     "asked,outputs,want_idx",
     [
-        ("IMAGE", [("image", "IMAGE"), ("alpha", "MASK")], 0),          # prod: BeebleSwitchXImageEdit
-        ("MODEL_TASK_ID", [("model task_id", "MODEL_TASK_ID")], 0),      # prod: Tripo* (space -> _)
-        ("Florence2_Model", [("florence2_model", "FL2MODEL")], 0),       # case only
-        ("alpha", [("image", "IMAGE"), ("alpha", "MASK")], 1),           # exact still wins
+        ("IMAGE", [("image", "IMAGE"), ("alpha", "MASK")], 0),  # prod: BeebleSwitchXImageEdit
+        ("MODEL_TASK_ID", [("model task_id", "MODEL_TASK_ID")], 0),  # prod: Tripo* (space -> _)
+        ("Florence2_Model", [("florence2_model", "FL2MODEL")], 0),  # case only
+        ("alpha", [("image", "IMAGE"), ("alpha", "MASK")], 1),  # exact still wins
     ],
 )
 def test_normalized_output_name_resolves(g, asked, outputs, want_idx):

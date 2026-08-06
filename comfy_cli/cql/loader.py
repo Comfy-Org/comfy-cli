@@ -31,7 +31,8 @@ from typing import Any
 
 from comfy_cli.cql._net import is_loopback_host
 from comfy_cli.cql.errors import CQLRuntimeError
-from comfy_cli.http import NoRedirectHandler
+from comfy_cli.file_utils import atomic_write_text
+from comfy_cli.http import NoRedirectHandler, build_http_only_opener
 
 # Cap raw bytes read from disk or the network. Real `object_info` dumps are a
 # few MB; anything past 256 MiB is almost certainly a wrong path or a hostile
@@ -39,7 +40,7 @@ from comfy_cli.http import NoRedirectHandler
 MAX_INPUT_BYTES = 256 * 1024 * 1024
 
 
-_LOADER_OPENER = urllib.request.build_opener(NoRedirectHandler())
+_LOADER_OPENER = build_http_only_opener(NoRedirectHandler())
 
 
 def load_graph(
@@ -314,16 +315,11 @@ def write_object_info_cache(host_key: str, data: dict[str, Any]) -> None:
     """
     path = object_info_cache_path(host_key)
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(path.suffix + f".{os.getpid()}.tmp")
-        tmp.write_text(json.dumps(data), encoding="utf-8")
-        os.replace(tmp, path)
+        atomic_write_text(path, json.dumps(data))
     except OSError:
         # A cache we can't write is not worth failing the command over.
-        try:
-            tmp.unlink()  # type: ignore[possibly-undefined]
-        except (OSError, NameError, UnboundLocalError):
-            pass
+        # atomic_write_text already cleaned up its own tmp file on failure.
+        pass
 
 
 def read_object_info_cache(host_key: str) -> dict[str, Any] | None:
@@ -389,7 +385,7 @@ def read_fresh_object_info_cache(host_key: str, ttl: float) -> dict[str, Any] | 
     return read_object_info_cache(host_key)
 
 
-def _resolve_host_key(mode: str, host: str, port: int) -> str:
+def _resolve_host_key(mode: str, host: str | None, port: int | None) -> str:
     """Resolve the cache key (the target base URL) without doing any I/O.
 
     Mirrors how the engine resolves its fetch target so the cache key matches
@@ -408,8 +404,8 @@ def _resolve_host_key(mode: str, host: str, port: int) -> str:
 def resilient_load_object_info(
     *,
     mode: str = "local",
-    host: str = "127.0.0.1",
-    port: int = 8188,
+    host: str | None = None,
+    port: int | None = None,
     input_path: str | None = None,
     _warn=None,
     on_stale=None,

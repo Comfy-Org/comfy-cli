@@ -1,3 +1,4 @@
+import os
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -80,13 +81,222 @@ class TestTrackEvent:
         tracking_module.track_event("some_event")
         tracking_module.provider.track.assert_called_once()
         _, _, properties = _last_track_call(tracking_module.provider)
-        assert set(properties.keys()) == {"cli_version", "tracing_id"}
+        assert set(properties.keys()) == {"cli_version", "tracing_id", "caller_kind"}
 
     def test_swallows_provider_errors(self, tracking_module):
         tracking_module.config_manager.set(constants.CONFIG_KEY_ENABLE_TRACKING, "True")
         tracking_module.provider.track.side_effect = RuntimeError("boom")
         tracking_module.track_event("some_event")
         tracking_module.provider.track.assert_called_once()
+
+
+class TestCallerKindEnrichment:
+    """``_dispatch`` stamps every event with the caller kind (human vs agent),
+    the same way it stamps cli_version/tracing_id — that is what makes
+    agent-vs-human analytics possible across the whole event stream."""
+
+    def test_track_event_carries_caller_kind(self, tracking_module):
+        tracking_module.config_manager.set(constants.CONFIG_KEY_ENABLE_TRACKING, "True")
+        tracking_module.track_event("some_event", {"k": "v"})
+        _, _, properties = _last_track_call(tracking_module.provider)
+        assert properties["caller_kind"] == tracking_module._caller_kind
+        assert isinstance(properties["caller_kind"], str) and properties["caller_kind"]
+
+    @pytest.mark.skipif(
+        bool(os.environ.get("COMFY_USER_AGENT")),
+        reason="a custom COMFY_USER_AGENT label legitimately replaces the intrinsic kinds",
+    )
+    def test_caller_kind_is_one_of_the_known_kinds_by_default(self, tracking_module):
+        # Without a COMFY_USER_AGENT override the module-scope value must be one
+        # of the four intrinsic kinds detect_caller() can return.
+        assert tracking_module._caller_kind in {"user", "pipe", "agent", "claude-code"}
+
+    def test_feedback_carries_caller_kind(self, tracking_module):
+        # Feedback rides the same _dispatch path, so it is enriched too — but
+        # with the narrowed label (see TestFeedbackCallerKindIsNarrowed).
+        tracking_module.submit_feedback("nice tool")
+        _, _, properties = _last_track_call(tracking_module.provider)
+        assert properties["caller_kind"] == tracking_module._intrinsic_caller_kind()
+
+    def test_explicit_user_agent_label_flows_through(self, tracking_module):
+        """An explicit ``COMFY_USER_AGENT`` label reaches the provider verbatim
+        (lowercased by detect_caller). Patched onto the module because
+        ``_caller_kind`` is evaluated once at import, not per event."""
+        from comfy_cli.caller import detect_caller
+
+        kind = detect_caller(env={"COMFY_USER_AGENT": "My-Harness"}, is_tty=True).kind
+        assert kind == "my-harness"
+
+        tracking_module.config_manager.set(constants.CONFIG_KEY_ENABLE_TRACKING, "True")
+        with patch.object(tracking_module, "_caller_kind", kind):
+            tracking_module.track_event("some_event")
+        _, _, properties = _last_track_call(tracking_module.provider)
+        assert properties["caller_kind"] == "my-harness"
+
+
+class TestSanitizeCallerKind:
+    """``COMFY_USER_AGENT`` is arbitrary user-supplied text that detect_caller
+    only lowercases, and the resulting label now rides EVERY event — including
+    feedback, which dispatches even when passive-telemetry consent is off. So it
+    gets the same cap-and-scrub treatment command kwargs get before it ships."""
+
+    def test_intrinsic_kinds_pass_through_unchanged(self, tracking_module):
+        for kind in ("user", "pipe", "agent", "claude-code"):
+            assert tracking_module._sanitize_caller_kind(kind) == kind
+
+    def test_long_label_is_truncated(self, tracking_module):
+        sanitized = tracking_module._sanitize_caller_kind("x" * 5000)
+        assert len(sanitized) == tracking_module._CALLER_KIND_MAX_LEN
+
+    def test_url_label_loses_its_query_string(self, tracking_module):
+        """A label shaped like a URL can carry a token in the query string."""
+        assert (
+            tracking_module._sanitize_caller_kind("https://harness.example/agent?token=s3cret")
+            == "https://harness.example/agent"
+        )
+
+    def test_module_scope_value_is_sanitized(self, tracking_module):
+        """The value actually stamped on events is bounded, whatever the env
+        said — this is the property that matters, not the helper in isolation."""
+        assert len(tracking_module._caller_kind) <= tracking_module._CALLER_KIND_MAX_LEN
+
+    def test_oversized_label_is_capped_on_the_wire(self, tracking_module):
+        tracking_module.config_manager.set(constants.CONFIG_KEY_ENABLE_TRACKING, "True")
+        with patch.object(tracking_module, "_caller_kind", tracking_module._sanitize_caller_kind("z" * 900)):
+            tracking_module.track_event("some_event")
+        _, _, properties = _last_track_call(tracking_module.provider)
+        assert len(properties["caller_kind"]) == tracking_module._CALLER_KIND_MAX_LEN
+
+
+class TestFeedbackCallerKindIsNarrowed:
+    """``feedback_submitted`` is the one send path that is NOT gated on passive
+    consent — an explicit user action, suppressed only by the hard env opt-out.
+    Attaching an arbitrary, environment-derived free-text label to the very path
+    where a user has declined passive telemetry is more than the analytics
+    question needs, so a custom ``COMFY_USER_AGENT`` collapses to ``"custom"``
+    there. The four intrinsic kinds still answer "human or agent?" exactly.
+    """
+
+    @staticmethod
+    def _as_caller(tracking_module, env):
+        """Patch the module-scope caller state as `detect_caller` would derive it
+        for *env*. Both values are computed once at import, so a test that sets
+        only one of them proves nothing about the real pairing."""
+        from comfy_cli.caller import detect_caller
+
+        caller = detect_caller(env=env, is_tty=True)
+        return (
+            patch.object(tracking_module, "_caller_kind", tracking_module._sanitize_caller_kind(caller.kind)),
+            patch.object(tracking_module, "_caller_kind_is_custom", caller.source_env == "COMFY_USER_AGENT"),
+        )
+
+    def test_custom_label_becomes_custom_on_the_feedback_path(self, tracking_module):
+        kind_patch, custom_patch = self._as_caller(tracking_module, {"COMFY_USER_AGENT": "Acme-Harness/2.1"})
+        with kind_patch, custom_patch:
+            tracking_module.submit_feedback("nice tool")
+        _, _, properties = _last_track_call(tracking_module.provider)
+        assert properties["caller_kind"] == "custom"
+        assert "acme-harness" not in str(properties)
+
+    def test_intrinsic_kinds_survive_on_the_feedback_path(self, tracking_module):
+        for env, expected in (
+            ({}, "user"),
+            ({"AI_AGENT": "1"}, "agent"),
+            ({"CLAUDECODE": "1"}, "claude-code"),
+        ):
+            kind_patch, custom_patch = self._as_caller(tracking_module, env)
+            with kind_patch, custom_patch:
+                tracking_module.submit_feedback("nice tool")
+            _, _, properties = _last_track_call(tracking_module.provider)
+            assert properties["caller_kind"] == expected
+
+    def test_a_label_spelling_an_intrinsic_kind_is_still_narrowed(self, tracking_module):
+        """`COMFY_USER_AGENT=user` produces the literal string "user" while being
+        exactly the self-attributed case. Deciding by membership in the intrinsic
+        set would let an agent pass itself off as a human here, so the decision
+        is made on `source_env`, which is authoritative."""
+        for label in ("user", "pipe", "agent", "claude-code"):
+            kind_patch, custom_patch = self._as_caller(tracking_module, {"COMFY_USER_AGENT": label})
+            with kind_patch, custom_patch:
+                tracking_module.submit_feedback("nice tool")
+            _, _, properties = _last_track_call(tracking_module.provider)
+            assert properties["caller_kind"] == "custom", f"COMFY_USER_AGENT={label} bypassed the narrowing"
+
+    def test_consent_gated_paths_keep_the_full_label(self, tracking_module):
+        """The narrowing is scoped to the unconsented path: passive telemetry
+        (which the user opted into) keeps the self-attribution label, which is
+        the whole point of COMFY_USER_AGENT."""
+        tracking_module.config_manager.set(constants.CONFIG_KEY_ENABLE_TRACKING, "True")
+        kind_patch, custom_patch = self._as_caller(tracking_module, {"COMFY_USER_AGENT": "Acme-Harness/2.1"})
+        with kind_patch, custom_patch:
+            tracking_module.track_event("some_event")
+            _, _, properties = _last_track_call(tracking_module.provider)
+            assert properties["caller_kind"] == "acme-harness/2.1"
+
+            tracking_module.submit_agent_review("went fine")
+            _, _, properties = _last_track_call(tracking_module.provider)
+            assert properties["caller_kind"] == "acme-harness/2.1"
+
+
+class TestScrubValueStripsUrlCredentials:
+    """``_scrub_value`` is the shared credential strip for anything shipped as a
+    telemetry property — command kwargs and, via ``_sanitize_caller_kind``, the
+    ``caller_kind`` on every event."""
+
+    def test_query_string_and_fragment_go(self, tracking_module):
+        assert tracking_module._scrub_value("https://civitai.com/api/x?token=s3cret") == "https://civitai.com/api/x"
+        assert tracking_module._scrub_value("https://h.example/a#tok") == "https://h.example/a"
+
+    def test_userinfo_goes(self, tracking_module):
+        """`scheme://user:pass@host` puts a basic-auth password in the
+        authority, which stripping the query alone leaves entirely intact."""
+        assert (
+            tracking_module._scrub_value("https://svc:s3cret@harness.example/agent") == "https://harness.example/agent"
+        )
+        assert tracking_module._scrub_value("http://tok@h.example") == "http://h.example"
+
+    def test_userinfo_goes_for_non_http_schemes_too(self, tracking_module):
+        """A credential rides the userinfo slot of ftp/ssh/redis just as easily
+        as http's; the strip only ever removes those components, so it is safe
+        to apply to any `<scheme>://` value."""
+        assert tracking_module._scrub_value("ssh://git:key@github.com/o/r") == "ssh://github.com/o/r"
+        assert tracking_module._scrub_value("redis://u:p@localhost:6379/0") == "redis://localhost:6379/0"
+
+    def test_at_inside_userinfo_uses_the_last_delimiter(self, tracking_module):
+        assert tracking_module._scrub_value("https://a@b:c@host.example/p") == "https://host.example/p"
+
+    def test_credential_containing_url_punctuation_is_still_stripped(self, tracking_module):
+        """The ordering trap: if the query/fragment split ran first, or the
+        authority were bounded at the first `/`, a credential containing `?`,
+        `#` or `/` would move the cut point and strand part of the secret in the
+        result. base64-ish tokens routinely contain `/` and `+`."""
+        cases = [
+            "https://svc:s3cr?et@harness.example/agent",
+            "https://svc:ab/cd@harness.example/agent",
+            "https://svc:x#y@harness.example/agent",
+            "https://svc:a/b?c#d@harness.example/agent",
+        ]
+        for value in cases:
+            scrubbed = tracking_module._scrub_value(value)
+            assert scrubbed == "https://harness.example/agent", value
+            for secret in ("s3cr", "ab/cd", "x#y", "a/b"):
+                assert secret not in scrubbed, f"{secret!r} survived in {scrubbed!r} from {value!r}"
+
+    def test_a_custom_user_agent_url_ships_no_secret(self, tracking_module):
+        """The end-to-end property: a harness that self-attributes with a
+        service URL must not ship its own basic-auth password to the providers
+        on every single event."""
+        sanitized = tracking_module._sanitize_caller_kind("https://svc:s3cret@harness.example/agent")
+        assert "s3cret" not in sanitized
+        assert sanitized == "https://harness.example/agent"
+
+    def test_non_url_values_are_untouched(self, tracking_module):
+        for value in ("claude-code", "my-harness/1.2", "/home/alice/wf.json", "C:\\Users\\alice", "", "a?b#c"):
+            assert tracking_module._scrub_value(value) == value
+
+    def test_non_string_values_are_untouched(self, tracking_module):
+        for value in (None, 7, True, ["https://a?b"], {"k": "v"}):
+            assert tracking_module._scrub_value(value) == value
 
 
 class TestSubmitFeedback:
@@ -191,7 +401,7 @@ def test_feedback_does_not_persist_user_id_without_consent(monkeypatch):
 
     sent = {}
     monkeypatch.setattr(tracking, "_telemetry_disabled_by_env", lambda: False)
-    monkeypatch.setattr(tracking, "_dispatch", lambda name, props, *, distinct_id: sent.update(id=distinct_id))
+    monkeypatch.setattr(tracking, "_dispatch", lambda name, props, *, distinct_id, **kw: sent.update(id=distinct_id))
     # Consent declined; no persisted user_id; in-memory user_id empty.
     monkeypatch.setattr(tracking.config_manager, "get_bool", lambda k: False)
     persisted = {}
@@ -209,7 +419,7 @@ def test_feedback_persists_user_id_with_consent(monkeypatch):
 
     sent = {}
     monkeypatch.setattr(tracking, "_telemetry_disabled_by_env", lambda: False)
-    monkeypatch.setattr(tracking, "_dispatch", lambda name, props, *, distinct_id: sent.update(id=distinct_id))
+    monkeypatch.setattr(tracking, "_dispatch", lambda name, props, *, distinct_id, **kw: sent.update(id=distinct_id))
     monkeypatch.setattr(tracking.config_manager, "get_bool", lambda k: True)  # consent ON
     persisted = {}
     monkeypatch.setattr(tracking.config_manager, "set", lambda k, v: persisted.update({k: v}))
@@ -749,3 +959,44 @@ class TestTelemetryDisabledByEnvHelper:
         monkeypatch.delenv("COMFY_NO_TELEMETRY")
         monkeypatch.setenv("DO_NOT_TRACK", "1")
         assert tm._telemetry_disabled_by_env() is True
+
+
+class TestConsentPromptSurvivesUnusableStdio:
+    """``prompt_tracking_consent`` runs from the main Typer callback
+    (``cmdline.py``) on every invocation. Under ``pythonw`` / a detached parent,
+    ``sys.stdin`` or ``sys.stdout`` is ``None`` or closed, and a bare
+    ``.isatty()`` there raises before argument parsing — killing every command,
+    including ``--help``. Both probes go through ``caller.stream_is_tty``, so an
+    unusable stream reads as "non-interactive" (the correct answer: nobody is
+    there to consent) instead of raising.
+    """
+
+    def test_missing_stdout_does_not_raise(self, tracking_module):
+        with (
+            patch.object(tracking_module.sys, "stdout", None),
+            patch.object(tracking_module.ui, "prompt_confirm_action") as mock_prompt,
+        ):
+            tracking_module.prompt_tracking_consent()
+        mock_prompt.assert_not_called()
+        assert tracking_module.config_manager.get_bool(constants.CONFIG_KEY_ENABLE_TRACKING) is None
+
+    def test_missing_stdin_does_not_raise(self, tracking_module):
+        with (
+            patch.object(tracking_module.sys, "stdin", None),
+            patch.object(tracking_module.ui, "prompt_confirm_action") as mock_prompt,
+        ):
+            tracking_module.prompt_tracking_consent()
+        mock_prompt.assert_not_called()
+
+    def test_revoked_fd_stdio_does_not_raise(self, tracking_module):
+        class Revoked:
+            def isatty(self):
+                raise OSError(9, "Bad file descriptor")
+
+        with (
+            patch.object(tracking_module.sys, "stdin", Revoked()),
+            patch.object(tracking_module.sys, "stdout", Revoked()),
+            patch.object(tracking_module.ui, "prompt_confirm_action") as mock_prompt,
+        ):
+            tracking_module.prompt_tracking_consent()
+        mock_prompt.assert_not_called()

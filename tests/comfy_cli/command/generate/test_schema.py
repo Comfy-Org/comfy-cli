@@ -100,8 +100,14 @@ def test_parse_args_object_accepts_json():
 
 def _string_array_flag():
     return schema.FlagDef(
-        name="image", kind="array", required=False, description="",
-        default=None, enum=[], item_kind="string", upload_mode=None,
+        name="image",
+        kind="array",
+        required=False,
+        description="",
+        default=None,
+        enum=[],
+        item_kind="string",
+        upload_mode=None,
     )
 
 
