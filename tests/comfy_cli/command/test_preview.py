@@ -109,3 +109,19 @@ def test_preview_missing_file_errors(tmp_path, monkeypatch):
     monkeypatch.setattr("comfy_cli.tracking.track_event", lambda *a, **kw: None)
     with pytest.raises(typer.Exit):
         preview_cmd(tmp_path / "nope.png")
+
+
+def test_classify_by_ext_unknown_for_non_media():
+    """The no-ffprobe fallback must return 'unknown' for a non-media extension so
+    preview_cmd emits preview_unsupported_media instead of handing a .txt to ffmpeg.
+    Regression: it previously defaulted every unrecognized extension to 'video'."""
+    from pathlib import Path
+
+    from comfy_cli.command.preview import _classify_by_ext
+
+    assert _classify_by_ext(Path("notes.txt"))["kind"] == "unknown"
+    assert _classify_by_ext(Path("archive.zip"))["kind"] == "unknown"
+    assert _classify_by_ext(Path("clip.mp4"))["kind"] == "video"
+    assert _classify_by_ext(Path("clip.mov"))["kind"] == "video"
+    assert _classify_by_ext(Path("pic.png"))["kind"] == "image"
+    assert _classify_by_ext(Path("sound.wav"))["kind"] == "audio"

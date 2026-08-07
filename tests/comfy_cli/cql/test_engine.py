@@ -169,8 +169,11 @@ def _object_info() -> dict[str, Any]:
                     "fps": [[25, 50], {"default": 25}],
                     "resolution": ["COMBO", {"options": ["1920x1080", "2560x1440"], "default": "1920x1080"}],
                 },
+                "optional": {
+                    "seed": ["INT", {"default": 0, "min": 0, "max": 2**31 - 1}],
+                },
             },
-            "input_order": {"required": ["prompt", "duration", "fps", "resolution"]},
+            "input_order": {"required": ["prompt", "duration", "fps", "resolution"], "optional": ["seed"]},
             "output": ["VIDEO"],
             "output_name": ["VIDEO"],
             "category": "partner/video/LTXV",
@@ -305,6 +308,85 @@ class TestWidgetOrder:
     def test_unknown_node_returns_empty(self, graph: Graph):
         order = graph.widget_order("Nonexistent")
         assert order == []
+
+
+class TestWidgetOrderForNode:
+    """graph.widget_order_for_node — dynamic combos expand by the node's ACTUAL
+    selected key, not the schema's first key (regression for set-widget writing
+    into the wrong slot when the selection expands to a different sub-widget count)."""
+
+    @staticmethod
+    def _dyn_graph() -> Graph:
+        # `model` is a dynamic combo: key "a" → 1 sub-widget, key "b" → 2. `seed`
+        # follows it, so its slot index depends on which key is selected.
+        return Graph.from_object_info(
+            {
+                "DynNode": {
+                    "input": {
+                        "required": {
+                            "model": [
+                                "COMFY_DYNAMICCOMBO_V3",
+                                {
+                                    "options": [
+                                        {
+                                            "key": "a",
+                                            "inputs": {
+                                                "required": {"res": ["COMBO", {"options": ["x", "y"], "default": "x"}]}
+                                            },
+                                        },
+                                        {
+                                            "key": "b",
+                                            "inputs": {
+                                                "required": {
+                                                    "res": ["COMBO", {"options": ["x", "y"], "default": "x"}],
+                                                    "quality": ["COMBO", {"options": ["lo", "hi"], "default": "lo"}],
+                                                }
+                                            },
+                                        },
+                                    ]
+                                },
+                            ],
+                            "seed": ["INT", {"default": 0}],
+                        }
+                    },
+                    "input_order": {"required": ["model", "seed"]},
+                    "output": ["IMAGE"],
+                    "output_name": ["IMAGE"],
+                    "category": "test",
+                    "display_name": "Dyn",
+                    "python_module": "nodes",
+                }
+            }
+        )
+
+    def test_static_order_uses_first_key(self):
+        g = self._dyn_graph()
+        assert g.widget_order("DynNode") == ["model", "model.res", "seed"]
+
+    def test_node_order_expands_selected_key(self):
+        g = self._dyn_graph()
+        # Selecting "b" adds model.quality, pushing seed to index 3.
+        order = g.widget_order_for_node("DynNode", ["b", "x", "hi", 12345])
+        assert order == ["model", "model.res", "model.quality", "seed"]
+        assert order.index("seed") == 3
+
+    def test_node_order_first_key_matches_static(self):
+        g = self._dyn_graph()
+        assert g.widget_order_for_node("DynNode", ["a", "x", 999]) == ["model", "model.res", "seed"]
+
+    def test_empty_widgets_falls_back_to_static(self):
+        g = self._dyn_graph()
+        assert g.widget_order_for_node("DynNode", []) == g.widget_order("DynNode")
+
+    def test_set_widget_writes_seed_to_selected_slot(self):
+        """End-to-end: set-widget on a "b"-selected node must land seed at index 3,
+        not overwrite model.quality at index 2."""
+        from comfy_cli import workflow_ops
+
+        g = self._dyn_graph()
+        wf = {"nodes": [{"id": 3, "type": "DynNode", "widgets_values": ["b", "x", "hi", 111]}]}
+        workflow_ops.set_widget(wf, g, 3, "seed", 424242, actor="cli", base_version=0)
+        assert wf["nodes"][0]["widgets_values"] == ["b", "x", "hi", 424242]
 
 
 # ===========================================================================
@@ -770,8 +852,11 @@ class TestAutogrowInputs:
             "30": {"class_type": "SaveImage", "inputs": {"images": ["20", 0], "filename_prefix": "out"}},
         }
         result = graph.validate_workflow(wf)
-        assert result["valid"] is True, result["errors"]
         # The dotted slots must not trip type-mismatch or unknown-input noise.
+        # (The bare VAEDecode loaders legitimately miss their own required
+        # links — scope the check to the autogrow node.)
+        errs_autogrow = [e for e in result["errors"] if e["node_id"] == "20"]
+        assert errs_autogrow == [], errs_autogrow
         assert result["warnings"] == []
 
     def test_bare_link_wiring_errors_with_slot_hint(self, graph: Graph):
@@ -1314,6 +1399,215 @@ class TestValidateEmptyCombo:
         assert ("unet_name", "no_options_available") not in by_field
 
 
+class TestValidateUploadBackedCombo:
+    """A COMBO marked ``<kind>_upload`` in object_info lists the server's
+    *installed input files*, not an install-time enum — so the catalog snapshot
+    can never be authoritative for it and it must not be enum-validated.
+
+    Found live: an agenteval run uploaded an image, wired it into
+    ``LoadImage.image``, and validate answered ``no_options_available`` ("the
+    server reports 0 installed options for image"). The workflow was rejected,
+    the agent retried, and the loop burned two of the turn's paid run slots. The
+    empty-list reasoning that ``no_options_available`` was built on holds for
+    MODEL folders (``UNETLoader``/``CLIPLoader`` — static, install-time) and is
+    exactly wrong for input files, which are per-user and populated at run time
+    by upload. A freshly uploaded file is missing from a POPULATED snapshot just
+    as surely as from an empty one, so BOTH enum branches are skipped.
+    """
+
+    def _object_info(self, **extra) -> dict[str, Any]:
+        # Shapes verified against the production catalog
+        # (services/ingest/data/object_info.json): LoadImage/LoadImageMask use
+        # the list-form dialect with `image_upload`, while the V3 loaders
+        # (LoadAudio/LoadVideo/Load3D) use `["COMBO", {"options": [...], ...}]`
+        # with their own kind of marker.
+        oi = {
+            "LoadImage": {
+                "input": {"required": {"image": [["beach.jpg", "example.png"], {"image_upload": True}]}},
+                "input_order": {"required": ["image"]},
+                "output": ["IMAGE", "MASK"],
+                "output_name": ["IMAGE", "MASK"],
+                "python_module": "nodes",
+            },
+            "LoadImageMask": {
+                # The counter-case lives on the SAME node: `image` is
+                # upload-backed, `channel` is an ordinary enum and must stay
+                # constrained.
+                "input": {
+                    "required": {
+                        "image": [["beach.jpg", "example.png"], {"image_upload": True}],
+                        "channel": [["alpha", "red", "green", "blue"]],
+                    }
+                },
+                "input_order": {"required": ["image", "channel"]},
+                "output": ["MASK"],
+                "output_name": ["MASK"],
+                "python_module": "nodes",
+            },
+            "SaveImage": {
+                "input": {"required": {"images": "IMAGE"}},
+                "output": [],
+                "output_name": [],
+                "output_node": True,
+                "python_module": "nodes",
+            },
+        }
+        oi.update(extra)
+        return oi
+
+    def _graph(self, **extra) -> Graph:
+        return Graph.from_object_info(self._object_info(**extra))
+
+    def _port(self, graph: Graph, class_type: str, name: str):
+        return next(p for p in graph.node(class_type).inputs if p.name == name)
+
+    def test_freshly_uploaded_filename_passes_against_a_populated_catalog(self):
+        """The regression, populated-list half: the snapshot lists other files,
+        the just-uploaded one is not among them, and that is NOT an error."""
+        g = self._graph()
+        result = g.validate_workflow(
+            {
+                "1": {"class_type": "LoadImage", "inputs": {"image": "user_upload_9f2c1a.png"}},
+                "2": {"class_type": "SaveImage", "inputs": {"images": ["1", 0]}},
+            }
+        )
+        assert result["valid"] is True, result["errors"]
+        assert [e for e in result["errors"] if e["field"] == "image"] == []
+
+    def test_freshly_uploaded_filename_passes_against_an_empty_catalog(self):
+        """The regression as it actually fired: a server with no sample images
+        declares an EMPTY list, which used to emit ``no_options_available``."""
+        oi = self._object_info()
+        oi["LoadImage"]["input"]["required"]["image"] = [[], {"image_upload": True}]
+        g = Graph.from_object_info(oi)
+        result = g.validate_workflow(
+            {
+                "1": {"class_type": "LoadImage", "inputs": {"image": "user_upload_9f2c1a.png"}},
+                "2": {"class_type": "SaveImage", "inputs": {"images": ["1", 0]}},
+            }
+        )
+        assert result["valid"] is True, result["errors"]
+        codes = {e["code"] for e in result["errors"]}
+        assert "no_options_available" not in codes
+        assert "unknown_enum_value" not in codes
+
+    def test_no_warning_on_the_edit_surface_either(self):
+        """``workflow_ops._validate_widget`` (the set-widget/apply warning
+        surface the agent reads) funnels through the same ``validate_catalog``,
+        so assert it directly for both list states."""
+        populated = self._port(self._graph(), "LoadImage", "image")
+        oi = self._object_info()
+        oi["LoadImage"]["input"]["required"]["image"] = [[], {"image_upload": True}]
+        empty = self._port(Graph.from_object_info(oi), "LoadImage", "image")
+        assert populated.validate_catalog("user_upload_9f2c1a.png") == []
+        assert empty.validate_catalog("user_upload_9f2c1a.png") == []
+
+    def test_sibling_plain_enum_on_the_same_node_still_rejects(self):
+        """The anti-blanket check: exempting the upload port must not disarm
+        enum checking for the node's ordinary enums."""
+        g = self._graph()
+        result = g.validate_workflow(
+            {
+                "1": {
+                    "class_type": "LoadImageMask",
+                    "inputs": {"image": "user_upload_9f2c1a.png", "channel": "cyan"},
+                },
+                "2": {"class_type": "SaveImage", "inputs": {"images": ["1", 0]}},
+            }
+        )
+        assert result["valid"] is False
+        errs = [e for e in result["errors"] if e["code"] == "unknown_enum_value"]
+        assert [e["field"] for e in errs] == ["channel"]
+        assert "alpha" in errs[0]["hint"]
+
+    def test_empty_model_folder_still_reports_no_options_available(self):
+        """The behaviour ``no_options_available`` exists for is untouched: an
+        unmarked (model-folder) combo with zero installed options still errors."""
+        g = self._graph(
+            UNETLoader={
+                "input": {"required": {"unet_name": [[]]}},
+                "input_order": {"required": ["unet_name"]},
+                "output": ["MODEL"],
+                "output_name": ["MODEL"],
+                "python_module": "nodes",
+            }
+        )
+        result = g.validate_workflow(
+            {
+                "1": {"class_type": "UNETLoader", "inputs": {"unet_name": "flux1-dev.safetensors"}},
+                "2": {"class_type": "SaveImage", "inputs": {"images": ["1", 0]}},
+            }
+        )
+        errs = [e for e in result["errors"] if e["code"] == "no_options_available"]
+        assert [e["field"] for e in errs] == ["unet_name"]
+
+    def test_marker_is_recognized_for_every_upload_kind(self):
+        """ComfyUI names the flag per loader kind — ``image_upload``,
+        ``audio_upload``, ``video_upload``, ``file_upload`` all ship in the
+        production catalog — and the V3 loaders declare their options in the
+        dict-form dialect. All are exempt; an unmarked combo is not."""
+        g = self._graph(
+            LoadAudio={
+                "input": {"required": {"audio": ["COMBO", {"options": ["sample.mp3"], "audio_upload": True}]}},
+                "output": ["AUDIO"],
+                "output_name": ["AUDIO"],
+                "python_module": "nodes",
+            },
+            LoadVideo={
+                "input": {"required": {"file": ["COMBO", {"options": ["bedroom.mp4"], "video_upload": True}]}},
+                "output": ["VIDEO"],
+                "output_name": ["VIDEO"],
+                "python_module": "nodes",
+            },
+            Load3D={
+                "input": {"required": {"model_file": ["COMBO", {"options": ["none"], "file_upload": True}]}},
+                "output": ["MESH"],
+                "output_name": ["MESH"],
+                "python_module": "nodes",
+            },
+        )
+        marked = [("LoadAudio", "audio"), ("LoadVideo", "file"), ("Load3D", "model_file")]
+        for class_type, name in marked:
+            port = self._port(g, class_type, name)
+            assert port.is_upload_backed is True, f"{class_type}.{name}"
+            assert port.validate_catalog("just-uploaded.bin") == [], f"{class_type}.{name}"
+        assert self._port(g, "LoadImageMask", "channel").is_upload_backed is False
+
+    def test_a_falsey_marker_does_not_exempt(self):
+        """``image_upload: false`` is a declaration that the port is NOT
+        upload-backed — it must stay constrained."""
+        oi = self._object_info()
+        oi["LoadImage"]["input"]["required"]["image"] = [["beach.jpg"], {"image_upload": False}]
+        port = self._port(Graph.from_object_info(oi), "LoadImage", "image")
+        assert port.is_upload_backed is False
+        assert [w["code"] for w in port.validate_catalog("nope.png")] == ["unknown_enum_value"]
+
+    def test_upload_port_stays_a_widget_not_a_link(self):
+        """The exemption is validation-only: it must not move the port between
+        widget and link wiring, nor drop the options `show_node` displays."""
+        port = self._port(self._graph(), "LoadImage", "image")
+        assert (port.is_link, port.enum_declared, port.enum_values) == (False, True, ["beach.jpg", "example.png"])
+
+    def test_uploaded_filename_is_not_rewritten_to_a_sample_file(self):
+        """``canonical_combo`` (set-widget's silent auto-correct) is exempt too:
+        against a stale directory listing, "the option it clearly means" is
+        unanswerable, and a case-only match would swap the user's upload for a
+        sample and generate from the wrong image."""
+        port = self._port(self._graph(), "LoadImage", "image")
+        assert port.canonical_combo("Beach.JPG") is None
+        assert port.canonical_combo("images/beach.jpg") is None
+        # An unmarked combo keeps the auto-correct.
+        g = self._graph(
+            VAELoader={
+                "input": {"required": {"vae_name": [["ae.safetensors"]]}},
+                "output": ["VAE"],
+                "output_name": ["VAE"],
+                "python_module": "nodes",
+            }
+        )
+        assert self._port(g, "VAELoader", "vae_name").canonical_combo("vae/ae.safetensors") == "ae.safetensors"
+
+
 class TestValidateDynamicCombo:
     """Validate expands a ``COMFY_DYNAMICCOMBO_V3`` selector's chosen option and
     checks the dotted sub-inputs the server will actually require (BE-3777).
@@ -1630,6 +1924,39 @@ class TestDirectModeSlots:
         warnings = _apply_one_slot(wf, "3.steps", 99999, graph)
         codes = [w["code"] for w in warnings]
         assert "above_max" in codes
+
+
+class TestSlotSuggestionOnNotFound:
+    """A not-found address is enriched with the real address that carries the
+    intended widget, so an agent that targeted the wrong node/separator (the
+    common LLM failure of rebuilding an address from memory) self-corrects in
+    one step instead of looping."""
+
+    def test_wrong_node_right_widget_suggests_correct_address(self, graph: Graph):
+        # 'text' lives on the CLIPTextEncode (node 6), not EmptyLatentImage (7).
+        wf = _direct_workflow()
+        with pytest.raises(ValueError, match=r"Did you mean:.*6\.text \(CLIPTextEncode\)"):
+            _apply_one_slot(wf, "7.text", "x", graph)
+
+    def test_missing_node_right_widget_suggests_correct_address(self, graph: Graph):
+        # Node 999 doesn't exist (mirrors a wrong id/separator); 'seed' is on KSampler 3.
+        wf = _direct_workflow()
+        with pytest.raises(ValueError, match=r"Did you mean:.*3\.seed \(KSampler\)"):
+            _apply_one_slot(wf, "999.seed", 1, graph)
+
+    def test_unknown_widget_name_gets_no_false_suggestion(self, graph: Graph):
+        # No node carries 'nonexistent' → original error, no "Did you mean".
+        wf = _direct_workflow()
+        with pytest.raises(ValueError) as ei:
+            _apply_one_slot(wf, "3.nonexistent", 1, graph)
+        assert "Did you mean" not in str(ei.value)
+
+    def test_shape_error_is_not_enriched(self, graph: Graph):
+        # The widget resolved fine; a shape rejection must pass through untouched.
+        wf = _direct_workflow()
+        with pytest.raises(ValueError) as ei:
+            _apply_one_slot(wf, "3.seed", "not_an_int", graph)
+        assert "Did you mean" not in str(ei.value)
 
 
 # ===========================================================================
@@ -1986,6 +2313,59 @@ def test_load_from_target_refuses_non_loopback_local_host():
 
     with pytest.raises(LoadError, match="non-loopback"):
         _load_from_target(mode="local", host="example.com", port=8188)
+
+
+class TestComboNormalizationAndSuggestions:
+    """Port.canonical_combo rewrites a mangled model value (dir prefix / dropped
+    subfolder / case drift) to the real option when unambiguous; suggest_combo +
+    validate_catalog.did_you_mean point a rejected value at the nearest options."""
+
+    def _port(self):
+        from comfy_cli.cql.engine import Port
+
+        return Port(
+            name="ckpt_name",
+            type="COMBO",
+            enum_values=["sd_xl_base.safetensors", "v1-5-pruned.safetensors", "sub/model_x.safetensors"],
+        )
+
+    def test_canonical_strips_added_directory_prefix(self):
+        p = self._port()
+        assert p.canonical_combo("checkpoints/sd_xl_base.safetensors") == "sd_xl_base.safetensors"
+
+    def test_canonical_matches_dropped_subfolder_by_basename(self):
+        p = self._port()
+        assert p.canonical_combo("model_x.safetensors") == "sub/model_x.safetensors"
+
+    def test_canonical_case_insensitive(self):
+        p = self._port()
+        assert p.canonical_combo("SD_XL_BASE.SAFETENSORS") == "sd_xl_base.safetensors"
+
+    def test_canonical_exact_value_returns_none(self):
+        p = self._port()
+        assert p.canonical_combo("sd_xl_base.safetensors") is None
+
+    def test_canonical_unknown_returns_none(self):
+        p = self._port()
+        assert p.canonical_combo("realisticVisionV60B1.safetensors") is None
+
+    def test_canonical_ambiguous_basename_returns_none(self):
+        from comfy_cli.cql.engine import Port
+
+        p = Port(name="ckpt_name", type="COMBO", enum_values=["a/dup.safetensors", "b/dup.safetensors"])
+        assert p.canonical_combo("dup.safetensors") is None  # two matches → don't guess
+
+    def test_suggest_returns_close_options(self):
+        p = self._port()
+        got = p.suggest_combo("sd_xl_bas.safetensors")
+        assert "sd_xl_base.safetensors" in got
+
+    def test_validate_catalog_adds_did_you_mean(self):
+        p = self._port()
+        w = p.validate_catalog("v1-5-prund.safetensors")  # typo
+        assert w and w[0]["code"] == "unknown_enum_value"
+        assert "did_you_mean" in w[0]
+        assert "v1-5-pruned.safetensors" in w[0]["did_you_mean"]
 
 
 # ===========================================================================

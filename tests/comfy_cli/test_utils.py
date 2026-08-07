@@ -18,7 +18,7 @@ class _FakeRaw(io.BytesIO):
 
 
 class TestDownloadUrl:
-    @patch("comfy_cli.utils.requests.get")
+    @patch("requests.get")
     def test_writes_file(self, mock_get, tmp_path):
         content = b"file contents here"
         mock_response = MagicMock()

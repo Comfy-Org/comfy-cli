@@ -2,8 +2,6 @@ import json
 import logging
 import os
 
-import requests
-
 # Reduced global imports from comfy_cli.registry
 from comfy_cli.registry.types import (
     License,
@@ -93,6 +91,10 @@ class RegistryAPI:
         headers = {"Content-Type": "application/json"}
         body = request_body
 
+        # Imported lazily: requests costs ~30ms to import and this module is
+        # on the import path of every CLI invocation.
+        import requests
+
         response = requests.post(url, headers=headers, data=json.dumps(body))
 
         if response.status_code == 201:
@@ -111,6 +113,8 @@ class RegistryAPI:
         Returns:
           list: A list of Node instances.
         """
+        import requests  # deferred; see publish_node_version
+
         url = f"{self.base_url}/nodes"
         response = requests.get(url)
         if response.status_code == 200:
@@ -130,6 +134,8 @@ class RegistryAPI:
         Returns:
           NodeVersion: Node version data or error message.
         """
+        import requests  # deferred; see publish_node_version
+
         if version is None:
             url = f"{self.base_url}/nodes/{node_id}/install"
         else:
@@ -159,6 +165,8 @@ class RegistryAPI:
         Returns:
           Node: Node data, including ``latest_version`` when the registry has one.
         """
+        import requests  # deferred; see publish_node_version
+
         url = f"{self.base_url}/nodes/{node_id}"
         # Same rationale as install_node: a stalled registry must not hang callers.
         response = requests.get(url, timeout=30)

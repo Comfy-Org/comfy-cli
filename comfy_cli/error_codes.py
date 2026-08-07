@@ -339,6 +339,11 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "for local filename listing use `comfy models list-folder <folder>`",
     ),
     ErrorCode(
+        "cloud_only_command",
+        "The command requires Comfy Cloud (e.g. `comfy assets library`); there is no local equivalent.",
+        "sign in with `comfy cloud login` and re-run with `--where cloud`",
+    ),
+    ErrorCode(
         "template_fetch_failed",
         "Fetching the per-template workflow JSON from `Comfy-Org/workflow_templates` failed.",
         "check network; if 404, the gallery and templates dir are out of sync — report upstream",
@@ -501,6 +506,18 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "workflow_slot_invalid",
         "A slot override failed validation (bad shape, unknown address, etc.).",
         "see `details` — addresses follow `<instance_id>.<input_name>`",
+    ),
+    ErrorCode(
+        "workflow_edit_invalid",
+        "A structured edit (add-node/connect/set-widget/delete-node) failed: "
+        "unknown class_type, missing node, bad slot/widget name, or malformed address.",
+        "run `comfy workflow slots <file>` for widget addresses or `comfy nodes types` for class_types",
+    ),
+    ErrorCode(
+        "normalized_value",
+        "Warning (not fatal): a set-widget value wasn't an exact COMBO option, so "
+        "the nearest matching option was used. Surfaced in the op's `warnings`.",
+        "see the warning's `from`/`to`; pass an exact option to avoid the fuzzy match",
     ),
     # --- workflow fragments / compose ---------------------------------------
     ErrorCode(

@@ -11,12 +11,12 @@ from __future__ import annotations
 
 import copy
 import difflib
+import hashlib as _hashlib
 import json
 import logging
 import urllib.error
 import urllib.parse
 import urllib.request
-import uuid as _uuid
 from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Any
@@ -40,6 +40,18 @@ class PortOptions:
     multiline: bool = False
     control_after_generate: bool = False
     force_input: bool = False
+    # For COMFY_DYNAMICCOMBO_V3: the raw options list ({key, inputs} dicts) so the
+    # engine can expand key-dependent sub-widgets (e.g. model → model.resolution),
+    # matching the converter. None for ordinary inputs.
+    dynamic_options: list | None = None
+    # For COMFY_AUTOGROW_V3: the raw ``template`` dict object_info carries for an
+    # autogrow input (e.g. {"input": {...}, "prefix": "image", "min": 1, "max": 50}).
+    # Use ``Port.autogrow_template`` to pull out just the naming fields.
+    template: dict | None = None
+    # True when object_info marked this input upload-backed — the frontend renders
+    # an upload button and the declared options are the server's *installed input
+    # files*, not an install-time enum. See ``Port.is_upload_backed``.
+    upload: bool = False
 
 
 @dataclass
@@ -89,6 +101,98 @@ class Port:
         stem = self.name[:-1] if self.name.endswith("s") else self.name
         return f"{self.name}.{stem}0, {self.name}.{stem}1, …"
 
+    @property
+    def autogrow_template(self) -> dict | None:
+        """The V3 autogrow element-naming template from object_info, if the
+        catalog carries one: ``{"names": [...]}`` verbatim, or ``{"prefix":
+        "..."}`` — the two never co-occur (0/108 catalog cases). None when this
+        port isn't autogrow, or the schema carries no template (older/partial
+        catalogs, offline edits), so callers fall back to the historical
+        ``{base[:-1]}{N}`` pluralization guess in :meth:`autogrow_slot_example`.
+        """
+        t = self.options.template
+        if not self.is_autogrow or not isinstance(t, dict):
+            return None
+        names = t.get("names")
+        if isinstance(names, list) and names:
+            return {"names": list(names)}
+        prefix = t.get("prefix")
+        if isinstance(prefix, str) and prefix:
+            return {"prefix": prefix}
+        return None
+
+    @property
+    def is_upload_backed(self) -> bool:
+        """This COMBO's options are the server's *installed input files*, so the
+        catalog snapshot is not authoritative for it.
+
+        ComfyUI marks these inputs in ``object_info`` with a ``<kind>_upload``
+        flag (``LoadImage.image`` → ``image_upload``, ``LoadAudio.audio`` →
+        ``audio_upload``, ``LoadVideo.file`` → ``video_upload``,
+        ``Load3D.model_file`` → ``file_upload``) — the same flag that makes the
+        frontend render an upload button. Unlike a model folder (static, set at
+        install time), this list is per-user and grows at RUN time: a file the
+        user just uploaded can never be in the snapshot we validated against.
+        Enum-checking it therefore produces guaranteed false rejections, so the
+        port is left unconstrained and the real membership check is the
+        server's at run time. The sibling ``LoadImageMask.channel`` carries no
+        marker and stays a normal, constrained enum.
+        """
+        return self.type == "COMBO" and self.options.upload
+
+    def canonical_combo(self, value: Any) -> Any | None:
+        """Map a *mangled* COMBO value to the real option it clearly means, or
+        None if it can't be resolved unambiguously.
+
+        A model name is one of these enum options, but an LLM tends to rebuild it
+        from memory — adding a directory prefix (``checkpoints/foo.safetensors``
+        when the option is bare ``foo.safetensors``), dropping a subfolder, or
+        drifting case. The filename is almost always right, so we match by
+        basename (case-insensitive) and, only when EXACTLY ONE option matches,
+        return it. Ambiguous or unmatched values return None so the caller still
+        surfaces ``unknown_enum_value``. Exact values return None (nothing to do).
+
+        Upload-backed ports are exempt for the same reason they are exempt from
+        the enum check (see :attr:`is_upload_backed`): the option list is a
+        stale directory listing, so "the real option it clearly means" is not a
+        question this snapshot can answer. Rewriting there would silently swap a
+        just-uploaded ``Beach.JPG`` for the sample ``beach.jpg`` and generate
+        from the wrong file.
+        """
+        if self.type != "COMBO" or not self.enum_values or self.is_upload_backed:
+            return None
+        opts = [str(e) for e in self.enum_values]
+        s = str(value)
+        if s in opts:
+            return None
+        base = s.rsplit("/", 1)[-1].lower()
+        matches = [o for o in opts if o.rsplit("/", 1)[-1].lower() == base]
+        if len(matches) == 1:
+            return matches[0]
+        ci = [o for o in opts if o.lower() == s.lower()]
+        if len(ci) == 1:
+            return ci[0]
+        return None
+
+    def suggest_combo(self, value: Any, *, limit: int = 5) -> list[str]:
+        """Closest real options to a rejected COMBO value, for a ``did_you_mean``
+        hint — so an unavailable model points at the nearest available one the
+        agent can substitute or offer, instead of a dead value."""
+        if self.type != "COMBO" or not self.enum_values:
+            return []
+        import difflib
+
+        opts = [str(e) for e in self.enum_values]
+        base = str(value).rsplit("/", 1)[-1]
+        bases = [o.rsplit("/", 1)[-1] for o in opts]
+        out: list[str] = []
+        for g in difflib.get_close_matches(base, bases, n=limit, cutoff=0.5):
+            for o in opts:
+                if o.rsplit("/", 1)[-1] == g and o not in out:
+                    out.append(o)
+                    break
+        return out[:limit]
+
     def validate_shape(self, value: Any) -> str | None:
         """Hard-reject on JSON-shape mismatch. Returns error message or None."""
         if self.type == "INT":
@@ -119,7 +223,14 @@ class Port:
         if self.validate_shape(value) is not None:
             return []
         warnings: list[dict] = []
-        if self.type == "COMBO" and self.enum_values:
+        if self.is_upload_backed:
+            # Upload-backed input file port: unconstrained, by design. Skipping
+            # BOTH enum branches is deliberate — a freshly uploaded file is
+            # absent from a POPULATED snapshot just as surely as from an empty
+            # one, so gating only the empty-list case would still false-reject
+            # (`LoadImage.image` typically ships a handful of sample images).
+            pass
+        elif self.type == "COMBO" and self.enum_values:
             # Membership compares on the stringified form BOTH ways, so a value
             # matches its option regardless of int/str (`8` ↔ "8", `8.0` ↔ "8").
             # This keeps validate lenient (never false-warns on a real value)
@@ -131,14 +242,17 @@ class Port:
                 candidates.add(str(int(value)))
             enum_str = {str(e) for e in self.enum_values}
             if not (candidates & enum_str):
-                warnings.append(
-                    {
-                        "code": "unknown_enum_value",
-                        "field": self.name,
-                        "message": f"{value!r} not in {len(self.enum_values)} known options for {self.name}",
-                        "valid_options": list(self.enum_values),
-                    }
-                )
+                warning = {
+                    "code": "unknown_enum_value",
+                    "field": self.name,
+                    "message": f"{value!r} not in {len(self.enum_values)} known options for {self.name}",
+                    "valid_options": list(self.enum_values),
+                }
+                suggestions = self.suggest_combo(value)
+                if suggestions:
+                    warning["did_you_mean"] = suggestions
+                    warning["message"] += f" — closest: {', '.join(suggestions)}"
+                warnings.append(warning)
         elif self.type == "COMBO" and self.enum_declared:
             # The server declared this field's choices and shipped NONE of them:
             # the folder backing it is empty — no models (or inputs) installed.
@@ -263,7 +377,20 @@ def _derive_pack(python_module: str) -> str:
     return "core"
 
 
+def _upload_marked(opts_raw: dict) -> bool:
+    """True when the input's options dict carries an upload marker.
+
+    ComfyUI has no single flag name — the marker is ``<kind>_upload`` and the
+    kind varies by loader (``image_upload``, ``audio_upload``, ``video_upload``,
+    ``file_upload`` are all present in the production catalog, and custom packs
+    add their own). Matching the suffix rather than an allow-list keeps a new
+    loader kind from silently regressing into false rejections.
+    """
+    return any(isinstance(k, str) and k.endswith("_upload") and bool(v) for k, v in opts_raw.items())
+
+
 def _parse_port_options(opts_raw: dict) -> PortOptions:
+    template_raw = opts_raw.get("template")
     return PortOptions(
         min=opts_raw.get("min"),
         max=opts_raw.get("max"),
@@ -272,6 +399,8 @@ def _parse_port_options(opts_raw: dict) -> PortOptions:
         multiline=bool(opts_raw.get("multiline", False)),
         control_after_generate=_control_after_generate_set(opts_raw.get("control_after_generate")),
         force_input=bool(opts_raw.get("forceInput", False)),
+        template=template_raw if isinstance(template_raw, dict) else None,
+        upload=_upload_marked(opts_raw),
     )
 
 
@@ -322,6 +451,14 @@ def _parse_input_spec(spec: Any) -> tuple[str, bool, list[Any], PortOptions, boo
             # before), but flagged as declared so validate can say "0 options
             # installed" instead of silently skipping the check.
             return first, bool(options), list(options), port_opts, True
+        # Dynamic combo (COMFY_DYNAMICCOMBO_V3): options are {key, inputs} dicts.
+        # It IS a widget (the frontend renders a selector + key-dependent
+        # sub-widgets); the selector's choices are the keys. Capture the tree so
+        # widget_order can expand the sub-widgets — matching the API converter.
+        # `enum_declared=True`: the choice list shipped, it just isn't scalar.
+        if isinstance(options, list) and options and all(isinstance(v, dict) and "key" in v for v in options):
+            port_opts.dynamic_options = options
+            return first, True, [v["key"] for v in options], port_opts, True
         # No usable `options` key at all: a remote/dynamic combo whose choices
         # the frontend fetches at runtime. Unknowable here — stay unconstrained.
         return first, False, [], port_opts, False
@@ -333,6 +470,49 @@ def _parse_input_spec(spec: Any) -> tuple[str, bool, list[Any], PortOptions, boo
         return "COMBO", True, list(first), port_opts, True
 
     return "UNKNOWN", False, [], port_opts, False
+
+
+_FIRST_KEY = object()  # sentinel: expand the first/default dynamic-combo key
+
+
+def _dynamic_sub_widget_names(base: str, options: list, selected: Any = _FIRST_KEY) -> list[str]:
+    """Sub-widget names a dynamic combo expands to for the ``selected`` key
+    (default: the first/default key) — e.g. ``model`` → ``["model.resolution"]``.
+    Static mirror of the converter's value-driven ``_dynamic_combo_sub_inputs``."""
+    return [name for name, _ in _dynamic_sub_widget_defaults(base, options, selected).items()]
+
+
+def _dynamic_sub_widget_defaults(base: str, options: list, selected: Any = _FIRST_KEY) -> dict[str, Any]:
+    """``{f"{base}.{sub}": default}`` for the ``selected`` key's sub-inputs.
+
+    Defaults to the first key (fresh nodes select it). Passing the node's actual
+    selected key — as ``widget_order_for_node`` does — keeps the widget order
+    aligned to ``widgets_values`` when a node picks an option whose sub-widget
+    count differs from the default. An unknown key expands to nothing, matching
+    the converter's ``_dynamic_combo_sub_inputs``."""
+    if not options:
+        return {}
+    if selected is _FIRST_KEY:
+        option = options[0] if isinstance(options[0], dict) else None
+    else:
+        option = next((o for o in options if isinstance(o, dict) and o.get("key") == selected), None)
+    if option is None:
+        return {}
+    sub_def = option.get("inputs")
+    if not isinstance(sub_def, dict):
+        return {}
+    out: dict[str, Any] = {}
+    for section in ("required", "optional"):
+        section_def = sub_def.get(section) or {}
+        if not isinstance(section_def, dict):
+            continue
+        for sub_name, spec in section_def.items():
+            _t, _e, enum_values, opts, _declared = _parse_input_spec(spec)
+            default = opts.default
+            if default is None and enum_values:
+                default = enum_values[0]
+            out[f"{base}.{sub_name}"] = default
+    return out
 
 
 def _is_scalar_choice(v: Any) -> bool:
@@ -731,9 +911,73 @@ class Graph:
             if p.is_link:
                 continue
             order.append(p.name)
+            if p.options.dynamic_options:
+                order.extend(_dynamic_sub_widget_names(p.name, p.options.dynamic_options))
             if p.options.control_after_generate:
                 order.append("control_after_generate")
         return order
+
+    def widget_order_for_node(self, class_name: str, widgets_values: Any = None) -> list[str]:
+        """Widget order aligned to a SPECIFIC node's ``widgets_values``.
+
+        Identical to :meth:`widget_order`, except a dynamic combo expands the
+        sub-widgets of its *currently selected* key (read from ``widgets_values``)
+        rather than the schema's first key. The two agree for a fresh node (which
+        defaults to the first key) but diverge once a node selects an option whose
+        sub-widget count differs — and there the static first-key order mis-indexes
+        every widget after the combo, so e.g. ``set-widget <id>.seed`` would write
+        into ``model.resolution``. Falls back to the static order when
+        ``widgets_values`` is empty (a fresh/unselected node selects the first key).
+        """
+        base = self.widget_order(class_name)
+        m = self._nodes.get(class_name)
+        values = list(widgets_values) if widgets_values else []
+        # The static order is already exact unless this node BOTH has a dynamic
+        # combo AND carries a selection to read. Delegating otherwise keeps the
+        # single source of truth (and any override) for the common case.
+        if m is None or not base or not values or not any(p.options.dynamic_options for p in m.inputs if not p.is_link):
+            return base
+        order: list[str] = []
+        vidx = 0
+        for p in m.inputs:
+            if p.is_link:
+                continue
+            order.append(p.name)
+            selector_idx = vidx
+            vidx += 1
+            if p.options.dynamic_options:
+                selected = values[selector_idx] if selector_idx < len(values) else _FIRST_KEY
+                subs = _dynamic_sub_widget_names(p.name, p.options.dynamic_options, selected)
+                order.extend(subs)
+                vidx += len(subs)
+            if p.options.control_after_generate:
+                order.append("control_after_generate")
+                vidx += 1
+        return order
+
+    def widget_defaults(self, class_name: str) -> dict[str, Any]:
+        """Default value per widget-order name — including dynamic-combo selectors
+        (first key), their sub-widgets, and control_after_generate. Used by
+        ``add-node`` so a fresh node is runtime-valid, aligned with the converter."""
+        m = self._nodes.get(class_name)
+        if m is None:
+            return {}
+        out: dict[str, Any] = {}
+        for p in m.inputs:
+            if p.is_link:
+                continue
+            if p.options.dynamic_options:
+                out[p.name] = p.enum_values[0] if p.enum_values else None  # selected key
+                out.update(_dynamic_sub_widget_defaults(p.name, p.options.dynamic_options))
+            elif p.options.default is not None:
+                out[p.name] = p.options.default
+            elif p.enum_values:
+                out[p.name] = p.enum_values[0]
+            else:
+                out[p.name] = None
+            if p.options.control_after_generate:
+                out["control_after_generate"] = "fixed"
+        return out
 
     # -- Validation --
 
@@ -1711,6 +1955,25 @@ def _subgraph_defs_by_id(workflow: dict) -> dict[str, dict]:
     return by_id
 
 
+def _widgets_as_list(widgets_values: Any) -> list[Any]:
+    """Normalize ``widgets_values`` to a list positionally indexable by widget order.
+
+    ComfyUI's own convention is a positional LIST, but some custom nodes —
+    VideoHelperSuite's ``VHS_*`` family (e.g. ``VHS_LoadVideo``) — serialize it
+    as a NAMED DICT instead: ``{"video": "...", "force_rate": 0, ...}``. Every
+    call site in this module indexes ``widgets_values`` by INTEGER position
+    against the schema's widget ``order``; a dict is truthy (so a bare
+    ``widgets_values or []`` guard doesn't catch it) and indexing it with an int
+    raises ``KeyError``, while ``.extend()`` on it raises ``AttributeError``.
+    Anything that isn't a list reads as "no positional values known" — mirrors
+    ``workflow_to_api.py``'s non-list handling
+    (``test_tolerates_non_list_widgets_values``) so the two code paths agree;
+    a node whose widgets can't be positionally read shows as unset rather than
+    crashing slot extraction or a set-widget write.
+    """
+    return list(widgets_values) if isinstance(widgets_values, list) else []
+
+
 def _node_widget_slots(node: dict, prefix: str, graph: Graph) -> list[dict]:
     """Surface a regular node's widget inputs as slots under ``prefix``.
 
@@ -1722,23 +1985,35 @@ def _node_widget_slots(node: dict, prefix: str, graph: Graph) -> list[dict]:
     m = graph.node(node_type)
     if m is None:
         return []
-    order = graph.widget_order(node_type)
-    widgets = node.get("widgets_values") or []
+    widgets = _widgets_as_list(node.get("widgets_values"))
+    order = graph.widget_order_for_node(node_type, widgets)
+    # Drive from `order`, not m.inputs. A COMFY_DYNAMICCOMBO_V3 input is ONE port
+    # (`model`) whose selected option contributes extra widgets addressed as
+    # `model.<sub>`; those dotted names exist in `order` but have no Port, so
+    # iterating m.inputs hid them. The only place they surfaced was the
+    # set-widget error ("available: model, model.prompt, model.resolution") —
+    # i.e. the CLI knew the answer and would not advertise it. 102 catalog types
+    # carry a dynamic combo.
+    by_name = {p.name: p for p in m.inputs if not p.is_link}
     slots: list[dict] = []
-    for port in m.inputs:
-        if port.is_link:
-            continue
-        try:
-            idx = order.index(port.name)
-        except ValueError:
-            continue
-        current = widgets[idx] if idx < len(widgets) else None
+    for idx, wname in enumerate(order):
+        port = by_name.get(wname)
+        if port is None:
+            # A dotted sub-widget: inherit type from its base port so the slot
+            # still advertises something useful. Skip if the base is unknown.
+            base = wname.split(".", 1)[0]
+            base_port = by_name.get(base)
+            if base_port is None:
+                continue
+            slot_type = base_port.type
+        else:
+            slot_type = port.type
         slots.append(
             {
-                "address": f"{prefix}.{port.name}",
-                "name": port.name,
-                "type": port.type,
-                "current_value": current,
+                "address": f"{prefix}.{wname}",
+                "name": wname,
+                "type": slot_type,
+                "current_value": widgets[idx] if idx < len(widgets) else None,
                 "instance_id": prefix,
                 "node_type": node_type,
             }
@@ -1872,12 +2147,12 @@ def _resolve_proxy_value(instance: dict, subgraph: dict, input_name: str, graph:
             if not isinstance(inode, dict) or str(inode.get("id", "")) != interior_id:
                 continue
             interior_class = inode.get("type", "")
-            order = graph.widget_order(interior_class)
+            widgets = inode.get("widgets_values") or []
+            order = graph.widget_order_for_node(interior_class, widgets)
             try:
                 idx = order.index(name)
             except ValueError:
                 return _UNRESOLVED
-            widgets = inode.get("widgets_values") or []
             return widgets[idx] if idx < len(widgets) else _UNRESOLVED
         break
     return _UNRESOLVED
@@ -1894,7 +2169,7 @@ def _write_widget(node: dict, input_name: str, value: Any, graph: Graph, *, exte
     m = graph.node(node_type)
     if m is None:
         raise ValueError(f"unknown node type {node_type!r} for node {node.get('id')}")
-    order = graph.widget_order(node_type)
+    order = graph.widget_order_for_node(node_type, node.get("widgets_values"))
     try:
         widget_idx = order.index(input_name)
     except ValueError:
@@ -1903,7 +2178,7 @@ def _write_widget(node: dict, input_name: str, value: Any, graph: Graph, *, exte
             f"widget {input_name!r} not found on {node_type}; "
             f"available widgets: {', '.join(avail) if avail else '(none — all inputs are links)'}"
         )
-    widgets = node.get("widgets_values") or []
+    widgets = _widgets_as_list(node.get("widgets_values"))
     if widget_idx >= len(widgets):
         if not extend:
             raise ValueError(f"widget index {widget_idx} out of range for {node_type}")
@@ -1971,19 +2246,87 @@ def _isolate_shared_subgraph(workflow: dict, instance: dict, defs_by_id: dict[st
     """If ``instance``'s subgraph definition is shared with another instance,
     deep-copy it under a fresh id and repoint ``instance`` so an interior write
     can't alias sibling instances. No-op when the instance already owns its def.
+
+    The fork id is DERIVED DETERMINISTICALLY from ``(definition id, instance id)``
+    — never a random UUID — so two replicas replaying the same op produce
+    byte-identical graphs (a convergence requirement of the op model in
+    :mod:`comfy_cli.workflow_ops`).
     """
     def_id = str(instance.get("type", ""))
     sg = defs_by_id.get(def_id)
     if sg is None or _count_instances(workflow, def_id) <= 1:
         return
     new_sg = copy.deepcopy(sg)
-    new_id = str(_uuid.uuid4())
+    new_id = _deterministic_fork_id(def_id, instance.get("id"))
     new_sg["id"] = new_id
     workflow.setdefault("definitions", {}).setdefault("subgraphs", []).append(new_sg)
     instance["type"] = new_id
 
 
+def _deterministic_fork_id(def_id: str, instance_id: Any) -> str:
+    """A stable id for the isolated copy of ``def_id`` owned by ``instance_id``.
+    Deterministic across processes (``hashlib``, not the salted builtin ``hash``)
+    so replaying the same op anywhere yields the same id. SHA-256 (not SHA-1) —
+    this isn't a security boundary, but there's no reason to reach for a broken
+    hash, and it keeps the scanners quiet."""
+    seed = f"{def_id}\x00{instance_id}".encode()
+    return "sg-" + _hashlib.sha256(seed).hexdigest()[:32]
+
+
+def _suggest_slots_for_input(workflow: dict, input_name: str, graph: Graph, *, limit: int = 6) -> list[str]:
+    """Real slot addresses whose widget name matches ``input_name``.
+
+    Turns an unresolvable address into an actionable correction: an agent that
+    named the right widget but the wrong node or separator (e.g.
+    ``285/288.vae_name`` or ``285:288.vae_name`` when the VAELoader is ``285/29``)
+    is pointed at the address that actually carries ``vae_name``. Best-effort —
+    any extraction failure yields no suggestions rather than masking the error.
+    """
+    if not input_name:
+        return []
+    try:
+        slots = _extract_frontend_slots(workflow, graph)
+    except Exception:
+        return []
+    out: list[str] = []
+    for s in slots:
+        if s.get("name") == input_name:
+            addr = s.get("address") or ""
+            node_type = s.get("node_type") or ""
+            out.append(f"{addr} ({node_type})" if node_type else addr)
+            if len(out) >= limit:
+                break
+    return out
+
+
 def _apply_one_slot(workflow: dict, addr: str, value: Any, graph: Graph) -> list[dict]:
+    """Apply one slot override, enriching *not-found* errors with real address
+    suggestions so a mistargeted edit self-corrects in one step.
+
+    An LLM that reconstructs an interior address from memory (rather than copying
+    it from ``slots``) tends to hit a real *sibling* node — e.g. writing
+    ``285/288.vae_name`` (a CLIPLoader) when the VAELoader is ``285/29``. The
+    intended widget name is almost always right, so on a not-found failure we
+    scan the workflow for the address that actually carries that widget and name
+    it in the error. Shape/enum errors (the target resolved fine) pass through
+    unchanged.
+    """
+    try:
+        return _apply_one_slot_impl(workflow, addr, value, graph)
+    except ValueError as e:
+        if "not found" not in str(e):
+            raise
+        input_name = addr.split(".", 1)[1] if "." in addr else ""
+        suggestions = _suggest_slots_for_input(workflow, input_name, graph)
+        if not suggestions:
+            raise
+        raise ValueError(
+            f"{e}. Did you mean: {'; '.join(suggestions)}? "
+            "Copy the address verbatim from `comfy workflow slots` — never rebuild it."
+        ) from e
+
+
+def _apply_one_slot_impl(workflow: dict, addr: str, value: Any, graph: Graph) -> list[dict]:
     """Apply a single slot override. Returns warnings. Raises ValueError on hard errors.
 
     Address forms (see ``_extract_frontend_slots`` / ``_SUBGRAPH_PATH_SEP``):

@@ -27,6 +27,7 @@ from comfy_cli.auth import store as auth_store
 from comfy_cli.cloud import oauth
 from comfy_cli.credentials import (
     CLOUD_API_KEY_PROVIDER,
+    CLOUD_BEARER_ENV_VAR,
     Credential,
     find_api_key,
     get_session,
@@ -51,6 +52,7 @@ def clean_env(monkeypatch: pytest.MonkeyPatch):
     """No ambient credentials: no env vars, no stored key, no session."""
     monkeypatch.delenv("COMFY_CLOUD_API_KEY", raising=False)
     monkeypatch.delenv("COMFY_API_KEY", raising=False)
+    monkeypatch.delenv("COMFY_CLOUD_AUTH_TOKEN", raising=False)
     monkeypatch.setattr(auth_store, "get", lambda _provider: None)
     monkeypatch.setattr(auth_store, "get_cloud_session", lambda: None)
     monkeypatch.setattr(oauth, "ensure_fresh_session", lambda **kw: None)
@@ -450,3 +452,46 @@ def test_no_direct_credential_reads_outside_resolver():
         "Direct credential reads found outside comfy_cli/credentials.py — "
         "use resolve_cloud_credential / find_api_key / get_session instead:\n" + "\n".join(violations)
     )
+
+
+# ---------------------------------------------------------------------------
+# forwarded Bearer token (COMFY_CLOUD_AUTH_TOKEN — the trusted-caller path)
+# ---------------------------------------------------------------------------
+
+
+class TestForwardedBearerToken:
+    def test_bearer_env_yields_oauth_credential_for_cloud(self, clean_env):
+        clean_env.setenv(CLOUD_BEARER_ENV_VAR, "jwt-abc")
+        cred = resolve_cloud_credential(purpose="cloud")
+        assert cred == Credential(kind="oauth", value="jwt-abc", source=f"env:{CLOUD_BEARER_ENV_VAR}")
+
+    def test_bearer_env_is_stripped(self, clean_env):
+        clean_env.setenv(CLOUD_BEARER_ENV_VAR, "  jwt-abc \n")
+        cred = resolve_cloud_credential(purpose="cloud")
+        assert cred is not None and cred.value == "jwt-abc"
+
+    def test_blank_bearer_env_is_ignored(self, clean_env):
+        clean_env.setenv(CLOUD_BEARER_ENV_VAR, "   \n\t")
+        assert resolve_cloud_credential(purpose="cloud") is None
+
+    def test_live_session_outranks_bearer_env(self, clean_env):
+        clean_env.setenv(CLOUD_BEARER_ENV_VAR, "jwt-abc")
+        clean_env.setattr(oauth, "ensure_fresh_session", lambda **kw: _session(token="live-token"))
+        cred = resolve_cloud_credential(purpose="cloud")
+        assert cred == Credential(kind="oauth", value="live-token", source="session")
+
+    def test_expired_session_falls_through_to_bearer_env(self, clean_env):
+        clean_env.setenv(CLOUD_BEARER_ENV_VAR, "jwt-abc")
+        clean_env.setattr(oauth, "ensure_fresh_session", lambda **kw: _session(expired=True))
+        cred = resolve_cloud_credential(purpose="cloud")
+        assert cred == Credential(kind="oauth", value="jwt-abc", source=f"env:{CLOUD_BEARER_ENV_VAR}")
+
+    def test_bearer_env_outranks_api_key_env(self, clean_env):
+        clean_env.setenv(CLOUD_BEARER_ENV_VAR, "jwt-abc")
+        clean_env.setenv("COMFY_CLOUD_API_KEY", "comfyui-key")
+        cred = resolve_cloud_credential(purpose="cloud")
+        assert cred == Credential(kind="oauth", value="jwt-abc", source=f"env:{CLOUD_BEARER_ENV_VAR}")
+
+    def test_bearer_env_ignored_for_partner_purpose(self, clean_env):
+        clean_env.setenv(CLOUD_BEARER_ENV_VAR, "jwt-abc")
+        assert resolve_cloud_credential(purpose="partner") is None

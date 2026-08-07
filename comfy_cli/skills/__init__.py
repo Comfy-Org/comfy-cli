@@ -18,8 +18,6 @@ Bundled skills (4 total):
                        contract, routing, discovery, execution, and all
                        domain patterns: image, video, audio, cloud, edit,
                        condition, pipeline)
-- ``comfy-fragments``— typed reusable workflow fragments + YAML blueprint
-                       composition (build large pipelines from small pieces)
 - ``comfy-debug``    — debugging skill for when workflows fail or jobs hang
 - ``comfy-relay``    — what to put in chat while driving the CLI
 """
@@ -51,7 +49,6 @@ _SKILL_FILE = "SKILL.md"
 # name). The bundled skills must satisfy their own convention.
 BUNDLED_SKILLS: tuple[tuple[str, str], ...] = (
     ("comfy", "comfy"),
-    ("comfy-fragments", "comfy-fragments"),
     ("comfy-debug", "comfy-debug"),
     ("comfy-relay", "comfy-relay"),
     ("comfy-director", "comfy-director"),
@@ -583,7 +580,6 @@ def _write_claude_skill(path: Path, content: str) -> None:
 def _cursor_description_for(skill_name: str) -> str:
     return {
         "comfy": "comfy CLI for ComfyUI workflows, models, node-graph queries, image/video/audio generation, cloud, and pipeline orchestration.",
-        "comfy-fragments": "Typed reusable workflow fragments + YAML blueprint composition: build large pipelines from small tested pieces via comfy CLI.",
         "comfy-debug": "Debugging skill for the comfy CLI: failed workflows, hung jobs, error envelopes.",
         "comfy-relay": "What to put in chat while driving the comfy CLI: show artifacts, surface results, truncation rules.",
     }.get(skill_name, f"comfy CLI skill: {skill_name}")
