@@ -48,6 +48,10 @@ class PortOptions:
     # autogrow input (e.g. {"input": {...}, "prefix": "image", "min": 1, "max": 50}).
     # Use ``Port.autogrow_template`` to pull out just the naming fields.
     template: dict | None = None
+    # True when object_info marked this input upload-backed — the frontend renders
+    # an upload button and the declared options are the server's *installed input
+    # files*, not an install-time enum. See ``Port.is_upload_backed``.
+    upload: bool = False
 
 
 @dataclass
@@ -117,6 +121,25 @@ class Port:
             return {"prefix": prefix}
         return None
 
+    @property
+    def is_upload_backed(self) -> bool:
+        """This COMBO's options are the server's *installed input files*, so the
+        catalog snapshot is not authoritative for it.
+
+        ComfyUI marks these inputs in ``object_info`` with a ``<kind>_upload``
+        flag (``LoadImage.image`` → ``image_upload``, ``LoadAudio.audio`` →
+        ``audio_upload``, ``LoadVideo.file`` → ``video_upload``,
+        ``Load3D.model_file`` → ``file_upload``) — the same flag that makes the
+        frontend render an upload button. Unlike a model folder (static, set at
+        install time), this list is per-user and grows at RUN time: a file the
+        user just uploaded can never be in the snapshot we validated against.
+        Enum-checking it therefore produces guaranteed false rejections, so the
+        port is left unconstrained and the real membership check is the
+        server's at run time. The sibling ``LoadImageMask.channel`` carries no
+        marker and stays a normal, constrained enum.
+        """
+        return self.type == "COMBO" and self.options.upload
+
     def canonical_combo(self, value: Any) -> Any | None:
         """Map a *mangled* COMBO value to the real option it clearly means, or
         None if it can't be resolved unambiguously.
@@ -128,8 +151,15 @@ class Port:
         basename (case-insensitive) and, only when EXACTLY ONE option matches,
         return it. Ambiguous or unmatched values return None so the caller still
         surfaces ``unknown_enum_value``. Exact values return None (nothing to do).
+
+        Upload-backed ports are exempt for the same reason they are exempt from
+        the enum check (see :attr:`is_upload_backed`): the option list is a
+        stale directory listing, so "the real option it clearly means" is not a
+        question this snapshot can answer. Rewriting there would silently swap a
+        just-uploaded ``Beach.JPG`` for the sample ``beach.jpg`` and generate
+        from the wrong file.
         """
-        if self.type != "COMBO" or not self.enum_values:
+        if self.type != "COMBO" or not self.enum_values or self.is_upload_backed:
             return None
         opts = [str(e) for e in self.enum_values]
         s = str(value)
@@ -193,7 +223,14 @@ class Port:
         if self.validate_shape(value) is not None:
             return []
         warnings: list[dict] = []
-        if self.type == "COMBO" and self.enum_values:
+        if self.is_upload_backed:
+            # Upload-backed input file port: unconstrained, by design. Skipping
+            # BOTH enum branches is deliberate — a freshly uploaded file is
+            # absent from a POPULATED snapshot just as surely as from an empty
+            # one, so gating only the empty-list case would still false-reject
+            # (`LoadImage.image` typically ships a handful of sample images).
+            pass
+        elif self.type == "COMBO" and self.enum_values:
             # Membership compares on the stringified form BOTH ways, so a value
             # matches its option regardless of int/str (`8` ↔ "8", `8.0` ↔ "8").
             # This keeps validate lenient (never false-warns on a real value)
@@ -340,6 +377,18 @@ def _derive_pack(python_module: str) -> str:
     return "core"
 
 
+def _upload_marked(opts_raw: dict) -> bool:
+    """True when the input's options dict carries an upload marker.
+
+    ComfyUI has no single flag name — the marker is ``<kind>_upload`` and the
+    kind varies by loader (``image_upload``, ``audio_upload``, ``video_upload``,
+    ``file_upload`` are all present in the production catalog, and custom packs
+    add their own). Matching the suffix rather than an allow-list keeps a new
+    loader kind from silently regressing into false rejections.
+    """
+    return any(isinstance(k, str) and k.endswith("_upload") and bool(v) for k, v in opts_raw.items())
+
+
 def _parse_port_options(opts_raw: dict) -> PortOptions:
     template_raw = opts_raw.get("template")
     return PortOptions(
@@ -351,6 +400,7 @@ def _parse_port_options(opts_raw: dict) -> PortOptions:
         control_after_generate=_control_after_generate_set(opts_raw.get("control_after_generate")),
         force_input=bool(opts_raw.get("forceInput", False)),
         template=template_raw if isinstance(template_raw, dict) else None,
+        upload=_upload_marked(opts_raw),
     )
 
 

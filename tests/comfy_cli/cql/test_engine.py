@@ -1399,6 +1399,215 @@ class TestValidateEmptyCombo:
         assert ("unet_name", "no_options_available") not in by_field
 
 
+class TestValidateUploadBackedCombo:
+    """A COMBO marked ``<kind>_upload`` in object_info lists the server's
+    *installed input files*, not an install-time enum — so the catalog snapshot
+    can never be authoritative for it and it must not be enum-validated.
+
+    Found live: an agenteval run uploaded an image, wired it into
+    ``LoadImage.image``, and validate answered ``no_options_available`` ("the
+    server reports 0 installed options for image"). The workflow was rejected,
+    the agent retried, and the loop burned two of the turn's paid run slots. The
+    empty-list reasoning that ``no_options_available`` was built on holds for
+    MODEL folders (``UNETLoader``/``CLIPLoader`` — static, install-time) and is
+    exactly wrong for input files, which are per-user and populated at run time
+    by upload. A freshly uploaded file is missing from a POPULATED snapshot just
+    as surely as from an empty one, so BOTH enum branches are skipped.
+    """
+
+    def _object_info(self, **extra) -> dict[str, Any]:
+        # Shapes verified against the production catalog
+        # (services/ingest/data/object_info.json): LoadImage/LoadImageMask use
+        # the list-form dialect with `image_upload`, while the V3 loaders
+        # (LoadAudio/LoadVideo/Load3D) use `["COMBO", {"options": [...], ...}]`
+        # with their own kind of marker.
+        oi = {
+            "LoadImage": {
+                "input": {"required": {"image": [["beach.jpg", "example.png"], {"image_upload": True}]}},
+                "input_order": {"required": ["image"]},
+                "output": ["IMAGE", "MASK"],
+                "output_name": ["IMAGE", "MASK"],
+                "python_module": "nodes",
+            },
+            "LoadImageMask": {
+                # The counter-case lives on the SAME node: `image` is
+                # upload-backed, `channel` is an ordinary enum and must stay
+                # constrained.
+                "input": {
+                    "required": {
+                        "image": [["beach.jpg", "example.png"], {"image_upload": True}],
+                        "channel": [["alpha", "red", "green", "blue"]],
+                    }
+                },
+                "input_order": {"required": ["image", "channel"]},
+                "output": ["MASK"],
+                "output_name": ["MASK"],
+                "python_module": "nodes",
+            },
+            "SaveImage": {
+                "input": {"required": {"images": "IMAGE"}},
+                "output": [],
+                "output_name": [],
+                "output_node": True,
+                "python_module": "nodes",
+            },
+        }
+        oi.update(extra)
+        return oi
+
+    def _graph(self, **extra) -> Graph:
+        return Graph.from_object_info(self._object_info(**extra))
+
+    def _port(self, graph: Graph, class_type: str, name: str):
+        return next(p for p in graph.node(class_type).inputs if p.name == name)
+
+    def test_freshly_uploaded_filename_passes_against_a_populated_catalog(self):
+        """The regression, populated-list half: the snapshot lists other files,
+        the just-uploaded one is not among them, and that is NOT an error."""
+        g = self._graph()
+        result = g.validate_workflow(
+            {
+                "1": {"class_type": "LoadImage", "inputs": {"image": "user_upload_9f2c1a.png"}},
+                "2": {"class_type": "SaveImage", "inputs": {"images": ["1", 0]}},
+            }
+        )
+        assert result["valid"] is True, result["errors"]
+        assert [e for e in result["errors"] if e["field"] == "image"] == []
+
+    def test_freshly_uploaded_filename_passes_against_an_empty_catalog(self):
+        """The regression as it actually fired: a server with no sample images
+        declares an EMPTY list, which used to emit ``no_options_available``."""
+        oi = self._object_info()
+        oi["LoadImage"]["input"]["required"]["image"] = [[], {"image_upload": True}]
+        g = Graph.from_object_info(oi)
+        result = g.validate_workflow(
+            {
+                "1": {"class_type": "LoadImage", "inputs": {"image": "user_upload_9f2c1a.png"}},
+                "2": {"class_type": "SaveImage", "inputs": {"images": ["1", 0]}},
+            }
+        )
+        assert result["valid"] is True, result["errors"]
+        codes = {e["code"] for e in result["errors"]}
+        assert "no_options_available" not in codes
+        assert "unknown_enum_value" not in codes
+
+    def test_no_warning_on_the_edit_surface_either(self):
+        """``workflow_ops._validate_widget`` (the set-widget/apply warning
+        surface the agent reads) funnels through the same ``validate_catalog``,
+        so assert it directly for both list states."""
+        populated = self._port(self._graph(), "LoadImage", "image")
+        oi = self._object_info()
+        oi["LoadImage"]["input"]["required"]["image"] = [[], {"image_upload": True}]
+        empty = self._port(Graph.from_object_info(oi), "LoadImage", "image")
+        assert populated.validate_catalog("user_upload_9f2c1a.png") == []
+        assert empty.validate_catalog("user_upload_9f2c1a.png") == []
+
+    def test_sibling_plain_enum_on_the_same_node_still_rejects(self):
+        """The anti-blanket check: exempting the upload port must not disarm
+        enum checking for the node's ordinary enums."""
+        g = self._graph()
+        result = g.validate_workflow(
+            {
+                "1": {
+                    "class_type": "LoadImageMask",
+                    "inputs": {"image": "user_upload_9f2c1a.png", "channel": "cyan"},
+                },
+                "2": {"class_type": "SaveImage", "inputs": {"images": ["1", 0]}},
+            }
+        )
+        assert result["valid"] is False
+        errs = [e for e in result["errors"] if e["code"] == "unknown_enum_value"]
+        assert [e["field"] for e in errs] == ["channel"]
+        assert "alpha" in errs[0]["hint"]
+
+    def test_empty_model_folder_still_reports_no_options_available(self):
+        """The behaviour ``no_options_available`` exists for is untouched: an
+        unmarked (model-folder) combo with zero installed options still errors."""
+        g = self._graph(
+            UNETLoader={
+                "input": {"required": {"unet_name": [[]]}},
+                "input_order": {"required": ["unet_name"]},
+                "output": ["MODEL"],
+                "output_name": ["MODEL"],
+                "python_module": "nodes",
+            }
+        )
+        result = g.validate_workflow(
+            {
+                "1": {"class_type": "UNETLoader", "inputs": {"unet_name": "flux1-dev.safetensors"}},
+                "2": {"class_type": "SaveImage", "inputs": {"images": ["1", 0]}},
+            }
+        )
+        errs = [e for e in result["errors"] if e["code"] == "no_options_available"]
+        assert [e["field"] for e in errs] == ["unet_name"]
+
+    def test_marker_is_recognized_for_every_upload_kind(self):
+        """ComfyUI names the flag per loader kind — ``image_upload``,
+        ``audio_upload``, ``video_upload``, ``file_upload`` all ship in the
+        production catalog — and the V3 loaders declare their options in the
+        dict-form dialect. All are exempt; an unmarked combo is not."""
+        g = self._graph(
+            LoadAudio={
+                "input": {"required": {"audio": ["COMBO", {"options": ["sample.mp3"], "audio_upload": True}]}},
+                "output": ["AUDIO"],
+                "output_name": ["AUDIO"],
+                "python_module": "nodes",
+            },
+            LoadVideo={
+                "input": {"required": {"file": ["COMBO", {"options": ["bedroom.mp4"], "video_upload": True}]}},
+                "output": ["VIDEO"],
+                "output_name": ["VIDEO"],
+                "python_module": "nodes",
+            },
+            Load3D={
+                "input": {"required": {"model_file": ["COMBO", {"options": ["none"], "file_upload": True}]}},
+                "output": ["MESH"],
+                "output_name": ["MESH"],
+                "python_module": "nodes",
+            },
+        )
+        marked = [("LoadAudio", "audio"), ("LoadVideo", "file"), ("Load3D", "model_file")]
+        for class_type, name in marked:
+            port = self._port(g, class_type, name)
+            assert port.is_upload_backed is True, f"{class_type}.{name}"
+            assert port.validate_catalog("just-uploaded.bin") == [], f"{class_type}.{name}"
+        assert self._port(g, "LoadImageMask", "channel").is_upload_backed is False
+
+    def test_a_falsey_marker_does_not_exempt(self):
+        """``image_upload: false`` is a declaration that the port is NOT
+        upload-backed — it must stay constrained."""
+        oi = self._object_info()
+        oi["LoadImage"]["input"]["required"]["image"] = [["beach.jpg"], {"image_upload": False}]
+        port = self._port(Graph.from_object_info(oi), "LoadImage", "image")
+        assert port.is_upload_backed is False
+        assert [w["code"] for w in port.validate_catalog("nope.png")] == ["unknown_enum_value"]
+
+    def test_upload_port_stays_a_widget_not_a_link(self):
+        """The exemption is validation-only: it must not move the port between
+        widget and link wiring, nor drop the options `show_node` displays."""
+        port = self._port(self._graph(), "LoadImage", "image")
+        assert (port.is_link, port.enum_declared, port.enum_values) == (False, True, ["beach.jpg", "example.png"])
+
+    def test_uploaded_filename_is_not_rewritten_to_a_sample_file(self):
+        """``canonical_combo`` (set-widget's silent auto-correct) is exempt too:
+        against a stale directory listing, "the option it clearly means" is
+        unanswerable, and a case-only match would swap the user's upload for a
+        sample and generate from the wrong image."""
+        port = self._port(self._graph(), "LoadImage", "image")
+        assert port.canonical_combo("Beach.JPG") is None
+        assert port.canonical_combo("images/beach.jpg") is None
+        # An unmarked combo keeps the auto-correct.
+        g = self._graph(
+            VAELoader={
+                "input": {"required": {"vae_name": [["ae.safetensors"]]}},
+                "output": ["VAE"],
+                "output_name": ["VAE"],
+                "python_module": "nodes",
+            }
+        )
+        assert self._port(g, "VAELoader", "vae_name").canonical_combo("vae/ae.safetensors") == "ae.safetensors"
+
+
 class TestValidateDynamicCombo:
     """Validate expands a ``COMFY_DYNAMICCOMBO_V3`` selector's chosen option and
     checks the dotted sub-inputs the server will actually require (BE-3777).
