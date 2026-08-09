@@ -20,6 +20,23 @@ flag switches the process-wide renderer into NDJSON streaming mode. The same
 event names are used by `comfy jobs watch` in stream mode, so the run stream
 and the watch stream speak one dialect.
 
+### `jobs watch` attaches as the submitting session
+
+A local ComfyUI server does **not** broadcast execution events: it addresses
+`executing` / `executed` / `progress_state` / `execution_cached` /
+`execution_success` to the websocket session that submitted the prompt. So
+`comfy jobs watch <prompt_id>` resolves that prompt's `client_id` — from the job
+state file `comfy run` wrote, else `/queue`, else `/history` — and reconnects
+under it; the terminal envelope reports which id it used (`data.client_id`) and
+whether it was the real submitter (`data.attached`). Use `--client-id` to force a
+specific one. Reconnecting under an existing id is ComfyUI's own session-resume
+path, so a submitter that is *still* holding that socket (an open browser tab, a
+blocking `comfy run`) stops receiving events until it reconnects.
+
+`data.completed_nodes` on the terminal envelope does not depend on the stream: it
+is the union of what the watch observed and what `/history` records for the
+prompt, so it is populated even for a watch that attached after the job ended.
+
 ## Overview
 
 When `--json` is passed, `comfy run` switches into a strict

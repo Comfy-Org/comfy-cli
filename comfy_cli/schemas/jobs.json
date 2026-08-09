@@ -35,6 +35,14 @@
     },
     "elapsed_seconds": {"type": ["number", "null"]},
     "completed_nodes": {"type": "array", "items": {"type": "string"}},
+    "client_id": {
+      "type": ["string", "null"],
+      "description": "`jobs watch` local terminal: the WS session id this watch listened as. ComfyUI addresses execution events to the submitting session only, so watch re-attaches with the prompt's own client_id when it can resolve one (job state file, /queue, /history) and falls back to a fresh id otherwise."
+    },
+    "attached": {
+      "type": "boolean",
+      "description": "`jobs watch` local terminal: true when `client_id` is the prompt's real submitting session — i.e. live execution events could reach this watch. False means the id could not be resolved and the envelope is snapshot-derived."
+    },
     "count": {"type": "integer"},
     "jobs": {
       "type": "array",

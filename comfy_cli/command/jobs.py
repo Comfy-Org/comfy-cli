@@ -1,9 +1,17 @@
 """``comfy jobs`` — list, status, and live-watch ComfyUI prompts.
 
-The ComfyUI server already speaks WebSocket: every node-execution event is
-pushed to every connected ``/ws?clientId=…`` client, tagged with the
-``prompt_id`` it belongs to. We use that channel as the live "push" feed —
-no daemon, no polling.
+The ComfyUI server already speaks WebSocket: node-execution events are pushed
+over ``/ws?clientId=…`` tagged with the ``prompt_id`` they belong to. We use
+that channel as the live "push" feed — no daemon, no polling.
+
+One thing that channel is *not* is a broadcast: the executor addresses every
+execution event (``executing`` / ``executed`` / ``progress_state`` /
+``execution_cached`` / ``execution_success``) to the socket of the session that
+submitted the prompt (``send_sync(..., server.client_id)`` in ComfyUI's
+``execution.py``, delivered by ``PromptServer.send_json`` only to that one
+``sid``). A watcher that connects with a *fresh* ``clientId`` therefore receives
+nothing at all — so ``jobs watch`` re-attaches with the submitting client_id
+(see ``_resolve_watch_client_id``).
 
 Three subcommands:
 
@@ -1754,6 +1762,103 @@ def _cloud_cancel(prompt_id: str) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _client_id_from_extra_data(extra: Any) -> str | None:
+    """Pull ``client_id`` out of a queue/history entry's ``extra_data`` slot."""
+    if isinstance(extra, dict):
+        cid = extra.get("client_id")
+        if isinstance(cid, str) and cid.strip():
+            return cid
+    return None
+
+
+def _resolve_watch_client_id(host: str, port: int, prompt_id: str) -> str | None:
+    """Find the ``client_id`` this prompt was submitted with, or None.
+
+    ComfyUI delivers execution events only to the submitting session's socket
+    (see the module docstring), so watching with a fresh id yields silence. The
+    submitting id is recoverable from three places, cheapest first:
+
+    1. our own on-disk job state, written at submit time by ``comfy run``;
+    2. ``/queue`` ``extra_data`` while the prompt is running or pending;
+    3. ``/history`` ``prompt[3]`` once it has finished.
+
+    Reconnecting under an existing id is ComfyUI's own session-resume mechanism
+    (its ``/ws`` handler pops the previous socket for that id), which is exactly
+    what we want for a prompt whose submitter has exited — the common case, since
+    ``comfy run --async`` returns immediately. The caveat is that a submitter
+    still holding that socket (a browser tab, a blocking ``comfy run``) stops
+    receiving events until it reconnects; pass ``--client-id`` to override the
+    resolution when that matters.
+    """
+    from comfy_cli import jobs_state
+
+    try:
+        job = jobs_state.read(prompt_id)
+    except (ValueError, OSError):  # unsafe prompt_id / unreadable state dir
+        job = None
+    if job is not None and isinstance(job.client_id, str) and job.client_id.strip():
+        return job.client_id
+
+    try:
+        q = _http_get_json(f"http://{host}:{port}/queue")
+    except RuntimeError:
+        q = {}
+    if isinstance(q, dict):
+        for key in ("queue_running", "queue_pending"):
+            for entry in q.get(key) or []:
+                # (number, prompt_id, prompt, extra_data, outputs_to_execute)
+                if isinstance(entry, list) and len(entry) > 3 and entry[1] == prompt_id:
+                    cid = _client_id_from_extra_data(entry[3])
+                    if cid:
+                        return cid
+
+    try:
+        h = _http_get_json(f"http://{host}:{port}/history/{prompt_id}")
+    except RuntimeError:
+        return None
+    body = h.get(prompt_id) if isinstance(h, dict) else None
+    prompt = body.get("prompt") if isinstance(body, dict) else None
+    if isinstance(prompt, list) and len(prompt) > 3:
+        return _client_id_from_extra_data(prompt[3])
+    return None
+
+
+def _history_completed_nodes(host: str, port: int, prompt_id: str) -> set[str]:
+    """Nodes the server itself records as having run, straight from ``/history``.
+
+    Independent of the WS stream on purpose: the terminal envelope must list the
+    nodes that ran even when no live event reached us (attached after the fact,
+    an unresolvable client_id, a third-party submitter). Union of the
+    ``execution_cached`` node ids, the ``executed`` list on an abnormal end, and
+    every node that produced an output.
+    """
+    nodes: set[str] = set()
+    try:
+        h = _http_get_json(f"http://{host}:{port}/history/{prompt_id}")
+    except RuntimeError:
+        return nodes
+    body = h.get(prompt_id) if isinstance(h, dict) else None
+    if not isinstance(body, dict):
+        return nodes
+    status_obj = body.get("status")
+    messages = status_obj.get("messages") if isinstance(status_obj, dict) else None
+    for msg in messages or []:
+        if not (isinstance(msg, list) and len(msg) > 1 and isinstance(msg[1], dict)):
+            continue
+        if msg[0] == "execution_cached":
+            listed = msg[1].get("nodes")
+        elif msg[0] in ("execution_error", "execution_interrupted"):
+            listed = msg[1].get("executed")
+        else:
+            continue
+        for n in listed or []:
+            nodes.add(str(n))
+    outputs = body.get("outputs")
+    if isinstance(outputs, dict):
+        nodes.update(str(n) for n in outputs)
+    return nodes
+
+
 @dataclass
 class _WatchState:
     """Loop-local state shared across the `jobs watch` WS recv loop.
@@ -1774,6 +1879,11 @@ class _WatchState:
     end_reason: str | None = None
     end_details: Any = None
     terminal: bool = False
+    # Nodes whose final (100% / errored) `progress` line has already been
+    # emitted. `progress_state` repeats EVERY non-pending node on every
+    # message, so without this the un-throttled final flush would re-fire for
+    # an already-finished node on each later step of the run.
+    progress_final: set[str] = field(default_factory=set)
 
 
 def _watch_executing(state: _WatchState, data: dict[str, Any]) -> None:
@@ -1818,6 +1928,60 @@ def _watch_progress(state: _WatchState, data: dict[str, Any]) -> None:
     )
 
 
+def _progress_int(value: Any) -> int | None:
+    """Coerce a progress counter to the ``integer|null`` the event schema declares.
+
+    The legacy ``progress`` message carries ints; ``progress_state`` carries
+    floats (``NodeProgressState.value``), and an unvalidated float would break
+    ``run_event.json`` for every NDJSON consumer.
+    """
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    try:
+        return int(value)
+    except (ValueError, OverflowError):  # nan / inf
+        return None
+
+
+def _watch_progress_state(state: _WatchState, data: dict[str, Any]) -> None:
+    """Handle ComfyUI's combined per-node ``progress_state`` message.
+
+    Current ComfyUI emits ``progress_state`` (``comfy_execution/progress.py``)
+    rather than the legacy per-node ``progress``; the legacy handler is kept for
+    older servers. The payload is ``{"nodes": {node_id: {value, max, state}}}``
+    holding EVERY non-pending node, resent on each transition — so this is also
+    the most complete source of "which nodes actually ran", including compute
+    nodes that never fire an ``executed`` event (that one only fires for nodes
+    with UI output).
+    """
+    nodes = data.get("nodes")
+    if not isinstance(nodes, dict):
+        return
+    renderer = state.renderer
+    for node_id, node_state in nodes.items():
+        if not isinstance(node_state, dict):
+            continue
+        node = str(node_id)
+        if node in state.progress_final:
+            continue
+        phase = node_state.get("state")
+        fields = {
+            "node": node,
+            "completed": _progress_int(node_state.get("value")),
+            "total": _progress_int(node_state.get("max")),
+            "prompt_id": state.prompt_id,
+        }
+        if phase in ("finished", "error"):
+            state.progress_final.add(node)
+            if phase == "finished":
+                state.completed_nodes.add(node)
+            # Emit the final line unthrottled: a 100%/errored step must not be
+            # swallowed by the rate limiter (`progress_final` keeps it to once).
+            renderer.event("progress", **fields)
+        else:
+            renderer.throttled_event(f"progress:{node}", "progress", max_hz=10, **fields)
+
+
 def _watch_executed(state: _WatchState, data: dict[str, Any]) -> None:
     renderer = state.renderer
     node = str(data.get("node"))
@@ -1835,20 +1999,54 @@ def _watch_executed(state: _WatchState, data: dict[str, Any]) -> None:
     renderer.event("executed", node=node, prompt_id=state.prompt_id)
 
 
+def _absorb_executed_list(state: _WatchState, data: dict[str, Any]) -> None:
+    """Fold an event's ``executed`` node list into ``completed_nodes``.
+
+    ``execution_error`` and ``execution_interrupted`` both carry the full list
+    of nodes that had already run when the prompt ended — the only place that
+    list is available on an abnormal exit.
+    """
+    for n in data.get("executed") or []:
+        state.completed_nodes.add(str(n))
+
+
 def _watch_execution_error(state: _WatchState, data: dict[str, Any]) -> None:
+    _absorb_executed_list(state, data)
     state.end_reason = "error"
     state.end_details = data
     state.terminal = True
 
 
+def _watch_execution_success(state: _WatchState, data: dict[str, Any]) -> None:
+    """Current ComfyUI's end-of-prompt signal.
+
+    Older servers marked the end with ``executing`` + ``node: null`` (still
+    handled above). Without this, a successful watch only ended once a ``recv``
+    timed out and the ``/history`` snapshot showed completion — i.e. it sat idle
+    for the full ``--timeout`` (30s by default) after the job was already done.
+    """
+    state.end_reason = "completed"
+    state.terminal = True
+
+
+def _watch_execution_interrupted(state: _WatchState, data: dict[str, Any]) -> None:
+    _absorb_executed_list(state, data)
+    state.end_reason = "cancelled"
+    state.end_details = data
+    state.terminal = True
+
+
 # type → pure per-message handler. Each mutates ``state`` (and sets
-# ``state.terminal`` for the two terminal events); the recv loop owns the break.
+# ``state.terminal`` for the terminal events); the recv loop owns the break.
 _WATCH_HANDLERS = {
     "executing": _watch_executing,
     "execution_cached": _watch_execution_cached,
     "progress": _watch_progress,
+    "progress_state": _watch_progress_state,
     "executed": _watch_executed,
     "execution_error": _watch_execution_error,
+    "execution_success": _watch_execution_success,
+    "execution_interrupted": _watch_execution_interrupted,
 }
 
 
@@ -1871,6 +2069,17 @@ def watch_cmd(
         float,
         typer.Option("--max-wait", help="Cloud-only: give up after this many seconds total."),
     ] = 600.0,
+    client_id: Annotated[
+        str | None,
+        typer.Option(
+            "--client-id",
+            help=(
+                "Local-only: attach as this WS client_id instead of the submitting one. "
+                "ComfyUI sends execution events only to the submitting session, so watch "
+                "resolves that id automatically; override it if resolution picks wrong."
+            ),
+        ),
+    ] = None,
 ):
     renderer = get_renderer()
     if _is_cloud(where):
@@ -1883,6 +2092,9 @@ def watch_cmd(
     # be no more WS events.
     snap = _snapshot(h, p, prompt_id)
     if snap and snap["status"] in {"completed", "error", "cancelled"}:
+        # No stream to summarise, so the node list has to come from /history —
+        # `completed_nodes` is part of the watch envelope on every exit path.
+        snap["completed_nodes"] = sorted(_history_completed_nodes(h, p, prompt_id))
         if renderer.is_pretty():
             renderer.console().print(f"[dim]Prompt {prompt_id} already {snap['status']}; nothing more to watch.[/dim]")
             _render_status_pretty(snap, host=h, port=p)
@@ -1890,9 +2102,12 @@ def watch_cmd(
         return
 
     ws = WebSocket()
-    client_id = str(uuid.uuid4())
+    # Re-attach as the submitting session, otherwise the server addresses every
+    # execution event to a socket we are not holding and this watch sees nothing.
+    attached_client_id = client_id or _resolve_watch_client_id(h, p, prompt_id)
+    ws_client_id = attached_client_id or str(uuid.uuid4())
     try:
-        ws.connect(f"ws://{h}:{p}/ws?clientId={client_id}")
+        ws.connect(f"ws://{h}:{p}/ws?clientId={urllib.parse.quote(ws_client_id, safe='')}")
     except (WebSocketException, ConnectionError, OSError) as e:
         renderer.error(
             code="ws_disconnected",
@@ -1913,6 +2128,11 @@ def watch_cmd(
 
     if renderer.is_pretty():
         renderer.console().print(f"[bold]Watching prompt[/bold] {prompt_id} on {h}:{p}   [dim](Ctrl-C to stop)[/dim]")
+        if attached_client_id is None:
+            renderer.console().print(
+                "[yellow]![/yellow] [dim]could not resolve the submitting client_id — the server "
+                "may not send live events for this prompt; pass --client-id if you know it[/dim]"
+            )
 
     try:
         while True:
@@ -1981,6 +2201,10 @@ def watch_cmd(
 
     elapsed = time.time() - start
     final_status = state.end_reason or ("completed" if state.completed_nodes else "unknown")
+    # Union in the server's own record of what ran. Strictly additive and done
+    # AFTER `final_status` is derived, so it can only correct an under-reported
+    # node list — never invent a terminal status the stream did not observe.
+    state.completed_nodes |= _history_completed_nodes(h, p, prompt_id)
     if renderer.is_pretty():
         from rich.text import Text
 
@@ -2001,6 +2225,11 @@ def watch_cmd(
         "elapsed_seconds": elapsed,
         "host": h,
         "port": p,
+        # Which session this watch listened as, and whether that was the
+        # prompt's real submitter — the difference between a live stream and
+        # silence, so it belongs in the envelope rather than only in the logs.
+        "client_id": ws_client_id,
+        "attached": attached_client_id is not None,
     }
     if state.end_details is not None:
         payload["details"] = state.end_details if isinstance(state.end_details, dict) else {"raw": state.end_details}
