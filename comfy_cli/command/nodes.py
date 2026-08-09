@@ -734,7 +734,7 @@ def path_cmd(
         bool,
         typer.Option(
             "--exact/--loose",
-            help="Exact: every step's required link inputs must be satisfiable from the path so far. Loose: any routed sequence.",
+            help="Exact: every step's other required link inputs must be satisfiable (reported per path as 'support'). Loose: any routed sequence.",
         ),
     ] = True,
     input_path: Annotated[str | None, typer.Option("--input", show_default=False)] = None,
@@ -755,13 +755,26 @@ def path_cmd(
         on_stale=lambda key, err: _stale.update(stale=True, source=key, reason=err),
     )
 
-    finder = graph.exact_paths if exact else graph.find_paths
-    paths = finder(from_type, to_type, max_depth=max_depth, max_paths=max_paths)
+    result = graph.search_paths(from_type, to_type, exact=exact, max_depth=max_depth, max_paths=max_paths)
+    paths = result["paths"]
+    truncated = bool(result["truncated"])
+    depth_limited = bool(result["depth_limited"])
+    collapsed = bool(result["collapsed"])
 
     payload = {
         "from": from_type,
         "to": to_type,
-        "exact": exact,
+        "mode": "exact" if exact else "loose",
+        # Not the flag echoed back: the honest claim that these paths are the
+        # complete, type-constrained answer. Any early stop (max_paths, the
+        # internal state budget), a frontier still expanding at max_depth, or an
+        # intermediate state reached by a second route that was not re-explored
+        # means paths may be missing, so the claim is withheld.
+        "exact": bool(exact and not truncated and not depth_limited and not collapsed),
+        "truncated": truncated,
+        "truncated_by": result["truncated_by"],
+        "depth_limited": depth_limited,
+        "collapsed": collapsed,
         "max_depth": max_depth,
         "max_paths": max_paths,
         "count": len(paths),
@@ -777,6 +790,7 @@ def path_cmd(
                     }
                     for s in (p.get("steps") or [])
                 ],
+                "support": list(p.get("support") or []),
             }
             for p in paths
         ],
@@ -805,7 +819,19 @@ def path_cmd(
                     f"[cyan]{sanitize_markup(p.get('from'))}[/cyan]  {chain}  "
                     f"[cyan]{sanitize_markup(p.get('to'))}[/cyan]"
                 )
+                needs = ", ".join(
+                    f"{sanitize_markup(s.get('type'))} from {sanitize_markup(s.get('node'))}"
+                    for s in (p.get("support") or [])
+                )
+                if needs:
+                    rprint(f"  [dim]also needs: {needs}[/dim]")
             rprint(f"[dim]{len(paths)} path(s)[/dim]")
+        if truncated:
+            rprint(f"[dim]Partial result — stopped at {payload['truncated_by']}; more paths may exist.[/dim]")
+        elif depth_limited:
+            rprint(f"[dim]Searched to depth {max_depth}; longer paths were not explored.[/dim]")
+        elif collapsed:
+            rprint("[dim]Equivalent alternate routes were collapsed; this is a sample, not every path.[/dim]")
     renderer.emit(payload, command="nodes path")
 
 
