@@ -352,6 +352,33 @@ class Morphism:
 # ---------------------------------------------------------------------------
 
 
+# Wildcard socket types: a port carrying one of these accepts/produces ANY type,
+# so an edge touching it can never be a type mismatch.
+#
+# "*" is ComfyUI's classic wildcard. COMFY_MATCHTYPE_V3 is the V3 schema's
+# match-type: a generic port whose concrete type is resolved at runtime from
+# what it is wired to (ComfySwitchNode, ResizeImageMaskNode and friends). It was
+# not recognised here, so every edge into or out of a V3 match-type port was
+# reported as edge_type_mismatch — ~30 spurious warnings in a single 48h prod
+# window, on graphs that were correct. The agent had to write a paragraph
+# explaining them away in nearly every reply, which teaches it to discount
+# validator output generally.
+_WILDCARD_TYPE_PREFIX = "COMFY_MATCHTYPE"
+_WILDCARD_TYPES = frozenset({"*"})
+
+
+def _is_wildcard_type(type_id: str) -> bool:
+    """True when a socket type accepts/produces any type.
+
+    Matches COMFY_MATCHTYPE_V3 by prefix rather than exact string so a future
+    match-type revision (V4, ...) does not silently reintroduce the false
+    warnings this exists to prevent.
+    """
+    if not type_id:
+        return False
+    return type_id in _WILDCARD_TYPES or type_id.startswith(_WILDCARD_TYPE_PREFIX)
+
+
 def _is_link(type_id: str, is_enum: bool, force_input: bool) -> bool:
     """Determine if an input participates in typed wiring (link) or is inline (widget)."""
     if is_enum:
@@ -1140,7 +1167,7 @@ class Graph:
                     if port is not None:
                         src_type = src_m.outputs[out_idx].type
                         dst_type = port.type
-                        if src_type != "*" and dst_type != "*" and src_type != dst_type:
+                        if not _is_wildcard_type(src_type) and not _is_wildcard_type(dst_type) and src_type != dst_type:
                             # Find the correct index for the expected type
                             correct = [f"[{i}]" for i, p in enumerate(src_m.outputs) if p.type == dst_type]
                             hint = (

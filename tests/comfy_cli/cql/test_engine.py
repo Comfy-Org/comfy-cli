@@ -2402,3 +2402,102 @@ def test_input_path_load_does_not_touch_the_network(tmp_path, monkeypatch):
     g = Graph.load(input_path=str(dump))
     assert g.node_count() > 0
     assert seen == {"allow_network": False}
+
+
+class TestMatchTypeWildcard:
+    """COMFY_MATCHTYPE_V3 is the V3 schema's generic port: its concrete type is
+    resolved at runtime from whatever it is wired to. It was not recognised as a
+    wildcard, so every edge touching one was reported as edge_type_mismatch —
+    ~30 spurious warnings in a single 48h prod window on graphs that were
+    correct (ComfySwitchNode, ResizeImageMaskNode). The agent explained them away
+    in nearly every reply, which teaches it to discount validator output.
+    """
+
+    @staticmethod
+    def _object_info() -> dict[str, Any]:
+        return {
+            "LoadImage": {
+                "input": {"required": {"image": [["a.png", "b.png"]]}},
+                "input_order": {"required": ["image"]},
+                "output": ["IMAGE"],
+                "output_name": ["IMAGE"],
+                "name": "LoadImage",
+            },
+            # Consumes anything, produces a match-type: the switch/resize shape.
+            "ComfySwitchNode": {
+                "input": {"required": {"on_true": ["COMFY_MATCHTYPE_V3", {}]}},
+                "input_order": {"required": ["on_true"]},
+                "output": ["COMFY_MATCHTYPE_V3"],
+                "output_name": ["out"],
+                "name": "ComfySwitchNode",
+            },
+            "PreviewImage": {
+                "input": {"required": {"images": ["IMAGE", {}]}},
+                "input_order": {"required": ["images"]},
+                "output": [],
+                "output_name": [],
+                "output_node": True,
+                "name": "PreviewImage",
+            },
+        }
+
+    @pytest.fixture
+    def graph(self) -> Graph:
+        return Graph.from_object_info(self._object_info())
+
+    def test_concrete_into_matchtype_input_is_not_a_mismatch(self, graph: Graph):
+        """IMAGE → COMFY_MATCHTYPE_V3 input: the observed
+        "input 'input' expects COMFY_MATCHTYPE_V3 but LoadImage[0] produces IMAGE".
+        """
+        wf = {
+            "1": {"class_type": "LoadImage", "inputs": {"image": "a.png"}},
+            "2": {"class_type": "ComfySwitchNode", "inputs": {"on_true": ["1", 0]}},
+        }
+        result = graph.validate_workflow(wf)
+        warns = [w for w in result["warnings"] if w["code"] == "edge_type_mismatch"]
+        assert warns == [], f"match-type input must accept any type, got {warns}"
+
+    def test_matchtype_output_into_concrete_input_is_not_a_mismatch(self, graph: Graph):
+        """COMFY_MATCHTYPE_V3 → IMAGE input: the observed
+        "input 'images' expects IMAGE but ResizeImageMaskNode[0] produces COMFY_MATCHTYPE_V3".
+        """
+        wf = {
+            "1": {"class_type": "LoadImage", "inputs": {"image": "a.png"}},
+            "2": {"class_type": "ComfySwitchNode", "inputs": {"on_true": ["1", 0]}},
+            "3": {"class_type": "PreviewImage", "inputs": {"images": ["2", 0]}},
+        }
+        result = graph.validate_workflow(wf)
+        warns = [w for w in result["warnings"] if w["code"] == "edge_type_mismatch"]
+        assert warns == [], f"match-type output must satisfy any input, got {warns}"
+
+    def test_genuine_mismatch_between_concrete_types_still_warns(self, graph: Graph):
+        """The wildcard must not blanket-silence real mismatches — otherwise the
+        fix trades false positives for false negatives."""
+        oi = self._object_info()
+        oi["MaskOnly"] = {
+            "input": {"required": {"mask": ["MASK", {}]}},
+            "input_order": {"required": ["mask"]},
+            "output": [],
+            "output_name": [],
+            "output_node": True,
+            "name": "MaskOnly",
+        }
+        g = Graph.from_object_info(oi)
+        wf = {
+            "1": {"class_type": "LoadImage", "inputs": {"image": "a.png"}},
+            "2": {"class_type": "MaskOnly", "inputs": {"mask": ["1", 0]}},
+        }
+        result = g.validate_workflow(wf)
+        warns = [w for w in result["warnings"] if w["code"] == "edge_type_mismatch"]
+        assert len(warns) == 1, "IMAGE → MASK is a real mismatch and must still warn"
+
+    def test_future_matchtype_revisions_are_wildcards_too(self):
+        """Prefix match, so a V4 match-type cannot silently reintroduce the
+        false warnings this exists to prevent."""
+        from comfy_cli.cql.engine import _is_wildcard_type
+
+        assert _is_wildcard_type("*")
+        assert _is_wildcard_type("COMFY_MATCHTYPE_V3")
+        assert _is_wildcard_type("COMFY_MATCHTYPE_V4")
+        assert not _is_wildcard_type("IMAGE")
+        assert not _is_wildcard_type("")
