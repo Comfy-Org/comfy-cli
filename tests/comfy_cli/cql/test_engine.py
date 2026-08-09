@@ -2501,3 +2501,102 @@ class TestMatchTypeWildcard:
         assert _is_wildcard_type("COMFY_MATCHTYPE_V4")
         assert not _is_wildcard_type("IMAGE")
         assert not _is_wildcard_type("")
+
+
+class TestUnreachableNodeIsVisible:
+    """A node that reaches no output is pruned by the server, and every promoted
+    check here skips pruned nodes — so such a graph could validate as
+    "0 errors, 0 warnings" while doing nothing the author intended.
+
+    Prod repro: a depth-ControlNet whose output was never wired into the sampler
+    validated completely clean. The graph then ran twice, produced an image with
+    no pose applied, and cost two paid GPU runs and three turns of "it does
+    nothing" / "still no pose" before the dangling link was found.
+    """
+
+    @staticmethod
+    def _object_info() -> dict[str, Any]:
+        return {
+            "LoadImage": {
+                "input": {"required": {"image": [["a.png"]]}},
+                "input_order": {"required": ["image"]},
+                "output": ["IMAGE"],
+                "output_name": ["IMAGE"],
+                "name": "LoadImage",
+            },
+            "DepthControlNet": {
+                "input": {"required": {"image": ["IMAGE", {}]}},
+                "input_order": {"required": ["image"]},
+                "output": ["CONTROL_NET"],
+                "output_name": ["CONTROL_NET"],
+                "name": "DepthControlNet",
+            },
+            "SaveImage": {
+                "input": {"required": {"images": ["IMAGE", {}]}},
+                "input_order": {"required": ["images"]},
+                "output": [],
+                "output_name": [],
+                "output_node": True,
+                "name": "SaveImage",
+            },
+            "MarkdownNote": {
+                "input": {"required": {}},
+                "input_order": {"required": []},
+                "output": [],
+                "output_name": [],
+                "name": "MarkdownNote",
+            },
+        }
+
+    @pytest.fixture
+    def graph(self) -> Graph:
+        return Graph.from_object_info(self._object_info())
+
+    def test_dangling_node_is_reported(self, graph: Graph):
+        """The ControlNet is fully configured and internally valid — its OUTPUT
+        just goes nowhere. That silence is the whole defect."""
+        wf = {
+            "1": {"class_type": "LoadImage", "inputs": {"image": "a.png"}},
+            # Wired IN, but its CONTROL_NET output feeds nothing.
+            "2": {"class_type": "DepthControlNet", "inputs": {"image": ["1", 0]}},
+            "3": {"class_type": "SaveImage", "inputs": {"images": ["1", 0]}},
+        }
+        result = graph.validate_workflow(wf)
+
+        # Still valid: the server does run this graph, it just drops node 2.
+        assert result["valid"] is True, result["errors"]
+        warns = [w for w in result["warnings"] if w["code"] == "node_not_reachable_from_output"]
+        assert len(warns) == 1, f"the dangling node must be visible, got {result['warnings']}"
+        assert warns[0]["node_id"] == "2"
+        assert "DepthControlNet" in warns[0]["message"]
+
+    def test_fully_wired_graph_warns_about_nothing(self, graph: Graph):
+        """No false positives on a correct graph — otherwise this becomes the
+        next warning the agent learns to explain away."""
+        wf = {
+            "1": {"class_type": "LoadImage", "inputs": {"image": "a.png"}},
+            "2": {"class_type": "SaveImage", "inputs": {"images": ["1", 0]}},
+        }
+        result = graph.validate_workflow(wf)
+        warns = [w for w in result["warnings"] if w["code"] == "node_not_reachable_from_output"]
+        assert warns == [], f"a fully wired graph must warn about nothing, got {warns}"
+
+    def test_output_less_notes_are_not_flagged(self, graph: Graph):
+        """MarkdownNote produces nothing and is supposed to feed nothing."""
+        wf = {
+            "1": {"class_type": "LoadImage", "inputs": {"image": "a.png"}},
+            "2": {"class_type": "SaveImage", "inputs": {"images": ["1", 0]}},
+            "3": {"class_type": "MarkdownNote", "inputs": {}},
+        }
+        result = graph.validate_workflow(wf)
+        warns = [w for w in result["warnings"] if w["code"] == "node_not_reachable_from_output"]
+        assert warns == [], f"note-style nodes legitimately feed nothing, got {warns}"
+
+    def test_no_output_node_at_all_does_not_double_report(self, graph: Graph):
+        """With no output node the graph already fails prompt_no_outputs; adding
+        a reachability warning per node would just be noise on top."""
+        wf = {"1": {"class_type": "LoadImage", "inputs": {"image": "a.png"}}}
+        result = graph.validate_workflow(wf)
+        assert any(e["code"] == "prompt_no_outputs" for e in result["errors"])
+        warns = [w for w in result["warnings"] if w["code"] == "node_not_reachable_from_output"]
+        assert warns == [], "prompt_no_outputs already says it; don't pile on"

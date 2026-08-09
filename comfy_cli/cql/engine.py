@@ -1246,6 +1246,46 @@ class Graph:
                 }
             )
 
+        # A node the server will silently PRUNE (not reachable from any output)
+        # is almost always a wiring mistake: the author added it and forgot to
+        # route its result onward. Because pruned nodes are skipped by every
+        # promoted check above, such a graph could validate as
+        # "0 errors, 0 warnings" while doing nothing the author intended.
+        #
+        # Observed in prod: a depth-ControlNet whose output was never wired into
+        # the sampler validated completely clean; the graph then ran twice,
+        # producing an image with no pose applied, and cost two paid GPU runs and
+        # three turns of "it does nothing" before the dangling link was found.
+        #
+        # Advisory, not an error: a scratch node parked mid-build is legitimate,
+        # and the server does run the graph. It only has to be VISIBLE.
+        if has_output_node:
+            for node_id, node_data in workflow.items():
+                if node_id == "_meta" or node_id in reachable:
+                    continue
+                if not isinstance(node_data, dict):
+                    continue
+                class_type = node_data.get("class_type")
+                m = self._nodes.get(class_type) if class_type else None
+                # Note-style nodes legitimately feed nothing.
+                if m is not None and not m.outputs:
+                    continue
+                warnings.append(
+                    {
+                        "node_id": node_id,
+                        "field": None,
+                        "code": "node_not_reachable_from_output",
+                        "message": (
+                            f"node {node_id} ({class_type}) feeds no output node — the server prunes it, "
+                            f"so it will not run and has no effect on the result"
+                        ),
+                        "hint": (
+                            "wire its output into the chain that reaches a save/preview node, or delete it; "
+                            "a node that reaches no output is skipped entirely"
+                        ),
+                    }
+                )
+
         return {
             "valid": len(errors) == 0,
             "errors": errors,
