@@ -466,19 +466,34 @@ def _local_folder_names(target) -> list[str]:
 _NAME_SEPARATORS = re.compile(r"[-_. ]+")
 
 
-def _search_tokens(text: str | None) -> list[tuple[str, str]]:
+def _search_tokens(text: str | None) -> list[tuple[str, str]] | None:
     """Split ``--text`` into ``(token, separator-squashed token)`` pairs.
 
-    Empty or whitespace-only ``--text`` yields no tokens, which
-    ``_name_matches`` treats as "no filter" — the same list-everything result
-    the local walk gives when ``--text`` is omitted entirely.
+    Returns ``None`` when there is no filter at all — ``--text`` omitted, or
+    the falsy ``--text ""``. That is the list-everything case, and it matches
+    what the cloud branch does with the same input (``if text:`` is false, so
+    no ``name_contains`` is sent).
+
+    Returns an *empty list* when ``--text`` was given but held nothing
+    matchable: whitespace only, or tokens that are purely separators. Those
+    are a filter nothing satisfies, not the absence of a filter — a token that
+    squashes to ``""`` is a substring of every name, so keeping it would turn
+    ``--text "."`` into a wildcard, and testing it raw would make it one
+    anyway (every name with an extension contains ``.``). Dropping such tokens
+    also stops a stray separator in a real query (``--text "sd - xl"``) from
+    ANDing in a literal ``-`` that ``sd_xl_base_1.0.safetensors`` fails.
     """
     if not text:
-        return []
-    return [(t, _NAME_SEPARATORS.sub("", t)) for t in text.lower().split()]
+        return None
+    tokens = []
+    for t in text.lower().split():
+        t_squashed = _NAME_SEPARATORS.sub("", t)
+        if t_squashed:
+            tokens.append((t, t_squashed))
+    return tokens
 
 
-def _name_matches(name: str, tokens: list[tuple[str, str]]) -> bool:
+def _name_matches(name: str, tokens: list[tuple[str, str]] | None) -> bool:
     """Token-AND, separator-insensitive filename match.
 
     Every whitespace-separated token of the query must be present, in any
@@ -490,15 +505,19 @@ def _name_matches(name: str, tokens: list[tuple[str, str]]) -> bool:
     match a multi-word query at all.
 
     The token is squashed too, so the match is symmetric — ``sd-xl``,
-    ``sd_xl`` and ``sdxl`` all find the same file. A token that is *only*
-    separators squashes to ``""``, which would be a substring of every name;
-    it falls back to the raw test so ``--text "---"`` still matches nothing.
+    ``sd_xl`` and ``sdxl`` all find the same file.
+
+    ``tokens`` carries the two no-token cases apart, per ``_search_tokens``:
+    ``None`` is "no filter" (everything matches), ``[]`` is "a filter nothing
+    can satisfy" (nothing matches).
     """
-    if not tokens:
+    if tokens is None:
         return True
+    if not tokens:
+        return False
     name_l = name.lower()
     name_squashed = _NAME_SEPARATORS.sub("", name_l)
-    return all(t in name_l or (t_squashed and t_squashed in name_squashed) for t, t_squashed in tokens)
+    return all(t in name_l or t_squashed in name_squashed for t, t_squashed in tokens)
 
 
 def _local_folder_matches(target, folder: str, *, text: str | None) -> list[dict[str, Any]]:

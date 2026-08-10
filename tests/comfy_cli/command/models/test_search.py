@@ -633,18 +633,51 @@ class TestSearch:
         assert env["data"]["rows"] == []
         assert env["data"]["total"] == 0
 
-    def test_local_separator_only_query_matches_nothing(self, local_target, monkeypatch, capsys):
-        """A token that squashes to `""` must not become a match-everything wildcard."""
-        _patch_urlopen(monkeypatch, _local_routes())
-        env = _run(["search", "--text", "---", "--where", "local"], capsys)
-        assert env["ok"] is True, env
-        assert env["data"]["total"] == 0
+    @pytest.mark.parametrize(
+        "query",
+        [
+            pytest.param("---", id="hyphens"),
+            # `.` and `-` are the dangerous ones: they are substrings of nearly
+            # every real filename, so testing them raw made them wildcards.
+            pytest.param(".", id="single-dot"),
+            pytest.param("-", id="single-hyphen"),
+            pytest.param("_", id="underscore"),
+            pytest.param("   ", id="whitespace-only"),
+        ],
+    )
+    def test_local_unmatchable_text_returns_zero(self, local_target, monkeypatch, capsys, query):
+        """`--text` that holds no matchable token filters everything out.
 
-    @pytest.mark.parametrize("query", ["", "   "])
-    def test_local_blank_text_lists_everything(self, local_target, monkeypatch, capsys, query):
-        """Empty/whitespace `--text` has nothing to match on, so it filters nothing."""
+        A separator-only token squashes to `""`, a substring of every name, and
+        matching it raw is no better — `.` hits every file with an extension.
+        Such a query is a filter nothing satisfies, *not* the absence of one, so
+        it must not degrade into a whole-catalog dump.
+        """
         _patch_urlopen(monkeypatch, _local_routes())
         env = _run(["search", "--text", query, "--limit", "100", "--where", "local"], capsys)
+        assert env["ok"] is True, env
+        assert env["data"]["rows"] == []
+        assert env["data"]["total"] == 0
+
+    def test_local_stray_separator_token_does_not_zero_the_query(self, local_target, monkeypatch, capsys):
+        """`sd - xl` must not AND in a literal `-` that `sd_xl_base...` fails.
+
+        The separator-only token is dropped, so this reads as `sd` AND `xl` —
+        the same result as `sd xl`.
+        """
+        _patch_urlopen(monkeypatch, _local_routes())
+        env = _run(["search", "--text", "sd - xl", "--type", "checkpoint", "--where", "local"], capsys)
+        assert env["ok"] is True, env
+        assert [r["name"] for r in env["data"]["rows"]] == [
+            "sd_xl_base_1.0.safetensors",
+            "sd_xl_refiner_1.0.safetensors",
+        ]
+
+    def test_local_empty_text_lists_everything(self, local_target, monkeypatch, capsys):
+        """`--text ""` is falsy, so it is "no filter" — as on cloud, which sends no
+        `name_contains` for it. Whitespace-only is the separate case above."""
+        _patch_urlopen(monkeypatch, _local_routes())
+        env = _run(["search", "--text", "", "--limit", "100", "--where", "local"], capsys)
         assert env["ok"] is True, env
         assert env["data"]["total"] == sum(len(f) for f in _LOCAL_FILES_BY_FOLDER.values())
 
