@@ -1684,3 +1684,123 @@ def test_cloud_route_load_failure_emits_envelope(tmp_path, capsys):
     lines = [ln for ln in out.splitlines() if ln.strip()]
     env = json.loads(lines[-1])
     assert env["ok"] is False and env["error"]["code"] == "workflow_not_found"
+
+
+class TestErrorEnvelopeCarriesRoutedTarget:
+    """BE-6274: run-path *error* envelopes carry `where` (the routed target),
+    matching the failure examples in docs/json-output.md.
+
+    These go through the real CLI (`comfy run --json --where …`) rather than
+    calling `execute()` directly, because the assignment under test —
+    `renderer.where = decision.target.value` — lives in the `run` command
+    right after the routing decision resolves.
+    """
+
+    # Deliberately does NOT describe the fixture workflow's node classes, so
+    # the CQL preflight reports them as unknown and fails the run.
+    MISMATCHED_OBJECT_INFO = {
+        "SomeOtherNode": {
+            "input": {"required": {}},
+            "input_order": {"required": []},
+            "output_node": False,
+            "display_name": "Some Other Node",
+        },
+    }
+
+    @staticmethod
+    def _invoke(argv):
+        from typer.testing import CliRunner
+
+        from comfy_cli import cmdline
+
+        result = CliRunner().invoke(cmdline.app, argv)
+        return _envelope(_parse_lines(result.stdout)), result
+
+    def test_local_preflight_failure_envelope_says_local(self, workflow_file, monkeypatch):
+        monkeypatch.delenv("COMFY_WHERE", raising=False)
+        with (
+            patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),
+            patch("comfy_cli.command.run._fetch_object_info", return_value=self.MISMATCHED_OBJECT_INFO),
+        ):
+            env, result = self._invoke(["run", "--json", "--where", "local", "--workflow", workflow_file])
+        assert result.exit_code == 1
+        assert env["ok"] is False
+        assert env["error"]["code"] == "workflow_unknown_nodes"
+        assert env["where"] == "local"
+
+    def test_cloud_preflight_failure_envelope_says_cloud(self, workflow_file, monkeypatch):
+        monkeypatch.delenv("COMFY_WHERE", raising=False)
+        with (
+            patch("comfy_cli.where.cloud_preflight", return_value=None),
+            patch("comfy_cli.cql.engine._load_from_target", return_value=self.MISMATCHED_OBJECT_INFO),
+        ):
+            env, result = self._invoke(["run", "--json", "--where", "cloud", "--workflow", workflow_file])
+        assert result.exit_code == 1
+        assert env["ok"] is False
+        assert env["error"]["code"] == "workflow_unknown_nodes"
+        assert env["where"] == "cloud"
+
+    def test_local_error_without_explicit_where_falls_back_to_decision(self, workflow_file, monkeypatch):
+        """`server_not_running` passes no explicit `where` — it inherits the
+        routed target purely through `renderer.where`."""
+        monkeypatch.delenv("COMFY_WHERE", raising=False)
+        with patch("comfy_cli.command.run.check_comfy_server_running", return_value=False):
+            env, result = self._invoke(["run", "--json", "--where", "local", "--workflow", workflow_file])
+        assert result.exit_code == 1
+        assert env["error"]["code"] == "server_not_running"
+        assert env["where"] == "local"
+
+    def test_cloud_error_without_explicit_where_falls_back_to_decision(self, workflow_file, monkeypatch):
+        """The cloud sign-in preflight passes no explicit `where` either."""
+        monkeypatch.delenv("COMFY_WHERE", raising=False)
+        from comfy_cli import where as where_module
+
+        err = where_module.CloudError(
+            code="cloud_not_configured",
+            message="not signed in",
+            hint="run: comfy cloud login",
+            details={},
+        )
+        with patch("comfy_cli.where.cloud_preflight", return_value=err):
+            env, result = self._invoke(["run", "--json", "--where", "cloud", "--workflow", workflow_file])
+        assert result.exit_code == 1
+        assert env["error"]["code"] == "cloud_not_configured"
+        assert env["where"] == "cloud"
+
+    def test_where_invalid_before_the_decision_stays_null(self, workflow_file, monkeypatch):
+        """Errors raised BEFORE routing resolves keep `where: null` — the
+        envelope schema keeps the field nullable for exactly this case."""
+        monkeypatch.delenv("COMFY_WHERE", raising=False)
+        env, result = self._invoke(["run", "--json", "--where", "nowhere", "--workflow", workflow_file])
+        assert result.exit_code == 1
+        assert env["error"]["code"] == "where_invalid"
+        assert env["where"] is None
+
+    def test_routed_target_does_not_leak_to_a_later_invocation(self, workflow_file, monkeypatch):
+        """`Renderer` is a process-wide singleton, so `run` must scope its
+        stamped target to one invocation. Without that, a second in-process run
+        that fails *before* routing would inherit the first run's target and
+        mislabel its envelope."""
+        monkeypatch.delenv("COMFY_WHERE", raising=False)
+        from comfy_cli import where as where_module
+
+        err = where_module.CloudError(
+            code="cloud_not_configured",
+            message="not signed in",
+            hint="run: comfy cloud login",
+            details={},
+        )
+        with patch("comfy_cli.where.cloud_preflight", return_value=err):
+            first, _ = self._invoke(["run", "--json", "--where", "cloud", "--workflow", workflow_file])
+        assert first["where"] == "cloud"
+
+        # ...and the stamp is gone once the invocation is over, so anything
+        # emitting later in this process (atexit/tracking) isn't mislabelled.
+        from comfy_cli.output.renderer import get_renderer
+
+        assert get_renderer().where is None
+
+        second, result = self._invoke(["run", "--json", "--where", "nowhere", "--workflow", workflow_file])
+        assert result.exit_code == 1
+        assert second["error"]["code"] == "where_invalid"
+        assert second["where"] is None

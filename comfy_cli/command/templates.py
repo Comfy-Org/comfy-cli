@@ -1471,17 +1471,22 @@ def run_template_cmd(
     # run`'s local branch (cmdline.py). This validates the host (rejecting
     # URL-injection characters), brackets IPv6 literals, and honors
     # config.background — behavior the old hand-rolled block lacked.
-    from comfy_cli.host_port import parse_host_port_arg, resolve_host_port
+    from comfy_cli.host_port import parse_host_port_arg, report_usage_error, resolve_host_port
 
-    if host:
-        host, parsed_port = parse_host_port_arg(host)
-        # ``port is None``, not ``not port``: a typed ``--port`` always wins over
-        # one embedded in ``--host h:p``, including ``--port 0``, which
-        # ``resolve_host_port`` then rejects as out of range instead of silently
-        # running against the embedded port.
-        if port is None and parsed_port is not None:
-            port = parsed_port
-    host, port = resolve_host_port(host, port)
+    # ``report_usage_error``: a rejected ``--host``/``--port`` raises
+    # ``typer.BadParameter``, which click renders as a stderr usage panel and
+    # exit 2 — with nothing on stdout. Emit the terminating envelope first so
+    # JSON/NDJSON consumers still get a parseable final line (exit stays 2).
+    with report_usage_error(renderer):
+        if host:
+            host, parsed_port = parse_host_port_arg(host)
+            # ``port is None``, not ``not port``: a typed ``--port`` always wins over
+            # one embedded in ``--host h:p``, including ``--port 0``, which
+            # ``resolve_host_port`` then rejects as out of range instead of silently
+            # running against the embedded port.
+            if port is None and parsed_port is not None:
+                port = parsed_port
+        host, port = resolve_host_port(host, port)
 
     if not check_comfy_server_running(port, host, timeout=timeout):
         renderer.error(

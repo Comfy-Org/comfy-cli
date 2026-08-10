@@ -286,6 +286,7 @@ class Renderer:
         details: Mapping[str, Any] | None = None,
         exit_code: int = 1,
         command: str | None = None,
+        where: str | None = None,
     ) -> None:
         """Emit a structured error. In pretty mode, prints red message + yellow
         hint. In JSON mode, emits an envelope with ``ok=false`` and the error
@@ -316,7 +317,7 @@ class Renderer:
             ok=False,
             command=command or self.command,
             data=None,
-            where=self.where,
+            where=where or self.where,
             changed=None,
             error={
                 "code": code,
