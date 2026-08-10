@@ -562,32 +562,44 @@ class TestPath:
         assert data["not_searched"] is False
         assert data["exact"] is False
 
-    def test_same_type_query_declines_rather_than_claiming_unreachability(self, patched_loader, capsys):
+    def test_same_type_query_lists_the_route_it_used_to_decline(self, patched_loader, capsys):
         """`MODEL -> MODEL` is a *reachable* query — the fixture carries
         `LoraLoaderModelOnly`, a stock-shaped node taking a MODEL link input and
-        emitting MODEL. The walker cannot represent that route (its no-op rule
-        drops any step whose output type equals its input type, which for a
-        same-type query is the terminal step), so it declines the query outright.
+        emitting MODEL — and the CLI now answers it.
 
-        Declining is fine. Declining while reporting `exact: true, count: 0` —
-        the envelope's proof that no route exists — would not be, so the
-        abstention is declared and the exactness claim withheld.
+        It used to decline: the walker's no-op rule dropped any step whose
+        output type equalled its input type, which for a same-type query is the
+        terminal step, so the command returned `count: 0` with the abstention
+        declared. Declining was honest but useless — the route is real, so it is
+        listed.
         """
         lora = _run(["show", "LoraLoaderModelOnly"], capsys)["data"]
         assert "MODEL" in {o["type"] for o in lora["outputs"]}, "fixture must offer a real MODEL -> MODEL route"
         assert "MODEL" in {i["type"] for i in lora["inputs"]}
 
         data = _run(["path", "MODEL", "MODEL"], capsys)["data"]
-        assert data["count"] == 0
-        assert data["not_searched"] is True
-        assert data["not_searched_reason"] == "same_type"
-        # The point of the whole ticket: an empty answer that is not a proof
-        # must not be labelled exact.
-        assert data["exact"] is False
-        # ...and it is the abstention doing it, not a bound that happened to bite.
+        assert data["count"] >= 1
+        one_step = [p for p in data["paths"] if [s["node"] for s in p["steps"]] == ["LoraLoaderModelOnly"]]
+        assert one_step, "the one-step MODEL -> MODEL route must be listed"
+        assert one_step[0]["steps"][0] == {
+            "node": "LoraLoaderModelOnly",
+            "from_type": "MODEL",
+            "to_type": "MODEL",
+        }
+        # The walk ran to completion: no abstention, no bound bit it.
+        assert data["not_searched"] is False
+        assert data["not_searched_reason"] is None
         assert data["truncated"] is False
         assert data["depth_limited"] is False
-        assert data["collapsed"] is False
+        # `exact` is still withheld here, and for the ordinary reason rather
+        # than a leftover of the old refusal: reaching MODEL ends a path, so the
+        # walk keeps expanding the branches that do not (KSampler -> LATENT),
+        # and there both decoders land on the same (IMAGE, {IMAGE, LATENT})
+        # state — a collapse. It costs no MODEL -> MODEL route (nothing in this
+        # catalog routes IMAGE back to MODEL), but the flag errs toward true by
+        # design, so the claim is withheld rather than forged.
+        assert data["collapsed"] is True
+        assert data["exact"] is False
 
     def test_loose_mode_never_claims_exactness(self, patched_loader, capsys):
         env = _run(["path", "MODEL", "IMAGE", "--loose", "--max-depth", "4"], capsys)["data"]

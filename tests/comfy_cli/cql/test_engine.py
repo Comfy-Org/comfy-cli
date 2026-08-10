@@ -366,8 +366,19 @@ class TestTraversal:
             for step in p["steps"]:
                 assert graph.node(step["node"]) is not None
 
-    def test_find_paths_same_type_returns_empty(self, graph: Graph):
+    def test_find_paths_same_type_is_searched_not_declined(self, graph: Graph):
+        """Same-type queries used to be refused outright; they are now walked
+        like any other. This small catalog happens to hold no route back to
+        MODEL — nothing here consumes MODEL and emits it — so the empty result
+        is a fact about the catalog rather than an abstention. The catalog that
+        *does* carry one (`LoraLoaderModelOnly`) is the `graph_path` fixture,
+        pinned by `test_same_type_query_finds_the_route` below.
+        """
         assert graph.find_paths("MODEL", "MODEL") == []
+        result = graph.search_paths("MODEL", "MODEL", exact=False, max_depth=4)
+        assert result["paths"] == []
+        assert result["not_searched"] is False
+        assert result["not_searched_reason"] is None
 
     def test_find_paths_unreachable_returns_empty(self, graph: Graph):
         # No node consumes IMAGE and produces MODEL in this fixture
@@ -556,14 +567,16 @@ class TestPathConstraints:
         assert result["truncated_by"] == "max_states"
 
     def test_degenerate_bounds_return_nothing(self, graph_path: Graph):
-        assert graph_path.search_paths("MODEL", "MODEL")["paths"] == []
+        # `MODEL -> MODEL` used to sit here as a third degenerate case. It is no
+        # longer degenerate — a same-type query is a real question with a real
+        # answer (see `test_same_type_query_finds_the_route`), so only the
+        # bounds no path can satisfy remain.
         assert graph_path.search_paths("MODEL", "IMAGE", max_depth=0)["paths"] == []
         assert graph_path.search_paths("MODEL", "IMAGE", max_paths=0)["paths"] == []
 
     @pytest.mark.parametrize(
         ("kwargs", "reason"),
         [
-            ({"from_type": "MODEL", "to_type": "MODEL"}, "same_type"),
             ({"from_type": "MODEL", "to_type": "IMAGE", "max_depth": 0}, "degenerate_bounds"),
             ({"from_type": "MODEL", "to_type": "IMAGE", "max_paths": 0}, "degenerate_bounds"),
         ],
@@ -586,17 +599,50 @@ class TestPathConstraints:
         assert result["depth_limited"] is False
         assert result["collapsed"] is False
 
-    def test_same_type_query_is_declined_even_though_a_route_exists(self, graph_path: Graph):
+    def test_same_type_query_finds_the_route(self, graph_path: Graph):
         """`LoraLoaderModelOnly` in the fixture takes a MODEL link input and
-        emits MODEL, so `MODEL -> MODEL` is genuinely routable. The walker still
-        declines it — the no-op rule (`out_t == cur_type`) drops that step — so
-        the empty result must be flagged as an abstention, never as proof."""
+        emits MODEL, so `MODEL -> MODEL` is genuinely routable — and is now
+        answered rather than declined. The walker used to refuse the query
+        outright and report the empty result as an abstention; the no-op rule
+        (`out_t == cur_type`) no longer drops the hop that answers it.
+        """
         lora = graph_path.node("LoraLoaderModelOnly")
         assert lora is not None and "MODEL" in lora.output_types()
+        assert lora.has_input("MODEL")
 
         result = graph_path.search_paths("MODEL", "MODEL")
-        assert result["paths"] == []
-        assert result["not_searched"] is True
+        assert ("LoraLoaderModelOnly",) in {_node_chain(p) for p in result["paths"]}
+        # A real walk, not an abstention — and the one-step route is a genuine
+        # MODEL-in/MODEL-out hop, not a mislabelled edge.
+        assert result["not_searched"] is False
+        assert result["not_searched_reason"] is None
+        one_step = next(p for p in result["paths"] if _node_chain(p) == ("LoraLoaderModelOnly",))
+        assert one_step["from"] == "MODEL" and one_step["to"] == "MODEL"
+        assert one_step["steps"] == [{"node": "LoraLoaderModelOnly", "input_type": "MODEL", "output_type": "MODEL"}]
+
+    def test_no_op_hops_are_still_dropped(self, graph_path: Graph):
+        """The exemption is scoped to the hop that answers a same-type query,
+        and to nothing else — a step that hands back the type it consumed is
+        still a no-op everywhere it is not the terminal step.
+
+        For a FROM != TO query that means *no* step may do it at all: a step
+        whose output equals the target ends the path, so a no-op-looking step
+        requires the incoming type to already be the target, which only the
+        first frontier item can satisfy.
+        """
+        for from_type in ("MODEL", "LATENT", "CLIP", "CONDITIONING"):
+            for p in graph_path.exact_paths(from_type, "IMAGE", max_depth=6):
+                assert all(s["input_type"] != s["output_type"] for s in p["steps"]), (
+                    f"no-op hop in {from_type} -> IMAGE via {_node_chain(p)}"
+                )
+        # And within a same-type query it is the terminal hop only.
+        same_type = graph_path.exact_paths("MODEL", "MODEL", max_depth=6)
+        assert same_type, "fixture must offer at least one MODEL -> MODEL route"
+        for p in same_type:
+            for i, step in enumerate(p["steps"]):
+                if step["input_type"] == step["output_type"]:
+                    assert i == len(p["steps"]) - 1, f"no-op mid-path in {_node_chain(p)}"
+                    assert step["output_type"] == "MODEL"
 
     def test_completed_walks_are_not_marked_as_declined(self, graph_path: Graph):
         """The abstention flag must stay off for searches that actually ran,
