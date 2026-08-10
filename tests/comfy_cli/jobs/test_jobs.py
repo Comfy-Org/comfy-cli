@@ -2468,8 +2468,15 @@ def test_watch_handlers_registry_covers_the_protocol_types():
         "executing",
         "execution_cached",
         "progress",
+        # Current ComfyUI's per-step channel; `progress` is the legacy name and
+        # both stay mapped so old and new servers both stream.
+        "progress_state",
         "executed",
         "execution_error",
+        # Current ComfyUI's end-of-prompt signals — without them a successful
+        # watch only ends when a recv times out (a full `--timeout` of silence).
+        "execution_success",
+        "execution_interrupted",
     }
     assert jobs_mod._WATCH_HANDLERS.get("unknown_type") is None
 
@@ -2519,11 +2526,95 @@ def test_watch_executed_collects_output_urls_with_host_port():
 
 def test_watch_execution_error_is_terminal_and_carries_details():
     st, _ = _watch_state()
-    data = {"node_id": "5", "exception_message": "boom"}
+    data = {"node_id": "5", "exception_message": "boom", "executed": ["1", 2]}
     jobs_mod._watch_execution_error(st, data)
     assert st.terminal is True
     assert st.end_reason == "error"
     assert st.end_details == data
+    # The `executed` list is the only record of what ran before the failure.
+    assert st.completed_nodes == {"1", "2"}
+
+
+def test_watch_progress_state_streams_per_node_and_marks_finished_nodes():
+    """`progress_state` (current ComfyUI) must produce per-step progress events
+    and count finished nodes — including compute nodes that never fire
+    `executed`. Regression: watch only understood the legacy `progress` type."""
+    st, r = _watch_state()
+    jobs_mod._watch_progress_state(
+        st,
+        {
+            "prompt_id": "pid",
+            "nodes": {
+                "3": {"value": 2.0, "max": 8.0, "state": "running"},
+                "4": {"value": 8.0, "max": 8.0, "state": "finished"},
+            },
+        },
+    )
+    assert [t[0] for t in r.throttled] == ["progress:3"]
+    # Floats coerced to the integer|null the event schema declares.
+    assert r.throttled[0][2] == {"max_hz": 10, "node": "3", "completed": 2, "total": 8, "prompt_id": "pid"}
+    # The 100% line is emitted unthrottled so it can never be swallowed.
+    assert r.events == [("progress", {"node": "4", "completed": 8, "total": 8, "prompt_id": "pid"})]
+    assert st.completed_nodes == {"4"}
+
+
+def test_watch_progress_state_reports_each_finished_node_once():
+    """`progress_state` repeats every non-pending node on every message, so the
+    un-throttled final flush must not re-fire for an already-finished node."""
+    st, r = _watch_state()
+    msg = {"prompt_id": "pid", "nodes": {"4": {"value": 8, "max": 8, "state": "finished"}}}
+    jobs_mod._watch_progress_state(st, msg)
+    jobs_mod._watch_progress_state(st, dict(msg))
+    assert len(r.events) == 1 and r.throttled == []
+    assert st.completed_nodes == {"4"}
+
+
+def test_watch_progress_state_errored_node_is_final_but_not_completed():
+    """An `error` node is final — it must flush its progress line once and never
+    fire again — but it did NOT complete, so it stays out of `completed_nodes`."""
+    st, r = _watch_state()
+    msg = {"prompt_id": "pid", "nodes": {"5": {"value": 1, "max": 8, "state": "error"}}}
+    jobs_mod._watch_progress_state(st, msg)
+    jobs_mod._watch_progress_state(st, dict(msg))
+    assert st.completed_nodes == set()
+    assert "5" in st.progress_final
+    assert r.throttled == []
+    assert r.events == [("progress", {"node": "5", "completed": 1, "total": 8, "prompt_id": "pid"})]
+
+
+def test_watch_progress_state_ignores_malformed_payloads():
+    st, r = _watch_state()
+    jobs_mod._watch_progress_state(st, {"prompt_id": "pid", "nodes": "not-a-dict"})
+    jobs_mod._watch_progress_state(st, {"prompt_id": "pid"})
+    jobs_mod._watch_progress_state(st, {"prompt_id": "pid", "nodes": {"3": "nope"}})
+    assert r.throttled == [] and r.events == []
+    assert st.completed_nodes == set()
+
+
+def test_watch_execution_success_is_terminal_completed():
+    st, r = _watch_state()
+    jobs_mod._watch_execution_success(st, {"prompt_id": "pid"})
+    assert st.terminal is True
+    assert st.end_reason == "completed"
+    assert r.events == []
+
+
+def test_watch_execution_interrupted_is_terminal_cancelled_and_keeps_nodes():
+    st, _ = _watch_state()
+    data = {"prompt_id": "pid", "node_id": "7", "executed": ["1", "2"]}
+    jobs_mod._watch_execution_interrupted(st, data)
+    assert st.terminal is True
+    assert st.end_reason == "cancelled"
+    assert st.end_details == data
+    assert st.completed_nodes == {"1", "2"}
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [(3, 3), (3.7, 3), (None, None), ("8", None), (True, None), (float("nan"), None), (float("inf"), None)],
+)
+def test_progress_int_coerces_to_the_event_schema_type(value, expected):
+    assert jobs_mod._progress_int(value) == expected
 
 
 class _PrettyRecordingRenderer(_RecordingRenderer):
@@ -2557,6 +2648,267 @@ def test_watch_executing_escapes_server_controlled_node_markup():
     assert r"\[red]evil\[/red]" in r.printed[0]
     # The event stream still carries the raw node id.
     assert ("executing", {"node": "[red]evil[/red]", "prompt_id": "pid"}) in r.events
+
+
+# ---------------------------------------------------------------------------
+# `jobs watch` — attaching as the submitting client_id (the reason the stream
+# was silent) and the history-derived completed_nodes backfill
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_watch_client_id_prefers_the_job_state_file(monkeypatch):
+    """`comfy run` records the submitting client_id on disk — cheapest source,
+    and no HTTP call should be needed when it is there."""
+    from comfy_cli import jobs_state
+
+    jobs_state.write(jobs_state.new(prompt_id="pid-a", client_id="cid-from-state", workflow="w", where="local"))
+
+    def _no_http(url, **kw):
+        raise AssertionError(f"should not have queried the server: {url}")
+
+    monkeypatch.setattr(jobs_mod, "_http_get_json", _no_http)
+    assert jobs_mod._resolve_watch_client_id("127.0.0.1", 8188, "pid-a") == "cid-from-state"
+
+
+def test_resolve_watch_client_id_falls_back_to_queue_extra_data(monkeypatch):
+    """A prompt submitted by something else (browser, older CLI) has no state
+    file — /queue's extra_data still carries the submitting client_id."""
+
+    def fake_get(url, **kw):
+        if url.endswith("/queue"):
+            return {
+                "queue_running": [[0, "other", {}, {"client_id": "nope"}, {}]],
+                "queue_pending": [[1, "pid-b", {}, {"client_id": "cid-from-queue"}, {}]],
+            }
+        raise AssertionError(f"unexpected url: {url}")
+
+    monkeypatch.setattr(jobs_mod, "_http_get_json", fake_get)
+    assert jobs_mod._resolve_watch_client_id("127.0.0.1", 8188, "pid-b") == "cid-from-queue"
+
+
+def test_resolve_watch_client_id_falls_back_to_history_then_none(monkeypatch):
+    def fake_get(url, **kw):
+        if url.endswith("/queue"):
+            return {"queue_running": [], "queue_pending": []}
+        if url.endswith("/history/pid-c"):
+            return {"pid-c": {"prompt": [0, "pid-c", {}, {"client_id": "cid-from-history"}, {}]}}
+        return {}
+
+    monkeypatch.setattr(jobs_mod, "_http_get_json", fake_get)
+    assert jobs_mod._resolve_watch_client_id("127.0.0.1", 8188, "pid-c") == "cid-from-history"
+    # Nothing anywhere -> None, so the caller can warn instead of pretending.
+    assert jobs_mod._resolve_watch_client_id("127.0.0.1", 8188, "pid-missing") is None
+
+
+def test_resolve_watch_client_id_survives_an_unreachable_server(monkeypatch):
+    def boom(url, **kw):
+        raise RuntimeError("connection refused")
+
+    monkeypatch.setattr(jobs_mod, "_http_get_json", boom)
+    assert jobs_mod._resolve_watch_client_id("127.0.0.1", 8188, "pid-x") is None
+
+
+def test_history_completed_nodes_unions_cached_executed_and_output_nodes(monkeypatch):
+    """The end-state node list must not depend on the live stream at all."""
+
+    def fake_get(url, **kw):
+        assert url.endswith("/history/pid-h")
+        return {
+            "pid-h": {
+                "status": {
+                    "completed": True,
+                    "messages": [
+                        ["execution_start", {"prompt_id": "pid-h"}],
+                        ["execution_cached", {"nodes": [1, "2"]}],
+                        ["execution_interrupted", {"executed": ["3"]}],
+                    ],
+                },
+                "outputs": {"9": {"images": []}},
+            }
+        }
+
+    monkeypatch.setattr(jobs_mod, "_http_get_json", fake_get)
+    assert jobs_mod._history_completed_nodes("127.0.0.1", 8188, "pid-h") == {"1", "2", "3", "9"}
+
+
+def test_history_completed_nodes_tolerates_junk(monkeypatch):
+    def fake_get(url, **kw):
+        return {"pid-j": {"status": {"messages": [["execution_cached"], "junk", ["x", 1]]}, "outputs": "nope"}}
+
+    monkeypatch.setattr(jobs_mod, "_http_get_json", fake_get)
+    assert jobs_mod._history_completed_nodes("127.0.0.1", 8188, "pid-j") == set()
+    monkeypatch.setattr(jobs_mod, "_http_get_json", lambda url, **kw: (_ for _ in ()).throw(RuntimeError("down")))
+    assert jobs_mod._history_completed_nodes("127.0.0.1", 8188, "pid-j") == set()
+
+
+class _ScriptedWS:
+    """A `websocket.WebSocket` stand-in that replays a scripted message list.
+
+    Once the script is exhausted every `recv` raises the same timeout the real
+    socket raises, which is how the watch loop is driven to its snapshot check.
+    """
+
+    def __init__(self, messages):
+        self._messages = [m if isinstance(m, str) else json.dumps(m) for m in messages]
+        self.url = None
+        self.closed = False
+
+    def connect(self, url):
+        self.url = url
+
+    def settimeout(self, _t):
+        pass
+
+    def recv(self):
+        if not self._messages:
+            raise jobs_mod.WebSocketTimeoutException("timed out")
+        return self._messages.pop(0)
+
+    def close(self):
+        self.closed = True
+
+
+def _run_local_watch(monkeypatch, capsys, *, messages, prompt_id="pid-w", argv_extra=()):
+    """Drive `jobs watch` (local, NDJSON) over a scripted WS; return the lines."""
+    from typer.testing import CliRunner
+
+    from comfy_cli.output import Renderer, set_renderer
+    from comfy_cli.output.renderer import OutputMode
+
+    ws = _ScriptedWS(messages)
+    monkeypatch.setattr(jobs_mod, "_server_or_error", lambda h, p, **kw: True)
+    monkeypatch.setattr(jobs_mod, "WebSocket", lambda *a, **k: ws)
+    set_renderer(Renderer(mode=OutputMode.NDJSON, command="jobs watch"))
+    result = CliRunner().invoke(
+        jobs_mod.app,
+        ["watch", prompt_id, "--where", "local", "--timeout", "1", *argv_extra],
+    )
+    # NDJSON goes to the CliRunner's captured stdout, not capsys — the renderer
+    # resolves its machine stream lazily, i.e. after the runner swapped it in.
+    capsys.readouterr()
+    lines = [json.loads(ln) for ln in result.output.splitlines() if ln.startswith("{")]
+    return result, ws, lines
+
+
+def test_watch_streams_events_and_reports_completed_nodes(monkeypatch, capsys):
+    """The BE-6856 regression, end to end: a multi-node job must produce MORE
+    THAN ONE NDJSON line during the watch, and the terminal envelope's
+    `completed_nodes` must list the nodes that ran."""
+    from comfy_cli import jobs_state
+
+    jobs_state.write(jobs_state.new(prompt_id="pid-w", client_id="cid-sub", workflow="w", where="local"))
+    monkeypatch.setattr(jobs_mod, "_snapshot", lambda h, p, pid: {"prompt_id": pid, "status": "running", "outputs": []})
+    monkeypatch.setattr(jobs_mod, "_history_completed_nodes", lambda h, p, pid: {"1"})
+
+    messages = [
+        {"type": "status", "data": {"status": {}, "sid": "cid-sub"}},  # no prompt_id -> ignored
+        {"type": "execution_cached", "data": {"prompt_id": "pid-w", "nodes": ["1"]}},
+        {"type": "executing", "data": {"prompt_id": "pid-w", "node": "3"}},
+        {
+            "type": "progress_state",
+            "data": {"prompt_id": "pid-w", "nodes": {"3": {"value": 4, "max": 8, "state": "running"}}},
+        },
+        {
+            "type": "progress_state",
+            "data": {"prompt_id": "pid-w", "nodes": {"3": {"value": 8, "max": 8, "state": "finished"}}},
+        },
+        {"type": "executed", "data": {"prompt_id": "pid-w", "node": "9", "output": {}}},
+        {"type": "execution_success", "data": {"prompt_id": "pid-w"}},
+    ]
+    result, ws, lines = _run_local_watch(monkeypatch, capsys, messages=messages)
+
+    assert result.exit_code == 0, result.output
+    # 1. The watch attached as the submitting session — the whole reason events
+    #    reach us at all (ComfyUI addresses them to that sid only).
+    assert "clientId=cid-sub" in ws.url
+    # 2. Intermediate events actually reached the stream.
+    assert len(lines) > 1, f"expected a stream, got a single envelope: {lines}"
+    types = [ln.get("type") for ln in lines[:-1]]
+    assert "execution_cached" in types and "executing" in types and "executed" in types
+    assert types.count("progress") >= 2, types
+    # 3. The terminal envelope is last, ok, and names the nodes that ran.
+    env = lines[-1]
+    assert env["type"] == "envelope" and env["ok"] is True
+    assert env["data"]["status"] == "completed"
+    assert env["data"]["completed_nodes"] == ["1", "3", "9"]
+    assert env["data"]["attached"] is True and env["data"]["client_id"] == "cid-sub"
+
+
+def test_watch_terminal_envelope_backfills_completed_nodes_without_events(monkeypatch, capsys):
+    """Symptom 2 is independent of streaming: even with zero WS events, the
+    envelope's `completed_nodes` comes from the server's own /history record."""
+    snapshots = iter(
+        [
+            {"prompt_id": "pid-w", "status": "running", "outputs": []},
+            {"prompt_id": "pid-w", "status": "completed", "outputs": ["http://x/view?f=1"]},
+        ]
+    )
+    monkeypatch.setattr(jobs_mod, "_snapshot", lambda h, p, pid: next(snapshots, None))
+    monkeypatch.setattr(jobs_mod, "_resolve_watch_client_id", lambda h, p, pid: None)
+    monkeypatch.setattr(jobs_mod, "_history_completed_nodes", lambda h, p, pid: {"4", "1"})
+
+    result, ws, lines = _run_local_watch(monkeypatch, capsys, messages=[])
+    assert result.exit_code == 0, result.output
+    env = lines[-1]
+    assert env["data"]["status"] == "completed"
+    assert env["data"]["completed_nodes"] == ["1", "4"]
+    # Unresolvable id -> a fresh one, flagged so a caller knows why it saw no
+    # events rather than guessing the job was silent.
+    assert env["data"]["attached"] is False
+    assert "clientId=" in ws.url
+
+
+def test_watch_already_terminal_job_still_lists_completed_nodes(monkeypatch, capsys):
+    """The short-circuit path (job already finished) also carries the node list —
+    and the `client_id`/`attached` pair, so a consumer reading `data.attached`
+    never hits a missing key on this exit path."""
+    import jsonschema
+
+    monkeypatch.setattr(
+        jobs_mod,
+        "_snapshot",
+        lambda h, p, pid: {"prompt_id": pid, "status": "completed", "outputs": [], "host": h, "port": p},
+    )
+    monkeypatch.setattr(jobs_mod, "_history_completed_nodes", lambda h, p, pid: {"2", "1"})
+    result, _ws, lines = _run_local_watch(monkeypatch, capsys, messages=[])
+    assert result.exit_code == 0, result.output
+    assert lines[-1]["data"]["completed_nodes"] == ["1", "2"]
+    # Nothing was attached: no socket was ever opened on this path.
+    assert lines[-1]["data"]["client_id"] is None
+    assert lines[-1]["data"]["attached"] is False
+
+    schema_path = Path(jobs_mod.__file__).parent.parent / "schemas" / "jobs.json"
+    jsonschema.Draft202012Validator(json.loads(schema_path.read_text())).validate(lines[-1]["data"])
+
+
+def test_watch_client_id_flag_overrides_resolution(monkeypatch, capsys):
+    monkeypatch.setattr(jobs_mod, "_snapshot", lambda h, p, pid: {"prompt_id": pid, "status": "running", "outputs": []})
+    monkeypatch.setattr(jobs_mod, "_resolve_watch_client_id", lambda h, p, pid: "resolved")
+    monkeypatch.setattr(jobs_mod, "_history_completed_nodes", lambda h, p, pid: set())
+    messages = [{"type": "execution_success", "data": {"prompt_id": "pid-w"}}]
+    _result, ws, lines = _run_local_watch(
+        monkeypatch, capsys, messages=messages, argv_extra=("--client-id", "forced id")
+    )
+    # Percent-encoded into the query string, never interpolated raw.
+    assert "clientId=forced%20id" in ws.url
+    assert lines[-1]["data"]["client_id"] == "forced id"
+
+
+def test_watch_terminal_envelope_validates_against_the_jobs_schema(monkeypatch, capsys):
+    """The additive `client_id`/`attached` keys are a published contract."""
+    import jsonschema
+
+    monkeypatch.setattr(jobs_mod, "_snapshot", lambda h, p, pid: {"prompt_id": pid, "status": "running", "outputs": []})
+    monkeypatch.setattr(jobs_mod, "_resolve_watch_client_id", lambda h, p, pid: "cid")
+    monkeypatch.setattr(jobs_mod, "_history_completed_nodes", lambda h, p, pid: {"1"})
+    messages = [{"type": "execution_success", "data": {"prompt_id": "pid-w"}}]
+    _result, _ws, lines = _run_local_watch(monkeypatch, capsys, messages=messages)
+
+    schema_path = Path(jobs_mod.__file__).parent.parent / "schemas" / "jobs.json"
+    schema = json.loads(schema_path.read_text())
+    jsonschema.Draft202012Validator(schema).validate(lines[-1]["data"])
+    assert schema["properties"]["attached"]["type"] == "boolean"
+    assert schema["properties"]["client_id"]["type"] == ["string", "null"]
 
 
 # ---------------------------------------------------------------------------
