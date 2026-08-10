@@ -39,6 +39,21 @@ comfy setup
 
 `comfy setup` walks you through everything — local or cloud routing, authentication, and agent skill installation — in one interactive wizard. Pass `-y` for non-interactive (CI/scripted) installs.
 
+## Run a workflow in the cloud
+
+No local GPU? Route any API-format workflow to [Comfy Cloud](https://www.comfy.org/) with `--where cloud`:
+
+```bash
+comfy cloud login                                        # sign in via your browser (OAuth)
+comfy run --workflow ./workflow.json --where cloud       # submits, prints a prompt_id, returns immediately
+comfy jobs wait <prompt_id> --where cloud                # block until the job finishes (or: jobs status for a one-shot check)
+comfy download <prompt_id> --where cloud -o ./outputs    # save the results locally
+```
+
+`comfy run` submits asynchronously and prints the `prompt_id` you feed to `jobs`/`download`; add `--wait` to block inline instead. Check your sign-in anytime with `comfy cloud whoami`. Export the workflow JSON from ComfyUI via **File → Export (API)** (UI-format JSON is auto-converted). Set cloud as your default target so you can drop the flag: `comfy set-default --where cloud`.
+
+**Credits:** cloud generation (`comfy run --where cloud`, `comfy generate`) consumes Comfy Cloud credits and needs an active subscription. Discovery and inspection commands — `comfy cloud whoami`, `comfy jobs status/ls`, `comfy templates ls`, `comfy generate list` — don't.
+
 ## Installation
 
 1. (Recommended) Activate a virtual environment ([venv](https://docs.python.org/3/library/venv.html) or [conda](https://conda.io/projects/conda/en/latest/user-guide/getting-started.html)).
@@ -106,6 +121,12 @@ dependencies using the following precedence:
 - `comfy update` (or `comfy update comfy`): pull the branch the workspace is currently on and reinstall `requirements.txt`.
 - `comfy update all`: also update every installed custom node.
 - `comfy update cli`: upgrade comfy-cli itself.
+
+By default `comfy update all` exits 0 even when the custom-node update step fails — the error is printed, but the exit code says success, so scripts and wrappers can't tell. Pass `--exit-on-fail` (the same flag name and default as `comfy node install --exit-on-fail`) to have that failure exit non-zero instead. The flag only changes the `all` target; `comfy update comfy` and `comfy update cli` already exit non-zero when they fail, and accept the flag as a no-op so it can be forwarded unconditionally.
+
+One limit worth knowing: `--exit-on-fail` can only surface what ComfyUI-Manager's `cm-cli update` reports. `cm-cli` currently handles a *single* pack failing to update by printing `ERROR: ...` and carrying on, still exiting 0, so that particular case stays invisible until ComfyUI-Manager propagates it. Unlike `comfy node install`, the flag is not forwarded to `cm-cli` — only its `install` subcommand accepts `--exit-on-fail`; its `update` subcommand has no such option and would reject it.
+
+When the flag does fire, the exit code is `cm-cli`'s own, normalized so it is always usable: a process killed by a signal becomes `128+N` rather than a truncated value, an exit code that would truncate to 0 becomes 1, and 2 becomes 1 so it can't be mistaken for a CLI usage error. In `--json` mode the failure is also reported as an `update_custom_nodes_failed` error envelope carrying `cm-cli`'s raw status in `details.cm_cli_returncode`.
 
 #### Switching to a specific version
 

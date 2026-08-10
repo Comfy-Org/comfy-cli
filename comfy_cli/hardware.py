@@ -317,6 +317,21 @@ def _detect_gpu_amd() -> dict | None:
     }
 
 
+def _is_apple_silicon(machine: str) -> bool:
+    """True when the underlying CPU is Apple Silicon (Darwin already assumed).
+
+    A native arm64 process reports ``machine == 'arm64'`` directly. An x86_64
+    Python running under Rosetta 2 on an Apple Silicon Mac reports
+    ``machine == 'x86_64'``, so fall back to ``sysctl.proc_translated`` — a value
+    of ``'1'`` means the process is translated, which only happens on Apple
+    Silicon. Genuine Intel Macs lack that sysctl key, so ``_run`` returns
+    ``None`` and this stays False.
+    """
+    if machine == "arm64":
+        return True
+    return _run(["sysctl", "-n", "sysctl.proc_translated"]) == "1"
+
+
 def _detect_gpu(system: str, machine: str, cpu: str | None) -> dict | None:
     """Resolve the GPU block, or ``None`` if no GPU is detected.
 
@@ -324,7 +339,7 @@ def _detect_gpu(system: str, machine: str, cpu: str | None) -> dict | None:
     other path tries NVIDIA (nvidia-smi then ctypes), then AMD.
     """
     try:
-        if system == "Darwin" and machine == "arm64":
+        if system == "Darwin" and _is_apple_silicon(machine):
             return {
                 "vendor": "apple",
                 "model": cpu,

@@ -36,6 +36,7 @@ from typing import Any
 
 from comfy_cli.command.pack_scan import iter_pack_dirs as _iter_pack_dirs
 from comfy_cli.command.pack_scan import read_pyproject as _read_pyproject
+from comfy_cli.file_utils import atomic_write_text
 from comfy_cli.registry import RegistryAPI
 
 CACHE_TTL_SECONDS = 3600  # 1 hour
@@ -77,24 +78,13 @@ def _load_cache() -> dict[str, Any]:
 def _save_cache(cache: dict[str, Any]) -> None:
     path = _cache_path()
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        # Write-then-rename: an interrupt mid-write must not leave a truncated
-        # file that the next `_load_cache` silently resets to `{}`. `os.replace`
-        # is atomic within a filesystem, and the temp file is a sibling so the
-        # rename never crosses one. Unique per process — two concurrent writers
-        # must not share (and truncate) one temp path.
-        tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
-        try:
-            # `encoding` pinned rather than left to the platform locale:
-            # `_load_cache` decodes bytes as JSON, which only accepts
-            # UTF-8/16/32. Today `json.dumps` defaults to `ensure_ascii=True`,
-            # so the payload is pure ASCII and any locale would round-trip —
-            # this keeps that a property of the writer, not a lucky default, if
-            # a non-ASCII pack id ever reaches the file verbatim.
-            tmp.write_text(json.dumps(cache), encoding="utf-8")
-            os.replace(tmp, path)
-        finally:
-            tmp.unlink(missing_ok=True)
+        # Write-then-rename (tier 4, regenerable cache — see the write policy in
+        # comfy_cli/file_utils.py): an interrupt mid-write must not leave a
+        # truncated file that the next `_load_cache` silently resets to `{}`.
+        # The helper creates the parent dir, writes UTF-8 (`_load_cache` decodes
+        # bytes as JSON, which only accepts UTF-8/16/32), and cleans up its own
+        # temp file on failure.
+        atomic_write_text(path, json.dumps(cache), fsync=False)
     except OSError:
         # A read-only cache dir must never break a read-only report.
         pass
