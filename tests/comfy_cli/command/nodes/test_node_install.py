@@ -5,11 +5,13 @@ import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
+import requests
 from typer.testing import CliRunner
 
 from comfy_cli import cmdline
 from comfy_cli.command.custom_nodes.command import app
 from comfy_cli.file_utils import DownloadException
+from comfy_cli.registry import RegistryAPIError
 
 runner = CliRunner()
 
@@ -507,3 +509,79 @@ class TestRegistryInstallDownloadError:
 
         assert "Traceback" not in result.output
         assert "DownloadException" not in result.output
+
+
+class TestRegistryInstallApiError:
+    """A RegistryAPIError from install_node must surface a machine-readable
+    renderer.error(code="registry_install_failed", details={status, body}) and
+    exit non-zero — not a bare traceback and not a silent exit 0."""
+
+    def test_api_error_surfaced_with_code_and_exit_1(self, tmp_path):
+        with (
+            patch("comfy_cli.command.custom_nodes.command.registry_api") as mock_api,
+            patch("comfy_cli.command.custom_nodes.command.workspace_manager") as mock_ws,
+            patch("comfy_cli.command.custom_nodes.command.get_renderer") as mock_get_renderer,
+        ):
+            mock_ws.workspace_path = str(tmp_path)
+            mock_api.install_node.side_effect = RegistryAPIError(
+                "Failed to install node: 404 - Not Found", status=404, body="Not Found"
+            )
+
+            result = runner.invoke(app, ["registry-install", "test-node"])
+
+        assert result.exit_code == 1
+        assert "Traceback" not in result.output
+        mock_get_renderer.return_value.error.assert_called_once()
+        _, kwargs = mock_get_renderer.return_value.error.call_args
+        assert kwargs["code"] == "registry_install_failed"
+        assert kwargs["details"] == {"node_id": "test-node", "status": 404, "body": "Not Found"}
+
+
+class TestRegistryInstallNonApiFailure:
+    """Failures that aren't RegistryAPIError — a connection error, a DNS failure,
+    a timeout, a JSON decode error, or a registry response carrying no download
+    URL — must also emit the registry_install_failed envelope and exit non-zero.
+    Exiting 0 here reports a network outage to automation / CI as success."""
+
+    def _invoke(self, tmp_path, *, install_node_side_effect=None, install_node_return=None):
+        with (
+            patch("comfy_cli.command.custom_nodes.command.registry_api") as mock_api,
+            patch("comfy_cli.command.custom_nodes.command.workspace_manager") as mock_ws,
+            patch("comfy_cli.command.custom_nodes.command.get_renderer") as mock_get_renderer,
+            patch("comfy_cli.command.custom_nodes.command.download_file") as mock_dl,
+        ):
+            mock_ws.workspace_path = str(tmp_path)
+            if install_node_side_effect is not None:
+                mock_api.install_node.side_effect = install_node_side_effect
+            else:
+                mock_api.install_node.return_value = install_node_return
+
+            result = runner.invoke(app, ["registry-install", "test-node"])
+            return result, mock_get_renderer, mock_dl
+
+    def test_connection_error_exits_1_with_envelope(self, tmp_path):
+        result, mock_get_renderer, mock_dl = self._invoke(
+            tmp_path, install_node_side_effect=requests.ConnectionError("Name or service not known")
+        )
+
+        # Must exit non-zero so automation / CI can detect the failure.
+        assert result.exit_code == 1
+        assert "Traceback" not in result.output
+        mock_dl.assert_not_called()
+        mock_get_renderer.return_value.error.assert_called_once()
+        _, kwargs = mock_get_renderer.return_value.error.call_args
+        assert kwargs["code"] == "registry_install_failed"
+        assert kwargs["details"] == {"node_id": "test-node"}
+
+    def test_missing_download_url_exits_1_with_envelope(self, tmp_path):
+        result, mock_get_renderer, mock_dl = self._invoke(
+            tmp_path, install_node_return=MagicMock(download_url="", version="1.0.0")
+        )
+
+        assert result.exit_code == 1
+        assert "Traceback" not in result.output
+        mock_dl.assert_not_called()
+        mock_get_renderer.return_value.error.assert_called_once()
+        _, kwargs = mock_get_renderer.return_value.error.call_args
+        assert kwargs["code"] == "registry_install_failed"
+        assert kwargs["details"] == {"node_id": "test-node"}

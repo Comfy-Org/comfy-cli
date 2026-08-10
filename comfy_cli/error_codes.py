@@ -779,6 +779,21 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "`generate --emit-workflow` could not build the partner-node workflow.",
         "check the model name and that all required inputs are provided",
     ),
+    # --- custom node registry ------------------------------------------------
+    ErrorCode(
+        "node_publish_failed",
+        "Publishing a custom-node version to the registry failed: either a "
+        "client-side validation gap (missing publisher id / project name in "
+        "pyproject.toml) or a non-2xx from the registry. `details.status` and "
+        "`details.body` carry the response when it was an HTTP failure.",
+        "check `details.body`; ensure `[tool.comfy] publisher_id` and `[project] name` are set, and the token is valid",
+    ),
+    ErrorCode(
+        "registry_install_failed",
+        "`comfy node registry-install` fetching a custom node from the registry failed with a non-2xx. "
+        "`details.status` and `details.body` carry the response.",
+        "check the node id and version exist in the registry (`comfy node registry-list`); check `details.body`",
+    ),
     ErrorCode(
         "spend_consent_required",
         "A credit-spending command hit its spend gate with no consent, so it failed closed — "
