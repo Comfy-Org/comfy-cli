@@ -745,7 +745,43 @@ def path_cmd(
         typer.Option("--where", show_default=False, help="'cloud' to query Comfy Cloud's catalog; default is local."),
     ] = None,
 ):
+    """Envelope contract (``data``):
+
+    - ``mode`` — the *requested* matching mode, ``"exact"`` or ``"loose"``. It
+      echoes ``--exact/--loose`` and says nothing about completeness.
+    - ``exact`` — the exhaustiveness claim, and deliberately NOT the flag echoed
+      back: true only when the listed paths are the complete, type-constrained
+      answer. Exact mode that stopped early (``truncated``), was still expanding
+      at the bound (``depth_limited``), or dropped an alternate route into an
+      already-explored state (``collapsed``) withholds the claim, as does loose
+      mode always. ``exact: true`` with ``count: 0`` is therefore a proof that
+      no route exists; ``exact: false`` means "these paths, maybe not all".
+    - ``truncated`` / ``truncated_by`` / ``depth_limited`` / ``collapsed`` — the
+      individual reasons the claim was withheld, so a caller can widen the right
+      bound instead of guessing.
+
+    One documented exception to the ``exact: true, count: 0`` proof: a query
+    whose FROM and TO are the *same* type is answered empty by construction
+    (``Graph.search_paths`` declines to walk it, long-standing behaviour), so it
+    reports an exhaustive empty set even where a real self-returning route such
+    as ``MODEL -> LoraLoader -> MODEL`` exists. Tracked separately; do not read
+    a same-type empty result as a proof of unreachability.
+    """
     renderer = get_renderer()
+
+    # A bound below 1 admits no path at all, so the search would return an empty
+    # result with every flag false — i.e. `exact: true, count: 0`, a proof that
+    # no route exists. That proof would come from the typo, not from a walk, so
+    # refuse the bound instead of emitting it.
+    if max_depth < 1 or max_paths < 1:
+        renderer.error(
+            code="path_bounds_invalid",
+            message="--max-depth and --max-paths must be at least 1.",
+            hint="retry with `--max-depth 6 --max-paths 10`",
+            details={"max_depth": max_depth, "max_paths": max_paths},
+        )
+        raise typer.Exit(code=1)
+
     _stale: dict = {}
     graph = _get_graph(
         input_path,

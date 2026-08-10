@@ -603,6 +603,13 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "Requested node class isn't in the loaded environment.",
         "see `details.close_matches` or run `comfy nodes search`",
     ),
+    ErrorCode(
+        "path_bounds_invalid",
+        "`comfy nodes path` was given `--max-depth` or `--max-paths` below 1. Such a bound admits no "
+        "path at all, so the search is refused rather than returning an empty result that would read "
+        "as a proof that no route exists.",
+        "use `--max-depth 6 --max-paths 10` (or any bound >= 1)",
+    ),
     # --- file transfer (upload / download) -----------------------------------
     ErrorCode(
         "upload_failed",

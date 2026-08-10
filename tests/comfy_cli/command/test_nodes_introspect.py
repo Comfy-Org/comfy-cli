@@ -522,6 +522,29 @@ class TestPath:
         assert env["truncated_by"] == "max_paths"
         assert env["exact"] is False
 
+    @pytest.mark.parametrize(
+        ("flag", "value"),
+        [("--max-depth", "0"), ("--max-depth", "-1"), ("--max-paths", "0"), ("--max-paths", "-3")],
+    )
+    def test_non_positive_bounds_are_refused_not_answered(self, patched_loader, capsys, flag, value):
+        """A bound below 1 admits no path, so the walker returns an empty result
+        with every flag false — which the envelope would publish as `exact: true,
+        count: 0`, a proof that no route exists. That proof would come from the
+        typo, not from a walk, so the bound is rejected up front instead.
+        """
+        env = _run(["path", "MODEL", "IMAGE", flag, value], capsys)
+        assert env["ok"] is False
+        assert env["error"]["code"] == "path_bounds_invalid"
+        assert env["error"]["details"][flag.removeprefix("--").replace("-", "_")] == int(value)
+        # Crucially: no envelope claiming an exhaustive empty answer.
+        assert "data" not in env or not (env.get("data") or {}).get("exact")
+
+    def test_smallest_valid_bounds_still_search(self, patched_loader, capsys):
+        """The rejection is for bounds below 1 only — 1 stays a real search."""
+        env = _run(["path", "MODEL", "IMAGE", "--max-depth", "2", "--max-paths", "1"], capsys)
+        assert env["ok"] is True
+        assert env["data"]["count"] == 1
+
     def test_loose_mode_never_claims_exactness(self, patched_loader, capsys):
         env = _run(["path", "MODEL", "IMAGE", "--loose", "--max-depth", "4"], capsys)["data"]
         assert env["mode"] == "loose"
