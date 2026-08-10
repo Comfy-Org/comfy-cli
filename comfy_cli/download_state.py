@@ -61,7 +61,7 @@ import sys
 import time
 import uuid
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -91,6 +91,14 @@ PID_CREATE_TIME_TOLERANCE_S = 1.0
 # Every worker's argv contains this; used to identify a worker when its start
 # time was never recorded.
 WORKER_ARGV_MARKER = "_download-worker"
+
+# How long a finished download's record is kept before :func:`prune` drops it.
+PRUNE_MAX_AGE_S = 7 * 24 * 60 * 60
+
+# Hard ceiling on retained *terminal* records, applied on top of the age rule so
+# a burst of downloads can't leave the directory (and `downloads`' output) large
+# for a week. Active records are never counted or evicted.
+PRUNE_MAX_TERMINAL_RECORDS = 200
 
 _SAFE_ID = re.compile(r"^[a-zA-Z0-9_\-]{1,64}$")
 
@@ -312,14 +320,116 @@ def read_path(path: Path) -> DownloadState | None:
         return None
 
 
+def _sort_key(state: DownloadState) -> tuple[str, str]:
+    """The newest-first ordering :func:`list_all` and :func:`prune` share.
+
+    They must agree: ``prune`` evicts the records that fall off the end of the
+    list ``downloads`` shows, so a divergent tiebreak would drop a record the
+    user is still looking at while keeping one they aren't.
+    """
+    return (state.started_at or "", state.id)
+
+
 def list_all(workspace: Path) -> list[DownloadState]:
     """Every readable state file, newest ``started_at`` first."""
     base = Path(workspace) / STATE_DIRNAME
     if not base.is_dir():
         return []
     states = [s for s in (read_path(p) for p in sorted(base.glob("*.json"))) if s is not None]
-    states.sort(key=lambda s: (s.started_at or "", s.id), reverse=True)
+    states.sort(key=_sort_key, reverse=True)
     return states
+
+
+def _has_partials(dest: str) -> bool:
+    """True while a ``.part`` sibling of ``dest`` still holds bytes on disk.
+
+    This is the same set of files ``download-cancel`` reclaims, so it is also
+    the only handle a user has left on those bytes once a download has failed.
+    """
+    from comfy_cli import file_utils
+
+    try:
+        return bool(file_utils.partial_paths_for(Path(dest)))
+    except (OSError, ValueError):
+        # An unreadable parent or a nonsense dest tells us nothing about the
+        # partial; assume there is one rather than deleting the record that
+        # points at it.
+        return True
+
+
+def _remove_record(path: Path) -> bool:
+    """Delete one state file and its companions. False if the record survived.
+
+    The ``<id>.log`` and ``<id>.cancel`` siblings are unreachable once the
+    record naming them is gone — no verb can look them up — so they go with it,
+    otherwise pruning the records alone would leave the directory growing.
+    """
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        return False
+    for companion in (path.with_name(f"{path.stem}.log"), cancel_marker_for(path)):
+        try:
+            companion.unlink(missing_ok=True)
+        except OSError:
+            continue
+    return True
+
+
+def prune(workspace: Path) -> int:
+    """Drop finished download records that are stale or over the retention cap.
+
+    Nothing else ever removes a record, so ``<workspace>/.comfy-downloads``
+    would otherwise grow for the life of the workspace — and ``list_all`` reads
+    and JSON-parses every file in it on every ``comfy model downloads`` call.
+
+    A record is removed when it is **terminal** (:data:`TERMINAL_STATUSES`) and
+    either:
+
+    * its ``updated_at`` is older than :data:`PRUNE_MAX_AGE_S` — except for a
+      ``failed``/``cancelled`` record whose destination still has a ``.part``
+      sibling. Those bytes are on disk and the record is the user's only handle
+      for reclaiming them with ``download-cancel``, which is the same contract
+      :func:`comfy_cli.file_utils.cleanup_partials` is written to; or
+    * it falls outside the newest :data:`PRUNE_MAX_TERMINAL_RECORDS` terminal
+      records. That ceiling is what makes the directory *bounded* rather than
+      merely self-expiring, so unlike the age rule it applies unconditionally.
+
+    An in-flight record (``starting``/``downloading``) is never touched at any
+    age, and never counts toward — or is evicted by — the cap.
+
+    Every step is best effort, exactly like :func:`write_path`'s OSError
+    handling: a read-only state directory, a permissions problem, or a file a
+    concurrent prune already removed must never raise into a download. Returns
+    the number of records actually removed.
+    """
+    base = Path(workspace) / STATE_DIRNAME
+    try:
+        if not base.is_dir():
+            return 0
+        paths = sorted(base.glob("*.json"))
+    except OSError:
+        return 0
+
+    terminal: list[tuple[DownloadState, Path]] = []
+    for path in paths:
+        state = read_path(path)
+        if state is not None and state.status in TERMINAL_STATUSES:
+            terminal.append((state, path))
+    terminal.sort(key=lambda item: _sort_key(item[0]), reverse=True)
+
+    cutoff = datetime.now(timezone.utc) - timedelta(seconds=PRUNE_MAX_AGE_S)
+    removed = 0
+    for index, (state, path) in enumerate(terminal):
+        if index < PRUNE_MAX_TERMINAL_RECORDS:
+            updated = _parse_iso(state.updated_at)
+            if updated is None or updated >= cutoff:
+                continue
+            if state.status in ("failed", "cancelled") and _has_partials(state.dest):
+                continue
+        if _remove_record(path):
+            removed += 1
+    return removed
 
 
 # ---------------------------------------------------------------------------

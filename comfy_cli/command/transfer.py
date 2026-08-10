@@ -27,7 +27,7 @@ import typer
 
 from comfy_cli import jobs_state
 from comfy_cli.comfy_client import Client, Unauthenticated, extract_output_entries
-from comfy_cli.host_port import validate_host
+from comfy_cli.host_port import report_usage_error, validate_host
 from comfy_cli.http import NoRedirectHandler, build_http_only_opener
 from comfy_cli.http import target_auth_headers as _auth_headers
 from comfy_cli.output import get_renderer
@@ -424,10 +424,16 @@ def execute_upload(
     # ``http://{host}:{port}`` with no checks of its own. Validating here makes
     # the no-URL-injection guarantee a property of ``execute_upload`` rather
     # than of whoever happens to call it.
-    if host is not None:
-        host = validate_host(host)
-    if port is not None and not (1 <= port <= 65535):
-        raise typer.BadParameter(f"invalid port: {port} is out of range (1-65535)")
+    # ``report_usage_error`` gives JSON/NDJSON consumers a terminating envelope
+    # for that rejection instead of an empty stdout; the exception still
+    # escapes, so click's exit-2 usage contract is unchanged. (``cmdline.upload``
+    # wraps its own copy of this guard the same way — the renderer's
+    # emit-once guard means the pair can never write two envelopes.)
+    with report_usage_error(renderer):
+        if host is not None:
+            host = validate_host(host)
+        if port is not None and not (1 <= port <= 65535):
+            raise typer.BadParameter(f"invalid port: {port} is out of range (1-65535)")
     target = resolve_target(where=where, host=host, port=port)
 
     uploads: list[dict[str, Any]] = []

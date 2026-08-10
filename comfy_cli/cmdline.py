@@ -52,7 +52,7 @@ from comfy_cli.cuda_detect import DEFAULT_CUDA_TAG, detect_cuda_driver_version, 
 from comfy_cli.discovery import build_discovery
 from comfy_cli.env_checker import EnvChecker, _bracket_host, _unbracket_host
 from comfy_cli.help_json import build_help_json
-from comfy_cli.host_port import validate_host
+from comfy_cli.host_port import report_usage_error, validate_host
 from comfy_cli.output import Renderer, get_renderer, rprint, set_renderer
 from comfy_cli.resolve_python import resolve_workspace_python
 from comfy_cli.skills import command as skill_command
@@ -1050,18 +1050,24 @@ def run(
             )
             return
 
-        from comfy_cli.host_port import parse_host_port_arg, resolve_host_port
+        from comfy_cli.host_port import parse_host_port_arg, report_usage_error, resolve_host_port
 
-        if host:
-            host, parsed_port = parse_host_port_arg(host)
-            # ``port is None``, not ``not port``: a typed ``--port`` always wins
-            # over one embedded in ``--host h:p``, including ``--port 0``, which
-            # ``resolve_host_port`` then rejects as out of range instead of
-            # silently running against the embedded port.
-            if port is None and parsed_port is not None:
-                port = parsed_port
+        # ``report_usage_error``: a bad ``--host``/``--port`` is a
+        # ``typer.BadParameter``, which click turns into a stderr usage panel +
+        # exit 2 — leaving stdout empty in JSON/NDJSON mode while every other
+        # failure here ends with an envelope. Emit the terminating envelope
+        # first; the exception still propagates, so exit 2 is unchanged.
+        with report_usage_error(renderer):
+            if host:
+                host, parsed_port = parse_host_port_arg(host)
+                # ``port is None``, not ``not port``: a typed ``--port`` always wins
+                # over one embedded in ``--host h:p``, including ``--port 0``, which
+                # ``resolve_host_port`` then rejects as out of range instead of
+                # silently running against the embedded port.
+                if port is None and parsed_port is not None:
+                    port = parsed_port
 
-        host, port = resolve_host_port(host, port)
+            host, port = resolve_host_port(host, port)
 
         run_inner.execute(
             workflow,
@@ -1174,18 +1180,21 @@ def validate(
     # honor it resolve upstream, here.
     is_local_fetch = input_path is None and decision.target is where_module.WhereTarget.LOCAL
     if is_local_fetch:
-        from comfy_cli.host_port import parse_host_port_arg, resolve_host_port
+        from comfy_cli.host_port import parse_host_port_arg, report_usage_error, resolve_host_port
 
         # `host is not None` (not `if host:`): `--host ""` must reach the parser
         # and be rejected, not be read as "no --host given". Likewise the port
         # merge tests `is None`, so an explicit `--port 0` isn't silently
         # overridden by a port embedded in the combined `--host h:p` form —
         # `resolve_host_port` rejects it as out of range instead.
-        if host is not None:
-            host, parsed_port = parse_host_port_arg(host)
-            if port is None and parsed_port is not None:
-                port = parsed_port
-        host, port = resolve_host_port(host, port)
+        # `report_usage_error` gives JSON/NDJSON consumers a terminating
+        # envelope for that rejection instead of an empty stdout (exit stays 2).
+        with report_usage_error(renderer):
+            if host is not None:
+                host, parsed_port = parse_host_port_arg(host)
+                if port is None and parsed_port is not None:
+                    port = parsed_port
+            host, port = resolve_host_port(host, port)
 
     try:
         graph = Graph.load(mode=mode, input_path=input_path, host=host, port=port)
@@ -1359,10 +1368,13 @@ def upload(
     # Validate the flags before resolving anything: the host lands verbatim in
     # ``http://{host}:{port}/upload/image``, so a URL-special or control
     # character is a usage error (BadParameter, exit 2) regardless of target.
-    if host is not None:
-        host = validate_host(host)
-    if port is not None and not (1 <= port <= 65535):
-        raise typer.BadParameter(f"invalid port: {port} is out of range (1-65535)")
+    # ``report_usage_error`` emits the terminating envelope for that rejection
+    # in JSON/NDJSON mode; the exception still escapes, so exit stays 2.
+    with report_usage_error(renderer):
+        if host is not None:
+            host = validate_host(host)
+        if port is not None and not (1 <= port <= 65535):
+            raise typer.BadParameter(f"invalid port: {port} is out of range (1-65535)")
 
     try:
         decision = where_module.resolve(flag=where, config_value=config.get(where_module.CONFIG_KEY_WHERE_DEFAULT))
