@@ -2056,8 +2056,14 @@ def test_cloud_status_snapshot_reads_execution_error_and_ms_timestamps(monkeypat
     assert snap["error_message"] == (
         "torch.cuda.OutOfMemoryError: Allocation on device 0 would exceed allowed memory (node 5 KSampler)"
     )
-    # The full record rides along untouched for `--json` consumers.
-    assert snap["execution_error"] == _FAILED_DETAIL["execution_error"]
+    # The record rides along for `--json` consumers — minus `current_inputs`,
+    # whose widget values can carry API keys.
+    assert snap["execution_error"] == {
+        k: v for k, v in _FAILED_DETAIL["execution_error"].items() if k != "current_inputs"
+    }
+    assert "current_inputs" not in snap["execution_error"]
+    # `jobs status` is the documented home of the full traceback.
+    assert snap["execution_error"]["traceback"] == _FAILED_DETAIL["execution_error"]["traceback"]
     assert snap["created_at"] == "2025-01-01T00:00:00+00:00"
     assert snap["updated_at"] == "2025-01-01T00:01:00.500000+00:00"
     # Not served by this endpoint — never fabricated.
@@ -2131,6 +2137,124 @@ def test_jobs_watch_cloud_failed_job_reports_the_real_cause(monkeypatch, capsys)
     assert "Allocation on device 0 would exceed allowed memory" in env["error"]["message"]
     assert "ended in status" not in env["error"]["message"]
     assert env["error"]["details"]["execution_error"]["node_type"] == "KSampler"
+    # The whole payload becomes `renderer.error(details=...)`, so the nested
+    # record must be as trimmed as the top-level one: no widget values, and a
+    # traceback capped at the same two-frame budget as `traceback_tail`.
+    record = env["error"]["details"]["execution_error"]
+    assert "current_inputs" not in record
+    assert len(record["traceback"]) <= 2
+
+
+def test_jobs_watch_cloud_terminal_envelope_trims_a_long_traceback(monkeypatch, capsys):
+    """A server traceback longer than the tail budget is capped in the watch
+    envelope — JSON mode auto-engages off a TTY, so an unbounded blob would
+    land in CI and agent logs."""
+    from comfy_cli.output import Renderer, set_renderer
+    from comfy_cli.output.renderer import OutputMode
+
+    frames = [f"  File f{i}.py, line {i}" for i in range(12)]
+    detail = {
+        **_FAILED_DETAIL,
+        "execution_error": {**_FAILED_DETAIL["execution_error"], "traceback": frames},
+    }
+    monkeypatch.setattr(jobs_mod, "cloud_preflight_or_exit", lambda: None)
+    monkeypatch.setattr(jobs_mod, "_cloud_client", lambda: _FakeCloudClient(detail))
+
+    set_renderer(Renderer(mode=OutputMode.NDJSON, command="jobs watch"))
+    with pytest.raises(typer.Exit):
+        jobs_mod._cloud_watch("pid-failed", poll_interval=0.01, max_wait=5)
+
+    env = json.loads([ln for ln in capsys.readouterr().out.splitlines() if ln.strip()][-1])
+    assert env["error"]["details"]["execution_error"]["traceback"] == frames[-2:]
+    # ...and the classified tail agrees with it, so the envelope carries the
+    # same two frames twice over rather than the full blob once.
+    assert env["error"]["details"]["error_message"] == env["error"]["message"]
+
+
+def test_jobs_watch_cloud_prefers_the_structured_record_over_a_json_message(monkeypatch, capsys):
+    """An `exception_message` that is itself JSON (API nodes raise with raw
+    JSON bodies) must not be re-decoded into a fields-less dict: classify the
+    structured record, not the flattened one-liner."""
+    from comfy_cli.output import Renderer, set_renderer
+    from comfy_cli.output.renderer import OutputMode
+
+    detail = {
+        "status": "failed",
+        "execution_error": {
+            "node_id": "9",
+            "node_type": "ApiNode",
+            "exception_message": '{"detail": "upstream refused the request"}',
+        },
+    }
+    monkeypatch.setattr(jobs_mod, "cloud_preflight_or_exit", lambda: None)
+    monkeypatch.setattr(jobs_mod, "_cloud_client", lambda: _FakeCloudClient(detail))
+
+    set_renderer(Renderer(mode=OutputMode.NDJSON, command="jobs watch"))
+    with pytest.raises(typer.Exit):
+        jobs_mod._cloud_watch("pid-json-msg", poll_interval=0.01, max_wait=5)
+
+    env = json.loads([ln for ln in capsys.readouterr().out.splitlines() if ln.strip()][-1])
+    assert env["error"]["message"] == 'ApiNode (node 9): {"detail": "upstream refused the request"}'
+    assert env["error"]["details"]["execution_error"]["node_type"] == "ApiNode"
+
+
+def test_cloud_status_snapshot_prefers_structured_over_generic_error_message(monkeypatch):
+    """A deployment serving both a terse `error_message` and a detailed
+    `execution_error` must surface the detailed one."""
+    detail = {**_FAILED_DETAIL, "error_message": "job failed"}
+    monkeypatch.setattr(jobs_mod, "_cloud_client", lambda: _FakeCloudClient(detail))
+
+    snap = jobs_mod._cloud_status_snapshot("pid-both")
+    assert snap["error_message"].startswith("torch.cuda.OutOfMemoryError: Allocation on device 0")
+
+
+def test_cloud_status_snapshot_parses_a_string_execution_error(monkeypatch):
+    """A non-dict `execution_error` (the deprecated dialect's JSON-encoded
+    record) must still produce a cause rather than being discarded to None."""
+    payload = {
+        "status": "failed",
+        "execution_error": json.dumps({"exception_message": "boom", "node_id": 3, "node_type": "VAEDecode"}),
+    }
+    monkeypatch.setattr(jobs_mod, "_cloud_client", lambda: _FakeCloudClient(payload))
+
+    snap = jobs_mod._cloud_status_snapshot("pid-str-err")
+    assert snap["error_message"] == "boom (node 3 VAEDecode)"
+    # The published key stays object-or-null, so a string shape lands as null.
+    assert snap["execution_error"] is None
+
+
+def test_cloud_status_snapshot_ignores_a_stale_error_on_a_succeeded_job(monkeypatch):
+    """A non-failed job never has a cause synthesized for it — a stale record
+    on a retried-then-succeeded job would fabricate an `error` row."""
+    payload = {"status": "success", "execution_error": _FAILED_DETAIL["execution_error"]}
+
+    class _SucceededClient(_FakeCloudClient):
+        # The shared fake refuses `get_history` to guard the error paths; a
+        # completed job legitimately fetches it (and has no outputs here).
+        def get_history(self, prompt_id):
+            return None
+
+    monkeypatch.setattr(jobs_mod, "_cloud_client", lambda: _SucceededClient(payload))
+
+    snap = jobs_mod._cloud_status_snapshot("pid-ok")
+    assert snap["status"] == "completed"
+    assert snap["error_message"] is None
+
+
+def test_poll_cloud_once_survives_a_malformed_traceback():
+    """A `traceback` served as an object slices to a TypeError that only
+    `_poll_cloud_once`'s *fetch* is guarded against — it would kill the
+    detached watcher and strand the state file mid-flight."""
+    from comfy_cli import jobs_state
+    from comfy_cli.command import job_watcher
+
+    client = _FakeCloudClient(
+        {"status": "failed", "execution_error": {"exception_message": "boom", "traceback": {"frame": 1}}}
+    )
+    state = jobs_state.new(prompt_id="pid", client_id="c", workflow="w", where="cloud")
+    assert job_watcher._poll_cloud_once(state, client=client) is True
+    assert state.status == "error"
+    assert state.error["message"] == "boom"
 
 
 def test_cloud_status_pretty_renders_the_execution_error_row(monkeypatch, capsys):
@@ -2153,7 +2277,6 @@ def test_cloud_status_pretty_renders_the_execution_error_row(monkeypatch, capsys
     ("err", "expected"),
     [
         ({}, None),
-        ("a string, not an object", None),
         (None, None),
         ({"exception_message": "boom"}, "boom"),
         ({"exception_message": "boom", "exception_type": "ValueError"}, "ValueError: boom"),
@@ -2162,7 +2285,16 @@ def test_cloud_status_pretty_renders_the_execution_error_row(monkeypatch, capsys
         # Node 0 is a real node id — it must not be dropped as falsy.
         ({"exception_message": "boom", "node_id": 0}, "boom (node 0)"),
         ({"exception_message": "boom", "node_type": "KSampler"}, "boom (KSampler)"),
-        ({"node_id": 5, "node_type": "KSampler"}, "(node 5 KSampler)"),
+        # Node fields but no cause: state one rather than emitting the bare
+        # parenthetical `(node 5 KSampler)` as the whole error line.
+        ({"node_id": 5, "node_type": "KSampler"}, "ComfyUI reported an execution error. (node 5 KSampler)"),
+        # Internal newlines collapse — this helper renders *one* line, and the
+        # pretty `error` cell is a single Rich row.
+        ({"exception_message": "boom\n  at frame\n  at frame2"}, "boom at frame at frame2"),
+        # Non-dict shapes route through `execution_errors.parse_error_message`
+        # rather than being discarded, so the watcher and this path agree.
+        ("a string, not an object", "a string, not an object"),
+        ('{"exception_message": "boom", "node_type": "KSampler"}', "boom (KSampler)"),
     ],
 )
 def test_execution_error_line_partial_records(err, expected):

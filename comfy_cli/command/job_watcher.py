@@ -448,8 +448,16 @@ def _poll_cloud_once(state: jobs_state.JobState, *, client: Any = None) -> bool:
         # `error_message` string. `classify` parses either shape, so hand it
         # whichever the deployment actually sent — without this the watcher
         # classifies `None` and writes the generic "ComfyUI reported an
-        # execution error." into every failed cloud job's state file.
-        verdict = execution_errors.classify(record.get("error_message") or record.get("execution_error"))
+        # execution error." into every failed cloud job's state file. The
+        # structured object wins when both are present: a deployment that also
+        # fills `error_message` with a short generic string would otherwise
+        # discard `node_id`/`exception_type`/`traceback_tail`, and the state
+        # file keeps no other copy of them. (`classify`'s details are built
+        # field-by-field, so the secret-bearing `current_inputs` never reaches
+        # the state file — see `execution_errors.redact_record`.)
+        structured = record.get("execution_error")
+        raw_cause = structured if isinstance(structured, dict) else (record.get("error_message") or structured)
+        verdict = execution_errors.classify(raw_cause)
         state.error = {
             "code": verdict["code"],
             "message": verdict["message"],

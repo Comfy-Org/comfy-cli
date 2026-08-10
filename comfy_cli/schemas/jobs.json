@@ -30,7 +30,7 @@
     },
     "execution_error": {
       "type": ["object", "null"],
-      "description": "Cloud `jobs status`/`jobs watch`: the failed job's structured cause, passed through verbatim from `/api/jobs/<id>` (`JobDetailResponse.execution_error` — `node_id`, `node_type`, `exception_message`, `exception_type`, `traceback`, `current_inputs`). Null on every job the server reports no execution error for. The top-level `error_message` is the same record flattened to one human line; this key is what a `--json` consumer reads to get the fields back without re-parsing that line.",
+      "description": "Cloud `jobs status`/`jobs watch`: the failed job's structured cause from `/api/jobs/<id>` (`JobDetailResponse.execution_error` — `node_id`, `node_type`, `exception_message`, `exception_type`, `traceback`). Null on every job the server reports no execution error for. `current_inputs` is always redacted — the failing node's widget values routinely carry API keys — and on the `jobs watch` terminal envelope `traceback` is capped at its last two frames, the same budget `error.details.traceback_tail` uses; `jobs status` carries it in full. The top-level `error_message` is the same record flattened to one human line; this key is what a `--json` consumer reads to get the fields back without re-parsing that line.",
       "additionalProperties": true
     },
     "scope": {
