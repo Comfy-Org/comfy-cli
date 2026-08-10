@@ -44,13 +44,18 @@ should be able to read — or tamper with — these records.
 Cancellation is signalled out-of-band by an empty ``<id>.cancel`` sentinel next
 to the state file. A sentinel can't be clobbered by a state write that raced it,
 so a worker that comes up (or ticks) after ``download-cancel`` always observes
-the request; see :func:`request_cancel`.
+the request; see :func:`request_cancel`. A worker treats its own state file
+disappearing as a cancellation too — that is what keeps :func:`prune` from
+collecting a record out from under a worker that outlived a failed kill and
+leaving it writing bytes nothing can track or stop.
 
 Terminal statuses (``completed``, ``failed``, ``cancelled``) mean the file won't
-change further; agents can stop polling. Such records are also the only ones
-:func:`prune` may delete — it keeps the :data:`PRUNE_KEEP` most recent records
-whatever their age, so the directory stays bounded without losing the recent
-history ``comfy model downloads`` renders.
+change further; agents can stop polling. Such records are what :func:`prune`
+normally collects; a record still claiming an *active* status is only collected
+after the far longer :data:`PRUNE_ACTIVE_MAX_AGE_S` (no live worker goes that
+long without a write). Either way prune keeps the :data:`PRUNE_KEEP` most recent
+records whatever their age, so the directory stays bounded without losing the
+recent history ``comfy model downloads`` renders.
 """
 
 from __future__ import annotations
@@ -86,6 +91,17 @@ PROGRESS_THROTTLE_S = 1.0
 # long-lived workspace.
 PRUNE_MAX_AGE_S = 7 * 24 * 3600.0
 PRUNE_KEEP = 50
+
+# A record still claiming `starting`/`downloading` gets its own, much longer
+# window. Without one the directory is not actually bounded: prune reads the
+# on-disk status as-is (see `prune`), so records left `downloading` by SIGKILLed
+# workers are only collected once some *poll* verb reconciles them to a terminal
+# status — and a submit-only workflow (fire `--background`, watch the
+# destination file, never poll) never runs one. A worker rewrites its state file
+# at least every PROGRESS_THROTTLE_S while it makes progress, so an active
+# record this stale has no live writer; the worker also treats its record
+# disappearing as a cancellation, so collecting one can't leave bytes streaming.
+PRUNE_ACTIVE_MAX_AGE_S = 30 * 24 * 3600.0
 
 # The state dir can hold presigned urls; keep it owner-only.
 STATE_DIR_MODE = 0o700
@@ -306,7 +322,12 @@ _FIELD_VALIDATORS: dict[str, Any] = {
 def read_path(path: Path) -> DownloadState | None:
     try:
         data = json.loads(Path(path).read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    except (OSError, ValueError):
+        # ValueError covers both json.JSONDecodeError and the UnicodeDecodeError
+        # a state file with invalid UTF-8 raises out of `read_text`. Callers rely
+        # on an unreadable record reading as *absent* rather than raising — the
+        # opportunistic sweep on the submit path must never fail a download over
+        # one corrupt file it happened to glob.
         return None
     if not isinstance(data, dict):
         return None
@@ -323,70 +344,151 @@ def read_path(path: Path) -> DownloadState | None:
         return None
 
 
+def _iter_records(workspace: Path) -> list[tuple[Path, DownloadState]]:
+    """Every readable state file paired with the path it was read from, newest first.
+
+    The path is what callers that *delete* need: a record's ``id`` field is
+    untrusted content read back off disk and does not necessarily agree with the
+    filename it was found under.
+    """
+    base = Path(workspace) / STATE_DIRNAME
+    try:
+        if not base.is_dir():
+            return []
+        paths = sorted(base.glob("*.json"))
+    except OSError:
+        return []
+    records = [(p, s) for p, s in ((p, read_path(p)) for p in paths) if s is not None]
+    records.sort(key=lambda item: (item[1].started_at or "", item[1].id), reverse=True)
+    return records
+
+
 def list_all(workspace: Path) -> list[DownloadState]:
     """Every readable state file, newest ``started_at`` first."""
+    return [state for _, state in _iter_records(workspace)]
+
+
+def _remove_record(state_file: Path) -> bool:
+    """Delete one record plus its ``.log``/``.cancel`` sidecars. True if it went.
+
+    Both the record and its sidecars are addressed relative to ``state_file``,
+    never rebuilt from the record's own ``id`` field: a corrupt or hand-copied
+    ``<a>.json`` carrying ``"id": "<b>"`` would otherwise unlink ``<b>``'s state,
+    log and cancel sentinel — potentially an in-flight download's — while
+    ``<a>.json`` survived every subsequent sweep. This is also exactly how the
+    worker derives its own sentinel (see :func:`cancel_marker_for`).
+
+    The state file goes first and the sidecars only follow if it actually went.
+    A record that could not be deleted (read-only mount, EPERM, a Windows
+    sharing violation) keeps showing up in ``comfy model downloads``, so it must
+    keep its ``<id>.log`` — the only diagnostic for why that download failed —
+    and its cancel sentinel with it.
+    """
+    try:
+        state_file.unlink(missing_ok=True)
+    except OSError:
+        return False
+    for sidecar in (state_file.with_suffix(".log"), state_file.with_suffix(".cancel")):
+        with contextlib.suppress(OSError):
+            sidecar.unlink(missing_ok=True)
+    return True
+
+
+def _mtime_before(path: Path, cutoff: datetime) -> bool:
+    """True when ``path``'s mtime is at or before ``cutoff`` (False if unknowable)."""
+    try:
+        return datetime.fromtimestamp(path.stat().st_mtime, timezone.utc) <= cutoff
+    except (OSError, OverflowError, ValueError):
+        return False
+
+
+def _sweep_junk(workspace: Path, cutoff: datetime, readable: set[Path]) -> int:
+    """Collect what :func:`_iter_records` cannot see, and would leak forever.
+
+    Three kinds: state files too corrupt for :func:`read_path` to parse, ``.tmp``
+    files a :func:`write_path` killed between write and ``os.replace`` leaked,
+    and ``.log``/``.cancel`` sidecars whose record is already gone. None of these
+    has a record timestamp to age off, so mtime stands in — and nothing is
+    touched inside the same window live files use, so a write racing the sweep is
+    never in scope. ``readable`` is the set of state files that *did* parse, so
+    they are not re-read here. Returns the number of *records* (state files)
+    removed; sidecars and tmp files are not records and are not counted.
+    """
     base = Path(workspace) / STATE_DIRNAME
-    if not base.is_dir():
-        return []
-    states = [s for s in (read_path(p) for p in sorted(base.glob("*.json"))) if s is not None]
-    states.sort(key=lambda s: (s.started_at or "", s.id), reverse=True)
-    return states
+    try:
+        entries = sorted(base.iterdir())
+    except OSError:
+        return 0
+    record_stems = {p.stem for p in entries if p.suffix == ".json"}
+    removed = 0
+    for path in entries:
+        suffix = path.suffix
+        if suffix == ".json":
+            if path in readable:
+                continue  # a readable record; the age sweep above owns it
+        elif suffix in (".log", ".cancel"):
+            if path.stem in record_stems:
+                continue  # still paired with a record
+        elif suffix != ".tmp":
+            continue
+        if not _mtime_before(path, cutoff):
+            continue
+        if suffix == ".json":
+            if _remove_record(path):
+                removed += 1
+        else:
+            with contextlib.suppress(OSError):
+                path.unlink(missing_ok=True)
+    return removed
 
 
-def prune(workspace: Path, *, max_age_s: float = PRUNE_MAX_AGE_S, keep: int = PRUNE_KEEP) -> int:
-    """Delete terminal records older than ``max_age_s``, keeping the ``keep`` most recent.
+def prune(
+    workspace: Path,
+    *,
+    max_age_s: float = PRUNE_MAX_AGE_S,
+    active_max_age_s: float = PRUNE_ACTIVE_MAX_AGE_S,
+    keep: int = PRUNE_KEEP,
+) -> int:
+    """Delete records older than ``max_age_s``, keeping the ``keep`` most recent.
 
     Age is measured from ``updated_at`` (the terminal transition time — every
     :func:`write_path` refreshes it), falling back to ``started_at`` when
-    unparsable; a record with neither parsable is junk and prunes. Records in
-    :data:`ACTIVE_STATUSES` are never touched, regardless of age — the on-disk
-    status is read as-is rather than :func:`reconcile`d, so a record whose worker
-    died while ``downloading`` is left alone until the next
-    ``downloads``/``download-status`` reconciles it to a terminal status, and a
-    later sweep collects it. That keeps prune off psutil, which is what lets it
-    be called opportunistically from the submit path.
+    unparsable; a record with neither parsable is junk and prunes. A record in
+    :data:`ACTIVE_STATUSES` is held to the far longer ``active_max_age_s``
+    instead: the on-disk status is read as-is rather than :func:`reconcile`d, so
+    a record whose worker died while ``downloading`` is normally left for the
+    next ``downloads``/``download-status`` to reconcile to a terminal status and
+    a later sweep to collect — but a workflow that only ever submits never runs
+    one, and those records must not accumulate forever either. Reading the
+    status as-is is what keeps prune off psutil, which is what lets it be called
+    opportunistically from the submit path.
 
     The keep floor counts ALL records, active and terminal alike, so it matches
     what ``comfy model downloads`` renders. Each pruned record's ``<id>.log`` and
-    ``<id>.cancel`` go with it. Best effort per file: an :class:`OSError` on one
-    unlink never aborts the sweep or propagates. Returns the number of records
-    removed.
+    ``<id>.cancel`` go with it; unparsable records, leaked ``.tmp`` files and
+    orphaned sidecars past the same window go too (see :func:`_sweep_junk`).
+    Best effort per file: an :class:`OSError` on one unlink — or on the directory
+    scan itself — never aborts the sweep or propagates. Returns the number of
+    records removed.
     """
     workspace = Path(workspace)
     keep = max(0, keep)
-    states = list_all(workspace)
-    if len(states) <= keep:
-        return 0
+    records = _iter_records(workspace)
 
-    cutoff = datetime.now(timezone.utc) - timedelta(seconds=max_age_s)
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(seconds=max_age_s)
+    active_cutoff = now - timedelta(seconds=active_max_age_s)
     removed = 0
-    for state in states[keep:]:
-        if state.status not in TERMINAL_STATUSES:
-            continue
+    for path, state in records[keep:]:
+        # An unrecognised status is neither active nor renderable history — it
+        # ages out on the normal window rather than pinning a file forever.
+        limit = active_cutoff if state.status in ACTIVE_STATUSES else cutoff
         stamp = _parse_iso(state.updated_at) or _parse_iso(state.started_at)
-        if stamp is not None and stamp > cutoff:
+        if stamp is not None and stamp > limit:
             continue
-        try:
-            # Route through the path helpers so the id re-validates: it comes
-            # out of a file this process did not necessarily write.
-            targets = (
-                state_path(workspace, state.id),
-                log_path(workspace, state.id),
-                cancel_path(workspace, state.id),
-            )
-        except ValueError:
-            continue
-        state_file, *side_files = targets
-        gone = False
-        with contextlib.suppress(OSError):
-            state_file.unlink(missing_ok=True)
-            gone = True
-        for path in side_files:
-            with contextlib.suppress(OSError):
-                path.unlink(missing_ok=True)
-        if gone:
+        if _remove_record(path):
             removed += 1
-    return removed
+    return removed + _sweep_junk(workspace, cutoff, {path for path, _ in records})
 
 
 # ---------------------------------------------------------------------------

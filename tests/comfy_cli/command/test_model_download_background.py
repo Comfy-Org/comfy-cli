@@ -13,6 +13,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -129,6 +130,12 @@ class TestStatePersistence:
 # ---------------------------------------------------------------------------
 
 
+def _backdate(path: Path, days_ago: float) -> None:
+    """Push ``path``'s mtime into the past — the only age the junk sweep has."""
+    when = time.time() - days_ago * 86400
+    os.utime(path, (when, when))
+
+
 def _persist_aged(
     workspace,
     *,
@@ -172,14 +179,73 @@ class TestPrune:
         assert download_state.list_all(workspace) == []
 
     @pytest.mark.parametrize("status", ["starting", "downloading"])
-    def test_active_records_are_never_pruned_however_old(self, workspace, status):
+    def test_active_records_survive_the_terminal_window(self, workspace, status):
         """An in-flight record has no business being deleted, and prune reads the
         on-disk status rather than reconciling — a worker that died mid-transfer
         is collected on a later sweep, once a poll verb has marked it failed."""
-        state = _persist_aged(workspace, status=status, days_ago=30)
+        state = _persist_aged(workspace, status=status, days_ago=20)
 
         assert download_state.prune(workspace, keep=0) == 0
         assert download_state.state_path(workspace, state.id).exists()
+
+    @pytest.mark.parametrize("status", ["starting", "downloading"])
+    def test_a_long_dead_active_record_is_eventually_collected(self, workspace, status):
+        """Otherwise the directory is not bounded at all: a workflow that only
+        ever submits never runs the poll verb that would reconcile these to a
+        terminal status, so they would accumulate forever. A worker writes at
+        least every PROGRESS_THROTTLE_S, so nothing live is this stale."""
+        state = _persist_aged(workspace, status=status, days_ago=40)
+
+        assert download_state.prune(workspace, keep=0) == 1
+        assert not download_state.state_path(workspace, state.id).exists()
+
+    def test_an_unrecognised_status_ages_out_on_the_normal_window(self, workspace):
+        """Neither terminal nor active: junk, and it must not pin a file forever."""
+        state = _persist_aged(workspace, status="wat", days_ago=8)
+
+        assert download_state.prune(workspace, keep=0) == 1
+        assert not download_state.state_path(workspace, state.id).exists()
+
+    def test_deletion_targets_come_from_the_filename_not_the_id_field(self, workspace):
+        """A record's `id` is untrusted content read back off disk. Rebuilding
+        the unlink targets from it lets a corrupt or hand-copied `<a>.json`
+        carrying `"id": "<b>"` delete *b*'s state and cancel sentinel — possibly
+        an in-flight download's — while surviving every sweep itself."""
+        victim = _state(status="downloading")
+        download_state.write(workspace, victim)
+        victim_cancel = download_state.cancel_path(workspace, victim.id)
+        victim_cancel.touch()
+
+        impostor = _persist_aged(workspace, status="completed", days_ago=8)
+        impostor_path = download_state.state_path(workspace, impostor.id)
+        data = json.loads(impostor_path.read_text())
+        data["id"] = victim.id
+        impostor_path.write_text(json.dumps(data))
+
+        assert download_state.prune(workspace, keep=0) == 1
+
+        assert not impostor_path.exists(), "the file actually enumerated is the one that goes"
+        assert download_state.state_path(workspace, victim.id).exists()
+        assert victim_cancel.exists()
+
+    def test_sidecars_survive_a_state_file_that_could_not_be_removed(self, workspace, monkeypatch):
+        """A record still listed by `comfy model downloads` must keep its
+        `<id>.log` — the only diagnostic for why that download failed."""
+        state = _persist_aged(workspace, status="failed", days_ago=8)
+        log = download_state.log_path(workspace, state.id)
+        log.write_text("traceback\n")
+        real_unlink = Path.unlink
+
+        def selective(self, missing_ok=False):
+            if self.suffix == ".json":
+                raise OSError("read-only file system")
+            return real_unlink(self, missing_ok=missing_ok)
+
+        monkeypatch.setattr(Path, "unlink", selective)
+
+        assert download_state.prune(workspace, keep=0) == 0
+        assert download_state.state_path(workspace, state.id).exists()
+        assert log.read_text() == "traceback\n"
 
     def test_keep_floor_wins_over_age(self, workspace):
         # started_at descending, so "newest" is unambiguous.
@@ -226,6 +292,70 @@ class TestPrune:
 
         assert download_state.prune(workspace, keep=len(states)) == 0
         assert len(download_state.list_all(workspace)) == len(states)
+
+
+class TestPruneCollectsJunk:
+    """`list_all` can only see what parses, so exactly the debris most likely to
+    accumulate — unreadable records, tmp files a killed writer leaked, sidecars
+    whose record is gone — is what a record-only sweep would leak forever. None
+    of it has a record timestamp, so mtime stands in for one.
+    """
+
+    def _junk(self, workspace, name: str, *, body: bytes = b"junk", days_ago: float) -> Path:
+        path = download_state.state_dir(workspace) / name
+        path.write_bytes(body)
+        _backdate(path, days_ago)
+        return path
+
+    @pytest.mark.parametrize("body", [b"{not json", b"\xff\xfe not utf-8"], ids=["bad-json", "bad-utf8"])
+    def test_an_old_unreadable_record_is_collected_with_its_sidecars(self, workspace, body):
+        path = self._junk(workspace, "deadbeefcafe.json", body=body, days_ago=8)
+        log = self._junk(workspace, "deadbeefcafe.log", days_ago=8)
+
+        assert download_state.prune(workspace, keep=0) == 1
+        assert not path.exists()
+        assert not log.exists()
+
+    def test_a_fresh_unreadable_record_is_left_alone(self, workspace):
+        """It could be a file something is still mid-way through creating."""
+        path = self._junk(workspace, "deadbeefcafe.json", body=b"{not json", days_ago=0)
+
+        assert download_state.prune(workspace, keep=0) == 0
+        assert path.exists()
+
+    def test_an_old_leaked_tmp_file_is_collected_but_a_fresh_one_is_not(self, workspace):
+        stale = self._junk(workspace, "deadbeefcafe.1234.ab12cd34.tmp", days_ago=8)
+        live = self._junk(workspace, "cafedeadbeef.1234.ef56ab78.tmp", days_ago=0)
+
+        # tmp files are not records, so they never count toward the return value.
+        assert download_state.prune(workspace, keep=0) == 0
+        assert not stale.exists()
+        assert live.exists()
+
+    def test_orphaned_sidecars_are_collected_but_paired_ones_are_kept(self, workspace):
+        kept = _state(status="downloading")
+        download_state.write(workspace, kept)
+        paired_log = download_state.log_path(workspace, kept.id)
+        paired_log.write_text("still in flight\n")
+        _backdate(paired_log, 8)
+
+        orphan_log = self._junk(workspace, "deadbeefcafe.log", days_ago=8)
+        orphan_cancel = self._junk(workspace, "deadbeefcafe.cancel", body=b"", days_ago=8)
+
+        assert download_state.prune(workspace, keep=0) == 0
+        assert not orphan_log.exists()
+        assert not orphan_cancel.exists()
+        assert paired_log.exists()
+
+    def test_an_unreadable_record_never_fails_the_sweep_or_the_listing(self, workspace):
+        """`read_text` raises UnicodeDecodeError — a ValueError, not an OSError —
+        on invalid UTF-8, and the submit path's sweep must survive it."""
+        good = _persist_aged(workspace, status="completed", days_ago=1)
+        self._junk(workspace, "deadbeefcafe.json", body=b"\xff\xfe", days_ago=0)
+
+        assert download_state.read_path(download_state.state_dir(workspace) / "deadbeefcafe.json") is None
+        assert [s.id for s in download_state.list_all(workspace)] == [good.id]
+        assert download_state.prune(workspace, keep=0) == 0
 
 
 class TestPruneOnSubmit:
@@ -310,6 +440,37 @@ class TestDownloadsPruneFlag:
         env = json_renderer()
         assert env["data"] == {"total": 0, "downloads": [], "pruned": 0}
         assert env["changed"] is False
+
+    def test_a_reconciliation_write_back_counts_as_changed(self, workspace, json_renderer, tmp_path):
+        """Nothing was deleted, but the listing still rewrote a record on disk —
+        reporting `changed: false` would tell an agent this call was a no-op."""
+        state = _state(dest=str(tmp_path / "missing.bin"), status="downloading", pid=424242, total_bytes=10)
+        download_state.write(workspace, state)
+
+        models.downloads(None, prune=True)
+        env = json_renderer()
+
+        assert env["data"]["pruned"] == 0
+        assert env["changed"] is True
+        assert download_state.read(workspace, state.id).status == "failed"
+
+    def test_a_failed_sweep_is_reported_rather_than_read_as_a_no_op(self, workspace, json_renderer, monkeypatch):
+        """`prune` swallows OSError per file and on the directory scan, so an
+        escape is unexpected — and may have deleted records before it happened.
+        The user asked for a destructive operation; `pruned: 0, changed: false`
+        would be a lie about it."""
+
+        def boom(*args, **kwargs):
+            raise OSError("state dir is unreadable")
+
+        monkeypatch.setattr(download_state, "prune", boom)
+
+        models.downloads(None, prune=True)
+        env = json_renderer()
+
+        assert env["ok"] is True
+        assert env["data"]["pruned"] == 0
+        assert env["changed"] is True
 
 
 # ---------------------------------------------------------------------------
@@ -1331,6 +1492,33 @@ class TestCancellationReachesTheWorker:
         final = download_state.read(workspace, state.id)
         assert (final.status, final.completed_bytes) == ("cancelled", 0)
         assert not dest.exists(), "the partial file must not survive the cancel"
+
+    def test_worker_stops_when_its_record_is_pruned_out_from_under_it(self, workspace, monkeypatch, tmp_path):
+        """`download-cancel` writes a terminal `cancelled` record and warns that
+        the worker may still be running when the kill fails; such a worker writes
+        nothing, so the record ages out and `prune` takes it — sentinel included.
+        Without treating a vanished record as a cancellation, a worker that woke
+        after that sweep would no longer see the cancel and would resume writing
+        to `dest`, untracked and uncancellable.
+        """
+        dest = tmp_path / "m.safetensors"
+        state = _state(dest=str(dest), status="starting", downloader="aria2", pid=None)
+        path = download_state.write(workspace, state)
+
+        def transfer(url, filepath, headers, downloader, progress_callback):
+            filepath.write_bytes(b"partial")
+            path.unlink()  # the sweep collects the record mid-transfer
+            progress_callback(7, 4096)
+
+        monkeypatch.setattr(models, "download_file", transfer)
+        monkeypatch.setattr(download_state, "PROGRESS_THROTTLE_S", 0.0)
+
+        with pytest.raises(typer.Exit) as exc:
+            models._download_worker(state_file=str(path))
+
+        assert exc.value.exit_code == 0
+        assert not dest.exists(), "the abandoned partial must not survive"
+        assert not path.exists(), "a pruned record must not be resurrected by the write-back"
 
     def test_worker_cancel_on_httpx_leaves_the_destination_alone(self, workspace, monkeypatch, tmp_path):
         """`DownloadCancelled` unwinds out of the httpx transfer *before* the

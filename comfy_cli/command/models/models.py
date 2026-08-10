@@ -755,9 +755,12 @@ def _submit_background_download(
 
     # Every submit adds two files here and nothing else ever removes them, so the
     # sweep rides along with the one command that grows the directory. Belt and
-    # braces: `prune` is already best-effort per file, and this covers the
-    # directory scan it starts with — a submit must never fail over bookkeeping.
-    with contextlib.suppress(OSError):
+    # braces: `prune` already swallows an OSError on every unlink *and* on the
+    # directory scan, so nothing should escape — but the state file is already
+    # written and the worker not yet spawned, so anything that did escape would
+    # strand a `starting` record with no download behind it. A submit must never
+    # fail over bookkeeping, so nothing at all is allowed out of here.
+    with contextlib.suppress(Exception):
         download_state.prune(workspace)
 
     try:
@@ -820,7 +823,14 @@ def _download_worker(
     cancel_marker = download_state.cancel_marker_for(path)
 
     def cancelled() -> bool:
-        return cancel_marker.exists()
+        # The sentinel is the explicit stop request. A vanished state file is the
+        # implicit one: `prune` deletes a record together with its sentinel, so
+        # without this a worker that outlived a failed `download-cancel` kill and
+        # woke up after the sweep would no longer see the cancel and would resume
+        # writing to `dest`. Nothing is tracking this transfer any more, and
+        # nothing could cancel it again — stop. State writes are atomic
+        # (`os.replace`), so the file never transiently disappears.
+        return cancel_marker.exists() or not path.exists()
 
     # `download-cancel` may have landed while we were still starting up — it
     # can't signal a process that has no pid on file yet, so the sentinel is how
@@ -878,8 +888,12 @@ def _download_worker(
             with contextlib.suppress(OSError):
                 pathlib.Path(state.dest).unlink(missing_ok=True)
         state.completed_bytes = 0
-        with contextlib.suppress(OSError):
-            download_state.write_path(path, state)
+        # Only persist a record that is still on disk: `write_path` would
+        # otherwise recreate — with a fresh `updated_at` — one `prune` just
+        # collected, and the sweep would have to age it out all over again.
+        if path.exists():
+            with contextlib.suppress(OSError):
+                download_state.write_path(path, state)
         raise typer.Exit(code=0) from None
     except BaseException as e:  # noqa: BLE001 — any failure must reach the state file
         state.status = "failed"
@@ -990,7 +1004,7 @@ def downloads(
         bool,
         typer.Option(
             "--prune",
-            help="Remove terminal download records older than 7 days (always keeps the 50 most recent).",
+            help="Remove finished download records older than 7 days (always keeps the 50 most recent).",
         ),
     ] = False,
 ):
@@ -998,14 +1012,25 @@ def downloads(
     renderer = get_renderer()
 
     pruned = 0
+    prune_failed = False
     if prune:
         # Before the rows are built, so the listing shows exactly the survivors.
-        with contextlib.suppress(OSError):
+        try:
             pruned = download_state.prune(get_workspace())
+        except Exception as e:  # noqa: BLE001 — `prune` is documented not to raise
+            # Reaching here means the sweep died somewhere its own per-file and
+            # per-scan handling doesn't cover, possibly *after* deleting records.
+            # The user asked for a destructive operation, so say it didn't finish
+            # rather than reporting a clean `pruned: 0`/`changed: false` no-op.
+            prune_failed = True
+            print(f"[bold yellow]Could not finish pruning download records: {escape(str(e))}[/bold yellow]")
         if pruned:
             print(f"Pruned {pruned} old download record(s).")
 
-    rows = [download_state.status_payload(_reconciled(s)[0]) for s in download_state.list_all(get_workspace())]
+    # `_reconciled` persists status corrections, so a plain listing can mutate
+    # on-disk state too; keep its flags to fold into `changed` below.
+    reconciled = [_reconciled(s) for s in download_state.list_all(get_workspace())]
+    rows = [download_state.status_payload(fresh) for fresh, _ in reconciled]
     if not rows:
         print("No background downloads found.")
     else:
@@ -1014,9 +1039,12 @@ def downloads(
     payload = {"total": len(rows), "downloads": rows}
     if prune:
         payload["pruned"] = pruned
-    # A plain listing changes nothing and keeps emitting no `changed` at all —
-    # only the pruning form has a mutation to report.
-    renderer.emit(payload, command="model downloads", changed=(pruned > 0) if prune else None)
+    # A plain listing keeps emitting no `changed` at all — only the pruning form
+    # has a mutation to report. When it does report one it covers every write
+    # this call made: deletions, the reconciliation write-backs above, and a
+    # sweep that failed partway and may have deleted before it did.
+    changed = pruned > 0 or prune_failed or any(did for _, did in reconciled)
+    renderer.emit(payload, command="model downloads", changed=changed if prune else None)
 
 
 @app.command("download-cancel")
