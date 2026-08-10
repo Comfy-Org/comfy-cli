@@ -2091,7 +2091,17 @@ def _cloud_status_snapshot(prompt_id: str) -> dict | None:
     # only landed correctly by fall-through. Mapping here keeps the snapshot —
     # and everything downstream of it (`jobs status`, `jobs watch` state events,
     # `_TERMINAL_VERDICT`) — inside the vocabulary `schemas/jobs.json` declares.
-    state = jobs_state.CLOUD_STATUS_ALIASES.get(raw, raw or "pending")
+    #
+    # An unmapped status resolves to `unknown` rather than passing through raw:
+    # unlike the per-row `jobs[].status` (deliberately unconstrained, so a new
+    # server spelling widens the listing instead of breaking it), this top-level
+    # `status` is a closed enum, and a raw `allocated` / `uploading` / future
+    # addition emitted here is a payload a strict consumer must reject. `unknown`
+    # is in that enum for exactly this case, and — like the passthrough it
+    # replaces — is non-terminal, so nothing about when `_cloud_watch` stops
+    # changes. The server's own word is kept verbatim in `status_raw` so no
+    # diagnostic detail is lost to the canonicalization.
+    state = jobs_state.CLOUD_STATUS_ALIASES.get(raw, "unknown") if raw else "pending"
 
     outputs: list[str] = []
     outputs_by_node: dict[str, list[str]] = {}
@@ -2110,6 +2120,11 @@ def _cloud_status_snapshot(prompt_id: str) -> dict | None:
     return {
         "prompt_id": prompt_id,
         "status": state,
+        # The server's own spelling, before canonicalization. Always present so
+        # an agent can tell `in_progress` from `executing` (and read a status
+        # this CLI has not learned yet) without the closed `status` enum having
+        # to widen for every server-side addition.
+        "status_raw": raw or None,
         "outputs": outputs,
         "outputs_by_node": outputs_by_node,
         "outputs_by_item": outputs_by_item,
@@ -2143,10 +2158,15 @@ def _cloud_status(prompt_id: str) -> None:
         tbl = Table(title=f"Cloud prompt {sanitize_markup(prompt_id[:8])}…", border_style="cyan", show_header=False)
         tbl.add_column(style="bold cyan")
         tbl.add_column()
-        # Every cell below comes straight off `/api/jobs/<id>` — including
-        # `status`, which falls through to the server's own vocabulary when it
-        # is not one of the aliases `_cloud_status_snapshot` knows.
-        tbl.add_row("status", sanitize_markup(snap["status"]))
+        # Every cell below comes straight off `/api/jobs/<id>`. `status` is the
+        # canonicalized one; when the server's spelling differs (an alias, or a
+        # status this CLI does not know and canonicalized to `unknown`), show it
+        # alongside so the pretty view never hides the server's actual word.
+        raw_status = snap.get("status_raw")
+        if raw_status and raw_status != snap["status"]:
+            tbl.add_row("status", f"{sanitize_markup(snap['status'])} [dim]({sanitize_markup(raw_status)})[/dim]")
+        else:
+            tbl.add_row("status", sanitize_markup(snap["status"]))
         if snap.get("assigned_inference"):
             tbl.add_row("inference", sanitize_markup(snap["assigned_inference"]))
         if snap.get("created_at"):
@@ -2216,9 +2236,13 @@ def _cloud_watch(prompt_id: str, *, poll_interval: float, max_wait: float) -> No
             break
 
         if time.time() >= deadline:
+            # The server's own spelling when we have it: "still unknown" names
+            # nothing, and a timeout on a status this CLI cannot map is exactly
+            # when the raw word is the whole diagnostic.
+            stuck_at = snap.get("status_raw") or snap["status"]
             renderer.error(
                 code="cloud_timeout",
-                message=f"prompt {prompt_id} still {snap['status']} after {max_wait}s",
+                message=f"prompt {prompt_id} still {stuck_at} after {max_wait}s",
                 hint="raise --max-wait or re-run with --where cloud",
                 details=snap,
             )

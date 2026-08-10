@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import json
 import re
+import types
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -63,20 +64,36 @@ TERMINAL_STATUSES = frozenset({"completed", "error", "cancelled"})
 # ``command/job_watcher.py`` can share one copy — ``job_watcher`` imports
 # ``command.jobs``, so a map owned by ``jobs`` could only be shared by importing
 # it the wrong way round.
-CLOUD_STATUS_ALIASES = {
-    "pending": "pending",
-    "in_progress": "running",
-    "completed": "completed",
-    "failed": "error",
-    "cancelled": "cancelled",
-    "canceled": "cancelled",
-    # legacy raw jobstate vocabulary (deprecated endpoint), kept defensively:
-    "success": "completed",
-    "error": "error",
-    "non_retryable_error": "error",
-    "lost": "error",
-    "executing": "running",
-}
+#
+# Read-only (like ``TERMINAL_STATUSES`` above) because the two consumers now
+# bind this object by identity rather than copying it: an in-place ``.update()``
+# / ``.pop()`` / ``monkeypatch.setitem`` used to be contained to one module and
+# would now rewrite terminal classification in the watcher and the exit code of
+# ``jobs watch`` process-wide.
+CLOUD_STATUS_ALIASES = types.MappingProxyType(
+    {
+        "pending": "pending",
+        "in_progress": "running",
+        "completed": "completed",
+        "failed": "error",
+        "cancelled": "cancelled",
+        "canceled": "cancelled",
+        # legacy raw jobstate vocabulary (deprecated endpoint), kept defensively:
+        "success": "completed",
+        "error": "error",
+        "non_retryable_error": "error",
+        # `retryable_error` is terminal-as-error here for the same reason
+        # ``output/glyphs.py`` already renders it ✗: the CLI is not told when
+        # (or whether) a retry happens, so the alternative is not "wait for the
+        # retry" but "sit on a status nothing recognizes" — `jobs watch` spins
+        # to `cloud_timeout`, `jobs ls` drops the state file's `error_code`, and
+        # the watcher's stall guard invents a terminal verdict after 300s
+        # anyway. Reporting the error the server reported is the honest one.
+        "retryable_error": "error",
+        "lost": "error",
+        "executing": "running",
+    }
+)
 
 
 def state_dir() -> Path:
