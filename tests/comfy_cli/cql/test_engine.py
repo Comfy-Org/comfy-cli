@@ -2228,6 +2228,56 @@ class TestDynamicComboInputs:
         result = g.validate_workflow({"1": {"class_type": "Foo", "inputs": {"shape": "anything"}}})
         assert isinstance(result["valid"], bool)  # must not raise
 
+    def test_unparseable_options_container_stays_lenient(self):
+        """When the options CONTAINER itself doesn't parse (empty, non-list,
+        garbage) — not just an individual entry — the validator has no basis to
+        judge the selection and must stay lenient rather than hard-rejecting
+        every value against a self-refuting zero-key set (skishore23 review)."""
+        for options_value in ([], "garbage", [1, 2, 3]):
+            info = {
+                "Foo": {
+                    "input": {"required": {"shape": ["COMFY_DYNAMICCOMBO_V3", {"options": options_value}]}},
+                    "input_order": {"required": ["shape"]},
+                    "output": [],
+                    "output_name": [],
+                    "output_node": True,
+                    "display_name": "Foo",
+                    "python_module": "nodes",
+                }
+            }
+            g = Graph.from_object_info(info)
+            result = g.validate_workflow({"1": {"class_type": "Foo", "inputs": {"shape": "Opus 4.6"}}})
+            assert result["valid"] is True, (options_value, result["errors"])
+
+    def test_option_missing_key_excluded_from_valid_options(self):
+        """An option dict without `key` must not leak a JSON `null` into the
+        agent-facing valid_options/suggestions lists (skishore23 review)."""
+        info = {
+            "Foo": {
+                "input": {
+                    "required": {
+                        "shape": [
+                            "COMFY_DYNAMICCOMBO_V3",
+                            {"options": [{"inputs": {}}, {"key": "square", "inputs": {}}]},
+                        ]
+                    }
+                },
+                "input_order": {"required": ["shape"]},
+                "output": [],
+                "output_name": [],
+                "output_node": True,
+                "display_name": "Foo",
+                "python_module": "nodes",
+            }
+        }
+        g = Graph.from_object_info(info)
+        result = g.validate_workflow({"1": {"class_type": "Foo", "inputs": {"shape": "bogus"}}})
+        assert result["valid"] is False
+        err = next(e for e in result["errors"] if e["code"] == "unknown_enum_value")
+        assert None not in err["valid_options"]
+        assert err["valid_options"] == ["square"]
+        assert "1 known options" in err["message"]
+
     def test_describe_exposes_selection_keys(self, graph_dynamic: Graph):
         desc = graph_dynamic.morphism_to_dict(graph_dynamic.node("ClaudeNode"))
         model = next(i for i in desc["inputs"] if i["name"] == "model")

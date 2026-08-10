@@ -1460,7 +1460,11 @@ def _check_dynamic_combo_input(
     errors: list[dict] = []
     warnings: list[dict] = []
     options = _dynamic_combo_options(spec)
-    keys = [o.get("key") for o in options]
+    # Only a scalar `key` is a real membership choice: an option dict missing
+    # `key` would otherwise contribute `None` into `valid_options`/`suggestions`
+    # (agent-facing "pick one of these" lists), which is worse than omitting it —
+    # an agent could try to set the field to `null`.
+    keys = [k for o in options if (k := o.get("key")) is not None]
 
     if name not in present:
         # ``_check_required_present`` deliberately exempts the dynamic types
@@ -1491,6 +1495,16 @@ def _check_dynamic_combo_input(
                     "valid_options": keys,
                 }
             )
+        return errors, warnings, set(), {f"{name}."}
+
+    if not keys:
+        # No option schema parsed (absent/unreadable `options`, or every entry
+        # was missing `key`) — we have no basis to judge the selection, so stay
+        # lenient rather than hard-erroring on a schema we can't read. Matches
+        # the "only strict where the option schema genuinely parsed" rule:
+        # unparseable individual entries already degrade this way; an
+        # unparseable options container must too (forward-compat with a newer
+        # ComfyUI option shape this parser doesn't recognize yet).
         return errors, warnings, set(), {f"{name}."}
 
     selected = present[name]
