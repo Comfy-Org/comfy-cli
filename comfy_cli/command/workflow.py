@@ -1490,11 +1490,24 @@ def validate_api_workflow(
     # Load graph. Route through the shared resolver rather than trusting the raw
     # `--where` string: it normalizes case/whitespace (`--where LOCAL` is the
     # same target as `local`) and emits a `where_invalid` envelope instead of
-    # letting an unknown value escape as a bare ValueError traceback. Everything
-    # below then branches on the resolved enum, so no routing decision is ever
-    # made by string-comparing user input.
-    decision = where_module.resolve_default_or_exit(flag=where)
-    mode = decision.target.value
+    # letting an unknown value escape as a bare ValueError traceback — but only
+    # for an *explicit* bad `--where`; a bad env/project/config default has no
+    # user to blame, so it drops to the local default instead of breaking the
+    # command, matching the pre-existing routing behavior of `nodes`/`jobs`.
+    target = where_module.WhereTarget.LOCAL
+    try:
+        target = where_module.resolve_default(flag=where).target
+    except ValueError as e:
+        if where:
+            renderer.error(
+                code="where_invalid",
+                message=str(e),
+                hint="use `--where local` or `--where cloud`",
+            )
+            raise typer.Exit(code=1) from e
+        # A bad env/project/config value with no explicit flag never breaks the
+        # command — drop to the local default, as before.
+    mode = target.value
 
     # Resolve the local object_info server the same way `comfy run` does —
     # flag > COMFY_LOCAL_URL > config.background > 127.0.0.1:8188. Without the
@@ -1505,7 +1518,7 @@ def validate_api_workflow(
     # not consult `config.background` on purpose (other callers, e.g. transfer
     # and system, must not), so — as its docstring says — the callers that do
     # honor it resolve upstream, here.
-    is_local_fetch = input_path is None and decision.target is where_module.WhereTarget.LOCAL
+    is_local_fetch = input_path is None and target is where_module.WhereTarget.LOCAL
     if is_local_fetch:
         from comfy_cli.host_port import parse_host_port_arg, resolve_host_port
 
