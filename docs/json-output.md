@@ -339,21 +339,37 @@ server all run through the foreground handlers, which write `error.code`
 (the classified execution verdict or `execution_error`; `cancelled`;
 `server_died`) before exiting.
 
-The gap is a `--wait` process that is **killed from outside** — a caller-imposed
-timeout (`SIGKILL`/`SIGTERM` on the process group), a terminal going away, the
-OS reaping the CLI alongside the server. No handler runs, so the state file is
-left at its submit-time `running`, and because `--wait` records no
-`watcher_pid`, `jobs ls`'s stale-watcher reap — which only fires on a recorded
-*and* dead pid — will not finalize it either. If the server then dies, nothing
-writes `server_died`.
+A `--wait` process that is **killed from outside** — a caller-imposed timeout
+(`SIGKILL`/`SIGTERM` on the process group), a terminal going away, the OS
+reaping the CLI alongside the server — runs no handler, so the state file is
+left at its submit-time `running`. To cover that, `--wait` (local and cloud)
+stamps its own `watcher_pid` (+ start time) on the submit-time record: the next
+`jobs ls` finds a non-terminal record whose recorded pid is dead, and its
+stale-watcher reap finalizes the job as `error` with `error_code:
+"watcher_crashed"` — the same treatment a crashed background watcher gets — and
+`jobs ls --orphaned` lists it. The stamp is dropped again on the exits where
+the job may genuinely still be alive on the server, so the reap can't claim a
+crash the CLI hasn't established: when local `--wait` gives up on its *own*
+`--timeout` (`ws_timeout`), and when cloud `--wait` dies on a network error
+that escapes its handlers (a DNS failure or connection reset while polling, as
+opposed to the handled `cloud_timeout` / `cloud_unauthorized` /
+`cloud_http_error` exits, which record a terminal verdict of their own). In
+both cases the record is left non-terminal with no pid, the reap never touches
+it, and `comfy jobs status <prompt_id>` can still consult the server for the
+real outcome.
 
-Attribution is degraded there, not lost: `comfy jobs status <prompt_id>` still
-names the job, its last-known status, and its workflow via `server_not_running`
-/ `prompt_not_found`. **For runs that may outlive the caller's patience, submit
-without `--wait`** — the async path spawns a watcher that survives the parent
-(its own session/process group), and it is the watcher that writes `server_died`
-when the server disappears mid-job. `comfy jobs ls` then reports both the status
-and the `error_code`.
+The reap itself never overwrites a verdict that landed first: it re-reads each
+record under that record's lock before rewriting it, so a `--wait` run
+finishing normally in the same instant keeps its `completed` status and its
+outputs.
+
+What the reap cannot tell you is *why* the process died, or what happened to the
+job afterwards — `watcher_crashed` records the watcher's death, not the job's
+outcome. **For runs that may outlive the caller's patience, submit without
+`--wait`** — the async path spawns a watcher that survives the parent (its own
+session/process group), and it is the watcher that writes `server_died` when the
+server disappears mid-job. `comfy jobs ls` then reports both the status and the
+`error_code`.
 
 A watcher is deliberately *not* spawned on `--wait`: it would put a second,
 independent writer on the state file the foreground already finalizes, add a

@@ -884,6 +884,111 @@ def test_orphaned_flag_filters_to_watcher_crashed(monkeypatch):
     assert orphan_ids == {"orphan-crashed"}, f"--orphaned should select only watcher_crashed rows; got {orphan_ids}"
 
 
+def test_reap_finalizes_nonterminal_record_with_dead_watcher_pid(monkeypatch):
+    """A `running` record carrying a dead pid + that pid's REAL create_time —
+    what a `comfy run --wait` killed from outside now leaves behind (BE-6641)
+    — is flipped by the reap to `error`/`watcher_crashed`, surfaces under
+    `--orphaned`, and the pid pair is cleared in the rewritten file."""
+    import psutil
+
+    from comfy_cli import jobs_state
+
+    # A real process that is provably gone: spawn, capture its create_time
+    # while alive, then terminate and reap it.
+    p = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        create_time = psutil.Process(p.pid).create_time()
+    finally:
+        # In `finally` so a create_time() failure can't leave a 30s sleeper
+        # behind for the rest of the suite.
+        if p.poll() is None:
+            p.terminate()
+        p.wait(timeout=10)
+
+    state_dir = jobs_state.state_dir()
+    _write_state(
+        state_dir,
+        "wait-killed",
+        status="running",
+        watcher_pid=p.pid,
+        watcher_pid_create_time=create_time,
+    )
+
+    rows = jobs_mod._gather_local_state_files(limit=100)
+    row = next(r for r in rows if r.prompt_id == "wait-killed")
+    assert row.status == "error"
+    assert row.error_code == "watcher_crashed"
+
+    orphans = jobs_mod._gather_local_state_files(limit=100, orphaned_only=True)
+    assert "wait-killed" in {r.prompt_id for r in orphans}
+
+    rewritten = jobs_state.read("wait-killed")
+    assert rewritten.status == "error"
+    assert rewritten.error["code"] == "watcher_crashed"
+    assert rewritten.watcher_pid is None
+    assert rewritten.watcher_pid_create_time is None
+
+
+def test_reap_leaves_nonterminal_record_without_pid_alone(monkeypatch):
+    """A `running` record with NO recorded pid — what a local `--wait` that
+    hit its own `--timeout` deliberately leaves (the job may still be running
+    server-side) — must never be reaped or listed as an orphan."""
+    from comfy_cli import jobs_state
+
+    state_dir = jobs_state.state_dir()
+    _write_state(state_dir, "wait-timed-out", status="running", watcher_pid=None)
+
+    rows = jobs_mod._gather_local_state_files(limit=100)
+    row = next(r for r in rows if r.prompt_id == "wait-timed-out")
+    assert row.status == "running"
+    assert row.error_code is None
+
+    orphans = jobs_mod._gather_local_state_files(limit=100, orphaned_only=True)
+    assert "wait-timed-out" not in {r.prompt_id for r in orphans}
+    assert jobs_state.read("wait-timed-out").status == "running"
+
+
+def test_reap_reread_yields_to_a_writer_that_finished_first(monkeypatch):
+    """The reap's read → liveness-probe → write is not atomic, and `--wait`
+    runs now stamp their foreground pid, so an ordinary `comfy run --wait`
+    finishing normally can land its terminal `completed` write (outputs and
+    all) inside that window — every `jobs ls --watch` refresh tick re-runs the
+    scan. The write must re-derive its verdict from a re-read under the lock,
+    or it clobbers that result with a generic `watcher_crashed`."""
+    from comfy_cli import jobs_state
+
+    state_dir = jobs_state.state_dir()
+    _write_state(state_dir, "raced-record", status="running", watcher_pid=999_999)
+
+    # No live process behind the pid, so the snapshot check says "reap it".
+    monkeypatch.setattr(jobs_mod, "_is_watcher_alive", lambda state: False)
+
+    real_locked = jobs_state.locked
+
+    def _locked_after_writer_wins(prompt_id):
+        # Stand-in for the racing `--wait` process: its terminal write lands
+        # between our liveness probe and our own write.
+        if prompt_id == "raced-record":
+            winner = jobs_state.read("raced-record")
+            winner.status = "completed"
+            winner.outputs = ["out.png"]
+            winner.watcher_pid = None
+            jobs_state.write(winner)
+        return real_locked(prompt_id)
+
+    monkeypatch.setattr(jobs_state, "locked", _locked_after_writer_wins)
+
+    rows = jobs_mod._gather_local_state_files(limit=100)
+    row = next(r for r in rows if r.prompt_id == "raced-record")
+    assert row.status == "completed", "the reap overwrote a verdict that landed first"
+    assert row.error_code is None
+    assert row.outputs == 1
+
+    final = jobs_state.read("raced-record")
+    assert final.status == "completed"
+    assert final.outputs == ["out.png"]
+
+
 def _command_flags(*path: str) -> list[str]:
     """Flags exposed for a command path via the machine-readable help contract.
 
@@ -2267,6 +2372,335 @@ def test_jobs_watch_cloud_terminal_envelope_carries_grouped_outputs(monkeypatch,
         "12": ["https://cloud.example/view/v.mp4"],
     }
     assert env["data"]["outputs_by_item"] == {"s1": ["https://cloud.example/view/a.png"]}
+
+
+# ---------------------------------------------------------------------------
+# `/api/jobs/<id>` (JobDetailResponse) field names — execution_error + *_time
+# ---------------------------------------------------------------------------
+
+
+# A failed job exactly as the plural jobs-detail endpoint serves it: the cause
+# is a structured `execution_error` object (never a top-level `error_message`)
+# and the timestamps are Unix-millisecond ints (never `created_at` strings).
+_FAILED_DETAIL = {
+    "status": "failed",
+    "execution_error": {
+        "node_id": "5",
+        "node_type": "KSampler",
+        "exception_message": "Allocation on device 0 would exceed allowed memory",
+        "exception_type": "torch.cuda.OutOfMemoryError",
+        "traceback": ["  File a.py, line 1", "  File b.py, line 2"],
+        "current_inputs": {"seed": [42]},
+    },
+    "create_time": 1_735_689_600_000,
+    "update_time": 1_735_689_660_500,
+}
+
+
+def test_cloud_status_snapshot_reads_execution_error_and_ms_timestamps(monkeypatch):
+    """The fields `/api/jobs/<id>` actually serves must land on the snapshot:
+    a compact `error_message` line, the structured record, ISO timestamps."""
+    monkeypatch.setattr(jobs_mod, "_cloud_client", lambda: _FakeCloudClient(_FAILED_DETAIL))
+
+    snap = jobs_mod._cloud_status_snapshot("pid-failed")
+    assert snap is not None
+    assert snap["status"] == "error"
+    assert snap["error_message"] == (
+        "torch.cuda.OutOfMemoryError: Allocation on device 0 would exceed allowed memory (node 5 KSampler)"
+    )
+    # The record rides along for `--json` consumers — minus `current_inputs`,
+    # whose widget values can carry API keys.
+    assert snap["execution_error"] == {
+        k: v for k, v in _FAILED_DETAIL["execution_error"].items() if k != "current_inputs"
+    }
+    assert "current_inputs" not in snap["execution_error"]
+    # `jobs status` is the documented home of the full traceback.
+    assert snap["execution_error"]["traceback"] == _FAILED_DETAIL["execution_error"]["traceback"]
+    assert snap["created_at"] == "2025-01-01T00:00:00+00:00"
+    assert snap["updated_at"] == "2025-01-01T00:01:00.500000+00:00"
+    # Not served by this endpoint — never fabricated.
+    assert snap["assigned_inference"] is None
+
+
+def test_cloud_status_snapshot_payload_validates_against_schema(monkeypatch):
+    """The emitted payload — `execution_error` included — must satisfy the
+    published `jobs status` contract."""
+    import jsonschema
+
+    monkeypatch.setattr(jobs_mod, "_cloud_client", lambda: _FakeCloudClient(_FAILED_DETAIL))
+    snap = jobs_mod._cloud_status_snapshot("pid-failed")
+
+    schema_path = Path(__file__).parents[3] / "comfy_cli" / "schemas" / "jobs.json"
+    schema = json.loads(schema_path.read_text())
+    # `host`/`port` are stamped by the renderer, not the snapshot.
+    jsonschema.Draft202012Validator(schema).validate({**snap, "host": "cloud.example", "port": 443})
+
+
+def test_cloud_status_snapshot_keeps_old_shape_fallback(monkeypatch):
+    """A deployment still serving the deprecated dialect (top-level
+    `error_message`, ready-made `created_at`) populates the same fields."""
+    payload = {
+        "status": "failed",
+        "error_message": "RIP to the server",
+        "created_at": "2025-01-01T00:00:00Z",
+        "updated_at": "2025-01-01T00:01:00Z",
+        "assigned_inference": "inf-7",
+    }
+    monkeypatch.setattr(jobs_mod, "_cloud_client", lambda: _FakeCloudClient(payload))
+
+    snap = jobs_mod._cloud_status_snapshot("pid-old")
+    assert snap is not None
+    assert snap["error_message"] == "RIP to the server"
+    assert snap["execution_error"] is None
+    assert snap["created_at"] == "2025-01-01T00:00:00Z"
+    assert snap["updated_at"] == "2025-01-01T00:01:00Z"
+    assert snap["assigned_inference"] == "inf-7"
+
+
+def test_cloud_status_snapshot_tolerates_unusable_timestamps(monkeypatch):
+    """A malformed `create_time` degrades to None — it must not raise out of
+    `jobs status`."""
+    payload = {"status": "running", "create_time": "not-a-number", "update_time": None}
+    monkeypatch.setattr(jobs_mod, "_cloud_client", lambda: _FakeCloudClient(payload))
+
+    snap = jobs_mod._cloud_status_snapshot("pid-bad-ts")
+    assert snap is not None
+    assert snap["created_at"] is None
+    assert snap["updated_at"] is None
+
+
+def test_jobs_watch_cloud_failed_job_reports_the_real_cause(monkeypatch, capsys):
+    """`jobs watch --where cloud` on a failed job exits 1 with ok:false and the
+    server's own exception text — not the generic "ended in status 'error'"."""
+    from comfy_cli.output import Renderer, set_renderer
+    from comfy_cli.output.renderer import OutputMode
+
+    monkeypatch.setattr(jobs_mod, "cloud_preflight_or_exit", lambda: None)
+    monkeypatch.setattr(jobs_mod, "_cloud_client", lambda: _FakeCloudClient(_FAILED_DETAIL))
+
+    set_renderer(Renderer(mode=OutputMode.NDJSON, command="jobs watch"))
+    with pytest.raises(typer.Exit) as exc:
+        jobs_mod._cloud_watch("pid-failed", poll_interval=0.01, max_wait=5)
+    assert exc.value.exit_code == 1
+
+    lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]
+    env = json.loads(lines[-1])
+    assert env["type"] == "envelope" and env["ok"] is False
+    assert "Allocation on device 0 would exceed allowed memory" in env["error"]["message"]
+    assert "ended in status" not in env["error"]["message"]
+    assert env["error"]["details"]["execution_error"]["node_type"] == "KSampler"
+    # The whole payload becomes `renderer.error(details=...)`, so the nested
+    # record must be as trimmed as the top-level one: no widget values, and a
+    # traceback capped at the same two-frame budget as `traceback_tail`.
+    record = env["error"]["details"]["execution_error"]
+    assert "current_inputs" not in record
+    assert len(record["traceback"]) <= 2
+
+
+def test_jobs_watch_cloud_terminal_envelope_trims_a_long_traceback(monkeypatch, capsys):
+    """A server traceback longer than the tail budget is capped in the watch
+    envelope — JSON mode auto-engages off a TTY, so an unbounded blob would
+    land in CI and agent logs."""
+    from comfy_cli.output import Renderer, set_renderer
+    from comfy_cli.output.renderer import OutputMode
+
+    frames = [f"  File f{i}.py, line {i}" for i in range(12)]
+    detail = {
+        **_FAILED_DETAIL,
+        "execution_error": {**_FAILED_DETAIL["execution_error"], "traceback": frames},
+    }
+    monkeypatch.setattr(jobs_mod, "cloud_preflight_or_exit", lambda: None)
+    monkeypatch.setattr(jobs_mod, "_cloud_client", lambda: _FakeCloudClient(detail))
+
+    set_renderer(Renderer(mode=OutputMode.NDJSON, command="jobs watch"))
+    with pytest.raises(typer.Exit):
+        jobs_mod._cloud_watch("pid-failed", poll_interval=0.01, max_wait=5)
+
+    env = json.loads([ln for ln in capsys.readouterr().out.splitlines() if ln.strip()][-1])
+    assert env["error"]["details"]["execution_error"]["traceback"] == frames[-2:]
+    # ...and the classified tail agrees with it, so the envelope carries the
+    # same two frames twice over rather than the full blob once.
+    assert env["error"]["details"]["error_message"] == env["error"]["message"]
+
+
+def test_jobs_watch_cloud_prefers_the_structured_record_over_a_json_message(monkeypatch, capsys):
+    """An `exception_message` that is itself JSON (API nodes raise with raw
+    JSON bodies) must not be re-decoded into a fields-less dict: classify the
+    structured record, not the flattened one-liner."""
+    from comfy_cli.output import Renderer, set_renderer
+    from comfy_cli.output.renderer import OutputMode
+
+    detail = {
+        "status": "failed",
+        "execution_error": {
+            "node_id": "9",
+            "node_type": "ApiNode",
+            "exception_message": '{"detail": "upstream refused the request"}',
+        },
+    }
+    monkeypatch.setattr(jobs_mod, "cloud_preflight_or_exit", lambda: None)
+    monkeypatch.setattr(jobs_mod, "_cloud_client", lambda: _FakeCloudClient(detail))
+
+    set_renderer(Renderer(mode=OutputMode.NDJSON, command="jobs watch"))
+    with pytest.raises(typer.Exit):
+        jobs_mod._cloud_watch("pid-json-msg", poll_interval=0.01, max_wait=5)
+
+    env = json.loads([ln for ln in capsys.readouterr().out.splitlines() if ln.strip()][-1])
+    assert env["error"]["message"] == 'ApiNode (node 9): {"detail": "upstream refused the request"}'
+    assert env["error"]["details"]["execution_error"]["node_type"] == "ApiNode"
+
+
+def test_cloud_status_snapshot_prefers_structured_over_generic_error_message(monkeypatch):
+    """A deployment serving both a terse `error_message` and a detailed
+    `execution_error` must surface the detailed one."""
+    detail = {**_FAILED_DETAIL, "error_message": "job failed"}
+    monkeypatch.setattr(jobs_mod, "_cloud_client", lambda: _FakeCloudClient(detail))
+
+    snap = jobs_mod._cloud_status_snapshot("pid-both")
+    assert snap["error_message"].startswith("torch.cuda.OutOfMemoryError: Allocation on device 0")
+
+
+def test_cloud_status_snapshot_parses_a_string_execution_error(monkeypatch):
+    """A non-dict `execution_error` (the deprecated dialect's JSON-encoded
+    record) must still produce a cause rather than being discarded to None."""
+    payload = {
+        "status": "failed",
+        "execution_error": json.dumps({"exception_message": "boom", "node_id": 3, "node_type": "VAEDecode"}),
+    }
+    monkeypatch.setattr(jobs_mod, "_cloud_client", lambda: _FakeCloudClient(payload))
+
+    snap = jobs_mod._cloud_status_snapshot("pid-str-err")
+    assert snap["error_message"] == "boom (node 3 VAEDecode)"
+    # The published key stays object-or-null, so a string shape lands as null.
+    assert snap["execution_error"] is None
+
+
+def test_cloud_status_snapshot_ignores_a_stale_error_on_a_succeeded_job(monkeypatch):
+    """A non-failed job never has a cause synthesized for it — a stale record
+    on a retried-then-succeeded job would fabricate an `error` row."""
+    payload = {"status": "success", "execution_error": _FAILED_DETAIL["execution_error"]}
+
+    class _SucceededClient(_FakeCloudClient):
+        # The shared fake refuses `get_history` to guard the error paths; a
+        # completed job legitimately fetches it (and has no outputs here).
+        def get_history(self, prompt_id):
+            return None
+
+    monkeypatch.setattr(jobs_mod, "_cloud_client", lambda: _SucceededClient(payload))
+
+    snap = jobs_mod._cloud_status_snapshot("pid-ok")
+    assert snap["status"] == "completed"
+    assert snap["error_message"] is None
+
+
+def test_poll_cloud_once_survives_a_malformed_traceback():
+    """A `traceback` served as an object slices to a TypeError that only
+    `_poll_cloud_once`'s *fetch* is guarded against — it would kill the
+    detached watcher and strand the state file mid-flight."""
+    from comfy_cli import jobs_state
+    from comfy_cli.command import job_watcher
+
+    client = _FakeCloudClient(
+        {"status": "failed", "execution_error": {"exception_message": "boom", "traceback": {"frame": 1}}}
+    )
+    state = jobs_state.new(prompt_id="pid", client_id="c", workflow="w", where="cloud")
+    assert job_watcher._poll_cloud_once(state, client=client) is True
+    assert state.status == "error"
+    assert state.error["message"] == "boom"
+
+
+def test_cloud_status_pretty_renders_the_execution_error_row(monkeypatch, capsys):
+    """The pretty `jobs status` table shows an `error` row for a failed cloud
+    job — the row that has been blank since the endpoint moved."""
+    from comfy_cli.output import Renderer, set_renderer
+    from comfy_cli.output.renderer import OutputMode
+
+    monkeypatch.setattr(jobs_mod, "cloud_preflight_or_exit", lambda: None)
+    monkeypatch.setattr(jobs_mod, "_cloud_client", lambda: _FakeCloudClient(_FAILED_DETAIL))
+
+    set_renderer(Renderer(mode=OutputMode.PRETTY, command="jobs status"))
+    jobs_mod._cloud_status("pid-failed")
+    out = capsys.readouterr().out
+    assert "error" in out
+    assert "OutOfMemoryError" in out
+
+
+@pytest.mark.parametrize(
+    ("err", "expected"),
+    [
+        ({}, None),
+        (None, None),
+        ({"exception_message": "boom"}, "boom"),
+        ({"exception_message": "boom", "exception_type": "ValueError"}, "ValueError: boom"),
+        ({"exception_type": "ValueError"}, "ValueError"),
+        ({"exception_message": "boom", "node_id": 5}, "boom (node 5)"),
+        # Node 0 is a real node id — it must not be dropped as falsy.
+        ({"exception_message": "boom", "node_id": 0}, "boom (node 0)"),
+        ({"exception_message": "boom", "node_type": "KSampler"}, "boom (KSampler)"),
+        # Node fields but no cause: state one rather than emitting the bare
+        # parenthetical `(node 5 KSampler)` as the whole error line.
+        ({"node_id": 5, "node_type": "KSampler"}, "ComfyUI reported an execution error. (node 5 KSampler)"),
+        # Internal newlines collapse — this helper renders *one* line, and the
+        # pretty `error` cell is a single Rich row.
+        ({"exception_message": "boom\n  at frame\n  at frame2"}, "boom at frame at frame2"),
+        # Non-dict shapes route through `execution_errors.parse_error_message`
+        # rather than being discarded, so the watcher and this path agree.
+        ("a string, not an object", "a string, not an object"),
+        ('{"exception_message": "boom", "node_type": "KSampler"}', "boom (KSampler)"),
+    ],
+)
+def test_execution_error_line_partial_records(err, expected):
+    """The endpoint marks every `ExecutionError` field required, but the line
+    builder degrades field-by-field rather than emitting `None: None (node
+    None None)` if one ever goes missing."""
+    assert jobs_mod._execution_error_line(err) == expected
+
+
+def test_poll_cloud_once_classifies_the_structured_execution_error():
+    """The background watcher polls the same `/api/jobs/<id>`, so it must read
+    the same fields — otherwise every failed cloud job's state file records the
+    generic "ComfyUI reported an execution error." with null timestamps."""
+    from comfy_cli import jobs_state
+    from comfy_cli.command import job_watcher
+
+    client = _FakeCloudClient(_FAILED_DETAIL)
+    state = jobs_state.new(prompt_id="pid", client_id="c", workflow="w", where="cloud")
+    assert job_watcher._poll_cloud_once(state, client=client) is True
+
+    assert state.status == "error"
+    assert state.error is not None
+    # `classify` parses the object shape directly, so the verdict keeps the
+    # node prefix and the structured fields — not just a flattened line.
+    assert state.error["message"] == "KSampler (node 5): Allocation on device 0 would exceed allowed memory"
+    assert state.error["details"]["exception_type"] == "torch.cuda.OutOfMemoryError"
+    assert state.error["details"]["node_id"] == "5"
+    assert state.error["details"]["traceback_tail"] == ["  File a.py, line 1", "  File b.py, line 2"]
+    assert state.error["details"]["created_at"] == "2025-01-01T00:00:00+00:00"
+    assert state.error["details"]["updated_at"] == "2025-01-01T00:01:00.500000+00:00"
+
+
+def test_poll_cloud_once_cancelled_carries_iso_timestamps():
+    """The cancelled branch reads the same timestamps through the same helper."""
+    from comfy_cli import jobs_state
+    from comfy_cli.command import job_watcher
+
+    client = _FakeCloudClient({"status": "cancelled", "create_time": 1_735_689_600_000})
+    state = jobs_state.new(prompt_id="pid", client_id="c", workflow="w", where="cloud")
+    assert job_watcher._poll_cloud_once(state, client=client) is True
+
+    assert state.error["code"] == "cancelled"
+    assert state.error["message"] == "Cloud job was cancelled."
+    assert state.error["details"]["created_at"] == "2025-01-01T00:00:00+00:00"
+    assert state.error["details"]["updated_at"] is None
+
+
+def test_jobs_schema_documents_execution_error():
+    """schemas/jobs.json carries the additive structured-cause key."""
+    schema_path = Path(__file__).parents[3] / "comfy_cli" / "schemas" / "jobs.json"
+    schema = json.loads(schema_path.read_text())
+    prop = schema["properties"]["execution_error"]
+    assert prop["type"] == ["object", "null"]
+    assert prop["additionalProperties"] is True
 
 
 def test_jobs_schema_documents_grouped_outputs():
