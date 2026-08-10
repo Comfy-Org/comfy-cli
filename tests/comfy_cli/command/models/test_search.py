@@ -203,7 +203,9 @@ def _patch_urlopen(monkeypatch: pytest.MonkeyPatch, routes: dict[str, Any]):
     """Wire urlopen to a URL→body lookup. Body is JSON-encoded.
 
     Substring matching: the first registered URL substring that matches wins.
-    Unknown URLs raise so we never silently pass on a typo'd path.
+    Unknown URLs raise so we never silently pass on a typo'd path. A ``bytes``
+    payload is served verbatim, so a test can hand back a body that is not
+    valid JSON (or not valid UTF-8) at all.
     """
     calls = []
 
@@ -214,11 +216,17 @@ def _patch_urlopen(monkeypatch: pytest.MonkeyPatch, routes: dict[str, Any]):
             if needle in url:
                 if isinstance(payload, Exception):
                     raise payload
-                body = json.dumps(payload).encode()
+                body = payload if isinstance(payload, bytes) else json.dumps(payload).encode()
                 return _fake_resp(body)
         raise AssertionError(f"unexpected URL hit by mock: {url}")
 
-    monkeypatch.setattr("urllib.request.urlopen", _fake)
+    # ``_http_get_json`` routes every request through the shared
+    # ``comfy_cli.http.request_json``, which opens via the module's
+    # ``_AUTHED_OPENER`` (built with NoRedirectHandler); the fake still
+    # receives a ``Request`` object, so the route-matching above is unchanged.
+    import comfy_cli.http as http_mod
+
+    monkeypatch.setattr(http_mod._AUTHED_OPENER, "open", _fake)
     return calls
 
 
@@ -266,6 +274,82 @@ class TestListFolders:
         assert env["error"]["code"] == "server_not_running"
         assert env["error"]["details"]["status"] == 500
         assert env["error"]["details"]["body"] == "boom"
+
+
+class TestMalformedResponseEnvelopes:
+    """Regression: an oversize or undecodable body must be an envelope, not a traceback.
+
+    Before the shared ``request_json`` migration, ``_http_get_json`` raised a
+    bare ``ValueError`` past the cap and let ``UnicodeDecodeError`` escape from
+    ``json.loads`` — neither is in the callers' ``(URLError, OSError,
+    JSONDecodeError)`` tuple, so both crashed the CLI with a traceback and no
+    ``--json`` envelope at all.
+    """
+
+    def test_oversize_response_yields_envelope_not_traceback(self, cloud_target, monkeypatch, capsys):
+        monkeypatch.setattr(search_cmd, "_MAX_RESPONSE_BYTES", 4)
+        _patch_urlopen(monkeypatch, {"/api/experiment/models": _CLOUD_FOLDERS})
+        env = _run(["list-folders", "--where", "cloud"], capsys)
+        assert env["ok"] is False
+        assert env["error"]["code"] == "cloud_http_error"
+        # The helper's message is interpolated into the envelope, so it stays informative.
+        assert "byte cap" in env["error"]["message"]
+
+    def test_oversize_response_local_uses_server_not_running(self, local_target, monkeypatch, capsys):
+        monkeypatch.setattr(search_cmd, "_MAX_RESPONSE_BYTES", 4)
+        _patch_urlopen(monkeypatch, {"127.0.0.1:8188/models": _LOCAL_FOLDERS})
+        env = _run(["list-folders", "--where", "local"], capsys)
+        assert env["ok"] is False
+        assert env["error"]["code"] == "server_not_running"
+
+    def test_non_utf8_response_yields_envelope_not_traceback(self, cloud_target, monkeypatch, capsys):
+        _patch_urlopen(monkeypatch, {"/api/experiment/models": b"\xff\xfe\x00not json"})
+        env = _run(["list-folders", "--where", "cloud"], capsys)
+        assert env["ok"] is False
+        assert env["error"]["code"] == "cloud_http_error"
+
+    def test_unparseable_response_yields_envelope_not_traceback(self, cloud_target, monkeypatch, capsys):
+        _patch_urlopen(monkeypatch, {"/api/experiment/models": b"<html>not json</html>"})
+        env = _run(["list-folders", "--where", "cloud"], capsys)
+        assert env["ok"] is False
+        assert env["error"]["code"] == "cloud_http_error"
+
+    def test_literal_null_body_yields_envelope(self, cloud_target, monkeypatch, capsys):
+        # The one intentional behavior change of the shared-helper migration:
+        # ``request_json`` cannot distinguish a literal JSON ``null`` from an
+        # unparseable body, so both become None and _http_get_json raises. Before,
+        # `list-folders` reported ok:true with count 0 for a `null` body — which
+        # silently presented a malformed response as "this backend has no folders".
+        _patch_urlopen(monkeypatch, {"/api/experiment/models": b"null"})
+        env = _run(["list-folders", "--where", "cloud"], capsys)
+        assert env["ok"] is False
+        assert env["error"]["code"] == "cloud_http_error"
+
+    def test_empty_response_yields_envelope_not_attribute_error(self, cloud_target, monkeypatch, capsys):
+        # `models show` calls body.get() on the parsed result; an empty body used
+        # to reach that as None. It now surfaces as a decode-family envelope.
+        _patch_urlopen(monkeypatch, {"/api/assets": b""})
+        env = _run(["show", "flux1-dev", "--where", "cloud"], capsys)
+        assert env["ok"] is False
+        assert env["error"]["code"] == "cloud_http_error"
+
+    @pytest.mark.parametrize(
+        ("args", "route"),
+        [
+            (["list-folders", "--where", "cloud"], "/api/experiment/models"),
+            (["list-folder", "loras", "--where", "cloud"], "/api/experiment/models/loras"),
+            (["search", "--where", "cloud"], "/api/assets"),
+            (["show", "flux1-dev", "--where", "cloud"], "/api/assets"),
+        ],
+    )
+    def test_every_call_site_routes_oversize_to_envelope(self, args, route, cloud_target, monkeypatch, capsys):
+        # Each of the four handlers wrapping _http_get_json must catch
+        # ResponseTooLarge; an uncaught one would be a traceback, not an envelope.
+        monkeypatch.setattr(search_cmd, "_MAX_RESPONSE_BYTES", 4)
+        _patch_urlopen(monkeypatch, {route: {"assets": [], "total": 0}})
+        env = _run(args, capsys)
+        assert env["ok"] is False, env
+        assert env["error"]["code"] == "cloud_http_error"
 
 
 # ---------------------------------------------------------------------------

@@ -1,11 +1,13 @@
 import contextlib
+import ntpath
 import os
 import pathlib
+import shutil
 import subprocess
 import sys
 import time
 from typing import Annotated
-from urllib.parse import parse_qs, unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlparse, urlsplit, urlunsplit
 
 import requests
 import typer
@@ -19,10 +21,12 @@ from comfy_cli.file_utils import (
     DownloadException,
     _friendly_network_error,
     check_unauthorized,
+    cleanup_partials,
     download_file,
 )
 from comfy_cli.output import get_renderer
 from comfy_cli.output import rprint as print  # context-aware: stderr in JSON mode
+from comfy_cli.output.sanitize import sanitize_markup
 from comfy_cli.workspace_manager import WorkspaceManager
 
 app = typer.Typer()
@@ -60,6 +64,118 @@ def _format_elapsed(seconds: float) -> str:
 
 def potentially_strip_param_url(path_name: str) -> str:
     return path_name.split("?")[0]
+
+
+def _download_failure(
+    *,
+    code: str,
+    message: str,
+    hint: str | None = None,
+    details: dict | None = None,
+) -> typer.Exit:
+    """Emit an ``envelope/1`` error for a `model download` failure and return the
+    ``typer.Exit`` the caller should raise.
+
+    Every failure path in :func:`download` funnels through here so a `--json`
+    consumer always gets a machine-readable ``error.code`` and a non-zero exit —
+    never a bare exit that an envelope-synthesizing wrapper would read as a
+    success for a download that never happened.
+
+    In pretty mode ``renderer.error`` renders the red error panel, so call sites
+    do not print the message themselves. Rich builds the panel body from
+    ``rich.text.Text``, which is literal, so a message containing markup
+    metacharacters (``[/]``) neither crashes nor gets swallowed — no ``escape()``
+    needed.
+
+    ``code`` is keyword-only on purpose: the registry test
+    (``tests/comfy_cli/output/test_error_code_registry.py``) AST-scans for
+    ``code="..."`` keywords, so a positional call site would silently drop out of
+    the both-ways registry enforcement.
+    """
+    get_renderer().error(
+        code=code,
+        message=message,
+        hint=hint,
+        details=details,
+        command="model download",
+    )
+    return typer.Exit(code=1)
+
+
+def _scrub_url(url: str) -> str:
+    """Drop the query string, fragment and userinfo from *url*.
+
+    CivitAI download links carry the API token as ``?token=`` — ``tracking._scrub_value``
+    already strips it before telemetry, and an error envelope is a *louder* channel
+    than telemetry (agent/MCP wrappers capture and log stdout verbatim), so the same
+    scrubbing applies to anything we put in ``error.details`` or a log line.
+    """
+    if not isinstance(url, str):
+        return url
+    try:
+        parts = urlsplit(url)
+    except ValueError:  # malformed authority (e.g. an unbracketed IPv6 literal)
+        return url.partition("?")[0].partition("#")[0]
+    if not parts.scheme:
+        return url.partition("?")[0].partition("#")[0]
+    return urlunsplit((parts.scheme, parts.netloc.rpartition("@")[2], parts.path, "", ""))
+
+
+def _reject_unsafe_component(value: str | None, *, label: str, url: str) -> None:
+    """Fail the download if *value* is anything but a single, inert path component.
+
+    ``local_filename`` and ``basemodel`` are joined into the destination path, and
+    both can come straight off the CivitAI API response (``file["name"]``,
+    ``version["baseModel"]``) — which is remote input, accepted without a prompt in
+    non-interactive runs. ``pathlib``/``os.path.join`` do not sanitize ``..`` or an
+    absolute component, so an unvalidated value writes outside the workspace.
+
+    Subdirectories are still reachable — via ``--relative-path``, which is the
+    option that exists for choosing the destination directory — so this rejects a
+    traversal without removing the capability.
+    """
+    if not value:
+        return
+    unsafe = (
+        value in (".", "..")
+        or os.path.isabs(value)
+        or bool(ntpath.splitdrive(value)[0])
+        or "/" in value
+        or "\\" in value
+    )
+    if unsafe:
+        raise _download_failure(
+            code="invalid_argument",
+            message=f"Unsafe {label}: {value!r} is not a plain name (it contains a path separator, a drive, or '..').",
+            hint="use `--relative-path <dir>` to choose the destination directory and `--filename <name>` for a plain name",
+            details={"url": _scrub_url(url), label: value},
+        )
+
+
+def _resolve_civitai_source(fetch, url: str):
+    """Run a CivitAI metadata lookup, converting any failure into an error envelope.
+
+    The lookups raise on HTTP/parse errors and ``request_civitai_model_version_api``
+    returns ``None`` when the version carries no primary file; both used to escape
+    as an unhandled traceback with no envelope.
+    """
+    try:
+        resolved = fetch()
+    except Exception as e:
+        raise _download_failure(
+            code="download_failed",
+            message=f"Could not resolve a downloadable file from the CivitAI URL: {e}",
+            hint="check the model/version exists and is public; a private model needs --set-civitai-api-token",
+            details={"url": _scrub_url(url), "stage": "resolve"},
+        ) from None
+    if resolved is None:
+        raise _download_failure(
+            code="download_failed",
+            message="The CivitAI model version has no primary file to download.",
+            hint="pick a version that has a primary file, or pass its direct download URL",
+            details={"url": _scrub_url(url), "stage": "resolve"},
+        )
+    return resolved
 
 
 def check_huggingface_url(url: str) -> tuple[bool, str | None, str | None, str | None, str | None]:
@@ -289,7 +405,10 @@ def download(
             headers["Authorization"] = f"Bearer {civitai_api_token}"
 
     if is_civitai_model_url:
-        local_filename, url, model_type, basemodel = request_civitai_model_api(model_id, version_id, headers)
+        local_filename, url, model_type, basemodel = _resolve_civitai_source(
+            lambda: request_civitai_model_api(model_id, version_id, headers), url
+        )
+        _reject_unsafe_component(basemodel, label="basemodel", url=url)
 
         model_path = model_path_map.get(model_type)
 
@@ -299,7 +418,10 @@ def download(
 
             relative_path = os.path.join(DEFAULT_COMFY_MODEL_PATH, model_path, basemodel)
     elif is_civitai_api_url:
-        local_filename, url, model_type, basemodel = request_civitai_model_version_api(version_id, headers)
+        local_filename, url, model_type, basemodel = _resolve_civitai_source(
+            lambda: request_civitai_model_version_api(version_id, headers), url
+        )
+        _reject_unsafe_component(basemodel, label="basemodel", url=url)
 
         model_path = model_path_map.get(model_type)
 
@@ -318,7 +440,14 @@ def download(
             basemodel = ui.prompt_input("Enter base model (e.g. SD1.5, SDXL, ...)", default="")
             relative_path = os.path.join(DEFAULT_COMFY_MODEL_PATH, model_path, basemodel)
     else:
-        print("Model source is unknown")
+        # Neither CivitAI nor Hugging Face — a plain file URL, which IS a supported
+        # source: the download proceeds via download_file() below. This is a note,
+        # not a failure, so it must not short-circuit.
+        # escape() the URL: `print` is Rich's markup-parsing print, and a URL holding
+        # markup metacharacters (`[/]`, or an IPv6 literal like `http://[::1]/x`)
+        # would otherwise raise MarkupError — an uncaught crash with no envelope,
+        # the exact failure mode this command is being hardened against.
+        print(f"Model source is unknown; treating {escape(_scrub_url(url))} as a direct file URL")
 
     if filename is None:
         if local_filename is None:
@@ -331,16 +460,29 @@ def download(
     if relative_path is None:
         relative_path = DEFAULT_COMFY_MODEL_PATH
 
-    if local_filename is None:
-        raise typer.Exit(code=1)
-    if local_filename == "":
-        raise DownloadException("Filename cannot be empty")
+    # None (prompt cancelled / no TTY) and "" (prompting skipped for an agentic
+    # caller, which returns the empty default) are the same failure: nothing to
+    # save the file as. Both used to end without an envelope — a bare exit 1 and
+    # an unhandled DownloadException traceback respectively.
+    if not local_filename:
+        raise _download_failure(
+            code="missing_argument",
+            message="Could not determine a filename to save the model as.",
+            hint="pass `--filename <name>`",
+            details={"url": _scrub_url(url)},
+        )
+
+    _reject_unsafe_component(local_filename, label="filename", url=url)
 
     local_filepath = get_workspace() / relative_path / local_filename
 
     if local_filepath.exists():
-        print(f"[bold red]File already exists: {local_filepath}[/bold red]")
-        return
+        raise _download_failure(
+            code="model_file_exists",
+            message=f"File already exists: {local_filepath}",
+            hint="pass `--filename` to save under a different name, or remove the existing file",
+            details={"path": str(local_filepath)},
+        )
 
     start_time = time.monotonic()
 
@@ -351,10 +493,15 @@ def download(
     needs_hf_auth = False
     if is_huggingface_url and check_unauthorized(url, headers):
         if hf_api_token is None:
-            print(
-                f"Unauthorized access to Hugging Face model. Please set the Hugging Face API token using `comfy model download --set-hf-api-token` or via the `{constants.HF_API_TOKEN_ENV_KEY}` environment variable"
+            raise _download_failure(
+                code="hf_unauthorized",
+                message="Unauthorized access to the Hugging Face model, and no Hugging Face API token is configured.",
+                hint=(
+                    "set the token via `comfy model download --set-hf-api-token <token>` or the "
+                    f"`{constants.HF_API_TOKEN_ENV_KEY}` environment variable"
+                ),
+                details={"url": _scrub_url(url), "repo_id": repo_id},
             )
-            return
         needs_hf_auth = True
 
     if background:
@@ -376,30 +523,104 @@ def download(
 
             from comfy_cli.resolve_python import resolve_workspace_python
 
-            python = resolve_workspace_python(str(get_workspace()))
-            subprocess.check_call([python, "-m", "pip", "install", "huggingface_hub"])
-            import huggingface_hub
+            try:
+                # NB: this installs into the *workspace* interpreter (pinned by
+                # tests/comfy_cli/test_models_python_resolution.py), which is not
+                # necessarily the one running this process — so the import below
+                # can still fail for e.g. a pipx-installed CLI. That predates this
+                # change and is tracked separately; what's new here is that the
+                # failure now ends in an envelope instead of a traceback.
+                python = resolve_workspace_python(str(get_workspace()))
+                subprocess.check_call([python, "-m", "pip", "install", "huggingface_hub"])
+                import huggingface_hub
+            except Exception as e:
+                raise _download_failure(
+                    code="download_failed",
+                    message=f"`huggingface_hub` is required for Hugging Face downloads and could not be installed: {e}",
+                    hint="install it manually (`pip install huggingface_hub`) and retry",
+                    details={"url": _scrub_url(url)},
+                ) from None
 
-        print(f"Downloading model {model_id} from Hugging Face...")
-        output_path = huggingface_hub.hf_hub_download(
-            repo_id=repo_id,
-            filename=hf_filename,
-            subfolder=hf_folder_name,
-            revision=hf_branch_name,
-            token=hf_api_token,
-            local_dir=get_workspace() / relative_path,
-            cache_dir=get_workspace() / relative_path,
-        )
-        print(f"Model downloaded successfully to: {output_path}")
+        print(f"Downloading model {escape(str(model_id))} from Hugging Face...")
+        try:
+            output_path = huggingface_hub.hf_hub_download(
+                repo_id=repo_id,
+                filename=hf_filename,
+                subfolder=hf_folder_name,
+                revision=hf_branch_name,
+                token=hf_api_token,
+                local_dir=get_workspace() / relative_path,
+                cache_dir=get_workspace() / relative_path,
+            )
+        except Exception as e:
+            raise _download_failure(
+                code="download_failed",
+                message=f"Hugging Face download failed: {e}",
+                hint="check the repo/revision exists and the token has access to it",
+                details={"url": _scrub_url(url), "repo_id": repo_id},
+            ) from None
+
+        # `hf_hub_download` names the file after the *repo* path (`hf_filename`)
+        # and nests it under `hf_folder_name`, so the resolved `local_filename` was
+        # silently ignored on this branch only — the public-HF path below goes
+        # through download_file(local_filepath) and honours it. That split made the
+        # `local_filepath.exists()` guard above check a path this branch never
+        # writes, and made its `model_file_exists` hint ("pass `--filename`")
+        # impossible to act on. Gate the move on the *resolved* name rather than on
+        # `--filename`: `local_filename` can equally come from the prompt above
+        # (whose default is only a suggestion), so keying on `filename is not None`
+        # left the same split open via the prompt door.
+        if pathlib.Path(output_path) != local_filepath:
+            try:
+                local_filepath.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(output_path), str(local_filepath))
+                output_path = str(local_filepath)
+            except OSError as e:
+                raise _download_failure(
+                    code="download_failed",
+                    message=f"Downloaded the model but could not save it as {local_filepath}: {e}",
+                    hint="check the destination directory is writable, or omit `--filename`",
+                    details={"url": _scrub_url(url), "path": str(local_filepath)},
+                ) from None
+
+        print(f"Model downloaded successfully to: {escape(str(output_path))}")
     else:
-        print(f"Start downloading URL: {url} into {local_filepath}")
+        print(f"Start downloading URL: {escape(_scrub_url(url))} into {escape(str(local_filepath))}")
         try:
             download_file(url, local_filepath, headers, downloader=resolved_downloader)
         except DownloadException as e:
-            # escape() so a dynamic error message containing "[/]" or similar
-            # rich-markup syntax doesn't trigger MarkupError or get mis-rendered.
-            print(f"[bold red]{escape(str(e))}[/bold red]")
-            raise typer.Exit(code=1) from None
+            # `message` is rendered through `Text` (see `_download_failure`), which
+            # never parses markup, and `error_panel` sanitizes it (ANSI/control-byte
+            # strip) before it reaches the terminal — so a server-chosen message (the
+            # 401 branch of guess_status_code_reason echoes one, and aria2 relays its
+            # own) can't clear the screen or repaint earlier output.
+            raise _download_failure(
+                code="download_failed",
+                message=str(e),
+                details={"url": _scrub_url(url), "path": str(local_filepath)},
+            ) from None
+        except OSError as e:
+            # download_file() converts network failures to DownloadException, but a
+            # local filesystem failure (unwritable dir, disk full) still escapes as
+            # OSError — which would end the command with a traceback and no envelope.
+            raise _download_failure(
+                code="download_failed",
+                message=f"Could not write the downloaded file to {local_filepath}: {e}",
+                hint="check the destination directory exists, is writable, and has free space",
+                details={"url": _scrub_url(url), "path": str(local_filepath)},
+            ) from None
+        except Exception as e:
+            # Backstop for the invariant this command promises: a `--json` caller must
+            # never get a bare traceback with no envelope. The downloader can still
+            # raise something neither branch above names — e.g. a malformed
+            # `Content-Length` from a broken proxy used to surface as ValueError out of
+            # `int(...)` (now guarded in file_utils, but the class of failure remains).
+            raise _download_failure(
+                code="download_failed",
+                message=f"Download failed unexpectedly ({type(e).__name__}): {e}",
+                hint="retry; if it persists, re-run without `--json` for the full traceback",
+                details={"url": _scrub_url(url), "path": str(local_filepath)},
+            ) from None
 
     elapsed = time.monotonic() - start_time
     print(f"Done in {_format_elapsed(elapsed)}")
@@ -641,8 +862,14 @@ def _download_worker(
     except DownloadCancelled:
         state.status = "cancelled"
         state.error = None
-        with contextlib.suppress(OSError):
-            pathlib.Path(state.dest).unlink(missing_ok=True)
+        # Same split as `download_cancel`: only aria2 wrote to the destination, so
+        # only aria2's leftovers are ours to delete. The httpx path raises this
+        # from inside the transfer loop, before the rename, and unwinds through
+        # `_download_file_httpx`'s own cleanup — the `.part` is already gone and
+        # anything at `dest` predates this download.
+        if state.downloader == "aria2":
+            with contextlib.suppress(OSError):
+                pathlib.Path(state.dest).unlink(missing_ok=True)
         state.completed_bytes = 0
         with contextlib.suppress(OSError):
             download_state.write_path(path, state)
@@ -701,16 +928,20 @@ def _render_download_rows(rows: list[dict]) -> None:
     ui.display_table(data, ["ID", "Status", "%", "Bytes", "Elapsed", "Destination"])
     for row in rows:
         if row.get("error"):
-            print(f"[bold red]{row['id']}: {escape(str(row['error']))}[/bold red]")
+            # The state file is written by a detached worker, so this string is
+            # server-influenced text read back from disk — sanitize on the way out.
+            print(f"[bold red]{row['id']}: {sanitize_markup(row['error'])}[/bold red]")
 
 
 def _reconciled(state: download_state.DownloadState) -> tuple[download_state.DownloadState, bool]:
     """Reconcile ``state`` against reality, persisting a *status* correction.
 
-    Only a status change is written back. Byte counts are re-derived from
-    ``stat(dest)`` on every poll anyway, so persisting them buys nothing — and
-    would let a poll racing a live worker rewind the file to whatever this
-    reader happened to load a moment earlier.
+    Only a status change is written back. Persisting the byte counts a reader
+    derived would let a poll racing a live worker rewind the file to whatever
+    this reader happened to load a moment earlier — the worker is the only
+    writer of progress, and mid-flight its state file is normally the sole source
+    of truth (the destination isn't written until the transfer completes; see
+    :func:`download_state.reconcile` for the caveat).
     """
     fresh = download_state.reconcile(state)
     changed = fresh.status != state.status
@@ -790,9 +1021,30 @@ def download_cancel(
                 download_state.write(workspace, state)
 
     if state.status in download_state.TERMINAL_STATUSES:
+        # Reaching a terminal status is not the same as having reclaimed the disk.
+        # A SIGKILLed worker's *first* `download-status` poll persists reconcile's
+        # `failed` verdict, and from then on this command short-circuits here — so
+        # the only path that sweeps the `.part` file would never run, and multi-GB
+        # of it would sit there with no command able to reclaim it (unlike the old
+        # truncated file at `dest`, a `.part` is invisible to `model list` and
+        # `model remove`). Sweep here too, but only once the worker is confirmed
+        # gone: a `cancelled` record can have been written while its worker was
+        # still running (that is what the "worker may still be running" error
+        # says), and that worker would re-create whatever we removed — or worse,
+        # find the temp it is streaming into deleted underneath it.
+        reclaimed = 0
+        if state.status != "completed" and not download_state.worker_alive(state):
+            reclaimed = cleanup_partials(pathlib.Path(state.dest))
+            if reclaimed:
+                state.completed_bytes = 0
+                with contextlib.suppress(OSError, ValueError):
+                    download_state.write(workspace, state)
         payload = download_state.status_payload(state)
-        print(f"Download {download_id} is already {state.status}; nothing to cancel.")
-        renderer.emit(payload, command="model download-cancel", changed=False)
+        if reclaimed:
+            print(f"Download {download_id} is already {state.status}; reclaimed its partial file.")
+        else:
+            print(f"Download {download_id} is already {state.status}; nothing to cancel.")
+        renderer.emit(payload, command="model download-cancel", changed=bool(reclaimed))
         return
 
     # Sentinel first, then the signal. The sentinel is what a worker that is
@@ -834,9 +1086,27 @@ def download_cancel(
         if size is not None:
             state.completed_bytes = size
     else:
-        if stopped and size is not None:
-            with contextlib.suppress(OSError):
-                partial.unlink()
+        if stopped:
+            # Only aria2 writes straight to the destination (it resumes from its
+            # own control file), so only an unfinished *aria2* transfer leaves its
+            # bytes here. The httpx path never writes through the destination, so
+            # a file sitting at `dest` after an httpx cancel is either one that
+            # predates this download — which `download_file` promises survives
+            # either way — or a rename that just landed, e.g. an unknown-length
+            # transfer (`total_bytes` is None, so the `finished` check above can't
+            # see it) whose worker was killed between the rename and persisting
+            # `completed`. Deleting it would destroy a complete model this command
+            # never wrote.
+            if size is not None and state.downloader == "aria2":
+                with contextlib.suppress(OSError):
+                    partial.unlink()
+                    removed = True
+            # The httpx downloader streams into a `.part` sibling and only renames
+            # onto the destination once the transfer completes, so a worker killed
+            # mid-flight leaves its gigabytes *there*, not at `dest`. Without this
+            # sweep the cancel would report success and reclaim nothing — the exact
+            # hand-cleanup this command exists to spare the user.
+            if cleanup_partials(partial):
                 removed = True
         state.status = "cancelled"
         state.error = None if stopped else "worker may still be running; partial file left in place"
@@ -854,7 +1124,7 @@ def download_cancel(
     renderer.emit(payload, command="model download-cancel", changed=True)
 
 
-@app.command(help="Remove downloaded model files, by name or through an interactive picker.")
+@app.command(help="Remove one or more downloaded models by name or via interactive selection.")
 @tracking.track_command("model")
 def remove(
     ctx: typer.Context,

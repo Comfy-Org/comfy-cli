@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from typing import Any
+from unittest.mock import MagicMock
 
 import pytest
 import typer
@@ -244,6 +245,35 @@ def test_server_not_running_short_circuits(app, gallery_file, template_body, run
     assert run_spy.calls == []
 
 
+def test_explicit_port_zero_is_rejected_not_overridden_by_host_port(
+    app, gallery_file, template_body, run_spy, monkeypatch
+):
+    """`--port 0` is an out-of-range port, not "no port given" — it must not be
+    silently replaced by the port embedded in `--host h:p` (BE-6486).
+
+    The check lives in the shared `resolve_host_port`, so the failure is a click
+    usage error (exit 2) raised before the server probe.
+    """
+    probe = MagicMock(return_value=True)
+    monkeypatch.setattr("comfy_cli.env_checker.check_comfy_server_running", probe)
+    result = CliRunner().invoke(
+        app,
+        ["run-template", "--gallery", gallery_file, "image_local_sd", "--host", "127.0.0.1:9100", "--port", "0"],
+    )
+    assert result.exit_code == 2, result.output
+    probe.assert_not_called()
+    assert run_spy.calls == []
+
+
+def test_explicit_port_wins_over_embedded_host_port(app, gallery_file, template_body, server_up, run_spy):
+    result = CliRunner().invoke(
+        app,
+        ["run-template", "--gallery", gallery_file, "image_local_sd", "--host", "127.0.0.1:9100", "--port", "9200"],
+    )
+    assert result.exit_code == 0, result.output
+    assert [(c["host"], c["port"]) for c in run_spy.calls] == [("127.0.0.1", 9200)]
+
+
 def test_unknown_param_key_lists_available_slots(app, gallery_file, template_body, server_up, run_spy):
     _force_json_renderer()
     result = CliRunner().invoke(
@@ -315,6 +345,20 @@ def test_allow_spend_unblocks_paid_template(app, gallery_file, template_body, se
     )
     assert result.exit_code == 0, result.output
     assert len(run_spy.calls) == 1
+
+
+def test_consented_handoff_forwards_allow_spend_so_run_does_not_regate(
+    app, gallery_file, template_body, server_up, run_spy
+):
+    # BE-4326: run-template's spend gate has already consented, so the handoff
+    # to `comfy run`'s execute() must forward allow_spend=True — otherwise
+    # execute()'s own gate would fail closed a second time under --json.
+    _force_json_renderer()
+    result = CliRunner().invoke(
+        app, ["run-template", "--gallery", gallery_file, "api_flux2", "--allow-spend", *HOSTPORT]
+    )
+    assert result.exit_code == 0, result.output
+    assert run_spy.calls[0]["allow_spend"] is True
 
 
 def test_interactive_decline_blocks_without_submitting(

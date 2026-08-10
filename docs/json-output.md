@@ -309,6 +309,71 @@ Without `--wait` (the default), the stream ends at the `queued` envelope
 watcher keeps the state file updated; follow up with
 `comfy jobs watch <prompt_id>` or `comfy jobs status <prompt_id>`.
 
+### Known limit: `--wait` has no background watcher
+
+`--wait` writes the job's state file at submit and finalizes it in the
+foreground — it does **not** spawn the detached watcher the async path does
+(`data.watcher_spawned` is an async-path field only). Every ordinary outcome is
+still recorded: a node failure, a cancel, and a lost connection to a dying
+server all run through the foreground handlers, which write `error.code`
+(the classified execution verdict or `execution_error`; `cancelled`;
+`server_died`) before exiting.
+
+The gap is a `--wait` process that is **killed from outside** — a caller-imposed
+timeout (`SIGKILL`/`SIGTERM` on the process group), a terminal going away, the
+OS reaping the CLI alongside the server. No handler runs, so the state file is
+left at its submit-time `running`, and because `--wait` records no
+`watcher_pid`, `jobs ls`'s stale-watcher reap — which only fires on a recorded
+*and* dead pid — will not finalize it either. If the server then dies, nothing
+writes `server_died`.
+
+Attribution is degraded there, not lost: `comfy jobs status <prompt_id>` still
+names the job, its last-known status, and its workflow via `server_not_running`
+/ `prompt_not_found`. **For runs that may outlive the caller's patience, submit
+without `--wait`** — the async path spawns a watcher that survives the parent
+(its own session/process group), and it is the watcher that writes `server_died`
+when the server disappears mid-job. `comfy jobs ls` then reports both the status
+and the `error_code`.
+
+A watcher is deliberately *not* spawned on `--wait`: it would put a second,
+independent writer on the state file the foreground already finalizes, add a
+second server connection per foreground run, and leave a background process
+behind after a synchronous command returns — a real regression on the common
+path in exchange for a case the async path already covers.
+
+## `comfy validate --json` envelope
+
+`comfy validate --workflow <file> --json` checks a workflow without submitting
+it and emits a single envelope (no event stream). On a valid workflow `ok` is
+`true` and `data` carries:
+
+| Field                  | Type          | Description                                                                                     |
+| ---------------------- | ------------- | ----------------------------------------------------------------------------------------------- |
+| `workflow`             | str           | Absolute path of the validated workflow file                                                    |
+| `valid`                | bool          | Whether the graph passed validation (also the envelope `ok`)                                     |
+| `error_count`          | number        | Number of entries in `errors`                                                                    |
+| `warning_count`        | number        | Number of entries in `warnings`                                                                  |
+| `errors`               | array of dict | Per-node validation errors (empty when `valid`)                                                  |
+| `warnings`             | array of dict | Non-fatal validation warnings                                                                    |
+| `partner_nodes`        | array of str  | Sorted class_types in the workflow that are partner-API (paid) nodes. **Always present**; `[]` when none |
+| `spends_credits`       | bool          | `true` iff `partner_nodes` is non-empty — a convenience flag for "will this workflow spend Comfy credits?" |
+| `converted_from_ui`    | bool          | Present and `true` only when the input was a UI export that was lowered to API format before validating |
+| `converted_node_count` | number        | Present only alongside `converted_from_ui`: node count of the converted graph                    |
+
+`partner_nodes` / `spends_credits` are **informational only** — they never
+change validate's exit code (validate stays advisory; the credit-spend gate
+lives in `comfy run`). Detection is the same authoritative `api_node: true`
+flag (with a `partner/...` category fallback) that `comfy run` uses, run over
+the loaded `object_info`; in offline `--input` mode where the `object_info`
+lacks `api_node` flags the list is simply empty (fail-open). When
+`spends_credits` is `true`, pretty (non-`--json`) mode also prints a yellow
+`⚠ uses partner-API (paid) nodes …` line after the verdict.
+
+Invalid workflows emit `ok: false` with the same `data` fields (`valid: false`,
+a populated `errors` array, `partner_nodes`/`spends_credits` still present) and
+exit code `1`. Structural failures (missing file, non-object JSON, an
+unconvertible UI export) emit an [error object](#error-object) instead.
+
 ## Error object
 
 Every failure envelope carries:
@@ -339,7 +404,8 @@ registry test enforces this) and surfaced by `comfy discover`.
 | `object_info_unavailable` | `/object_info` returned an HTTP error, or HTTP 200 with an unparseable body     | `status` (int), `body` (str)                       | 1 |
 | `connection_error`        | Server unreachable mid-flow: `URLError`, `TimeoutError`, or other `OSError` (including on `/object_info`) | —                       | 1 |
 | `workflow_unknown_nodes`  | Pre-submit validation found unknown class_types / shape mismatches              | `errors` (array), `warnings` (array)               | 1 |
-| `partner_node_requires_credential` | Workflow uses a partner-API node and no `api_key_comfy_org` credential is available | `partner_nodes` (array of str), `host`, `port` | 1 |
+| `partner_node_requires_credential` | Workflow uses a partner-API node and no `api_key_comfy_org` credential is available | `partner_nodes` (array of str, capped at 20 entries × 64 chars each), `partner_node_count` (int, the exact total — read this, not `len(partner_nodes)`), `host`, `port` | 1 |
+| `spend_consent_required`  | Workflow embeds partner-API (paid) nodes and `--allow-spend` was not passed (machine mode) or interactive consent was declined; re-run with `--allow-spend`. Free (non-partner) workflows are unaffected. | `partner_nodes` (array of str, capped at 20 entries × 64 chars each), `partner_node_count` (int, the exact total — read this, not `len(partner_nodes)`); local path also carries `host`, `port`, the cloud path carries `where: "cloud"` | 1 |
 | `prompt_rejected`         | Server returned HTTP 400 with `node_errors`                                     | `status` (400), `node_errors` (array — [shape](#node_errors-shape)) | 1 |
 | `client_error`            | Server returned another HTTP 4xx response                                       | `status` (int, 4xx), `body` (str)                  | 1 |
 | `server_error`            | Server returned an HTTP 5xx response                                            | `status` (int, 5xx), `body` (str)                  | 1 |

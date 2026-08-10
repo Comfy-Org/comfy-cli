@@ -14,6 +14,7 @@ from typing import Any
 import typer
 
 from comfy_cli.comfy_client import Client, HTTPError
+from comfy_cli.output.sanitize import sanitize_markup
 from comfy_cli.target import resolve_target
 
 
@@ -47,10 +48,14 @@ def _render_stats_pretty(renderer, stats: dict[str, Any]) -> None:
     for dev in devices:
         if not isinstance(dev, dict):
             continue
+        # Device name/type/index are whatever `/system_stats` reported, and
+        # `Table.add_row` parses markup in a `str` cell. The two byte columns
+        # are built by `_humanize_bytes`, which only ever emits digits and a
+        # unit, so they carry nothing to escape.
         tbl.add_row(
-            str(dev.get("name", "?")),
-            str(dev.get("type", "?")),
-            str(dev.get("index", "?")),
+            sanitize_markup(dev.get("name", "?")),
+            sanitize_markup(dev.get("type", "?")),
+            sanitize_markup(dev.get("index", "?")),
             _humanize_bytes(dev.get("vram_free")),
             _humanize_bytes(dev.get("vram_total")),
         )
@@ -59,7 +64,9 @@ def _render_stats_pretty(renderer, stats: dict[str, Any]) -> None:
     system = stats.get("system") or {}
     ram_free = _humanize_bytes(system.get("ram_free"))
     ram_total = _humanize_bytes(system.get("ram_total"))
-    version = system.get("comfyui_version", "?")
+    # Same payload, same hazard one line further on: this f-string IS markup,
+    # and `Renderer.print` hands it to `rich.print` without escaping anything.
+    version = sanitize_markup(system.get("comfyui_version", "?"))
     renderer.print(f"[dim]RAM: {ram_free} / {ram_total} free — ComfyUI {version}[/dim]")
 
 

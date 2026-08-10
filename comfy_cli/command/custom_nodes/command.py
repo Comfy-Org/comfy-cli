@@ -219,6 +219,15 @@ def restore_snapshot(
         show_default=False,
         help="Restore for pip packages specified by local paths.",
     ),
+    fast_deps: Annotated[
+        bool,
+        typer.Option(
+            "--fast-deps",
+            show_default=False,
+            help="Use the fast (uv) dependency installer, matching `comfy install --fast-deps`. "
+            "For snapshot restore this runs the uv-compile fast path (requires ComfyUI-Manager v4.1+).",
+        ),
+    ] = False,
     uv_compile: Annotated[
         bool | None,
         typer.Option(
@@ -228,6 +237,16 @@ def restore_snapshot(
         ),
     ] = None,
 ):
+    # `--fast-deps` mirrors the `comfy install --fast-deps` UX (issue #217). cm_cli's
+    # `restore-snapshot` does NOT accept `--no-deps`, so the DependencyCompiler-based
+    # fast path used by `install`/`reinstall` is unavailable here; the fast uv path
+    # restore-snapshot *does* support is `--uv-compile` (it sets no-deps + batch-resolves
+    # with uv internally). So `--fast-deps` forwards the uv-compile fast path. Passing it
+    # alongside an explicit `--no-uv-compile` is contradictory.
+    if fast_deps and uv_compile is False:
+        typer.echo("Cannot use --fast-deps with --no-uv-compile", err=True)
+        raise typer.Exit(code=1)
+
     extras = []
 
     if pip_non_url:
@@ -239,8 +258,12 @@ def restore_snapshot(
     if pip_local_url:
         extras += ["--pip-local-url"]
 
+    effective_uv_compile = _resolve_uv_compile(uv_compile)
+    if fast_deps:
+        effective_uv_compile = True
+
     path = os.path.abspath(path)
-    execute_cm_cli(["restore-snapshot", path] + extras, uv_compile=_resolve_uv_compile(uv_compile))
+    execute_cm_cli(["restore-snapshot", path] + extras, uv_compile=effective_uv_compile)
 
 
 @app.command("restore-dependencies", help="Restore dependencies from installed custom nodes")
@@ -281,7 +304,7 @@ def enable_gui():
 @manager_app.command("disable-gui", help="Disable the ComfyUI-Manager GUI (Manager stays enabled, headless)")
 @tracking.track_command("node")
 def disable_gui():
-    """Enable ComfyUI-Manager but disable its GUI."""
+    """Disable the ComfyUI-Manager GUI. Manager stays enabled, headless."""
     config_manager = ConfigManager()
     config_manager.set(constants.CONFIG_KEY_MANAGER_GUI_MODE, "disable-gui")
     print("[bold green]ComfyUI-Manager enabled with GUI disabled.[/bold green]")
@@ -1002,12 +1025,40 @@ def deps(
             autocompletion=installed_pack_completer,
         ),
     ] = None,
+    registry: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--registry",
+            show_default=False,
+            help=(
+                "Registry node id of a NOT-yet-installed pack to include, so its declared dependencies can be "
+                "checked for conflicts before installing. Repeatable, and additive with the pack names above. "
+                "Always reports the pack's LATEST published version: the registry exposes no read-only endpoint "
+                "for a pinned version's dependencies. Installs nothing."
+            ),
+            autocompletion=node_completer,
+        ),
+    ] = None,
+    refresh: Annotated[
+        bool,
+        typer.Option(
+            "--refresh",
+            help="Bypass the 1h cache of registry lookups (only affects --registry).",
+        ),
+    ] = False,
 ):
-    # Native + read-only on purpose: no cm-cli, no pip install, no network, so
-    # it works on a workspace that never installed ComfyUI-Manager.
+    # Native + read-only on purpose: no cm-cli, no pip install, and no network
+    # at all unless --registry is passed (a side-effect-free GET /nodes/{id}) —
+    # so it works on a workspace that never installed ComfyUI-Manager.
     from comfy_cli.command import node_deps
 
-    node_deps.execute(get_renderer(), workspace_manager.workspace_path, pack_names)
+    node_deps.execute(
+        get_renderer(),
+        workspace_manager.workspace_path,
+        pack_names,
+        registry_ids=registry,
+        refresh=refresh,
+    )
 
 
 def validate_node_for_publishing():

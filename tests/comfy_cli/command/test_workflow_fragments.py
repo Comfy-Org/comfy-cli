@@ -1242,3 +1242,55 @@ class TestComposeJournal:
         envelope = _run(["compose", str(blueprint), "-o", str(out), "--lib", str(lib_dir)], capsys)
         assert envelope["ok"] is True
         assert out.exists()
+
+
+class TestDecomposeFailureEnvelopes:
+    """Every `workflow decompose` failure must be a JSON envelope, not a traceback.
+
+    A frontend-format workflow needs object_info, so decompose resolves routing
+    and hits the network — with no per-command ``--where`` flag to fall back to.
+    Two failures used to escape ``_load_object_info`` uncaught: a typo'd
+    ``COMFY_WHERE`` (a ``ValueError`` out of ``resolve_default``) and an
+    unreachable server (a ``LoadError`` out of the resilient loader).
+    """
+
+    _UI_WF = {
+        "nodes": [{"id": 6, "type": "CLIPTextEncode", "widgets_values": ["a cat"]}],
+        "links": [],
+    }
+
+    def test_typoed_comfy_where_emits_envelope(self, tmp_path: Path, monkeypatch, capsys):
+        monkeypatch.setenv("COMFY_WHERE", "clod")
+        wf = tmp_path / "ui.json"
+        wf.write_text(json.dumps(self._UI_WF))
+        envelope = _run(["decompose", str(wf), "--lib", str(tmp_path / "fragments")], capsys)
+        assert envelope["ok"] is False
+        assert envelope["error"]["code"] == "where_invalid"
+        assert "clod" in envelope["error"]["message"]
+
+    def test_api_format_workflow_never_resolves_routing(self, tmp_path: Path, monkeypatch, capsys):
+        """API format needs no object_info, so bad routing stays harmless."""
+        monkeypatch.setenv("COMFY_WHERE", "clod")
+        wf = tmp_path / "restyle.json"
+        wf.write_text(json.dumps(TestFragmentizeCmd._RESTYLE_WF))
+        envelope = _run(["decompose", str(wf), "--name", "restyle", "--lib", str(tmp_path / "fragments")], capsys)
+        assert envelope["ok"] is True, envelope
+
+    def test_unreachable_server_emits_envelope(self, tmp_path: Path, monkeypatch, capsys):
+        """An unreachable server is a `LoadError` from the resilient loader —
+        that is the handler's own documented case ("start the server with
+        `comfy launch`"), but it predates the loader and used to escape as a
+        traceback."""
+        from comfy_cli.cql.engine import LoadError
+
+        def _boom(**kwargs):
+            raise LoadError("cannot reach http://127.0.0.1:8188/object_info: connection refused")
+
+        monkeypatch.setenv("COMFY_WHERE", "local")
+        monkeypatch.setattr("comfy_cli.cql.loader.resilient_load_object_info", _boom)
+        wf = tmp_path / "ui.json"
+        wf.write_text(json.dumps(self._UI_WF))
+        envelope = _run(["decompose", str(wf), "--lib", str(tmp_path / "fragments")], capsys)
+        assert envelope["ok"] is False
+        assert envelope["error"]["code"] == "object_info_unavailable"
+        assert "comfy launch" in envelope["error"]["hint"]

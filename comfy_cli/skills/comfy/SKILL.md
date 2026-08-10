@@ -326,7 +326,7 @@ comfy --json auth list       # all credentials (redacted)
 Use flag-based filters on `nodes ls` to find nodes by capability:
 
 ```bash
-comfy --json nodes search "checkpoint"           # fuzzy by name/desc
+comfy --json nodes search "checkpoint loader"    # name/display/category/desc, any word order
 comfy --json nodes show KSampler                 # full schema
 comfy --json nodes ls --produces MODEL --limit 5 # filter by output type
 comfy --json nodes ls --accepts CONDITIONING     # nodes that take this input
@@ -495,6 +495,11 @@ comfy --json templates ls --limit 1              # template count
 
 The `total` field in `nodes ls`, `nodes search`, and `models search`
 gives the full count even when `--limit` caps the returned rows.
+(One exception: when `nodes search` finds nothing it falls back to the
+closest node names and sets `data.close_match: true` — check that flag, not
+just `count`, because those rows are name-similarity guesses rather than
+matches, and `total` is only how many guesses it found. Each row carries
+`close_match: true` as well.)
 
 ## Workflows — what can I tweak?
 
@@ -507,7 +512,10 @@ object_info through the routing chain with a cached fallback — cloud-signed-in
 works with no local server. If the live fetch fails, the command still succeeds
 from cache and the envelope carries `data.stale: true` +
 `warnings[] {code: "object_info_stale"}` — treat results as possibly outdated
-and run `comfy nodes refresh --where cloud` to refresh.
+re-run the command once the live fetch recovers to pick up fresh object_info.
+`comfy nodes refresh` is a different cache — it re-pulls node
+*annotations* (pack/labels/cloud_disabled) from Comfy-Org/comfy-complete, not
+object_info.
 
 Slot addresses are `<instance_id>.<input_name>`. Feed them to
 `workflow set-slot` / `workflow vary` in the Execution half. Works on
@@ -632,6 +640,16 @@ the prompt_id mid-flight (it's hidden until the job finishes).
 It defaults **on** in pretty/human async mode, and **off** in JSON/agent
 contexts and with `--wait`. Override explicitly with `--notify` or `--no-notify`.
 
+**Spend gate — a workflow embedding partner-API (paid) nodes spends the
+user's Comfy credits.** Interactive TTY runs confirm before spending; `--json`
+/ non-TTY runs **fail closed** with error code `spend_consent_required` (exit
+1, nothing submitted, nothing spent) unless `--allow-spend` is passed. Add
+`--allow-spend` only when the human has actually approved the spend — do not
+reflexively add it to make the error go away. Free (non-partner) workflows run
+without the flag and are byte-identical. (`comfy run-template` gates the same
+way with the same flag, and forwards consent to `comfy run` once its own gate
+has passed.)
+
 **Scope:** the async-first / `jobs watch` / state-file pattern above is the
 **`comfy run`** workflow path only. `comfy generate` (partner-API one-call)
 has its own waiting model — see the next section.
@@ -669,8 +687,8 @@ Mechanical contracts that bite agents — encode them, don't rediscover:
   `generate_schema` in `comfy discover`). `data.models[]` carries
   `{alias, id, partner, category, mode, summary}` with the **untruncated**
   summary; `data.params[]` carries `{name, type, required, default, enum,
-  description}`. Unknown model → `generate_model_unknown`; missing model arg →
-  `missing_argument`. This catalog is **not** in `comfy discover` — `generate
+  description}`. Unknown model → `generate_unknown_model`; missing model arg →
+  `generate_bad_args`. This catalog is **not** in `comfy discover` — `generate
   list` is the only source of the alias list.
 - **Machine-readable output:** `generate <model> --json` prints the raw API
   response as JSON; `generate upload <file> --json` emits structured
@@ -679,6 +697,18 @@ Mechanical contracts that bite agents — encode them, don't rediscover:
   error code `emit_workflow_failed`) — the output is a runnable partner-node
   workflow you can compose with (fragments+`run` route, no extra API key).
   The default pretty path (no flags) is still human-only — do not parse it.
+- **Failures always come back as an envelope under global `--json`.** Any
+  failed/malformed `comfy --json generate …` emits exactly one `envelope/1`
+  error on stdout with a stable code — `generate_target_required`,
+  `generate_unknown_model`, `generate_bad_args`, `generate_timeout_invalid`,
+  `generate_api_error`, `generate_network_error`, `generate_job_failed`,
+  `generate_spec_invalid`, `spend_consent_required` — so branch on
+  `error.code`, never on the text.
+  (Success payloads are unchanged: still the raw API response, not an
+  envelope.) In particular `comfy generate --prompt "…"` with no model alias
+  is `generate_target_required`: `generate` is a paid cloud/partner verb and
+  always needs an alias first. For **local** text-to-image, use
+  `comfy run-template` instead.
 - **`--emit-workflow` resolves the escape-hatch vs. quality tradeoff:**
   fragments+`run` is the default for graph work; `generate` is the
   highest-quality single-shot for partner models. With
@@ -723,9 +753,16 @@ bad wiring — before burning cloud compute.
 
 ```bash
 comfy --json jobs ls                # merged: local state files + server queue
+comfy --json jobs ls --all          # ...every target, not just the resolved --where
 comfy --json jobs status <prompt_id>
 comfy --json jobs watch <prompt_id> # blocks until terminal; emits NDJSON with --json-stream
 ```
+
+`jobs ls` is scoped to the resolved `--where` target: a `--where local`
+listing shows local state-file rows only, a `--where cloud` listing cloud
+ones. The payload's `scope` field says which view you got (`local` /
+`cloud` / `all`); pass `--all` for the union of everything this CLI
+submitted.
 
 Terminal envelopes (`run --wait`, `jobs status`, `jobs watch`) carry the
 flat `outputs` list plus grouped views of the same artifacts:
