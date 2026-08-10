@@ -574,6 +574,12 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "install ffmpeg (e.g. `brew install ffmpeg` / `apt install ffmpeg`)",
     ),
     ErrorCode(
+        "ffmpeg_untrusted",
+        "ffmpeg/ffprobe were found, but only inside the directory you ran from, "
+        "so they were refused rather than executed — the shape of a planted binary.",
+        "run `comfy preview` from a directory that does not contain an ffmpeg/ffprobe binary",
+    ),
+    ErrorCode(
         "preview_unsupported_media",
         "The file has no image/video/audio stream to preview.",
         "pass an image, video, or audio file",
@@ -803,6 +809,13 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "version_switch_unknown_version",
         "`comfy update comfy --version X` could not resolve X to a ComfyUI tag; the workspace was left untouched.",
         "run `git tag --list 'v*'` in your ComfyUI workspace to see every available version",
+    ),
+    ErrorCode(
+        "version_switch_git_unavailable",
+        "`comfy update comfy --version X` could not use git at all — it is absent from PATH, or the "
+        "only match resolved into the directory you ran from and was refused. Reported separately so "
+        "it isn't misread as the requested version not existing.",
+        "a version switch needs a usable git — install it, or run from a directory that has no git binary in it",
     ),
     ErrorCode(
         "version_switch_dirty_tree",

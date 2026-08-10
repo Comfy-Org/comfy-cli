@@ -34,6 +34,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from comfy_cli._safe_exec import resolve_required_binary
 from comfy_cli.command.pack_scan import iter_pack_dirs as _iter_pack_dirs
 from comfy_cli.command.pack_scan import read_pyproject as _read_pyproject
 from comfy_cli.file_utils import atomic_write_text
@@ -197,8 +198,11 @@ def _git_output(args: list[str], cwd: str) -> str | None:
     ``_GIT_HARDENING`` / ``_GIT_SAFE_ENV``.
     """
     try:
+        # ``resolve_required_binary`` raises ``BinaryNotFoundError`` (a
+        # ``FileNotFoundError``), which the ``OSError`` arm below already turns
+        # into the same ``None`` a missing ``git`` produced before.
         out = subprocess.run(
-            ["git", *_GIT_HARDENING, *args],
+            [resolve_required_binary("git"), *_GIT_HARDENING, *args],
             cwd=cwd,
             capture_output=True,
             text=True,
