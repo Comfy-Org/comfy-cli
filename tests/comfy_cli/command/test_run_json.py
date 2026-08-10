@@ -306,10 +306,10 @@ class TestSuccessfulRun:
         ``host``/``port`` plus the local-only ``watcher_spawned``."""
         with (
             patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),
-            patch("comfy_cli.command.run.request.urlopen") as mock_open,
+            patch("comfy_cli.http._AUTHED_OPENER.open") as mock_open,
             patch("comfy_cli.command.run._spawn_watcher", return_value=True),
         ):
-            mock_open.return_value.read.return_value = json.dumps({"prompt_id": "pL"}).encode()
+            mock_open.return_value.__enter__.return_value.read.return_value = json.dumps({"prompt_id": "pL"}).encode()
             lines, exit_code = _run_execute_capture(workflow_file, capsys, wait=False)
         assert exit_code == 0
         data = _envelope(lines)["data"]
