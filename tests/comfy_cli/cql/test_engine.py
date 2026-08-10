@@ -7,6 +7,7 @@ No I/O, no CLI invocation — just the engine in isolation.
 from __future__ import annotations
 
 import copy
+import json
 from typing import Any
 
 import pytest
@@ -705,12 +706,15 @@ class TestValidateWorkflow:
 
     def test_below_min_error(self, graph: Graph):
         """A value below the catalog min is a hard error (the server rejects it
-        with value_smaller_than_min) — was a warning before BE-3357."""
+        with value_smaller_than_min) — was a warning before BE-3357. Node "1" is
+        wired to a SaveImage output so it is server-reachable (BE-3406); an
+        unreachable node would be pruned and the range demoted to a warning."""
         wf = {
             "1": {
                 "class_type": "EmptyLatentImage",
                 "inputs": {"width": 0, "height": 512, "batch_size": 1},
             },
+            "2": {"class_type": "SaveImage", "inputs": {"images": ["1", 0], "filename_prefix": "out"}},
         }
         result = graph.validate_workflow(wf)
         assert result["valid"] is False
@@ -721,12 +725,14 @@ class TestValidateWorkflow:
         assert "below_min" not in [w["code"] for w in result["warnings"]]
 
     def test_above_max_error(self, graph: Graph):
-        """A value above the catalog max is a hard error (value_bigger_than_max)."""
+        """A value above the catalog max is a hard error (value_bigger_than_max).
+        Node "1" is wired to a SaveImage output so it is server-reachable."""
         wf = {
             "1": {
                 "class_type": "EmptyLatentImage",
                 "inputs": {"width": 999999, "height": 512, "batch_size": 1},
             },
+            "2": {"class_type": "SaveImage", "inputs": {"images": ["1", 0], "filename_prefix": "out"}},
         }
         result = graph.validate_workflow(wf)
         assert result["valid"] is False
@@ -783,8 +789,11 @@ class TestAutogrowInputs:
         assert "images.image0" in err["hint"]
 
     def test_required_autogrow_with_no_slots_errors(self, graph: Graph):
+        # BatchImagesNode "20" is wired to a SaveImage output so it is
+        # server-reachable (BE-3406) — an unreachable node would be pruned.
         wf = {
             "20": {"class_type": "BatchImagesNode", "inputs": {}},
+            "30": {"class_type": "SaveImage", "inputs": {"images": ["20", 0], "filename_prefix": "out"}},
         }
         result = graph.validate_workflow(wf)
         assert result["valid"] is False
@@ -996,6 +1005,313 @@ class TestValidateServerParity:
         result = graph_sd15.validate_workflow(wf)
         assert result["valid"] is True, result["errors"]
         assert [e for e in result["errors"] if e.get("node_id") == "_meta"] == []
+
+    # -- Output-reachability pruning (BE-3406): match the server, which only
+    # validates output nodes and their transitive input ancestors. --
+
+    def test_disconnected_node_missing_required_is_pruned(self, graph_sd15: Graph):
+        """Acceptance (a): a disconnected KSampler missing all its required
+        inputs, alongside a valid connected output chain, does not fail
+        validation — the server prunes it (never reachable from an output), so
+        we must not hard-reject the whole prompt on it."""
+        wf = self._sd15_full()
+        # A stray KSampler wired to nothing and referenced by nothing: not
+        # reachable from SaveImage, so the server never validates it.
+        wf["99"] = {"class_type": "KSampler", "inputs": {"seed": 1}}
+        result = graph_sd15.validate_workflow(wf)
+        assert result["valid"] is True, result["errors"]
+        assert [e for e in result["errors"] if e["node_id"] == "99"] == []
+
+    def test_reachable_node_missing_required_still_errors(self, graph_sd15: Graph):
+        """Acceptance (b): a node ON the output chain that is missing a required
+        input still hard-errors — reachability doesn't weaken real validation."""
+        wf = self._sd15_full()
+        del wf["3"]["inputs"]["seed"]  # KSampler feeds VAEDecode → SaveImage
+        result = graph_sd15.validate_workflow(wf)
+        assert result["valid"] is False
+        missing = [e for e in result["errors"] if e["code"] == "required_input_missing" and e["node_id"] == "3"]
+        assert {e["field"] for e in missing} == {"seed"}
+
+    def test_transitive_ancestor_missing_required_still_errors(self, graph_sd15: Graph):
+        """A *transitive* ancestor (CLIPTextEncode, two hops upstream of the
+        SaveImage output) is reachable and its missing required input errors —
+        proving the backward walk follows link edges, not just direct parents."""
+        wf = self._sd15_full()
+        del wf["6"]["inputs"]["text"]  # "6" → KSampler.positive → VAEDecode → SaveImage
+        result = graph_sd15.validate_workflow(wf)
+        assert result["valid"] is False
+        missing = [e for e in result["errors"] if e["code"] == "required_input_missing" and e["node_id"] == "6"]
+        assert {e["field"] for e in missing} == {"text"}
+
+    def test_output_node_missing_required_still_errors(self, graph_sd15: Graph):
+        """The output node itself seeds the reachable set, so a required input
+        missing on SaveImage still errors."""
+        wf = self._sd15_full()
+        del wf["9"]["inputs"]["filename_prefix"]
+        result = graph_sd15.validate_workflow(wf)
+        assert result["valid"] is False
+        assert any(
+            e["code"] == "required_input_missing" and e["node_id"] == "9" and e["field"] == "filename_prefix"
+            for e in result["errors"]
+        )
+
+    def test_disconnected_out_of_range_demoted_to_warning(self, graph_sd15: Graph):
+        """A below_min value on a disconnected node is a warning, not a hard
+        error — the server never range-checks a pruned node. The connected chain
+        stays valid."""
+        wf = self._sd15_full()
+        # A stray EmptyLatentImage (all required inputs present) with an
+        # out-of-range width, wired to nothing.
+        wf["99"] = {"class_type": "EmptyLatentImage", "inputs": {"width": 1, "height": 512, "batch_size": 1}}
+        result = graph_sd15.validate_workflow(wf)
+        assert result["valid"] is True, result["errors"]
+        assert [e for e in result["errors"] if e["node_id"] == "99"] == []
+        warned = [w for w in result["warnings"] if w.get("code") == "below_min" and w.get("node_id") == "99"]
+        assert len(warned) == 1
+
+    def test_reachable_out_of_range_still_errors(self, graph_sd15: Graph):
+        """The connected EmptyLatentImage feeding the output chain still
+        hard-errors on an out-of-range width (reachability preserves the #551
+        promotion where it matters)."""
+        wf = self._sd15_full()
+        wf["5"]["inputs"]["width"] = 1  # "5" → KSampler.latent_image → … → SaveImage
+        result = graph_sd15.validate_workflow(wf)
+        assert result["valid"] is False
+        assert [e for e in result["errors"] if e["code"] == "below_min" and e["node_id"] == "5"]
+
+    def test_demoted_range_warning_field_is_qualified(self, graph_sd15: Graph):
+        """A range violation demoted to a warning on a pruned node uses the same
+        fully-qualified `field` (`node.class.input`) as every other warning, so
+        consumers (e.g. preflight renders w["field"]) see one schema."""
+        wf = self._sd15_full()
+        wf["99"] = {"class_type": "EmptyLatentImage", "inputs": {"width": 1, "height": 512, "batch_size": 1}}
+        result = graph_sd15.validate_workflow(wf)
+        warned = [w for w in result["warnings"] if w.get("code") == "below_min" and w.get("node_id") == "99"]
+        assert len(warned) == 1
+        assert warned[0]["field"] == "99.EmptyLatentImage.width"
+
+
+class TestValidateMalformedInputs:
+    """Malformed workflow JSON must yield structured output, never an unhandled
+    traceback (BE-3406 hardening) — the validator's whole contract is to catch
+    bad prompts, so it may not crash on the shapes it's meant to reject."""
+
+    def test_non_dict_inputs_does_not_crash(self, graph: Graph):
+        """A truthy non-dict `inputs` (string/list from malformed JSON) slips
+        past `or {}` and would crash `.items()`/`.values()`; validation must
+        instead return a result. Node is wired to a SaveImage so it's reachable
+        (exercises both the per-input loop and the reachability walk)."""
+        wf = {
+            "1": {"class_type": "EmptyLatentImage", "inputs": "not-a-dict"},
+            "2": {"class_type": "SaveImage", "inputs": {"images": ["1", 0], "filename_prefix": "out"}},
+        }
+        result = graph.validate_workflow(wf)  # must not raise
+        assert isinstance(result["errors"], list)
+        assert isinstance(result["warnings"], list)
+
+    def test_unhashable_class_type_does_not_crash(self, graph: Graph):
+        """An unhashable class_type (list/dict) would raise TypeError in the
+        `self._nodes.get(class_type)` lookup and the reachability walk's
+        `graph.node(...)`; both are screened so validation returns a result."""
+        wf = {
+            "1": {"class_type": ["EmptyLatentImage"], "inputs": {"width": 512}},
+            "2": {"class_type": "SaveImage", "inputs": {"images": ["1", 0], "filename_prefix": "out"}},
+        }
+        result = graph.validate_workflow(wf)  # must not raise
+        assert isinstance(result["errors"], list)
+
+
+class TestValidateEmptyCombo:
+    """A COMBO whose option list is declared but EMPTY means the server has zero
+    files installed for that field — it rejects every value against it — so it
+    must be reported, not skipped (BE-6585).
+
+    Before this, the membership check was gated on ``self.enum_values`` being
+    truthy, so detection got *worse* the emptier the install: ``VAELoader``
+    ships one built-in option and its missing model was caught, while
+    ``UNETLoader``/``CLIPLoader`` (no built-ins, and the two largest downloads)
+    were silent on a fresh install — the exact user this check exists to serve.
+    """
+
+    def _object_info(self, **extra) -> dict[str, Any]:
+        oi = {
+            "UNETLoader": {
+                # Bare install: `folder_paths.get_filename_list("diffusion_models")`
+                # is empty and the node ships no built-in option.
+                "input": {"required": {"unet_name": [[]], "weight_dtype": [["default", "fp8_e4m3fn"]]}},
+                "input_order": {"required": ["unet_name", "weight_dtype"]},
+                "output": ["MODEL"],
+                "output_name": ["MODEL"],
+                "python_module": "nodes",
+            },
+            "VAELoader": {
+                # One built-in option (`pixel_space`) — the loader that was
+                # already caught, kept here as the contrast case.
+                "input": {"required": {"vae_name": [["pixel_space"]]}},
+                "input_order": {"required": ["vae_name"]},
+                "output": ["VAE"],
+                "output_name": ["VAE"],
+                "python_module": "nodes",
+            },
+            "SaveImage": {
+                "input": {"required": {"images": "IMAGE"}},
+                "output": [],
+                "output_name": [],
+                "output_node": True,
+                "python_module": "nodes",
+            },
+        }
+        oi.update(extra)
+        return oi
+
+    def _graph(self, **extra) -> Graph:
+        return Graph.from_object_info(self._object_info(**extra))
+
+    def test_empty_combo_flags_the_missing_model(self):
+        """The regression: a value against a zero-option loader is an error, not
+        silence."""
+        g = self._graph()
+        result = g.validate_workflow(
+            {
+                "1": {
+                    "class_type": "UNETLoader",
+                    "inputs": {"unet_name": "flux1-dev.safetensors", "weight_dtype": "default"},
+                },
+                "2": {"class_type": "SaveImage", "inputs": {"images": ["1", 0]}},
+            }
+        )
+        assert result["valid"] is False
+        errs = [e for e in result["errors"] if e["code"] == "no_options_available"]
+        assert len(errs) == 1
+        assert errs[0]["field"] == "unet_name"
+        assert errs[0]["node_id"] == "1"
+        assert "flux1-dev.safetensors" in errs[0]["message"]
+        assert errs[0]["valid_options"] == []
+        assert "UNETLoader" in errs[0]["hint"]
+
+    def test_populated_and_empty_loaders_are_both_reported(self):
+        """The ticket's count bug: with one loader populated and one empty, only
+        the populated one used to be reported. Both are now."""
+        g = self._graph()
+        result = g.validate_workflow(
+            {
+                "1": {
+                    "class_type": "UNETLoader",
+                    "inputs": {"unet_name": "flux1-dev.safetensors", "weight_dtype": "default"},
+                },
+                "2": {"class_type": "VAELoader", "inputs": {"vae_name": "ae.safetensors"}},
+                "3": {"class_type": "SaveImage", "inputs": {"images": ["1", 0]}},
+            }
+        )
+        codes = {(e["field"], e["code"]) for e in result["errors"]}
+        assert ("unet_name", "no_options_available") in codes
+        assert ("vae_name", "unknown_enum_value") in codes
+
+    def test_same_loader_with_one_option_installed_flags_membership(self):
+        """The ticket's counter-experiment, at the unit level: drop one file into
+        the folder and the SAME missing model is caught by the membership check.
+        Proves the mechanism was the empty list, not the loader."""
+        oi = self._object_info()
+        oi["UNETLoader"]["input"]["required"]["unet_name"] = [["some-other-model.safetensors"]]
+        g = Graph.from_object_info(oi)
+        result = g.validate_workflow(
+            {
+                "1": {
+                    "class_type": "UNETLoader",
+                    "inputs": {"unet_name": "flux1-dev.safetensors", "weight_dtype": "default"},
+                },
+                "2": {"class_type": "SaveImage", "inputs": {"images": ["1", 0]}},
+            }
+        )
+        errs = [e for e in result["errors"] if e["field"] == "unet_name"]
+        assert len(errs) == 1
+        assert errs[0]["code"] == "unknown_enum_value"
+
+    def test_installed_value_on_populated_loader_still_passes(self):
+        """No false positive on the field that IS populated."""
+        g = self._graph()
+        result = g.validate_workflow(
+            {
+                "1": {"class_type": "VAELoader", "inputs": {"vae_name": "pixel_space"}},
+                "2": {"class_type": "SaveImage", "inputs": {"images": ["1", 0]}},
+            }
+        )
+        assert result["valid"] is True, result["errors"]
+
+    def test_dict_form_empty_options_is_flagged(self):
+        """The partner-node dialect (``["COMBO", {"options": [...]}]``) declares
+        its choices in the options dict — an empty list there is the same
+        statement as an empty list-form combo."""
+        g = self._graph(
+            PartnerNode={
+                "input": {"required": {"model_name": ["COMBO", {"options": []}]}},
+                "output": ["MODEL"],
+                "output_name": ["MODEL"],
+                "python_module": "nodes",
+            }
+        )
+        result = g.validate_workflow(
+            {
+                "1": {"class_type": "PartnerNode", "inputs": {"model_name": "seedream-5"}},
+                "2": {"class_type": "SaveImage", "inputs": {"images": ["1", 0]}},
+            }
+        )
+        errs = [e for e in result["errors"] if e["code"] == "no_options_available"]
+        assert [e["field"] for e in errs] == ["model_name"]
+
+    def test_remote_combo_stays_unconstrained(self):
+        """A combo whose options the frontend fetches at runtime ships NO
+        ``options`` key (``prune_dict`` drops it). That is "unknown", not "zero
+        installed" — validating against it would false-positive on every
+        remote-backed field, so it stays silent."""
+        g = self._graph(
+            RemoteNode={
+                "input": {"required": {"model": ["COMBO", {"remote": {"route": "/api/models"}}]}},
+                "output": ["MODEL"],
+                "output_name": ["MODEL"],
+                "python_module": "nodes",
+            }
+        )
+        port = next(p for p in g.node("RemoteNode").inputs if p.name == "model")
+        assert port.enum_declared is False
+        result = g.validate_workflow(
+            {
+                "1": {"class_type": "RemoteNode", "inputs": {"model": "whatever-the-route-returns"}},
+                "2": {"class_type": "SaveImage", "inputs": {"images": ["1", 0]}},
+            }
+        )
+        assert result["valid"] is True, result["errors"]
+
+    def test_empty_combo_is_still_a_widget_not_a_link(self):
+        """``enum_declared`` is deliberately separate from ``is_enum`` so the
+        empty case cannot move a port between widget and link wiring."""
+        g = self._graph(
+            PartnerNode={
+                "input": {"required": {"model_name": ["COMBO", {"options": []}]}},
+                "output": ["MODEL"],
+                "output_name": ["MODEL"],
+                "python_module": "nodes",
+            }
+        )
+        list_form = next(p for p in g.node("UNETLoader").inputs if p.name == "unet_name")
+        dict_form = next(p for p in g.node("PartnerNode").inputs if p.name == "model_name")
+        assert (list_form.is_link, list_form.enum_declared, list_form.enum_values) == (False, True, [])
+        assert (dict_form.is_link, dict_form.enum_declared, dict_form.enum_values) == (False, True, [])
+
+    def test_absent_input_is_not_reported_as_unavailable(self):
+        """The check only fires on a value the workflow actually supplies — an
+        input that is missing entirely stays the existing required_input_missing
+        error, so the two never double-report the same field."""
+        g = self._graph()
+        result = g.validate_workflow(
+            {
+                "1": {"class_type": "UNETLoader", "inputs": {"weight_dtype": "default"}},
+                "2": {"class_type": "SaveImage", "inputs": {"images": ["1", 0]}},
+            }
+        )
+        by_field = {(e["field"], e["code"]) for e in result["errors"]}
+        assert ("unet_name", "required_input_missing") in by_field
+        assert ("unet_name", "no_options_available") not in by_field
 
 
 class TestValidateDynamicCombo:
@@ -1670,3 +1986,39 @@ def test_load_from_target_refuses_non_loopback_local_host():
 
     with pytest.raises(LoadError, match="non-loopback"):
         _load_from_target(mode="local", host="example.com", port=8188)
+
+
+# ===========================================================================
+# `--input <dump>` is an offline path — annotation lookup must not reach out
+# ===========================================================================
+
+
+def test_input_path_load_does_not_touch_the_network(tmp_path, monkeypatch):
+    """``comfy nodes ls --input dump.json`` reads a local file by the caller's
+    explicit choice. Resolving annotations is incidental to that and must not be
+    the thing that turns an offline command into a network round-trip."""
+    from comfy_cli.cql import annotations_source
+    from comfy_cli.cql.engine import Graph
+
+    dump = tmp_path / "object_info.json"
+    dump.write_text(json.dumps(_object_info()))
+
+    monkeypatch.setattr(
+        annotations_source,
+        "fetch_pair",
+        lambda **kw: pytest.fail("annotation fetch attempted on the --input path"),
+    )
+    monkeypatch.setenv("COMFY_CLI_NO_REMOTE_REFRESH", "0")  # network would otherwise be allowed
+
+    seen: dict = {}
+    real_load = annotations_source.load_annotation_bytes
+
+    def spy(**kwargs):
+        seen.update(kwargs)
+        return real_load(**kwargs)
+
+    monkeypatch.setattr(annotations_source, "load_annotation_bytes", spy)
+
+    g = Graph.load(input_path=str(dump))
+    assert g.node_count() > 0
+    assert seen == {"allow_network": False}
