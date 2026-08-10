@@ -2569,6 +2569,19 @@ def test_watch_progress_state_reports_each_finished_node_once():
     assert st.completed_nodes == {"4"}
 
 
+def test_watch_progress_state_errored_node_is_final_but_not_completed():
+    """An `error` node is final — it must flush its progress line once and never
+    fire again — but it did NOT complete, so it stays out of `completed_nodes`."""
+    st, r = _watch_state()
+    msg = {"prompt_id": "pid", "nodes": {"5": {"value": 1, "max": 8, "state": "error"}}}
+    jobs_mod._watch_progress_state(st, msg)
+    jobs_mod._watch_progress_state(st, dict(msg))
+    assert st.completed_nodes == set()
+    assert "5" in st.progress_final
+    assert r.throttled == []
+    assert r.events == [("progress", {"node": "5", "completed": 1, "total": 8, "prompt_id": "pid"})]
+
+
 def test_watch_progress_state_ignores_malformed_payloads():
     st, r = _watch_state()
     jobs_mod._watch_progress_state(st, {"prompt_id": "pid", "nodes": "not-a-dict"})
@@ -2846,7 +2859,11 @@ def test_watch_terminal_envelope_backfills_completed_nodes_without_events(monkey
 
 
 def test_watch_already_terminal_job_still_lists_completed_nodes(monkeypatch, capsys):
-    """The short-circuit path (job already finished) also carries the node list."""
+    """The short-circuit path (job already finished) also carries the node list —
+    and the `client_id`/`attached` pair, so a consumer reading `data.attached`
+    never hits a missing key on this exit path."""
+    import jsonschema
+
     monkeypatch.setattr(
         jobs_mod,
         "_snapshot",
@@ -2856,6 +2873,12 @@ def test_watch_already_terminal_job_still_lists_completed_nodes(monkeypatch, cap
     result, _ws, lines = _run_local_watch(monkeypatch, capsys, messages=[])
     assert result.exit_code == 0, result.output
     assert lines[-1]["data"]["completed_nodes"] == ["1", "2"]
+    # Nothing was attached: no socket was ever opened on this path.
+    assert lines[-1]["data"]["client_id"] is None
+    assert lines[-1]["data"]["attached"] is False
+
+    schema_path = Path(jobs_mod.__file__).parent.parent / "schemas" / "jobs.json"
+    jsonschema.Draft202012Validator(json.loads(schema_path.read_text())).validate(lines[-1]["data"])
 
 
 def test_watch_client_id_flag_overrides_resolution(monkeypatch, capsys):

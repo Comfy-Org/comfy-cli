@@ -2095,6 +2095,11 @@ def watch_cmd(
         # No stream to summarise, so the node list has to come from /history —
         # `completed_nodes` is part of the watch envelope on every exit path.
         snap["completed_nodes"] = sorted(_history_completed_nodes(h, p, prompt_id))
+        # Same envelope shape as the live path — a consumer reading
+        # `data.attached` must never hit a missing key. The prompt already
+        # ended, so no session was attached and there is no id to report.
+        snap["client_id"] = None
+        snap["attached"] = False
         if renderer.is_pretty():
             renderer.console().print(f"[dim]Prompt {prompt_id} already {snap['status']}; nothing more to watch.[/dim]")
             _render_status_pretty(snap, host=h, port=p)
