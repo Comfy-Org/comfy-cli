@@ -22,7 +22,8 @@ from websocket import (  # noqa: F401 — patch target for tests (run.WebSocket)
     WebSocketTimeoutException,
 )
 
-from comfy_cli import cancellation, execution_errors, jobs_state
+from comfy_cli import cancellation, execution_errors, jobs_state, tracking
+from comfy_cli.caller import stream_is_tty
 
 # Re-exports — names patched by tests live at this namespace.
 from comfy_cli.command.run.credentials import _resolve_partner_credential as _resolve_partner_credential
@@ -53,23 +54,61 @@ from comfy_cli.workspace_manager import WorkspaceManager
 
 workspace_manager = WorkspaceManager()
 
+# Bounds on the `partner_nodes` telemetry property and on the partner-node names
+# echoed in the missing-credential error. class_type strings are attacker- (or
+# just accident-) controlled workflow JSON, so cap the list length and each name.
+_TELEMETRY_NODE_LIST_CAP = 20
+_TELEMETRY_NODE_NAME_MAX_LEN = 64
+
+
+def _bounded_node_names(names: list[str]) -> tuple[list[str], int]:
+    """Cap a partner-node name list in BOTH dimensions — element count and each
+    name's length. Returns ``(shown, omitted)``.
+
+    Applies to every payload built from these names: the telemetry property,
+    the prose message, and the structured ``details`` of both the credential
+    error and the spend gate. Capping only the prose would bound nothing —
+    ``error_panel`` renders ``details`` as ``key=value`` rows directly beneath
+    the message in pretty mode, and JSON mode serialises them. The exact total
+    travels alongside as ``partner_node_count``, so nothing is lost: a consumer
+    still learns how many nodes are involved, and the remedy is identical
+    whichever ones they are.
+
+    De-duplicates AFTER truncation, not before: ``_detect_partner_nodes``
+    returns distinct class_types, but two sharing a 64-char prefix collapse to
+    the same string once truncated, which would list one name twice.
+
+    Consumes input until the cap is filled with DISTINCT truncated names rather
+    than slicing the first 20 up front — otherwise a run of prefix-colliding
+    names burns output slots and silently drops later, genuinely distinct ones.
+
+    ``omitted`` counts only what the cap actually left behind, never what
+    de-duplication collapsed: a caller appending "and N more" must not claim
+    unlisted nodes that don't exist.
+    """
+    shown: list[str] = []
+    consumed = 0
+    for name in names:
+        if len(shown) >= _TELEMETRY_NODE_LIST_CAP:
+            break
+        consumed += 1
+        truncated = name[:_TELEMETRY_NODE_NAME_MAX_LEN]
+        if truncated not in shown:
+            shown.append(truncated)
+    return shown, len(names) - consumed
+
 
 def _stdin_is_interactive() -> bool:
     """True only when stdin is a live TTY.
 
     ``sys.stdin.isatty()`` assumes stdin is a live stream, but in detached /
-    ``pythonw`` contexts ``sys.stdin`` can be ``None`` (AttributeError on
-    ``.isatty``) or a closed file (ValueError). Treat both as non-interactive so
-    the spend gate falls through to the fail-closed machine-mode error instead
-    of raising an uncontrolled exception (BE-4326).
+    ``pythonw`` contexts ``sys.stdin`` can be ``None``, closed, or backed by a
+    revoked file descriptor. Treat every such case as non-interactive so the
+    spend gate falls through to the fail-closed machine-mode error instead of
+    raising an uncontrolled exception (BE-4326). Delegates to the shared
+    fail-safe probe so stdin and stdout are guarded identically.
     """
-    stdin = getattr(sys, "stdin", None)
-    if stdin is None:
-        return False
-    try:
-        return bool(stdin.isatty())
-    except (AttributeError, ValueError):
-        return False
+    return stream_is_tty(getattr(sys, "stdin", None))
 
 
 def _spend_gate(renderer, partner_nodes: list[str], allow_spend: bool, *, details: dict) -> None:
@@ -87,11 +126,18 @@ def _spend_gate(renderer, partner_nodes: list[str], allow_spend: bool, *, detail
     """
     if not partner_nodes or allow_spend:
         return
+    # Bound the names here rather than at each call site, so both `execute` and
+    # `execute_cloud` are covered: this gate runs on the same untrusted
+    # class_type strings and is the MORE commonly hit branch (it fires before
+    # any credential resolution), so leaving it unbounded would let a
+    # pathological graph flood the terminal and the JSON envelope anyway.
+    shown, omitted = _bounded_node_names(partner_nodes)
+    details = {**details, "partner_nodes": shown, "partner_node_count": len(partner_nodes)}
     if renderer.is_pretty() and _stdin_is_interactive():
         # Escape class_type names before interpolating into Rich markup: a name
         # containing markup like ``[bold]`` would otherwise be parsed as a tag
         # (MarkupError/StyleSyntaxError, or injected formatting).
-        names = ", ".join(_rich_escape(n) for n in partner_nodes)
+        names = ", ".join(_rich_escape(n) for n in shown) + (f", and {omitted} more" if omitted > 0 else "")
         pprint(f"[yellow]⚠ This workflow uses partner-API nodes that spend Comfy credits: {names}.[/yellow]")
         if not typer.confirm("Run anyway and spend credits?", default=False):
             renderer.error(
@@ -308,32 +354,68 @@ def execute(
     extra_data: dict | None = None
     if api_key:
         extra_data = {"api_key_comfy_org": api_key}
-    # Only resolve an injected credential when an explicit --api-key hasn't
-    # already satisfied the partner node: the resolver may perform a network
-    # OAuth refresh, so skipping it here keeps an explicit-key run network-free.
-    if partner_nodes and not extra_data:
-        cred = _resolve_partner_credential()
-        if cred is None:
-            msg = (
-                "Workflow uses partner-API node(s) that need an `api_key_comfy_org` "
-                "credential the local server doesn't have: " + ", ".join(partner_nodes) + "."
-            )
-            renderer.error(
-                code="partner_node_requires_credential",
-                message=msg,
-                hint=(
-                    "run: comfy cloud login   (or set COMFY_API_KEY in the environment, "
-                    "or persist a key with `comfy cloud set-key --key …`; "
-                    "cloud runs auto-inject via --where cloud)"
-                ),
-                details={
-                    "partner_nodes": partner_nodes,
-                    "host": host,
-                    "port": port,
-                },
-            )
-            raise typer.Exit(code=1)
-        extra_data = {cred[0]: cred[1]}
+    if partner_nodes:
+        # Only resolve an injected credential when an explicit --api-key hasn't
+        # already satisfied the partner node: the resolver may perform a network
+        # OAuth refresh, so skipping it here keeps an explicit-key run network-free.
+        # Resolved once — the result feeds both the telemetry prop below and the
+        # credential gate that follows.
+        cred = _resolve_partner_credential() if not extra_data else None
+        # Fired BEFORE the reject-for-missing-credential branch so runs that are
+        # turned away are still counted: that funnel is exactly what the metric
+        # is for, and `credential_present: False` marks them. class_types are
+        # node names, not PII — the same data `workflow_unknown_nodes` reports.
+        # It does sit AFTER the BE-4326 spend gate, so a run refused for lack of
+        # `--allow-spend` emits no event: the gate deliberately precedes any
+        # credential resolution (a refusal must not trigger a network OAuth
+        # refresh), and `credential_present` needs that resolution. The
+        # spend-declined funnel wants its own event rather than an early
+        # resolve here.
+        # class_type strings come verbatim from untrusted workflow JSON, so the
+        # names are bounded before they ship. The count stays exact, so the cap
+        # never distorts the metric.
+        bounded_nodes, omitted_nodes = _bounded_node_names(partner_nodes)
+        tracking.track_event(
+            "partner_nodes_detected",
+            {
+                "partner_nodes": bounded_nodes,
+                "partner_node_count": len(partner_nodes),
+                "where": "local",
+                "credential_present": bool(api_key) or cred is not None,
+            },
+        )
+        if not extra_data:
+            if cred is None:
+                # Same bounded list in the prose and in `details` — a graph with
+                # hundreds of partner nodes would otherwise render an unreadable
+                # wall of text, and `details` is rendered right below the message
+                # in pretty mode, so capping only one of them bounds nothing.
+                # `partner_node_count` carries the exact total for consumers.
+                # The suffix counts only what the CAP omitted — names collapsed
+                # by de-duplication are still listed, so counting them would
+                # promise unlisted nodes that don't exist.
+                listed = ", ".join(bounded_nodes) + (f", and {omitted_nodes} more" if omitted_nodes > 0 else "")
+                msg = (
+                    "Workflow uses partner-API node(s) that need an `api_key_comfy_org` "
+                    "credential the local server doesn't have: " + listed + "."
+                )
+                renderer.error(
+                    code="partner_node_requires_credential",
+                    message=msg,
+                    hint=(
+                        "run: comfy cloud login   (or set COMFY_API_KEY in the environment, "
+                        "or persist a key with `comfy cloud set-key --key …`; "
+                        "cloud runs auto-inject via --where cloud)"
+                    ),
+                    details={
+                        "partner_nodes": bounded_nodes,
+                        "partner_node_count": len(partner_nodes),
+                        "host": host,
+                        "port": port,
+                    },
+                )
+                raise typer.Exit(code=1)
+            extra_data = {cred[0]: cred[1]}
 
     # Pre-submit validation via pure-Python CQL engine (checks class_types + input shapes).
     _preflight_validate(renderer, workflow, object_info, target_label="server")
@@ -389,6 +471,29 @@ def execute(
             # the only place the in-flight prompt_id survives. Status is
             # "running" rather than "queued": this foreground process is
             # actively watching it, not leaving it detached in the queue.
+            #
+            # DOCUMENTED LIMIT — `--wait` spawns no background watcher, by
+            # design; this process *is* the watcher. Every ordinary outcome is
+            # still recorded, because the handlers below run: a node failure and
+            # a cancel via `_mark_watch_exit`/`_mark_cancelled`, and a server
+            # that dies mid-run via the `server_died` write in the
+            # WebSocketException/OSError handler. What is NOT covered is this
+            # process being killed from OUTSIDE (a caller-imposed timeout
+            # SIGKILLing the process group, the terminal going away): no handler
+            # runs, the record stays at the submit-time `running`, and since no
+            # `watcher_pid` is recorded, `jobs ls`'s stale-watcher reap — which
+            # only fires on a recorded *and* dead pid — won't finalize it
+            # either. `comfy jobs status` still names the job and its
+            # last-known status, so attribution is degraded rather than lost;
+            # callers that expect to outlive their patience should submit
+            # WITHOUT `--wait`, whose detached watcher gets its own session and
+            # survives the parent. Spawning one here too was considered and
+            # rejected: it would put a second, independent writer on the state
+            # file this branch already finalizes, add a second server
+            # connection per foreground run, and leave a background process
+            # behind after a synchronous command returns. See
+            # docs/json-output.md, "Known limit: `--wait` has no background
+            # watcher".
             wait_state = jobs_state.new(
                 prompt_id=execution.prompt_id,
                 client_id=execution.client_id,
@@ -531,6 +636,12 @@ def execute(
             )
         # The job may genuinely still be running server-side, so the
         # submit-time "running" record is left as-is — not marked terminal.
+        # Consequence of the no-watcher limit documented at the submit-time
+        # write above: nothing is left watching the prompt after this returns,
+        # so if the server dies later no `server_died` is ever written. The
+        # record stays `running` until the caller asks
+        # `comfy jobs status <prompt_id>`, which infers the death from a
+        # server that is down (or came back with no record of the prompt).
         details = {"timeout": timeout}
         prompt_id = _submitted_prompt_id(execution)
         if prompt_id is not None:

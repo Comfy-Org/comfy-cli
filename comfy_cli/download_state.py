@@ -215,6 +215,9 @@ def write(workspace: Path, state: DownloadState) -> Path:
 def write_path(path: Path, state: DownloadState) -> Path:
     """Atomically persist ``state`` at ``path`` (write a tmp file, ``os.replace``).
 
+    Deliberately not ``file_utils.atomic_write_text`` — see the write-policy note
+    in ``comfy_cli/file_utils.py`` (tier 2, secret-adjacent state).
+
     The worker addresses its state file by path rather than by workspace: it is
     handed ``--state <file>`` and must not have to re-resolve a workspace that
     the foreground already resolved.

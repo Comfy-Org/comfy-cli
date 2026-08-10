@@ -43,7 +43,10 @@ dependencies = [
   "packaging",
   "pathspec",
   "posthog>=6,<8",
-  "psutil",
+  # 6.0.0 renamed Process.connections() to Process.net_connections(), which
+  # `comfy stop --port` needs (the system-wide psutil.net_connections() is
+  # root-only on macOS, so per-process is the only usable form).
+  "psutil>=6",
   "pyyaml",
   "questionary",
   "requests",

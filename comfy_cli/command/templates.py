@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import json
 import os
-import tempfile
 import time
 import urllib.error
 import urllib.parse
@@ -30,6 +29,7 @@ from typing import Annotated, Any
 import typer
 
 from comfy_cli import tracking
+from comfy_cli.file_utils import atomic_write_bytes
 from comfy_cli.http import ResponseTooLarge, plain_urlopen, read_capped
 from comfy_cli.output import get_renderer, rprint
 
@@ -172,18 +172,15 @@ def _persist_cache(cache: Path, data: bytes) -> str | None:
     Returns ``None`` on success, or the error text when the write failed.
     """
     try:
-        cache.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(dir=str(cache.parent), prefix=".index-", suffix=".tmp")
-        try:
-            with os.fdopen(fd, "wb") as f:
-                f.write(data)
-            os.replace(tmp, cache)
-        except OSError:
-            try:
-                os.unlink(tmp)
-            except OSError:
-                pass
-            raise
+        # Tier 4 (regenerable cache) per the write policy in
+        # comfy_cli/file_utils.py — fsync=False, wrapped best-effort below.
+        # The previous inline `tempfile.mkstemp` left the cache at mode 0600
+        # (mkstemp hardcodes that and `os.replace` carries it onto the
+        # destination); the helper instead reuses the existing cache file's
+        # mode when there is one, else falls back to the umask-derived default
+        # for a fresh file — either way intentionally relaxed from 0600: the
+        # payload is the public template-gallery index, not user data.
+        atomic_write_bytes(cache, data, fsync=False)
     except OSError as e:
         # Couldn't persist (read-only dir, disk full, …). We still have valid
         # data in hand, so proceed without caching rather than failing the run.
@@ -1478,7 +1475,11 @@ def run_template_cmd(
 
     if host:
         host, parsed_port = parse_host_port_arg(host)
-        if not port and parsed_port is not None:
+        # ``port is None``, not ``not port``: a typed ``--port`` always wins over
+        # one embedded in ``--host h:p``, including ``--port 0``, which
+        # ``resolve_host_port`` then rejects as out of range instead of silently
+        # running against the embedded port.
+        if port is None and parsed_port is not None:
             port = parsed_port
     host, port = resolve_host_port(host, port)
 

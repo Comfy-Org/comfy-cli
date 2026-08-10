@@ -16,6 +16,60 @@ from pathspec import PathSpec
 from comfy_cli import constants, ui
 from comfy_cli.output.sanitize import sanitize_value
 
+# ---------------------------------------------------------------------------
+# Atomic writes — the write policy
+# ---------------------------------------------------------------------------
+#
+# Every hand-rolled tmp+``os.replace`` writer in comfy-cli falls into one of
+# four tiers. The tier decides whether the writer uses the shared helpers below
+# or stays bespoke; it is decided by *what the file can contain*, never by
+# convenience. The helpers deliberately take **no** ``mode=`` parameter —
+# parameterizing permissions was considered and rejected, because a writer whose
+# payload needs 0600 needs more than a mode (an ``O_EXCL`` open at that mode, a
+# 0700 parent, an fsync) and is clearer written out in full at its call site.
+#
+# Tier 1 — secrets. ``comfy_cli/auth/store.py`` ``_write_all`` stays bespoke:
+#   the tmp file is opened ``O_CREAT|O_EXCL`` with mode 0600 *at open*, so the
+#   OAuth tokens are never briefly world-readable under a permissive umask; the
+#   parent directory is forced to 0700; the write is fsynced.
+#
+# Tier 2 — secret-adjacent state. ``comfy_cli/download_state.py`` ``write_path``
+#   stays bespoke: chmod 0600 + 0700 parent + fsync, because the resolved
+#   download URL persisted in the state file can embed a presigned/SAS token,
+#   which is bearer credential material even though the file itself is nominally
+#   bookkeeping.
+#
+# Tier 3 — cross-process state. ``atomic_write_text(..., fsync=True)``:
+#   umask mode, durable. A second process (a watcher, a later CLI invocation, an
+#   agent shelling out) reads these, and losing one to power failure loses real
+#   work. Members: ``jobs_state.write``, ``command/project.py``
+#   ``_write_assets_lock``.
+#
+# Tier 4 — regenerable caches and manifests. ``fsync=False``: the content can be
+#   recomputed or refetched, so paying a sync per write buys nothing. Callers may
+#   additionally wrap the call best-effort (``except OSError: pass``) when a
+#   read-only or full cache directory must not break the command. Members:
+#   ``cql/loader``, ``command/outdated.py`` ``_save_cache``,
+#   ``command/templates.py`` ``_persist_cache``, the skills manifest writers,
+#   ``command/workflow.py``.
+#
+# Two invariants recorded here because they are the *reason* for a tier
+# assignment, and a future change to either moves a writer between tiers:
+#
+# (a) ``JobState`` files are tier 3 (umask mode), not tier 2, because their
+#     ``outputs`` are plain ``/view?filename=...`` URLs — they carry no embedded
+#     credential, and the CLI never asks the cloud jobs API for ``?short_link=``
+#     responses. If either changes (outputs start carrying signed URLs, or the
+#     CLI starts requesting short links), jobs_state moves to tier 2 and needs
+#     0600 like download_state.
+#
+# (b) No writer here fsyncs the parent directory *before* ``os.replace`` returns
+#     durably — ``fsync=True`` syncs the file's contents and then the parent
+#     directory, but on a power failure between the two an already-``replace``d
+#     rename can still be lost. This is accepted: the failure mode is losing the
+#     *newest* write, never observing a torn or half-written file. Contents are
+#     never torn; renames may be lost.
+
 # The process umask, captured once at import. os has no getter, so reading it
 # means the classic set-and-restore dance; doing it here (single-threaded under
 # the import lock) avoids re-running that dance per write, where it would leave
@@ -83,13 +137,36 @@ def atomic_write_text(path: pathlib.Path, content: str, *, fsync: bool = False) 
             the rename survive power loss, at the cost of a sync. Best-effort:
             a failing fsync is ignored, matching the prior per-site behavior.
     """
+    _atomic_write(path, content.encode("utf-8"), fsync=fsync)
+
+
+def atomic_write_bytes(path: pathlib.Path, data: bytes, *, fsync: bool = False) -> None:
+    """Atomically write ``data`` to ``path`` — the bytes twin of :func:`atomic_write_text`.
+
+    Identical semantics (same tmp-file creation, same permission handling, same
+    cleanup-on-failure); it just skips the UTF-8 encode for a caller that already
+    holds bytes. See :func:`atomic_write_text` for the full contract.
+    """
+    _atomic_write(path, data, fsync=fsync)
+
+
+def _atomic_write(path: pathlib.Path, data: bytes, *, fsync: bool) -> None:
+    """Shared implementation behind :func:`atomic_write_text` / :func:`atomic_write_bytes`."""
     path.parent.mkdir(parents=True, exist_ok=True)
     # mkstemp gives a unique, O_EXCL, non-symlink-following fd opened O_RDWR in the
     # destination directory — same filesystem, so the os.replace below is atomic.
     fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=path.name + ".", suffix=".tmp")
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(content)
+        try:
+            file_obj = os.fdopen(fd, "wb")
+        except BaseException:
+            # fdopen only fails *before* taking ownership of the descriptor, so
+            # this is the one place the raw fd still has to be closed by hand;
+            # everywhere below, closing is the file object's job.
+            os.close(fd)
+            raise
+        with file_obj as f:
+            f.write(data)
             if fsync:
                 f.flush()
                 try:

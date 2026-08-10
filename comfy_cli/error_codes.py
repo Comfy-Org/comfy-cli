@@ -79,6 +79,17 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "`comfy stop` could not kill the recorded background ComfyUI process. `details.pid` carries the process id.",
         "kill the process manually if it is still running",
     ),
+    ErrorCode(
+        "port_not_listening",
+        "`comfy stop --port <p>` found no process LISTENing on that port. `details.port` carries the port.",
+        "check the port, or run `comfy stop` to stop the server this CLI started",
+    ),
+    ErrorCode(
+        "unverified_process",
+        "`comfy stop --port <p>` found a listener it could not positively identify as ComfyUI, so it "
+        "refused to stop it. `details` carries the pid, whatever cmdline was readable, and the reason.",
+        "confirm what is on that port and stop it yourself if it really is ComfyUI",
+    ),
     # --- workflow loading ----------------------------------------------------
     ErrorCode(
         "workflow_not_found",
@@ -776,6 +787,15 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "update_version_target_invalid",
         "`comfy update --version` was combined with a target other than `comfy`.",
         "run `comfy update comfy --version <version>`",
+    ),
+    ErrorCode(
+        "update_custom_nodes_failed",
+        "`comfy update all --exit-on-fail` ran `cm-cli update all` and it exited non-zero. "
+        "The update is not atomic, so some packs may have updated before the failure; "
+        "`details.cm_cli_returncode` carries cm-cli's raw status (the process exit code is "
+        "normalized — signals become 128+N, and 2 becomes 1 so it can't be confused with a "
+        "CLI usage error).",
+        "read the cm-cli output above for the failing pack, then re-run `comfy update all`",
     ),
     ErrorCode(
         "version_switch_unknown_version",

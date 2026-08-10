@@ -12,6 +12,7 @@ from rich.console import Console
 from comfy_cli import cancellation, constants, env_checker, logging, tracking, ui, utils
 from comfy_cli import where as where_module
 from comfy_cli.auth import command as auth_command
+from comfy_cli.caller import stream_is_tty
 from comfy_cli.cloud import command as cloud_command
 from comfy_cli.command import (
     code_search,
@@ -39,6 +40,7 @@ from comfy_cli.command import transfer as transfer_inner
 from comfy_cli.command import (
     workflow as workflow_command,
 )
+from comfy_cli.command.custom_nodes.cm_cli_util import normalize_cm_cli_exit_code
 from comfy_cli.command.install import validate_optional_version, validate_version
 from comfy_cli.command.launch import launch as launch_command
 from comfy_cli.command.launch import logs as logs_command
@@ -139,7 +141,11 @@ def _maybe_nudge_setup(ctx: typer.Context, renderer) -> None:
     install. Onboarding must never break a command — failures are swallowed.
     """
     sub = ctx.invoked_subcommand
-    if sub in (None, "setup") or not renderer.is_pretty() or not sys.stderr.isatty():
+    # Guarded stderr probe: this runs from the main Typer callback, and stderr
+    # can be closed independently of stdout (`comfy install 2>&-`, where CPython
+    # sets `sys.stderr = None`). A bare `.isatty()` there would kill the command
+    # from the onboarding nudge of all places. See `caller.stream_is_tty`.
+    if sub in (None, "setup") or not renderer.is_pretty() or not stream_is_tty(getattr(sys, "stderr", None)):
         return
     try:
         from comfy_cli.credentials import get_session
@@ -673,6 +679,18 @@ def _switch_comfy_version(comfy_path: str, version: str, *, stash: bool) -> None
     renderer.emit(result, command="update")
 
 
+def _refresh_node_id_cache() -> None:
+    """Re-export the custom-node id cache that backs shell tab-completion.
+
+    Best-effort: a stale cache only degrades completion, so a failure here is a
+    warning, never the command's outcome.
+    """
+    try:
+        custom_nodes.command.update_node_id_cache()
+    except (FileNotFoundError, subprocess.CalledProcessError) as e:
+        rprint(f"[yellow]Failed to update node id cache: {e}[/yellow]")
+
+
 @app.command(help="Update ComfyUI Environment [all|comfy|cli]")
 @tracking.track_command()
 def update(
@@ -708,6 +726,16 @@ def update(
             ),
         ),
     ] = False,
+    exit_on_fail: Annotated[
+        bool,
+        typer.Option(
+            "--exit-on-fail",
+            help=(
+                "Exit on failure. Only affects target 'all': without it a failing custom-node update is "
+                "printed but still exits 0. Targets 'comfy' and 'cli' already exit non-zero on failure."
+            ),
+        ),
+    ] = False,
 ):
     if target not in ["all", "comfy", "cli"]:
         typer.echo(
@@ -734,7 +762,33 @@ def update(
     comfy_path = workspace_manager.workspace_path
 
     if "all" == target:
-        custom_nodes.command.execute_cm_cli(["update", "all"])
+        # Without raise_on_error, execute_cm_cli swallows a cm-cli exit 1 and returns None,
+        # so `comfy update all` would report success for a failed pack update. Mirrors the
+        # --exit-on-fail plumbing in `comfy node install`.
+        #
+        # Unlike `node install`, the flag is deliberately NOT forwarded to cm-cli: its
+        # `update` subcommand takes only (nodes, channel, mode, user_directory) — no
+        # --exit-on-fail — so passing it would be a Typer usage error and make the flag
+        # fail every invocation. Only `cm-cli install` has one.
+        try:
+            custom_nodes.command.execute_cm_cli(["update", "all"], raise_on_error=exit_on_fail)
+        except subprocess.CalledProcessError as e:
+            if not exit_on_fail:
+                # execute_cm_cli re-raises unexpected exit codes even with raise_on_error off;
+                # keep surfacing those instead of swallowing them here.
+                raise
+            # `cm-cli update all` is non-atomic — packs that did update stayed updated — so
+            # refresh the id cache exactly as the no-flag path below does before bailing out.
+            _refresh_node_id_cache()
+            code = normalize_cm_cli_exit_code(e.returncode)
+            get_renderer().error(
+                code="update_custom_nodes_failed",
+                message=f"`cm-cli update all` failed with exit code {e.returncode}.",
+                hint="re-run `comfy update all` to retry; it is safe to repeat",
+                details={"cm_cli_returncode": e.returncode},
+                exit_code=code,
+            )
+            raise typer.Exit(code=code) from e
     else:
         rprint(f"Updating ComfyUI in {comfy_path}...")
         if comfy_path is None:
@@ -754,10 +808,7 @@ def update(
                 check=True,
             )
 
-    try:
-        custom_nodes.command.update_node_id_cache()
-    except (FileNotFoundError, subprocess.CalledProcessError) as e:
-        rprint(f"[yellow]Failed to update node id cache: {e}[/yellow]")
+    _refresh_node_id_cache()
 
 
 @app.command(help="Report installed-vs-latest versions for ComfyUI core and custom node packs (read-only).")
@@ -1003,7 +1054,11 @@ def run(
 
         if host:
             host, parsed_port = parse_host_port_arg(host)
-            if not port and parsed_port is not None:
+            # ``port is None``, not ``not port``: a typed ``--port`` always wins
+            # over one embedded in ``--host h:p``, including ``--port 0``, which
+            # ``resolve_host_port`` then rejects as out of range instead of
+            # silently running against the embedded port.
+            if port is None and parsed_port is not None:
                 port = parsed_port
 
         host, port = resolve_host_port(host, port)
@@ -1458,10 +1513,36 @@ def free(
     system_command.free_execute(get_renderer(), where=where, unload_models=unload_models, free_memory=free_memory)
 
 
-@app.command(help="Stop background ComfyUI")
+@app.command(help="Stop background ComfyUI. Use --port to stop an untracked local ComfyUI this CLI didn't start.")
 @tracking.track_command()
-def stop():
+def stop(
+    port: Annotated[
+        int | None,
+        typer.Option(
+            "--port",
+            show_default=False,
+            min=1,
+            max=65535,
+            help="Stop whatever local ComfyUI is listening on this port, even if this CLI didn't start it. "
+            "Refuses anything it cannot positively identify as ComfyUI.",
+        ),
+    ] = None,
+    dry_run: Annotated[
+        bool,
+        typer.Option(
+            "--dry-run",
+            help="Report the process that would be stopped and exit 0 without stopping it.",
+        ),
+    ] = False,
+):
     renderer = get_renderer()
+
+    if port is not None:
+        from comfy_cli.command import stop_port
+
+        stop_port.stop_port_execute(renderer, port=port, dry_run=dry_run)
+        return
+
     config = ConfigManager()
     bg_info = config.background if constants.CONFIG_KEY_BACKGROUND in config.config["DEFAULT"] else None
     if not bg_info:
@@ -1473,6 +1554,24 @@ def stop():
                 command="stop",
             )
         raise typer.Exit(code=1)
+
+    if dry_run:
+        rprint(
+            f"[bold yellow]Would stop background ComfyUI.[/bold yellow] ({bg_info[0]}:{bg_info[1]}, pid={bg_info[2]})"
+        )
+        renderer.emit(
+            {
+                "stopped": False,
+                "dry_run": True,
+                "untracked": False,
+                "host": bg_info[0],
+                "port": bg_info[1],
+                "pid": bg_info[2],
+            },
+            command="stop",
+            changed=False,
+        )
+        return
 
     is_killed = utils.kill_all(bg_info[2])
 

@@ -184,6 +184,63 @@ class TestLocalSnapshotGroupedOutputs:
         assert snap["outputs_by_item"] == {}
 
 
+class TestLocalSnapshotTextOutputs:
+    """`_snapshot` surfaces text/STRING node outputs under an always-present
+    additive `text_outputs` key: grouped-by-node full strings on the history
+    branch, `{}` when there's no text or the job is still queued/running."""
+
+    def _patch_history(self, monkeypatch, prompt_id, body):
+        def fake_get(url, timeout=10.0):
+            if url.endswith("/queue"):
+                return {"queue_running": [], "queue_pending": []}
+            if url.endswith(f"/history/{prompt_id}"):
+                return {prompt_id: body}
+            raise AssertionError(url)
+
+        monkeypatch.setattr(jobs_mod, "_http_get_json", fake_get)
+
+    def test_history_snapshot_groups_text_by_node(self, monkeypatch):
+        body = {
+            "status": {"completed": True, "messages": []},
+            "outputs": {
+                "7": {"text": ["a detailed image description that stays untruncated"]},
+                "9": {"images": [{"filename": "a.png", "subfolder": "", "type": "output"}]},
+            },
+        }
+        self._patch_history(monkeypatch, "txt-1", body)
+
+        snap = jobs_mod._snapshot("h", 8188, "txt-1")
+        assert snap is not None
+        assert snap["status"] == "completed"
+        # Full, untruncated strings grouped by producing node.
+        assert snap["text_outputs"] == {"7": ["a detailed image description that stays untruncated"]}
+        # Existing media keys are byte-identical to before — additive only.
+        assert snap["outputs"] == ["http://h:8188/view?filename=a.png&subfolder=&type=output"]
+
+    def test_history_snapshot_without_text_emits_empty(self, monkeypatch):
+        body = {
+            "status": {"completed": True, "messages": []},
+            "outputs": {"9": {"images": [{"filename": "a.png", "subfolder": "", "type": "output"}]}},
+        }
+        self._patch_history(monkeypatch, "txt-none", body)
+
+        snap = jobs_mod._snapshot("h", 8188, "txt-none")
+        assert snap is not None
+        assert snap["text_outputs"] == {}
+
+    def test_queue_snapshot_emits_empty_text_outputs(self, monkeypatch):
+        def fake_get(url, timeout=10.0):
+            if url.endswith("/queue"):
+                return {"queue_running": [[0, "txt-live", {"a": {}}, {}, {}]], "queue_pending": []}
+            raise AssertionError(url)
+
+        monkeypatch.setattr(jobs_mod, "_http_get_json", fake_get)
+        snap = jobs_mod._snapshot("h", 8188, "txt-live")
+        assert snap is not None
+        assert snap["status"] == "running"
+        assert snap["text_outputs"] == {}
+
+
 def test_safe_queue_entry_handles_short_rows():
     assert jobs_mod._safe_queue_entry([0, "id", {"node": {}}]) == ("id", {"node": {}})
     assert jobs_mod._safe_queue_entry([])[0] == "?"
@@ -2082,6 +2139,85 @@ def test_watcher_known_inflight_status_never_stalls(monkeypatch):
     assert state.error is None
 
 
+def test_render_status_pretty_previews_text_truncated(monkeypatch, capsys):
+    """Pretty render shows a bounded per-entry text preview (first line, ~120
+    chars); the full untruncated string is reserved for the `--json` path."""
+    from comfy_cli.output import Renderer, set_renderer
+    from comfy_cli.output.renderer import OutputMode
+
+    set_renderer(Renderer(mode=OutputMode.PRETTY))
+    tail = "TAILMARKER" + "X" * 400
+    snap = {
+        "prompt_id": "p",
+        "status": "completed",
+        "outputs": [],
+        # First line is long enough to truncate; a second line must be dropped.
+        "text_outputs": {"7": [f"HEADMARKER {'Y' * 130}\ndropped second line {tail}"]},
+    }
+    jobs_mod._render_status_pretty(snap, host="h", port=8188)
+    out = capsys.readouterr().out
+    assert "HEADMARKER" in out  # first line previewed
+    assert "…" in out  # truncated past ~120 chars
+    assert tail not in out  # second line never rendered
+
+
+def test_render_status_pretty_text_preview_skips_leading_blank_lines(monkeypatch, capsys):
+    """A leading blank line must not blank out the preview — the first
+    *non-blank* line is what should surface, not the empty string before it."""
+    from comfy_cli.output import Renderer, set_renderer
+    from comfy_cli.output.renderer import OutputMode
+
+    set_renderer(Renderer(mode=OutputMode.PRETTY))
+    snap = {
+        "prompt_id": "p",
+        "status": "completed",
+        "outputs": [],
+        "text_outputs": {"7": ["\n\nactual content"]},
+    }
+    jobs_mod._render_status_pretty(snap, host="h", port=8188)
+    out = capsys.readouterr().out
+    assert "actual content" in out
+
+
+def test_render_status_pretty_text_preview_is_not_rich_markup(monkeypatch, capsys):
+    """Node ids/text are server-supplied and may contain `[...]` — the preview
+    must render it literally instead of letting Rich interpret it as markup
+    (which would otherwise corrupt output or raise on unmatched tags)."""
+    from comfy_cli.output import Renderer, set_renderer
+    from comfy_cli.output.renderer import OutputMode
+
+    set_renderer(Renderer(mode=OutputMode.PRETTY))
+    snap = {
+        "prompt_id": "p",
+        "status": "completed",
+        "outputs": [],
+        "text_outputs": {"7": ["[bold red]not a style tag[/] and an unmatched ]"]},
+    }
+    jobs_mod._render_status_pretty(snap, host="h", port=8188)
+    out = capsys.readouterr().out
+    assert "[bold red]not a style tag[/] and an unmatched ]" in out
+
+
+def test_render_status_pretty_text_preview_bounds_entry_count(monkeypatch, capsys):
+    """Many text-output entries must not blow up the pretty table — the
+    preview caps the number of lines shown and notes how many were dropped."""
+    from comfy_cli.output import Renderer, set_renderer
+    from comfy_cli.output.renderer import OutputMode
+
+    set_renderer(Renderer(mode=OutputMode.PRETTY))
+    snap = {
+        "prompt_id": "p",
+        "status": "completed",
+        "outputs": [],
+        "text_outputs": {"7": [f"entry {i}" for i in range(jobs_mod._TEXT_PREVIEW_LIMIT + 5)]},
+    }
+    jobs_mod._render_status_pretty(snap, host="h", port=8188)
+    out = capsys.readouterr().out
+    assert f"entry {jobs_mod._TEXT_PREVIEW_LIMIT - 1}" in out
+    assert f"entry {jobs_mod._TEXT_PREVIEW_LIMIT}" not in out
+    assert "5 more" in out
+
+
 def test_emit_terminal_verdicts():
     import typer
 
@@ -2903,3 +3039,309 @@ def test_untracked_prompt_keeps_the_default_hints(monkeypatch: pytest.MonkeyPatc
     result = _invoke_status("no-such-id", "--host", "127.0.0.1", "--port", "65431")
     assert result.exit_code == 1, result.output
     assert _last_json(result.stdout)["error"]["hint"] == "run: comfy launch"
+
+
+# ---------------------------------------------------------------------------
+# `jobs ls` rows carry the server-death attribution (`error_code`)
+# ---------------------------------------------------------------------------
+
+
+def test_state_error_code_extraction_is_defensive():
+    """Only a non-empty string `error.code` survives — a state file is
+    hand-editable, and `error_code` is typed `string | null` in the schema."""
+    assert jobs_mod._state_error_code({"code": "server_died"}, "error") == "server_died"
+    assert jobs_mod._state_error_code(None, "error") is None
+    assert jobs_mod._state_error_code({}, "error") is None
+    assert jobs_mod._state_error_code({"code": ""}, "error") is None
+    assert jobs_mod._state_error_code({"code": 500}, "error") is None
+    assert jobs_mod._state_error_code("server_died", "error") is None
+    assert jobs_mod._state_error_code(["server_died"], "error") is None
+
+
+@pytest.mark.parametrize("status", ["queued", "running", "pending", "executing", "completed"])
+def test_state_error_code_ignores_a_code_on_a_job_that_has_not_failed(status):
+    """`job_watcher._poll_local_once`/`_poll_cloud_once` park a transient
+    `watcher_poll_error` on the state file *without* moving the status off
+    `queued`/`running`, and only clear it on a later poll that returns a
+    snapshot — so a healthy in-flight job holds that code for many cycles.
+    Surfacing it would advertise a failure cause for a job that hasn't failed
+    (and contradict the schema, which promises null on every non-failed row)."""
+    assert jobs_mod._state_error_code({"code": "watcher_poll_error"}, status) is None
+
+
+def test_gather_local_state_files_ignores_a_poll_error_on_a_running_job():
+    """End to end through the gather, not just the helper: a running job whose
+    last poll blipped must still list as running with no cause attached."""
+    from comfy_cli import jobs_state
+
+    _write_state(
+        jobs_state.state_dir(),
+        "blipped",
+        status="running",
+        error={"code": "watcher_poll_error", "message": "Connection reset by peer"},
+    )
+
+    (row,) = jobs_mod._gather_local_state_files(limit=100)
+    assert row.status == "running"
+    assert row.error_code is None
+
+
+def test_state_scalar_narrowing_keeps_a_bad_state_file_from_breaking_the_listing():
+    """`jobs_state.read` type-checks nothing it keeps, so `where`,
+    `workflow_path`, and `updated_at` — all published with strict types — need
+    the same defensiveness `error_code` gets. A numeric `updated_at` is the
+    sharp case: it reaches `_merge_jobs`'s `sort_key` and raises `TypeError`
+    comparing int against str, aborting the whole listing rather than one row."""
+    assert jobs_mod._state_str("2026-08-04T00:00:00+00:00") == "2026-08-04T00:00:00+00:00"
+    assert jobs_mod._state_str(None) is None
+    assert jobs_mod._state_str("") is None
+    assert jobs_mod._state_str(1754265600) is None
+    assert jobs_mod._state_where("cloud") == "cloud"
+    assert jobs_mod._state_where("local") == "local"
+    # Missing, empty, or a legacy/hand-edited value outside the published enum.
+    assert jobs_mod._state_where(None) == "local"
+    assert jobs_mod._state_where("") == "local"
+    assert jobs_mod._state_where("remote") == "local"
+
+
+def test_gather_local_state_files_carries_error_code():
+    """A state-file row reports why the job failed, not just that it did."""
+    from comfy_cli import jobs_state
+
+    state_dir = jobs_state.state_dir()
+    _write_state(
+        state_dir,
+        "died-job",
+        status="error",
+        error={"code": "server_died", "message": "Lost connection while job died-job was running"},
+    )
+    _write_state(state_dir, "ok-job", status="completed")
+
+    rows = {r.prompt_id: r for r in jobs_mod._gather_local_state_files(limit=100)}
+    assert rows["died-job"].error_code == "server_died"
+    assert rows["ok-job"].error_code is None, "a healthy row must not invent an error code"
+
+
+def test_gather_local_state_files_reports_the_reaped_watcher_code(monkeypatch):
+    """The stale-watcher reap rewrites the file to `watcher_crashed`; the row it
+    then builds must carry that code, or `--orphaned` still can't say why."""
+    from comfy_cli import jobs_state
+
+    monkeypatch.setattr(jobs_mod, "_is_watcher_alive", lambda state: False)
+    _write_state(jobs_state.state_dir(), "reaped", status="running", watcher_pid=999999)
+
+    (row,) = jobs_mod._gather_local_state_files(limit=100)
+    assert row.status == "error"
+    assert row.error_code == "watcher_crashed"
+
+
+def _row(prompt_id: str, status: str, **kw) -> jobs_mod.JobRow:
+    return jobs_mod.JobRow(
+        prompt_id=prompt_id,
+        status=status,
+        queue_position=None,
+        elapsed_seconds=None,
+        workflow_size=None,
+        outputs=0,
+        **kw,
+    )
+
+
+def test_merge_carries_error_code_onto_a_superseding_server_row():
+    """`/queue` and `/history` carry no error code, so a server row that wins
+    the merge would otherwise drop the cause the state file recorded."""
+    merged = {
+        r.prompt_id: r
+        for r in jobs_mod._merge_jobs(
+            [_row("job-1", "error", error_code="execution_error", updated_at="2026-08-04T00:00:00+00:00")],
+            [_row("job-1", "error")],
+        )
+    }
+    assert merged["job-1"].error_code == "execution_error"
+
+
+def test_merge_drops_a_stale_error_code_when_the_server_says_completed():
+    """The carry-over is scoped to failure statuses: a server that reports the
+    prompt as completed must not be annotated with a stale `server_died`."""
+    merged = {
+        r.prompt_id: r
+        for r in jobs_mod._merge_jobs(
+            [_row("job-2", "error", error_code="server_died")],
+            [_row("job-2", "completed")],
+        )
+    }
+    assert merged["job-2"].status == "completed"
+    assert merged["job-2"].error_code is None
+
+
+def test_merge_prefers_the_server_rows_own_error_code():
+    """Carry-over only fills a gap — it never overwrites a code the server row
+    already has."""
+    merged = {
+        r.prompt_id: r
+        for r in jobs_mod._merge_jobs(
+            [_row("job-3", "error", error_code="server_died")],
+            [_row("job-3", "error", error_code="execution_error")],
+        )
+    }
+    assert merged["job-3"].error_code == "execution_error"
+
+
+def test_merge_reads_the_prior_row_from_the_state_snapshot_not_the_running_map():
+    """`/queue` and `/history` are fetched separately, so one gather can yield
+    two rows for a prompt caught mid-transition. Looking the prior code up from
+    the accumulating map lets the `running` row clobber the state row first,
+    and the `error` row that follows then finds nothing to inherit."""
+    merged = {
+        r.prompt_id: r
+        for r in jobs_mod._merge_jobs(
+            [_row("job-4", "error", error_code="execution_error")],
+            [_row("job-4", "running"), _row("job-4", "error")],
+        )
+    }
+    assert merged["job-4"].status == "error"
+    assert merged["job-4"].error_code == "execution_error"
+
+
+def test_merge_ignores_a_code_recorded_next_to_a_healthy_state_status():
+    """The gate is on both sides: a code sitting next to a non-failure state
+    status is a watcher poll blip, not this job's cause, so a server row that
+    genuinely failed must not be attributed to it."""
+    merged = {
+        r.prompt_id: r
+        for r in jobs_mod._merge_jobs(
+            [_row("job-5", "running", error_code="watcher_poll_error")],
+            [_row("job-5", "error")],
+        )
+    }
+    assert merged["job-5"].status == "error"
+    assert merged["job-5"].error_code is None
+
+
+def test_merge_carries_the_other_state_only_fields_onto_a_server_row():
+    """`workflow_path` and `updated_at` are state-file-only too. Blanking the
+    first drops the only field that says which workflow a prompt_id was;
+    blanking the second sorts a terminal row to epoch 0, below every dated row,
+    where the caller's `[:limit]` slice can drop a fresh completion."""
+    merged = {
+        r.prompt_id: r
+        for r in jobs_mod._merge_jobs(
+            [
+                _row(
+                    "job-6",
+                    "completed",
+                    workflow_path="/tmp/wf.json",
+                    updated_at="2026-08-04T00:00:00+00:00",
+                )
+            ],
+            [_row("job-6", "completed")],
+        )
+    }
+    assert merged["job-6"].workflow_path == "/tmp/wf.json"
+    assert merged["job-6"].updated_at == "2026-08-04T00:00:00+00:00"
+
+
+def test_merge_keeps_fresh_server_side_completions_within_the_limit():
+    """The consequence the carry-over above prevents, end to end: without an
+    `updated_at`, the freshly completed job the server knows about sorts below
+    a week-old one and falls outside a caller's `[:1]` slice."""
+    fresh = _row("fresh", "completed", updated_at="2026-08-04T00:00:00+00:00")
+    stale = _row("stale", "completed", updated_at="2026-07-28T00:00:00+00:00")
+    merged = jobs_mod._merge_jobs([fresh, stale], [_row("fresh", "completed")])
+    assert [r.prompt_id for r in merged][:1] == ["fresh"]
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("non_retryable_error", "error"),
+        ("lost", "error"),
+        ("canceled", "cancelled"),
+        ("cancelled", "cancelled"),
+        ("failed", "error"),
+        ("success", "completed"),
+    ],
+)
+def test_cloud_row_normalizes_the_failure_spellings(raw, expected):
+    """Cloud's other failure spellings used to pass through raw, missing
+    `_ERROR_STATUSES` — so the merge dropped the state file's `error_code` for
+    exactly the jobs that had failed."""
+    assert jobs_mod._cloud_job_to_row({"id": "j", "status": raw}).status == expected
+
+
+def test_cloud_row_is_marked_as_a_cloud_row():
+    """`where` is published with an enum as a per-row discriminator for a
+    follow-up `jobs status`/`jobs cancel`. Taking JobRow's "local" default here
+    made every row under `jobs ls --where cloud` claim `local` while the
+    envelope said `cloud`, superseding the state row that had it right."""
+    assert jobs_mod._cloud_job_to_row({"id": "j", "status": "running"}).where == "cloud"
+
+
+def test_merge_keeps_the_state_error_code_for_a_cloud_failure_spelling():
+    """The two fixes above together: a cloud `non_retryable_error` row now
+    normalizes to `error`, so it clears the gate and keeps the cause."""
+    merged = {
+        r.prompt_id: r
+        for r in jobs_mod._merge_jobs(
+            [_row("cj", "error", where="cloud", error_code="server_died")],
+            [jobs_mod._cloud_job_to_row({"id": "cj", "status": "non_retryable_error"})],
+        )
+    }
+    assert merged["cj"].status == "error"
+    assert merged["cj"].where == "cloud"
+    assert merged["cj"].error_code == "server_died"
+
+
+def test_ls_payload_names_the_server_death(capsys, monkeypatch):
+    """Acceptance: after a server death, `comfy jobs ls` — the escape hatch
+    `jobs status` points at — reports both the failure and its cause."""
+    from comfy_cli import jobs_state
+
+    state_dir = jobs_state.state_dir()
+    _write_state(
+        state_dir,
+        "oom-job",
+        status="error",
+        error={"code": "server_died", "message": "Lost connection to ComfyUI while job oom-job was running"},
+    )
+    _write_state(state_dir, "fine-job", status="completed")
+    monkeypatch.delenv("COMFY_WHERE", raising=False)
+
+    data = _ls_payload(capsys, limit=100)
+    by_id = {j["prompt_id"]: j for j in data["jobs"]}
+    assert by_id["oom-job"]["status"] == "error"
+    assert by_id["oom-job"]["error_code"] == "server_died"
+    assert by_id["oom-job"]["workflow_path"] == "/tmp/oom-job.json"
+    # Present on every row (agents can index it unconditionally), null when
+    # there is nothing to attribute.
+    assert by_id["fine-job"]["error_code"] is None
+
+
+def test_ls_payload_validates_against_the_jobs_schema(capsys, monkeypatch):
+    """`error_code` is a published contract field, not just an emitted one."""
+    import jsonschema
+
+    from comfy_cli import jobs_state
+
+    _write_state(
+        jobs_state.state_dir(),
+        "sch-job",
+        status="cancelled",
+        error={"code": "cancelled", "message": "Cancelled by user"},
+    )
+    monkeypatch.delenv("COMFY_WHERE", raising=False)
+    data = _ls_payload(capsys, limit=100)
+
+    schema_path = Path(jobs_mod.__file__).parent.parent / "schemas" / "jobs.json"
+    schema = json.loads(schema_path.read_text())
+    jsonschema.Draft202012Validator(schema).validate(data)
+    assert data["jobs"][0]["error_code"] == "cancelled"
+    # The row `status` this asserts on is validated by `jobs.items`, whose
+    # `status` is a bare string — not by the top-level `status` enum, which
+    # describes the single-job `jobs status` envelope. Row statuses are
+    # deliberately unconstrained (an unrecognized cloud status passes through
+    # raw rather than being dropped), so validate the field that *is* the
+    # contract here — `error_code` alongside a `cancelled` row — rather than
+    # asserting against an enum that never sees this value.
+    assert data["jobs"][0]["status"] == "cancelled"
+    assert schema["properties"]["jobs"]["items"]["properties"]["error_code"]["type"] == ["string", "null"]

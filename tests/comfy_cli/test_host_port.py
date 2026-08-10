@@ -214,6 +214,64 @@ def test_run_unsafe_host_exits_before_execute(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# `--port` beats the port embedded in a combined `--host h:p` (BE-6486)
+# ---------------------------------------------------------------------------
+#
+# The combined-host sites used to merge the two with `if not port and
+# parsed_port is not None`, which reads an explicit `--port 0` as "not passed"
+# and silently runs against the embedded port. They test `port is None`, so a
+# typed `--port` — including the out-of-range `0` — always wins and reaches the
+# range guard in `resolve_host_port`.
+
+
+def test_run_explicit_port_zero_is_rejected_not_overridden_by_host_port(tmp_path):
+    from typer.testing import CliRunner
+
+    from comfy_cli.cmdline import app
+
+    with patch("comfy_cli.command.run.execute") as mock_execute:
+        result = CliRunner().invoke(
+            app,
+            ["run", "--workflow", _write_workflow(tmp_path), "--host", "127.0.0.1:9100", "--port", "0"],
+            env={"COMFY_WHERE": "local"},
+        )
+    assert result.exit_code == 2, result.output
+    mock_execute.assert_not_called()
+
+
+def test_run_explicit_port_wins_over_embedded_host_port(tmp_path, monkeypatch):
+    monkeypatch.delenv("COMFY_LOCAL_URL", raising=False)
+    from typer.testing import CliRunner
+
+    from comfy_cli.cmdline import app
+
+    with patch("comfy_cli.command.run.execute") as mock_execute:
+        result = CliRunner().invoke(
+            app,
+            ["run", "--workflow", _write_workflow(tmp_path), "--host", "127.0.0.1:9100", "--port", "9200"],
+            env={"COMFY_WHERE": "local"},
+        )
+    assert result.exit_code == 0, result.output
+    args, _ = mock_execute.call_args
+    # execute(workflow, host, port, ...)
+    assert args[1] == "127.0.0.1"
+    assert args[2] == 9200
+
+
+def test_jobs_status_out_of_range_port_is_rejected():
+    """The guard lives in the shared resolver, so the `comfy jobs` sites — which
+    have no combined-host form — inherit it without their own check."""
+    from typer.testing import CliRunner
+
+    from comfy_cli.cmdline import app
+
+    with patch("comfy_cli.command.jobs._server_or_error") as mock_probe:
+        result = CliRunner().invoke(app, ["jobs", "status", "abc123", "--port", "0"])
+    assert result.exit_code == 2, result.output
+    mock_probe.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
 # explicit-flag validation at the shared choke point (BE-6306 review)
 # ---------------------------------------------------------------------------
 #
