@@ -734,6 +734,38 @@ class TestWaitStateFile:
         assert "wait-slow" not in {r.prompt_id for r in orphans}
         assert jobs_state.read("wait-slow").status == "running"
 
+    def test_timeout_does_not_walk_back_a_concurrent_terminal_verdict(self, workflow_file, monkeypatch):
+        """`wait_state` is a snapshot taken at submit and never re-read, and a
+        `--wait` that times out is precisely the case where the prompt sat
+        queued long enough for someone to run `comfy jobs cancel` on it. The
+        stamp-clearing write must therefore re-read under the lock: writing the
+        stale snapshot back would walk a persisted terminal `cancelled` to a
+        non-terminal `running` with no pid — a record that is neither terminal
+        nor reapable, i.e. a permanent phantom."""
+        from comfy_cli import jobs_state
+
+        self._capture_errors(monkeypatch)
+        mock_exec = self._mock_exec("wait-raced")
+
+        def _cancel_then_timeout():
+            # Stand-in for a concurrent `comfy jobs cancel`: a terminal record
+            # lands on disk while this process is still blocked in the watch.
+            racer = jobs_state.read("wait-raced")
+            racer.status = "cancelled"
+            racer.error = {"code": "cancelled", "message": "Cancelled by user", "details": {}}
+            jobs_state.write(racer)
+            raise WebSocketTimeoutException("timed out")
+
+        mock_exec.watch_execution.side_effect = _cancel_then_timeout
+
+        with pytest.raises(typer.Exit):
+            self._run(workflow_file, mock_exec)
+
+        state = jobs_state.read("wait-raced")
+        assert state is not None
+        assert state.status == "cancelled", "the timeout handler overwrote a terminal verdict"
+        assert state.error["code"] == "cancelled"
+
     def test_timeout_before_submit_writes_no_state(self, workflow_file, monkeypatch):
         """`connect()` can raise WebSocketTimeoutException before `queue()`
         ever returns a prompt_id — `wait_state` is still None there, so the
@@ -1040,6 +1072,56 @@ class TestCloudWaitWatcherStamp:
         row = next(r for r in rows if r.prompt_id == "cloud-wait-slow")
         assert row.status == "error"
         assert row.error_code == "cloud_timeout", "the reap must not overwrite a terminal record's cause"
+
+    def test_unhandled_network_error_clears_stamp(self, workflow_file, fake_target):
+        """`Client._request` only converts `urllib.error.HTTPError`, so a DNS
+        failure / connection reset / TLS error escapes `wait_for_completion` as
+        a bare `URLError` matching none of the handlers. That kills this
+        process with the record non-terminal; the stamp must come off on the
+        way out or the next `jobs ls` reaps a cloud job that is still running
+        server-side into `error`/`watcher_crashed`, destroying the one thing
+        that made it reconcilable against the API."""
+        import urllib.error
+
+        from comfy_cli import jobs_state
+        from comfy_cli.command import jobs as jobs_mod
+
+        mock_client = self._mock_client("cloud-wait-urlerror")
+        mock_client.wait_for_completion.side_effect = urllib.error.URLError("dns went away")
+
+        with pytest.raises(urllib.error.URLError):
+            self._run_cloud(workflow_file, fake_target, mock_client)
+
+        state = jobs_state.read("cloud-wait-urlerror")
+        assert state is not None
+        # Still the submit-time `queued` — an unhandled escape must not invent
+        # a terminal verdict about a job the cloud may well still be running.
+        assert not state.is_terminal, "an unhandled escape must not invent a terminal verdict"
+        assert state.watcher_pid is None
+        assert state.watcher_pid_create_time is None
+
+        rows = jobs_mod._gather_local_state_files(limit=100)
+        row = next(r for r in rows if r.prompt_id == "cloud-wait-urlerror")
+        assert row.status == state.status
+        assert row.error_code is None
+
+    def test_unhandled_error_after_poll_clears_stamp(self, workflow_file, fake_target):
+        """Same guarantee past the polling loop: `extract_outputs` and the
+        rendering after it run before/after the terminal write with no handler
+        of their own."""
+        from comfy_cli import jobs_state
+
+        mock_client = self._mock_client("cloud-wait-extract-boom")
+        mock_client.wait_for_completion.return_value = {"status": {"status_str": "success"}, "outputs": {}}
+        mock_client.extract_outputs.side_effect = TypeError("malformed record")
+
+        with pytest.raises(TypeError):
+            self._run_cloud(workflow_file, fake_target, mock_client)
+
+        state = jobs_state.read("cloud-wait-extract-boom")
+        assert state is not None
+        assert not state.is_terminal
+        assert state.watcher_pid is None
 
 
 class TestDetectPartnerNodes:

@@ -627,11 +627,6 @@ def execute(
         )
         raise typer.Exit(code=130)
     except WebSocketTimeoutException:
-        if renderer.is_pretty():
-            pprint(
-                f"[bold red]Error: WebSocket timed out after {timeout}s waiting for server response.[/bold red]\n"
-                "[yellow]For long-running workflows, increase the timeout: comfy run --workflow <file> --timeout 300[/yellow]"
-            )
         # The job may genuinely still be running server-side, so the
         # submit-time "running" record is left non-terminal — but the watcher
         # stamp MUST be cleared: this process is about to exit, and a
@@ -639,9 +634,17 @@ def execute(
         # stale-watcher reap finalizes, so the next `jobs ls` after a
         # `--wait --timeout 60` on a long-running job would flip a healthy
         # job's record to `error`/`watcher_crashed` — a regression worse than
-        # the external-kill gap the stamp closes. The None guard is required:
-        # `execution.connect()` raises this same exception, and it runs before
-        # `wait_state` exists.
+        # the external-kill gap the stamp closes. `clear_watcher_identity`
+        # re-reads under the record's lock and leaves an already-terminal
+        # record alone, so a `comfy jobs cancel` that landed while we were
+        # blocked here isn't walked back to `running`. The None guard is
+        # required: `execution.connect()` raises this same exception, and it
+        # runs before `wait_state` exists.
+        #
+        # Done BEFORE the pretty-mode render below: that render is blocking
+        # (and can itself die on a closed stdout), and every millisecond
+        # between "we know we're leaving" and "the stamp is gone" is a window
+        # in which an external SIGKILL strands the stale pid.
         #
         # Consequence of the no-watcher limit documented at the submit-time
         # write above: nothing is left watching the prompt after this returns,
@@ -650,9 +653,12 @@ def execute(
         # `comfy jobs status <prompt_id>`, which infers the death from a
         # server that is down (or came back with no record of the prompt).
         if wait_state is not None:
-            wait_state.watcher_pid = None
-            wait_state.watcher_pid_create_time = None
-            _write_state(wait_state)
+            jobs_state.clear_watcher_identity(wait_state)
+        if renderer.is_pretty():
+            pprint(
+                f"[bold red]Error: WebSocket timed out after {timeout}s waiting for server response.[/bold red]\n"
+                "[yellow]For long-running workflows, increase the timeout: comfy run --workflow <file> --timeout 300[/yellow]"
+            )
         details = {"timeout": timeout}
         prompt_id = _submitted_prompt_id(execution)
         if prompt_id is not None:
@@ -1106,132 +1112,150 @@ def execute_cloud(
     state_file = jobs_state.write(state)
     _journal_run(workflow_name, submit.prompt_id, "cloud")
 
+    # Guard every exit from here on. `Client._request` only converts
+    # `urllib.error.HTTPError`, so a DNS failure, a connection reset, a TLS
+    # error or a non-JSON body from `wait_for_completion` escapes as a bare
+    # `URLError`/`OSError`/`ValueError` and matches none of the handlers
+    # below; `extract_outputs` and the rendering after them are likewise
+    # unguarded. Such an escape kills this process with the record still
+    # non-terminal AND stamped, which is exactly what the next `jobs ls`
+    # reaps to `error`/`watcher_crashed` — asserting a crash verdict about a
+    # CLOUD job that is very likely still running server-side and that
+    # `comfy jobs status <id> --where cloud` could otherwise reconcile
+    # against the API. Dropping the stamp on the way out leaves what an
+    # un-stamped `--wait` left before: a non-terminal record nobody is
+    # watching. Every handled exit below writes a terminal record first, and
+    # `clear_watcher_identity` re-reads under the lock and no-ops on those.
     try:
+        try:
 
-        def _probe():
-            st = client.get_job_status(submit.prompt_id)
-            if not st:
-                return None
-            return (st.get("status"), st.get("progress"), st.get("queue_position"))
+            def _probe():
+                st = client.get_job_status(submit.prompt_id)
+                if not st:
+                    return None
+                return (st.get("status"), st.get("progress"), st.get("queue_position"))
 
-        record = client.wait_for_completion(submit.prompt_id, timeout=float(timeout), progress_probe=_probe)
-    except TimeoutError as e:
-        state.status = "error"
-        state.error = {"code": "cloud_timeout", "message": str(e)}
-        jobs_state.write(state)
-        renderer.error(
-            code="cloud_timeout",
-            message=str(e),
-            hint=f"the cloud job went silent for {timeout}s; raise --timeout or watch via `comfy jobs watch {submit.prompt_id} --where cloud`",
-            details={"prompt_id": submit.prompt_id},
-        )
-        raise typer.Exit(code=1) from e
-    except Unauthenticated as e:
-        state.status = "error"
-        state.error = {"code": "cloud_unauthorized", "message": str(e)}
-        jobs_state.write(state)
-        renderer.error(code="cloud_unauthorized", message=str(e), hint="run: comfy cloud login")
-        raise typer.Exit(code=1) from e
-    except HTTPError as e:
-        state.status = "error"
-        state.error = {"code": "cloud_http_error", "message": str(e)}
-        jobs_state.write(state)
-        renderer.error(
-            code="cloud_http_error",
-            message=f"Cloud server error while polling (HTTP {e.status}): {e.message}",
-            details={"status": e.status, "prompt_id": submit.prompt_id},
-        )
-        raise typer.Exit(code=1) from e
-    except KeyboardInterrupt:
-        state.status = "cancelled"
-        jobs_state.write(state)
-        renderer.error(code="cancelled", message="Cancelled by user", exit_code=130)
-        raise typer.Exit(code=130)
+            record = client.wait_for_completion(submit.prompt_id, timeout=float(timeout), progress_probe=_probe)
+        except TimeoutError as e:
+            state.status = "error"
+            state.error = {"code": "cloud_timeout", "message": str(e)}
+            jobs_state.write(state)
+            renderer.error(
+                code="cloud_timeout",
+                message=str(e),
+                hint=f"the cloud job went silent for {timeout}s; raise --timeout or watch via `comfy jobs watch {submit.prompt_id} --where cloud`",
+                details={"prompt_id": submit.prompt_id},
+            )
+            raise typer.Exit(code=1) from e
+        except Unauthenticated as e:
+            state.status = "error"
+            state.error = {"code": "cloud_unauthorized", "message": str(e)}
+            jobs_state.write(state)
+            renderer.error(code="cloud_unauthorized", message=str(e), hint="run: comfy cloud login")
+            raise typer.Exit(code=1) from e
+        except HTTPError as e:
+            state.status = "error"
+            state.error = {"code": "cloud_http_error", "message": str(e)}
+            jobs_state.write(state)
+            renderer.error(
+                code="cloud_http_error",
+                message=f"Cloud server error while polling (HTTP {e.status}): {e.message}",
+                details={"status": e.status, "prompt_id": submit.prompt_id},
+            )
+            raise typer.Exit(code=1) from e
+        except KeyboardInterrupt:
+            state.status = "cancelled"
+            jobs_state.write(state)
+            renderer.error(code="cancelled", message="Cancelled by user", exit_code=130)
+            raise typer.Exit(code=130)
 
-    # Determine the terminal status from the record.
-    node_outputs = client.extract_outputs(record)
-    output_urls = [o["url"] for o in node_outputs]
-    exec_status = record.get("status") or record.get("execution_status") or {}
-    if isinstance(exec_status, dict):
-        status_str = exec_status.get("status_str", "")
-    else:
-        status_str = str(exec_status).lower()
+        # Determine the terminal status from the record.
+        node_outputs = client.extract_outputs(record)
+        output_urls = [o["url"] for o in node_outputs]
+        exec_status = record.get("status") or record.get("execution_status") or {}
+        if isinstance(exec_status, dict):
+            status_str = exec_status.get("status_str", "")
+        else:
+            status_str = str(exec_status).lower()
 
-    if status_str in ("error", "failed"):
-        verdict = execution_errors.classify(record.get("error_message") or status_str)
-        state.status = "error"
-        state.error = {
-            "code": verdict["code"],
-            "message": verdict["message"],
-            "details": verdict["details"],
-        }
-        state_file = jobs_state.write(state)
-        renderer.error(
-            code=verdict["code"],
-            message=verdict["message"],
-            hint=verdict["hint"],
-            details={"prompt_id": submit.prompt_id, "status": status_str, **verdict["details"]},
-        )
-        raise typer.Exit(code=1)
-
-    # Success path.
-    state.status = "completed"
-    state.outputs = output_urls
-    # Stash the full node-keyed history record for downstream consumers
-    # (grouped outputs, item-named downloads).
-    state.record = record
-    state_file = jobs_state.write(state)
-
-    end = time.time()
-
-    # Silent-partial-execution guard: the cloud prunes branches that fail
-    # server-side validation and still reports `completed`. Diff the output
-    # nodes we submitted against the ones that actually returned outputs so a
-    # vanished branch surfaces instead of passing as a clean success.
-    warnings: list[dict] = []
-    submitted_outputs = _count_output_nodes(parsed_workflow, cloud_object_info)
-    returned_outputs = _returned_output_node_count(record)
-    if submitted_outputs is not None and returned_outputs < submitted_outputs:
-        warnings.append(
-            {
-                "code": "partial_execution",
-                "message": (
-                    f"submitted {submitted_outputs} output node(s) but the cloud returned outputs "
-                    f"for only {returned_outputs}; {submitted_outputs - returned_outputs} branch(es) "
-                    "were pruned server-side (likely failed validation) and produced nothing"
-                ),
-                "submitted_output_nodes": submitted_outputs,
-                "returned_output_nodes": returned_outputs,
+        if status_str in ("error", "failed"):
+            verdict = execution_errors.classify(record.get("error_message") or status_str)
+            state.status = "error"
+            state.error = {
+                "code": verdict["code"],
+                "message": verdict["message"],
+                "details": verdict["details"],
             }
+            state_file = jobs_state.write(state)
+            renderer.error(
+                code=verdict["code"],
+                message=verdict["message"],
+                hint=verdict["hint"],
+                details={"prompt_id": submit.prompt_id, "status": status_str, **verdict["details"]},
+            )
+            raise typer.Exit(code=1)
+
+        # Success path.
+        state.status = "completed"
+        state.outputs = output_urls
+        # Stash the full node-keyed history record for downstream consumers
+        # (grouped outputs, item-named downloads).
+        state.record = record
+        state_file = jobs_state.write(state)
+
+        end = time.time()
+
+        # Silent-partial-execution guard: the cloud prunes branches that fail
+        # server-side validation and still reports `completed`. Diff the output
+        # nodes we submitted against the ones that actually returned outputs so a
+        # vanished branch surfaces instead of passing as a clean success.
+        warnings: list[dict] = []
+        submitted_outputs = _count_output_nodes(parsed_workflow, cloud_object_info)
+        returned_outputs = _returned_output_node_count(record)
+        if submitted_outputs is not None and returned_outputs < submitted_outputs:
+            warnings.append(
+                {
+                    "code": "partial_execution",
+                    "message": (
+                        f"submitted {submitted_outputs} output node(s) but the cloud returned outputs "
+                        f"for only {returned_outputs}; {submitted_outputs - returned_outputs} branch(es) "
+                        "were pruned server-side (likely failed validation) and produced nothing"
+                    ),
+                    "submitted_output_nodes": submitted_outputs,
+                    "returned_output_nodes": returned_outputs,
+                }
+            )
+
+        if renderer.is_pretty():
+            if output_urls:
+                pprint("[bold green]\nOutputs:[/bold green]")
+                for u in output_urls:
+                    pprint(sanitize_markup(u))
+            for w in warnings:
+                pprint(f"[yellow]⚠ {sanitize_markup(w['message'])}[/yellow]")
+            pprint(f"[bold green]\nCloud workflow completed ({timedelta(seconds=end - start)})[/bold green]")
+
+        # Grouped views of the same artifacts: by producing node always, and by
+        # blueprint foreach item when compose stashed an item_map at submit.
+        outputs_by_node, outputs_by_item = _group_outputs(node_outputs, state.item_map)
+
+        renderer.emit(
+            {
+                "workflow": workflow_name,
+                "status": state.status,
+                "prompt_id": submit.prompt_id,
+                "client_id": client_id,
+                "outputs": output_urls,
+                "outputs_by_node": outputs_by_node,
+                "outputs_by_item": outputs_by_item,
+                "warnings": warnings,
+                "elapsed_seconds": end - start,
+                "base_url": target.base_url,
+                "state_file": str(state_file) if state_file else None,
+            },
+            command="run",
+            where="cloud",
         )
-
-    if renderer.is_pretty():
-        if output_urls:
-            pprint("[bold green]\nOutputs:[/bold green]")
-            for u in output_urls:
-                pprint(sanitize_markup(u))
-        for w in warnings:
-            pprint(f"[yellow]⚠ {sanitize_markup(w['message'])}[/yellow]")
-        pprint(f"[bold green]\nCloud workflow completed ({timedelta(seconds=end - start)})[/bold green]")
-
-    # Grouped views of the same artifacts: by producing node always, and by
-    # blueprint foreach item when compose stashed an item_map at submit.
-    outputs_by_node, outputs_by_item = _group_outputs(node_outputs, state.item_map)
-
-    renderer.emit(
-        {
-            "workflow": workflow_name,
-            "status": state.status,
-            "prompt_id": submit.prompt_id,
-            "client_id": client_id,
-            "outputs": output_urls,
-            "outputs_by_node": outputs_by_node,
-            "outputs_by_item": outputs_by_item,
-            "warnings": warnings,
-            "elapsed_seconds": end - start,
-            "base_url": target.base_url,
-            "state_file": str(state_file) if state_file else None,
-        },
-        command="run",
-        where="cloud",
-    )
+    except BaseException:
+        jobs_state.clear_watcher_identity(state)
+        raise

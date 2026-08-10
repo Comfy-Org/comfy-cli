@@ -896,9 +896,14 @@ def test_reap_finalizes_nonterminal_record_with_dead_watcher_pid(monkeypatch):
     # A real process that is provably gone: spawn, capture its create_time
     # while alive, then terminate and reap it.
     p = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
-    create_time = psutil.Process(p.pid).create_time()
-    p.terminate()
-    p.wait()
+    try:
+        create_time = psutil.Process(p.pid).create_time()
+    finally:
+        # In `finally` so a create_time() failure can't leave a 30s sleeper
+        # behind for the rest of the suite.
+        if p.poll() is None:
+            p.terminate()
+        p.wait(timeout=10)
 
     state_dir = jobs_state.state_dir()
     _write_state(
@@ -941,6 +946,47 @@ def test_reap_leaves_nonterminal_record_without_pid_alone(monkeypatch):
     orphans = jobs_mod._gather_local_state_files(limit=100, orphaned_only=True)
     assert "wait-timed-out" not in {r.prompt_id for r in orphans}
     assert jobs_state.read("wait-timed-out").status == "running"
+
+
+def test_reap_reread_yields_to_a_writer_that_finished_first(monkeypatch):
+    """The reap's read → liveness-probe → write is not atomic, and `--wait`
+    runs now stamp their foreground pid, so an ordinary `comfy run --wait`
+    finishing normally can land its terminal `completed` write (outputs and
+    all) inside that window — every `jobs ls --watch` refresh tick re-runs the
+    scan. The write must re-derive its verdict from a re-read under the lock,
+    or it clobbers that result with a generic `watcher_crashed`."""
+    from comfy_cli import jobs_state
+
+    state_dir = jobs_state.state_dir()
+    _write_state(state_dir, "raced-record", status="running", watcher_pid=999_999)
+
+    # No live process behind the pid, so the snapshot check says "reap it".
+    monkeypatch.setattr(jobs_mod, "_is_watcher_alive", lambda state: False)
+
+    real_locked = jobs_state.locked
+
+    def _locked_after_writer_wins(prompt_id):
+        # Stand-in for the racing `--wait` process: its terminal write lands
+        # between our liveness probe and our own write.
+        if prompt_id == "raced-record":
+            winner = jobs_state.read("raced-record")
+            winner.status = "completed"
+            winner.outputs = ["out.png"]
+            winner.watcher_pid = None
+            jobs_state.write(winner)
+        return real_locked(prompt_id)
+
+    monkeypatch.setattr(jobs_state, "locked", _locked_after_writer_wins)
+
+    rows = jobs_mod._gather_local_state_files(limit=100)
+    row = next(r for r in rows if r.prompt_id == "raced-record")
+    assert row.status == "completed", "the reap overwrote a verdict that landed first"
+    assert row.error_code is None
+    assert row.outputs == 1
+
+    final = jobs_state.read("raced-record")
+    assert final.status == "completed"
+    assert final.outputs == ["out.png"]
 
 
 def _command_flags(*path: str) -> list[str]:

@@ -327,11 +327,21 @@ stamps its own `watcher_pid` (+ start time) on the submit-time record: the next
 `jobs ls` finds a non-terminal record whose recorded pid is dead, and its
 stale-watcher reap finalizes the job as `error` with `error_code:
 "watcher_crashed"` — the same treatment a crashed background watcher gets — and
-`jobs ls --orphaned` lists it. One exception keeps a live job safe: when
-`--wait` gives up on its *own* `--timeout` (`ws_timeout`), the job may genuinely
-still be running server-side, so the record stays `running` and the pid stamp is
-cleared — the reap never touches it, and `comfy jobs status <prompt_id>` can
-still consult the server.
+`jobs ls --orphaned` lists it. The stamp is dropped again on the exits where
+the job may genuinely still be alive on the server, so the reap can't claim a
+crash the CLI hasn't established: when local `--wait` gives up on its *own*
+`--timeout` (`ws_timeout`), and when cloud `--wait` dies on a network error
+that escapes its handlers (a DNS failure or connection reset while polling, as
+opposed to the handled `cloud_timeout` / `cloud_unauthorized` /
+`cloud_http_error` exits, which record a terminal verdict of their own). In
+both cases the record is left non-terminal with no pid, the reap never touches
+it, and `comfy jobs status <prompt_id>` can still consult the server for the
+real outcome.
+
+The reap itself never overwrites a verdict that landed first: it re-reads each
+record under that record's lock before rewriting it, so a `--wait` run
+finishing normally in the same instant keeps its `completed` status and its
+outputs.
 
 What the reap cannot tell you is *why* the process died, or what happened to the
 job afterwards — `watcher_crashed` records the watcher's death, not the job's

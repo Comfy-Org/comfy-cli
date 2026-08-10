@@ -337,21 +337,46 @@ def _gather_local_state_files(*, limit: int, orphaned_only: bool = False, where:
         # Reap stale watchers: if the job is non-terminal and the watcher
         # PID is recorded but dead, mark the job as errored so it doesn't
         # sit as "running" forever.
+        #
+        # The verdict is re-derived from a re-read INSIDE the record's own
+        # lock, because everything above is a snapshot and this scan races
+        # live writers: `run --wait` now stamps its foreground pid too, so the
+        # window between the liveness probe and this write is one an ordinary
+        # `comfy run --wait` finishing normally can land its terminal
+        # `completed` write in — and `jobs ls --watch` re-runs the whole scan
+        # every refresh tick. Writing the snapshot back unconditionally would
+        # overwrite that verdict, and the outputs recorded with it, with a
+        # generic `watcher_crashed`.
         if (
             not state.is_terminal
             and state.watcher_pid is not None
             and state.watcher_pid > 0
             and not _is_watcher_alive(state)
         ):
-            state.status = "error"
-            state.error = {
-                "code": "watcher_crashed",
-                "message": f"Background watcher (pid {state.watcher_pid}) is no longer running.",
-                "hint": "re-submit the workflow, or check `comfy jobs status <id>` against the server",
-            }
-            state.watcher_pid = None
-            state.watcher_pid_create_time = None
-            jobs_state.write(state)
+            # Keyed on the filename, not `state.prompt_id`: the stem is what
+            # was read (and is already filter-validated above), so a record
+            # whose stored id disagrees with its file can't send the lock and
+            # the re-read to a different record than the one being reaped.
+            with jobs_state.locked(path.stem) as fresh:
+                if fresh is not None:
+                    if (
+                        not fresh.is_terminal
+                        and fresh.watcher_pid is not None
+                        and fresh.watcher_pid > 0
+                        and not _is_watcher_alive(fresh)
+                    ):
+                        fresh.status = "error"
+                        fresh.error = {
+                            "code": "watcher_crashed",
+                            "message": f"Background watcher (pid {fresh.watcher_pid}) is no longer running.",
+                            "hint": "re-submit the workflow, or check `comfy jobs status <id>` against the server",
+                        }
+                        fresh.watcher_pid = None
+                        fresh.watcher_pid_create_time = None
+                        jobs_state.write(fresh)
+                    # Report what is actually on disk either way — whether we
+                    # reaped it or the writer we raced beat us to a verdict.
+                    state = fresh
         # Scope to the resolved --where target. Done *after* the stale-watcher
         # reap above so cleanup stays where-agnostic no matter which view the
         # caller asked for.
