@@ -25,7 +25,6 @@ from comfy_cli.file_utils import (
 )
 from comfy_cli.output import get_renderer
 from comfy_cli.output import rprint as print  # context-aware: stderr in JSON mode
-from comfy_cli.output.renderer import get_renderer
 from comfy_cli.registry import (
     RegistryAPI,
     RegistryAPIError,
