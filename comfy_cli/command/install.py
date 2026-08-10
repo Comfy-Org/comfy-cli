@@ -30,12 +30,6 @@ workspace_manager = WorkspaceManager()
 console = Console()
 
 
-def get_os_details():
-    os_name = platform.system()  # e.g., Linux, Darwin (macOS), Windows
-    os_version = platform.release()
-    return os_name, os_version
-
-
 def _pip_install_torch(python: str, index_args: list[str]) -> subprocess.CompletedProcess:
     """Install torch, torchvision, and torchaudio with the given index arguments."""
     return subprocess.run(

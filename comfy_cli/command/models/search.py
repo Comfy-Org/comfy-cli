@@ -16,10 +16,11 @@ ride along when present.
 
 Local-mode caveats:
   * ``/models/<folder>`` returns ``[{name, pathIndex}, ...]`` — filenames only,
-    no enrichment. ``search`` on local degrades to a filename substring match:
-    without ``--type`` it walks *every* folder reported by ``/models`` (so a
+    no enrichment. ``search`` on local degrades to a filename match: without
+    ``--type`` it walks *every* folder reported by ``/models`` (so a
     diffusion_models/vae/lora file is findable by name), and ``--type`` scopes
-    the walk to that single folder.
+    the walk to that single folder. ``--text`` is token-AND and
+    separator-insensitive there (see ``_name_matches``).
   * The cloud asset catalog (``/api/assets``) has no local equivalent —
     local search is intentionally simpler.
 """
@@ -27,6 +28,7 @@ Local-mode caveats:
 from __future__ import annotations
 
 import json
+import re
 import urllib.error
 import urllib.parse
 from typing import Annotated, Any, NoReturn
@@ -34,7 +36,7 @@ from typing import Annotated, Any, NoReturn
 import typer
 
 from comfy_cli import tracking
-from comfy_cli.http import authed_urlopen
+from comfy_cli.http import ResponseTooLarge
 from comfy_cli.output import get_renderer, rprint
 from comfy_cli.output.sanitize import sanitize_markup
 
@@ -143,16 +145,17 @@ def _http_get_json(url: str, target, timeout: float = 30.0) -> Any:
     """Issue an authenticated GET and decode JSON. Raises urllib/JSON errors verbatim.
 
     Response body is capped at ``_MAX_RESPONSE_BYTES`` to bound memory use on a
-    misbehaving server. A ``ValueError`` is raised if the cap is exceeded.
+    misbehaving server; exceeding it raises ``ResponseTooLarge``, which every
+    caller routes to an envelope error alongside the urllib/JSON families.
     """
-    with authed_urlopen(url, target, timeout=timeout) as resp:
-        # ``read(N)`` returns up to N bytes; reading N+1 lets us distinguish
-        # "fits exactly" from "exceeds cap" without buffering the whole stream
-        # twice on the happy path.
-        body = resp.read(_MAX_RESPONSE_BYTES + 1)
-        if len(body) > _MAX_RESPONSE_BYTES:
-            raise ValueError(f"response from {url} exceeds {_MAX_RESPONSE_BYTES} byte cap")
-        return json.loads(body)
+    from comfy_cli.http import request_json
+
+    _, body = request_json(url, target, timeout=timeout, max_bytes=_MAX_RESPONSE_BYTES)
+    if body is None:
+        # Callers route JSONDecodeError to an envelope error; an empty or
+        # unparseable body must surface the same way, not crash on body.get().
+        raise json.JSONDecodeError("empty or unparseable response body", "", 0)
+    return body
 
 
 def _emit_http_error(e: urllib.error.HTTPError, *, renderer, target, message: str, hint: str) -> NoReturn:
@@ -208,7 +211,7 @@ def list_folders_cmd(
             if target.is_cloud
             else "run `comfy launch` to start a local server",
         )
-    except (urllib.error.URLError, OSError, json.JSONDecodeError) as e:
+    except (urllib.error.URLError, OSError, json.JSONDecodeError, ResponseTooLarge) as e:
         renderer.error(
             code="server_not_running" if not target.is_cloud else "cloud_http_error",
             message=f"failed to fetch {url}: {e}",
@@ -301,7 +304,7 @@ def list_folder_cmd(
                 details={"status": e.code, "folder": folder},
             )
         raise typer.Exit(code=1) from e
-    except (urllib.error.URLError, OSError, json.JSONDecodeError) as e:
+    except (urllib.error.URLError, OSError, json.JSONDecodeError, ResponseTooLarge) as e:
         renderer.error(
             code="cloud_http_error" if target.is_cloud else "server_not_running",
             message=f"failed to fetch {url}: {e}",
@@ -425,6 +428,11 @@ def _cloud_search(
     qs = urllib.parse.urlencode(params)
     url = target.url("assets") + "?" + qs
     body = _http_get_json(url, target)
+    if not isinstance(body, dict):
+        # Callers route JSONDecodeError to an envelope error; a non-object
+        # top-level body (list/scalar) must surface the same way, not crash
+        # on body.get().
+        raise json.JSONDecodeError(f"unexpected response shape (not an object) from {url}", "", 0)
     assets = body.get("assets") or []
     rows = [_asset_to_row(a) for a in assets if isinstance(a, dict)]
     return rows, int(body.get("total") or len(rows))
@@ -452,6 +460,66 @@ def _local_folder_names(target) -> list[str]:
     return names
 
 
+# Characters that separate the "words" of a model filename. Model files are
+# named with any of them, inconsistently, in the same catalog:
+# `sd_xl_base_1.0.safetensors`, `flux1-dev.safetensors`, `ltx-video-2b-v0.9`.
+_NAME_SEPARATORS = re.compile(r"[-_. ]+")
+
+
+def _search_tokens(text: str | None) -> list[tuple[str, str]] | None:
+    """Split ``--text`` into ``(token, separator-squashed token)`` pairs.
+
+    Returns ``None`` when there is no filter at all — ``--text`` omitted, or
+    the falsy ``--text ""``. That is the list-everything case, and it matches
+    what the cloud branch does with the same input (``if text:`` is false, so
+    no ``name_contains`` is sent).
+
+    Returns an *empty list* when ``--text`` was given but held nothing
+    matchable: whitespace only, or tokens that are purely separators. Those
+    are a filter nothing satisfies, not the absence of a filter — a token that
+    squashes to ``""`` is a substring of every name, so keeping it would turn
+    ``--text "."`` into a wildcard, and testing it raw would make it one
+    anyway (every name with an extension contains ``.``). Dropping such tokens
+    also stops a stray separator in a real query (``--text "sd - xl"``) from
+    ANDing in a literal ``-`` that ``sd_xl_base_1.0.safetensors`` fails.
+    """
+    if not text:
+        return None
+    tokens = []
+    for t in text.lower().split():
+        t_squashed = _NAME_SEPARATORS.sub("", t)
+        if t_squashed:
+            tokens.append((t, t_squashed))
+    return tokens
+
+
+def _name_matches(name: str, tokens: list[tuple[str, str]] | None) -> bool:
+    """Token-AND, separator-insensitive filename match.
+
+    Every whitespace-separated token of the query must be present, in any
+    order, either in the raw lowercased filename or in the filename with
+    ``- _ . space`` runs squashed out. The squashed pass is what lets
+    ``--text "sdxl base"`` find ``sd_xl_base_1.0.safetensors``: real model
+    filenames put separators wherever the uploader felt like it, so a
+    whole-string contiguous substring test (what this used to be) could not
+    match a multi-word query at all.
+
+    The token is squashed too, so the match is symmetric — ``sd-xl``,
+    ``sd_xl`` and ``sdxl`` all find the same file.
+
+    ``tokens`` carries the two no-token cases apart, per ``_search_tokens``:
+    ``None`` is "no filter" (everything matches), ``[]`` is "a filter nothing
+    can satisfy" (nothing matches).
+    """
+    if tokens is None:
+        return True
+    if not tokens:
+        return False
+    name_l = name.lower()
+    name_squashed = _NAME_SEPARATORS.sub("", name_l)
+    return all(t in name_l or t_squashed in name_squashed for t, t_squashed in tokens)
+
+
 def _local_folder_matches(target, folder: str, *, text: str | None) -> list[dict[str, Any]]:
     """Rows for one ``/models/<folder>`` listing, client-side filtered by ``text``.
 
@@ -459,6 +527,7 @@ def _local_folder_matches(target, folder: str, *, text: str | None) -> list[dict
     non-ASCII characters resolve correctly; the emitted rows carry the decoded
     name so ``type``/``tags`` stay human-readable.
     """
+    tokens = _search_tokens(text)
     segment = urllib.parse.quote(folder, safe="")
     data = _http_get_json(target.url(*_models_path_parts(target), segment), target)
     rows: list[dict[str, Any]] = []
@@ -471,7 +540,7 @@ def _local_folder_matches(target, folder: str, *, text: str | None) -> list[dict
             # normalizer does.
             if not isinstance(name, str) or not name:
                 continue
-            if text and text.lower() not in name.lower():
+            if not _name_matches(name, tokens):
                 continue
             rows.append(
                 {
@@ -540,7 +609,7 @@ def _local_search(
     "search",
     help=(
         "Search models. Cloud: enriched via /api/assets. "
-        "Local: filename substring across every /models folder (--type scopes it to one)."
+        "Local: filename match across every /models folder (--type scopes it to one)."
     ),
 )
 @tracking.track_command("models")
@@ -548,7 +617,13 @@ def search_cmd(
     text: Annotated[
         str | None,
         typer.Option(
-            "--text", "-t", show_default=False, help="Substring on the model name (case-insensitive on cloud)."
+            "--text",
+            "-t",
+            show_default=False,
+            help=(
+                "Match the model name (case-insensitive). Cloud: substring. "
+                "Local: every word must appear, in any order, ignoring - _ . separators."
+            ),
         ),
     ] = None,
     type_: Annotated[
@@ -591,7 +666,7 @@ def search_cmd(
             message=f"HTTP {e.code} during models search",
             hint="check auth (`comfy cloud whoami`) or network",
         )
-    except (urllib.error.URLError, OSError, json.JSONDecodeError) as e:
+    except (urllib.error.URLError, OSError, json.JSONDecodeError, ResponseTooLarge) as e:
         renderer.error(
             code="cloud_http_error" if target.is_cloud else "server_not_running",
             message=f"models search failed: {e}",
@@ -674,6 +749,8 @@ def show_cmd(
         url = target.url("assets") + "?" + qs
         try:
             body = _http_get_json(url, target)
+            if not isinstance(body, dict):
+                raise json.JSONDecodeError(f"unexpected response shape (not an object) from {url}", "", 0)
         except urllib.error.HTTPError as e:
             renderer.error(
                 code="cloud_http_error",
@@ -682,7 +759,7 @@ def show_cmd(
                 details={"status": e.code},
             )
             raise typer.Exit(code=1) from e
-        except (urllib.error.URLError, OSError, json.JSONDecodeError) as e:
+        except (urllib.error.URLError, OSError, json.JSONDecodeError, ResponseTooLarge) as e:
             renderer.error(code="cloud_http_error", message=f"models show failed: {e}")
             raise typer.Exit(code=1) from e
 

@@ -5,7 +5,6 @@ Module for utility functions.
 import functools
 import platform
 import shutil
-import subprocess
 import tarfile
 from contextlib import contextmanager
 from pathlib import Path
@@ -13,7 +12,6 @@ from typing import BinaryIO, cast
 
 import psutil
 import requests
-import typer
 from rich import progress
 from rich.live import Live
 from rich.table import Table
@@ -69,15 +67,6 @@ def get_proc():
         return PROC.ARM
     else:
         raise ValueError
-
-
-def install_conda_package(package_name):
-    try:
-        subprocess.check_call(["conda", "install", "-y", package_name])
-        print(f"[bold green] Successfully installed {package_name} [/bold green]")
-    except subprocess.CalledProcessError as e:
-        print(f"[bold red] Failed to install {package_name}. Error: {e} [/bold red]")
-        raise typer.Exit(code=1)
 
 
 def get_not_user_set_default_workspace():

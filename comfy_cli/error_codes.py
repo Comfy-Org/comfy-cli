@@ -79,6 +79,17 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "`comfy stop` could not kill the recorded background ComfyUI process. `details.pid` carries the process id.",
         "kill the process manually if it is still running",
     ),
+    ErrorCode(
+        "port_not_listening",
+        "`comfy stop --port <p>` found no process LISTENing on that port. `details.port` carries the port.",
+        "check the port, or run `comfy stop` to stop the server this CLI started",
+    ),
+    ErrorCode(
+        "unverified_process",
+        "`comfy stop --port <p>` found a listener it could not positively identify as ComfyUI, so it "
+        "refused to stop it. `details` carries the pid, whatever cmdline was readable, and the reason.",
+        "confirm what is on that port and stop it yourself if it really is ComfyUI",
+    ),
     # --- workflow loading ----------------------------------------------------
     ErrorCode(
         "workflow_not_found",
@@ -178,7 +189,15 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ),
     ErrorCode(
         "prompt_not_found",
-        "Asked about a prompt_id the server doesn't know.",
+        "Asked about a prompt_id the server doesn't know. `comfy jobs status` only reports this once the "
+        "local state file has been checked too — and only a file that names this same prompt on this same "
+        "target counts, so a cloud job or another local instance's job is never the answer here (when it "
+        "is a cloud one, `hint` redirects to `--where cloud`). If that file holds a terminal verdict (e.g. "
+        "the job died with an earlier server) AND the live server confirmed it has no record, the verdict "
+        "is returned as a normal result instead. When a matching file exists but that pair does not hold — "
+        "the record is non-terminal, or `/queue` and `/history` did not answer — `details` carries "
+        "`last_known_status`, `submitted_at`, `updated_at`, `workflow`, and `server_confirmed_no_record` "
+        "(false means the absence is unverified, so it is not the job's outcome).",
         "`comfy jobs ls` to find a valid prompt_id",
     ),
     ErrorCode(
@@ -200,6 +219,16 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "`comfy run --prompt`/`--set` could not load the bundled default text2img graph "
         "(missing or corrupt package data). A packaging fault, not user input.",
         "reinstall comfy-cli",
+    ),
+    ErrorCode(
+        "no_checkpoint_available",
+        "`comfy run --prompt`/`--set` (bundled default text2img) needs a checkpoint, but the "
+        "target positively enumerated ZERO installed checkpoints. Only raised when object_info "
+        "was fetched and its checkpoint list is empty — never when object_info couldn't be fetched "
+        "(that path fails open and submits).",
+        "install a checkpoint (local: `comfy model download --url <checkpoint-url>`; cloud: run a "
+        "published gallery template, which provisions models), then re-run — or `--set "
+        "checkpoint=<name>` once one is available",
     ),
     ErrorCode(
         "conversion_error",
@@ -227,6 +256,13 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "check your network connection and try again",
     ),
     ErrorCode(
+        "gallery_cache_write_failed",
+        "The gallery index was fetched but could not be written to the local cache. "
+        "Only `comfy templates refresh` raises this — for `templates ls/show/fetch` "
+        "a cache-write failure is non-fatal, since the data is already in hand.",
+        "check permissions and free space on the cache directory",
+    ),
+    ErrorCode(
         "workflow_unknown_nodes",
         "Workflow references class_type(s) not present in the server's object_info. "
         "`details.unknown_nodes` lists each with close_matches.",
@@ -237,6 +273,26 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "where_invalid",
         "`--where` value was neither `local` nor `cloud`.",
         "use `--where local` or `--where cloud`",
+    ),
+    ErrorCode(
+        "host_port_invalid",
+        "`--host`/`--port` (or a combined `--host host:port`) failed validation before any server "
+        "contact; the process exits 2 (usage error). The rejected value is usually a flag, but the "
+        "same check also covers the host recorded in `config.background`, so a corrupted background "
+        "record trips it with no bad flag passed. Click also writes its usual usage message to "
+        "stderr — this envelope exists so JSON/NDJSON consumers still get a parseable final line.",
+        "pass `--host <hostname-or-ip>` and `--port 1-65535`; if you passed neither, the saved "
+        "background server is bad — clear it with `comfy stop`",
+    ),
+    ErrorCode(
+        "host_flag_cloud",
+        "`--host`/`--port` were combined with an effective `cloud` target. They address a local "
+        "ComfyUI only; the cloud address comes from the signed-in account. `details` carries the "
+        "offending host/port, the resolved `where`, and the `where_source` that produced it "
+        "(`flag`, `env`, `project`, `config`, or `auto`) — the target may never have been "
+        "explicitly requested.",
+        "pass `--where local` to aim at a local server; to reach a different cloud address set "
+        "`COMFY_CLOUD_BASE_URL` or run `comfy cloud set-base-url`",
     ),
     ErrorCode(
         "cloud_not_configured",
@@ -353,11 +409,6 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "oauth_refresh_failed",
         "OAuth token refresh failed.",
         "run `comfy cloud login` to sign in again",
-    ),
-    ErrorCode(
-        "oauth_cancelled",
-        "OAuth flow was cancelled by the user.",
-        "re-run `comfy cloud login` to retry sign-in",
     ),
     ErrorCode(
         "oauth_timeout",
@@ -562,6 +613,13 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "Requested node class isn't in the loaded environment.",
         "see `details.close_matches` or run `comfy nodes search`",
     ),
+    ErrorCode(
+        "path_bounds_invalid",
+        "`comfy nodes path` was given `--max-depth` or `--max-paths` below 1. Such a bound admits no "
+        "path at all, so the search is refused rather than returning an empty result that would read "
+        "as a proof that no route exists.",
+        "use `--max-depth 6 --max-paths 10` (or any bound >= 1)",
+    ),
     # --- file transfer (upload / download) -----------------------------------
     ErrorCode(
         "upload_failed",
@@ -733,6 +791,15 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "run `comfy update comfy --version <version>`",
     ),
     ErrorCode(
+        "update_custom_nodes_failed",
+        "`comfy update all --exit-on-fail` ran `cm-cli update all` and it exited non-zero. "
+        "The update is not atomic, so some packs may have updated before the failure; "
+        "`details.cm_cli_returncode` carries cm-cli's raw status (the process exit code is "
+        "normalized — signals become 128+N, and 2 becomes 1 so it can't be confused with a "
+        "CLI usage error).",
+        "read the cm-cli output above for the failing pack, then re-run `comfy update all`",
+    ),
+    ErrorCode(
         "version_switch_unknown_version",
         "`comfy update comfy --version X` could not resolve X to a ComfyUI tag; the workspace was left untouched.",
         "run `git tag --list 'v*'` in your ComfyUI workspace to see every available version",
@@ -758,6 +825,17 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "`comfy feedback` was run in JSON/non-interactive mode without an inline message.",
         'comfy feedback "your feedback here"',
     ),
+    # --- custom node install (`comfy node install`) ---------------------------
+    ErrorCode(
+        "node_install_failed",
+        "`comfy node install --exit-on-fail` failed: `cm-cli install` exited non-zero "
+        '(`details.failed_stage` == "cm-cli", raw status in `details.cm_cli_returncode`) or, '
+        "with --fast-deps, the follow-up dependency install failed after the packs installed "
+        '(`details.failed_stage` == "dependency-install", raw status in `details.returncode`). '
+        "The process exit code is normalized — signals become 128+N, and any status whose low "
+        "byte is 0 or 2 becomes 1 so it can't read as success or a CLI usage error.",
+        "read the output above for the failing pack or dependency, then re-run `comfy node install --exit-on-fail`",
+    ),
     # --- custom node dependency report (`comfy node deps`) --------------------
     ErrorCode(
         "installed_versions_unavailable",
@@ -773,6 +851,45 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "the unreadable file's requirements. Surfaced in `data.warnings[]` (not as an error envelope) so the "
         "rest of the report still succeeds.",
         "check the file's permissions under `custom_nodes/<pack>/`",
+    ),
+    ErrorCode(
+        "registry_unavailable",
+        "`comfy node deps --registry <node-id>` could not reach the Comfy registry (network failure, timeout, "
+        "or a non-200 response), so that candidate's row carries `declared: null` plus a per-entry `warning`. "
+        "Surfaced in `data.warnings[]` (not as an error envelope): every other pack still reports normally.",
+        "check network access to api.comfy.org, then re-run (add `--refresh` to bypass the 1h cache)",
+    ),
+    ErrorCode(
+        "registry_invalid_node_id",
+        "A `comfy node deps --registry <node-id>` value was blank or contained characters outside "
+        "`[A-Za-z0-9._-]`, so it was rejected without a network call. Registry ids never contain `/`, `?` "
+        "or `#`; interpolated into the lookup URL those would retarget the request at a different path "
+        "(including the side-effecting install endpoint) or inject a query string. "
+        "Surfaced in `data.warnings[]`: the other `--registry` ids still report normally.",
+        "pass the pack's registry id as shown by `comfy node registry-list` (e.g. `comfyui-example`), "
+        "not a URL, an `owner/repo` path, or a local directory name",
+    ),
+    ErrorCode(
+        "registry_node_not_found",
+        "`comfy node deps --registry <node-id>` reached the Comfy registry, which reported no such node "
+        "(HTTP 404) — a misspelled id, or a pack that was never published to the registry. Distinct from "
+        "`registry_unavailable`: retrying or `--refresh` will never resolve it. Surfaced in `data.warnings[]`.",
+        "check the id with `comfy node registry-list`; an unpublished pack has no registry metadata, so "
+        "install it and re-run `comfy node deps` to read its requirements from disk instead",
+    ),
+    ErrorCode(
+        "registry_partial_dependency_metadata",
+        "`comfy node deps --registry <node-id>` got a dependency list from the registry containing "
+        "non-string entries (e.g. `null`), which were dropped. The row's `declared` list is therefore "
+        "incomplete — a dropped entry that would have conflicted is not reported. Surfaced in `data.warnings[]`.",
+        "treat that row as partial; read the pack's own `requirements.txt` upstream to confirm the full set",
+    ),
+    ErrorCode(
+        "registry_no_dependency_metadata",
+        "`comfy node deps --registry <node-id>` reached the registry, but it published no dependency metadata "
+        "for that pack's latest version, so the row carries `declared: null` rather than an empty list — the "
+        'API cannot distinguish "declares nothing" from "field absent". Surfaced in `data.warnings[]`.',
+        "the pack publisher must publish a version declaring its dependencies; nothing to fix locally",
     ),
 )
 

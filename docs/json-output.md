@@ -20,6 +20,26 @@ flag switches the process-wide renderer into NDJSON streaming mode. The same
 event names are used by `comfy jobs watch` in stream mode, so the run stream
 and the watch stream speak one dialect.
 
+## `jobs watch` attaches as the submitting session
+
+A local ComfyUI server does **not** broadcast execution events: it addresses
+`executing` / `executed` / `progress_state` / `execution_cached` /
+`execution_success` to the websocket session that submitted the prompt. So
+`comfy jobs watch <prompt_id>` resolves that prompt's `client_id` — from the job
+state file `comfy run` wrote, else `/queue`, else `/history` — and reconnects
+under it; the terminal envelope reports which id it used (`data.client_id`) and
+whether it was the real submitter (`data.attached`). Use `--client-id` to force a
+specific one. Both keys are present on *every* `jobs watch` terminal envelope: a
+watch of an already-finished prompt short-circuits without opening a socket, and
+reports `client_id: null` / `attached: false`. Reconnecting under an existing id
+is ComfyUI's own session-resume path, so a submitter that is *still* holding that
+socket (an open browser tab, a blocking `comfy run`) stops receiving events until
+it reconnects.
+
+`data.completed_nodes` on the terminal envelope does not depend on the stream: it
+is the union of what the watch observed and what `/history` records for the
+prompt, so it is populated even for a watch that attached after the job ended.
+
 ## Overview
 
 When `--json` is passed, `comfy run` switches into a strict
@@ -309,6 +329,54 @@ Without `--wait` (the default), the stream ends at the `queued` envelope
 watcher keeps the state file updated; follow up with
 `comfy jobs watch <prompt_id>` or `comfy jobs status <prompt_id>`.
 
+### Known limit: `--wait` has no background watcher
+
+`--wait` writes the job's state file at submit and finalizes it in the
+foreground — it does **not** spawn the detached watcher the async path does
+(`data.watcher_spawned` is an async-path field only). Every ordinary outcome is
+still recorded: a node failure, a cancel, and a lost connection to a dying
+server all run through the foreground handlers, which write `error.code`
+(the classified execution verdict or `execution_error`; `cancelled`;
+`server_died`) before exiting.
+
+A `--wait` process that is **killed from outside** — a caller-imposed timeout
+(`SIGKILL`/`SIGTERM` on the process group), a terminal going away, the OS
+reaping the CLI alongside the server — runs no handler, so the state file is
+left at its submit-time `running`. To cover that, `--wait` (local and cloud)
+stamps its own `watcher_pid` (+ start time) on the submit-time record: the next
+`jobs ls` finds a non-terminal record whose recorded pid is dead, and its
+stale-watcher reap finalizes the job as `error` with `error_code:
+"watcher_crashed"` — the same treatment a crashed background watcher gets — and
+`jobs ls --orphaned` lists it. The stamp is dropped again on the exits where
+the job may genuinely still be alive on the server, so the reap can't claim a
+crash the CLI hasn't established: when local `--wait` gives up on its *own*
+`--timeout` (`ws_timeout`), and when cloud `--wait` dies on a network error
+that escapes its handlers (a DNS failure or connection reset while polling, as
+opposed to the handled `cloud_timeout` / `cloud_unauthorized` /
+`cloud_http_error` exits, which record a terminal verdict of their own). In
+both cases the record is left non-terminal with no pid, the reap never touches
+it, and `comfy jobs status <prompt_id>` can still consult the server for the
+real outcome.
+
+The reap itself never overwrites a verdict that landed first: it re-reads each
+record under that record's lock before rewriting it, so a `--wait` run
+finishing normally in the same instant keeps its `completed` status and its
+outputs.
+
+What the reap cannot tell you is *why* the process died, or what happened to the
+job afterwards — `watcher_crashed` records the watcher's death, not the job's
+outcome. **For runs that may outlive the caller's patience, submit without
+`--wait`** — the async path spawns a watcher that survives the parent (its own
+session/process group), and it is the watcher that writes `server_died` when the
+server disappears mid-job. `comfy jobs ls` then reports both the status and the
+`error_code`.
+
+A watcher is deliberately *not* spawned on `--wait`: it would put a second,
+independent writer on the state file the foreground already finalizes, add a
+second server connection per foreground run, and leave a background process
+behind after a synchronous command returns — a real regression on the common
+path in exchange for a case the async path already covers.
+
 ## `comfy validate --json` envelope
 
 `comfy validate --workflow <file> --json` checks a workflow without submitting
@@ -372,8 +440,8 @@ registry test enforces this) and surfaced by `comfy discover`.
 | `object_info_unavailable` | `/object_info` returned an HTTP error, or HTTP 200 with an unparseable body     | `status` (int), `body` (str)                       | 1 |
 | `connection_error`        | Server unreachable mid-flow: `URLError`, `TimeoutError`, or other `OSError` (including on `/object_info`) | —                       | 1 |
 | `workflow_unknown_nodes`  | Pre-submit validation found unknown class_types / shape mismatches              | `errors` (array), `warnings` (array)               | 1 |
-| `partner_node_requires_credential` | Workflow uses a partner-API node and no `api_key_comfy_org` credential is available | `partner_nodes` (array of str), `host`, `port` | 1 |
-| `spend_consent_required`  | Workflow embeds partner-API (paid) nodes and `--allow-spend` was not passed (machine mode) or interactive consent was declined; re-run with `--allow-spend`. Free (non-partner) workflows are unaffected. | `partner_nodes` (array of str); local path also carries `host`, `port`, the cloud path carries `where: "cloud"` | 1 |
+| `partner_node_requires_credential` | Workflow uses a partner-API node and no `api_key_comfy_org` credential is available | `partner_nodes` (array of str, capped at 20 entries × 64 chars each), `partner_node_count` (int, the exact total — read this, not `len(partner_nodes)`), `host`, `port` | 1 |
+| `spend_consent_required`  | Workflow embeds partner-API (paid) nodes and `--allow-spend` was not passed (machine mode) or interactive consent was declined; re-run with `--allow-spend`. Free (non-partner) workflows are unaffected. | `partner_nodes` (array of str, capped at 20 entries × 64 chars each), `partner_node_count` (int, the exact total — read this, not `len(partner_nodes)`); local path also carries `host`, `port`, the cloud path carries `where: "cloud"` | 1 |
 | `prompt_rejected`         | Server returned HTTP 400 with `node_errors`                                     | `status` (400), `node_errors` (array — [shape](#node_errors-shape)) | 1 |
 | `client_error`            | Server returned another HTTP 4xx response                                       | `status` (int, 4xx), `body` (str)                  | 1 |
 | `server_error`            | Server returned an HTTP 5xx response                                            | `status` (int, 5xx), `body` (str)                  | 1 |

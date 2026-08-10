@@ -1,6 +1,9 @@
 """Tests for the openapi registry — verify the curated image allowlist resolves
 against the vendored spec and classifies each endpoint correctly."""
 
+import pytest
+import yaml
+
 from comfy_cli.command.generate import spec
 
 # A minimal JSON spec body — the shape api.comfy.org/openapi actually serves
@@ -104,6 +107,42 @@ def test_filter_by_partner_and_category():
 def test_proxy_prefix_accepted():
     ep = spec.get_endpoint("/proxy/bfl/flux-pro-1.1/generate")
     assert ep.id == "bfl/flux-pro-1.1/generate"
+
+
+@pytest.mark.parametrize("text", ["1e+16", "1e-07", "-2e+5"])
+def test_pointless_exponent_parses_as_float(text):
+    """Regression (BE-2982): the spec is now fetched as JSON, and `json.dumps`
+    emits exponents without a decimal point for very large/small floats. PyYAML's
+    YAML 1.1 resolver leaves those as strings, which would leak into flag schemas.
+    """
+    assert isinstance(yaml.load(text, Loader=spec._YamlLoader), float)
+
+
+@pytest.mark.parametrize("text", ["3.0.2", "on", "off", "v1e5"])
+def test_float_resolver_does_not_over_match(text):
+    """The added exponent resolver must not swallow version strings or the
+    string enums the spec relies on."""
+    assert isinstance(yaml.load(text, Loader=spec._YamlLoader), str)
+
+
+def test_validate_spec_text_accepts_openapi_mapping():
+    parsed = spec.validate_spec_text('{"openapi": "3.0.2", "paths": {}}')
+    assert parsed["openapi"] == "3.0.2"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "<html><body>Just a moment...</body></html>",  # interstitial → str
+        "[1, 2, 3]",  # JSON array
+        "42",  # JSON scalar
+        '{"foo": 1}',  # mapping, but not an OpenAPI doc
+    ],
+)
+def test_validate_spec_text_rejects_non_spec_bodies(text):
+    """A non-spec 200 must be refused, not cached for the 7-day TTL."""
+    with pytest.raises(spec.SpecError):
+        spec.validate_spec_text(text)
 
 
 # ── model_enum — spec-derived partner model lists ─────────────────────────

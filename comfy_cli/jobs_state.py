@@ -23,6 +23,7 @@ State-file contract (the same shape across local and cloud):
       "outputs": [<url>, ...],
       "error": {"code": "...", "message": "...", "details": {...}} | null,
       "watcher_pid": <int> | null,
+      "watcher_pid_create_time": <float epoch seconds> | null,
       "record": {<full final cloud history record>} | null,
       "item_map": {<item>: {"nodes": [...], "save_node": "...", "prefix": "..."}} | null
     }
@@ -41,13 +42,15 @@ from __future__ import annotations
 import json
 import os
 import re
-import secrets as _secrets
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from comfy_cli import constants, locking
+from comfy_cli.file_utils import atomic_write_text
 from comfy_cli.utils import get_os
 
 TERMINAL_STATUSES = frozenset({"completed", "error", "cancelled"})
@@ -87,6 +90,10 @@ class JobState:
     outputs: list[Any] = field(default_factory=list)
     error: dict[str, Any] | None = None
     watcher_pid: int | None = None
+    # Watcher process start time, recorded next to its pid so a recycled pid
+    # can't pass for the original watcher. Null on files written before this
+    # field existed (and when psutil couldn't read it).
+    watcher_pid_create_time: float | None = None
     # Full final cloud history record (node-keyed outputs), stashed at terminal.
     record: dict[str, Any] | None = None
     # foreach item -> {"nodes": [...], "save_node": ..., "prefix": ...} map,
@@ -123,18 +130,8 @@ def write(state: JobState) -> Path | None:
     # Lock per-file so a watcher and a foreground update can't tear each
     # other's writes.
     with locking.file_lock(path.with_suffix(".lock")):
-        tmp = path.with_suffix(f".{os.getpid()}.{_secrets.token_hex(4)}.tmp")
-        tmp.write_text(json.dumps(state.to_dict(), indent=2, default=str), encoding="utf-8")
-        # fsync for durability before atomic rename
-        try:
-            fd = os.open(str(tmp), os.O_RDONLY)
-            try:
-                os.fsync(fd)
-            finally:
-                os.close(fd)
-        except OSError:
-            pass
-        os.replace(tmp, path)
+        # fsync=True: durability against power loss before the atomic rename.
+        atomic_write_text(path, json.dumps(state.to_dict(), indent=2, default=str), fsync=True)
     return path
 
 
@@ -157,6 +154,85 @@ def read(prompt_id: str) -> JobState | None:
     except TypeError:
         # Required fields missing (e.g. truncated/legacy file) — treat as absent.
         return None
+
+
+def stamp_watcher_identity(state: JobState) -> None:
+    """Record the calling process as this record's watcher: pid + create_time
+    (both, or pid reuse defeats ``_is_watcher_alive``'s identity check).
+
+    Used by the detached watcher subprocess and by foreground ``--wait`` runs
+    alike — whichever process is actively finalizing the record stamps itself,
+    so the stale-watcher reap in ``jobs ls`` can finalize the record if that
+    process dies without running its handlers (killed from outside).
+    """
+    state.watcher_pid = os.getpid()
+    try:
+        import psutil
+
+        state.watcher_pid_create_time = psutil.Process().create_time()
+    except Exception:  # noqa: BLE001 — best effort; None just means liveness-only
+        state.watcher_pid_create_time = None
+
+
+@contextmanager
+def locked(prompt_id: str) -> Iterator[JobState | None]:
+    """Hold ``prompt_id``'s per-file lock and yield the record as it is on disk
+    *right now* (``None`` if there is no readable record).
+
+    Every writer of a job record — this module's ``write``, the watcher, the
+    foreground run, the reap in ``jobs ls`` — takes this same lock, so a
+    read-modify-write performed inside this block cannot interleave with
+    another process's write. ``write`` re-takes the lock, which is reentrant
+    within a thread, so calling it from inside the block is fine.
+
+    Yields ``None`` (without failing) when the id isn't one we can even name a
+    file for: callers are all best-effort bookkeeping paths that must not take
+    a command down over a state file.
+    """
+    try:
+        path = state_path(prompt_id)
+    except (ValueError, OSError, AttributeError, TypeError):
+        yield None
+        return
+    with locking.file_lock(path.with_suffix(".lock")):
+        yield read(prompt_id)
+
+
+def clear_watcher_identity(state: JobState) -> bool:
+    """Un-stamp this process as ``state``'s watcher and persist that, for a
+    process that is about to exit while deliberately leaving the record
+    NON-terminal (e.g. ``run --wait`` timing out on a job that is still running
+    server-side). Returns True if the on-disk record was rewritten.
+
+    Without this the record keeps a pid that is about to be dead, which is
+    exactly what the stale-watcher reap in ``jobs ls`` finalizes — it would
+    flip a healthy job to ``error``/``watcher_crashed``.
+
+    The read-modify-write runs under the record's lock against a *re-read*, not
+    against the caller's in-memory snapshot, which may be many minutes stale:
+    a concurrent ``comfy jobs cancel`` (or a watcher) can have made the record
+    terminal in the meantime, and blindly writing back the snapshot would walk
+    that verdict backwards to a non-terminal ``running`` that is then neither
+    terminal nor reapable — a permanent phantom. A record that is already
+    terminal, or that some other process has since stamped, is left untouched.
+    """
+    if not isinstance(state.prompt_id, str) or not state.prompt_id.strip():
+        return False
+    rewrote = False
+    try:
+        with locked(state.prompt_id) as on_disk:
+            if on_disk is not None and not on_disk.is_terminal and on_disk.watcher_pid == os.getpid():
+                on_disk.watcher_pid = None
+                on_disk.watcher_pid_create_time = None
+                rewrote = write(on_disk) is not None
+    except (OSError, ValueError):
+        # Same tolerance every other state-file write gets: bookkeeping must
+        # never fail an otherwise-handled exit path.
+        return False
+    # Keep the caller's snapshot in step so a later write can't re-stamp us.
+    state.watcher_pid = None
+    state.watcher_pid_create_time = None
+    return rewrote
 
 
 def new(

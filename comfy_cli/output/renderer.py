@@ -22,7 +22,7 @@ from typing import Any, TextIO
 
 from rich.console import Console
 
-from comfy_cli.caller import Caller, detect_caller
+from comfy_cli.caller import Caller, detect_caller, stream_is_tty
 from comfy_cli.output.sanitize import sanitize_markup
 
 # Machine-output contract versions, surfaced in every envelope/event line and
@@ -111,7 +111,11 @@ class Renderer:
         env_map = env if env is not None else os.environ
         caller = caller if caller is not None else detect_caller(env_map)
         if is_stdout_tty is None:
-            is_stdout_tty = sys.stdout.isatty()
+            # Guarded probe, not a bare `sys.stdout.isatty()`: this runs from
+            # the main Typer callback before any command dispatch, so under a
+            # detached / `pythonw` stdout a raising probe would kill every
+            # invocation — `comfy --help` included. See `caller.stream_is_tty`.
+            is_stdout_tty = stream_is_tty(getattr(sys, "stdout", None))
 
         mode: OutputMode
         if json_stream_flag:
@@ -376,8 +380,31 @@ class Renderer:
 
     def _write_json_line(self, payload: Mapping[str, Any]) -> None:
         line = json.dumps(payload, default=_json_default, ensure_ascii=False)
-        self.machine_stream.write(line + "\n")
-        self.machine_stream.flush()
+        stream = self.machine_stream
+        try:
+            stream.write(line + "\n")
+            stream.flush()
+        except (AttributeError, ValueError):
+            # Resolving to JSON mode against an unusable stdout must not merely
+            # DEFER the crash to the first emit — by then the command has
+            # already run and its side effects have landed, so dying here is
+            # strictly worse than dying at startup. `machine_stream` falls back
+            # to `sys.stdout`, which under pythonw / a detached parent is
+            # `None` (AttributeError on `.write`) or an already-closed file
+            # (ValueError). Neither can ever receive output, so the write is a
+            # no-op and the process still exits with the right code.
+            #
+            # `OSError` is deliberately NOT caught, even though it looks like it
+            # belongs. A `BrokenPipeError` here means the stream was real and the
+            # reader hung up, which is load-bearing: `comfy cloud login` relies
+            # on it propagating out of the `login_url` emit so the command fails
+            # fast instead of blocking the full 300s on a browser callback nobody
+            # will read (see test_json_login_fails_fast_when_login_url_write_breaks).
+            # Swallowing it would turn that into a silent hang.
+            #
+            # `TypeError` is likewise not caught: it would mean the payload is
+            # malformed, which is our bug and must stay visible.
+            return
 
     @property
     def exit_code(self) -> int:
