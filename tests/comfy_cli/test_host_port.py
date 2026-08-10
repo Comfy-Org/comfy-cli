@@ -391,7 +391,9 @@ def test_jobs_ls_auto_selected_json_bad_port_terminates_with_envelope():
     with patch("comfy_cli.command.jobs._server_or_error") as mock_probe:
         result = _invoke(["jobs", "ls", "--port", "0"])
     env = _usage_envelope(result)
-    assert env["command"] == "jobs"
+    # `jobs ls`, not `jobs`: the failure line must carry the same `command` as
+    # the success envelope so a consumer can dispatch on one value.
+    assert env["command"] == "jobs ls"
     mock_probe.assert_not_called()
 
 
@@ -474,3 +476,54 @@ def test_report_usage_error_lets_a_non_badparameter_through_untouched():
         with report_usage_error(r):
             raise RuntimeError("unrelated")
     assert buf.getvalue() == ""
+
+
+def test_a_broken_stdout_does_not_displace_the_usage_error():
+    """The envelope is best-effort and must never REPLACE the error it reports.
+
+    `Renderer._write_json_line` lets `OSError`/`BrokenPipeError` propagate on
+    purpose. Without the guard, `comfy jobs ls --port 0 | head -1` would swap
+    the `BadParameter` for a `BrokenPipeError`, click would never render the
+    usage panel, and the exit code would stop being the documented 2.
+    """
+    from comfy_cli.host_port import report_usage_error
+
+    class BrokenStream(io.StringIO):
+        def write(self, s):
+            raise BrokenPipeError(32, "Broken pipe")
+
+    r = Renderer(mode=OutputMode.JSON)
+    r.machine_stream = BrokenStream()
+    with pytest.raises(typer.BadParameter, match="invalid port"):
+        with report_usage_error(r):
+            raise typer.BadParameter("invalid port: 0 is out of range (1-65535)")
+
+
+def test_credentials_in_a_rejected_host_are_redacted_from_the_envelope():
+    """`validate_host` echoes the rejected value with `{host!r}`, so a
+    `user:pass@host` would otherwise land verbatim in the JSON stream that
+    agent harnesses capture and persist."""
+    from comfy_cli.host_port import report_usage_error
+
+    buf = io.StringIO()
+    r = Renderer(mode=OutputMode.JSON)
+    r.machine_stream = buf
+    with pytest.raises(typer.BadParameter):
+        with report_usage_error(r):
+            validate_host("user:s3cret@server")
+
+    message = json.loads(buf.getvalue().strip().splitlines()[-1])["error"]["message"]
+    assert "s3cret" not in message
+    assert "***@" in message
+
+
+def test_report_usage_error_command_overrides_the_renderer_default():
+    from comfy_cli.host_port import report_usage_error
+
+    buf = io.StringIO()
+    r = Renderer(mode=OutputMode.JSON, command="jobs")
+    r.machine_stream = buf
+    with pytest.raises(typer.BadParameter):
+        with report_usage_error(r, command="jobs status"):
+            raise typer.BadParameter("nope")
+    assert json.loads(buf.getvalue().strip().splitlines()[-1])["command"] == "jobs status"
