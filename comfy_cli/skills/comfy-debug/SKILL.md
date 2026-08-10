@@ -47,7 +47,7 @@ comfy --json run --workflow same_workflow.json --where cloud   # just resubmit �
 If several jobs from one batch died together with this code, resubmit them all; one retry each is normally enough.
 
 ### `workflow_not_api_format`
-UI-format workflows are converted to API format **client-side** using object_info (no server conversion endpoint exists). If conversion fails with `conversion_error`, re-export via `File > Export (API)` in ComfyUI; if object_info can't be fetched (`cql_no_graph`), run `comfy nodes refresh --where cloud` or start a local server.
+UI-format workflows are converted to API format **client-side** using object_info (no server conversion endpoint exists). If conversion fails with `conversion_error`, re-export via `File > Export (API)` in ComfyUI; if object_info can't be fetched (`cql_no_graph`), retry (it's fetched live — check cloud sign-in/connection) or start a local server.
 
 ### `workflow_invalid_json`
 The file isn't valid JSON. Inspect the first/last 100 bytes — often it's an HTML error page that was saved with `.json`.
@@ -59,7 +59,7 @@ The server validated the workflow and rejected nodes. The full per-node error ma
   ```
   comfy --json nodes search MissingNodeName
   ```
-  If `data.count` is 0, the node is genuinely absent. Then either install via `comfy node install <pkg>` (local) or pick a different workflow (cloud).
+  If `data.count` is 0 — or `data.close_match` is true, meaning the search found nothing and fell back to similarly-named classes — the node is genuinely absent. Then either install via `comfy node install <pkg>` (local) or pick a different workflow (cloud).
 
 - **Missing model file** (`ckpt_name`, `lora_name`, `vae_name` not found) → confirm the loader node exists and see its choices:
   ```

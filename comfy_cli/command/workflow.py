@@ -28,7 +28,15 @@ from typing import Annotated, Any
 import typer
 
 from comfy_cli import tracking
+from comfy_cli.file_utils import atomic_write_text
+
+# Aliased at module scope rather than lazy-imported: a class used in ``except``
+# clauses at module scope cannot be resolved lazily. ``comfy_cli.http`` is
+# stdlib-only and tiny, and ``search.py``/``jobs.py`` already pull
+# ``urllib.request`` in at import time, so the precedent exists.
+from comfy_cli.http import ResponseTooLarge as _ResponseTooLarge
 from comfy_cli.output import get_renderer, rprint
+from comfy_cli.output.sanitize import sanitize_markup
 
 app = typer.Typer(no_args_is_help=True, help="Slot-based editing of frontend-format ComfyUI workflows.")
 
@@ -98,7 +106,10 @@ def _get_graph(input_path: str | None, host: str | None, port: int | None, on_st
         # Live fetch: resolve mode from global routing chain, then use resilient loader.
         from comfy_cli import where as where_module
 
-        decision = where_module.resolve_default()
+        # ``_or_exit``: this command has no per-command --where flag to fall
+        # back to, so a bad COMFY_WHERE / project / persisted where_default
+        # becomes a clean `where_invalid` envelope rather than a traceback.
+        decision = where_module.resolve_default_or_exit()
         mode = "cloud" if decision.target is where_module.WhereTarget.CLOUD else "local"
         from comfy_cli.cql.loader import resilient_load_object_info
 
@@ -118,22 +129,6 @@ def _get_graph(input_path: str | None, host: str | None, port: int | None, on_st
             hint=e.details.get("hint", "pass --input <path>, or start the server with `comfy launch`"),
         )
         raise typer.Exit(code=1) from e
-
-
-def _atomic_write_text(path: Path, content: str) -> None:
-    """Write via tmp + rename so SIGINT mid-write can't leave a half-written file."""
-    import os
-
-    tmp = path.with_suffix(path.suffix + f".{os.getpid()}.tmp")
-    try:
-        tmp.write_text(content, encoding="utf-8")
-        os.replace(tmp, path)
-    except Exception:
-        try:
-            tmp.unlink()
-        except OSError:
-            pass
-        raise
 
 
 def _parse_value(raw: str) -> Any:
@@ -300,7 +295,7 @@ def set_slot_cmd(
         return
 
     if not stdout:
-        _atomic_write_text(p, json.dumps(new_workflow, indent=2))
+        atomic_write_text(p, json.dumps(new_workflow, indent=2))
 
     payload: dict[str, Any] = {
         "workflow": str(p),
@@ -415,7 +410,7 @@ def vary_cmd(
         out.mkdir(parents=True, exist_ok=True)
         for i, wf in enumerate(workflows):
             target = out / f"{p.stem}_{i:03d}.json"
-            _atomic_write_text(target, json.dumps(wf, indent=2))
+            atomic_write_text(target, json.dumps(wf, indent=2))
             written.append(str(target))
     elif renderer.is_pretty():
         import sys
@@ -603,10 +598,6 @@ _USERDATA_MAX_BYTES = 64 * 1024 * 1024
 # Same cap for a single cloud API response. Kept separate from
 # ``_USERDATA_MAX_BYTES`` so the two surfaces can diverge without surprise.
 _HTTP_MAX_BYTES = 64 * 1024 * 1024
-
-
-class _ResponseTooLarge(Exception):
-    """A response exceeded the surface's byte cap — refuse to truncate."""
 
 
 # Per-operation guidance for an oversize cloud response. ``save``/``delete``
@@ -815,7 +806,7 @@ def _userdata_file_url(target, key: str, query: dict | None = None) -> str:
 
 def _http_request(
     url: str, target, *, method: str = "GET", body: dict | None = None, timeout: float = 30.0
-) -> tuple[int, dict | None]:
+) -> tuple[int, dict | list | None]:
     """Authed HTTP call returning (status, parsed_json_or_none). Raises
     urllib errors verbatim so callers can surface the right error code, and
     ``_ResponseTooLarge`` when the body exceeds ``_HTTP_MAX_BYTES`` — an
@@ -851,9 +842,12 @@ def _http_request(
 
 
 def _handle_cloud_http_error(renderer, e, *, operation: str, workflow_id: str | None = None) -> typer.Exit:
-    """Map HTTP failures to envelope codes. Returns an Exit to ``raise from``."""
-    import urllib.error
+    """Map HTTP failures to envelope codes. Returns an Exit to ``raise from``.
 
+    Thin wrapper over the shared cloud-error mapper (BE-3266) that supplies the
+    ``workflow``-specific 404 envelope and the oversize/unparseable-response
+    checks; everything else is shared with ``jobs``.
+    """
     if isinstance(e, _ResponseUnparseable):
         renderer.error(
             code="workflow_unparseable",
@@ -861,47 +855,31 @@ def _handle_cloud_http_error(renderer, e, *, operation: str, workflow_id: str | 
             hint="the server sent a malformed body; retry, and report it if it persists",
             details={"operation": operation, "workflow_id": workflow_id},
         )
-    elif isinstance(e, _ResponseTooLarge):
+        return typer.Exit(code=1)
+    if isinstance(e, _ResponseTooLarge):
         renderer.error(
             code="workflow_too_large",
             message=f"cloud API response during {operation} exceeded the {_HTTP_MAX_BYTES // (1024 * 1024)} MiB cap",
             hint=_TOO_LARGE_HINTS.get(operation, "the cloud response was unexpectedly large"),
             details={"operation": operation, "workflow_id": workflow_id, "limit_bytes": _HTTP_MAX_BYTES},
         )
-    elif isinstance(e, urllib.error.HTTPError):
-        # Cap the read itself — ``[:1000]`` after a full ``read()`` would still pull an
-        # arbitrarily large (or malicious) error page into memory before slicing.
-        body = (e.read(1000) or b"").decode("utf-8", "replace")
-        if e.code == 404:
-            renderer.error(
-                code="workflow_not_found",
-                message=f"no saved workflow with id {workflow_id!r}"
-                if workflow_id
-                else f"workflow not found ({operation})",
-                hint="list available workflows via `comfy --json workflow list`",
-                details={"workflow_id": workflow_id, "operation": operation},
-            )
-        elif e.code in (401, 403):
-            renderer.error(
-                code="cloud_unauthorized",
-                message=f"HTTP {e.code} during {operation}",
-                hint="re-run `comfy cloud login`",
-                details={"status": e.code},
-            )
-        else:
-            renderer.error(
-                code="cloud_http_error",
-                message=f"HTTP {e.code} during {operation}",
-                hint="check `details.body` for the server's message",
-                details={"status": e.code, "body": body, "operation": operation},
-            )
-    else:
-        renderer.error(
-            code="cloud_http_error",
-            message=f"{operation} failed: {e}",
-            hint="check network / `comfy cloud whoami`",
-        )
-    return typer.Exit(code=1)
+        return typer.Exit(code=1)
+
+    from comfy_cli.command._cloud_errors import handle_cloud_http_error
+
+    not_found_message = (
+        f"no saved workflow with id {workflow_id!r}" if workflow_id else f"workflow not found ({operation})"
+    )
+    return handle_cloud_http_error(
+        renderer,
+        e,
+        operation=operation,
+        not_found_code="workflow_not_found",
+        not_found_message=not_found_message,
+        not_found_hint="list available workflows via `comfy --json workflow list`",
+        id_label="workflow_id",
+        resource_id=workflow_id,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -957,7 +935,12 @@ def _local_list(renderer, target, *, name: str | None, limit: int, sort: str, or
         tbl.add_column("id")
         tbl.add_column("size", justify="right", style="dim")
         for r in workflows[:50]:
-            tbl.add_row(r["id"], str(r["size"]) if r["size"] is not None else "")
+            # Both cells are fields of the `/userdata` listing the server
+            # returned, and `Table.add_row` parses markup in a `str` cell.
+            tbl.add_row(
+                sanitize_markup(r["id"]),
+                sanitize_markup(r["size"]) if r["size"] is not None else "",
+            )
         renderer.console().print(tbl)
         rprint(f"[dim]{len(workflows)} workflow(s) (local)[/dim]")
     renderer.emit(payload, command="workflow list", where="local")
@@ -1239,11 +1222,16 @@ def list_cmd(
         tbl.add_column("ver", justify="right", style="dim")
         tbl.add_column("updated", style="dim")
         for r in payload["workflows"][:50]:
+            # The cloud workflow catalog is server-supplied end to end, same as
+            # the local `/userdata` listing `_local_list` renders. `str()` before
+            # the slices: `sanitize_markup` coerces, but the truncation runs
+            # first, and a numeric `id`/`updated_at` in the JSON would raise
+            # `TypeError: 'int' object is not subscriptable` before it got there.
             tbl.add_row(
-                (r["id"] or "")[:8] + "…" if r["id"] else "",
-                r["name"] or "(untitled)",
-                str(r["latest_version"] or ""),
-                (r["updated_at"] or "")[:10],
+                sanitize_markup(str(r["id"])[:8] + "…" if r["id"] else ""),
+                sanitize_markup(r["name"] or "(untitled)"),
+                sanitize_markup(r["latest_version"] or ""),
+                sanitize_markup(str(r["updated_at"] or "")[:10]),
             )
         renderer.console().print(tbl)
         rprint(f"[dim]{len(rows)} workflow(s)[/dim]")
@@ -1468,6 +1456,7 @@ def validate_api_workflow(
     from comfy_cli.command.run import is_ui_workflow
     from comfy_cli.command.run.preflight import _detect_partner_nodes
     from comfy_cli.cql.engine import Graph, LoadError
+    from comfy_cli.env_checker import _bracket_host, _unbracket_host
     from comfy_cli.workflow_to_api import WorkflowConversionError, convert_ui_to_api
 
     renderer = get_renderer()
@@ -1498,28 +1487,41 @@ def validate_api_workflow(
         )
         raise typer.Exit(code=1)
 
-    # Load graph. Resolve routing up front so a typo (e.g. `clod`) fails here
-    # with an envelope: forwarded verbatim, it would surface as a bare
-    # ValueError from Graph.load's target resolution (online path only —
-    # Graph.load short-circuits to --input when supplied).
-    mode = "local"
-    try:
-        mode = where_module.resolve_default(flag=where).target.value
-    except ValueError as e:
-        if where:
-            renderer.error(
-                code="where_invalid",
-                message=str(e),
-                hint="use `--where local` or `--where cloud`",
-            )
-            raise typer.Exit(code=1) from e
-        # A bad env/project/config value with no explicit flag never breaks the
-        # command — drop to the local default, as before.
-    except Exception:
-        pass
+    # Load graph. Route through the shared resolver rather than trusting the raw
+    # `--where` string: it normalizes case/whitespace (`--where LOCAL` is the
+    # same target as `local`) and emits a `where_invalid` envelope instead of
+    # letting an unknown value escape as a bare ValueError traceback. Everything
+    # below then branches on the resolved enum, so no routing decision is ever
+    # made by string-comparing user input.
+    decision = where_module.resolve_default_or_exit(flag=where)
+    mode = decision.target.value
+
+    # Resolve the local object_info server the same way `comfy run` does —
+    # flag > COMFY_LOCAL_URL > config.background > 127.0.0.1:8188. Without the
+    # `config.background` step validate would consult whatever answers on the
+    # default port while `run` submits to the background server comfy-cli
+    # launched on another one, making the verdict meaningless for the server
+    # that will actually execute the workflow (BE-6299). `resolve_target` does
+    # not consult `config.background` on purpose (other callers, e.g. transfer
+    # and system, must not), so — as its docstring says — the callers that do
+    # honor it resolve upstream, here.
+    is_local_fetch = input_path is None and decision.target is where_module.WhereTarget.LOCAL
+    if is_local_fetch:
+        from comfy_cli.host_port import parse_host_port_arg, resolve_host_port
+
+        # `host is not None` (not `if host:`): `--host ""` must reach the parser
+        # and be rejected, not be read as "no --host given". Likewise the port
+        # merge tests `is None`, so an explicit `--port 0` isn't silently
+        # overridden by a port embedded in the combined `--host h:p` form —
+        # `resolve_host_port` rejects it as out of range instead.
+        if host is not None:
+            host, parsed_port = parse_host_port_arg(host)
+            if port is None and parsed_port is not None:
+                port = parsed_port
+        host, port = resolve_host_port(host, port)
 
     try:
-        graph = Graph.load(mode=mode, input_path=input_path, host=host or "127.0.0.1", port=port or 8188)
+        graph = Graph.load(mode=mode, input_path=input_path, host=host, port=port)
     except LoadError as e:
         renderer.error(
             code="cql_no_graph",
@@ -1585,6 +1587,19 @@ def validate_api_workflow(
         "warnings": result["warnings"],
         "partner_nodes": partner_nodes,
         "spends_credits": bool(partner_nodes),
+        # Name the server (or file) the verdict was computed against, so an
+        # agent comparing `validate` with `run` can see whether they consulted
+        # the same object_info. Populated from the values resolved above, so a
+        # local run reports the concrete host/port actually queried. `host` is
+        # reported unbracketed, matching `Target.host` — brackets belong to the
+        # URL composed for display, not to the address itself.
+        "object_info_source": (
+            {"mode": "file", "path": str(input_path)}
+            if input_path is not None
+            else {"mode": mode, "host": _unbracket_host(host), "port": port}
+            if is_local_fetch
+            else {"mode": mode}
+        ),
     }
     if converted_from_ui:
         # Signal that validation ran against the converted graph, not the file's
@@ -1598,6 +1613,22 @@ def validate_api_workflow(
         # crafted file can't inject markup to spoof/hide output (e.g. fake a green ✓).
         from rich.markup import escape
 
+        # Name the object_info source in one dim line. A file path (and, in
+        # principle, a hostname) can contain Rich-markup metacharacters, so
+        # escape it — same reason the partner-node line below does.
+        #
+        # Branch on the same flags that built the payload, not on its "mode"
+        # string: "file" is an offline sentinel that shares a key with the
+        # routing targets, so a mode-string branch couples display to a value
+        # the routing layer also owns.
+        source = payload["object_info_source"]
+        if input_path is not None:
+            where_oi = escape(source["path"])
+        elif is_local_fetch:
+            where_oi = escape(f"http://{_bracket_host(source['host'])}:{source['port']}")
+        else:
+            where_oi = escape(source["mode"])
+        rprint(f"[dim]object_info from {where_oi}[/dim]")
         if result["valid"]:
             rprint(f"[bold green]✓[/bold green] workflow is valid ({len(wf_data)} nodes)")
             for w in result["warnings"]:

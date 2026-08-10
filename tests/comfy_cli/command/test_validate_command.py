@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 from typer.testing import CliRunner
@@ -308,3 +309,276 @@ def test_partner_node_name_with_markup_does_not_crash_pretty(runner, tmp_path):
     assert result.exception is None, result.exception
     # The name is still shown (escaped) in the paid-nodes advisory.
     assert name in result.stdout
+
+
+# --- object_info target resolution (BE-6306) ------------------------------------
+#
+# `validate` used to resolve its local object_info server as
+# `--host`/`--port` > COMFY_LOCAL_URL > 127.0.0.1:8188, skipping the
+# `config.background` step `comfy run` honors via `host_port.resolve_host_port`.
+# With ComfyUI running as a comfy-cli background server on a non-8188 port, that
+# made validate consult a DIFFERENT server than the one `run` submits to, so its
+# verdict was meaningless (BE-6299: validate passed a workflow `run` rejected for
+# a missing node class). It now resolves through the same chain, and reports the
+# resolved target in the payload as `object_info_source`.
+
+BACKGROUND_PORT = 8388
+
+
+@pytest.fixture
+def no_background(monkeypatch):
+    """Neutralize the developer's real `config.background` (and COMFY_LOCAL_URL)
+    so the tests below observe only what they set themselves."""
+    return _set_background(monkeypatch, None)
+
+
+def _set_background(monkeypatch, background):
+    """Point `host_port.resolve_host_port` at a synthetic `config.background`.
+
+    `resolve_host_port` reads `ConfigManager().background`, and ConfigManager
+    already drops a record whose pid is dead — so a tuple here stands for a LIVE
+    background server.
+    """
+
+    class _FakeConfigManager:
+        def __init__(self):
+            self.background = background
+
+    monkeypatch.setattr("comfy_cli.host_port.ConfigManager", _FakeConfigManager)
+    monkeypatch.delenv("COMFY_LOCAL_URL", raising=False)
+
+
+@pytest.fixture
+def captured_target(monkeypatch, tmp_path):
+    """Stub the live object_info fetch, recording the host/port it was handed.
+
+    Returns the dict the engine call is recorded into (`{}` until the fetch
+    runs), so a test can assert on the server validate actually queried.
+    """
+    seen: dict = {}
+
+    def _fake_load_from_target(*, mode="local", host=None, port=None):
+        seen.update(mode=mode, host=host, port=port)
+        return {"PlainSave": _node_info(category="image")}
+
+    monkeypatch.setattr("comfy_cli.cql.engine._load_from_target", _fake_load_from_target)
+    return seen
+
+
+def _valid_workflow(tmp_path: Path) -> Path:
+    """A one-node API workflow that validates clean against `PlainSave`."""
+    return _write(tmp_path, "wf.json", {"1": {"class_type": "PlainSave", "inputs": {}}})
+
+
+def _validate_live(runner: CliRunner, workflow: Path, *args: str, json_mode: str = "--json"):
+    """Invoke `comfy validate` against a (stubbed) LIVE server — no `--input`."""
+    return runner.invoke(
+        app,
+        [json_mode, "validate", "--workflow", str(workflow), *args],
+        env={"COMFY_WHERE": "local"},
+    )
+
+
+def test_local_target_honors_background_server(runner, tmp_path, monkeypatch, captured_target):
+    """Acceptance: with a live `config.background` on a non-default port and no
+    `--host`/`--port`/`COMFY_LOCAL_URL`, validate fetches object_info from the
+    BACKGROUND server — the same one `comfy run` submits to — not 127.0.0.1:8188."""
+    _set_background(monkeypatch, ("127.0.0.1", BACKGROUND_PORT, 4242))
+
+    result = _validate_live(runner, _valid_workflow(tmp_path))
+
+    assert result.exit_code == 0, result.stdout
+    assert captured_target["port"] == BACKGROUND_PORT
+    assert captured_target["host"] == "127.0.0.1"
+
+
+def test_explicit_flags_beat_background_server(runner, tmp_path, monkeypatch, captured_target):
+    """Precedence is unchanged: explicit `--host`/`--port` still win over a
+    recorded background server."""
+    _set_background(monkeypatch, ("127.0.0.1", BACKGROUND_PORT, 4242))
+
+    result = _validate_live(runner, _valid_workflow(tmp_path), "--host", "127.0.0.1", "--port", "9000")
+
+    assert result.exit_code == 0, result.stdout
+    assert captured_target["port"] == 9000
+    assert captured_target["host"] == "127.0.0.1"
+
+
+def test_combined_host_port_flag_is_split(runner, tmp_path, monkeypatch, captured_target):
+    """Sharing `comfy run`'s resolution also gives validate `run`'s combined
+    `--host host:port` form. It previously flowed through unsplit and produced a
+    bogus `http://[127.0.0.1:9100]:8188` URL."""
+    _set_background(monkeypatch, ("127.0.0.1", BACKGROUND_PORT, 4242))
+
+    result = _validate_live(runner, _valid_workflow(tmp_path), "--host", "127.0.0.1:9100")
+
+    assert result.exit_code == 0, result.stdout
+    assert (captured_target["host"], captured_target["port"]) == ("127.0.0.1", 9100)
+
+
+def test_malformed_host_is_a_usage_error(runner, tmp_path, no_background, captured_target):
+    """A URL-unsafe `--host` is now rejected as a usage error (exit 2) by the
+    shared validator, the same way `comfy run` and `comfy upload` reject it,
+    instead of being built into a URL and failing at fetch time."""
+    result = _validate_live(runner, _valid_workflow(tmp_path), "--host", "evil.example.com/path")
+
+    assert result.exit_code == 2
+    assert captured_target == {}  # no fetch was attempted
+
+
+def test_env_local_url_beats_background_server(runner, tmp_path, monkeypatch, captured_target):
+    """`COMFY_LOCAL_URL` also still outranks the background server."""
+    _set_background(monkeypatch, ("127.0.0.1", BACKGROUND_PORT, 4242))
+    monkeypatch.setenv("COMFY_LOCAL_URL", "http://127.0.0.1:9500")
+
+    result = _validate_live(runner, _valid_workflow(tmp_path))
+
+    assert result.exit_code == 0, result.stdout
+    assert captured_target["port"] == 9500
+
+
+def test_no_background_still_defaults_to_8188(runner, tmp_path, no_background, captured_target):
+    """With nothing recorded and no flags, the default target is unchanged."""
+    result = _validate_live(runner, _valid_workflow(tmp_path))
+
+    assert result.exit_code == 0, result.stdout
+    assert (captured_target["host"], captured_target["port"]) == ("127.0.0.1", 8188)
+
+
+def test_payload_names_resolved_local_source(runner, tmp_path, monkeypatch, captured_target):
+    """The `--json` envelope names the object_info source, carrying the RESOLVED
+    host/port (the background server), so an agent can see which server answered."""
+    _set_background(monkeypatch, ("127.0.0.1", BACKGROUND_PORT, 4242))
+
+    result = _validate_live(runner, _valid_workflow(tmp_path))
+
+    assert result.exit_code == 0, result.stdout
+    data = _envelope(result)["data"]
+    assert data["object_info_source"] == {"mode": "local", "host": "127.0.0.1", "port": BACKGROUND_PORT}
+
+
+def test_payload_names_file_source_under_input(runner, tmp_path, monkeypatch):
+    """`--input` is offline mode: the source is the file, and no host/port
+    resolution happens (a recorded background server is irrelevant)."""
+    _set_background(monkeypatch, ("127.0.0.1", BACKGROUND_PORT, 4242))
+    oi = _write(tmp_path, "oi.json", {"PlainSave": _node_info(category="image")})
+    wf = _valid_workflow(tmp_path)
+
+    result = _validate_against(runner, wf, oi)
+
+    assert result.exit_code == 0, result.stdout
+    data = _envelope(result)["data"]
+    assert data["object_info_source"] == {"mode": "file", "path": str(oi)}
+
+
+def test_payload_names_cloud_source(runner, tmp_path, monkeypatch, captured_target):
+    """Cloud mode is unchanged — no local host/port resolution — and the payload
+    names the source as `cloud` only."""
+    _set_background(monkeypatch, ("127.0.0.1", BACKGROUND_PORT, 4242))
+
+    result = runner.invoke(
+        app,
+        ["--json", "validate", "--workflow", str(_valid_workflow(tmp_path)), "--where", "cloud"],
+    )
+
+    assert result.exit_code == 0, result.stdout
+    # The background server must not leak into a cloud fetch.
+    assert captured_target["mode"] == "cloud"
+    assert (captured_target["host"], captured_target["port"]) == (None, None)
+    assert _envelope(result)["data"]["object_info_source"] == {"mode": "cloud"}
+
+
+def test_pretty_mode_prints_resolved_source(runner, tmp_path, monkeypatch, captured_target):
+    """Pretty mode prints one dim line naming the server that answered."""
+    _set_background(monkeypatch, ("127.0.0.1", BACKGROUND_PORT, 4242))
+
+    result = _validate_live(runner, _valid_workflow(tmp_path), json_mode="--no-json")
+
+    assert result.exit_code == 0, result.stdout
+    assert f"object_info from http://127.0.0.1:{BACKGROUND_PORT}" in result.stdout
+
+
+# --- review follow-ups on the BE-6306 resolution block ---------------------------
+
+
+def test_wildcard_background_host_is_canonicalized(runner, tmp_path, monkeypatch, captured_target):
+    """`comfy launch -- --listen 0.0.0.0` records the wildcard BIND address in
+    `config.background`. Passing it through as a destination trips the
+    object_info loopback guard, so validate hard-failed with "Refusing to fetch
+    object_info from non-loopback host" where it previously succeeded — the exact
+    opposite of the `comfy run` parity this block is for (`run`'s own object_info
+    fetch fails open). It is canonicalized to loopback instead."""
+    _set_background(monkeypatch, ("0.0.0.0", BACKGROUND_PORT, 4242))
+
+    result = _validate_live(runner, _valid_workflow(tmp_path))
+
+    assert result.exit_code == 0, result.stdout
+    assert (captured_target["host"], captured_target["port"]) == ("127.0.0.1", BACKGROUND_PORT)
+
+
+def test_where_flag_is_normalized_before_routing(runner, tmp_path, monkeypatch, captured_target):
+    """`--where` is normalized through the shared resolver, not string-compared
+    raw: `--where LOCAL` must take the local path (splitting a combined `--host`,
+    consulting the background server) rather than skipping the whole block and
+    building `http://[127.0.0.1:9100]:8188`."""
+    _set_background(monkeypatch, ("127.0.0.1", BACKGROUND_PORT, 4242))
+
+    result = _validate_live(runner, _valid_workflow(tmp_path), "--where", "LOCAL", "--host", "127.0.0.1:9100")
+
+    assert result.exit_code == 0, result.stdout
+    assert (captured_target["host"], captured_target["port"]) == ("127.0.0.1", 9100)
+    assert _envelope(result)["data"]["object_info_source"]["mode"] == "local"
+
+
+@pytest.mark.parametrize("bad_where", ["bogus", "file"])
+def test_invalid_where_emits_envelope_not_traceback(runner, tmp_path, no_background, bad_where):
+    """An unknown `--where` used to escape as a bare ValueError traceback with no
+    envelope at all. (`file` is doubly interesting: it is the offline sentinel
+    `object_info_source.mode` also uses.)"""
+    result = _validate_live(runner, _valid_workflow(tmp_path), "--where", bad_where)
+
+    assert result.exit_code == 1
+    assert _envelope(result)["error"]["code"] == "where_invalid"
+
+
+def test_empty_host_flag_is_rejected(runner, tmp_path, no_background, captured_target):
+    """`--host ""` is not "no host" — it must be rejected rather than silently
+    resolving to COMFY_LOCAL_URL / the background server / 127.0.0.1."""
+    result = _validate_live(runner, _valid_workflow(tmp_path), "--host", "")
+
+    assert result.exit_code == 2
+    assert captured_target == {}
+
+
+@pytest.mark.parametrize("bad_port", ["0", "99999"])
+def test_out_of_range_port_flag_is_rejected(runner, tmp_path, no_background, captured_target, bad_port):
+    """An out-of-range `--port` is a usage error. `0` in particular used to read
+    as "not passed" and silently resolve to some other server."""
+    result = _validate_live(runner, _valid_workflow(tmp_path), "--port", bad_port)
+
+    assert result.exit_code == 2
+    assert captured_target == {}
+
+
+def test_explicit_port_zero_is_not_overridden_by_combined_host(runner, tmp_path, no_background, captured_target):
+    """The combined-host port merge tests `is None`, so an explicit (invalid)
+    `--port 0` is reported as such instead of being quietly replaced by the port
+    embedded in `--host h:p`."""
+    result = _validate_live(runner, _valid_workflow(tmp_path), "--host", "127.0.0.1:9100", "--port", "0")
+
+    assert result.exit_code == 2
+    assert captured_target == {}
+
+
+def test_ipv6_source_is_unbracketed_in_payload_and_bracketed_for_display(runner, tmp_path, no_background):
+    """Brackets are a URL encoding, not part of the address: the payload carries
+    the raw literal (matching `Target.host`) and only the display URL brackets it."""
+    with patch("comfy_cli.cql.engine._load_from_target", return_value={"PlainSave": _node_info(category="image")}):
+        result = _validate_live(runner, _valid_workflow(tmp_path), "--host", "::1", "--port", "9000")
+        assert result.exit_code == 0, result.stdout
+        assert _envelope(result)["data"]["object_info_source"] == {"mode": "local", "host": "::1", "port": 9000}
+
+        pretty = _validate_live(
+            runner, _valid_workflow(tmp_path), "--host", "::1", "--port", "9000", json_mode="--no-json"
+        )
+    assert "object_info from http://[::1]:9000" in pretty.stdout

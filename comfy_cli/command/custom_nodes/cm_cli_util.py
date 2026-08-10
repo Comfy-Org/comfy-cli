@@ -160,6 +160,27 @@ def resolve_manager_gui_mode(not_installed_value: str | None = None) -> str | No
     return "enable-gui"
 
 
+def normalize_cm_cli_exit_code(returncode: int) -> int:
+    """Map a ``CalledProcessError.returncode`` from :func:`execute_cm_cli` onto an
+    exit code that survives ``sys.exit``.
+
+    ``Popen.wait()`` reports ``-N`` when the child is killed by signal N (e.g. -9
+    when the OOM killer reaps cm-cli mid dependency build), and Windows can return
+    values far above 255. POSIX truncates to the low byte, so -9 would surface as a
+    fabricated 247 and any multiple of 256 as 0 — a failure reporting success.
+    Normalize to the shell's 128+N signal convention, and never return 0.
+
+    2 is remapped because Click already uses it for its own usage errors; leaving it
+    through would make "you invoked comfy wrong" indistinguishable from "cm-cli
+    exited 2". Callers should keep the raw status in their error ``details``.
+    """
+    if returncode < 0:
+        return min(128 + abs(returncode), 255)
+    if returncode == 2 or returncode % 256 == 0:
+        return 1
+    return returncode
+
+
 def execute_cm_cli(
     args, channel=None, fast_deps=False, no_deps=False, uv_compile=False, mode=None, raise_on_error=False
 ) -> str | None:

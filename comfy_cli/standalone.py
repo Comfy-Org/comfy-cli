@@ -167,18 +167,6 @@ class StandalonePython:
     def uv_install(self, *args: str):
         self.run_module("uv", "pip", "install", *args)
 
-    def install_comfy_cli(self, dev: bool = False):
-        if dev:
-            self.uv_install(str(_here.parent))
-        else:
-            self.uv_install("comfy_cli")
-
-    def run_comfy_cli(self, *args: str):
-        self.run_module("comfy_cli", *args)
-
-    def install_comfy(self, *args: str, gpu_arg: str = "--nvidia"):
-        self.run_comfy_cli("--here", "--skip-prompt", "install", "--fast-deps", gpu_arg, *args)
-
     def dehydrate_comfy_deps(
         self,
         comfyDir: PathLike,

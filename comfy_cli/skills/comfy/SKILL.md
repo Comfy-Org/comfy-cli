@@ -326,7 +326,7 @@ comfy --json auth list       # all credentials (redacted)
 Use flag-based filters on `nodes ls` to find nodes by capability:
 
 ```bash
-comfy --json nodes search "checkpoint"           # fuzzy by name/desc
+comfy --json nodes search "checkpoint loader"    # name/display/category/desc, any word order
 comfy --json nodes show KSampler                 # full schema
 comfy --json nodes ls --produces MODEL --limit 5 # filter by output type
 comfy --json nodes ls --accepts CONDITIONING     # nodes that take this input
@@ -495,6 +495,11 @@ comfy --json templates ls --limit 1              # template count
 
 The `total` field in `nodes ls`, `nodes search`, and `models search`
 gives the full count even when `--limit` caps the returned rows.
+(One exception: when `nodes search` finds nothing it falls back to the
+closest node names and sets `data.close_match: true` — check that flag, not
+just `count`, because those rows are name-similarity guesses rather than
+matches, and `total` is only how many guesses it found. Each row carries
+`close_match: true` as well.)
 
 ## Workflows — what can I tweak?
 
@@ -507,7 +512,10 @@ object_info through the routing chain with a cached fallback — cloud-signed-in
 works with no local server. If the live fetch fails, the command still succeeds
 from cache and the envelope carries `data.stale: true` +
 `warnings[] {code: "object_info_stale"}` — treat results as possibly outdated
-and run `comfy nodes refresh --where cloud` to refresh.
+re-run the command once the live fetch recovers to pick up fresh object_info.
+`comfy nodes refresh` is a different cache — it re-pulls node
+*annotations* (pack/labels/cloud_disabled) from Comfy-Org/comfy-complete, not
+object_info.
 
 Slot addresses are `<instance_id>.<input_name>`. Feed them to
 `workflow set-slot` / `workflow vary` in the Execution half. Works on
@@ -745,9 +753,16 @@ bad wiring — before burning cloud compute.
 
 ```bash
 comfy --json jobs ls                # merged: local state files + server queue
+comfy --json jobs ls --all          # ...every target, not just the resolved --where
 comfy --json jobs status <prompt_id>
 comfy --json jobs watch <prompt_id> # blocks until terminal; emits NDJSON with --json-stream
 ```
+
+`jobs ls` is scoped to the resolved `--where` target: a `--where local`
+listing shows local state-file rows only, a `--where cloud` listing cloud
+ones. The payload's `scope` field says which view you got (`local` /
+`cloud` / `all`); pass `--all` for the union of everything this CLI
+submitted.
 
 Terminal envelopes (`run --wait`, `jobs status`, `jobs watch`) carry the
 flat `outputs` list plus grouped views of the same artifacts:
