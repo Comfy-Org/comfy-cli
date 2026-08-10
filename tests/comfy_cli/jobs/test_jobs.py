@@ -1944,14 +1944,8 @@ def test_cloud_job_to_row_maps_in_progress_to_running():
 def test_jobs_status_cloud_in_progress_envelope_is_schema_conformant(monkeypatch, capsys):
     """End-to-end through `jobs status --where cloud` on an executing job: the
     envelope reports `running`, and the payload validates against the published
-    schema.
-
-    The union schema's `required: ["host", "port"]` is the one violation
-    tolerated: cloud payloads carry `base_url` instead and never had host/port,
-    a pre-existing gap that predates (and is out of scope for) the status
-    vocabulary this test is about. Every OTHER schema error still fails —
-    filtering the known errors rather than dropping `required` wholesale keeps
-    a future required field from silently going unchecked here.
+    schema with no exemptions — #696 made `host`/`port` required only for
+    payloads without a cloud `base_url`, so the cloud payload conforms outright.
     """
     import jsonschema
 
@@ -1975,11 +1969,7 @@ def test_jobs_status_cloud_in_progress_envelope_is_schema_conformant(monkeypatch
 
     schema_path = Path(__file__).parents[3] / "comfy_cli" / "schemas" / "jobs.json"
     schema = json.loads(schema_path.read_text())
-    errors = [
-        e
-        for e in jsonschema.Draft202012Validator(schema).iter_errors(data)
-        if not (e.validator == "required" and e.validator_value == ["host", "port"])
-    ]
+    errors = list(jsonschema.Draft202012Validator(schema).iter_errors(data))
     assert errors == [], [e.message for e in errors]
 
 
