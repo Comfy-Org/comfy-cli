@@ -394,24 +394,26 @@ def _ordered_names(raw: dict, order: list[str] | None) -> list[str]:
     return out
 
 
+def _port_from_spec(name: str, spec: Any, required: bool) -> Port:
+    """One place that turns an ``INPUT_TYPES`` entry into a :class:`Port`."""
+    type_id, is_enum, enum_values, opts, enum_declared, dynamic_options = _parse_input_spec(spec)
+    return Port(
+        name=name,
+        type=type_id,
+        required=required,
+        is_link=_is_link(type_id, is_enum, opts.force_input),
+        enum_values=enum_values,
+        enum_declared=enum_declared,
+        options=opts,
+        dynamic_options=dynamic_options,
+        raw_spec=spec,
+    )
+
+
 def _parse_inputs(raw: dict, order: list[str] | None, required: bool) -> list[Port]:
     ports: list[Port] = []
     for name in _ordered_names(raw, order):
-        spec = raw[name]
-        type_id, is_enum, enum_values, opts, enum_declared, dynamic_options = _parse_input_spec(spec)
-        ports.append(
-            Port(
-                name=name,
-                type=type_id,
-                required=required,
-                is_link=_is_link(type_id, is_enum, opts.force_input),
-                enum_values=enum_values,
-                enum_declared=enum_declared,
-                options=opts,
-                dynamic_options=dynamic_options,
-                raw_spec=spec,
-            )
-        )
+        ports.append(_port_from_spec(name, raw[name], required))
     return ports
 
 
@@ -1525,18 +1527,7 @@ def _check_dynamic_combo_sub(
     same ``_parse_input_spec`` / :class:`Port` machinery as a top-level input and
     inherits identical shape and enum/range semantics.
     """
-    type_id, is_enum, enum_values, opts, enum_declared, dynamic_options = _parse_input_spec(sub_spec)
-    port = Port(
-        name=dotted,
-        type=type_id,
-        required=sub_required,
-        is_link=_is_link(type_id, is_enum, opts.force_input),
-        enum_values=enum_values,
-        enum_declared=enum_declared,
-        options=opts,
-        dynamic_options=dynamic_options,
-        raw_spec=sub_spec,
-    )
+    port = _port_from_spec(dotted, sub_spec, sub_required)
 
     if port.is_dynamic_combo:
         # Nested dynamic combo: its own selector/presence rules apply one level down.
@@ -1787,22 +1778,6 @@ class _WidgetEntry:
     owner: str | None
 
 
-def _sub_port_from_spec(name: str, sub_spec: Any, required: bool) -> Port:
-    """Build a Port for a dynamic-combo option sub-input, applying the same
-    widget-vs-link rules as top-level parsing."""
-    type_id, is_enum, enum_values, opts, enum_declared, dynamic_options = _parse_input_spec(sub_spec)
-    return Port(
-        name=name,
-        type=type_id,
-        required=required,
-        is_link=_is_link(type_id, is_enum, opts.force_input),
-        enum_values=enum_values,
-        enum_declared=enum_declared,
-        options=opts,
-        dynamic_options=dynamic_options,
-    )
-
-
 def _dynamic_combo_sub_ports(dynamic_options: list[dict], selector: Any, prefix: str) -> list[Port]:
     """The selected option's sub-inputs as Ports, dotted under ``prefix``.
 
@@ -1822,7 +1797,7 @@ def _dynamic_combo_sub_ports(dynamic_options: list[dict], selector: Any, prefix:
         if not isinstance(section_def, dict):
             continue
         for sub_name, sub_spec in section_def.items():
-            ports.append(_sub_port_from_spec(f"{prefix}.{sub_name}", sub_spec, section == "required"))
+            ports.append(_port_from_spec(f"{prefix}.{sub_name}", sub_spec, section == "required"))
     return ports
 
 
