@@ -39,6 +39,9 @@ foreground process group. Signalling that group would kill the user's shell job,
 so ``download-cancel`` refuses a live foreground record instead. The field is
 additive within ``download-state/1``: readers drop unknown keys, and a record
 written before it existed reads back as ``"background"``, which is what it was.
+A record carrying an *unrecognized* ``kind`` is a different case — see
+``_TOLERANT_FALLBACKS`` — and reads back as ``"foreground"``, the side that
+refuses to be signalled.
 
 ``pid`` is only ever written by the worker itself, together with
 ``pid_create_time`` — the pair identifies the process, so a recycled pid can
@@ -191,7 +194,9 @@ class DownloadState:
 
         The distinction is only ever load-bearing in the *refusing* direction
         (``download-cancel`` must not signal a foreground pid's process group),
-        so an unrecognized value reads as ``background`` — see :data:`_TOLERANT_FIELDS`.
+        so an unrecognized value reads as ``foreground`` — the non-cancellable
+        side. See :data:`_TOLERANT_FALLBACKS`. Only a record with no ``kind`` at
+        all reads as ``background``, because that is what it provably was.
         """
         return self.kind == "foreground"
 
@@ -312,25 +317,31 @@ _FIELD_VALIDATORS: dict[str, Any] = {
     "needs_hf_auth": lambda v: isinstance(v, bool),
 }
 
-# Fields whose validator failure drops *the field* (falling back to the dataclass
-# default) rather than the whole record.
+# Fields whose validator failure replaces *the field* with the value below
+# rather than rejecting the whole record.
 #
 # `kind` is in here because rejecting the record is the more dangerous outcome by
-# far. A record reads as absent to every caller, including the destination-claim
-# scan — so one unrecognized `kind` on a *live* download would make its claim
-# invisible and let a second writer into the same file, which is the exact
-# corruption the claim exists to prevent. Dropping one advisory field is the
-# smaller loss.
+# far. A rejected record reads as absent to every caller, including the
+# destination-claim scan — so one unrecognized `kind` on a *live* download would
+# make its claim invisible and let a second writer into the same file, which is
+# the exact corruption the claim exists to prevent. Keeping the record and
+# distrusting one field is the smaller loss.
 #
-# The fallback is the dataclass default, `"background"`, which is exactly right
-# for the case that actually occurs — a record written before this field existed,
-# which *was* a background worker. It is the less conservative choice for the
-# case that does not occur today: a *live foreground* record whose `kind` got
-# rewritten to something unrecognized would read as cancellable, and
-# `download-cancel` would then `killpg` the user's shell job. Nothing writes a
-# third value, so that population is empty; a future version that adds one must
-# revisit this line rather than assume tolerance covers it.
-_TOLERANT_FIELDS = frozenset({"kind"})
+# The substitute is `"foreground"`, *not* the dataclass default. `kind` is the
+# one field that gates a destructive action, so tolerance here has to fail
+# closed: `download-cancel` refuses a live `foreground` record and sends the user
+# to Ctrl-C, whereas a `background` one reaches `kill_worker` ->
+# `os.killpg(os.getpgid(pid), ...)`. Guessing "background" for a value we could
+# not parse would aim that killpg at a pid we have no reason to believe is a
+# detached worker — and if it is in fact a foreground record whose `kind` was
+# corrupted, at the user's own shell job. Refusing to cancel a record we cannot
+# read is recoverable (the process is Ctrl-C-able, and the record reconciles once
+# it exits); signalling the wrong process group is not.
+#
+# A record with no `kind` key at all is a different case and is *not* routed
+# here: it falls through to the dataclass default, `"background"`, because every
+# record written before this field existed really was a detached worker.
+_TOLERANT_FALLBACKS: dict[str, Any] = {"kind": "foreground"}
 
 
 def read_path(path: Path) -> DownloadState | None:
@@ -345,8 +356,8 @@ def read_path(path: Path) -> DownloadState | None:
     for key, value in list(filtered.items()):
         validator = _FIELD_VALIDATORS.get(key)
         if validator is not None and not validator(value):
-            if key in _TOLERANT_FIELDS:
-                del filtered[key]
+            if key in _TOLERANT_FALLBACKS:
+                filtered[key] = _TOLERANT_FALLBACKS[key]
                 continue
             return None
     try:

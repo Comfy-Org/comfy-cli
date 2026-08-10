@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import sys
 import time
+from collections.abc import Callable
 from typing import Annotated
 from urllib.parse import parse_qs, unquote, urlparse, urlsplit, urlunsplit
 
@@ -626,6 +627,13 @@ def download(
                     local_filepath.parent.mkdir(parents=True, exist_ok=True)
                     shutil.move(str(output_path), str(local_filepath))
                     output_path = str(local_filepath)
+                # Covers `shutil.Error` too — it derives from `OSError` (Lib/shutil.py:
+                # `class Error(OSError)`), so the multi-file/partial-move failures
+                # `shutil.move` raises under that name land here and end in an
+                # envelope, not a bare traceback. Pinned by
+                # `test_hf_move_failure_emits_an_envelope_not_a_traceback`, because
+                # this branch has no `except Exception` backstop the way the
+                # direct-download one below does.
                 except OSError as e:
                     raise _download_failure(
                         code="download_failed",
@@ -638,7 +646,17 @@ def download(
         else:
             print(f"Start downloading URL: {escape(_scrub_url(url))} into {escape(str(local_filepath))}")
             try:
-                download_file(url, local_filepath, headers, downloader=resolved_downloader)
+                download_file(
+                    url,
+                    local_filepath,
+                    headers,
+                    downloader=resolved_downloader,
+                    # Feeds the claim record its byte counts — above all the
+                    # total, which is what lets `reconcile` tell a killed-but-
+                    # finished run from a killed-mid-flight one. See
+                    # `_foreground_progress`.
+                    progress_callback=_foreground_progress(claim) if claim is not None else None,
+                )
             except DownloadException as e:
                 # `message` is rendered through `Text` (see `_download_failure`), which
                 # never parses markup, and `error_panel` sanitizes it (ANSI/control-byte
@@ -698,7 +716,7 @@ def download(
         # `download_state.reconcile` already handles: a record whose pid and
         # pid_create_time no longer match a live process demotes to `failed`, so a
         # hard-killed foreground run self-clears just like a dead worker.
-        _release_foreground(claim)
+        _persist_foreground(claim)
 
     elapsed = time.monotonic() - start_time
     print(f"Done in {_format_elapsed(elapsed)}")
@@ -1204,7 +1222,17 @@ def _enforce_claim(state: download_state.DownloadState, dest: pathlib.Path) -> N
     if competitor is None or _claim_order(state) < _claim_order(competitor):
         return
 
-    download_state.delete(get_workspace(), state.id)
+    if not download_state.delete(get_workspace(), state.id):
+        # The unlink failed (a read-only state directory, a permission change
+        # under us). Withdrawing the claim is the whole point of this branch, so
+        # falling back to a terminal status is the next best thing: a `failed`
+        # record is inert to `_active_download_for` and to `download-cancel`,
+        # where the `downloading` one we just wrote would read as a live claim and
+        # refuse every later submission to this destination until something
+        # reconciled it away.
+        state.status = "failed"
+        state.error = f"withdrew this claim; {competitor.id} won {dest}"
+        _persist_foreground(state)
     raise _in_flight_failure(competitor, dest)
 
 
@@ -1227,11 +1255,12 @@ def _claim_foreground(url: str, dest: pathlib.Path, downloader: str) -> download
     :func:`download_state.is_worker_process` falls back to matching the *worker's*
     argv marker, which a foreground CLI process does not carry.
 
-    Returns None when the claim could not be persisted. That is a deliberate
-    degradation to the pre-claim behavior rather than a failure: the state
-    directory is bookkeeping, and an unwritable workspace must not turn a
-    download that used to work into an error. (The ``--background`` path *does*
-    fail there, because a detached worker has nowhere else to report from.)
+    Returns None when the claim could not be persisted, *or* when this process's
+    start time could not be read. Both are deliberate degradations to the
+    pre-claim behavior rather than failures: the state directory is bookkeeping,
+    and an unwritable workspace must not turn a download that used to work into
+    an error. (The ``--background`` path *does* fail there, because a detached
+    worker has nowhere else to report from.)
     """
     # Absolute, as `_submit_background_download` also takes care to be. `dest` is
     # built from `workspace_manager.workspace_path`, which is not guaranteed
@@ -1241,11 +1270,29 @@ def _claim_foreground(url: str, dest: pathlib.Path, downloader: str) -> download
     # elsewhere and the two would not recognize each other's claim.
     # `download_cancel` reads it as a plain path too.
     dest = pathlib.Path(dest).absolute()
-    state = download_state.new(url=url, dest=str(dest), downloader=downloader)
+    # `_scrub_url`, not `url`: a foreground record is written for its *claim*, and
+    # nothing ever reads this field back from one (only the detached worker needs
+    # the real url, and it gets its own record). A resolved download url routinely
+    # carries a credential — CivitAI links append `?token=`, presigned S3/SAS links
+    # carry the signature in the query — so persisting it verbatim would drop a
+    # secret into `<workspace>/.comfy-downloads/`, a directory inside the ComfyUI
+    # checkout that nothing gitignores, for no reader's benefit.
+    state = download_state.new(url=_scrub_url(url), dest=str(dest), downloader=downloader)
     state.kind = "foreground"
     state.status = "downloading"
     state.pid = os.getpid()
     state.pid_create_time = download_state.process_create_time(state.pid)
+    if state.pid_create_time is None:
+        # Without the start time this claim is unfalsifiable. `worker_alive` falls
+        # back to bare pid liveness when `pid_create_time` is None, so once this
+        # process exits and the OS recycles its number the record reads *live*
+        # forever: `reconcile` never demotes it, every later download to this
+        # destination is refused as `model_download_in_flight`, and
+        # `download-cancel` refuses it as foreground — leaving hand-deletion of
+        # the JSON as the only way out. A claim that cannot retract itself on
+        # death is worse than no claim, so degrade to the pre-claim behavior
+        # exactly as an unwritable state directory does.
+        return None
     try:
         download_state.write(get_workspace(), state)
     except (OSError, ValueError):
@@ -1253,12 +1300,54 @@ def _claim_foreground(url: str, dest: pathlib.Path, downloader: str) -> download
     return state
 
 
-def _release_foreground(state: download_state.DownloadState | None) -> None:
-    """Persist a foreground claim's terminal status. Never raises."""
+def _persist_foreground(state: download_state.DownloadState | None) -> None:
+    """Write a foreground claim to disk. Never raises.
+
+    Used for both the progress writes and the terminal one: the state directory
+    is bookkeeping, and a download that is otherwise fine must not die because a
+    record could not be updated.
+    """
     if state is None:
         return
     with contextlib.suppress(OSError, ValueError):
         download_state.write(get_workspace(), state)
+
+
+def _foreground_progress(state: download_state.DownloadState) -> Callable[[int, int | None], None]:
+    """A ``progress_callback`` that keeps a foreground claim's counters current.
+
+    Chiefly for ``total_bytes``, which is what lets a foreground record survive a
+    SIGKILL honestly. :func:`download_state.reconcile` resolves a dead ``downloading``
+    record to ``completed`` only when ``total_bytes`` is known and the file on disk
+    reached it; with no callback the field stayed None for the whole transfer, so a
+    run killed in the window between the rename and the ``finally`` below left a
+    *complete* model at ``dest`` under a record that read ``failed`` forever — and
+    ``download-cancel`` then deleted that finished file as an aria2 partial.
+
+    It also makes the record's progress real. ``comfy model downloads`` and
+    ``download-status`` now list foreground downloads, and without this they would
+    report 0 bytes and no percent for the entire transfer.
+
+    Writes are throttled to :data:`download_state.PROGRESS_THROTTLE_S`, as the
+    worker's are, with one exception: a newly-learned total is written
+    immediately. It arrives once, before the first chunk, and it is the field
+    that matters if this process is killed a moment later.
+    """
+    last_write = 0.0
+
+    def on_progress(completed: int, total: int | None) -> None:
+        nonlocal last_write
+        state.completed_bytes = completed
+        learned_total = total is not None and state.total_bytes != total
+        if total is not None:
+            state.total_bytes = total
+        now = time.monotonic()
+        if not learned_total and now - last_write < download_state.PROGRESS_THROTTLE_S:
+            return
+        last_write = now
+        _persist_foreground(state)
+
+    return on_progress
 
 
 @app.command("download-status")

@@ -357,6 +357,32 @@ class TestProgressCallback:
         assert (40, 100) in seen
         assert seen[-1] == (100, 100)
 
+    def test_ctrl_c_stops_the_daemon_side_aria2_transfer(self):
+        """Ctrl-C has to reach *aria2c*, not just this process.
+
+        With aria2 the bytes move inside the daemon, and the foreground
+        `download_file` call passes a progress callback that never raises
+        `DownloadCancelled` — so an interrupt lands here, in the poll loop, and
+        nothing else would ever tell aria2c to stop. Walking away would leave the
+        daemon writing to a destination whose *claim* the interrupted CLI has just
+        withdrawn: the unguarded double-writer the claim exists to prevent, via
+        the very keystroke `model_download_foreground_cancel` tells users to press.
+        """
+        from comfy_cli.file_utils import _poll_aria2_download
+
+        download = MagicMock()
+        download.total_length = 100
+        download.completed_length = 10
+        download.is_complete = False
+        download.has_failed = False
+        download.is_removed = False
+
+        with patch("time.sleep", side_effect=KeyboardInterrupt):
+            with pytest.raises(KeyboardInterrupt):
+                _poll_aria2_download(download)
+
+        download.remove.assert_called_once_with(force=True, files=True)
+
 
 class TestWorkerThrottle:
     def test_progress_writes_are_throttled_but_terminal_always_lands(self, workspace, monkeypatch, tmp_path):
@@ -1110,6 +1136,30 @@ class TestForegroundClaimsItsDestination:
             assert json_renderer()["error"]["details"]["download_id"] == rival.id
             assert download_state.read(workspace, "mmmmmmmmmmmm") is None
 
+    def test_a_claim_we_cannot_unlink_is_made_inert_instead(self, workspace, monkeypatch, json_renderer):
+        """Withdrawing the claim is the point of losing; the unlink is only how.
+
+        If the unlink fails, leaving our `downloading` record behind is worse than
+        never having written it: it reads as a live claim to `_active_download_for`
+        and would refuse every later submission to this destination until something
+        reconciled it away. A terminal status is inert to the same readers, so fall
+        back to that.
+        """
+        rival = _state(dest=str(self._dest(workspace)), status="downloading", pid=1234)
+        rival.started_at = "2000-01-01T00:00:00+00:00"
+        self._race(monkeypatch, rival)
+        monkeypatch.setattr(download_state, "delete", lambda workspace, download_id: False)
+        monkeypatch.setattr(models, "download_file", MagicMock(side_effect=AssertionError("a transfer started")))
+
+        with patch("comfy_cli.utils.is_running", return_value=True):
+            with pytest.raises(typer.Exit):
+                self._download()
+
+        assert json_renderer()["error"]["details"]["download_id"] == rival.id
+        ours = [s for s in download_state.list_all(workspace) if s.id != rival.id]
+        assert [s.status for s in ours] == ["failed"]
+        assert download_state.read(workspace, rival.id).status == "downloading"
+
     def test_an_unwritable_state_directory_still_downloads(self, workspace, monkeypatch, capsys):
         """The claim is bookkeeping. An unwritable workspace must degrade to the
         old behavior — no claim, transfer still runs — not turn a download that
@@ -1121,6 +1171,102 @@ class TestForegroundClaimsItsDestination:
         self._download()
 
         assert len(calls) == 1
+
+    def test_an_unverifiable_pid_claims_nothing(self, workspace, monkeypatch, capsys):
+        """No `pid_create_time` means the claim could never retract itself.
+
+        `worker_alive` falls back to bare pid liveness when the start time is
+        missing, so once this process exits and the OS recycles its number the
+        record reads *live* forever: `reconcile` never demotes it, every later
+        download to that destination is refused, and `download-cancel` refuses it
+        as foreground. A permanently wedged destination is worse than the race the
+        claim narrows, so the claim is simply not written — the same degradation
+        an unwritable state directory gets.
+        """
+        monkeypatch.setattr(download_state, "process_create_time", lambda pid: None)
+        calls = self._transfer(monkeypatch)
+
+        self._download()
+
+        assert len(calls) == 1
+        assert download_state.list_all(workspace) == []
+
+    def test_the_claim_does_not_persist_the_url_query(self, workspace, monkeypatch, capsys):
+        """A resolved download url carries credentials — a presigned S3/SAS
+        signature, or CivitAI's `?token=`. Nothing reads a *foreground* record's
+        url back (only the detached worker needs the real one), so persisting it
+        verbatim would write a secret into `<workspace>/.comfy-downloads/`, which
+        nothing gitignores, for no reader at all."""
+        signed = "https://example.com/m.safetensors?X-Amz-Signature=hunter2"
+        seen: list = []
+        monkeypatch.setattr(models, "download_file", lambda *a, **k: seen.append(a[0]))
+
+        models.download(None, url=signed, relative_path=self.DEST[0], filename=self.DEST[1])
+
+        # The transfer itself still gets the real url...
+        assert seen == [signed]
+        # ...but the record on disk does not.
+        (record,) = download_state.list_all(workspace)
+        assert record.url == "https://example.com/m.safetensors"
+        assert "hunter2" not in json.dumps(record.to_dict())
+
+    def test_progress_is_persisted_so_a_killed_run_reconciles_honestly(self, workspace, monkeypatch, capsys):
+        """The record has to learn `total_bytes` *during* the transfer.
+
+        `reconcile` resolves a dead `downloading` record to `completed` only when
+        the total is known and the file reached it. With no progress callback the
+        field stayed None for the whole foreground transfer, so a run SIGKILLed in
+        the window between the rename and its `finally` left a *complete* model
+        under a record reading `failed` forever — and `download-cancel` then
+        deleted that finished file as an aria2 partial.
+        """
+        snapshot: list = []
+
+        def land_the_file(url, path, headers, downloader=None, progress_callback=None):
+            # The size arrives before the first chunk, as it does off Content-Length.
+            progress_callback(0, 4096)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"x" * 4096)
+            # A SIGKILL landing *here* runs no Python cleanup: no terminal status,
+            # no `finally`. Whatever is on disk at this instant is all a later
+            # reader ever sees, so that is what this asserts on.
+            snapshot.extend(download_state.list_all(workspace))
+
+        monkeypatch.setattr(models, "download_file", land_the_file)
+
+        self._download()
+
+        (record,) = snapshot
+        assert record.status == "downloading"
+        assert record.total_bytes == 4096
+
+        # And that is enough for the next reader to call it what it is: the file
+        # reached the known total, so this is a finished download, not a corpse.
+        fresh = download_state.reconcile(record, pid_alive=lambda pid: False)
+        assert fresh.status == "completed"
+
+    def test_progress_writes_are_throttled(self, workspace, monkeypatch, capsys):
+        """Once the total is known the record must not be rewritten per chunk — a
+        multi-GB transfer would otherwise be thousands of state writes."""
+        writes: list = []
+        real_write = download_state.write
+
+        def counting_write(ws, state):
+            writes.append(state.completed_bytes)
+            return real_write(ws, state)
+
+        monkeypatch.setattr(download_state, "write", counting_write)
+
+        def chunked(url, path, headers, downloader=None, progress_callback=None):
+            for completed in range(0, 500):
+                progress_callback(completed, 4096)
+
+        monkeypatch.setattr(models, "download_file", chunked)
+
+        self._download()
+
+        # The claim, the newly-learned total, and the terminal write — not 500.
+        assert len(writes) <= 4
 
 
 class TestSubmitEnvelope:
@@ -1246,8 +1392,11 @@ class TestSubmitEnvelope:
         )
 
         assert len(calls) == 1
-        # The foreground call site does not pass a progress callback.
-        assert "progress_callback" not in calls[0][1]
+        # The foreground call site *does* pass a progress callback now — it used
+        # not to, because there was no record to feed. There is one now, and
+        # `total_bytes` on it is what tells `reconcile` a run killed just after
+        # the rename finished rather than died mid-transfer.
+        assert callable(calls[0][1]["progress_callback"])
         # It *does* now leave a record — a foreground transfer that claims nothing
         # is invisible to every other invocation, which is how two of them ended up
         # writing the same file. The record is a foreground one and it is terminal,
@@ -1999,15 +2148,21 @@ class TestCorruptStateFiles:
         assert state.is_foreground is False
 
     @pytest.mark.parametrize("value", ["worker", "", None, 3])
-    def test_an_unrecognized_kind_drops_the_field_not_the_record(self, workspace, tmp_path, value):
-        """`kind` is the one *tolerant* field: a bad value drops the field rather
-        than the whole record.
+    def test_an_unrecognized_kind_reads_as_the_non_cancellable_one(self, workspace, tmp_path, value):
+        """`kind` is the one *tolerant* field: a bad value replaces the field
+        rather than rejecting the whole record — and it fails *closed*.
 
         Rejecting the record is the far more dangerous outcome. A record that
         reads as absent is invisible to the destination-claim scan too, so one
         unrecognized `kind` on a *live* download would un-claim its destination
         and let a second writer into the same file — the exact corruption the
         claim exists to prevent.
+
+        But the substitute cannot be the `background` default, because `kind` is
+        what gates a destructive action: `background` reaches `kill_worker`'s
+        `os.killpg`. A value we could not parse is no evidence that the pid is a
+        detached worker, so it reads as `foreground` — refused by
+        `download-cancel`, which is the recoverable way to be wrong.
         """
         path = tmp_path / "odd-kind.json"
         payload = _state().to_dict()
@@ -2016,7 +2171,8 @@ class TestCorruptStateFiles:
 
         state = download_state.read_path(path)
         assert state is not None
-        assert state.kind == "background"
+        assert state.kind == "foreground"
+        assert state.is_foreground is True
 
     @pytest.mark.parametrize("kind", ["background", "foreground"])
     def test_the_status_row_reports_the_kind(self, kind):

@@ -234,6 +234,14 @@ def _poll_aria2_download(download, progress_callback: ProgressCallback | None = 
     removed before the exception propagates: with aria2 the bytes move inside the
     aria2c process, not this one, so simply walking away would leave it happily
     finishing a download the user just cancelled.
+
+    A :class:`KeyboardInterrupt` gets the same treatment, and needs it more.
+    Ctrl-C is what `comfy model download` tells a user to press to stop a
+    foreground transfer — and it lands here, in the poll loop's sleep, not in a
+    progress callback, so `DownloadCancelled` never fires. Without this the
+    interrupted CLI would tear down its destination *claim* on the way out while
+    the aria2c daemon carried on writing to that same destination: the exact
+    unguarded interleaving the claim exists to prevent.
     """
     import time
 
@@ -280,7 +288,7 @@ def _poll_aria2_download(download, progress_callback: ProgressCallback | None = 
                     raise DownloadException("aria2 download was removed before completion")
 
                 time.sleep(0.5)
-        except DownloadCancelled:
+        except (DownloadCancelled, KeyboardInterrupt):
             _remove_aria2_download(download)
             raise
 
