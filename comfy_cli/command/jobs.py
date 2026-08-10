@@ -34,7 +34,7 @@ import urllib.parse
 import urllib.request
 import uuid
 from dataclasses import dataclass, field, replace
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Annotated, Any
 
 import typer
@@ -205,8 +205,21 @@ def _emit_terminal(renderer, payload: dict, *, command: str, where: str | None =
         raw = payload.get("error_message") or payload.get("details")
     message = raw if isinstance(raw, str) else None
     hint = None
+    # This whole payload becomes `renderer.error(details=...)`, and a cloud
+    # snapshot's structured record carries the full server traceback — the very
+    # blob the trimming below exists to keep out of an envelope. Cap it before
+    # the status branches so the `cancelled` path is covered too; the full
+    # record stays reachable via `comfy --json jobs status <prompt_id>`.
+    structured = payload.get("execution_error")
+    if isinstance(structured, dict):
+        structured = execution_errors.trim_record(structured)
+        payload["execution_error"] = structured
     if status == "error":
-        verdict = execution_errors.classify(raw)
+        # Classify the structured record itself when the cloud snapshot
+        # carries one: re-parsing the flattened one-liner would JSON-sniff an
+        # `exception_message` that is itself JSON (API nodes commonly raise
+        # with raw JSON bodies) and decode it back into a fields-less dict.
+        verdict = execution_errors.classify(structured if isinstance(structured, dict) else raw)
         code, message, hint = verdict["code"], verdict["message"], verdict["hint"]
         # The raw server text repeats the full traceback; keep the envelope to
         # the one-line cause + structured tail and leave the full record to
@@ -2372,6 +2385,72 @@ def _cloud_client():
         raise typer.Exit(code=1) from e
 
 
+def _execution_error_line(err: Any) -> str | None:
+    """Render a ``JobDetailResponse.execution_error`` object as one human line.
+
+    ``/api/jobs/<id>`` serves a failed job's cause as a structured object
+    (``node_id``, ``node_type``, ``exception_message``, ``exception_type``,
+    ``traceback``, ``current_inputs``) — unlike the deprecated
+    ``/api/job/<id>/status``, which served a single JSON-encoded
+    ``error_message`` string. Flatten it back to the one-line shape the pretty
+    `error` row and the snapshot's top-level ``error_message`` both consume
+    (``_emit_terminal`` classifies the structured record directly, so it never
+    round-trips through this line). Returns ``None`` when the record carries
+    nothing nameable, so a present-but-empty record never fabricates an error
+    line.
+
+    Parsing is delegated to ``execution_errors.parse_error_message`` so this
+    path and the watcher's ``classify`` path agree on *what the record says*
+    whatever shape it arrives in — dict, JSON-encoded string or plain text.
+    Only the rendering differs: the line below keeps ``exception_type``, which
+    ``classify``'s envelope message drops in favour of the node prefix, and the
+    pretty `error` row is the one place that type is surfaced to a human.
+    """
+    parsed = execution_errors.parse_error_message(err)
+
+    def _one_line(value: Any) -> str:
+        # `split()` on arbitrary whitespace, not `strip()`: an
+        # `exception_message` with internal newlines (common for multi-line
+        # server errors) would otherwise blow up a helper documented as
+        # rendering "one human line" into a multi-row Rich cell.
+        return " ".join(str(value or "").split())
+
+    exception_message = _one_line(parsed.get("exception_message"))
+    exception_type = _one_line(parsed.get("exception_type"))
+    node_id = _one_line(parsed.get("node_id"))
+    node_type = _one_line(parsed.get("node_type"))
+
+    # Joining the present parts (rather than formatting both unconditionally)
+    # is what keeps a record missing one field from rendering `ValueError: `
+    # with a dangling separator.
+    head = ": ".join(part for part in (exception_type, exception_message) if part)
+    where = " ".join(part for part in (f"node {node_id}" if node_id else "", node_type) if part)
+    if not where:
+        return head or None
+    # A record with node fields but no exception text used to render the bare
+    # parenthetical `(node 5 KSampler)` — a cause-less error row. Borrow
+    # `classify`'s stand-in cause so the line always states one.
+    return f"{head or 'ComfyUI reported an execution error.'} ({where})"
+
+
+def _ms_to_iso(value: Any) -> str | None:
+    """Convert a Unix-millisecond timestamp to an ISO-8601 UTC string.
+
+    ``JobDetailResponse`` serves ``create_time``/``update_time`` as integer
+    milliseconds, where the deprecated status endpoint served ready-made
+    ``created_at``/``updated_at`` strings. Callers (the pretty table rows, the
+    JSON fields) expect the string shape, so normalize here. Anything that
+    isn't a finite, representable number returns ``None`` rather than raising —
+    a malformed timestamp must not take down a `jobs status` call.
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return datetime.fromtimestamp(float(value) / 1000, tz=timezone.utc).isoformat()
+    except (TypeError, ValueError, OverflowError, OSError):
+        return None
+
+
 def _cloud_status_snapshot(prompt_id: str) -> dict | None:
     """Compose a cloud snapshot from /api/jobs/<id> + /api/history_v2/<id>."""
     from comfy_cli import jobs_state
@@ -2412,16 +2491,50 @@ def _cloud_status_snapshot(prompt_id: str) -> dict | None:
             item_map = job.item_map if job is not None else None
             outputs_by_node, outputs_by_item = _group_outputs(node_outputs, item_map)
 
+    # `/api/jobs/<id>` (JobDetailResponse) serves the failure cause as a
+    # structured `execution_error` object and the timestamps as Unix-ms ints —
+    # the deprecated `/api/job/<id>/status` served `error_message` /
+    # `created_at` / `updated_at` instead. Read both dialects: the timestamps
+    # keep the old names as first choice (they carry the same information in a
+    # ready-made shape), while the failure cause prefers the structured record
+    # — see below.
+    raw_execution_error = status.get("execution_error")
+    # `current_inputs` — the failing node's widget values — can carry API keys,
+    # and this record is emitted verbatim by `jobs status`. Redact before it
+    # enters the payload at all, not at each rendering site.
+    execution_error = (
+        execution_errors.redact_record(raw_execution_error) if isinstance(raw_execution_error, dict) else None
+    )
+    # Only a *failed* job gets a cause synthesized from the record: a stale
+    # `execution_error` left on a retried-then-succeeded job would otherwise
+    # fabricate an `error` row on a green one. `canceled` is spelled out
+    # alongside `_ERROR_STATUSES` because the state map above deliberately
+    # leaves cloud's one-l spelling unmapped (BE-6612).
+    failed = state in _ERROR_STATUSES or state == "canceled"
+    # The structured record wins over `error_message` when the server sent
+    # one: a deployment that fills `error_message` with a short generic string
+    # ("job failed") alongside a detailed object would otherwise discard the
+    # only copy of the real cause. Non-dict shapes (the deprecated dialect's
+    # JSON-encoded string) still parse — `_execution_error_line` routes
+    # everything through `execution_errors.parse_error_message`.
+    error_message = (_execution_error_line(raw_execution_error) if failed else None) or status.get("error_message")
+
     return {
         "prompt_id": prompt_id,
         "status": state,
         "outputs": outputs,
         "outputs_by_node": outputs_by_node,
         "outputs_by_item": outputs_by_item,
+        # Not served by the plural jobs-detail endpoint at all — kept so an
+        # older deployment still populates it; never synthesized.
         "assigned_inference": status.get("assigned_inference"),
-        "error_message": status.get("error_message"),
-        "created_at": status.get("created_at"),
-        "updated_at": status.get("updated_at"),
+        "error_message": error_message,
+        # The full structured record rides along for `--json` consumers; the
+        # flattened one-liner above is what the pretty row and the envelope
+        # classification read.
+        "execution_error": execution_error,
+        "created_at": status.get("created_at") or _ms_to_iso(status.get("create_time")),
+        "updated_at": status.get("updated_at") or _ms_to_iso(status.get("update_time")),
         "base_url": client.target.base_url,
     }
 
