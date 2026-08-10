@@ -3431,3 +3431,30 @@ def test_jobs_schema_still_requires_host_and_port_without_base_url():
     # Both legitimate shapes still validate.
     validator.validate({"prompt_id": "p", "status": "completed", "host": "127.0.0.1", "port": 8188})
     validator.validate({"prompt_id": "p", "status": "completed", "base_url": "https://api.comfy.example"})
+
+
+def test_jobs_schema_empty_base_url_does_not_buy_the_host_port_exemption():
+    """An empty `base_url` names no source URL, so it must not be the key that
+    unlocks the cloud exemption. Guarded twice on purpose: `minLength` on the
+    property rejects the empty string outright, and the same `minLength` inside
+    the `if` keeps such a payload in the `else` branch, where it still owes
+    `host` + `port` — so neither guard alone is load-bearing."""
+    import jsonschema
+
+    schema = _jobs_schema()
+    validator = jsonschema.Draft202012Validator(schema)
+
+    with pytest.raises(jsonschema.ValidationError):
+        validator.validate({"prompt_id": "p", "status": "completed", "base_url": ""})
+
+    # The `if` branch alone: strip the property-level `minLength` and the empty
+    # `base_url` must STILL be rejected, now for missing `host` + `port`.
+    del schema["properties"]["base_url"]["minLength"]
+    errors = list(
+        jsonschema.Draft202012Validator(schema).iter_errors({"prompt_id": "p", "status": "completed", "base_url": ""})
+    )
+    assert errors, "empty base_url must fall to the `else` branch and be held to host+port"
+    assert any("host" in e.message for e in errors), [e.message for e in errors]
+
+    # A real cloud payload is untouched by either guard.
+    validator.validate({"prompt_id": "p", "status": "completed", "base_url": "https://api.comfy.example"})
