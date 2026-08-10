@@ -105,14 +105,15 @@ def neutral_cwd(tmp_path, monkeypatch):
     return directory
 
 
-# --- git_utils: the two ``os.chdir``-then-spawn sites -----------------------
+# --- git_utils: repo-directory spawn sites ----------------------------------
 
 
 class TestGitUtilsResolvesBeforeChdir:
-    """``git_checkout_tag`` / ``checkout_pr`` ``os.chdir`` into a caller-supplied
-    repo directory and then spawn ``git``. Both resolve ``git`` *before* that
-    chdir, so a ``git`` planted in the target repo can neither be executed nor
-    shadow the legitimate binary into a hard failure."""
+    """``git_checkout_tag`` / ``checkout_pr`` spawn ``git`` with ``cwd=`` set to a
+    caller-supplied repo directory, without ever ``os.chdir``-ing the process
+    itself. Both resolve ``git`` against the process's own CWD *before* touching
+    ``repo_path`` at all, so a ``git`` planted in the target repo can neither be
+    executed nor shadow the legitimate binary into a hard failure."""
 
     def test_checkout_tag_spawns_resolved_path_not_the_repo_plant(self, tmp_path, system_bin, neutral_cwd):
         legit = _plant(system_bin, "git")

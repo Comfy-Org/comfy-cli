@@ -31,6 +31,30 @@ workspace_manager = WorkspaceManager()
 console = Console()
 
 
+def _hard_exit(code: int) -> None:
+    """`os._exit(code)`, but drain telemetry on the way out.
+
+    Every exit path in this module uses `os._exit` (plain `sys.exit` doesn't
+    work once the redirector threads are running), which skips atexit handlers —
+    so `comfy_cli.tracking`'s shutdown drain never runs here. That cost nothing
+    while Mixpanel sent inline from `track()`: `@track_command` fires the
+    `launch` event *before* the command body runs, so it was already delivered.
+    Now that dispatch is queue-and-drain (BE-5868) the event is still queued at
+    this point, and without an explicit drain every `comfy launch` — background
+    success included — silently drops its own telemetry.
+
+    The drain is bounded (~5s worst case, same budget as the atexit hook) and
+    best-effort; the process exits with `code` regardless.
+    """
+    try:
+        from comfy_cli import tracking
+
+        tracking.flush_for_hard_exit()
+    except BaseException:  # noqa: BLE001  # pragma: no cover - defensive
+        pass
+    os._exit(code)
+
+
 def _get_manager_flags() -> list[str]:
     """Get manager flags based on config mode."""
     mode = resolve_manager_gui_mode(not_installed_value=None)
@@ -198,15 +222,15 @@ def launch_comfyui(extra, frontend_pr=None, python=sys.executable):
 
                 if reboot_path is None:
                     print("[bold red]ComfyUI is not installed.[/bold red]\n")
-                    os._exit(1)
+                    _hard_exit(1)
 
                 if not os.path.exists(reboot_path):
-                    os._exit(process.returncode)
+                    _hard_exit(process.returncode)
 
                 os.remove(reboot_path)
         except KeyboardInterrupt:
             if process is not None:
-                os._exit(1)
+                _hard_exit(1)
 
 
 def launch(
@@ -343,7 +367,7 @@ def background_launch(extra, frontend_pr=None):
     log = asyncio.run(launch_and_monitor(cmd, listen, port))
 
     # Reaching here means the monitor returned without seeing the success line
-    # (the success path emits its envelope and os._exit(0)s inside the monitor).
+    # (the success path emits its envelope and _hard_exit(0)s inside the monitor).
     if log is not None:
         print(
             Panel(
@@ -362,7 +386,7 @@ def background_launch(extra, frontend_pr=None):
             details={"log": _bounded_log(log)} if log else None,
         )
     # NOTE: os.exit(0) doesn't work
-    os._exit(1)
+    _hard_exit(1)
 
 
 def background_log_path(port, workspace: str | None = None) -> str:
@@ -439,7 +463,7 @@ async def launch_and_monitor(cmd, listen, port):
                 command="launch",
                 details={"log_path": log_path},
             )
-        os._exit(1)
+        _hard_exit(1)
 
     # Record the log path up front so `comfy logs` can surface a crash log even
     # when startup fails before the success marker below (where the running
@@ -489,7 +513,7 @@ async def launch_and_monitor(cmd, listen, port):
             _emit_launch_success(listen, port, process.pid)
 
             # NOTE: os.exit(0) doesn't work.
-            os._exit(0)
+            _hard_exit(0)
         if logging_flag:
             log.append(line)
 
