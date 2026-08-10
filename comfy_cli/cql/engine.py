@@ -30,6 +30,12 @@ from comfy_cli.http import NoRedirectHandler, build_http_only_opener
 
 _IMPLICIT_WIDGET_TYPES = frozenset({"STRING", "INT", "FLOAT", "NUMBER", "BOOLEAN", "COMBO"})
 
+# Work budget for ``Graph.search_paths``: the number of frontier states it will
+# expand before giving up and reporting ``truncated``. A full cloud catalog has
+# thousands of nodes, so an unreachable target must fail fast rather than walk
+# the whole type lattice.
+_MAX_PATH_SEARCH_STATES = 20_000
+
 
 @dataclass
 class PortOptions:
@@ -485,6 +491,9 @@ class Graph:
         self._consumers: dict[str, list[Morphism]] = defaultdict(list)
         self._types: set[str] = set()
         self._annotated = False
+        # Lazily-computed closure of types obtainable without wiring anything in
+        # (see ``free_types``). Invalidated implicitly: graphs are built once.
+        self._free_types: frozenset[str] | None = None
         # The raw ``/object_info`` payload this graph was built from. Retained
         # verbatim so callers that also need to lower a UI-format workflow to
         # API format (``convert_ui_to_api``) can reuse it without a second fetch.
@@ -606,6 +615,161 @@ class Graph:
         """All known pack names, sorted."""
         return sorted(set(m.pack for m in self._nodes.values() if m.pack))
 
+    def free_types(self) -> frozenset[str]:
+        """Types obtainable without wiring anything in — the fixpoint closure
+        over nodes whose required link inputs are already satisfied (loaders,
+        primitives, text-to-X API nodes, and whatever those unlock).
+
+        The exact walker uses this to decide whether a step's *other* required
+        inputs (a ``VAE`` for ``VAEDecode``, say) could be supplied by a support
+        node. Support nodes are reported per path rather than routed through, so
+        they never masquerade as steps on the requested path.
+        """
+        if self._free_types is None:
+            free: set[str] = set()
+            changed = True
+            while changed:
+                changed = False
+                for m in self._nodes.values():
+                    if not m.can_apply(free):
+                        continue
+                    for t in m.output_types():
+                        if t != "*" and t not in free:
+                            free.add(t)
+                            changed = True
+            self._free_types = frozenset(free)
+        return self._free_types
+
+    def search_paths(
+        self,
+        from_type: str,
+        to_type: str,
+        *,
+        exact: bool = True,
+        max_depth: int = 6,
+        max_paths: int = 10,
+        max_states: int = _MAX_PATH_SEARCH_STATES,
+    ) -> dict:
+        """Routed paths from ``from_type`` to ``to_type``, with honest bounds.
+
+        Every step consumes the type the previous step produced — the first step
+        consumes ``from_type`` — through a **declared link input of that type**,
+        so a node that merely owns a widget *named* like the type (the COMBO
+        ``model`` on the partner-API image nodes) is never routed through. Path
+        length (the number of steps) is bounded by ``max_depth``.
+
+        In ``exact`` mode a step is only taken when the node's other required
+        link inputs are satisfiable — from types produced earlier on the path, or
+        from a support node needing no wiring of its own (``free_types``). Those
+        support inputs are reported per path under ``support`` instead of being
+        spliced into ``steps``. Loose mode skips the satisfiability check and
+        reports no support.
+
+        Returns ``{"paths", "truncated", "truncated_by", "depth_limited",
+        "collapsed", "not_searched", "not_searched_reason"}``:
+
+        - ``not_searched`` — the walk declined the query outright and never ran,
+          so the empty result is an abstention rather than an answer.
+          ``not_searched_reason`` says which: ``"same_type"`` (FROM and TO are
+          the same type — self-returning routes exist but this walker cannot
+          represent them) or ``"degenerate_bounds"`` (``max_depth`` or
+          ``max_paths`` below 1, a bound no path can satisfy).
+        - ``truncated`` — the walk stopped early (``max_paths`` reached, or the
+          internal state budget exhausted), so paths exist that are not listed.
+        - ``depth_limited`` — the frontier was still expanding at ``max_depth``,
+          so longer paths may exist beyond the requested bound.
+        - ``collapsed`` — the walk reached some intermediate state by more than
+          one route and explored it only once, so alternate chains through that
+          state are not listed. Reachability is unaffected (the surviving route
+          explores exactly the same continuations), which is why an **empty**
+          result with all four flags false is a proof that no path exists —
+          but a non-empty one is a sample of the routes, not the full set.
+
+        A caller may only treat the listing as exhaustive when all four are
+        false. Each errs toward true: hitting ``max_paths`` exactly is reported
+        as truncated even when nothing further existed, and a revisited state is
+        reported as collapsed even when its alternate route led nowhere.
+        """
+        result: dict = {
+            "paths": [],
+            "truncated": False,
+            "truncated_by": None,
+            "depth_limited": False,
+            "collapsed": False,
+            "not_searched": False,
+            "not_searched_reason": None,
+        }
+        # Query shapes the walk declines outright. The empty result they yield is
+        # an abstention, not a proof, so it has to say so — otherwise it reads
+        # as "no route exists" with every limit flag reassuringly false.
+        if from_type == to_type:
+            # Self-returning routes are real (``MODEL -> LoraLoader -> MODEL``),
+            # but the walk cannot represent them: the no-op rule below drops any
+            # step whose output type equals its input type, and for a same-type
+            # query that is the terminal step. Declining is the honest option.
+            result["not_searched"] = True
+            result["not_searched_reason"] = "same_type"
+            return result
+        if max_depth < 1 or max_paths < 1:
+            result["not_searched"] = True
+            result["not_searched_reason"] = "degenerate_bounds"
+            return result
+
+        free = self.free_types() if exact else frozenset()
+        paths: list[dict] = result["paths"]
+        # state: (current_type, types produced by the path so far, steps[])
+        queue: list[tuple[str, frozenset[str], list[dict]]] = [(from_type, frozenset(), [])]
+        visited: set[tuple[str, frozenset[str]]] = {(from_type, frozenset())}
+        states = 0
+
+        while queue and len(paths) < max_paths:
+            next_queue: list[tuple[str, frozenset[str], list[dict]]] = []
+            for cur_type, produced, steps in queue:
+                consumers = self._consumers.get(cur_type, [])
+                if len(steps) >= max_depth:
+                    if consumers:
+                        result["depth_limited"] = True
+                    continue
+                available = free | produced | {from_type}
+                for consumer in consumers:
+                    if exact and not consumer.can_apply(available):
+                        continue
+                    outs = [t for t in consumer.output_types() if t != "*"]
+                    # Loose mode ignores availability, so keeping ``produced``
+                    # empty there collapses the visited key back to the type
+                    # alone — the pruning loose path-finding has always used.
+                    new_produced = produced | frozenset(outs) if exact else produced
+                    for out_t in outs:
+                        if out_t == cur_type:
+                            continue
+                        step = {"node": consumer.id, "input_type": cur_type, "output_type": out_t}
+                        new_steps = steps + [step]
+                        if out_t == to_type:
+                            paths.append(self._path_record(from_type, to_type, new_steps, free if exact else None))
+                            if len(paths) >= max_paths:
+                                result["truncated"] = True
+                                result["truncated_by"] = "max_paths"
+                                return result
+                            continue
+                        key = (out_t, new_produced)
+                        if key in visited:
+                            # A second route into a state already queued. Its
+                            # continuations are covered by the first one, so
+                            # dropping it costs no reachability — but the chains
+                            # it would have printed are lost, so the listing can
+                            # no longer be called complete.
+                            result["collapsed"] = True
+                            continue
+                        if states >= max_states:
+                            result["truncated"] = True
+                            result["truncated_by"] = "max_states"
+                            return result
+                        states += 1
+                        visited.add(key)
+                        next_queue.append((out_t, new_produced, new_steps))
+            queue = next_queue
+        return result
+
     def find_paths(
         self,
         from_type: str,
@@ -614,34 +778,8 @@ class Graph:
         max_depth: int = 4,
         max_paths: int = 10,
     ) -> list[dict]:
-        """BFS multi-hop path finding from one type to another."""
-        if from_type == to_type:
-            return []
-        # queue items: (current_type, steps[])
-        queue: list[tuple[str, list[dict]]] = [(from_type, [])]
-        visited: set[str] = {from_type}
-        paths: list[dict] = []
-
-        while queue and len(paths) < max_paths:
-            next_queue: list[tuple[str, list[dict]]] = []
-            for cur_type, steps in queue:
-                if len(steps) >= max_depth:
-                    continue
-                for consumer in self._consumers.get(cur_type, []):
-                    for out_t in consumer.output_types():
-                        if out_t == cur_type:
-                            continue
-                        step = {"node": consumer.id, "input_type": cur_type, "output_type": out_t}
-                        new_steps = steps + [step]
-                        if out_t == to_type:
-                            paths.append({"from": from_type, "to": to_type, "steps": new_steps})
-                            if len(paths) >= max_paths:
-                                return paths
-                        elif out_t not in visited and len(new_steps) < max_depth:
-                            visited.add(out_t)
-                            next_queue.append((out_t, new_steps))
-            queue = next_queue
-        return paths
+        """Loose (routing-only) paths — see ``search_paths``."""
+        return self.search_paths(from_type, to_type, exact=False, max_depth=max_depth, max_paths=max_paths)["paths"]
 
     def exact_paths(
         self,
@@ -651,49 +789,47 @@ class Graph:
         max_depth: int = 6,
         max_paths: int = 10,
     ) -> list[dict]:
-        """Satisfiability-aware BFS: each step's required link inputs must be
-        available from types produced by prior steps."""
-        if from_type == to_type:
-            return []
-        # state: (available_types_frozenset, steps[])
-        initial: frozenset[str] = frozenset({from_type})
-        queue: list[tuple[frozenset[str], list[dict]]] = [(initial, [])]
-        visited: set[frozenset[str]] = {initial}
-        paths: list[dict] = []
+        """Satisfiability-aware paths — see ``search_paths``."""
+        return self.search_paths(from_type, to_type, exact=True, max_depth=max_depth, max_paths=max_paths)["paths"]
 
-        while queue and len(paths) < max_paths:
-            next_queue: list[tuple[frozenset[str], list[dict]]] = []
-            for available, steps in queue:
-                if len(steps) >= max_depth:
+    def _path_record(self, from_type: str, to_type: str, steps: list[dict], free: frozenset[str] | None) -> dict:
+        record = {"from": from_type, "to": to_type, "steps": steps}
+        if free is not None:
+            record["support"] = self._support_for(from_type, steps, free)
+        return record
+
+    def _support_for(self, from_type: str, steps: list[dict], free: frozenset[str]) -> list[dict]:
+        """Required link inputs a routed path needs *besides* the routed type,
+        each with a node that can supply it without wiring of its own."""
+        available: set[str] = {from_type}
+        support: list[dict] = []
+        seen: set[str] = set()
+        for step in steps:
+            m = self._nodes.get(step["node"])
+            if m is None:
+                continue
+            for t in m.required_link_types():
+                if t in available or t in seen:
                     continue
-                for m in sorted(self._nodes.values(), key=lambda m: m.id):
-                    if not m.can_apply(available):
-                        continue
-                    new_outs = [t for t in m.output_types() if t not in available and t != "*"]
-                    if not new_outs:
-                        continue
-                    # Pick one representative input type this node consumes from available
-                    input_type = ""
-                    for t in m.required_link_types():
-                        if t in available:
-                            input_type = t
-                            break
-                    for out_t in new_outs:
-                        step = {"node": m.id, "input_type": input_type, "output_type": out_t}
-                        new_steps = steps + [step]
-                        new_avail = available | frozenset(new_outs)
-                        if out_t == to_type:
-                            # ``from_type`` seeds ``available`` and the set only
-                            # grows, so every reachable path originates from it by
-                            # construction — no extra consumption guard needed.
-                            paths.append({"from": from_type, "to": to_type, "steps": new_steps})
-                            if len(paths) >= max_paths:
-                                return paths
-                        elif new_avail not in visited and len(new_steps) < max_depth:
-                            visited.add(new_avail)
-                            next_queue.append((new_avail, new_steps))
-            queue = next_queue
-        return paths
+                seen.add(t)
+                support.append({"type": t, "node": self._free_producer(t, free)})
+            available.update(m.output_types())
+        return support
+
+    def _free_producer(self, type_id: str, free: frozenset[str]) -> str | None:
+        """A node producing ``type_id`` that needs no incoming links, preferring
+        one with no link inputs at all. ``None`` when the type can only be
+        obtained by wiring something up first."""
+        if type_id not in free:
+            return None
+        producers = self._producers.get(type_id, [])
+        for m in producers:
+            if not m.required_link_types():
+                return m.id
+        for m in producers:
+            if m.can_apply(free):
+                return m.id
+        return None
 
     # -- Browse --
 
