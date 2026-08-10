@@ -884,5 +884,57 @@
   "search_aliases": null,
   "essentials_category": null,
   "has_intermediate_output": false
+ },
+ "LoraLoaderModelOnly": {
+  "input": {
+   "required": {
+    "model": [
+     "MODEL",
+     {
+      "tooltip": "The diffusion model the LoRA will be applied to."
+     }
+    ],
+    "lora_name": [
+     [
+      "sd15/detail.safetensors",
+      "sdxl/style.safetensors"
+     ],
+     {
+      "tooltip": "The name of the LoRA."
+     }
+    ],
+    "strength_model": [
+     "FLOAT",
+     {
+      "default": 1.0,
+      "min": -100.0,
+      "max": 100.0,
+      "step": 0.01
+     }
+    ]
+   }
+  },
+  "input_order": {
+   "required": [
+    "model",
+    "lora_name",
+    "strength_model"
+   ]
+  },
+  "output": [
+   "MODEL"
+  ],
+  "output_is_list": [
+   false
+  ],
+  "output_name": [
+   "MODEL"
+  ],
+  "name": "LoraLoaderModelOnly",
+  "display_name": "LoraLoaderModelOnly",
+  "description": "LoRAs are used to modify diffusion models.",
+  "python_module": "nodes",
+  "category": "loaders",
+  "output_node": false
  }
 }

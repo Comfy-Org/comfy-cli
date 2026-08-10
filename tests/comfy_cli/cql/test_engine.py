@@ -560,6 +560,53 @@ class TestPathConstraints:
         assert graph_path.search_paths("MODEL", "IMAGE", max_depth=0)["paths"] == []
         assert graph_path.search_paths("MODEL", "IMAGE", max_paths=0)["paths"] == []
 
+    @pytest.mark.parametrize(
+        ("kwargs", "reason"),
+        [
+            ({"from_type": "MODEL", "to_type": "MODEL"}, "same_type"),
+            ({"from_type": "MODEL", "to_type": "IMAGE", "max_depth": 0}, "degenerate_bounds"),
+            ({"from_type": "MODEL", "to_type": "IMAGE", "max_paths": 0}, "degenerate_bounds"),
+        ],
+    )
+    def test_declined_queries_declare_the_abstention(self, graph_path: Graph, kwargs, reason):
+        """The query shapes the walk refuses return an empty result. An empty
+        result with every limit flag false is this module's proof that no path
+        exists, so a refusal that stayed silent would forge that proof. Each
+        one says so instead.
+        """
+        from_type = kwargs.pop("from_type")
+        to_type = kwargs.pop("to_type")
+        result = graph_path.search_paths(from_type, to_type, **kwargs)
+        assert result["paths"] == []
+        assert result["not_searched"] is True
+        assert result["not_searched_reason"] == reason
+        # No limit flag is set — which is exactly why the abstention needs its
+        # own signal rather than being inferred from the others.
+        assert result["truncated"] is False
+        assert result["depth_limited"] is False
+        assert result["collapsed"] is False
+
+    def test_same_type_query_is_declined_even_though_a_route_exists(self, graph_path: Graph):
+        """`LoraLoaderModelOnly` in the fixture takes a MODEL link input and
+        emits MODEL, so `MODEL -> MODEL` is genuinely routable. The walker still
+        declines it — the no-op rule (`out_t == cur_type`) drops that step — so
+        the empty result must be flagged as an abstention, never as proof."""
+        lora = graph_path.node("LoraLoaderModelOnly")
+        assert lora is not None and "MODEL" in lora.output_types()
+
+        result = graph_path.search_paths("MODEL", "MODEL")
+        assert result["paths"] == []
+        assert result["not_searched"] is True
+
+    def test_completed_walks_are_not_marked_as_declined(self, graph_path: Graph):
+        """The abstention flag must stay off for searches that actually ran,
+        whether they found routes or genuinely exhausted the space."""
+        found = graph_path.search_paths("MODEL", "IMAGE", max_depth=4)
+        assert found["paths"] and found["not_searched"] is False
+        empty = graph_path.search_paths("AUDIO", "IMAGE", max_depth=6)
+        assert empty["paths"] == [] and empty["not_searched"] is False
+        assert empty["not_searched_reason"] is None
+
 
 # ===========================================================================
 # TestValidateWorkflow

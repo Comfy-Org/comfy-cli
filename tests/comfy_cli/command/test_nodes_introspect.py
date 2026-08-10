@@ -526,12 +526,22 @@ class TestPath:
         ("flag", "value"),
         [("--max-depth", "0"), ("--max-depth", "-1"), ("--max-paths", "0"), ("--max-paths", "-3")],
     )
-    def test_non_positive_bounds_are_refused_not_answered(self, patched_loader, capsys, flag, value):
+    def test_non_positive_bounds_are_refused_before_any_graph_load(self, monkeypatch, capsys, flag, value):
         """A bound below 1 admits no path, so the walker returns an empty result
-        with every flag false — which the envelope would publish as `exact: true,
-        count: 0`, a proof that no route exists. That proof would come from the
-        typo, not from a walk, so the bound is rejected up front instead.
+        with every limit flag false — which the envelope would publish as
+        `exact: true, count: 0`, a proof that no route exists. That proof would
+        come from the typo, not from a walk, so the bound is rejected up front.
+
+        Deliberately *not* using the `patched_loader` fixture: `_get_graph` is
+        replaced with a tripwire, so the test fails if the command does any
+        object_info I/O before validating the caller's bounds.
         """
+
+        def _tripwire(*a, **kw):
+            raise AssertionError("_get_graph was called before the bounds were validated")
+
+        monkeypatch.setattr(nodes_cmd, "_get_graph", _tripwire)
+
         env = _run(["path", "MODEL", "IMAGE", flag, value], capsys)
         assert env["ok"] is False
         assert env["error"]["code"] == "path_bounds_invalid"
@@ -539,11 +549,45 @@ class TestPath:
         # Crucially: no envelope claiming an exhaustive empty answer.
         assert "data" not in env or not (env.get("data") or {}).get("exact")
 
-    def test_smallest_valid_bounds_still_search(self, patched_loader, capsys):
-        """The rejection is for bounds below 1 only — 1 stays a real search."""
-        env = _run(["path", "MODEL", "IMAGE", "--max-depth", "2", "--max-paths", "1"], capsys)
+    def test_smallest_valid_bounds_are_searched_not_refused(self, patched_loader, capsys):
+        """The rejection is for bounds below 1 only. `1` is a legitimate bound:
+        it must run a real (if very shallow) search rather than error out, even
+        though nothing is reachable from MODEL in a single hop."""
+        env = _run(["path", "MODEL", "IMAGE", "--max-depth", "1", "--max-paths", "1"], capsys)
         assert env["ok"] is True
-        assert env["data"]["count"] == 1
+        data = env["data"]
+        assert data["count"] == 0
+        # The walk genuinely ran and hit the depth bound — it was not declined.
+        assert data["depth_limited"] is True
+        assert data["not_searched"] is False
+        assert data["exact"] is False
+
+    def test_same_type_query_declines_rather_than_claiming_unreachability(self, patched_loader, capsys):
+        """`MODEL -> MODEL` is a *reachable* query — the fixture carries
+        `LoraLoaderModelOnly`, a stock-shaped node taking a MODEL link input and
+        emitting MODEL. The walker cannot represent that route (its no-op rule
+        drops any step whose output type equals its input type, which for a
+        same-type query is the terminal step), so it declines the query outright.
+
+        Declining is fine. Declining while reporting `exact: true, count: 0` —
+        the envelope's proof that no route exists — would not be, so the
+        abstention is declared and the exactness claim withheld.
+        """
+        lora = _run(["show", "LoraLoaderModelOnly"], capsys)["data"]
+        assert "MODEL" in {o["type"] for o in lora["outputs"]}, "fixture must offer a real MODEL -> MODEL route"
+        assert "MODEL" in {i["type"] for i in lora["inputs"]}
+
+        data = _run(["path", "MODEL", "MODEL"], capsys)["data"]
+        assert data["count"] == 0
+        assert data["not_searched"] is True
+        assert data["not_searched_reason"] == "same_type"
+        # The point of the whole ticket: an empty answer that is not a proof
+        # must not be labelled exact.
+        assert data["exact"] is False
+        # ...and it is the abstention doing it, not a bound that happened to bite.
+        assert data["truncated"] is False
+        assert data["depth_limited"] is False
+        assert data["collapsed"] is False
 
     def test_loose_mode_never_claims_exactness(self, patched_loader, capsys):
         env = _run(["path", "MODEL", "IMAGE", "--loose", "--max-depth", "4"], capsys)["data"]

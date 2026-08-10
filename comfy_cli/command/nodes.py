@@ -756,16 +756,16 @@ def path_cmd(
       already-explored state (``collapsed``) withholds the claim, as does loose
       mode always. ``exact: true`` with ``count: 0`` is therefore a proof that
       no route exists; ``exact: false`` means "these paths, maybe not all".
-    - ``truncated`` / ``truncated_by`` / ``depth_limited`` / ``collapsed`` — the
-      individual reasons the claim was withheld, so a caller can widen the right
-      bound instead of guessing.
-
-    One documented exception to the ``exact: true, count: 0`` proof: a query
-    whose FROM and TO are the *same* type is answered empty by construction
-    (``Graph.search_paths`` declines to walk it, long-standing behaviour), so it
-    reports an exhaustive empty set even where a real self-returning route such
-    as ``MODEL -> LoraLoader -> MODEL`` exists. Tracked separately; do not read
-    a same-type empty result as a proof of unreachability.
+    - ``truncated`` / ``truncated_by`` / ``depth_limited`` / ``collapsed`` /
+      ``not_searched`` — the individual reasons the claim was withheld, so a
+      caller can widen the right bound instead of guessing.
+    - ``not_searched`` / ``not_searched_reason`` — the walk declined the query
+      and never ran, so the empty result is an abstention, not an answer. Today
+      the only reason reachable from the CLI is ``"same_type"``: a query whose
+      FROM and TO are the same type is answered empty by construction, even
+      though real self-returning routes such as ``MODEL -> LoraLoader -> MODEL``
+      exist. Such a result reports ``exact: false`` and must not be read as a
+      proof of unreachability.
     """
     renderer = get_renderer()
 
@@ -796,6 +796,7 @@ def path_cmd(
     truncated = bool(result["truncated"])
     depth_limited = bool(result["depth_limited"])
     collapsed = bool(result["collapsed"])
+    not_searched = bool(result["not_searched"])
 
     payload = {
         "from": from_type,
@@ -803,14 +804,17 @@ def path_cmd(
         "mode": "exact" if exact else "loose",
         # Not the flag echoed back: the honest claim that these paths are the
         # complete, type-constrained answer. Any early stop (max_paths, the
-        # internal state budget), a frontier still expanding at max_depth, or an
-        # intermediate state reached by a second route that was not re-explored
-        # means paths may be missing, so the claim is withheld.
-        "exact": bool(exact and not truncated and not depth_limited and not collapsed),
+        # internal state budget), a frontier still expanding at max_depth, an
+        # intermediate state reached by a second route that was not re-explored,
+        # or a query the walk declined outright means paths may be missing, so
+        # the claim is withheld.
+        "exact": bool(exact and not truncated and not depth_limited and not collapsed and not not_searched),
         "truncated": truncated,
         "truncated_by": result["truncated_by"],
         "depth_limited": depth_limited,
         "collapsed": collapsed,
+        "not_searched": not_searched,
+        "not_searched_reason": result["not_searched_reason"],
         "max_depth": max_depth,
         "max_paths": max_paths,
         "count": len(paths),

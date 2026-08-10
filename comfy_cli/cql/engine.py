@@ -666,8 +666,14 @@ class Graph:
         reports no support.
 
         Returns ``{"paths", "truncated", "truncated_by", "depth_limited",
-        "collapsed"}``:
+        "collapsed", "not_searched", "not_searched_reason"}``:
 
+        - ``not_searched`` — the walk declined the query outright and never ran,
+          so the empty result is an abstention rather than an answer.
+          ``not_searched_reason`` says which: ``"same_type"`` (FROM and TO are
+          the same type — self-returning routes exist but this walker cannot
+          represent them) or ``"degenerate_bounds"`` (``max_depth`` or
+          ``max_paths`` below 1, a bound no path can satisfy).
         - ``truncated`` — the walk stopped early (``max_paths`` reached, or the
           internal state budget exhausted), so paths exist that are not listed.
         - ``depth_limited`` — the frontier was still expanding at ``max_depth``,
@@ -676,10 +682,10 @@ class Graph:
           one route and explored it only once, so alternate chains through that
           state are not listed. Reachability is unaffected (the surviving route
           explores exactly the same continuations), which is why an **empty**
-          result with all three flags false is a proof that no path exists —
+          result with all four flags false is a proof that no path exists —
           but a non-empty one is a sample of the routes, not the full set.
 
-        A caller may only treat the listing as exhaustive when all three are
+        A caller may only treat the listing as exhaustive when all four are
         false. Each errs toward true: hitting ``max_paths`` exactly is reported
         as truncated even when nothing further existed, and a revisited state is
         reported as collapsed even when its alternate route led nowhere.
@@ -690,8 +696,23 @@ class Graph:
             "truncated_by": None,
             "depth_limited": False,
             "collapsed": False,
+            "not_searched": False,
+            "not_searched_reason": None,
         }
-        if from_type == to_type or max_depth < 1 or max_paths < 1:
+        # Query shapes the walk declines outright. The empty result they yield is
+        # an abstention, not a proof, so it has to say so — otherwise it reads
+        # as "no route exists" with every limit flag reassuringly false.
+        if from_type == to_type:
+            # Self-returning routes are real (``MODEL -> LoraLoader -> MODEL``),
+            # but the walk cannot represent them: the no-op rule below drops any
+            # step whose output type equals its input type, and for a same-type
+            # query that is the terminal step. Declining is the honest option.
+            result["not_searched"] = True
+            result["not_searched_reason"] = "same_type"
+            return result
+        if max_depth < 1 or max_paths < 1:
+            result["not_searched"] = True
+            result["not_searched_reason"] = "degenerate_bounds"
             return result
 
         free = self.free_types() if exact else frozenset()
