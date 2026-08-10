@@ -170,13 +170,15 @@ def normalize_cm_cli_exit_code(returncode: int) -> int:
     fabricated 247 and any multiple of 256 as 0 — a failure reporting success.
     Normalize to the shell's 128+N signal convention, and never return 0.
 
-    2 is remapped because Click already uses it for its own usage errors; leaving it
-    through would make "you invoked comfy wrong" indistinguishable from "cm-cli
-    exited 2". Callers should keep the raw status in their error ``details``.
+    A low byte of 2 is remapped because Click already uses 2 for its own usage
+    errors; leaving it through (whether as a literal 2 or a wide status like 258
+    that ``sys.exit`` truncates back to 2) would make "you invoked comfy wrong"
+    indistinguishable from "cm-cli exited 2". Callers should keep the raw status
+    in their error ``details``.
     """
     if returncode < 0:
         return min(128 + abs(returncode), 255)
-    if returncode == 2 or returncode % 256 == 0:
+    if returncode % 256 in (0, 2):
         return 1
     return returncode
 
