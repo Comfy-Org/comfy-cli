@@ -4,11 +4,18 @@
   "title": "comfy jobs --json data payload",
   "description": "Union schema for `jobs ls`, `jobs status`, and `jobs watch`.",
   "type": "object",
-  "required": ["host", "port"],
+  "required": [],
+  "if": {"required": ["base_url"]},
+  "then": {},
+  "else": {"required": ["host", "port"]},
   "additionalProperties": true,
   "properties": {
     "host": {"type": "string"},
     "port": {"type": "integer"},
+    "base_url": {
+      "type": "string",
+      "description": "Cloud-only counterpart to `host` + `port`: the cloud API base URL a `jobs status`/`jobs watch --where cloud` payload came from. A payload carrying it is exempt from the host+port requirement, since cloud has no host/port to report."
+    },
     "prompt_id": {"type": "string"},
     "status": {
       "type": "string",
