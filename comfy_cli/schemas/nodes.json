@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "comfy nodes *",
-  "description": "Output shape for node introspection commands (ls, show, search, upstream, downstream, path, types, categories).",
+  "description": "Output shape for node introspection commands (ls, show, search, upstream, downstream, path, types, categories) and the annotation-cache refresh (refresh).",
   "type": "object",
   "properties": {
     "count": { "type": "integer" },
@@ -10,6 +10,39 @@
     "filter": { "type": "object" },
     "name": { "type": "string" },
     "paths": { "type": "array" },
-    "types": { "type": "array" }
+    "types": { "type": "array" },
+    "refreshed": {
+      "type": "boolean",
+      "description": "True only when every annotation file was re-fetched from the remote (refresh). False when any fell back to the bundled snapshot — including the intentional COMFY_CLI_NO_REMOTE_REFRESH case, which is not an error."
+    },
+    "files": {
+      "type": "array",
+      "description": "Per-file result of the annotation refresh (refresh).",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": { "type": "string", "description": "Annotation filename, e.g. supported_nodes.yaml." },
+          "source": {
+            "type": "string",
+            "enum": ["remote", "bundled", "unavailable"],
+            "description": "Where the bytes came from: freshly fetched, the package-bundled snapshot, or nothing at all."
+          },
+          "bytes": { "type": "integer", "description": "Size of the resolved document." },
+          "path": {
+            "oneOf": [{ "type": "string" }, { "type": "null" }],
+            "description": "Cache file the data was written to, or null when nothing was persisted. Both documents share one cache file, so both rows report the same path."
+          },
+          "error": {
+            "type": "string",
+            "description": "Why the remote fetch was not used. Present only when source is not 'remote'."
+          },
+          "cache_error": {
+            "type": "string",
+            "description": "Why fetched data could not be written to disk. Present only when source is 'remote' and path is null — the fetch itself succeeded, so this is not a network failure."
+          }
+        },
+        "required": ["name", "source", "bytes", "path"]
+      }
+    }
   }
 }
