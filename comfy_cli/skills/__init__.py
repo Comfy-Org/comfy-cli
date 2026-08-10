@@ -36,6 +36,8 @@ from importlib import resources
 from pathlib import Path
 from typing import Literal
 
+from comfy_cli.file_utils import atomic_write_text
+
 # Where the bundled skills live. Each tuple is (skill_name, package_subdir).
 # ``skill_name`` is the public identifier used in AGENTS.md fences and as the
 # subdir name in installed targets. ``package_subdir`` is the local resource
@@ -199,11 +201,7 @@ def read_manifest() -> dict:
 
 def write_manifest(manifest: dict) -> None:
     """Atomically write the manifest (tmp + rename so a SIGINT can't corrupt it)."""
-    path = manifest_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(f".{os.getpid()}.tmp")
-    tmp.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
-    os.replace(tmp, path)
+    atomic_write_text(manifest_path(), json.dumps(manifest, indent=2))
 
 
 def _sha256(text: str) -> str:
@@ -577,24 +575,9 @@ def _backup_if_user_edited(path: Path, expected_content: str) -> Path | None:
     return bak
 
 
-def _atomic_write_text(path: Path, content: str) -> None:
-    """Write via tmp + rename so a SIGINT mid-write can't leave the file empty."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + f".{os.getpid()}.tmp")
-    try:
-        tmp.write_text(content, encoding="utf-8")
-        os.replace(tmp, path)
-    except Exception:
-        try:
-            tmp.unlink()
-        except OSError:
-            pass
-        raise
-
-
 def _write_claude_skill(path: Path, content: str) -> None:
     _backup_if_user_edited(path, content)
-    _atomic_write_text(path, content)
+    atomic_write_text(path, content)
 
 
 def _cursor_description_for(skill_name: str) -> str:
@@ -610,14 +593,14 @@ def _write_cursor_rule(path: Path, content: str, *, skill_name: str) -> None:
     body = _strip_frontmatter(content)
     rule = f'---\ndescription: {_cursor_description_for(skill_name)}\nglobs: "**/*"\nalwaysApply: false\n---\n\n{body}'
     _backup_if_user_edited(path, rule)
-    _atomic_write_text(path, rule)
+    atomic_write_text(path, rule)
 
 
 def _upsert_agents_md_block(path: Path, content: str, *, skill_name: str) -> None:
     start, end = _agents_fence(skill_name)
     block = f"\n{start}\n{content}\n{end}\n"
     if not path.exists():
-        _atomic_write_text(path, block.lstrip("\n"))
+        atomic_write_text(path, block.lstrip("\n"))
         return
     existing = path.read_text(encoding="utf-8")
     if start in existing and end in existing:
@@ -626,7 +609,7 @@ def _upsert_agents_md_block(path: Path, content: str, *, skill_name: str) -> Non
         new = before.rstrip() + "\n\n" + block.lstrip("\n") + after.lstrip("\n")
     else:
         new = existing.rstrip() + "\n" + block
-    _atomic_write_text(path, new)
+    atomic_write_text(path, new)
 
 
 def _remove_agents_md_block(path: Path, *, skill_name: str) -> bool:
