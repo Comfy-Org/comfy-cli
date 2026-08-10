@@ -1,5 +1,4 @@
 import os
-import pathlib
 import stat
 import sys
 import time
@@ -367,6 +366,8 @@ def test_cleanup_stale_tmp_files_age_threshold_is_configurable(tmp_path):
         "job-1.json.ABCD1234.tmp",  # mkstemp never emits uppercase
         "job-1.json.abcd-234.tmp",  # '-' is not in mkstemp's alphabet
         ".abcd1234.tmp",  # token shape, but no destination stem
+        "..abcd1234.tmp",  # stem is "." — truthy, but not a real destination
+        "...abcd1234.tmp",  # ditto ".."
     ],
 )
 def test_cleanup_stale_tmp_files_ignores_wrong_shapes(tmp_path, name):
@@ -396,6 +397,70 @@ def test_cleanup_stale_tmp_files_leaves_lock_and_part_siblings(tmp_path):
     assert not corpse.exists()
 
 
+def test_cleanup_stale_tmp_files_honours_stem_suffix(tmp_path):
+    """``stem_suffix`` is the ownership evidence the token shape can't give.
+
+    ``db.a1b2c3d4.tmp`` has mkstemp's exact shape by coincidence; in a directory
+    whose only destinations are ``<id>.json`` it is plainly somebody else's.
+    """
+    ours = tmp_path / "job-1.json.abcd1234.tmp"
+    theirs = tmp_path / "db.a1b2c3d4.tmp"
+    for p in (ours, theirs):
+        p.write_text("x")
+        _backdate(p, 7200)
+
+    assert file_utils.cleanup_stale_tmp_files(tmp_path, stem_suffix=".json") == 1
+    assert not ours.exists()
+    assert theirs.exists()
+    # Without the hint the shape alone claims both — which is exactly why
+    # callers that know their directory should pass it.
+    assert file_utils.cleanup_stale_tmp_files(tmp_path) == 1
+    assert not theirs.exists()
+
+
+def test_cleanup_stale_tmp_files_ignores_a_directory(tmp_path):
+    """A directory shaped like a temp is not a regular file — and ``unlink`` on
+    one raises ``IsADirectoryError`` into the swallowing handler, so it would
+    have been retried fruitlessly on every sweep."""
+    a_dir = tmp_path / "job-1.json.aaaa1111.tmp"
+    a_dir.mkdir()
+    _backdate(a_dir, 7200)
+
+    assert file_utils.cleanup_stale_tmp_files(tmp_path) == 0
+    assert a_dir.is_dir()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="symlink creation needs privileges on Windows")
+def test_cleanup_stale_tmp_files_ignores_symlinks(tmp_path):
+    """Only the entry's own metadata decides, so nothing borrows a target's age.
+
+    A symlink to a *fresh* file and a dangling symlink both survive — the second
+    is the regression that matters: with ``stat()`` it raised on every sweep and
+    so could never be reasoned about at all.
+    """
+    fresh_target = tmp_path / "target.bin"
+    fresh_target.write_text("live")
+    to_fresh = tmp_path / "job-1.json.bbbb2222.tmp"
+    to_fresh.symlink_to(fresh_target)
+
+    dangling = tmp_path / "job-1.json.cccc3333.tmp"
+    dangling.symlink_to(tmp_path / "gone")
+
+    # An old symlink pointing at an old file is still a symlink — not swept.
+    old_target = tmp_path / "old.bin"
+    old_target.write_text("old")
+    _backdate(old_target, 7200)
+    to_old = tmp_path / "job-1.json.dddd4444.tmp"
+    to_old.symlink_to(old_target)
+    os.utime(to_old, (time.time() - 7200, time.time() - 7200), follow_symlinks=False)
+
+    assert file_utils.cleanup_stale_tmp_files(tmp_path) == 0
+    assert to_fresh.is_symlink()
+    assert dangling.is_symlink()
+    assert to_old.is_symlink()
+    assert old_target.exists()
+
+
 def test_cleanup_stale_tmp_files_survives_unreadable_directory(tmp_path):
     """An unlistable directory returns 0 rather than propagating the OSError."""
     assert file_utils.cleanup_stale_tmp_files(tmp_path / "does-not-exist") == 0
@@ -407,10 +472,10 @@ def test_cleanup_stale_tmp_files_survives_unlink_failure(tmp_path, monkeypatch):
     corpse.write_text("x")
     _backdate(corpse, 7200)
 
-    def boom(self):
+    def boom(path):
         raise PermissionError("nope")
 
-    monkeypatch.setattr(pathlib.Path, "unlink", boom)
+    monkeypatch.setattr(os, "unlink", boom)
     assert file_utils.cleanup_stale_tmp_files(tmp_path) == 0
     assert corpse.exists()
 
@@ -443,11 +508,15 @@ def test_cleanup_stale_tmp_files_matches_a_real_atomic_write_temp(tmp_path, monk
     def fail_replace(src, dst):
         raise OSError("disk full")
 
-    monkeypatch.setattr(os, "replace", fail_replace)
-    monkeypatch.setattr(os, "unlink", lambda path: None)  # the cleanup a SIGKILL skips
-    with pytest.raises(OSError):
-        atomic_write_text(target, "content")
-    monkeypatch.undo()
+    # A scoped context, not ``monkeypatch.undo()``: undo() reverts *every* patch
+    # on this function-scoped instance, including the autouse conftest fixtures
+    # that pin the config and jobs-state dirs — dropping the isolation they
+    # exist to guarantee for the rest of the test.
+    with monkeypatch.context() as m:
+        m.setattr(os, "replace", fail_replace)
+        m.setattr(os, "unlink", lambda path: None)  # the cleanup a SIGKILL skips
+        with pytest.raises(OSError):
+            atomic_write_text(target, "content")
 
     (leftover,) = list(workdir.iterdir())
     assert leftover.name.startswith("job-1.json."), f"unexpected temp name {leftover.name}"

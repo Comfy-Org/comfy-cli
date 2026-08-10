@@ -301,6 +301,28 @@ def _state_where(value: Any) -> str:
     return value if value in ("local", "cloud") else "local"
 
 
+def _sweep_state_tmp_files() -> None:
+    """Sweep atomic-write temps stranded in the jobs state dir.
+
+    Same unclean deaths the ``watcher_crashed`` reap in
+    :func:`_gather_local_state_files` exists for — a watcher SIGKILLed mid-write
+    leaves a ``<prompt_id>.json.<token>.tmp`` corpse nothing will ever collect.
+    Purely hygiene, so it rides the ``jobs ls`` reap rather than earning a
+    command of its own, and its count is never surfaced.
+
+    Deliberately *not* inside ``_gather_local_state_files``: that one is a
+    read-only listing helper, and ``jobs ls --watch`` re-enters it every 2s —
+    re-traversing the directory that often to look for hour-old corpses buys
+    nothing. Called once per ``jobs ls`` instead, watch or not.
+    """
+    from comfy_cli import file_utils, jobs_state
+
+    # ``stem_suffix``: every destination this dir owns is ``<prompt_id>.json``,
+    # so requiring it keeps the sweep off a coincidental ``<x>.<8 chars>.tmp``
+    # that mkstemp's shape alone would happily claim.
+    file_utils.cleanup_stale_tmp_files(jobs_state.state_dir(), stem_suffix=".json")
+
+
 def _gather_local_state_files(*, limit: int, orphaned_only: bool = False, where: str | None = None) -> list[JobRow]:
     """Read every state file in the jobs state dir → JobRow.
 
@@ -320,7 +342,7 @@ def _gather_local_state_files(*, limit: int, orphaned_only: bool = False, where:
     """
     import re as _re
 
-    from comfy_cli import file_utils, jobs_state
+    from comfy_cli import jobs_state
 
     # Reasonable prompt_ids are alphanumeric + dashes + underscores (UUIDs,
     # short hex IDs). Anything wilder (e.g. legacy MagicMock leak from tests)
@@ -328,11 +350,6 @@ def _gather_local_state_files(*, limit: int, orphaned_only: bool = False, where:
     _SANE_ID = _re.compile(r"^[A-Za-z0-9_-]{1,128}$")
     rows: list[JobRow] = []
     state_dir = jobs_state.state_dir()
-    # Sweep atomic-write temps stranded by a watcher that died mid-write — the
-    # same unclean deaths the ``watcher_crashed`` reap below exists for. Purely
-    # hygiene, so it rides this scan rather than a command of its own and its
-    # count is never surfaced.
-    file_utils.cleanup_stale_tmp_files(state_dir)
     for path in sorted(state_dir.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
         if not _SANE_ID.match(path.stem):
             continue
@@ -624,14 +641,21 @@ def ls_cmd(
     # applies exactly the same filters as the one-shot listing.
     state_where = None if (all_wheres or orphaned) else target_where
 
+    if watch and not renderer.is_pretty():
+        renderer.error(
+            code="json_incompatible",
+            message="--watch requires pretty mode (TTY). For JSON, poll with a shell loop.",
+            hint="drop --json, or run `while true; do comfy --json jobs ls; sleep 2; done`",
+        )
+        raise typer.Exit(code=1)
+
+    # Once per invocation, and above the watch branch rather than inside the
+    # gatherer: the live table re-gathers every 2s and would otherwise re-sweep
+    # on every refresh. Below the validation above so a rejected invocation
+    # touches nothing on disk.
+    _sweep_state_tmp_files()
+
     if watch:
-        if not renderer.is_pretty():
-            renderer.error(
-                code="json_incompatible",
-                message="--watch requires pretty mode (TTY). For JSON, poll with a shell loop.",
-                hint="drop --json, or run `while true; do comfy --json jobs ls; sleep 2; done`",
-            )
-            raise typer.Exit(code=1)
         _watch_ls(
             host=host,
             port=port,
