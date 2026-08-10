@@ -513,7 +513,7 @@ class TestRegistryInstallDownloadError:
 
 class TestRegistryInstallApiError:
     """A RegistryAPIError from install_node must surface a machine-readable
-    renderer.error(code="node_install_failed", details={status, body}) and
+    renderer.error(code="registry_install_failed", details={status, body}) and
     exit non-zero — not a bare traceback and not a silent exit 0."""
 
     def test_api_error_surfaced_with_code_and_exit_1(self, tmp_path):
@@ -533,14 +533,14 @@ class TestRegistryInstallApiError:
         assert "Traceback" not in result.output
         mock_get_renderer.return_value.error.assert_called_once()
         _, kwargs = mock_get_renderer.return_value.error.call_args
-        assert kwargs["code"] == "node_install_failed"
+        assert kwargs["code"] == "registry_install_failed"
         assert kwargs["details"] == {"node_id": "test-node", "status": 404, "body": "Not Found"}
 
 
 class TestRegistryInstallNonApiFailure:
     """Failures that aren't RegistryAPIError — a connection error, a DNS failure,
     a timeout, a JSON decode error, or a registry response carrying no download
-    URL — must also emit the node_install_failed envelope and exit non-zero.
+    URL — must also emit the registry_install_failed envelope and exit non-zero.
     Exiting 0 here reports a network outage to automation / CI as success."""
 
     def _invoke(self, tmp_path, *, install_node_side_effect=None, install_node_return=None):
@@ -570,7 +570,7 @@ class TestRegistryInstallNonApiFailure:
         mock_dl.assert_not_called()
         mock_get_renderer.return_value.error.assert_called_once()
         _, kwargs = mock_get_renderer.return_value.error.call_args
-        assert kwargs["code"] == "node_install_failed"
+        assert kwargs["code"] == "registry_install_failed"
         assert kwargs["details"] == {"node_id": "test-node"}
 
     def test_missing_download_url_exits_1_with_envelope(self, tmp_path):
@@ -583,5 +583,5 @@ class TestRegistryInstallNonApiFailure:
         mock_dl.assert_not_called()
         mock_get_renderer.return_value.error.assert_called_once()
         _, kwargs = mock_get_renderer.return_value.error.call_args
-        assert kwargs["code"] == "node_install_failed"
+        assert kwargs["code"] == "registry_install_failed"
         assert kwargs["details"] == {"node_id": "test-node"}

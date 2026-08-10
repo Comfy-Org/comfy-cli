@@ -1365,7 +1365,7 @@ def registry_install(
     except RegistryAPIError as e:
         logging.error(f"Encountered an error while installing the node. error: {str(e)}")
         get_renderer().error(
-            code="node_install_failed",
+            code="registry_install_failed",
             message=f"Failed to download the custom node {node_id}.",
             details={"node_id": node_id, "status": e.status, "body": e.body},
         )
@@ -1373,7 +1373,7 @@ def registry_install(
     except Exception as e:
         logging.error(f"Encountered an error while installing the node. error: {str(e)}")
         get_renderer().error(
-            code="node_install_failed",
+            code="registry_install_failed",
             message=f"Failed to download the custom node {node_id}.",
             details={"node_id": node_id},
         )
@@ -1384,7 +1384,7 @@ def registry_install(
     if not node_version.download_url:
         logging.error("Download URL not provided from the registry.")
         get_renderer().error(
-            code="node_install_failed",
+            code="registry_install_failed",
             message=f"Failed to download the custom node {node_id}.",
             details={"node_id": node_id},
         )

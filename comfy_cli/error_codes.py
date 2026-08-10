@@ -783,8 +783,8 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "check `details.body`; ensure `[tool.comfy] publisher_id` and `[project] name` are set, and the token is valid",
     ),
     ErrorCode(
-        "node_install_failed",
-        "Fetching a custom node from the registry for install failed with a non-2xx. "
+        "registry_install_failed",
+        "`comfy node registry-install` fetching a custom node from the registry failed with a non-2xx. "
         "`details.status` and `details.body` carry the response.",
         "check the node id and version exist in the registry (`comfy node registry-list`); check `details.body`",
     ),
