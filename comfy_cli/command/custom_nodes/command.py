@@ -1,3 +1,4 @@
+import contextlib
 import os
 import pathlib
 import platform
@@ -13,7 +14,11 @@ from rich.console import Console
 
 from comfy_cli import constants, logging, tracking, ui, utils
 from comfy_cli.command.custom_nodes.bisect_custom_nodes import bisect_app
-from comfy_cli.command.custom_nodes.cm_cli_util import execute_cm_cli, find_cm_cli
+from comfy_cli.command.custom_nodes.cm_cli_util import (
+    execute_cm_cli,
+    find_cm_cli,
+    normalize_cm_cli_exit_code,
+)
 from comfy_cli.config_manager import ConfigManager
 from comfy_cli.constants import NODE_ZIP_FILENAME
 from comfy_cli.file_utils import (
@@ -663,19 +668,64 @@ def install(
     else:
         cmd = ["install"] + nodes
 
+    renderer = get_renderer()
+    # execute_cm_cli streams cm-cli's raw output to sys.stdout; in JSON/NDJSON
+    # mode stdout is reserved for the single envelope, so route the stream to
+    # stderr (mirrors pack_scan._read_pyproject and outdated._core_latest).
+    stream_ctx = contextlib.nullcontext() if renderer.is_pretty() else contextlib.redirect_stdout(sys.stderr)
     try:
-        execute_cm_cli(
-            cmd,
-            channel=channel,
-            fast_deps=fast_deps,
-            no_deps=no_deps,
-            uv_compile=effective_uv_compile,
-            mode=mode,
-            raise_on_error=exit_on_fail,
-        )
+        with stream_ctx:
+            execute_cm_cli(
+                cmd,
+                channel=channel,
+                fast_deps=fast_deps,
+                no_deps=no_deps,
+                uv_compile=effective_uv_compile,
+                mode=mode,
+                raise_on_error=exit_on_fail,
+            )
     except subprocess.CalledProcessError as e:
-        if exit_on_fail:
-            raise typer.Exit(code=e.returncode)
+        if not exit_on_fail:
+            # execute_cm_cli re-raises unexpected exit codes even with raise_on_error
+            # off; keep surfacing those instead of swallowing them here (mirrors the
+            # `comfy update all` handler in cmdline.py).
+            raise
+        raw = e.returncode
+        code = normalize_cm_cli_exit_code(raw)
+        failed_argv = e.cmd if isinstance(e.cmd, list | tuple) else [e.cmd]
+        ran_cm_cli = any(str(part).replace("-", "_") == "cm_cli" for part in failed_argv)
+        if fast_deps and not ran_cm_cli:
+            # With --fast-deps, execute_cm_cli runs DependencyCompiler after cm-cli
+            # succeeds; a pip/uv failure there is not a cm-cli failure — the packs
+            # themselves installed.
+            message = (
+                f"dependency installation after `cm-cli install` failed with exit code {raw} "
+                "(the packs installed; their dependencies did not)."
+            )
+            hint = (
+                "see the pip/uv output above for the failing dependency; "
+                "re-run `comfy node install --fast-deps --exit-on-fail ...` to retry"
+            )
+            details = {"returncode": raw, "failed_stage": "dependency-install"}
+        else:
+            if raw < 0:
+                message = f"`cm-cli install` was killed by signal {-raw}."
+            else:
+                message = f"`cm-cli install` failed with exit code {raw}."
+            hint = (
+                "see the cm-cli output above for the failing pack; "
+                "re-run `comfy node install --exit-on-fail ...` to retry"
+            )
+            details = {"cm_cli_returncode": raw, "failed_stage": "cm-cli"}
+        renderer.error(
+            code="node_install_failed",
+            message=message,
+            hint=hint,
+            details=details,
+            exit_code=code,
+            command="node install",
+        )
+        raise typer.Exit(code=code) from e
 
 
 @app.command(help="Reinstall custom nodes")

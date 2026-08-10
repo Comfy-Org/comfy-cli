@@ -275,6 +275,16 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "use `--where local` or `--where cloud`",
     ),
     ErrorCode(
+        "host_port_invalid",
+        "`--host`/`--port` (or a combined `--host host:port`) failed validation before any server "
+        "contact; the process exits 2 (usage error). The rejected value is usually a flag, but the "
+        "same check also covers the host recorded in `config.background`, so a corrupted background "
+        "record trips it with no bad flag passed. Click also writes its usual usage message to "
+        "stderr — this envelope exists so JSON/NDJSON consumers still get a parseable final line.",
+        "pass `--host <hostname-or-ip>` and `--port 1-65535`; if you passed neither, the saved "
+        "background server is bad — clear it with `comfy stop`",
+    ),
+    ErrorCode(
         "host_flag_cloud",
         "`--host`/`--port` were combined with an effective `cloud` target. They address a local "
         "ComfyUI only; the cloud address comes from the signed-in account. `details` carries the "
@@ -603,6 +613,13 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "Requested node class isn't in the loaded environment.",
         "see `details.close_matches` or run `comfy nodes search`",
     ),
+    ErrorCode(
+        "path_bounds_invalid",
+        "`comfy nodes path` was given `--max-depth` or `--max-paths` below 1. Such a bound admits no "
+        "path at all, so the search is refused rather than returning an empty result that would read "
+        "as a proof that no route exists.",
+        "use `--max-depth 6 --max-paths 10` (or any bound >= 1)",
+    ),
     # --- file transfer (upload / download) -----------------------------------
     ErrorCode(
         "upload_failed",
@@ -807,6 +824,17 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "feedback_message_required",
         "`comfy feedback` was run in JSON/non-interactive mode without an inline message.",
         'comfy feedback "your feedback here"',
+    ),
+    # --- custom node install (`comfy node install`) ---------------------------
+    ErrorCode(
+        "node_install_failed",
+        "`comfy node install --exit-on-fail` failed: `cm-cli install` exited non-zero "
+        '(`details.failed_stage` == "cm-cli", raw status in `details.cm_cli_returncode`) or, '
+        "with --fast-deps, the follow-up dependency install failed after the packs installed "
+        '(`details.failed_stage` == "dependency-install", raw status in `details.returncode`). '
+        "The process exit code is normalized — signals become 128+N, and any status whose low "
+        "byte is 0 or 2 becomes 1 so it can't read as success or a CLI usage error.",
+        "read the output above for the failing pack or dependency, then re-run `comfy node install --exit-on-fail`",
     ),
     # --- custom node dependency report (`comfy node deps`) --------------------
     ErrorCode(
