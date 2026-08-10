@@ -9,7 +9,8 @@ import sys
 
 import pytest
 
-from comfy_cli.caller import detect_caller
+from comfy_cli import caller
+from comfy_cli.caller import detect_caller, usage_source_for
 
 
 def test_tty_no_env_is_user():
@@ -184,3 +185,68 @@ class TestStdoutProbeIsFailSafe:
 
         monkeypatch.setattr(sys, "stdout", RaisingGetattr())
         assert detect_caller(env={}).kind == "pipe"
+
+
+class TestUsageSource:
+    """``usage_source()`` — the ``comfy_usage_source`` attribution value.
+
+    Human-driven runs keep the bare ``comfy-cli`` so existing exact-match
+    dashboards/queries keep their meaning; every agentic caller gets the
+    slash-scoped ``comfy-cli/<kind>``, matching the ``comfy-cloud-mcp/<tool>``
+    convention already in production.
+    """
+
+    @staticmethod
+    def _source(env, *, is_tty=True):
+        """The value the CLI would send for a caller derived from *env*."""
+        return usage_source_for(detect_caller(env=env, is_tty=is_tty))
+
+    def test_human_at_a_terminal_keeps_the_bare_value(self):
+        assert self._source({}) == "comfy-cli"
+
+    def test_comfy_mcp_is_scoped(self):
+        """comfy-mcp exports COMFY_USER_AGENT=comfy-mcp on every subprocess."""
+        assert self._source({"COMFY_USER_AGENT": "comfy-mcp"}) == "comfy-cli/comfy-mcp"
+
+    def test_generic_agent_is_scoped(self):
+        assert self._source({"AI_AGENT": "1"}) == "comfy-cli/agent"
+
+    def test_claude_code_is_scoped(self):
+        assert self._source({"CLAUDECODE": "1"}) == "comfy-cli/claude-code"
+
+    def test_pipe_is_scoped(self):
+        assert self._source({}, is_tty=False) == "comfy-cli/pipe"
+
+    def test_an_agent_that_opts_out_is_treated_as_human(self):
+        """``AI_AGENT=0`` is a deliberate opt-out of the agentic path, so it
+        keeps the human value — the mapping follows ``agentic``, nothing else."""
+        assert self._source({"AI_AGENT": "0"}) == "comfy-cli"
+
+    def test_self_attributed_user_label_does_not_pass_as_human(self):
+        """``COMFY_USER_AGENT=user`` yields the *string* "user" while being
+        exactly the agentic case — keying off ``kind`` instead of ``agentic``
+        would let an agent bill itself as a human."""
+        assert self._source({"COMFY_USER_AGENT": "user"}) == "comfy-cli/user"
+
+    def test_a_custom_label_is_length_bounded(self):
+        """COMFY_USER_AGENT is arbitrary user text and this value rides a
+        request body the server bills against, so it cannot be unbounded."""
+        assert self._source({"COMFY_USER_AGENT": "x" * 500}) == "comfy-cli/" + "x" * 64
+
+    def test_the_value_is_computed_once_per_process(self, monkeypatch):
+        """``usage_source()`` memoises: the answer cannot change within a
+        process, and every workflow submission calls it."""
+        calls = []
+
+        def counting():
+            calls.append(1)
+            return detect_caller(env={"AI_AGENT": "1"}, is_tty=True)
+
+        monkeypatch.setattr(caller, "detect_caller", counting)
+        caller.usage_source.cache_clear()
+        try:
+            assert caller.usage_source() == "comfy-cli/agent"
+            assert caller.usage_source() == "comfy-cli/agent"
+            assert calls == [1]
+        finally:
+            caller.usage_source.cache_clear()

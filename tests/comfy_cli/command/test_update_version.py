@@ -5,10 +5,15 @@ touches a real repository or the network. The unit-level cases drive
 ``install.switch_comfyui_version`` directly; the CLI-level cases drive
 ``cmdline.update`` so the flag wiring, the dependency reinstall, and the exit
 codes are covered too.
+
+``git`` is spawned by its trusted absolute path (``_safe_exec``), so ``FakeGit``
+dispatches on the argv's *basename* and the resolver is pinned to
+``_FAKE_GIT_BIN`` to keep these tests hermetic.
 """
 
 from __future__ import annotations
 
+import os
 import subprocess
 from unittest.mock import patch
 
@@ -16,8 +21,19 @@ import pytest
 import typer
 from typer.testing import CliRunner
 
-from comfy_cli import cmdline
+from comfy_cli import _safe_exec, cmdline
 from comfy_cli.command import install as install_inner
+
+# ``os.path.join(os.sep, ...)`` yields the drive-less ``\usr\bin\<name>`` on Windows,
+# which ``_safe_exec._is_fully_qualified`` rejects — pin a drive-qualified path there
+# so these tests exercise the resolver instead of a ``BinaryNotFoundError`` on the very
+# platform the hardening targets.
+_FAKE_GIT_BIN = r"C:\tools\bin\git" if os.name == "nt" else os.path.join(os.sep, "usr", "bin", "git")
+
+
+def _is_git(argv: list[str]) -> bool:
+    """``argv[0]`` is now an absolute path, not the bare name."""
+    return bool(argv) and os.path.basename(argv[0]).removesuffix(".exe") == "git"
 
 
 class FakeGit:
@@ -66,7 +82,7 @@ class FakeGit:
 
     @property
     def git_calls(self) -> list[list[str]]:
-        return [c for c in self.calls if c and c[0] == "git"]
+        return [c for c in self.calls if _is_git(c)]
 
     def call_matching(self, *prefix: str) -> list[str] | None:
         for call in self.git_calls:
@@ -77,7 +93,7 @@ class FakeGit:
     # -- the dispatcher --------------------------------------------------
     def __call__(self, argv, **kwargs):
         argv = list(argv)
-        if not argv or argv[0] != "git":
+        if not _is_git(argv):
             self.other_calls.append((argv, kwargs))
             return self._done(argv, self.pip_returncode)
 
@@ -130,7 +146,10 @@ class FakeGit:
 @pytest.fixture
 def fake_git():
     git = FakeGit(tags=("v0.2.7", "v0.2.9", "v0.3.0", "v0.3.1"))
-    with patch("comfy_cli.command.install.subprocess.run", side_effect=git):
+    with (
+        patch.object(_safe_exec.shutil, "which", return_value=_FAKE_GIT_BIN),
+        patch("comfy_cli.command.install.subprocess.run", side_effect=git),
+    ):
         yield git
 
 
@@ -336,7 +355,7 @@ class TestTargetValidation:
         """The bare ``comfy update comfy`` path must be untouched by --version."""
         _run_update(tmp_path)
 
-        assert fake_git.git_calls[0] == ["git", "pull"]
+        assert fake_git.git_calls[0] == [_FAKE_GIT_BIN, "pull"]
         assert fake_git.other_calls[0][0] == [
             "/resolved/python",
             "-m",

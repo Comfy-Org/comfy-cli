@@ -11,6 +11,7 @@ from rich.console import Console
 
 from comfy_cli import cancellation, constants, env_checker, logging, tracking, ui, utils
 from comfy_cli import where as where_module
+from comfy_cli._safe_exec import resolve_required_binary
 from comfy_cli.auth import command as auth_command
 from comfy_cli.caller import stream_is_tty
 from comfy_cli.cloud import command as cloud_command
@@ -52,7 +53,7 @@ from comfy_cli.cuda_detect import DEFAULT_CUDA_TAG, detect_cuda_driver_version, 
 from comfy_cli.discovery import build_discovery
 from comfy_cli.env_checker import EnvChecker, _bracket_host, _unbracket_host
 from comfy_cli.help_json import build_help_json
-from comfy_cli.host_port import validate_host
+from comfy_cli.host_port import report_usage_error, validate_host
 from comfy_cli.output import Renderer, get_renderer, rprint, set_renderer
 from comfy_cli.resolve_python import resolve_workspace_python
 from comfy_cli.skills import command as skill_command
@@ -797,8 +798,11 @@ def update(
         if version is not None:
             _switch_comfy_version(comfy_path, version, stash=not no_stash)
         else:
+            # Resolved before the chdir so a ``git`` planted in ``comfy_path``
+            # can neither be picked up nor shadow the real one.
+            git_bin = resolve_required_binary("git")
             os.chdir(comfy_path)
-            subprocess.run(["git", "pull"], check=True)
+            subprocess.run([git_bin, "pull"], check=True)
             python = resolve_workspace_python(comfy_path)
             # A uv-managed venv may have no pip — bootstrap it first so the install
             # below doesn't crash with `No module named pip` (no-op if pip exists).
@@ -973,12 +977,20 @@ def run(
     _track_props = tracking.filter_command_kwargs(dict(locals()))
     tracking.track_event("execution_start", _track_props, mixpanel_name="run")
 
+    # Resolved outside the try so `renderer` is always bound by the time the
+    # `finally` below unstamps `where`, however early the body dies.
+    renderer = get_renderer()
+    # `Renderer` is a process-wide singleton, so a routed target stamped by an
+    # earlier in-process invocation would otherwise still be sitting here and
+    # would mislabel any envelope emitted before *this* run routes (e.g.
+    # `where_invalid`). Start every invocation unrouted.
+    renderer.where = None
+
     try:
         if api_key:
             api_key = api_key.strip() or None
 
         config = ConfigManager()
-        renderer = get_renderer()
 
         # Command-local --json means "stream the run": upgrade the renderer
         # (resolved once in the entry callback) into NDJSON mode so every
@@ -992,6 +1004,12 @@ def run(
         except ValueError as e:
             renderer.error(code="where_invalid", message=str(e), hint="use --where local or --where cloud")
             raise typer.Exit(code=1)
+
+        # The routing target is now known, so every downstream error envelope
+        # can carry it. Explicit ``emit(..., where=...)`` calls still win; this
+        # only fills the fallback (``where or self.where``) that error() and
+        # emit() resolve against.
+        renderer.where = decision.target.value
 
         # Default for --notify: on when a human is at the terminal, off for
         # agents (they shouldn't get surprise side-channel processes they didn't
@@ -1050,18 +1068,24 @@ def run(
             )
             return
 
-        from comfy_cli.host_port import parse_host_port_arg, resolve_host_port
+        from comfy_cli.host_port import parse_host_port_arg, report_usage_error, resolve_host_port
 
-        if host:
-            host, parsed_port = parse_host_port_arg(host)
-            # ``port is None``, not ``not port``: a typed ``--port`` always wins
-            # over one embedded in ``--host h:p``, including ``--port 0``, which
-            # ``resolve_host_port`` then rejects as out of range instead of
-            # silently running against the embedded port.
-            if port is None and parsed_port is not None:
-                port = parsed_port
+        # ``report_usage_error``: a bad ``--host``/``--port`` is a
+        # ``typer.BadParameter``, which click turns into a stderr usage panel +
+        # exit 2 — leaving stdout empty in JSON/NDJSON mode while every other
+        # failure here ends with an envelope. Emit the terminating envelope
+        # first; the exception still propagates, so exit 2 is unchanged.
+        with report_usage_error(renderer):
+            if host:
+                host, parsed_port = parse_host_port_arg(host)
+                # ``port is None``, not ``not port``: a typed ``--port`` always wins
+                # over one embedded in ``--host h:p``, including ``--port 0``, which
+                # ``resolve_host_port`` then rejects as out of range instead of
+                # silently running against the embedded port.
+                if port is None and parsed_port is not None:
+                    port = parsed_port
 
-        host, port = resolve_host_port(host, port)
+            host, port = resolve_host_port(host, port)
 
         run_inner.execute(
             workflow,
@@ -1093,6 +1117,12 @@ def run(
         raise
     else:
         tracking.track_event("execution_success", _track_props)
+    finally:
+        # Every envelope this invocation emits has already been written by now
+        # (renderer.error/emit flush inline), so unstamp the singleton rather
+        # than leaving `run`'s routed target visible to whatever emits next in
+        # this process — an atexit/tracking path, or a second invocation.
+        renderer.where = None
 
 
 @app.command(
@@ -1174,18 +1204,21 @@ def validate(
     # honor it resolve upstream, here.
     is_local_fetch = input_path is None and decision.target is where_module.WhereTarget.LOCAL
     if is_local_fetch:
-        from comfy_cli.host_port import parse_host_port_arg, resolve_host_port
+        from comfy_cli.host_port import parse_host_port_arg, report_usage_error, resolve_host_port
 
         # `host is not None` (not `if host:`): `--host ""` must reach the parser
         # and be rejected, not be read as "no --host given". Likewise the port
         # merge tests `is None`, so an explicit `--port 0` isn't silently
         # overridden by a port embedded in the combined `--host h:p` form —
         # `resolve_host_port` rejects it as out of range instead.
-        if host is not None:
-            host, parsed_port = parse_host_port_arg(host)
-            if port is None and parsed_port is not None:
-                port = parsed_port
-        host, port = resolve_host_port(host, port)
+        # `report_usage_error` gives JSON/NDJSON consumers a terminating
+        # envelope for that rejection instead of an empty stdout (exit stays 2).
+        with report_usage_error(renderer):
+            if host is not None:
+                host, parsed_port = parse_host_port_arg(host)
+                if port is None and parsed_port is not None:
+                    port = parsed_port
+            host, port = resolve_host_port(host, port)
 
     try:
         graph = Graph.load(mode=mode, input_path=input_path, host=host, port=port)
@@ -1359,10 +1392,13 @@ def upload(
     # Validate the flags before resolving anything: the host lands verbatim in
     # ``http://{host}:{port}/upload/image``, so a URL-special or control
     # character is a usage error (BadParameter, exit 2) regardless of target.
-    if host is not None:
-        host = validate_host(host)
-    if port is not None and not (1 <= port <= 65535):
-        raise typer.BadParameter(f"invalid port: {port} is out of range (1-65535)")
+    # ``report_usage_error`` emits the terminating envelope for that rejection
+    # in JSON/NDJSON mode; the exception still escapes, so exit stays 2.
+    with report_usage_error(renderer):
+        if host is not None:
+            host = validate_host(host)
+        if port is not None and not (1 <= port <= 65535):
+            raise typer.BadParameter(f"invalid port: {port} is out of range (1-65535)")
 
     try:
         decision = where_module.resolve(flag=where, config_value=config.get(where_module.CONFIG_KEY_WHERE_DEFAULT))

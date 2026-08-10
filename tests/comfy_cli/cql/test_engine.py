@@ -199,6 +199,19 @@ def graph_sd15() -> Graph:
     return Graph.from_object_info(json.loads(fixture.read_text()))
 
 
+@pytest.fixture
+def graph_path() -> Graph:
+    """Graph built from the captured path-search object_info fixture: the sd15
+    core nodes, the audio nodes (AUDIO is consumed but never reaches IMAGE), a
+    second LATENT->IMAGE decoder, and the partner-API image node whose `model`
+    widget is a COMBO of API ids rather than a MODEL input (BE-6857)."""
+    import json
+    from pathlib import Path
+
+    fixture = Path(__file__).parent.parent / "fixtures" / "nodes_path_object_info.json"
+    return Graph.from_object_info(json.loads(fixture.read_text()))
+
+
 # ---------------------------------------------------------------------------
 # Direct-mode workflow fixture
 # ---------------------------------------------------------------------------
@@ -550,6 +563,240 @@ class TestTraversal:
     def test_find_paths_unreachable_returns_empty(self, graph: Graph):
         # No node consumes IMAGE and produces MODEL in this fixture
         assert graph.find_paths("IMAGE", "MODEL") == []
+
+
+# ===========================================================================
+# TestPathConstraints — BE-6857
+# ===========================================================================
+
+
+def _node_chain(path: dict) -> tuple[str, ...]:
+    return tuple(s["node"] for s in path["steps"])
+
+
+class TestPathConstraints:
+    """`nodes path` used to enumerate anything that *produced* the target type,
+    ignoring the source type entirely: `AUDIO -> IMAGE` returned the same rows
+    as `MODEL -> IMAGE`, every step carried an empty `input_type`, and the
+    result was still labelled exact. These pin the source constraint, the depth
+    bound, and the honesty of the exhaustiveness claim.
+    """
+
+    def test_unreachable_source_type_returns_no_paths(self, graph_path: Graph):
+        # In THIS fixture AUDIO is consumed (SaveAudio, PreviewAudio) but never
+        # routed to IMAGE, so the correct answer is the empty set — not MODEL's
+        # rows. The emptiness is a fact about the catalog, never a hard-coded
+        # denial; the next test is the falsifier that pins that distinction.
+        assert graph_path.exact_paths("AUDIO", "IMAGE", max_depth=6) == []
+        assert graph_path.find_paths("AUDIO", "IMAGE", max_depth=6) == []
+
+    def test_real_audio_to_image_route_is_found_when_the_catalog_has_one(self, graph_path: Graph):
+        """`AUDIO -> IMAGE` is NOT inherently impossible, and this walker must
+        never treat it that way.
+
+        Current ComfyUI ships `VAEEncodeAudio` (AUDIO + VAE -> LATENT), which
+        reaches IMAGE through the ordinary `VAEDecode` hop. Add that real node
+        to the catalog and the route has to appear — with the VAE it also needs
+        reported as support rather than silently assumed.
+        """
+        info = copy.deepcopy(graph_path.object_info)
+        # Faithful to comfy_extras/nodes_audio.py::VAEEncodeAudio.
+        info["VAEEncodeAudio"] = {
+            "input": {"required": {"audio": ["AUDIO", {}], "vae": ["VAE", {}]}},
+            "input_order": {"required": ["audio", "vae"]},
+            "output": ["LATENT"],
+            "output_is_list": [False],
+            "output_name": ["LATENT"],
+            "name": "VAEEncodeAudio",
+            "display_name": "VAE Encode Audio",
+            "description": "",
+            "category": "model/latent",
+            "python_module": "comfy_extras.nodes_audio",
+            "output_node": False,
+            "search_aliases": ["audio to latent"],
+        }
+        graph = Graph.from_object_info(info)
+
+        paths = graph.exact_paths("AUDIO", "IMAGE", max_depth=6)
+        chains = {_node_chain(p) for p in paths}
+        assert ("VAEEncodeAudio", "VAEDecode") in chains
+        assert ("VAEEncodeAudio", "VAEDecodeTiled") in chains
+        # Every hop is a declared link of the type it claims to consume.
+        for p in paths:
+            assert p["steps"][0]["input_type"] == "AUDIO"
+            assert graph.node("VAEEncodeAudio").has_input("AUDIO")
+        # The VAE that VAEEncodeAudio also needs is surfaced, not assumed away.
+        route = next(p for p in paths if _node_chain(p) == ("VAEEncodeAudio", "VAEDecode"))
+        assert "VAE" in {s["type"] for s in route["support"]}
+
+    def test_unknown_source_type_returns_no_paths(self, graph_path: Graph):
+        assert graph_path.exact_paths("NOT_A_TYPE", "IMAGE", max_depth=6) == []
+
+    def test_source_type_changes_the_answer(self, graph_path: Graph):
+        model = graph_path.exact_paths("MODEL", "IMAGE", max_depth=6)
+        audio = graph_path.exact_paths("AUDIO", "IMAGE", max_depth=6)
+        assert model, "MODEL -> IMAGE should still route through the sampler"
+        assert model != audio
+
+    def test_first_step_consumes_the_declared_source_type(self, graph_path: Graph):
+        for from_type in ("MODEL", "LATENT", "CLIP", "CONDITIONING"):
+            for p in graph_path.exact_paths(from_type, "IMAGE", max_depth=6):
+                first = p["steps"][0]
+                assert first["input_type"] == from_type
+                assert graph_path.node(first["node"]).has_input(from_type)
+
+    def test_every_step_declares_a_link_input_of_its_from_type(self, graph_path: Graph):
+        for p in graph_path.exact_paths("CLIP", "IMAGE", max_depth=6):
+            previous_out = "CLIP"
+            for step in p["steps"]:
+                node = graph_path.node(step["node"])
+                assert step["input_type"] == previous_out
+                assert step["input_type"], "every step reports the type it consumes"
+                assert node.has_input(step["input_type"])
+                assert node.has_output(step["output_type"])
+                previous_out = step["output_type"]
+
+    def test_widget_named_model_is_not_a_model_input(self, graph_path: Graph):
+        """ByteDanceImageNode produces IMAGE and has a *widget* named `model`
+        (a COMBO of API ids) — never a MODEL link input, so it is not a routing
+        step for MODEL, nor for any other type."""
+        bytedance = graph_path.node("ByteDanceImageNode")
+        assert bytedance.has_output("IMAGE")
+        assert bytedance.input_link_types() == []
+        for from_type in ("MODEL", "AUDIO", "CLIP", "LATENT"):
+            for p in graph_path.exact_paths(from_type, "IMAGE", max_depth=6):
+                assert "ByteDanceImageNode" not in _node_chain(p)
+
+    def test_max_depth_bounds_path_length(self, graph_path: Graph):
+        for depth in range(1, 7):
+            for p in graph_path.exact_paths("CLIP", "IMAGE", max_depth=depth):
+                assert len(p["steps"]) <= depth
+
+    def test_shallower_depth_is_a_subset(self, graph_path: Graph):
+        deep = {_node_chain(p) for p in graph_path.exact_paths("CLIP", "IMAGE", max_depth=6)}
+        assert deep
+        for depth in range(1, 6):
+            shallow = {_node_chain(p) for p in graph_path.exact_paths("CLIP", "IMAGE", max_depth=depth)}
+            assert shallow <= deep
+        # The reported case: depth 1 is a *strict* subset of depth 4.
+        shallow = {_node_chain(p) for p in graph_path.exact_paths("MODEL", "IMAGE", max_depth=1)}
+        deep = {_node_chain(p) for p in graph_path.exact_paths("MODEL", "IMAGE", max_depth=4)}
+        assert shallow < deep
+
+    def test_support_nodes_cover_the_other_required_inputs(self, graph_path: Graph):
+        (path,) = [p for p in graph_path.exact_paths("MODEL", "IMAGE", max_depth=6) if "VAEDecode" in _node_chain(p)]
+        support = {s["type"]: s["node"] for s in path["support"]}
+        # KSampler needs conditioning + an initial latent, VAEDecode needs a VAE
+        assert support["CONDITIONING"] == "CLIPTextEncode"
+        assert support["LATENT"] == "EmptyLatentImage"
+        assert support["VAE"] == "CheckpointLoaderSimple"
+        # …and the routed type itself is never listed as support.
+        assert "MODEL" not in support
+
+    def test_free_types_excludes_types_nothing_can_produce(self, graph_path: Graph):
+        free = graph_path.free_types()
+        assert {"MODEL", "LATENT", "IMAGE", "AUDIO"} <= free
+        assert "NOT_A_TYPE" not in free
+
+    def test_exhausted_search_reports_no_truncation(self, graph_path: Graph):
+        result = graph_path.search_paths("AUDIO", "IMAGE", max_depth=6)
+        assert result["paths"] == []
+        assert result["truncated"] is False
+        assert result["depth_limited"] is False
+        assert result["collapsed"] is False
+
+    def test_collapsed_alternate_routes_are_reported(self, graph_path: Graph):
+        """The walk explores each intermediate state once, so a second node
+        offering the same hop is not re-expanded and the chains through it are
+        never printed. That is a real gap in the *listing*, so it has to be
+        reported — silently returning a subset while claiming exactness is the
+        bug this ticket is about, one level down.
+        """
+        info = copy.deepcopy(graph_path.object_info)
+        # A second MODEL -> LATENT sampler: a genuine alternate first hop.
+        info["KSamplerAdvanced"] = copy.deepcopy(info["KSampler"])
+        info["KSamplerAdvanced"]["name"] = "KSamplerAdvanced"
+        graph = Graph.from_object_info(info)
+
+        result = graph.search_paths("MODEL", "IMAGE", max_depth=3)
+        chains = {_node_chain(p) for p in result["paths"]}
+        # Both decoders are reported off the surviving sampler...
+        assert chains == {("KSampler", "VAEDecode"), ("KSampler", "VAEDecodeTiled")}
+        # ...but KSamplerAdvanced's equally valid routes are not, so the result
+        # must not be advertised as the complete set.
+        assert result["collapsed"] is True
+        assert result["truncated"] is False
+        assert result["depth_limited"] is False
+
+    def test_max_paths_is_reported_as_truncation(self, graph_path: Graph):
+        full = graph_path.search_paths("LATENT", "IMAGE", max_depth=6)
+        assert len(full["paths"]) > 1 and full["truncated"] is False
+        capped = graph_path.search_paths("LATENT", "IMAGE", max_depth=6, max_paths=1)
+        assert len(capped["paths"]) == 1
+        assert capped["truncated"] is True
+        assert capped["truncated_by"] == "max_paths"
+
+    def test_depth_cut_is_reported(self, graph_path: Graph):
+        result = graph_path.search_paths("MODEL", "IMAGE", max_depth=1)
+        assert result["paths"] == []
+        assert result["depth_limited"] is True
+
+    def test_state_budget_is_reported_as_truncation(self, graph_path: Graph):
+        result = graph_path.search_paths("CLIP", "IMAGE", max_depth=6, max_states=1)
+        assert result["truncated"] is True
+        assert result["truncated_by"] == "max_states"
+
+    def test_degenerate_bounds_return_nothing(self, graph_path: Graph):
+        assert graph_path.search_paths("MODEL", "MODEL")["paths"] == []
+        assert graph_path.search_paths("MODEL", "IMAGE", max_depth=0)["paths"] == []
+        assert graph_path.search_paths("MODEL", "IMAGE", max_paths=0)["paths"] == []
+
+    @pytest.mark.parametrize(
+        ("kwargs", "reason"),
+        [
+            ({"from_type": "MODEL", "to_type": "MODEL"}, "same_type"),
+            ({"from_type": "MODEL", "to_type": "IMAGE", "max_depth": 0}, "degenerate_bounds"),
+            ({"from_type": "MODEL", "to_type": "IMAGE", "max_paths": 0}, "degenerate_bounds"),
+        ],
+    )
+    def test_declined_queries_declare_the_abstention(self, graph_path: Graph, kwargs, reason):
+        """The query shapes the walk refuses return an empty result. An empty
+        result with every limit flag false is this module's proof that no path
+        exists, so a refusal that stayed silent would forge that proof. Each
+        one says so instead.
+        """
+        from_type = kwargs.pop("from_type")
+        to_type = kwargs.pop("to_type")
+        result = graph_path.search_paths(from_type, to_type, **kwargs)
+        assert result["paths"] == []
+        assert result["not_searched"] is True
+        assert result["not_searched_reason"] == reason
+        # No limit flag is set — which is exactly why the abstention needs its
+        # own signal rather than being inferred from the others.
+        assert result["truncated"] is False
+        assert result["depth_limited"] is False
+        assert result["collapsed"] is False
+
+    def test_same_type_query_is_declined_even_though_a_route_exists(self, graph_path: Graph):
+        """`LoraLoaderModelOnly` in the fixture takes a MODEL link input and
+        emits MODEL, so `MODEL -> MODEL` is genuinely routable. The walker still
+        declines it — the no-op rule (`out_t == cur_type`) drops that step — so
+        the empty result must be flagged as an abstention, never as proof."""
+        lora = graph_path.node("LoraLoaderModelOnly")
+        assert lora is not None and "MODEL" in lora.output_types()
+
+        result = graph_path.search_paths("MODEL", "MODEL")
+        assert result["paths"] == []
+        assert result["not_searched"] is True
+
+    def test_completed_walks_are_not_marked_as_declined(self, graph_path: Graph):
+        """The abstention flag must stay off for searches that actually ran,
+        whether they found routes or genuinely exhausted the space."""
+        found = graph_path.search_paths("MODEL", "IMAGE", max_depth=4)
+        assert found["paths"] and found["not_searched"] is False
+        empty = graph_path.search_paths("AUDIO", "IMAGE", max_depth=6)
+        assert empty["paths"] == [] and empty["not_searched"] is False
+        assert empty["not_searched_reason"] is None
 
 
 # ===========================================================================

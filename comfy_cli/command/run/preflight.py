@@ -52,6 +52,7 @@ def fetch_object_info(host, port, timeout):
             message=f"Failed to fetch /object_info (HTTP {e.code})",
             hint="check the ComfyUI server logs; restart the server",
             details={"status": e.code, "body": body_text[:_MAX_BODY_PREVIEW]},
+            where="local",
         )
         raise typer.Exit(code=1) from e
     except urllib.error.URLError as e:
@@ -59,6 +60,7 @@ def fetch_object_info(host, port, timeout):
             code="connection_error",
             message=f"Failed to fetch /object_info from {host}:{port}: {e.reason}",
             hint="override with --host / --port",
+            where="local",
         )
         raise typer.Exit(code=1) from e
     except TimeoutError as e:
@@ -66,6 +68,7 @@ def fetch_object_info(host, port, timeout):
             code="connection_error",
             message=f"Failed to fetch /object_info from {host}:{port}: timed out after {timeout}s",
             hint="override with --host / --port, or raise --timeout",
+            where="local",
         )
         raise typer.Exit(code=1) from e
     try:
@@ -76,16 +79,29 @@ def fetch_object_info(host, port, timeout):
             message="Server returned invalid JSON for /object_info",
             hint="check that the host:port really is a ComfyUI server",
             details={"status": 200, "body": body.decode("utf-8", errors="replace")[:_MAX_BODY_PREVIEW]},
+            where="local",
         )
         raise typer.Exit(code=1) from e
 
 
-def _preflight_validate(renderer, workflow: dict, object_info: dict, *, target_label: str = "server") -> None:
+def _preflight_validate(
+    renderer,
+    workflow: dict,
+    object_info: dict,
+    *,
+    target_label: str = "server",
+    where: str | None = None,
+) -> None:
     """Pre-submit validation via the pure-Python CQL engine.
 
     Checks unknown class_types, input shape mismatches, and catalog drift.
     Raises typer.Exit(1) on hard errors. Prints warnings in pretty mode.
     Skips silently when object_info is empty (server unreachable — fail open).
+
+    ``where`` is the routed run target (``"local"``/``"cloud"``) stamped on the
+    error envelope. It is deliberately NOT ``target_label`` — that one is prose
+    for the message and its local value (``"server"``) isn't in the envelope's
+    ``local|cloud`` vocabulary.
     """
     if not object_info:
         return
@@ -108,6 +124,7 @@ def _preflight_validate(renderer, workflow: dict, object_info: dict, *, target_l
             message=f"Workflow has {len(errors)} validation error(s) against {target_label}",
             hint="\n".join(hint_parts),
             details={"errors": errors, "warnings": validation.get("warnings", [])},
+            where=where,
         )
         raise typer.Exit(code=1)
 

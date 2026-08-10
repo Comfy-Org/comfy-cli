@@ -275,6 +275,16 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "use `--where local` or `--where cloud`",
     ),
     ErrorCode(
+        "host_port_invalid",
+        "`--host`/`--port` (or a combined `--host host:port`) failed validation before any server "
+        "contact; the process exits 2 (usage error). The rejected value is usually a flag, but the "
+        "same check also covers the host recorded in `config.background`, so a corrupted background "
+        "record trips it with no bad flag passed. Click also writes its usual usage message to "
+        "stderr — this envelope exists so JSON/NDJSON consumers still get a parseable final line.",
+        "pass `--host <hostname-or-ip>` and `--port 1-65535`; if you passed neither, the saved "
+        "background server is bad — clear it with `comfy stop`",
+    ),
+    ErrorCode(
         "host_flag_cloud",
         "`--host`/`--port` were combined with an effective `cloud` target. They address a local "
         "ComfyUI only; the cloud address comes from the signed-in account. `details` carries the "
@@ -564,6 +574,12 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "install ffmpeg (e.g. `brew install ffmpeg` / `apt install ffmpeg`)",
     ),
     ErrorCode(
+        "ffmpeg_untrusted",
+        "ffmpeg/ffprobe were found, but only inside the directory you ran from, "
+        "so they were refused rather than executed — the shape of a planted binary.",
+        "run `comfy preview` from a directory that does not contain an ffmpeg/ffprobe binary",
+    ),
+    ErrorCode(
         "preview_unsupported_media",
         "The file has no image/video/audio stream to preview.",
         "pass an image, video, or audio file",
@@ -602,6 +618,13 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "node_not_found",
         "Requested node class isn't in the loaded environment.",
         "see `details.close_matches` or run `comfy nodes search`",
+    ),
+    ErrorCode(
+        "path_bounds_invalid",
+        "`comfy nodes path` was given `--max-depth` or `--max-paths` below 1. Such a bound admits no "
+        "path at all, so the search is refused rather than returning an empty result that would read "
+        "as a proof that no route exists.",
+        "use `--max-depth 6 --max-paths 10` (or any bound >= 1)",
     ),
     # --- file transfer (upload / download) -----------------------------------
     ErrorCode(
@@ -756,6 +779,21 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "`generate --emit-workflow` could not build the partner-node workflow.",
         "check the model name and that all required inputs are provided",
     ),
+    # --- custom node registry ------------------------------------------------
+    ErrorCode(
+        "node_publish_failed",
+        "Publishing a custom-node version to the registry failed: either a "
+        "client-side validation gap (missing publisher id / project name in "
+        "pyproject.toml) or a non-2xx from the registry. `details.status` and "
+        "`details.body` carry the response when it was an HTTP failure.",
+        "check `details.body`; ensure `[tool.comfy] publisher_id` and `[project] name` are set, and the token is valid",
+    ),
+    ErrorCode(
+        "registry_install_failed",
+        "`comfy node registry-install` fetching a custom node from the registry failed with a non-2xx. "
+        "`details.status` and `details.body` carry the response.",
+        "check the node id and version exist in the registry (`comfy node registry-list`); check `details.body`",
+    ),
     ErrorCode(
         "spend_consent_required",
         "A credit-spending command hit its spend gate with no consent, so it failed closed — "
@@ -788,6 +826,13 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "run `git tag --list 'v*'` in your ComfyUI workspace to see every available version",
     ),
     ErrorCode(
+        "version_switch_git_unavailable",
+        "`comfy update comfy --version X` could not use git at all — it is absent from PATH, or the "
+        "only match resolved into the directory you ran from and was refused. Reported separately so "
+        "it isn't misread as the requested version not existing.",
+        "a version switch needs a usable git — install it, or run from a directory that has no git binary in it",
+    ),
+    ErrorCode(
         "version_switch_dirty_tree",
         "`comfy update comfy --version X --no-stash` found uncommitted changes and refused to switch.",
         "commit or stash your changes, or re-run without --no-stash to stash them automatically",
@@ -807,6 +852,17 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "feedback_message_required",
         "`comfy feedback` was run in JSON/non-interactive mode without an inline message.",
         'comfy feedback "your feedback here"',
+    ),
+    # --- custom node install (`comfy node install`) ---------------------------
+    ErrorCode(
+        "node_install_failed",
+        "`comfy node install --exit-on-fail` failed: `cm-cli install` exited non-zero "
+        '(`details.failed_stage` == "cm-cli", raw status in `details.cm_cli_returncode`) or, '
+        "with --fast-deps, the follow-up dependency install failed after the packs installed "
+        '(`details.failed_stage` == "dependency-install", raw status in `details.returncode`). '
+        "The process exit code is normalized — signals become 128+N, and any status whose low "
+        "byte is 0 or 2 becomes 1 so it can't read as success or a CLI usage error.",
+        "read the output above for the failing pack or dependency, then re-run `comfy node install --exit-on-fail`",
     ),
     # --- custom node dependency report (`comfy node deps`) --------------------
     ErrorCode(

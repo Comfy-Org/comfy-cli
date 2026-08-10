@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import pathlib
 import stat
@@ -14,7 +15,10 @@ import requests
 from pathspec import PathSpec
 
 from comfy_cli import constants, ui
+from comfy_cli._safe_exec import BinaryNotFoundError, resolve_required_binary
 from comfy_cli.output.sanitize import sanitize_value
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Atomic writes — the write policy
@@ -550,6 +554,102 @@ def cleanup_partials(local_filepath: pathlib.Path) -> int:
     return removed
 
 
+# The atomic-write helpers above stream through a sibling named
+# ``<dest name>.<mkstemp token>.tmp``. Unlike ``.part``, nothing ever *asks* for
+# one by name — they are pure in-flight scaffolding — so the only reason to name
+# the suffix here is to sweep up the corpses a killed writer leaves behind.
+_TMP_SUFFIX = ".tmp"
+# An in-flight atomic write lives for milliseconds, so an hour puts a live write
+# far outside the window under any normal clock — see the caveat in
+# ``cleanup_stale_tmp_files`` for the abnormal ones — while still bounding how
+# long a corpse survives in a long-running agent/CI environment.
+_TMP_STALE_SECONDS = 3600
+
+
+def cleanup_stale_tmp_files(
+    directory: pathlib.Path,
+    *,
+    older_than_seconds: float = _TMP_STALE_SECONDS,
+    stem_suffix: str = "",
+) -> int:
+    """Best-effort removal of stranded ``atomic_write_*`` temps in ``directory``.
+
+    A writer killed uncleanly (SIGKILL, OOM, power loss) never runs its
+    unlink-on-exception cleanup, so its ``<dest>.<mkstemp token>.tmp`` sibling
+    outlives it — and mkstemp mints a fresh token per attempt, so nothing bounds
+    how many a crash-prone process leaves.
+
+    A candidate must be a *regular file* (the entry's own metadata decides, so a
+    symlink shaped like a temp can't lend an unrelated target's mtime to the age
+    test, and a dangling one is skipped rather than raised on), carry mkstemp's
+    exact ``<stem>.<8 chars>.tmp`` shape, and have an mtime older than
+    ``older_than_seconds``.
+
+    Two honest limits on that, both worth knowing before adding a caller:
+
+    * The shape proves nothing about *who* wrote the file. ``db.a1b2c3d4.tmp``
+      matches it by coincidence, and this repo's own bespoke temps in
+      ``auth/store.py`` / ``download_state.py``
+      (``<name>.<pid>.<secrets.token_hex(4)>.tmp``) match it by construction.
+      Pass ``stem_suffix`` to also require the destination stem to end in it
+      (e.g. ``".json"`` in a directory whose only destinations are
+      ``<id>.json``) and give the match some actual ownership evidence.
+    * The age cutoff is a heuristic, not a lock. There is no coordination with
+      the writer, so a forward clock step (NTP correction, VM/laptop resume), a
+      lagging network-filesystem clock, or a writer stalled past the cutoff
+      inside ``fsync`` can still make a live temp eligible — and unlinking it
+      makes that writer's ``os.replace`` fail. An hour makes that vanishingly
+      unlikely, not impossible; keep the default unless a caller can afford the
+      loss.
+
+    Returns how many files were removed. Never raises.
+    """
+    now = time.time()
+    removed = 0
+    try:
+        # Streamed rather than materialized: the docstring's own premise is that
+        # nothing bounds how many corpses a crash-loop leaves, and there is no
+        # reason to hold the whole listing to delete entries one at a time.
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                name = entry.name
+                if not name.endswith(_TMP_SUFFIX):
+                    continue
+                # ``<stem>.<token>`` — the stem is the destination file name, so
+                # it must be a real name (``.``/``..`` are not) and, when the
+                # caller says so, carry ``stem_suffix``; the token must have
+                # mkstemp's exact shape. Together that keeps a hand-made
+                # ``notes.tmp`` (no token segment) or a ``.lock``/``.part``
+                # sibling (wrong suffix entirely) off the list.
+                stem, sep, token = name[: -len(_TMP_SUFFIX)].rpartition(".")
+                if not sep or not stem.strip(".") or not stem.endswith(stem_suffix):
+                    continue
+                if len(token) != _MKSTEMP_TOKEN_LEN or not set(token) <= _MKSTEMP_TOKEN_CHARS:
+                    continue
+                try:
+                    st = entry.stat(follow_symlinks=False)
+                except OSError:
+                    continue
+                if not stat.S_ISREG(st.st_mode):
+                    continue
+                if now - st.st_mtime <= older_than_seconds:
+                    continue
+                try:
+                    os.unlink(entry.path)
+                except OSError:
+                    continue
+                # The count goes nowhere useful at the call sites (this is
+                # hygiene, not a user-facing action), so a debug line is the
+                # only way to attribute a file's disappearance after the fact.
+                logger.debug("swept stranded atomic-write temp: %s", entry.path)
+                removed += 1
+    except OSError:
+        # scandir failed to open, or died mid-iteration. Whatever we already
+        # removed still counts.
+        return removed
+    return removed
+
+
 def _friendly_network_error(exc: Exception) -> str:
     """Return a user-friendly description of a network error."""
     if isinstance(exc, _TransientHTTPStatusError):
@@ -791,9 +891,27 @@ def _load_comfyignore_spec(ignore_filename: str = ".comfyignore") -> PathSpec | 
 
 
 def list_git_tracked_files(base_path: str | os.PathLike = ".") -> list[str]:
+    """Git-tracked files under ``base_path``, or ``[]`` when git can't tell us.
+
+    ``[]`` means "no git answer" and callers (see :func:`zip_files`) treat it as
+    "not a git repository". An *absent* git has always produced that, so it still
+    does. A git that was found and then **refused** must not: the caller would
+    silently fall back to walking the whole directory, so the refusal is raised
+    rather than flattened into the same empty list.
+    """
+    # Resolved outside the tolerant handler below so the two cases stay
+    # distinguishable — ``BinaryNotFoundError`` subclasses ``FileNotFoundError``,
+    # which that handler swallows.
+    try:
+        git_bin = resolve_required_binary("git")
+    except BinaryNotFoundError as exc:
+        if not exc.is_absent:
+            raise
+        return []
+
     try:
         result = subprocess.check_output(
-            ["git", "-C", os.fspath(base_path), "ls-files"],
+            [git_bin, "-C", os.fspath(base_path), "ls-files"],
             text=True,
         )
     except (subprocess.SubprocessError, FileNotFoundError):
@@ -814,7 +932,14 @@ def _is_force_included(rel_path: str, include_prefixes: list[str]) -> bool:
 
 
 def zip_files(zip_filename, includes=None):
-    """Zip git-tracked files respecting optional .comfyignore patterns."""
+    """Zip git-tracked files respecting optional .comfyignore patterns.
+
+    :raises BinaryNotFoundError: ``git`` was found but refused (see
+        :func:`comfy_cli._safe_exec.resolve_required_binary`). The walk-everything
+        fallback below is safe for "this isn't a git repo", but not for "we can't
+        trust git": it would package untracked and gitignored files — ``.env``,
+        keys, venvs — into an archive that ``comfy node publish`` uploads.
+    """
     includes = includes or []
     include_prefixes: list[str] = [_normalize_path(os.path.normpath(include.lstrip("/"))) for include in includes]
 

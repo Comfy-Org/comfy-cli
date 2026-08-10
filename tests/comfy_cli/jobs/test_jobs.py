@@ -884,6 +884,111 @@ def test_orphaned_flag_filters_to_watcher_crashed(monkeypatch):
     assert orphan_ids == {"orphan-crashed"}, f"--orphaned should select only watcher_crashed rows; got {orphan_ids}"
 
 
+def test_reap_finalizes_nonterminal_record_with_dead_watcher_pid(monkeypatch):
+    """A `running` record carrying a dead pid + that pid's REAL create_time —
+    what a `comfy run --wait` killed from outside now leaves behind (BE-6641)
+    — is flipped by the reap to `error`/`watcher_crashed`, surfaces under
+    `--orphaned`, and the pid pair is cleared in the rewritten file."""
+    import psutil
+
+    from comfy_cli import jobs_state
+
+    # A real process that is provably gone: spawn, capture its create_time
+    # while alive, then terminate and reap it.
+    p = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        create_time = psutil.Process(p.pid).create_time()
+    finally:
+        # In `finally` so a create_time() failure can't leave a 30s sleeper
+        # behind for the rest of the suite.
+        if p.poll() is None:
+            p.terminate()
+        p.wait(timeout=10)
+
+    state_dir = jobs_state.state_dir()
+    _write_state(
+        state_dir,
+        "wait-killed",
+        status="running",
+        watcher_pid=p.pid,
+        watcher_pid_create_time=create_time,
+    )
+
+    rows = jobs_mod._gather_local_state_files(limit=100)
+    row = next(r for r in rows if r.prompt_id == "wait-killed")
+    assert row.status == "error"
+    assert row.error_code == "watcher_crashed"
+
+    orphans = jobs_mod._gather_local_state_files(limit=100, orphaned_only=True)
+    assert "wait-killed" in {r.prompt_id for r in orphans}
+
+    rewritten = jobs_state.read("wait-killed")
+    assert rewritten.status == "error"
+    assert rewritten.error["code"] == "watcher_crashed"
+    assert rewritten.watcher_pid is None
+    assert rewritten.watcher_pid_create_time is None
+
+
+def test_reap_leaves_nonterminal_record_without_pid_alone(monkeypatch):
+    """A `running` record with NO recorded pid — what a local `--wait` that
+    hit its own `--timeout` deliberately leaves (the job may still be running
+    server-side) — must never be reaped or listed as an orphan."""
+    from comfy_cli import jobs_state
+
+    state_dir = jobs_state.state_dir()
+    _write_state(state_dir, "wait-timed-out", status="running", watcher_pid=None)
+
+    rows = jobs_mod._gather_local_state_files(limit=100)
+    row = next(r for r in rows if r.prompt_id == "wait-timed-out")
+    assert row.status == "running"
+    assert row.error_code is None
+
+    orphans = jobs_mod._gather_local_state_files(limit=100, orphaned_only=True)
+    assert "wait-timed-out" not in {r.prompt_id for r in orphans}
+    assert jobs_state.read("wait-timed-out").status == "running"
+
+
+def test_reap_reread_yields_to_a_writer_that_finished_first(monkeypatch):
+    """The reap's read → liveness-probe → write is not atomic, and `--wait`
+    runs now stamp their foreground pid, so an ordinary `comfy run --wait`
+    finishing normally can land its terminal `completed` write (outputs and
+    all) inside that window — every `jobs ls --watch` refresh tick re-runs the
+    scan. The write must re-derive its verdict from a re-read under the lock,
+    or it clobbers that result with a generic `watcher_crashed`."""
+    from comfy_cli import jobs_state
+
+    state_dir = jobs_state.state_dir()
+    _write_state(state_dir, "raced-record", status="running", watcher_pid=999_999)
+
+    # No live process behind the pid, so the snapshot check says "reap it".
+    monkeypatch.setattr(jobs_mod, "_is_watcher_alive", lambda state: False)
+
+    real_locked = jobs_state.locked
+
+    def _locked_after_writer_wins(prompt_id):
+        # Stand-in for the racing `--wait` process: its terminal write lands
+        # between our liveness probe and our own write.
+        if prompt_id == "raced-record":
+            winner = jobs_state.read("raced-record")
+            winner.status = "completed"
+            winner.outputs = ["out.png"]
+            winner.watcher_pid = None
+            jobs_state.write(winner)
+        return real_locked(prompt_id)
+
+    monkeypatch.setattr(jobs_state, "locked", _locked_after_writer_wins)
+
+    rows = jobs_mod._gather_local_state_files(limit=100)
+    row = next(r for r in rows if r.prompt_id == "raced-record")
+    assert row.status == "completed", "the reap overwrote a verdict that landed first"
+    assert row.error_code is None
+    assert row.outputs == 1
+
+    final = jobs_state.read("raced-record")
+    assert final.status == "completed"
+    assert final.outputs == ["out.png"]
+
+
 def _command_flags(*path: str) -> list[str]:
     """Flags exposed for a command path via the machine-readable help contract.
 
@@ -2022,6 +2127,335 @@ def test_jobs_watch_cloud_terminal_envelope_carries_grouped_outputs(monkeypatch,
     assert env["data"]["outputs_by_item"] == {"s1": ["https://cloud.example/view/a.png"]}
 
 
+# ---------------------------------------------------------------------------
+# `/api/jobs/<id>` (JobDetailResponse) field names — execution_error + *_time
+# ---------------------------------------------------------------------------
+
+
+# A failed job exactly as the plural jobs-detail endpoint serves it: the cause
+# is a structured `execution_error` object (never a top-level `error_message`)
+# and the timestamps are Unix-millisecond ints (never `created_at` strings).
+_FAILED_DETAIL = {
+    "status": "failed",
+    "execution_error": {
+        "node_id": "5",
+        "node_type": "KSampler",
+        "exception_message": "Allocation on device 0 would exceed allowed memory",
+        "exception_type": "torch.cuda.OutOfMemoryError",
+        "traceback": ["  File a.py, line 1", "  File b.py, line 2"],
+        "current_inputs": {"seed": [42]},
+    },
+    "create_time": 1_735_689_600_000,
+    "update_time": 1_735_689_660_500,
+}
+
+
+def test_cloud_status_snapshot_reads_execution_error_and_ms_timestamps(monkeypatch):
+    """The fields `/api/jobs/<id>` actually serves must land on the snapshot:
+    a compact `error_message` line, the structured record, ISO timestamps."""
+    monkeypatch.setattr(jobs_mod, "_cloud_client", lambda: _FakeCloudClient(_FAILED_DETAIL))
+
+    snap = jobs_mod._cloud_status_snapshot("pid-failed")
+    assert snap is not None
+    assert snap["status"] == "error"
+    assert snap["error_message"] == (
+        "torch.cuda.OutOfMemoryError: Allocation on device 0 would exceed allowed memory (node 5 KSampler)"
+    )
+    # The record rides along for `--json` consumers — minus `current_inputs`,
+    # whose widget values can carry API keys.
+    assert snap["execution_error"] == {
+        k: v for k, v in _FAILED_DETAIL["execution_error"].items() if k != "current_inputs"
+    }
+    assert "current_inputs" not in snap["execution_error"]
+    # `jobs status` is the documented home of the full traceback.
+    assert snap["execution_error"]["traceback"] == _FAILED_DETAIL["execution_error"]["traceback"]
+    assert snap["created_at"] == "2025-01-01T00:00:00+00:00"
+    assert snap["updated_at"] == "2025-01-01T00:01:00.500000+00:00"
+    # Not served by this endpoint — never fabricated.
+    assert snap["assigned_inference"] is None
+
+
+def test_cloud_status_snapshot_payload_validates_against_schema(monkeypatch):
+    """The emitted payload — `execution_error` included — must satisfy the
+    published `jobs status` contract."""
+    import jsonschema
+
+    monkeypatch.setattr(jobs_mod, "_cloud_client", lambda: _FakeCloudClient(_FAILED_DETAIL))
+    snap = jobs_mod._cloud_status_snapshot("pid-failed")
+
+    schema_path = Path(__file__).parents[3] / "comfy_cli" / "schemas" / "jobs.json"
+    schema = json.loads(schema_path.read_text())
+    # `host`/`port` are stamped by the renderer, not the snapshot.
+    jsonschema.Draft202012Validator(schema).validate({**snap, "host": "cloud.example", "port": 443})
+
+
+def test_cloud_status_snapshot_keeps_old_shape_fallback(monkeypatch):
+    """A deployment still serving the deprecated dialect (top-level
+    `error_message`, ready-made `created_at`) populates the same fields."""
+    payload = {
+        "status": "failed",
+        "error_message": "RIP to the server",
+        "created_at": "2025-01-01T00:00:00Z",
+        "updated_at": "2025-01-01T00:01:00Z",
+        "assigned_inference": "inf-7",
+    }
+    monkeypatch.setattr(jobs_mod, "_cloud_client", lambda: _FakeCloudClient(payload))
+
+    snap = jobs_mod._cloud_status_snapshot("pid-old")
+    assert snap is not None
+    assert snap["error_message"] == "RIP to the server"
+    assert snap["execution_error"] is None
+    assert snap["created_at"] == "2025-01-01T00:00:00Z"
+    assert snap["updated_at"] == "2025-01-01T00:01:00Z"
+    assert snap["assigned_inference"] == "inf-7"
+
+
+def test_cloud_status_snapshot_tolerates_unusable_timestamps(monkeypatch):
+    """A malformed `create_time` degrades to None — it must not raise out of
+    `jobs status`."""
+    payload = {"status": "running", "create_time": "not-a-number", "update_time": None}
+    monkeypatch.setattr(jobs_mod, "_cloud_client", lambda: _FakeCloudClient(payload))
+
+    snap = jobs_mod._cloud_status_snapshot("pid-bad-ts")
+    assert snap is not None
+    assert snap["created_at"] is None
+    assert snap["updated_at"] is None
+
+
+def test_jobs_watch_cloud_failed_job_reports_the_real_cause(monkeypatch, capsys):
+    """`jobs watch --where cloud` on a failed job exits 1 with ok:false and the
+    server's own exception text — not the generic "ended in status 'error'"."""
+    from comfy_cli.output import Renderer, set_renderer
+    from comfy_cli.output.renderer import OutputMode
+
+    monkeypatch.setattr(jobs_mod, "cloud_preflight_or_exit", lambda: None)
+    monkeypatch.setattr(jobs_mod, "_cloud_client", lambda: _FakeCloudClient(_FAILED_DETAIL))
+
+    set_renderer(Renderer(mode=OutputMode.NDJSON, command="jobs watch"))
+    with pytest.raises(typer.Exit) as exc:
+        jobs_mod._cloud_watch("pid-failed", poll_interval=0.01, max_wait=5)
+    assert exc.value.exit_code == 1
+
+    lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]
+    env = json.loads(lines[-1])
+    assert env["type"] == "envelope" and env["ok"] is False
+    assert "Allocation on device 0 would exceed allowed memory" in env["error"]["message"]
+    assert "ended in status" not in env["error"]["message"]
+    assert env["error"]["details"]["execution_error"]["node_type"] == "KSampler"
+    # The whole payload becomes `renderer.error(details=...)`, so the nested
+    # record must be as trimmed as the top-level one: no widget values, and a
+    # traceback capped at the same two-frame budget as `traceback_tail`.
+    record = env["error"]["details"]["execution_error"]
+    assert "current_inputs" not in record
+    assert len(record["traceback"]) <= 2
+
+
+def test_jobs_watch_cloud_terminal_envelope_trims_a_long_traceback(monkeypatch, capsys):
+    """A server traceback longer than the tail budget is capped in the watch
+    envelope — JSON mode auto-engages off a TTY, so an unbounded blob would
+    land in CI and agent logs."""
+    from comfy_cli.output import Renderer, set_renderer
+    from comfy_cli.output.renderer import OutputMode
+
+    frames = [f"  File f{i}.py, line {i}" for i in range(12)]
+    detail = {
+        **_FAILED_DETAIL,
+        "execution_error": {**_FAILED_DETAIL["execution_error"], "traceback": frames},
+    }
+    monkeypatch.setattr(jobs_mod, "cloud_preflight_or_exit", lambda: None)
+    monkeypatch.setattr(jobs_mod, "_cloud_client", lambda: _FakeCloudClient(detail))
+
+    set_renderer(Renderer(mode=OutputMode.NDJSON, command="jobs watch"))
+    with pytest.raises(typer.Exit):
+        jobs_mod._cloud_watch("pid-failed", poll_interval=0.01, max_wait=5)
+
+    env = json.loads([ln for ln in capsys.readouterr().out.splitlines() if ln.strip()][-1])
+    assert env["error"]["details"]["execution_error"]["traceback"] == frames[-2:]
+    # ...and the classified tail agrees with it, so the envelope carries the
+    # same two frames twice over rather than the full blob once.
+    assert env["error"]["details"]["error_message"] == env["error"]["message"]
+
+
+def test_jobs_watch_cloud_prefers_the_structured_record_over_a_json_message(monkeypatch, capsys):
+    """An `exception_message` that is itself JSON (API nodes raise with raw
+    JSON bodies) must not be re-decoded into a fields-less dict: classify the
+    structured record, not the flattened one-liner."""
+    from comfy_cli.output import Renderer, set_renderer
+    from comfy_cli.output.renderer import OutputMode
+
+    detail = {
+        "status": "failed",
+        "execution_error": {
+            "node_id": "9",
+            "node_type": "ApiNode",
+            "exception_message": '{"detail": "upstream refused the request"}',
+        },
+    }
+    monkeypatch.setattr(jobs_mod, "cloud_preflight_or_exit", lambda: None)
+    monkeypatch.setattr(jobs_mod, "_cloud_client", lambda: _FakeCloudClient(detail))
+
+    set_renderer(Renderer(mode=OutputMode.NDJSON, command="jobs watch"))
+    with pytest.raises(typer.Exit):
+        jobs_mod._cloud_watch("pid-json-msg", poll_interval=0.01, max_wait=5)
+
+    env = json.loads([ln for ln in capsys.readouterr().out.splitlines() if ln.strip()][-1])
+    assert env["error"]["message"] == 'ApiNode (node 9): {"detail": "upstream refused the request"}'
+    assert env["error"]["details"]["execution_error"]["node_type"] == "ApiNode"
+
+
+def test_cloud_status_snapshot_prefers_structured_over_generic_error_message(monkeypatch):
+    """A deployment serving both a terse `error_message` and a detailed
+    `execution_error` must surface the detailed one."""
+    detail = {**_FAILED_DETAIL, "error_message": "job failed"}
+    monkeypatch.setattr(jobs_mod, "_cloud_client", lambda: _FakeCloudClient(detail))
+
+    snap = jobs_mod._cloud_status_snapshot("pid-both")
+    assert snap["error_message"].startswith("torch.cuda.OutOfMemoryError: Allocation on device 0")
+
+
+def test_cloud_status_snapshot_parses_a_string_execution_error(monkeypatch):
+    """A non-dict `execution_error` (the deprecated dialect's JSON-encoded
+    record) must still produce a cause rather than being discarded to None."""
+    payload = {
+        "status": "failed",
+        "execution_error": json.dumps({"exception_message": "boom", "node_id": 3, "node_type": "VAEDecode"}),
+    }
+    monkeypatch.setattr(jobs_mod, "_cloud_client", lambda: _FakeCloudClient(payload))
+
+    snap = jobs_mod._cloud_status_snapshot("pid-str-err")
+    assert snap["error_message"] == "boom (node 3 VAEDecode)"
+    # The published key stays object-or-null, so a string shape lands as null.
+    assert snap["execution_error"] is None
+
+
+def test_cloud_status_snapshot_ignores_a_stale_error_on_a_succeeded_job(monkeypatch):
+    """A non-failed job never has a cause synthesized for it — a stale record
+    on a retried-then-succeeded job would fabricate an `error` row."""
+    payload = {"status": "success", "execution_error": _FAILED_DETAIL["execution_error"]}
+
+    class _SucceededClient(_FakeCloudClient):
+        # The shared fake refuses `get_history` to guard the error paths; a
+        # completed job legitimately fetches it (and has no outputs here).
+        def get_history(self, prompt_id):
+            return None
+
+    monkeypatch.setattr(jobs_mod, "_cloud_client", lambda: _SucceededClient(payload))
+
+    snap = jobs_mod._cloud_status_snapshot("pid-ok")
+    assert snap["status"] == "completed"
+    assert snap["error_message"] is None
+
+
+def test_poll_cloud_once_survives_a_malformed_traceback():
+    """A `traceback` served as an object slices to a TypeError that only
+    `_poll_cloud_once`'s *fetch* is guarded against — it would kill the
+    detached watcher and strand the state file mid-flight."""
+    from comfy_cli import jobs_state
+    from comfy_cli.command import job_watcher
+
+    client = _FakeCloudClient(
+        {"status": "failed", "execution_error": {"exception_message": "boom", "traceback": {"frame": 1}}}
+    )
+    state = jobs_state.new(prompt_id="pid", client_id="c", workflow="w", where="cloud")
+    assert job_watcher._poll_cloud_once(state, client=client) is True
+    assert state.status == "error"
+    assert state.error["message"] == "boom"
+
+
+def test_cloud_status_pretty_renders_the_execution_error_row(monkeypatch, capsys):
+    """The pretty `jobs status` table shows an `error` row for a failed cloud
+    job — the row that has been blank since the endpoint moved."""
+    from comfy_cli.output import Renderer, set_renderer
+    from comfy_cli.output.renderer import OutputMode
+
+    monkeypatch.setattr(jobs_mod, "cloud_preflight_or_exit", lambda: None)
+    monkeypatch.setattr(jobs_mod, "_cloud_client", lambda: _FakeCloudClient(_FAILED_DETAIL))
+
+    set_renderer(Renderer(mode=OutputMode.PRETTY, command="jobs status"))
+    jobs_mod._cloud_status("pid-failed")
+    out = capsys.readouterr().out
+    assert "error" in out
+    assert "OutOfMemoryError" in out
+
+
+@pytest.mark.parametrize(
+    ("err", "expected"),
+    [
+        ({}, None),
+        (None, None),
+        ({"exception_message": "boom"}, "boom"),
+        ({"exception_message": "boom", "exception_type": "ValueError"}, "ValueError: boom"),
+        ({"exception_type": "ValueError"}, "ValueError"),
+        ({"exception_message": "boom", "node_id": 5}, "boom (node 5)"),
+        # Node 0 is a real node id — it must not be dropped as falsy.
+        ({"exception_message": "boom", "node_id": 0}, "boom (node 0)"),
+        ({"exception_message": "boom", "node_type": "KSampler"}, "boom (KSampler)"),
+        # Node fields but no cause: state one rather than emitting the bare
+        # parenthetical `(node 5 KSampler)` as the whole error line.
+        ({"node_id": 5, "node_type": "KSampler"}, "ComfyUI reported an execution error. (node 5 KSampler)"),
+        # Internal newlines collapse — this helper renders *one* line, and the
+        # pretty `error` cell is a single Rich row.
+        ({"exception_message": "boom\n  at frame\n  at frame2"}, "boom at frame at frame2"),
+        # Non-dict shapes route through `execution_errors.parse_error_message`
+        # rather than being discarded, so the watcher and this path agree.
+        ("a string, not an object", "a string, not an object"),
+        ('{"exception_message": "boom", "node_type": "KSampler"}', "boom (KSampler)"),
+    ],
+)
+def test_execution_error_line_partial_records(err, expected):
+    """The endpoint marks every `ExecutionError` field required, but the line
+    builder degrades field-by-field rather than emitting `None: None (node
+    None None)` if one ever goes missing."""
+    assert jobs_mod._execution_error_line(err) == expected
+
+
+def test_poll_cloud_once_classifies_the_structured_execution_error():
+    """The background watcher polls the same `/api/jobs/<id>`, so it must read
+    the same fields — otherwise every failed cloud job's state file records the
+    generic "ComfyUI reported an execution error." with null timestamps."""
+    from comfy_cli import jobs_state
+    from comfy_cli.command import job_watcher
+
+    client = _FakeCloudClient(_FAILED_DETAIL)
+    state = jobs_state.new(prompt_id="pid", client_id="c", workflow="w", where="cloud")
+    assert job_watcher._poll_cloud_once(state, client=client) is True
+
+    assert state.status == "error"
+    assert state.error is not None
+    # `classify` parses the object shape directly, so the verdict keeps the
+    # node prefix and the structured fields — not just a flattened line.
+    assert state.error["message"] == "KSampler (node 5): Allocation on device 0 would exceed allowed memory"
+    assert state.error["details"]["exception_type"] == "torch.cuda.OutOfMemoryError"
+    assert state.error["details"]["node_id"] == "5"
+    assert state.error["details"]["traceback_tail"] == ["  File a.py, line 1", "  File b.py, line 2"]
+    assert state.error["details"]["created_at"] == "2025-01-01T00:00:00+00:00"
+    assert state.error["details"]["updated_at"] == "2025-01-01T00:01:00.500000+00:00"
+
+
+def test_poll_cloud_once_cancelled_carries_iso_timestamps():
+    """The cancelled branch reads the same timestamps through the same helper."""
+    from comfy_cli import jobs_state
+    from comfy_cli.command import job_watcher
+
+    client = _FakeCloudClient({"status": "cancelled", "create_time": 1_735_689_600_000})
+    state = jobs_state.new(prompt_id="pid", client_id="c", workflow="w", where="cloud")
+    assert job_watcher._poll_cloud_once(state, client=client) is True
+
+    assert state.error["code"] == "cancelled"
+    assert state.error["message"] == "Cloud job was cancelled."
+    assert state.error["details"]["created_at"] == "2025-01-01T00:00:00+00:00"
+    assert state.error["details"]["updated_at"] is None
+
+
+def test_jobs_schema_documents_execution_error():
+    """schemas/jobs.json carries the additive structured-cause key."""
+    schema_path = Path(__file__).parents[3] / "comfy_cli" / "schemas" / "jobs.json"
+    schema = json.loads(schema_path.read_text())
+    prop = schema["properties"]["execution_error"]
+    assert prop["type"] == ["object", "null"]
+    assert prop["additionalProperties"] is True
+
+
 def test_jobs_schema_documents_grouped_outputs():
     """schemas/jobs.json carries the additive grouped-output keys."""
     schema_path = Path(__file__).parents[3] / "comfy_cli" / "schemas" / "jobs.json"
@@ -2468,8 +2902,15 @@ def test_watch_handlers_registry_covers_the_protocol_types():
         "executing",
         "execution_cached",
         "progress",
+        # Current ComfyUI's per-step channel; `progress` is the legacy name and
+        # both stay mapped so old and new servers both stream.
+        "progress_state",
         "executed",
         "execution_error",
+        # Current ComfyUI's end-of-prompt signals — without them a successful
+        # watch only ends when a recv times out (a full `--timeout` of silence).
+        "execution_success",
+        "execution_interrupted",
     }
     assert jobs_mod._WATCH_HANDLERS.get("unknown_type") is None
 
@@ -2519,11 +2960,95 @@ def test_watch_executed_collects_output_urls_with_host_port():
 
 def test_watch_execution_error_is_terminal_and_carries_details():
     st, _ = _watch_state()
-    data = {"node_id": "5", "exception_message": "boom"}
+    data = {"node_id": "5", "exception_message": "boom", "executed": ["1", 2]}
     jobs_mod._watch_execution_error(st, data)
     assert st.terminal is True
     assert st.end_reason == "error"
     assert st.end_details == data
+    # The `executed` list is the only record of what ran before the failure.
+    assert st.completed_nodes == {"1", "2"}
+
+
+def test_watch_progress_state_streams_per_node_and_marks_finished_nodes():
+    """`progress_state` (current ComfyUI) must produce per-step progress events
+    and count finished nodes — including compute nodes that never fire
+    `executed`. Regression: watch only understood the legacy `progress` type."""
+    st, r = _watch_state()
+    jobs_mod._watch_progress_state(
+        st,
+        {
+            "prompt_id": "pid",
+            "nodes": {
+                "3": {"value": 2.0, "max": 8.0, "state": "running"},
+                "4": {"value": 8.0, "max": 8.0, "state": "finished"},
+            },
+        },
+    )
+    assert [t[0] for t in r.throttled] == ["progress:3"]
+    # Floats coerced to the integer|null the event schema declares.
+    assert r.throttled[0][2] == {"max_hz": 10, "node": "3", "completed": 2, "total": 8, "prompt_id": "pid"}
+    # The 100% line is emitted unthrottled so it can never be swallowed.
+    assert r.events == [("progress", {"node": "4", "completed": 8, "total": 8, "prompt_id": "pid"})]
+    assert st.completed_nodes == {"4"}
+
+
+def test_watch_progress_state_reports_each_finished_node_once():
+    """`progress_state` repeats every non-pending node on every message, so the
+    un-throttled final flush must not re-fire for an already-finished node."""
+    st, r = _watch_state()
+    msg = {"prompt_id": "pid", "nodes": {"4": {"value": 8, "max": 8, "state": "finished"}}}
+    jobs_mod._watch_progress_state(st, msg)
+    jobs_mod._watch_progress_state(st, dict(msg))
+    assert len(r.events) == 1 and r.throttled == []
+    assert st.completed_nodes == {"4"}
+
+
+def test_watch_progress_state_errored_node_is_final_but_not_completed():
+    """An `error` node is final — it must flush its progress line once and never
+    fire again — but it did NOT complete, so it stays out of `completed_nodes`."""
+    st, r = _watch_state()
+    msg = {"prompt_id": "pid", "nodes": {"5": {"value": 1, "max": 8, "state": "error"}}}
+    jobs_mod._watch_progress_state(st, msg)
+    jobs_mod._watch_progress_state(st, dict(msg))
+    assert st.completed_nodes == set()
+    assert "5" in st.progress_final
+    assert r.throttled == []
+    assert r.events == [("progress", {"node": "5", "completed": 1, "total": 8, "prompt_id": "pid"})]
+
+
+def test_watch_progress_state_ignores_malformed_payloads():
+    st, r = _watch_state()
+    jobs_mod._watch_progress_state(st, {"prompt_id": "pid", "nodes": "not-a-dict"})
+    jobs_mod._watch_progress_state(st, {"prompt_id": "pid"})
+    jobs_mod._watch_progress_state(st, {"prompt_id": "pid", "nodes": {"3": "nope"}})
+    assert r.throttled == [] and r.events == []
+    assert st.completed_nodes == set()
+
+
+def test_watch_execution_success_is_terminal_completed():
+    st, r = _watch_state()
+    jobs_mod._watch_execution_success(st, {"prompt_id": "pid"})
+    assert st.terminal is True
+    assert st.end_reason == "completed"
+    assert r.events == []
+
+
+def test_watch_execution_interrupted_is_terminal_cancelled_and_keeps_nodes():
+    st, _ = _watch_state()
+    data = {"prompt_id": "pid", "node_id": "7", "executed": ["1", "2"]}
+    jobs_mod._watch_execution_interrupted(st, data)
+    assert st.terminal is True
+    assert st.end_reason == "cancelled"
+    assert st.end_details == data
+    assert st.completed_nodes == {"1", "2"}
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [(3, 3), (3.7, 3), (None, None), ("8", None), (True, None), (float("nan"), None), (float("inf"), None)],
+)
+def test_progress_int_coerces_to_the_event_schema_type(value, expected):
+    assert jobs_mod._progress_int(value) == expected
 
 
 class _PrettyRecordingRenderer(_RecordingRenderer):
@@ -2557,6 +3082,267 @@ def test_watch_executing_escapes_server_controlled_node_markup():
     assert r"\[red]evil\[/red]" in r.printed[0]
     # The event stream still carries the raw node id.
     assert ("executing", {"node": "[red]evil[/red]", "prompt_id": "pid"}) in r.events
+
+
+# ---------------------------------------------------------------------------
+# `jobs watch` — attaching as the submitting client_id (the reason the stream
+# was silent) and the history-derived completed_nodes backfill
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_watch_client_id_prefers_the_job_state_file(monkeypatch):
+    """`comfy run` records the submitting client_id on disk — cheapest source,
+    and no HTTP call should be needed when it is there."""
+    from comfy_cli import jobs_state
+
+    jobs_state.write(jobs_state.new(prompt_id="pid-a", client_id="cid-from-state", workflow="w", where="local"))
+
+    def _no_http(url, **kw):
+        raise AssertionError(f"should not have queried the server: {url}")
+
+    monkeypatch.setattr(jobs_mod, "_http_get_json", _no_http)
+    assert jobs_mod._resolve_watch_client_id("127.0.0.1", 8188, "pid-a") == "cid-from-state"
+
+
+def test_resolve_watch_client_id_falls_back_to_queue_extra_data(monkeypatch):
+    """A prompt submitted by something else (browser, older CLI) has no state
+    file — /queue's extra_data still carries the submitting client_id."""
+
+    def fake_get(url, **kw):
+        if url.endswith("/queue"):
+            return {
+                "queue_running": [[0, "other", {}, {"client_id": "nope"}, {}]],
+                "queue_pending": [[1, "pid-b", {}, {"client_id": "cid-from-queue"}, {}]],
+            }
+        raise AssertionError(f"unexpected url: {url}")
+
+    monkeypatch.setattr(jobs_mod, "_http_get_json", fake_get)
+    assert jobs_mod._resolve_watch_client_id("127.0.0.1", 8188, "pid-b") == "cid-from-queue"
+
+
+def test_resolve_watch_client_id_falls_back_to_history_then_none(monkeypatch):
+    def fake_get(url, **kw):
+        if url.endswith("/queue"):
+            return {"queue_running": [], "queue_pending": []}
+        if url.endswith("/history/pid-c"):
+            return {"pid-c": {"prompt": [0, "pid-c", {}, {"client_id": "cid-from-history"}, {}]}}
+        return {}
+
+    monkeypatch.setattr(jobs_mod, "_http_get_json", fake_get)
+    assert jobs_mod._resolve_watch_client_id("127.0.0.1", 8188, "pid-c") == "cid-from-history"
+    # Nothing anywhere -> None, so the caller can warn instead of pretending.
+    assert jobs_mod._resolve_watch_client_id("127.0.0.1", 8188, "pid-missing") is None
+
+
+def test_resolve_watch_client_id_survives_an_unreachable_server(monkeypatch):
+    def boom(url, **kw):
+        raise RuntimeError("connection refused")
+
+    monkeypatch.setattr(jobs_mod, "_http_get_json", boom)
+    assert jobs_mod._resolve_watch_client_id("127.0.0.1", 8188, "pid-x") is None
+
+
+def test_history_completed_nodes_unions_cached_executed_and_output_nodes(monkeypatch):
+    """The end-state node list must not depend on the live stream at all."""
+
+    def fake_get(url, **kw):
+        assert url.endswith("/history/pid-h")
+        return {
+            "pid-h": {
+                "status": {
+                    "completed": True,
+                    "messages": [
+                        ["execution_start", {"prompt_id": "pid-h"}],
+                        ["execution_cached", {"nodes": [1, "2"]}],
+                        ["execution_interrupted", {"executed": ["3"]}],
+                    ],
+                },
+                "outputs": {"9": {"images": []}},
+            }
+        }
+
+    monkeypatch.setattr(jobs_mod, "_http_get_json", fake_get)
+    assert jobs_mod._history_completed_nodes("127.0.0.1", 8188, "pid-h") == {"1", "2", "3", "9"}
+
+
+def test_history_completed_nodes_tolerates_junk(monkeypatch):
+    def fake_get(url, **kw):
+        return {"pid-j": {"status": {"messages": [["execution_cached"], "junk", ["x", 1]]}, "outputs": "nope"}}
+
+    monkeypatch.setattr(jobs_mod, "_http_get_json", fake_get)
+    assert jobs_mod._history_completed_nodes("127.0.0.1", 8188, "pid-j") == set()
+    monkeypatch.setattr(jobs_mod, "_http_get_json", lambda url, **kw: (_ for _ in ()).throw(RuntimeError("down")))
+    assert jobs_mod._history_completed_nodes("127.0.0.1", 8188, "pid-j") == set()
+
+
+class _ScriptedWS:
+    """A `websocket.WebSocket` stand-in that replays a scripted message list.
+
+    Once the script is exhausted every `recv` raises the same timeout the real
+    socket raises, which is how the watch loop is driven to its snapshot check.
+    """
+
+    def __init__(self, messages):
+        self._messages = [m if isinstance(m, str) else json.dumps(m) for m in messages]
+        self.url = None
+        self.closed = False
+
+    def connect(self, url):
+        self.url = url
+
+    def settimeout(self, _t):
+        pass
+
+    def recv(self):
+        if not self._messages:
+            raise jobs_mod.WebSocketTimeoutException("timed out")
+        return self._messages.pop(0)
+
+    def close(self):
+        self.closed = True
+
+
+def _run_local_watch(monkeypatch, capsys, *, messages, prompt_id="pid-w", argv_extra=()):
+    """Drive `jobs watch` (local, NDJSON) over a scripted WS; return the lines."""
+    from typer.testing import CliRunner
+
+    from comfy_cli.output import Renderer, set_renderer
+    from comfy_cli.output.renderer import OutputMode
+
+    ws = _ScriptedWS(messages)
+    monkeypatch.setattr(jobs_mod, "_server_or_error", lambda h, p, **kw: True)
+    monkeypatch.setattr(jobs_mod, "WebSocket", lambda *a, **k: ws)
+    set_renderer(Renderer(mode=OutputMode.NDJSON, command="jobs watch"))
+    result = CliRunner().invoke(
+        jobs_mod.app,
+        ["watch", prompt_id, "--where", "local", "--timeout", "1", *argv_extra],
+    )
+    # NDJSON goes to the CliRunner's captured stdout, not capsys — the renderer
+    # resolves its machine stream lazily, i.e. after the runner swapped it in.
+    capsys.readouterr()
+    lines = [json.loads(ln) for ln in result.output.splitlines() if ln.startswith("{")]
+    return result, ws, lines
+
+
+def test_watch_streams_events_and_reports_completed_nodes(monkeypatch, capsys):
+    """The BE-6856 regression, end to end: a multi-node job must produce MORE
+    THAN ONE NDJSON line during the watch, and the terminal envelope's
+    `completed_nodes` must list the nodes that ran."""
+    from comfy_cli import jobs_state
+
+    jobs_state.write(jobs_state.new(prompt_id="pid-w", client_id="cid-sub", workflow="w", where="local"))
+    monkeypatch.setattr(jobs_mod, "_snapshot", lambda h, p, pid: {"prompt_id": pid, "status": "running", "outputs": []})
+    monkeypatch.setattr(jobs_mod, "_history_completed_nodes", lambda h, p, pid: {"1"})
+
+    messages = [
+        {"type": "status", "data": {"status": {}, "sid": "cid-sub"}},  # no prompt_id -> ignored
+        {"type": "execution_cached", "data": {"prompt_id": "pid-w", "nodes": ["1"]}},
+        {"type": "executing", "data": {"prompt_id": "pid-w", "node": "3"}},
+        {
+            "type": "progress_state",
+            "data": {"prompt_id": "pid-w", "nodes": {"3": {"value": 4, "max": 8, "state": "running"}}},
+        },
+        {
+            "type": "progress_state",
+            "data": {"prompt_id": "pid-w", "nodes": {"3": {"value": 8, "max": 8, "state": "finished"}}},
+        },
+        {"type": "executed", "data": {"prompt_id": "pid-w", "node": "9", "output": {}}},
+        {"type": "execution_success", "data": {"prompt_id": "pid-w"}},
+    ]
+    result, ws, lines = _run_local_watch(monkeypatch, capsys, messages=messages)
+
+    assert result.exit_code == 0, result.output
+    # 1. The watch attached as the submitting session — the whole reason events
+    #    reach us at all (ComfyUI addresses them to that sid only).
+    assert "clientId=cid-sub" in ws.url
+    # 2. Intermediate events actually reached the stream.
+    assert len(lines) > 1, f"expected a stream, got a single envelope: {lines}"
+    types = [ln.get("type") for ln in lines[:-1]]
+    assert "execution_cached" in types and "executing" in types and "executed" in types
+    assert types.count("progress") >= 2, types
+    # 3. The terminal envelope is last, ok, and names the nodes that ran.
+    env = lines[-1]
+    assert env["type"] == "envelope" and env["ok"] is True
+    assert env["data"]["status"] == "completed"
+    assert env["data"]["completed_nodes"] == ["1", "3", "9"]
+    assert env["data"]["attached"] is True and env["data"]["client_id"] == "cid-sub"
+
+
+def test_watch_terminal_envelope_backfills_completed_nodes_without_events(monkeypatch, capsys):
+    """Symptom 2 is independent of streaming: even with zero WS events, the
+    envelope's `completed_nodes` comes from the server's own /history record."""
+    snapshots = iter(
+        [
+            {"prompt_id": "pid-w", "status": "running", "outputs": []},
+            {"prompt_id": "pid-w", "status": "completed", "outputs": ["http://x/view?f=1"]},
+        ]
+    )
+    monkeypatch.setattr(jobs_mod, "_snapshot", lambda h, p, pid: next(snapshots, None))
+    monkeypatch.setattr(jobs_mod, "_resolve_watch_client_id", lambda h, p, pid: None)
+    monkeypatch.setattr(jobs_mod, "_history_completed_nodes", lambda h, p, pid: {"4", "1"})
+
+    result, ws, lines = _run_local_watch(monkeypatch, capsys, messages=[])
+    assert result.exit_code == 0, result.output
+    env = lines[-1]
+    assert env["data"]["status"] == "completed"
+    assert env["data"]["completed_nodes"] == ["1", "4"]
+    # Unresolvable id -> a fresh one, flagged so a caller knows why it saw no
+    # events rather than guessing the job was silent.
+    assert env["data"]["attached"] is False
+    assert "clientId=" in ws.url
+
+
+def test_watch_already_terminal_job_still_lists_completed_nodes(monkeypatch, capsys):
+    """The short-circuit path (job already finished) also carries the node list —
+    and the `client_id`/`attached` pair, so a consumer reading `data.attached`
+    never hits a missing key on this exit path."""
+    import jsonschema
+
+    monkeypatch.setattr(
+        jobs_mod,
+        "_snapshot",
+        lambda h, p, pid: {"prompt_id": pid, "status": "completed", "outputs": [], "host": h, "port": p},
+    )
+    monkeypatch.setattr(jobs_mod, "_history_completed_nodes", lambda h, p, pid: {"2", "1"})
+    result, _ws, lines = _run_local_watch(monkeypatch, capsys, messages=[])
+    assert result.exit_code == 0, result.output
+    assert lines[-1]["data"]["completed_nodes"] == ["1", "2"]
+    # Nothing was attached: no socket was ever opened on this path.
+    assert lines[-1]["data"]["client_id"] is None
+    assert lines[-1]["data"]["attached"] is False
+
+    schema_path = Path(jobs_mod.__file__).parent.parent / "schemas" / "jobs.json"
+    jsonschema.Draft202012Validator(json.loads(schema_path.read_text())).validate(lines[-1]["data"])
+
+
+def test_watch_client_id_flag_overrides_resolution(monkeypatch, capsys):
+    monkeypatch.setattr(jobs_mod, "_snapshot", lambda h, p, pid: {"prompt_id": pid, "status": "running", "outputs": []})
+    monkeypatch.setattr(jobs_mod, "_resolve_watch_client_id", lambda h, p, pid: "resolved")
+    monkeypatch.setattr(jobs_mod, "_history_completed_nodes", lambda h, p, pid: set())
+    messages = [{"type": "execution_success", "data": {"prompt_id": "pid-w"}}]
+    _result, ws, lines = _run_local_watch(
+        monkeypatch, capsys, messages=messages, argv_extra=("--client-id", "forced id")
+    )
+    # Percent-encoded into the query string, never interpolated raw.
+    assert "clientId=forced%20id" in ws.url
+    assert lines[-1]["data"]["client_id"] == "forced id"
+
+
+def test_watch_terminal_envelope_validates_against_the_jobs_schema(monkeypatch, capsys):
+    """The additive `client_id`/`attached` keys are a published contract."""
+    import jsonschema
+
+    monkeypatch.setattr(jobs_mod, "_snapshot", lambda h, p, pid: {"prompt_id": pid, "status": "running", "outputs": []})
+    monkeypatch.setattr(jobs_mod, "_resolve_watch_client_id", lambda h, p, pid: "cid")
+    monkeypatch.setattr(jobs_mod, "_history_completed_nodes", lambda h, p, pid: {"1"})
+    messages = [{"type": "execution_success", "data": {"prompt_id": "pid-w"}}]
+    _result, _ws, lines = _run_local_watch(monkeypatch, capsys, messages=messages)
+
+    schema_path = Path(jobs_mod.__file__).parent.parent / "schemas" / "jobs.json"
+    schema = json.loads(schema_path.read_text())
+    jsonschema.Draft202012Validator(schema).validate(lines[-1]["data"])
+    assert schema["properties"]["attached"]["type"] == "boolean"
+    assert schema["properties"]["client_id"]["type"] == ["string", "null"]
 
 
 # ---------------------------------------------------------------------------
@@ -3135,6 +3921,54 @@ def test_gather_local_state_files_reports_the_reaped_watcher_code(monkeypatch):
     assert row.error_code == "watcher_crashed"
 
 
+def test_jobs_ls_sweeps_stranded_atomic_write_temps():
+    """The command that reaps crashed watchers also sweeps the temps those same
+    unclean deaths strand — without disturbing the state files it lists."""
+    import time as _time
+
+    from typer.testing import CliRunner
+
+    from comfy_cli import jobs_state
+
+    state_dir = jobs_state.state_dir()
+    _write_state(state_dir, "job-1", status="completed")
+    corpse = state_dir / "job-1.json.abcd1234.tmp"
+    corpse.write_text("half a write")
+    old = _time.time() - 7200
+    os.utime(corpse, (old, old))
+    # A coincidental temp whose stem is not a state file: same mkstemp shape,
+    # not ours, must survive.
+    bystander = state_dir / "notes.abcd1234.tmp"
+    bystander.write_text("mine, not yours")
+    os.utime(bystander, (old, old))
+
+    result = CliRunner().invoke(jobs_mod.app, ["ls", "--local-only", "--where", "local"])
+
+    assert result.exit_code == 0, result.output
+    assert not corpse.exists(), "the stranded atomic-write temp should have been swept"
+    assert bystander.exists(), "a temp with no state-file stem is not ours to delete"
+    assert (state_dir / "job-1.json").exists()
+
+
+def test_gather_local_state_files_does_not_mutate_temps():
+    """The listing helper is read-only: the sweep belongs to the ``ls`` command
+    so ``--watch``'s 2s refresh doesn't re-run it on every table build."""
+    import time as _time
+
+    from comfy_cli import jobs_state
+
+    state_dir = jobs_state.state_dir()
+    _write_state(state_dir, "job-1", status="completed")
+    corpse = state_dir / "job-1.json.abcd1234.tmp"
+    corpse.write_text("half a write")
+    old = _time.time() - 7200
+    os.utime(corpse, (old, old))
+
+    (row,) = jobs_mod._gather_local_state_files(limit=10)
+    assert row.prompt_id == "job-1"
+    assert corpse.exists()
+
+
 def _row(prompt_id: str, status: str, **kw) -> jobs_mod.JobRow:
     return jobs_mod.JobRow(
         prompt_id=prompt_id,
@@ -3345,3 +4179,116 @@ def test_ls_payload_validates_against_the_jobs_schema(capsys, monkeypatch):
     # asserting against an enum that never sees this value.
     assert data["jobs"][0]["status"] == "cancelled"
     assert schema["properties"]["jobs"]["items"]["properties"]["error_code"]["type"] == ["string", "null"]
+
+
+# ---------------------------------------------------------------------------
+# schemas/jobs.json — host/port is required only for host/port-shaped payloads
+# ---------------------------------------------------------------------------
+
+
+def _jobs_schema() -> dict:
+    return json.loads((Path(jobs_mod.__file__).parent.parent / "schemas" / "jobs.json").read_text())
+
+
+def _fake_cloud_client(raw_status: str, outputs: list[dict] | None = None):
+    """Stand-in for `comfy_cli.api.Client` covering everything the cloud
+    status/watch path touches: the three calls `_cloud_status_snapshot` makes
+    and the `target.base_url` it stamps onto every snapshot."""
+    return SimpleNamespace(
+        target=SimpleNamespace(base_url="https://api.comfy.example"),
+        get_job_status=lambda pid: {
+            "status": raw_status,
+            "assigned_inference": "inference-1",
+            "error_message": None,
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:01:00Z",
+        },
+        get_history=lambda pid: {"outputs": {}},
+        extract_outputs=lambda record: list(outputs or []),
+    )
+
+
+def test_jobs_watch_cloud_terminal_envelope_is_schema_conformant(monkeypatch: pytest.MonkeyPatch):
+    """`comfy --json jobs watch --where cloud <id>` emits a terminal payload
+    that validates against `schemas/jobs.json` with ZERO tolerated errors.
+
+    Cloud has no host/port to report — `_cloud_status_snapshot` reports the
+    `base_url` it polled instead — so the schema's top-level requirement is
+    conditional: a payload carrying `base_url` is exempt from `host` + `port`.
+    """
+    import jsonschema
+    from typer.testing import CliRunner
+
+    from comfy_cli.output import Renderer, set_renderer
+    from comfy_cli.output.renderer import OutputMode
+
+    monkeypatch.setattr(jobs_mod, "_is_cloud", lambda w: True)
+    monkeypatch.setattr(jobs_mod, "cloud_preflight_or_exit", lambda: None)
+    monkeypatch.setattr(
+        jobs_mod,
+        "_cloud_client",
+        lambda: _fake_cloud_client("success", outputs=[{"url": "https://cdn.example/out.png", "node_id": "9"}]),
+    )
+
+    set_renderer(Renderer(mode=OutputMode.NDJSON, command="jobs watch"))
+    result = CliRunner().invoke(jobs_mod.app, ["watch", "cloud-p1", "--where", "cloud"])
+    assert result.exit_code == 0, result.output
+
+    data = _last_json(result.stdout)["data"]
+    # The shape the conditional exists for: base_url present, host/port absent.
+    assert data["base_url"] == "https://api.comfy.example"
+    assert "host" not in data and "port" not in data
+    assert data["status"] == "completed"
+    assert data["outputs"] == ["https://cdn.example/out.png"]
+
+    errors = list(jsonschema.Draft202012Validator(_jobs_schema()).iter_errors(data))
+    assert errors == [], [e.message for e in errors]
+
+
+def test_jobs_schema_still_requires_host_and_port_without_base_url():
+    """The `if base_url / else host+port` conditional must not weaken the local
+    guarantee: a payload with neither `base_url` nor `host`/`port` is still a
+    contract violation. Without this, a future edit to the conditional could
+    silently drop the requirement for every payload, not just cloud ones."""
+    import jsonschema
+
+    validator = jsonschema.Draft202012Validator(_jobs_schema())
+
+    # Local-shaped payload missing both — the `else` branch must reject it.
+    with pytest.raises(jsonschema.ValidationError):
+        validator.validate({"prompt_id": "p", "status": "completed"})
+
+    # A partial local payload is still short of the requirement.
+    with pytest.raises(jsonschema.ValidationError):
+        validator.validate({"prompt_id": "p", "status": "completed", "host": "127.0.0.1"})
+
+    # Both legitimate shapes still validate.
+    validator.validate({"prompt_id": "p", "status": "completed", "host": "127.0.0.1", "port": 8188})
+    validator.validate({"prompt_id": "p", "status": "completed", "base_url": "https://api.comfy.example"})
+
+
+def test_jobs_schema_empty_base_url_does_not_buy_the_host_port_exemption():
+    """An empty `base_url` names no source URL, so it must not be the key that
+    unlocks the cloud exemption. Guarded twice on purpose: `minLength` on the
+    property rejects the empty string outright, and the same `minLength` inside
+    the `if` keeps such a payload in the `else` branch, where it still owes
+    `host` + `port` — so neither guard alone is load-bearing."""
+    import jsonschema
+
+    schema = _jobs_schema()
+    validator = jsonschema.Draft202012Validator(schema)
+
+    with pytest.raises(jsonschema.ValidationError):
+        validator.validate({"prompt_id": "p", "status": "completed", "base_url": ""})
+
+    # The `if` branch alone: strip the property-level `minLength` and the empty
+    # `base_url` must STILL be rejected, now for missing `host` + `port`.
+    del schema["properties"]["base_url"]["minLength"]
+    errors = list(
+        jsonschema.Draft202012Validator(schema).iter_errors({"prompt_id": "p", "status": "completed", "base_url": ""})
+    )
+    assert errors, "empty base_url must fall to the `else` branch and be held to host+port"
+    assert any("host" in e.message for e in errors), [e.message for e in errors]
+
+    # A real cloud payload is untouched by either guard.
+    validator.validate({"prompt_id": "p", "status": "completed", "base_url": "https://api.comfy.example"})

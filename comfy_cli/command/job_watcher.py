@@ -13,7 +13,6 @@ command is purely the worker that the foreground ``run`` detaches.
 
 from __future__ import annotations
 
-import os
 import shutil
 import subprocess
 import sys
@@ -78,15 +77,9 @@ def watch_job(
         # practice; exit quietly.
         return
 
-    state.watcher_pid = os.getpid()
-    # Recorded together with the pid so the reaper can tell *this* watcher from
-    # whatever inherits its pid later (see `_is_watcher_alive` in jobs.py).
-    try:
-        import psutil
-
-        state.watcher_pid_create_time = psutil.Process().create_time()
-    except Exception:  # noqa: BLE001 — best effort; None just means liveness-only
-        state.watcher_pid_create_time = None
+    # Pid + create_time recorded together so the reaper can tell *this* watcher
+    # from whatever inherits its pid later (see `_is_watcher_alive` in jobs.py).
+    jobs_state.stamp_watcher_identity(state)
     jobs_state.write(state)
 
     cloud_client = None
@@ -382,6 +375,24 @@ _CLOUD_STATUS_MAP = {
 }
 
 
+def _cloud_record_meta(record: dict) -> dict[str, Any]:
+    """The metadata fields a cloud terminal verdict attaches to ``details``.
+
+    ``/api/jobs/<id>`` (``JobDetailResponse``) serves the timestamps as Unix
+    millisecond ints; the deprecated ``/api/job/<id>/status`` served ready-made
+    ``created_at``/``updated_at`` strings, and is the only dialect that ever
+    served ``assigned_inference``. Read both, old names first, so the state
+    file keeps the string shape it has always carried.
+    """
+    from comfy_cli.command.jobs import _ms_to_iso
+
+    return {
+        "assigned_inference": record.get("assigned_inference"),
+        "created_at": record.get("created_at") or _ms_to_iso(record.get("create_time")),
+        "updated_at": record.get("updated_at") or _ms_to_iso(record.get("update_time")),
+    }
+
+
 def _poll_cloud_once(state: jobs_state.JobState, *, client: Any = None) -> bool:
     """Update ``state`` in-place from Comfy Cloud. Return True if terminal."""
     try:
@@ -424,22 +435,34 @@ def _poll_cloud_once(state: jobs_state.JobState, *, client: Any = None) -> bool:
                 pass
         return True
     if state.status == "error":
-        verdict = execution_errors.classify(record.get("error_message"))
+        # Same endpoint move as `jobs._cloud_status_snapshot`: `/api/jobs/<id>`
+        # serves the cause as a structured `execution_error` object, while the
+        # deprecated `/api/job/<id>/status` served a JSON-encoded
+        # `error_message` string. `classify` parses either shape, so hand it
+        # whichever the deployment actually sent — without this the watcher
+        # classifies `None` and writes the generic "ComfyUI reported an
+        # execution error." into every failed cloud job's state file. The
+        # structured object wins when both are present: a deployment that also
+        # fills `error_message` with a short generic string would otherwise
+        # discard `node_id`/`exception_type`/`traceback_tail`, and the state
+        # file keeps no other copy of them. (`classify`'s details are built
+        # field-by-field, so the secret-bearing `current_inputs` never reaches
+        # the state file — see `execution_errors.redact_record`.)
+        structured = record.get("execution_error")
+        raw_cause = structured if isinstance(structured, dict) else (record.get("error_message") or structured)
+        verdict = execution_errors.classify(raw_cause)
         state.error = {
             "code": verdict["code"],
             "message": verdict["message"],
             "hint": verdict["hint"],
-            "details": {
-                **verdict["details"],
-                **{k: record.get(k) for k in ("assigned_inference", "created_at", "updated_at")},
-            },
+            "details": {**verdict["details"], **_cloud_record_meta(record)},
         }
         return True
     if state.status == "cancelled":
         state.error = {
             "code": "cancelled",
             "message": record.get("error_message") or "Cloud job was cancelled.",
-            "details": {k: record.get(k) for k in ("assigned_inference", "created_at", "updated_at")},
+            "details": _cloud_record_meta(record),
         }
         return True
     return False
