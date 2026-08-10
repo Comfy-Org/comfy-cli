@@ -275,6 +275,16 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "use `--where local` or `--where cloud`",
     ),
     ErrorCode(
+        "host_port_invalid",
+        "`--host`/`--port` (or a combined `--host host:port`) failed validation before any server "
+        "contact; the process exits 2 (usage error). The rejected value is usually a flag, but the "
+        "same check also covers the host recorded in `config.background`, so a corrupted background "
+        "record trips it with no bad flag passed. Click also writes its usual usage message to "
+        "stderr — this envelope exists so JSON/NDJSON consumers still get a parseable final line.",
+        "pass `--host <hostname-or-ip>` and `--port 1-65535`; if you passed neither, the saved "
+        "background server is bad — clear it with `comfy stop`",
+    ),
+    ErrorCode(
         "host_flag_cloud",
         "`--host`/`--port` were combined with an effective `cloud` target. They address a local "
         "ComfyUI only; the cloud address comes from the signed-in account. `details` carries the "
