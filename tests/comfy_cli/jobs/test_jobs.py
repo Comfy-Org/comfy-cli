@@ -3345,3 +3345,116 @@ def test_ls_payload_validates_against_the_jobs_schema(capsys, monkeypatch):
     # asserting against an enum that never sees this value.
     assert data["jobs"][0]["status"] == "cancelled"
     assert schema["properties"]["jobs"]["items"]["properties"]["error_code"]["type"] == ["string", "null"]
+
+
+# ---------------------------------------------------------------------------
+# schemas/jobs.json — host/port is required only for host/port-shaped payloads
+# ---------------------------------------------------------------------------
+
+
+def _jobs_schema() -> dict:
+    return json.loads((Path(jobs_mod.__file__).parent.parent / "schemas" / "jobs.json").read_text())
+
+
+def _fake_cloud_client(raw_status: str, outputs: list[dict] | None = None):
+    """Stand-in for `comfy_cli.api.Client` covering everything the cloud
+    status/watch path touches: the three calls `_cloud_status_snapshot` makes
+    and the `target.base_url` it stamps onto every snapshot."""
+    return SimpleNamespace(
+        target=SimpleNamespace(base_url="https://api.comfy.example"),
+        get_job_status=lambda pid: {
+            "status": raw_status,
+            "assigned_inference": "inference-1",
+            "error_message": None,
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:01:00Z",
+        },
+        get_history=lambda pid: {"outputs": {}},
+        extract_outputs=lambda record: list(outputs or []),
+    )
+
+
+def test_jobs_watch_cloud_terminal_envelope_is_schema_conformant(monkeypatch: pytest.MonkeyPatch):
+    """`comfy --json jobs watch --where cloud <id>` emits a terminal payload
+    that validates against `schemas/jobs.json` with ZERO tolerated errors.
+
+    Cloud has no host/port to report — `_cloud_status_snapshot` reports the
+    `base_url` it polled instead — so the schema's top-level requirement is
+    conditional: a payload carrying `base_url` is exempt from `host` + `port`.
+    """
+    import jsonschema
+    from typer.testing import CliRunner
+
+    from comfy_cli.output import Renderer, set_renderer
+    from comfy_cli.output.renderer import OutputMode
+
+    monkeypatch.setattr(jobs_mod, "_is_cloud", lambda w: True)
+    monkeypatch.setattr(jobs_mod, "cloud_preflight_or_exit", lambda: None)
+    monkeypatch.setattr(
+        jobs_mod,
+        "_cloud_client",
+        lambda: _fake_cloud_client("success", outputs=[{"url": "https://cdn.example/out.png", "node_id": "9"}]),
+    )
+
+    set_renderer(Renderer(mode=OutputMode.NDJSON, command="jobs watch"))
+    result = CliRunner().invoke(jobs_mod.app, ["watch", "cloud-p1", "--where", "cloud"])
+    assert result.exit_code == 0, result.output
+
+    data = _last_json(result.stdout)["data"]
+    # The shape the conditional exists for: base_url present, host/port absent.
+    assert data["base_url"] == "https://api.comfy.example"
+    assert "host" not in data and "port" not in data
+    assert data["status"] == "completed"
+    assert data["outputs"] == ["https://cdn.example/out.png"]
+
+    errors = list(jsonschema.Draft202012Validator(_jobs_schema()).iter_errors(data))
+    assert errors == [], [e.message for e in errors]
+
+
+def test_jobs_schema_still_requires_host_and_port_without_base_url():
+    """The `if base_url / else host+port` conditional must not weaken the local
+    guarantee: a payload with neither `base_url` nor `host`/`port` is still a
+    contract violation. Without this, a future edit to the conditional could
+    silently drop the requirement for every payload, not just cloud ones."""
+    import jsonschema
+
+    validator = jsonschema.Draft202012Validator(_jobs_schema())
+
+    # Local-shaped payload missing both — the `else` branch must reject it.
+    with pytest.raises(jsonschema.ValidationError):
+        validator.validate({"prompt_id": "p", "status": "completed"})
+
+    # A partial local payload is still short of the requirement.
+    with pytest.raises(jsonschema.ValidationError):
+        validator.validate({"prompt_id": "p", "status": "completed", "host": "127.0.0.1"})
+
+    # Both legitimate shapes still validate.
+    validator.validate({"prompt_id": "p", "status": "completed", "host": "127.0.0.1", "port": 8188})
+    validator.validate({"prompt_id": "p", "status": "completed", "base_url": "https://api.comfy.example"})
+
+
+def test_jobs_schema_empty_base_url_does_not_buy_the_host_port_exemption():
+    """An empty `base_url` names no source URL, so it must not be the key that
+    unlocks the cloud exemption. Guarded twice on purpose: `minLength` on the
+    property rejects the empty string outright, and the same `minLength` inside
+    the `if` keeps such a payload in the `else` branch, where it still owes
+    `host` + `port` — so neither guard alone is load-bearing."""
+    import jsonschema
+
+    schema = _jobs_schema()
+    validator = jsonschema.Draft202012Validator(schema)
+
+    with pytest.raises(jsonschema.ValidationError):
+        validator.validate({"prompt_id": "p", "status": "completed", "base_url": ""})
+
+    # The `if` branch alone: strip the property-level `minLength` and the empty
+    # `base_url` must STILL be rejected, now for missing `host` + `port`.
+    del schema["properties"]["base_url"]["minLength"]
+    errors = list(
+        jsonschema.Draft202012Validator(schema).iter_errors({"prompt_id": "p", "status": "completed", "base_url": ""})
+    )
+    assert errors, "empty base_url must fall to the `else` branch and be held to host+port"
+    assert any("host" in e.message for e in errors), [e.message for e in errors]
+
+    # A real cloud payload is untouched by either guard.
+    validator.validate({"prompt_id": "p", "status": "completed", "base_url": "https://api.comfy.example"})

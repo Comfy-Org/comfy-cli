@@ -4,11 +4,19 @@
   "title": "comfy jobs --json data payload",
   "description": "Union schema for `jobs ls`, `jobs status`, and `jobs watch`.",
   "type": "object",
-  "required": ["host", "port"],
+  "required": [],
+  "if": {"required": ["base_url"], "properties": {"base_url": {"minLength": 1}}},
+  "then": {},
+  "else": {"required": ["host", "port"]},
   "additionalProperties": true,
   "properties": {
     "host": {"type": "string"},
     "port": {"type": "integer"},
+    "base_url": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Cloud-only counterpart to `host` + `port`: the cloud API base URL a `jobs status`/`jobs watch --where cloud` payload came from. A payload carrying a non-empty one is exempt from the host+port requirement, since cloud has no host/port to report. An empty string identifies no source URL, so it neither satisfies this property nor buys the exemption — the `if` re-checks `minLength` so such a payload falls to the `else` branch and still owes `host` + `port`."
+    },
     "prompt_id": {"type": "string"},
     "status": {
       "type": "string",
