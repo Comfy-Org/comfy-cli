@@ -3487,6 +3487,54 @@ def test_gather_local_state_files_reports_the_reaped_watcher_code(monkeypatch):
     assert row.error_code == "watcher_crashed"
 
 
+def test_jobs_ls_sweeps_stranded_atomic_write_temps():
+    """The command that reaps crashed watchers also sweeps the temps those same
+    unclean deaths strand — without disturbing the state files it lists."""
+    import time as _time
+
+    from typer.testing import CliRunner
+
+    from comfy_cli import jobs_state
+
+    state_dir = jobs_state.state_dir()
+    _write_state(state_dir, "job-1", status="completed")
+    corpse = state_dir / "job-1.json.abcd1234.tmp"
+    corpse.write_text("half a write")
+    old = _time.time() - 7200
+    os.utime(corpse, (old, old))
+    # A coincidental temp whose stem is not a state file: same mkstemp shape,
+    # not ours, must survive.
+    bystander = state_dir / "notes.abcd1234.tmp"
+    bystander.write_text("mine, not yours")
+    os.utime(bystander, (old, old))
+
+    result = CliRunner().invoke(jobs_mod.app, ["ls", "--local-only", "--where", "local"])
+
+    assert result.exit_code == 0, result.output
+    assert not corpse.exists(), "the stranded atomic-write temp should have been swept"
+    assert bystander.exists(), "a temp with no state-file stem is not ours to delete"
+    assert (state_dir / "job-1.json").exists()
+
+
+def test_gather_local_state_files_does_not_mutate_temps():
+    """The listing helper is read-only: the sweep belongs to the ``ls`` command
+    so ``--watch``'s 2s refresh doesn't re-run it on every table build."""
+    import time as _time
+
+    from comfy_cli import jobs_state
+
+    state_dir = jobs_state.state_dir()
+    _write_state(state_dir, "job-1", status="completed")
+    corpse = state_dir / "job-1.json.abcd1234.tmp"
+    corpse.write_text("half a write")
+    old = _time.time() - 7200
+    os.utime(corpse, (old, old))
+
+    (row,) = jobs_mod._gather_local_state_files(limit=10)
+    assert row.prompt_id == "job-1"
+    assert corpse.exists()
+
+
 def _row(prompt_id: str, status: str, **kw) -> jobs_mod.JobRow:
     return jobs_mod.JobRow(
         prompt_id=prompt_id,
