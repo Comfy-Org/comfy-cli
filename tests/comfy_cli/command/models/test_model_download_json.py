@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import io
 import json
+import shutil
 import sys
 from typing import Any
 from unittest.mock import Mock, patch
@@ -521,3 +522,48 @@ def test_hf_download_honours_prompted_filename(tmp_path):
     assert result.exit_code == 0, result.output
     assert (tmp_path / "models" / "checkpoints" / "typed.safetensors").read_bytes() == b"weights"
     assert not hf_written.exists()
+
+
+def test_hf_move_failure_emits_an_envelope_not_a_traceback(tmp_path):
+    """`shutil.move` raises `shutil.Error` for a partial/multi-file move failure.
+
+    It derives from `OSError` (Lib/shutil.py: `class Error(OSError)`), so the
+    branch's `except OSError` does catch it — but this is the branch with no
+    `except Exception` backstop, so the one invariant this whole file pins (a
+    `--json` caller always gets an envelope) rests entirely on that class
+    relationship continuing to hold. Pin it.
+    """
+    hf_written = tmp_path / "models" / "checkpoints" / "repo-name.safetensors"
+    hf_written.parent.mkdir(parents=True)
+    hf_written.write_bytes(b"weights")
+
+    fake_hub = Mock()
+    fake_hub.hf_hub_download.return_value = str(hf_written)
+
+    cfg = Mock()
+    cfg.get_or_override.return_value = "hf_token"
+    cfg.get.return_value = None
+
+    fake_shutil = Mock()
+    fake_shutil.Error = shutil.Error
+    fake_shutil.move.side_effect = shutil.Error("Destination path already exists")
+
+    with patch.dict(sys.modules, {"huggingface_hub": fake_hub}):
+        result = _invoke(
+            [
+                "--url",
+                "https://huggingface.co/org/repo/resolve/main/repo-name.safetensors",
+                "--relative-path",
+                "models/checkpoints",
+                "--filename",
+                "mine.safetensors",
+            ],
+            config_manager=cfg,
+            check_huggingface_url={"return_value": (True, "org/repo", "repo-name.safetensors", None, "main")},
+            check_unauthorized={"return_value": True},
+            get_workspace={"return_value": tmp_path},
+            shutil={"new": fake_shutil},
+        )
+
+    env = _assert_error_envelope(result, "download_failed")
+    assert "could not save it as" in env["error"]["message"]

@@ -649,12 +649,27 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ),
     ErrorCode(
         "model_download_in_flight",
-        "`comfy model download` refused to start because a live background download is already "
-        "writing to the same destination (`details.path`). `details.download_id` names that "
-        "download and `details.status` is its current status. A background transfer streams into "
-        "a `.part` sibling, so the destination is absent until it completes — without this check "
-        "two submissions would both run and the later one would silently overwrite the earlier.",
-        "track it with `comfy model download-status <id>`, or cancel it with `comfy model download-cancel <id>`",
+        "`comfy model download` refused to start because a live download is already writing to "
+        "the same destination (`details.path`). `details.download_id` names that download, "
+        "`details.status` is its current status, and `details.kind` is `background` (a detached "
+        "worker) or `foreground` (a `comfy model download` running in another terminal). The httpx "
+        "downloader streams into a `.part` sibling, so the destination stays absent until the "
+        "transfer completes — without this check two submissions would both run and the later one "
+        "would silently overwrite the earlier; under `--downloader aria2`, which writes straight to "
+        "the destination, they would interleave into the same file.",
+        "track it with `comfy model download-status <id>`; a background download can be stopped "
+        "with `comfy model download-cancel <id>`, a foreground one with Ctrl-C in its own terminal",
+    ),
+    ErrorCode(
+        "model_download_foreground_cancel",
+        "`comfy model download-cancel` refused to cancel a download that is running in the "
+        "foreground of another terminal (`details.id`, `details.pid`). A background download runs in "
+        "its own session, so cancelling it signals only the worker's process group; a foreground "
+        "download's recorded pid is the user's own CLI process, which shares the terminal's "
+        "foreground process group — signalling that group would kill the surrounding shell job "
+        "rather than just the transfer. Once the foreground process is gone its record reconciles "
+        "to `failed` and `download-cancel` will sweep the partial file as usual.",
+        "interrupt it with Ctrl-C in the terminal running it",
     ),
     ErrorCode(
         "hf_unauthorized",
@@ -681,7 +696,9 @@ REGISTRY: tuple[ErrorCode, ...] = (
     # --- background model downloads (`model download --background`) ----------
     ErrorCode(
         "download_not_found",
-        "No background download state file matches the given download id.",
+        "No download state file matches the given download id. Both `--background` submissions and plain "
+        "foreground `comfy model download` runs write one, so an id that resolves to neither was never "
+        "written, or its record has already been pruned.",
         "list the known downloads with `comfy model downloads`",
     ),
     ErrorCode(
