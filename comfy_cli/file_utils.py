@@ -15,6 +15,7 @@ import requests
 from pathspec import PathSpec
 
 from comfy_cli import constants, ui
+from comfy_cli._safe_exec import BinaryNotFoundError, resolve_required_binary
 from comfy_cli.http import DEFAULT_HTTP_TIMEOUT, DOWNLOAD_TIMEOUT
 from comfy_cli.output.sanitize import sanitize_value
 
@@ -893,9 +894,27 @@ def _load_comfyignore_spec(ignore_filename: str = ".comfyignore") -> PathSpec | 
 
 
 def list_git_tracked_files(base_path: str | os.PathLike = ".") -> list[str]:
+    """Git-tracked files under ``base_path``, or ``[]`` when git can't tell us.
+
+    ``[]`` means "no git answer" and callers (see :func:`zip_files`) treat it as
+    "not a git repository". An *absent* git has always produced that, so it still
+    does. A git that was found and then **refused** must not: the caller would
+    silently fall back to walking the whole directory, so the refusal is raised
+    rather than flattened into the same empty list.
+    """
+    # Resolved outside the tolerant handler below so the two cases stay
+    # distinguishable — ``BinaryNotFoundError`` subclasses ``FileNotFoundError``,
+    # which that handler swallows.
+    try:
+        git_bin = resolve_required_binary("git")
+    except BinaryNotFoundError as exc:
+        if not exc.is_absent:
+            raise
+        return []
+
     try:
         result = subprocess.check_output(
-            ["git", "-C", os.fspath(base_path), "ls-files"],
+            [git_bin, "-C", os.fspath(base_path), "ls-files"],
             text=True,
         )
     except (subprocess.SubprocessError, FileNotFoundError):
@@ -916,7 +935,14 @@ def _is_force_included(rel_path: str, include_prefixes: list[str]) -> bool:
 
 
 def zip_files(zip_filename, includes=None):
-    """Zip git-tracked files respecting optional .comfyignore patterns."""
+    """Zip git-tracked files respecting optional .comfyignore patterns.
+
+    :raises BinaryNotFoundError: ``git`` was found but refused (see
+        :func:`comfy_cli._safe_exec.resolve_required_binary`). The walk-everything
+        fallback below is safe for "this isn't a git repo", but not for "we can't
+        trust git": it would package untracked and gitignored files — ``.env``,
+        keys, venvs — into an archive that ``comfy node publish`` uploads.
+    """
     includes = includes or []
     include_prefixes: list[str] = [_normalize_path(os.path.normpath(include.lstrip("/"))) for include in includes]
 

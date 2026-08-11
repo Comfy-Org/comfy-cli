@@ -14,7 +14,17 @@ from unittest.mock import patch
 import pytest
 
 from comfy_cli import comfy_client
+from comfy_cli.caller import Caller, usage_source_for
 from comfy_cli.target import Target
+
+
+def _mcp_usage_source() -> str:
+    """What ``usage_source()`` returns under ``COMFY_USER_AGENT=comfy-mcp``.
+
+    Built through the real mapper so these tests pin the wiring, not a
+    hand-copied string; only the environment probe is stubbed out.
+    """
+    return usage_source_for(Caller(kind="comfy-mcp", agentic=True, source_env="COMFY_USER_AGENT"))
 
 
 def _mock_response(payload):
@@ -161,6 +171,37 @@ class TestSubmitPrompt:
         body = json.loads(urlopen.call_args.args[0].data)
         # setdefault — caller wins.
         assert body["extra_data"]["auth_token_comfy_org"] == "caller-token"
+
+    def test_usage_source_is_derived_from_the_caller(self, monkeypatch):
+        """An agentic caller is attributed as ``comfy-cli/<kind>`` so
+        partner-node billing can tell MCP-driven runs from human ones. (The
+        assertions above pin the human case, via the conftest fixture.)"""
+        monkeypatch.setattr(comfy_client, "usage_source", _mcp_usage_source)
+        with patch.object(
+            comfy_client._OPENER,
+            "open",
+            return_value=_mock_response({"prompt_id": "pid", "number": 1, "node_errors": {}}),
+        ) as urlopen:
+            comfy_client.Client(CLOUD).submit_prompt({"1": {"class_type": "X", "inputs": {}}}, "cid")
+        body = json.loads(urlopen.call_args.args[0].data)
+        assert body["extra_data"]["comfy_usage_source"] == "comfy-cli/comfy-mcp"
+
+    def test_caller_supplied_usage_source_still_wins(self, monkeypatch):
+        """setdefault semantics are unchanged by the derivation: a caller that
+        names its own ``comfy_usage_source`` keeps it."""
+        monkeypatch.setattr(comfy_client, "usage_source", _mcp_usage_source)
+        with patch.object(
+            comfy_client._OPENER,
+            "open",
+            return_value=_mock_response({"prompt_id": "pid", "number": 1, "node_errors": {}}),
+        ) as urlopen:
+            comfy_client.Client(CLOUD).submit_prompt(
+                {"1": {"class_type": "X", "inputs": {}}},
+                "cid",
+                extra_data={"comfy_usage_source": "some-other-surface"},
+            )
+        body = json.loads(urlopen.call_args.args[0].data)
+        assert body["extra_data"]["comfy_usage_source"] == "some-other-surface"
 
     def test_oauth_refresh_rebuilds_partner_auth_extra_data(self):
         cloud = Target(

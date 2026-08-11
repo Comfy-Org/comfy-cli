@@ -11,6 +11,7 @@ from rich.console import Console
 
 from comfy_cli import cancellation, constants, env_checker, logging, tracking, ui, utils
 from comfy_cli import where as where_module
+from comfy_cli._safe_exec import resolve_required_binary
 from comfy_cli.auth import command as auth_command
 from comfy_cli.caller import stream_is_tty
 from comfy_cli.cloud import command as cloud_command
@@ -797,8 +798,11 @@ def update(
         if version is not None:
             _switch_comfy_version(comfy_path, version, stash=not no_stash)
         else:
+            # Resolved before the chdir so a ``git`` planted in ``comfy_path``
+            # can neither be picked up nor shadow the real one.
+            git_bin = resolve_required_binary("git")
             os.chdir(comfy_path)
-            subprocess.run(["git", "pull"], check=True)
+            subprocess.run([git_bin, "pull"], check=True)
             python = resolve_workspace_python(comfy_path)
             # A uv-managed venv may have no pip — bootstrap it first so the install
             # below doesn't crash with `No module named pip` (no-op if pip exists).
@@ -973,12 +977,20 @@ def run(
     _track_props = tracking.filter_command_kwargs(dict(locals()))
     tracking.track_event("execution_start", _track_props, mixpanel_name="run")
 
+    # Resolved outside the try so `renderer` is always bound by the time the
+    # `finally` below unstamps `where`, however early the body dies.
+    renderer = get_renderer()
+    # `Renderer` is a process-wide singleton, so a routed target stamped by an
+    # earlier in-process invocation would otherwise still be sitting here and
+    # would mislabel any envelope emitted before *this* run routes (e.g.
+    # `where_invalid`). Start every invocation unrouted.
+    renderer.where = None
+
     try:
         if api_key:
             api_key = api_key.strip() or None
 
         config = ConfigManager()
-        renderer = get_renderer()
 
         # Command-local --json means "stream the run": upgrade the renderer
         # (resolved once in the entry callback) into NDJSON mode so every
@@ -992,6 +1004,12 @@ def run(
         except ValueError as e:
             renderer.error(code="where_invalid", message=str(e), hint="use --where local or --where cloud")
             raise typer.Exit(code=1)
+
+        # The routing target is now known, so every downstream error envelope
+        # can carry it. Explicit ``emit(..., where=...)`` calls still win; this
+        # only fills the fallback (``where or self.where``) that error() and
+        # emit() resolve against.
+        renderer.where = decision.target.value
 
         # Default for --notify: on when a human is at the terminal, off for
         # agents (they shouldn't get surprise side-channel processes they didn't
@@ -1099,6 +1117,12 @@ def run(
         raise
     else:
         tracking.track_event("execution_success", _track_props)
+    finally:
+        # Every envelope this invocation emits has already been written by now
+        # (renderer.error/emit flush inline), so unstamp the singleton rather
+        # than leaving `run`'s routed target visible to whatever emits next in
+        # this process — an atexit/tracking path, or a second invocation.
+        renderer.where = None
 
 
 @app.command(
