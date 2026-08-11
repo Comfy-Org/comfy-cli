@@ -31,7 +31,7 @@ def _target(*, api_key=None, auth_token=None, is_cloud=True):
 
 
 def test_default_http_timeout_is_a_positive_scalar():
-    assert isinstance(DEFAULT_HTTP_TIMEOUT, (int, float))
+    assert isinstance(DEFAULT_HTTP_TIMEOUT, int | float)
     assert DEFAULT_HTTP_TIMEOUT > 0
 
 

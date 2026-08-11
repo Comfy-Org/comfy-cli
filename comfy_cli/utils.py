@@ -18,10 +18,6 @@ from rich.table import Table
 
 from comfy_cli.constants import DEFAULT_COMFY_WORKSPACE, OS, PROC
 from comfy_cli.http import DOWNLOAD_TIMEOUT
-
-# Use the output shim so prints go to stderr (not stdout) in JSON mode,
-# preserving the one-envelope-on-stdout contract.
-from comfy_cli.output import rprint as print  # noqa: A001 - intentional shadowing
 from comfy_cli.typing import PathLike
 
 
