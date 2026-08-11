@@ -40,7 +40,7 @@ from typing import TYPE_CHECKING, Annotated, Any
 import typer
 from websocket import WebSocket, WebSocketException, WebSocketTimeoutException
 
-from comfy_cli import cancellation, execution_errors, tracking
+from comfy_cli import cancellation, execution_errors, jobs_state, tracking
 from comfy_cli.env_checker import check_comfy_server_running
 from comfy_cli.host_port import report_usage_error
 from comfy_cli.host_port import resolve_host_port as _resolve_host_port
@@ -250,22 +250,12 @@ def _emit_terminal(renderer, payload: dict, *, command: str, where: str | None =
 # meaningful alongside. `completed` is terminal but deliberately absent.
 _ERROR_STATUSES = frozenset({"error", "cancelled"})
 
-# Cloud's raw job statuses → the row vocabulary above. Mirrors
-# ``job_watcher._CLOUD_STATUS_MAP`` (kept as a local copy rather than imported:
-# ``job_watcher`` imports this module, so the dependency only runs one way).
-# The failure spellings matter here — an unmapped `non_retryable_error` /
-# `lost` / `canceled` misses `_ERROR_STATUSES` and silently drops the state
-# file's `error_code` for exactly the jobs that failed.
-_CLOUD_ROW_STATUS_MAP = {
-    "success": "completed",
-    "completed": "completed",
-    "failed": "error",
-    "error": "error",
-    "non_retryable_error": "error",
-    "lost": "error",
-    "cancelled": "cancelled",
-    "canceled": "cancelled",
-}
+# Cloud's raw job statuses → the row vocabulary above. One shared map, owned by
+# ``jobs_state`` so ``job_watcher`` (which imports this module) can use the same
+# copy without an import cycle. The failure spellings matter here — an unmapped
+# `non_retryable_error` / `lost` / `canceled` misses `_ERROR_STATUSES` and
+# silently drops the state file's `error_code` for exactly the jobs that failed.
+_CLOUD_ROW_STATUS_MAP = jobs_state.CLOUD_STATUS_ALIASES
 
 
 @dataclass(frozen=True)
@@ -682,8 +672,9 @@ def ls_cmd(
 
     # Resolve the routing target once: per-command --where flag > COMFY_WHERE
     # env (how the top-level `comfy --where` arrives) > config default. Both
-    # the server query and the state-file scope key off this single decision.
-    target_where = "cloud" if _is_cloud(where) else "local"
+    # the server query and the state-file scope key off this single decision,
+    # and it is stamped on the renderer so error envelopes carry it too.
+    target_where = _stamp_where(renderer, where)
 
     # --orphaned only makes sense for state files (the server doesn't know
     # whether a watcher crashed), so skip the server query in that mode.
@@ -1099,7 +1090,7 @@ def status_cmd(
     ] = None,
 ):
     renderer = get_renderer()
-    if _is_cloud(where):
+    if _stamp_where(renderer, where) == "cloud":
         return _cloud_status(prompt_id)
 
     with report_usage_error(renderer, command="jobs status"):
@@ -1523,7 +1514,8 @@ def wait_cmd(
     wait_all: Annotated[bool, typer.Option("--all", help="Wait on all locally-tracked non-terminal jobs.")] = False,
 ):
     renderer = get_renderer()
-    cloud = _is_cloud(where)
+    where_label = _stamp_where(renderer, where)
+    cloud = where_label == "cloud"
 
     ids = list(prompt_ids or [])
     if wait_all:
@@ -1587,7 +1579,6 @@ def wait_cmd(
         "elapsed_seconds": round(time.time() - start, 2),
         "jobs": jobs_list,
     }
-    where_label = "cloud" if cloud else "local"
 
     if renderer.is_pretty():
         _render_wait_pretty(summary)
@@ -1636,9 +1627,10 @@ def cancel_cmd(
         typer.Option("--where", help="'local' (default) or 'cloud'."),
     ] = None,
 ):
-    if _is_cloud(where):
+    renderer = get_renderer()
+    if _stamp_where(renderer, where) == "cloud":
         return _cloud_cancel(prompt_id)
-    with report_usage_error(get_renderer(), command="jobs cancel"):
+    with report_usage_error(renderer, command="jobs cancel"):
         h, p = _resolve_host_port(host, port)
     _server_or_error(h, p)
     return _local_cancel(prompt_id, h, p)
@@ -2171,7 +2163,7 @@ def watch_cmd(
     ] = None,
 ):
     renderer = get_renderer()
-    if _is_cloud(where):
+    if _stamp_where(renderer, where) == "cloud":
         return _cloud_watch(prompt_id, poll_interval=poll_interval, max_wait=max_wait)
 
     with report_usage_error(renderer, command="jobs watch"):
@@ -2361,6 +2353,20 @@ def _is_cloud(where: str | None) -> bool:
     return decision.target is where_module.WhereTarget.CLOUD
 
 
+def _stamp_where(renderer, where: str | None) -> str:
+    """Resolve this invocation's routing target and stamp it on the renderer.
+
+    Every ``jobs`` verb calls this at entry, right where it decides
+    local-vs-cloud, so the error envelopes raised downstream carry ``where``
+    instead of ``null``. Returns the label so callers that also need it (the
+    ``ls``/``wait`` payloads) don't resolve twice. Explicit
+    ``emit(..., where=...)`` arguments still take precedence over the stamp.
+    """
+    label = "cloud" if _is_cloud(where) else "local"
+    renderer.where = label
+    return label
+
+
 def _cloud_job_to_row(j: dict) -> JobRow:
     """Map a /api/jobs entry to our JobRow shape.
 
@@ -2486,21 +2492,22 @@ def _cloud_status_snapshot(prompt_id: str) -> dict | None:
     if status is None:
         return None
     raw = (status.get("status") or "").lower()
-    # Deliberately NOT _CLOUD_ROW_STATUS_MAP: this map lacks cloud's two cancel
-    # spellings, so a cancelled cloud job snapshots as the raw `canceled` — not
-    # in the published `status` enum, not in `_cloud_watch`'s terminal set (so
-    # `jobs watch --where cloud` spins to `cloud_timeout`), and not in
-    # `_TERMINAL_VERDICT` (so `jobs status` reports it ok:true/exit 0 instead of
-    # the documented 130). Real bugs, but adding the aliases here changes an
-    # exit code on a path this PR does not otherwise touch — see BE-6612.
-    state = {
-        "success": "completed",
-        "completed": "completed",
-        "failed": "error",
-        "error": "error",
-        "non_retryable_error": "error",
-        "lost": "error",
-    }.get(raw, raw or "pending")
+    # The shared alias map: /api/jobs serves ingest's filter enum, whose
+    # `in_progress` is not in the published `status` enum and whose `cancelled`
+    # only landed correctly by fall-through. Mapping here keeps the snapshot —
+    # and everything downstream of it (`jobs status`, `jobs watch` state events,
+    # `_TERMINAL_VERDICT`) — inside the vocabulary `schemas/jobs.json` declares.
+    #
+    # An unmapped status resolves to `unknown` rather than passing through raw:
+    # unlike the per-row `jobs[].status` (deliberately unconstrained, so a new
+    # server spelling widens the listing instead of breaking it), this top-level
+    # `status` is a closed enum, and a raw `allocated` / `uploading` / future
+    # addition emitted here is a payload a strict consumer must reject. `unknown`
+    # is in that enum for exactly this case, and — like the passthrough it
+    # replaces — is non-terminal, so nothing about when `_cloud_watch` stops
+    # changes. The server's own word is kept verbatim in `status_raw` so no
+    # diagnostic detail is lost to the canonicalization.
+    state = jobs_state.CLOUD_STATUS_ALIASES.get(raw, "unknown") if raw else "pending"
 
     outputs: list[str] = []
     outputs_by_node: dict[str, list[str]] = {}
@@ -2547,6 +2554,11 @@ def _cloud_status_snapshot(prompt_id: str) -> dict | None:
     return {
         "prompt_id": prompt_id,
         "status": state,
+        # The server's own spelling, before canonicalization. Always present so
+        # an agent can tell `in_progress` from `executing` (and read a status
+        # this CLI has not learned yet) without the closed `status` enum having
+        # to widen for every server-side addition.
+        "status_raw": raw or None,
         "outputs": outputs,
         "outputs_by_node": outputs_by_node,
         "outputs_by_item": outputs_by_item,
@@ -2586,10 +2598,15 @@ def _cloud_status(prompt_id: str) -> None:
         tbl = Table(title=f"Cloud prompt {sanitize_markup(prompt_id[:8])}…", border_style="cyan", show_header=False)
         tbl.add_column(style="bold cyan")
         tbl.add_column()
-        # Every cell below comes straight off `/api/jobs/<id>` — including
-        # `status`, which falls through to the server's own vocabulary when it
-        # is not one of the aliases `_cloud_status_snapshot` knows.
-        tbl.add_row("status", sanitize_markup(snap["status"]))
+        # Every cell below comes straight off `/api/jobs/<id>`. `status` is the
+        # canonicalized one; when the server's spelling differs (an alias, or a
+        # status this CLI does not know and canonicalized to `unknown`), show it
+        # alongside so the pretty view never hides the server's actual word.
+        raw_status = snap.get("status_raw")
+        if raw_status and raw_status != snap["status"]:
+            tbl.add_row("status", f"{sanitize_markup(snap['status'])} [dim]({sanitize_markup(raw_status)})[/dim]")
+        else:
+            tbl.add_row("status", sanitize_markup(snap["status"]))
         if snap.get("assigned_inference"):
             tbl.add_row("inference", sanitize_markup(snap["assigned_inference"]))
         if snap.get("created_at"):
@@ -2659,9 +2676,13 @@ def _cloud_watch(prompt_id: str, *, poll_interval: float, max_wait: float) -> No
             break
 
         if time.time() >= deadline:
+            # The server's own spelling when we have it: "still unknown" names
+            # nothing, and a timeout on a status this CLI cannot map is exactly
+            # when the raw word is the whole diagnostic.
+            stuck_at = snap.get("status_raw") or snap["status"]
             renderer.error(
                 code="cloud_timeout",
-                message=f"prompt {prompt_id} still {snap['status']} after {max_wait}s",
+                message=f"prompt {prompt_id} still {stuck_at} after {max_wait}s",
                 hint="raise --max-wait or re-run with --where cloud",
                 details=snap,
             )

@@ -363,16 +363,10 @@ def _poll_local_once(state: jobs_state.JobState, *, host: str | None, port: int 
     return False, True
 
 
-_CLOUD_STATUS_MAP = {
-    "success": "completed",
-    "completed": "completed",
-    "failed": "error",
-    "error": "error",
-    "non_retryable_error": "error",
-    "lost": "error",
-    "cancelled": "cancelled",
-    "canceled": "cancelled",
-}
+# Cloud's /api/jobs status enum → the CLI's published vocabulary. Aliased to
+# the one shared map so the watcher, `jobs status`, and `jobs ls` can never
+# drift apart on what a raw cloud status means.
+_CLOUD_STATUS_MAP = jobs_state.CLOUD_STATUS_ALIASES
 
 
 def _cloud_record_meta(record: dict) -> dict[str, Any]:

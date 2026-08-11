@@ -1223,6 +1223,11 @@ def upload(
         raise typer.Exit(code=1)
 
     effective_where = "cloud" if decision.target is where_module.WhereTarget.CLOUD else "local"
+    # Routing is decided, so every error envelope from here down can name the
+    # target — including the `host_flag_cloud` rejection immediately below,
+    # which never reaches `execute_upload`. The `where_invalid` above stays
+    # `where: null`: it failed before there was a decision to report.
+    renderer.where = effective_where
     # --host/--port address a local ComfyUI; the cloud target's address comes
     # from the signed-in account's base URL and ignores them entirely
     # (``Target.host``/``Target.port`` are documented local-only). Rejecting
@@ -1284,6 +1289,10 @@ def download(
         raise typer.Exit(code=1)
 
     effective_where = "cloud" if decision.target is where_module.WhereTarget.CLOUD else "local"
+    # As in `upload`: stamped once routing resolves, so the preflight failure
+    # below and `execute_download`'s stdin-parsing errors (which run before it
+    # resolves its own target) all name the backend this invocation routed to.
+    renderer.where = effective_where
     if effective_where == "cloud":
         where_module.cloud_preflight_or_exit()
 

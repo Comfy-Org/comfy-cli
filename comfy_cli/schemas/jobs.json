@@ -23,6 +23,10 @@
       "description": "`cancelled` is one of `jobs_state.TERMINAL_STATUSES` and is copied verbatim out of a job's state file into a `jobs status` payload, so it belongs in this enum alongside the statuses the live `/queue` + `/history` snapshot produces.",
       "enum": ["running", "pending", "queued", "completed", "error", "cancelled", "unknown", "watching"]
     },
+    "status_raw": {
+      "type": ["string", "null"],
+      "description": "`jobs status`/`jobs watch --where cloud`: the server's own status spelling before canonicalization into the closed `status` enum above (e.g. `in_progress` -> `running`, `non_retryable_error` -> `error`). Null when the server reported no status. A cloud status this CLI does not know canonicalizes to `unknown` rather than passing through raw — this field is where that spelling survives, so the enum stays closed without losing what the server actually said."
+    },
     "queue_position": {"type": ["integer", "null"]},
     "workflow_size": {"type": ["integer", "null"]},
     "outputs": {"type": "array", "items": {"type": "string"}},
