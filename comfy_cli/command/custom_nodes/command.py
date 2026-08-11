@@ -13,6 +13,7 @@ import typer
 from rich.console import Console
 
 from comfy_cli import constants, logging, tracking, ui, utils
+from comfy_cli._safe_exec import BinaryNotFoundError
 from comfy_cli.command.custom_nodes.bisect_custom_nodes import bisect_app
 from comfy_cli.command.custom_nodes.cm_cli_util import (
     execute_cm_cli,
@@ -28,10 +29,11 @@ from comfy_cli.file_utils import (
     upload_file_to_signed_url,
     zip_files,
 )
+from comfy_cli.output import get_renderer
 from comfy_cli.output import rprint as print  # context-aware: stderr in JSON mode
-from comfy_cli.output.renderer import get_renderer
 from comfy_cli.registry import (
     RegistryAPI,
+    RegistryAPIError,
     extract_node_configuration,
     initialize_project_config,
 )
@@ -1263,8 +1265,15 @@ def publish(
         # Upload the zip file to the signed URL
         typer.echo("Uploading zip file...")
         upload_file_to_signed_url(signed_url, zip_filename)
+    except RegistryAPIError as e:
+        get_renderer().error(
+            code="node_publish_failed",
+            message=str(e),
+            details={"status": e.status, "body": e.body},
+        )
+        raise typer.Exit(code=1) from e
     except Exception as e:
-        ui.display_error_message({str(e)})
+        ui.display_error_message(str(e))
         raise typer.Exit(code=1)
 
 
@@ -1354,15 +1363,33 @@ def registry_install(
     try:
         # Call the API to install the node
         node_version = registry_api.install_node(node_id, version)
-        if not node_version.download_url:
-            logging.error("Download URL not provided from the registry.")
-            ui.display_error_message(f"Failed to download the custom node {node_id}.")
-            return
-
+    except RegistryAPIError as e:
+        logging.error(f"Encountered an error while installing the node. error: {str(e)}")
+        get_renderer().error(
+            code="registry_install_failed",
+            message=f"Failed to download the custom node {node_id}.",
+            details={"node_id": node_id, "status": e.status, "body": e.body},
+        )
+        raise typer.Exit(code=1) from e
     except Exception as e:
         logging.error(f"Encountered an error while installing the node. error: {str(e)}")
-        ui.display_error_message(f"Failed to download the custom node {node_id}.")
-        return
+        get_renderer().error(
+            code="registry_install_failed",
+            message=f"Failed to download the custom node {node_id}.",
+            details={"node_id": node_id},
+        )
+        raise typer.Exit(code=1) from e
+
+    # Checked outside the try: typer.Exit subclasses Exception, so raising it
+    # above would be swallowed by the broad handler and emit a second envelope.
+    if not node_version.download_url:
+        logging.error("Download URL not provided from the registry.")
+        get_renderer().error(
+            code="registry_install_failed",
+            message=f"Failed to download the custom node {node_id}.",
+            details={"node_id": node_id},
+        )
+        raise typer.Exit(code=1)
 
     # Download the node archive
     custom_nodes_path = pathlib.Path(workspace_manager.workspace_path) / "custom_nodes"
@@ -1420,7 +1447,13 @@ def pack():
     if includes:
         typer.echo(f"Including additional directories: {', '.join(includes)}")
 
-    zip_files(zip_filename, includes=includes)
+    try:
+        zip_files(zip_filename, includes=includes)
+    except BinaryNotFoundError as e:
+        # git was found and refused; packing anyway would sweep in untracked and
+        # gitignored files. Abort with the reason rather than a traceback.
+        ui.display_error_message(str(e))
+        raise typer.Exit(code=1) from None
 
     typer.echo(f"Created zip file: {NODE_ZIP_FILENAME}")
     logging.info("Node has been packed successfully.")

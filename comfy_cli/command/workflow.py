@@ -111,6 +111,11 @@ def _get_graph(input_path: str | None, host: str | None, port: int | None, on_st
         # becomes a clean `where_invalid` envelope rather than a traceback.
         decision = where_module.resolve_default_or_exit()
         mode = "cloud" if decision.target is where_module.WhereTarget.CLOUD else "local"
+        # Routing resolved — stamp it so the `cql_no_graph` envelope below names
+        # the catalog these verbs annotated against, matching what `nodes` does
+        # from its own `_get_graph`. The `where_invalid` raised just above stays
+        # `where: null`: it *is* the failed decision.
+        renderer.where = mode
         from comfy_cli.cql.loader import resilient_load_object_info
 
         raw = resilient_load_object_info(
@@ -637,10 +642,20 @@ _LOCAL_SORT_KEYS = {"create_time": "created", "update_time": "modified", "name":
 
 
 def _resolve_where_target(where: str | None):
-    """Resolve the routing Target for a saved-workflow verb (cloud or local)."""
+    """Resolve the routing Target for a saved-workflow verb (cloud or local).
+
+    This is the single point where ``workflow list/get/save/delete`` decide
+    local-vs-cloud, so it is also where the routed target gets stamped on the
+    renderer: every error envelope emitted downstream then carries ``where``
+    instead of ``null``. Explicit ``emit(..., where=...)`` arguments still win
+    (they resolve as ``where or self.where``), so the success envelopes are
+    unchanged.
+    """
     from comfy_cli.target import resolve_target
 
-    return resolve_target(where=where)
+    target = resolve_target(where=where)
+    get_renderer().where = target.kind
+    return target
 
 
 # Unicode categories that survive the C0/C1 filter but still let untrusted text

@@ -435,6 +435,11 @@ def execute_upload(
         if port is not None and not (1 <= port <= 65535):
             raise typer.BadParameter(f"invalid port: {port} is out of range (1-65535)")
     target = resolve_target(where=where, host=host, port=port)
+    # Same defence-in-depth as the validation above: ``cmdline.upload`` already
+    # stamps the renderer with its own resolved target (it has to — its
+    # `host_flag_cloud` rejection fires before we're called), but a direct
+    # caller like comfy-mcp never goes through that path, so stamp here too.
+    renderer.where = target.kind
 
     uploads: list[dict[str, Any]] = []
     cloud_names: list[str] = []
@@ -853,6 +858,10 @@ def execute_download(
         raise typer.Exit(code=1)
 
     target = resolve_target(where=where)
+    # Stamp the routed target for direct callers (comfy-mcp); `cmdline.download`
+    # already stamped its own before calling us, which is what gives the
+    # stdin-parsing errors above a non-null `where` on the CLI path.
+    renderer.where = target.kind
 
     # -- Resolve output URLs --------------------------------------------------
     # The state file is read regardless of the URL source: its `record` +

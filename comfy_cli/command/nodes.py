@@ -74,6 +74,13 @@ def _get_graph(
     and fired when a stale-cache fallback occurs (see loader for signature).
     """
     mode = _resolved_where(where)
+    # Every `comfy nodes` verb routes through here, so this is the one place
+    # the target is decided — stamp it on the renderer so the envelopes emitted
+    # downstream (the `cql_no_graph` error below included) carry `where`
+    # instead of `null`. `--input` reads a dump instead of talking to the
+    # backend, but `mode` still says which catalog the dump is interpreted as,
+    # which is what `where` reports (see the field's schema description).
+    get_renderer().where = mode
     # Resolve the local server the same way `comfy run` / `comfy jobs` do —
     # flag > COMFY_LOCAL_URL > config.background > 127.0.0.1:8188. `resolve_target`
     # deliberately skips the `config.background` step (other callers must not
