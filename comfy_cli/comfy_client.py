@@ -23,6 +23,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+from comfy_cli.caller import usage_source
 from comfy_cli.http import (
     NoRedirectHandler,
     ResponseTooLarge,
@@ -340,7 +341,9 @@ class Client:
             merged_extra: dict[str, Any] = dict(extra_data or {})
             # Usage-source attribution rides extra_data too — the execution
             # record keeps it even when the HTTP header is dropped by proxies.
-            merged_extra.setdefault("comfy_usage_source", "comfy-cli")
+            # Derived from the caller, so agent-driven runs are attributable
+            # server-side; an explicit caller-supplied value still wins.
+            merged_extra.setdefault("comfy_usage_source", usage_source())
             # Partner-API nodes (BFL, Gemini, Bria, ByteDance, etc.) read the
             # caller's comfy.org credential out of extra_data. Rebuild this at
             # send time so an OAuth refresh updates both the header and body.
@@ -602,6 +605,34 @@ def extract_output_entries(record: dict) -> list[dict]:
                         continue
                     seen.add(dedup_key)
                     results.append(entry)
+    return results
+
+
+def extract_text_outputs(record: dict) -> dict[str, list[str]]:
+    """Group the text/STRING node outputs of a /history record by node id.
+
+    Text-emitting nodes (GeminiNode image descriptions, ShowText, anything
+    emitting ``ui.text``) surface their payload as a bare-string list under the
+    ``text`` key of ``outputs[node_id]`` — a shape the media-key flatten in
+    :func:`extract_output_entries` drops entirely. This is the text counterpart:
+    for each node whose ``text`` value is a list, keep its ``str`` items and
+    return ``{node_id: [text, ...]}``. Nodes with no usable text are omitted.
+    Dict-shape tolerant like the flatten above (a non-dict ``outputs`` or a
+    non-dict node entry yields ``{}`` / is skipped rather than raising).
+    """
+    results: dict[str, list[str]] = {}
+    outputs = record.get("outputs") or {}
+    if not isinstance(outputs, dict):
+        return results
+    for node_id, node_output in outputs.items():
+        if not isinstance(node_output, dict):
+            continue
+        text = node_output.get("text")
+        if not isinstance(text, list):
+            continue
+        strings = [item for item in text if isinstance(item, str)]
+        if strings:
+            results[str(node_id)] = strings
     return results
 
 

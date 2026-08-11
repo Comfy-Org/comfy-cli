@@ -11,7 +11,9 @@ from rich.console import Console
 
 from comfy_cli import cancellation, constants, env_checker, logging, tracking, ui, utils
 from comfy_cli import where as where_module
+from comfy_cli._safe_exec import resolve_required_binary
 from comfy_cli.auth import command as auth_command
+from comfy_cli.caller import stream_is_tty
 from comfy_cli.cloud import command as cloud_command
 from comfy_cli.command import (
     code_search,
@@ -39,6 +41,7 @@ from comfy_cli.command import transfer as transfer_inner
 from comfy_cli.command import (
     workflow as workflow_command,
 )
+from comfy_cli.command.custom_nodes.cm_cli_util import normalize_cm_cli_exit_code
 from comfy_cli.command.install import validate_optional_version, validate_version
 from comfy_cli.command.launch import launch as launch_command
 from comfy_cli.command.launch import logs as logs_command
@@ -50,7 +53,7 @@ from comfy_cli.cuda_detect import DEFAULT_CUDA_TAG, detect_cuda_driver_version, 
 from comfy_cli.discovery import build_discovery
 from comfy_cli.env_checker import EnvChecker, _bracket_host, _unbracket_host
 from comfy_cli.help_json import build_help_json
-from comfy_cli.host_port import validate_host
+from comfy_cli.host_port import report_usage_error, validate_host
 from comfy_cli.output import Renderer, get_renderer, rprint, set_renderer
 from comfy_cli.resolve_python import resolve_workspace_python
 from comfy_cli.skills import command as skill_command
@@ -139,7 +142,11 @@ def _maybe_nudge_setup(ctx: typer.Context, renderer) -> None:
     install. Onboarding must never break a command — failures are swallowed.
     """
     sub = ctx.invoked_subcommand
-    if sub in (None, "setup") or not renderer.is_pretty() or not sys.stderr.isatty():
+    # Guarded stderr probe: this runs from the main Typer callback, and stderr
+    # can be closed independently of stdout (`comfy install 2>&-`, where CPython
+    # sets `sys.stderr = None`). A bare `.isatty()` there would kill the command
+    # from the onboarding nudge of all places. See `caller.stream_is_tty`.
+    if sub in (None, "setup") or not renderer.is_pretty() or not stream_is_tty(getattr(sys, "stderr", None)):
         return
     try:
         from comfy_cli.credentials import get_session
@@ -673,6 +680,18 @@ def _switch_comfy_version(comfy_path: str, version: str, *, stash: bool) -> None
     renderer.emit(result, command="update")
 
 
+def _refresh_node_id_cache() -> None:
+    """Re-export the custom-node id cache that backs shell tab-completion.
+
+    Best-effort: a stale cache only degrades completion, so a failure here is a
+    warning, never the command's outcome.
+    """
+    try:
+        custom_nodes.command.update_node_id_cache()
+    except (FileNotFoundError, subprocess.CalledProcessError) as e:
+        rprint(f"[yellow]Failed to update node id cache: {e}[/yellow]")
+
+
 @app.command(help="Update ComfyUI Environment [all|comfy|cli]")
 @tracking.track_command()
 def update(
@@ -708,6 +727,16 @@ def update(
             ),
         ),
     ] = False,
+    exit_on_fail: Annotated[
+        bool,
+        typer.Option(
+            "--exit-on-fail",
+            help=(
+                "Exit on failure. Only affects target 'all': without it a failing custom-node update is "
+                "printed but still exits 0. Targets 'comfy' and 'cli' already exit non-zero on failure."
+            ),
+        ),
+    ] = False,
 ):
     if target not in ["all", "comfy", "cli"]:
         typer.echo(
@@ -734,7 +763,33 @@ def update(
     comfy_path = workspace_manager.workspace_path
 
     if "all" == target:
-        custom_nodes.command.execute_cm_cli(["update", "all"])
+        # Without raise_on_error, execute_cm_cli swallows a cm-cli exit 1 and returns None,
+        # so `comfy update all` would report success for a failed pack update. Mirrors the
+        # --exit-on-fail plumbing in `comfy node install`.
+        #
+        # Unlike `node install`, the flag is deliberately NOT forwarded to cm-cli: its
+        # `update` subcommand takes only (nodes, channel, mode, user_directory) — no
+        # --exit-on-fail — so passing it would be a Typer usage error and make the flag
+        # fail every invocation. Only `cm-cli install` has one.
+        try:
+            custom_nodes.command.execute_cm_cli(["update", "all"], raise_on_error=exit_on_fail)
+        except subprocess.CalledProcessError as e:
+            if not exit_on_fail:
+                # execute_cm_cli re-raises unexpected exit codes even with raise_on_error off;
+                # keep surfacing those instead of swallowing them here.
+                raise
+            # `cm-cli update all` is non-atomic — packs that did update stayed updated — so
+            # refresh the id cache exactly as the no-flag path below does before bailing out.
+            _refresh_node_id_cache()
+            code = normalize_cm_cli_exit_code(e.returncode)
+            get_renderer().error(
+                code="update_custom_nodes_failed",
+                message=f"`cm-cli update all` failed with exit code {e.returncode}.",
+                hint="re-run `comfy update all` to retry; it is safe to repeat",
+                details={"cm_cli_returncode": e.returncode},
+                exit_code=code,
+            )
+            raise typer.Exit(code=code) from e
     else:
         rprint(f"Updating ComfyUI in {comfy_path}...")
         if comfy_path is None:
@@ -743,8 +798,11 @@ def update(
         if version is not None:
             _switch_comfy_version(comfy_path, version, stash=not no_stash)
         else:
+            # Resolved before the chdir so a ``git`` planted in ``comfy_path``
+            # can neither be picked up nor shadow the real one.
+            git_bin = resolve_required_binary("git")
             os.chdir(comfy_path)
-            subprocess.run(["git", "pull"], check=True)
+            subprocess.run([git_bin, "pull"], check=True)
             python = resolve_workspace_python(comfy_path)
             # A uv-managed venv may have no pip — bootstrap it first so the install
             # below doesn't crash with `No module named pip` (no-op if pip exists).
@@ -754,10 +812,7 @@ def update(
                 check=True,
             )
 
-    try:
-        custom_nodes.command.update_node_id_cache()
-    except (FileNotFoundError, subprocess.CalledProcessError) as e:
-        rprint(f"[yellow]Failed to update node id cache: {e}[/yellow]")
+    _refresh_node_id_cache()
 
 
 @app.command(help="Report installed-vs-latest versions for ComfyUI core and custom node packs (read-only).")
@@ -922,12 +977,20 @@ def run(
     _track_props = tracking.filter_command_kwargs(dict(locals()))
     tracking.track_event("execution_start", _track_props, mixpanel_name="run")
 
+    # Resolved outside the try so `renderer` is always bound by the time the
+    # `finally` below unstamps `where`, however early the body dies.
+    renderer = get_renderer()
+    # `Renderer` is a process-wide singleton, so a routed target stamped by an
+    # earlier in-process invocation would otherwise still be sitting here and
+    # would mislabel any envelope emitted before *this* run routes (e.g.
+    # `where_invalid`). Start every invocation unrouted.
+    renderer.where = None
+
     try:
         if api_key:
             api_key = api_key.strip() or None
 
         config = ConfigManager()
-        renderer = get_renderer()
 
         # Command-local --json means "stream the run": upgrade the renderer
         # (resolved once in the entry callback) into NDJSON mode so every
@@ -941,6 +1004,12 @@ def run(
         except ValueError as e:
             renderer.error(code="where_invalid", message=str(e), hint="use --where local or --where cloud")
             raise typer.Exit(code=1)
+
+        # The routing target is now known, so every downstream error envelope
+        # can carry it. Explicit ``emit(..., where=...)`` calls still win; this
+        # only fills the fallback (``where or self.where``) that error() and
+        # emit() resolve against.
+        renderer.where = decision.target.value
 
         # Default for --notify: on when a human is at the terminal, off for
         # agents (they shouldn't get surprise side-channel processes they didn't
@@ -999,14 +1068,24 @@ def run(
             )
             return
 
-        from comfy_cli.host_port import parse_host_port_arg, resolve_host_port
+        from comfy_cli.host_port import parse_host_port_arg, report_usage_error, resolve_host_port
 
-        if host:
-            host, parsed_port = parse_host_port_arg(host)
-            if not port and parsed_port is not None:
-                port = parsed_port
+        # ``report_usage_error``: a bad ``--host``/``--port`` is a
+        # ``typer.BadParameter``, which click turns into a stderr usage panel +
+        # exit 2 — leaving stdout empty in JSON/NDJSON mode while every other
+        # failure here ends with an envelope. Emit the terminating envelope
+        # first; the exception still propagates, so exit 2 is unchanged.
+        with report_usage_error(renderer):
+            if host:
+                host, parsed_port = parse_host_port_arg(host)
+                # ``port is None``, not ``not port``: a typed ``--port`` always wins
+                # over one embedded in ``--host h:p``, including ``--port 0``, which
+                # ``resolve_host_port`` then rejects as out of range instead of
+                # silently running against the embedded port.
+                if port is None and parsed_port is not None:
+                    port = parsed_port
 
-        host, port = resolve_host_port(host, port)
+            host, port = resolve_host_port(host, port)
 
         run_inner.execute(
             workflow,
@@ -1038,6 +1117,12 @@ def run(
         raise
     else:
         tracking.track_event("execution_success", _track_props)
+    finally:
+        # Every envelope this invocation emits has already been written by now
+        # (renderer.error/emit flush inline), so unstamp the singleton rather
+        # than leaving `run`'s routed target visible to whatever emits next in
+        # this process — an atexit/tracking path, or a second invocation.
+        renderer.where = None
 
 
 @app.command(
@@ -1107,6 +1192,11 @@ def validate(
     # made by string-comparing user input.
     decision = where_module.resolve_default_or_exit(flag=where)
     mode = decision.target.value
+    # Routing resolved — stamp it so the envelopes below (the object_info load
+    # failure and the UI-conversion errors) name the target this validate ran
+    # against. The file-read errors above stay `where: null`: they precede the
+    # decision, as does the `where_invalid` `resolve_default_or_exit` raises.
+    renderer.where = mode
 
     # Resolve the local object_info server the same way `comfy run` does —
     # flag > COMFY_LOCAL_URL > config.background > 127.0.0.1:8188. Without the
@@ -1119,18 +1209,21 @@ def validate(
     # honor it resolve upstream, here.
     is_local_fetch = input_path is None and decision.target is where_module.WhereTarget.LOCAL
     if is_local_fetch:
-        from comfy_cli.host_port import parse_host_port_arg, resolve_host_port
+        from comfy_cli.host_port import parse_host_port_arg, report_usage_error, resolve_host_port
 
         # `host is not None` (not `if host:`): `--host ""` must reach the parser
         # and be rejected, not be read as "no --host given". Likewise the port
         # merge tests `is None`, so an explicit `--port 0` isn't silently
         # overridden by a port embedded in the combined `--host h:p` form —
         # `resolve_host_port` rejects it as out of range instead.
-        if host is not None:
-            host, parsed_port = parse_host_port_arg(host)
-            if port is None and parsed_port is not None:
-                port = parsed_port
-        host, port = resolve_host_port(host, port)
+        # `report_usage_error` gives JSON/NDJSON consumers a terminating
+        # envelope for that rejection instead of an empty stdout (exit stays 2).
+        with report_usage_error(renderer):
+            if host is not None:
+                host, parsed_port = parse_host_port_arg(host)
+                if port is None and parsed_port is not None:
+                    port = parsed_port
+            host, port = resolve_host_port(host, port)
 
     try:
         graph = Graph.load(mode=mode, input_path=input_path, host=host, port=port)
@@ -1304,10 +1397,13 @@ def upload(
     # Validate the flags before resolving anything: the host lands verbatim in
     # ``http://{host}:{port}/upload/image``, so a URL-special or control
     # character is a usage error (BadParameter, exit 2) regardless of target.
-    if host is not None:
-        host = validate_host(host)
-    if port is not None and not (1 <= port <= 65535):
-        raise typer.BadParameter(f"invalid port: {port} is out of range (1-65535)")
+    # ``report_usage_error`` emits the terminating envelope for that rejection
+    # in JSON/NDJSON mode; the exception still escapes, so exit stays 2.
+    with report_usage_error(renderer):
+        if host is not None:
+            host = validate_host(host)
+        if port is not None and not (1 <= port <= 65535):
+            raise typer.BadParameter(f"invalid port: {port} is out of range (1-65535)")
 
     try:
         decision = where_module.resolve(flag=where, config_value=config.get(where_module.CONFIG_KEY_WHERE_DEFAULT))
@@ -1316,6 +1412,11 @@ def upload(
         raise typer.Exit(code=1)
 
     effective_where = "cloud" if decision.target is where_module.WhereTarget.CLOUD else "local"
+    # Routing is decided, so every error envelope from here down can name the
+    # target — including the `host_flag_cloud` rejection immediately below,
+    # which never reaches `execute_upload`. The `where_invalid` above stays
+    # `where: null`: it failed before there was a decision to report.
+    renderer.where = effective_where
     # --host/--port address a local ComfyUI; the cloud target's address comes
     # from the signed-in account's base URL and ignores them entirely
     # (``Target.host``/``Target.port`` are documented local-only). Rejecting
@@ -1377,6 +1478,10 @@ def download(
         raise typer.Exit(code=1)
 
     effective_where = "cloud" if decision.target is where_module.WhereTarget.CLOUD else "local"
+    # As in `upload`: stamped once routing resolves, so the preflight failure
+    # below and `execute_download`'s stdin-parsing errors (which run before it
+    # resolves its own target) all name the backend this invocation routed to.
+    renderer.where = effective_where
     if effective_where == "cloud":
         where_module.cloud_preflight_or_exit()
 
@@ -1458,10 +1563,36 @@ def free(
     system_command.free_execute(get_renderer(), where=where, unload_models=unload_models, free_memory=free_memory)
 
 
-@app.command(help="Stop background ComfyUI")
+@app.command(help="Stop background ComfyUI. Use --port to stop an untracked local ComfyUI this CLI didn't start.")
 @tracking.track_command()
-def stop():
+def stop(
+    port: Annotated[
+        int | None,
+        typer.Option(
+            "--port",
+            show_default=False,
+            min=1,
+            max=65535,
+            help="Stop whatever local ComfyUI is listening on this port, even if this CLI didn't start it. "
+            "Refuses anything it cannot positively identify as ComfyUI.",
+        ),
+    ] = None,
+    dry_run: Annotated[
+        bool,
+        typer.Option(
+            "--dry-run",
+            help="Report the process that would be stopped and exit 0 without stopping it.",
+        ),
+    ] = False,
+):
     renderer = get_renderer()
+
+    if port is not None:
+        from comfy_cli.command import stop_port
+
+        stop_port.stop_port_execute(renderer, port=port, dry_run=dry_run)
+        return
+
     config = ConfigManager()
     bg_info = config.background if constants.CONFIG_KEY_BACKGROUND in config.config["DEFAULT"] else None
     if not bg_info:
@@ -1473,6 +1604,24 @@ def stop():
                 command="stop",
             )
         raise typer.Exit(code=1)
+
+    if dry_run:
+        rprint(
+            f"[bold yellow]Would stop background ComfyUI.[/bold yellow] ({bg_info[0]}:{bg_info[1]}, pid={bg_info[2]})"
+        )
+        renderer.emit(
+            {
+                "stopped": False,
+                "dry_run": True,
+                "untracked": False,
+                "host": bg_info[0],
+                "port": bg_info[1],
+                "pid": bg_info[2],
+            },
+            command="stop",
+            changed=False,
+        )
+        return
 
     is_killed = utils.kill_all(bg_info[2])
 

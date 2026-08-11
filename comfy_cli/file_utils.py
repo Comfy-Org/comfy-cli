@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import pathlib
 import stat
@@ -14,7 +15,64 @@ import requests
 from pathspec import PathSpec
 
 from comfy_cli import constants, ui
+from comfy_cli._safe_exec import BinaryNotFoundError, resolve_required_binary
 from comfy_cli.output.sanitize import sanitize_value
+
+logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Atomic writes — the write policy
+# ---------------------------------------------------------------------------
+#
+# Every hand-rolled tmp+``os.replace`` writer in comfy-cli falls into one of
+# four tiers. The tier decides whether the writer uses the shared helpers below
+# or stays bespoke; it is decided by *what the file can contain*, never by
+# convenience. The helpers deliberately take **no** ``mode=`` parameter —
+# parameterizing permissions was considered and rejected, because a writer whose
+# payload needs 0600 needs more than a mode (an ``O_EXCL`` open at that mode, a
+# 0700 parent, an fsync) and is clearer written out in full at its call site.
+#
+# Tier 1 — secrets. ``comfy_cli/auth/store.py`` ``_write_all`` stays bespoke:
+#   the tmp file is opened ``O_CREAT|O_EXCL`` with mode 0600 *at open*, so the
+#   OAuth tokens are never briefly world-readable under a permissive umask; the
+#   parent directory is forced to 0700; the write is fsynced.
+#
+# Tier 2 — secret-adjacent state. ``comfy_cli/download_state.py`` ``write_path``
+#   stays bespoke: chmod 0600 + 0700 parent + fsync, because the resolved
+#   download URL persisted in the state file can embed a presigned/SAS token,
+#   which is bearer credential material even though the file itself is nominally
+#   bookkeeping.
+#
+# Tier 3 — cross-process state. ``atomic_write_text(..., fsync=True)``:
+#   umask mode, durable. A second process (a watcher, a later CLI invocation, an
+#   agent shelling out) reads these, and losing one to power failure loses real
+#   work. Members: ``jobs_state.write``, ``command/project.py``
+#   ``_write_assets_lock``.
+#
+# Tier 4 — regenerable caches and manifests. ``fsync=False``: the content can be
+#   recomputed or refetched, so paying a sync per write buys nothing. Callers may
+#   additionally wrap the call best-effort (``except OSError: pass``) when a
+#   read-only or full cache directory must not break the command. Members:
+#   ``cql/loader``, ``command/outdated.py`` ``_save_cache``,
+#   ``command/templates.py`` ``_persist_cache``, the skills manifest writers,
+#   ``command/workflow.py``.
+#
+# Two invariants recorded here because they are the *reason* for a tier
+# assignment, and a future change to either moves a writer between tiers:
+#
+# (a) ``JobState`` files are tier 3 (umask mode), not tier 2, because their
+#     ``outputs`` are plain ``/view?filename=...`` URLs — they carry no embedded
+#     credential, and the CLI never asks the cloud jobs API for ``?short_link=``
+#     responses. If either changes (outputs start carrying signed URLs, or the
+#     CLI starts requesting short links), jobs_state moves to tier 2 and needs
+#     0600 like download_state.
+#
+# (b) No writer here fsyncs the parent directory *before* ``os.replace`` returns
+#     durably — ``fsync=True`` syncs the file's contents and then the parent
+#     directory, but on a power failure between the two an already-``replace``d
+#     rename can still be lost. This is accepted: the failure mode is losing the
+#     *newest* write, never observing a torn or half-written file. Contents are
+#     never torn; renames may be lost.
 
 # The process umask, captured once at import. os has no getter, so reading it
 # means the classic set-and-restore dance; doing it here (single-threaded under
@@ -83,13 +141,36 @@ def atomic_write_text(path: pathlib.Path, content: str, *, fsync: bool = False) 
             the rename survive power loss, at the cost of a sync. Best-effort:
             a failing fsync is ignored, matching the prior per-site behavior.
     """
+    _atomic_write(path, content.encode("utf-8"), fsync=fsync)
+
+
+def atomic_write_bytes(path: pathlib.Path, data: bytes, *, fsync: bool = False) -> None:
+    """Atomically write ``data`` to ``path`` — the bytes twin of :func:`atomic_write_text`.
+
+    Identical semantics (same tmp-file creation, same permission handling, same
+    cleanup-on-failure); it just skips the UTF-8 encode for a caller that already
+    holds bytes. See :func:`atomic_write_text` for the full contract.
+    """
+    _atomic_write(path, data, fsync=fsync)
+
+
+def _atomic_write(path: pathlib.Path, data: bytes, *, fsync: bool) -> None:
+    """Shared implementation behind :func:`atomic_write_text` / :func:`atomic_write_bytes`."""
     path.parent.mkdir(parents=True, exist_ok=True)
     # mkstemp gives a unique, O_EXCL, non-symlink-following fd opened O_RDWR in the
     # destination directory — same filesystem, so the os.replace below is atomic.
     fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=path.name + ".", suffix=".tmp")
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(content)
+        try:
+            file_obj = os.fdopen(fd, "wb")
+        except BaseException:
+            # fdopen only fails *before* taking ownership of the descriptor, so
+            # this is the one place the raw fd still has to be closed by hand;
+            # everywhere below, closing is the file object's job.
+            os.close(fd)
+            raise
+        with file_obj as f:
+            f.write(data)
             if fsync:
                 f.flush()
                 try:
@@ -481,6 +562,102 @@ def cleanup_partials(local_filepath: pathlib.Path) -> int:
     return removed
 
 
+# The atomic-write helpers above stream through a sibling named
+# ``<dest name>.<mkstemp token>.tmp``. Unlike ``.part``, nothing ever *asks* for
+# one by name — they are pure in-flight scaffolding — so the only reason to name
+# the suffix here is to sweep up the corpses a killed writer leaves behind.
+_TMP_SUFFIX = ".tmp"
+# An in-flight atomic write lives for milliseconds, so an hour puts a live write
+# far outside the window under any normal clock — see the caveat in
+# ``cleanup_stale_tmp_files`` for the abnormal ones — while still bounding how
+# long a corpse survives in a long-running agent/CI environment.
+_TMP_STALE_SECONDS = 3600
+
+
+def cleanup_stale_tmp_files(
+    directory: pathlib.Path,
+    *,
+    older_than_seconds: float = _TMP_STALE_SECONDS,
+    stem_suffix: str = "",
+) -> int:
+    """Best-effort removal of stranded ``atomic_write_*`` temps in ``directory``.
+
+    A writer killed uncleanly (SIGKILL, OOM, power loss) never runs its
+    unlink-on-exception cleanup, so its ``<dest>.<mkstemp token>.tmp`` sibling
+    outlives it — and mkstemp mints a fresh token per attempt, so nothing bounds
+    how many a crash-prone process leaves.
+
+    A candidate must be a *regular file* (the entry's own metadata decides, so a
+    symlink shaped like a temp can't lend an unrelated target's mtime to the age
+    test, and a dangling one is skipped rather than raised on), carry mkstemp's
+    exact ``<stem>.<8 chars>.tmp`` shape, and have an mtime older than
+    ``older_than_seconds``.
+
+    Two honest limits on that, both worth knowing before adding a caller:
+
+    * The shape proves nothing about *who* wrote the file. ``db.a1b2c3d4.tmp``
+      matches it by coincidence, and this repo's own bespoke temps in
+      ``auth/store.py`` / ``download_state.py``
+      (``<name>.<pid>.<secrets.token_hex(4)>.tmp``) match it by construction.
+      Pass ``stem_suffix`` to also require the destination stem to end in it
+      (e.g. ``".json"`` in a directory whose only destinations are
+      ``<id>.json``) and give the match some actual ownership evidence.
+    * The age cutoff is a heuristic, not a lock. There is no coordination with
+      the writer, so a forward clock step (NTP correction, VM/laptop resume), a
+      lagging network-filesystem clock, or a writer stalled past the cutoff
+      inside ``fsync`` can still make a live temp eligible — and unlinking it
+      makes that writer's ``os.replace`` fail. An hour makes that vanishingly
+      unlikely, not impossible; keep the default unless a caller can afford the
+      loss.
+
+    Returns how many files were removed. Never raises.
+    """
+    now = time.time()
+    removed = 0
+    try:
+        # Streamed rather than materialized: the docstring's own premise is that
+        # nothing bounds how many corpses a crash-loop leaves, and there is no
+        # reason to hold the whole listing to delete entries one at a time.
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                name = entry.name
+                if not name.endswith(_TMP_SUFFIX):
+                    continue
+                # ``<stem>.<token>`` — the stem is the destination file name, so
+                # it must be a real name (``.``/``..`` are not) and, when the
+                # caller says so, carry ``stem_suffix``; the token must have
+                # mkstemp's exact shape. Together that keeps a hand-made
+                # ``notes.tmp`` (no token segment) or a ``.lock``/``.part``
+                # sibling (wrong suffix entirely) off the list.
+                stem, sep, token = name[: -len(_TMP_SUFFIX)].rpartition(".")
+                if not sep or not stem.strip(".") or not stem.endswith(stem_suffix):
+                    continue
+                if len(token) != _MKSTEMP_TOKEN_LEN or not set(token) <= _MKSTEMP_TOKEN_CHARS:
+                    continue
+                try:
+                    st = entry.stat(follow_symlinks=False)
+                except OSError:
+                    continue
+                if not stat.S_ISREG(st.st_mode):
+                    continue
+                if now - st.st_mtime <= older_than_seconds:
+                    continue
+                try:
+                    os.unlink(entry.path)
+                except OSError:
+                    continue
+                # The count goes nowhere useful at the call sites (this is
+                # hygiene, not a user-facing action), so a debug line is the
+                # only way to attribute a file's disappearance after the fact.
+                logger.debug("swept stranded atomic-write temp: %s", entry.path)
+                removed += 1
+    except OSError:
+        # scandir failed to open, or died mid-iteration. Whatever we already
+        # removed still counts.
+        return removed
+    return removed
+
+
 def _friendly_network_error(exc: Exception) -> str:
     """Return a user-friendly description of a network error."""
     if isinstance(exc, _TransientHTTPStatusError):
@@ -722,9 +899,27 @@ def _load_comfyignore_spec(ignore_filename: str = ".comfyignore") -> PathSpec | 
 
 
 def list_git_tracked_files(base_path: str | os.PathLike = ".") -> list[str]:
+    """Git-tracked files under ``base_path``, or ``[]`` when git can't tell us.
+
+    ``[]`` means "no git answer" and callers (see :func:`zip_files`) treat it as
+    "not a git repository". An *absent* git has always produced that, so it still
+    does. A git that was found and then **refused** must not: the caller would
+    silently fall back to walking the whole directory, so the refusal is raised
+    rather than flattened into the same empty list.
+    """
+    # Resolved outside the tolerant handler below so the two cases stay
+    # distinguishable — ``BinaryNotFoundError`` subclasses ``FileNotFoundError``,
+    # which that handler swallows.
+    try:
+        git_bin = resolve_required_binary("git")
+    except BinaryNotFoundError as exc:
+        if not exc.is_absent:
+            raise
+        return []
+
     try:
         result = subprocess.check_output(
-            ["git", "-C", os.fspath(base_path), "ls-files"],
+            [git_bin, "-C", os.fspath(base_path), "ls-files"],
             text=True,
         )
     except (subprocess.SubprocessError, FileNotFoundError):
@@ -745,7 +940,14 @@ def _is_force_included(rel_path: str, include_prefixes: list[str]) -> bool:
 
 
 def zip_files(zip_filename, includes=None):
-    """Zip git-tracked files respecting optional .comfyignore patterns."""
+    """Zip git-tracked files respecting optional .comfyignore patterns.
+
+    :raises BinaryNotFoundError: ``git`` was found but refused (see
+        :func:`comfy_cli._safe_exec.resolve_required_binary`). The walk-everything
+        fallback below is safe for "this isn't a git repo", but not for "we can't
+        trust git": it would package untracked and gitignored files — ``.env``,
+        keys, venvs — into an archive that ``comfy node publish`` uploads.
+    """
     includes = includes or []
     include_prefixes: list[str] = [_normalize_path(os.path.normpath(include.lstrip("/"))) for include in includes]
 

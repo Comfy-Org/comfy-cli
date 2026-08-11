@@ -801,6 +801,11 @@ def logs(tail: int = 200, where: str | None = None, port: int | None = None):
             command="logs",
         )
         raise typer.Exit(code=1)
+    # Routing is confirmed local, so every envelope from here down can name it —
+    # matching the `where="local"` the success emit already passes explicitly.
+    # Both `where_invalid` errors above stay `where: null`: they *are* the failed
+    # decision, and the second one rejects a target this command won't route to.
+    renderer.where = "local"
 
     resolved = resolve_background_log_path(port)
     if resolved is None:

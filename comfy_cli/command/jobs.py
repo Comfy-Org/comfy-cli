@@ -1,9 +1,17 @@
 """``comfy jobs`` — list, status, and live-watch ComfyUI prompts.
 
-The ComfyUI server already speaks WebSocket: every node-execution event is
-pushed to every connected ``/ws?clientId=…`` client, tagged with the
-``prompt_id`` it belongs to. We use that channel as the live "push" feed —
-no daemon, no polling.
+The ComfyUI server already speaks WebSocket: node-execution events are pushed
+over ``/ws?clientId=…`` tagged with the ``prompt_id`` they belong to. We use
+that channel as the live "push" feed — no daemon, no polling.
+
+One thing that channel is *not* is a broadcast: the executor addresses every
+execution event (``executing`` / ``executed`` / ``progress_state`` /
+``execution_cached`` / ``execution_success``) to the socket of the session that
+submitted the prompt (``send_sync(..., server.client_id)`` in ComfyUI's
+``execution.py``, delivered by ``PromptServer.send_json`` only to that one
+``sid``). A watcher that connects with a *fresh* ``clientId`` therefore receives
+nothing at all — so ``jobs watch`` re-attaches with the submitting client_id
+(see ``_resolve_watch_client_id``).
 
 Three subcommands:
 
@@ -25,8 +33,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
-from dataclasses import dataclass, field
-from datetime import datetime
+from dataclasses import dataclass, field, replace
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Annotated, Any
 
 import typer
@@ -34,6 +42,7 @@ from websocket import WebSocket, WebSocketException, WebSocketTimeoutException
 
 from comfy_cli import cancellation, execution_errors, tracking
 from comfy_cli.env_checker import check_comfy_server_running
+from comfy_cli.host_port import report_usage_error
 from comfy_cli.host_port import resolve_host_port as _resolve_host_port
 from comfy_cli.http import ResponseTooLarge, authed_urlopen, plain_urlopen, read_capped
 from comfy_cli.output import get_renderer
@@ -106,6 +115,18 @@ def _is_watcher_alive(state: JobState) -> bool:
 # Host/port resolution (`resolve_host_port`) is shared with `comfy run` via
 # `comfy_cli.host_port`; imported above as `_resolve_host_port` to preserve the
 # call sites in this module unchanged.
+#
+# Every machine-reachable call site is wrapped in `report_usage_error(renderer,
+# command=...)`. A rejected `--host`/`--port` raises `typer.BadParameter`, which
+# click renders as a human usage panel on stderr and exits 2 — leaving stdout
+# *empty* in JSON/NDJSON mode, while every other failure in this module ends
+# with an `ok:false` envelope. The context manager emits that terminating
+# envelope and re-raises, so the exit-2 usage contract is unchanged and pretty
+# mode is untouched (click still prints the message, exactly once). `command=`
+# matches the subcommand each site's success envelope reports, so a consumer
+# dispatching on `command` sees one value per subcommand, not `jobs` on failure
+# and `jobs ls` on success. The lone exception is `_watch_ls` — pretty-only by
+# construction, see the comment there.
 
 
 def _server_or_error(host: str, port: int, *, raise_on_missing: bool = True) -> bool:
@@ -184,8 +205,21 @@ def _emit_terminal(renderer, payload: dict, *, command: str, where: str | None =
         raw = payload.get("error_message") or payload.get("details")
     message = raw if isinstance(raw, str) else None
     hint = None
+    # This whole payload becomes `renderer.error(details=...)`, and a cloud
+    # snapshot's structured record carries the full server traceback — the very
+    # blob the trimming below exists to keep out of an envelope. Cap it before
+    # the status branches so the `cancelled` path is covered too; the full
+    # record stays reachable via `comfy --json jobs status <prompt_id>`.
+    structured = payload.get("execution_error")
+    if isinstance(structured, dict):
+        structured = execution_errors.trim_record(structured)
+        payload["execution_error"] = structured
     if status == "error":
-        verdict = execution_errors.classify(raw)
+        # Classify the structured record itself when the cloud snapshot
+        # carries one: re-parsing the flattened one-liner would JSON-sniff an
+        # `exception_message` that is itself JSON (API nodes commonly raise
+        # with raw JSON bodies) and decode it back into a fields-less dict.
+        verdict = execution_errors.classify(structured if isinstance(structured, dict) else raw)
         code, message, hint = verdict["code"], verdict["message"], verdict["hint"]
         # The raw server text repeats the full traceback; keep the envelope to
         # the one-line cause + structured tail and leave the full record to
@@ -212,6 +246,28 @@ def _emit_terminal(renderer, payload: dict, *, command: str, where: str | None =
 # ---------------------------------------------------------------------------
 
 
+# Row statuses that mean "this job failed" — the ones an `error_code` is
+# meaningful alongside. `completed` is terminal but deliberately absent.
+_ERROR_STATUSES = frozenset({"error", "cancelled"})
+
+# Cloud's raw job statuses → the row vocabulary above. Mirrors
+# ``job_watcher._CLOUD_STATUS_MAP`` (kept as a local copy rather than imported:
+# ``job_watcher`` imports this module, so the dependency only runs one way).
+# The failure spellings matter here — an unmapped `non_retryable_error` /
+# `lost` / `canceled` misses `_ERROR_STATUSES` and silently drops the state
+# file's `error_code` for exactly the jobs that failed.
+_CLOUD_ROW_STATUS_MAP = {
+    "success": "completed",
+    "completed": "completed",
+    "failed": "error",
+    "error": "error",
+    "non_retryable_error": "error",
+    "lost": "error",
+    "cancelled": "cancelled",
+    "canceled": "cancelled",
+}
+
+
 @dataclass(frozen=True)
 class JobRow:
     prompt_id: str
@@ -223,6 +279,82 @@ class JobRow:
     where: str = "local"  # "local" | "cloud"
     workflow_path: str | None = None  # set when sourced from a state file
     updated_at: str | None = None  # ISO timestamp, set for state-file rows
+    # `error.code` off the state file (e.g. "server_died", "execution_error",
+    # "watcher_crashed"). Without it a listing can say a job is in `error` and
+    # name its workflow, but never say *why* — which is the whole point of the
+    # state file surviving a server death. Only ever set alongside a status in
+    # `_ERROR_STATUSES`: the watcher parks a transient `watcher_poll_error` on
+    # the state file of a job that is still healthily `running`, and that is a
+    # poll blip, not this row's failure cause.
+    error_code: str | None = None
+
+
+def _state_error_code(err: Any, status: Any) -> str | None:
+    """Pull ``error.code`` out of a state file's ``error`` blob, or None.
+
+    Returns None unless ``status`` is one of ``_ERROR_STATUSES``. A non-failed
+    job can carry an ``error`` blob: ``job_watcher._poll_local_once`` /
+    ``_poll_cloud_once`` record ``watcher_poll_error`` when a single poll
+    raises, leave the status at ``queued``/``running``, and only clear it on a
+    later poll that actually returns a snapshot — so an in-flight job can hold
+    that code for many cycles. Surfacing it as ``error_code`` would advertise a
+    failure cause for a job that has not failed.
+
+    ``jobs_state.read`` keeps known keys' values untouched, so a hand-edited or
+    truncated file can carry a non-dict ``error`` (or a non-string ``code``) —
+    neither may reach the emitted envelope, where ``error_code`` is typed
+    ``string | null``.
+    """
+    if status not in _ERROR_STATUSES:
+        return None
+    if not isinstance(err, dict):
+        return None
+    code = err.get("code")
+    return code if isinstance(code, str) and code else None
+
+
+def _state_str(value: Any) -> str | None:
+    """Narrow a state-file value to ``str | None`` for the emitted envelope.
+
+    Same defensiveness as ``_state_error_code``, for the fields published as
+    ``string | null``: ``jobs_state.read`` type-checks nothing it keeps, and a
+    numeric ``updated_at`` from a hand-edited or legacy file would otherwise
+    reach ``_merge_jobs``'s ``sort_key`` and raise ``TypeError`` comparing int
+    against str — aborting the whole listing, not just one row.
+    """
+    return value if isinstance(value, str) and value else None
+
+
+def _state_where(value: Any) -> str:
+    """Narrow a state file's ``where`` to the published ``local``/``cloud`` enum.
+
+    Missing, empty, or unrecognized (a legacy ``"remote"``) reads as ``local``,
+    matching the filter in ``_gather_local_state_files`` — so a row can never be
+    scoped as local yet report a ``where`` the schema rejects.
+    """
+    return value if value in ("local", "cloud") else "local"
+
+
+def _sweep_state_tmp_files() -> None:
+    """Sweep atomic-write temps stranded in the jobs state dir.
+
+    Same unclean deaths the ``watcher_crashed`` reap in
+    :func:`_gather_local_state_files` exists for — a watcher SIGKILLed mid-write
+    leaves a ``<prompt_id>.json.<token>.tmp`` corpse nothing will ever collect.
+    Purely hygiene, so it rides the ``jobs ls`` reap rather than earning a
+    command of its own, and its count is never surfaced.
+
+    Deliberately *not* inside ``_gather_local_state_files``: that one is a
+    read-only listing helper, and ``jobs ls --watch`` re-enters it every 2s —
+    re-traversing the directory that often to look for hour-old corpses buys
+    nothing. Called once per ``jobs ls`` instead, watch or not.
+    """
+    from comfy_cli import file_utils, jobs_state
+
+    # ``stem_suffix``: every destination this dir owns is ``<prompt_id>.json``,
+    # so requiring it keeps the sweep off a coincidental ``<x>.<8 chars>.tmp``
+    # that mkstemp's shape alone would happily claim.
+    file_utils.cleanup_stale_tmp_files(jobs_state.state_dir(), stem_suffix=".json")
 
 
 def _gather_local_state_files(*, limit: int, orphaned_only: bool = False, where: str | None = None) -> list[JobRow]:
@@ -261,25 +393,50 @@ def _gather_local_state_files(*, limit: int, orphaned_only: bool = False, where:
         # Reap stale watchers: if the job is non-terminal and the watcher
         # PID is recorded but dead, mark the job as errored so it doesn't
         # sit as "running" forever.
+        #
+        # The verdict is re-derived from a re-read INSIDE the record's own
+        # lock, because everything above is a snapshot and this scan races
+        # live writers: `run --wait` now stamps its foreground pid too, so the
+        # window between the liveness probe and this write is one an ordinary
+        # `comfy run --wait` finishing normally can land its terminal
+        # `completed` write in — and `jobs ls --watch` re-runs the whole scan
+        # every refresh tick. Writing the snapshot back unconditionally would
+        # overwrite that verdict, and the outputs recorded with it, with a
+        # generic `watcher_crashed`.
         if (
             not state.is_terminal
             and state.watcher_pid is not None
             and state.watcher_pid > 0
             and not _is_watcher_alive(state)
         ):
-            state.status = "error"
-            state.error = {
-                "code": "watcher_crashed",
-                "message": f"Background watcher (pid {state.watcher_pid}) is no longer running.",
-                "hint": "re-submit the workflow, or check `comfy jobs status <id>` against the server",
-            }
-            state.watcher_pid = None
-            state.watcher_pid_create_time = None
-            jobs_state.write(state)
+            # Keyed on the filename, not `state.prompt_id`: the stem is what
+            # was read (and is already filter-validated above), so a record
+            # whose stored id disagrees with its file can't send the lock and
+            # the re-read to a different record than the one being reaped.
+            with jobs_state.locked(path.stem) as fresh:
+                if fresh is not None:
+                    if (
+                        not fresh.is_terminal
+                        and fresh.watcher_pid is not None
+                        and fresh.watcher_pid > 0
+                        and not _is_watcher_alive(fresh)
+                    ):
+                        fresh.status = "error"
+                        fresh.error = {
+                            "code": "watcher_crashed",
+                            "message": f"Background watcher (pid {fresh.watcher_pid}) is no longer running.",
+                            "hint": "re-submit the workflow, or check `comfy jobs status <id>` against the server",
+                        }
+                        fresh.watcher_pid = None
+                        fresh.watcher_pid_create_time = None
+                        jobs_state.write(fresh)
+                    # Report what is actually on disk either way — whether we
+                    # reaped it or the writer we raced beat us to a verdict.
+                    state = fresh
         # Scope to the resolved --where target. Done *after* the stale-watcher
         # reap above so cleanup stays where-agnostic no matter which view the
         # caller asked for.
-        if where is not None and (state.where or "local") != where:
+        if where is not None and _state_where(state.where) != where:
             continue
         if orphaned_only:
             err = state.error or {}
@@ -293,12 +450,13 @@ def _gather_local_state_files(*, limit: int, orphaned_only: bool = False, where:
                 elapsed_seconds=None,
                 workflow_size=None,
                 outputs=len(state.outputs or []),
-                # Same missing/empty -> "local" reading the filter above uses,
-                # so a row can never be scoped as local yet report `where: null`
-                # (JobRow.where is typed `str` and defaults to "local").
-                where=state.where or "local",
-                workflow_path=state.workflow,
-                updated_at=state.updated_at,
+                # Same narrowing the filter above uses, so a row can never be
+                # scoped as local yet report a `where` outside the published
+                # enum (JobRow.where is typed `str` and defaults to "local").
+                where=_state_where(state.where),
+                workflow_path=_state_str(state.workflow),
+                updated_at=_state_str(state.updated_at),
+                error_code=_state_error_code(state.error, state.status),
             )
         )
         if len(rows) >= limit:
@@ -320,9 +478,52 @@ def _merge_jobs(state_rows: list[JobRow], server_rows: list[JobRow]) -> list[Job
     """Server's view wins for prompts it knows about (fresher status); state
     files fill in everything else (jobs the server doesn't see, e.g. cloud
     jobs viewed from a local-only `jobs ls`).
+
+    "Wins" is per-row, not per-field: several fields exist only on the state
+    file, and a server row that supersedes one would otherwise blank them.
+
+    - ``error_code``: neither ``/queue``/``/history`` nor the cloud job list
+      carries one, so the cause the state file recorded would be lost. Carried
+      across only when *both* views call the job failed — the state file's,
+      because a code recorded next to a healthy status is a watcher poll blip
+      rather than this job's cause; the server's, so a state file left holding
+      a stale ``server_died`` can't contradict a server that now reports the
+      prompt as completed.
+    - ``workflow_path`` / ``updated_at``: also state-file-only. Blanking
+      ``workflow_path`` drops the one field that says *which workflow* a
+      prompt_id was, and blanking ``updated_at`` sorts a terminal row to epoch
+      0 below every dated one, where the caller's ``[:limit]`` slice can drop a
+      fresh completion. Carried whenever the server row has nothing to say.
+
+    ``where`` is deliberately *not* carried: server rows now set it themselves
+    (``_cloud_job_to_row`` marks cloud, ``_gather_jobs`` is local by
+    construction), so the server row is authoritative.
+
+    The prior row is looked up from a snapshot of ``state_rows`` rather than
+    from the accumulating map: ``/queue`` and ``/history`` are fetched
+    separately, so one gather can yield two rows for a transitioning prompt
+    (``running``, then ``error``), and reading the map would let the first one
+    clobber the state row before the second one gets to inherit from it.
     """
-    by_id: dict[str, JobRow] = {r.prompt_id: r for r in state_rows}
+    state_by_id: dict[str, JobRow] = {r.prompt_id: r for r in state_rows}
+    by_id: dict[str, JobRow] = dict(state_by_id)
     for r in server_rows:
+        prior = state_by_id.get(r.prompt_id)
+        if prior is not None:
+            carried: dict[str, Any] = {}
+            if (
+                r.error_code is None
+                and prior.error_code is not None
+                and prior.status in _ERROR_STATUSES
+                and r.status in _ERROR_STATUSES
+            ):
+                carried["error_code"] = prior.error_code
+            if r.workflow_path is None and prior.workflow_path is not None:
+                carried["workflow_path"] = prior.workflow_path
+            if r.updated_at is None and prior.updated_at is not None:
+                carried["updated_at"] = prior.updated_at
+            if carried:
+                r = replace(r, **carried)
         by_id[r.prompt_id] = r
 
     # Sort: non-terminal first (running/pending/allocated/executing), then
@@ -481,8 +682,9 @@ def ls_cmd(
 
     # Resolve the routing target once: per-command --where flag > COMFY_WHERE
     # env (how the top-level `comfy --where` arrives) > config default. Both
-    # the server query and the state-file scope key off this single decision.
-    target_where = "cloud" if _is_cloud(where) else "local"
+    # the server query and the state-file scope key off this single decision,
+    # and it is stamped on the renderer so error envelopes carry it too.
+    target_where = _stamp_where(renderer, where)
 
     # --orphaned only makes sense for state files (the server doesn't know
     # whether a watcher crashed), so skip the server query in that mode.
@@ -499,14 +701,21 @@ def ls_cmd(
     # applies exactly the same filters as the one-shot listing.
     state_where = None if (all_wheres or orphaned) else target_where
 
+    if watch and not renderer.is_pretty():
+        renderer.error(
+            code="json_incompatible",
+            message="--watch requires pretty mode (TTY). For JSON, poll with a shell loop.",
+            hint="drop --json, or run `while true; do comfy --json jobs ls; sleep 2; done`",
+        )
+        raise typer.Exit(code=1)
+
+    # Once per invocation, and above the watch branch rather than inside the
+    # gatherer: the live table re-gathers every 2s and would otherwise re-sweep
+    # on every refresh. Below the validation above so a rejected invocation
+    # touches nothing on disk.
+    _sweep_state_tmp_files()
+
     if watch:
-        if not renderer.is_pretty():
-            renderer.error(
-                code="json_incompatible",
-                message="--watch requires pretty mode (TTY). For JSON, poll with a shell loop.",
-                hint="drop --json, or run `while true; do comfy --json jobs ls; sleep 2; done`",
-            )
-            raise typer.Exit(code=1)
         _watch_ls(
             host=host,
             port=port,
@@ -521,7 +730,8 @@ def ls_cmd(
     state_rows = _gather_local_state_files(limit=limit, orphaned_only=orphaned, where=state_where)
 
     server_rows: list[JobRow] = []
-    h, p = _resolve_host_port(host, port)
+    with report_usage_error(renderer, command="jobs ls"):
+        h, p = _resolve_host_port(host, port)
     if not local_only:
         if target_where == "cloud":
             try:
@@ -576,6 +786,11 @@ def _watch_ls(*, host, port, limit, where, local_only, state_where=None, orphane
 
     renderer = get_renderer()
     console = renderer.console()
+    # No `report_usage_error` here, unlike every other resolver call site in
+    # this module: `ls_cmd` rejects a non-pretty renderer with
+    # `json_incompatible` before it can reach `--watch`, so this path is
+    # pretty-only by construction and the helper could never emit. Pretty mode
+    # wants exactly what click already does — the usage panel on stderr, once.
     h, p = _resolve_host_port(host, port)
 
     def build_table() -> Table:
@@ -642,6 +857,10 @@ def _row_to_dict(r: JobRow) -> dict:
         "where": r.where,
         "workflow_path": r.workflow_path,
         "updated_at": r.updated_at,
+        # Why an `error` row failed, when the state file knows. `jobs status`
+        # points callers at `comfy jobs ls` as the escape hatch after a server
+        # death, so the hatch has to be able to name the cause.
+        "error_code": r.error_code,
     }
 
 
@@ -881,10 +1100,11 @@ def status_cmd(
     ] = None,
 ):
     renderer = get_renderer()
-    if _is_cloud(where):
+    if _stamp_where(renderer, where) == "cloud":
         return _cloud_status(prompt_id)
 
-    h, p = _resolve_host_port(host, port)
+    with report_usage_error(renderer, command="jobs status"):
+        h, p = _resolve_host_port(host, port)
     if not _server_or_error(h, p, raise_on_missing=False):
         # Server is down. The on-disk state file (written by `comfy run` and
         # maintained by the async watcher) still knows what this prompt was
@@ -1035,6 +1255,7 @@ def _snapshot(host: str, port: int, prompt_id: str) -> dict | None:
                     "outputs": [],
                     "outputs_by_node": {},
                     "outputs_by_item": {},
+                    "text_outputs": {},
                     "host": host,
                     "port": port,
                 }
@@ -1063,7 +1284,7 @@ def _snapshot(host: str, port: int, prompt_id: str) -> dict | None:
     # their producing-node association — same flatten the cloud snapshot
     # uses, so the grouped keys match the cloud envelope shape exactly.
     from comfy_cli import jobs_state
-    from comfy_cli.comfy_client import _group_outputs, extract_output_entries
+    from comfy_cli.comfy_client import _group_outputs, extract_output_entries, extract_text_outputs
 
     node_outputs: list[dict] = []
     for entry in extract_output_entries(body):
@@ -1086,10 +1307,18 @@ def _snapshot(host: str, port: int, prompt_id: str) -> dict | None:
         "outputs": output_urls,
         "outputs_by_node": outputs_by_node,
         "outputs_by_item": outputs_by_item,
+        # Text/STRING node outputs (image descriptions, ShowText, …) live under
+        # outputs[node]["text"] as bare strings, which the URL flatten drops.
+        # Additive key: full untruncated strings for `--json`; the pretty
+        # renderer previews them. Empty {} when the run emitted no text.
+        "text_outputs": extract_text_outputs(body),
         "error": error_detail,
         "host": host,
         "port": port,
     }
+
+
+_TEXT_PREVIEW_LIMIT = 20
 
 
 def _render_status_pretty(snap: dict, *, host: str, port: int) -> None:
@@ -1124,6 +1353,29 @@ def _render_status_pretty(snap: dict, *, host: str, port: int) -> None:
     tbl.add_row("status", badge)
     if snap.get("outputs"):
         tbl.add_row("outputs", "\n".join(sanitize_markup(o) for o in snap["outputs"]))
+    if snap.get("text_outputs"):
+        # Bounded preview: first non-blank line, ~120 chars per entry, capped at
+        # _TEXT_PREVIEW_LIMIT entries total. The full untruncated text ships on
+        # the `--json` path (renderer.emit). Built as Text (not markup strings)
+        # since node ids / node text are server-supplied and may contain `[...]`
+        # that Rich would otherwise interpret as style markup.
+        preview_lines: list[Text] = []
+        total = sum(len(texts) for texts in snap["text_outputs"].values())
+        for node_id, texts in snap["text_outputs"].items():
+            for text in texts:
+                if len(preview_lines) >= _TEXT_PREVIEW_LIMIT:
+                    break
+                stripped = str(text).strip()
+                first = stripped.splitlines()[0] if stripped else ""
+                if len(first) > 120:
+                    first = first[:117] + "…"
+                preview_lines.append(Text(f"[{node_id}] {first}"))
+            if len(preview_lines) >= _TEXT_PREVIEW_LIMIT:
+                break
+        if total > len(preview_lines):
+            preview_lines.append(Text(f"… ({total - len(preview_lines)} more)", style="dim"))
+        if preview_lines:
+            tbl.add_row("text", Text("\n").join(preview_lines))
     if snap.get("error"):
         # Truncate first, escape second: the 600-char budget stays a budget on
         # the server's text rather than on the backslashes we add to it, and
@@ -1272,7 +1524,8 @@ def wait_cmd(
     wait_all: Annotated[bool, typer.Option("--all", help="Wait on all locally-tracked non-terminal jobs.")] = False,
 ):
     renderer = get_renderer()
-    cloud = _is_cloud(where)
+    where_label = _stamp_where(renderer, where)
+    cloud = where_label == "cloud"
 
     ids = list(prompt_ids or [])
     if wait_all:
@@ -1292,7 +1545,8 @@ def wait_cmd(
     if cloud:
         cloud_preflight_or_exit()
     else:
-        h, p = _resolve_host_port(host, port)
+        with report_usage_error(renderer, command="jobs wait"):
+            h, p = _resolve_host_port(host, port)
         server_up = _server_or_error(h, p, raise_on_missing=False)
 
     start = time.time()
@@ -1335,7 +1589,6 @@ def wait_cmd(
         "elapsed_seconds": round(time.time() - start, 2),
         "jobs": jobs_list,
     }
-    where_label = "cloud" if cloud else "local"
 
     if renderer.is_pretty():
         _render_wait_pretty(summary)
@@ -1384,9 +1637,11 @@ def cancel_cmd(
         typer.Option("--where", help="'local' (default) or 'cloud'."),
     ] = None,
 ):
-    if _is_cloud(where):
+    renderer = get_renderer()
+    if _stamp_where(renderer, where) == "cloud":
         return _cloud_cancel(prompt_id)
-    h, p = _resolve_host_port(host, port)
+    with report_usage_error(renderer, command="jobs cancel"):
+        h, p = _resolve_host_port(host, port)
     _server_or_error(h, p)
     return _local_cancel(prompt_id, h, p)
 
@@ -1598,6 +1853,103 @@ def _cloud_cancel(prompt_id: str) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _client_id_from_extra_data(extra: Any) -> str | None:
+    """Pull ``client_id`` out of a queue/history entry's ``extra_data`` slot."""
+    if isinstance(extra, dict):
+        cid = extra.get("client_id")
+        if isinstance(cid, str) and cid.strip():
+            return cid
+    return None
+
+
+def _resolve_watch_client_id(host: str, port: int, prompt_id: str) -> str | None:
+    """Find the ``client_id`` this prompt was submitted with, or None.
+
+    ComfyUI delivers execution events only to the submitting session's socket
+    (see the module docstring), so watching with a fresh id yields silence. The
+    submitting id is recoverable from three places, cheapest first:
+
+    1. our own on-disk job state, written at submit time by ``comfy run``;
+    2. ``/queue`` ``extra_data`` while the prompt is running or pending;
+    3. ``/history`` ``prompt[3]`` once it has finished.
+
+    Reconnecting under an existing id is ComfyUI's own session-resume mechanism
+    (its ``/ws`` handler pops the previous socket for that id), which is exactly
+    what we want for a prompt whose submitter has exited — the common case, since
+    ``comfy run --async`` returns immediately. The caveat is that a submitter
+    still holding that socket (a browser tab, a blocking ``comfy run``) stops
+    receiving events until it reconnects; pass ``--client-id`` to override the
+    resolution when that matters.
+    """
+    from comfy_cli import jobs_state
+
+    try:
+        job = jobs_state.read(prompt_id)
+    except (ValueError, OSError):  # unsafe prompt_id / unreadable state dir
+        job = None
+    if job is not None and isinstance(job.client_id, str) and job.client_id.strip():
+        return job.client_id
+
+    try:
+        q = _http_get_json(f"http://{host}:{port}/queue")
+    except RuntimeError:
+        q = {}
+    if isinstance(q, dict):
+        for key in ("queue_running", "queue_pending"):
+            for entry in q.get(key) or []:
+                # (number, prompt_id, prompt, extra_data, outputs_to_execute)
+                if isinstance(entry, list) and len(entry) > 3 and entry[1] == prompt_id:
+                    cid = _client_id_from_extra_data(entry[3])
+                    if cid:
+                        return cid
+
+    try:
+        h = _http_get_json(f"http://{host}:{port}/history/{prompt_id}")
+    except RuntimeError:
+        return None
+    body = h.get(prompt_id) if isinstance(h, dict) else None
+    prompt = body.get("prompt") if isinstance(body, dict) else None
+    if isinstance(prompt, list) and len(prompt) > 3:
+        return _client_id_from_extra_data(prompt[3])
+    return None
+
+
+def _history_completed_nodes(host: str, port: int, prompt_id: str) -> set[str]:
+    """Nodes the server itself records as having run, straight from ``/history``.
+
+    Independent of the WS stream on purpose: the terminal envelope must list the
+    nodes that ran even when no live event reached us (attached after the fact,
+    an unresolvable client_id, a third-party submitter). Union of the
+    ``execution_cached`` node ids, the ``executed`` list on an abnormal end, and
+    every node that produced an output.
+    """
+    nodes: set[str] = set()
+    try:
+        h = _http_get_json(f"http://{host}:{port}/history/{prompt_id}")
+    except RuntimeError:
+        return nodes
+    body = h.get(prompt_id) if isinstance(h, dict) else None
+    if not isinstance(body, dict):
+        return nodes
+    status_obj = body.get("status")
+    messages = status_obj.get("messages") if isinstance(status_obj, dict) else None
+    for msg in messages or []:
+        if not (isinstance(msg, list) and len(msg) > 1 and isinstance(msg[1], dict)):
+            continue
+        if msg[0] == "execution_cached":
+            listed = msg[1].get("nodes")
+        elif msg[0] in ("execution_error", "execution_interrupted"):
+            listed = msg[1].get("executed")
+        else:
+            continue
+        for n in listed or []:
+            nodes.add(str(n))
+    outputs = body.get("outputs")
+    if isinstance(outputs, dict):
+        nodes.update(str(n) for n in outputs)
+    return nodes
+
+
 @dataclass
 class _WatchState:
     """Loop-local state shared across the `jobs watch` WS recv loop.
@@ -1618,6 +1970,11 @@ class _WatchState:
     end_reason: str | None = None
     end_details: Any = None
     terminal: bool = False
+    # Nodes whose final (100% / errored) `progress` line has already been
+    # emitted. `progress_state` repeats EVERY non-pending node on every
+    # message, so without this the un-throttled final flush would re-fire for
+    # an already-finished node on each later step of the run.
+    progress_final: set[str] = field(default_factory=set)
 
 
 def _watch_executing(state: _WatchState, data: dict[str, Any]) -> None:
@@ -1662,6 +2019,60 @@ def _watch_progress(state: _WatchState, data: dict[str, Any]) -> None:
     )
 
 
+def _progress_int(value: Any) -> int | None:
+    """Coerce a progress counter to the ``integer|null`` the event schema declares.
+
+    The legacy ``progress`` message carries ints; ``progress_state`` carries
+    floats (``NodeProgressState.value``), and an unvalidated float would break
+    ``run_event.json`` for every NDJSON consumer.
+    """
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    try:
+        return int(value)
+    except (ValueError, OverflowError):  # nan / inf
+        return None
+
+
+def _watch_progress_state(state: _WatchState, data: dict[str, Any]) -> None:
+    """Handle ComfyUI's combined per-node ``progress_state`` message.
+
+    Current ComfyUI emits ``progress_state`` (``comfy_execution/progress.py``)
+    rather than the legacy per-node ``progress``; the legacy handler is kept for
+    older servers. The payload is ``{"nodes": {node_id: {value, max, state}}}``
+    holding EVERY non-pending node, resent on each transition — so this is also
+    the most complete source of "which nodes actually ran", including compute
+    nodes that never fire an ``executed`` event (that one only fires for nodes
+    with UI output).
+    """
+    nodes = data.get("nodes")
+    if not isinstance(nodes, dict):
+        return
+    renderer = state.renderer
+    for node_id, node_state in nodes.items():
+        if not isinstance(node_state, dict):
+            continue
+        node = str(node_id)
+        if node in state.progress_final:
+            continue
+        phase = node_state.get("state")
+        fields = {
+            "node": node,
+            "completed": _progress_int(node_state.get("value")),
+            "total": _progress_int(node_state.get("max")),
+            "prompt_id": state.prompt_id,
+        }
+        if phase in ("finished", "error"):
+            state.progress_final.add(node)
+            if phase == "finished":
+                state.completed_nodes.add(node)
+            # Emit the final line unthrottled: a 100%/errored step must not be
+            # swallowed by the rate limiter (`progress_final` keeps it to once).
+            renderer.event("progress", **fields)
+        else:
+            renderer.throttled_event(f"progress:{node}", "progress", max_hz=10, **fields)
+
+
 def _watch_executed(state: _WatchState, data: dict[str, Any]) -> None:
     renderer = state.renderer
     node = str(data.get("node"))
@@ -1679,20 +2090,54 @@ def _watch_executed(state: _WatchState, data: dict[str, Any]) -> None:
     renderer.event("executed", node=node, prompt_id=state.prompt_id)
 
 
+def _absorb_executed_list(state: _WatchState, data: dict[str, Any]) -> None:
+    """Fold an event's ``executed`` node list into ``completed_nodes``.
+
+    ``execution_error`` and ``execution_interrupted`` both carry the full list
+    of nodes that had already run when the prompt ended — the only place that
+    list is available on an abnormal exit.
+    """
+    for n in data.get("executed") or []:
+        state.completed_nodes.add(str(n))
+
+
 def _watch_execution_error(state: _WatchState, data: dict[str, Any]) -> None:
+    _absorb_executed_list(state, data)
     state.end_reason = "error"
     state.end_details = data
     state.terminal = True
 
 
+def _watch_execution_success(state: _WatchState, data: dict[str, Any]) -> None:
+    """Current ComfyUI's end-of-prompt signal.
+
+    Older servers marked the end with ``executing`` + ``node: null`` (still
+    handled above). Without this, a successful watch only ended once a ``recv``
+    timed out and the ``/history`` snapshot showed completion — i.e. it sat idle
+    for the full ``--timeout`` (30s by default) after the job was already done.
+    """
+    state.end_reason = "completed"
+    state.terminal = True
+
+
+def _watch_execution_interrupted(state: _WatchState, data: dict[str, Any]) -> None:
+    _absorb_executed_list(state, data)
+    state.end_reason = "cancelled"
+    state.end_details = data
+    state.terminal = True
+
+
 # type → pure per-message handler. Each mutates ``state`` (and sets
-# ``state.terminal`` for the two terminal events); the recv loop owns the break.
+# ``state.terminal`` for the terminal events); the recv loop owns the break.
 _WATCH_HANDLERS = {
     "executing": _watch_executing,
     "execution_cached": _watch_execution_cached,
     "progress": _watch_progress,
+    "progress_state": _watch_progress_state,
     "executed": _watch_executed,
     "execution_error": _watch_execution_error,
+    "execution_success": _watch_execution_success,
+    "execution_interrupted": _watch_execution_interrupted,
 }
 
 
@@ -1715,18 +2160,38 @@ def watch_cmd(
         float,
         typer.Option("--max-wait", help="Cloud-only: give up after this many seconds total."),
     ] = 600.0,
+    client_id: Annotated[
+        str | None,
+        typer.Option(
+            "--client-id",
+            help=(
+                "Local-only: attach as this WS client_id instead of the submitting one. "
+                "ComfyUI sends execution events only to the submitting session, so watch "
+                "resolves that id automatically; override it if resolution picks wrong."
+            ),
+        ),
+    ] = None,
 ):
     renderer = get_renderer()
-    if _is_cloud(where):
+    if _stamp_where(renderer, where) == "cloud":
         return _cloud_watch(prompt_id, poll_interval=poll_interval, max_wait=max_wait)
 
-    h, p = _resolve_host_port(host, port)
+    with report_usage_error(renderer, command="jobs watch"):
+        h, p = _resolve_host_port(host, port)
     _server_or_error(h, p)
 
     # If the job already finished, just print status and return — there will
     # be no more WS events.
     snap = _snapshot(h, p, prompt_id)
     if snap and snap["status"] in {"completed", "error", "cancelled"}:
+        # No stream to summarise, so the node list has to come from /history —
+        # `completed_nodes` is part of the watch envelope on every exit path.
+        snap["completed_nodes"] = sorted(_history_completed_nodes(h, p, prompt_id))
+        # Same envelope shape as the live path — a consumer reading
+        # `data.attached` must never hit a missing key. The prompt already
+        # ended, so no session was attached and there is no id to report.
+        snap["client_id"] = None
+        snap["attached"] = False
         if renderer.is_pretty():
             renderer.console().print(f"[dim]Prompt {prompt_id} already {snap['status']}; nothing more to watch.[/dim]")
             _render_status_pretty(snap, host=h, port=p)
@@ -1734,9 +2199,12 @@ def watch_cmd(
         return
 
     ws = WebSocket()
-    client_id = str(uuid.uuid4())
+    # Re-attach as the submitting session, otherwise the server addresses every
+    # execution event to a socket we are not holding and this watch sees nothing.
+    attached_client_id = client_id or _resolve_watch_client_id(h, p, prompt_id)
+    ws_client_id = attached_client_id or str(uuid.uuid4())
     try:
-        ws.connect(f"ws://{h}:{p}/ws?clientId={client_id}")
+        ws.connect(f"ws://{h}:{p}/ws?clientId={urllib.parse.quote(ws_client_id, safe='')}")
     except (WebSocketException, ConnectionError, OSError) as e:
         renderer.error(
             code="ws_disconnected",
@@ -1757,6 +2225,11 @@ def watch_cmd(
 
     if renderer.is_pretty():
         renderer.console().print(f"[bold]Watching prompt[/bold] {prompt_id} on {h}:{p}   [dim](Ctrl-C to stop)[/dim]")
+        if attached_client_id is None:
+            renderer.console().print(
+                "[yellow]![/yellow] [dim]could not resolve the submitting client_id — the server "
+                "may not send live events for this prompt; pass --client-id if you know it[/dim]"
+            )
 
     try:
         while True:
@@ -1825,6 +2298,10 @@ def watch_cmd(
 
     elapsed = time.time() - start
     final_status = state.end_reason or ("completed" if state.completed_nodes else "unknown")
+    # Union in the server's own record of what ran. Strictly additive and done
+    # AFTER `final_status` is derived, so it can only correct an under-reported
+    # node list — never invent a terminal status the stream did not observe.
+    state.completed_nodes |= _history_completed_nodes(h, p, prompt_id)
     if renderer.is_pretty():
         from rich.text import Text
 
@@ -1845,6 +2322,11 @@ def watch_cmd(
         "elapsed_seconds": elapsed,
         "host": h,
         "port": p,
+        # Which session this watch listened as, and whether that was the
+        # prompt's real submitter — the difference between a live stream and
+        # silence, so it belongs in the envelope rather than only in the logs.
+        "client_id": ws_client_id,
+        "attached": attached_client_id is not None,
     }
     if state.end_details is not None:
         payload["details"] = state.end_details if isinstance(state.end_details, dict) else {"raw": state.end_details}
@@ -1881,11 +2363,32 @@ def _is_cloud(where: str | None) -> bool:
     return decision.target is where_module.WhereTarget.CLOUD
 
 
+def _stamp_where(renderer, where: str | None) -> str:
+    """Resolve this invocation's routing target and stamp it on the renderer.
+
+    Every ``jobs`` verb calls this at entry, right where it decides
+    local-vs-cloud, so the error envelopes raised downstream carry ``where``
+    instead of ``null``. Returns the label so callers that also need it (the
+    ``ls``/``wait`` payloads) don't resolve twice. Explicit
+    ``emit(..., where=...)`` arguments still take precedence over the stamp.
+    """
+    label = "cloud" if _is_cloud(where) else "local"
+    renderer.where = label
+    return label
+
+
 def _cloud_job_to_row(j: dict) -> JobRow:
-    """Map a /api/jobs entry to our JobRow shape."""
-    status_map = {"completed": "completed", "success": "completed", "failed": "error", "error": "error"}
+    """Map a /api/jobs entry to our JobRow shape.
+
+    Statuses go through the same map the watcher uses, so cloud's other failure
+    spellings (``non_retryable_error``, ``lost``, ``canceled``) normalize to the
+    row vocabulary instead of passing through raw. Beyond keeping the rendered
+    status consistent with `jobs status`/`jobs watch`, it is what lets
+    ``_merge_jobs`` recognize those rows as failures and keep the state file's
+    ``error_code`` — the failures that most need a named cause.
+    """
     raw_status = (j.get("status") or "").lower()
-    status = status_map.get(raw_status, raw_status or "pending")
+    status = _CLOUD_ROW_STATUS_MAP.get(raw_status, raw_status or "pending")
     outputs = int(j.get("outputs_count") or 0)
     return JobRow(
         prompt_id=str(j.get("id") or ""),
@@ -1894,6 +2397,11 @@ def _cloud_job_to_row(j: dict) -> JobRow:
         elapsed_seconds=None,
         workflow_size=None,
         outputs=outputs,
+        # These rows come from the cloud job list; without this they'd take
+        # JobRow's "local" default and supersede the state row that correctly
+        # said "cloud", so `jobs ls --where cloud` would emit an envelope
+        # saying cloud with every row inside claiming local.
+        where="cloud",
     )
 
 
@@ -1918,6 +2426,72 @@ def _cloud_client():
         raise typer.Exit(code=1) from e
 
 
+def _execution_error_line(err: Any) -> str | None:
+    """Render a ``JobDetailResponse.execution_error`` object as one human line.
+
+    ``/api/jobs/<id>`` serves a failed job's cause as a structured object
+    (``node_id``, ``node_type``, ``exception_message``, ``exception_type``,
+    ``traceback``, ``current_inputs``) — unlike the deprecated
+    ``/api/job/<id>/status``, which served a single JSON-encoded
+    ``error_message`` string. Flatten it back to the one-line shape the pretty
+    `error` row and the snapshot's top-level ``error_message`` both consume
+    (``_emit_terminal`` classifies the structured record directly, so it never
+    round-trips through this line). Returns ``None`` when the record carries
+    nothing nameable, so a present-but-empty record never fabricates an error
+    line.
+
+    Parsing is delegated to ``execution_errors.parse_error_message`` so this
+    path and the watcher's ``classify`` path agree on *what the record says*
+    whatever shape it arrives in — dict, JSON-encoded string or plain text.
+    Only the rendering differs: the line below keeps ``exception_type``, which
+    ``classify``'s envelope message drops in favour of the node prefix, and the
+    pretty `error` row is the one place that type is surfaced to a human.
+    """
+    parsed = execution_errors.parse_error_message(err)
+
+    def _one_line(value: Any) -> str:
+        # `split()` on arbitrary whitespace, not `strip()`: an
+        # `exception_message` with internal newlines (common for multi-line
+        # server errors) would otherwise blow up a helper documented as
+        # rendering "one human line" into a multi-row Rich cell.
+        return " ".join(str(value or "").split())
+
+    exception_message = _one_line(parsed.get("exception_message"))
+    exception_type = _one_line(parsed.get("exception_type"))
+    node_id = _one_line(parsed.get("node_id"))
+    node_type = _one_line(parsed.get("node_type"))
+
+    # Joining the present parts (rather than formatting both unconditionally)
+    # is what keeps a record missing one field from rendering `ValueError: `
+    # with a dangling separator.
+    head = ": ".join(part for part in (exception_type, exception_message) if part)
+    where = " ".join(part for part in (f"node {node_id}" if node_id else "", node_type) if part)
+    if not where:
+        return head or None
+    # A record with node fields but no exception text used to render the bare
+    # parenthetical `(node 5 KSampler)` — a cause-less error row. Borrow
+    # `classify`'s stand-in cause so the line always states one.
+    return f"{head or 'ComfyUI reported an execution error.'} ({where})"
+
+
+def _ms_to_iso(value: Any) -> str | None:
+    """Convert a Unix-millisecond timestamp to an ISO-8601 UTC string.
+
+    ``JobDetailResponse`` serves ``create_time``/``update_time`` as integer
+    milliseconds, where the deprecated status endpoint served ready-made
+    ``created_at``/``updated_at`` strings. Callers (the pretty table rows, the
+    JSON fields) expect the string shape, so normalize here. Anything that
+    isn't a finite, representable number returns ``None`` rather than raising —
+    a malformed timestamp must not take down a `jobs status` call.
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return datetime.fromtimestamp(float(value) / 1000, tz=timezone.utc).isoformat()
+    except (TypeError, ValueError, OverflowError, OSError):
+        return None
+
+
 def _cloud_status_snapshot(prompt_id: str) -> dict | None:
     """Compose a cloud snapshot from /api/jobs/<id> + /api/history_v2/<id>."""
     from comfy_cli import jobs_state
@@ -1928,6 +2502,13 @@ def _cloud_status_snapshot(prompt_id: str) -> dict | None:
     if status is None:
         return None
     raw = (status.get("status") or "").lower()
+    # Deliberately NOT _CLOUD_ROW_STATUS_MAP: this map lacks cloud's two cancel
+    # spellings, so a cancelled cloud job snapshots as the raw `canceled` — not
+    # in the published `status` enum, not in `_cloud_watch`'s terminal set (so
+    # `jobs watch --where cloud` spins to `cloud_timeout`), and not in
+    # `_TERMINAL_VERDICT` (so `jobs status` reports it ok:true/exit 0 instead of
+    # the documented 130). Real bugs, but adding the aliases here changes an
+    # exit code on a path this PR does not otherwise touch — see BE-6612.
     state = {
         "success": "completed",
         "completed": "completed",
@@ -1951,16 +2532,50 @@ def _cloud_status_snapshot(prompt_id: str) -> dict | None:
             item_map = job.item_map if job is not None else None
             outputs_by_node, outputs_by_item = _group_outputs(node_outputs, item_map)
 
+    # `/api/jobs/<id>` (JobDetailResponse) serves the failure cause as a
+    # structured `execution_error` object and the timestamps as Unix-ms ints —
+    # the deprecated `/api/job/<id>/status` served `error_message` /
+    # `created_at` / `updated_at` instead. Read both dialects: the timestamps
+    # keep the old names as first choice (they carry the same information in a
+    # ready-made shape), while the failure cause prefers the structured record
+    # — see below.
+    raw_execution_error = status.get("execution_error")
+    # `current_inputs` — the failing node's widget values — can carry API keys,
+    # and this record is emitted verbatim by `jobs status`. Redact before it
+    # enters the payload at all, not at each rendering site.
+    execution_error = (
+        execution_errors.redact_record(raw_execution_error) if isinstance(raw_execution_error, dict) else None
+    )
+    # Only a *failed* job gets a cause synthesized from the record: a stale
+    # `execution_error` left on a retried-then-succeeded job would otherwise
+    # fabricate an `error` row on a green one. `canceled` is spelled out
+    # alongside `_ERROR_STATUSES` because the state map above deliberately
+    # leaves cloud's one-l spelling unmapped (BE-6612).
+    failed = state in _ERROR_STATUSES or state == "canceled"
+    # The structured record wins over `error_message` when the server sent
+    # one: a deployment that fills `error_message` with a short generic string
+    # ("job failed") alongside a detailed object would otherwise discard the
+    # only copy of the real cause. Non-dict shapes (the deprecated dialect's
+    # JSON-encoded string) still parse — `_execution_error_line` routes
+    # everything through `execution_errors.parse_error_message`.
+    error_message = (_execution_error_line(raw_execution_error) if failed else None) or status.get("error_message")
+
     return {
         "prompt_id": prompt_id,
         "status": state,
         "outputs": outputs,
         "outputs_by_node": outputs_by_node,
         "outputs_by_item": outputs_by_item,
+        # Not served by the plural jobs-detail endpoint at all — kept so an
+        # older deployment still populates it; never synthesized.
         "assigned_inference": status.get("assigned_inference"),
-        "error_message": status.get("error_message"),
-        "created_at": status.get("created_at"),
-        "updated_at": status.get("updated_at"),
+        "error_message": error_message,
+        # The full structured record rides along for `--json` consumers; the
+        # flattened one-liner above is what the pretty row and the envelope
+        # classification read.
+        "execution_error": execution_error,
+        "created_at": status.get("created_at") or _ms_to_iso(status.get("create_time")),
+        "updated_at": status.get("updated_at") or _ms_to_iso(status.get("update_time")),
         "base_url": client.target.base_url,
     }
 

@@ -835,6 +835,12 @@ def _submit_background_download(
         needs_hf_auth=needs_hf_auth,
     )
 
+    # Retire finished records before adding one, so submitting downloads is what
+    # bounds the state directory rather than something the user has to remember
+    # to do. Purely bookkeeping: never let it fail a submit.
+    with contextlib.suppress(Exception):
+        download_state.prune(workspace)
+
     try:
         # The parent directory has to exist before the worker starts writing, and
         # creating it here means a permission problem surfaces synchronously.
@@ -1385,7 +1391,12 @@ def downloads(_ctx: typer.Context):
     same file.
     """
     renderer = get_renderer()
-    rows = [download_state.status_payload(_reconciled(s)[0]) for s in download_state.list_all(get_workspace())]
+    workspace = get_workspace()
+    # Trim before listing: this is the verb whose cost — and whose output — grows
+    # with every record the directory has ever accumulated.
+    with contextlib.suppress(Exception):
+        download_state.prune(workspace)
+    rows = [download_state.status_payload(_reconciled(s)[0]) for s in download_state.list_all(workspace)]
     if not rows:
         print("No downloads found.")
     else:
