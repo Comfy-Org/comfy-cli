@@ -515,7 +515,13 @@ def worker_alive(state: DownloadState, *, pid_alive=None) -> bool:
     self-corrects on the next poll, while signalling a stranger's process group
     is not, so only the reporting side is allowed the benefit of the doubt.
     """
-    if state.pid is None:
+    if not state.pid or state.pid <= 0:
+        # Not just `is None`. The field validator accepts any non-bool int, so a
+        # corrupt or tampered record can carry a negative pid — and
+        # `psutil.Process(-1)` raises ValueError, which `utils.is_running` does
+        # not catch. One bad state file would then traceback out of every command
+        # that reconciles, including `model download` itself. `is_worker_process`
+        # and `kill_worker` already screen the same way.
         return False
     if pid_alive is None:
         from comfy_cli.utils import is_running as pid_alive  # noqa: N813
