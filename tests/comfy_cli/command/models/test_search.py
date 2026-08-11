@@ -100,7 +100,13 @@ _CLOUD_FILES_LORAS = [
 _LOCAL_SEARCH_FOLDERS = ["checkpoints", "diffusion_models", "loras", "vae"]
 
 _LOCAL_FILES_BY_FOLDER: dict[str, list[dict[str, Any]]] = {
-    "checkpoints": [{"name": "sd_xl_base_1.0.safetensors", "pathIndex": 0}],
+    # BE-5619: real checkpoint filenames — the separators (`_`, `-`, `.`) and the
+    # word order are what a whole-string substring match cannot cope with.
+    "checkpoints": [
+        {"name": "sd_xl_base_1.0.safetensors", "pathIndex": 0},
+        {"name": "sd_xl_refiner_1.0.safetensors", "pathIndex": 0},
+        {"name": "v1-5-pruned.ckpt", "pathIndex": 0},
+    ],
     "diffusion_models": [
         {"name": "flux1-dev.safetensors", "pathIndex": 0},
         {"name": "ltx-video-2b-v0.9.safetensors", "pathIndex": 0},
@@ -529,8 +535,7 @@ class TestSearch:
         assert env["ok"] is True
         assert env["data"]["mode"] == "local"
         rows = env["data"]["rows"]
-        assert len(rows) == 1
-        assert rows[0]["name"] == "sd_xl_base_1.0.safetensors"
+        assert [r["name"] for r in rows] == ["sd_xl_base_1.0.safetensors", "sd_xl_refiner_1.0.safetensors"]
         assert rows[0]["type"] == "checkpoints"
         # Local has no enrichment.
         assert rows[0]["base_model"] is None
@@ -560,6 +565,136 @@ class TestSearch:
         assert all(r["tags"] == [r["type"]] for r in rows)
         assert env["data"]["total"] == 4
         assert env["data"]["shown"] == 4
+
+    @pytest.mark.parametrize(
+        "query",
+        [
+            pytest.param("sdxl base", id="squashed-then-raw"),
+            pytest.param("base sdxl", id="reversed-order"),
+            pytest.param("xl base", id="partial-word"),
+            pytest.param("SDXL Base", id="uppercase"),
+            pytest.param("sd-xl base", id="wrong-separator"),
+        ],
+    )
+    def test_local_text_is_token_and_separator_insensitive(self, local_target, monkeypatch, capsys, query):
+        """BE-5619: multi-word queries match `sd_xl_base_1.0.safetensors`.
+
+        None of these exist as a contiguous substring of the filename — the old
+        whole-string test returned nothing for every one of them.
+        """
+        _patch_urlopen(monkeypatch, _local_routes())
+        env = _run(["search", "--text", query, "--where", "local"], capsys)
+        assert env["ok"] is True, env
+        assert [r["name"] for r in env["data"]["rows"]] == ["sd_xl_base_1.0.safetensors"]
+        assert env["data"]["total"] == 1
+
+    def test_local_single_token_still_matches_every_file(self, local_target, monkeypatch, capsys):
+        """A one-word query keeps its old substring reach — `xl` finds both sd_xl files."""
+        _patch_urlopen(monkeypatch, _local_routes())
+        env = _run(["search", "--text", "xl", "--type", "checkpoint", "--where", "local"], capsys)
+        assert [r["name"] for r in env["data"]["rows"]] == [
+            "sd_xl_base_1.0.safetensors",
+            "sd_xl_refiner_1.0.safetensors",
+        ]
+        assert env["data"]["total"] == 2
+
+    def test_local_squashing_can_match_across_a_separator(self, local_target, monkeypatch, capsys):
+        """Documented widening: squashing the name joins words, so `xl` also hits `ltx-lora`.
+
+        `ltx-lora-detail` squashes to `ltxloradetail`, which contains `xl` across
+        the `x`/`l` seam. Deliberate: the squashed pass is what makes `sdxl` find
+        `sd_xl_...`, and the same collapse cannot distinguish a seam from a real
+        word boundary. Over-returning on a short token is the acceptable side of
+        this trade — under-returning is the bug BE-4733 reported.
+        """
+        _patch_urlopen(monkeypatch, _local_routes())
+        env = _run(["search", "--text", "xl", "--where", "local"], capsys)
+        assert "ltx-lora-detail.safetensors" in [r["name"] for r in env["data"]["rows"]]
+
+    def test_local_single_token_regression_across_separators(self, local_target, monkeypatch, capsys):
+        """`pruned` still finds `v1-5-pruned.ckpt` — the `-`-separated name is untouched."""
+        _patch_urlopen(monkeypatch, _local_routes())
+        env = _run(["search", "--text", "pruned", "--where", "local"], capsys)
+        assert [r["name"] for r in env["data"]["rows"]] == ["v1-5-pruned.ckpt"]
+        assert env["data"]["total"] == 1
+
+    def test_local_all_tokens_must_match(self, local_target, monkeypatch, capsys):
+        """Token-AND, not token-OR: `base` alone hits, `base nonexistent` must not."""
+        _patch_urlopen(monkeypatch, _local_routes())
+        env = _run(["search", "--text", "base nonexistent", "--where", "local"], capsys)
+        assert env["ok"] is True, env
+        assert env["data"]["rows"] == []
+        assert env["data"]["total"] == 0
+
+    def test_local_no_match_returns_zero(self, local_target, monkeypatch, capsys):
+        _patch_urlopen(monkeypatch, _local_routes())
+        env = _run(["search", "--text", "nonexistent", "--where", "local"], capsys)
+        assert env["ok"] is True, env
+        assert env["data"]["rows"] == []
+        assert env["data"]["total"] == 0
+
+    @pytest.mark.parametrize(
+        "query",
+        [
+            pytest.param("---", id="hyphens"),
+            # `.` and `-` are the dangerous ones: they are substrings of nearly
+            # every real filename, so testing them raw made them wildcards.
+            pytest.param(".", id="single-dot"),
+            pytest.param("-", id="single-hyphen"),
+            pytest.param("_", id="underscore"),
+            pytest.param("   ", id="whitespace-only"),
+        ],
+    )
+    def test_local_unmatchable_text_returns_zero(self, local_target, monkeypatch, capsys, query):
+        """`--text` that holds no matchable token filters everything out.
+
+        A separator-only token squashes to `""`, a substring of every name, and
+        matching it raw is no better — `.` hits every file with an extension.
+        Such a query is a filter nothing satisfies, *not* the absence of one, so
+        it must not degrade into a whole-catalog dump.
+        """
+        _patch_urlopen(monkeypatch, _local_routes())
+        env = _run(["search", "--text", query, "--limit", "100", "--where", "local"], capsys)
+        assert env["ok"] is True, env
+        assert env["data"]["rows"] == []
+        assert env["data"]["total"] == 0
+
+    def test_local_stray_separator_token_does_not_zero_the_query(self, local_target, monkeypatch, capsys):
+        """`sd - xl` must not AND in a literal `-` that `sd_xl_base...` fails.
+
+        The separator-only token is dropped, so this reads as `sd` AND `xl` —
+        the same result as `sd xl`.
+        """
+        _patch_urlopen(monkeypatch, _local_routes())
+        env = _run(["search", "--text", "sd - xl", "--type", "checkpoint", "--where", "local"], capsys)
+        assert env["ok"] is True, env
+        assert [r["name"] for r in env["data"]["rows"]] == [
+            "sd_xl_base_1.0.safetensors",
+            "sd_xl_refiner_1.0.safetensors",
+        ]
+
+    def test_local_empty_text_lists_everything(self, local_target, monkeypatch, capsys):
+        """`--text ""` is falsy, so it is "no filter" — as on cloud, which sends no
+        `name_contains` for it. Whitespace-only is the separate case above."""
+        _patch_urlopen(monkeypatch, _local_routes())
+        env = _run(["search", "--text", "", "--limit", "100", "--where", "local"], capsys)
+        assert env["ok"] is True, env
+        assert env["data"]["total"] == sum(len(f) for f in _LOCAL_FILES_BY_FOLDER.values())
+
+    def test_local_token_and_still_walks_every_folder(self, local_target, monkeypatch, capsys):
+        """PR #603's multi-folder walk is unchanged: no `--type` still fetches every folder."""
+        calls = _patch_urlopen(monkeypatch, _local_routes())
+        env = _run(["search", "--text", "ltx 0.9", "--where", "local"], capsys)
+        # `0.9` squashes to `09`, so it matches `v0.9` and `0.9.7` in either form.
+        assert [r["name"] for r in env["data"]["rows"]] == [
+            "ltx-video-2b-v0.9.safetensors",
+            "ltxv-13b-0.9.7-dev.safetensors",
+        ]
+        # One folder-list call plus one listing per advertised folder.
+        assert [c["url"] for c in calls] == [
+            "http://127.0.0.1:8188/models",
+            *[f"http://127.0.0.1:8188/models/{f}" for f in _LOCAL_SEARCH_FOLDERS],
+        ]
 
     def test_local_type_still_scopes_to_one_folder(self, local_target, monkeypatch, capsys):
         calls = _patch_urlopen(monkeypatch, _local_routes())

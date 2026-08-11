@@ -13,7 +13,6 @@ command is purely the worker that the foreground ``run`` detaches.
 
 from __future__ import annotations
 
-import os
 import shutil
 import subprocess
 import sys
@@ -78,7 +77,9 @@ def watch_job(
         # practice; exit quietly.
         return
 
-    state.watcher_pid = os.getpid()
+    # Pid + create_time recorded together so the reaper can tell *this* watcher
+    # from whatever inherits its pid later (see `_is_watcher_alive` in jobs.py).
+    jobs_state.stamp_watcher_identity(state)
     jobs_state.write(state)
 
     cloud_client = None
@@ -242,6 +243,7 @@ def _resolve_watch_target(state: jobs_state.JobState, host: str | None, port: in
     Shared by the liveness probe and the poll so the two can never disagree
     about which server they are talking about.
     """
+    from comfy_cli.env_checker import _bracket_host
     from comfy_cli.local_address import resolve_local_host_port
 
     # Per-job recorded state (state.host/port, captured when the job was
@@ -249,10 +251,9 @@ def _resolve_watch_target(state: jobs_state.JobState, host: str | None, port: in
     # server it was launched against: flag > state > COMFY_LOCAL_URL > default.
     h, p = resolve_local_host_port(host or state.host, port or state.port)
     # Bracket IPv6 literals so ``_snapshot`` builds a well-formed URL (it takes
-    # an already-bracketed host, like the `jobs` resolver produces).
-    if ":" in h and not h.startswith("["):
-        h = f"[{h}]"
-    return h, p
+    # an already-bracketed host, like the `jobs` resolver produces). Delegates
+    # to the shared ``_bracket_host`` choke point.
+    return _bracket_host(h), p
 
 
 def _probe_local_server(host: str, port: int) -> str:
@@ -362,16 +363,28 @@ def _poll_local_once(state: jobs_state.JobState, *, host: str | None, port: int 
     return False, True
 
 
-_CLOUD_STATUS_MAP = {
-    "success": "completed",
-    "completed": "completed",
-    "failed": "error",
-    "error": "error",
-    "non_retryable_error": "error",
-    "lost": "error",
-    "cancelled": "cancelled",
-    "canceled": "cancelled",
-}
+# Cloud's /api/jobs status enum → the CLI's published vocabulary. Aliased to
+# the one shared map so the watcher, `jobs status`, and `jobs ls` can never
+# drift apart on what a raw cloud status means.
+_CLOUD_STATUS_MAP = jobs_state.CLOUD_STATUS_ALIASES
+
+
+def _cloud_record_meta(record: dict) -> dict[str, Any]:
+    """The metadata fields a cloud terminal verdict attaches to ``details``.
+
+    ``/api/jobs/<id>`` (``JobDetailResponse``) serves the timestamps as Unix
+    millisecond ints; the deprecated ``/api/job/<id>/status`` served ready-made
+    ``created_at``/``updated_at`` strings, and is the only dialect that ever
+    served ``assigned_inference``. Read both, old names first, so the state
+    file keeps the string shape it has always carried.
+    """
+    from comfy_cli.command.jobs import _ms_to_iso
+
+    return {
+        "assigned_inference": record.get("assigned_inference"),
+        "created_at": record.get("created_at") or _ms_to_iso(record.get("create_time")),
+        "updated_at": record.get("updated_at") or _ms_to_iso(record.get("update_time")),
+    }
 
 
 def _poll_cloud_once(state: jobs_state.JobState, *, client: Any = None) -> bool:
@@ -416,22 +429,34 @@ def _poll_cloud_once(state: jobs_state.JobState, *, client: Any = None) -> bool:
                 pass
         return True
     if state.status == "error":
-        verdict = execution_errors.classify(record.get("error_message"))
+        # Same endpoint move as `jobs._cloud_status_snapshot`: `/api/jobs/<id>`
+        # serves the cause as a structured `execution_error` object, while the
+        # deprecated `/api/job/<id>/status` served a JSON-encoded
+        # `error_message` string. `classify` parses either shape, so hand it
+        # whichever the deployment actually sent — without this the watcher
+        # classifies `None` and writes the generic "ComfyUI reported an
+        # execution error." into every failed cloud job's state file. The
+        # structured object wins when both are present: a deployment that also
+        # fills `error_message` with a short generic string would otherwise
+        # discard `node_id`/`exception_type`/`traceback_tail`, and the state
+        # file keeps no other copy of them. (`classify`'s details are built
+        # field-by-field, so the secret-bearing `current_inputs` never reaches
+        # the state file — see `execution_errors.redact_record`.)
+        structured = record.get("execution_error")
+        raw_cause = structured if isinstance(structured, dict) else (record.get("error_message") or structured)
+        verdict = execution_errors.classify(raw_cause)
         state.error = {
             "code": verdict["code"],
             "message": verdict["message"],
             "hint": verdict["hint"],
-            "details": {
-                **verdict["details"],
-                **{k: record.get(k) for k in ("assigned_inference", "created_at", "updated_at")},
-            },
+            "details": {**verdict["details"], **_cloud_record_meta(record)},
         }
         return True
     if state.status == "cancelled":
         state.error = {
             "code": "cancelled",
             "message": record.get("error_message") or "Cloud job was cancelled.",
-            "details": {k: record.get(k) for k in ("assigned_inference", "created_at", "updated_at")},
+            "details": _cloud_record_meta(record),
         }
         return True
     return False

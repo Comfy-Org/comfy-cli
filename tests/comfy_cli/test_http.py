@@ -9,11 +9,13 @@ import pytest
 
 import comfy_cli.http as http_mod
 from comfy_cli.http import (
+    MAX_RESPONSE_BYTES,
     NoRedirectHandler,
     ResponseTooLarge,
     authed_urlopen,
     build_authed_request,
     no_redirect_urlopen,
+    read_capped,
     request_json,
     target_auth_headers,
 )
@@ -453,3 +455,67 @@ def test_request_json_recursion_error_returns_none(monkeypatch, cloud_target):
     _patch_urlopen(monkeypatch, b'{"a": 1}')
     monkeypatch.setattr(http_mod.json, "loads", lambda *a, **kw: (_ for _ in ()).throw(RecursionError()))
     assert request_json("https://cloud.example/api/thing", cloud_target, max_bytes=1024) == (200, None)
+
+
+# ---------------------------------------------------------------------------
+# read_capped — the shared bounded-read primitive
+# ---------------------------------------------------------------------------
+
+
+def test_read_capped_returns_a_body_under_the_cap():
+    assert read_capped(_fake_resp(b"hello"), "https://example.com/x", max_bytes=1024) == b"hello"
+
+
+def test_read_capped_body_exactly_at_cap_is_complete_not_truncated():
+    # Boundary: len(raw) == cap is a *complete* body. The primitive reads cap+1
+    # precisely so this case is distinguishable from a truncated one.
+    body = b"0123456789"
+    assert read_capped(_fake_resp(body), "https://example.com/x", max_bytes=len(body)) == body
+
+
+def test_read_capped_one_byte_over_the_cap_raises():
+    with pytest.raises(ResponseTooLarge):
+        read_capped(_fake_resp(b"0123456789"), "https://example.com/x", max_bytes=9)
+
+
+def test_read_capped_message_names_the_url_and_the_cap():
+    # Callers interpolate this into user-facing envelopes, so it must stay
+    # descriptive enough to tell a user *which* endpoint misbehaved.
+    with pytest.raises(ResponseTooLarge) as exc_info:
+        read_capped(_fake_resp(b"x" * 100), "https://example.com/gallery.json", max_bytes=4)
+    msg = str(exc_info.value)
+    assert "https://example.com/gallery.json" in msg
+    assert "4" in msg
+
+
+@pytest.mark.parametrize("max_bytes", [0, -1])
+def test_read_capped_rejects_non_positive_max_bytes(max_bytes):
+    with pytest.raises(ValueError):
+        read_capped(_fake_resp(b"x"), "https://example.com/x", max_bytes=max_bytes)
+
+
+def test_read_capped_default_cap_is_the_shared_constant():
+    # An unbounded read is the bug this primitive exists to remove, so the
+    # default must be a real ceiling, not None/0.
+    assert MAX_RESPONSE_BYTES == 64 * 1024 * 1024
+    reads: list[int] = []
+
+    class _Recording:
+        def read(self, n):
+            reads.append(n)
+            return b"body"
+
+    assert read_capped(_Recording(), "https://example.com/x") == b"body"
+    assert reads == [MAX_RESPONSE_BYTES + 1]
+
+
+def test_read_capped_asks_for_exactly_one_byte_past_the_cap():
+    reads: list[int] = []
+
+    class _Recording:
+        def read(self, n):
+            reads.append(n)
+            return b"ab"
+
+    read_capped(_Recording(), "https://example.com/x", max_bytes=8)
+    assert reads == [9]

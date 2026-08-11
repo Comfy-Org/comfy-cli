@@ -28,6 +28,7 @@ from typing import Annotated, Any
 import typer
 
 from comfy_cli import tracking
+from comfy_cli.file_utils import atomic_write_text
 
 # Aliased at module scope rather than lazy-imported: a class used in ``except``
 # clauses at module scope cannot be resolved lazily. ``comfy_cli.http`` is
@@ -35,6 +36,7 @@ from comfy_cli import tracking
 # ``urllib.request`` in at import time, so the precedent exists.
 from comfy_cli.http import ResponseTooLarge as _ResponseTooLarge
 from comfy_cli.output import get_renderer, rprint
+from comfy_cli.output.sanitize import sanitize_markup
 
 app = typer.Typer(no_args_is_help=True, help="Slot-based editing of frontend-format ComfyUI workflows.")
 
@@ -104,8 +106,16 @@ def _get_graph(input_path: str | None, host: str | None, port: int | None, on_st
         # Live fetch: resolve mode from global routing chain, then use resilient loader.
         from comfy_cli import where as where_module
 
-        decision = where_module.resolve_default()
+        # ``_or_exit``: this command has no per-command --where flag to fall
+        # back to, so a bad COMFY_WHERE / project / persisted where_default
+        # becomes a clean `where_invalid` envelope rather than a traceback.
+        decision = where_module.resolve_default_or_exit()
         mode = "cloud" if decision.target is where_module.WhereTarget.CLOUD else "local"
+        # Routing resolved — stamp it so the `cql_no_graph` envelope below names
+        # the catalog these verbs annotated against, matching what `nodes` does
+        # from its own `_get_graph`. The `where_invalid` raised just above stays
+        # `where: null`: it *is* the failed decision.
+        renderer.where = mode
         from comfy_cli.cql.loader import resilient_load_object_info
 
         raw = resilient_load_object_info(
@@ -124,22 +134,6 @@ def _get_graph(input_path: str | None, host: str | None, port: int | None, on_st
             hint=e.details.get("hint", "pass --input <path>, or start the server with `comfy launch`"),
         )
         raise typer.Exit(code=1) from e
-
-
-def _atomic_write_text(path: Path, content: str) -> None:
-    """Write via tmp + rename so SIGINT mid-write can't leave a half-written file."""
-    import os
-
-    tmp = path.with_suffix(path.suffix + f".{os.getpid()}.tmp")
-    try:
-        tmp.write_text(content, encoding="utf-8")
-        os.replace(tmp, path)
-    except Exception:
-        try:
-            tmp.unlink()
-        except OSError:
-            pass
-        raise
 
 
 def _parse_value(raw: str) -> Any:
@@ -306,7 +300,7 @@ def set_slot_cmd(
         return
 
     if not stdout:
-        _atomic_write_text(p, json.dumps(new_workflow, indent=2))
+        atomic_write_text(p, json.dumps(new_workflow, indent=2))
 
     payload: dict[str, Any] = {
         "workflow": str(p),
@@ -421,7 +415,7 @@ def vary_cmd(
         out.mkdir(parents=True, exist_ok=True)
         for i, wf in enumerate(workflows):
             target = out / f"{p.stem}_{i:03d}.json"
-            _atomic_write_text(target, json.dumps(wf, indent=2))
+            atomic_write_text(target, json.dumps(wf, indent=2))
             written.append(str(target))
     elif renderer.is_pretty():
         import sys
@@ -648,10 +642,20 @@ _LOCAL_SORT_KEYS = {"create_time": "created", "update_time": "modified", "name":
 
 
 def _resolve_where_target(where: str | None):
-    """Resolve the routing Target for a saved-workflow verb (cloud or local)."""
+    """Resolve the routing Target for a saved-workflow verb (cloud or local).
+
+    This is the single point where ``workflow list/get/save/delete`` decide
+    local-vs-cloud, so it is also where the routed target gets stamped on the
+    renderer: every error envelope emitted downstream then carries ``where``
+    instead of ``null``. Explicit ``emit(..., where=...)`` arguments still win
+    (they resolve as ``where or self.where``), so the success envelopes are
+    unchanged.
+    """
     from comfy_cli.target import resolve_target
 
-    return resolve_target(where=where)
+    target = resolve_target(where=where)
+    get_renderer().where = target.kind
+    return target
 
 
 # Unicode categories that survive the C0/C1 filter but still let untrusted text
@@ -853,9 +857,12 @@ def _http_request(
 
 
 def _handle_cloud_http_error(renderer, e, *, operation: str, workflow_id: str | None = None) -> typer.Exit:
-    """Map HTTP failures to envelope codes. Returns an Exit to ``raise from``."""
-    import urllib.error
+    """Map HTTP failures to envelope codes. Returns an Exit to ``raise from``.
 
+    Thin wrapper over the shared cloud-error mapper (BE-3266) that supplies the
+    ``workflow``-specific 404 envelope and the oversize/unparseable-response
+    checks; everything else is shared with ``jobs``.
+    """
     if isinstance(e, _ResponseUnparseable):
         renderer.error(
             code="workflow_unparseable",
@@ -863,47 +870,31 @@ def _handle_cloud_http_error(renderer, e, *, operation: str, workflow_id: str | 
             hint="the server sent a malformed body; retry, and report it if it persists",
             details={"operation": operation, "workflow_id": workflow_id},
         )
-    elif isinstance(e, _ResponseTooLarge):
+        return typer.Exit(code=1)
+    if isinstance(e, _ResponseTooLarge):
         renderer.error(
             code="workflow_too_large",
             message=f"cloud API response during {operation} exceeded the {_HTTP_MAX_BYTES // (1024 * 1024)} MiB cap",
             hint=_TOO_LARGE_HINTS.get(operation, "the cloud response was unexpectedly large"),
             details={"operation": operation, "workflow_id": workflow_id, "limit_bytes": _HTTP_MAX_BYTES},
         )
-    elif isinstance(e, urllib.error.HTTPError):
-        # Cap the read itself — ``[:1000]`` after a full ``read()`` would still pull an
-        # arbitrarily large (or malicious) error page into memory before slicing.
-        body = (e.read(1000) or b"").decode("utf-8", "replace")
-        if e.code == 404:
-            renderer.error(
-                code="workflow_not_found",
-                message=f"no saved workflow with id {workflow_id!r}"
-                if workflow_id
-                else f"workflow not found ({operation})",
-                hint="list available workflows via `comfy --json workflow list`",
-                details={"workflow_id": workflow_id, "operation": operation},
-            )
-        elif e.code in (401, 403):
-            renderer.error(
-                code="cloud_unauthorized",
-                message=f"HTTP {e.code} during {operation}",
-                hint="re-run `comfy cloud login`",
-                details={"status": e.code},
-            )
-        else:
-            renderer.error(
-                code="cloud_http_error",
-                message=f"HTTP {e.code} during {operation}",
-                hint="check `details.body` for the server's message",
-                details={"status": e.code, "body": body, "operation": operation},
-            )
-    else:
-        renderer.error(
-            code="cloud_http_error",
-            message=f"{operation} failed: {e}",
-            hint="check network / `comfy cloud whoami`",
-        )
-    return typer.Exit(code=1)
+        return typer.Exit(code=1)
+
+    from comfy_cli.command._cloud_errors import handle_cloud_http_error
+
+    not_found_message = (
+        f"no saved workflow with id {workflow_id!r}" if workflow_id else f"workflow not found ({operation})"
+    )
+    return handle_cloud_http_error(
+        renderer,
+        e,
+        operation=operation,
+        not_found_code="workflow_not_found",
+        not_found_message=not_found_message,
+        not_found_hint="list available workflows via `comfy --json workflow list`",
+        id_label="workflow_id",
+        resource_id=workflow_id,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -959,7 +950,12 @@ def _local_list(renderer, target, *, name: str | None, limit: int, sort: str, or
         tbl.add_column("id")
         tbl.add_column("size", justify="right", style="dim")
         for r in workflows[:50]:
-            tbl.add_row(r["id"], str(r["size"]) if r["size"] is not None else "")
+            # Both cells are fields of the `/userdata` listing the server
+            # returned, and `Table.add_row` parses markup in a `str` cell.
+            tbl.add_row(
+                sanitize_markup(r["id"]),
+                sanitize_markup(r["size"]) if r["size"] is not None else "",
+            )
         renderer.console().print(tbl)
         rprint(f"[dim]{len(workflows)} workflow(s) (local)[/dim]")
     renderer.emit(payload, command="workflow list", where="local")
@@ -1241,11 +1237,16 @@ def list_cmd(
         tbl.add_column("ver", justify="right", style="dim")
         tbl.add_column("updated", style="dim")
         for r in payload["workflows"][:50]:
+            # The cloud workflow catalog is server-supplied end to end, same as
+            # the local `/userdata` listing `_local_list` renders. `str()` before
+            # the slices: `sanitize_markup` coerces, but the truncation runs
+            # first, and a numeric `id`/`updated_at` in the JSON would raise
+            # `TypeError: 'int' object is not subscriptable` before it got there.
             tbl.add_row(
-                (r["id"] or "")[:8] + "…" if r["id"] else "",
-                r["name"] or "(untitled)",
-                str(r["latest_version"] or ""),
-                (r["updated_at"] or "")[:10],
+                sanitize_markup(str(r["id"])[:8] + "…" if r["id"] else ""),
+                sanitize_markup(r["name"] or "(untitled)"),
+                sanitize_markup(r["latest_version"] or ""),
+                sanitize_markup(str(r["updated_at"] or "")[:10]),
             )
         renderer.console().print(tbl)
         rprint(f"[dim]{len(rows)} workflow(s)[/dim]")

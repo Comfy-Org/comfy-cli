@@ -118,6 +118,46 @@ class TestStopEnvelope:
         cfg.remove_background.assert_not_called()
         assert "Failed to stop" in capsys.readouterr().out
 
+    def test_dry_run_reports_the_recorded_server_and_kills_nothing(self, capsys):
+        _json_renderer("stop")
+        cfg = self._config(("127.0.0.1", 8188, 4242))
+        with (
+            patch("comfy_cli.cmdline.ConfigManager", return_value=cfg),
+            patch("comfy_cli.cmdline.utils.kill_all") as killer,
+        ):
+            stop(dry_run=True)
+
+        killer.assert_not_called()
+        cfg.remove_background.assert_not_called()
+
+        env = _envelopes(capsys.readouterr().out)[-1]
+        assert env["ok"] is True
+        assert env["changed"] is False
+        assert env["data"] == {
+            "stopped": False,
+            "dry_run": True,
+            "untracked": False,
+            "host": "127.0.0.1",
+            "port": 8188,
+            "pid": 4242,
+        }
+
+    def test_port_flag_delegates_to_the_untracked_path(self):
+        # `--port` must never fall through to the recorded-background branch,
+        # even when a background server happens to be recorded.
+        _json_renderer("stop")
+        cfg = self._config(("127.0.0.1", 8188, 4242))
+        with (
+            patch("comfy_cli.cmdline.ConfigManager", return_value=cfg),
+            patch("comfy_cli.cmdline.utils.kill_all") as killer,
+            patch("comfy_cli.command.stop_port.stop_port_execute") as delegate,
+        ):
+            stop(port=9000, dry_run=True)
+
+        killer.assert_not_called()
+        assert delegate.call_count == 1
+        assert delegate.call_args.kwargs == {"port": 9000, "dry_run": True}
+
     def test_pretty_mode_stdout_has_no_json(self, capsys):
         _pretty_renderer("stop")
         cfg = self._config(("127.0.0.1", 8188, 4242))

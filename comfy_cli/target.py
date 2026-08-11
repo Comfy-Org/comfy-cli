@@ -108,13 +108,15 @@ def resolve_target(
 
     # Local — resolve host/port by precedence: explicit flag > COMFY_LOCAL_URL
     # env > 127.0.0.1:8188. host/port may be None here; callers that also honor
-    # a persisted background server (run/jobs) resolve that upstream via
-    # host_port.resolve_host_port before reaching us.
+    # a persisted background server (run/jobs, and validate/nodes since BE-6306)
+    # resolve that upstream via host_port.resolve_host_port before reaching us.
+    from comfy_cli.env_checker import _bracket_host
     from comfy_cli.local_address import resolve_local_host_port
 
     resolved_host, resolved_port = resolve_local_host_port(host, port)
     # Bracket IPv6 literals so the URL is well-formed (RFC 3986 §3.2.2).
-    url_host = f"[{resolved_host}]" if ":" in resolved_host and not resolved_host.startswith("[") else resolved_host
+    # Delegates to the shared ``_bracket_host`` choke point.
+    url_host = _bracket_host(resolved_host)
     return Target(
         kind="local",
         base_url=f"http://{url_host}:{resolved_port}",
