@@ -2273,6 +2273,8 @@ class TestQueueStashesWarningsWithoutEmitting:
             ex.queue()
         capsys.readouterr()
         assert ex.validation_warnings == []
+
+
 class TestErrorEnvelopeCarriesRoutedTarget:
     """BE-6274: run-path *error* envelopes carry `where` (the routed target),
     matching the failure examples in docs/json-output.md.
