@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
+import sys
 import time
 import urllib.error
 import urllib.parse
@@ -46,17 +48,30 @@ GALLERY_TTL_SECONDS = 24 * 60 * 60
 
 # Everything a gallery load can throw. ``_fetch_gallery`` raises ``RuntimeError``
 # on a non-200 status (which ``urlopen`` doesn't already turn into an
-# ``HTTPError``), the fetch itself raises ``URLError``/``OSError``, decoding a
-# 200-with-garbage body raises ``JSONDecodeError``, and an over-cap body raises
-# ``ResponseTooLarge`` — all of which must route through the same stale-cache
-# fallback / command-level error, never an uncaught traceback.
+# ``HTTPError``), and ``_parse_gallery`` also raises ``RuntimeError`` for a
+# valid-JSON-but-wrong-shape body. The fetch itself raises ``URLError``/``OSError``
+# or, for an over-cap body, ``ResponseTooLarge``. Decoding a 200-with-garbage body
+# raises a ``ValueError`` — ``JSONDecodeError`` for malformed JSON, but also a bare
+# ``UnicodeDecodeError`` (a ``ValueError`` subclass, *not* a ``JSONDecodeError``)
+# for a non-UTF-8 body; catching ``ValueError`` covers both. All of these must
+# route through the same stale-cache fallback / command-level error, never an
+# uncaught traceback.
 _GALLERY_LOAD_ERRORS = (
     urllib.error.URLError,
     OSError,
     RuntimeError,
-    json.JSONDecodeError,
+    ValueError,
     ResponseTooLarge,
 )
+
+# How long a single background revalidation "counts" before another may be
+# launched. Stale-while-revalidate serves the cache on every call past the TTL;
+# without a debounce, an offline host (where the refresh fetch never succeeds and
+# so never advances the cache mtime) would spawn a fresh detached refresher on
+# *every* ``templates ls/show/fetch`` — unbounded PID fan-out / a local DoS in
+# exactly the offline scenario this feature targets. This caps the steady-state
+# launch rate to one per window while still revalidating promptly once back online.
+_REFRESH_DEBOUNCE_SECONDS = 60.0
 
 
 # ---------------------------------------------------------------------------
@@ -101,16 +116,25 @@ def _load_gallery(
     explicit_path: str | None,
     *,
     refresh: bool = False,
+    background_ok: bool = True,
 ) -> list[dict[str, Any]]:
     """Resolve the gallery index. Precedence: explicit --gallery > cache > fetch.
 
     Returns the raw decoded JSON (a list of category dicts). The CLI does
     its own filtering on top.
 
-    A cache older than ``GALLERY_TTL_SECONDS`` is transparently re-fetched so
-    ``templates ls/show`` never serves a frozen catalog forever. If that refresh
-    fails (offline / GitHub down), we fall back to the stale cache with a
-    non-fatal renderer warning rather than erroring out.
+    A cache older than ``GALLERY_TTL_SECONDS`` is served immediately and
+    revalidated in the background (stale-while-revalidate, BE-3427): a stale
+    cache is returned right away and a detached subprocess re-fetches it for
+    the *next* invocation, so an offline/firewalled machine never blocks on the
+    15s fetch timeout on every call. An explicit ``--refresh`` (or a genuinely
+    absent/corrupt cache) still fetches synchronously and surfaces errors.
+
+    ``background_ok=False`` opts a caller out of the stale-while-revalidate fast
+    path: an exact-name lookup (``show``/``fetch``) resolves a specific template,
+    and serving stale would report a freshly-added template as *not found* until
+    a later call — so those callers fetch synchronously on a stale cache (still
+    falling back to the stale copy if the fetch fails offline).
     """
     if explicit_path:
         return _parse_gallery(Path(explicit_path).read_bytes())
@@ -127,22 +151,57 @@ def _load_gallery(
             # fall through and re-fetch so the CLI self-heals.
             have_cache = False
 
-    # A TTL-expired cache is refreshed transparently, so a fetch failure here
-    # must NOT break `templates ls` — fall back to the stale cache with a
-    # non-fatal warning. An explicit `--refresh` (or a genuinely absent cache),
-    # by contrast, surfaces the fetch error so the user learns it failed.
+    # Stale-while-revalidate: a TTL-expired *but present* cache is served
+    # immediately, and a detached background process re-fetches it for the next
+    # invocation. This is what keeps an offline/firewalled machine from hanging
+    # on the full fetch timeout once per invocation past the TTL — the fetch
+    # never blocks the current call. `--refresh` is an explicit user request and
+    # `background_ok=False` (exact-name lookups) both deliberately stay
+    # synchronous (fetch + surface errors) below.
+    if not refresh and have_cache and background_ok:
+        try:
+            stale = _parse_gallery(cache.read_bytes())
+        except _GALLERY_LOAD_ERRORS:
+            # Cache is unreadable/corrupt (bad bytes, non-UTF-8, malformed
+            # JSON, wrong shape) — nothing safe to serve, so fall through to a
+            # synchronous fetch instead of the SWR fast path.
+            stale = None
+        if stale is not None:
+            spawned = _spawn_background_refresh()
+            if spawned:
+                get_renderer().warn(
+                    f"gallery index is stale (last updated {_cache_age_str(cache)} ago); "
+                    "serving the cached copy and refreshing in the background",
+                    hint="run `comfy templates refresh` to update it now",
+                )
+            else:
+                # The spawn failed outright (no fork, exec denied); don't claim a
+                # refresh is happening when none is.
+                get_renderer().warn(
+                    f"gallery index is stale (last updated {_cache_age_str(cache)} ago); "
+                    "serving the cached copy (couldn't start a background refresh)",
+                    hint="run `comfy templates refresh` to update it now",
+                )
+            return stale
+
+    # No cache at all, an explicit `--refresh`, an exact-name lookup on a stale
+    # cache (``background_ok=False``), or an unreadable/wrong-shape stale cache:
+    # fetch synchronously. On a TTL auto-refresh with a cache present a fetch
+    # failure still falls back to the stale cache; `--refresh` / no-cache surface
+    # the error so the user learns it failed.
     ttl_auto_refresh = have_cache and not refresh
     try:
         data = _fetch_gallery()
         # Validate BEFORE we touch the cache: a 200 with a non-JSON body
-        # (rate-limit HTML, captive portal, truncated response) must never
-        # clobber the last-known-good cache with garbage.
+        # (rate-limit HTML, captive portal, truncated response) or a valid-JSON
+        # but wrong-shape body (``{"error": …}``, ``null``) must never clobber
+        # the last-known-good cache with garbage.
         parsed = _parse_gallery(data)
     except _GALLERY_LOAD_ERRORS as e:
         if ttl_auto_refresh:
             # The stale cache is our fallback — but a concurrent `refresh` may
             # have removed it or left it corrupt mid-write. If reading it back
-            # also fails, surface the original fetch error, not the read error.
+            # also fails (or is wrong-shape), surface the original fetch error.
             try:
                 stale = _parse_gallery(cache.read_bytes())
             except _GALLERY_LOAD_ERRORS:
@@ -213,6 +272,120 @@ def _cache_age_str(cache: Path) -> str:
     if hours >= 1:
         return f"{hours:.1f}h"
     return f"{age / 60:.0f}m"
+
+
+def _refresh_marker_path() -> Path:
+    """Debounce marker next to the cache (``index.refresh``). Its mtime is the
+    time of the last background-refresh launch."""
+    return _cache_path().with_suffix(".refresh")
+
+
+def _refresh_due(marker: Path) -> bool:
+    """True when no background refresh has been launched within the debounce
+    window — i.e. a new one may fire. Best-effort rate limiter (mtime-based, no
+    hard lock): concurrent callers in the same instant may both spawn, but the
+    steady-state launch rate is capped at one per ``_REFRESH_DEBOUNCE_SECONDS``,
+    which is what bounds the offline fan-out (see ``_REFRESH_DEBOUNCE_SECONDS``).
+    """
+    try:
+        age = time.time() - marker.stat().st_mtime
+    except OSError:
+        return True  # no marker yet (or unreadable) → a refresh is due
+    # A future-dated marker (clock skew / restored file) must not pin the
+    # debounce open indefinitely; treat anything outside the window as due.
+    return not (0 <= age < _REFRESH_DEBOUNCE_SECONDS)
+
+
+def _note_refresh_launched(marker: Path) -> None:
+    """Record 'a refresh was just launched' by (re)touching the debounce marker.
+    Best-effort: a read-only cache dir simply means no debounce this run (the
+    common case is already bounded), never a command failure."""
+    try:
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.touch()
+    except OSError:
+        pass
+
+
+def _refresh_cwd() -> str | None:
+    """A trusted working directory for the detached refresher.
+
+    Running ``sys.executable -m comfy_cli`` prepends the child's cwd to
+    ``sys.path``, so inheriting the parent's cwd would let a ``comfy_cli.py`` (or
+    ``comfy_cli/`` package) planted in whatever directory the user happened to run
+    ``comfy templates`` from be imported and executed by the detached child.
+    Anchor the child in our own cache dir instead (created by comfy-cli, under the
+    user's home) — writing there already requires home-dir access. ``-P`` on
+    3.11+ disables the prepend outright as defense-in-depth.
+    """
+    parent = _cache_path().parent
+    return str(parent) if parent.is_dir() else None
+
+
+def _spawn_background_refresh() -> bool:
+    """Kick off a detached subprocess that re-fetches the gallery index.
+
+    Serve-stale-while-revalidate (BE-3427): the caller has already returned the
+    stale cache, so this revalidation must never block or delay process exit —
+    a firewalled machine would otherwise hang on the 15s fetch timeout on every
+    invocation past the TTL. We spawn a fully detached ``comfy templates
+    _refresh-cache`` (stdio → /dev/null; new session on POSIX, native detach
+    flags on Windows), broadly like the ``comfy run`` async job watcher does: the
+    child re-fetches and atomically rewrites the cache for the *next* invocation,
+    and its success or failure never touches the current command.
+
+    Returns ``True`` when a background refresh is now running — freshly spawned,
+    or already in flight from a launch within the debounce window; ``False`` only
+    when the spawn was attempted and failed and none is in flight (so the caller
+    can avoid telling the user a refresh started when it didn't).
+    """
+    marker = _refresh_marker_path()
+    if not _refresh_due(marker):
+        # A refresh was launched moments ago and is (at worst) still in flight;
+        # don't pile another detached process on top of it. Report True: a
+        # refresh is genuinely happening.
+        return True
+
+    argv = [sys.executable]
+    if sys.version_info >= (3, 11):
+        # -P stops Python prepending the process cwd to sys.path (3.11+),
+        # neutralizing the `-m comfy_cli` cwd-import vector across the board.
+        argv.append("-P")
+    argv += ["-m", "comfy_cli", "templates", "_refresh-cache"]
+
+    # The detached child runs the full `comfy` entry callback, which on a
+    # first-run / non-TTY host would persist an anonymous user_id via a
+    # *non-atomic* config.ini rewrite — racing the foreground process and risking
+    # a corrupt config. `_refresh-cache` is contractually 'no telemetry,
+    # best-effort', so opt the child out of consent entirely.
+    child_env = {**os.environ, "COMFY_NO_TELEMETRY": "1", "DO_NOT_TRACK": "1"}
+
+    kwargs: dict[str, Any] = dict(
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        stdin=subprocess.DEVNULL,
+        close_fds=True,
+        cwd=_refresh_cwd(),
+        env=child_env,
+    )
+    if sys.platform == "win32":
+        # start_new_session maps to setsid and is silently ignored on Windows;
+        # use the native flags so the child is truly detached from the parent's
+        # console/process group and survives console-close / Ctrl-C.
+        kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
+    else:
+        kwargs["start_new_session"] = True
+
+    try:
+        subprocess.Popen(argv, **kwargs)
+    except OSError:
+        # Couldn't spawn the refresher (no fork available, exec denied, …). We
+        # already served the stale cache, so degrade silently rather than
+        # failing the foreground command. Don't record a launch — a transient
+        # failure should be retried on the next call, not debounced away.
+        return False
+    _note_refresh_launched(marker)
+    return True
 
 
 def _as_str_list(value: Any) -> list[str]:
@@ -500,7 +673,10 @@ def show_cmd(
 ):
     renderer = get_renderer()
     try:
-        cats = _load_gallery(gallery_path, refresh=refresh)
+        # Exact-name lookup: opt out of stale-while-revalidate so a template
+        # added upstream since the cache went stale resolves on *this* call
+        # rather than being reported not-found until a later background refresh.
+        cats = _load_gallery(gallery_path, refresh=refresh, background_ok=False)
     except _GALLERY_LOAD_ERRORS as e:
         renderer.error(code="gallery_load_failed", message=str(e))
         raise typer.Exit(code=1) from e
@@ -570,6 +746,28 @@ def refresh_cmd():
     if renderer.is_pretty():
         rprint(f"[green]✓[/green] cached gallery to {cache} ({len(data)} bytes, {len(parsed)} categories)")
     renderer.emit(payload, command="templates refresh")
+
+
+@app.command("_refresh-cache", hidden=True)
+def _refresh_cache_cmd():
+    """Hidden: the detached background gallery refresh (see
+    ``_spawn_background_refresh``).
+
+    Fetch + atomically persist only — no output, no telemetry, never a non-zero
+    exit. It is spawned by ``templates ls/show/fetch`` when they serve a stale
+    cache, so any failure (offline, rate-limit, garbage 200) must be swallowed:
+    the foreground command already succeeded on the stale copy, and a bad body
+    must not clobber the last-known-good cache.
+    """
+    try:
+        data = _fetch_gallery()
+        # Validate before persisting — never cache garbage. Reject both malformed
+        # JSON (and non-UTF-8 bodies, via ValueError) and a valid-JSON-but-wrong-
+        # shape body (``{"error": …}``, ``null``) that would poison the cache.
+        _parse_gallery(data)
+    except _GALLERY_LOAD_ERRORS:
+        return
+    _persist_cache(_cache_path(), data)
 
 
 # Where the per-template workflow JSONs live on GitHub. The gallery index lists
@@ -644,9 +842,11 @@ def fetch_cmd(
 
     # Resolve against the gallery index first so we surface "no such template"
     # with the same close_matches affordance the rest of the CLI uses, instead
-    # of letting the user hit a raw GitHub 404.
+    # of letting the user hit a raw GitHub 404. Exact-name lookup, so opt out of
+    # stale-while-revalidate (background_ok=False): a template added upstream
+    # since the cache went stale must resolve now, not on a later call.
     try:
-        cats = _load_gallery(gallery_path, refresh=refresh)
+        cats = _load_gallery(gallery_path, refresh=refresh, background_ok=False)
     except _GALLERY_LOAD_ERRORS as e:
         renderer.error(code="gallery_load_failed", message=str(e))
         raise typer.Exit(code=1) from e

@@ -40,6 +40,9 @@ COMMAND_SCHEMAS: dict[str, str] = {
     "comfy update": "update",
     # help / validation
     "comfy help": "help",
+    # `comfy workflow validate` is the canonical home; `comfy validate` is the
+    # hidden deprecated alias — both emit the same workflow-validation payload.
+    "comfy workflow validate": "workflow",
     "comfy validate": "workflow",
     # nodes introspection
     "comfy nodes ls": "nodes",
