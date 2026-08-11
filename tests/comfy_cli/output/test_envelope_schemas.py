@@ -52,6 +52,10 @@ def _validator_for(name: str) -> jsonschema.Validator:
         "download.json",
         "download_status.json",
         "downloads.json",
+        # Carries an `if`/`then`/`else` conditional (host+port required only
+        # for payloads without a cloud `base_url`), so its well-formedness is
+        # worth pinning rather than assuming.
+        "jobs.json",
     ],
 )
 def test_schemas_are_well_formed(schema_name):

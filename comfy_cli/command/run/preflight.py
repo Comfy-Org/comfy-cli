@@ -52,6 +52,7 @@ def fetch_object_info(host, port, timeout):
             message=f"Failed to fetch /object_info (HTTP {e.code})",
             hint="check the ComfyUI server logs; restart the server",
             details={"status": e.code, "body": body_text[:_MAX_BODY_PREVIEW]},
+            where="local",
         )
         raise typer.Exit(code=1) from e
     except urllib.error.URLError as e:
@@ -59,6 +60,7 @@ def fetch_object_info(host, port, timeout):
             code="connection_error",
             message=f"Failed to fetch /object_info from {host}:{port}: {e.reason}",
             hint="override with --host / --port",
+            where="local",
         )
         raise typer.Exit(code=1) from e
     except TimeoutError as e:
@@ -66,6 +68,7 @@ def fetch_object_info(host, port, timeout):
             code="connection_error",
             message=f"Failed to fetch /object_info from {host}:{port}: timed out after {timeout}s",
             hint="override with --host / --port, or raise --timeout",
+            where="local",
         )
         raise typer.Exit(code=1) from e
     try:
@@ -76,16 +79,29 @@ def fetch_object_info(host, port, timeout):
             message="Server returned invalid JSON for /object_info",
             hint="check that the host:port really is a ComfyUI server",
             details={"status": 200, "body": body.decode("utf-8", errors="replace")[:_MAX_BODY_PREVIEW]},
+            where="local",
         )
         raise typer.Exit(code=1) from e
 
 
-def _preflight_validate(renderer, workflow: dict, object_info: dict, *, target_label: str = "server") -> None:
+def _preflight_validate(
+    renderer,
+    workflow: dict,
+    object_info: dict,
+    *,
+    target_label: str = "server",
+    where: str | None = None,
+) -> None:
     """Pre-submit validation via the pure-Python CQL engine.
 
     Checks unknown class_types, input shape mismatches, and catalog drift.
     Raises typer.Exit(1) on hard errors. Prints warnings in pretty mode.
     Skips silently when object_info is empty (server unreachable — fail open).
+
+    ``where`` is the routed run target (``"local"``/``"cloud"``) stamped on the
+    error envelope. It is deliberately NOT ``target_label`` — that one is prose
+    for the message and its local value (``"server"``) isn't in the envelope's
+    ``local|cloud`` vocabulary.
     """
     if not object_info:
         return
@@ -108,6 +124,7 @@ def _preflight_validate(renderer, workflow: dict, object_info: dict, *, target_l
             message=f"Workflow has {len(errors)} validation error(s) against {target_label}",
             hint="\n".join(hint_parts),
             details={"errors": errors, "warnings": validation.get("warnings", [])},
+            where=where,
         )
         raise typer.Exit(code=1)
 
@@ -117,6 +134,67 @@ def _preflight_validate(renderer, workflow: dict, object_info: dict, *, target_l
             pprint(
                 f"[yellow]⚠ {sanitize_markup(w.get('field', '?'))}: {sanitize_markup(w.get('message', ''))}[/yellow]"
             )
+
+
+def _resolve_default_checkpoint_or_exit(renderer, workflow: dict, object_info: dict, *, where: str) -> None:
+    """Runtime-resolve the bundled default's pinned checkpoint against the
+    target, in place, then report the outcome through the renderer.
+
+    Call ONLY for the bundled default graph (``workflow_name ==
+    "default_text2img"``) when the user did NOT explicitly ``--set`` the
+    checkpoint. Three outcomes:
+
+    - pinned present / can't tell (object_info empty or not enumerated) → no-op
+      (fail open — preflight + the server decide);
+    - pinned absent but the target has ≥1 checkpoint → substitute the first
+      available one and emit a ``checkpoint_substituted`` note;
+    - target positively has zero checkpoints → for ``where="local"`` a hard
+      ``no_checkpoint_available`` error (exit 1) instead of a cryptic
+      server-side reject; for ``where="cloud"`` a no-op (fail open), since Comfy
+      Cloud provisions its models per-job and the cached enum can't prove the
+      run would fail.
+
+    ``where`` is ``"local"`` or ``"cloud"`` and drives the target label + hint.
+    """
+    from comfy_cli.cql.default_workflow import resolve_default_checkpoint
+
+    target_label = "the local server" if where == "local" else "Comfy Cloud"
+    _, res = resolve_default_checkpoint(workflow, object_info, target=target_label)
+
+    # Comfy Cloud provisions its models per-job at runtime, so an empty
+    # checkpoint enum in the cached/bundled cloud object_info does NOT mean the
+    # run would fail — hard-erroring there would wrongly block valid default
+    # cloud submits. Only the local path (where the enum reflects what's
+    # actually installed) treats a positively-empty enum as a hard stop.
+    if res.no_checkpoint and where == "cloud":
+        return
+
+    if res.no_checkpoint:
+        # Only reachable for the local path (cloud returned above).
+        hint = (
+            "download a checkpoint, e.g. `comfy model download --url "
+            "https://huggingface.co/Comfy-Org/stable-diffusion-v1-5-archive/resolve/main/"
+            "v1-5-pruned-emaonly-fp16.safetensors`, then re-run — or `--set checkpoint=<name>`"
+        )
+        renderer.error(
+            code="no_checkpoint_available",
+            message=(
+                f"the bundled default text2img workflow needs a checkpoint, but {target_label} has none installed"
+            ),
+            hint=hint,
+            details={"where": where},
+        )
+        raise typer.Exit(code=1)
+
+    if res.note:
+        # Event fires in NDJSON/stream mode only; the pretty line covers humans.
+        renderer.event("checkpoint_substituted", message=res.note, checkpoint=res.substituted_to, where=where)
+        if renderer.is_pretty():
+            from rich.markup import escape
+
+            # res.note embeds a target-provided checkpoint name; escape it so a
+            # name containing Rich tags can't inject terminal markup.
+            pprint(f"[yellow]⚠ {escape(res.note)}[/yellow]")
 
 
 def _fetch_object_info(host: str, port: int) -> dict:
