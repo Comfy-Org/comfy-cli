@@ -177,6 +177,22 @@ def _emit_http_error(e: urllib.error.HTTPError, *, renderer, target, message: st
     raise typer.Exit(code=1) from e
 
 
+def _resolve_and_stamp(renderer, where: str | None):
+    """Resolve the routing Target for a ``models`` verb and stamp it on the renderer.
+
+    Every verb here calls this at the point it decides local-vs-cloud, so the
+    error envelopes raised downstream carry ``where`` instead of ``null``.
+    Errors raised *before* this (an unsafe path segment) keep ``where: null``,
+    which is correct — nothing had routed yet. Explicit
+    ``emit(..., where=...)`` arguments still take precedence over the stamp.
+    """
+    from comfy_cli.target import resolve_target
+
+    target = resolve_target(where=where)
+    renderer.where = target.kind
+    return target
+
+
 # ---------------------------------------------------------------------------
 # list-folders / list-folder — runtime introspection
 # ---------------------------------------------------------------------------
@@ -193,10 +209,8 @@ def list_folders_cmd(
         typer.Option("--where", show_default=False, help="Override the resolved routing mode."),
     ] = None,
 ):
-    from comfy_cli.target import resolve_target
-
     renderer = get_renderer()
-    target = resolve_target(where=where)
+    target = _resolve_and_stamp(renderer, where)
     url = target.url(*_models_path_parts(target))
 
     try:
@@ -268,11 +282,9 @@ def list_folder_cmd(
         typer.Option("--limit", show_default=False, help="Cap output to N rows."),
     ] = None,
 ):
-    from comfy_cli.target import resolve_target
-
     renderer = get_renderer()
     _reject_unsafe_path_segment(folder, kind="folder", renderer=renderer)
-    target = resolve_target(where=where)
+    target = _resolve_and_stamp(renderer, where)
     # Percent-encoded for the same reason `_local_folder_matches` does it: the
     # relaxed validation above admits spaces, `?`/`#`, and non-ASCII, none of
     # which may be allowed to alter the request. Error payloads below carry the
@@ -646,12 +658,10 @@ def search_cmd(
         typer.Option("--where", show_default=False, help="Override the resolved routing mode."),
     ] = None,
 ):
-    from comfy_cli.target import resolve_target
-
     renderer = get_renderer()
     if type_ is not None:
         _reject_unsafe_path_segment(type_, kind="type", renderer=renderer)
-    target = resolve_target(where=where)
+    target = _resolve_and_stamp(renderer, where)
 
     try:
         if target.is_cloud:
@@ -717,10 +727,8 @@ def show_cmd(
         typer.Option("--where", show_default=False, help="Override the resolved routing mode."),
     ] = None,
 ):
-    from comfy_cli.target import resolve_target
-
     renderer = get_renderer()
-    target = resolve_target(where=where)
+    target = _resolve_and_stamp(renderer, where)
 
     if not target.is_cloud:
         # On local there's no asset catalog. We can confirm the file exists by

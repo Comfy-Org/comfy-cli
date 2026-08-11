@@ -682,8 +682,9 @@ def ls_cmd(
 
     # Resolve the routing target once: per-command --where flag > COMFY_WHERE
     # env (how the top-level `comfy --where` arrives) > config default. Both
-    # the server query and the state-file scope key off this single decision.
-    target_where = "cloud" if _is_cloud(where) else "local"
+    # the server query and the state-file scope key off this single decision,
+    # and it is stamped on the renderer so error envelopes carry it too.
+    target_where = _stamp_where(renderer, where)
 
     # --orphaned only makes sense for state files (the server doesn't know
     # whether a watcher crashed), so skip the server query in that mode.
@@ -1099,7 +1100,7 @@ def status_cmd(
     ] = None,
 ):
     renderer = get_renderer()
-    if _is_cloud(where):
+    if _stamp_where(renderer, where) == "cloud":
         return _cloud_status(prompt_id)
 
     with report_usage_error(renderer, command="jobs status"):
@@ -1523,7 +1524,8 @@ def wait_cmd(
     wait_all: Annotated[bool, typer.Option("--all", help="Wait on all locally-tracked non-terminal jobs.")] = False,
 ):
     renderer = get_renderer()
-    cloud = _is_cloud(where)
+    where_label = _stamp_where(renderer, where)
+    cloud = where_label == "cloud"
 
     ids = list(prompt_ids or [])
     if wait_all:
@@ -1587,7 +1589,6 @@ def wait_cmd(
         "elapsed_seconds": round(time.time() - start, 2),
         "jobs": jobs_list,
     }
-    where_label = "cloud" if cloud else "local"
 
     if renderer.is_pretty():
         _render_wait_pretty(summary)
@@ -1636,9 +1637,10 @@ def cancel_cmd(
         typer.Option("--where", help="'local' (default) or 'cloud'."),
     ] = None,
 ):
-    if _is_cloud(where):
+    renderer = get_renderer()
+    if _stamp_where(renderer, where) == "cloud":
         return _cloud_cancel(prompt_id)
-    with report_usage_error(get_renderer(), command="jobs cancel"):
+    with report_usage_error(renderer, command="jobs cancel"):
         h, p = _resolve_host_port(host, port)
     _server_or_error(h, p)
     return _local_cancel(prompt_id, h, p)
@@ -2171,7 +2173,7 @@ def watch_cmd(
     ] = None,
 ):
     renderer = get_renderer()
-    if _is_cloud(where):
+    if _stamp_where(renderer, where) == "cloud":
         return _cloud_watch(prompt_id, poll_interval=poll_interval, max_wait=max_wait)
 
     with report_usage_error(renderer, command="jobs watch"):
@@ -2359,6 +2361,20 @@ def _is_cloud(where: str | None) -> bool:
         # (cmdline.py top-level option) will surface ``where_invalid``.
         return False
     return decision.target is where_module.WhereTarget.CLOUD
+
+
+def _stamp_where(renderer, where: str | None) -> str:
+    """Resolve this invocation's routing target and stamp it on the renderer.
+
+    Every ``jobs`` verb calls this at entry, right where it decides
+    local-vs-cloud, so the error envelopes raised downstream carry ``where``
+    instead of ``null``. Returns the label so callers that also need it (the
+    ``ls``/``wait`` payloads) don't resolve twice. Explicit
+    ``emit(..., where=...)`` arguments still take precedence over the stamp.
+    """
+    label = "cloud" if _is_cloud(where) else "local"
+    renderer.where = label
+    return label
 
 
 def _cloud_job_to_row(j: dict) -> JobRow:
