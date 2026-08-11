@@ -16,7 +16,7 @@ from unittest.mock import patch
 
 import jsonschema
 
-from comfy_cli import hardware
+from comfy_cli import _safe_exec, hardware
 from comfy_cli.env_checker import EnvChecker, format_hardware_summary
 
 _EnvCheckerCls = EnvChecker.__closure__[0].cell_contents
@@ -396,7 +396,7 @@ class TestRunResolvesBinaryPath:
             return "ok\n"
 
         with (
-            patch.object(hardware.shutil, "which", return_value="/usr/bin/sysctl"),
+            patch.object(_safe_exec.shutil, "which", return_value="/usr/bin/sysctl"),
             patch.object(hardware.subprocess, "check_output", side_effect=fake_check_output),
         ):
             result = hardware._run(["sysctl", "-n", "machdep.cpu.brand_string"])
@@ -410,7 +410,7 @@ class TestRunResolvesBinaryPath:
         """A binary missing from PATH resolves to None → probe is skipped and the
         subprocess is never spawned."""
         with (
-            patch.object(hardware.shutil, "which", return_value=None),
+            patch.object(_safe_exec.shutil, "which", return_value=None),
             patch.object(hardware.subprocess, "check_output") as mock_run,
         ):
             assert hardware._run(["nvidia-smi", "--query-gpu=name"]) is None
@@ -419,7 +419,7 @@ class TestRunResolvesBinaryPath:
     def test_run_never_raises_on_resolve_failure(self):
         """Even a broken PATH lookup degrades to None, honoring the never-raise
         contract."""
-        with patch.object(hardware.shutil, "which", side_effect=RuntimeError("boom")):
+        with patch.object(_safe_exec.shutil, "which", side_effect=RuntimeError("boom")):
             assert hardware._run(["nvidia-smi"]) is None
 
     def test_run_empty_cmd_returns_none(self):
@@ -429,117 +429,11 @@ class TestRunResolvesBinaryPath:
             assert hardware._run([]) is None
         mock_run.assert_not_called()
 
-
-class TestResolveBinaryCwdGuard:
-    """A binary that ``shutil.which`` resolves *directly inside* the current
-    working directory is rejected — closing the CWD binary-planting hole. The
-    guard fires on every platform (``$PATH`` can search the CWD on POSIX too via a
-    ``.``/empty entry) and rejects only the immediate directory so a legitimate
-    system binary in a subdirectory is never lost."""
-
-    def test_windows_rejects_binary_planted_in_cwd(self, tmp_path):
-        planted = tmp_path / "nvidia-smi.exe"
-        planted.write_text("")
-        with (
-            patch.object(hardware.platform, "system", return_value="Windows"),
-            patch.object(hardware.os, "getcwd", return_value=str(tmp_path)),
-            patch.object(hardware.shutil, "which", return_value=str(planted)),
-        ):
-            assert hardware._resolve_binary("nvidia-smi") is None
-
-    def test_windows_allows_system_binary_outside_cwd(self, tmp_path):
-        cwd = tmp_path / "attacker"
-        system_dir = tmp_path / "System32"
-        cwd.mkdir()
-        system_dir.mkdir()
-        legit = system_dir / "nvidia-smi.exe"
-        legit.write_text("")
-        with (
-            patch.object(hardware.platform, "system", return_value="Windows"),
-            patch.object(hardware.os, "getcwd", return_value=str(cwd)),
-            patch.object(hardware.shutil, "which", return_value=str(legit)),
-        ):
-            assert hardware._resolve_binary("nvidia-smi") == str(legit)
-
-    def test_allows_system_binary_in_subdirectory_of_cwd(self, tmp_path):
-        """Running from an ancestor of the binary (e.g. ``C:\\Windows`` with the
-        real binary under ``System32``) must NOT reject it — only a binary
-        directly in the CWD is a plant."""
-        system_dir = tmp_path / "System32"
-        system_dir.mkdir()
-        legit = system_dir / "nvidia-smi.exe"
-        legit.write_text("")
-        with (
-            patch.object(hardware.platform, "system", return_value="Windows"),
-            # CWD is the ANCESTOR (tmp_path), binary lives one level deeper.
-            patch.object(hardware.os, "getcwd", return_value=str(tmp_path)),
-            patch.object(hardware.shutil, "which", return_value=str(legit)),
-        ):
-            assert hardware._resolve_binary("nvidia-smi") == str(legit)
-
-    def test_posix_also_rejects_binary_planted_in_cwd(self, tmp_path):
-        """A ``.``/empty entry in ``$PATH`` lets ``shutil.which`` return a CWD
-        match on POSIX too, so the guard applies there as well."""
-        planted = tmp_path / "nvidia-smi"
-        planted.write_text("")
-        with (
-            patch.object(hardware.platform, "system", return_value="Darwin"),
-            patch.object(hardware.os, "getcwd", return_value=str(tmp_path)),
-            patch.object(hardware.shutil, "which", return_value=str(planted)),
-        ):
-            assert hardware._resolve_binary("nvidia-smi") is None
-
-    def test_posix_allows_system_binary_outside_cwd(self, tmp_path):
-        """A legitimate binary outside the CWD is returned as-is on POSIX."""
-        cwd = tmp_path / "project"
-        bin_dir = tmp_path / "usr_bin"
-        cwd.mkdir()
-        bin_dir.mkdir()
-        resolved = bin_dir / "sysctl"
-        resolved.write_text("")
-        with (
-            patch.object(hardware.platform, "system", return_value="Darwin"),
-            patch.object(hardware.os, "getcwd", return_value=str(cwd)),
-            patch.object(hardware.shutil, "which", return_value=str(resolved)),
-        ):
-            assert hardware._resolve_binary("sysctl") == str(resolved)
-
-
-class TestResolveBinaryRejectsRelativeMatches:
-    """``shutil.which`` returns ``os.path.join(entry, name)``, so a relative
-    ``$PATH`` entry yields a relative match anchored in the CWD. Executing that
-    string would let ``subprocess`` re-resolve it against the attacker-controlled
-    CWD, so such a match is skipped rather than run."""
-
-    def test_rejects_relative_subdirectory_match(self):
-        """``PATH=subdir`` → ``subdir/nvidia-smi``: not *directly* in the CWD, so
-        the planted-in-CWD guard lets it through — the absolute-path check is what
-        stops it."""
-        relative = os.path.join("subdir", "nvidia-smi")
-        # Precondition: this is exactly the case the CWD guard does NOT catch.
-        assert not hardware._is_planted_in_cwd(relative)
-        with patch.object(hardware.shutil, "which", return_value=relative):
-            assert hardware._resolve_binary("nvidia-smi") is None
-
-    def test_rejects_dot_relative_match(self):
-        """Windows prepends ``os.curdir`` to the search path, so a CWD plant comes
-        back as ``.\\nvidia-smi.exe``."""
-        with (
-            patch.object(hardware.platform, "system", return_value="Windows"),
-            patch.object(hardware.shutil, "which", return_value=os.path.join(os.curdir, "nvidia-smi.exe")),
-        ):
-            assert hardware._resolve_binary("nvidia-smi") is None
-
-    def test_rejects_bare_name_match(self):
-        """An empty ``$PATH`` entry joins to a bare name, which ``subprocess``
-        would resolve by its own PATH/CWD search — the bare-name invocation this
-        PR removes."""
-        with patch.object(hardware.shutil, "which", return_value="nvidia-smi"):
-            assert hardware._resolve_binary("nvidia-smi") is None
-
     def test_run_never_spawns_a_relative_path(self):
+        """A relative ``which`` match is anchored in the CWD, so ``_run`` skips
+        the probe rather than letting ``subprocess`` re-resolve it there."""
         with (
-            patch.object(hardware.shutil, "which", return_value=os.path.join("subdir", "nvidia-smi")),
+            patch.object(_safe_exec.shutil, "which", return_value=os.path.join("subdir", "nvidia-smi")),
             patch.object(hardware.subprocess, "check_output") as mock_run,
         ):
             assert hardware._run(["nvidia-smi", "--query-gpu=name"]) is None

@@ -40,7 +40,10 @@ won't change further; agents can stop polling.
 from __future__ import annotations
 
 import json
+import os
 import re
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -151,6 +154,85 @@ def read(prompt_id: str) -> JobState | None:
     except TypeError:
         # Required fields missing (e.g. truncated/legacy file) — treat as absent.
         return None
+
+
+def stamp_watcher_identity(state: JobState) -> None:
+    """Record the calling process as this record's watcher: pid + create_time
+    (both, or pid reuse defeats ``_is_watcher_alive``'s identity check).
+
+    Used by the detached watcher subprocess and by foreground ``--wait`` runs
+    alike — whichever process is actively finalizing the record stamps itself,
+    so the stale-watcher reap in ``jobs ls`` can finalize the record if that
+    process dies without running its handlers (killed from outside).
+    """
+    state.watcher_pid = os.getpid()
+    try:
+        import psutil
+
+        state.watcher_pid_create_time = psutil.Process().create_time()
+    except Exception:  # noqa: BLE001 — best effort; None just means liveness-only
+        state.watcher_pid_create_time = None
+
+
+@contextmanager
+def locked(prompt_id: str) -> Iterator[JobState | None]:
+    """Hold ``prompt_id``'s per-file lock and yield the record as it is on disk
+    *right now* (``None`` if there is no readable record).
+
+    Every writer of a job record — this module's ``write``, the watcher, the
+    foreground run, the reap in ``jobs ls`` — takes this same lock, so a
+    read-modify-write performed inside this block cannot interleave with
+    another process's write. ``write`` re-takes the lock, which is reentrant
+    within a thread, so calling it from inside the block is fine.
+
+    Yields ``None`` (without failing) when the id isn't one we can even name a
+    file for: callers are all best-effort bookkeeping paths that must not take
+    a command down over a state file.
+    """
+    try:
+        path = state_path(prompt_id)
+    except (ValueError, OSError, AttributeError, TypeError):
+        yield None
+        return
+    with locking.file_lock(path.with_suffix(".lock")):
+        yield read(prompt_id)
+
+
+def clear_watcher_identity(state: JobState) -> bool:
+    """Un-stamp this process as ``state``'s watcher and persist that, for a
+    process that is about to exit while deliberately leaving the record
+    NON-terminal (e.g. ``run --wait`` timing out on a job that is still running
+    server-side). Returns True if the on-disk record was rewritten.
+
+    Without this the record keeps a pid that is about to be dead, which is
+    exactly what the stale-watcher reap in ``jobs ls`` finalizes — it would
+    flip a healthy job to ``error``/``watcher_crashed``.
+
+    The read-modify-write runs under the record's lock against a *re-read*, not
+    against the caller's in-memory snapshot, which may be many minutes stale:
+    a concurrent ``comfy jobs cancel`` (or a watcher) can have made the record
+    terminal in the meantime, and blindly writing back the snapshot would walk
+    that verdict backwards to a non-terminal ``running`` that is then neither
+    terminal nor reapable — a permanent phantom. A record that is already
+    terminal, or that some other process has since stamped, is left untouched.
+    """
+    if not isinstance(state.prompt_id, str) or not state.prompt_id.strip():
+        return False
+    rewrote = False
+    try:
+        with locked(state.prompt_id) as on_disk:
+            if on_disk is not None and not on_disk.is_terminal and on_disk.watcher_pid == os.getpid():
+                on_disk.watcher_pid = None
+                on_disk.watcher_pid_create_time = None
+                rewrote = write(on_disk) is not None
+    except (OSError, ValueError):
+        # Same tolerance every other state-file write gets: bookkeeping must
+        # never fail an otherwise-handled exit path.
+        return False
+    # Keep the caller's snapshot in step so a later write can't re-stamp us.
+    state.watcher_pid = None
+    state.watcher_pid_create_time = None
+    return rewrote
 
 
 def new(

@@ -1520,18 +1520,21 @@ def validate_api_workflow(
     # honor it resolve upstream, here.
     is_local_fetch = input_path is None and target is where_module.WhereTarget.LOCAL
     if is_local_fetch:
-        from comfy_cli.host_port import parse_host_port_arg, resolve_host_port
+        from comfy_cli.host_port import parse_host_port_arg, report_usage_error, resolve_host_port
 
         # `host is not None` (not `if host:`): `--host ""` must reach the parser
         # and be rejected, not be read as "no --host given". Likewise the port
         # merge tests `is None`, so an explicit `--port 0` isn't silently
         # overridden by a port embedded in the combined `--host h:p` form —
         # `resolve_host_port` rejects it as out of range instead.
-        if host is not None:
-            host, parsed_port = parse_host_port_arg(host)
-            if port is None and parsed_port is not None:
-                port = parsed_port
-        host, port = resolve_host_port(host, port)
+        # `report_usage_error` gives JSON/NDJSON consumers a terminating
+        # envelope for that rejection instead of an empty stdout (exit stays 2).
+        with report_usage_error(renderer, command=command):
+            if host is not None:
+                host, parsed_port = parse_host_port_arg(host)
+                if port is None and parsed_port is not None:
+                    port = parsed_port
+            host, port = resolve_host_port(host, port)
 
     try:
         graph = Graph.load(mode=mode, input_path=input_path, host=host, port=port)

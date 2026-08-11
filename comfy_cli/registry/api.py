@@ -13,6 +13,46 @@ from comfy_cli.registry.types import (
     PyProjectConfig,
 )
 
+MAX_ERROR_BODY_CHARS = 2000
+
+
+def sanitize_error_body(text: str, *, secrets: tuple[str | None, ...] = ()) -> str:
+    """Make an untrusted registry response body safe to log and render.
+
+    The registry is upstream of us: its response body can echo back what we
+    sent (including the publish PAT), embed newlines that forge extra log
+    lines, or be arbitrarily large. Redact known secrets, flatten CR/LF to
+    escapes, and bound the length before the body reaches a log record or a
+    ``renderer.error`` envelope.
+    """
+    for secret in secrets:
+        if secret:
+            text = text.replace(secret, "***REDACTED***")
+
+    text = text.replace("\r", "\\r").replace("\n", "\\n")
+
+    if len(text) > MAX_ERROR_BODY_CHARS:
+        text = f"{text[:MAX_ERROR_BODY_CHARS]}... [truncated, {len(text)} chars total]"
+
+    return text
+
+
+class RegistryAPIError(Exception):
+    """Raised when a Registry API call fails.
+
+    Carries the HTTP ``status`` and response ``body`` when the failure came
+    from a non-2xx response, so the command boundary can surface a
+    machine-readable ``renderer.error(code=..., details={status, body})``
+    instead of a bare traceback. Client-side validation failures (missing
+    publisher id / project name) carry no status/body.
+    """
+
+    def __init__(self, message: str, *, status: int | None = None, body: str | None = None):
+        super().__init__(message)
+        self.message = message
+        self.status = status
+        self.body = body
+
 
 class NodeFetchError(Exception):
     """``get_node`` got a non-200 from the registry.
@@ -58,10 +98,10 @@ class RegistryAPI:
         """
         # Local import to prevent circular dependency
         if not node_config.tool_comfy.publisher_id:
-            raise Exception("Publisher ID is required in pyproject.toml to publish a node version")
+            raise RegistryAPIError("Publisher ID is required in pyproject.toml to publish a node version")
 
         if not node_config.project.name:
-            raise Exception("Project name is required in pyproject.toml to publish a node version")
+            raise RegistryAPIError("Project name is required in pyproject.toml to publish a node version")
         license_json = serialize_license(node_config.project.license)
         request_body = {
             "personal_access_token": token,
@@ -102,7 +142,14 @@ class RegistryAPI:
                 signedUrl=data["signedUrl"],
             )
         else:
-            raise Exception(f"Failed to publish node version: {response.status_code} {response.text}")
+            # The publish request body carries the PAT, so a registry error that
+            # echoes the payload back would otherwise leak it into logs.
+            safe_body = sanitize_error_body(response.text, secrets=(token,))
+            raise RegistryAPIError(
+                f"Failed to publish node version: {response.status_code} {safe_body}",
+                status=response.status_code,
+                body=safe_body,
+            )
 
     def list_all_nodes(self):
         """
@@ -117,7 +164,12 @@ class RegistryAPI:
             raw_nodes = response.json()["nodes"]
             return [map_node_to_node_class(node) for node in raw_nodes]
         else:
-            raise Exception(f"Failed to retrieve nodes: {response.status_code} - {response.text}")
+            safe_body = sanitize_error_body(response.text)
+            raise RegistryAPIError(
+                f"Failed to retrieve nodes: {response.status_code} - {safe_body}",
+                status=response.status_code,
+                body=safe_body,
+            )
 
     def install_node(self, node_id, version=None):
         """
@@ -143,7 +195,12 @@ class RegistryAPI:
             logging.debug(f"RegistryAPI install_node response: {response.json()}")
             return map_node_version(response.json())
         else:
-            raise Exception(f"Failed to install node: {response.status_code} - {response.text}")
+            safe_body = sanitize_error_body(response.text)
+            raise RegistryAPIError(
+                f"Failed to install node: {response.status_code} - {safe_body}",
+                status=response.status_code,
+                body=safe_body,
+            )
 
     def get_node(self, node_id):
         """
