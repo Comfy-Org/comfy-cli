@@ -263,6 +263,76 @@ def delete_cmd(
 
 
 # ---------------------------------------------------------------------------
+# delete-nodes — batch delete: N ids, ONE atomic write
+# ---------------------------------------------------------------------------
+
+
+@tracking.track_command("workflow")
+def delete_nodes_cmd(
+    file: Annotated[str, typer.Argument(help="Frontend-format workflow JSON.")],
+    nodes: Annotated[list[str], typer.Argument(help="Node ids to delete (one or more).")],
+    actor: ActorOpt = "cli",
+    base_version: BaseVersionOpt = 0,
+    stdout: StdoutOpt = False,
+    input_path: InputOpt = None,
+    host: HostOpt = None,
+    port: PortOpt = None,
+    where: WhereOpt = None,
+):
+    """Delete N nodes in one pass: one file load, one catalog load, ONE atomic
+    write, and one frozen ``delete_node`` op per id (via
+    ``workflow_ops.delete_node`` — no new op kind). Any invalid id fails the
+    whole batch atomically: the file is left byte-identical.
+    """
+    renderer = get_renderer()
+    renderer.command = "workflow delete-nodes"
+    p, workflow = _load_workflow_or_fail(renderer, file)
+    graph = _graph_or_exit(input_path, host, port, renderer, where)
+    # Snapshot the inventory BEFORE any delete mutates the in-memory graph: on
+    # failure nothing is written, so a mid-batch "nodes in this workflow" hint
+    # must describe the graph as it still stands on disk (the same pre-batch
+    # re-hinting `apply` does — advertising already-discarded state is exactly
+    # the phantom-id failure mode the batch surfaces were bitten by).
+    pre_batch_hint = workflow_ops._available_nodes_hint(workflow)
+    ops: list[dict] = []
+    try:
+        for raw in nodes:
+            raw = raw.strip()
+            node_id: Any = int(raw) if raw.lstrip("-").isdigit() else raw
+            workflow, op = workflow_ops.delete_node(workflow, graph, node_id, actor=actor, base_version=base_version)
+            ops.append(op)
+    except ValueError as e:
+        renderer.error(
+            code="workflow_edit_invalid",
+            message=f"batch failed: {workflow_ops._rehint_discarded_batch(e, pre_batch_hint)}",
+            hint="run `comfy workflow ls-nodes <file>` for the live node ids; the file was not modified",
+        )
+        raise typer.Exit(code=1) from e
+
+    workflow_ops.strip_internal(workflow)
+    serialized = json.dumps(workflow, indent=2)
+    wrote: str | None = None
+    if stdout:
+        import sys
+
+        sys.stdout.write(serialized + "\n")
+    else:
+        _atomic_write_text(p, serialized)
+        wrote = str(p)
+    payload = {
+        "workflow": str(p),
+        "count": len(ops),
+        "ops": ops,
+        "base_version": base_version,
+        "version": base_version + len(ops),
+        "wrote": wrote,
+    }
+    if renderer.is_pretty():
+        rprint(f"[bold green]✓[/bold green] deleted {len(ops)} node(s) → [dim]{p}[/dim]")
+    renderer.emit(payload, command="workflow delete-nodes", changed=True)
+
+
+# ---------------------------------------------------------------------------
 # clear
 # ---------------------------------------------------------------------------
 

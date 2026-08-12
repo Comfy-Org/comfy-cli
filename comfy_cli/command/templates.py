@@ -746,6 +746,209 @@ def fetch_cmd(
 
 
 # ---------------------------------------------------------------------------
+# templates get — resolve by ls filters + fetch in ONE call
+# ---------------------------------------------------------------------------
+
+# The ONLY filter vocabulary `get --where` accepts: exactly the `templates ls`
+# flags, mapped onto the same `_matches` kwargs — no new query language. Keep
+# this in lockstep with `_matches`' signature.
+_GET_FILTER_KEYS = {
+    "type": "type_",
+    "category": "category",
+    "tag": "tag",
+    "model": "model",
+    "provider": "provider",
+    "name": "name_sub",
+}
+
+
+def _parse_get_filters(renderer, where: list[str]) -> dict[str, str | None]:
+    """Parse repeatable ``--where key=value`` pairs into `_matches` kwargs.
+
+    Strict: a pair without ``=``, an empty/unknown key, or no filters at all is
+    an error — a filterless `get` is just `ls`, and would always be ambiguous.
+    """
+    filters: dict[str, str | None] = {v: None for v in _GET_FILTER_KEYS.values()}
+    valid = ", ".join(sorted(_GET_FILTER_KEYS))
+    if not where:
+        renderer.error(
+            code="template_filter_invalid",
+            message="`templates get` needs at least one --where filter to resolve a single template",
+            hint=f"pass --where key=value (repeatable); keys: {valid} — same semantics as `templates ls`",
+        )
+        raise typer.Exit(code=1)
+    for raw in where:
+        key, sep, value = raw.partition("=")
+        key = key.strip()
+        if not sep or not key:
+            renderer.error(
+                code="template_filter_invalid",
+                message=f"--where must be key=value, got {raw!r}",
+                hint=f"keys: {valid} — e.g. --where type=video --where tag=API",
+            )
+            raise typer.Exit(code=1)
+        if key not in _GET_FILTER_KEYS:
+            renderer.error(
+                code="template_filter_invalid",
+                message=f"unknown --where key {key!r}",
+                hint=f"keys: {valid} — same semantics as the `templates ls` flags",
+                details={"key": key, "valid_keys": sorted(_GET_FILTER_KEYS)},
+            )
+            raise typer.Exit(code=1)
+        filters[_GET_FILTER_KEYS[key]] = value
+    return filters
+
+
+def _get_near_misses(rows: list[dict[str, Any]], filters: dict[str, str | None]) -> list[dict[str, Any]]:
+    """Leave-one-out suggestions for a zero-match filter set: for each active
+    filter, what would have matched with that one filter dropped. Reuses
+    `_matches` verbatim, so the suggestions obey exactly the ls semantics."""
+    active = {k: v for k, v in filters.items() if v is not None}
+    key_by_kwarg = {v: k for k, v in _GET_FILTER_KEYS.items()}
+    near: list[dict[str, Any]] = []
+    if len(active) < 2 and "name_sub" not in active:
+        # With a single non-name filter there is nothing useful to relax against.
+        return near
+    for dropped in active:
+        relaxed = dict(filters)
+        relaxed[dropped] = None
+        names = [r["name"] for r in rows if _matches(r, **relaxed)][:5]
+        if names:
+            near.append({"without": key_by_kwarg[dropped], "names": names})
+    return near
+
+
+@app.command(
+    "get",
+    help=(
+        "Resolve ONE template by `templates ls` filters and fetch its workflow in the same call. "
+        "Filters are repeatable `--where key=value` pairs (keys: type, category, tag, model, "
+        "provider, name — identical semantics to the `templates ls` flags). Errors when zero "
+        "or more than one template matches."
+    ),
+)
+@tracking.track_command("templates")
+def get_cmd(
+    where: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--where",
+            "-w",
+            metavar="KEY=VALUE",
+            show_default=False,
+            help="Filter (repeatable): type=…, category=…, tag=…, model=…, provider=…, name=…",
+        ),
+    ] = None,
+    gallery_path: Annotated[
+        str | None,
+        typer.Option("--gallery", show_default=False, help="Path to a local index.json (skips the cache + fetch)."),
+    ] = None,
+    refresh: Annotated[
+        bool,
+        typer.Option("--refresh", help="Re-fetch the gallery index from GitHub before resolving."),
+    ] = False,
+):
+    """Fuse `templates ls` (find) + `templates fetch` (get) into one hop.
+
+    Measured agent loops run ls → fetch with the name copied verbatim; `get`
+    resolves the same filter predicates and, when exactly ONE template matches,
+    returns its workflow in the same envelope `fetch` uses.
+    """
+    renderer = get_renderer()
+    filters = _parse_get_filters(renderer, list(where or []))
+
+    try:
+        cats = _load_gallery(gallery_path, refresh=refresh)
+    except _GALLERY_LOAD_ERRORS as e:
+        renderer.error(code="gallery_load_failed", message=str(e))
+        raise typer.Exit(code=1) from e
+
+    rows = _flatten_templates(cats)
+    matched = [r for r in rows if _matches(r, **filters)]
+    shown_filters = {k: filters[v] for k, v in _GET_FILTER_KEYS.items()}
+
+    if not matched:
+        near = _get_near_misses(rows, filters)
+        near_hint = "; ".join(f"drop {n['without']}= to match {', '.join(n['names'])}" for n in near[:2])
+        renderer.error(
+            code="template_not_found",
+            message=f"no template matches {shown_filters}",
+            hint=near_hint or "relax a filter, or browse with `comfy templates ls`",
+            details={"filters": shown_filters, "near_misses": near},
+        )
+        raise typer.Exit(code=1)
+
+    if len(matched) > 1:
+        candidates = [
+            {
+                "name": r["name"],
+                "title": r["title"],
+                "output_type": r["output_type"],
+                "tags": r["tags"],
+                "models": r["models"],
+            }
+            for r in matched[:10]
+        ]
+        renderer.error(
+            code="template_ambiguous",
+            message=f"{len(matched)} templates match {shown_filters}; `get` needs exactly one",
+            hint="add another --where filter (e.g. name=<substring>) to narrow to a single template",
+            details={"filters": shown_filters, "matched": len(matched), "candidates": candidates},
+        )
+        raise typer.Exit(code=1)
+
+    match = matched[0]
+    name = match["name"]
+
+    # From here down this is `fetch` with no --out: same fetch helper, same
+    # error envelopes, workflow riding in the envelope (or pretty stdout).
+    try:
+        body = _fetch_template_workflow(name)
+    except (urllib.error.HTTPError, urllib.error.URLError, OSError, RuntimeError, ResponseTooLarge) as e:
+        status = getattr(e, "code", None)
+        renderer.error(
+            code="template_fetch_failed",
+            message=f"failed to fetch workflow for {name!r}: {e}",
+            hint=(
+                "the gallery index references a template whose workflow JSON "
+                "is missing upstream — report at "
+                "https://github.com/Comfy-Org/workflow_templates/issues"
+                if status == 404
+                else "check network connectivity"
+            ),
+            details={"status": status} if status else None,
+        )
+        raise typer.Exit(code=1) from e
+
+    try:
+        wf = json.loads(body)
+    except (json.JSONDecodeError, UnicodeDecodeError) as e:
+        renderer.error(
+            code="template_workflow_invalid_json",
+            message=f"upstream returned non-JSON for {name!r}: {e}",
+            hint="report at https://github.com/Comfy-Org/workflow_templates/issues",
+        )
+        raise typer.Exit(code=1) from e
+
+    payload = {
+        "name": name,
+        "title": match["title"],
+        "output_type": match["output_type"],
+        "filters": shown_filters,
+        "bytes": len(body),
+        "node_count": _workflow_node_count(wf),
+        "workflow": wf,
+    }
+    if renderer.is_pretty():
+        # Pipeable, exactly like `fetch` with no --out.
+        import sys
+
+        sys.stdout.write(body.decode("utf-8"))
+        sys.stdout.write("\n")
+    renderer.emit(payload, command="templates get")
+
+
+# ---------------------------------------------------------------------------
 # templates check — per-template runnable/missing/api-required/unknown verdict
 # ---------------------------------------------------------------------------
 

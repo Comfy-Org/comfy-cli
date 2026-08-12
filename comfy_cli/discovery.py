@@ -61,6 +61,7 @@ COMMAND_SCHEMAS: dict[str, str] = {
     "comfy workflow connect": "workflow",
     "comfy workflow set-widget": "workflow",
     "comfy workflow delete-node": "workflow",
+    "comfy workflow delete-nodes": "workflow",
     "comfy workflow ls-nodes": "workflow",
     "comfy workflow apply": "workflow",
     "comfy workflow capture": "workflow",
@@ -108,6 +109,7 @@ COMMAND_SCHEMAS: dict[str, str] = {
     "comfy templates ls": "templates",
     "comfy templates show": "templates",
     "comfy templates fetch": "templates",
+    "comfy templates get": "templates",
     "comfy templates refresh": "templates",
     "comfy templates check": "templates",
     # lifecycle
