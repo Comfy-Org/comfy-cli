@@ -28,7 +28,7 @@ from typing import Annotated, Any
 
 import typer
 
-from comfy_cli import tracking
+from comfy_cli import tracking, workflow_ops
 from comfy_cli.file_utils import atomic_write_bytes
 from comfy_cli.http import ResponseTooLarge, plain_urlopen, read_capped
 from comfy_cli.output import get_renderer, rprint
@@ -646,6 +646,22 @@ def fetch_cmd(
         bool,
         typer.Option("--refresh", help="Re-fetch the gallery index from GitHub before resolving."),
     ] = False,
+    emit_ops: Annotated[
+        bool,
+        typer.Option(
+            "--emit-ops",
+            help=(
+                "Also emit `ops`: the stamped op batch that turns the file being replaced INTO this "
+                "template (delete_node + add_node + connect, frozen vocabulary). Replays through a merge "
+                "consumer AND is a legal `comfy workflow apply --ops` batch. Omitted, with `ops_skipped` "
+                "saying why, for templates the vocabulary cannot express (subgraphs, groups)."
+            ),
+        ),
+    ] = False,
+    actor: Annotated[str, typer.Option("--actor", help="Op author id for --emit-ops (CRDT stamping).")] = "cli",
+    base_version: Annotated[
+        int, typer.Option("--base-version", help="Draft version the emitted ops are stamped against.")
+    ] = 0,
 ):
     renderer = get_renderer()
 
@@ -711,6 +727,18 @@ def fetch_cmd(
         )
         raise typer.Exit(code=1) from e
 
+    # The graph this fetch is REPLACING, read before the write clobbers it —
+    # `--emit-ops` needs it to emit the delete_node half of the batch. Only read
+    # when asked: an unparseable file at the target is not an error for a plain
+    # fetch (it is about to be overwritten), so it must not become one here.
+    previous: dict[str, Any] = {}
+    if emit_ops and out:
+        try:
+            loaded = json.loads(Path(out).expanduser().read_text(encoding="utf-8"))
+            previous = loaded if isinstance(loaded, dict) else {}
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+            previous = {}
+
     if out:
         out_path = Path(out).expanduser()
         out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -740,6 +768,17 @@ def fetch_cmd(
         # can get the workflow — emit() owns stdout in JSON mode, so without this
         # the fetch would produce nothing but metadata.
         payload["workflow"] = wf
+    if emit_ops:
+        # A bulk writer that emits ops stops being a whole-document replacement:
+        # the consumer folds the batch into the document it already has, so the
+        # replaced canvas keeps ONE identity and an attributed history instead of
+        # being re-seeded (op-vocabulary-v1 §8.6). Failure is NOT fatal — the
+        # fetch itself succeeded and the file is written; the consumer falls back
+        # to whatever it did before ops existed, and `ops_skipped` says why.
+        try:
+            payload["ops"] = workflow_ops.replace_ops(previous, wf, actor=actor, base_version=base_version)
+        except workflow_ops.NotExpressibleError as e:
+            payload["ops_skipped"] = str(e)
     if renderer.is_pretty() and out:
         rprint(f"[green]✓[/green] wrote {len(body):,} bytes ({payload['node_count']} nodes) to {target_repr}")
     renderer.emit(payload, command="templates fetch")
