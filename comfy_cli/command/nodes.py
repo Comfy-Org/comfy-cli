@@ -782,6 +782,83 @@ def downstream_cmd(
     renderer.emit(payload, command="nodes downstream")
 
 
+def _alias_slug(class_type: str) -> str:
+    """A spec-batch alias for a class name — the same slugging
+    ``workflow_ops.capture_recipe`` uses, so the two surfaces mint identical
+    alias vocabulary."""
+    import re
+
+    return re.sub(r"[^a-z0-9]+", "_", str(class_type or "node").lower()).strip("_") or "node"
+
+
+def _emit_path_ops(graph, steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Project a routed path (``steps`` from ``find_paths``/``exact_paths``)
+    into a ready-to-apply spec batch in the frozen edit vocabulary.
+
+    THE CONTRACT IS THE ROUND-TRIP: the returned specs must pass
+    ``workflow_ops.apply_specs`` unchanged. Shape:
+
+    * one ``add_node`` per step, with a deterministic dedup-suffixed ``as:``
+      alias (``tinysampler``, ``tinysampler_2``, …);
+    * one ``connect`` per step whose consumed type is produced by an earlier
+      step — from the NEAREST prior producer's matching output to this step's
+      first link input accepting that type. Alias references are emitted as
+      bare names (the freeze vocabulary's valid form; the ``$``-canonical
+      sugar lands with the vocabulary-freeze PR).
+
+    The path's seed FROM type is produced by nothing in the path, so the first
+    step's input deliberately stays unbound — never a phantom connect.
+    """
+    from comfy_cli.workflow_ops import _types_compatible
+
+    # Deterministic dedup-suffixed aliases, one add_node per step.
+    counts: dict[str, int] = {}
+    aliases: list[str] = []
+    specs: list[dict[str, Any]] = []
+    for step in steps:
+        class_type = str(step.get("node") or "")
+        slug = _alias_slug(class_type)
+        counts[slug] = counts.get(slug, 0) + 1
+        alias = slug if counts[slug] == 1 else f"{slug}_{counts[slug]}"
+        aliases.append(alias)
+        specs.append({"op": "add_node", "class_type": class_type, "as": alias})
+
+    def _producer_output(class_type: str, want: str) -> str | None:
+        m = graph.node(class_type)
+        for p in m.outputs if m is not None else ():
+            types = {t.strip() for t in str(p.type).split(",") if t.strip()}
+            if want in types or "*" in types:
+                return p.name
+        return None
+
+    def _consumer_input(class_type: str, want: str) -> str | None:
+        m = graph.node(class_type)
+        ports = [p for p in (m.inputs if m is not None else ()) if p.is_link]
+        # Required inputs first — that's the slot the plan is routing through.
+        for p in sorted(ports, key=lambda p: not p.required):
+            if _types_compatible(want, p.type):
+                return p.name
+        return None
+
+    for j, step in enumerate(steps):
+        want = str(step.get("input_type") or "")
+        if not want:
+            continue  # step consumes nothing from the path (e.g. a loader)
+        # Nearest prior step whose node actually produces `want` — in exact
+        # mode the recorded per-step output_type is one of possibly several
+        # outputs, so resolve against the schema, not just the step record.
+        for k in range(j - 1, -1, -1):
+            src_class = str(steps[k].get("node") or "")
+            out_name = _producer_output(src_class, want)
+            if out_name is None:
+                continue
+            in_name = _consumer_input(str(step.get("node") or ""), want)
+            if in_name is not None:
+                specs.append({"op": "connect", "from": f"{aliases[k]}.{out_name}", "to": f"{aliases[j]}.{in_name}"})
+            break
+    return specs
+
+
 @app.command("path", help="Routed paths from one type to another (e.g. MODEL -> IMAGE).")
 @tracking.track_command("nodes")
 def path_cmd(
@@ -796,6 +873,17 @@ def path_cmd(
             help="Exact: every step's required link inputs must be satisfiable from the path so far. Loose: any routed sequence.",
         ),
     ] = True,
+    emit_ops: Annotated[
+        bool,
+        typer.Option(
+            "--emit-ops",
+            help=(
+                "Attach each path's plan as a ready-to-apply spec batch under `paths[].ops` "
+                "(frozen add_node/connect vocabulary with `as:` aliases) — feed it straight "
+                "to `comfy workflow apply --ops`."
+            ),
+        ),
+    ] = False,
     input_path: Annotated[str | None, typer.Option("--input", show_default=False)] = None,
     host: Annotated[str | None, typer.Option(show_default=False)] = None,
     port: Annotated[int | None, typer.Option(show_default=False)] = None,
@@ -836,6 +924,10 @@ def path_cmd(
                     }
                     for s in (p.get("steps") or [])
                 ],
+                # --emit-ops: the plan as a ready-to-apply spec batch (round-trips
+                # through workflow_ops.apply_specs unchanged). Absent without the
+                # flag so the default output stays byte-identical.
+                **({"ops": _emit_path_ops(graph, list(p.get("steps") or []))} if emit_ops else {}),
             }
             for p in paths
         ],
