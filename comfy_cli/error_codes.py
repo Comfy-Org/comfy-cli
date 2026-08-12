@@ -521,6 +521,20 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "run the standalone `comfy workflow clear <file>` first, then apply the remaining ops as a batch",
     ),
     ErrorCode(
+        "workflow_reset_doc_not_batchable",
+        "A batch (`workflow apply` / `workflow foreach`) contained a `reset_doc` op. `reset_doc` resets the "
+        "whole document to the empty baseline and erases its replay history, so it is standalone-only "
+        "(docs/op-vocabulary-v1.md: batchable = no) and the batch was rejected atomically — nothing was applied.",
+        "run the standalone `comfy workflow reset-doc <file> --confirm` first, then apply the remaining ops as a batch",
+    ),
+    ErrorCode(
+        "workflow_reset_doc_unconfirmed",
+        "`comfy workflow reset-doc` was called without `--confirm`. The command fails closed: it erases every "
+        "node AND the document's replay history, which no later op can undo.",
+        "re-run with `--confirm` if that is really what you want — otherwise `comfy workflow clear <file>` "
+        "empties the graph while keeping the document's history",
+    ),
+    ErrorCode(
         "normalized_value",
         "Warning (not fatal): a set-widget value wasn't an exact COMBO option, so "
         "the nearest matching option was used. Surfaced in the op's `warnings`.",

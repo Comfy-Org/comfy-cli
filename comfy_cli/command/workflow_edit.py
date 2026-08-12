@@ -283,6 +283,54 @@ def clear_cmd(
 
 
 # ---------------------------------------------------------------------------
+# reset-doc — the guarded document reset (op-vocabulary-v1 §1.6)
+# ---------------------------------------------------------------------------
+
+
+@tracking.track_command("workflow")
+def reset_doc_cmd(
+    file: Annotated[str, typer.Argument(help="Frontend-format workflow JSON.")],
+    confirm: Annotated[
+        bool,
+        typer.Option(
+            "--confirm",
+            help="REQUIRED. Without it the command fails closed and writes nothing.",
+        ),
+    ] = False,
+    actor: ActorOpt = "cli",
+    base_version: BaseVersionOpt = 0,
+    stdout: StdoutOpt = False,
+    where: WhereOpt = None,  # accepted for caller uniformity; reset needs no catalog
+):
+    """Reset the document to the empty baseline — nodes, links, groups, ids AND
+    the applied-op history.
+
+    Guarded, unlike every other edit command, because it is the only one whose
+    effect no later op can undo: it is a history barrier, so ops minted against
+    a pre-reset base_version do not replay across it. The check runs BEFORE the
+    file is read, so an unconfirmed call cannot even fail halfway.
+    """
+    renderer = get_renderer()
+    renderer.command = "workflow reset-doc"
+    if not confirm:
+        renderer.error(
+            code="workflow_reset_doc_unconfirmed",
+            message=(
+                "`workflow reset-doc` erases every node AND the document's replay history; "
+                "it requires an explicit --confirm. Nothing was written."
+            ),
+            hint=(
+                "re-run with --confirm if that is really what you want — otherwise "
+                "`comfy workflow clear <file>` empties the graph while keeping the document's history"
+            ),
+        )
+        raise typer.Exit(code=1)
+    p, workflow = _load_workflow_or_fail(renderer, file)
+    workflow, op = workflow_ops.reset_doc(workflow, actor=actor, base_version=base_version)
+    _finish(renderer, p, workflow, op, base_version, stdout, "workflow reset-doc")
+
+
+# ---------------------------------------------------------------------------
 # Litegraph node modes worth surfacing on ls-nodes. 0 (always) and 1 (on-event)
 # are normal execution and are deliberately unlabeled. Mirrors workflow_to_api's
 # _MODE_MUTED / _MODE_BYPASS.

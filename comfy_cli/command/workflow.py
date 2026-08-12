@@ -1483,6 +1483,10 @@ app.command("connect", help="Wire an output slot to an input slot; emits a conne
 app.command("set-widget", help="Set a widget by name (`<id>.<widget>`); emits a set_widget op.")(_wedit.set_widget_cmd)
 app.command("delete-node", help="Delete a node and its links; emits a delete_node op.")(_wedit.delete_cmd)
 app.command("clear", help="Remove every node, link, and group; emits one clear op.")(_wedit.clear_cmd)
+app.command(
+    "reset-doc",
+    help="Reset the document to the empty baseline — nodes, ids AND replay history. Requires --confirm.",
+)(_wedit.reset_doc_cmd)
 app.command("ls-nodes", help="List nodes (id/type/title) in a workflow file.")(_wedit.ls_nodes_cmd)
 app.command("apply", help="Apply a recipe / batch of edits in one pass; supports node aliases + --param.")(
     _wedit.apply_cmd

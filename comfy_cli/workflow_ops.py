@@ -92,15 +92,31 @@ def _new_op(kind: str, actor: str, base_version: int, **fields: Any) -> dict[str
 #: Every op kind in the v1 vocabulary, including defined-but-deferred kinds.
 FROZEN_OPS: tuple[str, ...] = ("add_node", "connect", "set_widget", "delete_node", "clear", "reset_doc")
 
-#: Kinds frozen in the contract whose replay is not implemented yet
-#: (``reset_doc`` is specified in op-vocabulary-v1.md; implementation is
-#: deferred to the bulk-writers ticket). ``apply_op`` must keep rejecting these.
-DEFERRED_OPS: tuple[str, ...] = ("reset_doc",)
+#: Kinds frozen in the contract whose replay is not implemented yet.
+#: ``apply_op`` must keep rejecting these. Empty since amendment v1.1:
+#: ``reset_doc`` was un-deferred by the bulk-writers ticket (V1-038).
+DEFERRED_OPS: tuple[str, ...] = ()
 
 #: Kinds a batch (``apply_specs``) dispatches. ``clear`` and ``reset_doc`` are
 #: standalone-only: they rewrite the whole document, so they never ride inside
 #: an atomic batch.
 BATCHABLE_OPS: tuple[str, ...] = ("add_node", "connect", "set_widget", "delete_node")
+
+#: Per-kind rendering for :class:`NotBatchableError` — the registered error code
+#: and the standalone command that DOES do the job. One entry per frozen kind
+#: outside ``BATCHABLE_OPS``; the contract test pins that correspondence.
+_NOT_BATCHABLE: dict[str, dict[str, str]] = {
+    "clear": {
+        "code": "workflow_clear_not_batchable",
+        "command": "comfy workflow clear <file>",
+        "does": "wipes the whole graph",
+    },
+    "reset_doc": {
+        "code": "workflow_reset_doc_not_batchable",
+        "command": "comfy workflow reset-doc <file> --confirm",
+        "does": "resets the whole document to the empty baseline and erases its replay history",
+    },
+}
 
 
 class NotBatchableError(ValueError):
@@ -110,16 +126,25 @@ class NotBatchableError(ValueError):
     (see ``comfy_cli/error_codes.py``) instead of the generic
     ``workflow_edit_invalid``, so a caller learns the exact standalone command
     to run rather than re-trying the batch.
+
+    ``code``/``hint`` are per-kind INSTANCE attributes; the class attributes are
+    the ``clear`` values, kept so existing callers that read
+    ``NotBatchableError.code`` off the class still resolve.
     """
 
     code = "workflow_clear_not_batchable"
     hint = "run the standalone `comfy workflow clear <file>` first, then apply the remaining ops as a batch"
 
-    def __init__(self, index: int):
+    def __init__(self, index: int, kind: str = "clear"):
+        entry = _NOT_BATCHABLE.get(kind, _NOT_BATCHABLE["clear"])
+        command = entry["command"]
+        self.code = entry["code"]
+        self.kind = kind
+        self.hint = f"run the standalone `{command}` first, then apply the remaining ops as a batch"
         super().__init__(
-            f"spec #{index}: `clear` wipes the whole graph and is standalone-only (op-vocabulary-v1: "
+            f"spec #{index}: `{kind}` {entry['does']} and is standalone-only (op-vocabulary-v1: "
             "batchable = no) — it never rides inside a batch. No changes were applied — the batch was "
-            "discarded. Run `comfy workflow clear <file>` as its own command, then apply the remaining ops."
+            f"discarded. Run `{command}` as its own command, then apply the remaining ops."
         )
 
 
@@ -843,6 +868,207 @@ def clear(workflow: dict, *, actor: str = "cli", base_version: int = 0) -> tuple
     return apply_op(workflow, op, None), op
 
 
+def reset_doc(workflow: dict, *, actor: str = "cli", base_version: int = 0) -> tuple[dict, dict]:
+    """Reset the whole document to the empty baseline (op-vocabulary-v1 §1.6).
+
+    Not ``clear``. ``clear`` empties the graph but PRESERVES the id high-water
+    marks and the applied-op bookkeeping, so it is an ordinary edit that merges
+    with concurrent ops. ``reset_doc`` drops those too: it is a **history
+    barrier**, and ops minted against a pre-reset ``base_version`` do not replay
+    across it.
+
+    That is why the CLI surface guards it behind an explicit ``--confirm`` and
+    why it is standalone-only — there is no safe way to fold "forget everything
+    that ever applied" into the middle of a batch.
+    """
+    removed = [n.get("id") for n in workflow.get("nodes") or [] if isinstance(n, dict)]
+    op = _new_op("reset_doc", actor, base_version, removed_nodes=removed)
+    return apply_op(workflow, op, None), op
+
+
+# ---------------------------------------------------------------------------
+# Bulk writers — expressing a whole-file replacement as ops (V1-038)
+# ---------------------------------------------------------------------------
+
+
+class NotExpressibleError(ValueError):
+    """A graph uses structure the frozen v1 vocabulary cannot express.
+
+    Raised by :func:`replace_ops` INSTEAD of returning a partial batch. A
+    partial batch is the dangerous answer: it applies cleanly and leaves a
+    document that is not the graph the caller asked for. The caller is expected
+    to fall back to whatever whole-document path it had before (the cloud
+    agent re-mints), and to say why.
+    """
+
+
+def _inexpressible_reason(workflow: dict) -> str | None:
+    """Why ``workflow`` cannot be rebuilt from add_node/connect ops, or None.
+
+    The frozen vocabulary has four batchable kinds and none of them can create a
+    subgraph definition, a canvas group, or a reroute point — so a graph that
+    carries any of those is not reconstructible from ops, full stop. Enumerated
+    positively (a closed list of things we know we CAN'T do) rather than by
+    trying and checking, so an unexpressible template fails before it has
+    written anything.
+    """
+    if not isinstance(workflow, dict) or not isinstance(workflow.get("nodes"), list):
+        return "not a frontend-format workflow (no `nodes` list) — only the save/UI format can be op-ified"
+    definitions = workflow.get("definitions")
+    if isinstance(definitions, dict) and definitions.get("subgraphs"):
+        return "the workflow contains a subgraph definition, which no frozen op kind can create"
+    if workflow.get("groups"):
+        return "the workflow contains canvas groups, which no frozen op kind can create"
+    extra = workflow.get("extra")
+    if isinstance(extra, dict) and (extra.get("reroutes") or extra.get("linkExtensions")):
+        return "the workflow contains reroute points, which no frozen op kind can create"
+    for node in workflow["nodes"]:
+        if not isinstance(node, dict) or node.get("id") is None or not node.get("type"):
+            return "the workflow contains a node with no id or no type"
+    for link in workflow.get("links") or []:
+        if not isinstance(link, list) or len(link) < 5:
+            return "the workflow contains a link that is not a [id, from, from_slot, to, to_slot, type] tuple"
+    return None
+
+
+def _slot_ref(node: dict, slots_key: str, index: Any, alias: str) -> str:
+    """`$alias.<slot>` for a spec-form connect, preferring the slot NAME.
+
+    Names are the canonical reference form and survive slot reordering; the
+    index is the fallback for a node whose slot list the template omits.
+    ``_split_ref_slot`` partitions on the FIRST dot, so a name containing one
+    would resolve wrong — those fall back to the index too.
+    """
+    slots = node.get(slots_key)
+    if isinstance(slots, list) and isinstance(index, int) and 0 <= index < len(slots):
+        name = (slots[index] or {}).get("name") if isinstance(slots[index], dict) else None
+        if isinstance(name, str) and name and "." not in name:
+            return f"${alias}.{name}"
+    return f"${alias}.{index}"
+
+
+def _alias_for(class_type: str, used: dict[str, int]) -> str:
+    """A deterministic, batch-unique alias for a node — `ksampler`, `ksampler_2`."""
+    base = re.sub(r"[^a-z0-9_]", "", str(class_type).lower()) or "node"
+    used[base] = used.get(base, 0) + 1
+    return base if used[base] == 1 else f"{base}_{used[base]}"
+
+
+def replace_ops(old: dict, new: dict, *, actor: str = "cli", base_version: int = 0) -> list[dict]:
+    """The stamped op batch that turns ``old`` into ``new``.
+
+    This is what makes a BULK WRITER (a template fetch, a saved-workflow open)
+    an attributed, incremental edit instead of a whole-document replacement.
+    Without it the only way to land a replaced canvas in a shared document is to
+    re-seed it — and §8.6 is explicit that independently re-seeding a base is
+    the one thing a replica must never do, because the duplicate identities
+    only show up on the first merge.
+
+    Shape: ``delete_node`` for everything currently in ``old`` (in order), then
+    ``add_node`` for every node in ``new``, then ``connect`` for every link.
+    Widget values need no ``set_widget`` ops — they ride inside the ``add_node``
+    payload, which §8.5 makes authoritative at replay.
+
+    **Identity is re-minted, never inherited.** Template graphs are numbered
+    from small frontend counters (1, 2, 3…); replaying those ids into a live
+    document would reuse identities a concurrent replica may still hold, which
+    §1.5 calls out as letting a merge resurrect a deleted node. Every node and
+    link gets a fresh ``mint_id`` and every interior reference is remapped onto
+    it.
+
+    **Dual-shape on purpose.** Each returned dict is a fully minted op (``op_id``
+    / ``actor`` / ``stamp`` + the kind's minted fields) AND carries that kind's
+    SPEC keys (``class_type``/``at``/``as``, ``from``/``to``, ``node``). So the
+    same array replays through :func:`apply_op` losslessly *and* is accepted
+    verbatim by :func:`apply_specs` — one artifact, both consumers. The two are
+    not equivalent: ``apply_specs`` re-mints each node from the live catalog, so
+    it reproduces the STRUCTURE (classes + wiring) while the op path reproduces
+    the graph exactly, widget values included.
+
+    :raises NotExpressibleError: ``new`` uses structure no frozen op can create.
+    """
+    reason = _inexpressible_reason(new)
+    if reason:
+        raise NotExpressibleError(reason)
+
+    ops: list[dict] = []
+    old_links = [link for link in (old.get("links") or []) if isinstance(link, list) and len(link) >= 5]
+    for node in old.get("nodes") or []:
+        if not isinstance(node, dict) or node.get("id") is None:
+            continue
+        nid = node["id"]
+        ops.append(
+            _new_op(
+                "delete_node",
+                actor,
+                base_version,
+                node_id=nid,
+                removed_links=[link[0] for link in old_links if link[1] == nid or link[3] == nid],
+                # spec key, so apply_specs dispatches the same entry
+                node=nid,
+            )
+        )
+
+    node_ids: dict[Any, int] = {n["id"]: mint_id() for n in new["nodes"]}
+    link_ids: dict[Any, int] = {link[0]: mint_id() for link in (new.get("links") or [])}
+    aliases: dict[Any, str] = {}
+    used: dict[str, int] = {}
+
+    for original in new["nodes"]:
+        node = copy.deepcopy(original)
+        node["id"] = node_ids[original["id"]]
+        for slot in node.get("inputs") or []:
+            if isinstance(slot, dict) and slot.get("link") is not None:
+                slot["link"] = link_ids.get(slot["link"])
+        for slot in node.get("outputs") or []:
+            if isinstance(slot, dict) and isinstance(slot.get("links"), list):
+                slot["links"] = [link_ids[x] for x in slot["links"] if x in link_ids]
+        alias = _alias_for(original.get("type"), used)
+        aliases[original["id"]] = alias
+        pos = original.get("pos")
+        ops.append(
+            _new_op(
+                "add_node",
+                actor,
+                base_version,
+                node_id=node["id"],
+                class_type=original.get("type"),
+                pos=pos,
+                node=node,
+                # spec keys
+                **{"at": pos, "as": alias},
+            )
+        )
+
+    by_original_id = {n["id"]: n for n in new["nodes"]}
+    for link in new.get("links") or []:
+        lid, from_node, from_slot, to_node, to_slot = link[0], link[1], link[2], link[3], link[4]
+        if from_node not in node_ids or to_node not in node_ids:
+            # A link to a node the graph does not contain is already broken in
+            # the source; dropping it is the faithful translation of a graph the
+            # canvas would render with a dangling edge.
+            continue
+        ops.append(
+            _new_op(
+                "connect",
+                actor,
+                base_version,
+                link_id=link_ids[lid],
+                from_node=node_ids[from_node],
+                from_slot=from_slot,
+                to_node=node_ids[to_node],
+                to_slot=to_slot,
+                link_type=link[5] if len(link) > 5 else None,
+                # spec keys
+                **{
+                    "from": _slot_ref(by_original_id[from_node], "outputs", from_slot, aliases[from_node]),
+                    "to": _slot_ref(by_original_id[to_node], "inputs", to_slot, aliases[to_node]),
+                },
+            )
+        )
+    return ops
+
+
 def delete_node(
     workflow: dict,
     graph,
@@ -1144,11 +1370,11 @@ def apply_specs(
                     workflow, op = delete_node(
                         workflow, graph, resolve_ref(spec["node"], aliases), actor=actor, base_version=base_version
                     )
-                elif kind == "clear":
+                elif kind in _NOT_BATCHABLE:
                     # In the frozen vocabulary but standalone-only — surfaced with
                     # its own registered code so the caller learns the standalone
                     # command instead of a generic "unknown op".
-                    raise NotBatchableError(i)
+                    raise NotBatchableError(i, kind)
                 else:
                     raise ValueError(f"spec #{i}: unknown op {kind!r}")
             except KeyError as e:
@@ -1185,9 +1411,16 @@ def apply_op(workflow: dict, op: dict, graph) -> dict:
         _apply_delete_node(workflow, op)
     elif kind == "clear":
         _apply_clear(workflow, op)
+    elif kind == "reset_doc":
+        _apply_reset_doc(workflow, op)
     else:
         raise ValueError(f"unknown op {kind!r}")
-    applied.append(op["op_id"])
+    # NOT ``applied.append`` — ``_apply_reset_doc`` REPLACES ``_applied_ops``
+    # with a fresh list (that is what makes it a history barrier), so the local
+    # binding above is stale for that kind and the reset's own op_id would be
+    # written into a discarded list. Re-read, so a re-delivered reset_doc is a
+    # no-op rather than a second wipe.
+    workflow.setdefault("_applied_ops", []).append(op["op_id"])
     return workflow
 
 
@@ -1380,6 +1613,32 @@ def _apply_clear(workflow: dict, op: dict) -> None:
     workflow["links"] = []
     if "groups" in workflow:
         workflow["groups"] = []
+
+
+#: Document-identity keys a ``reset_doc`` keeps. Everything else is discarded:
+#: the point of the op is that nothing from the old document survives it. The
+#: id stays so the reset document is still THIS workflow, not a new one.
+_RESET_DOC_KEEP = ("id",)
+
+
+def _apply_reset_doc(workflow: dict, op: dict) -> None:
+    """Replace the whole document with the empty baseline, bookkeeping included.
+
+    Unlike ``_apply_clear`` this drops ``last_node_id``/``last_link_id``,
+    ``_applied_ops`` and ``_widget_stamps`` — the history barrier of §1.6. Ids
+    are minted at random in ``[2**40, 2**53)`` (``mint_id``), never allocated
+    from the high-water marks, so resetting them to 0 cannot cause id reuse.
+    """
+    kept = {k: workflow[k] for k in _RESET_DOC_KEEP if k in workflow}
+    workflow.clear()
+    workflow.update(kept)
+    workflow["nodes"] = []
+    workflow["links"] = []
+    workflow["groups"] = []
+    workflow["last_node_id"] = 0
+    workflow["last_link_id"] = 0
+    workflow["_applied_ops"] = []
+    workflow["_widget_stamps"] = {}
 
 
 # ---------------------------------------------------------------------------
