@@ -423,6 +423,15 @@ def apply_cmd(
         list[str] | None,
         typer.Option("--param", show_default=False, help="Recipe param as key=value; repeatable."),
     ] = None,
+    ack: Annotated[
+        str,
+        typer.Option(
+            "--ack",
+            help="Envelope acknowledgment detail: 'full' (default) echoes every applied op in "
+            "`data.ops`; 'summary' returns a compact receipt (counts, minted/deleted node ids, "
+            "aliases) with no ops echo.",
+        ),
+    ] = "full",
     actor: ActorOpt = "cli",
     base_version: BaseVersionOpt = 0,
     stdout: StdoutOpt = False,
@@ -436,6 +445,9 @@ def apply_cmd(
     minted node by alias instead of a captured id."""
     renderer = get_renderer()
     renderer.command = "workflow apply"
+    if ack not in ("full", "summary"):
+        renderer.error(code="workflow_edit_invalid", message=f"--ack must be 'summary' or 'full', got {ack!r}")
+        raise typer.Exit(code=1)
     p, workflow = _load_workflow_or_fail(renderer, file)
     graph = _graph_or_exit(input_path, host, port, renderer, where)
 
@@ -479,8 +491,22 @@ def apply_cmd(
             workflow, graph, specs, actor=actor, base_version=base_version
         )
     except (ValueError, KeyError) as e:
-        # Atomic batch: nothing is written if any spec fails.
-        renderer.error(code="workflow_edit_invalid", message=f"batch failed: {e}")
+        # Atomic batch: nothing is written if any spec fails. Same error code
+        # and exit in both ack modes — `--ack summary` only ADDS a structured
+        # receipt (`failed` position + `applied_count`) to `error.details`;
+        # the default envelope stays exactly what it is today.
+        details = None
+        if ack == "summary":
+            details = {
+                "failed": {
+                    "index": getattr(e, "spec_index", None),
+                    "op": getattr(e, "spec_op", None),
+                    "code": "workflow_edit_invalid",
+                },
+                # Specs applied before the abort — all discarded (atomic batch).
+                "applied_count": getattr(e, "applied_count", 0),
+            }
+        renderer.error(code="workflow_edit_invalid", message=f"batch failed: {e}", details=details)
         raise typer.Exit(code=1) from e
 
     workflow_ops.strip_internal(workflow)
@@ -493,17 +519,40 @@ def apply_cmd(
     else:
         _atomic_write_text(p, serialized)
         wrote = str(p)
-    payload = {
-        "workflow": str(p),
-        "count": len(ops),
-        "ops": ops,
-        "aliases": aliases,
-        "base_version": base_version,
-        "version": base_version + len(ops),
-        "wrote": wrote,
-    }
+    if ack == "summary":
+        # PINNED shape — these field names feed the cloud field-contract
+        # manifest; add/rename only with a contract bump on that side.
+        ops_by_kind: dict[str, int] = {}
+        for op in ops:
+            ops_by_kind[op["op"]] = ops_by_kind.get(op["op"], 0) + 1
+        payload = {
+            "count": len(ops),
+            "ops_by_kind": ops_by_kind,
+            "nodes_added": [op["node_id"] for op in ops if op["op"] == "add_node"],
+            "nodes_deleted": [op["node_id"] for op in ops if op["op"] == "delete_node"],
+            "aliases": aliases,
+            "base_version": base_version,
+            "version": base_version + len(ops),
+            "changed": True,
+        }
+    else:
+        payload = {
+            "workflow": str(p),
+            "count": len(ops),
+            "ops": ops,
+            "aliases": aliases,
+            "base_version": base_version,
+            "version": base_version + len(ops),
+            "wrote": wrote,
+        }
     if renderer.is_pretty():
         rprint(f"[bold green]✓[/bold green] applied {len(ops)} edit(s) → [dim]{p}[/dim]")
+        if ack == "summary":
+            kinds = ", ".join(f"{k} ×{n}" for k, n in payload["ops_by_kind"].items())
+            if kinds:
+                rprint(f"  [dim]{kinds}[/dim]")
+            for alias, node_id in aliases.items():
+                rprint(f"  [dim]alias {alias} → {node_id}[/dim]")
     renderer.emit(payload, command="workflow apply", changed=True)
 
 

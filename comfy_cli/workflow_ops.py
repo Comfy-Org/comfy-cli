@@ -1092,7 +1092,16 @@ def apply_specs(
                 raise ValueError(f"spec #{i} ({kind}) is missing required field {e}") from e
             ops.append(op)
     except (ValueError, KeyError) as e:
-        raise _rehint_discarded_batch(e, pre_batch_hint) from e
+        err = _rehint_discarded_batch(e, pre_batch_hint)
+        # Structured failure position for callers that report a summary
+        # receipt (`apply --ack summary`): which spec aborted the batch, its
+        # op kind, and how many specs had applied before the abort (all of
+        # them then discarded — the batch is atomic). `i`/`spec` are the loop
+        # variables at raise time; guard for a non-dict spec.
+        err.spec_index = i  # type: ignore[attr-defined]
+        err.spec_op = spec.get("op") if isinstance(spec, dict) else None  # type: ignore[attr-defined]
+        err.applied_count = len(ops)  # type: ignore[attr-defined]
+        raise err from e
     return workflow, ops, aliases
 
 
