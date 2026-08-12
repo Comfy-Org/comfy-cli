@@ -4,7 +4,13 @@ from __future__ import annotations
 
 import pytest
 
-from comfy_cli.output.sanitize import sanitize, sanitize_markup, sanitize_optional, sanitize_value
+from comfy_cli.output.sanitize import (
+    sanitize,
+    sanitize_markup,
+    sanitize_optional,
+    sanitize_terminal_stream,
+    sanitize_value,
+)
 
 
 @pytest.mark.parametrize(
@@ -114,6 +120,75 @@ def test_sanitize_markup_leaves_markup_free_text_untouched():
 
 def test_sanitize_markup_stringifies_non_strings():
     assert sanitize_markup(42) == "42"
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        # SGR survives byte-for-byte — that is the whole point of this variant.
+        ("\x1b[31mred\x1b[0m", "\x1b[31mred\x1b[0m"),
+        ("\x1b[mreset-shorthand", "\x1b[mreset-shorthand"),
+        ("\x1b[1;38;2;255;0;0mtruecolor\x1b[0m", "\x1b[1;38;2;255;0;0mtruecolor\x1b[0m"),
+        # Sub-parameter colons (ITU T.416 style) are still SGR.
+        ("\x1b[38:2:255:0:0mcolon", "\x1b[38:2:255:0:0mcolon"),
+        # Everything else a terminal acts on still goes: erase, cursor moves,
+        # scroll region, private modes, and an 'm' final byte reached through
+        # private/intermediate bytes rather than plain SGR.
+        ("job \x1b[2Jevil", "job evil"),
+        ("up\x1b[3Aover", "upover"),
+        ("a\x1b[?25lb", "ab"),
+        ("a\x1b[>1mb", "ab"),
+        ("a\x1b[1 mb", "ab"),
+        # 8-bit C1 CSI is stripped even when it *is* an SGR: terminals in UTF-8
+        # mode do not honor it, so keeping it would only leak bytes.
+        ("a\x9b31mb", "ab"),
+        ("a\x9b2Jb", "ab"),
+        # OSC/DCS/APC, terminated and unterminated.
+        ("a\x1b]0;pwned\x07b", "ab"),
+        ("a\x1b]0;pwned\x1b\\b", "ab"),
+        ("before\x1b]0;never terminated", "before"),
+        ("a\x1bPq#0;2\x1b\\b", "ab"),
+        ("a\x1b_G payload \x1b\\b", "ab"),
+        # Two-character escapes / charset designators.
+        ("a\x1b(Bb", "ab"),
+        ("a\x1b=b", "ab"),
+        # Stray control bytes, including a lone trailing ESC and DEL.
+        ("a\x00b\x07c\x7fd", "abcd"),
+        ("trailing\x1b", "trailing"),
+        ("trailing\x9b", "trailing"),
+        # Layout survives — and unlike ``sanitize``, so does CR: a tqdm line
+        # recorded in the log must replay as one rewritten line.
+        ("col1\tcol2\nrow2", "col1\tcol2\nrow2"),
+        ("50%|#####     |\r100%|##########|\n", "50%|#####     |\r100%|##########|\n"),
+        ("windows\r\nlines", "windows\r\nlines"),
+        # Rich markup is text here — this sink never parses it.
+        ("[INFO] hello [world]", "[INFO] hello [world]"),
+        ("[/red]", "[/red]"),
+        ("", ""),
+        ("héllo · 世界 ✓", "héllo · 世界 ✓"),
+    ],
+)
+def test_sanitize_terminal_stream_keeps_sgr_and_cr(raw: str, expected: str):
+    assert sanitize_terminal_stream(raw) == expected
+
+
+def test_sanitize_terminal_stream_leaves_only_sgr_escapes():
+    payload = "x\x1b[2J\x1b]0;t\x07\x1b[32mgreen\x1b[0m\x1bPz\x1b\\\x9b1m\x7f\x00y"
+    cleaned = sanitize_terminal_stream(payload)
+    assert cleaned == "x\x1b[32mgreen\x1b[0my"
+    assert "\x9b" not in cleaned
+
+
+def test_sanitize_terminal_stream_is_idempotent():
+    once = sanitize_terminal_stream("\x1b[31mred\x1b[0m\x1b[2Jgone\r\n")
+    assert sanitize_terminal_stream(once) == once
+
+
+def test_sanitize_terminal_stream_does_not_split_kept_sequences():
+    # The regression the single-pass design exists to prevent: a two-pass
+    # implementation (escapes, then a residual control-char sweep) would strip
+    # the ESC out of a preserved SGR and leave a bare literal '[31m' on screen.
+    assert sanitize_terminal_stream("\x1b[31mred") == "\x1b[31mred"
 
 
 def test_sanitize_value_leaves_container_repr_inert():

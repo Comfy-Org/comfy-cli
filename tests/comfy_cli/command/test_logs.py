@@ -286,16 +286,111 @@ def test_logs_pretty_honors_large_tail_past_line_cap(monkeypatch, tmp_path, caps
 
 
 def test_logs_pretty_writes_raw_lines(monkeypatch, tmp_path, capsys):
-    # Default renderer is pretty; log text with '[...]' must not be reinterpreted.
+    # Default renderer is pretty; log text with '[...]' must not be reinterpreted
+    # as Rich markup. Escape bytes ARE stripped (see the sanitization tests
+    # below), so this no longer pins the output byte-for-byte — but every
+    # bracketed run has to survive verbatim, including an unbalanced closer that
+    # would raise MarkupError from a markup-parsing sink.
     log = tmp_path / "comfyui_8188.log"
-    log.write_text("[INFO] hello [world]\nplain\n")
+    log.write_text("[INFO] hello [world]\n[####  ] 50%\n[/red]\nplain\n")
     monkeypatch.setattr(launch, "resolve_background_log_path", lambda port=None: (str(log), "recorded"))
 
     launch.logs(tail=10)
 
     out = capsys.readouterr().out
     assert "[INFO] hello [world]" in out
+    assert "[####  ] 50%" in out
+    assert "[/red]" in out
     assert "plain" in out
+
+
+# --------------------------------------------------------------------------- #
+# `comfy logs` pretty replay — terminal-control sanitization
+# --------------------------------------------------------------------------- #
+
+
+def _logs_pretty_out(monkeypatch, tmp_path, capsys, contents: str) -> str:
+    """Run pretty-mode ``logs()`` over ``contents`` and return captured stdout."""
+    log = tmp_path / "comfyui_8188.log"
+    log.write_text(contents)
+    monkeypatch.setattr(launch, "resolve_background_log_path", lambda port=None: (str(log), "recorded"))
+    launch.logs(tail=50)
+    return capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    ("contents", "banned"),
+    [
+        # OSC 0 retitles the user's terminal window; BEL-terminated form.
+        ("start\x1b]0;evil\x07end\n", "\x1b]"),
+        # ...and the unterminated form, which consumes to end-of-string.
+        ("start\x1b]0;evil\n", "\x1b]"),
+        # CSI erase-display and cursor-up repaint CLI-owned lines above.
+        ("start\x1b[2Jend\n", "\x1b[2J"),
+        ("start\x1b[3Aend\n", "\x1b[3A"),
+        # 8-bit C1 CSI — not honored by UTF-8 terminals, so it is stripped too.
+        ("start\x9b31mend\n", "\x9b"),
+    ],
+)
+def test_logs_pretty_strips_terminal_control_sequences(monkeypatch, tmp_path, capsys, contents, banned):
+    out = _logs_pretty_out(monkeypatch, tmp_path, capsys, contents)
+
+    assert banned not in out
+    assert "start" in out
+
+
+def test_logs_pretty_preserves_sgr_colour(monkeypatch, tmp_path, capsys):
+    # The reason this is `sanitize_terminal_stream` and not `sanitize`: a
+    # coloured ComfyUI log must still be coloured when replayed.
+    out = _logs_pretty_out(monkeypatch, tmp_path, capsys, "\x1b[31mred\x1b[0m\n")
+
+    assert "\x1b[31mred\x1b[0m" in out
+
+
+def test_logs_pretty_closes_styles_left_open_by_the_log(monkeypatch, tmp_path, capsys):
+    # A log that never resets (or conceals with \x1b[8m) would otherwise leave
+    # the terminal styled for everything the user types next.
+    out = _logs_pretty_out(monkeypatch, tmp_path, capsys, "\x1b[8mconcealed\n")
+
+    assert out.endswith("\x1b[0m")
+
+
+def test_logs_pretty_adds_no_reset_when_the_log_has_no_sgr(monkeypatch, tmp_path, capsys):
+    # The overwhelmingly common case stays byte-identical to the pre-sanitize
+    # output: an uncoloured log gains nothing.
+    out = _logs_pretty_out(monkeypatch, tmp_path, capsys, "plain one\nplain two\n")
+
+    assert out == "plain one\nplain two\n"
+
+
+def test_logs_pretty_preserves_progress_lines_and_layout(monkeypatch, tmp_path, capsys):
+    # Tabs and newlines are layout and survive. The '\r' a tqdm progress line is
+    # recorded with survives the sanitizer too (see the unit tests) — but it
+    # never reaches the sanitizer, because `read_log_tail` opens the file in the
+    # default universal-newline mode, which normalizes '\r' to '\n' one layer
+    # up. That is pre-existing reader behavior shared with the JSON envelope, so
+    # this asserts what the pretty path actually prints rather than pinning a
+    # '\r' the display layer never sees.
+    out = _logs_pretty_out(monkeypatch, tmp_path, capsys, "50%|##   |\r100%|#####|\ncol1\tcol2\n")
+
+    assert "50%|##   |" in out
+    assert "100%|#####|" in out
+    assert "col1\tcol2\n" in out
+
+
+def test_logs_json_lines_are_byte_faithful(monkeypatch, tmp_path, capsys):
+    # The machine path stays raw: json.dumps already escapes \x1b, and stripping
+    # here would mutate data agents parse.
+    _force_json_renderer()
+    raw = "\x1b]0;evil\x07\x1b[2J\x1b[31mred\x1b[0m\x9b31m\n"
+    log = tmp_path / "comfyui_8188.log"
+    log.write_text(raw)
+    monkeypatch.setattr(launch, "resolve_background_log_path", lambda port=None: (str(log), "recorded"))
+
+    launch.logs(tail=50)
+
+    env = _envelope(capsys)
+    assert env["data"]["lines"] == [raw]
 
 
 # --------------------------------------------------------------------------- #

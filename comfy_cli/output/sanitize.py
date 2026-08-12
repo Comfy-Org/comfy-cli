@@ -27,6 +27,15 @@ lets a message overwrite a line that has already been printed. Non-control
 Unicode is left alone; homoglyph and bidi-override spoofing are a different
 problem and deliberately out of scope here.
 
+Two display contracts, one module. ``sanitize`` above is for text the CLI
+*authors* — a message we compose around an untrusted value, where colour is
+ours to add and nothing in the value needs to survive as styling.
+``sanitize_terminal_stream`` is for *replaying a captured stream* back to the
+terminal (``comfy logs``): the bytes were produced by another program that owns
+its own colouring, so SGR and carriage return are kept and only the sequences a
+terminal would *act* on are dropped. Use the narrower one whenever the sink is a
+message rather than a replayed stream. Neither belongs on a JSON path.
+
 Removing the escape *bytes* is only half the boundary: Rich manufactures new
 ones from markup it finds in a string, so text bound for a markup-interpreting
 sink also needs ``sanitize_markup`` (see its docstring).
@@ -56,6 +65,27 @@ _ESCAPE_SEQUENCE_RE = re.compile(
 # C1 block. A lone trailing ESC and an orphaned 8-bit introducer land here.
 _CONTROL_CHAR_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
 
+# Exact-match test for a kept sequence: 7-bit SGR only, parameter bytes
+# restricted to digits/;/: so private-mode or intermediate-byte oddities
+# ending in 'm' are still stripped. 8-bit C1 CSI (\x9b...m) is NOT kept —
+# UTF-8 terminals don't honor it and keeping it buys nothing.
+_SGR_RE = re.compile(r"\x1b\[[0-9;:]*m\Z")
+
+# ``_ESCAPE_SEQUENCE_RE``'s alternation plus the residual control characters,
+# in one pattern so a single ``.sub()`` pass sees whole escape sequences before
+# the lone-control-char fallback can split them. Keeps tab/newline/CR:
+# tab+newline are layout, and \r only rewrites the line it is on — which its
+# writer already fully controls — while being how tqdm progress lines are
+# genuinely recorded.
+# The leading newline is load-bearing under ``re.VERBOSE``: the borrowed pattern
+# ends in a ``#`` comment, and appending to the same line would make the whole
+# alternative part of that comment — a regex that still compiles and still
+# strips escape sequences, but silently stops stripping lone control bytes.
+_TERMINAL_STREAM_RE = re.compile(
+    _ESCAPE_SEQUENCE_RE.pattern + "\n" + r"| [\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]",
+    re.VERBOSE | re.DOTALL,
+)
+
 
 def sanitize(text: str) -> str:
     """Return ``text`` with ANSI escape sequences and control characters removed.
@@ -65,6 +95,35 @@ def sanitize(text: str) -> str:
     the conservative reading, not data loss we could have avoided.
     """
     return _CONTROL_CHAR_RE.sub("", _ESCAPE_SEQUENCE_RE.sub("", text))
+
+
+def sanitize_terminal_stream(text: str) -> str:
+    """``sanitize`` for a captured stream replayed to the terminal, keeping colour.
+
+    Same threat model as ``sanitize`` — CSI cursor/erase sequences, OSC title
+    rewrites, DCS payloads and stray control bytes are all removed — with two
+    deliberate exceptions, because the text being replayed is another program's
+    own output rather than a message we composed:
+
+    * **7-bit SGR is preserved** (``\\x1b[31m``), so a ComfyUI log that coloured
+      its own warnings still reads the way it did on the launching terminal.
+      SGR only restyles subsequent characters; it cannot move the cursor, erase
+      anything, or address the terminal outside the stream.
+    * **Carriage return is preserved**, so a ``tqdm`` progress line recorded in
+      the log renders as one rewritten line instead of a wall of duplicates.
+      ``\\r`` can only repaint the line it is already on, which the replayed
+      stream owns in full — unlike in ``sanitize``, where a server string would
+      be overwriting text the CLI itself printed.
+
+    This cannot be layered on top of ``sanitize``: that function's second pass
+    sweeps residual control characters, which would eat the ``\\x1b`` of every
+    SGR the first pass deliberately kept. Hence the single combined pass here.
+
+    The caller must still pick a sink that does not parse Rich markup — this
+    returns log text verbatim, brackets included. For a markup-interpreting
+    sink use ``sanitize_markup`` instead and accept the loss of colour.
+    """
+    return _TERMINAL_STREAM_RE.sub(lambda m: m.group(0) if _SGR_RE.fullmatch(m.group(0)) else "", text)
 
 
 def sanitize_optional(text: str | None) -> str | None:
