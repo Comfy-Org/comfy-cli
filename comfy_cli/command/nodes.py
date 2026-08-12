@@ -1118,6 +1118,102 @@ def categories_cmd(
 
 
 # ---------------------------------------------------------------------------
+# widget-catalog — the derived name↔index projection the CRDT applier needs
+# ---------------------------------------------------------------------------
+
+
+@app.command(
+    "widget-catalog",
+    help=(
+        "Emit the widget catalog: per-class widget order (plus autogrow/inputcount families) "
+        "with a content-hash catalog_version. The projection of object_info a name<->index "
+        "widget converter needs."
+    ),
+)
+@tracking.track_command("nodes")
+def widget_catalog_cmd(
+    where: Annotated[
+        str | None,
+        typer.Option("--where", show_default=False, help="'cloud' to query Comfy Cloud's catalog; default is local."),
+    ] = None,
+    input_path: Annotated[
+        str | None,
+        typer.Option("--input", show_default=False, help="Path to a local object_info JSON (offline mode)."),
+    ] = None,
+    host: Annotated[str | None, typer.Option(show_default=False)] = None,
+    port: Annotated[int | None, typer.Option(show_default=False)] = None,
+    select: Annotated[
+        str | None,
+        typer.Option(
+            "--select",
+            show_default=False,
+            help="Project the payload: dot path (types.KSampler.widget_order), comma multi-select.",
+        ),
+    ] = None,
+):
+    """Export ``{types: {<class_type>: {widget_order, ...}}}`` + ``catalog_version``.
+
+    A ComfyUI workflow stores widget values POSITIONALLY (``widgets_values``);
+    the CRDT document the cloud agent and the frontend co-edit stores them BY
+    NAME. Converting between the two needs the widget order — which
+    ``cql.engine.Graph`` already computes for every ``set-widget`` in this CLI,
+    including the two shapes a naive projection gets wrong (the synthetic
+    ``control_after_generate`` slot, and dynamic-combo sub-widget expansion).
+    Exporting it from here means there is one implementation of widget order,
+    not one per consumer; see ``comfy_cli.cql.widget_catalog``.
+
+    Offline is the normal case for a server-side host: with
+    ``COMFY_OBJECT_INFO_FILE`` set (or ``--input``) this reads a baked dump and
+    never touches the network or a credential.
+    """
+    from comfy_cli.cql.widget_catalog import build_catalog
+
+    renderer = get_renderer()
+    _stale: dict = {}
+    graph = _get_graph(
+        input_path,
+        host,
+        port,
+        where=where,
+        on_stale=lambda key, err: _stale.update(stale=True, source=key, reason=err),
+    )
+
+    payload = build_catalog(graph)
+
+    if _stale:
+        # A stale catalog is still a usable catalog — the version pins WHICH one
+        # it is, so a consumer that cached a different version re-fetches. Warn,
+        # don't fail: the alternative is no catalog at all.
+        payload["stale"] = True
+        payload["warnings"] = [
+            {
+                "code": "object_info_stale",
+                "message": f"served from cache ({_stale['source']}): {_stale['reason']}",
+            }
+        ]
+
+    if select is not None:
+        from comfy_cli.selector import emit_selected
+
+        return emit_selected(renderer, payload, select, command="nodes widget-catalog")
+
+    if renderer.is_pretty():
+        from rich.table import Table
+
+        rprint(f"[bold]{payload['class_count']}[/bold] class(es)  [dim]{payload['catalog_version']}[/dim]")
+        table = Table(show_header=True, header_style="bold")
+        table.add_column("class_type")
+        table.add_column("widgets")
+        table.add_column("widget_order")
+        for class_type, entry in sorted(payload["types"].items()):
+            order = entry["widget_order"]
+            table.add_row(sanitize_markup(class_type), str(len(order)), sanitize_markup(", ".join(order)))
+        renderer.console().print(table)
+
+    renderer.emit(payload, command="nodes widget-catalog")
+
+
+# ---------------------------------------------------------------------------
 # refresh — object_info is fetched live; the annotation data is what's cached
 # ---------------------------------------------------------------------------
 
