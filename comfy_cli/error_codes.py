@@ -620,6 +620,13 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "Requested node class isn't in the loaded environment.",
         "see `details.close_matches` or run `comfy nodes search`",
     ),
+    ErrorCode(
+        "expand_miss",
+        "`comfy nodes search --expand-top N` matched a node class but could not resolve its full schema "
+        "from the catalog. Surfaced as a per-hit error entry inside `data.expanded[]` (not as an error "
+        "envelope) — the search itself still succeeds and the other hits still expand.",
+        "the hit itself is still valid; inspect it directly with `comfy nodes show <class_type>`",
+    ),
     # --- file transfer (upload / download) -----------------------------------
     ErrorCode(
         "upload_failed",

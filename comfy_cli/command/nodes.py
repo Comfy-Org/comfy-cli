@@ -459,6 +459,18 @@ def search_cmd(
         ),
     ],
     limit: Annotated[int, typer.Option(help="Cap output to N rows.")] = 20,
+    expand_top: Annotated[
+        int,
+        typer.Option(
+            "--expand-top",
+            metavar="N",
+            help=(
+                "Also attach the full `nodes show` schema (inputs, defaults, enum choices, outputs) "
+                "for the top-N hits under `expanded`, so no follow-up `show` calls are needed. "
+                "0 (the default) leaves the output unchanged."
+            ),
+        ),
+    ] = 0,
     input_path: Annotated[
         str | None,
         typer.Option("--input", show_default=False, help="Path to a local object_info JSON (offline mode)."),
@@ -568,6 +580,31 @@ def search_cmd(
             for m in matched
         ],
     }
+
+    # --expand-top N: kill the search → show × N loop (measured on prod agent
+    # traces: the follow-up `show` args are overwhelmingly a verbatim copy of the
+    # hit name). The top-N returned rows are re-resolved through the SAME catalog
+    # path `nodes show` uses (graph.node → morphism_to_dict), so `expanded[i]` is
+    # exactly the show payload plus a `class_type` key to join back on the row.
+    # A per-hit miss degrades to a per-hit error entry — it never fails the
+    # search, since the rows themselves are still perfectly good results.
+    if expand_top > 0:
+        expanded: list[dict[str, Any]] = []
+        for m in matched[: max(0, expand_top)]:
+            resolved = graph.node(m.id)
+            if resolved is None:
+                expanded.append(
+                    {
+                        "class_type": m.id,
+                        "error": {
+                            "code": "expand_miss",
+                            "message": f"search matched {m.id!r} but the catalog could not resolve its schema",
+                        },
+                    }
+                )
+                continue
+            expanded.append({"class_type": m.id, **graph.morphism_to_dict(resolved)})
+        payload["expanded"] = expanded
 
     if _stale:
         payload["stale"] = True
