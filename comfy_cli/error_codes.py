@@ -484,6 +484,16 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "Requested feature is not available in JSON output mode.",
         "drop `--json` (or pass `--no-json`) for this command",
     ),
+    ErrorCode(
+        "select_no_match",
+        "A `--select <expr>` projection was malformed or matched nothing in the payload. The command "
+        "fails open — `ok` stays true and exit code stays 0 — and `data` carries a bounded key "
+        "inventory of the full payload (`data.inventory`: top-level keys, value types, sizes, one "
+        "nested level of keys) plus this advisory in `data.warnings[]`.",
+        "read `data.inventory` for the payload's real keys, then re-run with a corrected --select; "
+        "grammar: dot path `a.b.c`, array index `a.0.b`, wildcard `items.#.name`, comma multi-select "
+        "`name,inputs`",
+    ),
     # --- skills --------------------------------------------------------------
     ErrorCode(
         "unknown_skill",
