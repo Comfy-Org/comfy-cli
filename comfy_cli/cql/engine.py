@@ -711,10 +711,12 @@ class Graph:
 
         - ``not_searched`` — the walk declined the query outright and never ran,
           so the empty result is an abstention rather than an answer.
-          ``not_searched_reason`` says which: ``"same_type"`` (FROM and TO are
-          the same type — self-returning routes exist but this walker cannot
-          represent them) or ``"degenerate_bounds"`` (``max_depth`` or
-          ``max_paths`` below 1, a bound no path can satisfy).
+          ``not_searched_reason`` names the only shape that does this:
+          ``"degenerate_bounds"`` (``max_depth`` or ``max_paths`` below 1, a
+          bound no path can satisfy). A same-type query is *answered*, not
+          declined — self-returning routes such as
+          ``MODEL -> LoraLoaderModelOnly -> MODEL`` are real, and the no-op rule
+          below exempts the terminal hop so they are found like any other.
         - ``truncated`` — the walk stopped early (``max_paths`` reached, or the
           internal state budget exhausted), so paths exist that are not listed.
         - ``depth_limited`` — the frontier was still expanding at ``max_depth``,
@@ -740,17 +742,9 @@ class Graph:
             "not_searched": False,
             "not_searched_reason": None,
         }
-        # Query shapes the walk declines outright. The empty result they yield is
-        # an abstention, not a proof, so it has to say so — otherwise it reads
-        # as "no route exists" with every limit flag reassuringly false.
-        if from_type == to_type:
-            # Self-returning routes are real (``MODEL -> LoraLoader -> MODEL``),
-            # but the walk cannot represent them: the no-op rule below drops any
-            # step whose output type equals its input type, and for a same-type
-            # query that is the terminal step. Declining is the honest option.
-            result["not_searched"] = True
-            result["not_searched_reason"] = "same_type"
-            return result
+        # The one query shape the walk declines outright. The empty result it
+        # yields is an abstention, not a proof, so it has to say so — otherwise
+        # it reads as "no route exists" with every limit flag reassuringly false.
         if max_depth < 1 or max_paths < 1:
             result["not_searched"] = True
             result["not_searched_reason"] = "degenerate_bounds"
@@ -781,7 +775,16 @@ class Graph:
                     # alone — the pruning loose path-finding has always used.
                     new_produced = produced | frozenset(outs) if exact else produced
                     for out_t in outs:
-                        if out_t == cur_type:
+                        # A step that hands back the type it consumed is a no-op
+                        # hop — except when that type is the target, where it is
+                        # the terminal step and the only one that can answer the
+                        # query (``MODEL -> LoraLoaderModelOnly -> MODEL``). The
+                        # exemption is confined to same-type queries: any state
+                        # whose output matched ``to_type`` was recorded as a
+                        # completed path and never queued, so ``cur_type ==
+                        # to_type`` can only hold for the initial frontier item,
+                        # i.e. exactly when ``from_type == to_type``.
+                        if out_t == cur_type and out_t != to_type:
                             continue
                         step = {"node": consumer.id, "input_type": cur_type, "output_type": out_t}
                         new_steps = steps + [step]

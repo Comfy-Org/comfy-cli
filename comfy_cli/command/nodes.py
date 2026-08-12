@@ -772,12 +772,14 @@ def path_cmd(
       ``not_searched`` — the individual reasons the claim was withheld, so a
       caller can widen the right bound instead of guessing.
     - ``not_searched`` / ``not_searched_reason`` — the walk declined the query
-      and never ran, so the empty result is an abstention, not an answer. Today
-      the only reason reachable from the CLI is ``"same_type"``: a query whose
-      FROM and TO are the same type is answered empty by construction, even
-      though real self-returning routes such as ``MODEL -> LoraLoader -> MODEL``
-      exist. Such a result reports ``exact: false`` and must not be read as a
-      proof of unreachability.
+      and never ran, so the empty result is an abstention, not an answer. No
+      reason is reachable from this command: the only shape ``search_paths``
+      declines is a bound below 1, which is rejected up front with
+      ``path_bounds_invalid`` before the graph is even loaded. Same-type queries
+      (``MODEL MODEL``) are searched like any other and return the real
+      self-returning routes. The fields stay in the envelope so a caller can
+      never mistake an abstention the engine adds later for a proof of
+      unreachability — an abstention always reports ``exact: false``.
     """
     renderer = get_renderer()
 
