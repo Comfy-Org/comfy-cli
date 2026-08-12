@@ -1,0 +1,73 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "comfy nodes widget-catalog",
+  "description": "The widget catalog: a derived projection of object_info giving, per node class, the positional order of its widgets (plus the grow families that mint slots). It is what a name<->index widget converter needs — notably the CRDT applier, which stores widget values by NAME while the workflow JSON stores them POSITIONALLY in widgets_values. It is NOT object_info: no types, defaults, enum choices, or descriptions.",
+  "type": "object",
+  "properties": {
+    "catalog_version": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "description": "SHA-256 of the canonical JSON encoding of `types` alone (sorted keys, no whitespace, UTF-8), prefixed 'sha256:'. Excludes itself and class_count, so a consumer holding only the catalog can recompute it. Deterministic for identical object_info regardless of key order; any change to any class's widget order or grow family moves it. Consumers pin and cache on this."
+    },
+    "class_count": {
+      "type": "integer",
+      "description": "Number of entries in `types`. Redundant with the map's size; present so a consumer can sanity-check a truncated transfer without walking the map."
+    },
+    "types": {
+      "type": "object",
+      "description": "One entry per node class the loaded environment knows. EVERY class is present, including widget-less ones: a missing entry ('unknown class') and an empty widget_order ('no widgets') are different statements and a converter must distinguish them.",
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "widget_order": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Widget names in the exact positional order of the node's widgets_values array — index i in this list IS index i in widgets_values. Includes the synthetic 'control_after_generate' slot the frontend injects after a seed, and dynamic-combo sub-widgets flattened as '<selector>.<sub>'. Computed by cql.engine.Graph.widget_order, the same call every set-widget in this CLI resolves against."
+          },
+          "autogrow_templates": {
+            "type": "object",
+            "description": "Present only for classes with a COMFY_AUTOGROW_V3 input: base input name -> element-naming template. The schema's own template when object_info ships one, else the pluralization fallback the edit path applies ('images' -> prefix 'image'), so a consumer holding only the catalog can name grown slots without object_info.",
+            "additionalProperties": {
+              "type": "object",
+              "properties": {
+                "prefix": {
+                  "type": "string",
+                  "description": "Grown slots are '<base>.<prefix><N>', N from 0. Mutually exclusive with 'names'."
+                },
+                "names": {
+                  "type": "array",
+                  "items": { "type": "string" },
+                  "description": "Verbatim element names by index; past the end, growth continues as '<names[-1]><N>'. Mutually exclusive with 'prefix'."
+                }
+              }
+            }
+          },
+          "inputcount": {
+            "type": "object",
+            "description": "Present only for the kijai 'inputcount' family (ImageBatchMulti, JoinStringMulti, ...). NOT autogrow: the schema declares fixed '<elem>_N' inputs plus an INT widget the node reads at runtime, so bare 1-based '<elem>_N' keys are the wire address and growing one also means WRITING that widget.",
+            "properties": {
+              "widget": { "type": "string", "description": "The widget to bump when a slot is grown (always 'inputcount')." },
+              "elements": {
+                "type": "array",
+                "items": { "type": "string" },
+                "description": "Element bases with a '<elem>_1' input, sorted (e.g. ['image'])."
+              }
+            },
+            "required": ["widget", "elements"]
+          }
+        },
+        "required": ["widget_order"]
+      }
+    },
+    "stale": {
+      "type": "boolean",
+      "description": "True when object_info came from the on-disk cache because the server/session was unreachable. The catalog is still usable — catalog_version identifies WHICH snapshot it is — so this is a warning, not an error."
+    },
+    "warnings": {
+      "type": "array",
+      "items": { "type": "object" },
+      "description": "Non-fatal advisories; carries the 'object_info_stale' entry when stale is true."
+    }
+  },
+  "required": ["catalog_version", "class_count", "types"]
+}

@@ -51,6 +51,10 @@ COMMAND_SCHEMAS: dict[str, str] = {
     "comfy nodes types": "nodes",
     "comfy nodes categories": "nodes",
     "comfy nodes refresh": "nodes",
+    # The widget catalog gets its OWN schema, not `nodes`: `nodes.json` declares
+    # `types` as an array of connection-type names (`nodes types`), and the
+    # catalog's `types` is a class_type→entry map. Same key, different contract.
+    "comfy nodes widget-catalog": "widget_catalog",
     # workflow editing
     "comfy workflow slots": "workflow",
     "comfy workflow set-slot": "workflow",

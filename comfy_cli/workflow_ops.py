@@ -1619,6 +1619,32 @@ def _resolve_input_slot(node: dict, graph, slot: Any) -> int:
 
 _INPUTCOUNT_KEY_RE = re.compile(r"^(.+)_(\d+)$")
 
+INPUTCOUNT_WIDGET = "inputcount"
+
+
+def inputcount_family_elements(graph, node_type: str) -> list[str]:
+    """The element bases of ``node_type``'s kijai ``inputcount`` family, sorted
+    — ``["image"]`` for ImageBatchMulti, ``[]`` for anything that isn't one.
+
+    Both detection signals must be present (see
+    :func:`_inputcount_family_match`, which is defined in terms of this): a
+    required INT widget named exactly ``inputcount``, PLUS at least one
+    ``{elem}_1`` sibling input. Exposed (not private) because the family is a
+    *class-level* property of the schema, and exporters — ``nodes
+    widget-catalog``, which ships this to the CRDT applier — need to ask about
+    a class without first inventing a slot name to probe with.
+
+    Returns ``[]`` when ``graph`` is unavailable (offline edit) or the class
+    isn't in the catalog."""
+    if graph is None:
+        return []
+    schema = graph.node(node_type)
+    if schema is None:
+        return []
+    if not any(p.name == INPUTCOUNT_WIDGET and p.type == "INT" and not p.is_link for p in schema.inputs):
+        return []
+    return sorted({p.name[: -len("_1")] for p in schema.inputs if p.name.endswith("_1")})
+
 
 def _inputcount_family_match(graph, node_type: str, slot: str) -> tuple[str, int] | None:
     """Detect a kijai ``inputcount``-family numbered key (e.g. ``image_3`` on
@@ -1642,19 +1668,13 @@ def _inputcount_family_match(graph, node_type: str, slot: str) -> tuple[str, int
     isn't shaped ``{elem}_<N>``, or the node's schema doesn't carry both
     signals."""
     m = _INPUTCOUNT_KEY_RE.fullmatch(slot)
-    if not m or graph is None:
+    if not m:
         return None
     elem, n_str = m.group(1), m.group(2)
     n = int(n_str)
     if n < 1:
         return None
-    schema = graph.node(node_type)
-    if schema is None:
-        return None
-    has_inputcount = any(p.name == "inputcount" and p.type == "INT" and not p.is_link for p in schema.inputs)
-    if not has_inputcount:
-        return None
-    if not any(p.name == f"{elem}_1" for p in schema.inputs):
+    if elem not in inputcount_family_elements(graph, node_type):
         return None
     return elem, n
 
