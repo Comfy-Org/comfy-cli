@@ -269,7 +269,128 @@ be stable within a writer session. The CLI's `--actor` flag carries the origin;
 its default `cli` is a legacy value accepted for interactive local use —
 merge-consumer traffic uses the structured forms above.
 
-## 8. Amendments
+## 8. Replication and replay semantics
+
+Rules a second implementation (JS/TS merge consumer, multi-player) must follow
+to converge with the Python applier. Grounded against `workflow_ops.py` and the
+V1-007 CRDT replay spike. The unit of replication is the **op**: every replica
+applies every op exactly once (any order) through an applier with these
+semantics. Exchanging raw document state between concurrently-editing replicas
+is not equivalent and does not inherit these guarantees.
+
+### 8.1 Stamp comparison is code-point lexicographic
+
+`_stamp_key` builds `[base_version, actor, op_id]` and relies on Python
+sequence comparison: element-wise, first difference decides. The frozen rule,
+so any implementation compares identically:
+
+* `base_version`: numeric comparison.
+* `actor`, then `op_id`: **Unicode code point order** (Python `str` `<`),
+  compared character by character; a strict prefix sorts before its extension.
+* No locale, no case folding, no normalization.
+
+`op_id` is lowercase ASCII hex (8.2), so code-point order equals byte order
+for it. `actor` strings MUST be ASCII (the section 7 grammar is) — for ASCII,
+JS UTF-16 `<` agrees with code-point order; above the Basic Multilingual Plane
+it does not, which is why non-ASCII actors are not valid.
+
+### 8.2 `op_id` format is LWW-load-bearing
+
+`_new_op` emits `uuid.uuid4().hex`: exactly **32 lowercase hex characters
+`[0-9a-f]`, no dashes**. This is a frozen format, not an implementation
+detail: `op_id` is the final LWW tiebreaker (8.1), so its generation and its
+lexicographic comparison decide conflict outcomes, not just deduplication. An
+implementation that emits a different shape (uppercase, dashed UUID, shorter)
+changes who wins ties. Receivers never regenerate or normalize an `op_id`.
+
+### 8.3 `last_node_id` / `last_link_id` are max-registers
+
+Both are advisory high-water marks, never allocators (ids come from
+`mint_id`). Register semantics: **max-register** — a write is
+`max(current, new)`, and merging two replicas' values is `max(a, b)`; a plain
+overwrite is wrong under concurrency.
+
+`_apply_add_node` implements this for nodes:
+`workflow["last_node_id"] = max(workflow.get("last_node_id") or 0, op["node_id"])`.
+`_apply_connect` does **not** bump `last_link_id` today — no apply path writes
+it. The intended, frozen rule is symmetric: connect SHOULD set
+`last_link_id = max(last_link_id, link_id)`; the omission is a known gap, and
+because the field is advisory, an implementation that already bumps it does
+not diverge semantically from one that does not. `clear` preserves both
+(section 1.5).
+
+### 8.4 `inputcount`-family autogrow: one op, two registers
+
+A connect whose `grow.inputcount` is set (the kijai `*Multi` family) performs
+two writes under one `op_id`:
+
+1. **Structural growth**: a new input slot with a bare `{elem}_N` name
+   (`_next_inputcount_name` — never the dotted `base.elemN` autogrow shape),
+   keyed by `grow_id = link_id` for idempotent, non-clobbering replay.
+2. **A stamped widget write** to the family's count widget
+   (`_apply_inputcount_bump`), passing through the same `_lww_gate` /
+   `_lww_commit` as an explicit `set_widget`, **stamped with the connect's own
+   `op_id` / `stamp` / `base_version`**. It therefore occupies the same LWW
+   register (`("widget", node_id, widget)`) as a concurrent explicit
+   `set_widget` on that widget, and the winner is decided by 8.1 regardless of
+   apply order.
+
+The written value is the mint-time-planned count — a static property of the
+op, never re-derived from a post-collision slot number — so both apply orders
+carry the same winning value and the graph converges. Known, accepted
+limitation: the register is LWW, not a monotonic counter, so a slot that loses
+a bare-key naming race can leave the count low until the next write to that
+widget. When the applier has no catalog (`graph is None`), the slot still
+grows and the count write is skipped.
+
+### 8.5 `op.node` on `add_node` is authoritative
+
+`_apply_add_node` inserts `op["node"]` verbatim (`copy.deepcopy`, one append).
+Receivers MUST use the payload as-is and MUST NOT re-mint the node from the
+schema catalog at apply time: widget defaults drift between catalog versions,
+so a re-derived node diverges from the creator's. No catalog is needed to
+apply an `add_node`.
+
+### 8.6 Bootstrap: one common initial snapshot
+
+All replicas of a workflow document MUST fork from one seeded initial
+snapshot. Independently re-seeding the same base workflow on two replicas
+creates content with distinct internal identities that **duplicates on first
+merge** — silently, because each replica looks correct alone (verified in the
+spike). Creating a document and seeding its base state is a single-writer
+event; replication starts from that snapshot.
+
+### 8.7 Subgraph scope
+
+Current contract, pinned:
+
+* **Only `set_widget` is subgraph-scoped.** Three address forms are accepted
+  and normalize to ONE write target: flat promoted (`57.text`, routed through
+  the instance's `proxyWidgets`), nested interior (`57/3.steps`), and the
+  flattened UI→API alias (`57:3.cfg`). The minted op carries the **resolved**
+  `path` (e.g. `["57", "27"]`) plus `inner_widget`, so replay needs no
+  proxyWidgets logic, and the LWW target is
+  `("widget", ("57", "27"), "text")` — a flat-form and a nested-form
+  concurrent write to the same interior widget converge under 8.1.
+* **`connect` refuses subgraph scope** with a structural explanation: an
+  interior endpoint is rejected with "a link cannot cross the subgraph
+  boundary"; a promoted-widget target is rejected with "promoted widget (a
+  value), not a link input".
+* **`add_node` and `delete_node` cannot address interior nodes** at all; an
+  interior id fails as node-not-found against the top-level inventory.
+* An interior write to a **shared** definition forks the definition at apply
+  time (`engine._isolate_shared_subgraph`): the definition is deep-copied
+  under `"sg-" + sha256(def_id + "\x00" + instance_id)[:32]` — deterministic,
+  never random — and the instance's `type` is repointed, so two replicas
+  replaying the same op produce byte-identical graphs and sibling instances
+  are never aliased.
+* OPEN: the shared-definition forking semantics above are apply-time behavior
+  that rewrites `instance.type` without an explicit op saying so. A full
+  specification (fork visibility, interaction with concurrent interior writes
+  to sibling instances, definition garbage collection) is owed before this
+  document's v1.1, together with the FE stable-ID reconciliation (section 6).
+
+## 9. Amendments
 
 * Post-freeze changes require a **versioned amendment section** appended to
   this document (`## Amendment v1.x — <date>`), stating what changed and why.

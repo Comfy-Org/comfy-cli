@@ -13,6 +13,7 @@ tests pin it two ways so neither the doc nor the code can drift silently:
 
 from __future__ import annotations
 
+import re
 import uuid
 from pathlib import Path
 from typing import Any
@@ -205,7 +206,30 @@ def test_dollar_brace_rejected():
 
 
 # ---------------------------------------------------------------------------
-# 6. clear in a batch: registered code, hint names the standalone command
+# 6. op_id format (doc section 8.2): LWW-load-bearing, so its shape is contract
+# ---------------------------------------------------------------------------
+
+
+def test_op_id_format_is_frozen():
+    """op_id is the final LWW tiebreaker (doc sections 8.1/8.2): exactly 32
+    lowercase hex chars, no dashes, on every minted op kind — its lexicographic
+    comparison decides conflict outcomes, not just deduplication."""
+    op_id_re = re.compile(r"^[0-9a-f]{32}$")
+    g = _graph()
+    wf: dict[str, Any] = {"nodes": [], "links": []}
+    wf, add_op = workflow_ops.add_node(wf, g, "TinyLoader")
+    wf, add2_op = workflow_ops.add_node(wf, g, "TinySink")
+    wf, conn_op = workflow_ops.connect(wf, g, add_op["node_id"], "MODEL", add2_op["node_id"], "model")
+    wf, set_op = workflow_ops.set_widget(wf, g, add_op["node_id"], "ckpt_name", "a.safetensors")
+    wf, del_op = workflow_ops.delete_node(wf, g, add2_op["node_id"])
+    wf, clear_op = workflow_ops.clear(wf)
+    for op in (add_op, add2_op, conn_op, set_op, del_op, clear_op):
+        assert op_id_re.match(op["op_id"]), f"{op['op']} minted op_id {op['op_id']!r}, not 32 lowercase hex chars"
+        assert op["stamp"] == [op["base_version"], op["actor"]]
+
+
+# ---------------------------------------------------------------------------
+# 7. clear in a batch: registered code, hint names the standalone command
 # ---------------------------------------------------------------------------
 
 
