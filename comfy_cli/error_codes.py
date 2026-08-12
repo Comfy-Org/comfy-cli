@@ -484,6 +484,16 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "Requested feature is not available in JSON output mode.",
         "drop `--json` (or pass `--no-json`) for this command",
     ),
+    ErrorCode(
+        "select_no_match",
+        "A `--select <expr>` projection was malformed or matched nothing in the payload. The command "
+        "fails open — `ok` stays true and exit code stays 0 — and `data` carries a bounded key "
+        "inventory of the full payload (`data.inventory`: top-level keys, value types, sizes, one "
+        "nested level of keys) plus this advisory in `data.warnings[]`.",
+        "read `data.inventory` for the payload's real keys, then re-run with a corrected --select; "
+        "grammar: dot path `a.b.c`, array index `a.0.b`, wildcard `items.#.name`, comma multi-select "
+        "`name,inputs`",
+    ),
     # --- skills --------------------------------------------------------------
     ErrorCode(
         "unknown_skill",
@@ -512,6 +522,13 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "A structured edit (add-node/connect/set-widget/delete-node) failed: "
         "unknown class_type, missing node, bad slot/widget name, or malformed address.",
         "run `comfy workflow slots <file>` for widget addresses or `comfy nodes types` for class_types",
+    ),
+    ErrorCode(
+        "workflow_clear_not_batchable",
+        "A batch (`workflow apply` / `workflow foreach`) contained a `clear` op. `clear` wipes the whole "
+        "graph and is standalone-only (docs/op-vocabulary-v1.md: batchable = no), so the batch was "
+        "rejected atomically — nothing was applied.",
+        "run the standalone `comfy workflow clear <file>` first, then apply the remaining ops as a batch",
     ),
     ErrorCode(
         "normalized_value",

@@ -395,6 +395,14 @@ def ls_cmd(
         bool,
         typer.Option("--refresh", help="Re-fetch index.json from GitHub before listing."),
     ] = False,
+    select: Annotated[
+        str | None,
+        typer.Option(
+            "--select",
+            show_default=False,
+            help="Project the payload: dot path (rows.0.name), wildcard (rows.#.name), comma multi-select.",
+        ),
+    ] = None,
 ):
     renderer = get_renderer()
 
@@ -457,6 +465,11 @@ def ls_cmd(
             for r in rows
         ],
     }
+
+    if select is not None:
+        from comfy_cli.selector import emit_selected
+
+        return emit_selected(renderer, payload, select, command="templates ls")
 
     if renderer.is_pretty():
         from rich.table import Table

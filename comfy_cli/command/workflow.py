@@ -194,6 +194,14 @@ def slots_cmd(
         str,
         typer.Option("--id", show_default=False, help="Template ID label; cosmetic only — defaults to the filename."),
     ] = "",
+    select: Annotated[
+        str | None,
+        typer.Option(
+            "--select",
+            show_default=False,
+            help="Project the payload: dot path (slots.0.address), wildcard (slots.#.address), comma multi-select.",
+        ),
+    ] = None,
 ):
     renderer = get_renderer()
     p, workflow = _load_workflow_or_fail(renderer, file)
@@ -221,6 +229,11 @@ def slots_cmd(
         payload["warnings"] = [
             {"code": "object_info_stale", "message": f"served from cache ({_stale['source']}): {_stale['reason']}"}
         ]
+
+    if select is not None:
+        from comfy_cli.selector import emit_selected
+
+        return emit_selected(renderer, payload, select, command="workflow slots")
 
     if renderer.is_pretty():
         from rich.table import Table

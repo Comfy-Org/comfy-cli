@@ -340,6 +340,14 @@ def show_cmd(
             show_default=False, help="ComfyUI port (defaults to COMFY_LOCAL_URL, the background server, or 8188)."
         ),
     ] = None,
+    select: Annotated[
+        str | None,
+        typer.Option(
+            "--select",
+            show_default=False,
+            help="Project the payload: dot path (inputs.0.name), wildcard (inputs.#.name), comma multi-select.",
+        ),
+    ] = None,
 ):
     renderer = get_renderer()
     _stale: dict = {}
@@ -400,6 +408,11 @@ def show_cmd(
                 "message": f"served from cache ({_stale['source']}): {_stale['reason']}",
             }
         ]
+
+    if select is not None:
+        from comfy_cli.selector import emit_selected
+
+        return emit_selected(renderer, payload, select, command="nodes show")
 
     if renderer.is_pretty():
         from rich.table import Table
