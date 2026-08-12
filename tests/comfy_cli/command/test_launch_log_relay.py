@@ -368,10 +368,13 @@ def test_drain_deadline_covers_both_pumps():
         pump.start()
     try:
         start = time.monotonic()
-        launch._drain_child_pipes(threading.Event(), pumps, deadline=0.2)
+        launch._drain_child_pipes(threading.Event(), pumps, deadline=0.5)
         elapsed = time.monotonic() - start
 
-        assert elapsed < 0.4, f"deadline applied per-pump, not overall: {elapsed:.2f}s"
+        # Shared deadline lands at ~0.5s, per-pump at ~1.0s. The bound sits
+        # between the two rather than on top of the per-pump value, so a loaded
+        # CI runner's scheduling jitter cannot fail a correct implementation.
+        assert elapsed < 0.8, f"deadline applied per-pump, not overall: {elapsed:.2f}s"
     finally:
         release.set()
         for pump in pumps:
