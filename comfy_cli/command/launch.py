@@ -113,6 +113,33 @@ def _emit_launch_success(listen, port, pid) -> None:
         )
 
 
+def _relay_child_line(line: str) -> None:
+    """Relay one line of the background child's ComfyUI output, markup-escaped.
+
+    ``print`` in this module is the Rich-backed ``rprint``, which parses its
+    argument as markup. ComfyUI's raw output is full of square brackets (log
+    levels, ``[1/4]`` step counters, tqdm bars, quoted paths in tracebacks), and
+    unescaped those are read as style tags:
+
+    - ``Progress: [####  ] 50%`` -> the bracketed run is silently deleted
+    - ``File "[x]"``             -> ``[x]`` is silently deleted
+    - ``... [/red] ...``         -> raises ``rich.errors.MarkupError``
+
+    The raise is the damaging one. It kills the redirector thread, so the child
+    stops relaying ComfyUI's output into ``comfyui_<port>.log`` from that line
+    onward, truncating the log at exactly the moment something is going wrong,
+    which is when ``comfy logs`` is most needed.
+
+    ``escape`` rather than ``sanitize_markup`` because this is a *capture* path,
+    not a render path: the bytes land in a logfile, and any ANSI colour ComfyUI
+    emitted is part of what it genuinely wrote. ``Renderer`` sanitizes on the
+    way back out when ``comfy logs`` displays it. Escaping round-trips exactly
+    (the backslashes are consumed by the markup parser), so the logged text
+    stays byte-identical to ComfyUI's own output.
+    """
+    print(escape(line), end="")
+
+
 def launch_comfyui(extra, frontend_pr=None, python=sys.executable):
     reboot_path = None
 
@@ -185,12 +212,12 @@ def launch_comfyui(extra, frontend_pr=None, python=sys.executable):
         def redirector_stderr():
             while True:
                 if process is not None and process.stderr is not None:
-                    print(process.stderr.readline(), end="")
+                    _relay_child_line(process.stderr.readline())
 
         def redirector_stdout():
             while True:
                 if process is not None and process.stdout is not None:
-                    print(process.stdout.readline(), end="")
+                    _relay_child_line(process.stdout.readline())
 
         threading.Thread(target=redirector_stderr).start()
         threading.Thread(target=redirector_stdout).start()
