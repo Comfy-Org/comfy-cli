@@ -24,6 +24,7 @@ from comfy_cli.config_manager import ConfigManager
 from comfy_cli.env_checker import _bracket_host, check_comfy_server_running
 from comfy_cli.output import get_renderer
 from comfy_cli.output import rprint as print  # context-aware print: stderr in JSON mode
+from comfy_cli.output.sanitize import sanitize_markup
 from comfy_cli.resolve_python import resolve_workspace_python
 from comfy_cli.workspace_manager import WorkspaceManager, WorkspaceType
 
@@ -113,31 +114,93 @@ def _emit_launch_success(listen, port, pid) -> None:
         )
 
 
+# Backoff for a redirector thread whose pipe has nothing to give (not started,
+# exited, or mid-reboot). Long enough that an idle pump costs nothing, short
+# enough that a rebooted server's first lines are not visibly delayed.
+_REDIRECTOR_IDLE_SLEEP = 0.05
+
+
 def _relay_child_line(line: str) -> None:
-    """Relay one line of the background child's ComfyUI output, markup-escaped.
+    """Relay one line of the background child's ComfyUI output, verbatim.
 
-    ``print`` in this module is the Rich-backed ``rprint``, which parses its
-    argument as markup. ComfyUI's raw output is full of square brackets (log
-    levels, ``[1/4]`` step counters, tqdm bars, quoted paths in tracebacks), and
-    unescaped those are read as style tags:
+    This is a *capture* path, not a render path: the child's stdout is
+    ``comfyui_<port>.log`` (see ``launch_and_monitor``), so every byte ComfyUI
+    wrote has to land in the file unchanged for ``comfy logs`` to be worth
+    reading. That rules out ``print`` — in this module that name is the
+    Rich-backed ``rprint``, and routing a line through Rich mangles it three
+    ways:
 
-    - ``Progress: [####  ] 50%`` -> the bracketed run is silently deleted
-    - ``File "[x]"``             -> ``[x]`` is silently deleted
-    - ``... [/red] ...``         -> raises ``rich.errors.MarkupError``
+    - *Markup parsing.* ComfyUI's output is full of square brackets (log
+      levels, ``[1/4]`` step counters, tqdm bars, quoted paths in tracebacks).
+      ``Progress: [####  ] 50%`` loses the bracketed run, and an unbalanced
+      ``[/red]`` raises ``rich.errors.MarkupError``. The raise is the damaging
+      one: it kills the redirector thread, so the log truncates at exactly the
+      moment something is going wrong.
+    - *Wrapping.* ``rich.print`` builds a ``Console`` per call, whose width
+      auto-detects to 80 against the non-tty logfile. Long lines — absolute
+      model paths, traceback frames, tqdm bars — get newlines injected.
+    - *Highlighting and emoji.* The default ``ReprHighlighter`` injects ANSI
+      colour ComfyUI never emitted (Rich honours an inherited ``FORCE_COLOR``),
+      and ``:x:``-style runs get emoji-substituted.
 
-    The raise is the damaging one. It kills the redirector thread, so the child
-    stops relaying ComfyUI's output into ``comfyui_<port>.log`` from that line
-    onward, truncating the log at exactly the moment something is going wrong,
-    which is when ``comfy logs`` is most needed.
+    ``escape()`` only addresses the first, and not exactly: ``render`` rewrites
+    ``\\[`` to ``[`` unconditionally, so ``C:\\[TEMP]\\model.safetensors`` loses
+    a backslash, and a chunk ending in a lone backslash gains one. So write to
+    the stream directly and skip Rich entirely — the same reasoning (and the
+    same ``pretty_stream``) as the raw write ``comfy logs`` uses to replay the
+    file.
 
-    ``escape`` rather than ``sanitize_markup`` because this is a *capture* path,
-    not a render path: the bytes land in a logfile, and any ANSI colour ComfyUI
-    emitted is part of what it genuinely wrote. ``Renderer`` sanitizes on the
-    way back out when ``comfy logs`` displays it. Escaping round-trips exactly
-    (the backslashes are consumed by the markup parser), so the logged text
-    stays byte-identical to ComfyUI's own output.
+    ANSI ComfyUI emitted is preserved because it is part of what ComfyUI
+    genuinely wrote. Sanitizing it is the display path's job:
+    ``background_launch``'s error panel does that (``sanitize_markup``). Note
+    that ``logs()`` deliberately does *not* — it writes the file byte-for-byte,
+    so ``comfy logs`` still replays whatever escapes the file holds.
     """
-    print(escape(line), end="")
+    stream = get_renderer().pretty_stream
+    stream.write(line)
+    # Rich flushed on every print; the logfile is block-buffered, and
+    # `launch_and_monitor` tails it live waiting for the startup marker.
+    stream.flush()
+
+
+def _pump_child_pipe(pick_pipe, stop: threading.Event | None = None) -> None:
+    """Relay one of the background child's pipes until the process exits.
+
+    ``pick_pipe`` is re-called every pass rather than handed a pipe once:
+    ``launch_comfyui`` *reassigns* ``process`` on every reboot, and re-reading
+    is how a rebooted server's output keeps reaching the log.
+
+    The consequence is that there is no terminal condition to break on — an
+    empty read means "the current child's pipe is closed", which is equally the
+    not-started-yet, the exited, and the mid-reboot state. So back off rather
+    than break, and never spin: an unguarded ``readline()`` on a closed pipe
+    returns ``""`` immediately and forever, burning a core for the rest of the
+    run. (Two such threads, both non-daemon, used to do exactly that from the
+    moment the server exited.)
+
+    ``stop`` is the seam that follows from that: production never sets it (the
+    pumps die with the process at ``_hard_exit``), but a caller that needs the
+    thread to actually end — the tests — has no other way to ask.
+    """
+    while stop is None or not stop.is_set():
+        pipe = pick_pipe()
+        line = ""
+        try:
+            if pipe is not None:
+                line = pipe.readline()
+                if line:
+                    _relay_child_line(line)
+        except (ValueError, OSError):
+            # A closed handle — the reboot path swaps the pipe out from under
+            # us, and a torn-down stdout fails the relay's write the same way.
+            # Back off and retry: losing a line beats losing the pump, which
+            # would truncate the log for the rest of the run.
+            line = ""
+        if not line:
+            if stop is None:
+                time.sleep(_REDIRECTOR_IDLE_SLEEP)
+            else:
+                stop.wait(_REDIRECTOR_IDLE_SLEEP)
 
 
 def launch_comfyui(extra, frontend_pr=None, python=sys.executable):
@@ -209,18 +272,19 @@ def launch_comfyui(extra, frontend_pr=None, python=sys.executable):
             os.remove(reboot_path)
     else:
         # If running in background mode without using a popen, broken pipe errors may occur when flushing stdout/stderr.
-        def redirector_stderr():
-            while True:
-                if process is not None and process.stderr is not None:
-                    _relay_child_line(process.stderr.readline())
-
-        def redirector_stdout():
-            while True:
-                if process is not None and process.stdout is not None:
-                    _relay_child_line(process.stdout.readline())
-
-        threading.Thread(target=redirector_stderr).start()
-        threading.Thread(target=redirector_stdout).start()
+        # Daemon threads: every exit path here is `_hard_exit` (os._exit), which
+        # kills them regardless, but a `Popen` failure or an early Ctrl-C returns
+        # normally — and non-daemon pumps would hang interpreter shutdown there.
+        threading.Thread(
+            target=_pump_child_pipe,
+            args=(lambda: process.stderr if process is not None else None,),
+            daemon=True,
+        ).start()
+        threading.Thread(
+            target=_pump_child_pipe,
+            args=(lambda: process.stdout if process is not None else None,),
+            daemon=True,
+        ).start()
 
         try:
             while True:
@@ -232,6 +296,10 @@ def launch_comfyui(extra, frontend_pr=None, python=sys.executable):
                         text=True,
                         env=new_env,
                         encoding="utf-8",
+                        # ComfyUI and custom nodes can emit non-UTF-8 bytes; a
+                        # strict decode would raise inside the redirector thread
+                        # and truncate the log from that byte onward.
+                        errors="replace",
                         shell=True,  # win32 only
                         creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,  # win32 only
                     )
@@ -241,6 +309,7 @@ def launch_comfyui(extra, frontend_pr=None, python=sys.executable):
                         text=True,
                         env=new_env,
                         encoding="utf-8",
+                        errors="replace",  # see the win32 branch above
                         stdout=subprocess.PIPE,
                         stderr=subprocess.PIPE,
                     )
@@ -396,9 +465,14 @@ def background_launch(extra, frontend_pr=None):
     # Reaching here means the monitor returned without seeing the success line
     # (the success path emits its envelope and _hard_exit(0)s inside the monitor).
     if log is not None:
+        # `log` is ComfyUI's own output, relayed verbatim by `_relay_child_line`
+        # — so it reaches here with its brackets and ANSI intact. `Panel` body
+        # text is markup-parsed, where an unbalanced `[/...]` in the crash output
+        # would raise `MarkupError` while we are reporting the crash. This is the
+        # render path, so neutralize both markup and escape sequences.
         print(
             Panel(
-                "".join(log),
+                sanitize_markup("".join(log)),
                 title="[bold red]Error log during ComfyUI execution[/bold red]",
                 border_style="bright_red",
             )
