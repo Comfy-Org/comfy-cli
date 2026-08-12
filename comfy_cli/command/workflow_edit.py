@@ -478,6 +478,11 @@ def apply_cmd(
         workflow, ops, aliases = workflow_ops.apply_specs(
             workflow, graph, specs, actor=actor, base_version=base_version
         )
+    except workflow_ops.NotBatchableError as e:
+        # A standalone-only op (clear) inside the batch: its own registered code,
+        # with the hint naming the standalone command to run instead.
+        renderer.error(code=e.code, message=f"batch failed: {e}", hint=e.hint)
+        raise typer.Exit(code=1) from e
     except (ValueError, KeyError) as e:
         # Atomic batch: nothing is written if any spec fails.
         renderer.error(code="workflow_edit_invalid", message=f"batch failed: {e}")
@@ -589,6 +594,19 @@ def foreach_cmd(
             target = out / f"{name}_{i:03d}.json"
             _atomic_write_text(target, json.dumps(wf, indent=2))
             written.append(str(target))
+    except workflow_ops.NotBatchableError as e:
+        renderer.error(
+            code=e.code,
+            message=f"foreach failed: {e}",
+            hint=e.hint
+            + (
+                f" ({len(written)} workflow(s) were already written to {out} — delete them or re-run)"
+                if written
+                else ""
+            ),
+            details={"written": written} if written else None,
+        )
+        raise typer.Exit(code=1) from e
     except (workflow_ops.RecipeError, ValueError, KeyError) as e:
         # foreach writes one file per param-set as it goes, so a mid-batch failure
         # leaves the earlier files on disk. Surface them (in the hint AND machine-

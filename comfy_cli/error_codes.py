@@ -514,6 +514,13 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "run `comfy workflow slots <file>` for widget addresses or `comfy nodes types` for class_types",
     ),
     ErrorCode(
+        "workflow_clear_not_batchable",
+        "A batch (`workflow apply` / `workflow foreach`) contained a `clear` op. `clear` wipes the whole "
+        "graph and is standalone-only (docs/op-vocabulary-v1.md: batchable = no), so the batch was "
+        "rejected atomically — nothing was applied.",
+        "run the standalone `comfy workflow clear <file>` first, then apply the remaining ops as a batch",
+    ),
+    ErrorCode(
         "normalized_value",
         "Warning (not fatal): a set-widget value wasn't an exact COMBO option, so "
         "the nearest matching option was used. Surfaced in the op's `warnings`.",

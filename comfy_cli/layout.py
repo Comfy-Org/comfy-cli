@@ -101,6 +101,10 @@ def assign_positions(workflow: dict, graph, specs: list) -> list:
 
     def endpoint(ref):
         node_part = str(ref).partition(".")[0].strip()
+        # `$alias` is sugar for `alias` (see workflow_ops.resolve_ref); `${...}`
+        # is a recipe-param hole that apply_specs rejects — not an alias.
+        if node_part.startswith("$") and not node_part.startswith("${"):
+            node_part = node_part[1:]
         if node_part in adds:
             return ("new", node_part)
         nid = int(node_part) if node_part.lstrip("-").isdigit() else node_part

@@ -81,6 +81,48 @@ def _new_op(kind: str, actor: str, base_version: int, **fields: Any) -> dict[str
     }
 
 
+# ---------------------------------------------------------------------------
+# The frozen op vocabulary — the normative contract is docs/op-vocabulary-v1.md;
+# these constants are its machine-readable projection, and
+# tests/comfy_cli/test_op_vocabulary_contract.py pins doc == constants == the
+# dispatch tables in apply_op / apply_specs. Amend the doc (versioned amendment
+# section) before touching any of the three.
+# ---------------------------------------------------------------------------
+
+#: Every op kind in the v1 vocabulary, including defined-but-deferred kinds.
+FROZEN_OPS: tuple[str, ...] = ("add_node", "connect", "set_widget", "delete_node", "clear", "reset_doc")
+
+#: Kinds frozen in the contract whose replay is not implemented yet
+#: (``reset_doc`` is specified in op-vocabulary-v1.md; implementation is
+#: deferred to the bulk-writers ticket). ``apply_op`` must keep rejecting these.
+DEFERRED_OPS: tuple[str, ...] = ("reset_doc",)
+
+#: Kinds a batch (``apply_specs``) dispatches. ``clear`` and ``reset_doc`` are
+#: standalone-only: they rewrite the whole document, so they never ride inside
+#: an atomic batch.
+BATCHABLE_OPS: tuple[str, ...] = ("add_node", "connect", "set_widget", "delete_node")
+
+
+class NotBatchableError(ValueError):
+    """A frozen op kind that is standalone-only was submitted inside a batch.
+
+    The command layer renders this with the registered ``code``/``hint`` below
+    (see ``comfy_cli/error_codes.py``) instead of the generic
+    ``workflow_edit_invalid``, so a caller learns the exact standalone command
+    to run rather than re-trying the batch.
+    """
+
+    code = "workflow_clear_not_batchable"
+    hint = "run the standalone `comfy workflow clear <file>` first, then apply the remaining ops as a batch"
+
+    def __init__(self, index: int):
+        super().__init__(
+            f"spec #{index}: `clear` wipes the whole graph and is standalone-only (op-vocabulary-v1: "
+            "batchable = no) — it never rides inside a batch. No changes were applied — the batch was "
+            "discarded. Run `comfy workflow clear <file>` as its own command, then apply the remaining ops."
+        )
+
+
 # Node types that live only in the UI graph and never reach the API — the
 # frontend's isVirtualNode set. Mirrors workflow_to_api._UI_ONLY_NODE_TYPES;
 # duplicated rather than imported to keep workflow_ops import-free of the
@@ -1022,8 +1064,24 @@ def _slot_name(slots: Any, idx: Any) -> Any:
 
 
 def resolve_ref(ref: Any, aliases: dict[str, Any]) -> Any:
-    """Map an alias to its minted id; pass ints/unknown strings through."""
+    """Map an alias (bare or ``$``-prefixed) to its minted id; pass ints and
+    unknown strings through.
+
+    ``$up`` and ``up`` address the same alias — exactly one leading ``$`` is
+    stripped before lookup (``$``-prefixed is the canonical documented form; see
+    docs/op-vocabulary-v1.md). ``${name}`` is NOT an alias: that shape is
+    reserved for recipe parameters (filled by :func:`substitute_params`), so an
+    unsubstituted one is rejected loudly here instead of falling through to a
+    misleading "node not found"."""
     if isinstance(ref, str):
+        if ref.startswith("${"):
+            raise ValueError(
+                f"{ref!r} looks like an unsubstituted recipe parameter — `${{name}}` is reserved for recipe "
+                "params (declare it under `params` and fill it with --param); an alias reference is `$name` "
+                "(or bare `name`)"
+            )
+        if ref.startswith("$"):
+            ref = ref[1:]
         if ref in aliases:
             return aliases[ref]
         if ref.lstrip("-").isdigit():
@@ -1086,11 +1144,20 @@ def apply_specs(
                     workflow, op = delete_node(
                         workflow, graph, resolve_ref(spec["node"], aliases), actor=actor, base_version=base_version
                     )
+                elif kind == "clear":
+                    # In the frozen vocabulary but standalone-only — surfaced with
+                    # its own registered code so the caller learns the standalone
+                    # command instead of a generic "unknown op".
+                    raise NotBatchableError(i)
                 else:
                     raise ValueError(f"spec #{i}: unknown op {kind!r}")
             except KeyError as e:
                 raise ValueError(f"spec #{i} ({kind}) is missing required field {e}") from e
             ops.append(op)
+    except NotBatchableError:
+        # Already carries the registered code, the standalone command, and the
+        # nothing-was-applied statement — don't wrap it into a generic hint.
+        raise
     except (ValueError, KeyError) as e:
         raise _rehint_discarded_batch(e, pre_batch_hint) from e
     return workflow, ops, aliases
