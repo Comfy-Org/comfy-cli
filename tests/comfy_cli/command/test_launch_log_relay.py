@@ -270,3 +270,133 @@ def test_pump_picks_up_a_rebooted_process(relay_output, run_pump, monkeypatch):
     run_pump(pick, seconds=0.3)
 
     assert relay_output.getvalue() == "before reboot\nafter reboot\n"
+
+
+class _ListPipe:
+    """A pipe holding a fixed backlog, then EOF — an exited child's buffer."""
+
+    def __init__(self, *lines):
+        self.lines = list(lines)
+
+    def readline(self):
+        return self.lines.pop(0) if self.lines else ""
+
+
+def test_pump_drains_buffered_output_before_ending(relay_output):
+    """`drain` must flush the pipe's backlog, not abandon it.
+
+    `process.wait()` returning means the child is gone, not that its output has
+    been read — the last thing it wrote is still in the pipe buffer. Exiting on
+    the flag itself would drop exactly the crash tail the drain exists to save.
+    """
+    pipe = _ListPipe("loading model\n", "RuntimeError: out of memory\n")
+    drain = threading.Event()
+    drain.set()
+
+    # Returns on its own once the pipe reaches EOF: no thread, no timing.
+    launch._pump_child_pipe(lambda: pipe, drain=drain)
+
+    assert relay_output.getvalue() == "loading model\nRuntimeError: out of memory\n"
+
+
+def test_drain_relays_a_line_written_just_before_child_exit(relay_output, monkeypatch):
+    """The race CodeRabbit flagged: last line written while the pump backs off.
+
+    A pump sitting in its `_REDIRECTOR_IDLE_SLEEP` backoff when the child writes
+    its final traceback and exits has not read that line yet, and nothing
+    obliges the exit path to take longer than the backoff to reach `os._exit`.
+    `_drain_child_pipes` is what closes that window.
+    """
+    monkeypatch.setattr(launch, "_REDIRECTOR_IDLE_SLEEP", 0.05)
+    pipe = _ListPipe()  # empty: the pump starts out backing off, as in the race
+    drain = threading.Event()
+    pump = threading.Thread(target=launch._pump_child_pipe, args=(lambda: pipe,), kwargs={"drain": drain}, daemon=True)
+    pump.start()
+    time.sleep(0.02)  # let it reach the backoff
+
+    pipe.lines.append("RuntimeError: the last thing ComfyUI said\n")
+    launch._drain_child_pipes(drain, [pump])
+
+    assert not pump.is_alive(), "drain returned before the pump finished"
+    assert relay_output.getvalue() == "RuntimeError: the last thing ComfyUI said\n"
+
+
+def test_drain_is_bounded_when_a_pipe_never_reaches_eof():
+    """A descendant holding the pipe open must not block shutdown forever.
+
+    `readline()` only sees EOF once *every* writer closes; a grandchild that
+    inherited the pipe keeps it open past the child's death. The pumps stay
+    daemons precisely so blowing the deadline costs the tail, not the exit.
+    """
+    release = threading.Event()
+
+    class BlockingPipe:
+        def readline(self):
+            release.wait(5)
+            return ""
+
+    drain = threading.Event()
+    pump = threading.Thread(
+        target=launch._pump_child_pipe, args=(lambda: BlockingPipe(),), kwargs={"drain": drain}, daemon=True
+    )
+    pump.start()
+    try:
+        start = time.monotonic()
+        launch._drain_child_pipes(drain, [pump], deadline=0.1)
+        elapsed = time.monotonic() - start
+
+        assert elapsed < 2, f"drain blocked {elapsed:.1f}s on a pipe that never EOFs"
+        assert pump.is_alive(), "the blocked pump should outlive the bounded wait"
+    finally:
+        release.set()
+        pump.join(timeout=5)
+
+
+def test_drain_deadline_covers_both_pumps():
+    """The deadline is for the whole drain, not per thread.
+
+    Joining each pump with the full timeout would let two stuck pipes take
+    2 x `_DRAIN_DEADLINE` to give up.
+    """
+    release = threading.Event()
+
+    def block():
+        release.wait(5)
+
+    pumps = [threading.Thread(target=block, daemon=True) for _ in range(2)]
+    for pump in pumps:
+        pump.start()
+    try:
+        start = time.monotonic()
+        launch._drain_child_pipes(threading.Event(), pumps, deadline=0.2)
+        elapsed = time.monotonic() - start
+
+        assert elapsed < 0.4, f"deadline applied per-pump, not overall: {elapsed:.2f}s"
+    finally:
+        release.set()
+        for pump in pumps:
+            pump.join(timeout=5)
+
+
+def test_exit_paths_drain_and_the_reboot_path_does_not():
+    """Every `_hard_exit` in the background branch drains; the reboot path must not.
+
+    Draining on reboot would end the pumps mid-run and silence the restarted
+    server, which is the same truncation bug from the other direction — and no
+    behavioral test above covers the wiring.
+    """
+    import inspect
+
+    source = inspect.getsource(launch.launch_comfyui)
+    # The background branch's own opening comment: the foreground branch above
+    # has `else:` and `os.remove(reboot_path)` of its own to be confused with.
+    background = source.split("broken pipe errors may occur", 1)[1]
+
+    # Every `_hard_exit` has a drain between it and the previous one.
+    for i, chunk in enumerate(background.split("_hard_exit(")[:-1]):
+        statements = [ln.strip() for ln in chunk.splitlines() if ln.strip() and not ln.strip().startswith("#")]
+        assert "_drain_child_pipes(drain, pumps)" in statements, f"undrained _hard_exit #{i + 1}"
+
+    # The reboot path continues the loop instead, so the pumps survive it.
+    reboot_step = background.split("os.remove(reboot_path)")[0].rsplit("_hard_exit(", 1)[1]
+    assert "_drain_child_pipes" not in reboot_step

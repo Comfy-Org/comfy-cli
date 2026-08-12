@@ -163,7 +163,19 @@ def _relay_child_line(line: str) -> None:
     stream.flush()
 
 
-def _pump_child_pipe(pick_pipe, stop: threading.Event | None = None) -> None:
+# How long the exit path will wait for the pumps to reach EOF before giving up
+# and exiting anyway. Generous next to the microseconds a drain of an already
+# exited child actually takes, but bounded: a *descendant* that inherited the
+# pipe keeps the write end open, so `readline()` there blocks until that
+# grandchild dies. Shutting down promptly beats waiting on it.
+_DRAIN_DEADLINE = 2.0
+
+
+def _pump_child_pipe(
+    pick_pipe,
+    stop: threading.Event | None = None,
+    drain: threading.Event | None = None,
+) -> None:
     """Relay one of the background child's pipes until the process exits.
 
     ``pick_pipe`` is re-called every pass rather than handed a pipe once:
@@ -178,9 +190,17 @@ def _pump_child_pipe(pick_pipe, stop: threading.Event | None = None) -> None:
     run. (Two such threads, both non-daemon, used to do exactly that from the
     moment the server exited.)
 
-    ``stop`` is the seam that follows from that: production never sets it (the
-    pumps die with the process at ``_hard_exit``), but a caller that needs the
-    thread to actually end — the tests — has no other way to ask.
+    The two events are the seams that follow from that, and they are not the
+    same request:
+
+    - ``stop`` means *give up now*, mid-pipe if need be. Production never sets
+      it; a caller that needs the thread to actually end — the tests — has no
+      other way to ask.
+    - ``drain`` means *the child has exited, so finish the pipe and then end*.
+      Only once a read comes back empty is the pipe genuinely at EOF, and only
+      then does the loop return. That distinction is the whole point: exiting
+      on the flag itself would drop exactly the buffered tail — the last frames
+      of the traceback that killed the server — that the drain exists to save.
     """
     while stop is None or not stop.is_set():
         pipe = pick_pipe()
@@ -194,13 +214,44 @@ def _pump_child_pipe(pick_pipe, stop: threading.Event | None = None) -> None:
             # A closed handle — the reboot path swaps the pipe out from under
             # us, and a torn-down stdout fails the relay's write the same way.
             # Back off and retry: losing a line beats losing the pump, which
-            # would truncate the log for the rest of the run.
+            # would truncate the log for the rest of the run. Under `drain`
+            # there is no retry left to make, and the loop below ends it.
             line = ""
         if not line:
-            if stop is None:
+            if drain is not None and drain.is_set():
+                return
+            # Wait on an event rather than sleep where there is one, so a
+            # `drain` raised mid-backoff is answered now and not up to
+            # `_REDIRECTOR_IDLE_SLEEP` later.
+            waiter = stop if stop is not None else drain
+            if waiter is None:
                 time.sleep(_REDIRECTOR_IDLE_SLEEP)
             else:
-                stop.wait(_REDIRECTOR_IDLE_SLEEP)
+                waiter.wait(_REDIRECTOR_IDLE_SLEEP)
+
+
+def _drain_child_pipes(drain: threading.Event, pumps, deadline: float = _DRAIN_DEADLINE) -> None:
+    """Let the pumps finish the exited child's pipes before the process dies.
+
+    ``process.wait()`` returning only means the child is gone, not that its
+    output has been read: whatever it wrote last is still sitting in the pipe
+    buffer. Every exit below is ``_hard_exit`` (``os._exit``), which takes the
+    daemon pumps with it wherever they are — so without this the tail of the
+    log is lost precisely when it matters most, on the crash whose traceback
+    ``background_launch`` is about to render.
+
+    The race is not theoretical: a pump that happens to be inside its
+    ``_REDIRECTOR_IDLE_SLEEP`` backoff when the child writes its last line and
+    exits has not yet read that line, and the exit path is not obliged to take
+    longer than the backoff to reach ``os._exit``.
+
+    Bounded, and best-effort by construction — the pumps stay daemons, so
+    blowing the deadline costs the tail rather than the shutdown.
+    """
+    drain.set()
+    end = time.monotonic() + deadline
+    for pump in pumps:
+        pump.join(max(0.0, end - time.monotonic()))
 
 
 def launch_comfyui(extra, frontend_pr=None, python=sys.executable):
@@ -275,16 +326,26 @@ def launch_comfyui(extra, frontend_pr=None, python=sys.executable):
         # Daemon threads: every exit path here is `_hard_exit` (os._exit), which
         # kills them regardless, but a `Popen` failure or an early Ctrl-C returns
         # normally — and non-daemon pumps would hang interpreter shutdown there.
-        threading.Thread(
-            target=_pump_child_pipe,
-            args=(lambda: process.stderr if process is not None else None,),
-            daemon=True,
-        ).start()
-        threading.Thread(
-            target=_pump_child_pipe,
-            args=(lambda: process.stdout if process is not None else None,),
-            daemon=True,
-        ).start()
+        # Held onto so the exit paths below can drain them first; the reboot
+        # path deliberately does not, since the same pumps carry the restarted
+        # server's output.
+        drain = threading.Event()
+        pumps = [
+            threading.Thread(
+                target=_pump_child_pipe,
+                args=(lambda: process.stderr if process is not None else None,),
+                kwargs={"drain": drain},
+                daemon=True,
+            ),
+            threading.Thread(
+                target=_pump_child_pipe,
+                args=(lambda: process.stdout if process is not None else None,),
+                kwargs={"drain": drain},
+                daemon=True,
+            ),
+        ]
+        for pump in pumps:
+            pump.start()
 
         try:
             while True:
@@ -317,15 +378,26 @@ def launch_comfyui(extra, frontend_pr=None, python=sys.executable):
                 process.wait()
 
                 if reboot_path is None:
+                    # Drain before printing, so our message lands after the
+                    # child's own output rather than in the middle of it.
+                    _drain_child_pipes(drain, pumps)
                     print("[bold red]ComfyUI is not installed.[/bold red]\n")
                     _hard_exit(1)
 
                 if not os.path.exists(reboot_path):
+                    # The server exited for good — this is the path whose tail
+                    # `background_launch` renders as the crash panel.
+                    _drain_child_pipes(drain, pumps)
                     _hard_exit(process.returncode)
 
+                # Reboot: no drain. The pumps keep running and pick the new
+                # `process` up on their next pass.
                 os.remove(reboot_path)
         except KeyboardInterrupt:
             if process is not None:
+                # The child takes the same SIGINT and is on its way out; give
+                # its last words the same bounded chance to reach the log.
+                _drain_child_pipes(drain, pumps)
                 _hard_exit(1)
 
 
