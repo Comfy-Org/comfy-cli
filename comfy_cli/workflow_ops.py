@@ -346,9 +346,16 @@ def _stamp_key(op: dict) -> list:
 
 
 def _lww_gate(workflow: dict, op: dict) -> bool:
-    """True iff this ``set_widget`` should apply under last-writer-wins. A write
-    to a target already claimed by a higher-or-equal stamp is dropped, making the
-    surviving value independent of apply order."""
+    """True iff this op's write should apply under last-writer-wins. A write to a
+    target already claimed by a higher-or-equal stamp is dropped, making the
+    surviving value independent of apply order.
+
+    Gated targets (``_write_target``): ``set_widget``'s ``("widget", …)``, the
+    connect-embedded ``inputcount`` bump that shares a connect's stamp (§8.4),
+    and — since amendment v1.2 — a concrete connect's ``("input", to_node,
+    to_slot)``. The register store is still spelled ``_widget_stamps`` for
+    on-the-wire compatibility with documents written before v1.2; it holds every
+    gated target, not just widgets."""
     prior = workflow.get("_widget_stamps", {}).get(json.dumps(_write_target(op), default=str))
     return prior is None or _stamp_key(op) > list(prior)
 
@@ -1434,11 +1441,17 @@ def apply_op(workflow: dict, op: dict, graph) -> dict:
 
 
 def _apply_add_node(workflow: dict, op: dict) -> None:
+    # Node identity is compared as a STRING everywhere in the apply path
+    # (amendment v1.2): ids are legitimately either JSON type, and an exact
+    # ``==`` made ``7`` and ``"7"`` two different nodes.
     nodes = workflow.setdefault("nodes", [])
-    if any(n.get("id") == op["node_id"] for n in nodes):
+    if any(str(n.get("id")) == str(op["node_id"]) for n in nodes):
         return
     nodes.append(copy.deepcopy(op["node"]))
-    workflow["last_node_id"] = max(workflow.get("last_node_id") or 0, op["node_id"])
+    # last_node_id is a max-register over INT ids only; a string id (subgraph
+    # address, historical workflow) is not comparable and never bumps it.
+    if isinstance(op["node_id"], int) and not isinstance(op["node_id"], bool):
+        workflow["last_node_id"] = max(workflow.get("last_node_id") or 0, op["node_id"])
 
 
 def _apply_set_widget(workflow: dict, op: dict, graph) -> None:
@@ -1462,7 +1475,7 @@ def _apply_set_widget(workflow: dict, op: dict, graph) -> None:
         _engine._write_widget(target, op["inner_widget"], op["value"], graph, extend=False)
         _lww_commit(workflow, op)
         return
-    node = _find(workflow, op["node_id"])
+    node = _find_by_str(workflow, op["node_id"])
     if node is None:
         return  # target concurrently deleted => no-op (delete wins).
     from comfy_cli.cql import engine as _engine
@@ -1508,15 +1521,21 @@ def _apply_inputcount_bump(workflow: dict, dst: dict, op: dict, graph, widget: s
 
 
 def _apply_connect(workflow: dict, op: dict, graph) -> None:
-    # Totality: either endpoint concurrently deleted => no-op (delete wins), so a
-    # merge consumer can replay a connect and a delete in either order without a
-    # crash or a dangling link. Resolve both before mutating anything.
-    dst = _find(workflow, op["to_node"])
-    src = _find(workflow, op["from_node"])
-    if dst is None or src is None:
+    # Totality: an endpoint concurrently deleted => no crash and no dangling
+    # link, so a merge consumer can replay a connect and a delete in either
+    # order. Resolve the destination before mutating anything; if it is gone the
+    # target slot does not exist and never will (ids are never reused), so there
+    # is no register to claim and delete simply wins.
+    dst = _find_by_str(workflow, op["to_node"])
+    if dst is None:
         return
     grow = op.get("grow")
     if grow is not None:
+        # Autogrow is NOT a shared register: every grow mints its own slot keyed
+        # by ``grow_id``, so two concurrent grows onto one base both survive and
+        # there is nothing to gate (§1.2 / amendment v1.2's carve-out).
+        if _find_by_str(workflow, op["from_node"]) is None:
+            return
         # Autogrow: grow a concrete slot and wire it. Keyed by ``grow_id`` (the
         # link id) so replay is idempotent AND non-clobbering — a concurrent
         # autogrow that minted the same requested name gets its own fresh slot
@@ -1566,11 +1585,32 @@ def _apply_connect(workflow: dict, op: dict, graph) -> None:
                 _apply_inputcount_bump(workflow, dst, op, graph, inputcount["widget"], inputcount["value"])
     else:
         to_idx = op["to_slot"]
-        # A concrete input holds at most one link. Replacing it must fully retire
-        # the old link (drop the tuple + scrub the old source's out-links).
+        # --- The concrete-input LWW register (op-vocabulary-v1.md amendment v1.2)
+        #
+        # A concrete input holds at most one link, so "who occupies this slot" is
+        # a SCALAR target — ``("input", to_node, to_slot)`` — resolved by exactly
+        # the ``_lww_gate``/``_lww_commit`` pair ``set_widget`` uses. Without the
+        # gate the occupant was decided by ARRIVAL ORDER, and composed with
+        # delete-wins that produced graphs where a link exists in one
+        # interleaving and not in another (found adversarially against the
+        # TypeScript port: cloud PR #6722, FINDING 1).
+        if not _lww_gate(workflow, op):
+            return
+        # Claiming the register is UNCONDITIONAL once the gate passes: the prior
+        # occupant is retired even if this op then turns out to be a delete-wins
+        # no-op below. Deferring the retirement until the link is known to be
+        # installable would reintroduce order dependence — whether the incumbent
+        # survives would depend on whether the concurrent delete of THIS op's
+        # source had arrived yet.
+        _lww_commit(workflow, op)
         prev = dst["inputs"][to_idx].get("link")
         if prev is not None and prev != op["link_id"]:
             _remove_link(workflow, prev)
+    # Source concurrently deleted => the winning connect leaves the input EMPTY
+    # (delete wins over the link, not over the register claim).
+    src = _find_by_str(workflow, op["from_node"])
+    if src is None:
+        return
     link = [op["link_id"], op["from_node"], op["from_slot"], op["to_node"], to_idx, op["link_type"]]
     links = workflow.setdefault("links", [])
     if not any(ln[0] == op["link_id"] for ln in links):
@@ -1602,10 +1642,14 @@ def _remove_link(workflow: dict, link_id: Any) -> None:
 
 
 def _apply_delete_node(workflow: dict, op: dict) -> None:
-    node_id = op["node_id"]
-    workflow["nodes"] = [n for n in workflow.get("nodes") or [] if n.get("id") != node_id]
+    node_id = str(op["node_id"])  # node identity is compared as a string (amendment v1.2)
+    workflow["nodes"] = [n for n in workflow.get("nodes") or [] if str(n.get("id")) != node_id]
     removed = set(op.get("removed_links") or [])
-    kept = [ln for ln in workflow.get("links") or [] if ln[0] not in removed and ln[1] != node_id and ln[3] != node_id]
+    kept = [
+        ln
+        for ln in workflow.get("links") or []
+        if ln[0] not in removed and str(ln[1]) != node_id and str(ln[3]) != node_id
+    ]
     workflow["links"] = kept
     kept_ids = {ln[0] for ln in kept}
     # Scrub dangling references so no input/output points at a gone link.
@@ -1656,6 +1700,17 @@ def _apply_reset_doc(workflow: dict, op: dict) -> None:
 
 
 def _write_target(op: dict) -> tuple:
+    """The conflict/write target of an op — the LWW register it claims.
+
+    NODE IDS ARE NORMALIZED WITH ``str()`` (amendment v1.2). Node ids are
+    legitimately either JSON type — historical workflows carry string ids and
+    subgraph addresses are strings like ``"57:3"`` — while every lookup path
+    resolves them as strings (``_find_by_str``). Building the target from the
+    raw value gave ``7`` and ``"7"`` two different registers for one node, so
+    ``_lww_gate`` never compared them and the pair converged by apply order
+    (adversarial finding, comfy-multi-player PR #6725). Interior writes already
+    normalized their path; every case now matches.
+    """
     kind = op["op"]
     if kind == "set_widget":
         # Subgraph writes target the resolved interior path so the flat promoted
@@ -1663,17 +1718,17 @@ def _write_target(op: dict) -> tuple:
         # same interior widget share one write target (converge, not clobber).
         if op.get("path"):
             return ("widget", tuple(str(s) for s in op["path"]), op["inner_widget"])
-        return ("widget", op["node_id"], op["widget"])
+        return ("widget", str(op["node_id"]), op["widget"])
     if kind in ("add_node", "delete_node"):
-        return ("node", op["node_id"])
+        return ("node", str(op["node_id"]))
     if kind == "connect":
         grow = op.get("grow")
         if grow is not None:
             # Two autogrow connects onto the same base share a target (their
             # relative order in the batch is the sequence decision the merge
             # consumer must make); distinct bases don't collide.
-            return ("input", op["to_node"], "grow", str(grow["name"]).split(".", 1)[0])
-        return ("input", op["to_node"], op["to_slot"])
+            return ("input", str(op["to_node"]), "grow", str(grow["name"]).split(".", 1)[0])
+        return ("input", str(op["to_node"]), op["to_slot"])
     return (kind,)
 
 
