@@ -27,13 +27,14 @@ Six kinds. No other kind is valid in v1: `apply_op` rejects an unknown kind with
 | `set_widget` | yes | `comfy workflow set-widget` | Set one widget value by name |
 | `delete_node` | yes | `comfy workflow delete` | Remove one node and its incident links |
 | `clear` | no | `comfy workflow clear` | Remove every node, link, and group |
-| `reset_doc` | no | (deferred) | Reset the whole document to an empty baseline |
+| `reset_doc` | no | `comfy workflow reset-doc --confirm` | Reset the whole document to an empty baseline |
 
 Batchable = the kind is accepted by `apply_specs` (the `workflow apply` /
 `workflow foreach` batch surface). `clear` and `reset_doc` rewrite the whole
-document, so they are standalone-only: a batch containing `clear` is rejected
-atomically with error code `workflow_clear_not_batchable` and a hint naming the
-standalone `comfy workflow clear` command. Nothing from such a batch is applied.
+document, so they are standalone-only: a batch containing either is rejected
+atomically with its own registered error code —
+`workflow_clear_not_batchable` / `workflow_reset_doc_not_batchable` — and a hint
+naming the standalone command. Nothing from such a batch is applied.
 
 Every op carries the common envelope stamped by `_new_op`:
 
@@ -141,19 +142,31 @@ monotonic — id reuse would let a merge resurrect a deleted node's identity.
   names the standalone command.
 * Idempotency: `op_id` no-op; clearing an empty document changes nothing.
 
-### 1.6 `reset_doc` — standalone only, deferred
+### 1.6 `reset_doc` — standalone only
 
-Defined here; **implementation is deferred to the bulk-writers ticket**.
-`apply_op` currently rejects it (`unknown op 'reset_doc'`), and the contract
-tests pin that it stays rejected until it is un-deferred by amendment.
+Command: `comfy workflow reset-doc <file> --confirm`. Implemented by amendment
+v1.1 (§10); `DEFERRED_OPS` is now empty. Minted op fields: `removed_nodes` (ids
+present at mint time), same as `clear`.
 
-Semantics when implemented: replace the entire document with the empty baseline,
-including apply bookkeeping — unlike `clear`, which preserves the id high-water
-marks and the applied-op history. Because it erases replay history, it is a
-history barrier: ops minted against a pre-reset `base_version` do not replay
-across it. Guard semantics: the CLI surface requires an explicit `--confirm`
-flag; without it the command fails closed and applies nothing. Not batchable,
-for the same reason as `clear`.
+Replaces the entire document with the empty baseline, **including apply
+bookkeeping** — unlike `clear`, which preserves the id high-water marks and the
+applied-op history. `last_node_id` / `last_link_id` go to 0 (safe: ids come from
+`mint_id`, never from the high-water marks — §8.3), `_applied_ops` and
+`_widget_stamps` are dropped, and only the document `id` survives. Because it
+erases replay history it is a **history barrier**: ops minted against a
+pre-reset `base_version` do not replay across it.
+
+* Guard: the CLI surface requires an explicit `--confirm`; without it the
+  command fails closed with `workflow_reset_doc_unconfirmed` and writes nothing.
+  The check runs before the file is read, so an unconfirmed call cannot fail
+  halfway. It is the only edit command with a guard, because it is the only one
+  no later op can undo.
+* Idempotency: the reset's own `op_id` is written into the freshly-emptied
+  `_applied_ops`, so a re-delivered `reset_doc` is a no-op, not a second wipe.
+* Batchable: **no**, for the same reason as `clear` — rejected with
+  `workflow_reset_doc_not_batchable`.
+* Never emitted implicitly: no `--emit-ops` surface and no bulk writer (§8.8)
+  mints one. It exists only where a caller asked for it by name.
 
 ## 2. Idempotency and identity
 
@@ -390,6 +403,43 @@ Current contract, pinned:
   to sibling instances, definition garbage collection) is owed before this
   document's v1.1, together with the FE stable-ID reconciliation (section 6).
 
+### 8.8 Bulk writers emit ops, they do not re-seed
+
+A **bulk writer** is any command that replaces the working file wholesale rather
+than editing it: `comfy templates fetch -o <file>` today, `workflow get -o`
+next. Downstream, such a replacement used to become a new document — the
+consumer re-minted a snapshot from the new file. §8.6 forbids exactly that for a
+replica, and even for the store owner it throws away the attributed history the
+op log exists to keep.
+
+`workflow_ops.replace_ops(old, new)` is the alternative, and `templates fetch
+--emit-ops` is its first caller. The rules:
+
+* **Shape**: `delete_node` for every node in `old` (in order), then `add_node`
+  for every node in `new`, then `connect` for every link. No `set_widget` ops —
+  widget values ride inside the `add_node` payload, which §8.5 makes
+  authoritative.
+* **Identity is re-minted, never inherited.** Template graphs are numbered from
+  small frontend counters; replaying those ids into a live document reuses
+  identities a concurrent replica may still hold (§1.5's resurrection hazard).
+  Every node and link gets a fresh `mint_id` and every interior reference
+  (`inputs[].link`, `outputs[].links`, the `links` tuples) is remapped onto it.
+* **Dual shape.** Each emitted entry is a fully minted op (envelope + the kind's
+  minted fields) AND carries that kind's spec keys (`class_type`/`at`/`as`,
+  `from`/`to`, `node`). The same array therefore replays through `apply_op`
+  losslessly and is accepted verbatim by `apply_specs`. The two are not
+  equivalent: `apply_specs` re-mints each node from the live catalog, so it
+  reproduces the structure (classes + wiring) while the op path reproduces the
+  graph exactly, widget values included.
+* **All or nothing.** A graph the vocabulary cannot express — a subgraph
+  definition, a canvas group, a reroute point, a malformed node or link — emits
+  **no ops at all** (`NotExpressibleError`, surfaced as `ops_skipped`), never a
+  partial batch. A partial batch applies cleanly and leaves a document that is
+  not the graph the caller asked for; the consumer is expected to keep its
+  whole-document fallback for these cases.
+* **`reset_doc` is never part of a bulk batch** (§1.6). Replacing a canvas is
+  expressed as deletes + adds, which merge; a history barrier does not.
+
 ## 9. Amendments
 
 * Post-freeze changes require a **versioned amendment section** appended to
@@ -401,3 +451,26 @@ Current contract, pinned:
 * Adding, removing, or re-scoping an op kind requires updating `FROZEN_OPS` /
   `DEFERRED_OPS` / `BATCHABLE_OPS`, the dispatch tables, and this document in
   one commit — `tests/comfy_cli/test_op_vocabulary_contract.py` fails otherwise.
+
+## 10. Amendment v1.1 — 2026-08-12 (V1-038 / BE-7171)
+
+**`reset_doc` is un-deferred.** `DEFERRED_OPS` is now empty; `apply_op`
+dispatches `reset_doc` and `apply_specs` rejects it as standalone-only with its
+own registered code. §1.6 is rewritten from "semantics when implemented" to the
+implemented contract, and the frozen table's standalone-command cell names
+`comfy workflow reset-doc --confirm` instead of "(deferred)". No frozen kind was
+added, removed, or re-scoped: `reset_doc` was already in `FROZEN_OPS` and
+already `Batchable = no`.
+
+*Why now*: the bulk-writers ticket needed a real, guarded "start this document
+over" primitive so that "replace the canvas" and "erase the document" stopped
+being the same operation. They are now distinct: §8.8's bulk batch replaces the
+canvas with merging deletes+adds, and `reset_doc` is the explicit, confirmed
+barrier a caller asks for by name.
+
+**§8.8 is new** and normative for bulk writers (`replace_ops`,
+`templates fetch --emit-ops`). It adds no op kind — it constrains how existing
+kinds are minted for a whole-file replacement.
+
+**No change to §§2-7, 8.1-8.7.** Stamping, LWW, abort-remainder, aliases and
+replication semantics are untouched.

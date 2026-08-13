@@ -1500,6 +1500,10 @@ app.command(
     help="Delete N nodes in one atomic write; emits one delete_node op per id (all-or-nothing).",
 )(_wedit.delete_nodes_cmd)
 app.command("clear", help="Remove every node, link, and group; emits one clear op.")(_wedit.clear_cmd)
+app.command(
+    "reset-doc",
+    help="Reset the document to the empty baseline — nodes, ids AND replay history. Requires --confirm.",
+)(_wedit.reset_doc_cmd)
 app.command("ls-nodes", help="List nodes (id/type/title) in a workflow file.")(_wedit.ls_nodes_cmd)
 app.command("apply", help="Apply a recipe / batch of edits in one pass; supports node aliases + --param.")(
     _wedit.apply_cmd
