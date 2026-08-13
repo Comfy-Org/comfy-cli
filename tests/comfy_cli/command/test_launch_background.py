@@ -111,6 +111,34 @@ def test_background_launch_error_panel_neutralizes_log_text(
     mock_exit.assert_called_once_with(1)
 
 
+@patch("comfy_cli.command.launch.os._exit")
+@patch("comfy_cli.command.launch.launch_and_monitor", new_callable=AsyncMock)
+@patch("comfy_cli.command.launch.check_comfy_server_running", return_value=False)
+@patch("comfy_cli.command.launch.ConfigManager")
+def test_background_launch_error_panel_survives_a_stray_escape_introducer(
+    mock_config_manager, mock_check_running, mock_monitor, mock_exit, pretty_renderer, capsys
+):
+    """A crashed process can dump a bare `\\x1b]` into the captured output. The
+    panel exists to show the traceback under it, so the sanitizer bounds that
+    introducer at its line (`sanitize_log_markup`) instead of letting it eat the
+    rest of the capture the way the authored-message `sanitize` does."""
+    mock_config_manager.return_value.background = None
+    mock_monitor.return_value = [
+        "Traceback (most recent call last):\n",
+        "\x1b]0;stray introducer\n",
+        '  File "node.py", line 42\n',
+        "RuntimeError: boom\n",
+    ]
+
+    launch.background_launch(extra=[])
+
+    out = capsys.readouterr().out
+    assert "RuntimeError: boom" in out
+    assert "node.py" in out
+    assert "\x1b]" not in out
+    mock_exit.assert_called_once_with(1)
+
+
 @patch("comfy_cli.command.launch.launch_and_monitor", new_callable=AsyncMock)
 @patch("comfy_cli.command.launch.check_comfy_server_running", return_value=False)
 @patch("comfy_cli.command.launch.ConfigManager")

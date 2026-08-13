@@ -5,7 +5,9 @@ from __future__ import annotations
 import pytest
 
 from comfy_cli.output.sanitize import (
+    close_open_sgr,
     sanitize,
+    sanitize_log_markup,
     sanitize_markup,
     sanitize_optional,
     sanitize_terminal_stream,
@@ -143,12 +145,20 @@ def test_sanitize_markup_stringifies_non_strings():
         # mode do not honor it, so keeping it would only leak bytes.
         ("a\x9b31mb", "ab"),
         ("a\x9b2Jb", "ab"),
-        # OSC/DCS/APC, terminated and unterminated.
+        # OSC/DCS/APC, properly terminated.
         ("a\x1b]0;pwned\x07b", "ab"),
         ("a\x1b]0;pwned\x1b\\b", "ab"),
-        ("before\x1b]0;never terminated", "before"),
         ("a\x1bPq#0;2\x1b\\b", "ab"),
         ("a\x1b_G payload \x1b\\b", "ab"),
+        # ...and unterminated, where this variant differs from ``sanitize``:
+        # the sequence ends at the newline instead of eating the rest of the
+        # log. Everything below the stray introducer survives.
+        ("a\x1b]0;never terminated\nkeep me\n", "a\nkeep me\n"),
+        ("a\x1bPnever terminated\nkeep me\n", "a\nkeep me\n"),
+        ("a\x9d0;never terminated\nkeep me\n", "a\nkeep me\n"),
+        # On the last line there is no newline to stop at, so the tail does go —
+        # the introducer's payload is unknowable and must not be printed.
+        ("before\x1b]0;never terminated", "before"),
         # Two-character escapes / charset designators.
         ("a\x1b(Bb", "ab"),
         ("a\x1b=b", "ab"),
@@ -184,11 +194,108 @@ def test_sanitize_terminal_stream_is_idempotent():
     assert sanitize_terminal_stream(once) == once
 
 
+def test_sanitize_terminal_stream_keeps_the_log_below_a_stray_introducer():
+    # The tail-swallow regression: one unterminated introducer must cost the
+    # line it is on, not every line after it.
+    raw = "line one\n\x1b]0;truncator\nline two\nline three\n"
+    assert sanitize_terminal_stream(raw) == "line one\n\nline two\nline three\n"
+
+
 def test_sanitize_terminal_stream_does_not_split_kept_sequences():
     # The regression the single-pass design exists to prevent: a two-pass
     # implementation (escapes, then a residual control-char sweep) would strip
     # the ESC out of a preserved SGR and leave a bare literal '[31m' on screen.
     assert sanitize_terminal_stream("\x1b[31mred") == "\x1b[31mred"
+
+
+# --------------------------------------------------------------------------- #
+# sanitize_log_markup — captured log into a markup-parsing sink
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        # Brackets are neutralized rather than parsed — an unbalanced closer
+        # would otherwise raise MarkupError from inside the failure handler.
+        ("[/red] boom", r"\[/red] boom"),
+        # Rich only escapes what it would otherwise parse, so a bracketed run
+        # that is not a tag (the usual log-level prefix) passes through as-is.
+        ("[INFO] tail", "[INFO] tail"),
+        # Escapes go entirely, colour included: the panel does its own styling.
+        ("\x1b[31mred\x1b[0m", "red"),
+        ("a\x1b[2Jb", "ab"),
+        ("a\x9b31mb", "ab"),
+        # CR goes too, unlike the stream variant: the Panel lays out its lines.
+        ("real\rspoofed", "realspoofed"),
+        # Layout survives.
+        ("col1\tcol2\nrow2", "col1\tcol2\nrow2"),
+        ("", ""),
+    ],
+)
+def test_sanitize_log_markup_neutralizes_markup_and_escapes(raw: str, expected: str):
+    assert sanitize_log_markup(raw) == expected
+
+
+def test_sanitize_log_markup_keeps_the_traceback_below_a_stray_introducer():
+    # Why this exists instead of plain ``sanitize_markup``: one stray '\x1b]'
+    # byte in the capture would otherwise truncate the panel there, discarding
+    # exactly the traceback the panel is being printed to show.
+    raw = "Traceback:\n\x1b]0;stray\n  File 'x.py', line 1\nRuntimeError: boom\n"
+    out = sanitize_log_markup(raw)
+
+    assert "RuntimeError: boom" in out
+    assert "x.py" in out
+    assert sanitize_markup(raw) == "Traceback:\n"  # the behavior being avoided
+
+
+def test_sanitize_log_markup_stringifies_non_strings():
+    assert sanitize_log_markup(42) == "42"
+
+
+# --------------------------------------------------------------------------- #
+# close_open_sgr — containing style bleed in a replayed stream
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        # A line that leaves a style open is closed at its own newline, so the
+        # style cannot hide or restyle the lines below it.
+        ("\x1b[8mconcealed\nvisible\n", "\x1b[8mconcealed\x1b[0m\nvisible\n"),
+        ("\x1b[31mred\nplain\n", "\x1b[31mred\x1b[0m\nplain\n"),
+        # A line that already resets gains nothing, in any spelling of reset.
+        ("\x1b[31mred\x1b[0m\n", "\x1b[31mred\x1b[0m\n"),
+        ("\x1b[31mred\x1b[m\n", "\x1b[31mred\x1b[m\n"),
+        ("\x1b[31mred\x1b[0;0m\n", "\x1b[31mred\x1b[0;0m\n"),
+        # Only the *last* SGR on a line decides — an early reset followed by a
+        # new colour still leaves the line open.
+        ("\x1b[31ma\x1b[0m b\x1b[32mc\n", "\x1b[31ma\x1b[0m b\x1b[32mc\x1b[0m\n"),
+        # Text with no SGR at all is returned unchanged, byte for byte.
+        ("plain one\nplain two\n", "plain one\nplain two\n"),
+        ("", ""),
+        # An unterminated final line is closed too — there is no newline to
+        # hide behind, and the shell prompt follows it directly.
+        ("\x1b[31mno trailing newline", "\x1b[31mno trailing newline\x1b[0m"),
+        # '\r' is a within-line repaint (tqdm), not a line break: one reset for
+        # the whole progress line, not one per rewrite.
+        ("\x1b[32m50%\r\x1b[32m100%\n", "\x1b[32m50%\r\x1b[32m100%\x1b[0m\n"),
+    ],
+)
+def test_close_open_sgr(raw: str, expected: str):
+    assert close_open_sgr(raw) == expected
+
+
+def test_close_open_sgr_is_idempotent():
+    once = close_open_sgr("\x1b[8ma\nb\n\x1b[31mc")
+    assert close_open_sgr(once) == once
+
+
+def test_close_open_sgr_ignores_non_sgr_escapes():
+    # It runs after ``sanitize_terminal_stream``, so nothing else should be
+    # left — but it must not treat a stray erase sequence as an open style.
+    assert close_open_sgr("\x1b[2Jtext\n") == "\x1b[2Jtext\n"
 
 
 def test_sanitize_value_leaves_container_repr_inert():
