@@ -354,6 +354,20 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "report at https://github.com/Comfy-Org/workflow_templates/issues",
     ),
     ErrorCode(
+        "template_ambiguous",
+        "`comfy templates get --where …` matched more than one template; `get` resolves exactly one. "
+        "`details.candidates` carries up to 10 matches (name + title/type/tags/models) and "
+        "`details.matched` the full count.",
+        "add another --where filter (e.g. name=<substring>) to narrow to a single template",
+    ),
+    ErrorCode(
+        "template_filter_invalid",
+        "A `comfy templates get --where` filter was malformed (not key=value), used an unknown key, "
+        "or no filter was given at all. Valid keys: type, category, tag, model, provider, name — "
+        "identical semantics to the `templates ls` flags.",
+        "pass repeatable `--where key=value` pairs, e.g. `--where type=video --where tag=API`",
+    ),
+    ErrorCode(
         "cancel_failed",
         "`comfy jobs cancel` could not reach the local server to cancel the prompt.",
         "check the server is still running on the host/port",
@@ -650,6 +664,13 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "node_not_found",
         "Requested node class isn't in the loaded environment.",
         "see `details.close_matches` or run `comfy nodes search`",
+    ),
+    ErrorCode(
+        "expand_miss",
+        "`comfy nodes search --expand-top N` matched a node class but could not resolve its full schema "
+        "from the catalog. Surfaced as a per-hit error entry inside `data.expanded[]` (not as an error "
+        "envelope) — the search itself still succeeds and the other hits still expand.",
+        "the hit itself is still valid; inspect it directly with `comfy nodes show <class_type>`",
     ),
     # --- file transfer (upload / download) -----------------------------------
     ErrorCode(
