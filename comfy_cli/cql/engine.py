@@ -122,6 +122,26 @@ class Port:
         return None
 
     @property
+    def autogrow_element_template(self) -> dict | None:
+        """The element-naming template a caller should USE for this autogrow
+        input — never None for an autogrow port.
+
+        Identical to :attr:`autogrow_template` when object_info ships one;
+        otherwise the historical pluralization fallback (``images`` → prefix
+        ``image``) that ``workflow_ops._autogrow_elem_name`` applies when the
+        schema is silent. Exporters need the *effective* answer: a consumer
+        holding only the exported catalog has no object_info to fall back to,
+        and omitting the entry would tell it the input does not autogrow at all.
+        """
+        if not self.is_autogrow:
+            return None
+        declared = self.autogrow_template
+        if declared is not None:
+            return declared
+        stem = self.name[:-1] if self.name.endswith("s") else self.name
+        return {"prefix": stem}
+
+    @property
     def is_upload_backed(self) -> bool:
         """This COMBO's options are the server's *installed input files*, so the
         catalog snapshot is not authoritative for it.
