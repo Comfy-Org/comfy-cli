@@ -84,11 +84,14 @@ and optionally `grow` (autogrow slot descriptor: `{name, type, widget?, inputcou
 
 * Idempotency: `op_id` no-op; a link tuple with an already-present `link_id` is
   not appended twice.
-* Conflict: a concrete input holds at most one link — a connect to an occupied
-  input replaces it and fully retires the prior link (`_remove_link`). Two
-  concurrent connects to the same concrete input are an update-vs-update
-  conflict on that input (section 3). Autogrow connects are non-clobbering:
-  each grows a fresh slot keyed by `grow_id` (the link id), so both survive.
+* Conflict: a concrete input holds at most one link, so its occupant is a
+  **scalar LWW register** on the target `("input", to_node, to_slot)`, resolved
+  by `_stamp_key`/`_lww_gate` exactly like a `set_widget` (section 3, and
+  amendment v1.2 for the full rule). The winning connect retires the prior
+  occupant with `_remove_link`; the losing connect is dropped whole — no link
+  tuple, no out-link entry. Autogrow connects are non-clobbering and therefore
+  **not** gated: each grows a fresh slot keyed by `grow_id` (the link id), so
+  both survive.
 * Invalid: type-mismatched slots are rejected at mint time; a link cannot cross
   a subgraph boundary (rejected with the boundary explanation).
 
@@ -196,10 +199,17 @@ for its target. Higher `base_version` wins; ties break by `actor`, then by the
 unique `op_id` — so no two distinct ops ever compare equal, the order is total,
 and the surviving value is independent of apply order.
 
+Gated targets: the `set_widget` rows, the connect-embedded `inputcount` bump
+(8.4), and — since amendment v1.2 — a concrete `connect`'s
+`("input", to_node, to_slot)`. **Node ids in a target are compared as strings**
+(v1.2): ids are legitimately either JSON type, and comparing them raw gave `7`
+and `"7"` two registers for one node.
+
 | Scenario | Ruling | Where in code |
 |----------|--------|---------------|
 | update vs update (same widget) | LWW on `stamp` with `op_id` tiebreak; loser dropped | `_lww_gate` / `_stamp_key` |
-| update vs delete | **delete wins**: `set_widget` to a deleted node is a no-op; `connect` with either endpoint deleted is a no-op; replay never raises on a since-removed target | `_apply_set_widget` (missing node → return), `_apply_connect` (missing endpoint → return) |
+| **concurrent `connect` to the same concrete input** | LWW on `stamp` with `op_id` tiebreak, target `("input", to_node, to_slot)`; the loser is dropped whole (no link tuple, no out-link entry) and the winner retires the prior occupant. Amendment v1.2 — previously **undefined** and decided by arrival order | `_apply_connect` (concrete branch) / `_lww_gate` |
+| update vs delete | **delete wins**: `set_widget` to a deleted node is a no-op; a `connect` whose destination is gone is a no-op; a `connect` whose SOURCE is gone still claims its input register and leaves that input empty (v1.2 — otherwise the incumbent's survival depends on when the delete arrives); replay never raises on a since-removed target | `_apply_set_widget` (missing node → return), `_apply_connect` (missing endpoint → return) |
 | concurrent moves | no `move` op exists in v1 — positions are decided once at `add_node` mint time and frozen into the op; live position editing is frontend view state, out of scope until the FE stable-ID reconciliation (section 6) | `add_node` / `layout.cascade_pos` |
 | edges referencing deleted nodes | the connect no-ops (delete wins); a delete removes incident links and scrubs every dangling input/output reference, so no dangling edge survives either order | `_apply_connect`, `_apply_delete_node` |
 | duplicate entity creation | impossible by construction across writers (random 53-bit `mint_id`, no shared counter); a replayed `add_node` whose `node_id` already exists is a no-op; a re-sent op is dropped by `op_id` | `mint_id`, `_apply_add_node` |
@@ -474,3 +484,126 @@ kinds are minted for a whole-file replacement.
 
 **No change to §§2-7, 8.1-8.7.** Stamping, LWW, abort-remainder, aliases and
 replication semantics are untouched.
+
+## 11. Amendment v1.2 — 2026-08-12 (concrete-input contention; id-type identity)
+
+Two convergence rules that v1 left undefined, both found by **adversarial
+testing against the TypeScript port of this applier** — not by review. The
+Python `apply_op` and the port agreed with each other in every case below,
+which is what made these contract gaps rather than port bugs.
+
+### 11.1 A concrete input is an LWW register
+
+**The rule.** The occupant of a CONCRETE input slot is a scalar target
+`("input", to_node, to_slot)` under exactly the comparison of §3/§8.1 —
+`[base_version, actor, op_id]`, numeric then code-point, `op_id` breaking
+exact ties. `_apply_connect`'s concrete branch now runs `_lww_gate` /
+`_lww_commit` around its write, the same pair `_apply_set_widget` uses.
+
+**The repro** (writer A and writer B, each keeping its own causal order):
+
+```
+A: [add_node 400, connect 400 -> 200.positive]
+B: [connect 300 -> 200.positive, delete_node 300]
+```
+
+Before v1.2, order A-then-B left `200.positive` EMPTY (B's connect displaced
+A's link by arrival, then B's delete retired B's link) while order B-then-A
+left link 9003 in place. Same op set, two legal interleavings, two different
+graphs: one user sees a wired sampler, the other an unwired one.
+
+**The displaced link.** A concrete input holds at most one link, so exactly one
+link record survives per register:
+
+* the **winning** connect fully retires the prior occupant (`_remove_link`:
+  the link tuple plus the old source's out-link entry). The displaced link is
+  deleted, never orphaned and never re-parented to another slot.
+* the **losing** connect is dropped WHOLE — no link tuple, no out-link entry,
+  no slot write. It still consumes its `op_id` (§2): a dropped write is a
+  protocol-level apply, exactly like a losing `set_widget`.
+
+**Composition with delete-wins.** Claiming the register is unconditional once
+the gate passes, and it happens BEFORE the source endpoint is resolved:
+
+* destination node gone → the slot does not exist and never will (ids are
+  never reused), so there is no register and the op is a plain no-op;
+* source node gone → the winning connect still claims the register and clears
+  the input. Deferring the retirement until the link is known to be
+  installable would reintroduce order dependence: whether the incumbent
+  survives would depend on whether the concurrent delete had arrived yet.
+  "Delete wins" therefore means *the new link does not appear*, not *the
+  previous link is preserved*.
+* a stamp outlives the node it names, which is what makes the composed case
+  converge: a later, lower-stamped connect onto that input is still dropped.
+
+**Autogrow is explicitly NOT gated.** An autogrow connect grows a fresh slot
+keyed by `grow_id`, so two concurrent autogrows onto one base never contend:
+both survive (§1.2). Gating `("input", to_node, "grow", base)` would silently
+discard one writer's connection. That target keeps its §3 role as conflict
+*identity* for `detect_conflict`, not as a gate.
+
+**Alternatives considered and rejected.**
+
+1. *Allow multiple links on one concrete input and let the projection pick.*
+   Rejected: it breaks the graph invariant that a concrete input has at most
+   one link, and every downstream consumer (`convert_ui_to_api`, the executor,
+   the frontend) assumes it. It also just relocates the decision into a
+   projection rule that would itself have to be stamp-ordered.
+2. *Reject the later connect (return an error to the second writer).*
+   Rejected: it breaks "nobody's work is rejected" — a merge consumer replays
+   ops that were already accepted from the writer's point of view, and §4's
+   abort-remainder would then discard the remainder of an innocent batch. LWW
+   drops a write silently and locally; rejection propagates.
+3. *Order by receipt (status quo).* Rejected: that is the finding.
+
+**What v1.2 does NOT close** (filed, tested, unchanged):
+
+* `outputs[].links` is appended in arrival order, so two connects out of ONE
+  source into two DIFFERENT inputs record the same set in two different
+  sequences. No link is lost or invented; closing it means canonicalizing a
+  set-valued field in both implementations' projections.
+* An autogrow connect racing a delete of its source leaves the grown slot
+  present in one order and absent in the other — the structural sibling of the
+  gap above, on a target that is deliberately not a register.
+* Two `add_node` ops with the SAME `node_id` and different payloads resolve
+  first-writer-wins by arrival (`("node", node_id)` is reserved but ungated).
+  §1.1 rules this out by construction — `mint_id` draws 53-bit random ids — so
+  it is a property of hand-authored or replayed streams, not of minted ones.
+
+**Batch caveat, now stated.** `apply_specs` stamps every op in one batch with
+the same `base_version`, so two writes to the SAME target inside one batch are
+decided by the `op_id` tiebreak, not by spec order — "last spec wins" does not
+hold. This has been true of `set_widget` since the freeze; v1.2 extends the
+same property to `connect` and names it rather than leaving it implicit.
+
+### 11.2 Write targets compare node ids as strings
+
+`_write_target` built its key from the raw `node_id` / `to_node` while every
+apply-path lookup resolves ids as strings. An op carrying `7` and one carrying
+`"7"` therefore addressed the same node through two different registers: the
+gate never compared them and the pair converged by arrival order. Node ids are
+legitimately either JSON type — historical workflows carry string ids, and
+subgraph-scoped addresses are strings like `"57:3"` (§6) — so this is legal
+traffic, not malformed input. Interior `set_widget` targets already normalized
+their path (`tuple(str(s) for s in path)`) and were unaffected.
+
+**The rule:** every node id in a write target is normalized with `str()`.
+Equivalently: **node identity is compared as a string throughout the apply
+path.** `_apply_add_node`, `_apply_set_widget`, `_apply_connect` and
+`_apply_delete_node` now resolve nodes by string id (`_find_by_str`) so the
+register key and the node it names can never disagree. `last_node_id` stays a
+max-register over INT ids only — a string id is not comparable and never bumps
+it (§8.3).
+
+This changes the BYTES of a stamp key (`["widget", 7, "steps"]` becomes
+`["widget", "7", "steps"]`). Stamp maps are apply-time bookkeeping stripped
+before serialization (`strip_internal`, §2), and the doc-side `__stamps` map
+lives only inside a live document, so the change is not a data migration; a
+document mid-flight across the upgrade loses prior stamp claims for
+numerically-keyed targets and falls back to first-writer-wins for those
+targets until the next write. Downstream repos that pin this document by SHA
+must move the SHA and their applier pin together.
+
+**No change to §§2, 4-7, 8.1-8.8** beyond the §3 table row and the §1.2
+conflict bullet cited above. No op kind was added, removed, or re-scoped;
+`FROZEN_OPS` / `DEFERRED_OPS` / `BATCHABLE_OPS` are untouched.
