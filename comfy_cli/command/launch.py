@@ -19,12 +19,13 @@ from rich.markup import escape
 from rich.panel import Panel
 
 from comfy_cli import constants, utils
+from comfy_cli.caller import stream_is_tty
 from comfy_cli.command.custom_nodes.cm_cli_util import find_cm_cli, resolve_manager_gui_mode
 from comfy_cli.config_manager import ConfigManager
 from comfy_cli.env_checker import _bracket_host, check_comfy_server_running
 from comfy_cli.output import get_renderer
 from comfy_cli.output import rprint as print  # context-aware print: stderr in JSON mode
-from comfy_cli.output.sanitize import sanitize_markup
+from comfy_cli.output.sanitize import close_open_sgr, sanitize_log_markup, sanitize_terminal_stream
 from comfy_cli.resolve_python import resolve_workspace_python
 from comfy_cli.workspace_manager import WorkspaceManager, WorkspaceType
 
@@ -152,9 +153,10 @@ def _relay_child_line(line: str) -> None:
 
     ANSI ComfyUI emitted is preserved because it is part of what ComfyUI
     genuinely wrote. Sanitizing it is the display path's job:
-    ``background_launch``'s error panel does that (``sanitize_markup``). Note
-    that ``logs()`` deliberately does *not* — it writes the file byte-for-byte,
-    so ``comfy logs`` still replays whatever escapes the file holds.
+    ``background_launch``'s error panel does that (``sanitize_log_markup``).
+    Note that ``logs()`` deliberately does *not* strip it outright either — it
+    replays the file through ``sanitize_terminal_stream``, which keeps colour,
+    so ``comfy logs`` still shows what ComfyUI's own output looked like.
     """
     stream = get_renderer().pretty_stream
     stream.write(line)
@@ -538,13 +540,19 @@ def background_launch(extra, frontend_pr=None):
     # (the success path emits its envelope and _hard_exit(0)s inside the monitor).
     if log is not None:
         # `log` is ComfyUI's own output, relayed verbatim by `_relay_child_line`
-        # — so it reaches here with its brackets and ANSI intact. `Panel` body
-        # text is markup-parsed, where an unbalanced `[/...]` in the crash output
-        # would raise `MarkupError` while we are reporting the crash. This is the
-        # render path, so neutralize both markup and escape sequences.
+        # — so it reaches here with its brackets and ANSI intact. Panel content
+        # IS parsed as Rich markup, so this sink needs the markup escape as well
+        # as the escape-byte strip: an unbalanced '[/red]' in the captured log
+        # raised MarkupError from inside the failure handler, and any other
+        # bracketed run was silently deleted. The markup-parsing sink is why
+        # this is not sanitize_terminal_stream — monochrome is fine in an error
+        # panel, and no colour is worth reporting a failed launch by crashing on
+        # the log that explains it. sanitize_log_markup rather than plain
+        # sanitize_markup so a stray '\x1b]' in the capture truncates one line
+        # instead of the whole traceback below it.
         print(
             Panel(
-                sanitize_markup("".join(log)),
+                sanitize_log_markup("".join(log)),
                 title="[bold red]Error log during ComfyUI execution[/bold red]",
                 border_style="bright_red",
             )
@@ -1055,9 +1063,21 @@ def logs(tail: int = 200, where: str | None = None, port: int | None = None):
                 f"{escape(log_path)}, ComfyUI-Manager's unsuffixed log, which does not "
                 f"record which port it served.[/bold yellow]"
             )
-        # Write raw so ComfyUI log text (which can contain '[...]') isn't
-        # reinterpreted as Rich markup, and byte-for-byte matches the file.
-        renderer.pretty_stream.write("".join(lines))
+        # Raw stream write so ComfyUI log text (which can contain '[...]') isn't
+        # reinterpreted as Rich markup; sanitize_terminal_stream strips the escape
+        # sequences a terminal would act on (CSI-non-SGR/OSC/DCS/stray C0) while
+        # keeping SGR colour, tab/newline/CR — so legitimate logs render unchanged.
+        replayed = sanitize_terminal_stream("".join(lines))
+        # Keeping SGR means a log line that never resets — or opens \x1b[8m
+        # (conceal) — styles every line replayed after it, and then whatever the
+        # user types next. close_open_sgr closes each line the log left open.
+        # Only for a TTY: there is no terminal state to protect behind
+        # `comfy logs > file` or `| grep`, and adding resets there would put
+        # bytes in the output that the source file never contained.
+        stream = renderer.pretty_stream
+        if stream_is_tty(stream):
+            replayed = close_open_sgr(replayed)
+        stream.write(replayed)
 
     renderer.emit(
         {

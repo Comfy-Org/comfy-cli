@@ -284,6 +284,9 @@ def ls_cmd(
                 "display_name": m.display_name,
                 "output_types": m.output_types(),
                 "output_node": m.is_output_node,
+                # Paid partner-API node vs free open-weights node. JSON only —
+                # the pretty table is deliberately left unchanged.
+                "is_api_node": m.is_api_node,
             }
             for m in nodes
         ],
@@ -553,6 +556,10 @@ def search_cmd(
                 "display_name": m.display_name,
                 "description": m.description,
                 "output_types": m.output_types(),
+                # Paid partner-API node vs free open-weights node — two nodes can
+                # share a display name and differ only here (MiniMax H3). JSON
+                # only; the pretty table is deliberately left unchanged.
+                "is_api_node": m.is_api_node,
                 **({"close_match": True} if close_match else {}),
             }
             for m in matched

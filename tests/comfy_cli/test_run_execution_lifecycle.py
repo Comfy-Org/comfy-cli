@@ -113,6 +113,70 @@ class TestRunHappyPath:
             assert "sk-supersecret" not in str(props)
 
 
+class TestRunCloudTarget:
+    """``--where cloud`` must be analytics-equivalent to the local target.
+
+    The cloud branch used to `return` straight out of the `try` suite, and
+    Python skips a try's ``else:`` clause on `return` — so ``execution_success``
+    never fired for a cloud run (only `--print-prompt` got it by accident, via
+    the ``except typer.Exit`` handler, back when it raised ``Exit(0)``).
+    """
+
+    def test_cloud_submit_emits_execution_start_then_success(self, runner, tracked_run, monkeypatch):
+        from comfy_cli.cmdline import app
+
+        monkeypatch.setattr("comfy_cli.where.cloud_preflight_or_exit", lambda *a, **kw: None)
+        with patch("comfy_cli.cmdline.run_inner.execute_cloud") as mock_cloud:
+            mock_cloud.return_value = None
+            result = runner.invoke(app, ["run", "--workflow", "wf.json", "--where", "cloud"])
+
+        assert result.exit_code == 0, f"stdout={result.output!r} exc={result.exception!r}"
+        assert mock_cloud.called
+        assert _event_names(tracked_run) == ["execution_start", "execution_success"]
+
+    def test_cloud_print_prompt_emits_execution_success(self, runner, tracked_run, monkeypatch):
+        # execute_cloud()'s --print-prompt branch returns rather than raising
+        # Exit(0); the success event must still land.
+        from comfy_cli.cmdline import app
+
+        monkeypatch.setattr("comfy_cli.where.cloud_preflight_or_exit", lambda *a, **kw: None)
+        with patch("comfy_cli.cmdline.run_inner.execute_cloud") as mock_cloud:
+            mock_cloud.return_value = None
+            result = runner.invoke(app, ["run", "--workflow", "wf.json", "--where", "cloud", "--print-prompt"])
+
+        assert result.exit_code == 0, f"stdout={result.output!r} exc={result.exception!r}"
+        assert mock_cloud.call_args.kwargs["print_prompt"] is True
+        assert _event_names(tracked_run) == ["execution_start", "execution_success"]
+
+    def test_cloud_failure_still_emits_execution_error_only(self, runner, tracked_run, monkeypatch):
+        from comfy_cli.cmdline import app
+
+        monkeypatch.setattr("comfy_cli.where.cloud_preflight_or_exit", lambda *a, **kw: None)
+        with patch("comfy_cli.cmdline.run_inner.execute_cloud") as mock_cloud:
+            mock_cloud.side_effect = typer.Exit(code=1)
+            result = runner.invoke(app, ["run", "--workflow", "wf.json", "--where", "cloud"])
+
+        assert result.exit_code == 1
+        names = _event_names(tracked_run)
+        assert "execution_error" in names
+        assert "execution_success" not in names
+
+    def test_cloud_target_does_not_resolve_host_port(self, runner, tracked_run, monkeypatch):
+        # host/port aren't applicable to the HTTPS+Bearer cloud path; the
+        # if/else must keep that resolution off the cloud branch.
+        from comfy_cli.cmdline import app
+
+        monkeypatch.setattr("comfy_cli.where.cloud_preflight_or_exit", lambda *a, **kw: None)
+        with (
+            patch("comfy_cli.cmdline.run_inner.execute_cloud"),
+            patch("comfy_cli.host_port.resolve_host_port") as mock_resolve,
+        ):
+            result = runner.invoke(app, ["run", "--workflow", "wf.json", "--where", "cloud"])
+
+        assert result.exit_code == 0, f"stdout={result.output!r} exc={result.exception!r}"
+        assert not mock_resolve.called
+
+
 class TestRunFailurePath:
     def test_typer_exit_1_emits_execution_error_with_exit_code(self, runner, tracked_run):
         from comfy_cli.cmdline import app

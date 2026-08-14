@@ -57,6 +57,47 @@ def _safe_close(execution: WorkflowExecution) -> None:
         pass
 
 
+def node_title(workflow: dict, node_id) -> str:
+    """Display label: ``_meta.title`` if present, else ``class_type``, else the
+    node id. Defensive against unknown ids and non-dict nodes."""
+    node = workflow.get(node_id)
+    if node is None and not isinstance(node_id, str):
+        node = workflow.get(str(node_id))
+    if not isinstance(node, dict):
+        return str(node_id)
+    meta = node.get("_meta")
+    if isinstance(meta, dict):
+        title = meta.get("title")
+        if isinstance(title, str) and title:
+            return title
+    class_type = node.get("class_type")
+    return class_type if isinstance(class_type, str) and class_type else str(node_id)
+
+
+def workflow_manifest(workflow: dict) -> list[dict]:
+    """Build the `nodes` array for the `queued` event — one entry per node in
+    the submitted (post-conversion) workflow.
+
+    Module-level so the cloud submit path (``run.execute_cloud``) emits a
+    byte-identical manifest without owning a ``WorkflowExecution``: the two
+    pipelines are separate, the ``queued`` contract is not.
+    """
+    manifest: list[dict] = []
+    for node_id, node in workflow.items():
+        if not isinstance(node, dict):
+            continue
+        class_type = node.get("class_type", "")
+        class_type = class_type if isinstance(class_type, str) else ""
+        manifest.append(
+            {
+                "node_id": str(node_id),
+                "class_type": class_type,
+                "title": node_title(workflow, node_id),
+            }
+        )
+    return manifest
+
+
 class ExecutionProgress(Progress):
     def get_renderables(self):
         table_columns = (
@@ -123,6 +164,12 @@ class WorkflowExecution:
         # compute nodes that never fire a server-side `executed` event.
         self.cached_node_ids: list[str] = []
         self.executed_node_ids: list[str] = []
+        # Per-node issues the server reported alongside a successful (HTTP 200)
+        # queue, stashed by ``queue()`` for the caller's `queued` event. The
+        # event itself is emitted by ``comfy_cli.command.run.execute`` — only
+        # *after* the job's state file is persisted — so a consumer sees it and
+        # can immediately rely on `comfy jobs status` / `jobs ls` finding it.
+        self.validation_warnings: list[dict] = []
         # Classified verdict of a terminal server-side `execution_error`,
         # stashed by `on_error` before it raises `typer.Exit`. The `--wait`
         # caller only sees the exit, so this is how the real cause reaches
@@ -148,20 +195,7 @@ class WorkflowExecution:
     def workflow_manifest(self) -> list[dict]:
         """Build the `nodes` array for the `queued` event — one entry per
         node in the submitted (post-conversion) workflow."""
-        manifest: list[dict] = []
-        for node_id, node in self.workflow.items():
-            if not isinstance(node, dict):
-                continue
-            class_type = node.get("class_type", "")
-            class_type = class_type if isinstance(class_type, str) else ""
-            manifest.append(
-                {
-                    "node_id": str(node_id),
-                    "class_type": class_type,
-                    "title": self.get_node_title(node_id),
-                }
-            )
-        return manifest
+        return workflow_manifest(self.workflow)
 
     def queue(self):
         data: dict = {"prompt": self.workflow, "client_id": self.client_id}
@@ -264,16 +298,11 @@ class WorkflowExecution:
 
         # 200 may still carry node_errors if some output chains failed
         # validation but others passed — surface as warnings, not a failure.
+        # Stored rather than emitted here: the contractual `queued` event is
+        # emitted by the caller once the job state file exists (see
+        # ``validation_warnings`` above and ``run._emit_queued``).
         node_errors = body.get("node_errors") if isinstance(body, dict) else None
-        validation_warnings = _node_errors_to_list(node_errors)
-
-        self.renderer.event(
-            "queued",
-            prompt_id=prompt_id,
-            client_id=self.client_id,
-            validation_warnings=validation_warnings,
-            nodes=self.workflow_manifest(),
-        )
+        self.validation_warnings = _node_errors_to_list(node_errors)
 
     def watch_execution(self):
         if self.ws is None:
@@ -299,18 +328,7 @@ class WorkflowExecution:
     def get_node_title(self, node_id):
         """Display label: ``_meta.title`` if present, else ``class_type``,
         else the node id. Defensive against unknown ids and non-dict nodes."""
-        node = self.workflow.get(node_id)
-        if node is None and not isinstance(node_id, str):
-            node = self.workflow.get(str(node_id))
-        if not isinstance(node, dict):
-            return str(node_id)
-        meta = node.get("_meta")
-        if isinstance(meta, dict):
-            title = meta.get("title")
-            if isinstance(title, str) and title:
-                return title
-        class_type = node.get("class_type")
-        return class_type if isinstance(class_type, str) and class_type else str(node_id)
+        return node_title(self.workflow, node_id)
 
     def _class_type(self, node_id):
         node = self.workflow.get(node_id)
