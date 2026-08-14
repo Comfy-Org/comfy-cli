@@ -350,6 +350,11 @@ comfy --json nodes ls --produces VIDEO --exclude-deprecated --limit 10
 comfy --json nodes ls --pack core --produces MASK --limit 5
 ```
 
+Every `nodes ls` and `nodes search` row carries `is_api_node` — `true` for a paid
+partner-API node, `false` for a free open-weights one. Two nodes can share a
+display name and differ only in this flag, so read it off the row instead of
+running `nodes show` per candidate.
+
 If no local server is running and you're not signed into cloud, pass
 `--input <object_info.json>` to query against a saved dump.
 
