@@ -1,19 +1,21 @@
-"""Build a CQL-shaped graph dict from sources.
+"""Shape and load CQL ``object_info`` graphs.
 
-Sources, in priority order:
+This module contains two things:
 
-1. A local file (``--input path``). May be:
-   - A raw ``object_info`` JSON dump (the response from ``/object_info``).
-   - An API-format workflow JSON.
-   - An already-shaped CQL graph (``{"nodes": [...], "inputs": [...]}``).
-2. A local ComfyUI server's ``/object_info`` endpoint (``--host`` / ``--port``).
+- ``normalize`` — turn any supported input (a raw ``object_info`` dump, an
+  API-format workflow, or an already-shaped CQL graph) into the uniform
+  ``{"nodes": [...], "inputs": [...], "categories": [...]}`` dict the engine
+  runs on. It is intentionally permissive: anything dict-shaped that looks
+  like one of those formats is accepted.
+- ``resilient_load_object_info`` — a cache + refresh-retry + stale-fallback
+  wrapper over the engine's loaders (``comfy_cli.cql.engine._load_from_file``
+  / ``_load_from_target``). It auto-caches every successful fetch per host,
+  retries once after a token refresh on failure, and falls back to the cached
+  dump (with a stderr warning) when the retry still fails.
 
-The loader is intentionally permissive: anything dict-shaped that looks like
-one of those formats is normalized into ``{"nodes": [...], "inputs": [...],
-"categories": [...]}`` so the engine can run uniformly.
-
-This module performs only local I/O. Network calls hit ``http://host:port``
-and are short-circuited when no host is provided.
+The live network fetch and its security guards (loopback check, no-redirect
+opener, byte cap, cloud HTTPS+auth) live in ``comfy_cli.cql.engine`` — this
+module never opens a socket itself.
 """
 
 from __future__ import annotations
@@ -23,96 +25,11 @@ import json
 import os
 import sys
 import time
-import urllib.error
-import urllib.parse
-import urllib.request
 from pathlib import Path
 from typing import Any
 
-from comfy_cli.cql._net import is_loopback_host
 from comfy_cli.cql.errors import CQLRuntimeError
 from comfy_cli.file_utils import atomic_write_text
-from comfy_cli.http import NoRedirectHandler, build_http_only_opener
-
-# Cap raw bytes read from disk or the network. Real `object_info` dumps are a
-# few MB; anything past 256 MiB is almost certainly a wrong path or a hostile
-# server and would just OOM the CLI before json.loads even fails.
-MAX_INPUT_BYTES = 256 * 1024 * 1024
-
-
-_LOADER_OPENER = build_http_only_opener(NoRedirectHandler())
-
-
-def load_graph(
-    *,
-    input_path: str | None = None,
-    host: str | None = None,
-    port: int | None = None,
-    timeout: float = 5.0,
-) -> dict[str, Any]:
-    if input_path:
-        return _load_from_file(input_path)
-    if host and port:
-        return _load_from_server(host, int(port), timeout=timeout)
-    raise CQLRuntimeError(
-        "no graph source available",
-        details={"hint": "pass --input <path> or --host/--port pointing at a ComfyUI server"},
-    )
-
-
-def _load_from_file(path: str) -> dict[str, Any]:
-    p = Path(path).expanduser()
-    try:
-        size = p.stat().st_size
-    except OSError as e:
-        raise CQLRuntimeError(f"cannot stat {p}: {e}") from e
-    if size > MAX_INPUT_BYTES:
-        raise CQLRuntimeError(
-            f"{p} is {size} bytes, exceeds MAX_INPUT_BYTES={MAX_INPUT_BYTES}",
-            details={"hint": "shrink the input or raise MAX_INPUT_BYTES in cql.loader"},
-        )
-    try:
-        raw = p.read_text(encoding="utf-8")
-    except OSError as e:
-        raise CQLRuntimeError(f"cannot read {p}: {e}") from e
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError as e:
-        raise CQLRuntimeError(f"{p} is not valid JSON: {e}") from e
-    return normalize(data)
-
-
-def _load_from_server(host: str, port: int, *, timeout: float) -> dict[str, Any]:
-    url = f"http://{host}:{port}/object_info"
-    # Refuse anything that isn't a localhost-ish target — we don't want CQL
-    # silently sending traffic to a remote box. (Cloud CQL goes through its
-    # own path; this loader is local-only by design.)
-    parsed = urllib.parse.urlsplit(url)
-    hostname = (parsed.hostname or "").strip().lower()
-    if not is_loopback_host(hostname):
-        raise CQLRuntimeError(
-            f"refusing non-loopback CQL server target: {host}",
-            details={"hint": "pass --input <path> for remote object_info dumps"},
-        )
-    try:
-        with _LOADER_OPENER.open(url, timeout=timeout) as resp:
-            # Bounded read so a misbehaving server can't OOM us.
-            raw = resp.read(MAX_INPUT_BYTES + 1)
-            if len(raw) > MAX_INPUT_BYTES:
-                raise CQLRuntimeError(
-                    f"server response exceeds MAX_INPUT_BYTES={MAX_INPUT_BYTES}",
-                    details={"host": host, "port": port},
-                )
-            data = json.loads(raw)
-    except urllib.error.URLError as e:
-        raise CQLRuntimeError(
-            f"failed to reach {url}: {e.reason if hasattr(e, 'reason') else e}",
-            details={"host": host, "port": port},
-        ) from e
-    except (json.JSONDecodeError, OSError) as e:
-        raise CQLRuntimeError(f"server returned invalid object_info: {e}") from e
-    return normalize(data)
-
 
 # ---- normalization --------------------------------------------------------
 

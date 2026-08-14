@@ -23,6 +23,7 @@ from comfy_cli.file_utils import (
     partial_paths_for,
     upload_file_to_signed_url,
 )
+from comfy_cli.http import DEFAULT_HTTP_TIMEOUT, DOWNLOAD_TIMEOUT
 
 
 def test_guess_status_code_reason_401_with_json():
@@ -53,20 +54,42 @@ def test_guess_status_code_reason_unknown():
     assert "Unknown error occurred (status code: 500)" in result
 
 
+def _mock_probe_response(mock_get, status_code):
+    """Wire a mock response that ``check_unauthorized`` can use as a context manager."""
+    mock_response = Mock()
+    mock_response.status_code = status_code
+    mock_get.return_value.__enter__.return_value = mock_response
+    return mock_response
+
+
 @patch("requests.get")
 def test_check_unauthorized_true(mock_get):
-    mock_response = Mock()
-    mock_response.status_code = 401
-    mock_get.return_value = mock_response
+    _mock_probe_response(mock_get, 401)
 
     assert check_unauthorized("http://example.com") is True
 
 
 @patch("requests.get")
+def test_check_unauthorized_passes_timeout(mock_get):
+    """The unauthorized probe must set a timeout so a stalled peer can't hang the CLI."""
+    _mock_probe_response(mock_get, 200)
+
+    check_unauthorized("http://example.com")
+    assert mock_get.call_args.kwargs["timeout"] == DEFAULT_HTTP_TIMEOUT
+
+
+@patch("requests.get")
+def test_check_unauthorized_closes_response(mock_get):
+    """The probe reads only the status line, so it must release the streamed socket promptly."""
+    _mock_probe_response(mock_get, 401)
+
+    check_unauthorized("http://example.com")
+    mock_get.return_value.__exit__.assert_called_once()
+
+
+@patch("requests.get")
 def test_check_unauthorized_false(mock_get):
-    mock_response = Mock()
-    mock_response.status_code = 200
-    mock_get.return_value = mock_response
+    _mock_probe_response(mock_get, 200)
 
     assert check_unauthorized("http://example.com") is False
 
@@ -159,6 +182,7 @@ def test_upload_file_success(mock_put, tmp_path):
     upload_file_to_signed_url("http://example.com", str(test_file))
 
     mock_put.assert_called_once()
+    assert mock_put.call_args.kwargs["timeout"] == DOWNLOAD_TIMEOUT
 
 
 @patch("requests.put")

@@ -24,9 +24,24 @@ State-file contract (``download-state/1``)::
       "started_at": "<iso8601>",
       "updated_at": "<iso8601>",
       "downloader": "httpx" | "aria2",
+      "kind": "background" | "foreground",
       "needs_civitai_auth": <bool>,
       "needs_hf_auth": <bool>
     }
+
+``kind`` distinguishes a detached worker from a plain ``comfy model download``
+running in the caller's own terminal. Both write records — a foreground transfer
+that claimed no destination was invisible to every other invocation, so two of
+them raced into the same file — but they are not interchangeable: a background
+worker gets its own session (:func:`kill_worker` may ``killpg`` it), whereas a
+foreground record's pid is the *user's CLI process*, sharing the terminal's
+foreground process group. Signalling that group would kill the user's shell job,
+so ``download-cancel`` refuses a live foreground record instead. The field is
+additive within ``download-state/1``: readers drop unknown keys, and a record
+written before it existed reads back as ``"background"``, which is what it was.
+A record carrying an *unrecognized* ``kind`` is a different case — see
+``_TOLERANT_FALLBACKS`` — and reads back as ``"foreground"``, the side that
+refuses to be signalled.
 
 ``pid`` is only ever written by the worker itself, together with
 ``pid_create_time`` — the pair identifies the process, so a recycled pid can
@@ -61,7 +76,7 @@ import sys
 import time
 import uuid
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -91,6 +106,14 @@ PID_CREATE_TIME_TOLERANCE_S = 1.0
 # Every worker's argv contains this; used to identify a worker when its start
 # time was never recorded.
 WORKER_ARGV_MARKER = "_download-worker"
+
+# How long a finished download's record is kept before :func:`prune` drops it.
+PRUNE_MAX_AGE_S = 7 * 24 * 60 * 60
+
+# Hard ceiling on retained *terminal* records, applied on top of the age rule so
+# a burst of downloads can't leave the directory (and `downloads`' output) large
+# for a week. Active records are never counted or evicted.
+PRUNE_MAX_TERMINAL_RECORDS = 200
 
 _SAFE_ID = re.compile(r"^[a-zA-Z0-9_\-]{1,64}$")
 
@@ -169,8 +192,21 @@ class DownloadState:
     started_at: str = ""
     updated_at: str = ""
     downloader: str = "httpx"
+    kind: str = "background"
     needs_civitai_auth: bool = False
     needs_hf_auth: bool = False
+
+    @property
+    def is_foreground(self) -> bool:
+        """True when this record's pid is a user CLI process, not a detached worker.
+
+        The distinction is only ever load-bearing in the *refusing* direction
+        (``download-cancel`` must not signal a foreground pid's process group),
+        so an unrecognized value reads as ``foreground`` — the non-cancellable
+        side. See :data:`_TOLERANT_FALLBACKS`. Only a record with no ``kind`` at
+        all reads as ``background``, because that is what it provably was.
+        """
+        return self.kind == "foreground"
 
     @property
     def is_terminal(self) -> bool:
@@ -287,9 +323,36 @@ _FIELD_VALIDATORS: dict[str, Any] = {
     "started_at": lambda v: isinstance(v, str),
     "updated_at": lambda v: isinstance(v, str),
     "downloader": lambda v: isinstance(v, str),
+    "kind": lambda v: v in ("background", "foreground"),
     "needs_civitai_auth": lambda v: isinstance(v, bool),
     "needs_hf_auth": lambda v: isinstance(v, bool),
 }
+
+# Fields whose validator failure replaces *the field* with the value below
+# rather than rejecting the whole record.
+#
+# `kind` is in here because rejecting the record is the more dangerous outcome by
+# far. A rejected record reads as absent to every caller, including the
+# destination-claim scan — so one unrecognized `kind` on a *live* download would
+# make its claim invisible and let a second writer into the same file, which is
+# the exact corruption the claim exists to prevent. Keeping the record and
+# distrusting one field is the smaller loss.
+#
+# The substitute is `"foreground"`, *not* the dataclass default. `kind` is the
+# one field that gates a destructive action, so tolerance here has to fail
+# closed: `download-cancel` refuses a live `foreground` record and sends the user
+# to Ctrl-C, whereas a `background` one reaches `kill_worker` ->
+# `os.killpg(os.getpgid(pid), ...)`. Guessing "background" for a value we could
+# not parse would aim that killpg at a pid we have no reason to believe is a
+# detached worker — and if it is in fact a foreground record whose `kind` was
+# corrupted, at the user's own shell job. Refusing to cancel a record we cannot
+# read is recoverable (the process is Ctrl-C-able, and the record reconciles once
+# it exits); signalling the wrong process group is not.
+#
+# A record with no `kind` key at all is a different case and is *not* routed
+# here: it falls through to the dataclass default, `"background"`, because every
+# record written before this field existed really was a detached worker.
+_TOLERANT_FALLBACKS: dict[str, Any] = {"kind": "foreground"}
 
 
 def read_path(path: Path) -> DownloadState | None:
@@ -301,9 +364,12 @@ def read_path(path: Path) -> DownloadState | None:
         return None
     known = set(DownloadState.__dataclass_fields__)
     filtered = {k: v for k, v in data.items() if k in known}
-    for key, value in filtered.items():
+    for key, value in list(filtered.items()):
         validator = _FIELD_VALIDATORS.get(key)
         if validator is not None and not validator(value):
+            if key in _TOLERANT_FALLBACKS:
+                filtered[key] = _TOLERANT_FALLBACKS[key]
+                continue
             return None
     try:
         return DownloadState(**filtered)
@@ -312,14 +378,137 @@ def read_path(path: Path) -> DownloadState | None:
         return None
 
 
+def delete(workspace: Path, download_id: str) -> bool:
+    """Remove one state file. Returns False if it could not be removed.
+
+    Used to *withdraw a claim*: both the background and the foreground submit
+    paths write their record and then re-scan for a competitor, and the racer
+    that loses that comparison has to take its record back off disk before it
+    exits. Leaving it behind would be worse than never having written it — an
+    abandoned ``downloading`` record with a pid that is about to disappear reads
+    as a live claim until something reconciles it, so it would refuse every later
+    submission to that destination for no reason.
+
+    Absent is success: the caller's goal is "this claim is gone", and a record
+    that was never written (or already swept) satisfies it.
+    """
+    try:
+        state_path(workspace, download_id).unlink(missing_ok=True)
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def _sort_key(state: DownloadState) -> tuple[str, str]:
+    """The newest-first ordering :func:`list_all` and :func:`prune` share.
+
+    They must agree: ``prune`` evicts the records that fall off the end of the
+    list ``downloads`` shows, so a divergent tiebreak would drop a record the
+    user is still looking at while keeping one they aren't.
+    """
+    return (state.started_at or "", state.id)
+
+
 def list_all(workspace: Path) -> list[DownloadState]:
     """Every readable state file, newest ``started_at`` first."""
     base = Path(workspace) / STATE_DIRNAME
     if not base.is_dir():
         return []
     states = [s for s in (read_path(p) for p in sorted(base.glob("*.json"))) if s is not None]
-    states.sort(key=lambda s: (s.started_at or "", s.id), reverse=True)
+    states.sort(key=_sort_key, reverse=True)
     return states
+
+
+def _has_partials(dest: str) -> bool:
+    """True while a ``.part`` sibling of ``dest`` still holds bytes on disk.
+
+    This is the same set of files ``download-cancel`` reclaims, so it is also
+    the only handle a user has left on those bytes once a download has failed.
+    """
+    from comfy_cli import file_utils
+
+    try:
+        return bool(file_utils.partial_paths_for(Path(dest)))
+    except (OSError, ValueError):
+        # An unreadable parent or a nonsense dest tells us nothing about the
+        # partial; assume there is one rather than deleting the record that
+        # points at it.
+        return True
+
+
+def _remove_record(path: Path) -> bool:
+    """Delete one state file and its companions. False if the record survived.
+
+    The ``<id>.log`` and ``<id>.cancel`` siblings are unreachable once the
+    record naming them is gone — no verb can look them up — so they go with it,
+    otherwise pruning the records alone would leave the directory growing.
+    """
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        return False
+    for companion in (path.with_name(f"{path.stem}.log"), cancel_marker_for(path)):
+        try:
+            companion.unlink(missing_ok=True)
+        except OSError:
+            continue
+    return True
+
+
+def prune(workspace: Path) -> int:
+    """Drop finished download records that are stale or over the retention cap.
+
+    Nothing else ever removes a record, so ``<workspace>/.comfy-downloads``
+    would otherwise grow for the life of the workspace — and ``list_all`` reads
+    and JSON-parses every file in it on every ``comfy model downloads`` call.
+
+    A record is removed when it is **terminal** (:data:`TERMINAL_STATUSES`) and
+    either:
+
+    * its ``updated_at`` is older than :data:`PRUNE_MAX_AGE_S` — except for a
+      ``failed``/``cancelled`` record whose destination still has a ``.part``
+      sibling. Those bytes are on disk and the record is the user's only handle
+      for reclaiming them with ``download-cancel``, which is the same contract
+      :func:`comfy_cli.file_utils.cleanup_partials` is written to; or
+    * it falls outside the newest :data:`PRUNE_MAX_TERMINAL_RECORDS` terminal
+      records. That ceiling is what makes the directory *bounded* rather than
+      merely self-expiring, so unlike the age rule it applies unconditionally.
+
+    An in-flight record (``starting``/``downloading``) is never touched at any
+    age, and never counts toward — or is evicted by — the cap.
+
+    Every step is best effort, exactly like :func:`write_path`'s OSError
+    handling: a read-only state directory, a permissions problem, or a file a
+    concurrent prune already removed must never raise into a download. Returns
+    the number of records actually removed.
+    """
+    base = Path(workspace) / STATE_DIRNAME
+    try:
+        if not base.is_dir():
+            return 0
+        paths = sorted(base.glob("*.json"))
+    except OSError:
+        return 0
+
+    terminal: list[tuple[DownloadState, Path]] = []
+    for path in paths:
+        state = read_path(path)
+        if state is not None and state.status in TERMINAL_STATUSES:
+            terminal.append((state, path))
+    terminal.sort(key=lambda item: _sort_key(item[0]), reverse=True)
+
+    cutoff = datetime.now(timezone.utc) - timedelta(seconds=PRUNE_MAX_AGE_S)
+    removed = 0
+    for index, (state, path) in enumerate(terminal):
+        if index < PRUNE_MAX_TERMINAL_RECORDS:
+            updated = _parse_iso(state.updated_at)
+            if updated is None or updated >= cutoff:
+                continue
+            if state.status in ("failed", "cancelled") and _has_partials(state.dest):
+                continue
+        if _remove_record(path):
+            removed += 1
+    return removed
 
 
 # ---------------------------------------------------------------------------
@@ -405,7 +594,13 @@ def worker_alive(state: DownloadState, *, pid_alive=None) -> bool:
     self-corrects on the next poll, while signalling a stranger's process group
     is not, so only the reporting side is allowed the benefit of the doubt.
     """
-    if state.pid is None:
+    if not state.pid or state.pid <= 0:
+        # Not just `is None`. The field validator accepts any non-bool int, so a
+        # corrupt or tampered record can carry a negative pid — and
+        # `psutil.Process(-1)` raises ValueError, which `utils.is_running` does
+        # not catch. One bad state file would then traceback out of every command
+        # that reconciles, including `model download` itself. `is_worker_process`
+        # and `kill_worker` already screen the same way.
         return False
     if pid_alive is None:
         from comfy_cli.utils import is_running as pid_alive  # noqa: N813
@@ -479,10 +674,19 @@ def percent(state: DownloadState) -> float | None:
 
 
 def status_payload(state: DownloadState) -> dict[str, Any]:
-    """The ``download-status`` / ``downloads`` envelope row for one download."""
+    """The ``download-status`` / ``downloads`` envelope row for one download.
+
+    ``kind`` is reported because these rows are now the only place a foreground
+    download is visible, and the two kinds are not interchangeable to a consumer:
+    ``download-cancel`` refuses a live ``foreground`` row (its pid is a user CLI
+    process sharing a terminal's process group, so signalling it would kill the
+    surrounding shell job). Without the field the only way to learn that is to
+    try the cancel and read the refusal.
+    """
     return {
         "id": state.id,
         "status": state.status,
+        "kind": state.kind,
         "completed_bytes": state.completed_bytes,
         "total_bytes": state.total_bytes,
         "percent": percent(state),

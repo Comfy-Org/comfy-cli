@@ -2,18 +2,33 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://comfy.org/schemas/download_status.json",
   "title": "comfy model download-status <id> --json data payload",
-  "description": "Reconciled progress for one background download. The reported status is the state file corrected against reality: completed_bytes prefers a live stat() of dest, and an 'downloading' record whose worker pid is gone resolves to 'completed' (size reached the known total) or 'failed' (it did not).",
+  "description": "Reconciled progress for one download, background or foreground (see 'kind'). The reported status is the state file corrected against reality: completed_bytes prefers a live stat() of dest, and an 'downloading' record whose pid is gone resolves to 'completed' (size reached the known total) or 'failed' (it did not).",
   "type": "object",
   "$defs": {
     "row": {
       "type": "object",
-      "required": ["id", "status", "completed_bytes", "total_bytes", "percent", "elapsed_seconds", "dest", "error"],
+      "required": [
+        "id",
+        "status",
+        "kind",
+        "completed_bytes",
+        "total_bytes",
+        "percent",
+        "elapsed_seconds",
+        "dest",
+        "error"
+      ],
       "additionalProperties": true,
       "properties": {
         "id": { "type": "string" },
         "status": {
           "type": "string",
           "enum": ["starting", "downloading", "completed", "failed", "cancelled"]
+        },
+        "kind": {
+          "type": "string",
+          "enum": ["background", "foreground"],
+          "description": "'background' is a detached worker, cancellable with `comfy model download-cancel <id>`. 'foreground' is a `comfy model download` running in a user's own terminal; download-cancel refuses a live one (its pid shares that terminal's process group) — interrupt it with Ctrl-C there instead. A record written before this field existed reads back as 'background', which is what it was."
         },
         "completed_bytes": { "type": "integer" },
         "total_bytes": {

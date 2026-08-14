@@ -20,6 +20,8 @@ from __future__ import annotations
 
 import ipaddress
 import urllib.parse
+from collections.abc import Iterator
+from contextlib import contextmanager
 
 import typer
 
@@ -28,6 +30,71 @@ from comfy_cli.config_manager import ConfigManager
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8188
 _UNSAFE_HOST_CHARS = frozenset("/@?#")
+
+
+@contextmanager
+def report_usage_error(renderer, *, command: str | None = None) -> Iterator[None]:
+    """Emit a terminating ``ok:false`` envelope before a host/port usage error
+    escapes to click.
+
+    Every other failure on these commands ends with an envelope; a
+    ``typer.BadParameter`` did not — click printed a human usage panel to
+    stderr and exited 2 with *zero bytes* on stdout, so a machine consumer just
+    saw the stream stop. Wrap the guard/resolver block in this and JSON/NDJSON
+    consumers get a parseable final line either way.
+
+    The exception is re-raised: click still converts it to the usage-error
+    ``SystemExit(2)``, so the exit code is unchanged. ``exit_code=2`` is passed
+    through so the renderer's recorded exit code agrees with the real one.
+    Guarded on ``is_json()`` (JSON *and* NDJSON — single-envelope JSON mode has
+    the same gap): click writes its usage error to stderr, so an envelope on
+    stdout never double-prints, and pretty mode is left alone entirely (the
+    message appears exactly once, from click).
+
+    ``command`` names the *subcommand* for the envelope. Pass it wherever the
+    success envelope does (``jobs ls``, ``jobs status``, …), so a consumer
+    dispatching on ``command`` sees the same value on the failure line as on
+    the success line; omitted, the renderer's own ``command`` is used.
+
+    ``renderer`` is a parameter rather than a module-level import so this
+    module keeps depending only on ``typer``; callers already hold a renderer,
+    or can pass ``comfy_cli.output.get_renderer()``.
+
+    NOT covered — this only sees errors raised inside a command *body*. Click
+    coerces and validates argv before any callback runs, so a type-invalid
+    ``--port notaport`` (or a missing option value) is rejected during parsing
+    and still exits 2 with an empty stdout. Closing that gap needs a handler at
+    the click/typer entrypoint, not per-call-site wrapping.
+    """
+    try:
+        yield
+    except typer.BadParameter as e:
+        if renderer.is_json():
+            # ``validate_host`` formats its message with ``{host!r}``, so a
+            # rejected ``--host user:s3cret@server`` would otherwise land
+            # verbatim in the JSON stream that agent harnesses capture and
+            # persist. Scrub it with the same helper ``local_address`` uses on
+            # the analogous host-parse warning.
+            from comfy_cli.local_address import _redact_userinfo
+
+            try:
+                renderer.error(
+                    code="host_port_invalid",
+                    message=_redact_userinfo(str(e)),
+                    exit_code=2,
+                    command=command,
+                )
+            except OSError:
+                # The envelope is best-effort; it must never REPLACE the usage
+                # error it is reporting. ``Renderer._write_json_line`` lets
+                # ``OSError``/``BrokenPipeError`` propagate on purpose (a
+                # hung-up reader is load-bearing elsewhere), so without this a
+                # closed consumer — ``comfy jobs ls --port 0 | head -1`` —
+                # would swap the ``BadParameter`` for a ``BrokenPipeError``,
+                # click would never render the usage panel, and the exit code
+                # would stop being the documented 2.
+                pass
+        raise
 
 
 def validate_host(host: str) -> str:

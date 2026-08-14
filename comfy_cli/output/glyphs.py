@@ -23,16 +23,31 @@ STATUS_STYLE: dict[str, tuple[str, str]] = {
 DEFAULT_STYLE: tuple[str, str] = ("·", "dim")
 
 
-# Cloud's raw status vocabulary (``executing``, ``success``, ``failed``,
-# ``non_retryable_error``, ``retryable_error``) doesn't match the small set
-# above. Canonicalize at the rendering boundary so users see one stable set
-# regardless of whether the prompt ran on a local server or Comfy Cloud.
+# Cloud's raw status vocabulary (``executing``, ``in_progress``, ``success``,
+# ``failed``, ``non_retryable_error``, ``retryable_error``, ``lost``) doesn't
+# match the small set above. Canonicalize at the rendering boundary so users see
+# one stable set regardless of whether the prompt ran on a local server or
+# Comfy Cloud.
+#
+# This has to agree with ``jobs_state.CLOUD_STATUS_ALIASES``, but deliberately
+# stays a separate literal rather than importing it: this module is the leaf of
+# the output package, and ``jobs_state`` pulls in ``comfy_cli.utils`` (psutil,
+# requests, rich) — too much to drag in to draw a check mark. The agreement is
+# pinned instead by
+# ``test_glyphs.test_cloud_aliases_agree_with_the_shared_status_map``, which
+# renders every key of the shared map through ``status_glyph`` and fails on any
+# drift in either direction.
 _CLOUD_ALIASES = {
     "executing": "running",
+    # /api/jobs (ingest's filter enum) spells an executing job `in_progress`;
+    # without this it renders as the unknown-status fallback dot.
+    "in_progress": "running",
     "success": "completed",
     "failed": "error",
     "non_retryable_error": "error",
     "retryable_error": "error",
+    "lost": "error",
+    "canceled": "cancelled",
 }
 
 

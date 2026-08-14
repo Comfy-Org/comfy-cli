@@ -458,6 +458,185 @@ class TestSearch:
         assert "KSampler" in [r["name"] for r in env["data"]["rows"]]
 
 
+class TestPath:
+    """`comfy nodes path` — the envelope an agent plans a graph off (BE-6857)."""
+
+    @pytest.fixture
+    def patched_loader(self, monkeypatch: pytest.MonkeyPatch):
+        import json as _json
+        from pathlib import Path
+
+        from comfy_cli.cql.engine import Graph
+
+        fixture = Path(__file__).parent.parent / "fixtures" / "nodes_path_object_info.json"
+        graph = Graph.from_object_info(_json.loads(fixture.read_text()))
+        monkeypatch.setattr(nodes_cmd, "_get_graph", lambda *a, **kw: graph)
+
+    def test_reachable_route(self, patched_loader, capsys):
+        env = _run(["path", "MODEL", "IMAGE", "--max-depth", "4"], capsys)
+        data = env["data"]
+        assert data["mode"] == "exact"
+        assert data["count"] >= 1
+        chains = [[s["node"] for s in p["steps"]] for p in data["paths"]]
+        assert ["KSampler", "VAEDecode"] in chains
+        first = data["paths"][0]["steps"][0]
+        assert first["from_type"] == "MODEL"
+        assert first["to_type"] == "LATENT"
+
+    def test_unreachable_source_is_an_honest_empty_set(self, patched_loader, capsys):
+        env = _run(["path", "AUDIO", "IMAGE", "--max-depth", "4", "--max-paths", "3"], capsys)
+        data = env["data"]
+        assert data["count"] == 0
+        assert data["paths"] == []
+        # Nothing was cut short, so the empty answer is genuinely exhaustive.
+        assert data["truncated"] is False
+        assert data["depth_limited"] is False
+        assert data["exact"] is True
+
+    def test_source_type_changes_the_rows(self, patched_loader, capsys):
+        model = _run(["path", "MODEL", "IMAGE", "--max-depth", "4", "--max-paths", "3"], capsys)["data"]
+        audio = _run(["path", "AUDIO", "IMAGE", "--max-depth", "4", "--max-paths", "3"], capsys)["data"]
+        assert model["paths"] != audio["paths"]
+        assert model["count"] > 0 and audio["count"] == 0
+
+    def test_partner_api_node_with_a_model_widget_is_not_routed_through(self, patched_loader, capsys):
+        env = _run(["path", "MODEL", "IMAGE", "--max-depth", "6"], capsys)
+        nodes = {s["node"] for p in env["data"]["paths"] for s in p["steps"]}
+        assert "ByteDanceImageNode" not in nodes
+
+    def test_shallow_depth_is_a_subset_and_says_so(self, patched_loader, capsys):
+        shallow = _run(["path", "MODEL", "IMAGE", "--max-depth", "1"], capsys)["data"]
+        deep = _run(["path", "MODEL", "IMAGE", "--max-depth", "4"], capsys)["data"]
+        assert shallow["count"] < deep["count"]
+        for p in deep["paths"]:
+            assert len(p["steps"]) <= 4
+        # An empty result from a search that stopped at the depth bound is not
+        # proof of unreachability, so `exact` is withheld.
+        assert shallow["depth_limited"] is True
+        assert shallow["exact"] is False
+
+    def test_max_paths_truncation_withholds_the_exact_claim(self, patched_loader, capsys):
+        env = _run(["path", "LATENT", "IMAGE", "--max-depth", "4", "--max-paths", "1"], capsys)["data"]
+        assert env["count"] == 1
+        assert env["truncated"] is True
+        assert env["truncated_by"] == "max_paths"
+        assert env["exact"] is False
+
+    @pytest.mark.parametrize(
+        ("flag", "value"),
+        [("--max-depth", "0"), ("--max-depth", "-1"), ("--max-paths", "0"), ("--max-paths", "-3")],
+    )
+    def test_non_positive_bounds_are_refused_before_any_graph_load(self, monkeypatch, capsys, flag, value):
+        """A bound below 1 admits no path, so the walker returns an empty result
+        with every limit flag false — which the envelope would publish as
+        `exact: true, count: 0`, a proof that no route exists. That proof would
+        come from the typo, not from a walk, so the bound is rejected up front.
+
+        Deliberately *not* using the `patched_loader` fixture: `_get_graph` is
+        replaced with a tripwire, so the test fails if the command does any
+        object_info I/O before validating the caller's bounds.
+        """
+
+        def _tripwire(*a, **kw):
+            raise AssertionError("_get_graph was called before the bounds were validated")
+
+        monkeypatch.setattr(nodes_cmd, "_get_graph", _tripwire)
+
+        env = _run(["path", "MODEL", "IMAGE", flag, value], capsys)
+        assert env["ok"] is False
+        assert env["error"]["code"] == "path_bounds_invalid"
+        assert env["error"]["details"][flag.removeprefix("--").replace("-", "_")] == int(value)
+        # Crucially: no envelope claiming an exhaustive empty answer.
+        assert "data" not in env or not (env.get("data") or {}).get("exact")
+
+    def test_smallest_valid_bounds_are_searched_not_refused(self, patched_loader, capsys):
+        """The rejection is for bounds below 1 only. `1` is a legitimate bound:
+        it must run a real (if very shallow) search rather than error out, even
+        though nothing is reachable from MODEL in a single hop."""
+        env = _run(["path", "MODEL", "IMAGE", "--max-depth", "1", "--max-paths", "1"], capsys)
+        assert env["ok"] is True
+        data = env["data"]
+        assert data["count"] == 0
+        # The walk genuinely ran and hit the depth bound — it was not declined.
+        assert data["depth_limited"] is True
+        assert data["not_searched"] is False
+        assert data["exact"] is False
+
+    def test_same_type_query_lists_the_route_it_used_to_decline(self, patched_loader, capsys):
+        """`MODEL -> MODEL` is a *reachable* query — the fixture carries
+        `LoraLoaderModelOnly`, a stock-shaped node taking a MODEL link input and
+        emitting MODEL — and the CLI now answers it.
+
+        It used to decline: the walker's no-op rule dropped any step whose
+        output type equalled its input type, which for a same-type query is the
+        terminal step, so the command returned `count: 0` with the abstention
+        declared. Declining was honest but useless — the route is real, so it is
+        listed.
+        """
+        lora = _run(["show", "LoraLoaderModelOnly"], capsys)["data"]
+        assert "MODEL" in {o["type"] for o in lora["outputs"]}, "fixture must offer a real MODEL -> MODEL route"
+        assert "MODEL" in {i["type"] for i in lora["inputs"]}
+
+        data = _run(["path", "MODEL", "MODEL"], capsys)["data"]
+        assert data["count"] >= 1
+        one_step = [p for p in data["paths"] if [s["node"] for s in p["steps"]] == ["LoraLoaderModelOnly"]]
+        assert one_step, "the one-step MODEL -> MODEL route must be listed"
+        assert one_step[0]["steps"][0] == {
+            "node": "LoraLoaderModelOnly",
+            "from_type": "MODEL",
+            "to_type": "MODEL",
+        }
+        # The walk ran to completion: no abstention, no bound bit it.
+        assert data["not_searched"] is False
+        assert data["not_searched_reason"] is None
+        assert data["truncated"] is False
+        assert data["depth_limited"] is False
+        # `exact` is still withheld here, and for the ordinary reason rather
+        # than a leftover of the old refusal: reaching MODEL ends a path, so the
+        # walk keeps expanding the branches that do not (KSampler -> LATENT),
+        # and there both decoders land on the same (IMAGE, {IMAGE, LATENT})
+        # state — a collapse. It costs no MODEL -> MODEL route (nothing in this
+        # catalog routes IMAGE back to MODEL), but the flag errs toward true by
+        # design, so the claim is withheld rather than forged.
+        assert data["collapsed"] is True
+        assert data["exact"] is False
+
+    def test_loose_mode_never_claims_exactness(self, patched_loader, capsys):
+        env = _run(["path", "MODEL", "IMAGE", "--loose", "--max-depth", "4"], capsys)["data"]
+        assert env["mode"] == "loose"
+        assert env["exact"] is False
+        assert env["count"] >= 1
+
+    def test_support_inputs_are_reported(self, patched_loader, capsys):
+        env = _run(["path", "MODEL", "IMAGE", "--max-depth", "4"], capsys)["data"]
+        path = next(p for p in env["paths"] if [s["node"] for s in p["steps"]] == ["KSampler", "VAEDecode"])
+        assert {s["type"] for s in path["support"]} == {"CONDITIONING", "LATENT", "VAE"}
+
+    def test_collapsed_alternate_routes_withhold_the_exact_claim(self, monkeypatch, capsys):
+        """A second node offering the same hop is not re-expanded, so its routes
+        never reach the output. The envelope has to say so — a silently partial
+        list labelled `exact` is the defect this ticket is about."""
+        import copy
+        import json as _json
+        from pathlib import Path
+
+        from comfy_cli.cql.engine import Graph
+
+        fixture = Path(__file__).parent.parent / "fixtures" / "nodes_path_object_info.json"
+        info = _json.loads(fixture.read_text())
+        info["KSamplerAdvanced"] = copy.deepcopy(info["KSampler"])
+        info["KSamplerAdvanced"]["name"] = "KSamplerAdvanced"
+        graph = Graph.from_object_info(info)
+        monkeypatch.setattr(nodes_cmd, "_get_graph", lambda *a, **kw: graph)
+
+        data = _run(["path", "MODEL", "IMAGE", "--max-depth", "3"], capsys)["data"]
+        assert data["count"] > 0
+        assert data["collapsed"] is True
+        assert data["truncated"] is False
+        assert data["depth_limited"] is False
+        assert data["exact"] is False
+
+
 class TestFlattenCategoryTree:
     """Pin the shape contract for the wasm CategoryTree, since the flattener
     has to know the (capital-cased) field names the Go side emits."""

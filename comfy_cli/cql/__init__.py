@@ -1,10 +1,10 @@
-"""object_info loader — normalize ComfyUI's ``/object_info`` into typed rows.
+"""CQL public surface.
 
 Public entry points:
-    load_graph(input_path=..., host=..., port=...) -> dict
+    resilient_load_object_info(mode=..., host=..., port=..., input_path=...) -> dict
 """
 
 from comfy_cli.cql.errors import CQLRuntimeError
-from comfy_cli.cql.loader import load_graph
+from comfy_cli.cql.loader import resilient_load_object_info
 
-__all__ = ["CQLRuntimeError", "load_graph"]
+__all__ = ["CQLRuntimeError", "resilient_load_object_info"]

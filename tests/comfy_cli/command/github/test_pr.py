@@ -1,3 +1,4 @@
+import os
 import subprocess
 import sys
 from unittest.mock import Mock, patch
@@ -254,7 +255,12 @@ class TestGitOperations:
         assert mock_subprocess.call_count == 4
 
         calls = mock_subprocess.call_args_list
-        assert "git" in calls[0][0][0]
+        # git is spawned by its resolved absolute path, never the bare name
+        # Windows' CreateProcess would look up in the CWD first (BE-5358).
+        for call in calls:
+            argv0 = call[0][0][0]
+            assert os.path.isabs(argv0), argv0
+            assert os.path.basename(argv0).removesuffix(".exe") == "git", argv0
         assert "remote" in calls[1][0][0]
         assert "fetch" in calls[2][0][0]
         assert "checkout" in calls[3][0][0]

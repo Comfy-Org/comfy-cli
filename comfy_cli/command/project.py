@@ -224,6 +224,10 @@ def assets_push_cmd(
         renderer.error(code="invalid_argument", message=str(e))
         raise typer.Exit(code=1) from e
     where_kind = target.kind
+    # Routing resolved — stamp it so the upload failures below name the backend
+    # this push targeted. The `project_not_found` and `invalid_argument` errors
+    # above precede the decision and stay `where: null`.
+    renderer.where = where_kind
 
     assets_dir = project.root / "assets"
     lock_path = project.root / ".comfy" / "assets.lock.json"
