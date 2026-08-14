@@ -1098,26 +1098,25 @@ def run(
                 allow_spend=allow_spend,
             )
         else:
-            # The whole local path stays INSIDE this else. main could dedent it
-            # because its cloud branch ended in `return`; that return is exactly
-            # what this branch removed (it skipped the try's `else` and so never
-            # fired `execution_success`), so unindenting here would run the local
-            # submit after every cloud submit.
+            # Both targets must fall off the END of this try suite: Python skips
+            # a try's `else:` clause when the suite leaves via `return`, so an
+            # early return here would silently drop the `execution_success`
+            # tracking below (it only ever fired on the cloud branch by way of
+            # the `except typer.Exit` handler).
             from comfy_cli.host_port import parse_host_port_arg, report_usage_error, resolve_host_port
 
             # ``report_usage_error``: a bad ``--host``/``--port`` is a
-            # ``typer.BadParameter``, which click turns into a stderr usage panel
-            # + exit 2 — leaving stdout empty in JSON/NDJSON mode while every
-            # other failure here ends with an envelope. Emit the terminating
-            # envelope first; the exception still propagates, so exit 2 is
-            # unchanged.
+            # ``typer.BadParameter``, which click turns into a stderr usage panel +
+            # exit 2 — leaving stdout empty in JSON/NDJSON mode while every other
+            # failure here ends with an envelope. Emit the terminating envelope
+            # first; the exception still propagates, so exit 2 is unchanged.
             with report_usage_error(renderer):
                 if host:
                     host, parsed_port = parse_host_port_arg(host)
-                    # ``port is None``, not ``not port``: a typed ``--port`` always
-                    # wins over one embedded in ``--host h:p``, including
-                    # ``--port 0``, which ``resolve_host_port`` then rejects as out
-                    # of range instead of silently running against the embedded one.
+                    # ``port is None``, not ``not port``: a typed ``--port`` always wins
+                    # over one embedded in ``--host h:p``, including ``--port 0``, which
+                    # ``resolve_host_port`` then rejects as out of range instead of
+                    # silently running against the embedded port.
                     if port is None and parsed_port is not None:
                         port = parsed_port
 

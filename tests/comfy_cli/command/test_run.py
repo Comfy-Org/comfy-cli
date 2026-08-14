@@ -3012,6 +3012,14 @@ class TestRunJournal:
         with (
             patch("comfy_cli.target.resolve_target", return_value=fake_target),
             patch("comfy_cli.cql.engine._load_from_target", return_value={}),
+            # `execute_cloud` reaches object_info through the RESILIENT loader,
+            # not `engine._load_from_target` directly. Patching only the latter
+            # left the loader's own cache/refresh/stale-fallback path live, so
+            # this test performed a real cloud fetch — ~9s in isolation, and an
+            # indefinite hang once an earlier test in the file had populated the
+            # credential/cache state it depends on. Stub the loader itself so the
+            # test is hermetic regardless of which path the implementation picks.
+            patch("comfy_cli.cql.loader.resilient_load_object_info", return_value={}),
             patch("comfy_cli.comfy_client.Client", return_value=mock_client),
             patch("comfy_cli.command.run._spawn_watcher"),
         ):

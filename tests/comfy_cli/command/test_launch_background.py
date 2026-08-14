@@ -10,7 +10,30 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from comfy_cli.caller import Caller
 from comfy_cli.command import launch
+from comfy_cli.output.renderer import (
+    OutputMode,
+    Renderer,
+    reset_renderer_for_testing,
+    set_renderer,
+)
+
+
+@pytest.fixture
+def pretty_renderer():
+    """Pin PRETTY mode: under pytest stdout is not a TTY, so the default
+    resolution would pick JSON and never render the failure Panel at all."""
+    reset_renderer_for_testing()
+    r = Renderer.resolve(
+        is_stdout_tty=True,
+        env={},
+        caller=Caller(kind="user", agentic=False, source_env=None),
+    )
+    r.mode = OutputMode.PRETTY
+    set_renderer(r)
+    yield r
+    reset_renderer_for_testing()
 
 
 @patch("comfy_cli.command.launch.os._exit")
@@ -58,6 +81,61 @@ def test_background_launch_surfaces_error_log(mock_config_manager, mock_check_ru
 
     mock_monitor.assert_awaited_once()
     assert mock_print.called
+    mock_exit.assert_called_once_with(1)
+
+
+@patch("comfy_cli.command.launch.os._exit")
+@patch("comfy_cli.command.launch.launch_and_monitor", new_callable=AsyncMock)
+@patch("comfy_cli.command.launch.check_comfy_server_running", return_value=False)
+@patch("comfy_cli.command.launch.ConfigManager")
+def test_background_launch_error_panel_neutralizes_log_text(
+    mock_config_manager, mock_check_running, mock_monitor, mock_exit, pretty_renderer, capsys
+):
+    """The failure Panel parses its content as Rich markup, so the captured log
+    goes through `sanitize_markup`: an unbalanced `[/red]` used to raise
+    MarkupError from inside the failure handler (and any other bracketed run was
+    silently deleted), while escape bytes reached the terminal unfiltered."""
+    mock_config_manager.return_value.background = None
+    mock_monitor.return_value = ["[/red] boom\n", "\x1b[2Jerased\n", "[INFO] tail\n"]
+
+    launch.background_launch(extra=[])
+
+    out = capsys.readouterr().out
+    # No MarkupError escaped, and the bracket text is visible rather than eaten.
+    assert "[/red]" in out
+    assert "[INFO]" in out
+    assert "boom" in out
+    assert "erased" in out
+    # ...with nothing the terminal would act on left in the rendered panel.
+    assert "\x1b[2J" not in out
+    mock_exit.assert_called_once_with(1)
+
+
+@patch("comfy_cli.command.launch.os._exit")
+@patch("comfy_cli.command.launch.launch_and_monitor", new_callable=AsyncMock)
+@patch("comfy_cli.command.launch.check_comfy_server_running", return_value=False)
+@patch("comfy_cli.command.launch.ConfigManager")
+def test_background_launch_error_panel_survives_a_stray_escape_introducer(
+    mock_config_manager, mock_check_running, mock_monitor, mock_exit, pretty_renderer, capsys
+):
+    """A crashed process can dump a bare `\\x1b]` into the captured output. The
+    panel exists to show the traceback under it, so the sanitizer bounds that
+    introducer at its line (`sanitize_log_markup`) instead of letting it eat the
+    rest of the capture the way the authored-message `sanitize` does."""
+    mock_config_manager.return_value.background = None
+    mock_monitor.return_value = [
+        "Traceback (most recent call last):\n",
+        "\x1b]0;stray introducer\n",
+        '  File "node.py", line 42\n',
+        "RuntimeError: boom\n",
+    ]
+
+    launch.background_launch(extra=[])
+
+    out = capsys.readouterr().out
+    assert "RuntimeError: boom" in out
+    assert "node.py" in out
+    assert "\x1b]" not in out
     mock_exit.assert_called_once_with(1)
 
 
