@@ -1807,11 +1807,66 @@ def canonical(workflow: dict) -> dict:
     return w
 
 
+#: Save-format version this module emits — array-style `links`, matching what
+#: `apply_op` builds and what the frontend's zod schema expects.
+SAVE_FORMAT_VERSION = 0.4
+
+
+def _max_id(values) -> int:
+    """Largest non-negative int in ``values``; 0 when there is none."""
+    best = 0
+    for v in values:
+        try:
+            n = int(v)
+        except (TypeError, ValueError):
+            continue
+        if n > best:
+            best = n
+    return best
+
+
+def complete_save_format(workflow: dict) -> dict:
+    """Fill the save-format keys a consumer is entitled to assume (BE-7215).
+
+    We emitted ``{nodes, links, last_node_id}`` and omitted ``version`` and
+    ``last_link_id``. The frontend's ``validateComfyWorkflow`` zod schema
+    requires them, so every consumer had to patch the document before it could
+    be used — the cloud agent carried a whole module (`internal/draft/
+    normalize.go`) doing exactly this. Completing it at the source deletes that
+    for every current and future caller.
+
+    Only ABSENT keys are filled: a document that already declares a version or
+    carries its own counters keeps them, so this never rewrites a producer's
+    intent. Counters are derived from content, so they cannot under-report an
+    id that is actually in use.
+    """
+    workflow.setdefault("version", SAVE_FORMAT_VERSION)
+
+    if "last_node_id" not in workflow:
+        nodes = workflow.get("nodes")
+        workflow["last_node_id"] = (
+            _max_id(n.get("id") for n in nodes if isinstance(n, dict)) if isinstance(nodes, list) else 0
+        )
+
+    if "last_link_id" not in workflow:
+        links = workflow.get("links")
+        # A link row is [link_id, src, src_slot, tgt, tgt_slot, type].
+        workflow["last_link_id"] = (
+            _max_id(ln[0] for ln in links if isinstance(ln, list | tuple) and ln) if isinstance(links, list) else 0
+        )
+    return workflow
+
+
 def strip_internal(workflow: dict) -> dict:
-    """Remove apply-only bookkeeping before serializing to disk."""
+    """Remove apply-only bookkeeping and complete the save format before serializing.
+
+    Called at every point the document leaves this process, so the two
+    guarantees — no internal bookkeeping, no missing save-format keys — hold for
+    file writes, ``--stdout`` and batch output alike.
+    """
     workflow.pop("_applied_ops", None)
     workflow.pop("_widget_stamps", None)
-    return workflow
+    return complete_save_format(workflow)
 
 
 # ---------------------------------------------------------------------------
@@ -1855,6 +1910,24 @@ def _widget_index(graph, class_type: str, widget: str, widgets_values=None) -> i
     return order.index(widget)
 
 
+class FatalFindingError(ValueError):
+    """A catalog finding the server will reject — the edit is refused (BE-7215).
+
+    Carries the finding verbatim so the command layer can emit ``code``,
+    ``value``, ``field`` and ``did_you_mean`` as ENVELOPE FIELDS. Previously
+    these shipped as a soft warning on an ``ok:true`` envelope and every
+    consumer had to re-derive fatality by parsing the message text; the agent
+    grew ~750 lines of Go doing exactly that.
+
+    Subclasses ValueError so existing ``except ValueError`` handlers still
+    catch it — they just lose the structure.
+    """
+
+    def __init__(self, finding: dict):
+        self.finding = finding
+        super().__init__(finding.get("message", finding.get("code", "invalid value")))
+
+
 def _validate_widget(graph, class_type: str, widget: str, value: Any) -> list[dict]:
     """Shape-validate a widget value (hard error) and collect catalog warnings
     (soft — e.g. unknown COMBO option, out-of-range number)."""
@@ -1867,7 +1940,17 @@ def _validate_widget(graph, class_type: str, widget: str, value: Any) -> list[di
     err = port.validate_shape(value)
     if err:
         raise ValueError(err)
-    return port.validate_catalog(value)
+    findings = port.validate_catalog(value)
+    # A value the server will reject must not reach the document. `validate`
+    # already refused these (`Graph._validate_catalog_value` puts them in
+    # `errors`); the edit path was the last surface still writing them and
+    # returning ok:true.
+    from comfy_cli.cql.engine import SEVERITY_ERROR
+
+    fatal = next((f for f in findings if f.get("severity") == SEVERITY_ERROR), None)
+    if fatal is not None:
+        raise FatalFindingError(fatal)
+    return findings
 
 
 def _normalize_slot_name(name: Any) -> str:

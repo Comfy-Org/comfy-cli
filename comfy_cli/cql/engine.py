@@ -249,7 +249,13 @@ class Port:
         return None
 
     def validate_catalog(self, value: Any) -> list[dict]:
-        """Soft checks against catalog snapshot. Returns warnings list."""
+        """Catalog findings for ``value``. Returns a list of finding dicts.
+
+        Every finding carries ``code``, ``severity`` and ``value`` (BE-7215):
+        ``severity`` so a caller never infers fatality from prose, and ``value``
+        so the offending operand is a field rather than something to regex back
+        out of ``message``. Fatal codes are :data:`FATAL_FINDING_CODES`.
+        """
         if self.validate_shape(value) is not None:
             return []
         warnings: list[dict] = []
@@ -320,6 +326,11 @@ class Port:
                         "message": f"{self.name}={value} above catalog max {self.options.max}",
                     }
                 )
+        # Stamp centrally: a finding added at any site above inherits its
+        # severity from the code table, so none can ship without one.
+        for w in warnings:
+            w.setdefault("severity", finding_severity(w.get("code", "")))
+            w.setdefault("value", value)
         return warnings
 
 
@@ -395,6 +406,34 @@ class Morphism:
 # validator output generally.
 _WILDCARD_TYPE_PREFIX = "COMFY_MATCHTYPE"
 _WILDCARD_TYPES = frozenset({"*"})
+
+
+# Finding severity — BE-7215. Every catalog finding carries an explicit
+# ``severity`` so a consumer never has to infer fatality from prose. The rule the
+# codes below encode: a finding is an ERROR when the value cannot resolve at run
+# time, which is precisely when `Graph.validate_workflow` already refuses it
+# (see `_validate_catalog_value`) — the edit path was the only surface still
+# demoting these to advisory warnings on an ``ok:true`` envelope.
+SEVERITY_ERROR = "error"
+SEVERITY_WARNING = "warning"
+SEVERITY_INFO = "info"
+
+#: Codes whose finding means "the server will reject this value". Callers must
+#: treat these as fatal; `workflow_ops` refuses the edit outright rather than
+#: writing the value and warning about it.
+FATAL_FINDING_CODES = frozenset(
+    {
+        "unknown_enum_value",
+        "no_options_available",
+        "below_min",
+        "above_max",
+    }
+)
+
+
+def finding_severity(code: str) -> str:
+    """Severity for a finding code. Unknown codes are advisory, never fatal."""
+    return SEVERITY_ERROR if code in FATAL_FINDING_CODES else SEVERITY_WARNING
 
 
 def _is_wildcard_type(type_id: str) -> bool:

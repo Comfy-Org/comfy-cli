@@ -40,6 +40,26 @@ PortOpt = Annotated[int | None, typer.Option(show_default=False)]
 WhereOpt = Annotated[str | None, typer.Option("--where", show_default=False, help="Catalog target: local | cloud.")]
 
 
+def _emit_edit_error(renderer, e: ValueError, *, hint: str) -> None:
+    """Emit an edit failure, preferring the typed form when one is available.
+
+    A :class:`workflow_ops.FatalFindingError` carries the catalog finding, so
+    the envelope can name the offending ``value``, ``field``, ``valid_options``
+    and ``did_you_mean`` as DETAILS rather than burying them in prose a caller
+    has to regex (BE-7215). Any other ValueError keeps the previous shape.
+    """
+    if isinstance(e, workflow_ops.FatalFindingError):
+        f = e.finding
+        renderer.error(
+            code=f.get("code", "workflow_edit_invalid"),
+            message=f.get("message", str(e)),
+            hint=(f"did you mean: {', '.join(str(v) for v in f['did_you_mean'])}?" if f.get("did_you_mean") else hint),
+            details={k: v for k, v in f.items() if k != "message"},
+        )
+        return
+    renderer.error(code="workflow_edit_invalid", message=str(e), hint=hint)
+
+
 def _split_addr(addr: str, renderer) -> tuple[Any, str]:
     """Split ``<node_id>.<name>`` → (node_id, name). node_id is int when numeric."""
     if "." not in addr:
@@ -151,7 +171,7 @@ def add_node_cmd(
         )
         raise typer.Exit(code=1) from e
     except ValueError as e:
-        renderer.error(code="workflow_edit_invalid", message=str(e))
+        _emit_edit_error(renderer, e, hint="run `comfy workflow slots <file>` to list widget addresses")
         raise typer.Exit(code=1) from e
     _finish(renderer, p, workflow, op, base_version, stdout, "workflow add-node")
 
@@ -189,11 +209,7 @@ def set_widget_cmd(
             workflow, graph, node_id, widget, _parse_value(value), actor=actor, base_version=base_version
         )
     except ValueError as e:
-        renderer.error(
-            code="workflow_edit_invalid",
-            message=str(e),
-            hint="run `comfy workflow slots <file>` to list widget addresses",
-        )
+        _emit_edit_error(renderer, e, hint="run `comfy workflow slots <file>` to list widget addresses")
         raise typer.Exit(code=1) from e
     _finish(renderer, p, workflow, op, base_version, stdout, "workflow set-widget")
 
@@ -227,7 +243,7 @@ def connect_cmd(
             workflow, graph, from_node, from_slot, to_node, to_slot, actor=actor, base_version=base_version
         )
     except ValueError as e:
-        renderer.error(code="workflow_edit_invalid", message=str(e))
+        _emit_edit_error(renderer, e, hint="run `comfy workflow slots <file>` to list widget addresses")
         raise typer.Exit(code=1) from e
     _finish(renderer, p, workflow, op, base_version, stdout, "workflow connect")
 
@@ -257,7 +273,7 @@ def delete_cmd(
     try:
         workflow, op = workflow_ops.delete_node(workflow, graph, node_id, actor=actor, base_version=base_version)
     except ValueError as e:
-        renderer.error(code="workflow_edit_invalid", message=str(e))
+        _emit_edit_error(renderer, e, hint="run `comfy workflow slots <file>` to list widget addresses")
         raise typer.Exit(code=1) from e
     _finish(renderer, p, workflow, op, base_version, stdout, "workflow delete")
 

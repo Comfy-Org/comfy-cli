@@ -1991,11 +1991,29 @@ class TestSetWidgetModelNormalization:
         assert op["value"] == "euler"
         assert not any(w.get("code") == "normalized_value" for w in op.get("warnings", []))
 
-    def test_unknown_value_is_left_for_validate_to_flag(self):
+    def test_unknown_value_is_refused_not_written(self):
+        """BE-7215: an unknown COMBO value on a non-upload-backed port is FATAL.
+
+        It used to be applied and reported as a soft warning on an ``ok:true``
+        envelope, so the bad value reached the canvas and only failed at run
+        time — the agent grew ~750 lines of Go re-deriving that this "warning"
+        was actually fatal. `validate` already refused it; the edit path now
+        agrees, and the document is left untouched.
+        """
         g, wf = _graph(), _base_workflow()
-        _, op = workflow_ops.set_widget(wf, g, 3, "sampler_name", "totally_made_up")
-        assert op["value"] == "totally_made_up"  # not silently changed
-        assert any(w.get("code") == "unknown_enum_value" for w in op.get("warnings", []))
+        before = json.loads(json.dumps(wf))
+        with pytest.raises(workflow_ops.FatalFindingError) as ei:
+            workflow_ops.set_widget(wf, g, 3, "sampler_name", "totally_made_up")
+
+        f = ei.value.finding
+        assert f["code"] == "unknown_enum_value"
+        assert f["severity"] == "error"
+        # The offending operand is a FIELD, not something to regex out of prose.
+        assert f["value"] == "totally_made_up"
+        assert f["field"] == "sampler_name"
+        assert f["valid_options"]
+        # Refused means refused: the scratch document is byte-identical.
+        assert wf == before
 
 
 class TestWhereInvalid:
