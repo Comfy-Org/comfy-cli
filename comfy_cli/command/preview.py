@@ -168,6 +168,7 @@ def _bundled_ffmpeg() -> str | None:
     except Exception:  # noqa: BLE001 — package absent or no bundled build for this platform
         return None
 
+
 def _classify_by_ext(path: Path) -> dict:
     """Fallback classification when ffprobe is unavailable (e.g. only the
     imageio-ffmpeg static ffmpeg is present): pick kind from the extension.

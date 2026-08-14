@@ -1275,9 +1275,12 @@ class TestDynamicCombo:
         nid = _run(["add-node", str(path), "KlingFLFTest"], capsys)["data"]["op"]["node_id"]
         g = _graph()
         node = next(n for n in json.loads(path.read_text())["nodes"] if n["id"] == nid)
-        order = g.widget_order("KlingFLFTest")
-        assert "model" in order and "model.resolution" in order
         wv = node["widgets_values"]
+        # Index against the node's ACTUAL values: `widget_order` is value-
+        # independent (selector only), so a dynamic combo's sub-inputs only
+        # appear once the selection is known.
+        order = g.widget_order_for_node("KlingFLFTest", wv)
+        assert "model" in order and "model.resolution" in order
         assert wv[order.index("model")] == "kling-v3"  # first key
         assert wv[order.index("model.resolution")] == "1080p"  # sub default
 
@@ -1288,8 +1291,8 @@ class TestDynamicCombo:
         e2 = _run(["set-widget", str(path), f"{nid}.model.resolution", "720p"], capsys)
         assert e1["ok"] and e2["ok"], (e1, e2)
         g = _graph()
-        order = g.widget_order("KlingFLFTest")
         wv = next(n for n in json.loads(path.read_text())["nodes"] if n["id"] == nid)["widgets_values"]
+        order = g.widget_order_for_node("KlingFLFTest", wv)
         assert wv[order.index("model.resolution")] == "720p"
 
         from comfy_cli.workflow_to_api import convert_ui_to_api

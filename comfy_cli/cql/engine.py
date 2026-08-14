@@ -408,6 +408,7 @@ def _is_wildcard_type(type_id: str) -> bool:
         return False
     return type_id in _WILDCARD_TYPES or type_id.startswith(_WILDCARD_TYPE_PREFIX)
 
+
 def _is_dynamic_combo_type(type_id: str) -> bool:
     """V3 dynamic-combo types (e.g. ``COMFY_DYNAMICCOMBO_V3``): a selector
     widget whose chosen option contributes its own sub-inputs. Same rule the
@@ -599,7 +600,7 @@ def _dynamic_sub_widget_defaults(base: str, options: list, selected: Any = _FIRS
         if not isinstance(section_def, dict):
             continue
         for sub_name, spec in section_def.items():
-            _t, _e, enum_values, opts, _declared = _parse_input_spec(spec)
+            _t, _e, enum_values, opts, _declared, _dyn = _parse_input_spec(spec)
             default = opts.default
             if default is None and enum_values:
                 default = enum_values[0]
@@ -1143,8 +1144,31 @@ class Graph:
             if p.is_link:
                 continue
             order.append(p.name)
-            if p.options.dynamic_options:
-                order.extend(_dynamic_sub_widget_names(p.name, p.options.dynamic_options))
+            if p.options.control_after_generate:
+                order.append("control_after_generate")
+        return order
+
+    def widget_order_default(self, class_name: str) -> list[str]:
+        """Static order with every dynamic combo expanded at its FIRST key.
+
+        :meth:`widget_order` is deliberately value-independent — a combo
+        contributes only its selector, because which sub-inputs exist depends on
+        the node's current selection. A CATALOG has no node and no selection, but
+        its consumers still need the sub-input names in order to address them
+        (``set-widget <id>.model.resolution``). So the catalog publishes the order
+        a FRESH node would have, which is the first key — the same option
+        ``add_node`` materializes via :meth:`widget_defaults`.
+        """
+        m = self._nodes.get(class_name)
+        if m is None:
+            return []
+        order: list[str] = []
+        for p in m.inputs:
+            if p.is_link:
+                continue
+            order.append(p.name)
+            if p.dynamic_options:
+                order.extend(_dynamic_sub_widget_names(p.name, p.dynamic_options))
             if p.options.control_after_generate:
                 order.append("control_after_generate")
         return order
@@ -1171,9 +1195,9 @@ class Graph:
         for p in m.inputs:
             if p.is_link:
                 continue
-            if p.options.dynamic_options:
+            if p.dynamic_options:
                 out[p.name] = p.enum_values[0] if p.enum_values else None  # selected key
-                out.update(_dynamic_sub_widget_defaults(p.name, p.options.dynamic_options))
+                out.update(_dynamic_sub_widget_defaults(p.name, p.dynamic_options))
             elif p.options.default is not None:
                 out[p.name] = p.options.default
             elif p.enum_values:
@@ -2207,6 +2231,7 @@ def _widgets_as_list(widgets_values: Any) -> list[Any]:
     crashing slot extraction or a set-widget write.
     """
     return list(widgets_values) if isinstance(widgets_values, list) else []
+
 
 # A dynamic combo may nest another dynamic combo among its sub-inputs. Real
 # schemas are one or two levels deep; the cap defends the expansion walk

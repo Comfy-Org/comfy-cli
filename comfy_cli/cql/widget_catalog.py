@@ -76,7 +76,7 @@ def build_types(graph) -> dict[str, dict[str, Any]]:
 
     types: dict[str, dict[str, Any]] = {}
     for m in graph.all_nodes():
-        entry: dict[str, Any] = {"widget_order": list(graph.widget_order(m.id))}
+        entry: dict[str, Any] = {"widget_order": list(graph.widget_order_default(m.id))}
 
         # V3 autogrow (COMFY_AUTOGROW_V3): one declared input, one wire slot per
         # connection (`images` → `images.image0`, `images.image1`, …). The

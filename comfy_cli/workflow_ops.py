@@ -484,7 +484,7 @@ def add_node(
     size = layout.estimate_size(
         len([p for p in m.inputs if p.is_link]),
         len(m.outputs),
-        len(graph.widget_order(class_type)),
+        len(graph.widget_order_default(class_type)),
     )
     if pos is None:
         # Layout-aware default: right of the current graph, collision-free.
@@ -1214,7 +1214,7 @@ def capture_recipe(workflow: dict, graph, name: str = "captured", lift: dict | N
         node = by_id.get(node_id)
         if node is None:
             raise RecipeError(f"--param target node {node_id!r} not in workflow")
-        if widget not in graph.widget_order(node.get("type", "")):
+        if widget not in graph.widget_order_default(node.get("type", "")):
             raise RecipeError(f"--param target {node_id}.{widget!r}: not a widget on {node.get('type')}")
 
     alias_by_id: dict[Any, str] = {}
@@ -1825,7 +1825,7 @@ def _build_node(node_id: int, class_type: str, m, graph, pos: list, size: list) 
     # Widget values in positional order, including dynamic-combo selectors and
     # their sub-widgets — sourced from the engine so add-node matches the converter.
     defaults = graph.widget_defaults(class_type)
-    widgets = [defaults.get(name) for name in graph.widget_order(class_type)]
+    widgets = [defaults.get(name) for name in graph.widget_order_default(class_type)]
     return {
         "id": node_id,
         "type": class_type,

@@ -204,7 +204,10 @@ class TestWidgetOrder:
         graph = _graph()
         assert set(types) == {m.id for m in graph.all_nodes()}
         for class_type, entry in types.items():
-            assert entry["widget_order"] == graph.widget_order(class_type), class_type
+            # The catalog publishes the FRESH-node order (dynamic combos expanded
+            # at their first key), which is what a consumer can address before it
+            # has a node to read a selection from.
+            assert entry["widget_order"] == graph.widget_order_default(class_type), class_type
 
     def test_control_after_generate_is_in_the_order(self, patched_loader, capsys):
         """The synthetic widget the frontend injects after a seed occupies a

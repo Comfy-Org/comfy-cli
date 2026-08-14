@@ -373,24 +373,41 @@ class TestWidgetOrderForNode:
             }
         )
 
-    def test_static_order_uses_first_key(self):
+    def test_static_order_is_selector_only(self):
+        """`widget_order` is value-INDEPENDENT: a dynamic combo contributes only
+        its selector, because which sub-inputs exist depends on the selection the
+        node actually carries. First-key expansion moved to `widget_order_default`
+        (what a fresh node has, and what the catalog publishes)."""
         g = self._dyn_graph()
-        assert g.widget_order("DynNode") == ["model", "model.res", "seed"]
+        assert g.widget_order("DynNode") == ["model", "seed"]
+
+    def test_default_order_uses_first_key(self):
+        g = self._dyn_graph()
+        assert g.widget_order_default("DynNode") == ["model", "model.res", "seed"]
 
     def test_node_order_expands_selected_key(self):
         g = self._dyn_graph()
-        # Selecting "b" adds model.quality, pushing seed to index 3.
+        # Selecting "b" adds model.quality, pushing seed to index 3. The trailing
+        # control_after_generate is implicit: the frontend's useIntWidget always
+        # companions an INT `seed`, regardless of the schema flag.
         order = g.widget_order_for_node("DynNode", ["b", "x", "hi", 12345])
-        assert order == ["model", "model.res", "model.quality", "seed"]
+        assert order == ["model", "model.res", "model.quality", "seed", "control_after_generate"]
         assert order.index("seed") == 3
 
     def test_node_order_first_key_matches_static(self):
         g = self._dyn_graph()
-        assert g.widget_order_for_node("DynNode", ["a", "x", 999]) == ["model", "model.res", "seed"]
+        assert g.widget_order_for_node("DynNode", ["a", "x", 999]) == [
+            "model",
+            "model.res",
+            "seed",
+            "control_after_generate",
+        ]
 
     def test_empty_widgets_falls_back_to_static(self):
         g = self._dyn_graph()
-        assert g.widget_order_for_node("DynNode", []) == g.widget_order("DynNode")
+        # No values to read -> no selection to expand, so it degrades to the
+        # selector-only static order (plus the implicit seed companion).
+        assert g.widget_order_for_node("DynNode", []) == ["model", "seed", "control_after_generate"]
 
     def test_set_widget_writes_seed_to_selected_slot(self):
         """End-to-end: set-widget on a "b"-selected node must land seed at index 3,

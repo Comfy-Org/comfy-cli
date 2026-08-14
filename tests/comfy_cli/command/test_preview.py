@@ -143,6 +143,7 @@ def test_classify_by_ext_unknown_for_non_media():
     assert _classify_by_ext(Path("pic.png"))["kind"] == "image"
     assert _classify_by_ext(Path("sound.wav"))["kind"] == "audio"
 
+
 # --- CWD binary-planting guard ---------------------------------------------
 
 
