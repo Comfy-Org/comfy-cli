@@ -7,6 +7,7 @@ from pathlib import Path
 import requests
 
 from comfy_cli.constants import DEFAULT_STANDALONE_PYTHON_MINOR_VERSION, OS, PROC
+from comfy_cli.http import DEFAULT_HTTP_TIMEOUT
 from comfy_cli.typing import PathLike
 from comfy_cli.utils import create_tarball, download_url, extract_tarball, get_os, get_proc
 from comfy_cli.uv import DependencyCompiler
@@ -35,7 +36,7 @@ def _resolve_python_version(asset_url_prefix: str, minor_version: str) -> str:
     the available patch version for the requested minor series (e.g. "3.12" -> "3.12.13").
     """
     sha256sums_url = f"{asset_url_prefix.rstrip('/')}/SHA256SUMS"
-    response = requests.get(sha256sums_url)
+    response = requests.get(sha256sums_url, timeout=DEFAULT_HTTP_TIMEOUT)
     response.raise_for_status()
 
     pattern = re.compile(rf"cpython-({re.escape(minor_version)}\.\d+)\+")
@@ -73,7 +74,7 @@ def download_standalone_python(
 
     if tag == "latest":
         # try to fetch json with info about latest release
-        response = requests.get(_latest_release_json_url)
+        response = requests.get(_latest_release_json_url, timeout=DEFAULT_HTTP_TIMEOUT)
         if response.status_code != 200:
             response.raise_for_status()
             raise RuntimeError(f"Request to {_latest_release_json_url} returned status code {response.status_code}")

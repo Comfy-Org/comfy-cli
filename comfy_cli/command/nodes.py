@@ -74,6 +74,13 @@ def _get_graph(
     and fired when a stale-cache fallback occurs (see loader for signature).
     """
     mode = _resolved_where(where)
+    # Every `comfy nodes` verb routes through here, so this is the one place
+    # the target is decided — stamp it on the renderer so the envelopes emitted
+    # downstream (the `cql_no_graph` error below included) carry `where`
+    # instead of `null`. `--input` reads a dump instead of talking to the
+    # backend, but `mode` still says which catalog the dump is interpreted as,
+    # which is what `where` reports (see the field's schema description).
+    get_renderer().where = mode
     # Resolve the local server the same way `comfy run` / `comfy jobs` do —
     # flag > COMFY_LOCAL_URL > config.background > 127.0.0.1:8188. `resolve_target`
     # deliberately skips the `config.background` step (other callers must not
@@ -277,6 +284,9 @@ def ls_cmd(
                 "display_name": m.display_name,
                 "output_types": m.output_types(),
                 "output_node": m.is_output_node,
+                # Paid partner-API node vs free open-weights node. JSON only —
+                # the pretty table is deliberately left unchanged.
+                "is_api_node": m.is_api_node,
             }
             for m in nodes
         ],
@@ -546,6 +556,10 @@ def search_cmd(
                 "display_name": m.display_name,
                 "description": m.description,
                 "output_types": m.output_types(),
+                # Paid partner-API node vs free open-weights node — two nodes can
+                # share a display name and differ only here (MiniMax H3). JSON
+                # only; the pretty table is deliberately left unchanged.
+                "is_api_node": m.is_api_node,
                 **({"close_match": True} if close_match else {}),
             }
             for m in matched
@@ -765,12 +779,14 @@ def path_cmd(
       ``not_searched`` — the individual reasons the claim was withheld, so a
       caller can widen the right bound instead of guessing.
     - ``not_searched`` / ``not_searched_reason`` — the walk declined the query
-      and never ran, so the empty result is an abstention, not an answer. Today
-      the only reason reachable from the CLI is ``"same_type"``: a query whose
-      FROM and TO are the same type is answered empty by construction, even
-      though real self-returning routes such as ``MODEL -> LoraLoader -> MODEL``
-      exist. Such a result reports ``exact: false`` and must not be read as a
-      proof of unreachability.
+      and never ran, so the empty result is an abstention, not an answer. No
+      reason is reachable from this command: the only shape ``search_paths``
+      declines is a bound below 1, which is rejected up front with
+      ``path_bounds_invalid`` before the graph is even loaded. Same-type queries
+      (``MODEL MODEL``) are searched like any other and return the real
+      self-returning routes. The fields stay in the envelope so a caller can
+      never mistake an abstention the engine adds later for a proof of
+      unreachability — an abstention always reports ``exact: false``.
     """
     renderer = get_renderer()
 

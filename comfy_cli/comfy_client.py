@@ -23,6 +23,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+from comfy_cli.caller import usage_source
 from comfy_cli.http import (
     NoRedirectHandler,
     ResponseTooLarge,
@@ -340,7 +341,9 @@ class Client:
             merged_extra: dict[str, Any] = dict(extra_data or {})
             # Usage-source attribution rides extra_data too — the execution
             # record keeps it even when the HTTP header is dropped by proxies.
-            merged_extra.setdefault("comfy_usage_source", "comfy-cli")
+            # Derived from the caller, so agent-driven runs are attributable
+            # server-side; an explicit caller-supplied value still wins.
+            merged_extra.setdefault("comfy_usage_source", usage_source())
             # Partner-API nodes (BFL, Gemini, Bria, ByteDance, etc.) read the
             # caller's comfy.org credential out of extra_data. Rebuild this at
             # send time so an OAuth refresh updates both the header and body.

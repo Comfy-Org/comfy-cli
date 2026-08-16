@@ -87,7 +87,7 @@ jobs:
       # Omitting it rejects the run outright ("requesting 'actions: read', but is
       # only allowed 'actions: none'").
       actions: read
-    uses: Comfy-Org/github-workflows/.github/workflows/groom.yml@0b6ebf5e460ca02499e362aa8d650ac4d6806a7c # main @ 0b6ebf5
+    uses: Comfy-Org/github-workflows/.github/workflows/groom.yml@eb4b26c9bc13feea5ae76c4334370158713fb23a # main @ eb4b26c
     with:
       # File as cloud-code-bot (App token) rather than github-actions[bot]. Absent
       # APP_ID degrades to github-actions[bot] instead of failing.
@@ -95,7 +95,7 @@ jobs:
       # Keep the assets ref (finder and verifier briefs plus dedup ledger) in
       # lock-step with the `uses:` ref above, so a run always loads the briefs
       # that match the workflow filing the issues.
-      workflows_ref: 0b6ebf5e460ca02499e362aa8d650ac4d6806a7c
+      workflows_ref: eb4b26c9bc13feea5ae76c4334370158713fb23a
       # Manual dispatch can dry-run; the scheduled run always files live.
       #
       # BOTH comparisons are load-bearing, and the `inputs` context is NOT usable

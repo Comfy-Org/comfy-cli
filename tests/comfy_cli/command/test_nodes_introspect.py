@@ -458,6 +458,87 @@ class TestSearch:
         assert "KSampler" in [r["name"] for r in env["data"]["rows"]]
 
 
+class TestIsApiNodeRows:
+    """`is_api_node` on `nodes ls` / `nodes search` rows.
+
+    The twin-family trap: a paid partner-API node and a free open-weights one can
+    carry the same display name, so an agent picking off a search row needs the
+    flag inline rather than a follow-up `nodes show` per candidate.
+    """
+
+    @pytest.fixture
+    def patched_loader(self, monkeypatch: pytest.MonkeyPatch):
+        from comfy_cli.cql.engine import Graph
+
+        info = {
+            # Paid partner-API twin: object_info carries `api_node: true`.
+            "MinimaxHailuo03ReferenceNode": {
+                "input": {"required": {}},
+                "output": ["VIDEO"],
+                "output_name": ["VIDEO"],
+                "category": "partner/video",
+                "display_name": "MiniMax H3 Reference to Video",
+                "description": "Generate video from a reference image.",
+                "output_node": False,
+                "api_node": True,
+                "python_module": "comfy_api_nodes",
+            },
+            # Free open-weights twin: no `api_node` key at all.
+            "MiniMaxH3ReferenceToVideo": {
+                "input": {"required": {}},
+                "output": ["VIDEO"],
+                "output_name": ["VIDEO"],
+                "category": "video",
+                "display_name": "MiniMax H3 Reference to Video",
+                "description": "Generate video from a reference image.",
+                "output_node": False,
+                "python_module": "nodes",
+            },
+        }
+        graph = Graph.from_object_info(info)
+        monkeypatch.setattr(nodes_cmd, "_get_graph", lambda *a, **kw: graph)
+
+    def test_ls_rows_carry_the_flag(self, patched_loader, capsys):
+        env = _run(["ls"], capsys)
+        flags = {r["name"]: r["is_api_node"] for r in env["data"]["rows"]}
+        assert flags == {
+            "MinimaxHailuo03ReferenceNode": True,
+            "MiniMaxH3ReferenceToVideo": False,
+        }
+
+    def test_search_rows_carry_the_flag(self, patched_loader, capsys):
+        """Both twins match the same query and are told apart only by the flag."""
+        env = _run(["search", "MiniMax H3 Reference to Video"], capsys)
+        flags = {r["name"]: r["is_api_node"] for r in env["data"]["rows"]}
+        assert flags == {
+            "MinimaxHailuo03ReferenceNode": True,
+            "MiniMaxH3ReferenceToVideo": False,
+        }
+
+    def test_missing_api_node_key_is_false_not_absent(self, patched_loader, capsys):
+        """A node whose object_info entry omits `api_node` reports `false`; a
+        caller must never have to distinguish "free" from "field missing"."""
+        for args in (["ls"], ["search", "MiniMaxH3ReferenceToVideo"]):
+            env = _run(args, capsys)
+            row = next(r for r in env["data"]["rows"] if r["name"] == "MiniMaxH3ReferenceToVideo")
+            assert row["is_api_node"] is False
+
+    def test_close_match_fallback_rows_carry_the_flag(self, patched_loader, capsys):
+        """The typo path builds its rows from the same projection, so the flag
+        must survive there too."""
+        env = _run(["search", "MinimaxHailou03ReferenceNode"], capsys)
+        rows = env["data"]["rows"]
+        assert rows and all(r["close_match"] is True for r in rows)
+        assert next(r for r in rows if r["name"] == "MinimaxHailuo03ReferenceNode")["is_api_node"] is True
+
+    def test_api_only_filter_is_unchanged(self, patched_loader, capsys):
+        """Additive change: `--api-only` still selects exactly the API nodes."""
+        env = _run(["ls", "--api-only"], capsys)
+        rows = env["data"]["rows"]
+        assert [r["name"] for r in rows] == ["MinimaxHailuo03ReferenceNode"]
+        assert rows[0]["is_api_node"] is True
+
+
 class TestPath:
     """`comfy nodes path` — the envelope an agent plans a graph off (BE-6857)."""
 
@@ -562,32 +643,44 @@ class TestPath:
         assert data["not_searched"] is False
         assert data["exact"] is False
 
-    def test_same_type_query_declines_rather_than_claiming_unreachability(self, patched_loader, capsys):
+    def test_same_type_query_lists_the_route_it_used_to_decline(self, patched_loader, capsys):
         """`MODEL -> MODEL` is a *reachable* query — the fixture carries
         `LoraLoaderModelOnly`, a stock-shaped node taking a MODEL link input and
-        emitting MODEL. The walker cannot represent that route (its no-op rule
-        drops any step whose output type equals its input type, which for a
-        same-type query is the terminal step), so it declines the query outright.
+        emitting MODEL — and the CLI now answers it.
 
-        Declining is fine. Declining while reporting `exact: true, count: 0` —
-        the envelope's proof that no route exists — would not be, so the
-        abstention is declared and the exactness claim withheld.
+        It used to decline: the walker's no-op rule dropped any step whose
+        output type equalled its input type, which for a same-type query is the
+        terminal step, so the command returned `count: 0` with the abstention
+        declared. Declining was honest but useless — the route is real, so it is
+        listed.
         """
         lora = _run(["show", "LoraLoaderModelOnly"], capsys)["data"]
         assert "MODEL" in {o["type"] for o in lora["outputs"]}, "fixture must offer a real MODEL -> MODEL route"
         assert "MODEL" in {i["type"] for i in lora["inputs"]}
 
         data = _run(["path", "MODEL", "MODEL"], capsys)["data"]
-        assert data["count"] == 0
-        assert data["not_searched"] is True
-        assert data["not_searched_reason"] == "same_type"
-        # The point of the whole ticket: an empty answer that is not a proof
-        # must not be labelled exact.
-        assert data["exact"] is False
-        # ...and it is the abstention doing it, not a bound that happened to bite.
+        assert data["count"] >= 1
+        one_step = [p for p in data["paths"] if [s["node"] for s in p["steps"]] == ["LoraLoaderModelOnly"]]
+        assert one_step, "the one-step MODEL -> MODEL route must be listed"
+        assert one_step[0]["steps"][0] == {
+            "node": "LoraLoaderModelOnly",
+            "from_type": "MODEL",
+            "to_type": "MODEL",
+        }
+        # The walk ran to completion: no abstention, no bound bit it.
+        assert data["not_searched"] is False
+        assert data["not_searched_reason"] is None
         assert data["truncated"] is False
         assert data["depth_limited"] is False
-        assert data["collapsed"] is False
+        # `exact` is still withheld here, and for the ordinary reason rather
+        # than a leftover of the old refusal: reaching MODEL ends a path, so the
+        # walk keeps expanding the branches that do not (KSampler -> LATENT),
+        # and there both decoders land on the same (IMAGE, {IMAGE, LATENT})
+        # state — a collapse. It costs no MODEL -> MODEL route (nothing in this
+        # catalog routes IMAGE back to MODEL), but the flag errs toward true by
+        # design, so the claim is withheld rather than forged.
+        assert data["collapsed"] is True
+        assert data["exact"] is False
 
     def test_loose_mode_never_claims_exactness(self, patched_loader, capsys):
         env = _run(["path", "MODEL", "IMAGE", "--loose", "--max-depth", "4"], capsys)["data"]

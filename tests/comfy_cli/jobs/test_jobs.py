@@ -1977,6 +1977,253 @@ def test_poll_cloud_once_treats_fatal_statuses_as_terminal(raw_status):
     assert state.error["message"] == "RIP to the server"
 
 
+# The status enum `GET /api/jobs/<id>` and `/api/jobs` actually serve (ingest's
+# `toFilterStatus`), plus the legacy raw-jobstate spellings the shared alias map
+# keeps defensively. `in_progress` is the one that used to pass through unmapped.
+_CLOUD_STATUS_CASES = [
+    # cloud's served filter enum
+    ("pending", "pending"),
+    ("in_progress", "running"),
+    ("completed", "completed"),
+    ("failed", "error"),
+    ("cancelled", "cancelled"),
+    # defensive aliases
+    ("canceled", "cancelled"),
+    ("success", "completed"),
+    ("non_retryable_error", "error"),
+    ("retryable_error", "error"),
+    ("lost", "error"),
+]
+
+
+@pytest.mark.parametrize(("raw_status", "expected"), _CLOUD_STATUS_CASES)
+def test_cloud_status_snapshot_speaks_the_published_vocabulary(monkeypatch, raw_status, expected):
+    """Every status cloud actually serves maps into `schemas/jobs.json`'s enum."""
+
+    class _Client(_FakeCloudClient):
+        def get_history(self, prompt_id):
+            return None  # `completed` reaches the history fetch; nothing to group.
+
+    monkeypatch.setattr(jobs_mod, "_cloud_client", lambda: _Client({"status": raw_status}))
+    snap = jobs_mod._cloud_status_snapshot("pid-vocab")
+    assert snap is not None
+    assert snap["status"] == expected
+
+    schema_path = Path(__file__).parents[3] / "comfy_cli" / "schemas" / "jobs.json"
+    schema = json.loads(schema_path.read_text())
+    assert snap["status"] in schema["properties"]["status"]["enum"]
+
+
+def test_every_cloud_alias_target_is_in_the_published_status_enum():
+    """Guards the invariant the parametrized cases above only sample: whatever
+    an alias maps *to* must be a status `schemas/jobs.json` declares, so a
+    future entry cannot reintroduce an out-of-vocabulary passthrough."""
+    from comfy_cli import jobs_state
+
+    schema_path = Path(__file__).parents[3] / "comfy_cli" / "schemas" / "jobs.json"
+    allowed = set(json.loads(schema_path.read_text())["properties"]["status"]["enum"])
+    assert set(jobs_state.CLOUD_STATUS_ALIASES.values()) <= allowed
+    # Everything ingest's `toFilterStatus` can serve is covered — an unmapped
+    # one falls through raw, which is how `in_progress` escaped in the first place.
+    assert {"pending", "in_progress", "completed", "failed", "cancelled"} <= set(jobs_state.CLOUD_STATUS_ALIASES)
+
+
+def test_cloud_status_snapshot_uses_the_one_shared_alias_map():
+    """`jobs status`, `jobs ls`, and the watcher must not re-diverge — they all
+    point at `jobs_state.CLOUD_STATUS_ALIASES`, not private copies."""
+    from comfy_cli import jobs_state
+    from comfy_cli.command import job_watcher
+
+    assert jobs_mod._CLOUD_ROW_STATUS_MAP is jobs_state.CLOUD_STATUS_ALIASES
+    assert job_watcher._CLOUD_STATUS_MAP is jobs_state.CLOUD_STATUS_ALIASES
+
+
+def test_cloud_job_to_row_maps_in_progress_to_running():
+    """`jobs ls --where cloud` rows carry the documented `running`, not the raw
+    `in_progress` JobRow's docstring never listed."""
+    row = jobs_mod._cloud_job_to_row({"id": "pid-row", "status": "in_progress"})
+    assert row.status == "running"
+    assert row.where == "cloud"
+
+
+def test_jobs_status_cloud_in_progress_envelope_is_schema_conformant(monkeypatch, capsys):
+    """End-to-end through `jobs status --where cloud` on an executing job: the
+    envelope reports `running`, and the payload validates against the published
+    schema with no exemptions — #696 made `host`/`port` required only for
+    payloads without a cloud `base_url`, so the cloud payload conforms outright.
+    """
+    import jsonschema
+
+    from comfy_cli.output import Renderer, set_renderer
+    from comfy_cli.output.renderer import OutputMode
+
+    class _RunningClient(_FakeCloudClient):
+        def get_history(self, prompt_id):  # pragma: no cover — in-flight never fetches
+            raise AssertionError("history must not be fetched for an in-flight job")
+
+    monkeypatch.setattr(jobs_mod, "cloud_preflight_or_exit", lambda: None)
+    monkeypatch.setattr(jobs_mod, "_cloud_client", lambda: _RunningClient({"status": "in_progress"}))
+
+    set_renderer(Renderer(mode=OutputMode.NDJSON, command="jobs status"))
+    jobs_mod._cloud_status("pid-inflight")
+    lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]
+    env = json.loads(lines[-1])
+    assert env["type"] == "envelope" and env["ok"] is True
+    data = env["data"]
+    assert data["status"] == "running"
+
+    schema_path = Path(__file__).parents[3] / "comfy_cli" / "schemas" / "jobs.json"
+    schema = json.loads(schema_path.read_text())
+    errors = list(jsonschema.Draft202012Validator(schema).iter_errors(data))
+    assert errors == [], [e.message for e in errors]
+
+
+@pytest.mark.parametrize("raw_cancel", ["cancelled", "canceled"])
+def test_cloud_watch_in_progress_then_cancelled_exits_130(monkeypatch, capsys, raw_cancel):
+    """A cloud job that goes in_progress -> cancelled streams `running` then
+    `cancelled` state events, breaks out of the poll loop (no `cloud_timeout`),
+    and settles the documented cancelled verdict: ok:false, code `cancelled`,
+    exit 130."""
+    from comfy_cli.output import Renderer, set_renderer
+    from comfy_cli.output.renderer import OutputMode
+
+    class _CancelClient(_FakeCloudClient):
+        def __init__(self):
+            super().__init__({})
+            self._statuses = iter(["in_progress", raw_cancel, raw_cancel])
+
+        def get_job_status(self, prompt_id):
+            return {"status": next(self._statuses)}
+
+    client = _CancelClient()
+    monkeypatch.setattr(jobs_mod, "cloud_preflight_or_exit", lambda: None)
+    monkeypatch.setattr(jobs_mod, "_cloud_client", lambda: client)
+
+    set_renderer(Renderer(mode=OutputMode.NDJSON, command="jobs watch"))
+    with pytest.raises(typer.Exit) as exc:
+        jobs_mod._cloud_watch("pid-cancel", poll_interval=0.0, max_wait=5)
+    assert exc.value.exit_code == 130
+
+    lines = [json.loads(ln) for ln in capsys.readouterr().out.splitlines() if ln.strip()]
+    states = [ln["status"] for ln in lines if ln.get("type") == "state"]
+    assert states == ["running", "cancelled"]
+    env = lines[-1]
+    assert env["type"] == "envelope"
+    assert env["ok"] is False
+    assert env["error"]["code"] == "cancelled"
+    # A `cloud_timeout` here would mean the terminal status was never recognized.
+    assert not any(ln.get("error", {}).get("code") == "cloud_timeout" for ln in lines if ln.get("error"))
+
+
+def test_poll_cloud_once_records_in_progress_as_running():
+    """The async watcher writes `running` into the job state file — a raw
+    `in_progress` there would be a non-terminal status nothing recognizes."""
+    from comfy_cli import jobs_state
+    from comfy_cli.command import job_watcher
+
+    client = _FakeCloudClient({"status": "in_progress"})
+    state = jobs_state.new(prompt_id="pid", client_id="c", workflow="w", where="cloud")
+    assert job_watcher._poll_cloud_once(state, client=client) is False
+    assert state.status == "running"
+    assert state.status in job_watcher._KNOWN_INFLIGHT_STATUSES
+    assert state.status not in jobs_state.TERMINAL_STATUSES
+
+
+def test_retryable_error_is_classified_everywhere_the_other_failures_are():
+    """`retryable_error` is part of the raw cloud vocabulary `output/glyphs.py`
+    already renders ✗, but was the one failure spelling missing from the shared
+    map. Unmapped it reproduced the `in_progress` bug on all three surfaces: the
+    watcher never sees a terminal status (its stall guard then invents one after
+    300s), `jobs ls` rows miss `_ERROR_STATUSES` and drop the state file's
+    `error_code`, and `jobs watch` spins to `cloud_timeout`."""
+    from comfy_cli import jobs_state
+    from comfy_cli.command import job_watcher
+
+    assert jobs_state.CLOUD_STATUS_ALIASES["retryable_error"] == "error"
+
+    row = jobs_mod._cloud_job_to_row({"id": "pid-retry", "status": "retryable_error"})
+    assert row.status == "error"
+    assert row.status in jobs_mod._ERROR_STATUSES
+
+    client = _FakeCloudClient({"status": "retryable_error", "error_message": "boom"})
+    state = jobs_state.new(prompt_id="pid", client_id="c", workflow="w", where="cloud")
+    assert job_watcher._poll_cloud_once(state, client=client) is True
+    assert state.status == "error"
+    assert state.status in jobs_state.TERMINAL_STATUSES
+
+
+def test_shared_alias_map_is_read_only():
+    """The two consumers bind this map by identity (see the `is` assertions
+    above), so an in-place mutation that used to be contained to one module
+    would now rewrite terminal classification in the watcher and the exit code
+    of `jobs watch` process-wide. `TERMINAL_STATUSES` is a frozenset for the
+    same reason."""
+    from comfy_cli import jobs_state
+
+    with pytest.raises(TypeError):
+        jobs_state.CLOUD_STATUS_ALIASES["failed"] = "completed"  # type: ignore[index]
+    with pytest.raises(AttributeError):
+        jobs_state.CLOUD_STATUS_ALIASES.pop("failed")  # type: ignore[attr-defined]
+    assert jobs_state.CLOUD_STATUS_ALIASES["failed"] == "error"
+
+
+@pytest.mark.parametrize("raw_status", ["allocated", "uploading", "a_status_from_2027"])
+def test_cloud_status_snapshot_canonicalizes_an_unknown_status_and_keeps_the_raw(monkeypatch, raw_status):
+    """The top-level `status` is a closed enum (unlike the per-row
+    `jobs[].status`, which the schema deliberately leaves open), so a status the
+    CLI cannot map must not pass through raw and put the payload out of
+    contract. It resolves to the enum's `unknown`, and the server's own word
+    survives in `status_raw`."""
+    monkeypatch.setattr(jobs_mod, "_cloud_client", lambda: _FakeCloudClient({"status": raw_status}))
+    snap = jobs_mod._cloud_status_snapshot("pid-alloc")
+    assert snap is not None
+    assert snap["status"] == "unknown"
+    assert snap["status_raw"] == raw_status
+
+    schema_path = Path(__file__).parents[3] / "comfy_cli" / "schemas" / "jobs.json"
+    schema = json.loads(schema_path.read_text())
+    assert snap["status"] in schema["properties"]["status"]["enum"]
+    # Non-terminal, exactly like the raw passthrough it replaces — canonicalizing
+    # must not change when `_cloud_watch` decides a job is done.
+    assert snap["status"] not in {"completed", "error", "cancelled"}
+
+
+@pytest.mark.parametrize(("raw_status", "expected"), _CLOUD_STATUS_CASES)
+def test_cloud_status_snapshot_always_reports_the_servers_own_spelling(monkeypatch, raw_status, expected):
+    """`status_raw` is present on every cloud snapshot, not just unmapped ones,
+    so an agent can tell `in_progress` from `executing` after both canonicalize
+    to `running`."""
+
+    class _Client(_FakeCloudClient):
+        def get_history(self, prompt_id):
+            return None
+
+    monkeypatch.setattr(jobs_mod, "_cloud_client", lambda: _Client({"status": raw_status}))
+    snap = jobs_mod._cloud_status_snapshot("pid-raw")
+    assert snap is not None
+    assert snap["status"] == expected
+    assert snap["status_raw"] == raw_status
+
+
+def test_cloud_watch_timeout_names_the_raw_status_it_is_stuck_on(monkeypatch, capsys):
+    """A timeout on a status the CLI cannot map is exactly when the server's own
+    word is the whole diagnostic — "still unknown" would name nothing."""
+    from comfy_cli.output import Renderer, set_renderer
+    from comfy_cli.output.renderer import OutputMode
+
+    monkeypatch.setattr(jobs_mod, "cloud_preflight_or_exit", lambda: None)
+    monkeypatch.setattr(jobs_mod, "_cloud_client", lambda: _FakeCloudClient({"status": "allocated"}))
+
+    set_renderer(Renderer(mode=OutputMode.NDJSON, command="jobs watch"))
+    with pytest.raises(typer.Exit):
+        jobs_mod._cloud_watch("pid-stuck", poll_interval=0.0, max_wait=0.0)
+
+    lines = [json.loads(ln) for ln in capsys.readouterr().out.splitlines() if ln.strip()]
+    err = next(ln for ln in lines if ln.get("error", {}).get("code") == "cloud_timeout")
+    assert "allocated" in err["error"]["message"]
+    assert err["error"]["details"]["status"] == "unknown"
+
+
 _CLOUD_RECORD = {
     "status": {"completed": True, "status_str": "success"},
     "outputs": {

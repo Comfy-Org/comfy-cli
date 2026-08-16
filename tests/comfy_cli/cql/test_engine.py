@@ -17,6 +17,7 @@ from comfy_cli.cql.engine import (
     Graph,
     _apply_one_slot,
     _extract_frontend_slots,
+    _write_widget,
 )
 
 # ---------------------------------------------------------------------------
@@ -321,6 +322,196 @@ class TestWidgetOrder:
 
 
 # ===========================================================================
+# TestWidgetOrderDynamicCombo
+# ===========================================================================
+
+
+def _dynamic_combo_object_info() -> dict:
+    """A COMFY_DYNAMICCOMBO_V3 node with a nested dynamic combo among one
+    option's sub-inputs, plus connection-only subs that own no value slot."""
+    return {
+        "DynNode": {
+            "input": {
+                "required": {
+                    "prompt": ["STRING", {"default": ""}],
+                    "model": [
+                        "COMFY_DYNAMICCOMBO_V3",
+                        {
+                            "options": [
+                                {
+                                    "key": "alpha",
+                                    "inputs": {
+                                        "required": {
+                                            "size": ["COMBO", {"options": ["S", "M"]}],
+                                            "width": ["INT", {"default": 512}],
+                                            "images": ["COMFY_AUTOGROW_V3", {"min": 0}],
+                                        }
+                                    },
+                                },
+                                {
+                                    "key": "beta",
+                                    "inputs": {
+                                        "required": {
+                                            "mode": [
+                                                "COMFY_DYNAMICCOMBO_V3",
+                                                {
+                                                    "options": [
+                                                        {
+                                                            "key": "fast",
+                                                            "inputs": {"required": {"steps": ["INT", {"default": 4}]}},
+                                                        },
+                                                        {
+                                                            "key": "slow",
+                                                            "inputs": {
+                                                                "required": {
+                                                                    "steps": ["INT", {"default": 50}],
+                                                                    "refine": ["BOOLEAN", {"default": True}],
+                                                                }
+                                                            },
+                                                        },
+                                                    ]
+                                                },
+                                            ],
+                                        }
+                                    },
+                                },
+                            ]
+                        },
+                    ],
+                    "seed": ["INT", {"default": 0, "control_after_generate": True}],
+                },
+            },
+            "input_order": {"required": ["prompt", "model", "seed"]},
+            "output": ["IMAGE"],
+            "output_name": ["IMAGE"],
+            "category": "test",
+            "display_name": "DynNode",
+            "python_module": "nodes",
+        }
+    }
+
+
+class TestWidgetOrderDynamicCombo:
+    """Value-aware order expansion for COMFY_DYNAMICCOMBO_V3 ports."""
+
+    @pytest.fixture
+    def dyn_graph(self) -> Graph:
+        return Graph.from_object_info(_dynamic_combo_object_info())
+
+    def test_dynamic_combo_is_widget_not_link(self, dyn_graph: Graph):
+        m = dyn_graph.node("DynNode")
+        model = next(p for p in m.inputs if p.name == "model")
+        assert model.is_link is False
+        assert model.enum_values == ["alpha", "beta"]
+        assert len(model.dynamic_options) == 2
+
+    def test_value_independent_order_has_selector_only(self, dyn_graph: Graph):
+        assert dyn_graph.widget_order("DynNode") == ["prompt", "model", "seed", "control_after_generate"]
+
+    def test_value_aware_order_expands_selected_option(self, dyn_graph: Graph):
+        order = dyn_graph.widget_order_for_node("DynNode", ["p", "alpha", "S", 512, 0, "fixed"])
+        # connection-only sub (COMFY_AUTOGROW_V3 images) contributes no slot.
+        assert order == ["prompt", "model", "model.size", "model.width", "seed", "control_after_generate"]
+
+    def test_value_aware_order_recurses_nested_dynamic_combo(self, dyn_graph: Graph):
+        order = dyn_graph.widget_order_for_node("DynNode", ["p", "beta", "slow", 50, True, 0, "fixed"])
+        assert order == [
+            "prompt",
+            "model",
+            "model.mode",
+            "model.mode.steps",
+            "model.mode.refine",
+            "seed",
+            "control_after_generate",
+        ]
+
+    def test_unknown_selector_expands_nothing(self, dyn_graph: Graph):
+        order = dyn_graph.widget_order_for_node("DynNode", ["p", "gone", 0, "fixed"])
+        assert order == ["prompt", "model", "seed", "control_after_generate"]
+
+    def test_nested_selector_change_rebuilds_inner_roster(self, dyn_graph: Graph):
+        wf = {"nodes": [{"id": 1, "type": "DynNode", "widgets_values": ["p", "beta", "fast", 4, 7, "fixed"]}]}
+        out, warnings = dyn_graph.apply_slots(wf, {"1.model.mode": "slow"})
+        assert [w["code"] for w in warnings] == ["dynamic_combo_roster_rebuilt"]
+        # fast's [steps=4] roster is replaced by slow's defaults [steps=50, refine=True];
+        # the trailing seed + control marker stay aligned.
+        assert out["nodes"][0]["widgets_values"] == ["p", "beta", "slow", 50, True, 7, "fixed"]
+
+    def test_outer_selector_change_replaces_nested_span(self, dyn_graph: Graph):
+        wf = {"nodes": [{"id": 1, "type": "DynNode", "widgets_values": ["p", "beta", "slow", 50, True, 7, "fixed"]}]}
+        out, warnings = dyn_graph.apply_slots(wf, {"1.model": "alpha"})
+        assert [w["code"] for w in warnings] == ["dynamic_combo_roster_rebuilt"]
+        # the whole nested span (mode, mode.steps, mode.refine) is replaced by
+        # alpha's defaults (size first-enum, width default).
+        assert out["nodes"][0]["widgets_values"] == ["p", "alpha", "S", 512, 7, "fixed"]
+
+
+def _dynamic_combo_implicit_seed_object_info() -> dict:
+    """A COMFY_DYNAMICCOMBO_V3 option whose sub-input is an implicit
+    seed/noise_seed INT — the frontend's ``useIntWidget`` composable
+    companions it with a control_after_generate marker even without the
+    schema's ``control_after_generate`` flag (mirrors
+    ``workflow_to_api._has_control_after_generate_companion``)."""
+    return {
+        "SeedComboNode": {
+            "input": {
+                "required": {
+                    "mode": [
+                        "COMFY_DYNAMICCOMBO_V3",
+                        {"options": [{"key": "a", "inputs": {"required": {"seed": ["INT", {"default": 0}]}}}]},
+                    ],
+                },
+            },
+            "input_order": {"required": ["mode"]},
+            "output": ["IMAGE"],
+            "output_name": ["IMAGE"],
+            "category": "test",
+            "display_name": "SeedComboNode",
+            "python_module": "nodes",
+        }
+    }
+
+
+def _prefixed_dynamic_combo_object_info() -> dict:
+    """Same as above but with a leading widget, so the combo's selector sits
+    at a non-zero positional index — needed to exercise padding-before-write."""
+    info = _dynamic_combo_implicit_seed_object_info()
+    info["PrefixedDynNode"] = info.pop("SeedComboNode")
+    info["PrefixedDynNode"]["display_name"] = "PrefixedDynNode"
+    info["PrefixedDynNode"]["input"]["required"] = {
+        "prefix": ["STRING", {"default": ""}],
+        **info["PrefixedDynNode"]["input"]["required"],
+    }
+    info["PrefixedDynNode"]["input_order"] = {"required": ["prefix", "mode"]}
+    return info
+
+
+class TestDynamicComboImplicitControlAfterGenerate:
+    """Sub-input seed/noise_seed widgets companion a control_after_generate
+    marker even without the schema flag — same rule as the UI→API converter."""
+
+    @pytest.fixture
+    def seed_graph(self) -> Graph:
+        return Graph.from_object_info(_dynamic_combo_implicit_seed_object_info())
+
+    def test_value_aware_order_includes_implicit_marker(self, seed_graph: Graph):
+        order = seed_graph.widget_order_for_node("SeedComboNode", ["a", 0, "fixed"])
+        assert order == ["mode", "mode.seed", "control_after_generate"]
+
+    def test_roster_rebuild_synthesizes_implicit_marker_default(self, seed_graph: Graph):
+        wf = {"nodes": [{"id": 1, "type": "SeedComboNode", "widgets_values": [None]}]}
+        out, warnings = seed_graph.apply_slots(wf, {"1.mode": "a"})
+        assert [w["code"] for w in warnings] == ["dynamic_combo_roster_rebuilt"]
+        assert out["nodes"][0]["widgets_values"] == ["a", 0, "fixed"]
+
+    def test_roster_rebuild_respects_extend_false(self):
+        graph = Graph.from_object_info(_prefixed_dynamic_combo_object_info())
+        node = {"id": 1, "type": "PrefixedDynNode", "widgets_values": []}
+        with pytest.raises(ValueError, match="out of range"):
+            _write_widget(node, "mode", "a", graph, extend=False)
+
+
+# ===========================================================================
 # TestTraversal
 # ===========================================================================
 
@@ -366,8 +557,19 @@ class TestTraversal:
             for step in p["steps"]:
                 assert graph.node(step["node"]) is not None
 
-    def test_find_paths_same_type_returns_empty(self, graph: Graph):
+    def test_find_paths_same_type_is_searched_not_declined(self, graph: Graph):
+        """Same-type queries used to be refused outright; they are now walked
+        like any other. This small catalog happens to hold no route back to
+        MODEL — nothing here consumes MODEL and emits it — so the empty result
+        is a fact about the catalog rather than an abstention. The catalog that
+        *does* carry one (`LoraLoaderModelOnly`) is the `graph_path` fixture,
+        pinned by `test_same_type_query_finds_the_route` below.
+        """
         assert graph.find_paths("MODEL", "MODEL") == []
+        result = graph.search_paths("MODEL", "MODEL", exact=False, max_depth=4)
+        assert result["paths"] == []
+        assert result["not_searched"] is False
+        assert result["not_searched_reason"] is None
 
     def test_find_paths_unreachable_returns_empty(self, graph: Graph):
         # No node consumes IMAGE and produces MODEL in this fixture
@@ -556,14 +758,16 @@ class TestPathConstraints:
         assert result["truncated_by"] == "max_states"
 
     def test_degenerate_bounds_return_nothing(self, graph_path: Graph):
-        assert graph_path.search_paths("MODEL", "MODEL")["paths"] == []
+        # `MODEL -> MODEL` used to sit here as a third degenerate case. It is no
+        # longer degenerate — a same-type query is a real question with a real
+        # answer (see `test_same_type_query_finds_the_route`), so only the
+        # bounds no path can satisfy remain.
         assert graph_path.search_paths("MODEL", "IMAGE", max_depth=0)["paths"] == []
         assert graph_path.search_paths("MODEL", "IMAGE", max_paths=0)["paths"] == []
 
     @pytest.mark.parametrize(
         ("kwargs", "reason"),
         [
-            ({"from_type": "MODEL", "to_type": "MODEL"}, "same_type"),
             ({"from_type": "MODEL", "to_type": "IMAGE", "max_depth": 0}, "degenerate_bounds"),
             ({"from_type": "MODEL", "to_type": "IMAGE", "max_paths": 0}, "degenerate_bounds"),
         ],
@@ -586,17 +790,50 @@ class TestPathConstraints:
         assert result["depth_limited"] is False
         assert result["collapsed"] is False
 
-    def test_same_type_query_is_declined_even_though_a_route_exists(self, graph_path: Graph):
+    def test_same_type_query_finds_the_route(self, graph_path: Graph):
         """`LoraLoaderModelOnly` in the fixture takes a MODEL link input and
-        emits MODEL, so `MODEL -> MODEL` is genuinely routable. The walker still
-        declines it — the no-op rule (`out_t == cur_type`) drops that step — so
-        the empty result must be flagged as an abstention, never as proof."""
+        emits MODEL, so `MODEL -> MODEL` is genuinely routable — and is now
+        answered rather than declined. The walker used to refuse the query
+        outright and report the empty result as an abstention; the no-op rule
+        (`out_t == cur_type`) no longer drops the hop that answers it.
+        """
         lora = graph_path.node("LoraLoaderModelOnly")
         assert lora is not None and "MODEL" in lora.output_types()
+        assert lora.has_input("MODEL")
 
         result = graph_path.search_paths("MODEL", "MODEL")
-        assert result["paths"] == []
-        assert result["not_searched"] is True
+        assert ("LoraLoaderModelOnly",) in {_node_chain(p) for p in result["paths"]}
+        # A real walk, not an abstention — and the one-step route is a genuine
+        # MODEL-in/MODEL-out hop, not a mislabelled edge.
+        assert result["not_searched"] is False
+        assert result["not_searched_reason"] is None
+        one_step = next(p for p in result["paths"] if _node_chain(p) == ("LoraLoaderModelOnly",))
+        assert one_step["from"] == "MODEL" and one_step["to"] == "MODEL"
+        assert one_step["steps"] == [{"node": "LoraLoaderModelOnly", "input_type": "MODEL", "output_type": "MODEL"}]
+
+    def test_no_op_hops_are_still_dropped(self, graph_path: Graph):
+        """The exemption is scoped to the hop that answers a same-type query,
+        and to nothing else — a step that hands back the type it consumed is
+        still a no-op everywhere it is not the terminal step.
+
+        For a FROM != TO query that means *no* step may do it at all: a step
+        whose output equals the target ends the path, so a no-op-looking step
+        requires the incoming type to already be the target, which only the
+        first frontier item can satisfy.
+        """
+        for from_type in ("MODEL", "LATENT", "CLIP", "CONDITIONING"):
+            for p in graph_path.exact_paths(from_type, "IMAGE", max_depth=6):
+                assert all(s["input_type"] != s["output_type"] for s in p["steps"]), (
+                    f"no-op hop in {from_type} -> IMAGE via {_node_chain(p)}"
+                )
+        # And within a same-type query it is the terminal hop only.
+        same_type = graph_path.exact_paths("MODEL", "MODEL", max_depth=6)
+        assert same_type, "fixture must offer at least one MODEL -> MODEL route"
+        for p in same_type:
+            for i, step in enumerate(p["steps"]):
+                if step["input_type"] == step["output_type"]:
+                    assert i == len(p["steps"]) - 1, f"no-op mid-path in {_node_chain(p)}"
+                    assert step["output_type"] == "MODEL"
 
     def test_completed_walks_are_not_marked_as_declined(self, graph_path: Graph):
         """The abstention flag must stay off for searches that actually ran,
@@ -2196,12 +2433,12 @@ def test_slot_address_with_dotted_input_name(graph, monkeypatch):
         inputs = []  # no declared inputs -> _write_widget skips shape/catalog validation
 
     real_node = graph.node
-    real_order = graph.widget_order
+    real_order = graph.widget_order_for_node
     monkeypatch.setattr(graph, "node", lambda nt: _FakeMeta() if nt == "DottedWidgetNode" else real_node(nt))
     monkeypatch.setattr(
         graph,
-        "widget_order",
-        lambda nt: ["images.image0"] if nt == "DottedWidgetNode" else real_order(nt),
+        "widget_order_for_node",
+        lambda nt, wv: ["images.image0"] if nt == "DottedWidgetNode" else real_order(nt, wv),
     )
 
     wf = {

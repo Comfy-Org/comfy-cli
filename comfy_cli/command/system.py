@@ -4,6 +4,10 @@ Thin wrappers over ComfyUI's own ``GET /system_stats`` and ``POST /free``
 endpoints (routed through :class:`comfy_cli.comfy_client.Client`, cloud or
 local via ``resolve_target``), so agents can read VRAM state and free it
 without any direct HTTP.
+
+Both entry points stamp ``renderer.where`` from the resolved target right
+after ``resolve_target``, so every envelope they emit — the unreachable-server
+errors especially — names the backend the command routed to.
 """
 
 from __future__ import annotations
@@ -95,6 +99,7 @@ def _handle_unreachable(renderer, e: Exception, *, target, operation: str) -> No
 def system_stats_execute(renderer, *, where: str | None = None) -> None:
     """Entry point wired from ``comfy system-stats`` in cmdline.py."""
     target = resolve_target(where=where)
+    renderer.where = target.kind
     client = Client(target)
     try:
         stats = client.get_system_stats()
@@ -124,6 +129,7 @@ def free_execute(
 ) -> None:
     """Entry point wired from ``comfy free`` in cmdline.py."""
     target = resolve_target(where=where)
+    renderer.where = target.kind
     client = Client(target)
     try:
         client.post_free(unload_models=unload_models, free_memory=free_memory)

@@ -574,6 +574,12 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "install ffmpeg (e.g. `brew install ffmpeg` / `apt install ffmpeg`)",
     ),
     ErrorCode(
+        "ffmpeg_untrusted",
+        "ffmpeg/ffprobe were found, but only inside the directory you ran from, "
+        "so they were refused rather than executed — the shape of a planted binary.",
+        "run `comfy preview` from a directory that does not contain an ffmpeg/ffprobe binary",
+    ),
+    ErrorCode(
         "preview_unsupported_media",
         "The file has no image/video/audio stream to preview.",
         "pass an image, video, or audio file",
@@ -642,6 +648,30 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "pass `--filename` to save under a different name, or remove the existing file",
     ),
     ErrorCode(
+        "model_download_in_flight",
+        "`comfy model download` refused to start because a live download is already writing to "
+        "the same destination (`details.path`). `details.download_id` names that download, "
+        "`details.status` is its current status, and `details.kind` is `background` (a detached "
+        "worker) or `foreground` (a `comfy model download` running in another terminal). The httpx "
+        "downloader streams into a `.part` sibling, so the destination stays absent until the "
+        "transfer completes — without this check two submissions would both run and the later one "
+        "would silently overwrite the earlier; under `--downloader aria2`, which writes straight to "
+        "the destination, they would interleave into the same file.",
+        "track it with `comfy model download-status <id>`; a background download can be stopped "
+        "with `comfy model download-cancel <id>`, a foreground one with Ctrl-C in its own terminal",
+    ),
+    ErrorCode(
+        "model_download_foreground_cancel",
+        "`comfy model download-cancel` refused to cancel a download that is running in the "
+        "foreground of another terminal (`details.id`, `details.pid`). A background download runs in "
+        "its own session, so cancelling it signals only the worker's process group; a foreground "
+        "download's recorded pid is the user's own CLI process, which shares the terminal's "
+        "foreground process group — signalling that group would kill the surrounding shell job "
+        "rather than just the transfer. Once the foreground process is gone its record reconciles "
+        "to `failed` and `download-cancel` will sweep the partial file as usual.",
+        "interrupt it with Ctrl-C in the terminal running it",
+    ),
+    ErrorCode(
         "hf_unauthorized",
         "Hugging Face returned 401 for the model URL and no Hugging Face API token is configured "
         "(gated or private repo).",
@@ -666,7 +696,9 @@ REGISTRY: tuple[ErrorCode, ...] = (
     # --- background model downloads (`model download --background`) ----------
     ErrorCode(
         "download_not_found",
-        "No background download state file matches the given download id.",
+        "No download state file matches the given download id. Both `--background` submissions and plain "
+        "foreground `comfy model download` runs write one, so an id that resolves to neither was never "
+        "written, or its record has already been pruned.",
         "list the known downloads with `comfy model downloads`",
     ),
     ErrorCode(
@@ -773,6 +805,21 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "`generate --emit-workflow` could not build the partner-node workflow.",
         "check the model name and that all required inputs are provided",
     ),
+    # --- custom node registry ------------------------------------------------
+    ErrorCode(
+        "node_publish_failed",
+        "Publishing a custom-node version to the registry failed: either a "
+        "client-side validation gap (missing publisher id / project name in "
+        "pyproject.toml) or a non-2xx from the registry. `details.status` and "
+        "`details.body` carry the response when it was an HTTP failure.",
+        "check `details.body`; ensure `[tool.comfy] publisher_id` and `[project] name` are set, and the token is valid",
+    ),
+    ErrorCode(
+        "registry_install_failed",
+        "`comfy node registry-install` fetching a custom node from the registry failed with a non-2xx. "
+        "`details.status` and `details.body` carry the response.",
+        "check the node id and version exist in the registry (`comfy node registry-list`); check `details.body`",
+    ),
     ErrorCode(
         "spend_consent_required",
         "A credit-spending command hit its spend gate with no consent, so it failed closed — "
@@ -803,6 +850,13 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "version_switch_unknown_version",
         "`comfy update comfy --version X` could not resolve X to a ComfyUI tag; the workspace was left untouched.",
         "run `git tag --list 'v*'` in your ComfyUI workspace to see every available version",
+    ),
+    ErrorCode(
+        "version_switch_git_unavailable",
+        "`comfy update comfy --version X` could not use git at all — it is absent from PATH, or the "
+        "only match resolved into the directory you ran from and was refused. Reported separately so "
+        "it isn't misread as the requested version not existing.",
+        "a version switch needs a usable git — install it, or run from a directory that has no git binary in it",
     ),
     ErrorCode(
         "version_switch_dirty_tree",

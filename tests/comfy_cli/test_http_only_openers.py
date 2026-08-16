@@ -16,7 +16,7 @@ import pytest
 from comfy_cli import comfy_client, http
 from comfy_cli.cloud import oauth
 from comfy_cli.command import transfer
-from comfy_cli.cql import engine, loader
+from comfy_cli.cql import engine
 
 NON_HTTP_URLS = ["file:///etc/passwd", "ftp://example.com/x", "data:text/plain,hi"]
 
@@ -28,7 +28,6 @@ OPENERS = [
     ("http._AUTHED_OPENER", http._AUTHED_OPENER),
     ("comfy_client._OPENER", comfy_client._OPENER),
     ("cql.engine._opener", engine._opener),
-    ("cql.loader._LOADER_OPENER", loader._LOADER_OPENER),
     ("cloud.oauth._OAUTH_OPENER", oauth._OAUTH_OPENER),
     ("transfer._TRANSFER_OPENER", transfer._TRANSFER_OPENER),
     ("transfer._DOWNLOAD_OPENER", transfer._DOWNLOAD_OPENER),

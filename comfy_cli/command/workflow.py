@@ -111,6 +111,11 @@ def _get_graph(input_path: str | None, host: str | None, port: int | None, on_st
         # becomes a clean `where_invalid` envelope rather than a traceback.
         decision = where_module.resolve_default_or_exit()
         mode = "cloud" if decision.target is where_module.WhereTarget.CLOUD else "local"
+        # Routing resolved — stamp it so the `cql_no_graph` envelope below names
+        # the catalog these verbs annotated against, matching what `nodes` does
+        # from its own `_get_graph`. The `where_invalid` raised just above stays
+        # `where: null`: it *is* the failed decision.
+        renderer.where = mode
         from comfy_cli.cql.loader import resilient_load_object_info
 
         raw = resilient_load_object_info(
@@ -637,10 +642,20 @@ _LOCAL_SORT_KEYS = {"create_time": "created", "update_time": "modified", "name":
 
 
 def _resolve_where_target(where: str | None):
-    """Resolve the routing Target for a saved-workflow verb (cloud or local)."""
+    """Resolve the routing Target for a saved-workflow verb (cloud or local).
+
+    This is the single point where ``workflow list/get/save/delete`` decide
+    local-vs-cloud, so it is also where the routed target gets stamped on the
+    renderer: every error envelope emitted downstream then carries ``where``
+    instead of ``null``. Explicit ``emit(..., where=...)`` arguments still win
+    (they resolve as ``where or self.where``), so the success envelopes are
+    unchanged.
+    """
     from comfy_cli.target import resolve_target
 
-    return resolve_target(where=where)
+    target = resolve_target(where=where)
+    get_renderer().where = target.kind
+    return target
 
 
 # Unicode categories that survive the C0/C1 filter but still let untrusted text
@@ -1425,6 +1440,286 @@ def delete_cmd(
     if renderer.is_pretty():
         rprint(f"[green]✓[/green] deleted [dim]{workflow_id}[/dim]")
     renderer.emit(payload, command="workflow delete", where="cloud", changed=True)
+
+
+# ---------------------------------------------------------------------------
+# validate — API-format workflow validation
+# ---------------------------------------------------------------------------
+# The canonical home for API-format workflow validation. The top-level
+# `comfy validate` is kept as a hidden deprecated alias that delegates to the
+# shared implementation below (see cmdline.py).
+
+
+def validate_api_workflow(
+    workflow: str,
+    *,
+    where: str | None = None,
+    host: str | None = None,
+    port: int | None = None,
+    input_path: str | None = None,
+    command: str = "workflow validate",
+) -> None:
+    """Validate an API-format workflow without submitting it.
+
+    Shared implementation behind ``comfy workflow validate`` (canonical) and the
+    deprecated top-level ``comfy validate`` alias. Checks class_types, input
+    shapes, enum values, and edge wiring against object_info loaded from the run
+    target. ``command`` labels the emitted envelope so each entry point reports
+    its own path.
+    """
+    from comfy_cli import where as where_module
+    from comfy_cli.command.run import is_ui_workflow
+    from comfy_cli.command.run.preflight import _detect_partner_nodes
+    from comfy_cli.cql.engine import Graph, LoadError
+    from comfy_cli.env_checker import _bracket_host, _unbracket_host
+    from comfy_cli.workflow_to_api import WorkflowConversionError, convert_ui_to_api
+
+    renderer = get_renderer()
+
+    # Load workflow
+    wf_path = Path(workflow).expanduser()
+    if not wf_path.is_file():
+        renderer.error(code="workflow_not_found", message=f"Workflow file not found: {workflow}", hint="check the path")
+        raise typer.Exit(code=1)
+    try:
+        wf_data = json.loads(wf_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as e:
+        renderer.error(code="workflow_invalid_json", message=f"Invalid JSON: {e}", hint="re-export from ComfyUI")
+        raise typer.Exit(code=1) from e
+    except (OSError, UnicodeDecodeError) as e:
+        # e.g. a non-UTF-8 file, permission denied, or a TOCTOU race if the file
+        # vanished after the is_file() check above. Report structurally instead
+        # of crashing with a raw traceback.
+        renderer.error(
+            code="workflow_read_error",
+            message=f"Unable to read workflow file: {e}",
+            hint="check file permissions and encoding",
+        )
+        raise typer.Exit(code=1) from e
+    if not isinstance(wf_data, dict):
+        renderer.error(
+            code="workflow_not_api_format", message="Workflow must be a JSON object", hint="use File > Export (API)"
+        )
+        raise typer.Exit(code=1)
+
+    # Load graph. Route through the shared resolver rather than trusting the raw
+    # `--where` string: it normalizes case/whitespace (`--where LOCAL` is the
+    # same target as `local`) and emits a `where_invalid` envelope instead of
+    # letting an unknown value escape as a bare ValueError traceback — but only
+    # for an *explicit* bad `--where`; a bad env/project/config default has no
+    # user to blame, so it drops to the local default instead of breaking the
+    # command, matching the pre-existing routing behavior of `nodes`/`jobs`.
+    target = where_module.WhereTarget.LOCAL
+    try:
+        target = where_module.resolve_default(flag=where).target
+    except ValueError as e:
+        if where:
+            renderer.error(
+                code="where_invalid",
+                message=str(e),
+                hint="use `--where local` or `--where cloud`",
+            )
+            raise typer.Exit(code=1) from e
+        # A bad env/project/config value with no explicit flag never breaks the
+        # command — drop to the local default, as before.
+    mode = target.value
+    # Routing resolved — stamp it so the envelopes below (the object_info load
+    # failure and the UI-conversion errors) name the target this validate ran
+    # against. The file-read errors above stay `where: null`: they precede the
+    # decision, as does the `where_invalid` envelope raised just above.
+    renderer.where = mode
+
+    # Resolve the local object_info server the same way `comfy run` does —
+    # flag > COMFY_LOCAL_URL > config.background > 127.0.0.1:8188. Without the
+    # `config.background` step validate would consult whatever answers on the
+    # default port while `run` submits to the background server comfy-cli
+    # launched on another one, making the verdict meaningless for the server
+    # that will actually execute the workflow (BE-6299). `resolve_target` does
+    # not consult `config.background` on purpose (other callers, e.g. transfer
+    # and system, must not), so — as its docstring says — the callers that do
+    # honor it resolve upstream, here.
+    is_local_fetch = input_path is None and target is where_module.WhereTarget.LOCAL
+    if is_local_fetch:
+        from comfy_cli.host_port import parse_host_port_arg, report_usage_error, resolve_host_port
+
+        # `host is not None` (not `if host:`): `--host ""` must reach the parser
+        # and be rejected, not be read as "no --host given". Likewise the port
+        # merge tests `is None`, so an explicit `--port 0` isn't silently
+        # overridden by a port embedded in the combined `--host h:p` form —
+        # `resolve_host_port` rejects it as out of range instead.
+        # `report_usage_error` gives JSON/NDJSON consumers a terminating
+        # envelope for that rejection instead of an empty stdout (exit stays 2).
+        with report_usage_error(renderer, command=command):
+            if host is not None:
+                host, parsed_port = parse_host_port_arg(host)
+                if port is None and parsed_port is not None:
+                    port = parsed_port
+            host, port = resolve_host_port(host, port)
+
+    try:
+        graph = Graph.load(mode=mode, input_path=input_path, host=host, port=port)
+    except LoadError as e:
+        renderer.error(
+            code="cql_no_graph",
+            message=str(e),
+            hint=e.details.get("hint", "pass --input <object_info.json>, or start the server"),
+            details=e.details,
+        )
+        raise typer.Exit(code=1) from e
+
+    # Detect a UI-export (frontend/canvas) workflow and lower it to API format
+    # before validating — exactly as `comfy run` does. Without this the wrapper
+    # keys (`nodes`, `links`, `groups`, `config`, …) each emit a `non_node_key`
+    # warning, zero nodes are checked, and the result is a vacuous `valid:true`.
+    # The converter reuses the object_info the graph was already built from
+    # (`graph.object_info`), so offline `--input` works and no second fetch happens.
+    converted_from_ui = False
+    if is_ui_workflow(wf_data):
+        if renderer.is_pretty():
+            rprint("[yellow]Detected UI-format workflow, converting to API format...[/yellow]")
+        try:
+            converted = convert_ui_to_api(wf_data, graph.object_info)
+        except WorkflowConversionError as e:
+            renderer.error(
+                code="workflow_not_api_format",
+                message=f"Workflow is a UI export that could not be converted to API format: {e}",
+                hint="use ComfyUI's 'File > Export (API)' to save as API format",
+            )
+            raise typer.Exit(code=1) from e
+        except Exception as e:  # noqa: BLE001 — never leak a raw traceback to the agent flow
+            renderer.error(
+                code="conversion_crash",
+                message=f"Workflow conversion crashed unexpectedly: {type(e).__name__}: {e}",
+                hint="report this at https://github.com/Comfy-Org/comfy-cli/issues",
+                details={"exception_type": type(e).__name__},
+            )
+            raise typer.Exit(code=1) from e
+        if not converted:
+            renderer.error(
+                code="workflow_not_api_format",
+                message="Workflow is a UI export that converted to no executable nodes",
+                hint="use ComfyUI's 'File > Export (API)' to save as API format",
+            )
+            raise typer.Exit(code=1)
+        wf_data = converted
+        converted_from_ui = True
+
+    result = graph.validate_workflow(wf_data)
+
+    # Preview credit spend: partner-API (paid) nodes spend Comfy credits when the
+    # workflow is run. This is the same detection `comfy run` uses (authoritative
+    # `api_node: true`, `partner/...` category fallback), surfaced here read-only
+    # so agents can answer "will this spend credits?" without running. `wf_data`
+    # is API format at this point (any UI export already converted above), which
+    # is the format the detector reads. Purely informational — no exit-code gate.
+    partner_nodes = _detect_partner_nodes(wf_data, graph.object_info)
+
+    payload = {
+        "workflow": str(wf_path),
+        "valid": result["valid"],
+        "error_count": len(result["errors"]),
+        "warning_count": len(result["warnings"]),
+        "errors": result["errors"],
+        "warnings": result["warnings"],
+        "partner_nodes": partner_nodes,
+        "spends_credits": bool(partner_nodes),
+        # Name the server (or file) the verdict was computed against, so an
+        # agent comparing `validate` with `run` can see whether they consulted
+        # the same object_info. Populated from the values resolved above, so a
+        # local run reports the concrete host/port actually queried. `host` is
+        # reported unbracketed, matching `Target.host` — brackets belong to the
+        # URL composed for display, not to the address itself.
+        "object_info_source": (
+            {"mode": "file", "path": str(input_path)}
+            if input_path is not None
+            else {"mode": mode, "host": _unbracket_host(host), "port": port}
+            if is_local_fetch
+            else {"mode": mode}
+        ),
+    }
+    if converted_from_ui:
+        # Signal that validation ran against the converted graph, not the file's
+        # literal bytes, and report how many nodes the conversion produced.
+        payload["converted_from_ui"] = True
+        payload["converted_node_count"] = len(wf_data)
+
+    if renderer.is_pretty():
+        # Workflow-supplied strings (node ids, messages, enum/input values echoed
+        # in messages) flow into rprint, which parses Rich markup. Escape them so a
+        # crafted file can't inject markup to spoof/hide output (e.g. fake a green ✓).
+        from rich.markup import escape
+
+        # Name the object_info source in one dim line. A file path (and, in
+        # principle, a hostname) can contain Rich-markup metacharacters, so
+        # escape it — same reason the partner-node line below does.
+        #
+        # Branch on the same flags that built the payload, not on its "mode"
+        # string: "file" is an offline sentinel that shares a key with the
+        # routing targets, so a mode-string branch couples display to a value
+        # the routing layer also owns.
+        source = payload["object_info_source"]
+        if input_path is not None:
+            where_oi = escape(source["path"])
+        elif is_local_fetch:
+            where_oi = escape(f"http://{_bracket_host(source['host'])}:{source['port']}")
+        else:
+            where_oi = escape(source["mode"])
+        rprint(f"[dim]object_info from {where_oi}[/dim]")
+        if result["valid"]:
+            rprint(f"[bold green]✓[/bold green] workflow is valid ({len(wf_data)} nodes)")
+            for w in result["warnings"]:
+                rprint(f"  [yellow]⚠[/yellow] {escape(str(w.get('message', '')))}")
+        else:
+            rprint(f"[bold red]✗[/bold red] {len(result['errors'])} error(s)")
+            for e in result["errors"]:
+                msg = str(e.get("message", ""))
+                suggestions = e.get("suggestions", [])
+                if suggestions:
+                    msg += f" (did you mean: {', '.join(str(s) for s in suggestions[:3])}?)"
+                rprint(f"  [red]•[/red] node {escape(str(e.get('node_id', '?')))}: {escape(msg)}")
+            for w in result["warnings"]:
+                rprint(f"  [yellow]⚠[/yellow] {escape(str(w.get('message', '')))}")
+        if partner_nodes:
+            rprint(
+                f"[yellow]⚠ uses partner-API (paid) nodes that spend Comfy credits: "
+                f"{', '.join(escape(n) for n in partner_nodes)}[/yellow]"
+            )
+    renderer.emit(payload, command=command, ok=result["valid"])
+
+    if not result["valid"]:
+        raise typer.Exit(code=1)
+
+
+@app.command(
+    "validate",
+    help="Validate an API-format workflow without submitting. Checks class_types, input shapes, enum values, and edge wiring.",
+)
+@tracking.track_command("workflow")
+def validate_cmd(
+    workflow: Annotated[
+        str,
+        typer.Option(help="Path to the API-format workflow JSON file."),
+    ],
+    where: Annotated[
+        str | None,
+        typer.Option("--where", show_default=False, help="Routing target for object_info: 'local' or 'cloud'."),
+    ] = None,
+    host: Annotated[
+        str | None,
+        typer.Option(show_default=False, help="ComfyUI host (default 127.0.0.1)."),
+    ] = None,
+    port: Annotated[
+        int | None,
+        typer.Option(show_default=False, help="ComfyUI port (default 8188)."),
+    ] = None,
+    input_path: Annotated[
+        str | None,
+        typer.Option("--input", show_default=False, help="Path to a saved object_info JSON (offline mode)."),
+    ] = None,
+):
+    validate_api_workflow(
+        workflow, where=where, host=host, port=port, input_path=input_path, command="workflow validate"
+    )
 
 
 # ---------------------------------------------------------------------------
