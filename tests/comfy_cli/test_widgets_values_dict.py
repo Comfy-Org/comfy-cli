@@ -73,8 +73,9 @@ class TestListSlotsToleratesDictWidgetsValues:
         slots = _extract_frontend_slots(wf, graph)
         names = {s["name"] for s in slots}
         assert names == {"width", "height", "batch_size"}
-        # Values are unknown (treated as empty), not silently wrong.
-        assert all(s["current_value"] is None for s in slots)
+        # The named-dict values are projected onto their schema positions —
+        # slots show the node's REAL values instead of pretending they're unset.
+        assert {s["name"]: s["current_value"] for s in slots} == {"width": 512, "height": 512, "batch_size": 1}
 
     def test_partial_dict_does_not_crash(self, graph: Graph):
         wf = _dict_widget_node({"width": 512})
@@ -92,9 +93,9 @@ class TestSetWidgetToleratesDictWidgetsValues:
     def test_apply_one_slot_grows_past_a_short_dict(self, graph: Graph):
         wf = _dict_widget_node({"width": 512})
         _apply_one_slot(wf, "7.batch_size", 4, graph)
-        # The dict is replaced by a real positional list; the write lands at
-        # batch_size's schema position.
-        assert wf["nodes"][0]["widgets_values"] == [None, None, 4]
+        # The dict is projected onto a real positional list — the known value
+        # survives at its schema position and the write lands at batch_size's.
+        assert wf["nodes"][0]["widgets_values"] == [512, None, 4]
 
     def test_apply_one_slot_within_dict_len(self, graph: Graph):
         wf = _dict_widget_node({"width": 512, "height": 512, "batch_size": 1})
@@ -110,4 +111,4 @@ class TestSetWidgetToleratesDictWidgetsValues:
     def test_set_widget_grows_past_a_short_dict(self, graph: Graph):
         wf = _dict_widget_node({"width": 512})
         new_wf, op = W.set_widget(wf, graph, 7, "batch_size", 4)
-        assert new_wf["nodes"][0]["widgets_values"] == [None, None, 4]
+        assert new_wf["nodes"][0]["widgets_values"] == [512, None, 4]

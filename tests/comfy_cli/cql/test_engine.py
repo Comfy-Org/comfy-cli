@@ -379,11 +379,14 @@ class TestWidgetOrderForNode:
         node actually carries. First-key expansion moved to `widget_order_default`
         (what a fresh node has, and what the catalog publishes)."""
         g = self._dyn_graph()
-        assert g.widget_order("DynNode") == ["model", "seed"]
+        # The trailing control_after_generate is implicit: the frontend's
+        # useIntWidget always companions a seed-like INT, schema flag or not —
+        # every order surface must agree with the expansion path on markers.
+        assert g.widget_order("DynNode") == ["model", "seed", "control_after_generate"]
 
     def test_default_order_uses_first_key(self):
         g = self._dyn_graph()
-        assert g.widget_order_default("DynNode") == ["model", "model.res", "seed"]
+        assert g.widget_order_default("DynNode") == ["model", "model.res", "seed", "control_after_generate"]
 
     def test_node_order_expands_selected_key(self):
         g = self._dyn_graph()

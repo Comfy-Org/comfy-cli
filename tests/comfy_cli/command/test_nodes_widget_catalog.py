@@ -229,7 +229,7 @@ class TestWidgetOrder:
 
     def test_dynamic_combo_sub_widgets_expand(self, patched_loader, capsys):
         types = _run(["widget-catalog"], capsys)["data"]["types"]
-        assert types["DynNode"]["widget_order"] == ["model", "model.resolution", "seed"]
+        assert types["DynNode"]["widget_order"] == ["model", "model.resolution", "seed", "control_after_generate"]
 
 
 # ---------------------------------------------------------------------------

@@ -466,8 +466,15 @@ def _has_control_after_generate_slot(port: Port) -> bool:
     schema-level test."""
     if port.options.control_after_generate:
         return True
+    # Same seed-like rule as the converter's companion guard: partner nodes
+    # name the widget every which way — ``image_seed``/``model_seed`` (Tripo),
+    # ``Seed`` (Rodin3D), ``rand_seed``, ``noise_seed_sde``, ``variation_seed``
+    # — and several ship it UNFLAGGED, yet the frontend still appends the
+    # companion. An exact ``seed``/``noise_seed`` match here made the exported
+    # widget catalog off by one for every such node, so a name<->index
+    # consumer wrote into the marker slot.
     leaf_name = port.name.rsplit(".", 1)[-1]
-    return port.type == "INT" and leaf_name in ("seed", "noise_seed")
+    return port.type == "INT" and "seed" in leaf_name.lower()
 
 
 def _is_link(type_id: str, is_enum: bool, force_input: bool) -> bool:
@@ -1183,7 +1190,7 @@ class Graph:
             if p.is_link:
                 continue
             order.append(p.name)
-            if p.options.control_after_generate:
+            if _has_control_after_generate_slot(p):
                 order.append("control_after_generate")
         return order
 
@@ -1208,7 +1215,7 @@ class Graph:
             order.append(p.name)
             if p.dynamic_options:
                 order.extend(_dynamic_sub_widget_names(p.name, p.dynamic_options))
-            if p.options.control_after_generate:
+            if _has_control_after_generate_slot(p):
                 order.append("control_after_generate")
         return order
 
@@ -1243,7 +1250,7 @@ class Graph:
                 out[p.name] = p.enum_values[0]
             else:
                 out[p.name] = None
-            if p.options.control_after_generate:
+            if _has_control_after_generate_slot(p):
                 out["control_after_generate"] = "fixed"
         return out
 
@@ -2272,6 +2279,30 @@ def _widgets_as_list(widgets_values: Any) -> list[Any]:
     return list(widgets_values) if isinstance(widgets_values, list) else []
 
 
+def _widgets_as_positional(widgets_values: Any, graph: Graph | None, class_type: str) -> list[Any]:
+    """Positional view of ``widgets_values`` that PRESERVES the named-dict form.
+
+    Lists pass through unchanged. The VHS-style dict serialization is projected
+    onto the class's default widget order when the catalog knows it — each
+    named value lands at its schema position, names the schema doesn't know are
+    dropped (they have no positional home), and missing names read as ``None``.
+    Without a catalog (or an unknown class) this degrades to
+    :func:`_widgets_as_list`'s "no positional values known" behavior.
+
+    Use this wherever a graph is in scope (set-widget, apply/replay, capture,
+    slot writes): reading a dict as ``[]`` there meant one write silently
+    destroyed every sibling value on the node (``{"width": 768, "height": 512,
+    "batch_size": 1}`` + set ``batch_size`` → ``[None, None, 4]``).
+    """
+    if isinstance(widgets_values, list):
+        return list(widgets_values)
+    if isinstance(widgets_values, dict) and graph is not None:
+        order = graph.widget_order_default(class_type)
+        if order:
+            return [widgets_values.get(name) for name in order]
+    return _widgets_as_list(widgets_values)
+
+
 # A dynamic combo may nest another dynamic combo among its sub-inputs. Real
 # schemas are one or two levels deep; the cap defends the expansion walk
 # against a pathological/malicious object_info entry.
@@ -2362,7 +2393,7 @@ def _node_widget_slots(node: dict, prefix: str, graph: Graph) -> list[dict]:
     m = graph.node(node_type)
     if m is None:
         return []
-    widgets = _widgets_as_list(node.get("widgets_values"))
+    widgets = _widgets_as_positional(node.get("widgets_values"), graph, node_type)
     slots: list[dict] = []
     for idx, entry in enumerate(_expand_widget_entries(m, widgets)):
         if entry.port is None:  # control_after_generate marker — not a slot
@@ -2508,7 +2539,7 @@ def _resolve_proxy_value(instance: dict, subgraph: dict, input_name: str, graph:
             if not isinstance(inode, dict) or str(inode.get("id", "")) != interior_id:
                 continue
             interior_class = inode.get("type", "")
-            widgets = _widgets_as_list(inode.get("widgets_values"))
+            widgets = _widgets_as_positional(inode.get("widgets_values"), graph, interior_class)
             order = graph.widget_order_for_node(interior_class, widgets)
             try:
                 idx = order.index(name)
@@ -2536,7 +2567,12 @@ def _write_widget(node: dict, input_name: str, value: Any, graph: Graph, *, exte
     m = graph.node(node_type)
     if m is None:
         raise ValueError(f"unknown node type {node_type!r} for node {node.get('id')}")
-    widgets = _widgets_as_list(node.get("widgets_values"))
+    widgets = _widgets_as_positional(node.get("widgets_values"), graph, node_type)
+    if not isinstance(node.get("widgets_values"), list):
+        # Persist the positional projection so downstream re-reads (the
+        # dynamic-combo selector path re-reads from the node) see the same
+        # values this write is about to index against.
+        node["widgets_values"] = widgets
     order = graph.widget_order_for_node(node_type, widgets)
     try:
         widget_idx = order.index(input_name)
